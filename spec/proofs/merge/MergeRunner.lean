@@ -135,6 +135,7 @@ private def frozenJson (loss : FrozenLoss Nat Nat Nat) (cols : Nat) : Json :=
   let cause := match r.cause with
     | .schemaChange version write => Json.mkObj [("schema", toJson version), ("write", toJson write)]
     | .write write => Json.mkObj [("write", toJson write)]
+    | .dependency write sources => Json.mkObj [("write", toJson write), ("sources", toJson sources)]
     | .rules rules => Json.mkObj [("rules", toJson (rules.map namedRuleJson))]
   Json.mkObj [("row", toJson r.row), ("gen", toJson r.generation),
     ("values", toJson values), ("cause", cause)]

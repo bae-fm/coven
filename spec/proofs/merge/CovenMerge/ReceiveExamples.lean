@@ -67,58 +67,59 @@ example : Step noSnapshot logs past (fun _ => true) (.download .create)
 
 example : (pass (pass received .create) .edit).passed = [.create, .edit] := by decide
 
-/-- Two writes suffice to lose the generation witness. The creation lands
-while retirement is dropped, one second after its deadline. An active device
-reads it and edits. Once replay keeps retirement again, §10 excludes the
-creation but specifies no inherited exclusion for the edit. Store-log replay
-supplies the changed verdict; this example checks its data consequences. -/
-theorem retirement_removes_generation_witness :
-    withinWindow policy .create = false ∧ withinWindow policy .edit = true ∧
-    ¬ SnapshotGenerations history noSnapshot (eligible policy) := by
-  refine ⟨by decide, by decide, ?_⟩
-  intro h
-  have witness := h .edit () ⟨.upd, 1, fun _ => true⟩ (by decide) rfl
-  rcases witness with impossible | ⟨w, ch, _, kept, change, kind, gen⟩
-  · cases impossible
-  · cases w <;> simp [history] at change <;> subst ch
-    · contradiction
-    · exact kind rfl
-    · simp at gen
+/-- Exact data used by the original edit and delete, independently of the
+positions they passed. Both replaced the creation's cell at generation one. -/
+def provenance : DataDependency.Authored history where
+  provenance w _ := if w = .create then ⟨none, []⟩ else ⟨some .create, [((), .create)]⟩
+  read_source w r a h := by
+    cases w <;> cases a <;> simp_all [DataDependency.Provenance.sources, history]
+  generation_source w r ch h := by
+    cases w <;> simp only [history, reduceCtorEq, ↓reduceIte, Option.some.injEq] at h
+    · subst ch; exact Or.inl ⟨rfl, rfl⟩
+    · subst ch; exact Or.inr ⟨.create, _, rfl, rfl, by decide, rfl⟩
+    · subst ch; exact Or.inr ⟨.create, _, rfl, rfl, by decide, rfl⟩
+  setter_source w r c a h := by
+    cases w <;> simp at h
+    all_goals subst a; exact ⟨_, _, rfl, rfl, by decide, rfl, rfl⟩
 
-example : ¬ SnapshotGenerations history noSnapshot (eligible policy) :=
-  retirement_removes_generation_witness.2.2
+def values (w : Write) (_r _c : Unit) : Option Write :=
+  some (if w = .delete then .create else w)
+def snapshot : MergeSnapshot Write Unit Unit := ⟨St.init, []⟩
+def output (rules : St Write Unit Unit → EntryInputs Unit Unit) (s : State Write) :=
+  result history authored_valid provenance policy snapshot values rules s
 
-/-- Literal causality cannot hold after discarding this cause. The effective
-past can be filtered, but that does not repair the missing row generation. -/
-example : history.past .edit .create = true ∧
-    applied policy (pass (pass received .create) .edit) = [.edit] ∧
-    (effective history policy).past .edit .create = false := by decide
+theorem changes_dropped (w : Write) :
+    DataDependency.retained (DataDependency.authoredState history authored_valid provenance (base policy)) w () = false := by
+  have first := DataDependency.dropped_stays_dropped
+    (DataDependency.authoredState history authored_valid provenance (base policy)) .create () (by decide)
+  cases w with
+  | create => exact first
+  | edit | delete =>
+    rw [DataDependency.retained_eq]
+    change (true && true && [Write.create, .create].all _) = false
+    simp [first]
+
+theorem changes_restored (w : Write) :
+    DataDependency.retained (DataDependency.authoredState history authored_valid provenance
+      (base { policy with retirements := [] })) w () = true := by
+  have first : DataDependency.retained (DataDependency.authoredState history authored_valid provenance
+      (base { policy with retirements := [] })) .create () = true := by
+    rw [DataDependency.retained_eq]
+    rfl
+  cases w with
+  | create => exact first
+  | edit | delete =>
+    rw [DataDependency.retained_eq]
+    change (true && true && [Write.create, .create].all _) = true
+    simp [first]
+
+theorem retirement_generation_accounted :
+    withinWindow policy .create = false ∧
+    Valid (effective history authored_valid provenance policy) ∧
+    (effective history authored_valid provenance policy).chg .edit () = none :=
+  ⟨by decide, DataDependency.effective_valid _ _ _ _, by simp [effective, DataDependency.effective, changes_dropped]⟩
 
 def creationAndEdit : State Write := pass (pass ⟨[.create, .edit], []⟩ .create) .edit
-
-/-- With only the creation and edit consumed, the admitted edit has no
-displayed value, loss record, or replacement that read it. This fails value
-accounting under every choice of the app's removal rules. -/
-theorem retirement_value_unaccounted (I : EntryInputs Unit Unit) :
-    Setter (effective history policy) (inputs policy creationAndEdit) () () .edit 1 ∧
-    ¬ ValueAccounted (effective history policy) (inputs policy creationAndEdit)
-      (merged history policy St.init creationAndEdit) I () () .edit 1 := by
-  have cell : (merged history policy St.init creationAndEdit).cell () () = none := by decide
-  have lost : (merged history policy St.init creationAndEdit).lost () () .edit = none := by decide
-  constructor
-  · exact ⟨Or.inr (by decide), ⟨⟨.upd, 1, fun _ => true⟩, rfl, by decide, rfl, rfl⟩⟩
-  · intro accounted
-    rcases accounted with shown | ⟨w, _, read⟩ | recorded | hidden
-    · simp [cell] at shown
-    · have unread : (effective history policy).past w .edit = false := by cases w <;> decide
-      simp [unread] at read
-    · simp [lost] at recorded
-    · simp [cell] at hidden
-
-example (I : EntryInputs Unit Unit) :
-    ¬ ValueAccounted (effective history policy) (inputs policy creationAndEdit)
-      (merged history policy St.init creationAndEdit) I () () .edit 1 :=
-  (retirement_value_unaccounted I).2
 
 def editThenDelete : State Write := pass (pass (pass received .create) .edit) .delete
 def deleteThenEdit : State Write := pass (pass (pass received .create) .delete) .edit
@@ -153,29 +154,74 @@ def arrivalRun (editFirst : Bool) : Run noSnapshot logs past (fun _ _ => true) w
     | 5 => exact .attempt _ _
     | _ + 6 => exact .idle _
 
-/-- Three writes expose actual merge disagreement: creation, then a concurrent
-edit and delete on two active devices. Both orders consume all causes. -/
-theorem retirement_loss_disagrees :
-    editThenDelete.passed = [.create, .edit, .delete] ∧
-    deleteThenEdit.passed = [.create, .delete, .edit] ∧
-    (merged history policy St.init editThenDelete).lost () () .edit = none ∧
-    (merged history policy St.init deleteThenEdit).lost () () .edit = some (1, .delete) := by
-  decide
+theorem retirement_value_recorded (rules : St Write Unit Unit → EntryInputs Unit Unit) :
+    ((output rules creationAndEdit).excluded .edit ()).map (fun l =>
+      (l.record.generation, l.record.values (), l.record.cause)) =
+      some (1, some .edit, .dependency .edit [.create, .create]) := by
+  simp only [output, result, Data.loss, changes_dropped, Bool.false_eq_true, ↓reduceIte,
+    dependentLoss, DataDependency.droppedSources, Bool.not_false]
+  simp [creationAndEdit, pass, attempt, enabled,
+    ready, consumed, past, noSnapshot, base, policy, snapshotRetains, boundaryEligible,
+    resetAllows, withinWindow, retirementAllows, logs, history, freeze, DataDependency.authoredState, provenance,
+    DataDependency.Provenance.sources, values]
 
-example : (merged history policy St.init editThenDelete).lost () () .edit ≠
-    (merged history policy St.init deleteThenEdit).lost () () .edit := by decide
+theorem retirement_value_accounted (rules : St Write Unit Unit → EntryInputs Unit Unit) :
+    Data.ValueAccounted (effective history authored_valid provenance policy)
+      (inputs policy creationAndEdit) (output rules creationAndEdit).current.merged
+      (rules (output rules creationAndEdit).current.merged)
+      (output rules creationAndEdit).excluded () () .edit 1 := by
+  have recorded := retirement_value_recorded rules
+  cases found : (output rules creationAndEdit).excluded .edit () with
+  | none => simp [found] at recorded
+  | some loss =>
+    simp only [found, Option.map_some, Option.some.injEq] at recorded
+    exact Or.inr ⟨loss, found, congrArg (fun x => x.2.1) recorded⟩
 
-theorem receive_runs_disagree :
-    (∀ w, w ∈ ((arrivalRun true).state 6).passed ↔ w ∈ ((arrivalRun false).state 6).passed) ∧
-    (merged history policy St.init ((arrivalRun true).state 6)).lost () () .edit ≠
-      (merged history policy St.init ((arrivalRun false).state 6)).lost () () .edit := by
-  constructor
-  · intro w; cases w <;> decide
-  · decide
+theorem retirement_loss_agrees (rules : St Write Unit Unit → EntryInputs Unit Unit) :
+    ((output rules editThenDelete).excluded .edit ()).map (fun l => l.record.cause) =
+      some (.dependency .edit [.create, .create]) ∧
+    ((output rules deleteThenEdit).excluded .edit ()).map (fun l => l.record.cause) =
+      some (.dependency .edit [.create, .create]) ∧
+    ((output rules editThenDelete).excluded .delete ()).map (fun l => l.record.cause) =
+      some (.dependency .delete [.create, .create]) ∧
+    (output rules editThenDelete).excluded .create () = none := by
+  simp only [output, result, Data.loss, changes_dropped, Bool.false_eq_true, ↓reduceIte,
+    dependentLoss, DataDependency.droppedSources, Bool.not_false]
+  simp [editThenDelete, deleteThenEdit,
+    received, pass, attempt, enabled, ready, consumed, past, noSnapshot, base, policy,
+    snapshotRetains, boundaryEligible, resetAllows, withinWindow, retirementAllows,
+    logs, history, freeze,
+    DataDependency.authoredState, provenance, DataDependency.Provenance.sources]
 
-/-- Waiting for applied effects instead of consumed positions holds the edit
-forever: even after both objects arrive its only cause cannot be applied. -/
-example : ready (past .edit) (fun w => decide (w ∈ applied policy (pass received .create))) = false := by
+/-- The two legal runs agree in all merge, app-view and loss fields. -/
+theorem receive_runs_agree (rules : St Write Unit Unit → EntryInputs Unit Unit) :
+    output rules ((arrivalRun true).state 6) = output rules ((arrivalRun false).state 6) := by
+  apply receive_result_converges history authored_valid provenance policy past exact_past
+    (fun _ _ => true) (fun _ _ => true) (arrivalRun true) (arrivalRun false)
+    (by intro w h; cases h) snapshot
+    (isSpec_congr (by intro w; simp [policy, noSnapshot]) isSpec_init) values rules
+  intro w; cases w <;> decide
+
+example (rules : St Write Unit Unit → EntryInputs Unit Unit) :
+    output rules editThenDelete = output rules deleteThenEdit := receive_runs_agree rules
+
+/-- Retirement replay may restore a base by changing its own admission.
+Receipt of an active reader never changes that admission. -/
+theorem replay_restores_by_own_window :
+    withinWindow { policy with retirements := [] } .create = true ∧
+    (merged history authored_valid provenance { policy with retirements := [] }
+      St.init creationAndEdit).cell () () = some .edit ∧
+    (merged history authored_valid provenance policy St.init creationAndEdit).cell () () = none := by
+  simp only [merged, Data.merged, DataDependency.effective]
+  have dropped : (fun w r => if DataDependency.retained
+      (DataDependency.authoredState history authored_valid provenance (base policy)) w r
+      then history.chg w r else none) = (fun _ _ => none) := by
+    funext w r; cases r; simp [changes_dropped]
+  have restored : (fun w r => if DataDependency.retained
+      (DataDependency.authoredState history authored_valid provenance (base { policy with retirements := [] })) w r
+      then history.chg w r else none) = history.chg := by
+    funext w r; cases r; simp [changes_restored]
+  rw [dropped, restored]
   decide
 
 /-- Reset has an explicit exception for discarded causes (§19.3). It passes
@@ -191,16 +237,49 @@ reset snapshot, rather than reusing the discarded creation's generation. -/
 def resetHistory : Writes Write Unit Unit :=
   { history with chg := fun w r => if w = .edit then history.chg .create r else history.chg w r }
 
+theorem reset_history_valid : Valid resetHistory where
+  ts_inj := authored_valid.ts_inj
+  past_ts := authored_valid.past_ts
+  gen_seen w r ch h := by
+    cases w <;> simp only [resetHistory, history, reduceCtorEq, ↓reduceIte, Option.some.injEq] at h
+    · subst ch; exact Or.inl rfl
+    · subst ch; exact Or.inl rfl
+    · subst ch; exact Or.inr ⟨.create, _, rfl, rfl, by decide, rfl⟩
+  parity w r ch h := by
+    cases w <;> simp only [resetHistory, history, reduceCtorEq, ↓reduceIte, Option.some.injEq] at h <;>
+      subst ch <;> decide
+
+def resetProvenance : DataDependency.Authored resetHistory where
+  provenance w _ := if w = .delete then ⟨some .create, [((), .create)]⟩ else ⟨none, []⟩
+  read_source w r a h := by
+    cases w <;> cases a <;> simp_all [DataDependency.Provenance.sources, resetHistory, history]
+  generation_source w r ch h := by
+    cases w <;> simp only [resetHistory, history, reduceCtorEq, ↓reduceIte, Option.some.injEq] at h
+    · subst ch; exact Or.inl ⟨rfl, rfl⟩
+    · subst ch; exact Or.inl ⟨rfl, rfl⟩
+    · subst ch; exact Or.inr ⟨.create, _, rfl, rfl, by decide, rfl⟩
+  setter_source w r c a h := by
+    cases w <;> simp at h
+    subst a
+    exact ⟨_, _, rfl, rfl, by decide, rfl, rfl⟩
+
+theorem reset_independent_applies :
+    (merged resetHistory reset_history_valid resetProvenance resetPolicy St.init
+      (pass (pass received .create) .edit)).cell () () = some .edit ∧
+    (merged resetHistory reset_history_valid resetProvenance resetPolicy St.init
+      (pass (pass received .create) .edit)).lost () () .create = none := by
+  have kept (w : Write) (r : Unit) : DataDependency.retained
+      (DataDependency.authoredState resetHistory reset_history_valid resetProvenance
+        (base resetPolicy)) w r = decide (w = .edit) := by
+    rw [DataDependency.retained_eq]
+    cases w <;> rfl
+  simp only [merged, Data.merged, DataDependency.effective, kept]
+  decide
+
 example : consumed noSnapshot (pass (pass received .create) .edit) .create = true ∧
     applied resetPolicy (pass (pass received .create) .edit) = [.edit] ∧
     disposition noSnapshot resetPolicy.reset resetPolicy.readEntry resetPolicy.schema .create =
       .resetIgnored := by decide
-
-example : (merged resetHistory resetPolicy St.init (pass (pass received .create) .edit)).cell () () =
-    some .edit ∧
-    (merged resetHistory resetPolicy St.init (pass (pass received .create) .edit)).lost () () .create =
-      none := by decide
-
 def schemaPolicy : Policy Write :=
   { policy with
     retirements := []

@@ -1,4 +1,5 @@
 import CovenMerge.Circles
+import CovenMerge.DataDependency
 
 /-! Breaking migrations (§17.1). Re-evaluate all removal rules without
 non-final circle deletions, then use the ordinary generation delete. Capture
@@ -53,6 +54,19 @@ structure FrozenLoss (W Row Col : Type) where
 
 /-- Freezing preserves the entire record, including its original cause. -/
 def freeze (record : LossRecord W Row Col) : FrozenLoss W Row Col := ⟨record⟩
+
+/-- A dependent row change keeps its own identity even when it deletes a
+key-only row. Values and names remain in their authored schema; conversion
+and subsequent live replacements never rewrite this record. -/
+def dependentLoss (s : DataDependency.State W Row Col) (w : W) (r : Row)
+    (generation : Nat) (values : Col → Option W) : FrozenLoss W Row Col :=
+  freeze ⟨r, generation, none, values, .dependency w (DataDependency.droppedSources s w r)⟩
+
+theorem dependent_loss_preserves (s : DataDependency.State W Row Col) (w : W) (r : Row)
+    (generation : Nat) (values : Col → Option W) :
+    (dependentLoss s w r generation values).record.values = values ∧
+    (dependentLoss s w r generation values).record.cause =
+      .dependency w (DataDependency.droppedSources s w r) := ⟨rfl, rfl⟩
 
 theorem freeze_preserves (record : LossRecord W Row Col) :
     (freeze record).record = record := rfl

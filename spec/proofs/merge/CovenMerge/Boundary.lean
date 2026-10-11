@@ -134,4 +134,103 @@ theorem boundary_value_accounted {M : Writes W Row Col} (valid : Valid M)
   exact value_accounted v result.2 result.1 _ (present _) setter
 
 end
+
+/-! Per-change boundary application. The whole-write boundary functions above
+remain the inputs of the Rust differential. This path carries actual data
+provenance and derives validity after drops rather than assuming witnesses. -/
+namespace Data
+
+variable {W Row Col K : Type} [DecidableEq W]
+
+def loss (M : Writes W Row Col) (valid : Valid M) (p : DataDependency.Authored M)
+    (base : W → Row → Bool) (direct : W → Row → Option (FrozenLoss W Row Col))
+    (values : W → Row → Col → Option W) (received : List W)
+    (w : W) (r : Row) : Option (FrozenLoss W Row Col) :=
+  if w ∈ received then
+    (M.chg w r).bind fun ch =>
+      if base w r then
+        if DataDependency.retained (DataDependency.authoredState M valid p base) w r then none
+        else some (dependentLoss (DataDependency.authoredState M valid p base) w r ch.gen (values w r))
+      else direct w r
+  else none
+
+def merged (M : Writes W Row Col) (valid : Valid M) (p : DataDependency.Authored M)
+    (base : W → Row → Bool) (snapshot : St W Row Col) (received : List W) : St W Row Col :=
+  received.foldl (step (DataDependency.effective M valid p base)) snapshot
+
+theorem isSpec (M : Writes W Row Col) (valid : Valid M) (p : DataDependency.Authored M)
+    (base : W → Row → Bool) (C : W → Prop)
+    (closed : Closed M C) (snapshot : St W Row Col)
+    (correct : IsSpec (DataDependency.effective M valid p base) C snapshot)
+    (received : List W) (causal : CausalFrom M C received) :
+    IsSpec (DataDependency.effective M valid p base) (fun w => C w ∨ w ∈ received)
+      (merged M valid p base snapshot received) ∧
+    Closed (DataDependency.effective M valid p base) (fun w => C w ∨ w ∈ received) :=
+  foldl_isSpec (DataDependency.effective_valid M valid p base) closed correct
+    (DataDependency.causal_from M valid p base causal)
+
+theorem converges (M : Writes W Row Col) (valid : Valid M) (p : DataDependency.Authored M)
+    (base : W → Row → Bool) (C : W → Prop)
+    (closed : Closed M C) (snapshot : St W Row Col)
+    (correct : IsSpec (DataDependency.effective M valid p base) C snapshot)
+    {a b : List W} (ca : CausalFrom M C a) (cb : CausalFrom M C b)
+    (same : ∀ w, w ∈ a ↔ w ∈ b) :
+    merged M valid p base snapshot a = merged M valid p base snapshot b :=
+  isSpec_unique (isSpec M valid p base C closed snapshot correct a ca).1
+    (isSpec_congr (fun w => by rw [same w])
+      (isSpec M valid p base C closed snapshot correct b cb).1)
+
+theorem loss_converges (M : Writes W Row Col) (valid : Valid M) (p : DataDependency.Authored M)
+    (base : W → Row → Bool) (direct : W → Row → Option (FrozenLoss W Row Col))
+    (values : W → Row → Col → Option W) {a b : List W}
+    (same : ∀ w, w ∈ a ↔ w ∈ b) :
+    loss M valid p base direct values a = loss M valid p base direct values b := by
+  funext w r
+  simp only [loss, same w]
+
+theorem dependent_recorded (M : Writes W Row Col) (valid : Valid M) (p : DataDependency.Authored M)
+    (base : W → Row → Bool) (direct : W → Row → Option (FrozenLoss W Row Col))
+    (values : W → Row → Col → Option W) (received : List W) (w : W) (r : Row)
+    (ch : Change Col) (mem : w ∈ received) (change : M.chg w r = some ch)
+    (admitted : base w r = true)
+    (depends : DataDependency.dependsOnDropped (DataDependency.authoredState M valid p base) w r = true) :
+    loss M valid p base direct values received w r =
+      some (dependentLoss (DataDependency.authoredState M valid p base) w r ch.gen (values w r)) := by
+  simp [loss, mem, change, admitted, DataDependency.dependent_not_retained _ _ _ depends]
+
+variable [DecidableEq Row] [DecidableEq Col] [DecidableEq K]
+
+/-- Ordinary merge accounting plus a frozen loss for this original change.
+The latter includes setters which never entered the effective merge. -/
+def ValueAccounted (M : Writes W Row Col) (S : W → Prop) (st : St W Row Col)
+    (I : EntryInputs Row K) (losses : W → Row → Option (FrozenLoss W Row Col))
+    (r : Row) (c : Col) (w : W) (k : Nat) : Prop :=
+  CovenMerge.ValueAccounted M S st I r c w k ∨
+    ∃ record, losses w r = some record ∧ record.record.values c = some w
+
+/-- Accounts for the original setter, including a change filtered out of the
+effective merge. A deletion is separately covered by `dependent_recorded`. -/
+theorem value_accounted (M : Writes W Row Col) (valid : Valid M) (p : DataDependency.Authored M)
+    (base : W → Row → Bool) (direct : W → Row → Option (FrozenLoss W Row Col))
+    (values : W → Row → Col → Option W) (C : W → Prop)
+    (closed : Closed M C) (snapshot : St W Row Col)
+    (correct : IsSpec (DataDependency.effective M valid p base) C snapshot)
+    (received : List W) (causal : CausalFrom M C received)
+    (I : EntryInputs Row K)
+    (present : ∀ r, I.present r = decide ((merged M valid p base snapshot received).gen r % 2 = 1))
+    (w : W) (r : Row) (c : Col) (k : Nat) (mem : w ∈ received)
+    (setter : Setter M (fun a => C a ∨ a ∈ received) r c w k)
+    (admitted : base w r = true) (written : values w r c = some w) :
+    ValueAccounted (DataDependency.effective M valid p base) (fun a => C a ∨ a ∈ received)
+      (merged M valid p base snapshot received) I
+      (loss M valid p base direct values received) r c w k := by
+  obtain ⟨hw, ch, change, kind, sets, inc⟩ := setter
+  cases kept : DataDependency.retained (DataDependency.authoredState M valid p base) w r
+  · exact Or.inr ⟨dependentLoss (DataDependency.authoredState M valid p base) w r ch.gen (values w r),
+      by simp [loss, mem, change, admitted, kept], written⟩
+  · have spec := isSpec M valid p base C closed snapshot correct received causal
+    exact Or.inl (CovenMerge.value_accounted (DataDependency.effective_valid M valid p base)
+      spec.2 spec.1 I present ⟨hw, ch, by simp [DataDependency.effective, kept, change], kind, sets, inc⟩)
+
+end Data
 end CovenMerge

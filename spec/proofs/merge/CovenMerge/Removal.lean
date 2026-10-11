@@ -229,6 +229,7 @@ inductive LossCause (W : Type) where
   | write (setter : W)
   | rules (reasons : List Rule)
   | schemaChange (version : Nat) (write : W)
+  | dependency (write : W) (sources : List W)
   deriving DecidableEq, Repr
 
 /-- One loss record. Values are identified with their setters, as in `St`:

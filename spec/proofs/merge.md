@@ -29,15 +29,17 @@
   [§8.3](../coven.md#83-deletes) and [§14](../coven.md#14-audiences).
 - *Row*: one table, key and audience. The store's note 1 and a circle's note
   1 are two rows, each with its own generations ([§14.2](../coven.md#142-moving-rows)).
-- *Had read*: write `w` had read write `a` when `w`'s device had applied `a`
-  before making `w`; a device has always read its own earlier writes ([§7.1](../coven.md#71-causality)).
+- *Had read*: the recorded position says the device passed `a` before making
+  `w`, including its own earlier writes. Passing a position does not mean
+  applying its data ([§7.1](../coven.md#71-causality)). Actual generation and
+  replaced-cell sources are separate retained evidence in B17.
 - *Causal order*: an order of applying writes in which each write comes after
   every write it had read. B17 derives this order from receive steps, with
   consumed positions distinguished from retained effects at a boundary.
 - *Closed set*: a set of writes that holds every write any of them had read.
   The ordinary applied set is closed. After exclusions, closure refers to
-  retained inputs. B17 checks the window-only retirement failure and proves
-  the proposed closure that retains its retired causes.
+  retained inputs in the original boundary model. B17 keeps consumed causal
+  metadata and filters individual changes by their data sources.
 - *Incarnation*: one lifetime of a row. An insert made at generation `g`
   starts incarnation `g + 1`; an update or delete made at generation `g` acts
   on incarnation `g`.
@@ -440,9 +442,9 @@ at.
 
 **§3 coverage:** this model proves merge convergence, causal winners and value
 accounting for valid causal inputs and supplied boundary verdicts (B6, B8,
-B12–B14). B17 derives causal application from receive steps; its checked
-retirement counterexamples concern the window-only rule. The proposed
-retirement closure retains the causes needed by its counting readers.
+B12–B14). B17 derives causal application from receive steps and filters
+changes by their actual data sources. Retirement never regains a write
+because another write read it; dependent changes become recorded losses.
 Applying those results to stored objects assumes correct authentication
 and sealing; it proves neither confidentiality nor signature or cipher security.
 Atomic SQLite installation and §2's provider behavior are assumed, not proved.
@@ -474,8 +476,10 @@ specified by §14.2; the proof does not establish those claims from SQL.
 Store-log replay supplies the kept entry, its snapshot, and which deletions
 are final. Selecting these is outside this package. Schema eligibility and
 conversion verdicts are also inputs:
-`Boundary.lean` applies them, but does not prove the version/conversion
-algorithm or exclusion of a write that read an excluded input.
+the original `boundaryDevice` applies supplied whole-write verdicts for the
+existing Rust differential. `Data` in `Boundary.lean` and B17 additionally apply the
+shared per-change data rule. The queue package derives schema admission and
+conversion decisions; recorded reads are not data dependencies.
 
 As in B3, convergence assumes valid writes. At a reset it additionally
 requires a correct selected snapshot and `ResetGenerations`: a retained
@@ -501,9 +505,9 @@ the separate store-log/data package.
 
 B17 models a retained receive queue and checks Rust's causal prerequisite
 decision separately. It derives causal order rather than assuming it at the
-receive boundary. Retirement can remove the generation witnesses needed by
-merge under the window-only rule. B17 proves the proposed closure and states
-the remaining boundary and refusal conditions.
+receive boundary. Retirement can remove a generation's source. B17 records
+each dependent change as a loss and proves validity of the surviving merge without assuming
+that retirement preserves generation witnesses.
 
 ### B12 Circle entries, migration deletes and frozen losses
 
@@ -622,9 +626,9 @@ still shows and the circle row is hidden by the other-audience rule.
 
 ### B15 Checked counterexamples and readings
 
-The retirement histories in B17 fail under the window-only rule. The proposed
-reader closure makes those same histories converge and accounts for their
-values; it does not override a refusal or another boundary exclusion.
+The retirement histories in B17 use each write's own landing window. Their
+dependent row changes become frozen losses; the dropped creation stays
+dropped. The receive results agree in both legal orders.
 `UniqueOnce.unique_with_others` remains a checked counterexample to running
 uniqueness in an unrestricted loop: a deleted folder with two notes sharing
 a title can leave one note or neither, depending on rule order. The spec's
@@ -754,7 +758,7 @@ the effects of writes it covers” and “An old-version write outside S is
 excluded: keep its values as frozen losses, and pass its position without
 applying its changes.” The adapter supplies the eligibility verdict from the
 write's version or explicit disposition, and tests the boundary's use of it.
-Conversion callbacks, deriving exclusions from excluded inputs, and competing
+Conversion callbacks, per-change data dependencies, and competing
 store-log selection remain outside this comparison. Schema tests use no reset,
 so the known reset discrepancy cannot stop this family first.
 
@@ -810,256 +814,172 @@ COVEN_MERGE_LEAN="$PWD/spec/proofs/merge/.lake/build/bin/mergeRunner" \
   cargo test -p coven-database migration_differential_histories -- --ignored --nocapture
 ```
 
-### B17 Receive order, progress, and the retirement gap
+<a id="b17-receive-order-progress-and-the-retirement-gap"></a>
 
-`Receive.lean` models separate downloaded and consumed lists. A download
-commits only when every smaller positive number in its device's log has a
-retained or snapshot-covered write. Different logs interleave arbitrarily;
-prefetched reads become visible to this queue when their contiguous prefix
-commits. An application attempt requires the write's retained bytes, an
-unconsumed position, the other prerequisite checks, and every write in its
-finite recorded past to be consumed. A failed attempt changes nothing.
-Misses, read failures, and unfinished reads cannot advance download progress.
+### B17 Receive order, progress, and dropping by data
 
-`passed_causal` derives `CausalFrom` for every receive prefix.
-`received_causalOrder` gives `CausalOrder` when no snapshot covers positions.
-`ordinary_receive_converges` feeds these results directly to `merge_converges`:
-its receive side has no causal-order hypothesis. The authored metadata must
-still satisfy B3's `Valid`, and both devices must have consumed the same set.
-`positionsReady_correct` in `ReceivePositions.lean` proves
-that testing each recorded frontier, including the preceding own write, is
-equivalent to testing every positive position that those frontiers cover.
+This is a proposal implementing the user principle: building on a dropped
+write does not make that write count. The normative spec files are unchanged;
+the edits required to align them are listed below and in [queue.md](queue.md).
+The reader-rescue model has been removed.
 
-The queue distinguishes passing a position from applying its values.
-`ReceiveMerge.lean` uses the existing snapshot, reset, and schema definitions.
-It also checks every supplied kept retirement against the write's author,
-recorded entry reads, and first complete publication time. Exactly thirty
-storage days is allowed; one second later is excluded (`window_exact`). The
-window-only theorem `retired_no_effects` assumes snapshot inputs satisfy
-this window too, and proves an excluded write supplies neither changes nor
-input edges. That assumption belongs to this theorem rather than `Policy`: a
-snapshot under the proposed closure can represent a rescued late write. The
-other-checks gate must refuse a write made after reading its own
-removal, rather than consume it merely because it fails the retirement test.
+**One data definition.** `DataDependency.dependsOnDropped` asks whether the
+change's recorded generation source or any cell setter it replaced has a
+non-retained change at that row. A row includes table, key and audience. The
+unit of loss is the D5 row change, not its entire write or audience part; a
+multi-column row change is one unit. Deletes retain their change identity
+even without scalar values. A source whose change was itself lost cannot
+support another change, even if that source's write kept other changes.
 
-`applied_causal` filters consumed positions into a causal sequence of retained
-effects; `applied_causalOrder` gives the form with no initial snapshot inputs.
-`passed_not_applied`, `receive_reset_no_loss`, and `receive_schema_loss` prove
-that ignored positions can release later writes without adding effects, that
-reset-ignored writes create no loss, and that schema exclusions keep the
-written values in frozen losses. The schema verdict is supplied, including
-its inherited exclusions; the queue does not implement migration conversion.
+`DataDependency.State` is retained merge evidence: source identities, original
+change presence, their timestamp order and their own admission verdicts.
+`retained` follows only those sources and terminates by strictly decreasing
+authored timestamps. `dependencyDecision` is an executable decision of the
+source predicate; `depends_iff` gives its exact meaning. There is no read
+frontier, future-reader set, device-local observation or loss-dismissal state
+in this decision. `state_alone` proves equal evidence gives equal decisions.
+Retirement and schema exclusion supply their own base verdicts to this same
+function. A theft policy can supply its verdicts there too; this package
+does not define theft admission.
 
-`receive_isSpec`, `receive_converges`, `receive_result_converges`, and
-`receive_value_accounted` connect these receive sequences to B6 and B14.
-They cover generations, cells, merge losses, the app view, removed-row losses,
-snapshot-frozen losses, and received schema losses. They require valid authored
-writes, equal effective sets (equal consumed sets for the complete loss view),
-the same kept boundary and retirement facts, a correct closed snapshot, and
-`SnapshotGenerations`: every retained change's generation has a retained
-witness. No receive-side `CausalOrder` or `CausalFrom` is assumed.
+This is an extension of retained merge state, not a claim that the existing
+compact `St` or D5 records already contain this evidence. `Authored` requires
+an actual generation source and the original setters the change replaced.
+It checks source reads, timestamp descent, generation advancement, setter
+incarnation and cell identity. Capturing the *actual* author-state choice,
+including all replaced cells, is an authoring/validation obligation: a numeric
+generation, old scalar equality or a plausible timestamp cannot establish it.
+The current canonical generation setter may differ from the author's source.
+Malformed or unavailable evidence fails validation or waits; it is not treated
+as an independent change. Snapshots and conversions must preserve this evidence
+separately from dismissible losses.
 
-For progress, `complete_past_eventually_passed` proves that a retained write
-whose finite past is eventually consumed will itself be consumed.
-`arriving_past_eventually_passed` derives consumption from arrival by induction
-on authored timestamps. `receive_eventually_applied` concludes that every
-eligible uncovered write in that history eventually appears in the applied
-sequence. A consumed reset, schema, or retirement exclusion is not claimed
-to be applied. These results require:
+**No rescue, and no missing generation premise.** `effective` leaves recorded
+causal metadata intact and removes only non-retained changes.
+`dropped_stays_dropped`, `dependent_not_retained` and `independent_retained`
+prove the three decisions. `effective_valid` derives `Valid` for this merge:
+if a retained change needs a generation source, that source's change also
+survived. No retained-witness hypothesis is assumed for retirement, schema
+exclusion or reset. Sources are required to be valid in the original authored
+history, before any exclusion.
 
-- every dependency in the chosen causally closed history eventually arrives
-  or is covered by the installed snapshot;
-- the scheduler eventually retries each retained, unconsumed write;
-- other prerequisites eventually stay satisfied, including store-log reads,
-  keys, supported schema, authorization, and successful validation;
-- the boundary and retirement decisions remain fixed during the run.
+`Data.loss` captures dependent changes as `FrozenLoss`, preserving
+their generation, written values and original write identity. Its dependency
+cause lists the failed source identities in authored role order; a write may
+occur twice when it supplied both generation and old cell. Direct schema
+exclusions instead keep their schema cause. A later ordinary replacement never
+acknowledges these frozen values away. `dependent_recorded` covers every
+change, including an empty-valued delete; `dependent_loss_preserves` keeps the
+written values. Base retirement drops and reset-ignored writes create no
+schema loss. Their otherwise admitted dependent changes do create data losses.
 
-Arrival alone cannot imply progress. `ReceiveExamples.lean` checks a run
-that downloads one write with empty past and then idles forever. It also
-checks holding an effect that arrives before its cause, reset consumption,
-schema consumption, and the exact retirement deadline. Replay changing a
-decision must rebuild atomically and begin another run; this development
-does not prove termination of an indefinitely changing sequence of boundaries.
+`Data.ValueAccounted` extends the ordinary four outcomes with a
+frozen loss of the original change. `Data.value_accounted` and
+`Receive.receive_value_accounted` quantify over original setters, including
+ones removed before merge. Direct schema-excluded changes are covered by
+`receive_schema_loss`. `Data.converges` and `loss_converges` prove agreement
+of merge fields and recorded losses. `receive_converges` and
+`receive_result_converges` derive causal order from actual receive runs and
+include the app view, rule losses and snapshot-frozen records. The remaining
+premises are valid authored evidence, the same admission facts and consumed
+sets, and a correct snapshot with causally closed **consumed** coverage.
+An empty snapshot needs no retained-generation or safe-reader premise.
 
-**Checked retirement counterexamples.** Two writes suffice to invalidate the
-retained-generation assumption. Device A creates a row at generation zero.
-Its removal was stored at time zero. The creation was authored before that
-entry, but first lands at thirty days plus one second while replay drops the
-retirement. Active device B reads the creation in that view and authors an
-update at generation one. Replay then keeps the retirement again, excluding
-A's creation. §10 explicitly permits dropped retirements to return before
-finality; sending freshness therefore does not rule out this data history.
-The store-log histories producing those verdicts are inputs to this model.
-Both writes have valid authored metadata, but §10 gives no inherited verdict
-for B's update, whose generation now has no retained witness.
-`retirement_removes_generation_witness` checks
-this history; the adjacent `example` shows the effect's consumed cause is
-absent from the applied sequence.
+**The four retirement histories.** `ReceiveExamples` uses the same creation,
+active edit, concurrent delete, first publication times and legal receive
+runs as the original failures. Retirement was temporarily dropped when the
+creation landed and the other devices used it; it then returns before
+finality. The creation is one second outside its window and remains dropped.
 
-The same two writes already violate value retention under the pass-and-merge
-reading. `retirement_value_unaccounted` proves that B's admitted update is
-neither displayed nor recorded as lost, and no replacement had read it.
-This holds for every choice of app removal rules. Its adjacent `example`
-refutes `ValueAccounted` directly; no concurrent delete is needed.
+- `retirement_generation_accounted` proves the filtered merge is valid and
+  omits the dependent edit, despite the original generation being unavailable.
+- `retirement_value_recorded` proves that edit's original value and generation
+  are held in a dependency loss naming the creation;
+  `retirement_value_accounted` checks the original setter's accounting predicate.
+- `retirement_loss_agrees` proves edit-then-delete and delete-then-edit record
+  the same edit loss; the dependent delete gets its own record too. Neither
+  dependent change alters generations, cells or ordinary merge losses.
+- `receive_runs_agree` proves exact equality of both complete receive results,
+  for any common rule-input function. It applies the general theorem without
+  a retained-witness hypothesis.
 
-Add an active device C's concurrent delete at generation one. All devices
-read the creation before authoring; neither update nor delete reads the
-other. Two legal receive runs consume all three writes. If the receiver
-passes the excluded creation and runs the ordinary merge on the other two,
-update-then-delete has no loss for B's value; delete-then-update records it
-against C's delete. `retirement_loss_disagrees` and `receive_runs_disagree`
-check the different loss records and the legal download/attempt sequences.
-This is a counterexample to unconditional convergence and value retention
-under that reading, not a counterexample to the conditional merge theorem.
+`replay_restores_by_own_window` separately checks that dropping the retirement
+restores the creation and edit through an atomic rebuild. Receiving or losing
+a later reader cannot change the creation's own verdict.
 
-Requiring the discarded creation's effects to be applied instead leaves B's
-update waiting even after all objects arrive; another `example` checks its
-unsatisfied readiness test. Refusing the dependent write would also require
-an explicit verdict and would fall outside the progress theorem's successful
-validation hypothesis. Reset explicitly discards old dependencies, and schema
-exclusion explicitly propagates through old inputs; §10 specifies neither
-rule for this retirement case. The proposal below changes retirement admission
-without changing either boundary rule.
+**Finality and the send gate.** `window_exact` checks every kept retirement,
+including replacement and member/device removal, using first complete provider
+publication times. Exactly thirty days counts. `retired_no_effects` applies
+also to snapshot contributions rebuilt under a changed retirement decision.
+`post_read_refused` and `passed_before_removal` retain the hard gate on a write
+made after reading its own retirement. Such a write is refused before its
+position passes; a late pre-retirement write is consumed without changes.
 
-**Proposed rule: retain retired causes of counting readers.**
-`RetiredClosure.lean` models the decided extension to §10; `spec/coven.md`
-still describes the window-only rule. The original `Receive` functions and
-counterexamples remain available to distinguish the two policies. The new
-results below are in `Receive.RetiredClosure`.
+`retirement_verdict_final` uses the final kept retiring entry and the stable
+preceding store-log prefix supplied by §9, including storage-time ties.
+Retirements after that prefix may appear or disappear. With the post-read send
+gate in both views, those changes cannot reverse either window verdict: an
+admitted write already meets the final entry's earlier deadline. No premise concerns future
+readers, their admission, or draining their logs. This proves retirement
+admission finality; another independent schema/reset policy can still change
+its own verdict.
 
-`Counts` starts with received writes that pass the window and the other
-admission conditions. It adds a received retired write when a counting write's
-recorded past includes it, and repeats. `counts_fixed` and `counts_least`
-prove this is the least fixed point. A group of excluded readers cannot keep
-itself counting without a seed (`counts_have_seed`). `counts_path` gives the
-exact condition: a finite path of permitted retired causes from a window-admitted
-root. The checked `repeated_closure` history requires two reader steps.
+`send_gate_publication_bound` proves that a catch-up started after finality
+blocks an old-id send, and an earlier catch-up plus the strict five-minute
+freshness gate and one-day provider request bound cannot publish at or after
+finality plus one day and five minutes. This supplies a discovery drain bound,
+not an extra admission exception. The store-log finality theorem, completeness
+of catch-up, honest sends and the provider-duration bound remain inputs.
 
-The inputs are kept retirements, first complete storage times, immutable
-recorded entry reads and write pasts, and a finite received set. Equal entry
-sets and received sets suffice; duplicates and order do not matter
-(`counts_deterministic`). The other metadata and boundary decisions must
-agree too. Removal of a member, removal of a device and replacement all supply
-retirements of the affected device; the closure does not distinguish their
-causes. Recorded pasts mean the expanded frontiers, including implicit own
-previous writes, as in `ReceivePositions` and `exactPast`.
+**Receive order and progress.** `Receive.lean` separates downloaded bytes from
+consumed positions. Each device log downloads a contiguous prefix. Attempts
+require retained bytes, other prerequisite checks and every recorded position
+to be consumed; a failed attempt changes nothing. `passed_causal` derives the
+order for every run. `positionsReady_correct` proves frontier readiness,
+including implicit own predecessors, equivalent to checking the expanded past.
+Passing an excluded position can release an unrelated change without applying
+the excluded data.
 
-“Counting” here means a merge input for the selected audience. Reset-ignored,
-schema-excluded and snapshot-covered non-input writes cannot seed or enter
-this closure. All additions still pass `beforeRemoval`: their recorded entry
-past contains no kept retirement of their own author. Thus a revived reader
-cannot authorize a post-read write (`post_read_refused`), including through
-any number of intermediate readers. `revived_reader_cannot_authorize_refused`
-checks a three-write chain whose middle write counts only through its reader
-and whose oldest cause remains refused. Authentication and the other ordinary
-admission checks are supplied at the receive boundary.
+`complete_past_eventually_passed`, `arriving_past_eventually_passed` and
+`receive_eventually_applied` retain their progress results: required inputs
+must eventually arrive or be covered, scheduling must retry retained work,
+other checks must eventually stay open, and admission facts must stabilize.
+Here `applied` identifies base-admitted writes; each one's changes are separately
+filtered and accounted. Arrival alone does not imply progress; `starved` checks
+a downloaded write never attempted. Every changed replay decision requires an
+atomic rebuild of rows, provenance verdicts and losses; these functions model
+the completed transaction, not recovery by a later pass.
 
-**The four window-only failures are repaired.**
-`RetiredClosureExamples.lean` reuses the original authored history, storage
-times, retirement, and legal receive runs:
+**Spec edit checklist.** The normative files have not been edited.
 
-- `retirement_generation_restored` proves `SnapshotGenerations` for the
-  creation and edit, although the creation still fails `withinWindow`.
-- `retirement_value_accounted` proves `ValueAccounted` for the edit, for any
-  app removal rules whose presence input agrees with the merged generation.
-- `retirement_loss_agrees` proves both edit/delete orders record the edit
-  against the delete, with the creation retained.
-- `receive_runs_agree` proves equality of every merge field in the two
-  original runs; `receive_loss_records_agree` includes the app's removed-row
-  and cell records for any common rule-input function. `triple_generations`
-  checks the three-write history's generation witnesses too.
+- §10: retain the inclusive per-write retirement window and hard post-read
+  refusal. Specify a consumed base drop, per-change dependency losses and
+  atomic recomputation when a non-final retiring entry changes. State that
+  the retirement verdict is final with its deciding entry; no reader rescues it.
+- §3: replace the undecided retirement-dependent-value wording with original
+  change accounting, distinguishing intentionally dropped bases from dependent
+  values kept as losses.
+- §17.1, E13 and D5: replace inherited read exclusion and whole queued-tail
+  loss with the shared data rule; the queue write-up gives the conversion cases.
+- D5/D7 and the loss API: retain authentic generation-source and old-setter
+  identities per row change, preserve original changes across conversion and
+  snapshots, and name dependency losses even for empty deletes. Decide the
+  concrete encoding; the Lean evidence is not an assertion that current bytes
+  already provide it. Keep consumed frontiers separate from applied data.
 
-`generations` derives the retained generation witnesses; retirement no longer
-requires them as a hypothesis. `receive_converges` and
-`receive_value_accounted` apply this result to the receive machine. At a
-snapshot, reset or schema boundary, these general theorems still require:
+**Rust obligations for the queue work.** Thread provider publication times and
+all kept retirements into admission. Capture and validate data provenance at
+authoring; store and snapshot it independently of losses, preserving original
+row identity and column names through conversions. Classify each change with
+the shared rule, record its loss before advancing the consumed position, and
+install replay rebuilds atomically. Never infer a source from a frontier or
+from the current canonical generation setter. Check both retirement receive
+orders, independent changes in the same write, source-change chains, snapshot
+reload, dismissal and finality. Concrete conversion obligations are in
+[queue.md](queue.md).
 
-- valid authored timestamps, pasts and row generations;
-- generation witnesses surviving the snapshot/reset/schema rules *before*
-  applying retirement, and complete recorded pasts in the received set;
-- `safePast`: a received write that passes its own removal-read check has
-  no recorded cause that fails that check;
-- a correct, closed snapshot whose represented inputs agree with the closure;
-- equal effective inputs for convergence, and presence inputs matching the
-  merged row generations for value accounting.
-
-There is no assumed receive-side causal order. For receive without a
-snapshot, reset or schema exclusion, `receive_prefix_correct` proves complete
-pasts and `safePast` from the actual run: the refusal gate prevents consuming
-post-read writes, and causal readiness prevents passing their readers.
-`receive_prefix_converges` and `receive_prefix_value_accounted` therefore need
-no additional generation-witness or safe-past hypothesis. They require only
-`Valid`, exact recorded pasts, the refusal gate, and equal consumed sets
-(for convergence) or matching presence inputs (for accounting).
-`receive_prefix_runs_agree` applies this theorem to the original two runs,
-using each run's own consumed list as its closure input.
-
-The boundary safety condition cannot be inferred from `Valid` alone.
-`refused_witness_still_fails` gives a two-write counterexample: a creation
-made after reading its own removal, and an active edit claiming the creation's
-generation. The edit passes its own check; the creation must remain refused.
-`refused_witness_value_unaccounted` checks the missing edit value if such an
-input set is merged. This is not a successful run through the refusal gate;
-that run cannot consume the creation or its dependent edit. Boundary authoring
-and snapshot validation must not introduce the same invalid dependency.
-
-**When a verdict is permanent.** With fixed admission facts and recorded pasts,
-receiving more writes can change excluded to counting, but never counting to
-excluded (`counts_monotone`, `counting_permanent`). A late write alone is
-excluded and a later received active reader retains it
-(`later_reader_revives`). Thus the retired author's deadline, final retirement,
-or completed log drain alone cannot make a negative verdict permanent.
-
-Changing replay or boundary decisions can remove counting. In
-`dropped_reader_stops_counting`, the same two received writes initially retain
-the late creation. Keeping a retirement of its sole reader makes that reader
-late too; there is no seed and neither counts. The target's own retirement,
-both publication times and both pasts remain unchanged. Two writes suffice;
-`revival_needs_other_write` proves that rescue of an out-of-window write needs
-a distinct received root, so a one-write example cannot exhibit this reversal.
-
-`counts_path` states exactly what must survive for a positive verdict: at
-least one admitted root and a permitted reader path to the target. It need
-not be the same path after every replay. `counts_transfer` proves preservation
-when the relevant admission rules are preserved, including a retired cause
-becoming an ordinary window seed. A fixed policy and immutable retained
-receipts are one sufficient permanent case. For a permanent negative verdict,
-`exclusion_permanent` requires exclusion even in the closure over every
-possible future receipt. `exclusion_barrier` gives an alternative certificate:
-a set with no seed that contains every possible reader of its members.
-Establishing these future bounds from storage discovery and store-log finality
-is outside this package. Entry finality alone is not write-verdict finality.
-
-These functions describe one completed atomic rebuild. A newly admitted reader
-can restore a cause whose position was already passed; that cause must be
-included when rebuilding generations, cells and losses. A changed decision
-cannot be implemented solely by appending new merge steps or by leaving old
-losses until another sync pass. Compact snapshot encoding, retention of the
-bytes and pasts needed for another rebuild, and atomic SQL installation remain
-outside the proof. `counting` is a declarative Boolean view of `Counts`, not
-an executable closure runner.
-
-**Rust implementation obligation.** The inspected receive path calls
-`coven-sync::write_object::authority` with the write's recorded store-log view;
-that function does not take publication times or compute this closure.
-`coven-database::download::accepted` handles schema/reset boundaries, not
-retirement closure. The implementation queue needs admission over the retained
-write set: seeds from the storage-time window, backward reader expansion to
-its least fixed point, hard post-read refusal at every addition, and an atomic
-rebuild when a reader or replay changes the set. Keep original storage facts,
-recorded pasts and excluded inputs needed by that rebuild. Any queue retirement
-or compaction criterion must use the verdict's supporting readers as well as
-the retired author's finality. Rust and its runners are unchanged here. The
-closure differential belongs with the Rust implementation and must cover both
-receipt orders, repeated expansion, refusal, reader removal, restored values
-and equal loss records.
-
-**Rust comparison.** `ReceiveRunner.lean` calls the proved frontier readiness
-function. The ignored `lean_differential_receive` test calls the actual
-`coven-database::download::prerequisite` across three logs, varying the write's
-number, other-device frontiers, and consumed prefixes. Store-log and schema
-gates are satisfied, and actual retained metadata is checked by Rust. This
-compares the hold-until-ready decision, including implicit own-write order;
-it does not claim Rust implements the modeled reset, schema, retirement,
-discovery, or fair scheduling rules. `scripts/check.sh` builds the runner and
-runs this comparison alongside the existing differentials.
+**Rust comparison.** `ReceiveRunner.lean` still calls the proved frontier
+readiness function. `lean_differential_receive` calls the real database
+prerequisite function across three logs and consumed prefixes. The Boolean,
+reset and schema runners retain their existing paths and comparison scope.
+No Rust implementation or differential for the data-loss proposal is added.

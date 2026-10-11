@@ -1,4 +1,5 @@
 import CovenMerge.Model
+import CovenMerge.DataDependency
 import CovenMerge.Lemmas
 import CovenMerge.Step
 import CovenMerge.StepLost
@@ -22,7 +23,6 @@ import CovenMerge.Receive
 import CovenMerge.ReceivePositions
 import CovenMerge.ReceiveMerge
 import CovenMerge.ReceiveExamples
-import CovenMerge.RetiredClosure
-import CovenMerge.RetiredClosureExamples
+import CovenMerge.Retirement
 import CovenMerge.ResetCounterexample
 import CovenMerge.MigrationCounterexample

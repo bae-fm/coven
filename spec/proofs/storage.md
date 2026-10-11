@@ -74,18 +74,18 @@ from retained inputs. Entries instead keep §9's permanent rule against any
 unread entry, kept or dropped; they never revive after a time-based drop.
 These landing checks do not depend on the provider request-duration assumption.
 
-The proposed reader closure is proved separately in
-[the merge receive model](merge.md#b17-receive-order-progress-and-the-retirement-gap).
-It extends this window-only rule: a counting reader can retain a retired write
-outside the window. The recorded-read refusal above remains a hard condition
-at every step; `RetiredClosure.post_read_refused` proves no reader can override
-it. This proposal does not change `ReplacementRead` or `spec/coven.md`.
-Its counting set is deterministic for equal received writes, pasts, storage
-times and kept retirements. A verdict can reverse when its supporting reader
-stops counting, even if the target's own retirement stays kept. Consequently,
-retirement finality and draining the target's log do not alone establish that
-an excluded write can never return. The merge write-up states the proved
-permanence conditions and the Rust implementation obligation.
+The data rule is proved separately in
+[the merge receive model](merge.md#b17-receive-order-progress-and-dropping-by-data).
+An out-of-window write stays dropped. Each otherwise eligible change using
+its generation or replaced cell setter becomes a recorded loss; unrelated
+changes remain eligible. Recorded write frontiers do not decide dependency.
+`retirement_verdict_final` proves window-verdict stability once the deciding
+retirement and preceding entry prefix are final, under the post-read send gate.
+Later readers cannot change it. `send_gate_publication_bound` proves the one-day
+plus five-minute drain bound from finality. Both proofs state their store-log,
+catch-up and provider assumptions explicitly. This proposal changes neither
+`ReplacementRead` nor the normative spec files; the merge write-up lists the
+required wording and Rust obligations.
 
 **Stored bytes are preserved; receipt is conditional.** `stored_object_survives` combines
 create-once storage with receipt: later publications preserve the original
