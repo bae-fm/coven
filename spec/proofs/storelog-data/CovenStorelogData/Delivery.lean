@@ -4,7 +4,8 @@ namespace CovenStorelogData
 
 /-- The restoration test in store_log_sync.rs::apply. Appendix C represents
 a deleted circle by absence, so `none` corresponds to either no circle or a
-deleted tombstone. Both cases fail Rust's `!previous.deleted` test. -/
+deleted tombstone. Both cases fail Rust's requirement that the previous
+circle exist without a deletion cause. -/
 def membershipReload (before after : CovenStorelog.State) (member : Nat) : Bool :=
   after.circles.any fun (circle, current) => member ∈ current.members &&
     (CovenStorelog.lookup before.circles circle).any (fun previous => member ∉ previous.members)

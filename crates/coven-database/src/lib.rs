@@ -114,7 +114,7 @@ pub use store_log::{
     DropReason, EntryOutcome, StoreCircle, StoreDevice, StoreIdentity, StoreLog, StoreLogReplay,
     StoreLogState, StoreMember, StoreVersion,
 };
-pub use store_log_check::{ReplayEntry, StoreLogCheck};
+pub use store_log_check::{CircleRemoval, ReplayEntry, StoreLogCheck};
 pub use store_log_upload::{LocalStoreLog, StoreLogKeyUpload, StoreLogSealing, StoreLogUpload};
 pub use upload::{UploadBytes, UploadParts, UploadReadError, WaitingUpload};
 pub use user_file::{prepare_user_file, PreparedUserFile, UserFile};

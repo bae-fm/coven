@@ -253,7 +253,9 @@ impl StoreLogSync {
                     state
                         .circles
                         .iter()
-                        .filter(|(_, c)| !c.deleted && c.members.contains(&me))
+                        .filter(|(id, c)| {
+                            !state.circle_deletions.contains_key(id) && c.members.contains(&me)
+                        })
                         .map(|(id, c)| Circle {
                             id: *id,
                             name: c.name.clone(),

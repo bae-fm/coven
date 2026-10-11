@@ -24,6 +24,7 @@ use serde_json::{json, Value};
 use crate::{
     effects::tests::{raise, rotation, snapshot},
     replay,
+    replay::circles::tests::circle_history,
     replay::tests::*,
     replay_entry,
 };
@@ -47,8 +48,8 @@ impl Generator {
         }
         // Arbitrary actions use a complete past. Concurrent branches exercise
         // boundaries, renames, deletion and rotations, whose policies agree.
-        // Independent membership changes are compared below; removal tiers and
-        // late admission retain explicit counterexamples.
+        // Independent membership changes and removal tiers are compared below;
+        // late admission retains explicit counterexamples.
         for _ in 0..3 {
             let author = self.pick(5) as u8;
             let change = self.action(&replay(&h.entries).state);
@@ -77,7 +78,7 @@ impl Generator {
             snapshot: snapshot(30, audience),
         };
         let audience = self.audience();
-        match self.pick(12) {
+        match self.pick(19) {
             0 => [rotation(audience.clone(), 100), rotation(audience, 101)],
             1 => [delete(0), rotation(Audience::Circle(circle(0)), 102)],
             2 => [rename(0, "Birthdays"), rotation(audience, 103)],
@@ -93,6 +94,13 @@ impl Generator {
             9 => [delete(0), raise(2, 30, Audience::Circle(circle(0)))],
             10 => [rename(0, "Birthdays"), rename(0, "Presents")],
             11 => [rename(0, "Birthdays"), delete(0)],
+            12 => [delete(0), remove(0)],
+            13 => [leave(0, 1), delete(0)],
+            14 => [leave(0, 0), leave(0, 2)],
+            15 => [join(0, 1), leave(0, 1)],
+            16 => [remove(1), remove(2)],
+            17 => [leave(0, 0), join(0, 1)],
+            18 => [leave(0, 0), leave(0, 0)],
             _ => unreachable!(),
         }
     }
@@ -244,7 +252,7 @@ fn projected(h: &History, replay: &StoreLogReplay) -> Value {
     let circles: Vec<_> = state
         .circles
         .iter()
-        .filter(|(_, c)| !c.deleted)
+        .filter(|(id, _)| !state.circle_deletions.contains_key(id))
         .map(|(id, c)| {
             let mut members: Vec<_> = c.members.iter().map(member_number).collect();
             members.sort();
@@ -252,6 +260,11 @@ fn projected(h: &History, replay: &StoreLogReplay) -> Value {
         })
         .collect();
     let index = |entry| h.entries.iter().position(|e| e.position == entry).unwrap();
+    let circle_causes: Vec<_> = state
+        .circle_deletions
+        .iter()
+        .map(|(circle, entry)| [circle_number(*circle) as usize, index(*entry)])
+        .collect();
     let mut versions = vec![];
     for (a, v) in &state.schema {
         versions.push(json!([
@@ -286,7 +299,7 @@ fn projected(h: &History, replay: &StoreLogReplay) -> Value {
             .then_some(i)
         })
         .collect();
-    json!({"created":state.store.is_some(),"members":members,"access":access,"devices":devices,"circles":circles,"versions":versions,"resets":resets,"kept":kept,"dropped":dropped})
+    json!({"created":state.store.is_some(),"members":members,"access":access,"devices":devices,"circles":circles,"versions":versions,"resets":resets,"kept":kept,"dropped":dropped,"circle_causes":circle_causes})
 }
 
 fn key_number(id: coven_foundation::id_source::KeyId) -> u64 {
@@ -421,20 +434,6 @@ fn lean_differential_generated() {
     }
 }
 
-// CurrentExamples.emptyCircleLog's common prefix, with the Rust fixture's
-// public keys and storage-access spelling. Entry indices match the proof.
-fn circle_history() -> History {
-    let mut h = History::new();
-    h.all(0, 0, add(1, MemberRole::Member));
-    h.all(0, 0, add(2, MemberRole::Member));
-    h.all(0, 0, add(3, MemberRole::Admin));
-    h.all(1, 1, device(1));
-    h.all(0, 0, device(2));
-    h.all(0, 0, make(0, "Gifts"));
-    h.all(0, 0, join(0, 1));
-    h
-}
-
 fn orders(h: &History) -> Vec<Vec<usize>> {
     vec![arrival_order(h, |_| 0), arrival_order(h, |n| n - 1)]
 }
@@ -486,7 +485,10 @@ fn lean_differential_checked_examples() {
     let mut empty = circle_history();
     empty.push(0, 0, &past, leave(0, 1));
     empty.push(0, 2, &past, remove(0));
-    assert!(replay(&empty.entries).state.circles[&circle(0)].deleted);
+    assert!(replay(&empty.entries)
+        .state
+        .circle_deletions
+        .contains_key(&circle(0)));
     histories.push(empty);
 
     let mut last_admins = History::new();
@@ -598,74 +600,58 @@ fn expected(
     .unwrap();
     let access: Vec<_> = access_members.iter().map(|m| json!([m, access])).collect();
     json!({"created":true,"members":members,"access":access,"devices":devices,
-        "circles":circles,"versions":[],"resets":[],"kept":kept,"dropped":dropped})
+        "circles":circles,"versions":[],"resets":[],"kept":kept,"dropped":dropped,"circle_causes":[]})
+}
+
+#[test]
+fn concurrent_addition_refills_a_collectively_emptied_circle() {
+    let mut h = circle_history();
+    let past: Vec<_> = (0..8).collect();
+    h.push(0, 0, &past, leave(0, 1));
+    h.push(0, 2, &past, remove(0));
+    h.push(1, 1, &past, join(0, 2));
+    h.every_order(|r| {
+        assert!(h.drops(r).is_empty());
+        assert_eq!(r.state.circles[&circle(0)].members, [member(2)].into());
+        assert!(!r.state.circle_deletions.contains_key(&circle(0)));
+    });
+}
+
+#[test]
+fn circle_deletion_outranks_an_earlier_shared_member_removal() {
+    let mut h = gifts();
+    h.push(0, 0, &[0, 1, 2, 3, 4], leave(0, 1));
+    h.push(1, 1, &[0, 1, 2, 3, 4], delete(0));
+    h.every_order(|r| {
+        assert!(r.state.circle_deletions.contains_key(&circle(0)));
+        assert_eq!(h.drops(r), [5]);
+        assert_eq!(
+            r.entries[&h.entries[5].position],
+            EntryOutcome::Dropped(DropReason::BeatenBy(h.entries[6].position))
+        );
+    });
 }
 
 #[test]
 #[ignore = "requires COVEN_STORELOG_LEAN, supplied by scripts/check.sh"]
-fn lean_differential_policy_counterexamples() {
-    // CurrentExamples: a concurrent addition repopulates the circle after two
-    // removals empty it. Rust deletes the empty circle before the addition.
+fn lean_differential_circle_replay() {
     let mut refill = circle_history();
     let past: Vec<_> = (0..8).collect();
     refill.push(0, 0, &past, leave(0, 1));
     refill.push(0, 2, &past, remove(0));
     refill.push(1, 1, &past, join(0, 2));
-    counterexample(
-        &refill,
-        &sequential_times(&refill),
-        (0..11).collect(),
-        expected(
-            &[[1, 1], [2, 1], [3, 0]],
-            &[0, 1, 2, 3],
-            &[[1, 1]],
-            json!([]),
-            &(0..10).collect::<Vec<_>>(),
-            &[10],
-        ),
-        expected(
-            &[[1, 1], [2, 1], [3, 0]],
-            &[0, 1, 2, 3],
-            &[[1, 1]],
-            json!([[0, "Gifts", [2]]]),
-            &(0..11).collect::<Vec<_>>(),
-            &[],
-        ),
-    );
-    assert_eq!(
-        replay(&refill.entries).entries[&refill.entries[10].position],
-        EntryOutcome::Dropped(DropReason::TargetGone)
-    );
-
-    // Removing one of two circle members has lower priority than deletion.
     let mut tiers = gifts();
     tiers.push(0, 0, &[0, 1, 2, 3, 4], leave(0, 1));
     tiers.push(1, 1, &[0, 1, 2, 3, 4], delete(0));
-    counterexample(
-        &tiers,
-        &sequential_times(&tiers),
-        (0..7).collect(),
-        expected(
-            &[[0, 0], [1, 1]],
-            &[0, 1],
-            &[[0, 0], [1, 1]],
-            json!([[0, "Gifts", [0]]]),
-            &[0, 1, 2, 3, 4, 5],
-            &[6],
-        ),
-        expected(
-            &[[0, 0], [1, 1]],
-            &[0, 1],
-            &[[0, 0], [1, 1]],
-            json!([]),
-            &[0, 1, 2, 3, 4, 6],
-            &[5],
-        ),
-    );
-    assert_eq!(
-        replay(&tiers.entries).entries[&tiers.entries[6].position],
-        EntryOutcome::Dropped(DropReason::BeatenBy(tiers.entries[5].position))
-    );
+    for h in [refill, tiers]
+        .into_iter()
+        .chain(crate::replay::circles::tests::cause_histories())
+    {
+        let orders = orders(&h);
+        let input = input(&h, &sequential_times(&h), &received_prefixes(&orders));
+        let actual = lean_results(std::slice::from_ref(&input));
+        compare_arrivals(&h, &orders, &actual[0], &input);
+    }
 }
 
 #[test]
@@ -876,7 +862,7 @@ fn projection_rejects_an_unmapped_snapshot_writer() {
     input(&h, &sequential_times(&h), &[vec![0, 1]]);
 }
 
-async fn open(directory: StoreDir) -> coven_database::Database {
+pub(crate) async fn open(directory: StoreDir) -> coven_database::Database {
     DatabaseBuilder::new(directory)
         .synced_tables(vec![])
         .migrations(vec![])
@@ -888,7 +874,7 @@ async fn open(directory: StoreDir) -> coven_database::Database {
 #[tokio::test]
 async fn cached_author_views_survive_reopening_and_a_deletions_reversal() {
     let mut h = gifts();
-    h.push(0, 0, &[0, 1, 2, 3, 4], leave(0, 1));
+    h.push(0, 0, &[0, 1, 2, 3, 4], remove(1));
     h.push(1, 1, &[0, 1, 2, 3, 4], delete(0));
     let temporary = tempfile::tempdir().unwrap();
     let layout = StoreLayout::new(temporary.path().to_owned());
@@ -918,12 +904,12 @@ async fn cached_author_views_survive_reopening_and_a_deletions_reversal() {
             );
         }
         if i == 6 {
-            assert!(log.replay.state.circles[&circle(0)].deleted);
+            assert!(log.replay.state.circle_deletions.contains_key(&circle(0)));
         }
         database.close().await.unwrap();
     }
     assert_eq!(log.replay, replay(&h.entries));
-    assert!(!log.replay.state.circles[&circle(0)].deleted);
+    assert!(!log.replay.state.circle_deletions.contains_key(&circle(0)));
 }
 
 #[tokio::test]
@@ -970,6 +956,12 @@ async fn every_author_view_check_is_durable_and_reused_after_reopening() {
     assert_eq!(log.entries[9].check, StoreLogCheck::NotAllowed);
     assert_eq!(
         log.entries[10].check,
-        StoreLogCheck::DeletedCircles([circle(1)].into())
+        StoreLogCheck::MemberRemoval(
+            [
+                (circle(0), coven_database::CircleRemoval::Member),
+                (circle(1), coven_database::CircleRemoval::Circle)
+            ]
+            .into()
+        )
     );
 }

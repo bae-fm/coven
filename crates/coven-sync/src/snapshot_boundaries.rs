@@ -22,7 +22,7 @@ pub(super) fn entries(log: &StoreLog) -> impl Iterator<Item = (&StoreLogEntry, &
         if crate::effects::already_in_place(&state, &entry.entry) {
             return None;
         }
-        crate::effects::apply_effect(&mut state, &entry.entry);
+        crate::effects::apply_effect(&mut state, &entry.check, &entry.entry);
         match &entry.entry.change {
             StoreChange::RaiseSchema { snapshot, .. } | StoreChange::Reset { snapshot } => {
                 Some((&entry.entry, snapshot))

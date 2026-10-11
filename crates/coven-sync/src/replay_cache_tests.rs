@@ -7,7 +7,7 @@ use std::{hint::black_box, time::Instant};
 #[test]
 fn historical_views_match_uncached_and_full_replay_in_each_arrival_order() {
     let mut h = history::gifts();
-    h.push(0, 0, &[0, 1, 2, 3, 4], history::leave(0, 1));
+    h.push(0, 0, &[0, 1, 2, 3, 4], history::remove(1));
     h.push(1, 1, &[0, 1, 2, 3, 4], history::delete(0));
     let views = [
         vec![],
@@ -40,8 +40,16 @@ fn historical_views_match_uncached_and_full_replay_in_each_arrival_order() {
                 .cloned()
                 .collect::<Vec<_>>(),
         );
-        assert!(cache.at(&deletion).state.circles[&history::circle(0)].deleted);
-        assert!(!cache.at(&log.positions()).state.circles[&history::circle(0)].deleted);
+        assert!(cache
+            .at(&deletion)
+            .state
+            .circle_deletions
+            .contains_key(&history::circle(0)));
+        assert!(!cache
+            .at(&log.positions())
+            .state
+            .circle_deletions
+            .contains_key(&history::circle(0)));
     }
 }
 

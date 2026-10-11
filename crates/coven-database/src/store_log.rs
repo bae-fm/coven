@@ -75,6 +75,9 @@ pub struct StoreLogState {
     pub devices: BTreeMap<DeviceId, StoreDevice>,
     /// Every circle made by a kept entry, including deleted circles.
     pub circles: BTreeMap<CircleId, StoreCircle>,
+    /// Deleted-circle causes selected after replay, including circles whose
+    /// creation dropped. Every cause is a kept entry; absence means no deletion.
+    pub circle_deletions: BTreeMap<CircleId, EntryId>,
     /// The selected schema raise per audience; creation itself carries no raise.
     pub schema: BTreeMap<Audience, StoreVersion>,
     /// The last kept reset of each audience (§19.3).
@@ -124,8 +127,6 @@ pub struct StoreCircle {
     pub name: String,
     /// The current key selected in replay order (§11).
     pub key: KeyId,
-    /// Whether a kept deletion or removal deleted the circle.
-    pub deleted: bool,
     /// Current members; empty after deletion.
     pub members: BTreeSet<MemberId>,
 }

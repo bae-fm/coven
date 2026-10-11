@@ -595,7 +595,8 @@ async fn deleted_circle_takes_out_late_downloads_and_deletion_rolls_back_on_trig
     );
     assert_eq!(count(&source, "notes"), 1);
     assert_eq!(count(&source, "children"), 1);
-    assert!(!source.store_log().await.unwrap().replay.state.circles[&circle].deleted);
+    let state = source.store_log().await.unwrap().replay.state;
+    assert!(!state.circle_deletions.contains_key(&circle));
     assert_eq!(count(&source, "_coven_lost"), 0);
     source.inspect_writer(|sql| sql.batch("DROP TRIGGER refuse").unwrap());
     crate::store_log::tests::delete_circle(&source, circle)

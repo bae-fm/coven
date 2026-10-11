@@ -100,6 +100,7 @@ async fn only_the_spec_tables_are_created() {
                 "_coven_cache",
                 "_coven_cache_budgets",
                 "_coven_cells",
+                "_coven_circle_deletions",
                 "_coven_circle_members",
                 "_coven_circles",
                 "_coven_claims",

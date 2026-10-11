@@ -371,9 +371,10 @@ an explicit injectivity hypothesis, not a proof of SHA-256 security.
   proves encryption.
 - Correspondence between these Lean functions and Rust is not proved.
   `scripts/check.sh` builds `storelogRunner` and runs Rust's generated
-  differential test against `CurrentReplay.resolve`, comparing state, kept entries,
-  and dropped entries. State includes the current access of active and removed
-  members; generated histories include access updates and repeated access values.
+  differential test against `CurrentReplay.resolve` and `circleCause`, comparing
+  state, kept entries, dropped entries and deleted-circle causes. State includes
+  the current access of active and removed members; generated histories include
+  access updates and repeated access values.
   Arbitrary generated actions read the complete past; concurrent branches cover
   circle renames, deletion, rotations, and resets against version raises in
   both timestamp orders, for the store and circles. The comparison includes each
@@ -381,8 +382,9 @@ an explicit injectivity hypothesis, not a proof of SHA-256 security.
   different versions of one audience,
   equal versions of different audiences, and circle deletions against raises.
 - Rust retains each applied entry's author-view check, observed device owner,
-  and derived circle deletions with its immutable bytes. The recorded past is
-  closed before application and never changes, so reusing these facts is the
+  and each removal's affected circles and sole-member classification with its
+  immutable bytes. The recorded past is closed before application and never
+  changes, so reusing these facts is the
   same check as rebuilding that view. The complete received set still settles
   with fresh dropped marks on every arrival; a previous result is reused as
   the new entry's author view only when that entry has read the entire set.
@@ -409,13 +411,13 @@ an explicit injectivity hypothesis, not a proof of SHA-256 security.
   removals. Duration units are days; generated landings include ties and
   remain within the 30-day window. Separate cases exercise exactly 30 days,
   31 days, and witnesses outside the received set.
-- Rust uses C11's contradiction predicate. The combined removal tier, eager
-  empty-circle deletion, and missing storage-time admission still differ.
-  The suite asserts exact counterexamples for an emptied circle's concurrent
-  addition, circle-removal versus deletion priority, and an unread late-drop witness.
-  These compare complete expected states and fates on both sides; a passing check does not claim
-  agreement on those policies. Replacing Rust's policy requires changing those
-  counterexamples into agreement assertions.
+- Rust uses C11's contradiction predicate, five priority tiers and finishing of
+  collectively empty circles. Agreement cases cover concurrent refilling, tier
+  boundaries, latest kept removal causes (including unchanged removals), dropped
+  deletion restoration, and a kept deletion whose circle creation dropped.
+  Missing storage-time admission retains exact counterexamples for unread
+  late-drop witnesses. Those compare complete expected states and fates on both
+  sides; a passing check does not claim agreement on storage-time admission.
 - Drop reasons, retained device names and public keys, cryptographic bytes,
   and codecs have separate Rust assertions. The model compares active
   membership, retained access, audience boundaries and entry fates. Replacement

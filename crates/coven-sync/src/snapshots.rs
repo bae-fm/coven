@@ -639,7 +639,7 @@ pub(super) fn audiences_for_member(
         audiences.insert(Audience::Store, store.key);
     }
     for (id, circle) in &state.circles {
-        if !circle.deleted && circle.members.contains(member) {
+        if !state.circle_deletions.contains_key(id) && circle.members.contains(member) {
             audiences.insert(Audience::Circle(*id), circle.key);
         }
     }

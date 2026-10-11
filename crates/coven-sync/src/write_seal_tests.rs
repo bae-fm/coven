@@ -217,7 +217,15 @@ async fn a_circle_restored_and_rejoined_after_deletion_reloads_previously_skippe
     }
     assert!(ben.db.test_queued_writes().await.unwrap().is_empty());
     ana.sync.sync_store_log().await.unwrap();
-    assert!(ana.db.store_log().await.unwrap().replay.state.circles[&circle].deleted);
+    assert!(ana
+        .db
+        .store_log()
+        .await
+        .unwrap()
+        .replay
+        .state
+        .circle_deletions
+        .contains_key(&circle));
 
     // Ana's tablet still has the common prefix. Its earlier store removal
     // defeats Ben's deletion. The two membership removals both survive.
@@ -243,7 +251,7 @@ async fn a_circle_restored_and_rejoined_after_deletion_reloads_previously_skippe
         device.sync.sync_store_log().await.unwrap();
         device.writes.download_writes().await.unwrap();
         let log = device.db.store_log().await.unwrap();
-        assert!(!log.replay.state.circles[&circle].deleted);
+        assert!(!log.replay.state.circle_deletions.contains_key(&circle));
         assert!(log.replay.state.circles[&circle]
             .members
             .contains(&identity(3).member_id()));
@@ -296,7 +304,11 @@ async fn new_uploads_wait_for_a_current_members_replacement_circle_key() {
         .await;
     devices[1].custody.persist(&ring).unwrap();
     let log = devices[1].db.store_log().await.unwrap();
-    assert!(!log.replay.state.circles[&CircleId(Uuid::from_u128(10))].deleted);
+    assert!(!log
+        .replay
+        .state
+        .circle_deletions
+        .contains_key(&CircleId(Uuid::from_u128(10))));
     sql(&devices[1].db,"INSERT INTO pins VALUES('00000000-0000-4000-8000-000000000001','00000000-0000-0000-0000-00000000000a','new')").await;
     assert!(
         matches!(devices[1].writes.upload_writes().await, Err(SyncError::KeyUnavailable(key)) if key == KeyId(Uuid::from_u128(11)))

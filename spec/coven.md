@@ -1096,8 +1096,9 @@ Two mechanisms order writes:
   removes its entry row atomically (§9, §18). Occupancy of this writer's path
   requires §10's byte comparison, not an assumption that another writer won.
 - The store log's effects that the database applies are kept with it:
-  - `_coven_circles.deleted` records whether each circle is deleted; local
-    writes, downloaded writes and row recomputation all read that same fact
+  - `_coven_circle_deletions` records each deleted circle's responsible kept
+    entry; local writes, downloaded writes and row recomputation all read
+    deletion from that same table
     ([§9](#9-members-and-roles), [§14.7](#147-deleting-a-circle));
   - `_coven_boundaries`, keyed by the boundary's store-log entry, keeps its
     audience, kind (raise or reset), snapshot schema version, snapshot id,
@@ -1806,8 +1807,9 @@ Carol's tablet:
     added, their public keys and role, and whether they were removed),
     `_coven_devices` (every device a kept entry added, its member and name,
     and whether it is active, removed or replaced),
-    `_coven_circles` (every circle a kept entry made, its name and whether
-    it was deleted), and `_coven_circle_members`.
+    `_coven_circles` (every circle a kept entry made and its name),
+    `_coven_circle_members`, and `_coven_circle_deletions` (each deleted
+    circle's responsible kept entry, including when its creation dropped).
     The store's id and name come from its create-store entry; directory
     settings supply them while creation or bootstrap is incomplete and must
     match that entry when it is read. There is no duplicate store table.

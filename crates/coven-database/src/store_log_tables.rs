@@ -56,11 +56,9 @@ pub(crate) fn deleted_circles(
     database: &DatabaseConnection,
 ) -> Result<BTreeSet<CircleId>, DbError> {
     Ok(database
-        .query(
-            "SELECT circle FROM _coven_circles WHERE deleted=1",
-            [],
-            |row| circle(row.get(0)?),
-        )?
+        .query("SELECT circle FROM _coven_circle_deletions", [], |row| {
+            circle(row.get(0)?)
+        })?
         .into_iter()
         .collect())
 }
@@ -128,21 +126,16 @@ pub(crate) fn read(database: &DatabaseConnection) -> Result<StoreLog, DbError> {
         .into_iter()
         .collect();
     state.circles = database
-        .query(
-            "SELECT circle,name,key,deleted FROM _coven_circles",
-            [],
-            |row| {
-                Ok((
-                    circle(row.get(0)?)?,
-                    StoreCircle {
-                        name: row.get(1)?,
-                        key: KeyId(uuid::Uuid::from_bytes(row.get(2)?)),
-                        deleted: row.get(3)?,
-                        members: BTreeSet::new(),
-                    },
-                ))
-            },
-        )?
+        .query("SELECT circle,name,key FROM _coven_circles", [], |row| {
+            Ok((
+                circle(row.get(0)?)?,
+                StoreCircle {
+                    name: row.get(1)?,
+                    key: KeyId(uuid::Uuid::from_bytes(row.get(2)?)),
+                    members: BTreeSet::new(),
+                },
+            ))
+        })?
         .into_iter()
         .collect();
     for (circle, member) in database.query(
@@ -157,6 +150,14 @@ pub(crate) fn read(database: &DatabaseConnection) -> Result<StoreLog, DbError> {
             .members
             .insert(member);
     }
+    state.circle_deletions = database
+        .query(
+            "SELECT circle,entry_device,entry_number FROM _coven_circle_deletions",
+            [],
+            |row| Ok((circle(row.get(0)?)?, entry_id(row, 1)?)),
+        )?
+        .into_iter()
+        .collect();
     state.store = database
         .query("SELECT id,name,key FROM _coven_store", [], |row| {
             let text: String = row.get(0)?;
@@ -253,6 +254,7 @@ pub(crate) fn replace(
         )?;
     }
     for table in [
+        "_coven_circle_deletions",
         "_coven_circle_members",
         "_coven_devices",
         "_coven_circles",
@@ -293,12 +295,11 @@ pub(crate) fn replace(
     }
     for (id, circle) in &state.circles {
         database.internal_execute(
-            "INSERT INTO _coven_circles(circle,name,key,deleted) VALUES(?1,?2,?3,?4)",
+            "INSERT INTO _coven_circles(circle,name,key) VALUES(?1,?2,?3)",
             params![
                 id.to_string(),
                 circle.name,
-                circle.key.0.as_bytes().as_slice(),
-                circle.deleted
+                circle.key.0.as_bytes().as_slice()
             ],
         )?;
         for member in &circle.members {
@@ -307,6 +308,12 @@ pub(crate) fn replace(
                 (id.to_string(), member.to_bytes().as_slice()),
             )?;
         }
+    }
+    for (circle, entry) in &state.circle_deletions {
+        database.internal_execute(
+            "INSERT INTO _coven_circle_deletions(circle,entry_device,entry_number) VALUES(?1,?2,?3)",
+            (circle.to_string(), entry.device.0.to_be_bytes().as_slice(), entry.number.to_be_bytes().as_slice()),
+        )?;
     }
     if let Some(store) = &state.store {
         database.internal_execute(

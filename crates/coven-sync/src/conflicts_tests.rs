@@ -201,7 +201,7 @@ fn deleting_a_circle_defeats_its_concurrent_raise() {
                 h.push(author, device, &[0, 1, 2, 3], change);
             }
             h.every_order(|r| {
-                assert!(r.state.circles[&circle(0)].deleted);
+                assert!(r.state.circle_deletions.contains_key(&circle(0)));
                 assert!(!r.state.schema.contains_key(&audience));
                 assert_eq!(h.drops(r), [if deletion_first { 5 } else { 4 }]);
             });
@@ -468,6 +468,52 @@ fn removing_a_member_contradicts_only_changes_requiring_that_member() {
         let vb = crate::effects::check(&view, b);
         for (a, va, b, vb) in [(a, &va, b, &vb), (b, &vb, a, &va)] {
             assert_eq!(super::conflict(a, va, b, vb), contradicts, "{:?}", b.change);
+        }
+    }
+}
+
+#[test]
+fn every_priority_boundary_uses_the_author_view_before_the_timestamp() {
+    use coven_database::{CircleRemoval, StoreLogCheck};
+    let shared = StoreLogCheck::MemberRemoval([(circle(0), CircleRemoval::Member)].into());
+    let sole = StoreLogCheck::MemberRemoval([(circle(0), CircleRemoval::Circle)].into());
+    let allowed = StoreLogCheck::Allowed;
+    let cases = [
+        (remove(1), shared.clone(), 0),
+        (
+            StoreChange::RemoveDevice {
+                device: coven_foundation::id_source::DeviceId(1),
+            },
+            StoreLogCheck::DeviceOwner(member(1)),
+            0,
+        ),
+        (delete(0), allowed.clone(), 1),
+        (leave(0, 0), sole, 1),
+        (leave(0, 1), shared, 2),
+        (join(0, 2), allowed.clone(), 3),
+        (
+            add(3, coven_format::store_log::MemberRole::Member),
+            allowed.clone(),
+            3,
+        ),
+        (
+            role(1, coven_format::store_log::MemberRole::Member),
+            allowed.clone(),
+            3,
+        ),
+        (add(3, Admin), allowed.clone(), 4),
+        (role(1, Admin), allowed, 4),
+    ];
+    for (a, va, ta) in &cases {
+        for (b, vb, tb) in &cases {
+            let mut h = gifts();
+            h.push(0, 20, &[0, 1, 2, 3, 4], a.clone());
+            h.push(0, 21, &[0, 1, 2, 3, 4], b.clone());
+            assert_eq!(
+                super::before(&h.entries[5], va, &h.entries[6], vb),
+                ta <= tb
+            );
+            assert_eq!(super::before(&h.entries[6], vb, &h.entries[5], va), tb < ta);
         }
     }
 }

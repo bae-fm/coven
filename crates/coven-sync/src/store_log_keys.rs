@@ -44,12 +44,12 @@ pub(crate) fn recipients<'a>(
             let included = !member.removed
                 && match audience {
                     Audience::Store => true,
-                    Audience::Circle(circle) => log
-                        .replay
-                        .state
-                        .circles
-                        .get(circle)
-                        .is_some_and(|circle| !circle.deleted && circle.members.contains(id)),
+                    Audience::Circle(circle) => {
+                        log.replay.state.circles.get(circle).is_some_and(|state| {
+                            !log.replay.state.circle_deletions.contains_key(circle)
+                                && state.members.contains(id)
+                        })
+                    }
                 };
             included.then_some((id, &member.sealing))
         })

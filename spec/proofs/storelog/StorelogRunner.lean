@@ -4,9 +4,9 @@ import Lean
 
 /-! JSON adapter for the Rust differential test. Histories are numbered in
 timestamp order; past lists contain all observed entry indices. The adapter
-checks causal histories and received subsets, then calls `CurrentReplay.resolveReceived`,
-proved equal to mapping `resolve` over those subsets of the complete storage history.
-No replay or admission rule is reimplemented. -/
+checks causal histories and received subsets, then calls the shared replay,
+finishing and deletion-cause functions used by `CurrentReplay.resolve` and
+`CurrentReplay.circleCause`. No replay or admission rule is reimplemented. -/
 
 open Lean CovenStorelog
 
@@ -72,7 +72,7 @@ private def sorted (xs : List Nat) : List Nat := xs.mergeSort (fun a b => decide
 private def byKey {α : Type} (xs : List (Nat × α)) : List (Nat × α) :=
   xs.mergeSort (fun a b => decide (a.1 ≤ b.1))
 
-private def project (r : Result) : Json := Id.run do
+private def project (r : Result) (causes : List (List Nat)) : Json := Id.run do
   let members := (byKey r.state.members).map fun (m, role) => toJson [m, roleNumber role]
   let access := (byKey r.state.access).map fun (m, a) => Json.arr #[toJson m, toJson a]
   let devices := (byKey r.state.devices).map fun (d, m) => toJson [d, m]
@@ -86,7 +86,8 @@ private def project (r : Result) : Json := Id.run do
     ("created", toJson r.state.created), ("members", toJson members), ("access", toJson access),
     ("devices", toJson devices), ("circles", toJson circles),
     ("versions", toJson versions), ("resets", toJson resets),
-    ("kept", toJson (sorted r.kept)), ("dropped", toJson (sorted r.dropped))])
+    ("kept", toJson (sorted r.kept)), ("dropped", toJson (sorted r.dropped)),
+    ("circle_causes", toJson causes)])
 
 private def run (j : Json) : Except String Json := do
   let raw ← j.getObjValAs? (Array Json) "entries"
@@ -116,7 +117,15 @@ private def run (j : Json) : Except String Json := do
     if subset.any (· ≥ entries.size) then throw "received entry outside history"
     for e in subset do
       if !(H.log e).past.all (· ∈ subset) then throw "received subset is not causally closed"
-  pure (toJson ((CurrentReplay.resolveReceived H window entries.size received).map project))
+  let circles := sorted ((entries.toList.filterMap fun e => match e.action with
+    | .makeCircle c _ _ => some c
+    | _ => none).eraseDups)
+  pure (toJson (received.map fun subset =>
+    let r := ReplayPolicy.replay H.membership window entries.size entries.size
+      (entrySet subset) views
+    let causes := circles.filterMap fun c =>
+      (CurrentReplay.deletionCause H.log views r c).map fun e => [c, e]
+    project (CurrentReplay.finish r) causes))
 
 def main : IO UInt32 := do
   let stdin ← IO.getStdin

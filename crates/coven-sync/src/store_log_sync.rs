@@ -417,10 +417,11 @@ impl StoreLogSync {
         // Restored membership must reload those skipped parts before continuing
         // from that frontier. Record the reload with the membership replay.
         for (circle, current) in &after.circles {
-            if !current.deleted
+            if !after.circle_deletions.contains_key(circle)
                 && current.members.contains(&member.member_id())
                 && before.circles.get(circle).is_some_and(|previous| {
-                    !previous.deleted && !previous.members.contains(&member.member_id())
+                    !before.circle_deletions.contains_key(circle)
+                        && !previous.members.contains(&member.member_id())
                 })
             {
                 changed.insert(Audience::Circle(*circle));

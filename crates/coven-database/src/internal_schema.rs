@@ -104,8 +104,15 @@ macro_rules! coven_tables {
             CREATE TABLE _coven_circles (
                 circle TEXT PRIMARY KEY NOT NULL,
                 name TEXT NOT NULL,
-                key BLOB NOT NULL CHECK(length(key)=16),
-                deleted INTEGER NOT NULL CHECK(deleted IN (0,1))
+                key BLOB NOT NULL CHECK(length(key)=16)
+            ) STRICT, WITHOUT ROWID;
+        ");
+        $visit!(_coven_circle_deletions, "
+            CREATE TABLE _coven_circle_deletions (
+                circle TEXT PRIMARY KEY NOT NULL,
+                entry_device BLOB NOT NULL CHECK(length(entry_device)=8),
+                entry_number BLOB NOT NULL CHECK(length(entry_number)=8 AND entry_number>x'0000000000000000'),
+                FOREIGN KEY(entry_device,entry_number) REFERENCES _coven_store_log(device,number)
             ) STRICT, WITHOUT ROWID;
         ");
         $visit!(_coven_circle_members, "

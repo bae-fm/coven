@@ -39,7 +39,7 @@ fn entry(number: u64, change: StoreChange) -> StoreLogEntry {
 fn checked(entry: StoreLogEntry) -> ReplayEntry {
     let check = match &entry.change {
         StoreChange::RemoveMember { .. } | StoreChange::RemoveCircleMember { .. } => {
-            StoreLogCheck::DeletedCircles(BTreeSet::new())
+            StoreLogCheck::MemberRemoval(BTreeMap::new())
         }
         _ => StoreLogCheck::Allowed,
     };
@@ -129,7 +129,6 @@ fn circle_history(circle: CircleId) -> Vec<(StoreLogEntry, StoreLogReplay)> {
         StoreCircle {
             name: "Gifts".into(),
             key: key(2),
-            deleted: false,
             members: [ana.signing.clone()].into(),
         },
     );
@@ -157,8 +156,11 @@ fn circle_history(circle: CircleId) -> Vec<(StoreLogEntry, StoreLogReplay)> {
     delete.timestamp = Timestamp::new(6, 0, delete.position.device).unwrap();
     delete.had_read = EntryPositions(vec![history[3].0.position]);
     let gifts = replay.state.circles.get_mut(&circle).unwrap();
-    gifts.deleted = true;
     gifts.members.clear();
+    replay
+        .state
+        .circle_deletions
+        .insert(circle, delete.position);
     replay.entries.insert(delete.position, EntryOutcome::Kept);
     history.push((delete, replay));
     history
@@ -248,7 +250,14 @@ async fn deletion_and_reversal_commit_marks_and_visible_rows_together() {
     assert_eq!(db.store_log().await.unwrap(), before);
     assert_eq!(count(&db, "notes"), 1);
     assert_eq!(count(&db, "children"), 1);
-    assert!(!db.store_log().await.unwrap().replay.state.circles[&circle].deleted);
+    assert!(!db
+        .store_log()
+        .await
+        .unwrap()
+        .replay
+        .state
+        .circle_deletions
+        .contains_key(&circle));
     assert!(!rows.is_marked_for_rerun());
     assert!(!losses.is_marked_for_rerun());
     db.inspect_writer(|sql| sql.batch("DROP TRIGGER refuse").unwrap());
@@ -258,19 +267,31 @@ async fn deletion_and_reversal_commit_marks_and_visible_rows_together() {
     assert_eq!(next(&mut rows).await, (0, 0));
     assert_eq!(next(&mut losses).await.len(), 2);
     assert_eq!(db.store_log().await.unwrap().replay, deleted);
-    assert!(db.store_log().await.unwrap().replay.state.circles[&circle].deleted);
+    assert!(db
+        .store_log()
+        .await
+        .unwrap()
+        .replay
+        .state
+        .circle_deletions
+        .contains_key(&circle));
 
     // §9: Ana's earlier concurrent removal of Ben beats Ben's deletion.
     let remove = entry(
         5,
-        StoreChange::RemoveCircleMember {
-            circle,
+        StoreChange::RemoveMember {
             member: keys(2).signing,
         },
     );
     let mut restored = history[3].1.clone();
     let gifts = restored.state.circles.get_mut(&circle).unwrap();
     gifts.members = [keys(1).signing].into();
+    restored
+        .state
+        .members
+        .get_mut(&keys(2).signing)
+        .unwrap()
+        .removed = true;
     restored.entries.insert(remove.position, EntryOutcome::Kept);
     restored.entries.insert(
         delete.position,
@@ -284,7 +305,14 @@ async fn deletion_and_reversal_commit_marks_and_visible_rows_together() {
         Err(DbError::Sqlite(_))
     ));
     assert_eq!(db.store_log().await.unwrap(), before);
-    assert!(db.store_log().await.unwrap().replay.state.circles[&circle].deleted);
+    assert!(db
+        .store_log()
+        .await
+        .unwrap()
+        .replay
+        .state
+        .circle_deletions
+        .contains_key(&circle));
     assert_eq!(count(&db, "notes"), 0);
     assert!(!rows.is_marked_for_rerun());
     db.inspect_writer(|sql| sql.batch("DROP TRIGGER refuse").unwrap());
@@ -293,7 +321,14 @@ async fn deletion_and_reversal_commit_marks_and_visible_rows_together() {
         .unwrap();
     assert_eq!(next(&mut rows).await, (1, 1));
     assert!(next(&mut losses).await.is_empty());
-    assert!(!db.store_log().await.unwrap().replay.state.circles[&circle].deleted);
+    assert!(!db
+        .store_log()
+        .await
+        .unwrap()
+        .replay
+        .state
+        .circle_deletions
+        .contains_key(&circle));
     assert_eq!(records(&db).len(), 1, "recomputation creates no app write");
     let committed = db.store_log().await.unwrap();
     assert_eq!(committed.replay, restored);
@@ -619,7 +654,6 @@ async fn audience_versions_round_trip_and_a_failed_raise_keeps_every_audience() 
         StoreCircle {
             name: "Notes".into(),
             key: key(3),
-            deleted: false,
             members: [keys(1).signing].into(),
         },
     );

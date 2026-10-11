@@ -136,7 +136,7 @@ proofs() {
     for test in \
         tests::lean_differential_generated \
         tests::lean_differential_checked_examples \
-        tests::lean_differential_policy_counterexamples \
+        tests::lean_differential_circle_replay \
         tests::lean_differential_storage_admission \
         tests::lean_differential_rejects_invalid_inputs; do
         if ! printf '%s\n' "$storelog_tests" | grep -qxF "$test: test"; then

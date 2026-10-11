@@ -2,8 +2,8 @@
 
 use coven_crypto::MemberId;
 use coven_database::{
-    DropReason, StoreCircle, StoreDevice, StoreIdentity, StoreLogCheck, StoreLogState, StoreMember,
-    StoreVersion,
+    CircleRemoval, DropReason, StoreCircle, StoreDevice, StoreIdentity, StoreLogCheck,
+    StoreLogState, StoreMember, StoreVersion,
 };
 use coven_format::store_log::{MemberRole, StoreChange, StoreLogEntry};
 use coven_foundation::id_source::{CircleId, DeviceId};
@@ -18,7 +18,10 @@ pub(crate) fn device(state: &StoreLogState, id: DeviceId) -> Option<&StoreDevice
 }
 
 pub(crate) fn circle(state: &StoreLogState, id: CircleId) -> Option<&StoreCircle> {
-    state.circles.get(&id).filter(|circle| !circle.deleted)
+    state
+        .circles
+        .get(&id)
+        .filter(|_| !state.circle_deletions.contains_key(&id))
 }
 
 fn admin(state: &StoreLogState, id: &MemberId) -> bool {
@@ -79,13 +82,19 @@ pub(crate) fn check(view: &StoreLogState, entry: &StoreLogEntry) -> StoreLogChec
                         _ => true,
                     };
                     (targets
-                        && !circle.deleted
-                        && circle.members.len() == 1
+                        && !view.circle_deletions.contains_key(id)
                         && circle.members.contains(member))
-                    .then_some(*id)
+                    .then_some((
+                        *id,
+                        if circle.members.len() == 1 {
+                            CircleRemoval::Circle
+                        } else {
+                            CircleRemoval::Member
+                        },
+                    ))
                 })
                 .collect();
-            StoreLogCheck::DeletedCircles(circles)
+            StoreLogCheck::MemberRemoval(circles)
         }
         _ => StoreLogCheck::Allowed,
     }
@@ -197,7 +206,7 @@ pub(crate) fn check_effect(
 }
 
 /// Apply an effect only after its targets, remaining admin and conflicts pass.
-pub(crate) fn apply_effect(next: &mut StoreLogState, entry: &StoreLogEntry) {
+pub(crate) fn apply_effect(next: &mut StoreLogState, view: &StoreLogCheck, entry: &StoreLogEntry) {
     use StoreChange::*;
     match &entry.change {
         RotateKey { audience, key, .. } => match audience {
@@ -260,9 +269,14 @@ pub(crate) fn apply_effect(next: &mut StoreLogState, entry: &StoreLogEntry) {
             for device in next.devices.values_mut().filter(|d| d.member == *id) {
                 device.removed = true;
             }
-            for circle in next.circles.values_mut().filter(|c| !c.deleted) {
-                circle.members.remove(id);
-                circle.deleted = circle.members.is_empty();
+            for (circle_id, circle) in &mut next.circles {
+                if !next.circle_deletions.contains_key(circle_id) {
+                    circle.members.remove(id);
+                    if view.deletes_circle(*circle_id) {
+                        circle.members.clear();
+                        next.circle_deletions.insert(*circle_id, entry.position);
+                    }
+                }
             }
         }
         SetAccess { access } => {
@@ -295,12 +309,12 @@ pub(crate) fn apply_effect(next: &mut StoreLogState, entry: &StoreLogEntry) {
             key,
             ..
         } => {
+            next.circle_deletions.remove(id);
             next.circles.insert(
                 *id,
                 StoreCircle {
                     name: name.clone(),
                     key: *key,
-                    deleted: false,
                     members: [entry.author.clone()].into(),
                 },
             );
@@ -310,7 +324,7 @@ pub(crate) fn apply_effect(next: &mut StoreLogState, entry: &StoreLogEntry) {
         }
         DeleteCircle { circle: id } => {
             let circle = next.circles.get_mut(id).expect("checked circle");
-            circle.deleted = true;
+            next.circle_deletions.insert(*id, entry.position);
             circle.members.clear();
         }
         AddCircleMember {
@@ -329,7 +343,10 @@ pub(crate) fn apply_effect(next: &mut StoreLogState, entry: &StoreLogEntry) {
         } => {
             let circle = next.circles.get_mut(id).expect("checked circle");
             circle.members.remove(who);
-            circle.deleted = circle.members.is_empty();
+            if view.deletes_circle(*id) {
+                circle.members.clear();
+                next.circle_deletions.insert(*id, entry.position);
+            }
         }
         RaiseSchema { version, snapshot } => {
             next.schema.insert(

@@ -1,6 +1,6 @@
 //! The immutable facts a replay needs from an entry's recorded past (§9).
 
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 
 use coven_crypto::MemberId;
 use coven_format::store_log::StoreLogEntry;
@@ -18,6 +18,15 @@ pub struct ReplayEntry {
     pub check: StoreLogCheck,
 }
 
+/// What removing a member does to a circle in the author's recorded past.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CircleRemoval {
+    /// Other members remain in that view.
+    Member,
+    /// The removed member was its only member, so the removal deletes it.
+    Circle,
+}
+
 /// The result of checking an entry against its author's immutable view.
 /// This retains only facts needed during later replays, not the whole past state.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -28,12 +37,21 @@ pub enum StoreLogCheck {
     NotAllowed,
     /// An authorized device removal, with the owner its author observed.
     DeviceOwner(MemberId),
-    /// An authorized store or circle member removal, with the circles it deletes
-    /// in its author's view. The set may be empty.
-    DeletedCircles(BTreeSet<CircleId>),
+    /// An authorized store or circle member removal. Each circle contained the
+    /// removed member in the author's view; the value records whether it deletes
+    /// that circle. The map may be empty.
+    MemberRemoval(BTreeMap<CircleId, CircleRemoval>),
 }
 
 impl StoreLogCheck {
+    /// Whether this removal deletes the circle in its immutable author view.
+    pub fn deletes_circle(&self, circle: CircleId) -> bool {
+        let Self::MemberRemoval(circles) = self else {
+            unreachable!("authorized member removal has its circle classifications")
+        };
+        circles.get(&circle) == Some(&CircleRemoval::Circle)
+    }
+
     // This is a local table encoding, not a downloaded format. The tag determines
     // the payload's shape; invalid or noncanonical bytes fail the database read.
     pub(crate) fn encode(&self) -> Vec<u8> {
@@ -45,10 +63,14 @@ impl StoreLogCheck {
                 bytes.extend(owner.to_bytes());
                 bytes
             }
-            Self::DeletedCircles(circles) => {
+            Self::MemberRemoval(circles) => {
                 let mut bytes = vec![3];
-                for circle in circles {
+                for (circle, removal) in circles {
                     bytes.extend(circle.0.as_bytes());
+                    bytes.push(match removal {
+                        CircleRemoval::Member => 0,
+                        CircleRemoval::Circle => 1,
+                    });
                 }
                 bytes
             }
@@ -63,18 +85,26 @@ impl StoreLogCheck {
                 MemberId::from_bytes(owner.try_into().expect("checked owner length"))
                     .map_err(|_| DbError::DamagedDatabase)?,
             )),
-            [3, circles @ ..] if circles.len().is_multiple_of(16) => {
-                let mut result = BTreeSet::new();
-                for bytes in circles.chunks_exact(16) {
+            [3, circles @ ..] if circles.len().is_multiple_of(17) => {
+                let mut result = BTreeMap::new();
+                for bytes in circles.chunks_exact(17) {
                     let circle = CircleId(uuid::Uuid::from_bytes(
-                        bytes.try_into().expect("exact circle chunk"),
+                        bytes[..16].try_into().expect("exact circle chunk"),
                     ));
-                    if result.last().is_some_and(|previous| *previous >= circle) {
+                    let removal = match bytes[16] {
+                        0 => CircleRemoval::Member,
+                        1 => CircleRemoval::Circle,
+                        _ => return Err(DbError::DamagedDatabase),
+                    };
+                    if result
+                        .last_key_value()
+                        .is_some_and(|(previous, _)| *previous >= circle)
+                    {
                         return Err(DbError::DamagedDatabase);
                     }
-                    result.insert(circle);
+                    result.insert(circle, removal);
                 }
-                Ok(Self::DeletedCircles(result))
+                Ok(Self::MemberRemoval(result))
             }
             _ => Err(DbError::DamagedDatabase),
         }

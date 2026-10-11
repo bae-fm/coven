@@ -58,7 +58,13 @@ async fn deletion_write_and_operation_commit_together_and_wait_for_upload() {
     assert_eq!(count(&b).await, 1);
     let deletion = begin(&mut a, Command::DeleteCircle(circle)).await;
     assert_eq!(count(&a).await, 0);
-    assert!(!a.log().await.replay.state.circles[&circle].deleted);
+    assert!(!a
+        .log()
+        .await
+        .replay
+        .state
+        .circle_deletions
+        .contains_key(&circle));
     assert_eq!(a.db.operations().await.unwrap().len(), 1);
     assert_eq!(a.db.operations().await.unwrap()[0].last_step, 1);
     assert_eq!(a.db.test_queued_writes().await.unwrap().len(), 1);
@@ -70,11 +76,17 @@ async fn deletion_write_and_operation_commit_together_and_wait_for_upload() {
     assert_eq!(count(&b).await, 0);
     finish(&mut a, deletion).await;
     b.sync().await;
-    assert!(b.log().await.replay.state.circles[&circle].deleted);
+    assert!(b
+        .log()
+        .await
+        .replay
+        .state
+        .circle_deletions
+        .contains_key(&circle));
 }
 
 #[tokio::test]
-async fn dropped_circle_deletion_restores_hidden_rows_but_keeps_explicit_deletes() {
+async fn circle_deletion_survives_an_earlier_concurrent_circle_removal() {
     let storage = google();
     let [mut a, mut b, _c] = accounts(storage).await;
     rows(&mut a).await;
@@ -116,14 +128,14 @@ async fn dropped_circle_deletion_restores_hidden_rows_but_keeps_explicit_deletes
     a.sync().await;
     assert!(matches!(
         a.log().await.replay.entries[&delete_entry.position],
-        coven_database::EntryOutcome::Dropped(_)
+        coven_database::EntryOutcome::Kept
     ));
-    assert_eq!(count(&a).await, 1); // the explicit delete of row 1 remains a delete
-    assert_eq!(count(&b).await, 1);
+    assert_eq!(count(&a).await, 0);
+    assert_eq!(count(&b).await, 0);
 }
 
 #[tokio::test]
-async fn restarted_circle_deletion_deletes_rows_that_arrived_during_its_first_attempt() {
+async fn concurrent_circle_removal_does_not_restart_a_deletions_row_write() {
     let storage = google();
     let [mut a, mut b, c] = accounts(storage).await;
     rows(&mut a).await;
@@ -153,26 +165,9 @@ async fn restarted_circle_deletion_deletes_rows_that_arrived_during_its_first_at
     finish(&mut b, removal).await;
     transfer(&b, &a).await;
     assert_eq!(count(&a).await, 1);
-    loop {
-        match step(&mut a, deletion).await.unwrap() {
-            Progress::Waiting(_) => break,
-            Progress::Advanced => (),
-            _ => panic!("restarted deletion must wait for its new row-delete write"),
-        }
-    }
-    assert_eq!(count(&a).await, 0);
-    let mut writes = a.db.test_queued_writes().await.unwrap();
-    assert_eq!(writes.len(), 1);
-    assert!(matches!(
-        b.db.apply_downloaded(writes.remove(0).into())
-            .await
-            .unwrap(),
-        coven_database::ApplyOutcome::Waiting(coven_database::WriteWait::StoreLog(_))
-    ));
-    // The replacement write read the dropped deletion entry as well as the removal.
-    b.sync().await;
-    transfer(&a, &b).await;
     finish(&mut a, deletion).await;
+    assert_eq!(count(&a).await, 0);
+    assert!(a.db.test_queued_writes().await.unwrap().is_empty());
     b.sync().await;
     assert_eq!(count(&b).await, 0);
 }

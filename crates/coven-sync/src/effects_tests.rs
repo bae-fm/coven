@@ -302,7 +302,7 @@ fn concurrent_circle_deletion_does_not_drop_an_authorized_rotation() {
     h.push(1, 1, &past, rotation(Audience::Circle(circle(0)), 20));
     h.every_order(|r| {
         assert!(h.drops(r).is_empty());
-        assert!(r.state.circles[&circle(0)].deleted);
+        assert!(r.state.circle_deletions.contains_key(&circle(0)));
         assert!(r.state.circles[&circle(0)].members.is_empty());
     });
 }

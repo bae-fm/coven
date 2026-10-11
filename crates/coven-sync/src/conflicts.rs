@@ -8,13 +8,18 @@ use coven_merge::Audience;
 
 use crate::replay::had_read;
 
-fn priority(change: &StoreChange) -> u8 {
+fn priority(change: &StoreChange, view: &StoreLogCheck) -> u8 {
     use StoreChange::*;
     match change {
-        RemoveMember { .. }
-        | RemoveDevice { .. }
-        | DeleteCircle { .. }
-        | RemoveCircleMember { .. } => 0,
+        RemoveMember { .. } | RemoveDevice { .. } => 0,
+        DeleteCircle { .. } => 1,
+        RemoveCircleMember { circle, .. } => {
+            if view.deletes_circle(*circle) {
+                1
+            } else {
+                2
+            }
+        }
         AddMember {
             role: MemberRole::Admin,
             ..
@@ -22,13 +27,18 @@ fn priority(change: &StoreChange) -> u8 {
         | ChangeRole {
             role: MemberRole::Admin,
             ..
-        } => 2,
-        _ => 1,
+        } => 4,
+        _ => 3,
     }
 }
 
-pub(crate) fn before(a: &StoreLogEntry, b: &StoreLogEntry) -> bool {
-    (priority(&a.change), a.timestamp) < (priority(&b.change), b.timestamp)
+pub(crate) fn before(
+    a: &StoreLogEntry,
+    va: &StoreLogCheck,
+    b: &StoreLogEntry,
+    vb: &StoreLogCheck,
+) -> bool {
+    (priority(&a.change, va), a.timestamp) < (priority(&b.change, vb), b.timestamp)
 }
 
 fn membership_state(change: &StoreChange) -> Option<&MemberId> {
@@ -182,10 +192,7 @@ fn deletes_circle(view: &StoreLogCheck, change: &StoreChange, circle: CircleId) 
     use StoreChange::*;
     match change {
         DeleteCircle { circle: id } => *id == circle,
-        RemoveMember { .. } | RemoveCircleMember { .. } => match view {
-            StoreLogCheck::DeletedCircles(circles) => circles.contains(&circle),
-            _ => unreachable!("authorized member removal records circle deletions"),
-        },
+        RemoveMember { .. } | RemoveCircleMember { .. } => view.deletes_circle(circle),
         _ => false,
     }
 }

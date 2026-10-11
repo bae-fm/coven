@@ -10,6 +10,9 @@ use coven_foundation::id_source::DeviceId;
 
 use crate::{conflicts, effects};
 
+#[path = "replay_circles.rs"]
+pub(crate) mod circles;
+
 /// Replay the applied, checked entries, independently of their arrival order (§9).
 ///
 /// This is a pure function of the entry set, with no clock, storage or database reads.
@@ -19,9 +22,9 @@ use crate::{conflicts, effects};
 /// is present and causally closed. These are Appendix C's `Valid` assumptions.
 /// Checking downloaded entries and deciding when they are ready precedes this call.
 /// Authority and required targets are checked by this replay; failures produce
-/// dropped marks, not errors or partial state. Circles left empty are derived
-/// from the author's view. None of those facts can be established by decoding
-/// one store-log frame.
+/// dropped marks, not errors or partial state. Circle-deleting removals use the
+/// author's view; collectively empty circles finish after replay. None of those
+/// facts can be established by decoding one store-log frame.
 pub fn replay(entries: &[StoreLogEntry]) -> StoreLogReplay {
     let mut entries: Vec<_> = entries.iter().collect();
     entries.sort_by_key(|entry| entry.timestamp);
@@ -143,16 +146,15 @@ fn settle(
                     conflicts::conflict(entry, &views[index], entries[prior], &views[prior])
                 })
                 .collect();
-            if let Some(&winner) = opponents
-                .iter()
-                .find(|&&prior| !conflicts::before(entry, entries[prior]))
-            {
+            if let Some(&winner) = opponents.iter().find(|&&prior| {
+                !conflicts::before(entry, &views[index], entries[prior], &views[prior])
+            }) {
                 dropped.insert(
                     entry.position,
                     DropReason::BeatenBy(entries[winner].position),
                 );
             } else if opponents.is_empty() {
-                effects::apply_effect(&mut state, entry);
+                effects::apply_effect(&mut state, &views[index], entry);
                 kept.push(index);
                 devices
                     .entry(entry.position.device)
@@ -171,6 +173,7 @@ fn settle(
             }
         }
         if !restart {
+            circles::finish(&mut state, entries, views, &kept);
             let entries = kept
                 .into_iter()
                 .map(|index| (entries[index].position, EntryOutcome::Kept))

@@ -528,7 +528,7 @@ fn circle_deletion_beats_rename_and_reset() {
         h.push(0, 0, &[0, 1, 2, 3, 4], action);
         h.push(1, 1, &[0, 1, 2, 3, 4], delete(0));
         h.every_order(|r| {
-            assert!(r.state.circles[&circle(0)].deleted);
+            assert!(r.state.circle_deletions.contains_key(&circle(0)));
             assert!(r.state.circles[&circle(0)].members.is_empty());
             assert!(r.state.resets.is_empty());
             assert_eq!(h.drops(r), [5]);
@@ -588,7 +588,7 @@ fn ordinary_members_make_circles_and_outside_admins_cannot_manage_them() {
         h.every_order(|r| {
             assert_eq!(r.state.circles[&circle(0)].members, [member(1)].into());
             assert_eq!(r.state.circles[&circle(0)].name, "Gifts");
-            assert!(!r.state.circles[&circle(0)].deleted);
+            assert!(!r.state.circle_deletions.contains_key(&circle(0)));
             assert_eq!(
                 r.entries[&h.entries[4].position],
                 EntryOutcome::Dropped(DropReason::NotAllowed)
@@ -597,7 +597,7 @@ fn ordinary_members_make_circles_and_outside_admins_cannot_manage_them() {
     }
     base.all(1, 1, leave(0, 1));
     base.every_order(|r| {
-        assert!(r.state.circles[&circle(0)].deleted);
+        assert!(r.state.circle_deletions.contains_key(&circle(0)));
         assert!(!r.state.members[&member(1)].removed);
         assert!(base.drops(r).is_empty());
     });
@@ -620,7 +620,7 @@ fn removing_carol_preserves_shared_keys_and_deletes_her_private_circle() {
         assert!(r.state.devices[&DeviceId(2)].removed);
         assert_eq!(r.state.circles[&circle(0)].members, [member(1)].into());
         assert_eq!(r.state.circles[&circle(0)].key, key(10));
-        assert!(r.state.circles[&circle(1)].deleted);
+        assert!(r.state.circle_deletions.contains_key(&circle(1)));
         assert!(h.drops(r).is_empty());
     });
 }
@@ -648,7 +648,7 @@ fn repeated_member_removals_need_no_key_payload() {
     h.all(0, 0, remove(2));
     h.every_order(|r| {
         assert!(h.drops(r).is_empty());
-        assert!(r.state.circles[&circle(1)].deleted);
+        assert!(r.state.circle_deletions.contains_key(&circle(1)));
     });
 }
 
@@ -680,7 +680,7 @@ fn circle_and_store_removals_do_not_conflict_over_a_key() {
     h.push(0, 4, &[0, 1, 2, 3, 4], remove(0));
     h.every_order(|r| {
         assert!(r.state.members[&member(0)].removed);
-        assert!(r.state.circles[&circle(0)].deleted);
+        assert!(r.state.circle_deletions.contains_key(&circle(0)));
         assert_eq!(r.state.circles[&circle(0)].key, key(10));
         assert!(h.drops(r).is_empty());
     });
@@ -693,22 +693,25 @@ fn removing_a_circles_only_member_beats_their_concurrent_rename() {
     h.push(1, 1, &[0, 1, 2, 3], rename(0, "Journal"));
     h.push(0, 0, &[0, 1, 2, 3], remove(1));
     h.every_order(|r| {
-        assert!(r.state.circles[&circle(0)].deleted);
+        assert!(r.state.circle_deletions.contains_key(&circle(0)));
         assert_eq!(h.drops(r), [4]);
     });
 }
 
 #[test]
-fn an_earlier_circle_removal_reverses_a_previously_kept_deletion() {
+fn a_store_removal_reverses_a_previously_kept_deletion() {
     let mut h = gifts();
-    h.push(0, 0, &[0, 1, 2, 3, 4], leave(0, 1));
+    h.push(0, 0, &[0, 1, 2, 3, 4], remove(1));
     h.push(1, 1, &[0, 1, 2, 3, 4], delete(0));
     let mut arrived = h.entries[..5].to_vec();
     arrived.push(h.entries[6].clone());
-    assert!(replay(&arrived).state.circles[&circle(0)].deleted);
+    assert!(replay(&arrived)
+        .state
+        .circle_deletions
+        .contains_key(&circle(0)));
     arrived.push(h.entries[5].clone());
     let expected = h.every_order(|r| {
-        assert!(!r.state.circles[&circle(0)].deleted);
+        assert!(!r.state.circle_deletions.contains_key(&circle(0)));
         assert_eq!(r.state.circles[&circle(0)].members, [member(0)].into());
         assert_eq!(h.drops(r), [6]);
     });
@@ -757,7 +760,7 @@ fn a_new_arrival_reconsiders_entries_dropped_by_the_previous_replay() {
     h.every_order(|r| {
         assert_eq!(h.drops(r), [7]);
         assert_eq!(r.state.resets[&Audience::Circle(circle(0))].number, 50);
-        assert!(!r.state.circles[&circle(0)].deleted);
+        assert!(!r.state.circle_deletions.contains_key(&circle(0)));
         assert_eq!(
             r.entries[&h.entries[7].position],
             EntryOutcome::Dropped(DropReason::BeatenBy(h.entries[6].position))
@@ -937,7 +940,10 @@ async fn replay_cost() {
     assert_eq!(result.state.circles.len(), 13);
     for m in 17..20 {
         assert!(result.state.members[&member(m)].removed);
-        assert!(result.state.circles[&circle(u64::from(m))].deleted);
+        assert!(result
+            .state
+            .circle_deletions
+            .contains_key(&circle(u64::from(m))));
     }
     // Only the renames of private circles deleted by member removals drop.
     assert_eq!(h.drops(&result), [600, 1_200, 1_800]);

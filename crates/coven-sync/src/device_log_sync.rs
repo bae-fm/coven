@@ -408,7 +408,9 @@ impl DeviceLogSync {
             .ok_or(SyncError::KeyUnavailable(store.key))?;
         let mut selected = vec![(Audience::Store, store.key)];
         for (circle, state) in &local.log.replay.state.circles {
-            if state.deleted || !state.members.contains(&member.member_id()) {
+            if local.log.replay.state.circle_deletions.contains_key(circle)
+                || !state.members.contains(&member.member_id())
+            {
                 continue;
             }
             let audience = Audience::Circle(*circle);
