@@ -18,22 +18,38 @@ structure Snapshot where
   writer : Nat
   number : Nat
   storedAt : Nat
+  caughtAt : Nat
   positions : List (Nat × Nat)
   deriving DecidableEq, Repr
 
 def Snapshot.position (s : Snapshot) (writer : Nat) : Nat :=
   ((s.positions.filter (fun p => p.1 == writer)).map Prod.snd).foldl max 0
 
-/-- §15: latest storage time, then smaller path within one audience. -/
-def newer (a b : Snapshot) : Bool :=
-  decide (b.storedAt < a.storedAt ∨ (a.storedAt = b.storedAt ∧
+/-- Prefix positions have one entry per writer in the executable histories. -/
+def Snapshot.writeCount (s : Snapshot) : Nat := (s.positions.map Prod.snd).sum
+
+inductive SnapshotOrder where
+  | writes | catchup | storage
+  deriving DecidableEq, Repr
+
+def Snapshot.rank (order : SnapshotOrder) (s : Snapshot) : Nat :=
+  match order with
+  | .writes => s.writeCount
+  | .catchup => s.caughtAt
+  | .storage => s.storedAt
+
+/-- A smaller path breaks ties for all three proposed orderings. -/
+def newer (order : SnapshotOrder) (a b : Snapshot) : Bool :=
+  decide (b.rank order < a.rank order ∨ (a.rank order = b.rank order ∧
     (a.writer < b.writer ∨ (a.writer = b.writer ∧ a.number < b.number))))
 
-def newest : List Snapshot → Option Snapshot
+def newest (order : SnapshotOrder) : List Snapshot → Option Snapshot
   | [] => none
-  | s :: rest => match newest rest with
+  | s :: rest => match newest order rest with
     | none => some s
-    | some other => some (if newer s other then s else other)
+    | some other => some (if newer order s other then s else other)
+
+def Snapshot.counts (s : Snapshot) : Bool := decide (s.storedAt ≤ s.caughtAt + day)
 
 def advances (s : Snapshot) (localPosition : Nat → Nat) : Bool :=
   s.positions.any fun p => decide (localPosition p.1 < p.2)
@@ -50,126 +66,102 @@ def Dominates (new old : Snapshot) : Prop :=
 abbrev Current := Nat → Option Snapshot
 
 def Covered (current : Current) (w : Write) : Prop :=
-  ∀ a ∈ w.audiences, ∃ s, current a = some s ∧ s.covers w a
+  ∀ a ∈ w.audiences, match current a with
+    | none => False
+    | some snap => snap.covers w a
 
-/-- The capture covers the current snapshot. Checking this at capture/send
-and checking it at publication are different contracts. -/
+instance (current : Current) (w : Write) : Decidable (Covered current w) := by
+  unfold Covered
+  letI (a : Nat) : Decidable (match current a with
+      | none => False | some snap => snap.covers w a) := by
+    cases current a <;> infer_instance
+  infer_instance
+
+/-- Current selection filters late uploads before ranking or loading. -/
+def catalogCurrent (order : SnapshotOrder) (snapshots : List Snapshot) : Current :=
+  fun audience => newest order (snapshots.filter (fun s => s.audience == audience && s.counts))
+
+/-- This is checked at preparation, never atomically at remote publication. -/
 def CanSnapshot (current : Current) (snap : Snapshot) : Prop :=
   ∀ old, current snap.audience = some old → Dominates snap old
 
-def publishCurrent (current : Current) (snap : Snapshot) : Current :=
-  fun a => if a = snap.audience then
-    match current a with
-    | none => some snap
-    | some old => some (if newer snap old then snap else old)
-  else current a
-
-/-- The incremental current map is the listing's storage-time selection. -/
-def catalogCurrent (snapshots : List Snapshot) : Current :=
-  fun audience => newest (snapshots.filter (fun s => s.audience == audience))
-
-theorem current_matches_listing (snapshots : List Snapshot) (snap : Snapshot) :
-    catalogCurrent (snap :: snapshots) = publishCurrent (catalogCurrent snapshots) snap := by
-  funext audience
-  by_cases same : audience = snap.audience
-  · subst audience
-    simp only [catalogCurrent, List.filter_cons, beq_self_eq_true, ↓reduceIte,
-      newest, publishCurrent]
-  · simp [catalogCurrent, publishCurrent, same, Ne.symm same]
-
-/-- Older retained snapshots do not affect this projection. Removing an old
-snapshot leaves the current one; removing the current one is not permitted. -/
-structure Retention where
-  current : Current
-  deleted : List Write
-
-def Retention.Valid (s : Retention) : Prop := ∀ w ∈ s.deleted, Covered s.current w
-
+/-- The existing §15 prerequisites, also used by the recent-reader proofs.
+The additional snapshot age condition is `MatureCoverage`. -/
 def Deletable (current : Current) (active : List Nat)
     (posted : Nat → Nat → Nat) (time : Nat) (final : Prop) (w : Write) : Prop :=
   Covered current w ∧ final ∧
     ((∀ reader ∈ active, w.number ≤ posted reader w.writer) ∨ w.storedAt + month ≤ time)
 
-/-- This relation enforces the coverage rule at publication. The separate
-SnapshotPublication relation checks it at send and allows concurrent requests. -/
-inductive RetainStep : Retention → Retention → Prop
-  | publish (s : Retention) (snap : Snapshot) (covered : CanSnapshot s.current snap) :
-      RetainStep s { s with current := publishCurrent s.current snap }
-  | deleteWrite (s : Retention) (w : Write) (active : List Nat)
-      (posted : Nat → Nat → Nat) (time : Nat) (final : Prop)
-      (eligible : Deletable s.current active posted time final w) :
-      RetainStep s { s with deleted := w :: s.deleted }
-  | discardOld (s : Retention) : RetainStep s s
+/-- “Once a snapshot ... landed” uses historical counting publications.
+Removing or superseding that snapshot does not restart its age. -/
+def MatureCoverage (landed : List Snapshot) (time : Nat) (w : Write) : Prop :=
+  ∀ a ∈ w.audiences, ∃ snap ∈ landed,
+    snap.counts = true ∧ snap.covers w a ∧ snap.storedAt + day < time
 
-def CoverageGrows (before after : Current) : Prop :=
-  ∀ a old, before a = some old → ∃ next, after a = some next ∧ Dominates next old
+def Eligible (order : SnapshotOrder) (landed : List Snapshot) (active : List Nat)
+    (posted : Nat → Nat → Nat) (time : Nat) (final : Prop) (w : Write) : Prop :=
+  Deletable (catalogCurrent order landed) active posted time final w ∧
+    MatureCoverage landed time w
 
-theorem publication_coverage_grows (current : Current) (snap : Snapshot)
-    (covered : CanSnapshot current snap) : CoverageGrows current (publishCurrent current snap) := by
-  intro a old found
-  by_cases same : a = snap.audience
-  · subst a
-    cases chosen : newer snap old
-    · exact ⟨old, by simp [publishCurrent, found, chosen], rfl, fun _ => Nat.le_refl _⟩
-    · exact ⟨snap, by simp [publishCurrent, found, chosen], covered old found⟩
-  · exact ⟨old, by simp [publishCurrent, same, found], rfl, fun _ => Nat.le_refl _⟩
+instance (landed : List Snapshot) (time : Nat) (w : Write) :
+    Decidable (MatureCoverage landed time w) := by
+  unfold MatureCoverage
+  infer_instance
 
-theorem coverage_trans {a b c : Current} (ab : CoverageGrows a b) (bc : CoverageGrows b c) :
-    CoverageGrows a c := by
-  intro audience old found
-  obtain ⟨middle, hm, dm⟩ := ab audience old found
-  obtain ⟨last, hl, dl⟩ := bc audience middle hm
-  exact ⟨last, hl, dl.1.trans dm.1, fun w => Nat.le_trans (dm.2 w) (dl.2 w)⟩
+instance (current : Current) (active : List Nat) (posted : Nat → Nat → Nat)
+    (time : Nat) (final : Prop) [Decidable final] (w : Write) :
+    Decidable (Deletable current active posted time final w) := by
+  unfold Deletable
+  infer_instance
 
-theorem covered_of_grows {a b : Current} (grows : CoverageGrows a b) (w : Write)
-    (covered : Covered a w) : Covered b w := by
-  intro audience ha
-  obtain ⟨old, found, hc⟩ := covered audience ha
-  obtain ⟨next, hn, dominates⟩ := grows audience old found
-  exact ⟨next, hn, dominates.1.trans hc.1, Nat.le_trans hc.2 (dominates.2 _)⟩
+instance (order : SnapshotOrder) (landed : List Snapshot) (active : List Nat)
+    (posted : Nat → Nat → Nat) (time : Nat) (final : Prop) [Decidable final] (w : Write) :
+    Decidable (Eligible order landed active posted time final w) := by
+  unfold Eligible
+  infer_instance
 
-theorem current_never_shrinks {a b : Retention} (step : RetainStep a b) :
-    CoverageGrows a.current b.current := by
-  cases step with
-  | publish snap covered => exact publication_coverage_grows _ snap covered
-  | deleteWrite | discardOld =>
-      exact fun _ old found => ⟨old, found, rfl, fun _ => Nat.le_refl _⟩
+theorem late_snapshot_ignored (order : SnapshotOrder) (snap : Snapshot) (rest : List Snapshot)
+    (late : snap.caughtAt + day < snap.storedAt) :
+    catalogCurrent order (snap :: rest) = catalogCurrent order rest := by
+  funext audience
+  simp [catalogCurrent, Snapshot.counts, Nat.not_le.mpr late]
 
-inductive RetainSteps : Retention → Retention → Prop
-  | refl (s : Retention) : RetainSteps s s
-  | step {a b c : Retention} : RetainSteps a b → RetainStep b c → RetainSteps a c
+theorem old_upload_before_deletion (snap witness : Snapshot) (time : Nat)
+    (counts : snap.counts = true) (old : snap.caughtAt ≤ witness.storedAt)
+    (mature : witness.storedAt + day < time) : snap.storedAt < time := by
+  simp only [Snapshot.counts, decide_eq_true_eq] at counts
+  omega
 
-theorem coverage_never_shrinks {a b : Retention} (steps : RetainSteps a b) :
-    CoverageGrows a.current b.current := by
-  induction steps with
-  | refl => exact fun _ old found => ⟨old, found, rfl, fun _ => Nat.le_refl _⟩
-  | step _ next ih => exact coverage_trans ih (current_never_shrinks next)
+theorem symmetric_in_flight_impossible (a b : Snapshot) (deleteA deleteB : Nat)
+    (ca : a.counts = true) (cb : b.counts = true)
+    (oldA : a.caughtAt ≤ b.storedAt) (oldB : b.caughtAt ≤ a.storedAt)
+    (matureA : a.storedAt + day < deleteA) (matureB : b.storedAt + day < deleteB)
+    (late : deleteB ≤ a.storedAt ∨ deleteA ≤ b.storedAt) : False := by
+  have ha := old_upload_before_deletion a b deleteB ca oldA matureB
+  have hb := old_upload_before_deletion b a deleteA cb oldB matureA
+  rcases late with lateA | lateB
+  · exact Nat.not_lt_of_ge lateA ha
+  · exact Nat.not_lt_of_ge lateB hb
 
-theorem retention_preserves {a b : Retention} (step : RetainStep a b)
-    (valid : a.Valid) : b.Valid := by
-  cases step with
-  | publish snap covered =>
-      exact fun w hw => covered_of_grows (publication_coverage_grows _ snap covered) w (valid w hw)
-  | deleteWrite w active posted time final eligible =>
-      intro v hv
-      rcases List.mem_cons.mp hv with rfl | hv
-      · exact eligible.1
-      · exact valid v hv
-  | discardOld => exact valid
+theorem maturity_survives_new_snapshots (old added : List Snapshot) (time : Nat) (w : Write)
+    (mature : MatureCoverage old time w) : MatureCoverage (added ++ old) time w := by
+  intro a ha
+  obtain ⟨snap, member, counted, covered, aged⟩ := mature a ha
+  exact ⟨snap, List.mem_append_right _ member, counted, covered, aged⟩
 
-inductive RetainRun : Retention → Prop
-  | initial : RetainRun ⟨fun _ => none, []⟩
-  | step {a b : Retention} : RetainRun a → RetainStep a b → RetainRun b
-
-theorem deleted_write_covered {s : Retention} (h : RetainRun s) : s.Valid := by
-  induction h with
-  | initial => intro w hw; cases hw
-  | step _ step ih => exact retention_preserves step ih
-
-/-- Selecting the current snapshot needs no separate dominance premise. -/
-theorem selection_covers_deleted (s : Retention) (run : RetainRun s)
-    (w : Write) (deleted : w ∈ s.deleted) : Covered s.current w :=
-  deleted_write_covered run w deleted
+/-- Once the current selection covers the write, new publications cannot
+reset the historical witness's deadline. Finality and positions remain required. -/
+theorem eligible_after_day (order : SnapshotOrder) (landed : List Snapshot)
+    (active : List Nat) (posted : Nat → Nat → Nat) (time bound : Nat) (w : Write)
+    (witnesses : ∀ a ∈ w.audiences, ∃ snap ∈ landed,
+      snap.counts = true ∧ snap.covers w a ∧ snap.storedAt ≤ bound)
+    (current : Covered (catalogCurrent order landed) w)
+    (passed : ∀ reader ∈ active, w.number ≤ posted reader w.writer)
+    (age : bound + day < time) : Eligible order landed active posted time True w := by
+  refine ⟨⟨current, trivial, Or.inl passed⟩, ?_⟩
+  intro a ha
+  obtain ⟨snap, member, counted, covered, stored⟩ := witnesses a ha
+  exact ⟨snap, member, counted, covered, by omega⟩
 
 /-- The reader is active and its posted position never claims unconsumed work. -/
 theorem recent_write_protected (current : Current) (active : List Nat)
@@ -206,25 +198,131 @@ theorem miss_before_retention (checkpoint observed elapsed storageTime : Nat)
 
 namespace SnapshotPublication
 
+/-- Each session contains fully applied reads. Failed or unresolved reads
+have no successful transition. The clock sample precedes every read. -/
+structure Catchup where
+  snapshot : Snapshot
+  missed : List Nat
+  lastRead : Nat
+  deriving DecidableEq, Repr
+
 structure State where
-  retention : Retention
-  pending : List Snapshot
+  time : Nat
+  writers : List Nat
+  writes : List Write
+  deleted : List Write
+  landed : List Snapshot
+  catching : List Catchup
+  uploading : List Snapshot
+  deriving DecidableEq, Repr
 
-inductive Step : State → State → Prop
-  | prepare (s : State) (snap : Snapshot) (covered : CanSnapshot s.retention.current snap) :
-      Step s { s with pending := snap :: s.pending }
-  | land (s : State) (snap : Snapshot) (time : Nat) (pending : snap ∈ s.pending) :
-      Step s ⟨{ s.retention with
-        current := publishCurrent s.retention.current { snap with storedAt := time } },
-        s.pending.filter (· != snap)⟩
-  | deleteWrite (s : State) (w : Write) (active : List Nat) (posted : Nat → Nat → Nat)
-      (time : Nat) (final : Prop)
-      (eligible : Deletable s.retention.current active posted time final w) :
-      Step s { s with retention := { s.retention with deleted := w :: s.retention.deleted } }
+def initial (writers : List Nat) : State := ⟨0, writers, [], [], [], [], []⟩
 
-inductive Run : State → Prop
-  | initial : Run ⟨⟨fun _ => none, []⟩, []⟩
-  | step {a b : State} : Run a → Step a b → Run b
+def live (s : State) (writer number : Nat) : Option Write :=
+  s.writes.find? fun w => w.writer == writer && w.number == number && !s.deleted.contains w
+
+def current (order : SnapshotOrder) (s : State) : Current := catalogCurrent order s.landed
+
+def samePath (a b : Snapshot) : Bool :=
+  a.audience == b.audience && a.writer == b.writer && a.number == b.number
+
+def dominates (a b : Snapshot) : Bool :=
+  a.audience == b.audience && b.positions.all (fun p => decide (p.2 ≤ a.position p.1))
+
+def canPrepare (order : SnapshotOrder) (s : State) (snap : Snapshot) : Bool :=
+  match current order s snap.audience with
+  | none => true
+  | some old => dominates snap old
+
+def postedPosition (posted : List (Nat × Nat × Nat)) (reader writer : Nat) : Nat :=
+  ((posted.filter (fun p => p.1 == reader && p.2.1 == writer)).map (fun p => p.2.2)).foldl max 0
+
+def eligible (order : SnapshotOrder) (s : State) (w : Write)
+    (posted : List (Nat × Nat × Nat)) (final : Bool) : Bool :=
+  decide (Eligible order s.landed s.writers (postedPosition posted) s.time (final = true) w)
+
+inductive Action where
+  | write (writer : Nat) (audiences : List Nat)
+  | beginCatchup (audience writer number : Nat)
+  | read (snapshotWriter logWriter : Nat)
+  | prepare (writer : Nat)
+  | land (audience writer number : Nat)
+  | delete (writer number : Nat) (posted : List (Nat × Nat × Nat)) (final : Bool)
+  | tick
+  deriving DecidableEq, Repr
+
+/-- Requests are ordered independently of time ticks. Preparation checks the
+current snapshot after every writer's terminal miss; landing has no precheck.
+`uploading` includes abandoned requests that may still publish remotely. -/
+def act (order : SnapshotOrder) (s : State) : Action → Option State
+  | .write writer audiences =>
+      if s.writers.contains writer then
+        let number := (s.writes.filter (fun w => w.writer == writer)).length + 1
+        some { s with writes := ⟨writer, number, s.time, audiences⟩ :: s.writes }
+      else none
+  | .beginCatchup audience writer number =>
+      if s.writers.contains writer && !(s.catching.any (fun c => c.snapshot.writer == writer)) then
+        let positions := match current order s audience with
+          | none => []
+          | some snap => snap.positions
+        let snap : Snapshot := ⟨audience, writer, number, s.time, s.time, positions⟩
+        if s.landed.any (samePath snap) || s.uploading.any (samePath snap) then none
+        else some { s with catching := ⟨snap, [], s.time⟩ :: s.catching }
+      else none
+  | .read writer logWriter => do
+      let c ← s.catching.find? (fun c => c.snapshot.writer == writer)
+      if !s.writers.contains logWriter then none else
+      let position := c.snapshot.position logWriter
+      let next := match live s logWriter (position + 1) with
+        | none => { c with missed := logWriter :: c.missed, lastRead := s.time }
+        | some _ => { c with
+            snapshot := { c.snapshot with positions :=
+              (logWriter, position + 1) :: c.snapshot.positions.filter (fun p => p.1 != logWriter) }
+            missed := c.missed.filter (· != logWriter), lastRead := s.time }
+      some { s with catching := next :: s.catching.filter (fun c => c.snapshot.writer != writer) }
+  | .prepare writer => do
+      let c ← s.catching.find? (fun c => c.snapshot.writer == writer)
+      if c.lastRead == s.time && s.writers.all c.missed.contains &&
+          canPrepare order s c.snapshot then
+        some { s with
+          catching := s.catching.filter (fun c => c.snapshot.writer != writer)
+          uploading := { c.snapshot with storedAt := s.time } :: s.uploading }
+      else none
+  | .land audience writer number => do
+      let snap ← s.uploading.find? (fun snap =>
+        snap.audience == audience && snap.writer == writer && snap.number == number)
+      some { s with
+        landed := { snap with storedAt := s.time } :: s.landed
+        uploading := s.uploading.filter (fun s => !samePath s snap) }
+  | .delete writer number posted final => do
+      let w ← live s writer number
+      if eligible order s w posted final then some { s with deleted := w :: s.deleted } else none
+  | .tick => some s
+
+def step (order : SnapshotOrder) (s : State) (time : Nat) (action : Action) : Option State :=
+  if s.time ≤ time then act order { s with time := time } action else none
+
+def execute (order : SnapshotOrder) : State → List (Nat × Action) → Option State
+  | s, [] => some s
+  | s, (time, action) :: rest => (step order s time action).bind (fun next => execute order next rest)
+
+def Run (order : SnapshotOrder) (writers : List Nat) (s : State) : Prop :=
+  ∃ events, execute order (initial writers) events = some s
+
+theorem run_append (order : SnapshotOrder) (s : State) (a b : List (Nat × Action)) :
+    execute order s (a ++ b) = (execute order s a).bind (fun next => execute order next b) := by
+  induction a generalizing s with
+  | nil => rfl
+  | cons head tail ih =>
+      simp only [List.cons_append, execute]
+      cases step order s head.1 head.2 <;> simp [ih]
+
+/-- Deletion needs an explicit successful action. The coverage rule does
+not supply a bound for scheduling or provider completion. -/
+theorem tick_preserves_deleted (order : SnapshotOrder) (s : State) (time : Nat)
+    (later : s.time ≤ time) :
+    step order s time .tick = some { s with time := time } := by
+  simp [step, later, act]
 
 end SnapshotPublication
 end CovenIO

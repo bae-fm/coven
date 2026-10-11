@@ -140,21 +140,29 @@ theorem recent_prefix_available (world : World) (writer start finish first targe
       checkpoint reader first True (metadata n) activeReader (honest n)
       (by rw [metadataNumber]; exact hn) (afterCheckpoint n hn hn') (recent t ht he) deleted)
 
-/-- At each observation use the current snapshots. A previously loaded
-snapshot can become stale during a concurrent publication and deletion. -/
-theorem selected_snapshot_suffix_available (world : World) (writer start finish first target : Nat)
-    (history : Nat → Retention) (metadata : Nat → Write)
-    (runs : ∀ t, RetainRun (history t))
-    (uncovered : ∀ t, start ≤ t → t ≤ finish → ∀ n, first < n → n ≤ target →
-      ¬ Covered (history t).current (metadata n))
-    (storedOrDeleted : ∀ t, start ≤ t → t ≤ finish → ∀ n, first < n → n ≤ target →
-      (∃ o, world t (.log .write writer n) = some o) ∨ (metadata n) ∈ (history t).deleted) :
-    Available world .write writer start finish first target := by
-  intro t ht he n hn hn'
-  rcases storedOrDeleted t ht he n hn hn' with stored | deleted
-  · exact stored
-  · exact False.elim (uncovered t ht he n hn hn'
-      (selection_covers_deleted (history t) (runs t) (metadata n) deleted))
+/-- The snapshot histories expose their surviving writes at the exact paths
+used by `Scan` and `readLog`. Bytes name the write; successful application
+stands for validation. -/
+def snapshotStore (s : SnapshotPublication.State) : Store := fun path =>
+  match path with
+  | .log .write writer number =>
+      (SnapshotPublication.live s writer number).map (fun w => ⟨⟨[w.number], w.storedAt⟩, 0⟩)
+  | _ => none
+
+/-- Newest-at-selection alone does not establish suffix availability. -/
+theorem loaded_snapshot_complete {world : World} {writer start finish last : Nat}
+    {trace : List ReadEvent} (loaded : Snapshot)
+    (scan : Scan world .write writer start (loaded.position writer) finish last trace)
+    (target : Nat)
+    (present : Available world .write writer start finish (loaded.position writer) target) :
+    target ≤ last := discovery_complete scan target present
+
+/-- A preceding sample does not date an early writer's miss at the end of
+the whole catch-up. Writers may finish at different times. -/
+theorem catchup_miss_after_sample {world : World} {writer start first finish last : Nat}
+    {trace : List ReadEvent} (scan : Scan world .write writer start first finish last trace)
+    (sample : Nat) (before : sample ≤ start) : sample ≤ finish :=
+  Nat.le_trans before (scan_terminal scan).1
 
 /-- Only the terminal miss needs the recent-return test. The miss may occur
 anywhere in the pass; no assumption about its start time occurs here. -/

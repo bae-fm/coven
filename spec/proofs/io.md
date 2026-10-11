@@ -6,12 +6,13 @@ It uses Appendix B's Lean 4.34.1 toolchain and the standard library, without
 Mathlib. `CovenIO/Axioms.lean` audits every named theorem; `scripts/check.sh`
 builds the package and rejects unfinished proofs and additional axioms.
 
-The publication-time snapshot invariant, per-miss deadline, preceding-unit
-clock observation, retirement verdict and gated-send deadline are checked.
-Two stronger claims have checked counterexamples: checking snapshot coverage
-before an upload does not serialize concurrent publications, and a merely
-nondecreasing provider clock need not advance at the rate of an elapsed timer.
-The conditions and remaining boundaries are stated below.
+The snapshot coverage proposal has checked counterexamples for a reader
+whose selection is followed by deletion, and for bounded cleanup without a
+scheduling obligation. Its one-day limits exclude the original delayed-upload
+races. The per-miss deadline, preceding-unit clock observation, retirement
+verdict and gated-send deadline retain their checked results. A merely
+nondecreasing provider clock still has a checked counterexample to the
+elapsed-time test.
 
 ## Storage and execution
 
@@ -80,41 +81,142 @@ bytes are refused; entry 2 remains unread. There is no failed provider request.
 Thus “no failed request” alone is insufficient. A completed terminal scan and
 successful durable retention are the conditions used in the theorems.
 
-**3. Current snapshots (item 19) — proved at publication; checked
-counterexamples for concurrent uploads and an earlier selection.**
-`current_matches_listing` connects the current map to the retained audience's
-latest storage time, with smaller path breaking ties. Each audience has one
-current snapshot. Coverage means its signed positions include the write.
-Old snapshot deletion leaves this current projection unchanged.
+**3. Snapshot coverage proposal — checked against the following exact rule.**
+This is a proposal under examination, not a statement that §15 contains it:
 
-`RetainStep.publish` checks that a candidate covers the current snapshot at
-publication. `coverage_never_shrinks` proves that all later current snapshots
-dominate their predecessors. `deleted_write_covered` and
-`selection_covers_deleted` prove current coverage of every deleted write
-through arbitrary allowed transitions. No additional selected-snapshot
-dominance hypothesis remains. `Examples.incomparable_latest` rejects Ben's
-incomparable snapshot against Ana's current one;
-`incomparable_deletion_impossible` rejects that state in `RetainRun`.
+> a) Up-to-date snapshots: a device publishes a snapshot only right after a
+> catch-up that read every writer's log to its next-number miss with nothing
+> pending, and only if it covers the current newest snapshot.
+>
+> b) Snapshots record, in their signed prefix, the storage time T_c of the
+> catch-up they were made from. Readers ignore a snapshot whose storage time
+> is more than one day after its T_c (it is not loaded, not newest, gives no
+> coverage). Writers give up an upload after a day and make a fresh snapshot.
+> No request-duration assumption.
+>
+> c) Deletion: a write may be deleted once a snapshot covering it landed more
+> than a day ago (storage time) and the current newest snapshot also covers
+> it (plus §15's existing conditions).
 
-That publication-time rule is stronger than checking before sending.
-`SnapshotPublication` separates preparation from landing. Its checked
-`concurrent_snapshot_history` has one audience, two snapshots and one deletion:
-both writers prepare while there is no current snapshot; Ana's lands covering
-Ana 1; Ana 1 is deleted at its 30-day deadline; Ben's lands one second later,
-covering Ben 1 only. Both preparation checks and the deletion check passed.
-`concurrent_snapshot_loses_deleted_write` proves the resulting invariant false.
-This failure requires neither a timestamp tie nor an inaccurate listing.
-No cross-device publication serialization is specified by the two rules.
+`SnapshotPublication.execute` checks explicit histories of write publication,
+catch-up start, individual log reads, snapshot preparation, remote landing,
+and deletion. A catch-up begins from the current counting snapshot and reads
+each registered writer through a miss. Hits advance applied positions; there
+is no successful unresolved-read transition. Different writers' misses can
+precede different publications. Preparation immediately follows the final
+read and checks the current snapshot then. No check at landing assumes that
+concurrent uploads have been serialized.
 
-Even enforcing the publication-time rule does not protect a snapshot already
-selected by a reader. `loaded_snapshot_can_become_stale` selects coverage
-through write 1, then publishes coverage through write 2 and deletes write 2.
-The reader's selected snapshot does not cover the deleted suffix.
-`selected_snapshot_suffix_available` therefore uses the current coverage at
-each observation, proved by `RetainRun`, rather than assuming a fixed selection
-dominates all future snapshots. Keeping a selection usable during reload,
-fetching its bodies and atomically loading the common point across audiences
-remain outside this completeness theorem.
+The chosen reading of T_c is a storage sample at catch-up start, before its
+reads, consistent with §15's checkpoint sample. It is not the finishing time
+of the last writer's scan. `catchup_miss_after_sample` checks this distinction.
+The counterexamples use instantaneous completed catch-ups, so dating them at
+completion instead would not remove those failures.
+
+Exactly one day after T_c still counts. Deletion needs strictly more than a
+day since a covering counting snapshot landed (`snapshot_age_boundaries`).
+The current snapshot and the old covering witness may differ. Each audience
+of a write needs both conditions. Finality and either all active posted
+positions or the write's thirty-day storage age remain required. The
+executable deletion check directly decides `Eligible`; it does not implement
+a second version of those conditions.
+
+“Once a snapshot ... landed” is read as historical evidence: replacing a
+snapshot does not reset the covered write's age. `landed` retains that
+publication evidence. Physical reclamation of obsolete snapshot bodies and
+persistence of their signed age evidence are outside these histories. An
+implementation that forgets the witness when deleting its object does not
+satisfy this reading. The model allows an abandoned remote upload to land;
+it never assumes that local timeout cancels remote publication.
+
+**Requested safety — counterexample.** `fresh_selection_race` uses two writes,
+three snapshots, two snapshot writers and an active reader with no posted
+progress. Both writes are stored at second zero. Concurrent catch-ups produce
+snapshot B covering only B's write, then snapshot A covering only A's write.
+B's snapshot lands at second one; A's lands at second two. A has the smaller
+path, so it wins the write-count and T_c ties, as well as storage-time ordering.
+Both snapshots count, and each author includes its own write.
+
+At day thirty, the reader loads A. Another catch-up starts from A, reads B's
+still-present write, finishes every writer's log and publishes a snapshot
+covering both. B's old snapshot has aged more than a day; the new current
+snapshot covers B's write; the write is thirty days old; finality holds.
+Deletion therefore succeeds despite the reader's zero position. The reader
+then GETs B's write 1 and finds it absent. Selection, new publication,
+deletion and the miss can all occur in the same storage-time tick.
+`fresh_selection_reader_misses` runs the actual `readLog` against the store
+reached by that checked history. There is no delayed reader or clock jump.
+
+`loaded_snapshot_can_become_stale` also checks a two-write, two-snapshot
+case: load coverage through write 1, create and cover write 2, then pause
+through its thirty-day age deadline before GET 2. `loaded_snapshot_advances`
+checks that the first snapshot satisfies §15's loading guard.
+`reader_race_despite_dominance` checks that the replacement dominates the
+loaded snapshot. A missed GET does not by itself prove permanent data loss:
+a reader that detects it and reloads may recover. Such a retry protocol is
+not the promised guarantee that this loaded snapshot's suffix stays present.
+`loaded_snapshot_complete` therefore still requires suffix availability.
+
+**Requested old examples — the deletion races are excluded; incomparable
+snapshots remain possible.** `incomparable_latest` rejects preparation of an
+incomparable candidate after the first snapshot is current.
+`incomparable_history` instead checks concurrent preparations, both before
+publication: the rule permits these incomparable snapshots.
+`incomparable_deletion_impossible` excludes deletion of the write missing
+from the selected snapshot in that history.
+
+`old_upload_before_deletion` proves that a counting upload with T_c no later
+than the covering witness's landing must itself land before that witness can
+authorize deletion. `in_flight_race_excluded` checks the original delayed
+competitor against the strict age boundary. `late_snapshot_ignored` proves
+that adding any late snapshot cannot change any audience's selection;
+`late_upload_lands_but_does_not_count` checks an actual late landing after a
+write is created, covered and deleted while that upload remains in flight.
+The abandoned upload is retained as an object and supplies no coverage.
+
+`symmetric_in_flight_impossible` excludes either member of the symmetric
+old-upload timing race. `symmetric_deletions_excluded` checks that the two
+incomparable snapshots alone cannot authorize both missing-write deletions.
+These results exclude those named histories; they do not establish a general
+reachability invariant for every newer reader/deletion race.
+
+**Requested liveness — counterexample to a deadline from this rule alone;
+non-resetting eligibility proved.** `busy_step` and `busy_run` check a history
+that extends indefinitely: another write and a fresh up-to-date snapshot land
+each storage second. `busy_eligible` supplies finality and every device's
+posted position past write 1, and proves deletion stays eligible after the
+first day. `busy_cleanup_unbounded` nevertheless gives, for every proposed
+bound, a reachable later state in this continuing history with no deletion.
+The rule says when deletion is allowed, not when it must run or finish.
+This counterexample deliberately has no cleanup scheduling guarantee; it is
+not starvation caused by a changing newest snapshot.
+
+`maturity_survives_new_snapshots` proves that adding arbitrarily many snapshots
+does not restart a historical witness's age. `eligible_after_day` gives the
+precise bound for eligibility: if each audience has a counting witness landed
+by B, the current selection covers the write, finality holds and all devices
+have posted past it, deletion is eligible at every T greater than B + one day.
+The current-coverage premise is explicit; continued snapshot production alone
+is not a bound on when a particular audience's current selection catches up.
+A bound on scheduling and successful provider deletion would turn sustained
+eligibility into a deletion deadline. Those bounds are outside the rule and
+are not inferred from successful snapshot uploads.
+
+**Requested ordering — counterexample for most writes; T_c and storage time
+also fail the full reader claim.** `fresh_selection_race` checks all three
+orders, including their path tie-breaks. Choosing by T_c does not fix it.
+An order enforcing coverage dominance alone cannot fix an indefinitely paused
+reader either (`reader_race_despite_dominance`). There is no ordering-only
+solution to the full claim as stated: it also needs a condition connecting
+selection, subsequent reads and concurrent deletion. No alternative ordering
+is presented as proved safe for that claim.
+
+Outside this model are dynamic membership, snapshot body growth and size,
+cryptography, schema/reset usability, physical deletion of snapshot objects,
+persistent age evidence, provider request completion bounds and a complete
+reload/retry protocol. All snapshots in the counterexamples are usable and
+all finality inputs true. Stable membership and successful reads suffice for
+the failures; errors and unavailable keys are unnecessary.
 
 **4. Recent-return misses (item 20) — proved with a clock-advance bound;
 checked counterexample without it.** `needsSnapshots` evaluates
@@ -426,9 +528,11 @@ no Rust behavior.
   access epoch requires a new scan, and rows, losses, history and non-final effects
   continue protecting file deletion.
 
-Chosen readings: snapshot coverage is enforced at publication for the
-invariant theorem; its pre-send implementation is checked separately and
-fails under concurrency. Path ties choose the smaller path. A write miss is
+Chosen readings: the proposed snapshot rule is checked at preparation, with
+T_c sampled before catch-up reads, strict one-day deletion age, inclusive
+one-day upload admission, and historical covering evidence. Path ties choose
+the smaller path. Neither actual cleanup scheduling nor suffix availability
+is inferred from those checks. A write miss is
 recent only at its own observation, with a strict 29-day limit and an explicit
 provider/elapsed-time bound. Finality uses the preceding provider unit, with
 underflow certifying no old entries. Retirement timing begins at finality and
