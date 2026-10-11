@@ -14,8 +14,8 @@ pub(super) fn publish_bootstrap(
     let keys = &owners.keys;
     let identity = &owners.identity;
     let keychain = &owners.keychain;
-    let old_keys = keys.unlock()?;
-    let old_identity = identity.unlock()?;
+    let old_keys = keys.read()?;
+    let old_identity = identity.read()?;
     let old_device = keychain.device_id()?;
     let old_credentials = keychain.storage_credentials()?;
     let old_code = if keychain.supports_synced_restore_codes() {

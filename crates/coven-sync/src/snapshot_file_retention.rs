@@ -194,7 +194,7 @@ impl StoreLogSync {
             return Ok(files);
         }
         let storage = self.storage.as_deref().ok_or(SyncError::NoStorage)?;
-        let ring = self.store_keys.unlock()?;
+        let ring = self.store_keys.read()?;
         let crate::write_object::ReadyWrite {
             opened,
             author,

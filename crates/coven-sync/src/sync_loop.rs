@@ -177,7 +177,7 @@ impl SyncLoop {
     }
 
     /// Finish the active pass and transfers, then release every worker's provider
-    /// reference. Unlocked keys are scoped to work and dropped before it returns.
+    /// reference. Custody sessions keep their keys until forget or handle close.
     /// Credentials remain in custody for the next start; failures publish Failed.
     pub fn stop(&self) {
         let _ = self.commands.send(SyncCommand::Stop);

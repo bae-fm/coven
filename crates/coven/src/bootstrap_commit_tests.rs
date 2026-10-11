@@ -47,6 +47,7 @@ impl MemberKeyCustody for RefusedIdentity {
     fn forget(&self) -> Result<(), KeyError> {
         Ok(())
     }
+    fn close(&self) {}
 }
 
 async fn prepared(
@@ -83,9 +84,10 @@ async fn custody_failure_restores_the_prior_keys_without_publishing() {
     let layout = StoreLayout::new(root.path().into());
     let id = StoreId(UuidIds.new_id());
     let keychain = Keychain::in_memory("commit-test").unwrap();
-    let scoped = StoreKeychain::new(keychain.clone(), id);
+    let scoped = Arc::new(StoreKeychain::new(keychain.clone(), id));
     let old = StoreKeyring::new(StoreKey::generate(KeyId(UuidIds.new_id())).unwrap());
-    let custody = Arc::new(InMemoryCustody::new(old.clone()));
+    let custody = Arc::new(KeyringCustody::<StoreKeyring>::new(scoped.clone()));
+    custody.persist(&old).unwrap();
     let next = StoreKeyring::new(StoreKey::generate(KeyId(UuidIds.new_id())).unwrap());
     let (pending, owners, database) = prepared(
         &layout,

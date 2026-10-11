@@ -1,7 +1,7 @@
 //! Member identity and host secrets, without exposing retained custody.
 
-use super::{KeyError, MemberKeyCustody, StoreKeychain};
-use crate::{CryptoError, MemberId, MemberKeys};
+use super::{KeyError, KeySession, StoreKeychain};
+use crate::{CryptoError, MemberId, MemberKeys, StoreKeyring};
 use std::sync::Arc;
 
 /// Initializing this device's member identity failed (E11).
@@ -19,23 +19,38 @@ pub enum IdentityError {
 }
 
 /// The store's identity and host secrets, retaining their custody and keychain.
-/// Construction reads no keys; each operation unlocks only the custody it needs.
+/// Shares the unlocked sessions used by the handle and its workers.
 pub struct StoreCustody {
-    identity: Arc<dyn MemberKeyCustody>,
+    identity: Arc<KeySession<MemberKeys>>,
+    keys: Arc<KeySession<StoreKeyring>>,
     keychain: Arc<StoreKeychain>,
 }
 
 impl StoreCustody {
     /// Compose already chosen custody at the application opening root.
-    pub fn new(identity: Arc<dyn MemberKeyCustody>, keychain: Arc<StoreKeychain>) -> Self {
-        Self { identity, keychain }
+    pub fn new(
+        keys: Arc<KeySession<StoreKeyring>>,
+        identity: Arc<KeySession<MemberKeys>>,
+        keychain: Arc<StoreKeychain>,
+    ) -> Self {
+        Self {
+            keys,
+            identity,
+            keychain,
+        }
+    }
+
+    /// Release both sessions after the handle has stopped their users.
+    pub fn close(&self) {
+        self.keys.close();
+        self.identity.close();
     }
 
     /// Makes this member's two key pairs and puts them in identity custody,
     /// for the person creating a store. Fails if custody already holds keys.
     /// Joining and restoring put the keys there themselves.
     pub fn initialize_identity(&mut self) -> Result<MemberId, IdentityError> {
-        if self.identity.unlock()?.is_some() {
+        if self.identity.read()?.is_some() {
             return Err(IdentityError::AlreadyInitialized);
         }
         let keys = MemberKeys::generate()?;

@@ -1,6 +1,9 @@
 use super::*;
 use crate::StoreLogSync;
-use coven_crypto::{custody::InMemoryCustody, MemberKeys, StoreKey, StoreKeyring};
+use coven_crypto::{
+    custody::{InMemoryCustody, KeySession},
+    MemberKeys, StoreKey, StoreKeyring,
+};
 use coven_format::store_log::{MemberPublicKeys, StoreChange};
 use coven_foundation::id_source::KeyId;
 use coven_merge::Audience;
@@ -9,10 +12,14 @@ use coven_storage::{ObjectPath, ObjectPrefix, Storage};
 async fn sync(f: &Fixture) -> (StoreLogSync, MemberKeys, crate::DeviceLogSync) {
     let member = MemberKeys::generate().unwrap();
     let key = KeyId(uuid::Uuid::from_u128(500));
-    let store_keys = Arc::new(InMemoryCustody::new(StoreKeyring::new(
-        StoreKey::generate(key).unwrap(),
-    )));
-    let member_keys = Arc::new(InMemoryCustody::new(member.clone()));
+    let store_keys = Arc::new(
+        KeySession::store(Arc::new(InMemoryCustody::new(StoreKeyring::new(
+            StoreKey::generate(key).unwrap(),
+        ))))
+        .unwrap(),
+    );
+    let member_keys =
+        Arc::new(KeySession::member(Arc::new(InMemoryCustody::new(member.clone()))).unwrap());
     let writes = crate::DeviceLogSync::new(
         f.storage.clone(),
         f.database.clone(),

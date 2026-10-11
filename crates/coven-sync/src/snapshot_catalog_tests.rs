@@ -57,7 +57,7 @@ async fn unsigned_snapshot(device: &Device, id: coven_format::store_log::Snapsho
     let plain: Vec<_> = receive.into_iter().flatten().collect();
     let key = device
         .custody
-        .unlock()
+        .read()
         .unwrap()
         .unwrap()
         .store_key(key_id)
@@ -357,7 +357,7 @@ async fn authors_must_be_in_the_applied_store_log_and_remain_known_after_removal
         )))
     ));
     {
-        let ring = a.custody.unlock().unwrap().unwrap();
+        let ring = a.custody.read().unwrap().unwrap();
         assert!(
             matches!(crate::posted_positions::open(&bytes, &path, Some(&ring), &before),
             Err(SyncError::Damaged(object)) if object.path == path.as_str())
@@ -373,7 +373,7 @@ async fn authors_must_be_in_the_applied_store_log_and_remain_known_after_removal
         .await
         .unwrap();
     assert!(a.sync.reload_from_snapshots().await.unwrap().is_empty());
-    let ring = a.custody.unlock().unwrap().unwrap();
+    let ring = a.custody.read().unwrap().unwrap();
     for log in [registered, a.log().await] {
         crate::posted_positions::open(&bytes, &path, Some(&ring), &log).unwrap();
     }

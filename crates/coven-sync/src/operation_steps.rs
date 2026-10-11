@@ -163,7 +163,7 @@ impl StoreLogSync {
                     }
                 }
             }
-            let mut ring = self.store_keys.unlock()?;
+            let mut ring = self.store_keys.read()?;
             let mut damages = Vec::new();
             self.update_keys(&local.log, &member, &mut ring, &mut damages)
                 .await?;
@@ -206,7 +206,7 @@ impl StoreLogSync {
                 n if n == data.entry_step_number(2) => {
                     let bytes = crate::store_log_object::seal_upload(
                         upload,
-                        self.store_keys.unlock()?.as_ref(),
+                        self.store_keys.read()?.as_ref(),
                         &member,
                     )?;
                     self.storage
@@ -220,7 +220,7 @@ impl StoreLogSync {
                     return Ok(Progress::Advanced);
                 }
                 n if n == data.entry_step_number(3) => {
-                    let mut ring = self.store_keys.unlock()?;
+                    let mut ring = self.store_keys.read()?;
                     match self
                         .apply(
                             &mut local,

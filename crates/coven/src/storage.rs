@@ -4,6 +4,7 @@ use crate::{
     error::{setup_error, unlock_error},
     *,
 };
+use coven_crypto::custody::KeySession;
 use coven_storage::{
     providers::{OAuthFlow, StorageConnector},
     ConnectionCredentials, S3Credentials, Storage, StorageCredentials,
@@ -31,7 +32,7 @@ pub struct ConnectedStorage {
 pub(crate) struct StorageConnections {
     codes: coven_sync::RestoreCodes,
     initial_name: String,
-    keys: std::sync::Mutex<Option<Arc<dyn StoreKeyCustody>>>,
+    keys: std::sync::Mutex<Option<Arc<KeySession<StoreKeyring>>>>,
     connector: Arc<dyn StorageConnector>,
     oauth: Option<OAuthFlow>,
     authentication: tokio::sync::Mutex<Option<crate::authentication::Authentication>>,
@@ -46,7 +47,7 @@ impl StorageConnections {
     pub(crate) fn new(
         codes: coven_sync::RestoreCodes,
         initial_name: String,
-        keys: Arc<dyn StoreKeyCustody>,
+        keys: Arc<KeySession<StoreKeyring>>,
         connector: Arc<dyn StorageConnector>,
         oauth: Option<OAuthFlow>,
         authentication: Option<crate::authentication::Authentication>,
@@ -107,7 +108,7 @@ impl StorageConnections {
                 .expect("store keys lock poisoned")
                 .as_ref()
                 .ok_or(KeyError::StoreClosed)?
-                .unlock()?
+                .read()?
                 .is_some()
             {
                 StoreKeyState::Available

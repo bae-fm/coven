@@ -32,7 +32,7 @@ impl StoreLogSync {
                 .key;
             let keys = self
                 .store_keys
-                .unlock()?
+                .read()?
                 .ok_or(SyncError::KeyUnavailable(key))?;
             keys.store_key(key)?;
             Ok(())
@@ -53,9 +53,9 @@ impl StoreLogSync {
     ) -> Result<(), SyncError> {
         let member = self
             .member_keys
-            .unlock()?
+            .read()?
             .ok_or(coven_storage::StorageFailure::MemberKeysMissing)?;
-        let previous = self.store_keys.unlock()?;
+        let previous = self.store_keys.read()?;
         let mut local = self.database.local_store_log().await?;
         let objects = match storage.list(&ObjectPrefix::all()).await {
             Ok(objects) => objects,

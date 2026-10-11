@@ -58,13 +58,7 @@ async fn approve_seals_store_history_and_removes_the_request() {
     let [mut a, b, _c] = accounts(storage.clone()).await;
     let id = begin(&mut a, Command::RemoveMember(b.member.member_id())).await;
     finish(&mut a, id).await;
-    let expected: Vec<_> = a
-        .custody
-        .unlock()
-        .unwrap()
-        .unwrap()
-        .store_key_ids()
-        .collect();
+    let expected: Vec<_> = a.custody.read().unwrap().unwrap().store_key_ids().collect();
     assert_eq!(expected.len(), 2);
     let (operation, invite) = invite(&mut a, "join@example.com").await;
     let joining = MemoryStorage::for_recipient(&storage, "join@example.com").unwrap();

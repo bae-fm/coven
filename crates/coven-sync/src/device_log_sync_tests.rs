@@ -170,7 +170,7 @@ async fn posted(storage: &MemoryStorage, device: &Device, number: u64) -> Posted
         panic!("positions prefix");
     };
     let prefix = sealed.prefix().encode().unwrap();
-    let key = device.custody.unlock().unwrap().unwrap();
+    let key = device.custody.read().unwrap().unwrap();
     let plain = key
         .store_key(key_id)
         .unwrap()
@@ -311,8 +311,8 @@ mod writes {
     }
 
     pub(super) async fn resealed(device: &Device) -> (WriteId, Vec<u8>) {
-        let ring = device.custody.unlock().unwrap().unwrap();
-        let member = device.identity.unlock().unwrap().unwrap();
+        let ring = device.custody.read().unwrap().unwrap();
+        let member = device.identity.read().unwrap().unwrap();
         device
             .db
             .read_oldest_upload(move |upload| {

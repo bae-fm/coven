@@ -63,7 +63,7 @@ async fn damaged_entries_block_only_their_device_and_retain_each_cause() {
                     key: key(1),
                     origin: None,
                 };
-                let ring = a.custody.unlock().unwrap().unwrap();
+                let ring = a.custody.read().unwrap().unwrap();
                 let chunk = ring
                     .store_key(key(1))
                     .unwrap()
@@ -200,7 +200,7 @@ async fn invalid_causal_past_and_timestamps_are_damaged() {
             }
             _ => unreachable!(),
         }
-        let ring = a.custody.unlock().unwrap().unwrap();
+        let ring = a.custody.read().unwrap().unwrap();
         let signer = if defect == "author" {
             member(2)
         } else {

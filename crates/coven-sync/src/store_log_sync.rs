@@ -5,8 +5,7 @@ use crate::{
     SyncFailure,
 };
 use coven_crypto::{
-    custody::{MemberKeyCustody, StoreKeyCustody},
-    seal_circle_key, seal_store_key, MemberKeys, SealedKey, StoreKeyring,
+    custody::KeySession, seal_circle_key, seal_store_key, MemberKeys, SealedKey, StoreKeyring,
 };
 use coven_database::{Database, LocalStoreLog, StoreLog};
 use coven_format::{
@@ -30,8 +29,8 @@ pub struct StoreLogSync {
     reads: crate::pass_reads::PassReads,
     storage: Option<Arc<dyn Storage>>,
     database: Database,
-    store_keys: Arc<dyn StoreKeyCustody>,
-    member_keys: Arc<dyn MemberKeyCustody>,
+    store_keys: Arc<KeySession<StoreKeyring>>,
+    member_keys: Arc<KeySession<MemberKeys>>,
     clock: ClockRef,
     ids: IdSourceRef,
     directory: coven_foundation::files::StoreDir,
@@ -42,8 +41,8 @@ impl StoreLogSync {
     pub fn new(
         storage: Arc<dyn Storage>,
         database: Database,
-        store_keys: Arc<dyn StoreKeyCustody>,
-        member_keys: Arc<dyn MemberKeyCustody>,
+        store_keys: Arc<KeySession<StoreKeyring>>,
+        member_keys: Arc<KeySession<MemberKeys>>,
         clock: ClockRef,
         ids: IdSourceRef,
         directory: coven_foundation::files::StoreDir,
@@ -63,8 +62,8 @@ impl StoreLogSync {
     /// Compose a store that can journal operations before storage connects.
     pub fn disconnected(
         database: Database,
-        store_keys: Arc<dyn StoreKeyCustody>,
-        member_keys: Arc<dyn MemberKeyCustody>,
+        store_keys: Arc<KeySession<StoreKeyring>>,
+        member_keys: Arc<KeySession<MemberKeys>>,
         clock: ClockRef,
         ids: IdSourceRef,
         directory: coven_foundation::files::StoreDir,
@@ -117,9 +116,9 @@ impl StoreLogSync {
         let mut local = self.database.local_store_log().await?;
         let member = self
             .member_keys
-            .unlock()?
+            .read()?
             .ok_or(coven_storage::StorageFailure::MemberKeysMissing)?;
-        let mut ring = self.store_keys.unlock()?;
+        let mut ring = self.store_keys.read()?;
         let mut damages = Vec::new();
         self.check_stopped(&local, &member)?;
         self.update_keys(&local.log, &member, &mut ring, &mut damages)
@@ -151,7 +150,7 @@ impl StoreLogSync {
         // Re-read the committed queue, so the first attempt uses the same path as
         // every retry and never depends on a callback's transient return value.
         local = self.database.local_store_log().await?;
-        let mut ring = self.store_keys.unlock()?;
+        let mut ring = self.store_keys.read()?;
         let mut damages = Vec::new();
         self.publish(&mut local, &member, &mut ring, &mut damages)
             .await?;
@@ -165,9 +164,9 @@ impl StoreLogSync {
         let mut local = self.database.local_store_log().await?;
         let member = self
             .member_keys
-            .unlock()?
+            .read()?
             .ok_or(coven_storage::StorageFailure::MemberKeysMissing)?;
-        let mut ring = self.store_keys.unlock()?;
+        let mut ring = self.store_keys.read()?;
         let mut damages = Vec::new();
         self.check_stopped(&local, &member)?;
         self.update_keys(&local.log, &member, &mut ring, &mut damages)

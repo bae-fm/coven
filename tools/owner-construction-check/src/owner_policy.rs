@@ -25,6 +25,21 @@ pub(crate) const POLICY: Policy = Policy {
     // Owner constructors include their private representations; names grant no exemption.
     composition_roots: &[
         (
+            "crates/coven-crypto/src/custody/key_session.rs",
+            "KeySession",
+            "open",
+        ),
+        (
+            "crates/coven-crypto/src/custody/key_session.rs",
+            "KeySession",
+            "store",
+        ),
+        (
+            "crates/coven-crypto/src/custody/key_session.rs",
+            "KeySession",
+            "member",
+        ),
+        (
             "crates/coven-crypto/src/custody/passphrase.rs",
             "PassphraseCustody",
             "new",
@@ -514,6 +529,7 @@ pub(crate) const POLICY: Policy = Policy {
         "KeyringCustody",
         "StoreKeyCustody",
         "MemberKeyCustody",
+        "CustodyPersistence",
         "StorageConnector",
         "Storage",
         "ProviderOps",
@@ -528,6 +544,7 @@ pub(crate) const POLICY: Policy = Policy {
         "IdSource",
         "StoreKeyCustody",
         "MemberKeyCustody",
+        "CustodyPersistence",
         "StorageConnector",
         "Storage",
         "ProviderOps",

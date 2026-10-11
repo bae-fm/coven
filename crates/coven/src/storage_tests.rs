@@ -829,6 +829,9 @@ impl StoreKeyCustody for RefusePersist {
         self.keys.lock().unwrap().take();
         Ok(())
     }
+    fn close(&self) {
+        self.keys.lock().unwrap().take();
+    }
 }
 
 #[tokio::test]

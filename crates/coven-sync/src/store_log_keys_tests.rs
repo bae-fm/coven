@@ -189,7 +189,7 @@ async fn a_rekept_removal_uses_a_key_disclosed_while_it_was_dropped() {
             carol.sync().await;
             assert!(carol
                 .custody
-                .unlock()
+                .read()
                 .unwrap()
                 .unwrap()
                 .store_key(key(3))
@@ -212,14 +212,14 @@ async fn a_rekept_removal_uses_a_key_disclosed_while_it_was_dropped() {
         assert!(log.replay.state.members[&carol.member.member_id()].removed);
         assert_eq!(storage.read(&copy).await.is_ok(), temporary_drop);
         if temporary_drop {
-            let ring = ben.custody.unlock().unwrap().unwrap();
+            let ring = ben.custody.read().unwrap().unwrap();
             let encrypted = ring
                 .store_key(key(3))
                 .unwrap()
                 .derive()
                 .seal_object_chunk("after-removal", b"header", 0, 0, b"new private data")
                 .unwrap();
-            let ring = carol.custody.unlock().unwrap().unwrap();
+            let ring = carol.custody.read().unwrap().unwrap();
             assert_eq!(
                 ring.store_key(key(3))
                     .unwrap()
@@ -285,7 +285,7 @@ async fn dropped_store_removal_key_lets_the_excluded_member_read_later_entries()
         .contains_key(&DeviceId(20)));
     assert!(erin
         .custody
-        .unlock()
+        .read()
         .unwrap()
         .unwrap()
         .store_key(key(3))
@@ -356,7 +356,7 @@ async fn a_removed_sole_holder_cannot_share_a_dropped_removals_key() {
     ));
     assert!(ben
         .custody
-        .unlock()
+        .read()
         .unwrap()
         .unwrap()
         .store_key(key(3))
@@ -496,7 +496,7 @@ async fn two_holders_race_to_store_the_same_key_for_one_member() {
     erin.sync().await;
     assert!(erin
         .custody
-        .unlock()
+        .read()
         .unwrap()
         .unwrap()
         .store_key(key(3))
@@ -562,7 +562,7 @@ async fn interrupted_copy_reuses_fixed_bytes_after_restart_and_lost_reply_counts
         erin.sync().await;
         assert!(erin
             .custody
-            .unlock()
+            .read()
             .unwrap()
             .unwrap()
             .store_key(key(3))
@@ -625,7 +625,7 @@ async fn dropped_circle_removals_share_only_with_the_latest_circle_members() {
         storage.delete(&excluded).await.unwrap();
         let secret = ben
             .custody
-            .unlock()
+            .read()
             .unwrap()
             .unwrap()
             .circle_key(circle(1), key(12))
@@ -642,7 +642,7 @@ async fn dropped_circle_removals_share_only_with_the_latest_circle_members() {
         );
         ana.sync().await;
         erin.sync().await;
-        let ring = erin.custody.unlock().unwrap().unwrap();
+        let ring = erin.custody.read().unwrap().unwrap();
         let received = ring
             .circle_key(circle(1), key(12))
             .expect("Erin gets the dropped circle key");

@@ -87,7 +87,7 @@ async fn upload(device: &Device, storage: &Arc<MemoryStorage>) {
         storage.clone(),
         device.db.clone(),
         device.custody.clone(),
-        Arc::new(InMemoryCustody::new(device.member.clone())),
+        device.identity.clone(),
     )
     .upload_writes()
     .await
@@ -109,7 +109,7 @@ async fn tables(device: &Device) -> Vec<(String, String, Vec<u8>)> {
 }
 
 async fn fingerprint(device: &Device) -> Vec<(Audience, coven_crypto::Fingerprint)> {
-    let ring = device.custody.unlock().unwrap().unwrap();
+    let ring = device.custody.read().unwrap().unwrap();
     let state = device.log().await.replay.state;
     let mut keys = vec![(
         Audience::Store,

@@ -232,7 +232,7 @@ async fn a_circle_restored_after_deletion_keeps_a_previously_skipped_part_missin
             coven_database::EntryOutcome::Dropped(_)
         ));
         assert!(crate::store_log_keys::holds(
-            Some(&device.custody.unlock().unwrap().unwrap()),
+            Some(&device.custody.read().unwrap().unwrap()),
             &Audience::Circle(circle),
             KeyId(Uuid::from_u128(11)),
         ));
@@ -257,7 +257,7 @@ async fn a_circle_restored_after_deletion_keeps_a_previously_skipped_part_missin
 async fn new_uploads_wait_for_a_current_members_replacement_circle_key() {
     let storage = storage();
     let mut devices = household(storage.clone()).await;
-    let ring = devices[1].custody.unlock().unwrap().unwrap();
+    let ring = devices[1].custody.read().unwrap().unwrap();
     devices[0]
         .sync
         .make_and_upload_entry(StoreChange::RemoveCircleMember {
@@ -442,7 +442,7 @@ async fn dropped_removal_parts(
                 if id == winner
         ));
         assert!(!crate::store_log_keys::holds(
-            Some(&ben.custody.unlock().unwrap().unwrap()),
+            Some(&ben.custody.read().unwrap().unwrap()),
             &audience,
             dropped_key,
         ));
@@ -473,7 +473,7 @@ async fn dropped_removal_parts(
     }
     ben.sync.sync_store_log().await.unwrap();
     assert!(crate::store_log_keys::holds(
-        Some(&ben.custody.unlock().unwrap().unwrap()),
+        Some(&ben.custody.read().unwrap().unwrap()),
         &audience,
         dropped_key,
     ));
@@ -505,7 +505,7 @@ async fn retention_waits_for_key_copies_without_failing() {
         let mut devices = household(storage.clone()).await;
         sql(&devices[0].db, "INSERT INTO pins VALUES('00000000-0000-4000-8000-000000000001','00000000-0000-0000-0000-00000000000a','private')").await;
         devices[0].writes.upload_writes().await.unwrap();
-        let keys = devices[reader].custody.unlock().unwrap().unwrap();
+        let keys = devices[reader].custody.read().unwrap().unwrap();
         devices[reader]
             .custody
             .persist(&StoreKeyring::new(StoreKey::from_bytes(

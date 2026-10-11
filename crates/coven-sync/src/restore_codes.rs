@@ -2,8 +2,8 @@
 
 use crate::SyncError;
 use coven_crypto::{
-    custody::{MemberKeyCustody, StoreKeychain},
-    SecretBytes, SecretText,
+    custody::{KeySession, StoreKeychain},
+    MemberKeys, SecretBytes, SecretText,
 };
 use coven_database::{Database, DbError};
 use coven_format::codes::RestoreCode;
@@ -21,7 +21,7 @@ pub struct RestoreCodes {
 }
 struct RestoreCodesInner {
     database: Database,
-    identity: Arc<dyn MemberKeyCustody>,
+    identity: Arc<KeySession<MemberKeys>>,
     keychain: Arc<StoreKeychain>,
     settings: StorageSettings,
     operations: crate::Operations,
@@ -33,7 +33,7 @@ impl RestoreCodes {
     /// are also the narrow persisted connection contract used by storage setup.
     pub fn new(
         database: Database,
-        identity: Arc<dyn MemberKeyCustody>,
+        identity: Arc<KeySession<MemberKeys>>,
         keychain: Arc<StoreKeychain>,
         settings: StorageSettings,
         operations: crate::Operations,
@@ -178,7 +178,7 @@ impl RestoreCodes {
                 .map_or(initial_name, |store| store.name),
             member_keys: owner
                 .identity
-                .unlock()?
+                .read()?
                 .ok_or(coven_storage::StorageFailure::MemberKeysMissing)?,
             storage: RestoreStorage::from_connection(&data).encode()?,
         };
@@ -277,7 +277,7 @@ impl RestoreCodesInner {
         let data = self.connection()?.ok_or(SyncError::NoStorage)?;
         let member_keys = self
             .identity
-            .unlock()?
+            .read()?
             .ok_or(coven_storage::StorageFailure::MemberKeysMissing)?;
         Ok(RestoreCode {
             store: store.id,

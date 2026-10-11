@@ -4,6 +4,7 @@ use crate::{MemberKeys, StoreKeyring};
 use std::sync::Arc;
 
 mod error;
+mod key_session;
 mod keychain;
 mod memory;
 mod passphrase;
@@ -11,6 +12,7 @@ mod platform;
 mod store_custody;
 
 pub use error::{KeyError, KeychainError};
+pub use key_session::KeySession;
 pub use keychain::{set_keyring_service, Keychain, KeyringCustody, StoreKeychain};
 pub use memory::InMemoryCustody;
 pub use passphrase::{Passphrase, PassphraseCustody};
@@ -21,22 +23,27 @@ const MEMBER_KEYS_ENTRY: &str = "member-keys";
 
 /// The app's own store for the store keys and circle keys this device holds.
 pub trait StoreKeyCustody: Send + Sync {
-    /// The keys, or `None` when this device has never held any.
+    /// Called once at open; `None` when this device has never held keys.
+    /// Retain the unlocked persistence capability until close.
     fn unlock(&self) -> Result<Option<StoreKeyring>, KeyError>;
     /// Keeps `keyring`, replacing what was kept.
     fn persist(&self, keyring: &StoreKeyring) -> Result<(), KeyError>;
     /// Removes the keys; succeeds if none were kept.
     fn forget(&self) -> Result<(), KeyError>;
+    /// Erase held memory after users finish; performs no persistence or IO.
+    fn close(&self);
 }
 
 /// The app's own store for this member's keys.
 pub trait MemberKeyCustody: Send + Sync {
-    /// The member's keys, or `None` when none were kept.
+    /// Called once at open; persistence reuses the held session capability.
     fn unlock(&self) -> Result<Option<MemberKeys>, KeyError>;
     /// Keeps the member's keys, replacing what was kept.
     fn persist(&self, keys: &MemberKeys) -> Result<(), KeyError>;
     /// Removes the member's keys; succeeds if none were kept.
     fn forget(&self) -> Result<(), KeyError>;
+    /// Erase held memory after users finish; performs no persistence or IO.
+    fn close(&self);
 }
 
 /// Where this device keeps every store and circle key it has opened (E1).
@@ -97,6 +104,9 @@ impl StoreKeyCustody for InMemoryCustody<StoreKeyring> {
         self.remove();
         Ok(())
     }
+    fn close(&self) {
+        self.remove();
+    }
 }
 
 impl StoreKeyCustody for PassphraseCustody<StoreKeyring> {
@@ -110,6 +120,9 @@ impl StoreKeyCustody for PassphraseCustody<StoreKeyring> {
     }
     fn forget(&self) -> Result<(), KeyError> {
         self.remove()
+    }
+    fn close(&self) {
+        self.release();
     }
 }
 
@@ -125,6 +138,7 @@ impl StoreKeyCustody for KeyringCustody<StoreKeyring> {
     fn forget(&self) -> Result<(), KeyError> {
         self.remove(STORE_KEYS_ENTRY)
     }
+    fn close(&self) {}
 }
 
 impl MemberKeyCustody for InMemoryCustody<MemberKeys> {
@@ -138,6 +152,9 @@ impl MemberKeyCustody for InMemoryCustody<MemberKeys> {
     fn forget(&self) -> Result<(), KeyError> {
         self.remove();
         Ok(())
+    }
+    fn close(&self) {
+        self.remove();
     }
 }
 
@@ -153,6 +170,9 @@ impl MemberKeyCustody for PassphraseCustody<MemberKeys> {
     fn forget(&self) -> Result<(), KeyError> {
         self.remove()
     }
+    fn close(&self) {
+        self.release();
+    }
 }
 
 impl MemberKeyCustody for KeyringCustody<MemberKeys> {
@@ -167,6 +187,7 @@ impl MemberKeyCustody for KeyringCustody<MemberKeys> {
     fn forget(&self) -> Result<(), KeyError> {
         self.remove(MEMBER_KEYS_ENTRY)
     }
+    fn close(&self) {}
 }
 #[cfg(test)]
 #[path = "mod_tests.rs"]

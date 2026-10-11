@@ -279,8 +279,8 @@ async fn a_raise_resumes_after_reopening_at_every_publication_step() {
         let expected = fixed.as_ref().map(|upload| {
             crate::store_log_object::seal_upload(
                 upload,
-                device.custody.unlock().unwrap().as_ref(),
-                &device.identity.unlock().unwrap().unwrap(),
+                device.custody.read().unwrap().as_ref(),
+                &device.identity.read().unwrap().unwrap(),
             )
             .unwrap()
         });
@@ -381,12 +381,7 @@ async fn a_circle_is_raised_by_its_first_updating_member_after_the_store() {
     // Both the store's first updater and the circle's first updater are
     // ordinary members; migration publication does not require an admin.
     for index in [2, 0] {
-        let member = devices[index]
-            .identity
-            .unlock()
-            .unwrap()
-            .unwrap()
-            .member_id();
+        let member = devices[index].identity.read().unwrap().unwrap().member_id();
         devices[0]
             .sync
             .make_and_upload_entry(StoreChange::ChangeRole {

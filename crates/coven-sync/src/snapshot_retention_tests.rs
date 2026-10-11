@@ -5,7 +5,7 @@ pub(super) async fn post(device: &Device, storage: &Arc<MemoryStorage>) {
         storage.clone(),
         device.db.clone(),
         device.custody.clone(),
-        Arc::new(InMemoryCustody::new(device.member.clone())),
+        device.identity.clone(),
     )
     .post_positions()
     .await

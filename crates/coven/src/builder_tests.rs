@@ -1,5 +1,5 @@
 use crate::*;
-use coven_crypto::custody::{InMemoryCustody, StoreKeyCustody};
+use coven_crypto::custody::{KeySession, KeyringCustody, StoreKeychain};
 use coven_database::DatabaseBuilder;
 use coven_format::store_log::StoreChange;
 use coven_storage::{test_utils::MemoryStorage, Storage};
@@ -44,8 +44,13 @@ async fn app_reopening_resumes_operations_and_files_using_one_storage_capability
             .unwrap(),
     );
     let member = MemberKeys::generate().unwrap();
-    let identity = Arc::new(InMemoryCustody::new(member.clone()));
-    let keys = Arc::new(InMemoryCustody::<StoreKeyring>::empty());
+    let scoped = Arc::new(StoreKeychain::new(
+        app.builder(layout.clone()).keychain().unwrap(),
+        directory.id(),
+    ));
+    let identity = Arc::new(KeyringCustody::<MemberKeys>::new(scoped.clone()));
+    identity.persist(&member).unwrap();
+    let keys = Arc::new(KeyringCustody::<StoreKeyring>::new(scoped));
     let open = || {
         app.builder(layout.clone())
             .synced_tables(tables())
@@ -435,8 +440,13 @@ mod recovery {
                     .build()
                     .unwrap(),
             );
-            let identity = Arc::new(InMemoryCustody::new(MemberKeys::generate().unwrap()));
-            let keys = Arc::new(InMemoryCustody::<StoreKeyring>::empty());
+            let scoped = Arc::new(StoreKeychain::new(
+                app.builder(layout.clone()).keychain().unwrap(),
+                directory.id(),
+            ));
+            let identity = Arc::new(KeyringCustody::<MemberKeys>::new(scoped.clone()));
+            identity.persist(&MemberKeys::generate().unwrap()).unwrap();
+            let keys = Arc::new(KeyringCustody::<StoreKeyring>::new(scoped));
             let builder = || {
                 app.builder(layout.clone())
                     .synced_tables(recovery_tables())
@@ -464,11 +474,13 @@ mod recovery {
                 .open()
                 .await
                 .unwrap();
+            let key_session = Arc::new(KeySession::store(keys.clone()).unwrap());
+            let member_session = Arc::new(KeySession::member(identity.clone()).unwrap());
             let mut sync = StoreLogSync::new(
                 storage.clone(),
                 db.clone(),
-                keys.clone(),
-                identity.clone(),
+                key_session.clone(),
+                member_session.clone(),
                 clock.clone(),
                 ids.clone(),
                 directory.clone(),
@@ -482,8 +494,8 @@ mod recovery {
             let mut writes = coven_sync::DeviceLogSync::new(
                 storage.clone(),
                 db.clone(),
-                keys.clone(),
-                identity.clone(),
+                key_session.clone(),
+                member_session.clone(),
             );
             writes.upload_writes().await.unwrap();
             sync.write_snapshot(Audience::Store).await.unwrap();
@@ -518,14 +530,18 @@ mod recovery {
             let operations = coven_sync::Operations::new(
                 StoreLogSync::disconnected(
                     db.clone(),
-                    keys.clone(),
-                    identity.clone(),
+                    key_session.clone(),
+                    member_session.clone(),
                     clock.clone(),
                     ids.clone(),
                     directory.clone(),
                 ),
                 files,
-                coven_sync::DeviceLogSync::disconnected(db.clone(), keys.clone(), identity.clone()),
+                coven_sync::DeviceLogSync::disconnected(
+                    db.clone(),
+                    key_session.clone(),
+                    member_session.clone(),
+                ),
                 clock.clone(),
             );
             let mut pending = Box::pin(operations.create_circle("Waiting operation"));
@@ -551,6 +567,8 @@ mod recovery {
             db.close().await.unwrap();
             drop(sync);
             drop(writes);
+            key_session.close();
+            member_session.close();
             let path = directory.database_path();
             let mut damaged = std::fs::read(&path).unwrap();
             if readable {
@@ -687,8 +705,8 @@ mod recovery {
             let mut writes = coven_sync::DeviceLogSync::new(
                 storage.clone(),
                 db.clone(),
-                keys.clone(),
-                identity.clone(),
+                Arc::new(KeySession::store(keys.clone()).unwrap()),
+                Arc::new(KeySession::member(identity.clone()).unwrap()),
             );
             writes.upload_writes().await.unwrap();
             assert_eq!(

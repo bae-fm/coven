@@ -3,7 +3,7 @@
 use super::KeyError;
 use crate::{cipher, randomness, wire, CryptoError, SecretBytes};
 use coven_foundation::{files::AtomicFile, id_source::StoreId};
-use std::marker::PhantomData;
+use std::{marker::PhantomData, sync::Mutex};
 use zeroize::Zeroizing;
 
 /// A memorized secret that protects custody with Argon2id (E1).
@@ -30,18 +30,28 @@ const WRITE_PARAMETERS: [u32; 3] = [65536, 3, 4];
 /// Passphrase file custody for `StoreKeyring` or `MemberKeys` (E1).
 /// The composition root supplies the corresponding reserved `AtomicFile`.
 pub struct PassphraseCustody<T> {
-    passphrase: Passphrase,
+    protection: Mutex<Option<Protection>>,
     file: AtomicFile,
     store: StoreId,
     material: PhantomData<fn() -> T>,
 }
 
+enum Protection {
+    Locked(Passphrase),
+    Unlocked(Sealing),
+}
+
+struct Sealing {
+    header: Vec<u8>,
+    key: Zeroizing<[u8; 32]>,
+}
+
 impl<T> PassphraseCustody<T> {
-    /// Keep a passphrase and its store's reserved file for lazy unlocking.
-    /// Construction reads no file and derives no key (E1).
+    /// Retain the passphrase until the session opens. Construction performs no IO.
+    /// Successful unlocking erases the passphrase and keeps its derived key.
     pub fn new(passphrase: Passphrase, file: AtomicFile, store: StoreId) -> Self {
         Self {
-            passphrase,
+            protection: Mutex::new(Some(Protection::Locked(passphrase))),
             file,
             store,
             material: PhantomData,
@@ -49,10 +59,88 @@ impl<T> PassphraseCustody<T> {
     }
 
     pub(crate) fn read(&self, kind: &str) -> Result<Option<SecretBytes>, KeyError> {
-        let Some(bytes) = self.file.read_optional()? else {
-            return Ok(None);
+        let mut protection = self
+            .protection
+            .lock()
+            .expect("passphrase custody lock poisoned");
+        let Protection::Locked(passphrase) = protection.as_ref().ok_or(KeyError::StoreClosed)?
+        else {
+            panic!("passphrase custody must be unlocked once by its session owner");
         };
-        let mut body = bytes.as_slice();
+        let (sealing, material) = match self.file.read_optional()? {
+            Some(bytes) => {
+                let sealing = Sealing::open(passphrase, &bytes)?;
+                let aad =
+                    cipher::context(&[&sealing.header, self.store.0.as_bytes(), kind.as_bytes()]);
+                let material =
+                    match cipher::open_random(&sealing.key, &aad, &bytes[sealing.header.len()..]) {
+                        Ok(bytes) => SecretBytes::new(bytes),
+                        Err(CryptoError::Authentication) => {
+                            return Err(KeyError::PassphraseAuthentication)
+                        }
+                        Err(error) => return Err(error.into()),
+                    };
+                (sealing, Some(material))
+            }
+            None => (Sealing::create(passphrase)?, None),
+        };
+        *protection = Some(Protection::Unlocked(sealing));
+        Ok(material)
+    }
+
+    pub(crate) fn write(&self, kind: &str, plaintext: &[u8]) -> Result<(), KeyError> {
+        let protection = self
+            .protection
+            .lock()
+            .expect("passphrase custody lock poisoned");
+        let Protection::Unlocked(sealing) = protection.as_ref().ok_or(KeyError::StoreClosed)?
+        else {
+            panic!("passphrase custody must be unlocked before persisting");
+        };
+        let aad = cipher::context(&[&sealing.header, self.store.0.as_bytes(), kind.as_bytes()]);
+        let mut bytes = sealing.header.clone();
+        // Each save uses a fresh nonce under the session's held key. It reads
+        // neither the existing file nor the erased passphrase.
+        bytes.extend(cipher::seal_random(&sealing.key, &aad, plaintext)?);
+        self.file.replace(&bytes)?;
+        Ok(())
+    }
+
+    pub(crate) fn remove(&self) -> Result<(), KeyError> {
+        let protection = self
+            .protection
+            .lock()
+            .expect("passphrase custody lock poisoned");
+        protection.as_ref().ok_or(KeyError::StoreClosed)?;
+        self.file.remove().map_err(KeyError::from)
+    }
+
+    pub(crate) fn release(&self) {
+        self.protection
+            .lock()
+            .expect("passphrase custody lock poisoned")
+            .take();
+    }
+}
+
+impl Sealing {
+    fn create(passphrase: &Passphrase) -> Result<Self, KeyError> {
+        let mut salt = [0; SALT_LEN];
+        randomness::fill(&mut salt)?;
+        let params = read_parameters(WRITE_PARAMETERS)
+            .expect("custody writer parameters must satisfy the passphrase resource bounds");
+        let key = derive(passphrase, &salt, params)?;
+        let mut header = HEADER.to_vec();
+        header.extend_from_slice(&0x13u32.to_le_bytes());
+        for param in WRITE_PARAMETERS {
+            header.extend_from_slice(&param.to_le_bytes());
+        }
+        header.extend_from_slice(&salt);
+        Ok(Self { header, key })
+    }
+
+    fn open(passphrase: &Passphrase, bytes: &[u8]) -> Result<Self, KeyError> {
+        let mut body = bytes;
         wire::prefix(&mut body, HEADER).map_err(|_| KeyError::PassphraseHeader)?;
         let version =
             u32::from_le_bytes(wire::array(&mut body).map_err(|_| KeyError::PassphraseHeader)?);
@@ -68,38 +156,9 @@ impl<T> PassphraseCustody<T> {
         if body.len() < 40 {
             return Err(KeyError::PassphraseHeader);
         }
-        let header = bytes.get(..37).ok_or(KeyError::PassphraseHeader)?;
-        let key = derive(&self.passphrase, &salt, read_parameters(params)?)?;
-        let aad = cipher::context(&[header, self.store.0.as_bytes(), kind.as_bytes()]);
-        match cipher::open_random(&key, &aad, body) {
-            Ok(bytes) => Ok(Some(SecretBytes::new(bytes))),
-            Err(CryptoError::Authentication) => Err(KeyError::PassphraseAuthentication),
-            Err(error) => Err(error.into()),
-        }
-    }
-
-    pub(crate) fn write(&self, kind: &str, plaintext: &[u8]) -> Result<(), KeyError> {
-        // Only current writer parameters affect a new file. Reading uses the
-        // exact authenticated parameters recorded in that particular file.
-        let mut salt = [0; SALT_LEN];
-        randomness::fill(&mut salt)?;
-        let params = read_parameters(WRITE_PARAMETERS)
-            .expect("custody writer parameters must satisfy the passphrase resource bounds");
-        let key = derive(&self.passphrase, &salt, params)?;
-        let mut header = HEADER.to_vec();
-        header.extend_from_slice(&0x13u32.to_le_bytes());
-        for param in WRITE_PARAMETERS {
-            header.extend_from_slice(&param.to_le_bytes());
-        }
-        header.extend_from_slice(&salt);
-        let aad = cipher::context(&[&header, self.store.0.as_bytes(), kind.as_bytes()]);
-        header.extend(cipher::seal_random(&key, &aad, plaintext)?);
-        self.file.replace(&header)?;
-        Ok(())
-    }
-
-    pub(crate) fn remove(&self) -> Result<(), KeyError> {
-        self.file.remove().map_err(KeyError::from)
+        let header = bytes[..bytes.len() - body.len()].to_vec();
+        let key = derive(passphrase, &salt, read_parameters(params)?)?;
+        Ok(Self { header, key })
     }
 }
 
@@ -140,6 +199,8 @@ fn derive(
     salt: &[u8; SALT_LEN],
     params: argon2::Params,
 ) -> Result<Zeroizing<[u8; 32]>, KeyError> {
+    #[cfg(test)]
+    tests::DERIVATIONS.with(|count| count.set(count.get() + 1));
     let mut blocks = allocate_blocks(params.block_count())?;
     let argon = argon2::Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params);
     let mut key = Zeroizing::new([0; 32]);

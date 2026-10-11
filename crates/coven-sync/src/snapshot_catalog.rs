@@ -281,7 +281,7 @@ impl StoreLogSync {
         let storage = self.storage.as_deref().ok_or(SyncError::NoStorage)?;
         let ring = self
             .store_keys
-            .unlock()?
+            .read()?
             .ok_or(SyncError::KeyUnavailable(candidate.prefix.key))?;
         let key = io::key(&ring, &candidate.prefix.audience, candidate.prefix.key)?;
         let prefix = candidate.prefix.encode()?;

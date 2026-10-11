@@ -58,7 +58,7 @@ async fn damaged_objects_roll_back_and_block_only_their_device() {
             .find(|object| object.path == path)
             .unwrap();
         let log = devices[2].db.store_log().await.unwrap();
-        let ring = devices[2].custody.unlock().unwrap().unwrap();
+        let ring = devices[2].custody.read().unwrap().unwrap();
         let mut replays = crate::replay_cache::ReplayCache::new(&log);
         let error = devices[2]
             .writes
@@ -339,7 +339,7 @@ async fn a_newer_schema_does_not_hide_a_damaged_signature() {
         .unwrap()
         .remove(0);
     let log = devices[1].db.store_log().await.unwrap();
-    let ring = devices[1].custody.unlock().unwrap().unwrap();
+    let ring = devices[1].custody.read().unwrap().unwrap();
     let mut replays = crate::replay_cache::ReplayCache::new(&log);
     assert!(matches!(
         devices[1]
@@ -408,7 +408,7 @@ async fn missing_read_view_waits_then_replays_after_the_store_log_arrives() {
             .unwrap()
             .remove(0);
         let log = devices[1].db.store_log().await.unwrap();
-        let ring = devices[1].custody.unlock().unwrap().unwrap();
+        let ring = devices[1].custody.read().unwrap().unwrap();
         let mut replays = crate::replay_cache::ReplayCache::new(&log);
         let result = devices[1]
             .writes
@@ -514,7 +514,7 @@ async fn authorization_causality_and_identity_refusals_keep_their_report_tags() 
             .unwrap()
             .remove(0);
         let log = devices[1].db.store_log().await.unwrap();
-        let ring = devices[1].custody.unlock().unwrap().unwrap();
+        let ring = devices[1].custody.read().unwrap().unwrap();
         let mut replays = crate::replay_cache::ReplayCache::new(&log);
         let error = devices[1]
             .writes

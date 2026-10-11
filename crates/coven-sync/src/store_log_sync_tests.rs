@@ -21,8 +21,8 @@ pub(crate) struct Device {
     pub(crate) writes: crate::DeviceLogSync,
     pub(crate) db: Database,
     pub(crate) directory: StoreDir,
-    pub(crate) custody: Arc<InMemoryCustody<StoreKeyring>>,
-    pub(crate) identity: Arc<InMemoryCustody<MemberKeys>>,
+    pub(crate) custody: Arc<KeySession<StoreKeyring>>,
+    pub(crate) identity: Arc<KeySession<MemberKeys>>,
     pub(crate) member: MemberKeys,
     pub(crate) clock: Arc<FixedClock>,
     pub(crate) ids: coven_foundation::id_source::IdSourceRef,
@@ -91,8 +91,9 @@ impl Device {
             .open()
             .await
             .unwrap();
-        let custody = Arc::new(InMemoryCustody::empty());
-        let identity = Arc::new(InMemoryCustody::new(member.clone()));
+        let custody = Arc::new(KeySession::store(Arc::new(InMemoryCustody::empty())).unwrap());
+        let identity =
+            Arc::new(KeySession::member(Arc::new(InMemoryCustody::new(member.clone()))).unwrap());
         let writes = crate::DeviceLogSync::new(
             storage.clone(),
             db.clone(),
@@ -173,12 +174,7 @@ impl Device {
     }
 
     fn reseal(&self, upload: &coven_database::StoreLogUpload) -> Vec<u8> {
-        object::seal_upload(
-            upload,
-            self.custody.unlock().unwrap().as_ref(),
-            &self.member,
-        )
-        .unwrap()
+        object::seal_upload(upload, self.custody.read().unwrap().as_ref(), &self.member).unwrap()
     }
 
     fn writes(&self) -> crate::DeviceLogSync {
@@ -405,7 +401,7 @@ async fn removal_rotates_keys_for_remaining_members_and_stops_removed_devices() 
         Err(SyncFailure::Removed)
     ));
     for device in [&a, &c] {
-        let ring = device.custody.unlock().unwrap().unwrap();
+        let ring = device.custody.read().unwrap().unwrap();
         assert!(ring.store_key(key(1)).is_ok());
         assert!(ring.store_key(key(3)).is_ok());
         assert!(ring.circle_key(circle(1), key(4)).is_ok());
@@ -427,7 +423,7 @@ async fn removal_rotates_keys_for_remaining_members_and_stops_removed_devices() 
     let mut joined = device(storage.clone(), 4, member(4), store(1)).await;
     a.add(&joined.member, MemberRole::Member).await;
     joined.sync().await;
-    let ring = joined.custody.unlock().unwrap().unwrap();
+    let ring = joined.custody.read().unwrap().unwrap();
     assert!(ring.store_key(key(1)).is_ok());
     assert!(ring.store_key(key(3)).is_ok());
     assert_eq!(a.log().await, joined.log().await);
@@ -583,7 +579,7 @@ async fn key_objects_are_fixed_and_published_before_the_entry() {
         .await
         .unwrap()
         .is_empty());
-    assert!(a.custody.unlock().unwrap().is_none());
+    assert!(a.custody.read().unwrap().is_none());
     let expected = a.reseal(&pending);
     assert!(matches!(
         object::seal_upload(&pending, None, &member(2)),
@@ -616,13 +612,7 @@ async fn key_objects_are_fixed_and_published_before_the_entry() {
             .unwrap(),
         sealed_key.bytes
     );
-    assert!(a
-        .custody
-        .unlock()
-        .unwrap()
-        .unwrap()
-        .store_key(key(1))
-        .is_ok());
+    assert!(a.custody.read().unwrap().unwrap().store_key(key(1)).is_ok());
 }
 
 #[tokio::test]
@@ -666,14 +656,14 @@ async fn outside_admin_does_not_keep_circle_key_and_noop_keeps_named_store_key()
     c.sync().await;
     assert!(a
         .custody
-        .unlock()
+        .read()
         .unwrap()
         .unwrap()
         .circle_key(circle(1), key(4))
         .is_err());
     assert!(c
         .custody
-        .unlock()
+        .read()
         .unwrap()
         .unwrap()
         .circle_key(circle(1), key(4))
@@ -691,7 +681,7 @@ async fn outside_admin_does_not_keep_circle_key_and_noop_keeps_named_store_key()
         assert_eq!(device.log().await.replay.state.store.unwrap().key, key(3));
         assert!(device
             .custody
-            .unlock()
+            .read()
             .unwrap()
             .unwrap()
             .store_key(key(5))
@@ -759,7 +749,8 @@ async fn changing_custody_cannot_change_a_devices_author() {
     let mut a = device(storage.clone(), 1, member(1), store(1)).await;
     a.create(key(1)).await;
     a.add(&member(2), MemberRole::Admin).await;
-    a.sync.member_keys = Arc::new(InMemoryCustody::new(member(2)));
+    a.sync.member_keys =
+        Arc::new(KeySession::member(Arc::new(InMemoryCustody::new(member(2)))).unwrap());
     let result = a
         .sync
         .make_and_upload_entry(StoreChange::AddDevice {
@@ -832,7 +823,7 @@ async fn a_waiting_entry_reseals_with_its_recorded_key_after_rotation() {
     let (entry, replay) = crate::replay_entry(&a.log().await, rotation);
     a.db.apply_store_log(entry, replay).await.unwrap();
     a.custody
-        .persist(&b.custody.unlock().unwrap().unwrap())
+        .persist(&b.custody.read().unwrap().unwrap())
         .unwrap();
     a.restart(storage.clone()).await;
     assert_eq!(a.log().await.replay.state.store.unwrap().key, key(2));

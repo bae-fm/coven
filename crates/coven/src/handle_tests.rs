@@ -1,6 +1,6 @@
 use crate::*;
 use std::sync::{
-    atomic::{AtomicUsize, Ordering},
+    atomic::{AtomicBool, AtomicUsize, Ordering},
     Arc, Mutex,
 };
 
@@ -61,13 +61,19 @@ async fn kept_keys_survive_reopen_and_forgetting_preserves_identity() {
     app.delete_store(&directory).await.unwrap();
 }
 
+#[derive(Default)]
 struct Keys {
     keys: Mutex<Option<StoreKeyring>>,
     unlocks: AtomicUsize,
+    closes: AtomicUsize,
+    refuse: AtomicBool,
 }
 impl StoreKeyCustody for Keys {
     fn unlock(&self) -> Result<Option<StoreKeyring>, KeyError> {
         self.unlocks.fetch_add(1, Ordering::SeqCst);
+        if self.refuse.load(Ordering::SeqCst) {
+            return Err(KeyError::PassphraseAuthentication);
+        }
         Ok(self.keys.lock().unwrap().clone())
     }
     fn persist(&self, keys: &StoreKeyring) -> Result<(), KeyError> {
@@ -78,15 +84,25 @@ impl StoreKeyCustody for Keys {
         self.keys.lock().unwrap().take();
         Ok(())
     }
+    fn close(&self) {
+        self.closes.fetch_add(1, Ordering::SeqCst);
+        self.keys.lock().unwrap().take();
+    }
 }
 
+#[derive(Default)]
 struct Identity {
     keys: Mutex<Option<MemberKeys>>,
     unlocks: AtomicUsize,
+    closes: AtomicUsize,
+    refuse: AtomicBool,
 }
 impl MemberKeyCustody for Identity {
     fn unlock(&self) -> Result<Option<MemberKeys>, KeyError> {
         self.unlocks.fetch_add(1, Ordering::SeqCst);
+        if self.refuse.load(Ordering::SeqCst) {
+            return Err(KeyError::PassphraseAuthentication);
+        }
         Ok(self.keys.lock().unwrap().clone())
     }
     fn persist(&self, keys: &MemberKeys) -> Result<(), KeyError> {
@@ -97,25 +113,23 @@ impl MemberKeyCustody for Identity {
         self.keys.lock().unwrap().take();
         Ok(())
     }
+    fn close(&self) {
+        self.closes.fetch_add(1, Ordering::SeqCst);
+        self.keys.lock().unwrap().take();
+    }
 }
 
 #[tokio::test]
-async fn opening_and_sql_do_not_unlock_custody_and_callback_failures_roll_back() {
+async fn opening_unlocks_once_and_sql_callback_failures_roll_back() {
     let root = tempfile::tempdir().unwrap();
     let layout = StoreLayout::new(root.path().to_owned());
     let app = TestCoven::new();
     let directory = app
-        .create_store(&layout, "lazy", Arc::new(UuidIds))
+        .create_store(&layout, "session", Arc::new(UuidIds))
         .await
         .unwrap();
-    let keys = Arc::new(Keys {
-        keys: Mutex::new(None),
-        unlocks: AtomicUsize::new(0),
-    });
-    let identity = Arc::new(Identity {
-        keys: Mutex::new(None),
-        unlocks: AtomicUsize::new(0),
-    });
+    let keys = Arc::new(Keys::default());
+    let identity = Arc::new(Identity::default());
     let handle = builder(&app, layout.clone())
         .key_custody(KeyCustody::Custom(keys.clone()))
         .identity_custody(IdentityCustody::Custom(identity.clone()))
@@ -155,8 +169,8 @@ async fn opening_and_sql_do_not_unlock_custody_and_callback_failures_roll_back()
         reader.read(|_| Ok(())).await,
         Err(CovenError::Database(DbError::StoreClosed))
     ));
-    assert_eq!(keys.unlocks.load(Ordering::SeqCst), 0);
-    assert_eq!(identity.unlocks.load(Ordering::SeqCst), 0);
+    assert_eq!(keys.unlocks.load(Ordering::SeqCst), 1);
+    assert_eq!(identity.unlocks.load(Ordering::SeqCst), 1);
     handle.initialize_identity().unwrap();
     assert_eq!(identity.unlocks.load(Ordering::SeqCst), 1);
     assert_eq!(handle.store_key_state().unwrap(), StoreKeyState::Locked);
@@ -336,4 +350,212 @@ async fn closing_waits_for_setup_after_its_caller_is_cancelled() {
         assert_eq!(storage.list(&ObjectPrefix::store_logs()).await.unwrap().len(), 1);
         assert!(matches!(handle.store_key_state(), Err(KeyError::StoreClosed)));
     }).await.expect("cancelled setup finishes before close");
+}
+
+#[tokio::test]
+async fn workers_share_keys_across_stop_forget_and_reacquisition_until_close() {
+    use coven_storage::{test_utils::MemoryStorage, Storage};
+    let root = tempfile::tempdir().unwrap();
+    let layout = StoreLayout::new(root.path().into());
+    let app = TestCoven::new();
+    let directory = app
+        .create_store(&layout, "session", Arc::new(UuidIds))
+        .await
+        .unwrap();
+    let storage = Arc::new(MemoryStorage::builder().build().unwrap());
+    let keys = Arc::new(Keys::default());
+    let identity = Arc::new(Identity::default());
+    let handle = builder(&app, layout)
+        .key_custody(KeyCustody::Custom(keys.clone()))
+        .identity_custody(IdentityCustody::Custom(identity.clone()))
+        .storage_connector(storage.clone())
+        .open(directory.id())
+        .await
+        .unwrap();
+    let member = handle.initialize_identity().unwrap();
+    handle
+        .setup_s3_storage(
+            storage.config(),
+            "Owner",
+            "owner-key".into(),
+            SecretText::new("secret".into()),
+        )
+        .await
+        .unwrap();
+    let clone = handle.clone();
+    let circle = clone.circles().create("Shared").await.unwrap();
+    assert!(keys
+        .keys
+        .lock()
+        .unwrap()
+        .as_ref()
+        .unwrap()
+        .circle_key_ids(circle)
+        .next()
+        .is_some());
+    let code = handle.restore_code().await.unwrap();
+    for _ in 0..2 {
+        let mut status = handle.subscribe_sync_status();
+        handle.stop_sync();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            status.wait_for(|s| matches!(s, SyncStatus::Stopped)),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(clone.store_key_state().unwrap(), StoreKeyState::Available);
+        assert_eq!(handle.restore_code().await.unwrap(), code);
+        handle.start_sync().await.unwrap();
+    }
+    handle.forget_store_keys().await.unwrap();
+    assert!(keys.keys.lock().unwrap().is_none());
+    assert_eq!(clone.store_key_state().unwrap(), StoreKeyState::Locked);
+    assert_eq!(
+        identity.keys.lock().unwrap().as_ref().unwrap().member_id(),
+        member
+    );
+    assert_eq!(handle.restore_code().await.unwrap(), code);
+    handle.unlock_store_key().await.unwrap();
+    assert_eq!(clone.store_key_state().unwrap(), StoreKeyState::Available);
+    assert!(keys
+        .keys
+        .lock()
+        .unwrap()
+        .as_ref()
+        .unwrap()
+        .circle_key_ids(circle)
+        .next()
+        .is_some());
+    assert_eq!(keys.unlocks.load(Ordering::SeqCst), 1);
+    assert_eq!(identity.unlocks.load(Ordering::SeqCst), 1);
+    handle.close().await.unwrap();
+    assert!(keys.keys.lock().unwrap().is_none());
+    assert!(identity.keys.lock().unwrap().is_none());
+    assert_eq!(keys.closes.load(Ordering::SeqCst), 1);
+    assert_eq!(identity.closes.load(Ordering::SeqCst), 1);
+    assert!(matches!(
+        clone.store_key_state(),
+        Err(KeyError::StoreClosed)
+    ));
+    assert!(matches!(clone.close().await, Err(DbError::StoreClosed)));
+    assert_eq!(keys.closes.load(Ordering::SeqCst), 1);
+    assert_eq!(identity.closes.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn failed_identity_unlock_releases_the_opened_store_session() {
+    let root = tempfile::tempdir().unwrap();
+    let layout = StoreLayout::new(root.path().into());
+    let app = TestCoven::new();
+    let directory = app
+        .create_store(&layout, "session", Arc::new(UuidIds))
+        .await
+        .unwrap();
+    let keys = Arc::new(Keys::default());
+    let identity = Arc::new(Identity::default());
+    identity.refuse.store(true, Ordering::SeqCst);
+    assert!(matches!(
+        builder(&app, layout)
+            .key_custody(KeyCustody::Custom(keys.clone()))
+            .identity_custody(IdentityCustody::Custom(identity.clone()))
+            .open(directory.id())
+            .await,
+        Err(CovenError::Key(KeyError::PassphraseAuthentication))
+    ));
+    assert_eq!(keys.unlocks.load(Ordering::SeqCst), 1);
+    assert_eq!(identity.unlocks.load(Ordering::SeqCst), 1);
+    assert_eq!(keys.closes.load(Ordering::SeqCst), 1);
+    assert_eq!(identity.closes.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn migration_failure_precedes_custody_unlock() {
+    let root = tempfile::tempdir().unwrap();
+    let layout = StoreLayout::new(root.path().into());
+    let app = TestCoven::new();
+    let directory = app
+        .create_store(&layout, "session", Arc::new(UuidIds))
+        .await
+        .unwrap();
+    let keys = Arc::new(Keys::default());
+    let identity = Arc::new(Identity::default());
+    keys.refuse.store(true, Ordering::SeqCst);
+    let error = builder(&app, layout)
+        .migrations(vec![Migration::sql(1, "invalid", "INVALID SQL")])
+        .key_custody(KeyCustody::Custom(keys.clone()))
+        .identity_custody(IdentityCustody::Custom(identity.clone()))
+        .open(directory.id())
+        .await
+        .unwrap_err();
+    assert!(matches!(error, CovenError::Migration(_)), "{error:?}");
+    assert_eq!(keys.unlocks.load(Ordering::SeqCst), 0);
+    assert_eq!(identity.unlocks.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn closing_erases_custody_even_when_releasing_a_worker_fails() {
+    use std::{
+        future::Future,
+        pin::Pin,
+        time::{Duration, SystemTime},
+    };
+
+    struct HeldClock;
+    impl Clock for HeldClock {
+        fn now(&self) -> SystemTime {
+            SystemTime::UNIX_EPOCH + Duration::from_secs(1_000)
+        }
+        fn sleep(&self, _: Duration) -> Pin<Box<dyn Future<Output = ()> + Send>> {
+            Box::pin(std::future::pending())
+        }
+    }
+
+    let root = tempfile::tempdir().unwrap();
+    let layout = StoreLayout::new(root.path().into());
+    let app = TestCoven::new();
+    let ids = Arc::new(UuidIds);
+    let directory = app
+        .create_store(&layout, "closing", ids.clone())
+        .await
+        .unwrap();
+    let keys = Arc::new(Keys {
+        keys: Mutex::new(Some(StoreKeyring::new(
+            StoreKey::generate(KeyId(ids.new_id())).unwrap(),
+        ))),
+        ..Keys::default()
+    });
+    let identity = Arc::new(Identity::default());
+    let handle = builder(&app, layout)
+        .clock(Arc::new(HeldClock))
+        .key_custody(KeyCustody::Custom(keys.clone()))
+        .identity_custody(IdentityCustody::Custom(identity.clone()))
+        .open(directory.id())
+        .await
+        .unwrap();
+    handle.initialize_identity().unwrap();
+    handle.pending_operations().await.unwrap();
+    // Hold timer-driven work so closing encounters the damaged journal row.
+    handle
+        .database
+        .start_operation(coven_database::NewOperation {
+            kind: "create-circle".into(),
+            data: b"malformed operation".to_vec(),
+            started_by: "create_circle".into(),
+        })
+        .await
+        .unwrap();
+    let clone = handle.clone();
+    assert!(matches!(
+        handle.close().await,
+        Err(DbError::OperationWorker(_))
+    ));
+    assert_eq!(keys.closes.load(Ordering::SeqCst), 1);
+    assert_eq!(identity.closes.load(Ordering::SeqCst), 1);
+    assert!(keys.keys.lock().unwrap().is_none());
+    assert!(identity.keys.lock().unwrap().is_none());
+    assert!(matches!(
+        clone.read(|_| Ok(())).await,
+        Err(CovenError::Database(DbError::StoreClosed))
+    ));
 }

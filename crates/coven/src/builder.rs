@@ -3,7 +3,8 @@
 use crate::authentication::Authentication;
 use crate::*;
 use coven_crypto::custody::{
-    InMemoryCustody, Keychain, KeyringCustody, PassphraseCustody, StoreCustody, StoreKeychain,
+    InMemoryCustody, KeySession, Keychain, KeyringCustody, PassphraseCustody, StoreCustody,
+    StoreKeychain,
 };
 use coven_database::DatabaseBuilder;
 use coven_foundation::files::StoreFile;
@@ -157,9 +158,9 @@ impl CovenBuilder {
 
     /// Opens the store for reading and writing, taking the store's lock.
     /// Opening always migrates coven's tables before the app's schema, then
-    /// resumes unfinished operations and committed file work. An empty journal
-    /// needs no keys; resumed steps read keys when needed. No sync loop starts,
-    /// and local database calls need no unlocked key.
+    /// unlocks both custody sessions before resuming unfinished operations and
+    /// committed file work. Empty custody is allowed; an unlock failure prevents
+    /// opening. No sync loop starts, and local database calls need no key material.
     pub async fn open(self, store: StoreId) -> CovenResult<CovenHandle> {
         crate::coven::blocking(move || self.open_graph(store, false))
             .await?
@@ -279,7 +280,9 @@ impl CovenBuilder {
         Ok(OpeningStore {
             database,
             lock,
-            owners: self.owners(directory, keychain)?,
+            builder: self,
+            directory,
+            keychain,
         })
     }
 
@@ -292,13 +295,22 @@ impl CovenBuilder {
         let connector = self.connector();
         let settings = directory.settings()?;
         let has_storage_credentials = keychain.storage_credentials()?.is_some();
-        let keys = Self::make_keys(self.keys, &directory, settings.id, keychain.clone());
-        let identity =
-            Self::make_identity(self.identity, &directory, settings.id, keychain.clone());
+        let keys = Arc::new(KeySession::store(Self::make_keys(
+            self.keys,
+            &directory,
+            settings.id,
+            keychain.clone(),
+        ))?);
+        let identity = Arc::new(KeySession::member(Self::make_identity(
+            self.identity,
+            &directory,
+            settings.id,
+            keychain.clone(),
+        ))?);
         Ok(OpeningOwners {
             directory,
             has_storage_credentials,
-            custody: StoreCustody::new(identity.clone(), keychain.clone()),
+            custody: StoreCustody::new(keys.clone(), identity.clone(), keychain.clone()),
             keychain,
             connector,
             oauth,
@@ -361,7 +373,9 @@ impl CovenBuilder {
 struct OpeningStore {
     database: DatabaseBuilder,
     lock: coven_foundation::files::StoreLock,
-    owners: OpeningOwners,
+    builder: CovenBuilder,
+    directory: StoreDir,
+    keychain: Arc<StoreKeychain>,
 }
 
 struct OpeningOwners {
@@ -375,8 +389,8 @@ struct OpeningOwners {
     device: DeviceId,
     directory: StoreDir,
     custody: StoreCustody,
-    keys: Arc<dyn StoreKeyCustody>,
-    identity: Arc<dyn MemberKeyCustody>,
+    keys: Arc<KeySession<StoreKeyring>>,
+    identity: Arc<KeySession<MemberKeys>>,
     clock: ClockRef,
     ids: IdSourceRef,
     storage: Option<Arc<coven_storage::StorageConnection>>,
@@ -385,56 +399,58 @@ struct OpeningOwners {
 impl OpeningStore {
     async fn open(self) -> CovenResult<CovenHandle> {
         let database = self.database.open_locked(self.lock).await?;
-        let sync = self.owners.sync(database.clone());
-        Ok(self.owners.handle(database, sync))
+        let owners =
+            crate::coven::blocking(move || self.builder.owners(self.directory, self.keychain))
+                .await?;
+        let sync = owners.sync(database.clone());
+        Ok(owners.handle(database, sync))
     }
 
-    async fn open_reloading(mut self, device_name: &str) -> Result<CovenHandle, RecoveryError> {
+    async fn open_reloading(self, device_name: &str) -> Result<CovenHandle, RecoveryError> {
+        let mut owners =
+            crate::coven::blocking(move || self.builder.owners(self.directory, self.keychain))
+                .await?;
         let mut data = coven_sync::read_connection(
-            &coven_storage::StorageSettings::new(self.owners.directory.clone()),
-            &self.owners.keychain,
+            &coven_storage::StorageSettings::new(owners.directory.clone()),
+            &owners.keychain,
         )?
         .ok_or(SyncError::NoStorage)?;
-        self.owners
+        owners
             .keys
-            .unlock()
+            .read()
             .map_err(CovenError::from)?
             .ok_or(RecoveryError::NoStoreKeys)?;
-        self.owners
+        owners
             .identity
-            .unlock()
+            .read()
             .map_err(CovenError::from)?
             .ok_or(SyncError::from(
                 coven_storage::StorageFailure::MemberKeysMissing,
             ))?;
-        if let Some(credentials) = coven_sync::refreshed_credentials(
-            &data,
-            self.owners.oauth.as_ref(),
-            self.owners.clock.now(),
-        )
-        .await?
+        if let Some(credentials) =
+            coven_sync::refreshed_credentials(&data, owners.oauth.as_ref(), owners.clock.now())
+                .await?
         {
-            coven_sync::commit_credentials(&self.owners.keychain, &credentials, None)?;
+            coven_sync::commit_credentials(&owners.keychain, &credentials, None)?;
             data.credentials = credentials;
         }
-        let storage = self
-            .owners
+        let storage = owners
             .connector
-            .connect(data.location, data.credentials, self.owners.device)
+            .connect(data.location, data.credentials, owners.device)
             .await
             .map_err(SyncError::from)?;
         storage
             .list(&ObjectPrefix::all())
             .await
             .map_err(SyncError::from)?;
-        self.owners.storage = Some(storage);
-        let archive = coven_foundation::files::FileName::new(self.owners.ids.new_id().to_string())
+        owners.storage = Some(storage);
+        let archive = coven_foundation::files::FileName::new(owners.ids.new_id().to_string())
             .expect("UUID filename");
         let database = self
             .database
             .open_reloading_locked(self.lock, archive)
             .await?;
-        let mut sync = self.owners.sync(database.clone());
+        let mut sync = owners.sync(database.clone());
         // Store-log replay and snapshot loading remain owned by sync. The new
         // device identity prevents reuse of numbers the damaged file cannot supply.
         sync.sync_store_log().await.map_err(SyncError::from)?;
@@ -448,7 +464,7 @@ impl OpeningStore {
             .await?;
         }
         database.finish_recovery().await.map_err(CovenError::from)?;
-        Ok(self.owners.handle(database, sync))
+        Ok(owners.handle(database, sync))
     }
 }
 

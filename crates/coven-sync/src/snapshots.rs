@@ -397,7 +397,7 @@ impl StoreLogSync {
             .ok_or(SyncError::PermissionDenied)?;
         let ring = self
             .store_keys
-            .unlock()?
+            .read()?
             .ok_or(SyncError::KeyUnavailable(key_id))?;
         let key = io::key(&ring, &id.audience, key_id)?;
         let name = self

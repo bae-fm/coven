@@ -217,7 +217,7 @@ impl StoreLogSync {
     ) -> Result<(DeviceId, WritePositions), SyncError> {
         let storage = self.storage.as_deref().ok_or(SyncError::NoStorage)?;
         let bytes = storage.read(path).await?;
-        let ring = self.store_keys.unlock()?;
+        let ring = self.store_keys.read()?;
         let positions = crate::posted_positions::open(&bytes, path, ring.as_ref(), log)?;
         Ok((positions.device, positions.writes))
     }

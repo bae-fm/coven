@@ -86,7 +86,7 @@ impl StoreLogSync {
         if self.bootstrap_member().await? {
             return Ok(JoinOutcome::Admitted);
         }
-        Ok(if self.store_keys.unlock()?.is_some() {
+        Ok(if self.store_keys.read()?.is_some() {
             JoinOutcome::Waiting
         } else {
             JoinOutcome::Declined

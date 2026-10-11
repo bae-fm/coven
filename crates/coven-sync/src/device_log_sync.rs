@@ -1,7 +1,7 @@
 //! One upload, download or position-posting step; scheduling belongs to the caller.
 
 use crate::{SyncError, SyncFailure};
-use coven_crypto::custody::{MemberKeyCustody, StoreKeyCustody};
+use coven_crypto::{custody::KeySession, MemberKeys, StoreKeyring};
 use coven_database::{ApplyOutcome, Database, DbError};
 use coven_format::{
     objects::{Fingerprint, PostedPositions},
@@ -29,8 +29,8 @@ pub struct DeviceLogSync {
     reads: crate::pass_reads::PassReads,
     storage: Option<Arc<dyn Storage>>,
     database: Database,
-    store_keys: Arc<dyn StoreKeyCustody>,
-    member_keys: Arc<dyn MemberKeyCustody>,
+    store_keys: Arc<KeySession<StoreKeyring>>,
+    member_keys: Arc<KeySession<MemberKeys>>,
 }
 
 impl DeviceLogSync {
@@ -38,8 +38,8 @@ impl DeviceLogSync {
     pub fn new(
         storage: Arc<dyn Storage>,
         database: Database,
-        store_keys: Arc<dyn StoreKeyCustody>,
-        member_keys: Arc<dyn MemberKeyCustody>,
+        store_keys: Arc<KeySession<StoreKeyring>>,
+        member_keys: Arc<KeySession<MemberKeys>>,
     ) -> Self {
         Self {
             reads: crate::pass_reads::PassReads::default(),
@@ -53,8 +53,8 @@ impl DeviceLogSync {
     /// Compose device-log work before a provider has connected.
     pub fn disconnected(
         database: Database,
-        store_keys: Arc<dyn StoreKeyCustody>,
-        member_keys: Arc<dyn MemberKeyCustody>,
+        store_keys: Arc<KeySession<StoreKeyring>>,
+        member_keys: Arc<KeySession<MemberKeys>>,
     ) -> Self {
         Self {
             reads: crate::pass_reads::PassReads::default(),
@@ -84,7 +84,7 @@ impl DeviceLogSync {
             let state = self.database.sync_state(Vec::new()).await?;
             let member = self
                 .member_keys
-                .unlock()?
+                .read()?
                 .ok_or(coven_storage::StorageFailure::MemberKeysMissing)?;
             crate::write_seal::check_member(&local.log, &member, local.device)?;
             crate::write_seal::check_upload_version(&local.log, state.schema_version)?;
@@ -108,7 +108,7 @@ impl DeviceLogSync {
                 .expect("checked store membership");
             let ring = self
                 .store_keys
-                .unlock()?
+                .read()?
                 .ok_or(SyncError::KeyUnavailable(store.key))?;
             let selected_ring = ring.clone();
             let signer = member.clone();
@@ -145,7 +145,7 @@ impl DeviceLogSync {
         let state = self.database.sync_state(Vec::new()).await?;
         let member = self
             .member_keys
-            .unlock()?
+            .read()?
             .ok_or(coven_storage::StorageFailure::MemberKeysMissing)?;
         crate::write_seal::check_member(&local.log, &member, local.device)?;
         let key = local
@@ -158,7 +158,7 @@ impl DeviceLogSync {
             .key;
         let ring = self
             .store_keys
-            .unlock()?
+            .read()?
             .ok_or(SyncError::KeyUnavailable(key))?;
         let mut objects = BTreeMap::new();
         for object in self
@@ -246,7 +246,7 @@ impl DeviceLogSync {
     pub async fn post_positions(&mut self) -> Result<bool, SyncError> {
         let member = self
             .member_keys
-            .unlock()?
+            .read()?
             .ok_or(coven_storage::StorageFailure::MemberKeysMissing)?;
         let Some(positions) = self.positions_for(&member).await? else {
             return Ok(false);
@@ -259,7 +259,7 @@ impl DeviceLogSync {
             .key;
         let ring = self
             .store_keys
-            .unlock()?
+            .read()?
             .ok_or(SyncError::KeyUnavailable(key))?;
         let path = ObjectPath::positions(positions.device);
         let prefix = SingleChunkPrefix::PostedPositions(key);
@@ -288,7 +288,7 @@ impl DeviceLogSync {
     /// Signed peer reports about our objects are retained independently of agreement.
     async fn compare_fingerprints(&mut self) -> Result<(), SyncError> {
         let own = self.current_positions().await?;
-        let ring = self.store_keys.unlock()?;
+        let ring = self.store_keys.read()?;
         let local = self.database.local_store_log().await?;
         let log = local.log;
         let state = self.database.sync_state(Vec::new()).await?;
@@ -378,7 +378,7 @@ impl DeviceLogSync {
     pub(crate) async fn current_positions(&self) -> Result<Option<PostedPositions>, SyncError> {
         let member = self
             .member_keys
-            .unlock()?
+            .read()?
             .ok_or(coven_storage::StorageFailure::MemberKeysMissing)?;
         self.positions_for(&member).await
     }
@@ -397,7 +397,7 @@ impl DeviceLogSync {
             .ok_or(SyncFailure::Removed)?;
         let ring = self
             .store_keys
-            .unlock()?
+            .read()?
             .ok_or(SyncError::KeyUnavailable(store.key))?;
         let mut selected = vec![(Audience::Store, store.key)];
         for (circle, state) in &local.log.replay.state.circles {

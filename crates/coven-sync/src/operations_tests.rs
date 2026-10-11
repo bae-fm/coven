@@ -136,7 +136,7 @@ async fn owner_removal_rotates_keys_and_revokes_the_account() {
     assert_ne!(state.circles[&circle].key, old.circles[&circle].key);
     assert!(state.members[&b.member.member_id()].removed);
     assert!(state.devices[&b.device().await].removed);
-    let ring = c.custody.unlock().unwrap().unwrap();
+    let ring = c.custody.read().unwrap().unwrap();
     assert!(ring.store_key(state.store.as_ref().unwrap().key).is_ok());
     assert!(ring.circle_key(circle, state.circles[&circle].key).is_ok());
     for (audience, key) in [
@@ -177,12 +177,12 @@ async fn outside_admin_rotates_gifts_without_learning_its_key() {
     c.sync().await;
     let key = a.log().await.replay.state.circles[&gifts].key;
     assert!(matches!(
-        a.custody.unlock().unwrap().unwrap().circle_key(gifts, key),
+        a.custody.read().unwrap().unwrap().circle_key(gifts, key),
         Err(coven_crypto::MaterialError::UnknownCircleKey { .. })
     ));
     assert!(c
         .custody
-        .unlock()
+        .read()
         .unwrap()
         .unwrap()
         .circle_key(gifts, key)
@@ -411,7 +411,7 @@ async fn circle_membership_rotates_and_shares_history() {
     assert_ne!(old_key, new_key);
     assert!(matches!(
         b.custody
-            .unlock()
+            .read()
             .unwrap()
             .unwrap()
             .circle_key(circle, new_key),
@@ -424,7 +424,7 @@ async fn circle_membership_rotates_and_shares_history() {
     .await;
     finish(&mut a, add).await;
     c.sync().await;
-    let ring = c.custody.unlock().unwrap().unwrap();
+    let ring = c.custody.read().unwrap().unwrap();
     assert!(ring.circle_key(circle, old_key).is_ok());
     assert!(ring.circle_key(circle, new_key).is_ok());
     assert!(matches!(
@@ -577,7 +577,7 @@ async fn removing_a_member_cuts_off_every_device_of_their_account() {
     assert!(matches!(
         phone
             .custody
-            .unlock()
+            .read()
             .unwrap()
             .unwrap()
             .store_key(state.store.unwrap().key),
@@ -849,9 +849,7 @@ async fn app_reload_and_reset_stay_pending_until_explicit_retry() {
             storage.clone(),
             a.db.clone(),
             a.custody.clone(),
-            Arc::new(coven_crypto::custody::InMemoryCustody::new(
-                a.member.clone(),
-            )),
+            a.identity.clone(),
             a.clock.clone(),
             Arc::new(coven_foundation::id_source::UuidIds),
             a.directory.clone(),

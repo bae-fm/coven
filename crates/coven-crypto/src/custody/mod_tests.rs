@@ -19,7 +19,7 @@ fn directory() -> (tempfile::TempDir, StoreDir) {
     (temp, store)
 }
 
-fn exercise_store_custody(custody: &dyn StoreKeyCustody) {
+fn exercise_store_custody(custody: &KeySession<StoreKeyring>) {
     let key_ids = coven_foundation::id_source::SequentialIds::new();
     let mut keys = StoreKeyring::new(StoreKey::generate(KeyId(key_ids.new_id())).unwrap());
     keys.insert_store_key(StoreKey::generate(KeyId(key_ids.new_id())).unwrap())
@@ -29,23 +29,23 @@ fn exercise_store_custody(custody: &dyn StoreKeyCustody) {
     )
     .unwrap();
     custody.persist(&keys).unwrap();
-    let unlocked = custody.unlock().unwrap().unwrap();
+    let unlocked = custody.read().unwrap().unwrap();
     assert_eq!(
         unlocked.to_secret_bytes().as_bytes(),
         keys.to_secret_bytes().as_bytes()
     );
-    // Unlock returns independently owned keys and leaves custody available.
+    // Reads return independently owned keys and leave the shared session available.
     drop(unlocked);
-    assert!(custody.unlock().unwrap().is_some());
+    assert!(custody.read().unwrap().is_some());
     custody.forget().unwrap();
     custody.forget().unwrap();
-    assert!(custody.unlock().unwrap().is_none());
+    assert!(custody.read().unwrap().is_none());
 }
 
-fn exercise_member_custody(custody: &dyn MemberKeyCustody) {
+fn exercise_member_custody(custody: &KeySession<MemberKeys>) {
     let keys = MemberKeys::generate().unwrap();
     custody.persist(&keys).unwrap();
-    let unlocked = custody.unlock().unwrap().unwrap();
+    let unlocked = custody.read().unwrap().unwrap();
     assert_eq!(unlocked.member_id(), keys.member_id());
     assert_eq!(unlocked.sealing_public_key(), keys.sealing_public_key());
     keys.member_id()
@@ -53,7 +53,7 @@ fn exercise_member_custody(custody: &dyn MemberKeyCustody) {
         .unwrap();
     custody.forget().unwrap();
     custody.forget().unwrap();
-    assert!(custody.unlock().unwrap().is_none());
+    assert!(custody.read().unwrap().is_none());
 }
 
 #[test]
@@ -65,25 +65,52 @@ fn in_memory_custody_keeps_both_material_kinds_for_one_session() {
     let member = InMemoryCustody::new(MemberKeys::generate().unwrap());
     assert!(store.unlock().unwrap().is_some());
     assert!(member.unlock().unwrap().is_some());
-    exercise_store_custody(&store);
-    exercise_member_custody(&member);
+    exercise_store_custody(&KeySession::store(Arc::new(store)).unwrap());
+    exercise_member_custody(&KeySession::member(Arc::new(member)).unwrap());
 }
 
 #[test]
 fn passphrase_files_round_trip_both_material_kinds() {
     let (_temp, directory) = directory();
-    let store = PassphraseCustody::new(
-        Passphrase::new("store passphrase".into()),
-        directory.owned_file(StoreFile::StoreKeys),
-        directory.id(),
+    let open_store = || {
+        KeySession::store(Arc::new(PassphraseCustody::new(
+            Passphrase::new("store passphrase".into()),
+            directory.owned_file(StoreFile::StoreKeys),
+            directory.id(),
+        )))
+        .unwrap()
+    };
+    let open_member = || {
+        KeySession::member(Arc::new(PassphraseCustody::new(
+            Passphrase::new("member passphrase".into()),
+            directory.owned_file(StoreFile::MemberKeys),
+            directory.id(),
+        )))
+        .unwrap()
+    };
+    let store = open_store();
+    let member = open_member();
+    assert!(store.read().unwrap().is_none());
+    assert!(member.read().unwrap().is_none());
+    let keys = StoreKeyring::new(StoreKey::generate(KeyId(Uuid::from_u128(3))).unwrap());
+    let identity = MemberKeys::generate().unwrap();
+    store.persist(&keys).unwrap();
+    member.persist(&identity).unwrap();
+    store.close();
+    member.close();
+    let store = open_store();
+    let member = open_member();
+    assert_eq!(
+        store.read().unwrap().unwrap().to_secret_bytes().as_bytes(),
+        keys.to_secret_bytes().as_bytes()
     );
-    let member = PassphraseCustody::new(
-        Passphrase::new("member passphrase".into()),
-        directory.owned_file(StoreFile::MemberKeys),
-        directory.id(),
-    );
-    assert!(StoreKeyCustody::unlock(&store).unwrap().is_none());
-    assert!(MemberKeyCustody::unlock(&member).unwrap().is_none());
+    let reopened = member.read().unwrap().unwrap();
+    assert_eq!(reopened.member_id(), identity.member_id());
+    assert_eq!(reopened.sealing_public_key(), identity.sealing_public_key());
+    identity
+        .member_id()
+        .verify(b"reopened", &reopened.sign(b"reopened"))
+        .unwrap();
     exercise_store_custody(&store);
     exercise_member_custody(&member);
     assert!(directory
@@ -123,8 +150,8 @@ fn keyring_custody_uses_the_fake_and_isolates_stores_and_material_kinds() {
         .unlock()
         .unwrap()
         .is_none());
-    exercise_store_custody(&store);
-    exercise_member_custody(&member);
+    exercise_store_custody(&KeySession::store(Arc::new(store)).unwrap());
+    exercise_member_custody(&KeySession::member(Arc::new(member)).unwrap());
 }
 
 #[test]

@@ -108,9 +108,9 @@ impl CovenHandle {
     pub async fn start_sync(&self) -> Result<(), SyncError> {
         self.sync.start().await
     }
-    /// Finish the active pass and transfers, then drop unlocked keys and the
-    /// provider client. Completion publishes Stopped, or Disconnected without
-    /// configured storage; release failures publish Failed.
+    /// Finish the active pass and transfers, then release the provider client.
+    /// Keys remain unlocked for the handle session. Completion publishes Stopped,
+    /// or Disconnected without configured storage; release failures publish Failed.
     pub fn stop_sync(&self) {
         self.sync.stop();
     }
@@ -403,22 +403,36 @@ impl CovenHandle {
         let handle = self.clone();
         crate::coven::completion(tokio::spawn(async move {
             handle.storage.close().await;
-            match handle.sync.close().await {
-                Ok(()) | Err(SyncError::Database(DbError::StoreClosed)) => (),
-                Err(error) => return Err(DbError::OperationWorker(Box::new(error))),
-            }
+            let sync = handle.sync.close().await;
             handle.codes.close().await;
-            match handle.operations.close().await {
-                Ok(()) | Err(SyncError::Database(DbError::StoreClosed)) => (),
-                Err(error) => return Err(DbError::OperationWorker(Box::new(error))),
-            }
+            let operations = handle.operations.close().await;
             handle.files.close().await;
             let custody = handle.custody.clone();
             crate::coven::blocking(move || {
-                custody.lock().expect("custody lock poisoned").take();
+                if let Some(custody) = custody.lock().expect("custody lock poisoned").take() {
+                    custody.close();
+                }
             })
             .await;
-            handle.database.close().await
+            let database = handle.database.close().await;
+            // Closing a worker can fail while releasing its provider. Finish
+            // closing every owner and erase custody before reporting failures.
+            let workers = [sync, operations].into_iter().map(|result| match result {
+                Err(SyncError::Database(DbError::StoreClosed)) => Ok(()),
+                result => result,
+            });
+            let failure = workers
+                .chain([database.map_err(SyncError::from)])
+                .filter_map(Result::err)
+                .reduce(|operation, cleanup| SyncError::Cleanup {
+                    operation: Box::new(operation),
+                    cleanup: Box::new(cleanup),
+                });
+            match failure {
+                None => Ok(()),
+                Some(SyncError::Database(error)) => Err(error),
+                Some(error) => Err(DbError::OperationWorker(Box::new(error))),
+            }
         }))
         .await
     }

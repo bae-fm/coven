@@ -322,8 +322,12 @@ async fn prepare_and_load(
         )
         .await
         .map_err(SyncError::from)?;
-    let ring: Arc<dyn StoreKeyCustody> = Arc::new(InMemoryCustody::<StoreKeyring>::empty());
-    let identity: Arc<dyn MemberKeyCustody> = Arc::new(InMemoryCustody::new(member.clone()));
+    let ring = Arc::new(KeySession::store(Arc::new(
+        InMemoryCustody::<StoreKeyring>::empty(),
+    ))?);
+    let identity = Arc::new(KeySession::member(Arc::new(InMemoryCustody::new(
+        member.clone(),
+    )))?);
     let database = builder.database(directory.clone())?.open().await?;
     let mut sync = StoreLogSync::new(
         storage.clone(),
@@ -381,7 +385,7 @@ async fn prepare_and_load(
             return Ok(None);
         }
         let ring = ring
-            .unlock()?
+            .read()?
             .ok_or(SyncError::from(StorageFailure::MemberKeysMissing))?;
         Ok(Some((
             RestoreCode {

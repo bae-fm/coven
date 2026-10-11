@@ -18,7 +18,7 @@ impl StoreLogSync {
         object: &StoredObject,
     ) -> Result<WriteHeaderFrame, SyncError> {
         let storage = self.storage.as_deref().ok_or(SyncError::NoStorage)?;
-        let ring = self.store_keys.unlock()?;
+        let ring = self.store_keys.read()?;
         let result = crate::write_object::open(storage, object, ring.as_ref(), &self.reads).await;
         if let Err(SyncError::Damaged(damage)) = &result {
             crate::write_object::record_damage(&self.database, storage, object, &damage.failure)
@@ -66,7 +66,7 @@ impl StoreLogSync {
         names: &mut impl Iterator<Item = String>,
     ) -> Result<SavedWrite, SyncError> {
         let storage = self.storage.as_deref().ok_or(SyncError::NoStorage)?;
-        let ring = self.store_keys.unlock()?;
+        let ring = self.store_keys.read()?;
         let crate::write_object::ReadyWrite {
             opened,
             author,

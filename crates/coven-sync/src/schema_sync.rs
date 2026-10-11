@@ -132,7 +132,7 @@ impl StoreLogSync {
         }
         let mut local = self.database.local_store_log().await?;
         let member = self.operation_member()?;
-        let mut ring = self.store_keys.unlock()?;
+        let mut ring = self.store_keys.read()?;
         let mut damages = Vec::new();
         self.update_keys(&local.log, &member, &mut ring, &mut damages)
             .await?;

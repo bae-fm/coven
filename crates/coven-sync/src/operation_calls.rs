@@ -91,7 +91,7 @@ impl StoreLogSync {
                     .ok_or(SyncError::NoStorage)?
                     .key;
                 self.store_keys
-                    .unlock()?
+                    .read()?
                     .ok_or(SyncError::KeyUnavailable(key))?
                     .store_key(key)?;
                 return Ok(Begun::Value(Output::Unit));
@@ -171,7 +171,7 @@ impl StoreLogSync {
                 {
                     let member = self.operation_member()?;
                     let mut local = self.database.local_store_log().await?;
-                    let mut ring = self.store_keys.unlock()?;
+                    let mut ring = self.store_keys.read()?;
                     self.publish_queued(&mut local, &member, &mut ring, &mut Vec::new())
                         .await?;
                 }
@@ -431,7 +431,7 @@ impl StoreLogSync {
 
     pub(super) fn operation_member(&self) -> Result<MemberKeys, SyncError> {
         self.member_keys
-            .unlock()?
+            .read()?
             .ok_or_else(|| coven_storage::StorageFailure::MemberKeysMissing.into())
     }
 

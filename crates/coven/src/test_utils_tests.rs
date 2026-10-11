@@ -1,5 +1,5 @@
 use crate::*;
-use coven_crypto::custody::InMemoryCustody;
+use coven_crypto::custody::{InMemoryCustody, KeyringCustody, StoreKeychain};
 use coven_database::test_utils::WriteCheckpoint;
 use coven_format::{
     sealed_snapshot::{SnapshotObjectLayout, SnapshotObjectPrefix},
@@ -40,7 +40,7 @@ struct Fixture {
     ids: IdSourceRef,
     clock: Arc<FixedClock>,
     storage: Arc<MemoryStorage>,
-    keys: Arc<InMemoryCustody<StoreKeyring>>,
+    keys: Arc<KeyringCustody<StoreKeyring>>,
     member: MemberKeys,
     _root: tempfile::TempDir,
 }
@@ -69,6 +69,10 @@ impl Fixture {
             .create_store(&layout, "Guarantees", ids.clone())
             .await
             .unwrap();
+        let keys = Arc::new(KeyringCustody::new(Arc::new(StoreKeychain::new(
+            app.keychain.clone(),
+            directory.id(),
+        ))));
         let f = Self {
             app,
             directory,
@@ -76,7 +80,7 @@ impl Fixture {
             ids,
             clock,
             storage,
-            keys: Arc::new(InMemoryCustody::empty()),
+            keys,
             member: member(17),
             _root: root,
         };
