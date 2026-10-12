@@ -473,9 +473,16 @@ identify parts. An already cached wait is not a download trigger.
 Stream each uncached object once and check chunks as below. Apply each
 write atomically only after all checks, with its header facts and file
 references. Skipped audiences, resets and schema exclusions keep their
-existing rules. Apply §10's retirement landing deadline from retained write
-and entry storage times and current replay; consume an excluded write's
-position while keeping inputs needed for reversal. Entries retain §9's
+existing rules. Verify a write with its device owner's key in its recorded
+`store_log_read`. Apply §10's device-retirement and member-key deadlines from
+retained first-publication times and current replay. Every unread kept
+replacement installing another signing key supplies an inclusive 30-day
+window, including for losing candidate keys. Consume an excluded write's
+position without effects or losses; later readers never rescue it. Feed that
+base verdict into §8's per-change source rule, recording dependent originals
+as losses while independent changes remain eligible. Rebuild admission,
+source evidence, losses, rows and positions atomically, retaining inputs
+until the deciding prefix is final and other retention gates pass. Entries retain §9's
 permanent landing rule. A required path neither supplied by a snapshot nor
 safely skipped under step 5 remains pending
 ([`scan_spec`](proofs/io/CovenIO/FixedReload.lean)); retry only when its shared
