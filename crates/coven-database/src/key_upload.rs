@@ -160,11 +160,7 @@ where
 
 pub(crate) fn complete(database: &DatabaseConnection, copy: &KeyUpload) -> Result<(), DbError> {
     database.transaction(|db| {
-        // No confirmed copy means the next publication must be number one.
-        let previous = db.query(
-            "SELECT number FROM _coven_key_publications WHERE writer=?1", [copy.writer.0.to_be_bytes().as_slice()],
-            |row| Ok(u64::from_be_bytes(row.get(0)?)),
-        )?.into_iter().next().unwrap_or(0);
+        let previous = published(db, copy.writer)?;
         if copy.number.get() <= previous {
             return Ok(());
         }
@@ -180,6 +176,19 @@ pub(crate) fn complete(database: &DatabaseConnection, copy: &KeyUpload) -> Resul
         db.internal_execute("DELETE FROM _coven_key_uploads WHERE writer=?1 AND number=?2", (&args.0[..], &args.1[..]))?;
         Ok(())
     })
+}
+
+pub(crate) fn published(database: &DatabaseConnection, writer: DeviceId) -> Result<u64, DbError> {
+    // An absent publication row means this writer has confirmed no copies.
+    Ok(database
+        .query(
+            "SELECT number FROM _coven_key_publications WHERE writer=?1",
+            [writer.0.to_be_bytes().as_slice()],
+            |row| Ok(u64::from_be_bytes(row.get(0)?)),
+        )?
+        .into_iter()
+        .next()
+        .unwrap_or(0))
 }
 
 #[cfg(test)]

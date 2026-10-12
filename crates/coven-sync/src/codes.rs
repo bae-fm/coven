@@ -9,7 +9,8 @@ use coven_storage::{CloudProvider, ConnectionCredentials, InviteStorage, Storage
 pub enum CodeKind {
     /// This person's identity, store id and name, and storage location only.
     Restore,
-    /// A one-time request requiring another member's approval.
+    /// A one-time request carrying the initial key, inviting writer and its
+    /// published key-copy number; approval is required.
     Invite,
 }
 

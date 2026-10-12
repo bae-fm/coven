@@ -345,6 +345,15 @@ impl Database {
             .await
     }
 
+    /// This installation's last confirmed key-copy number, or zero before its
+    /// first publication. Reserved but unconfirmed copies do not advance it.
+    pub async fn published_key_copy_number(&self) -> Result<u64, DbError> {
+        self.call(move |inner| {
+            inner.with_writer(|writer| crate::key_upload::published(writer, inner.access.device))
+        })
+        .await
+    }
+
     /// Confirm the writer's next copy after storage accepted its exact bytes.
     /// Confirmation and queue retirement commit together; repetitions are idempotent.
     pub async fn complete_key_upload(&self, copy: crate::KeyUpload) -> Result<(), DbError> {

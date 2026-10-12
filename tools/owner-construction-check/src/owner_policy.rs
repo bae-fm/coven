@@ -351,6 +351,11 @@ pub(crate) const POLICY: Policy = Policy {
             "publish_bootstrap",
         ),
         (
+            "crates/coven/src/bootstrap_join.rs",
+            "<free>",
+            "prepare_request",
+        ),
+        (
             "crates/coven/src/builder.rs",
             "CovenBuilder",
             "authenticate",

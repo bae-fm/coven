@@ -7,6 +7,8 @@ pub enum Rule {
     Kind,
     /// Base32 length or unused trailing bits are not canonical.
     CodePadding,
+    /// An invite's key-copy number leaves no representable next copy.
+    CodeCursor,
     /// A required name, collection or number was empty or zero.
     Required,
     /// A set was not in strictly increasing order, or repeated an identity.

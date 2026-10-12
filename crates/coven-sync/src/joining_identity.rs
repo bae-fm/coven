@@ -9,12 +9,12 @@ use coven_format::{
     store_log::MemberPublicKeys,
     Object,
 };
-use coven_foundation::files::AtomicFile;
+use coven_foundation::files::{AtomicFile, StoreDir, StoreFile};
 use coven_storage::{ObjectPath, Storage, StorageFailure};
 use zeroize::Zeroizing;
 
 /// An unpublished member identity and its immutable request. The only durable
-/// local copy is encrypted with the invite secret, bound to store and invite.
+/// local copy is encrypted with the invite secret, bound to the complete code.
 /// No member keys or provider credentials enter final custody while waiting.
 pub struct JoiningIdentity {
     keys: MemberKeys,
@@ -27,17 +27,25 @@ impl JoiningIdentity {
     /// Restore a fixed request or prepare it before any provider mutation.
     /// A changed invite or device name cannot silently reuse another request.
     pub fn prepare(
-        file: &AtomicFile,
+        directory: &StoreDir,
         code: &InviteCode,
         device_name: &str,
     ) -> Result<Self, SyncError> {
+        if code.store != directory.id() {
+            return Err(SyncError::WrongStore {
+                expected: directory.id(),
+                actual: code.store,
+            });
+        }
+        let file = directory.owned_file(StoreFile::Bootstrap);
+        let binding = code.to_bytes()?;
         let path = ObjectPath::join_request(code.store, code.invite);
         let prefix = SingleChunkPrefix::JoinRequest;
         let saved = file.read_optional()?;
         if let Some(saved) = saved {
             let bytes = Zeroizing::new(code.secret.join_request_key().open_object_chunk(
                 &local_path(code),
-                code.store.0.as_bytes(),
+                &binding,
                 0,
                 0,
                 &saved,
@@ -126,7 +134,7 @@ impl JoiningIdentity {
             path,
             attempted: false,
         };
-        identity.save(file, code)?;
+        identity.save(&file, code)?;
         Ok(identity)
     }
 
@@ -162,7 +170,7 @@ impl JoiningIdentity {
         plain.extend_from_slice(&self.request);
         let sealed = code.secret.join_request_key().seal_object_chunk(
             &local_path(code),
-            code.store.0.as_bytes(),
+            &code.to_bytes()?,
             0,
             0,
             &plain,

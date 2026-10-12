@@ -1,6 +1,6 @@
 use super::*;
 use coven_crypto::{InviteSecret, MemberKeys, SecretBytes, SecretText};
-use coven_foundation::id_source::InviteId;
+use coven_foundation::id_source::{DeviceId, InviteId, KeyId};
 use coven_storage::{S3Credentials, StorageConfig, StorageInvitation};
 
 fn location() -> StorageConfig {
@@ -33,6 +33,9 @@ fn metadata_validates_kind_checksum_and_storage_without_exposing_secrets() {
         name: restore.name.clone(),
         invite: InviteId(uuid::Uuid::from_u128(2)),
         secret: InviteSecret::generate().unwrap(),
+        initial_key: KeyId(uuid::Uuid::from_u128(3)),
+        inviting_writer: DeviceId(4),
+        key_copy_number: 12,
         storage: InviteStorage::S3 {
             invitation: StorageInvitation::for_account(location()).unwrap(),
             credentials: credentials(),
@@ -41,6 +44,10 @@ fn metadata_validates_kind_checksum_and_storage_without_exposing_secrets() {
         .unwrap(),
     };
     let invite_text = invite.to_text().unwrap();
+    let decoded = read_invite_code(&invite_text).unwrap();
+    assert_eq!(decoded.initial_key, invite.initial_key);
+    assert_eq!(decoded.inviting_writer, invite.inviting_writer);
+    assert_eq!(decoded.key_copy_number, invite.key_copy_number);
     for (text, kind) in [
         (&restore_text, CodeKind::Restore),
         (&invite_text, CodeKind::Invite),

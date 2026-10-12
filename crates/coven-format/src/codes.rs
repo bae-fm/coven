@@ -5,7 +5,7 @@ use crate::value::name;
 use crate::wire::{decode_frame, Decoder, Wire};
 use crate::{FORMAT_VERSION, FRAME_PREFIX_LEN};
 use coven_crypto::{InviteSecret, MemberKeys, SecretBytes};
-use coven_foundation::id_source::{InviteId, StoreId};
+use coven_foundation::id_source::{DeviceId, InviteId, KeyId, StoreId};
 use zeroize::Zeroizing;
 
 const MAX_STORAGE: usize = 16 * 1024;
@@ -79,6 +79,12 @@ pub struct InviteCode {
     pub invite: InviteId,
     /// Crypto owns the one-time secret and its erasure.
     pub secret: InviteSecret,
+    /// The store key introduced by the creation entry, even after rotations.
+    pub initial_key: KeyId,
+    /// The device whose permanent key-copy log supplies approval evidence.
+    pub inviting_writer: DeviceId,
+    /// Its last published copy number; zero means it has published no copies.
+    pub key_copy_number: u64,
     /// Storage settings, including any credentials for the recipient.
     pub storage: SecretBytes,
 }
@@ -86,11 +92,18 @@ impl InviteCode {
     /// Encode a bounded frame into a buffer erased on drop, allocated once.
     pub fn to_bytes(&self) -> Result<Zeroizing<Vec<u8>>, Error> {
         let secret = self.secret.to_secret_bytes();
+        invite_cursor(self.key_copy_number)?;
         encode_code(
             11,
             self.store,
             &self.name,
-            &[self.invite.0.as_bytes(), secret.as_bytes()],
+            &[
+                self.invite.0.as_bytes(),
+                secret.as_bytes(),
+                self.initial_key.0.as_bytes(),
+                &self.inviting_writer.0.to_be_bytes(),
+                &self.key_copy_number.to_be_bytes(),
+            ],
             &self.storage,
         )
     }
@@ -105,6 +118,10 @@ impl InviteCode {
         let mut secret = Zeroizing::new([0; 32]);
         secret.copy_from_slice(input.take(32)?);
         let secret = InviteSecret::from_bytes(*secret);
+        let initial_key = Wire::get(&mut input)?;
+        let inviting_writer = Wire::get(&mut input)?;
+        let key_copy_number = u64::get(&mut input)?;
+        invite_cursor(key_copy_number)?;
         let storage = storage(&mut input)?;
         input.finish()?;
         Ok(Self {
@@ -112,6 +129,9 @@ impl InviteCode {
             name: label,
             invite,
             secret,
+            initial_key,
+            inviting_writer,
+            key_copy_number,
             storage,
         })
     }
@@ -123,6 +143,14 @@ impl InviteCode {
     pub fn from_text(text: &str) -> Result<Self, Error> {
         Self::from_bytes(&text_decode("CVI1-", text)?)
     }
+}
+
+fn invite_cursor(number: u64) -> Result<(), Error> {
+    require(
+        number < u64::MAX,
+        "invite key-copy number",
+        Rule::CodeCursor,
+    )
 }
 
 fn storage(input: &mut Decoder<'_>) -> Result<SecretBytes, Error> {

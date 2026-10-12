@@ -90,6 +90,9 @@ fn pinned_text_restores_member_identity_and_location_and_invite_secrets() {
         invite.secret.to_secret_bytes().as_bytes()
     );
     assert_eq!(invited.storage.as_bytes(), invite.storage.as_bytes());
+    assert_eq!(invited.initial_key, test_utils::store_key().id());
+    assert_eq!(invited.inviting_writer, DeviceId(1));
+    assert_eq!(invited.key_copy_number, 12);
     assert!(format!("{restore:?}").contains("[REDACTED]"));
     assert!(format!("{invite:?}").contains("[REDACTED]"));
     assert!(!format!("{restore:?}").contains("51, 51"));
@@ -172,10 +175,52 @@ fn padding_material_lengths_and_hostile_sizes_are_errors() {
         Err(Error::Material(_))
     ));
     let mut encoded = test_utils::invite().to_bytes().unwrap();
-    encoded[76..80].copy_from_slice(&u32::MAX.to_be_bytes());
+    encoded[108..112].copy_from_slice(&u32::MAX.to_be_bytes());
     assert!(matches!(
         InviteCode::from_bytes(&encoded),
         Err(Error::Limit { .. })
+    ));
+}
+
+#[test]
+fn invite_cursor_round_trips_zero_and_unsigned_numbers_but_requires_a_next_copy() {
+    let mut invite = test_utils::invite();
+    for number in [0, 12, u64::MAX - 1] {
+        invite.key_copy_number = number;
+        let decoded = InviteCode::from_text(&invite.to_text().unwrap()).unwrap();
+        assert_eq!(decoded.initial_key, invite.initial_key);
+        assert_eq!(decoded.inviting_writer, invite.inviting_writer);
+        assert_eq!(decoded.key_copy_number, number);
+    }
+    let mut bytes = invite.to_bytes().unwrap();
+    bytes[100..108].copy_from_slice(&u64::MAX.to_be_bytes());
+    assert!(matches!(
+        InviteCode::from_bytes(&bytes),
+        Err(Error::Invalid {
+            rule: Rule::CodeCursor,
+            ..
+        })
+    ));
+    assert!(InviteCode::from_text(&text_encode("CVI1-", &bytes).unwrap()).is_err());
+    invite.key_copy_number = u64::MAX;
+    assert!(matches!(
+        invite.to_bytes(),
+        Err(Error::Invalid {
+            rule: Rule::CodeCursor,
+            ..
+        })
+    ));
+}
+
+#[test]
+fn invite_frames_require_initial_key_and_writer_cursor_evidence() {
+    let mut bytes = test_utils::invite().to_bytes().unwrap();
+    bytes.drain(76..108);
+    let payload_length = (bytes.len() - FRAME_PREFIX_LEN) as u32;
+    bytes[3..7].copy_from_slice(&payload_length.to_be_bytes());
+    assert!(matches!(
+        InviteCode::from_bytes(&bytes),
+        Err(Error::Truncated)
     ));
 }
 #[test]

@@ -9,7 +9,10 @@ use crate::{
 use coven_crypto::{InviteSecret, MemberId, ObjectHasher, SecretText};
 use coven_database::{LocalStoreLog, OperationRecord};
 use coven_format::{
-    codes::InviteCode, sealed_single::SingleChunkObject, store_log::MemberRole, Object,
+    codes::InviteCode,
+    sealed_single::SingleChunkObject,
+    store_log::{MemberRole, StoreChange},
+    Object,
 };
 use coven_foundation::id_source::InviteId;
 use coven_storage::{
@@ -187,7 +190,7 @@ impl StoreLogSync {
                     invitation,
                     request: None,
                 };
-                let value = self.invite_value(&local, work)?;
+                let value = self.invite_value(&local, work).await?;
                 let pending = self
                     .operation_condition(
                         record,
@@ -269,7 +272,11 @@ impl StoreLogSync {
         }
     }
 
-    fn invite_value(&self, local: &LocalStoreLog, work: &InviteWork) -> Result<Invite, SyncError> {
+    async fn invite_value(
+        &self,
+        local: &LocalStoreLog,
+        work: &InviteWork,
+    ) -> Result<Invite, SyncError> {
         let InviteState::Waiting { invitation, .. } = &work.state else {
             unreachable!()
         };
@@ -293,11 +300,35 @@ impl StoreLogSync {
             .store
             .as_ref()
             .ok_or(SyncError::PermissionDenied)?;
+        if store.id != local.store {
+            return Err(SyncError::WrongStore {
+                expected: local.store,
+                actual: store.id,
+            });
+        }
+        let initial_key = local
+            .log
+            .entries
+            .iter()
+            .find_map(|entry| match &entry.entry.change {
+                StoreChange::CreateStore { store, key, .. }
+                    if *store == local.store
+                        && local.log.replay.entries.get(&entry.entry.position)
+                            == Some(&coven_database::EntryOutcome::Kept) =>
+                {
+                    Some(*key)
+                }
+                _ => None,
+            })
+            .ok_or(coven_database::DbError::DamagedDatabase)?;
         let code = InviteCode {
             store: store.id,
             name: store.name.clone(),
             invite: work.id,
             secret: self.invite_secret(work)?,
+            initial_key,
+            inviting_writer: local.device,
+            key_copy_number: self.database.published_key_copy_number().await?,
             storage: storage.encode()?,
         }
         .to_text()?;

@@ -62,6 +62,14 @@ async fn approve_seals_store_history_and_removes_the_request() {
     let expected: Vec<_> = a.custody.read().unwrap().unwrap().store_key_ids().collect();
     assert_eq!(expected.len(), 2);
     let (operation, invite) = invite(&mut a, "join@example.com").await;
+    let code = InviteCode::from_text(&invite.code).unwrap();
+    assert_eq!(code.initial_key, key(1));
+    assert_eq!(code.inviting_writer, a.device().await);
+    assert_eq!(
+        code.key_copy_number,
+        a.db.published_key_copy_number().await.unwrap()
+    );
+    assert!(code.key_copy_number > 0);
     let joining = MemoryStorage::for_recipient(&storage, "join@example.com").unwrap();
     let keys = member(9);
     request(&joining, &invite, &keys, "New phone").await;
@@ -86,6 +94,9 @@ async fn approve_seals_store_history_and_removes_the_request() {
     ));
     for key in expected {
         let path = copy_path(&joining, Audience::Store, key, &keys.member_id()).await;
+        let (writer, number) = path.key_copy_position().unwrap();
+        assert_eq!(writer, code.inviting_writer);
+        assert!(number.get() > code.key_copy_number);
         assert_eq!(
             coven_format::sealed_key::SealedKey::decode(&joining.read(&path).await.unwrap())
                 .unwrap()
@@ -101,6 +112,62 @@ async fn approve_seals_store_history_and_removes_the_request() {
         coven_format::MemberAccess::ProviderAccount("join@example.com".into())
     );
     assert!(!state.devices.values().any(|d| d.member == keys.member_id())); // Joining device adds itself later.
+}
+
+#[tokio::test]
+async fn invite_cursor_uses_its_writer_publications_and_excludes_reserved_copies() {
+    let storage = storage();
+    let mut a = device(storage.clone(), 1, member(1), store(1)).await;
+    a.create(key(9)).await;
+    a.sync.test_rotate(Audience::Store, key(2)).await;
+    let mut b = device(storage.clone(), 2, member(1), store(1)).await;
+    b.sync().await;
+    b.sync.load_new_device("Second phone").await.unwrap();
+    assert_eq!(a.db.published_key_copy_number().await.unwrap(), 2);
+    assert_eq!(b.db.published_key_copy_number().await.unwrap(), 0);
+    for (d, expected) in [(&mut a, 2), (&mut b, 0)] {
+        let fixed_key = d
+            .custody
+            .read()
+            .unwrap()
+            .unwrap()
+            .store_key(key(9))
+            .unwrap()
+            .clone();
+        let recipient = d.member.clone();
+        let reserved =
+            d.db.prepare_key_upload(move |path| {
+                keys::store_copy(
+                    path,
+                    &fixed_key,
+                    &recipient.member_id(),
+                    &recipient.sealing_public_key(),
+                )
+            })
+            .await
+            .unwrap();
+        assert_eq!(reserved.number.get(), expected + 1);
+        d.restart(storage.clone()).await;
+        let operation = begin(
+            d,
+            Command::Invite(
+                MemberRole::Member,
+                InviteAccess::S3AccessKey {
+                    access_key_id: "new-key".into(),
+                    secret_access_key: coven_crypto::SecretText::new("secret".into()),
+                },
+            ),
+        )
+        .await;
+        let Output::Invite(invite) = finish(d, operation).await else {
+            panic!()
+        };
+        let code = InviteCode::from_text(&invite.code).unwrap();
+        assert_eq!(code.initial_key, key(9));
+        assert_eq!(code.inviting_writer, d.device().await);
+        assert_eq!(code.key_copy_number, expected);
+        assert_eq!(d.db.key_uploads().await.unwrap(), [reserved]);
+    }
 }
 
 #[tokio::test]

@@ -5,11 +5,11 @@ use super::*;
 use coven_crypto::custody::{InMemoryCustody, Keychain, StoreKeychain};
 use coven_database::Database;
 use coven_format::codes::{InviteCode, RestoreCode};
-use coven_foundation::files::{BootstrapDirectoryError, BootstrapStore, StoreFile};
+use coven_foundation::files::{BootstrapDirectoryError, BootstrapStore};
 use coven_storage::{
     ConnectionCredentials, InviteStorage, StorageCredentials, StorageFailure, StorageSettings,
 };
-use coven_sync::{JoiningIdentity, StoreLogSync};
+use coven_sync::StoreLogSync;
 use std::{sync::Arc, time::Duration};
 use tokio::sync::watch;
 
@@ -19,6 +19,9 @@ use authentication::{account_credentials, refresh_sign_in};
 
 #[path = "bootstrap_commit.rs"]
 mod commit;
+
+#[path = "bootstrap_join.rs"]
+mod join;
 
 #[path = "restore_credentials.rs"]
 mod credentials;
@@ -263,11 +266,7 @@ async fn bootstrap_device(
 
 enum Admission<'a> {
     Restoring,
-    Joining {
-        identity: JoiningIdentity,
-        invitation: coven_storage::StorageInvitation,
-        code: &'a InviteCode,
-    },
+    Joining(join::Joining<'a>),
 }
 
 async fn prepare_and_load(
@@ -287,7 +286,6 @@ async fn prepare_and_load(
     BootstrapError,
 > {
     let directory = pending.directory();
-    let file = directory.owned_file(StoreFile::Bootstrap);
     let (member, mut data, device_name, mut admission) = match request {
         BootstrapRequest::Restore { code, data, name } => (
             code.member_keys.clone(),
@@ -296,31 +294,13 @@ async fn prepare_and_load(
             Admission::Restoring,
         ),
         BootstrapRequest::Join { code, name } => {
-            let identity = JoiningIdentity::prepare(&file, code, name)?;
-            let (invitation, credentials) =
-                match InviteStorage::decode(code.storage.as_bytes()).map_err(SyncError::from)? {
-                    InviteStorage::S3 {
-                        invitation,
-                        credentials,
-                    } => (invitation, StorageCredentials::S3(credentials)),
-                    InviteStorage::Account(invitation) => {
-                        let provider = invitation.location().provider();
-                        let credentials = account_credentials(builder, provider, cancel).await?;
-                        (invitation, credentials)
-                    }
-                };
+            let (joining, data) =
+                join::prepare_request(builder, &directory, code, name, cancel).await?;
             (
-                identity.member_keys(),
-                ConnectionCredentials {
-                    location: invitation.location().clone(),
-                    credentials,
-                },
+                joining.member_keys(),
+                data,
                 name.as_str(),
-                Admission::Joining {
-                    identity,
-                    invitation,
-                    code,
-                },
+                Admission::Joining(joining),
             )
         }
     };
@@ -352,28 +332,19 @@ async fn prepare_and_load(
         directory,
     );
     let loading = async {
-        if let Admission::Joining {
-            identity: joining,
-            invitation,
-            code,
-        } = &mut admission
-        {
-            status("Accepting provider access");
-            sync.accept_join(invitation).await?;
-            if !joining.attempted() {
-                status("Sending the join request");
-                joining.record_attempt(&file, code)?;
-                sync.submit_join(joining).await?;
-            }
-            status("Waiting for approval");
-            loop {
-                refresh_sign_in(builder, &mut data, storage.as_ref(), cancel).await?;
-                match sync.join_outcome(joining).await? {
-                    coven_sync::JoinOutcome::Admitted => break,
-                    coven_sync::JoinOutcome::Declined => return Ok(false),
-                    coven_sync::JoinOutcome::Waiting => {}
-                }
-                builder.clock.sleep(Duration::from_secs(1)).await;
+        if let Admission::Joining(joining) = &mut admission {
+            if !joining
+                .admit(
+                    builder,
+                    &mut sync,
+                    &mut data,
+                    storage.as_ref(),
+                    status,
+                    cancel,
+                )
+                .await?
+            {
+                return Ok(false);
             }
         } else {
             status("Opening member keys and the store log");

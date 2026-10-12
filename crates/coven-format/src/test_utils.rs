@@ -410,6 +410,9 @@ pub fn invite() -> InviteCode {
         name: "S".into(),
         invite: InviteId(Uuid::from_bytes([0x55; 16])),
         secret: InviteSecret::from_bytes([0x66; 32]),
+        initial_key: store_key().id(),
+        inviting_writer: DeviceId(1),
+        key_copy_number: 12,
         storage: SecretBytes::new(vec![0x44]),
     }
 }

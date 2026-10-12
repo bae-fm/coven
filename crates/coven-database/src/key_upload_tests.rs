@@ -4,11 +4,13 @@ use crate::{tests::TestStore, DbError};
 async fn fixed_copy_survives_reopen_and_confirmation_preserves_the_next_number() {
     let store = TestStore::new();
     let db = store.builder(vec![], vec![]).open().await.unwrap();
+    assert_eq!(db.published_key_copy_number().await.unwrap(), 0);
     let fixed = db
         .prepare_key_upload(|_| Ok::<_, DbError>(vec![1, 2, 3]))
         .await
         .unwrap();
     assert_eq!(fixed.number.get(), 1);
+    assert_eq!(db.published_key_copy_number().await.unwrap(), 0);
     db.close().await.unwrap();
     let db = store.builder(vec![], vec![]).open().await.unwrap();
     assert_eq!(
@@ -17,6 +19,7 @@ async fn fixed_copy_survives_reopen_and_confirmation_preserves_the_next_number()
     );
     db.complete_key_upload(fixed.clone()).await.unwrap();
     db.complete_key_upload(fixed).await.unwrap();
+    assert_eq!(db.published_key_copy_number().await.unwrap(), 1);
     assert!(db.key_uploads().await.unwrap().is_empty());
     db.close().await.unwrap();
     let db = store.builder(vec![], vec![]).open().await.unwrap();
@@ -25,6 +28,7 @@ async fn fixed_copy_survives_reopen_and_confirmation_preserves_the_next_number()
         .await
         .unwrap();
     assert_eq!(next.number.get(), 2);
+    assert_eq!(db.published_key_copy_number().await.unwrap(), 1);
 }
 
 #[tokio::test]
@@ -76,6 +80,7 @@ async fn failed_retirement_rolls_back_publication_progress_and_preserves_bytes()
         Err(DbError::Sqlite(_))
     ));
     assert_eq!(db.key_uploads().await.unwrap(), std::slice::from_ref(&copy));
+    assert_eq!(db.published_key_copy_number().await.unwrap(), 0);
     db.inspect_writer(|sql| {
         assert_eq!(
             sql.query_row("SELECT count(*) FROM _coven_key_publications", [], |row| {
@@ -87,6 +92,7 @@ async fn failed_retirement_rolls_back_publication_progress_and_preserves_bytes()
         sql.batch("DROP TRIGGER reject_retirement").unwrap();
     });
     db.complete_key_upload(copy).await.unwrap();
+    assert_eq!(db.published_key_copy_number().await.unwrap(), 1);
     assert!(db.key_uploads().await.unwrap().is_empty());
 }
 
@@ -148,6 +154,7 @@ async fn unsigned_copy_numbers_exhaust_without_wrapping_or_reserving() {
         Err(DbError::KeyCopyNumberExhausted)
     ));
     db.complete_key_upload(last).await.unwrap();
+    assert_eq!(db.published_key_copy_number().await.unwrap(), u64::MAX);
     assert!(matches!(
         db.prepare_key_upload(|_| Ok::<_, DbError>(vec![2])).await,
         Err(DbError::KeyCopyNumberExhausted)
