@@ -2479,11 +2479,11 @@ Carol's tablet:
     circle's rows and files and the sealed keys;
   - each circle's key, which encrypts that circle's rows and files
     ([§14.3](#143-circles));
-  - each member's keys, which identify them ([§9](#9-members-and-roles)),
-    sign their writes and store log entries, and open the store key;
+  - each member's current signing and sealing keys, bound to their stable
+    `MemberId` (§9), which sign objects and open store and circle key copies;
   - storage credentials: each device's own sign-in to the provider, or on
     S3 its member's access key ([§4](#4-storage-providers-and-access)).
-- Each key has a random id, picked when it is made, and the store log entry
+- Each store or circle key has a random id, picked when it is made, and the store log entry
   that brings it in names it ([§9](#9-members-and-roles)):
   - the store's first key, the entry creating the store; a circle's first
     key, the entry making the circle;
@@ -2506,10 +2506,12 @@ Carol's tablet:
     data with an unpublished key.
   - Dan plants chosen bytes under K2's copy path for Ana. Ana opens the box
     but rejects its hash; those bytes cannot become K2 in her custody.
-- A copy addressed to an excluded member counts as exposure of the named
-  key. A device cannot open a box sealed to someone else, so it cannot
+- A copy addressed to an excluded member, a retired sealing credential,
+  or a credential that is not the named member's current one counts as
+  exposure of the named audience key. A device cannot open a box sealed to someone else, so it cannot
   check that box's key hash. Exposure detection uses its named audience,
-  key id and recipient; it does not require proof that the recipient opened it.
+  key id, stable recipient id and exact sealing key; it does not require
+  proof that the recipient opened it.
   - Dan is excluded. Someone publishes a forged K2 copy addressed to Dan.
     Ana cannot open it, even though she holds K2, and retires K2 for first
     attempts. That forged copy costs at worst an extra rotation; it cannot
@@ -2518,11 +2520,14 @@ Carol's tablet:
     hash. That check governs key acceptance, not third-party exposure.
     Retain the invalid-copy verdict and continue to the writer's next copy;
     a later valid copy can supply the key.
-- Each store key is sealed to every member's public key. Store and circle
+- Each store key is sealed to every member's current non-retired sealing
+  key. Store and circle
   copies share the writer's log at `<store>/keys/<writer>/<n>`, numbered
   from 1 with no publication gaps. Copies are never deleted.
   - The clear prefix holds the public routing facts: audience, key id and
-    recipient (D9/D10). Key bytes and their hash remain encrypted. Each copy
+    recipient id and exact sealing public key (D9/D10). The authenticated
+    prefix's sealing key must equal the key actually used by the box.
+    Key bytes and their hash remain encrypted. Each copy
     is a small object, read whole by its discovery GET. Keep its routing
     facts and bytes.
   - Numbering belongs to the writer, across all audiences and recipients.
@@ -2551,13 +2556,14 @@ Carol's tablet:
   copy history without another probe.
   - An observed copy means its recipient may hold the key, whether or not the
     recipient has downloaded it. Copies remain in storage for good.
-  - A key with a copy for someone the current replay excludes from its
-    audience is retired for first attempts. Keep it for reading and for
+  - A key with an exposed copy under the rule above is retired for first
+    attempts. Keep it for reading and for
     identical attempted retries. An addition or removal that drops does not
     erase its copies; an introducing entry returning does not erase them either.
   - Retirement is derived from all observed copies and replay, not remembered in
     a separate local table. A recipient returning to the audience is no
-    longer excluded; other excluded recipients' copies still retire the key.
+    longer excluded, but copies to its retired or noncurrent credentials
+    still retire the key.
   - If no usable replacement is held, a current audience member's device
     acquires one or makes a fresh key, seals it to current members, then
     publishes a rotation entry. Old exposed copies remain known forever;
@@ -2570,12 +2576,25 @@ Carol's tablet:
   the newest usable key this device holds, ordered by its introducing
   entry's timestamp, then key id.
   - Usable means introduced by a received authorized entry, available in
-    custody, and with no observed copy for an excluded member after this
+    custody, and with no observed exposed copy after this
     pass has read each undrained writer's new copies through its terminal
     miss, together with the complete histories of drained writers.
   - If no usable key exists, rotate or wait for its sealed copy, recording
     the first unmet condition. Never use a known exposed key as a fallback.
-- Share every historical key with current members who lack it. A membership
+- Every kept Replace member keys entry exposes the preceding sealing
+  credential from its recorded view, regardless of why keys changed. Copies
+  to that credential retire their audience keys even though the member stays
+  active. Only current members of each affected audience may rotate its key.
+  A store admin outside a circle cannot rotate for that circle.
+  - Catch up before reserving new copies. Ordinary historical sharing and
+    rotation route to the current non-retired sealing key. Binding-entry
+    prerequisites instead route to the validated candidate's fresh keys (§12).
+  - A candidate's copies remain if its replacement loses or never becomes
+    current. Those copies expose the audience key too, even for an active id.
+    Sharing an exposed historical key with the winning new credential does
+    not make that audience key safe for first attempts again.
+- Share every historical key with current members who lack a copy for their
+  current non-retired sealing credential. A membership
   reversal does not revoke an authorized key introduction. Sharing adds a permanent sealed copy;
   every device's next-number reads can observe it.
 - The guarantee uses the sending device's replay and copy observation at the start
@@ -2604,14 +2623,23 @@ Carol's tablet:
   its encryption, so a reader knows which key opens it.
 - A file's independent key is carried in its row's encrypted writes
   ([§16.1](#161-kinds-and-where-files-are)).
-- A member's key opens every store key sealed to that member. A device
-  reads the named copies from storage; key selection follows the rule above.
+- A device opens each copy with the historical private sealing credential
+  named by its authenticated prefix, never by guessing from the latest
+  member binding. Retain needed private credentials and all public bindings;
+  a fresh installation can instead receive historical audience keys sealed
+  to its new credential. Old copies remain immutable in the same writer log.
 - Removal retires keys exposed to that member for first attempts. A remaining
   member's device publishes a rotation before using a replacement key.
   - First attempts made after learning the removal use a key eligible under
     the pass's copy observation, subject to the residual window above.
   - Devices keep the old keys, to read writes made before.
-- Each device keeps its member's key in the OS keychain.
+- Each device keeps its stable member id and private key custody in the OS
+  keychain, including retained credentials needed for historical copies.
+  Keep a self-replacement's candidate durably before publication; after a
+  failed publication retain it and the previous pair for idempotent retry.
+  Select signing authority from checked replay, not the last pair saved.
+  Activating new credentials and refreshing restore-code custody must finish
+  before reporting success or resuming app writes; failures reach the caller.
 - Storage access, not keys, is what keeps a removed device out.
 - The app can keep each of its own secrets, such as an API token, in a separate
   keychain entry, under the same access policy as coven's keys and with the
@@ -2631,6 +2659,10 @@ Carol's tablet:
 - A member's keys are two key pairs, kept together:
   - an Ed25519 pair, which signs;
   - an X25519 pair, which opens keys sealed to the member.
+- `MemberId` is an independent random UUID. `SigningKey` is a 32-byte
+  Ed25519 public key with invalid and weak points refused; `SealingKey` is a
+  32-byte X25519 public key. The public `MemberKeys` pair in D2 contains both.
+  Replacing it requires fresh keys of both kinds (§9); it never changes the id.
 - Everything coven writes to storage is encrypted with XChaCha20-Poly1305:
   write records, store log entries, snapshots, sealed keys and file
   chunks.
