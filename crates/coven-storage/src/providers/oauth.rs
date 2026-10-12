@@ -149,7 +149,7 @@ impl OAuthFlow {
 /// The app's OAuth client ids and injected clock (E10).
 #[derive(Clone)]
 pub struct OAuthClients {
-    google: Option<String>,
+    google: Option<GoogleClient>,
     dropbox: Option<String>,
     onedrive: Option<String>,
     clock: ClockRef,
@@ -157,6 +157,13 @@ pub struct OAuthClients {
     #[cfg(any(test, feature = "test-utils"))]
     token_override: Option<String>,
 }
+
+#[derive(Clone)]
+struct GoogleClient {
+    id: String,
+    secret: Option<SecretText>,
+}
+
 impl OAuthClients {
     /// Configure client ids, `None` for providers the app does not offer.
     pub fn new(
@@ -166,7 +173,7 @@ impl OAuthClients {
         clock: ClockRef,
     ) -> Self {
         Self {
-            google: google_drive_client_id,
+            google: google_drive_client_id.map(|id| GoogleClient { id, secret: None }),
             dropbox: dropbox_client_id,
             onedrive: onedrive_client_id,
             clock,
@@ -175,18 +182,32 @@ impl OAuthClients {
             token_override: None,
         }
     }
+    /// Supply the Google Desktop client's secret for code exchange and refresh.
+    /// Google's mobile clients do not require it. It is never sent to another provider.
+    pub fn with_google_client_secret(mut self, secret: SecretText) -> Result<Self, OAuthError> {
+        let google = self
+            .google
+            .as_mut()
+            .ok_or(OAuthError::Unavailable(CloudProvider::GoogleDrive))?;
+        if secret.as_str().is_empty() {
+            return Err(StorageFailure::InvalidConfiguration
+                .with_source("empty Google client secret")
+                .into());
+        }
+        google.secret = Some(secret);
+        Ok(self)
+    }
     fn config(
         &self,
         provider: CloudProvider,
     ) -> Result<(&str, &'static str, &'static str, &'static str), OAuthError> {
         let (id, auth, token, scope) = match provider {
-            CloudProvider::GoogleDrive => (&self.google, "https://accounts.google.com/o/oauth2/v2/auth", "https://oauth2.googleapis.com/token", "https://www.googleapis.com/auth/drive"),
-            CloudProvider::Dropbox => (&self.dropbox, "https://www.dropbox.com/oauth2/authorize", "https://api.dropboxapi.com/oauth2/token", "files.content.read files.content.write files.metadata.read sharing.read sharing.write account_info.read"),
-            CloudProvider::OneDrive => (&self.onedrive, "https://login.microsoftonline.com/common/oauth2/v2.0/authorize", "https://login.microsoftonline.com/common/oauth2/v2.0/token", "Files.ReadWrite.All offline_access User.Read"),
+            CloudProvider::GoogleDrive => (self.google.as_ref().map(|client| client.id.as_str()), "https://accounts.google.com/o/oauth2/v2/auth", "https://oauth2.googleapis.com/token", "https://www.googleapis.com/auth/drive"),
+            CloudProvider::Dropbox => (self.dropbox.as_deref(), "https://www.dropbox.com/oauth2/authorize", "https://api.dropboxapi.com/oauth2/token", "files.content.read files.content.write files.metadata.read sharing.read sharing.write account_info.read"),
+            CloudProvider::OneDrive => (self.onedrive.as_deref(), "https://login.microsoftonline.com/common/oauth2/v2.0/authorize", "https://login.microsoftonline.com/common/oauth2/v2.0/token", "Files.ReadWrite.All offline_access User.Read"),
             _ => return Err(OAuthError::Unavailable(provider)),
         };
         let id = id
-            .as_deref()
             .filter(|id| !id.is_empty())
             .ok_or(OAuthError::Unavailable(provider))?;
         Ok((id, auth, token, scope))
@@ -332,6 +353,16 @@ impl OAuthClients {
         params: &[(&str, &str)],
     ) -> Result<OAuthTokens, OAuthError> {
         let (_, _, token, _) = self.config(provider)?;
+        let mut params = params.to_vec();
+        if provider == CloudProvider::GoogleDrive {
+            if let Some(secret) = self
+                .google
+                .as_ref()
+                .and_then(|client| client.secret.as_ref())
+            {
+                params.push(("client_secret", secret.as_str()));
+            }
+        }
         #[cfg(any(test, feature = "test-utils"))]
         let token = match &self.token_override {
             Some(url) => url.as_str(),
@@ -347,7 +378,7 @@ impl OAuthClients {
             })?;
         let response = client
             .post(token)
-            .form(params)
+            .form(&params)
             .send()
             .await
             .map_err(|e| http::transport(provider, e))?;

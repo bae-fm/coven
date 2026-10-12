@@ -281,6 +281,65 @@ async fn refresh_retains_unrotated_token() {
 }
 
 #[tokio::test]
+async fn google_client_secret_reaches_only_google_token_exchanges() {
+    let state = Arc::new(Mutex::new(Provider::default()));
+    let server = TestServer::new(Router::new().fallback(token).with_state(state.clone())).await;
+    let presenter = presenter("https://callback.example?code=code&state=STATE");
+    let flow = OAuthFlow::new(
+        clients(Arc::new(FixedClock::new(SystemTime::UNIX_EPOCH)))
+            .with_google_client_secret(SecretText::new("desktop-secret".into()))
+            .unwrap()
+            .with_token_endpoint(server.url.clone()),
+        presenter.clone(),
+    );
+    let refresh_token = SecretText::new("refresh".into());
+    for provider in [
+        CloudProvider::GoogleDrive,
+        CloudProvider::Dropbox,
+        CloudProvider::OneDrive,
+    ] {
+        flow.authenticate(provider).await.unwrap();
+        let saved = OAuthTokens {
+            access_token: SecretText::new(String::new()),
+            refresh_token: Some(refresh_token.clone()),
+            expires_at: None,
+        };
+        let refreshed = flow.refresh(provider, &saved).await.unwrap();
+        assert_eq!(refreshed.refresh_token.unwrap().as_str(), "refresh");
+        let requests = std::mem::take(&mut state.lock().unwrap().requests);
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0]["grant_type"], "authorization_code");
+        assert_eq!(requests[1]["grant_type"], "refresh_token");
+        for request in requests {
+            assert_eq!(
+                request.get("client_secret").map(String::as_str),
+                (provider == CloudProvider::GoogleDrive).then_some("desktop-secret")
+            );
+        }
+    }
+    assert!(presenter
+        .requests
+        .lock()
+        .unwrap()
+        .iter()
+        .all(|url| !url.contains("desktop-secret")));
+}
+
+#[test]
+fn google_client_secret_requires_a_configured_client_and_nonempty_secret() {
+    let clock = Arc::new(FixedClock::new(SystemTime::UNIX_EPOCH));
+    assert!(matches!(
+        OAuthClients::new(None, None, None, clock.clone())
+            .with_google_client_secret(SecretText::new("desktop-secret".into())),
+        Err(OAuthError::Unavailable(CloudProvider::GoogleDrive))
+    ));
+    assert!(matches!(
+        clients(clock).with_google_client_secret(SecretText::new(String::new())),
+        Err(OAuthError::Storage(error)) if error.failure() == StorageFailure::InvalidConfiguration
+    ));
+}
+
+#[tokio::test]
 async fn token_errors_retain_the_original_response_during_sign_in_and_refresh() {
     let state = Arc::new(Mutex::new(Provider::default()));
     let server = TestServer::new(Router::new().fallback(token).with_state(state.clone())).await;

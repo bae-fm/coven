@@ -2976,6 +2976,10 @@ impl OAuthClients {
         dropbox_client_id: Option<String>,
         onedrive_client_id: Option<String>,
     ) -> Self;
+    /// Supplies a Google Desktop client's secret, which Google requires for code
+    /// exchange and refresh; mobile clients have none. It is sent only to Google's
+    /// token endpoint. Refused when no Google client id is set or the secret is empty.
+    pub fn with_google_client_secret(self, secret: SecretText) -> Result<Self, OAuthError>;
 }
 ```
 

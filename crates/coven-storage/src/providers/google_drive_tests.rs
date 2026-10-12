@@ -1,5 +1,6 @@
 use super::*;
-use crate::providers::tests::{json as reply, query, read, response, session, TestServer};
+use crate::providers::tests::google_drive::{endpoint, metadata, respond, Remote};
+use crate::providers::tests::{json as reply, response, session, TestServer};
 use crate::test_utils::STORE_ID;
 use axum::{
     body::{Body, Bytes},
@@ -7,336 +8,7 @@ use axum::{
     http::{HeaderMap, Method, Response, Uri},
     Router,
 };
-use std::{
-    collections::BTreeMap,
-    sync::{Arc, Mutex},
-};
-#[derive(Default)]
-struct Remote {
-    next: u64,
-    non_owner: bool,
-    single_uploads: usize,
-    files: BTreeMap<String, (Value, Vec<u8>)>,
-    uploads: BTreeMap<String, (Value, Vec<u8>, usize)>,
-    fail_reply: bool,
-    partial: Option<usize>,
-    permissions: BTreeMap<String, String>,
-    extra_permissions: BTreeMap<String, Value>,
-    permission_mutations: Vec<(String, String)>,
-    refuse_share: bool,
-    lose_share_reply: bool,
-    lose_delete_reply: bool,
-}
-fn metadata(mut value: Value, size: usize) -> Value {
-    value["size"] = json!(size.to_string());
-    value["capabilities"] = json!({"canDelete":true,"canRemoveMyDriveParent":true});
-    value["ownedByMe"] = json!(true);
-    value["createdTime"] = json!("2026-10-06T00:00:00Z");
-    value
-}
-async fn endpoint(
-    State(state): State<Arc<Mutex<Remote>>>,
-    method: Method,
-    uri: Uri,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Response<Body> {
-    respond(&state, &method, &uri, &headers, &body)
-}
-
-fn respond(
-    state: &Mutex<Remote>,
-    method: &Method,
-    uri: &Uri,
-    headers: &HeaderMap,
-    body: &Bytes,
-) -> Response<Body> {
-    assert_eq!(headers["authorization"], "Bearer token");
-    let mut state = state.lock().unwrap();
-    let q = query(uri);
-    let parts: Vec<_> = uri.path().trim_start_matches('/').split('/').collect();
-    let value: Value = if body.is_empty() {
-        Value::Null
-    } else if headers
-        .get("content-type")
-        .is_some_and(|v| v.to_str().unwrap().starts_with("application/json"))
-    {
-        serde_json::from_slice(body).unwrap()
-    } else {
-        Value::Null
-    };
-    if parts == ["drive", "files", "folder"] && method == Method::GET {
-        return reply(
-            json!({"id":"folder", "ownedByMe":!state.non_owner,"mimeType":"application/vnd.google-apps.folder"}),
-        );
-    }
-    if parts == ["drive", "files", "generateIds"] {
-        state.next += 1;
-        return reply(json!({"ids":[format!("id{}",state.next)]}));
-    }
-    if parts == ["upload", "files"] {
-        assert_eq!(method, Method::POST);
-        if q["uploadType"] == "multipart" {
-            let content_type = headers["content-type"].to_str().unwrap();
-            let boundary = content_type
-                .strip_prefix("multipart/related; boundary=")
-                .unwrap();
-            let marker = format!("--{boundary}");
-            let metadata_start = body.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4;
-            let separator =
-                format!("\r\n{marker}\r\nContent-Type: application/octet-stream\r\n\r\n");
-            let metadata_end = body
-                .windows(separator.len())
-                .position(|w| w == separator.as_bytes())
-                .unwrap();
-            let mut value: Value =
-                serde_json::from_slice(&body[metadata_start..metadata_end]).unwrap();
-            let end = format!("\r\n{marker}--\r\n");
-            assert!(body.ends_with(end.as_bytes()));
-            let bytes = body[metadata_end + separator.len()..body.len() - end.len()].to_vec();
-            state.next += 1;
-            state.single_uploads += 1;
-            let id = format!("id{}", state.next);
-            value["id"] = json!(id);
-            let value = metadata(value, bytes.len());
-            state.files.insert(id, (value.clone(), bytes));
-            return reply(value);
-        }
-        assert_eq!(q["uploadType"], "resumable");
-        let id = value["id"].as_str().unwrap().to_owned();
-        let total = headers["x-upload-content-length"]
-            .to_str()
-            .unwrap()
-            .parse()
-            .unwrap();
-        state.uploads.insert(id.clone(), (value, Vec::new(), total));
-        return Response::builder()
-            .header(
-                "location",
-                format!("http://{}/session/{id}", headers["host"].to_str().unwrap()),
-            )
-            .body(Body::empty())
-            .unwrap();
-    }
-    if parts.first() == Some(&"session") {
-        let id = parts[1].to_owned();
-        if method == Method::DELETE {
-            let status = if state.uploads.remove(&id).is_some() {
-                499
-            } else {
-                404
-            };
-            return response(status, Vec::new());
-        }
-        if let Some((metadata, _)) = state.files.get(&id) {
-            return reply(metadata.clone());
-        }
-        let range = headers["content-range"].to_str().unwrap();
-        let partial = state.partial.take();
-        let Some((metadata, bytes, total)) = state.uploads.get_mut(&id) else {
-            return response(404, "{}");
-        };
-        if !range.starts_with("bytes */") {
-            let start: usize = range
-                .strip_prefix("bytes ")
-                .unwrap()
-                .split('-')
-                .next()
-                .unwrap()
-                .parse()
-                .unwrap();
-            assert_eq!(start, bytes.len());
-            bytes.extend_from_slice(&body[..partial.unwrap_or(body.len())]);
-        }
-        let size = bytes.len();
-        let complete = size == *total;
-        if complete {
-            let (value, bytes, _) = state.uploads.remove(&id).unwrap();
-            let value = super::tests::metadata(value, bytes.len());
-            state.files.insert(id, (value.clone(), bytes));
-            return reply(value);
-        }
-        let _ = metadata;
-        if !range.starts_with("bytes */") && std::mem::replace(&mut state.fail_reply, false) {
-            return response(503, "{}");
-        }
-        let mut response = Response::builder().status(308);
-        if size > 0 {
-            response = response.header("range", format!("bytes=0-{}", size - 1));
-        }
-        return response.body(Body::empty()).unwrap();
-    }
-    if parts.len() >= 4 && parts[2] == "folder" && parts[3] == "permissions" {
-        return match *method {
-            Method::GET => {
-                let entries: Vec<_> = state.permissions.iter().map(|(email,role)|json!({"id":email,"type":"user","emailAddress":email,"role":role,"permissionDetails":[{"inherited":false}]})).chain(state.extra_permissions.values().cloned()).collect();
-                let start = q
-                    .get("pageToken")
-                    .map(|value| value.parse::<usize>().unwrap())
-                    .unwrap_or(0);
-                let mut page =
-                    json!({"permissions":entries.iter().skip(start).take(1).collect::<Vec<_>>()});
-                if entries.len() > start + 1 {
-                    page["nextPageToken"] = json!((start + 1).to_string());
-                }
-                reply(page)
-            }
-            Method::POST => {
-                let email = value["emailAddress"].as_str().unwrap();
-                state
-                    .permission_mutations
-                    .push(("create".into(), email.into()));
-                if state.refuse_share {
-                    return response(
-                        403,
-                        r#"{"error":{"errors":[{"reason":"insufficientFilePermissions"}]}}"#,
-                    );
-                }
-                if let Some(permission) = state
-                    .extra_permissions
-                    .values_mut()
-                    .find(|permission| permission["emailAddress"] == email)
-                {
-                    permission["role"] = value["role"].clone();
-                    permission["permissionDetails"]
-                        .as_array_mut()
-                        .unwrap()
-                        .push(json!({"inherited":false}));
-                } else {
-                    state
-                        .permissions
-                        .insert(email.into(), value["role"].as_str().unwrap().into());
-                }
-                if std::mem::replace(&mut state.lose_share_reply, false) {
-                    return response(503, "{}");
-                }
-                reply(json!({"id":"permission"}))
-            }
-            Method::PATCH => {
-                state
-                    .permission_mutations
-                    .push(("update".into(), parts[4].into()));
-                if state.refuse_share {
-                    return response(
-                        403,
-                        r#"{"error":{"errors":[{"reason":"insufficientFilePermissions"}]}}"#,
-                    );
-                }
-                if let Some(permission) = state.extra_permissions.get_mut(parts[4]) {
-                    if permission["permissionDetails"]
-                        .as_array()
-                        .is_some_and(|details| {
-                            details.iter().all(|detail| detail["inherited"] == true)
-                        })
-                    {
-                        return response(
-                            403,
-                            r#"{"error":{"errors":[{"reason":"cannotModifyInheritedTeamDrivePermission"}]}}"#,
-                        );
-                    }
-                    permission["role"] = value["role"].clone();
-                } else {
-                    state
-                        .permissions
-                        .insert(parts[4].into(), value["role"].as_str().unwrap().into());
-                }
-                if std::mem::replace(&mut state.lose_share_reply, false) {
-                    return response(503, "{}");
-                }
-                reply(json!({}))
-            }
-            Method::DELETE => {
-                state
-                    .permission_mutations
-                    .push(("delete".into(), parts[4].into()));
-                if let Some(permission) = state.extra_permissions.get_mut(parts[4]) {
-                    if permission["role"] == "owner" {
-                        return response(
-                            403,
-                            r#"{"error":{"errors":[{"reason":"cannotDeletePermission"}]}}"#,
-                        );
-                    }
-                    if let Some(details) = permission["permissionDetails"].as_array_mut() {
-                        details.retain(|detail| detail["inherited"] == true);
-                        if !details.is_empty() {
-                            permission["role"] = json!("reader");
-                            return response(204, Vec::new());
-                        }
-                    }
-                    state.extra_permissions.remove(parts[4]);
-                }
-                state.permissions.remove(parts[4]);
-                response(204, Vec::new())
-            }
-            _ => panic!(),
-        };
-    }
-    if parts == ["drive", "files"] {
-        if method == Method::POST {
-            state.next += 1;
-            let id = format!("id{}", state.next);
-            let mut value = value;
-            value["id"] = json!(id);
-            let value = metadata(value, 0);
-            state.files.insert(id, (value.clone(), Vec::new()));
-            return reply(value);
-        }
-        let filter = q["q"]
-            .split("name = '")
-            .nth(1)
-            .map(|s| s.split('\'').next().unwrap());
-        let prefix = q["q"]
-            .split("name contains '")
-            .nth(1)
-            .map(|s| s.split('\'').next().unwrap());
-        let files: Vec<_> = state
-            .files
-            .values()
-            .filter(|(v, _)| {
-                v["parents"].as_array().unwrap().contains(&json!("folder"))
-                    && filter.is_none_or(|name| v["name"] == name)
-                    && prefix.is_none_or(|prefix| v["name"].as_str().unwrap().starts_with(prefix))
-            })
-            .map(|(v, _)| v.clone())
-            .collect();
-        let start = q
-            .get("pageToken")
-            .map(|s| s.parse::<usize>().unwrap())
-            .unwrap_or(0);
-        let mut page = json!({"files":files.iter().skip(start).take(1).collect::<Vec<_>>()});
-        if files.len() > start + 1 {
-            page["nextPageToken"] = json!((start + 1).to_string());
-        }
-        return reply(page);
-    }
-    if parts.len() == 3 && parts[1] == "files" {
-        let id = parts[2];
-        if method == Method::DELETE {
-            state.files.remove(id);
-            if std::mem::replace(&mut state.lose_delete_reply, false) {
-                return response(503, "{}");
-            }
-            return response(204, Vec::new());
-        }
-        let Some((value, bytes)) = state.files.get_mut(id) else {
-            return response(404, "{}");
-        };
-        if method == Method::PATCH {
-            if q.contains_key("removeParents") {
-                value["parents"] = json!([]);
-            } else {
-                *bytes = body.to_vec();
-                value["size"] = json!(bytes.len().to_string());
-            }
-            return reply(value.clone());
-        }
-        if q.get("alt").map(String::as_str) == Some("media") {
-            return read(bytes, headers);
-        }
-        return reply(value.clone());
-    }
-    panic!("unexpected Drive request {method} {uri}")
-}
+use std::sync::{Arc, Mutex};
 
 #[tokio::test]
 async fn missing_session_and_destination_is_expired() {
@@ -886,5 +558,422 @@ async fn upload_start_refuses_empty_ids_and_cross_origin_session_urls() {
             starts.load(std::sync::atomic::Ordering::SeqCst),
             usize::from(!empty_id)
         );
+    }
+}
+
+/// Live Drive checks. Run with `COVEN_LIVE_DRIVE_ENV=<file> cargo test -p
+/// coven-storage --all-features --lib drive_live -- --ignored --nocapture`.
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
+mod live {
+    use super::*;
+    use crate::providers::http::Body as RequestBody;
+    use crate::providers::tests::live_drive_tokens;
+    use coven_foundation::{
+        clock::{ClockRef, SystemClock},
+        id_source::{IdSource, StoreId, UuidIds},
+    };
+    use std::{future::Future, time::Duration};
+
+    struct Drive {
+        storage: Arc<StorageConnection<GoogleDriveStorage>>,
+        store: StoreId,
+        parent: String,
+        clock: ClockRef,
+        uploads: Mutex<Vec<UploadSession>>,
+    }
+    impl Drive {
+        async fn json(
+            &self,
+            method: Method,
+            parts: &[&str],
+            fields: &str,
+            body: RequestBody,
+        ) -> Value {
+            let provider = &self.storage.provider;
+            let url = provider.url(parts, &[("fields", fields)]).unwrap();
+            http::json(PROVIDER, provider.send(method, &url, body).await.unwrap())
+                .await
+                .unwrap()
+        }
+        fn path(&self, number: u64) -> ObjectPath {
+            ObjectPath::device_log(
+                self.store,
+                self.storage.provider.device,
+                number.try_into().unwrap(),
+            )
+        }
+        async fn listed(&self, path: &ObjectPath) -> StoredObject {
+            self.storage
+                .list(&ObjectPrefix::all(self.store))
+                .await
+                .unwrap()
+                .into_iter()
+                .find(|item| &item.path == path)
+                .expect("published object listed")
+        }
+        async fn metadata(&self, path: &ObjectPath) -> Value {
+            let found = self
+                .storage
+                .provider
+                .find(path)
+                .await
+                .unwrap()
+                .expect("published file id");
+            self.json(
+                Method::GET,
+                &["files", http::string(&found, "id").unwrap()],
+                "id,size,createdTime,modifiedTime,version,headRevisionId",
+                RequestBody::Empty,
+            )
+            .await
+        }
+        async fn marker(&self, number: u64) -> Value {
+            let path = self.path(number);
+            self.storage
+                .create(&path, b"publication marker")
+                .await
+                .unwrap();
+            self.metadata(&path).await
+        }
+        async fn begin(&self, path: &ObjectPath) -> UploadSession {
+            let upload = self
+                .storage
+                .begin_upload(path, crate::session::GOOGLE_DRIVE_PART_SIZE as u64 + 1)
+                .await
+                .unwrap();
+            self.uploads.lock().unwrap().push(upload.clone());
+            upload
+        }
+        async fn children(&self) -> Result<Vec<String>, StorageError> {
+            let provider = &self.storage.provider;
+            let query = format!(
+                "'{}' in parents and trashed = false",
+                escape(&provider.folder)
+            );
+            let mut objects = Vec::new();
+            let mut token = None::<String>;
+            let mut seen = Pagination::new();
+            loop {
+                let mut params = vec![
+                    ("q", query.as_str()),
+                    ("fields", "nextPageToken,incompleteSearch,files(id)"),
+                    ("pageSize", "1000"),
+                ];
+                if let Some(token) = &token {
+                    params.push(("pageToken", token));
+                }
+                let url = provider.url(&["files"], &params)?;
+                let value = http::json(
+                    PROVIDER,
+                    provider.send(Method::GET, &url, RequestBody::Empty).await?,
+                )
+                .await?;
+                if value["incompleteSearch"].as_bool() != Some(false) {
+                    return Err(StorageFailure::Protocol.with_source("incomplete cleanup listing"));
+                }
+                for item in http::array(&value, "files")? {
+                    objects.push(http::string(item, "id")?.to_owned());
+                }
+                let Some(next) = value.get("nextPageToken") else {
+                    break;
+                };
+                let next = next
+                    .as_str()
+                    .filter(|v| !v.is_empty())
+                    .ok_or(StorageFailure::Protocol)?;
+                seen.check(next)?;
+                token = Some(next.to_owned());
+            }
+            Ok(objects)
+        }
+        async fn cleanup(&self) {
+            let uploads = std::mem::take(&mut *self.uploads.lock().unwrap());
+            let mut failures = Vec::new();
+            for upload in uploads {
+                if let Err(error) = self.storage.abort_upload(&upload).await {
+                    failures.push(error);
+                }
+            }
+            let provider = &self.storage.provider;
+            let mut objects = match self.children().await {
+                Ok(objects) => objects,
+                Err(error) => {
+                    failures.push(error);
+                    Vec::new()
+                }
+            };
+            objects.extend([provider.folder.clone(), self.parent.clone()]);
+            // Delete children directly: parent deletion can return before they disappear.
+            for id in &objects {
+                let url = provider.url(&["files", id], &[]).unwrap();
+                let deleted = match provider
+                    .send(Method::DELETE, &url, RequestBody::Empty)
+                    .await
+                {
+                    Ok(response) if response.status().as_u16() == 404 => Ok(()),
+                    Ok(response) => http::checked(PROVIDER, response).await.map(|_| ()),
+                    Err(error) => Err(error),
+                };
+                if let Err(error) = deleted {
+                    failures.push(error);
+                }
+            }
+            for id in &objects {
+                let url = provider.url(&["files", id], &[]).unwrap();
+                match provider.send(Method::GET, &url, RequestBody::Empty).await {
+                    Ok(response) if response.status().as_u16() == 404 => {}
+                    Ok(response) if response.status().is_success() => failures.push(
+                        StorageFailure::Protocol
+                            .with_source(format!("test object {id} survived deletion")),
+                    ),
+                    Ok(response) => failures.push(http::response_error(PROVIDER, response).await),
+                    Err(error) => failures.push(error),
+                }
+            }
+            assert!(failures.is_empty(), "Drive cleanup failed: {failures:?}");
+            println!(
+                "Drive cleanup store={}: upload sessions aborted; objects, store and parent folders absent",
+                self.store
+            );
+        }
+    }
+    async fn run<F, Fut>(test: F)
+    where
+        F: FnOnce(Arc<Drive>) -> Fut + Send + 'static,
+        Fut: Future<Output = ()> + Send + 'static,
+    {
+        let clock: ClockRef = Arc::new(SystemClock);
+        let session = OAuthSession::new(
+            PROVIDER,
+            live_drive_tokens(clock.clone()).await,
+            clock.clone(),
+        )
+        .unwrap();
+        let url = http::endpoint(
+            "https://www.googleapis.com/drive/v3",
+            &["files", "generateIds"],
+            &[("count", "2"), ("space", "drive"), ("type", "files")],
+        )
+        .unwrap();
+        let generated = http::json(
+            PROVIDER,
+            session
+                .send(Method::GET, &url, &[], RequestBody::Empty, true)
+                .await
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+        let ids = http::array(&generated, "ids").unwrap();
+        assert_eq!(ids.len(), 2);
+        let parent = ids[0].as_str().unwrap().to_owned();
+        let folder = ids[1].as_str().unwrap().to_owned();
+        let ids = UuidIds;
+        let provider = GoogleDriveStorage::new(
+            StorageConfig::GoogleDrive { folder_id: folder },
+            ids.new_device_id(),
+            session,
+        )
+        .unwrap();
+        let fixture = Arc::new(Drive {
+            storage: Arc::new(StorageConnection::from_provider(Arc::new(provider))),
+            store: StoreId(ids.new_id()),
+            parent,
+            clock,
+            uploads: Mutex::new(Vec::new()),
+        });
+        let work = fixture.clone();
+        // Await a task to catch assertion panics as well as failed provider calls.
+        // Cleanup also covers a lost folder-create reply because IDs were reserved first.
+        let result = tokio::spawn(async move {
+            for (id, name, parent) in [
+                (&work.parent, "coven-live".to_owned(), "root"),
+                (&work.storage.provider.folder, work.store.to_string(), work.parent.as_str()),
+            ] {
+                work.json(Method::POST, &["files"], "id", RequestBody::Json(json!({
+                    "id": id, "name": name, "mimeType": "application/vnd.google-apps.folder", "parents": [parent]
+                }))).await;
+            }
+            test(work).await;
+        }).await;
+        fixture.cleanup().await;
+        if let Err(error) = result {
+            if error.is_panic() {
+                std::panic::resume_unwind(error.into_panic());
+            }
+            panic!("Drive test cancelled: {error}");
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires COVEN_LIVE_DRIVE_ENV and a real Google Drive account"]
+    async fn drive_live_conformance() {
+        run(|drive| async move {
+            crate::test_utils::Conformance::new(drive.storage.clone(), drive.store)
+                .run()
+                .await
+                .unwrap();
+            println!("Drive conformance store={}: passed", drive.store);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires COVEN_LIVE_DRIVE_ENV and a real Google Drive account"]
+    async fn drive_live_complete_publication_time() {
+        run(|drive| async move {
+            for (trial, pause) in [3, 10, 20].into_iter().enumerate() {
+                let first_marker = trial as u64 * 4 + 1;
+                let before = drive.marker(first_marker).await;
+                let path = drive.path(first_marker + 1);
+                let started = drive.clock.now();
+                let mut upload = drive.begin(&path).await;
+                let session_ready = drive.clock.now();
+                let part = vec![0x5a; upload.part_size()];
+                drive.storage.upload_part(&mut upload, &part).await.unwrap();
+                assert!(!upload.is_complete());
+                assert_eq!(upload.confirmed_bytes(), part.len() as u64);
+                let wait = tokio::time::Instant::now();
+                drive.clock.sleep(Duration::from_secs(pause)).await;
+                // Server timestamps bracket publication independently of the device clock.
+                let before_final = drive.marker(first_marker + 2).await;
+                let between_parts = wait.elapsed();
+                let completing = drive.clock.now();
+                drive.storage.upload_part(&mut upload, b"z").await.unwrap();
+                drive.storage.finish_upload(&mut upload).await.unwrap();
+                let completed = drive.clock.now();
+                let after = drive.marker(first_marker + 3).await;
+                let listed = drive.listed(&path).await;
+                let native = drive.metadata(&path).await;
+                println!("Drive publication pause={pause}s, start={started:?}, session_ready={session_ready:?}, completing={completing:?}, completed={completed:?}, between_parts={:?}, listed={:?}; before={before}; before_final={before_final}; after={after}; object={native}", between_parts, listed.stored_at);
+                assert!(between_parts >= Duration::from_secs(pause));
+                assert_eq!(listed.size, part.len() as u64 + 1);
+                let mut expected = part;
+                expected.push(b'z');
+                assert_eq!(drive.storage.read(&path).await.unwrap(), expected);
+                assert_eq!(listed.stored_at, http::timestamp(&native, "createdTime").unwrap());
+                assert!(http::timestamp(&before_final, "createdTime").unwrap() > http::timestamp(&before, "createdTime").unwrap());
+                assert!(listed.stored_at >= http::timestamp(&before_final, "createdTime").unwrap(),
+                    "§4 requires first complete publication, after the delayed final part starts");
+                assert!(listed.stored_at <= http::timestamp(&after, "createdTime").unwrap());
+            }
+        }).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires COVEN_LIVE_DRIVE_ENV and a real Google Drive account"]
+    async fn drive_live_unfinished_upload_is_invisible() {
+        run(|drive| async move {
+            let path = drive.path(1);
+            let mut upload = drive.begin(&path).await;
+            let part = vec![0x5a; upload.part_size()];
+            drive
+                .storage
+                .upload_part(&mut upload, &part)
+                .await
+                .unwrap();
+            assert!(!upload.is_complete());
+            let listed = drive
+                .storage
+                .list(&ObjectPrefix::all(drive.store))
+                .await
+                .unwrap();
+            let read = drive.storage.read(&path).await;
+            let crate::session::SessionState::GoogleDrive { file_id, .. } = &upload.state else {
+                panic!("expected an unfinished Drive upload");
+            };
+            let provider = &drive.storage.provider;
+            let url = provider
+                .url(&["files", file_id.as_str()], &[("alt", "media")])
+                .unwrap();
+            let native_status = provider
+                .send(Method::GET, &url, RequestBody::Empty)
+                .await
+                .unwrap()
+                .status();
+            println!(
+                "Drive unfinished confirmed={}, total={}, listed={listed:?}, native_read_status={native_status}, read_length_or_failure={:?}",
+                upload.confirmed_bytes(),
+                upload.total_bytes(),
+                read.as_ref().map(Vec::len).map_err(StorageError::failure)
+            );
+            assert_eq!(
+                native_status,
+                reqwest::StatusCode::NOT_FOUND,
+                "unfinished bytes must not be readable by native file ID"
+            );
+            assert!(listed.is_empty(), "unfinished bytes must not be listed");
+            assert!(matches!(read, Err(error) if error.failure() == StorageFailure::NotFound));
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    #[ignore = "fails §4: adapter exposes no revision; requires COVEN_LIVE_DRIVE_ENV"]
+    async fn drive_live_replacement_revision() {
+        run(|drive| async move {
+            let path = ObjectPath::positions(drive.store, drive.storage.provider.device);
+            let mut listed = Vec::new();
+            let mut native = Vec::new();
+            for bytes in [b"first".as_slice(), b"first", b"other"] {
+                drive.storage.replace(&path, bytes).await.unwrap();
+                listed.push(drive.listed(&path).await);
+                native.push(drive.metadata(&path).await);
+                assert_eq!(drive.storage.read(&path).await.unwrap(), bytes);
+            }
+            println!("Drive replacement listed={listed:?}; native={native:?}");
+            for pair in native.windows(2) {
+                assert_ne!(http::string(&pair[0], "version").unwrap(), http::string(&pair[1], "version").unwrap(), "native version must change even for identical bytes");
+            }
+            // Observed live: native version 1 -> 4 -> 5, with a new headRevisionId each time.
+            // StoredObject exposes only path, size=5 and createdTime=2026-10-12T12:29:35.747Z;
+            // all three remain identical. §4 requires the replacement revision to reach callers.
+            // T36 adds the missing adapter revision; retain this failing contract check.
+            for pair in listed.windows(2) {
+                assert_ne!(pair[0], pair[1], "§4 requires a changing revision; adapter metadata cannot identify this replacement");
+            }
+        }).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires COVEN_LIVE_DRIVE_ENV and a real Google Drive account"]
+    async fn drive_live_immutable_time_is_stable() {
+        run(|drive| async move {
+            let path = drive.path(1);
+            drive.storage.create(&path, b"immutable").await.unwrap();
+            let first = drive.listed(&path).await;
+            let native_first = drive.metadata(&path).await;
+            assert_eq!(drive.storage.read(&path).await.unwrap(), b"immutable");
+            drive.clock.sleep(Duration::from_secs(5)).await;
+            let later = drive.marker(2).await;
+            drive.storage.create_once(&path, b"immutable").await.unwrap();
+            assert_eq!(drive.storage.read(&path).await.unwrap(), b"immutable");
+            let last = drive.listed(&path).await;
+            let native_last = drive.metadata(&path).await;
+            println!("Drive immutable first={first:?}, last={last:?}; native_first={native_first}; native_last={native_last}; later={later}");
+            assert_eq!(first, last);
+            assert_eq!(native_first["createdTime"], native_last["createdTime"]);
+            assert!(http::timestamp(&later, "createdTime").unwrap() > first.stored_at);
+        }).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires COVEN_LIVE_DRIVE_ENV and a real Google Drive account"]
+    async fn drive_live_create_once_preserves_bytes() {
+        run(|drive| async move {
+            let path = drive.path(1);
+            drive.storage.create(&path, b"original").await.unwrap();
+            let first = drive.listed(&path).await;
+            let second = drive.storage.create(&path, b"replaced").await;
+            let bytes = drive.storage.read(&path).await.unwrap();
+            let last = drive.listed(&path).await;
+            println!(
+                "Drive create-once result={second:?}, bytes={bytes:?}, first={first:?}, last={last:?}"
+            );
+            assert_eq!(second.unwrap_err().failure(), StorageFailure::AlreadyExists);
+            assert_eq!(bytes, b"original");
+            assert_eq!(first, last);
+        })
+        .await;
     }
 }
