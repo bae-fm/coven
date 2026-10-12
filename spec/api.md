@@ -3265,6 +3265,7 @@ pub struct CircleMemberInfo {
   - Local migration preserves every queued original record, including
     untried writes; tried uploads also retain their format and sealing keys
     ([`conversions_preserve_uploads`, `conversions_preserve_attempt`](proofs/queue/CovenQueue/Conversion.lean)).
+  - Key-replacement window drops use the same data rule (§10).
   - Before invoking a callback, coven determines candidate schema admission
     and resolves each change's original generation source and replaced
     setters under §8. A dependent change never reaches the callback: retain
@@ -3353,6 +3354,7 @@ pub struct RowChange {
     pub key: RowKey,
     pub op: ChangeOp,
     pub columns: Vec<ColumnChange>,
+    /* private: original write/row/generation and authenticated data sources */
 }
 
 impl RowChange {
@@ -3366,7 +3368,7 @@ pub struct ColumnChange {
     pub name: String,
     pub old: Option<rusqlite::types::Value>,
     pub new: Option<rusqlite::types::Value>,
-    /* private: the references the new value carries */
+    /* private: written references and original setter-source identity */
 }
 
 impl ColumnChange {
