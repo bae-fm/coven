@@ -2709,8 +2709,8 @@ pub enum OAuthError {
     Unavailable(CloudProvider),
     /// The redirect state is missing or different.
     StateMismatch,
-    /// The provider declined sign-in.
-    Denied,
+    /// The provider returned access_denied, retaining its checked callback.
+    Denied(OAuthRedirectError),
     /// The callback omitted its authorization code.
     MissingCode,
     /// The person cancelled sign-in.
@@ -2727,6 +2727,16 @@ pub enum OAuthError {
     Presentation(Box<dyn std::error::Error + Send + Sync>),
     /// The provider refused sign-in or token exchange, or could not be reached.
     Storage(StorageError),
+}
+
+/// An original checked OAuth error callback, retained as the cause of Denied
+/// or StorageError::Provider. Display and Debug omit the callback because the
+/// provider may echo secrets in any field.
+pub struct OAuthRedirectError { /* private */ }
+
+impl OAuthRedirectError {
+    /// Inspect the unmodified callback explicitly, including provider extensions.
+    pub fn callback(&self) -> &str;
 }
 
 impl CovenHandle {
@@ -2869,6 +2879,15 @@ impl OAuthClients {
   transfers and sync use a token until the provider rejects it with HTTP 401.
 - A rejected request refreshes once, commits the replacement to custody,
   then retries once. A failed refresh or second rejection reaches the caller.
+- OAuth error codes distinguish the required action in token responses and
+  checked redirects: invalid grants and interaction or consent requirements
+  are `Authentication`; invalid client, scope, resource or request configuration is
+  `InvalidConfiguration`; `server_error` and `temporarily_unavailable` are
+  retryable `Network` failures. Only an `access_denied` redirect is `Denied`;
+  native cancellation stays `Cancelled`. Other redirect errors are `Refused`.
+  Token failures retain the original `ProviderResponse`; redirect failures
+  retain the original `OAuthRedirectError`, including denial. Neither prints
+  provider-supplied details.
 - Refresh and S3 key replacement leave restore codes untouched. Restore
   codes carry the storage location, never S3 keys or OAuth tokens.
 

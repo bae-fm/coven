@@ -15,9 +15,9 @@ pub enum OAuthError {
     /// Redirect state is missing or different.
     #[error("authorization state mismatch")]
     StateMismatch,
-    /// The provider declined the sign-in.
+    /// The provider returned access_denied, retaining its checked callback.
     #[error("provider denied sign-in")]
-    Denied,
+    Denied(#[source] OAuthRedirectError),
     /// The callback omitted its authorization code.
     #[error("authorization callback omitted its code")]
     MissingCode,
@@ -48,6 +48,43 @@ pub enum OAuthError {
     /// Network or provider failure, preserving its classification.
     #[error(transparent)]
     Storage(#[from] StorageError),
+}
+
+/// The original checked error callback, omitted from diagnostics because it may
+/// contain secrets echoed by the provider.
+#[derive(Debug, thiserror::Error)]
+#[error("provider returned an OAuth error redirect")]
+pub struct OAuthRedirectError {
+    callback: SecretText,
+}
+
+impl OAuthRedirectError {
+    /// Inspect the unmodified callback explicitly, including provider extensions.
+    pub fn callback(&self) -> &str {
+        self.callback.as_str()
+    }
+}
+
+/// OAuth error codes have the same meaning in token responses and checked
+/// authorization redirects. Unrecognized codes leave HTTP status classification
+/// to the caller; redirects without a recognized code are provider refusals.
+pub(crate) fn classify_error(code: &str) -> Option<StorageFailure> {
+    match code {
+        "invalid_grant" | "interaction_required" | "consent_required" => {
+            Some(StorageFailure::Authentication)
+        }
+        "invalid_client"
+        | "unauthorized_client"
+        | "deleted_client"
+        | "invalid_scope"
+        | "invalid_resource"
+        | "invalid_request"
+        | "unsupported_grant_type"
+        | "unsupported_response_type" => Some(StorageFailure::InvalidConfiguration),
+        "server_error" | "temporarily_unavailable" => Some(StorageFailure::Network),
+        "access_denied" => Some(StorageFailure::PermissionDenied),
+        _ => None,
+    }
 }
 
 /// Presents sign-in without handling tokens. The platform sheet must be dismissed
@@ -225,8 +262,24 @@ impl OAuthClients {
         if fields.get("state").map(SecretText::as_str) != Some(request.state.as_str()) {
             return Err(OAuthError::StateMismatch);
         }
-        if fields.contains_key("error") {
-            return Err(OAuthError::Denied);
+        if let Some(error) = fields.get("error") {
+            if error.as_str().is_empty() || fields.contains_key("code") {
+                return Err(OAuthError::InvalidRedirect);
+            }
+            let source = OAuthRedirectError { callback };
+            if error.as_str() == "access_denied" {
+                return Err(OAuthError::Denied(source));
+            }
+            let failure = match classify_error(error.as_str()) {
+                Some(failure) => failure,
+                None => StorageFailure::Refused,
+            };
+            return Err(StorageError::Provider {
+                provider,
+                failure,
+                source: Box::new(source),
+            }
+            .into());
         }
         let code = fields
             .get("code")

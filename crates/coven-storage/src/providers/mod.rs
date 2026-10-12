@@ -4,7 +4,7 @@ mod http;
 mod oauth;
 mod pagination;
 pub use http::{OAuthSession, ProviderResponse};
-pub use oauth::{OAuthClients, OAuthError, OAuthFlow, OAuthPresenter};
+pub use oauth::{OAuthClients, OAuthError, OAuthFlow, OAuthPresenter, OAuthRedirectError};
 #[cfg(not(any(target_os = "ios", target_os = "android")))]
 mod desktop_oauth;
 #[cfg(not(any(target_os = "ios", target_os = "android")))]

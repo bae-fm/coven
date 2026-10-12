@@ -7,27 +7,27 @@ use std::{collections::BTreeMap, sync::Mutex, time::SystemTime};
 #[derive(Default)]
 struct Provider {
     requests: Vec<BTreeMap<String, String>>,
-    status: Option<u16>,
+    error_response: Option<(u16, String)>,
 }
 async fn token(State(state): State<Arc<Mutex<Provider>>>, body: Bytes) -> axum::response::Response {
     let mut state = state.lock().unwrap();
     state
         .requests
         .push(url::form_urlencoded::parse(&body).into_owned().collect());
-    if let Some(status) = state.status {
-        return response(
-            status,
-            match status {
-                400 => r#"{"error":"invalid_grant"}"#,
-                503 => "service unavailable",
-                _ => panic!("unsupported fake status"),
-            },
-        );
+    if let Some((status, body)) = &state.error_response {
+        let mut reply = response(*status, body.clone());
+        reply
+            .headers_mut()
+            .insert("retry-after", "37".parse().unwrap());
+        reply
+            .headers_mut()
+            .insert("x-request-id", "secret-request-id".parse().unwrap());
+        return reply;
     }
     json(serde_json::json!({"access_token":"new-token","token_type":"Bearer","expires_in":3600}))
 }
 struct Presenter {
-    reply: &'static str,
+    reply: String,
     requests: Mutex<Vec<String>>,
 }
 #[async_trait::async_trait]
@@ -37,7 +37,7 @@ impl OAuthPresenter for Presenter {
     }
     async fn present(&self, authorization_url: &str) -> Result<SecretText, OAuthError> {
         self.requests.lock().unwrap().push(authorization_url.into());
-        match self.reply {
+        match self.reply.as_str() {
             "cancel" => return Err(OAuthError::Cancelled),
             "wait" => return std::future::pending().await,
             _ => {}
@@ -57,11 +57,83 @@ fn clients(clock: Arc<FixedClock>) -> OAuthClients {
         clock,
     )
 }
-fn presenter(reply: &'static str) -> Arc<Presenter> {
+fn presenter(reply: impl Into<String>) -> Arc<Presenter> {
     Arc::new(Presenter {
-        reply,
+        reply: reply.into(),
         requests: Mutex::new(Vec::new()),
     })
+}
+
+#[tokio::test]
+async fn redirect_provider_errors_keep_their_classification_and_original_callback() {
+    let state = Arc::new(Mutex::new(Provider::default()));
+    let server = TestServer::new(Router::new().fallback(token).with_state(state.clone())).await;
+    for provider in [
+        CloudProvider::GoogleDrive,
+        CloudProvider::Dropbox,
+        CloudProvider::OneDrive,
+    ] {
+        for (code, expected) in [
+            ("invalid_client", StorageFailure::InvalidConfiguration),
+            ("unauthorized_client", StorageFailure::InvalidConfiguration),
+            ("invalid_scope", StorageFailure::InvalidConfiguration),
+            ("invalid_resource", StorageFailure::InvalidConfiguration),
+            ("invalid_request", StorageFailure::InvalidConfiguration),
+            (
+                "unsupported_response_type",
+                StorageFailure::InvalidConfiguration,
+            ),
+            ("interaction_required", StorageFailure::Authentication),
+            ("consent_required", StorageFailure::Authentication),
+            ("server_error", StorageFailure::Network),
+            ("temporarily_unavailable", StorageFailure::Network),
+            ("unknown_provider_error", StorageFailure::Refused),
+            ("access_denied", StorageFailure::PermissionDenied),
+        ] {
+            let presenter = presenter(format!("https://CALLBACK.example?error={code}&state=STATE&error_description=secret%20description&error_uri=https%3A%2F%2Fprovider.example%2Fsecret-help&extra=secret-extension"));
+            let flow = OAuthFlow::new(
+                clients(Arc::new(FixedClock::new(SystemTime::UNIX_EPOCH)))
+                    .with_token_endpoint(server.url.clone()),
+                presenter.clone(),
+            );
+            let error = flow.authenticate(provider).await.err().unwrap();
+            assert!(!format!("{error} {error:?}").contains("secret"));
+            let original = if code == "access_denied" {
+                let OAuthError::Denied(original) = error else {
+                    panic!("denial lost: {error:?}")
+                };
+                original
+            } else {
+                let OAuthError::Storage(error) = error else {
+                    panic!("{provider:?}: {code}: {error:?}")
+                };
+                assert_eq!(error.failure(), expected, "{provider:?}: {code}");
+                assert_eq!(error.retryable(), expected == StorageFailure::Network);
+                let StorageError::Provider {
+                    provider: actual_provider,
+                    source,
+                    ..
+                } = error
+                else {
+                    panic!("provider callback discarded")
+                };
+                assert_eq!(actual_provider, provider);
+                *source
+                    .downcast::<crate::providers::OAuthRedirectError>()
+                    .unwrap()
+            };
+            let requests = presenter.requests.lock().unwrap();
+            assert_eq!(requests.len(), 1);
+            let url = url::Url::parse(&requests[0]).unwrap();
+            let params: BTreeMap<_, _> = url.query_pairs().into_owned().collect();
+            assert_eq!(
+                original.callback(),
+                presenter.reply.replace("STATE", &params["state"])
+            );
+            assert!(!format!("{original} {original:?}").contains(&params["state"]));
+        }
+    }
+    assert!(state.lock().unwrap().requests.is_empty());
 }
 
 #[tokio::test]
@@ -142,6 +214,24 @@ async fn invalid_or_denied_redirects_never_reach_the_token_endpoint() {
             "https://callback.example?error=access_denied&state=STATE",
             "denied",
         ),
+        (
+            "https://callback.example?error=invalid_client&state=wrong",
+            "state",
+        ),
+        ("https://callback.example?error=server_error", "state"),
+        (
+            "https://elsewhere.example?error=server_error&state=STATE",
+            "redirect",
+        ),
+        (
+            "https://callback.example?error=server_error&error=access_denied&state=STATE",
+            "redirect",
+        ),
+        ("https://callback.example?error=&state=STATE", "redirect"),
+        (
+            "https://callback.example?error=server_error&code=code&state=STATE",
+            "redirect",
+        ),
         ("https://callback.example?state=STATE", "code"),
         ("https://callback.example?code=&state=STATE", "code"),
         ("cancel", "cancel"),
@@ -159,7 +249,7 @@ async fn invalid_or_denied_redirects_never_reach_the_token_endpoint() {
                 (expected, &error),
                 ("state", OAuthError::StateMismatch)
                     | ("redirect", OAuthError::InvalidRedirect)
-                    | ("denied", OAuthError::Denied)
+                    | ("denied", OAuthError::Denied(_))
                     | ("code", OAuthError::MissingCode)
                     | ("cancel", OAuthError::Cancelled)
             ),
@@ -170,7 +260,7 @@ async fn invalid_or_denied_redirects_never_reach_the_token_endpoint() {
 }
 
 #[tokio::test]
-async fn refresh_retains_unrotated_token_and_classifies_provider_failures() {
+async fn refresh_retains_unrotated_token() {
     let state = Arc::new(Mutex::new(Provider::default()));
     let server = TestServer::new(Router::new().fallback(token).with_state(state.clone())).await;
     let flow = OAuthFlow::new(
@@ -188,15 +278,92 @@ async fn refresh_retains_unrotated_token_and_classifies_provider_failures() {
         .await
         .unwrap();
     assert_eq!(refreshed.refresh_token.unwrap().as_str(), "refresh");
-    for (status, failure) in [
-        (400, crate::StorageFailure::Authentication),
-        (503, crate::StorageFailure::Network),
+}
+
+#[tokio::test]
+async fn token_errors_retain_the_original_response_during_sign_in_and_refresh() {
+    let state = Arc::new(Mutex::new(Provider::default()));
+    let server = TestServer::new(Router::new().fallback(token).with_state(state.clone())).await;
+    let flow = OAuthFlow::new(
+        clients(Arc::new(FixedClock::new(SystemTime::UNIX_EPOCH)))
+            .with_token_endpoint(server.url.clone()),
+        presenter("https://callback.example?code=code&state=STATE"),
+    );
+    let previous = OAuthTokens {
+        access_token: SecretText::new("old".into()),
+        refresh_token: Some(SecretText::new("refresh".into())),
+        expires_at: None,
+    };
+    for provider in [
+        CloudProvider::GoogleDrive,
+        CloudProvider::Dropbox,
+        CloudProvider::OneDrive,
     ] {
-        state.lock().unwrap().status = Some(status);
-        assert!(
-            matches!(flow.refresh(CloudProvider::Dropbox, &previous).await,
-            Err(OAuthError::Storage(error)) if error.failure() == failure)
-        );
+        for (status, code, expected) in [
+            (400, "invalid_grant", StorageFailure::Authentication),
+            (400, "invalid_client", StorageFailure::InvalidConfiguration),
+            (401, "invalid_client", StorageFailure::InvalidConfiguration),
+            (
+                400,
+                "unauthorized_client",
+                StorageFailure::InvalidConfiguration,
+            ),
+            (400, "deleted_client", StorageFailure::InvalidConfiguration),
+            (400, "invalid_scope", StorageFailure::InvalidConfiguration),
+            (
+                400,
+                "invalid_resource",
+                StorageFailure::InvalidConfiguration,
+            ),
+            (400, "interaction_required", StorageFailure::Authentication),
+            (400, "consent_required", StorageFailure::Authentication),
+            (400, "temporarily_unavailable", StorageFailure::Network),
+            (400, "server_error", StorageFailure::Network),
+            (429, "unrecognized_error", StorageFailure::RateLimited),
+            (503, "unrecognized_error", StorageFailure::Network),
+            (400, "unrecognized_error", StorageFailure::Refused),
+        ] {
+            let body = format!(
+                r#"{{ "error": "{code}", "error_description": "secret-description", "extra": "secret-extension" }}"#
+            );
+            state.lock().unwrap().error_response = Some((status, body.clone()));
+            for result in [
+                flow.authenticate(provider).await,
+                flow.refresh(provider, &previous).await,
+            ] {
+                let error = result.err().unwrap();
+                assert!(!format!("{error} {error:?}").contains("secret"));
+                let OAuthError::Storage(error) = error else {
+                    panic!("{provider:?}: {code}: {error:?}")
+                };
+                assert_eq!(error.failure(), expected, "{provider:?}: {code}");
+                assert_eq!(
+                    error.retryable(),
+                    matches!(
+                        expected,
+                        StorageFailure::Network | StorageFailure::RateLimited
+                    )
+                );
+                let StorageError::Provider {
+                    provider: actual_provider,
+                    source,
+                    ..
+                } = error
+                else {
+                    panic!("provider response discarded")
+                };
+                assert_eq!(actual_provider, provider);
+                let original = source.downcast_ref::<http::ProviderResponse>().unwrap();
+                assert_eq!(original.status(), status);
+                assert_eq!(original.headers()["retry-after"], "37");
+                assert_eq!(original.headers()["x-request-id"], "secret-request-id");
+                assert_eq!(original.body(), body.as_bytes());
+            }
+            let requests = std::mem::take(&mut state.lock().unwrap().requests);
+            assert_eq!(requests.len(), 2);
+            assert_eq!(requests[0]["grant_type"], "authorization_code");
+            assert_eq!(requests[1]["grant_type"], "refresh_token");
+        }
     }
 }
 

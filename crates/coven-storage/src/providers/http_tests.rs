@@ -1,6 +1,58 @@
 use super::*;
 use crate::providers::tests::{response, TestServer};
 use axum::Router;
+
+#[test]
+fn oauth_error_codes_determine_the_action_before_http_status() {
+    for provider in [
+        CloudProvider::GoogleDrive,
+        CloudProvider::Dropbox,
+        CloudProvider::OneDrive,
+    ] {
+        for (code, expected) in [
+            ("invalid_grant", StorageFailure::Authentication),
+            ("invalid_client", StorageFailure::InvalidConfiguration),
+            ("unauthorized_client", StorageFailure::InvalidConfiguration),
+            ("deleted_client", StorageFailure::InvalidConfiguration),
+            ("invalid_scope", StorageFailure::InvalidConfiguration),
+            ("invalid_resource", StorageFailure::InvalidConfiguration),
+            ("invalid_request", StorageFailure::InvalidConfiguration),
+            (
+                "unsupported_grant_type",
+                StorageFailure::InvalidConfiguration,
+            ),
+            (
+                "unsupported_response_type",
+                StorageFailure::InvalidConfiguration,
+            ),
+            ("interaction_required", StorageFailure::Authentication),
+            ("consent_required", StorageFailure::Authentication),
+            ("temporarily_unavailable", StorageFailure::Network),
+            ("server_error", StorageFailure::Network),
+            ("access_denied", StorageFailure::PermissionDenied),
+        ] {
+            let body = serde_json::json!({"error": code}).to_string();
+            for status in [400, 401, 403] {
+                assert_eq!(
+                    classify(provider, status, body.as_bytes()),
+                    expected,
+                    "{provider:?}: {status}, {code}"
+                );
+            }
+        }
+        for (status, expected) in [
+            (400, StorageFailure::Refused),
+            (429, StorageFailure::RateLimited),
+            (503, StorageFailure::Network),
+        ] {
+            assert_eq!(
+                classify(provider, status, br#"{"error":"unrecognized_error"}"#),
+                expected
+            );
+        }
+    }
+}
+
 #[test]
 fn typed_provider_error_mapping() {
     let cases = [

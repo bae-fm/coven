@@ -248,13 +248,12 @@ pub(crate) fn classify(provider: CloudProvider, status: u16, body: &[u8]) -> Sto
             None
         }
     };
-    if parsed.as_ref().is_some_and(|value| {
-        matches!(
-            value["error"].as_str(),
-            Some("invalid_grant" | "unauthorized_client" | "invalid_client")
-        )
-    }) {
-        return StorageFailure::Authentication;
+    if let Some(failure) = parsed
+        .as_ref()
+        .and_then(|value| value["error"].as_str())
+        .and_then(super::oauth::classify_error)
+    {
+        return failure;
     }
     if provider == CloudProvider::Dropbox {
         if let Some(failure) = parsed.as_ref().and_then(dropbox_failure) {
