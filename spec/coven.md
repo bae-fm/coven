@@ -4543,6 +4543,16 @@ retry rule.
 
 ### 19.1 Noticing
 
+Old-key window drops use the write's `Dropped(LandedTooLate)` record; otherwise
+admitted changes depending on dropped data appear as per-change losses (§8).
+Until the kept replacement and its preceding prefix are final, a replay change
+rebuilds admission, source evidence, rows, losses and pending records atomically.
+No later reader rescues an excluded object. Old-credential send failures use
+`MemberKeysReplaced`, independently of device removal. A key-copy subject names
+the exact sealing credential as well as member, audience and key (D8); a report
+for the old credential cannot satisfy a new-credential wait. Historical
+snapshot, positions and clock signatures follow D9's separate object policies.
+
 Ana is offline with a photo waiting to upload. Ben's key has not arrived.
 Both appear in `pending()` with their own first unmet condition; the list also
 holds failures and rejected entries, without making either wait look completed.
@@ -4572,7 +4582,7 @@ holds failures and rejected entries, without making either wait look completed.
   - file sources that cannot be uploaded, paused transfers, and provider
     work waiting for the owner, a request, or an app action;
   - a dropped entry, including “landed too late” on its author's device,
-    a retired device's write that landed too late (§10), or a fingerprint
+    a write that missed its device-retirement or member-key deadline (§10), or a fingerprint
     disagreement.
 - E.g. Carol's tablet has Ben's write 9, which read Ana's write 4. GETting
   Ana's next write, 4, returns a miss.
