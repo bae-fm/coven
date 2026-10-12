@@ -4202,6 +4202,8 @@ Carol's tablet:
     use the winning raise's supplied conversions in version and causal
     order, independently of whether their upload was tried
     ([`receive_matches_evaluation`, `receive_agreement`](proofs/queue/CovenQueue/Conversion.lean)).
+  - Member-key window exclusions supply base verdicts to the same §8 data
+    rule (§10); conversion cannot rescue them.
   - First determine candidate schema admission without changing values,
     then resolve each change's original data sources under §8. Invoke the
     callback only on eligible changes. A dependent change stays frozen in
@@ -4277,9 +4279,12 @@ Carol's tablet:
 - Every object records the format version it was written in, outside its
   encryption, so an older coven tells a newer object from a damaged one,
   and asks for an update instead of reporting it.
-- A newer coven reads every older format and writes the newest. It keeps
-  every older reader, since a device can return with waiting writes from
-  any of them.
+- Format 1 is the first, unreleased format. Its layouts include stable
+  member ids, replacement entries and credential-specific copies/codes (D1).
+  There are no older formats or compatibility readers. After release a layout
+  change gets a new format number: a newer coven reads every released older
+  format and writes the newest, since a device can return with waiting writes
+  from any released format.
 - A write or store log entry already tried is retried in the format of
   its first attempt, so re-sealing it reproduces the same bytes under the
   same content-bound nonces ([§6](#6-syncing-writes)).
