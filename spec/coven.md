@@ -4805,7 +4805,7 @@ holds failures and rejected entries, without making either wait look completed.
   [Appendix B](proofs/merge.md), without SQLite or storage.
 - Whole-history construction belongs to test support; production merges
   arriving writes against the applied metadata without retaining write bodies.
-- Ids shared by several crates (store, device and circle ids) live in
+- Ids shared by several crates (store, member, device and circle ids) live in
   `coven-foundation`; each concept has one type.
 - Each external dependency's version is set once, in the workspace, and
   crates name only the features they need.
