@@ -263,7 +263,7 @@
 | Tag | Change | Fields |
 | --- | --- | --- |
 | 0 | Create store | `store:uuid \| name:name \| admin:MemberKeys \| access:MemberAccess \| device_name:name \| key:uuid \| key_hash:32 bytes` |
-| 1 | Add member | `keys:MemberKeys \| role:u8 \| access:MemberAccess` |
+| 1 | Add member | `member:MemberId \| keys:MemberKeys \| role:u8 \| access:MemberAccess` |
 | 2 | Remove member | `member:MemberId` |
 | 3 | Change role | `member:MemberId \| role:u8` |
 | 4 | Add device | `device:DeviceId \| name:name \| replaces:Option<DeviceId>` |
@@ -277,14 +277,28 @@
 | 13 | Reset | `snapshot:SnapshotId` |
 | 14 | Set access | `access:MemberAccess` |
 | 15 | Rotate key | `audience:Audience \| key:uuid \| key_hash:32 bytes` |
+| 16 | Replace member keys | `member:MemberId \| keys:MemberKeys` |
 
 - Tag 12 is unused. The other tags retain their numbers.
 - A role is `0` admin or `1` member. `SnapshotId` is
   `audience:Audience | device:DeviceId | number:u64`, its path's parts (D10).
   Its number is positive and belongs to the device's snapshot sequence.
   The entry's timestamp names its writing device.
-- The create-store entry is number 1 of its device, reads nothing, and its
-  `admin` is its author; the device it adds is the one writing it.
+- The create-store entry is number 1 of its device and reads nothing.
+  Its 16-byte header `author` is the first admin's stable id; `admin` supplies
+  that member's public pair, with no duplicate id. Verify creation with its
+  supplied signing key and require its store id to match the path. The device
+  it adds is the one writing it. For every other entry replay `had_read`,
+  including implicit own entries, resolve `author` there, and verify with
+  that member's current signing key. The proof model's signer is verified
+  evidence, not an additional wire field.
+- Creation and addition establish keys. Only tag 16 changes an active
+  member's keys; it carries no audience keys, role, access or device changes.
+  Neither signing nor sealing key may reuse a previously established key.
+  Its target must exist in its recorded view and at its replay position.
+  Authority and equal-payload replacement conflicts follow §9: self is
+  classified by author equal to target even for an admin, another admin
+  wins over self, then the earlier timestamp wins; member removal wins.
 - Add-device carries no member id; create-circle carries no member list.
 - An add-device replacement names an older device of the same member,
   distinct from the added device. It carries no log ends. Concurrent
