@@ -2,7 +2,9 @@ import CovenMerge.OwnerEvaluation
 
 /-! Delete protection in the deleting member's merged context. Only other
 members' unread candidate deletes are withheld; the test reads retained references
-before ordinary removal rules. Nodes identify row incarnations, so a child of
+before ordinary removal rules. A superseded delete remains generation evidence
+for later incarnations: withholding its removal must not exclude its reinsertion.
+Nodes identify row incarnations, so a child of
 a reinserted row does not refer to the incarnation an old delete removed. -/
 namespace CovenMerge.Ownership
 
@@ -30,6 +32,19 @@ theorem reference_parent (g : ReferenceGraph Node) (targets : Node → Bool) (r 
     (affected : references g targets parent = true) : references g targets r = true :=
   normal_closed (close_normal g.rows (referenceFires g) targets) r mem
     (List.any_eq_true.mpr ⟨parent, link, affected⟩)
+
+/-- Every path through retained references is traversed, including through
+an unowned intermediate row or any number of audience-parent links. -/
+theorem reference_path (g : ReferenceGraph Node) (targets : Node → Bool) (target r : Node)
+    (seed : targets target = true)
+    (path : Star (fun parent child => child ∈ g.rows ∧ parent ∈ g.parents child) target r) :
+    references g targets r = true := by
+  have walk (affected : references g targets target = true) : references g targets r = true := by
+    clear seed
+    induction path with
+    | refl => exact affected
+    | head link _ ih => exact ih (reference_parent g targets _ _ link.1 link.2 affected)
+  exact walk (reference_seed g targets target seed)
 
 private theorem reference_monotone (g : ReferenceGraph Node) :
     MonotoneRules (FiresP (referenceFires g)) := by
@@ -122,6 +137,26 @@ theorem passing_has_no_foreign_reference (g : ReferenceGraph Node) (owner : Node
 
 variable {W Row Col Table : Type} [DecidableEq W] [DecidableEq Row]
 
+/-- Only a delete which can still remove the current incarnation is withheld.
+Earlier deletes remain as generation evidence, without removing the later row.
+This distinction belongs to trials; a rejected change still loses its dependents
+in the actual merge. The generation comes from the full retained round. -/
+def incarnationContext (M : Writes W Row Col) (P : Policy W Row Table Member)
+    (st : St W Row Col) (active : List (W × Row)) (w : W) : List (W × Row) :=
+  memberContext (fun op => P.author op.1)
+    (fun op => (M.chg op.1 op.2).any fun ch =>
+      decide (ch.kind = .del) && decide (st.gen op.2 ≤ ch.gen + 1))
+    (fun op => M.past w op.1) active (P.author w)
+
+theorem incarnation_context_exact (M : Writes W Row Col) (P : Policy W Row Table Member)
+    (st : St W Row Col) (active : List (W × Row)) (w a : W) (r : Row) (ch : Change Col)
+    (change : M.chg a r = some ch) :
+    (a, r) ∈ incarnationContext M P st active w ↔
+      (a, r) ∈ active ∧ ((ch.kind ≠ .del ∨ ch.gen + 1 < st.gen r) ∨
+        P.author a = P.author w ∨ M.past w a = true) := by
+  by_cases deleted : ch.kind = .del <;>
+    simp [incarnationContext, memberContext, change, deleted, or_assoc]
+
 /-- One rebuilt context per delete, using its recorded reads and incarnation.
 Ownership comes from the authenticated policy, not a graph publisher. -/
 def deleteTrial (M : Writes W Row Col) (P : Policy W Row Table Member)
@@ -130,9 +165,7 @@ def deleteTrial (M : Writes W Row Col) (P : Policy W Row Table Member)
     (w : W) (r : Row) : Option (Cause W Member Row) :=
   (M.chg w r).bind fun ch =>
     if ch.kind = .del then
-      let context := memberContext (fun op => P.author op.1)
-        (fun op => (M.chg op.1 op.2).any (fun change => decide (change.kind = .del)))
-        (fun op => M.past w op.1) active (P.author w)
+      let context := incarnationContext M P (build active) active w
       let g := graph (build context)
       referenceReason g
         (fun node => if P.owned (P.table node.1) then some (owner P node.1) else none)

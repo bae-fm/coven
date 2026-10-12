@@ -1,9 +1,9 @@
 import CovenMerge.OwnerDeleteRule
 import CovenMerge.OwnerDeleteContexts
 
-/-! Withholding a foreign delete also excludes its dependent reinsertion.
-The restored old incarnation can have different references from the final
-new incarnation, concealing the row the delete rule needs to protect. -/
+/-! Withholding a foreign removal keeps the row's later incarnation. Ben's
+parent deletion becomes a recorded loss, and Ana's reinserted child remains
+visible with its retained parent reference. -/
 namespace CovenMerge.Ownership.DeleteGenerationExample
 
 inductive Write where
@@ -132,9 +132,9 @@ theorem causal : CausalOrder history received := by
 
 def rebuilt (active : List (Write × Bool)) := roundState history valid provenance policy candidates active received
 
-/-- The context used by Ben contains Ana's old, unlinked incarnation.
-Keeping Ana's delete instead exposes her new child and its parent link. -/
-theorem withholding_conceals_reference :
+/-- Actual rejection still drops dependent changes. Trial withholding must
+not use that operation when a later incarnation is retained. -/
+theorem rejecting_delete_excludes_reinsertion :
     (rebuilt [(.parentDelete, false)]).gen true = 1 ∧
     (inputs (rebuilt [(.parentDelete, false)])).refs true = [] ∧
     (rebuilt candidates).gen true = 3 ∧
@@ -157,38 +157,65 @@ theorem exhaustive_guard_sees_child :
   simp only [DataDependency.effective, retained]
   decide
 
-theorem both_deletes_pass :
-    roundTrial history valid provenance policy candidates trial received candidates (.parentDelete, false) = none ∧
-    roundTrial history valid provenance policy candidates trial received candidates (.childDelete, true) = none := by
+/-- Ana's earlier deletion is evidence for her current incarnation, so it
+cannot conceal that incarnation when Ben's trial withholds her removal. -/
+theorem trial_keeps_reinsertion :
+    incarnationContext history policy (rebuilt candidates) candidates .parentDelete = candidates ∧
+    (rebuilt (incarnationContext history policy (rebuilt candidates) candidates .parentDelete)).gen true = 3 ∧
+    (rebuilt (incarnationContext history policy (rebuilt candidates) candidates .parentDelete)).cell true () =
+      some .newChild := by
+  unfold rebuilt roundState Data.merged
+  simp only [DataDependency.effective, retained]
+  decide
+
+theorem parent_delete_blocked :
+    roundTrial history valid provenance policy candidates trial received candidates (.parentDelete, false) =
+      some (.delete true true) := by
   unfold roundTrial roundState Data.merged
   simp only [DataDependency.effective, retained]
   decide
 
-theorem guards_empty : settledGuard history valid provenance policy candidates trial received = fun _ _ => none := by
-  funext w r
-  obtain ⟨parent, child⟩ := both_deletes_pass
-  simp only [candidates] at parent child
+theorem child_delete_passes :
+    roundTrial history valid provenance policy candidates trial received candidates (.childDelete, true) = none ∧
+    roundTrial history valid provenance policy candidates trial received [(.childDelete, true)] (.childDelete, true) = none := by
+  unfold roundTrial roundState Data.merged
+  simp only [DataDependency.effective, retained]
+  decide
+
+theorem guard_reason (w : Write) (r : Bool) :
+    settledGuard history valid provenance policy candidates trial received w r =
+      if w = .parentDelete ∧ r = false then some (.delete true true) else none := by
+  have parent := parent_delete_blocked
+  obtain ⟨child, childOnly⟩ := child_delete_passes
+  simp only [candidates] at parent child childOnly
   cases w <;> cases r <;> rw [settledGuard, rejectionReason.eq_def] <;>
     simp [candidates, parent, child, keepRound]
+  rw [rejectionReason.eq_def]
+  simp [childOnly, keepRound]
 
 def evaluated := protectedResult history valid provenance policy candidates trial (fun w _ _ => some w) inputs received
 
-/-- Two rows suffice without CHECK, uniqueness, set null or audience rules.
-Ana's generation-three child is visible with only her own delete and hidden
-by Ben's accepted parent deletion in the final merged state. -/
-theorem foreign_child_hidden :
+/-- The actual filtered merge restores P, keeps C's generation-three setter,
+records Ben's original deletion, and shows both rows after all removal passes. -/
+theorem foreign_child_protected :
     owner policy true ≠ policy.author .parentDelete ∧
-    (entryView (inputs (rebuilt [(.childDelete, true)]))).shown true = true ∧
-    evaluated.1.merged.gen true = 3 ∧ evaluated.1.view.shown true = false ∧
-    evaluated.2 .parentDelete false = none ∧ evaluated.2 .childDelete true = none ∧
-    (evaluated.1.losses true none).map (fun loss => loss.values ()) = some (some .newChild) ∧
-    (evaluated.1.losses true none).map (fun loss => loss.cause) = some (.rules [.foreignKey]) := by
+    evaluated.1.merged.gen false = 1 ∧ evaluated.1.merged.gen true = 3 ∧
+    evaluated.1.merged.cell true () = some .newChild ∧
+    evaluated.1.view.shown false = true ∧ evaluated.1.view.shown true = true ∧
+    (evaluated.2 .parentDelete false).map (fun record => record.cause) = some (.delete true true) ∧
+    (evaluated.2 .parentDelete false).map (fun record => (record.write, record.row, record.generation)) =
+      some (.parentDelete, false, 1) ∧
+    evaluated.2 .childDelete true = none ∧ evaluated.2 .newChild true = none ∧
+    evaluated.1.losses true none = none := by
+  have guards : settledGuard history valid provenance policy candidates trial received =
+      fun w r => if w = .parentDelete ∧ r = false then some (.delete true true) else none := by
+    funext w r; exact guard_reason w r
   unfold evaluated protectedResult result
-  rw [guards_empty]
-  unfold rebuilt roundState merged Data.merged
+  rw [guards]
+  unfold merged Data.merged
   simp only [DataDependency.effective, retained, loss, DataDependency.dependsOnDropped]
   decide
 
-example : evaluated.1.view.shown true = false := foreign_child_hidden.2.2.2.1
+example : evaluated.1.view.shown true = true := foreign_child_protected.2.2.2.2.2.1
 
 end CovenMerge.Ownership.DeleteGenerationExample

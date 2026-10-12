@@ -105,6 +105,38 @@ theorem trial_calls_at_least_candidates (bad : List Op → Op → Bool) (active 
   rw [trialCalls]
   split <;> omega
 
+/-- Each trial filters the active list once. Charge that whole scan even
+when retention or operation kind skips the trial; charge repeated rounds as
+`trialCalls` does. History replay and generation lookup remain separate. -/
+def contextChecks (bad : List Op → Op → Bool) (active : List Op) : Nat :=
+  active.length * active.length + if (keepRound bad active).length = active.length then 0
+    else active.length * active.length + contextChecks bad (keepRound bad active)
+termination_by active.length
+decreasing_by
+  have bound : (keepRound bad active).length ≤ active.length := List.length_filter_le _ _
+  omega
+
+theorem context_checks_le_calls (bad : List Op → Op → Bool) (active : List Op) :
+    contextChecks bad active ≤ active.length * trialCalls bad active := by
+  rw [contextChecks, trialCalls]
+  split
+  · simp
+  · have ih := context_checks_le_calls bad (keepRound bad active)
+    have bound : (keepRound bad active).length ≤ active.length := List.length_filter_le _ _
+    have tail := Nat.mul_le_mul_right (trialCalls bad (keepRound bad active)) bound
+    simp only [Nat.mul_add]
+    omega
+termination_by active.length
+decreasing_by
+  have bound : (keepRound bad active).length ≤ active.length := List.length_filter_le _ _
+  omega
+
+theorem context_checks_polynomial (bad : List Op → Op → Bool) (active : List Op) :
+    contextChecks bad active ≤ 2 * (active.length * (active.length * active.length)) := by
+  have bound := Nat.le_trans (context_checks_le_calls bad active)
+    (Nat.mul_le_mul_left active.length (trial_calls_polynomial bad active))
+  simpa only [Nat.mul_left_comm] using bound
+
 /-- Even distinct candidates at one row have no bound in the row count:
 every candidate is tested in the first round. This is independent of the
 cost of replaying their original writes or constructing their graphs. -/

@@ -86,8 +86,8 @@ def provenance : DataDependency.Authored history where
     cases w <;> cases r <;> cases a <;> simp at h
     exact ⟨_, _, rfl, rfl, by decide, rfl, rfl⟩
 
-def policy : Policy Write Row Unit Bool where
-  table _ := ()
+def policy : Policy Write Row Bool Bool where
+  table r := r == .parent
   owned _ := true
   creator | .parent => .parent | .child => .child | .rival => .rival
   author w := w == .rival
@@ -106,7 +106,8 @@ def inputs (st : St Write Row Unit) : EntryInputs Row Nat where
 def graph (st : St Write Row Unit) : ReferenceGraph (Row × Nat) where
   rows := [.parent, .child, .rival].map fun r => (r, st.gen r)
   present node := decide (st.gen node.1 % 2 = 1)
-  parents node := (inputs st).refs node.1 |>.map fun ref => (ref.parent, 1)
+  -- Keep the authored reference even when its displayed value is null.
+  parents node := if node.1 = .child then [(.parent, 1)] else []
 
 def trial := deleteTrial history policy graph
 
@@ -160,8 +161,14 @@ def evaluated := protectedResult history valid provenance policy candidates tria
 
 def withoutDelete := roundState history valid provenance policy candidates [] received
 
+/-- There is no foreign removal to withhold, independently of the full
+round's generations. Keeping reinsertion evidence cannot change this trial. -/
+theorem context_unchanged (st : St Write Row Unit) :
+    incarnationContext history policy st candidates .erase = candidates := by
+  simp [incarnationContext, memberContext, candidates, history, policy]
+
 /-- A reference-free foreign row is hidden by a changed unique claim. The
-new rule accepts the deletion; the final ordinary loss still records Ana's
+reference rule accepts the deletion; the final ordinary loss still records Ana's
 value, so value accounting does not imply owner protection. -/
 theorem foreign_row_hidden :
     (entryView (inputs withoutDelete)).shown .rival = true ∧
@@ -176,6 +183,16 @@ theorem foreign_row_hidden :
   decide
 
 example : evaluated.1.view.shown .rival = false := foreign_row_hidden.2.2.1
+
+/-- The final protection assertion is false even with valid writes, checked
+provenance and a causal received history. The before view has no foreign delete. -/
+theorem final_owner_protection_refuted :
+    ¬ (∀ r, owner policy r ≠ policy.author .erase →
+      (entryView (inputs withoutDelete)).shown r = true → evaluated.1.view.shown r = true) := by
+  intro protects
+  have visible := protects .rival (by decide) foreign_row_hidden.1
+  rw [foreign_row_hidden.2.2.1] at visible
+  contradiction
 
 /-- Removing any of the three roles eliminates this set-null/unique history. -/
 theorem three_roles_needed :

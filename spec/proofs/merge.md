@@ -990,14 +990,25 @@ This is a proposal, not a change to the normative spec or Rust. `Ownership`,
 `OwnerProtection` and `OwnerEvaluation` check the owner filter, state-based
 protection tests and an executable, terminating rejection procedure.
 `OwnerDeleteRule` implements the member-context reference rule;
-`OwnerDeleteCost` bounds its traversal and rejection rounds.
+`OwnerDeleteRetention` proves that trial withholding preserves retained setters
+and current incarnations. `OwnerDeleteCost` bounds traversal, context selection
+and rejection rounds.
 `OwnerDeleteContexts` retains the exhaustive rule as a comparison model.
 `OwnerExamples`, `OwnerFilterExamples`, `OwnerDeleteExamples`,
-`OwnerReinsertExamples`, `OwnerDeleteRuleExamples` and
-`OwnerDeleteGenerationExample` check races and failures. The signed-root
+`OwnerReinsertExamples`, `OwnerDeleteRuleExamples`,
+`OwnerDeleteGenerationExample` and `OwnerDeleteDependents` check races,
+reference updates, audience transfers and cascades. The signed-root
 argument is in
 [the storage model](storage.md#signed-roots-and-row-authorship).
 SQL extraction and store-log authority remain outside the model.
+
+**Final owner protection still fails through set-null and uniqueness.** The
+checked three-row, four-write history below has no foreign delete to withhold,
+so preserving dependent reinsertions cannot change its result. Ben's deletion
+is accepted and Ana's unrelated row loses uniqueness. The general final
+visibility theorem is therefore false for this rule. No different deletion
+rule is installed. The two-row reinsertion history is protected; convergence,
+B6, B14, termination and the polynomial graph/rejection bounds remain proved.
 
 **Owner changes and value accounting are proved.** `Policy` makes ownership
 an opt-in table declaration and derives a row's owner from its creating
@@ -1073,34 +1084,59 @@ forge new child values. The model does not silently exempt an ordinary
 non-owner child edit from the owner filter.
 
 **The member-context delete rule is executable and deterministic.** For a
-delete by M, `memberContext` keeps all non-delete candidates and M's own
-deletes, withholding other members' **unread** candidate deletes. Foreign
-deletes already read by that write stay in its context (`read_delete_kept`), using
+delete by M, `incarnationContext` starts with the full retained round's row
+generations. It keeps all non-deletes, M's own deletes and every foreign
+delete M already read. Among unread foreign deletes, it withholds a removal
+only when that row has no later retained incarnation: a delete at generation
+g remains as generation evidence if the full row generation exceeds g + 1.
+That earlier delete cannot remove the later row. The rebuilt context therefore
+keeps the later insertion and its updates while withholding current removals.
+`incarnation_context_exact` gives the exact selection. Recorded reads use
 `M.past` directly; different deleting writes can have different read bases.
-`member_context_exact` proves that selection. `deleteTrial` rebuilds the
-original-write merge in that one context and extracts a `ReferenceGraph`.
+
+This is trial withholding, not an admission rejection. An actually rejected
+delete still excludes its data dependents in the final merge. Trials never
+resurrect a change already lost to ownership or an earlier rejection round.
+`incarnation_context_no_new_change` proves that restriction. The policy and
+all reference generations remain authenticated retained evidence.
+
+`OwnerDeleteRetention` proves the distinction for every valid authored history
+and causal received set. `delete_source_is_generation` proves a delete can
+be a source only for the next insertion's generation; replaced-cell sources
+are always inserts or updates. `incarnation_context_retains` follows arbitrary
+provenance chains and preserves every retained insert/update and each earlier
+delete supporting a later incarnation. `incarnation_context_setters` gives
+exactly the same setters at every incarnation. `incarnation_context_current`
+proves every present row keeps its generation and every winning cell, including
+reference changes. `incarnation_context_generations` proves withholding can
+lower a generation by at most one: even after repeated reinsertions and a
+last delete, it cannot restore an obsolete earlier incarnation.
+
+`deleteTrial` uses that one rebuilt context and extracts a `ReferenceGraph`.
 It rejects exactly when a present row of another owner reaches the deleted
 incarnation through retained direct, cascade or audience-parent references.
-The test runs before ordinary removals, so a CHECK-hidden row still blocks.
-The owner comes from the authenticated `Policy`.
-
+The test precedes ordinary removals: CHECK, unique and other-audience hiding
+do not erase its blockers. Ownership comes from `Policy`.
 `references_least` proves the traversal computes the least closed set;
-`reference_seed` and `reference_parent` include targets and paths of any depth.
-`references_order_independent` and `reference_veto_order_independent` prove
-that graph enumeration changes neither reachability nor the veto.
-`reference_blocker_exact` proves the stated iff, and
-`passing_has_no_foreign_reference` proves the corresponding absence of a
-blocker in that member's test context. The nodes identify row **incarnations**,
-not logical keys alone. An old delete must not reject a child of the reinserted
-incarnation. Graph extraction supplies those generation-aware edges and any
-audience-derived targets; missing evidence cannot mean an empty graph.
-SQL extraction and store-log operation grouping are outside this model.
+`reference_seed`, `reference_parent` and `reference_path` include paths of any
+depth, including unowned intermediate rows. `references_order_independent`
+and `reference_veto_order_independent` prove graph enumeration changes neither
+reachability nor the veto. `reference_blocker_exact` proves the stated iff;
+`passing_has_no_foreign_reference` excludes blockers in that member's context.
+
+Nodes identify row **incarnations**, not logical keys alone. Graph extraction
+supplies generation-aware edges, including audience-parent links and any
+audience-derived targets, before ordinary removal. Missing evidence cannot
+mean an empty graph. SQL extraction and store-log operation grouping remain
+outside the model. The retention theorems concern original current setters;
+they do not prove that arbitrary SQL-derived claims are unchanged.
 
 The atomic order is:
 
 1. Filter non-owner changes and their data dependents; rebuild from originals.
 2. Judge active moves against merged descendants and replayed membership.
-   Judge active deletes in their deleting members' contexts, before removals.
+   Judge active deletes in their deleting members' contexts, preserving
+   generation evidence for later incarnations, before removals.
 3. Reject all failing candidates together, retaining each first rejecting
    cause. Rebuild without those changes and their data dependents; repeat
    until no candidate fails.
@@ -1111,8 +1147,8 @@ The atomic order is:
 actual merge. `unretained_not_tried` excludes already absent changes from
 trials. `settled_admission` and `settled_merge` prove recorded reasons give
 exactly the settled merge. `settled_safe` means every surviving retained
-candidate passes its **reference test**; it is not a theorem of final owner
-visibility. The failure below distinguishes those claims.
+candidate passes its **reference test**. The set-null/unique counterexample
+below prevents inferring final owner visibility from that result.
 
 **Termination and no remove/restore cycle are proved.** `rounds_bounded`
 gives at most D strict rounds for D candidates. `settles_subset` never
@@ -1142,7 +1178,12 @@ This is a completed traversal, not a timeout with a partial result.
 `trial_calls_polynomial` proves at most 2D² charged trial calls for one complete
 settling traversal, including its unchanged last round and both occurrences
 of `keepRound` in a strict round, without assuming compiler sharing. Each delete
-trial uses one context instead of enumerating subsets. Looking up every
+trial uses one context instead of enumerating subsets. It reads the full
+round's generations, selects the context and rebuilds that context; there is
+no search over histories. `contextChecks` charges a full active-list scan for
+every trial call, and `context_checks_polynomial` proves at most 2D³ candidate
+checks across the same traversal. Generation and metadata lookups are supplied
+operations; replay cost remains outside the bound. Looking up every
 candidate's recorded reason separately can repeat that traversal D times;
 this is still polynomial in D. The model does not equate D or the number of
 retained writes with N: fixed rows can have arbitrarily many historical
@@ -1172,27 +1213,51 @@ an old delete supporting a reinsertion is permitted and Ana's child at the
 new incarnation remains visible. Logical-key-only traversal fails that test
 (`row_key_guard_rejects_valid_history`).
 
-**“Never hides another owner's row in the final state” fails.**
-`DeleteGenerationExample.foreign_child_hidden` gives a two-owned-row history
-with five writes and no CHECK, uniqueness, set-null or audience rules:
+**The two-row reinsertion history is protected.**
+`DeleteGenerationExample.foreign_child_protected` checks the full five-write
+history, with valid writes, authored provenance and causal order:
 
-- Ben creates parent P; Ana creates child C with no parent reference.
+- Ben creates P; Ana creates C with no parent reference.
 - Ana deletes C and reinserts it at generation three, referring to P.
 - Ben concurrently deletes P, having read neither Ana's delete nor reinsertion.
 
-Ben's trial withholds Ana's delete. The shared data-dependency filter then
-excludes her reinsertion, so the rebuilt C is its old, unlinked incarnation.
-`withholding_conceals_reference` checks both rebuilt states. Neither delete
-finds a foreign blocker (`both_deletes_pass`), and the rejection procedure
-keeps both (`guards_empty`). In the actual final merge Ana's delete and
-reinsertion survive: C is at generation three and is hidden by Ben's accepted
-parent delete. With only Ana's delete it is visible. The final record preserves
-her new value and names `.foreignKey`; the literal Lean `example` checks the
-hidden child. Write validity, generation and setter dependencies, and causal
-order are all checked. Two owned rows suffice, so this failure does not depend
-on unique expressions or SQL null substitution.
+`trial_keeps_reinsertion` proves Ben's context keeps C at generation three
+with its new setter. `parent_delete_blocked` finds Ana's C; `guard_reason`
+records Ben's deletion while permitting Ana's earlier deletion. The final
+`protectedResult` restores P at generation one, keeps C's generation-three
+setter and shows both rows after all three removal passes. Ben's loss retains
+his write, row, generation and `.delete C Ana` cause. Ana's deletion and
+reinsertion have no rejected-change loss, and C has no removed-row loss.
+`rejecting_delete_excludes_reinsertion` separately checks that actual admission
+rejection still drops the dependent insertion; trial withholding no longer
+uses that operation for a superseded removal.
 
-There is also an independent three-row failure through uniqueness.
+**Reference updates, audience transfers and a third-row cascade are checked.**
+`DeleteDependents.protected_final` executes each of these histories through
+the same trial, rejection rounds, merge and loss recorder:
+
+- Ana changes C's reference to P with an ordinary update, without a
+  delete/reinsert. Ben's concurrent deletion loses and C keeps that update.
+- Ana reinserts C pointing through an unowned bridge B to P. The bridge does
+  not itself veto Ben's deletion; the traversal reaches Ana's C and records
+  Ben's deletion. P, B and C survive.
+- Ana moves C from the store into a circle, then sets its reference to the
+  store's P. Ben's trial withholds C's old-audience removal while keeping its
+  destination insertion and later update. The restored store copy would hide
+  the circle copy under the ordinary other-audience rule, but the reference
+  test still sees the circle copy (`move_trial_before_audience_choice`). Ben's
+  delete loses; the final source remains deleted and the destination is shown
+  (`move_source_stays_deleted`). Both copies carry the same original owner.
+
+The general retention theorem covers the setters in these cases and arbitrary
+longer source chains. `reference_path` covers longer reference and audience
+paths on the supplied graph. The move example supplies the two authored halves
+with Ana allowed in the destination; it does not establish discovery of an
+unreadable audience, generated move pairing, or store-log membership replay.
+The existing `move_safe` theorem still requires the complete merged descendant
+graph and replayed membership for destination access.
+
+**Final owner protection fails through uniqueness.**
 `DeleteRuleExamples.foreign_row_hidden` executes three creations and one
 delete through `protectedResult`, with checked `Valid`, authored dependencies
 and causal order:
@@ -1204,8 +1269,9 @@ and causal order:
 - Ben deletes P concurrently with C's insertion. C's reference becomes null;
   its expression now agrees with A's. C stays visible and A loses uniqueness.
 
-A does not reference P in Ben's context, so `trial_permits` and `guards_empty`
-prove the new guard accepts the deletion. The final result hides A and
+A does not reference P in Ben's context. The graph retains C's authored link
+even when C displays null; C belongs to Ben. `trial_permits` and `guards_empty`
+prove the revised guard accepts the deletion. The final result hides A and
 records its original value in a `.unique` loss. A was visible with the delete
 withheld. With no other member's delete in this history, withholding all of
 them cannot change the result. The literal Lean `example` checks the hidden
@@ -1213,23 +1279,24 @@ foreign row. `three_roles_needed` checks the absent conflict/no-deletion
 reductions and that a foreign child directly referencing P would block.
 Three rows and one deletion suffice for this set-null/unique failure.
 
-The safety theorem has therefore not been asserted or replaced by a stronger
-unstated rule. The exhaustive comparison model still rejects this history
-(`null_unique_delete_blocked`) and proves `all_deletes_preserve` through both
-reference and full-removal projections. Its protected-owner contexts keep Ana's
-deletion fixed, avoiding the reinsertion omission as well
-(`exhaustive_guard_sees_child`). Those theorems belong to that comparison model;
-they do not transfer to the member-context reference rule.
+`context_unchanged` proves that the context keeps every candidate regardless
+of the supplied generations. `final_owner_protection_refuted` negates the final
+protection assertion using this valid history. The exhaustive
+comparison model rejects the unique history (`null_unique_delete_blocked`)
+and proves `all_deletes_preserve` through reference and full-removal projections.
+Those theorems belong to that comparison model; they do not transfer to the
+member-context reference rule and do not replace it.
 An unrelated ordinary CHECK can also keep a restored row hidden, so “R
 returns” means its delete is excluded in the merge, subject to ordinary rules.
 
-**B6 and B14 survive both revisions.** `delete_result_converges` proves equal
+**B6 and B14 hold when withholding preserves incarnations.**
+`delete_result_converges` proves equal
 complete results for every causal order of the same writes: core, final
 view, ordinary losses and recorded ownership/dependency causes.
-`delete_value_accounted` applies B14 to the new `settledGuard`: every original
+`delete_value_accounted` applies B14 to `settledGuard`: every original
 setter has an ordinary accounting outcome or its original value in a rejected
-change record. The counterexamples' foreign-key and unique losses are ordinary
-outcomes; accounting is weaker than preventing those losses.
+change record. The remaining counterexample's unique loss is an ordinary accounting
+outcome; accounting is weaker than preventing that loss.
 
 `originalCell` in `OwnerCellAccounting.lean` builds the cell leaf from the
 original write's row, generation, operation kind, column and scalar.
@@ -1265,11 +1332,11 @@ freshness/completeness and SQL correspondence remain the stated boundaries.
 - §§3, 5, 8, 14 and 15: per-change owner rejection, the shared data-dependency
   rule, merged descendant/membership evaluation, atomic recomputation, the
   precise protection/removal order, generation-aware member contexts and
-  qualified restoration. The reference-only proposal does not establish the
-  requested final owner-visibility guarantee: withholding deletes can conceal
-  dependent reinsertions, and set-null can create foreign unique losses. Both
-  interactions need a policy decision. Specify each deleting write's recorded
-  read base and circle-entry feedback.
+  qualified restoration. Trial withholding keeps a later incarnation and its
+  original setters; an actual rejection still drops data dependents. The
+  reference-only proposal does not establish final owner visibility through
+  set-null and uniqueness; that policy remains unresolved. Specify each
+  deleting write's recorded read base and circle-entry feedback.
 - D5/D9/D11 and §11.1: a signature binding the write identity and header,
   including one domain-separated Merkle root per audience part, keyed by that
   part's audience key (32 bytes per part). Specify canonical cell/creation/delete
