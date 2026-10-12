@@ -812,23 +812,32 @@
 
 ### D13 Codes
 
-- A restore code (kind 10): `store:uuid | name:name | member_keys:bytes |
+- A restore code (kind 10): `store:uuid | name:name | member:MemberId | member_keys:bytes |
   storage:bytes`.
   - `member_keys` is `CVMK 01 | signing seed:32 bytes | sealing secret:32
     bytes`; `storage` is the provider location only, at most 16 KiB.
+    The private-pair blob is unchanged and explicitly belongs to `member`.
+    Restore requires that id's current pair; an old code cannot rebind it.
     A restore code never carries storage credentials: neither an S3 access
     key nor OAuth tokens. A device-to-device QR transfer or iCloud Keychain
     may carry the S3 key alongside the code (§12.1), outside this frame.
-- An invite code (kind 11): `store:uuid | name:name | invite:uuid |
+- An invite code (kind 11): `store:uuid | name:name | invite:uuid | member:MemberId |
   secret:32 bytes | initial_key:uuid | inviting_writer:DeviceId |
   key_copy_number:u64 | storage:bytes`.
   The key is the one introduced by creation. `key_copy_number` is the
   inviting writer's last published copy number at invite time, zero if none.
   The joiner starts at the next number in that writer's D10 key-copy log
   and reads forward until her initial-key copy arrives (§12.2).
+  The admin fixes `member`: a fresh id for addition, or an existing active id
+  for replacement. The signed request must repeat that id. Approval publishes
+  its exact pair, after prerequisite copies; bootstrap requires a kept matching
+  id-and-pair binding from the approving writer named in the invite, never
+  merely an active id, another writer's equal pair or an available key copy.
 - As text, a code is `CVR1-` (restore) or `CVI1-` (invite), then unpadded
   uppercase base32 (`A`–`Z`, `2`–`7`) of its frame followed by a CRC-32C
   of the frame, big-endian.
+  These text envelopes and `CVMK 01` identify their own encoding; the inner
+  frame carries storage format 1.
   - CRC-32C: reflected polynomial `0x82F63B78`, initial and final XOR
     `0xFFFFFFFF`; the check value of `123456789` is `E3069283`.
   - Unused trailing bits are zero; there is no other spelling, and the
