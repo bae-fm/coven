@@ -5,10 +5,12 @@
   to [§19](coven.md#19-recovery) store, laid out exactly.
 - `coven-format` implements it, with crypto's ciphers for the sealed layers
   ([§20.1](coven.md#201-crates)).
-- It is format 1, the first; no older format exists
-  ([§17.2](coven.md#172-covens-schema)). After release, a change to any
-  layout here is a new format version, and older versions' readers stay.
-  Coven writes the newest format and reads every older one without a
+- This appendix specifies format **1**, the first, including stable member
+  ids and replaceable member keys. Nothing has shipped and no older format
+  exists; fixtures must encode these layouts as format 1. After release, a
+  layout change gets a new version and released
+  versions' readers stay.
+  Coven writes the newest format and reads every released older one without a
   store-wide version raise ([§17.2](coven.md#172-covens-schema)).
 - Coven's local `_coven_` tables keep their own encodings, versioned by the
   database's schema; they reuse the primitives of D2, and appear here only
@@ -22,6 +24,9 @@
 - Every stored object starts in the clear with `kind:u8 | version:u16`. A
   reader refuses an unknown kind, and asks for an update on a newer version
   instead of calling the object damaged.
+  The version for every layout in this appendix is 1, including inner frames
+  and code frames. Cryptographic context labels retain their D11 versions;
+  they do not identify a storage layout.
 - Within an object, every length is checked against what remains before
   anything is allocated, and trailing bytes are refused.
 - Every decoded value is checked, and re-encoding it gives the same bytes:
