@@ -3849,6 +3849,13 @@ Carol's tablet:
 
 ### 16.5 Uploads and deletion
 
+- Member-key replacement never closes a device's logs or file folder.
+  Its send bound concerns old credentials only (§10). Retain files referenced
+  by original inputs or dependent losses while a replacement decision can
+  reverse; release needs its final prefix and all ordinary reference,
+  snapshot-coverage and provider-cut-off checks. Per-change losses preserve
+  their file references even when another change in the same write applies.
+
 - The attaching write queues each file atomically with its row. It waits
   there until storage is connected and the upload succeeds.
 - A separate file-upload worker services that queue outside sync passes.
