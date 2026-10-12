@@ -1025,6 +1025,36 @@ Two mechanisms order writes:
   - Lost values, including a removed row's cells, show what was written;
     deleting a reference's parent does not change them.
   - It stops being lost if a later write replaces it having read it.
+- Building on something that does not count does not make it count.
+  Dependence is decided by data, never by recorded reads.
+  - For each row change, retain the write that supplied its generation and
+    the setter of each cell it replaced, as used on the authoring device.
+    A row is its table, key and audience. Generation zero has no source.
+  - An otherwise eligible change is a frozen loss if any such source's
+    change at that row was dropped. Follow sources through earlier changes:
+    a change frozen by this rule cannot support another, even if its write's
+    other changes survived. An ordinary merge loss does not drop its setter's
+    change. One row change, including all its columns, is the unit of loss.
+  - Other changes in the same write apply under the ordinary rules. Reading
+    a dropped write's position, including an implicit own predecessor,
+    creates no data dependence by itself.
+  - Record the original change on every device reading that audience: its
+    write identity, row, generation, operation, old names and written values,
+    with the failed source identities as its cause, generation first and then
+    replaced setters in authored order. Keep repeated identities when one
+    write supplied several roles, and keep even a delete with no scalar
+    values. A later replacement does not acknowledge this loss away.
+  - Keep source identities and their per-change verdicts separately from
+    dismissible losses, through conversion, snapshots and replay. Snapshot
+    coverage records consumed positions; it cannot turn a dropped source
+    into retained data. Preserve the original loss cause through later raises.
+  - Validate sources against the original authored history. Missing evidence
+    waits; invalid evidence is refused. Neither a read position, an equal old
+    scalar nor the current winning generation setter establishes the source.
+  - Retirement, schema exclusion and reset supply their own admission rules
+    (§10, §17.1, §19.3). A directly dropped retirement write or reset-ignored
+    part creates no loss; an otherwise eligible dependent change does.
+    [The data rule and value accounting are proved in B17](proofs/merge.md#b17-receive-order-progress-and-dropping-by-data).
 - The removal rules take a row out of the app's table while a reason holds:
   - foreign keys: a row whose parent was deleted since the row pointed at
     it is taken out under cascade, restrict and no action, and a row whose
@@ -1143,13 +1173,15 @@ Two mechanisms order writes:
     - the value that lost, or every value of the removed row;
     - the write that set each value;
     - what replaced it: a write that hadn't read it, the rules that removed
-      the row, or a breaking change that excluded it;
-    - whether its values are frozen: schema-excluded writes and rows
-      deleted by a breaking migration retain old-shape values
+      the row, a breaking change that excluded it, or its dropped data sources;
+    - whether its values are frozen: dependent changes, schema-excluded writes
+      and rows deleted by a breaking migration retain old-shape values
       ([§17.1](#171-host-application));
-    - for an excluded write, its identity even if a deletion has no old values.
+    - for an excluded or dependent change, its write identity and operation,
+      even if a deletion has no old values.
     All losses use this record, one snapshot section and one fingerprint
-    leaf shape; excluded writes need no duplicate header or row changes.
+    leaf shape. Required source evidence is retained independently of these
+    loss records; dismissing one cannot change a source's verdict.
 - Store-log publication uses `_coven_store_log_uploads`: the next local entry's
   number, canonical plaintext record and sealing key id.
 - `_coven_key_uploads` is the one sealed-copy queue. It holds each writer's
