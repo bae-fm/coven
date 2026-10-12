@@ -2668,7 +2668,8 @@ pub enum ProviderSignOut {
 - A person's new device opens the store from their restore code: scanned
   as a QR code, typed in, or read from iCloud Keychain
   ([§12.1](coven.md#121-a-persons-new-device)).
-- The restore code contains only the member key, store id and name, and
+- The restore code contains only the stable member id and current private
+  pair, store id and name, and
   storage location. On S3, the person keeps their access key separately,
   such as in a password manager, and supplies it on the new device. Google
   Drive, Dropbox and OneDrive likewise require the person's provider sign-in.
@@ -2678,6 +2679,14 @@ pub enum ProviderSignOut {
   iCloud Keychain may also hold the S3 key separately alongside the code.
 - An admin adds a person with an invite, and approves their join request
   ([§12.2](coven.md#122-adding-a-person)).
+- A replacement invite fixes an existing active id before the requester
+  generates keys. Approval binds the exact signed request's new pair after
+  publishing the initial and available historical audience-key copies. The
+  join waits for its approving writer's kept matching id-and-pair binding
+  before registration; an equal-payload winner does not rescue a rejected approval.
+  A losing replacement fails with its replay reason even if copies exist.
+  Restore checks the supplied pair against the current binding and reports
+  `SyncError::MemberKeysReplaced` for an old code; it never rebinds old keys.
 - Each call takes the app's layout-scoped `CovenBuilder`, plus its code,
   device name, status callback and cancellation receiver, and
   returns the open `CovenHandle`. Restore also accepts the separately
@@ -2725,6 +2734,8 @@ pub struct CodeInfo {
     pub store_id: StoreId,
     /// The store's name.
     pub store_name: String,
+    /// Stable member id fixed by either kind of code.
+    pub member: MemberId,
     /// The provider holding the store.
     pub cloud_provider: CloudProvider,
     /// Whether this provider requires sign-in before using the code.
@@ -2733,9 +2744,9 @@ pub struct CodeInfo {
 
 /// The two codes used to open a store on a new device (§12).
 pub enum CodeKind {
-    /// Holds only the person's member keys, store id and name, and location.
+    /// Holds only the person's member id and private keys, store id/name and location.
     Restore,
-    /// Holds an invite id, secret, initial key id, inviting writer and its
+    /// Holds an invite id, chosen member id, secret, initial key id, inviting writer and its
     /// key-copy number at invite time; approval is required (§12.2).
     Invite,
 }
@@ -2825,22 +2836,27 @@ impl OAuthRedirectError {
 }
 
 impl CovenHandle {
-    /// This member's restore code: their member key, the store's id and
+    /// This member's restore code: their stable id and current private pair, the store's id and
     /// name, and storage location only. It never carries storage credentials.
+    /// Selects the pair current in checked replay; absent current credentials
+    /// return MemberKeysReplaced rather than exporting a retired pair.
     /// The app shows it as a QR code, blurred until the person taps it,
     /// and asks them to write it down at setup.
     pub async fn restore_code(&self) -> Result<String, SyncError>;
 
-    /// Starts adding a person, as an admin, and returns the invite to show as
-    /// a QR code. Expires after a day.
-    pub async fn create_invite(&self, role: MemberRole, access: InviteAccess) -> Result<Invite, SyncError>;
+    /// Fixes a fresh member id or an existing active replacement target, as
+    /// an admin. The invite expires after a day. Replacement preserves role,
+    /// circle memberships and device ids; changed provider access is separate.
+    pub async fn create_invite(&self, target: InviteTarget, access: InviteAccess) -> Result<Invite, SyncError>;
 
     /// Join requests waiting for approval, live. The first value is the
     /// current list.
     pub fn subscribe_join_requests(&self) -> watch::Receiver<Vec<JoinRequest>>;
 
-    /// Adds the person who sent `request` as a member with the invite's role,
-    /// and seals the store key to them.
+    /// Checks the invite's member id and the exact request's fresh key pair.
+    /// Confirms initial/historical key copies, then adds the new member with
+    /// the invite's role or replaces the existing member's keys. A rejected
+    /// replacement is reported, not automatically retried with a new entry.
     pub async fn approve_join_request(&self, request: &JoinRequest) -> Result<(), SyncError>;
 
     /// Declines the request, and takes back the storage access its invite
@@ -2853,7 +2869,13 @@ impl CovenHandle {
     pub async fn cancel_invite(&self, invite: &InviteId) -> Result<(), SyncError>;
 }
 
-/// How the new person reaches storage (§12.2).
+/// The admin's choice, fixed before sharing the invite (§12.2, §12.3).
+pub enum InviteTarget {
+    NewMember { role: MemberRole },
+    ReplaceMemberKeys { member: MemberId },
+}
+
+/// How the invited person reaches storage (§12.2).
 pub enum InviteAccess {
     /// Google Drive, Dropbox, OneDrive or iCloud: the store is shared with
     /// this account.
@@ -2864,23 +2886,24 @@ pub enum InviteAccess {
 
 pub struct Invite {
     pub id: InviteId,
+    pub member: MemberId,
     /// The code to show as a QR code.
     pub code: String,
-    pub role: MemberRole,
     pub expires_at: SystemTime,
 }
 
 pub struct JoinRequest {
     pub invite: InviteId,
-    /// The new member's public key.
+    /// The stable id fixed by the invite, never chosen by the requester.
     pub member: MemberId,
+    pub keys: MemberPublicKeys,
     /// The name the new device gave itself, for the admin to check.
     pub device_name: String,
     pub provider_account_email: Option<String>,
 }
 
-/// What a restore code or invite is for, before using it: the store's id and
-/// name, its provider, and whether the provider needs a sign-in first.
+/// What a restore code or invite is for: the store and member ids, store
+/// name, provider, and whether the provider needs a sign-in first.
 pub fn decode_code_info(code: &str) -> Result<CodeInfo, CodeError>;
 
 /// Bootstrap progress, using the same records before an open handle exists.
@@ -3018,7 +3041,7 @@ Example, Ana adding Carol. On Ana's phone:
 ```rust
 let invite = handle
     .create_invite(
-        MemberRole::Member,
+        InviteTarget::NewMember { role: MemberRole::Member },
         InviteAccess::ProviderAccount { email: "carol@example.com".into() },
     )
     .await?;
