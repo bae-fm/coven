@@ -48,9 +48,10 @@
 | `map<K, V>` | `count:u32 \| (K V)…` | Keys strictly increasing. |
 | `set<T>` | `count:u32 \| T…` | Strictly increasing. |
 | `Option<T>` | `0`, or `1 \| T` | |
-| `uuid` | 16 bytes | UUID byte order. Store, circle, invite, key and file ids. |
+| `uuid` | 16 bytes | UUID byte order. Store, member, circle, invite, key and file ids. |
 | `DeviceId` | `u64` | |
-| `MemberId` | 32 bytes | An Ed25519 public key; weak and invalid points refused. |
+| `MemberId` | `uuid` | Random stable member identity, independent of keys. |
+| `SigningKey` | 32 bytes | An Ed25519 public key; weak and invalid points refused. |
 | `SealingKey` | 32 bytes | An X25519 public key. |
 | `Timestamp` | `ms:u48 \| counter:u16 \| device:u64` | 16 bytes; byte order is timestamp order ([§7.2](coven.md#72-timestamps)). |
 | `StorageTime` | `seconds:u64 \| nanos:u32` | Unix seconds plus a nanosecond fraction from 0 through 999,999,999; retain the provider sample's precision without rounding forward. |
@@ -64,7 +65,7 @@
 | `ForeignKey` | `columns:Columns \| parent:name \| parent_columns:Columns` | Both lists nonempty and equally long. |
 | `Unique` | `terms:[text] \| predicate:Option<text>` | Nonempty terms; each is a column or an expression as written. Terms and predicates use `text`, not `name`. |
 | `ColumnValue` | `value:Value \| parents:map<ForeignKey, Parent>` | |
-| `MemberKeys` | `signing:MemberId \| sealing:SealingKey` | |
+| `MemberKeys` | `signing:SigningKey \| sealing:SealingKey` | Public pair, independent of `MemberId`. |
 | `MemberAccess` | `0 \| account:text`, or `1 \| access_key_id:text` | A provider account, or an S3 key's public id. |
 
 - Identifiers order as their bytes, except where a row says otherwise. Names
