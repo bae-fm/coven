@@ -415,8 +415,9 @@ and checks `Axioms.lean`; the audit permits only Lean's own `propext`,
 existing `KeySelection` and `KeyPhases` results for the
 [stable-member proposal](storelog.md#c13-stable-members-and-replaceable-keys--checked-proposal).
 They use `CurrentReplay.Keyed` directly; the unkeyed interfaces and their
-Rust comparisons remain available. This section describes the checked
-proposal, not a change already made to `spec/coven.md` or `spec/format.md`.
+Rust comparisons remain available. The normative rules and layouts are in
+`spec/coven.md` and `spec/format.md`; these models still have no Rust differential
+for member-key replacement.
 
 A recipient contains a stable member id and the exact sealing public key.
 An old copy and a new copy can address the same member while disclosing their
