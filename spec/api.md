@@ -3122,28 +3122,43 @@ pub struct CircleMemberInfo {
 - Opening runs every migration above the database's version in one
   transaction, so a failure leaves the schema as it was.
 - A migration has two parts (§17.1): the first changes the database; the
-  optional second interprets received late ordinary writes across a kept
-  breaking change, in version and causal order, using only surviving inputs
+  optional second converts eligible row changes of received late ordinary
+  writes using the winning raise's conversion, in version and causal order
   ([`receive_matches_evaluation`](proofs/queue/CovenQueue/Conversion.lean)).
   - Local migration preserves every queued original record, including
     untried writes; tried uploads also retain their format and sealing keys
     ([`conversions_preserve_uploads`, `conversions_preserve_attempt`](proofs/queue/CovenQueue/Conversion.lean)).
-  - Conversion is independent of attempt status and preserves identity,
-    timestamps, causal positions and row generations; no callback or an
-    excluded input means a local original-value loss and a passed position,
-    never a rewritten upload
-    ([`conversion_preserves_identity`, `excluded_input_not_converted`, `excluded_records_loss`](proofs/queue/CovenQueue/Conversion.lean);
-    row-generation preservation is a callback validation obligation).
-  - The author reloading after a competing raise uses the same receive
-    rule as peers; after adopting the boundary, new writes do not use
-    discarded effects merely because their positions have passed
-    ([`reload_matches_receiver`](proofs/queue/CovenQueue/Conversion.lean),
-    [`no_applied_discarded_read`](proofs/queue/CovenQueue/Verdicts.lean)).
-  - E.g. Ben's attempted write 9 and untried 10 both upload in their old
-    schema: eligible callbacks can interpret both on receipt, or without a
-    callback both retain losses; his post-adoption write 11 uses the new state
-    ([`receive_losses_converge`](proofs/queue/CovenQueue/Conversion.lean),
-    [`no_applied_discarded_read`](proofs/queue/CovenQueue/Verdicts.lean)).
+  - Before invoking a callback, coven determines candidate schema admission
+    and resolves each change's original generation source and replaced
+    setters under §8. A dependent change never reaches the callback: retain
+    its original write/row identity, generation, operation, names, scalar
+    values and failed source identities as a frozen loss. A delete keeps
+    its identity even without scalars. Recorded reads only govern readiness
+    ([`dependent_change_not_converted`, `converted_change_matches_receiver`](proofs/queue/CovenQueue/Conversion.lean)).
+  - One received interpretation, including one audience part, can contain
+    converted changes and frozen originals. Conversion is independent of
+    attempt status and preserves device, number, timestamp, causal positions,
+    row identity, generation, operation and original source identities.
+    Renamed tables and columns retain their sources under the new names;
+    frozen changes keep their old names and original cause
+    ([`conversion_preserves_identity`, `convertChange_metadata`](proofs/queue/CovenQueue/Conversion.lean);
+    reference and rename validation remain implementation obligations).
+  - With no converter, keep each original change as a schema loss naming
+    the breaking version and pass the position. No callback changes any
+    upload record. Already frozen values and causes survive later raises
+    ([`missing_converter_preserves_values`, `conversions_preserve_frozen`, `lost_never_reconverted`](proofs/queue/CovenQueue/Conversion.lean)).
+  - The author reloading after a competing raise uses the same per-change
+    rule as peers. New writes use the atomically reloaded state; an implicit
+    own read of an excluded position creates no data dependence. Source
+    evidence and verdicts survive snapshots and loss dismissal (§8).
+  - E.g. Ben's attempted 9 arrives after Ana's raise: its eligible changes
+    convert on receipt. If 9's note change was already excluded, 10's edit
+    of it stays frozen while its unrelated playlist rename can convert;
+    later changes keep that same distinction (§17.1;
+    [`mixed_write`, `partial_write_chain`](proofs/queue/CovenQueue/DataExamples.lean)).
+  - A failed callback aborts the receive or reload transaction, preserving
+    the preceding committed values, losses, source verdicts and positions.
+    The upload queue remains unchanged on success and failure alike.
 - Coven decides whether a migration is an addition or a breaking change by
   comparing the schema before and after it. Statements that change rows of
   synced tables also make it breaking (§17.1).
@@ -3166,8 +3181,10 @@ impl Migration {
 
     /// Its second part: interprets eligible received old-schema row changes
     /// in the new schema, independently of upload attempt status (§17.1).
-    /// Without it, or with an excluded input, retain original-value losses.
-    /// It never rewrites the original upload record.
+    /// Dependent changes never reach this callback; they remain frozen
+    /// originals alongside the write's converted changes. Without a converter,
+    /// retain each original change as a schema loss. It never rewrites the
+    /// original upload record. An error aborts the receive or reload transaction.
     pub fn writes<F>(self, f: F) -> Self
     where
         F: Fn(&mut RowChange) -> Result<(), DbError> + Send + Sync + 'static;
