@@ -2116,7 +2116,8 @@ loop {
   returns `SyncError::NoStorage`; a failed read returns its typed error.
   Neither starts an operation or reserves an entry. Already-started work
   retains its progress across network failures.
-- A tried entry still publishes its fixed bytes. If it lands too late, its
+- A tried entry publishes its fixed bytes only while §10's current-credential
+  gate permits it. If it lands too late, its
   `Entry` subject reports `Dropped(LandedTooLate)`; publication settles but
   the action has not succeeded. When replay drops an attempt's entry and
   work remains, starting over catches up and validates again, then resumes
@@ -2124,6 +2125,9 @@ loop {
   The old copies and entry stay in storage, and a late entry's pending
   record remains (§18, §19.1;
   [checked history: `restart_changes_key`](proofs/queue.md#checked-histories-and-limits)).
+  Member-key replacement instead reports its rejection without creating a
+  new entry to override the winner; replacing again needs an explicit call
+  or approved invite. Retrying publication keeps the same pair and bytes.
 - Every unfinished operation is a row in `_coven_operations`
   ([§18](coven.md#18-operations)).
 - A failed step returns its typed error to a waiting caller and records its
@@ -2157,8 +2161,10 @@ pub enum OperationKind {
     SchemaChange,
     /// Reload an audience, requested by the app or required by sync.
     ReloadFromSnapshot,
-    /// Replace a key known to have reached an excluded member (§11).
+    /// Replace an audience key exposed to an excluded member or credential (§11).
     RotateKey,
+    /// Publish a member's replacement pair and finish required custody (§11, E9).
+    ReplaceMemberKeys,
     /// Write and verify a snapshot for retention.
     WriteSnapshot,
     /// Grant access, approve or decline a join, and settle the invite.
@@ -2176,7 +2182,10 @@ impl CovenHandle {
     pub async fn retry_pending_operation(&self, operation: OperationId) -> Result<(), OperationError>;
 
     /// Abandons a failed operation and deletes its row. Completed steps stay
-    /// completed; reserved entries and sealed copies still publish (§6, §18).
+    /// completed; reserved objects keep their bytes and §10's sending gates.
+    /// Returns Pending with the operation's unmet condition while a reserved
+    /// replacement needs settlement or its current binding needs custody. Before
+    /// reservation, releasing a self-replacement pause requires held current keys.
     /// Other devices may already see stored copies or a complete snapshot;
     /// §18's publication order and reader checks still apply (queue proof:
     /// copies_visible_before_finish, snapshot_visible_before_finish).
