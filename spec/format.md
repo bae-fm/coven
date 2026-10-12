@@ -460,7 +460,7 @@
   | --- | --- | --- |
   | 0 | Write | `WriteId` |
   | 1 | Entry | `EntryId` |
-  | 2 | Key copy | `audience:Audience \| key:uuid \| member:MemberId` |
+  | 2 | Key copy | `audience:Audience \| key:uuid \| member:MemberId \| sealing:SealingKey` |
   | 3 | File | `device:DeviceId \| file:uuid` |
   | 4 | Snapshot | `SnapshotId` |
   | 5 | Positions | `DeviceId` |
@@ -496,14 +496,17 @@
   that field is not repeated in each record.
   - Only observations made by the poster travel. Never forward a peer's report.
   - Key-copy reports concern copies sealed to the poster's member.
+    Order their fields by audience, key id, member id, then sealing key.
+    A report for an old credential never satisfies a wait for its replacement.
   - No local times, paths to user files, attempt counts, operation ids or
     coven package versions travel.
   - The signature authenticates the complete list (§19.1). A list exceeding
     D1/D2 or the provider's replacement limit fails publication and records
     a pending Positions record; it is never silently truncated.
 
-- A clock observation (kind 12) contains `device:DeviceId`, matching its
-  path. It asserts no device time. Its sealed object's provider-assigned
+- A clock observation (kind 12) is
+  `device:DeviceId | store_log_read:EntryPositions`, with the device matching
+  its path. It asserts no device time. Its sealed object's provider-assigned
   publication time is T. A subsequent complete store-log scan uses
   `T′ = T - δ` for finality, with δ from §4; the tick at T is not certified
   complete (§9). T and T′ are provider metadata and derived local evidence,
@@ -512,7 +515,8 @@
   completed pass's saved storage time. That check does not substitute T′.
 
 - A join request (kind 9):
-  `invite:uuid | keys:MemberKeys | device_name:name`.
+  `invite:uuid | member:MemberId | keys:MemberKeys | device_name:name`.
+  Verify with the supplied signing key and require the id fixed by the invite.
 
 ### D9 Sealed objects
 
