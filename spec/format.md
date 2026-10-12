@@ -540,13 +540,13 @@
 
   ```
   kind:u8 (37) | version:u16 | audience:Audience | key:uuid | member:MemberId |
-  ephemeral:32 bytes | nonce:24 bytes | ciphertext | tag:16 bytes
+  sealing:SealingKey | ephemeral:32 bytes | nonce:24 bytes | ciphertext | tag:16 bytes
   ```
 
-  The clear prefix is `kind | version | audience | key | member`. Discovery
+  The clear prefix is `kind | version | audience | key | member | sealing`. Discovery
   reads the whole copy at `keys/<writer>/<n>`; routing, sharing and exposure
   use that prefix, including when the reader is not the recipient. Audience,
-  key id and recipient are public routing facts; the key and its hash are
+  key id, recipient id and exact sealing credential are public routing facts; the key and its hash are
   not exposed. D11 binds this prefix into the box's authentication.
 
 - Every store-log entry has the same 19-byte prefix including kind and
@@ -585,19 +585,37 @@
     every record, and compares with the fingerprint of the captured database
     state (§15). After upload it checks the complete stored bytes' checksum.
     These checks add no receipt or field to the object.
-  - Both signatures must verify with the member the store log names for the
-    device in the path, as of the entries the reader has applied. An unknown
-    device waits for its registration. A missing signature or wrong signer
+  - For both signatures, replay the snapshot's signed `store_log` coverage,
+    resolve the device's stable owner there, and use its current signing key
+    in that view. Unverified positions are lookup hints only: they can request
+    prerequisite entries but cannot establish coverage, finality or authority.
+    An unknown device waits for its registration. A missing signature or wrong signer
     is a permanent refusal once the author is known (§19.1).
 - Posted positions have exactly one chunk followed by the author's 64-byte
   `coven/object-signature/v1` signature. Every read verifies it against the
-  member the applied store log names for the device in the path, before using
+  current signing key of the path device's member in the replay of the
+  object's signed `store_log`, before using
   positions, fingerprints or pending reports. An unknown device waits for
   registration; a missing or wrong signature has reason InvalidPositions
   and does not count as posted (§19.1).
 - Clock observations use the same one-chunk framing and author signature.
-  They contain no positions, fingerprints or reports; the time probe reads
-  their provider metadata through status, not their body.
+  Replay their `store_log_read` to find the path device's member and current
+  signing key. They contain no write positions, fingerprints or reports;
+  the time probe reads their provider metadata through status, not their body.
+- Write signatures use the device owner's signing key current in the
+  header's `store_log_read`; entry signatures use D6's `had_read` lookup.
+  Retain historical public bindings. All unverified view fields are lookup
+  hints until verification. Join requests use their supplied new keys;
+  creation uses D6's supplied initial pair.
+- Historical snapshot, positions and clock signatures remain valid when
+  their key was current in the signed view. Replacing keys alone does not
+  invalidate them or add a 30-day landing deadline. Snapshot admission still
+  requires its signed catch-up time, coverage and §15's other checks; loading
+  rebuilds replay-dependent effects before commit. Positions retain their
+  causality and fingerprint checks and never establish finality. Clock time
+  remains provider metadata under §9. None grants current signing authority.
+  These are explicit object policies outside the checked entry/write window
+  theorem; every new send or retry still obeys §10's current-credential gate.
 - A chunk is `length:u32 | nonce:24 bytes | ciphertext | tag:16 bytes`:
   XChaCha20-Poly1305 under the encryption key derived from the named key.
   Writes and store log entries derive the nonce with HMAC-SHA256 from that
@@ -641,7 +659,7 @@
 - E.g. Ana's write 12, with a store part and a Gifts part:
 
   ```
-  20 0002                       kind 32, version 2
+  20 0001                       kind 32, version 1
   <store key id>                header_key
   00000002 <store key id> <Gifts key id>    part_keys
   <length><nonce><header frame sealed><tag>                 section 0
