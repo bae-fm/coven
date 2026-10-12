@@ -35,13 +35,27 @@ fn check(path: &str, source: &str) -> Vec<Finding> {
     find_capability_construction_violations(
         &[
             RustFile::fixture("crates/coven-foundation/src/capabilities.rs", CAPABILITIES),
-            RustFile::fixture(path, source),
+            RustFile::fixture(
+                path,
+                &format!("{source} use coven_foundation::capabilities::*;"),
+            ),
         ],
         &POLICY,
     )
 }
 
 const CAPABILITIES: &str = r#"
+    use std::sync::Arc;
+    fn consume<T>(_: T) {}
+    struct Wrapper<T>(T);
+    struct Builder;
+    struct Runtime;
+    struct Factory;
+    struct StoreDir;
+    struct AtomicFile;
+    struct ClockRef;
+    struct IdSourceRef;
+    pub use fakes::*;
     trait Clock {}
     trait IdSource {}
     struct SystemClock;
@@ -50,6 +64,7 @@ const CAPABILITIES: &str = r#"
     impl IdSource for UuidIds {}
     #[cfg(feature = "test-utils")]
     mod fakes {
+        use super::*;
         struct FixedClock(u64);
         impl Clock for FixedClock {}
         struct SequentialIds { next: u64 }
@@ -61,7 +76,7 @@ const CAPABILITIES: &str = r#"
 
 #[test]
 fn test_factories_do_not_assign_capability_types_to_production_values() {
-    let source = "fn work(file: File, directory: Path) {\n    consume(file);\n    consume(directory);\n    let _ = AtomicFile::new(path);\n}";
+    let source = "struct AtomicFile; fn consume<T>(_: T) {} fn work(file: File, directory: Path) {\n    consume(file);\n    consume(directory);\n    let _ = AtomicFile::new(path);\n}";
     let files = [
         RustFile::fixture("crates/coven/src/work.rs", source),
         RustFile::fixture(
@@ -93,7 +108,7 @@ fn test_only_factories_do_not_change_production_factory_results() {
             fn directory() -> StoreDir { todo!() }
             impl Factory { fn build() -> AtomicFile { todo!() } }
         }
-        impl Factory {
+        struct Factory; impl Factory {
             #[cfg(test)] fn build() -> AtomicFile { todo!() }
             #[cfg(not(test))]
             fn build() -> Value { todo!() }
@@ -177,7 +192,7 @@ fn injected_owner_factory_authority_is_explicit_and_limited_to_its_product() {
         ..POLICY
     };
     let source = r#"
-        impl StoreDir {
+        struct StoreDir; struct AtomicFile; impl StoreDir {
             fn file(&self) -> AtomicFile { AtomicFile::new(self.path()) }
             fn unrelated(&self) -> AtomicFile { AtomicFile::new(path) }
         }
@@ -199,7 +214,7 @@ fn injected_owner_factory_authority_is_explicit_and_limited_to_its_product() {
         );
     }
     let source = r#"
-        impl StoreDir {
+        struct StoreDir; struct AtomicFile; impl StoreDir {
             fn file(&self) -> AtomicFile {
                 let _ = StoreDir::new(path);
                 fn nested() { let _ = AtomicFile::new(path); }
@@ -233,7 +248,7 @@ fn unit_value_paths_and_empty_literals_are_construction() {
             "SystemClock",
             [
                 "SystemClock",
-                "coven_foundation::clock::SystemClock.now()",
+                "coven_foundation::capabilities::SystemClock.now()",
                 "SystemClock {}",
                 "Clock::now(&SystemClock)",
                 "Arc::new(SystemClock)",
@@ -243,7 +258,7 @@ fn unit_value_paths_and_empty_literals_are_construction() {
             "UuidIds",
             [
                 "UuidIds",
-                "coven_foundation::id_source::UuidIds.new_id()",
+                "coven_foundation::capabilities::UuidIds.new_id()",
                 "UuidIds {}",
                 "IdSource::new_id(&UuidIds)",
                 "Arc::new(UuidIds)",
@@ -270,8 +285,8 @@ fn imports_types_and_injected_capabilities_do_not_construct_values() {
     let violations = check(
         "crates/coven/src/runtime.rs",
         r#"
-        use coven_foundation::clock::SystemClock;
-        use coven_foundation::id_source::UuidIds;
+        use coven_foundation::capabilities::SystemClock;
+        use coven_foundation::capabilities::UuidIds;
         struct Runtime { clock: SystemClock, ids: UuidIds }
         impl Runtime {
             fn run(&self) { self.clock.now(); self.ids.new_id(); }
@@ -425,7 +440,10 @@ fn every_value_form_requires_a_composition_root() {
         ("SystemClock", "SystemClock"),
         ("SystemClock", "SystemClock {}"),
         ("FixedClock", "FixedClock(17)"),
-        ("FixedClock", "coven_foundation::fakes::FixedClock(17)"),
+        (
+            "FixedClock",
+            "coven_foundation::capabilities::fakes::FixedClock(17)",
+        ),
         ("ClosureClock", "ClosureClock::<F>(f)"),
         ("SequentialIds", "SequentialIds { next: 17 }"),
         ("SequentialIds", "SequentialIds { next: 17, ..other }"),
@@ -595,8 +613,8 @@ fn factory_helpers_do_not_hide_construction_from_callers() {
         for (method, allowed) in [("open", true), ("run", false)] {
             let source = format!(
                 r#"
-                impl ClockFactory {{ fn frozen(value: u64) -> FixedClock {{ FixedClock(value) }} }}
-                mod factory {{ fn fixed(value: u64) -> FixedClock {{ FixedClock(value) }} }}
+                struct ClockFactory; impl ClockFactory {{ fn frozen(value: u64) -> FixedClock {{ FixedClock(value) }} }}
+                mod factory {{ use super::*; fn fixed(value: u64) -> FixedClock {{ FixedClock(value) }} }}
                 impl Builder {{ fn {method}() {{ let _ = {expression}; }} }}
             "#
             );
@@ -693,9 +711,10 @@ fn associated_constants_are_not_composition_roots() {
 fn trait_implementations_are_collected_across_crates_modules_and_features() {
     assert!(POLICY.capability_traits.contains(&"Clock"));
     let files = [
+        RustFile::fixture("crates/coven-foundation/src/clock.rs", "pub trait Clock {}"),
         RustFile::fixture(
             "crates/coven/src/builder.rs",
-            "impl Builder { fn run() { let _ = other::Provider::<u64>(17); } }",
+            "struct Builder; impl Builder { fn run() { let _ = other::provider::nested::Provider::<u64>(17); } }",
         ),
         RustFile::fixture(
             "crates/other/src/provider.rs",
@@ -768,7 +787,7 @@ fn named_free_roots_construct_capabilities_without_authorizing_other_functions()
     let files = [RustFile::fixture(
         "crates/coven/src/bootstrap.rs",
         r#"
-        fn restore() { let _ = Keychain::new(); }
+        struct Keychain; fn restore() { let _ = Keychain::new(); }
         fn unrelated() { let _ = Keychain::new(); }
     "#,
     )];

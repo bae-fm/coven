@@ -13,7 +13,7 @@ fn capability_implementations() -> RustFile {
     RustFile::fixture(
         "crates/coven-foundation/src/implementations.rs",
         r#"
-        impl Clock for SystemClock {}
+        trait Clock {} trait IdSource {} struct SystemClock; struct UuidIds; impl Clock for SystemClock {}
         impl IdSource for UuidIds {}
     "#,
     )
@@ -148,7 +148,9 @@ fn concrete_clock_and_ids_cannot_be_constructed_outside_composition_roots() {
         "std::sync::Arc::new(SystemClock)",
         "std::sync::Arc::new(UuidIds)",
     ] {
-        let source = format!("fn acquire() {{ let _ = {expression}; }}");
+        let source = format!(
+            "use coven_foundation::implementations::*; fn acquire() {{ let _ = {expression}; }}"
+        );
         let report = check(
             &workspace(vec![
                 capability_implementations(),
@@ -176,7 +178,7 @@ fn composition_roots_can_construct_and_use_concrete_clock_and_ids() {
             RustFile::fixture(
                 "crates/coven/src/builder.rs",
                 r#"
-            struct Builder;
+            use coven_foundation::implementations::*; struct Builder;
             impl Builder {
                 fn open() {
                     let clock = std::sync::Arc::new(SystemClock);
@@ -200,7 +202,7 @@ fn inferred_default_construction_is_prevented_at_its_implementation() {
             RustFile::fixture(
                 "crates/coven-foundation/src/clock.rs",
                 r#"
-                struct SuppliedClock(u64);
+                trait Clock {} struct SuppliedClock(u64);
                 #[cfg(feature = "test-utils")] impl Clock for SuppliedClock {}
                 impl Default for SuppliedClock { fn default() -> Self { Self(17) } }
             "#,
@@ -237,7 +239,7 @@ fn one_exact_list_entry_allows_construction_and_task_starts() {
             false,
         ),
     ] {
-        let source = format!("struct Worker {{ clock: Clock }} impl {owner} {{ fn {method}(clock: Clock) {{ let _ = Worker {{ clock }}; tokio::spawn(async {{}}); }} }}");
+        let source = format!("extern crate tokio; struct Other; struct Worker {{ clock: Clock }} impl {owner} {{ fn {method}(clock: Clock) {{ let _ = Worker {{ clock }}; tokio::spawn(async {{}}); }} }}");
         let report = check(&workspace(vec![RustFile::fixture(path, &source)]), &ROOTED);
         let expected = if allowed {
             Vec::new()
@@ -246,7 +248,7 @@ fn one_exact_list_entry_allows_construction_and_task_starts() {
         };
         assert_eq!(report.0, expected);
     }
-    let source = "struct Worker { clock: Clock } impl Worker { fn open() { fn hidden(clock: Clock) { Worker { clock }; tokio::spawn(async {}); } } }";
+    let source = "extern crate tokio; struct Worker { clock: Clock } impl Worker { fn open() { fn hidden(clock: Clock) { Worker { clock }; tokio::spawn(async {}); } } }";
     assert_eq!(
         check(&workspace(vec![RustFile::fixture(PATH, source)]), &ROOTED).0,
         unrooted_worker(PATH, "<free>::hidden")

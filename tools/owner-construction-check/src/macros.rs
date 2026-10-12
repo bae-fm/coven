@@ -19,6 +19,11 @@ pub(crate) enum MacroBody {
 }
 
 pub(crate) fn parse_macro_body(node: &syn::Macro) -> Option<MacroBody> {
+    // cfg! consumes a configuration predicate, whose `any(...)` and `all(...)`
+    // nodes are metadata rather than Rust function calls.
+    if node.path.is_ident("cfg") {
+        return None;
+    }
     if let Ok(expressions) =
         Punctuated::<syn::Expr, syn::Token![,]>::parse_terminated.parse2(node.tokens.clone())
     {
@@ -62,9 +67,13 @@ pub(crate) struct TokenPath {
     pub(crate) after_dot: bool,
     /// The identifier before the `.` when the path is a method name.
     pub(crate) receiver: Option<String>,
+    /// An absolute path uses the external-crate namespace even if a local
+    /// module has the same name.
+    pub(crate) leading_colon: bool,
 }
 
-/// Every path in `tokens`, nested groups included. A leading `::` is dropped.
+/// Every path in `tokens`, nested groups included. A leading `::` is recorded
+/// separately from the path's segments.
 pub(crate) fn token_paths(tokens: TokenStream) -> Vec<TokenPath> {
     let mut paths = Vec::new();
     collect_token_paths(tokens, &mut paths);
@@ -104,6 +113,9 @@ fn collect_token_paths(tokens: TokenStream, paths: &mut Vec<TokenPath>) {
                     followed_by,
                     after_dot,
                     receiver,
+                    leading_colon: index >= 2
+                        && matches!(&trees[index - 2], TokenTree::Punct(punct) if punct.as_char() == ':')
+                        && matches!(&trees[index - 1], TokenTree::Punct(punct) if punct.as_char() == ':'),
                 });
                 index = cursor;
             }

@@ -14,6 +14,8 @@ pub(crate) struct RustFile {
     pub(crate) syntax: syn::File,
     /// How many lines the source holds.
     pub(crate) lines: usize,
+    /// Cargo dependency names, including aliases, mapped to their crate names.
+    pub(crate) extern_crates: BTreeMap<String, String>,
 }
 
 impl RustFile {
@@ -23,6 +25,7 @@ impl RustFile {
             relative_path: relative_path.to_string(),
             syntax: syn::parse_file(source).expect("parse fixture"),
             lines: source.lines().count(),
+            extern_crates: BTreeMap::new(),
         }
     }
 
@@ -252,30 +255,6 @@ pub(crate) fn path_names(path: &syn::Path) -> Vec<String> {
         .iter()
         .map(|segment| segment.ident.to_string())
         .collect()
-}
-
-/// A call path that could name a free function: one segment, or segments that
-/// are all modules (`crate`, `self`, `super` or lowercase names).
-pub(crate) fn could_be_free_function_path(segments: &[String]) -> bool {
-    segments.len() == 1
-        || segments[..segments.len() - 1].iter().all(|name| {
-            matches!(name.as_str(), "crate" | "self" | "super")
-                || name
-                    .chars()
-                    .next()
-                    .is_some_and(|character| character.is_lowercase())
-        })
-}
-
-/// A call path that could name an associated function of a local type:
-/// `Type::function`, or one rooted at `crate`, `self` or `super`. An external
-/// crate's `Store::new` does not match a local `Store`.
-pub(crate) fn could_be_local_associated_function_path(segments: &[String]) -> bool {
-    segments.len() == 2
-        || (segments.len() > 2
-            && segments
-                .first()
-                .is_some_and(|name| matches!(name.as_str(), "crate" | "self" | "super")))
 }
 
 /// The test layout of §20.3: a source's tests live beside it in

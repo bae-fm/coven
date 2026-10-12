@@ -98,7 +98,7 @@ fn package_name(manifest: &Manifest) -> Option<String> {
 
 /// Every dependency entry of every dependency table, target-specific ones
 /// included.
-fn dependency_entries(table: &toml::Table) -> Vec<(&String, &toml::Value)> {
+pub(crate) fn dependency_entries(table: &toml::Table) -> Vec<(&String, &toml::Value)> {
     let targets = match table.get("target") {
         Some(toml::Value::Table(targets)) => targets
             .values()
@@ -127,7 +127,7 @@ fn entry_keys(entry: &toml::Value) -> Vec<String> {
 
 /// The package a member's dependency key resolves to through the workspace's
 /// dependency table, which may rename it.
-fn workspace_package(workspace: &Workspace, dependency: &str) -> String {
+pub(crate) fn workspace_package(workspace: &Workspace, dependency: &str) -> String {
     workspace
         .workspace_dependencies
         .get(dependency)

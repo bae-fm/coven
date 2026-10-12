@@ -1,8 +1,10 @@
 //! Reading the workspace: every Rust file under `crates/` and `tools/`, parsed,
 //! and every member manifest, plus the workspace manifest's dependency table.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use crate::crate_dependencies::{dependency_entries, workspace_package};
 use crate::syntax::RustFile;
 
 /// The directories, relative to the workspace root, whose files the checker
@@ -88,6 +90,7 @@ pub(crate) fn load(root: &Path) -> Result<Workspace, LoadError> {
                 relative_path: relative(root, &path)?,
                 syntax,
                 lines: source.lines().count(),
+                extern_crates: BTreeMap::new(),
             })
         })
         .collect::<Result<Vec<_>, LoadError>>()?;
@@ -115,11 +118,43 @@ pub(crate) fn load(root: &Path) -> Result<Workspace, LoadError> {
             _ => None,
         })
         .unwrap_or_default();
-    Ok(Workspace {
+    let mut workspace = Workspace {
         files,
         manifests,
         workspace_dependencies,
-    })
+    };
+    let dependencies = workspace
+        .manifests
+        .iter()
+        .map(|manifest| {
+            let names = dependency_entries(&manifest.table)
+                .into_iter()
+                .map(|(name, entry)| {
+                    let package =
+                        if entry.get("workspace").and_then(toml::Value::as_bool) == Some(true) {
+                            workspace_package(&workspace, name)
+                        } else {
+                            entry
+                                .get("package")
+                                .and_then(toml::Value::as_str)
+                                .unwrap_or(name)
+                                .to_string()
+                        };
+                    (name.replace('-', "_"), package.replace('-', "_"))
+                })
+                .collect::<BTreeMap<_, _>>();
+            (manifest.relative_path.trim_end_matches("Cargo.toml"), names)
+        })
+        .collect::<Vec<_>>();
+    for file in &mut workspace.files {
+        if let Some((_, names)) = dependencies
+            .iter()
+            .find(|(directory, _)| file.relative_path.starts_with(directory))
+        {
+            file.extern_crates = names.clone();
+        }
+    }
+    Ok(workspace)
 }
 
 fn read(path: &Path) -> Result<String, LoadError> {

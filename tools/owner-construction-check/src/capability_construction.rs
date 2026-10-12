@@ -9,21 +9,19 @@
 //! `Default` is forbidden on capability types: inferred `Default::default()`
 //! cannot be resolved by a syntax checker.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 use proc_macro2::Span;
 use syn::spanned::Spanned;
 use syn::visit::{self, Visit};
 
-use crate::factories::{collect_associated_factories, collect_free_constructors};
+use crate::factories::Factories;
 use crate::finding::Finding;
 use crate::macros::{parse_macro_body, token_paths};
+use crate::name_resolution::{qualified_path, NameResolver};
 use crate::owner_graph::OwnerGraph;
 use crate::policy::Policy;
-use crate::syntax::{
-    could_be_free_function_path, could_be_local_associated_function_path, is_test_only,
-    is_test_source, path_names, type_name, type_names, RustFile,
-};
+use crate::syntax::{is_test_only, is_test_source, type_name, type_names, RustFile};
 
 #[derive(Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub(crate) enum ConstructionKind {
@@ -94,11 +92,11 @@ pub(crate) fn find_capability_construction_violations(
         .cloned()
         .collect::<BTreeSet<_>>();
     let constructed = capabilities.union(&owners).cloned().collect();
-    let associated_factories = collect_associated_factories(files, &constructed);
-    let free_factories = collect_free_constructors(files, &constructed);
+    let resolver = NameResolver::collect(files);
     let mut violations = BTreeSet::new();
+    let factories = Factories::collect(files, &constructed, &resolver, &mut violations);
     for file in files {
-        if is_test_source(&file.relative_path) {
+        if is_test_source(&file.relative_path) || is_test_only(&file.syntax.attrs) {
             continue;
         }
         let mut visitor = ConstructionVisitor {
@@ -106,8 +104,8 @@ pub(crate) fn find_capability_construction_violations(
             policy,
             capabilities: &capabilities,
             owners: &owners,
-            associated_factories: &associated_factories,
-            free_factories: &free_factories,
+            resolver: &resolver,
+            factories: &factories,
             current_type: None,
             current_method: None,
             bindings: BTreeSet::new(),
@@ -125,14 +123,38 @@ enum ConstructionScope {
     Factory(BTreeSet<String>),
 }
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum ReferenceKind {
+    Value,
+    Call,
+    Literal,
+    Receiver,
+}
+
+struct TypeContext {
+    name: String,
+    path: syn::Path,
+    implemented_trait: Option<syn::Path>,
+}
+
+impl TypeContext {
+    fn new(path: syn::Path, implemented_trait: Option<syn::Path>) -> Self {
+        Self {
+            name: path.segments.last().expect("type name").ident.to_string(),
+            path,
+            implemented_trait,
+        }
+    }
+}
+
 struct ConstructionVisitor<'a> {
     path: &'a str,
     policy: &'a Policy,
     capabilities: &'a BTreeSet<String>,
     owners: &'a BTreeSet<String>,
-    associated_factories: &'a BTreeMap<(String, String), BTreeSet<String>>,
-    free_factories: &'a BTreeMap<String, BTreeSet<String>>,
-    current_type: Option<String>,
+    resolver: &'a NameResolver,
+    factories: &'a Factories,
+    current_type: Option<TypeContext>,
     current_method: Option<String>,
     bindings: BTreeSet<String>,
     scope: ConstructionScope,
@@ -140,9 +162,55 @@ struct ConstructionVisitor<'a> {
 }
 
 impl ConstructionVisitor<'_> {
+    fn check_expr_path(&mut self, node: &syn::ExprPath, kind: ReferenceKind) {
+        let segments = match &node.qself {
+            Some(qself) => match qself.ty.as_ref() {
+                syn::Type::Path(ty) => Some(qualified_path(&ty.path)),
+                _ => None,
+            }
+            .map(|owner| {
+                owner
+                    .into_iter()
+                    .chain(
+                        node.path
+                            .segments
+                            .iter()
+                            .skip(qself.position)
+                            .map(|segment| segment.ident.to_string()),
+                    )
+                    .collect::<Vec<_>>()
+            }),
+            None => Some(qualified_path(&node.path)),
+        };
+        if let Some(segments) = segments {
+            let trait_path = node
+                .qself
+                .as_ref()
+                .filter(|qself| qself.position > 0)
+                .map(|qself| {
+                    let mut path = qualified_path(&node.path);
+                    path.truncate(qself.position + usize::from(node.path.leading_colon.is_some()));
+                    path
+                });
+            self.check_value_path(&segments, node.span(), kind, trait_path.as_deref());
+        }
+    }
+
+    fn check_callee(&mut self, node: &syn::Expr) {
+        match node {
+            syn::Expr::Path(path) => {
+                self.check_expr_path(path, ReferenceKind::Call);
+                visit::visit_expr_path(self, path);
+            }
+            syn::Expr::Paren(node) => self.check_callee(&node.expr),
+            syn::Expr::Group(node) => self.check_callee(&node.expr),
+            _ => self.visit_expr(node),
+        }
+    }
+
     fn resolve_self<'a>(&'a self, name: &'a str) -> &'a str {
         match (name, &self.current_type) {
-            ("Self", Some(name)) => name,
+            ("Self", Some(ty)) => &ty.name,
             _ => name,
         }
     }
@@ -169,74 +237,151 @@ impl ConstructionVisitor<'_> {
             "capability"
         };
         let message = match kind {
-            ConstructionKind::Value => format!("{}::{} constructs {subject} {name} outside a composition root", self.current_type.as_deref().unwrap_or("<free>"), self.current_method.as_deref().unwrap_or("<item>")),
+            ConstructionKind::Value => format!("{}::{} constructs {subject} {name} outside a composition root", self.current_type.as_ref().map(|ty| ty.name.as_str()).unwrap_or("<free>"), self.current_method.as_deref().unwrap_or("<item>")),
             ConstructionKind::DefaultImplementation => format!("implements Default for {subject} {name}, which permits implicit construction through Default::default()"),
         };
         self.violations.insert(Finding::new(self.path, span.start().line, message,
             "construct owners and capabilities explicitly at the listed roots; inject them elsewhere; do not implement or derive Default"));
     }
 
-    fn check_value_path(&mut self, segments: &[String], span: Span) {
-        if matches!(segments, [name] if self.bindings.contains(name)) {
+    fn check_value_path(
+        &mut self,
+        segments: &[String],
+        span: Span,
+        kind: ReferenceKind,
+        trait_path: Option<&[String]>,
+    ) {
+        if kind != ReferenceKind::Literal
+            && matches!(segments, [name] if self.bindings.contains(name))
+        {
             return;
         }
-        if let Some(name) = segments
-            .last()
-            .filter(|_| could_be_free_function_path(segments))
-        {
-            // Unit values and tuple constructors, including constructor values
-            // passed to another function without immediately being called.
-            self.record(name, span, ConstructionKind::Value);
-        }
-        if let [.., owner, method] = segments {
-            let owner = self.resolve_self(owner).to_string();
-            if matches!(method.as_str(), "new" | "default") {
-                self.record(&owner, span, ConstructionKind::Value);
+        self.check_factory_path(segments, span, kind, trait_path);
+    }
+
+    fn check_factory_path(
+        &mut self,
+        segments: &[String],
+        span: Span,
+        kind: ReferenceKind,
+        trait_path: Option<&[String]>,
+    ) {
+        let resolved = if segments.first().is_some_and(|name| name == "Self") {
+            match &self.current_type {
+                Some(ty) => self
+                    .resolver
+                    .resolve_type(self.path, ty.path.span(), &qualified_path(&ty.path))
+                    .map(|mut path| {
+                        path.extend_from_slice(&segments[1..]);
+                        path
+                    }),
+                None => self.resolver.resolve(self.path, span, segments),
             }
-            if let Some(results) = self
-                .associated_factories
-                .get(&(owner.clone(), method.clone()))
-            {
-                for result in results {
-                    // A declared receiver factory uses an already supplied
-                    // owner, including when called as Owner::method(&owner).
-                    if (!self.owners.contains(result)
-                        || could_be_local_associated_function_path(segments))
-                        && !self.policy.capability_factories.iter().any(
-                            |(_, factory, name, product)| {
-                                *factory == owner && *name == method && *product == result
-                            },
-                        )
-                    {
-                        self.record(result, span, ConstructionKind::Value);
+        } else if kind == ReferenceKind::Literal {
+            self.resolver.resolve_type(self.path, span, segments)
+        } else {
+            self.resolver.resolve(self.path, span, segments)
+        };
+        let resolved = resolved.and_then(|path| {
+            let trait_path = trait_path
+                .map(|name| self.resolver.resolve_type(self.path, span, name))
+                .transpose()?;
+            let implemented_trait = self
+                .current_type
+                .as_ref()
+                .and_then(|context| context.implemented_trait.as_ref())
+                .map(|path| {
+                    self.resolver
+                        .resolve_type(self.path, path.span(), &qualified_path(path))
+                })
+                .transpose()?;
+            let products = self
+                .factories
+                .products(&path, trait_path.as_ref(), |path| {
+                    implemented_trait.as_ref() == Some(path)
+                        || self.resolver.path_in_scope(self.path, span, path)
+                })?;
+            Ok((path, products))
+        });
+        match resolved {
+            Ok((path, products)) => {
+                if kind != ReferenceKind::Receiver {
+                    if self.resolver.types.contains(&path) {
+                        self.record(
+                            path.last().expect("type name"),
+                            span,
+                            ConstructionKind::Value,
+                        );
+                    }
+                    if let [owner_path @ .., method] = path.as_slice() {
+                        if matches!(method.as_str(), "new" | "default")
+                            && self.resolver.types.contains(owner_path)
+                        {
+                            self.record(
+                                owner_path.last().expect("constructor type"),
+                                span,
+                                ConstructionKind::Value,
+                            );
+                        }
+                    }
+                }
+                if let Some(results) = products {
+                    for result in results {
+                        let permitted_receiver = path.len() >= 2
+                            && self.policy.capability_factories.iter().any(
+                                |(_, owner, method, product)| {
+                                    *owner == path[path.len() - 2]
+                                        && *method == path[path.len() - 1]
+                                        && *product == result
+                                },
+                            );
+                        if !permitted_receiver
+                            && (kind != ReferenceKind::Receiver || self.owners.contains(result))
+                        {
+                            self.record(result, span, ConstructionKind::Value);
+                        }
                     }
                 }
             }
-        }
-        if could_be_free_function_path(segments) {
-            if let Some(results) = segments
-                .last()
-                .and_then(|name| self.free_factories.get(name))
-            {
-                for result in results {
-                    self.record(result, span, ConstructionKind::Value);
+            Err(error) => {
+                let relevant = segments
+                    .last()
+                    .is_some_and(|name| self.factories.free_names.contains(name))
+                    || segments
+                        .iter()
+                        .any(|name| self.factories.associated_types.contains(name));
+                let relevant = relevant
+                    || segments
+                        .iter()
+                        .any(|name| self.capabilities.contains(name) || self.owners.contains(name));
+                if relevant || matches!(kind, ReferenceKind::Call | ReferenceKind::Receiver) {
+                    self.violations.insert(Finding::new(
+                        self.path,
+                        span.start().line,
+                        format!(
+                            "cannot resolve call {} in {}::{}: {error}",
+                            segments.join("::"),
+                            self.current_type
+                                .as_ref()
+                                .map(|ty| ty.name.as_str())
+                                .unwrap_or("<free>"),
+                            self.current_method.as_deref().unwrap_or("<item>")
+                        ),
+                        "use an unambiguous module path or import for calls to workspace factories",
+                    ));
                 }
             }
         }
     }
 
     fn check_own_method(&mut self, method: &str, span: Span) {
-        if let Some(owner) = &self.current_type {
-            if let Some(results) = self
-                .associated_factories
-                .get(&(owner.clone(), method.into()))
-            {
-                for result in results {
-                    if self.owners.contains(result) {
-                        self.record(result, span, ConstructionKind::Value);
-                    }
-                }
-            }
+        if self.current_type.is_some() {
+            self.check_factory_path(
+                &["Self".into(), method.into()],
+                span,
+                ReferenceKind::Receiver,
+                None,
+            );
         }
     }
 
@@ -259,7 +404,8 @@ impl ConstructionVisitor<'_> {
                     || self.policy.capability_factories.iter().any(
                         |(path, owner, method, product)| {
                             *path == self.path
-                                && self.current_type.as_deref() == Some(*owner)
+                                && self.current_type.as_ref().map(|ty| ty.name.as_str())
+                                    == Some(*owner)
                                 && signature.ident == *method
                                 && *product == name
                         },
@@ -352,7 +498,9 @@ impl<'ast> Visit<'ast> for ConstructionVisitor<'_> {
 
     fn visit_item_trait(&mut self, node: &'ast syn::ItemTrait) {
         if !is_test_only(&node.attrs) {
-            let previous = self.current_type.replace(node.ident.to_string());
+            let previous = self
+                .current_type
+                .replace(TypeContext::new(syn::Path::from(node.ident.clone()), None));
             visit::visit_item_trait(self, node);
             self.current_type = previous;
         }
@@ -437,7 +585,16 @@ impl<'ast> Visit<'ast> for ConstructionVisitor<'_> {
         if is_test_only(&node.attrs) {
             return;
         }
-        let previous = std::mem::replace(&mut self.current_type, type_name(&node.self_ty));
+        let previous = std::mem::replace(
+            &mut self.current_type,
+            match node.self_ty.as_ref() {
+                syn::Type::Path(ty) => Some(TypeContext::new(
+                    ty.path.clone(),
+                    node.trait_.as_ref().map(|(path, _)| path.clone()),
+                )),
+                _ => None,
+            },
+        );
         if node.trait_.as_ref().is_some_and(|(path, _)| {
             path.segments
                 .last()
@@ -456,7 +613,10 @@ impl<'ast> Visit<'ast> for ConstructionVisitor<'_> {
         let method = node.sig.ident.to_string();
         let allowed = self.policy.is_composition_root(
             self.path,
-            self.current_type.as_deref().unwrap_or("<impl>"),
+            self.current_type
+                .as_ref()
+                .map(|ty| ty.name.as_str())
+                .unwrap_or("<impl>"),
             &method,
         );
         let scope = if allowed {
@@ -481,6 +641,9 @@ impl<'ast> Visit<'ast> for ConstructionVisitor<'_> {
     }
 
     fn visit_local(&mut self, node: &'ast syn::Local) {
+        if is_test_only(&node.attrs) {
+            return;
+        }
         // The initializer (and let-else branch) sees the previous binding.
         visit::visit_local(self, node);
         self.bind_pattern(&node.pat);
@@ -533,6 +696,9 @@ impl<'ast> Visit<'ast> for ConstructionVisitor<'_> {
     }
 
     fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
+        if is_test_only(&node.attrs) {
+            return;
+        }
         if matches!(node.receiver.as_ref(), syn::Expr::Path(path) if path.path.is_ident("self")) {
             self.check_own_method(&node.method.to_string(), node.span());
         }
@@ -540,32 +706,50 @@ impl<'ast> Visit<'ast> for ConstructionVisitor<'_> {
     }
 
     fn visit_expr_path(&mut self, node: &'ast syn::ExprPath) {
-        let segments = match &node.qself {
-            Some(qself) => type_name(&qself.ty).map(|owner| {
-                std::iter::once(owner)
-                    .chain(
-                        node.path
-                            .segments
-                            .iter()
-                            .skip(qself.position)
-                            .map(|segment| segment.ident.to_string()),
-                    )
-                    .collect::<Vec<_>>()
-            }),
-            None => Some(path_names(&node.path)),
-        };
-        if let Some(segments) = segments {
-            self.check_value_path(&segments, node.span());
-        }
+        self.check_expr_path(node, ReferenceKind::Value);
         visit::visit_expr_path(self, node);
     }
 
+    fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
+        if is_test_only(&node.attrs) {
+            return;
+        }
+        self.check_callee(&node.func);
+        for argument in &node.args {
+            self.visit_expr(argument);
+        }
+    }
+
     fn visit_expr_struct(&mut self, node: &'ast syn::ExprStruct) {
-        self.check_value_path(&path_names(&node.path), node.span());
+        if is_test_only(&node.attrs) {
+            return;
+        }
+        self.check_value_path(
+            &qualified_path(&node.path),
+            node.span(),
+            ReferenceKind::Literal,
+            None,
+        );
         visit::visit_expr_struct(self, node);
     }
 
+    fn visit_expr_block(&mut self, node: &'ast syn::ExprBlock) {
+        if !is_test_only(&node.attrs) {
+            visit::visit_expr_block(self, node);
+        }
+    }
+
+    fn visit_stmt_macro(&mut self, node: &'ast syn::StmtMacro) {
+        if !is_test_only(&node.attrs) {
+            visit::visit_stmt_macro(self, node);
+        }
+    }
+
     fn visit_macro(&mut self, node: &'ast syn::Macro) {
+        if let Some(expanded) = self.resolver.expanded_macro(self.path, node) {
+            self.visit_file(expanded);
+            return;
+        }
         match parse_macro_body(node) {
             Some(body) => body.visit(self),
             None => {
@@ -576,7 +760,11 @@ impl<'ast> Visit<'ast> for ConstructionVisitor<'_> {
                     {
                         self.check_own_method(&path.segments[0], path.span);
                     } else if !path.after_dot {
-                        self.check_value_path(&path.segments, path.span);
+                        let mut segments = path.segments;
+                        if path.leading_colon {
+                            segments.insert(0, String::new());
+                        }
+                        self.check_value_path(&segments, path.span, ReferenceKind::Value, None);
                     }
                 }
             }

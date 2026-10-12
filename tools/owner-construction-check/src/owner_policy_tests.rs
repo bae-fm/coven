@@ -306,14 +306,22 @@ fn native_keychain_acquisition_is_checked_at_its_real_factory_use_site() {
         .into_iter()
         .filter(RustFile::is_crate_source)
         .collect::<Vec<_>>();
-    files.push(RustFile::fixture("crates/coven/src/builder.rs", "impl Builder {\n    fn open() { let _ = Keychain::registered(); }\n    fn run(&self) { let _ = Keychain::registered(); }\n}"));
+    let builder = files
+        .iter_mut()
+        .find(|file| file.relative_path == "crates/coven/src/builder.rs")
+        .expect("builder source");
+    let source = std::fs::read_to_string(workspace_root().join(&builder.relative_path))
+        .expect("read builder source");
+    let source = format!("{}\nstruct Builder; impl Builder {{\n    fn open() {{ let _ = Keychain::registered(); }}\n    fn run(&self) {{ let _ = Keychain::registered(); }}\n}}", source.trim_end());
+    let call_line = source.lines().count() - 1;
+    builder.syntax = syn::parse_file(&source).expect("parse factory use sites");
     let violations = find_capability_construction_violations(
         &files,
         &rooted,
         &crate::owner_graph::OwnerGraph::collect(&files, &rooted),
     );
     assert_eq!(violations, [crate::finding::Finding::new(
-        "crates/coven/src/builder.rs", 3,
+        "crates/coven/src/builder.rs", call_line,
         "Builder::run constructs capability Keychain outside a composition root",
         "construct owners and capabilities explicitly at the listed roots; inject them elsewhere; do not implement or derive Default",
     )]);

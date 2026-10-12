@@ -33,6 +33,7 @@ fn a_macro_rules_body_is_read_as_tokens() {
         .iter()
         .any(|path| path.segments == ["uuid", "Uuid", "new_v4"]
             && path.followed_by == Some(Delimiter::Parenthesis)
+            && path.leading_colon
             && !path.after_dot));
 }
 
