@@ -212,8 +212,10 @@ entries or copies. Store-log entries and key copies are never deleted, so
 a miss is an exact end observation at that instant.
 
 Each key-copy GET reads the whole small object. Its clear prefix supplies
-audience, key id and recipient; index these facts for key selection, sharing
-and exposure. Open only this member's boxes, reusing their retained bytes.
+audience, key id, stable recipient id and exact sealing credential; index
+these facts for key selection, sharing and exposure. Open a matching box
+with its named held private credential, reusing retained bytes; the current
+pair is not a substitute for the historical key named by that copy.
 An invalid opened key is ignored without hiding subsequent copies: retain
 its verdict and continue discovery (§11).
 Read an entry as one stream; its clear prefix names the store key. A copy
@@ -290,7 +292,12 @@ it cannot reuse evidence from before reconnect, reset or intervening work
 that invalidates it. Its required refreshes count as that call's requests.
 Every sender also checks the first phase's age immediately before each
 request (§10). A long-running pass or upload waits for the next pass once
-five minutes have elapsed from that catch-up's start.
+five minutes have elapsed from that catch-up's start. Sending also requires
+this installation's current signing credential in the completed replay, and
+a signed attempt's signer must still be current (§10). Neither new custody
+nor a retry rewrites an old object's signer or recorded view. Read-only
+confirmation can settle an already-published old-key attempt. Member-key
+replacement leaves device logs active; it does not permit a retirement drain.
 
 ### 4. Observe keys and peers
 
