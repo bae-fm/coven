@@ -1079,7 +1079,8 @@ Two mechanisms order writes:
   - Validate sources against the original authored history. Missing evidence
     waits; invalid evidence is refused. Neither a read position, an equal old
     scalar nor the current winning generation setter establishes the source.
-  - Retirement, schema exclusion and reset supply their own admission rules
+  - Device retirement, member-key replacement, schema exclusion and reset
+    supply their own admission rules
     (§10, §17.1, §19.3). A directly dropped retirement write or reset-ignored
     part creates no loss; an otherwise eligible dependent change does.
     [The data rule and value accounting are proved in B17](proofs/merge.md#b17-receive-order-progress-and-dropping-by-data).
