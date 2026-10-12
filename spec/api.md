@@ -1301,8 +1301,8 @@ pub struct LostValue {
     pub key: RowKey,
     /// One cell's value, or a whole removed row's values.
     pub lost: Lost,
-    /// What replaced it: a write that hadn't read it, the removal rules, or
-    /// a breaking change that excluded it.
+    /// What replaced it: a write that hadn't read it, removal rules, a
+    /// breaking change, or dropped data sources.
     pub replaced_by: Replacement,
     /// Old-shape values kept independently of the current schema (§17.1).
     /// Their table or columns may no longer exist; dismissal still works.
@@ -1338,6 +1338,10 @@ pub enum Replacement {
     /// A breaking change excluded the write or deleted a hidden row through
     /// its generation. Frozen values retain their original setters (§17.1).
     SchemaChange { version: u32 },
+    /// This original row change used dropped data (§8, §10). Sources are
+    /// failed generation/setter writes in authored role order, with repeats.
+    /// `write` preserves the change identity even for a delete without values.
+    DataDependency { write: WriteId, sources: Vec<WriteId> },
 }
 
 pub enum RemovalRule {
