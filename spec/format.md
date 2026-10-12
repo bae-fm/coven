@@ -688,8 +688,9 @@
   sequence across audiences and recipients. Store-log entries and key
   copies are never deleted. Snapshot numbers identify snapshots but are
   never discovery cursors; list their audience folder (§15).
-- Store, circle, key, invite and file ids are lowercase hyphenated UUIDs.
-  A member is its public key in lowercase hex.
+- Store, member, circle, key, invite and file ids are canonical lowercase
+  hyphenated UUIDs. A member spelling never encodes a public key.
+  Replacing keys starts no second writer log and overwrites no old copy.
 - A path is used exactly as written here, with no other spelling, and is
   bound into its object's authentication.
 
