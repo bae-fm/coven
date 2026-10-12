@@ -1452,6 +1452,8 @@ while let Ok(values) = lost.next().await {
     positions and snapshots, received store log and device custody to check
     identity, counters, removal and replacement (§10). Other senders use
     the same serialized check. They do not make independent duplicate scans.
+    Every send checks current signing credentials; an already signed object
+    must also have the current signer, with §10's bootstrap exceptions.
     Every send, including retries and file parts, also checks that the last
     completed first phase started less than five minutes ago, monotonically
     with sleep counted. Otherwise it waits for the next pass (§10).
@@ -1740,6 +1742,9 @@ pub enum SyncError {
     Damaged(DamagedObject),
     /// This device or its member was removed; syncing stops for good (§10).
     Removed,
+    /// Held signing credentials are no longer current for this stable id.
+    /// Sending stops; restoring with current keys registers a new device.
+    MemberKeysReplaced { member: MemberId },
     /// No storage is connected for a call that requires it.
     NoStorage,
     /// The provider refused or failed the call.
@@ -1799,7 +1804,7 @@ pub struct PendingRecord {
 pub enum PendingSubject {
     Write(WriteId),
     Entry(EntryId),
-    KeyCopy { audience: Audience, key: KeyId, member: MemberId },
+    KeyCopy { audience: Audience, key: KeyId, member: MemberId, sealing: SealingKey },
     Snapshot(SnapshotId),
     /// Retention waits for this active reader's position, or storage age (§15).
     Positions(DeviceId),
@@ -1892,6 +1897,8 @@ pub enum PendingReason {
     Failed(LocalFailure),
     Paused,
     Removed,
+    /// Sending needs this stable member's current credentials (§10).
+    MemberKeysReplaced { member: MemberId },
 }
 
 pub enum Retry {
@@ -1924,13 +1931,14 @@ pub enum EntryTarget {
     Circle(CircleId),
 }
 
-/// Why an entry or a retired device's write was dropped (§9, §10).
+/// Why an entry or a write was dropped (§9, §10).
 pub enum DropReason {
     /// Storage published this entry more than 30 days after an entry it had
     /// not read (§9). Shown as “landed too late”, including on its author's
     /// device. Permanent across replay and updates; the entry's position passes.
-    /// For a write, publication exceeded a kept retirement's 30-day deadline
-    /// (§10). Its position passes, but dropping that retirement can restore it.
+    /// For a write, publication exceeded a kept device retirement's or member-key
+    /// replacement's 30-day deadline (§10). Its position passes, but dropping
+    /// that deciding entry can restore it.
     LandedTooLate,
     /// A conflicting concurrent entry beat it.
     BeatenBy(EntryId),
@@ -1939,6 +1947,8 @@ pub enum DropReason {
     TargetGone(EntryTarget),
     /// Applying it would have left the store without an admin.
     NoAdminLeft,
+    /// The proposed member pair reuses an established signing or sealing key.
+    KeysAlreadyUsed,
     /// Its author's role didn't allow it, in the member list they had read.
     NotAllowed,
 }
