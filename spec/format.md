@@ -851,18 +851,23 @@
   sealed key, file and code, including:
   - a write with a store part and a circle part, the first spanning three
     chunks;
-  - every store-log change tag, including both member-access variants
+  - every store-log change tag, including stable 16-byte author/member ids,
+    signing and sealing public pairs, tag 16, and both member-access variants
     across creation and addition, key-free removals, and all three kinds of
     key introduction with their key hashes;
   - a dismissal frame;
   - a snapshot with its signed catch-up storage time, every section and
     active, frozen and excluded losses;
   - a migration write;
-  - a clock frame and sealed clock object, with its path and author signature.
+  - a clock frame and sealed clock object, with its path, `store_log_read`
+    and author signature;
+  - re-binding invites and signed requests for an existing id, a restore
+    code naming that id without storage credentials, and old/new credential
+    key copies and distinct key-copy reports for the same member.
 - Every successful decode re-encodes to the same bytes; tests decode every
   truncation and single-bit change of every fixture without panicking.
 
-- `v2.hex` pins the plaintext frames, then write prefix/header/part chunks
+- `v1.hex` pins the plaintext frames, then write prefix/header/part chunks
   and snapshot prefix/plaintext chunks. Frame mutations exercise the payload decoder,
   including dismissal and migration frames; a successful mutation must
   re-encode to exactly the mutated bytes.
@@ -877,7 +882,12 @@
   Python hashlib/hmac and libsodium; tests open them through the Rust APIs.
   Snapshot fixtures pin both signatures and the positions fixture pins its
   author signature. Tests reject every truncation and every single-bit change
-  of those signatures, and verify their path and author bindings.
+  of those signatures, and verify their path, stable author and recorded-view
+  key bindings. Mutating either recipient field in a key copy must fail box
+  authentication; pin copies to both historical and current credentials.
+  Creation's author id is not a public key and has no duplicate payload id.
+  Fixtures and mutation tests must be regenerated for format 1; changing a
+  fixture's version bytes without recalculating its crypto is not sufficient.
 
 - Fixtures must pin D11's content-bound nonce recipe:
   Ana retries an identical chunk, changes its plaintext at the same path,
