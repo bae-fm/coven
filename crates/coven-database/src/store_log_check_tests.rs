@@ -6,6 +6,7 @@ fn author_view_checks_retain_all_facts_and_reject_damaged_encodings() {
     let circle = CircleId(uuid::Uuid::from_u128(u128::MAX));
     for check in [
         StoreLogCheck::Allowed,
+        StoreLogCheck::LandedTooLate,
         StoreLogCheck::NotAllowed,
         StoreLogCheck::DeviceOwner(keys(1).signing),
         StoreLogCheck::MemberRemoval(BTreeMap::new()),
@@ -19,7 +20,7 @@ fn author_view_checks_retain_all_facts_and_reject_damaged_encodings() {
     for bytes in [
         vec![],
         vec![2],
-        vec![4],
+        vec![5],
         vec![0, 0],
         vec![2, 0],
         vec![3, 0],

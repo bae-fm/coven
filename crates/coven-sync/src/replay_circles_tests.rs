@@ -1,4 +1,4 @@
-use crate::{replay, replay::tests::*};
+use crate::replay::tests::*;
 use coven_database::{DropReason, EntryOutcome};
 use coven_format::store_log::MemberRole;
 
@@ -229,9 +229,9 @@ async fn circle_causes_and_author_view_classifications_survive_reopening() {
         for entry in &h.entries {
             let database = crate::tests::open(directory.clone()).await;
             assert_eq!(database.store_log().await.unwrap(), log);
-            let (checked, result) = crate::replay_entry(&log, entry.clone());
+            let (checked, result) = crate::replay::tests::replay_entry(&log, entry.clone());
             database
-                .apply_store_log(checked.clone(), result.clone())
+                .apply_store_log::<crate::PendingRecord>(checked.clone(), result.clone())
                 .await
                 .unwrap();
             log.entries.push(checked);

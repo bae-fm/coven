@@ -122,10 +122,10 @@ pub(crate) fn seal(
     if !crate::store_log_object::author_matches_device(log, entry) {
         return Err(SyncError::Rejected(coven_database::DropReason::NotAllowed));
     }
-    let (_, result) = crate::replay_entry(log, entry.clone());
-    if let EntryOutcome::Dropped(reason) = &result.entries[&entry.position] {
-        return Err(SyncError::Rejected(reason.clone()));
-    }
+    // Preparation records the whole current log, so this unpublished candidate
+    // has no concurrent opponent or publication time yet.
+    crate::effects::validate_change(&log.replay.state, &entry.author, &entry.change)
+        .map_err(SyncError::Rejected)?;
     // A key id identifies one introduction and one committed hash.
     let used: BTreeSet<_> = log
         .entries

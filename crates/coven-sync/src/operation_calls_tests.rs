@@ -74,7 +74,7 @@ async fn absent_targets_return_replays_reason() {
         candidate.position.number = 2;
         candidate.timestamp = coven_merge::Timestamp::new(100_000, 0, local.device).unwrap();
         candidate.change = change;
-        let (_, replay) = crate::replay_entry(&local.log, candidate.clone());
+        let (_, replay) = crate::replay::tests::replay_entry(&local.log, candidate.clone());
         let EntryOutcome::Dropped(expected) = &replay.entries[&candidate.position] else {
             panic!("absent target must reject this change");
         };
@@ -200,20 +200,28 @@ async fn dropped_attempt_revalidates_before_reserving_a_retry() {
         ));
     }
     let before = a.db.local_store_log().await.unwrap();
-    assert!(matches!(
-        before.log.replay.entries[&fixed.position],
-        EntryOutcome::Dropped(_)
-    ));
+    let EntryOutcome::Dropped(reason) = &before.log.replay.entries[&fixed.position] else {
+        panic!("the attempted entry must be dropped");
+    };
+    let dropped = PendingRecord {
+        subject: PendingSubject::Entry(fixed.position),
+        reason: PendingReason::Dropped(reason.clone()),
+        reported_by: fixed.position.device,
+    };
     let files = file_owner(&a);
     let operations = operation_owner(a.sync, files);
-    assert_eq!(pending_id(&pending(&operations, &a.db).await[0]), operation);
-    for _ in 0..2 {
-        assert!(matches!(
-            operations.retry_pending_operation(operation).await,
-            Err(SyncError::Rejected(DropReason::NotAllowed))
-        ));
-        assert_eq!(a.db.local_store_log().await.unwrap(), before);
-        assert_eq!(pending_id(&pending(&operations, &a.db).await[0]), operation);
+    for attempt in 0..3 {
+        if attempt > 0 {
+            assert!(matches!(
+                operations.retry_pending_operation(operation).await,
+                Err(SyncError::Rejected(DropReason::NotAllowed))
+            ));
+            assert_eq!(a.db.local_store_log().await.unwrap(), before);
+        }
+        let conditions = pending(&operations, &a.db).await;
+        assert_eq!(conditions.len(), 2);
+        assert_eq!(conditions[0], dropped);
+        assert_eq!(pending_id(&conditions[1]), operation);
     }
     operations.close().await.unwrap();
 }

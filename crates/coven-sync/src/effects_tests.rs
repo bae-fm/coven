@@ -257,7 +257,7 @@ fn rotations_preserve_membership_and_do_not_conflict_with_removals_or_each_other
             leave(0, 1)
         };
         h.push(0, 0, &past, removal);
-        let removed = crate::replay(&h.entries).state;
+        let removed = crate::replay::tests::replay(&h.entries).state;
         h.push(1, 1, &past, rotation(audience.clone(), 20));
         h.push(0, 3, &past, rotation(audience.clone(), 21));
         h.every_order(|r| {
@@ -309,7 +309,7 @@ fn concurrent_circle_deletion_does_not_drop_an_authorized_rotation() {
 
 #[test]
 fn replay_rejections_identify_each_target() {
-    use crate::{replay, replay::circles::tests::circle_history};
+    use crate::replay::{circles::tests::circle_history, tests::replay};
     use coven_database::{DropReason, EntryOutcome, EntryTarget};
     for (change, target) in [
         (role(4, Admin), EntryTarget::Member(member(4))),

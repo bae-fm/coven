@@ -41,6 +41,7 @@ fn circle(text: String) -> rusqlite::Result<CircleId> {
 pub(crate) fn outcome(row: &Row<'_>, start: usize) -> rusqlite::Result<EntryOutcome> {
     match row.get::<_, String>(start)?.as_str() {
         "kept" => Ok(EntryOutcome::Kept),
+        "late" => Ok(EntryOutcome::Dropped(DropReason::LandedTooLate)),
         "beaten" => Ok(EntryOutcome::Dropped(DropReason::BeatenBy(entry_id(
             row,
             start + 1,
@@ -74,7 +75,7 @@ pub(crate) fn deleted_circles(
 pub(crate) fn read(database: &DatabaseConnection) -> Result<StoreLog, DbError> {
     let mut log = StoreLog::default();
     for (entry, outcome) in database.query(
-        "SELECT record,outcome,beaten_device,beaten_number,target,author_view FROM _coven_store_log",
+        "SELECT record,outcome,beaten_device,beaten_number,target,author_view,stored_at FROM _coven_store_log",
         [],
         |row| {
             let Object::StoreLog(entry) = decoded(Object::decode(&row.get::<_, Vec<u8>>(0)?))?
@@ -84,7 +85,9 @@ pub(crate) fn read(database: &DatabaseConnection) -> Result<StoreLog, DbError> {
             let outcome = outcome(row, 1)?;
             let check = StoreLogCheck::decode(&row.get::<_, Vec<u8>>(5)?)
                 .map_err(|error| decode_failure(5, Type::Blob, error))?;
-            Ok((ReplayEntry { entry, check }, outcome))
+            let stored_at = crate::user_file::decode_time(&row.get::<_, Vec<u8>>(6)?)
+                .map_err(|error| decode_failure(6, Type::Blob, error))?;
+            Ok((ReplayEntry { entry, stored_at, check }, outcome))
         },
     )? {
         log.replay.entries.insert(entry.entry.position, outcome);
@@ -243,6 +246,7 @@ pub(crate) fn replace(
         let (tag, beaten, target) = match outcome {
             EntryOutcome::Kept => ("kept", None, None),
             EntryOutcome::Dropped(reason) => match reason {
+                DropReason::LandedTooLate => ("late", None, None),
                 DropReason::BeatenBy(entry) => ("beaten", Some(entry), None),
                 DropReason::TargetGone(target) => match target {
                     EntryTarget::Member(id) => {

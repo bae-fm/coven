@@ -290,6 +290,12 @@ pub(crate) const POLICY: Policy = Policy {
         ("crates/coven-sync/src/file_read.rs", "UploadedFile", "open"),
         ("crates/coven-sync/src/files.rs", "Files", "new"),
         ("crates/coven-sync/src/operations.rs", "Operations", "new"),
+        // Setup stages its candidate connection's keys without changing custody.
+        (
+            "crates/coven-sync/src/storage_setup.rs",
+            "StoreLogSync",
+            "catch_up_setup",
+        ),
         (
             "crates/coven-sync/src/restore_codes.rs",
             "RestoreCodes",

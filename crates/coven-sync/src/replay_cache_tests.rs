@@ -1,5 +1,8 @@
 use super::*;
-use crate::replay::{at, replay_entry, tests as history};
+use crate::replay::{
+    at,
+    tests::{self as history, replay_entry},
+};
 use coven_format::store_log::StoreLogEntry;
 use coven_format::value::EntryPositions;
 use std::{hint::black_box, time::Instant};
@@ -27,7 +30,7 @@ fn historical_views_match_uncached_and_full_replay_in_each_arrival_order() {
                 let frontier = positions(&entries);
                 let cached = cache.at(&frontier);
                 assert_eq!(cached, &at(&log, &frontier));
-                assert_eq!(cached, &crate::replay(&entries));
+                assert_eq!(cached, &crate::replay::tests::replay(&entries));
             }
         }
         assert_eq!(cache.views.len(), views.len());

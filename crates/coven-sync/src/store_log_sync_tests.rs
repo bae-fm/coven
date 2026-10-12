@@ -29,21 +29,21 @@ pub(crate) struct Device {
     _temporary: tempfile::TempDir,
 }
 
-fn key(n: u128) -> KeyId {
+pub(crate) fn key(n: u128) -> KeyId {
     KeyId(Uuid::from_u128(n))
 }
 fn circle(n: u128) -> CircleId {
     CircleId(Uuid::from_u128(n))
 }
-fn store(n: u128) -> StoreId {
+pub(crate) fn store(n: u128) -> StoreId {
     StoreId(Uuid::from_u128(n))
 }
-fn member(n: u8) -> MemberKeys {
+pub(crate) fn member(n: u8) -> MemberKeys {
     let mut bytes = b"CVMK\x01".to_vec();
     bytes.extend([n; 64]);
     MemberKeys::from_secret_bytes(&bytes).unwrap()
 }
-fn public(member: &MemberKeys) -> MemberPublicKeys {
+pub(crate) fn public(member: &MemberKeys) -> MemberPublicKeys {
     MemberPublicKeys {
         signing: member.member_id(),
         sealing: member.sealing_public_key(),
@@ -81,7 +81,12 @@ async fn copy_path(
         .path
 }
 
-async fn device(storage: Arc<MemoryStorage>, n: u64, member: MemberKeys, store: StoreId) -> Device {
+pub(crate) async fn device(
+    storage: Arc<MemoryStorage>,
+    n: u64,
+    member: MemberKeys,
+    store: StoreId,
+) -> Device {
     Device::new(
         storage,
         n,
@@ -134,6 +139,15 @@ impl StoreLogSync {
 }
 
 impl Device {
+    pub(crate) async fn interrupt_entry(&mut self, number: u64) {
+        let device = self.db.local_store_log().await.unwrap().device;
+        self.sync.storage = Some(key_distribution::failing_creation(
+            self.storage.clone(),
+            object::path(self.directory.id(), EntryId { device, number }),
+            false,
+        ));
+    }
+
     pub(crate) async fn new(
         storage: Arc<MemoryStorage>,
         n: u64,
@@ -260,7 +274,7 @@ impl Device {
         )
     }
 
-    async fn create(&mut self, key: KeyId) -> EntryId {
+    pub(crate) async fn create(&mut self, key: KeyId) -> EntryId {
         self.sync
             .make_and_upload_entry(StoreChange::CreateStore {
                 access: coven_format::MemberAccess::S3AccessKey {
@@ -288,13 +302,13 @@ impl Device {
             .await
             .unwrap()
     }
-    async fn sync(&mut self) {
+    pub(crate) async fn sync(&mut self) {
         self.sync.sync_store_log().await.unwrap();
     }
-    async fn log(&self) -> StoreLog {
+    pub(crate) async fn log(&self) -> StoreLog {
         self.db.local_store_log().await.unwrap().log
     }
-    async fn restart(&mut self, storage: Arc<MemoryStorage>) {
+    pub(crate) async fn restart(&mut self, storage: Arc<MemoryStorage>) {
         self.reopen(storage, vec![], vec![]).await;
     }
     async fn device(&self) -> DeviceId {
@@ -922,8 +936,10 @@ async fn a_waiting_entry_reseals_with_its_recorded_key_after_rotation() {
     b.sync.test_rotate(Audience::Store, key(2)).await;
     // Apply the downloaded rotation while the local entry is still queued.
     let rotation = b.log().await.entries.last().unwrap().entry.clone();
-    let (entry, replay) = crate::replay_entry(&a.log().await, rotation);
-    a.db.apply_store_log(entry, replay).await.unwrap();
+    let (entry, replay) = crate::replay::tests::replay_entry(&a.log().await, rotation);
+    a.db.apply_store_log::<crate::PendingRecord>(entry, replay)
+        .await
+        .unwrap();
     a.custody
         .persist(&b.custody.read().unwrap().unwrap())
         .unwrap();

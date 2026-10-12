@@ -48,10 +48,12 @@ macro_rules! coven_tables {
                 number BLOB NOT NULL CHECK(length(number)=8 AND number>x'0000000000000000'),
                 record BLOB NOT NULL,
                 author_view BLOB NOT NULL,
-                outcome TEXT NOT NULL CHECK(outcome IN ('kept','beaten','target-member','target-device','target-circle','admin','authority')),
+                stored_at BLOB NOT NULL CHECK(length(stored_at)=13),
+                outcome TEXT NOT NULL CHECK(outcome IN ('kept','late','beaten','target-member','target-device','target-circle','admin','authority')),
                 beaten_device BLOB CHECK(length(beaten_device)=8),
                 beaten_number BLOB CHECK(length(beaten_number)=8),
                 target BLOB,
+                CHECK((author_view=x'04')=(outcome='late')),
                 CHECK((outcome='target-member' AND target IS NOT NULL AND length(target)=32)
                    OR (outcome='target-device' AND target IS NOT NULL AND length(target)=8)
                    OR (outcome='target-circle' AND target IS NOT NULL AND length(target)=16)

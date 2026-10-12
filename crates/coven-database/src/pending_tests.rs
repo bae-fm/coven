@@ -14,8 +14,17 @@ enum Reason {
     Missing,
     Refused,
     Update(u32),
+    Dropped,
 }
 impl PendingValue for Record {
+    fn dropped_entry(entry: crate::EntryId, _reason: crate::DropReason) -> Self {
+        Self {
+            subject: entry.number,
+            reported_by: entry.device,
+            reason: Reason::Dropped,
+            operation: None,
+        }
+    }
     type Subject = u64;
     fn subject(&self) -> &u64 {
         &self.subject
@@ -27,11 +36,15 @@ impl PendingValue for Record {
         self.operation
     }
     fn log_object(&self) -> Option<crate::LogObject> {
-        None
+        matches!(self.reason, Reason::Dropped).then_some(crate::LogObject::Entry(crate::EntryId {
+            device: self.reported_by,
+            number: self.subject,
+        }))
     }
     fn can_retry(&self, version: &str, schema: u32) -> bool {
         match self.reason {
             Reason::Missing => true,
+            Reason::Dropped => false,
             Reason::Refused => version != env!("CARGO_PKG_VERSION"),
             Reason::Update(required) => schema >= required,
         }

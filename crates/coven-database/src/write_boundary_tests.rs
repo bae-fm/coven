@@ -185,6 +185,7 @@ async fn repeated_boundaries_keep_their_original_coverage_and_application_order(
 }
 
 mod differential {
+    use crate::pending::tests::Record as PendingRecord;
     use crate::snapshot_write::tests::{frames, id as snapshot_id, stream};
     use crate::test_utils::tests::*;
     use crate::tests::TestStore;
@@ -214,10 +215,11 @@ mod differential {
             .state
             .resets
             .insert(Audience::Store, snapshot_id(Audience::Store));
-        db.apply_store_log(
+        db.apply_store_log::<PendingRecord>(
             crate::ReplayEntry {
                 entry,
                 check: crate::StoreLogCheck::Allowed,
+                stored_at: std::time::UNIX_EPOCH,
             },
             replay,
         )

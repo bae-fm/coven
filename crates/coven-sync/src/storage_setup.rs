@@ -2,7 +2,10 @@
 
 use super::{keys, object, StoreLogSync};
 use crate::{StorageCommit, SyncError};
-use coven_crypto::{MemberKeys, StoreKey, StoreKeyring};
+use coven_crypto::{
+    custody::{InMemoryCustody, KeySession},
+    MemberKeys, StoreKey, StoreKeyring,
+};
 use coven_format::{
     sealed_single::SingleChunkObject,
     store_log::{MemberPublicKeys, StoreChange, StoreLogEntry},
@@ -157,6 +160,12 @@ impl StoreLogSync {
             None => StoreKeyring::new(key),
         };
         let mut creation = Some(entry);
+        if local.log.replay.state.store.is_some() && local.upload.is_none() {
+            // A new access attempt reads every stored witness through the
+            // candidate connection. Reserved attempts retain their recorded past.
+            ring = self.catch_up_setup(storage.clone(), ring).await?;
+            local = self.database.local_store_log().await?;
+        }
         if let Some(store) = &local.log.replay.state.store {
             let opened =
                 keys::read_store_key(storage.as_ref(), store_id, store.key, &member).await?;
@@ -210,12 +219,35 @@ impl StoreLogSync {
                 creation = Some(upload.entry.clone());
             }
         }
+        let applied = if let Some(entry) = creation {
+            let publications = crate::store_log_landing::observe_publication(
+                store_id,
+                Some(storage.as_ref()),
+                &local.log,
+                entry.position,
+            )
+            .await?;
+            let (entry, replay) = crate::replay_entry(&local.log, entry, &publications);
+            if let coven_database::EntryOutcome::Dropped(reason) =
+                &replay.entries[&entry.entry.position]
+            {
+                let reason = reason.clone();
+                self.database
+                    .apply_store_log::<crate::PendingRecord>(entry, replay)
+                    .await?;
+                return Err(SyncError::Rejected(reason));
+            }
+            Some((entry, replay))
+        } else {
+            None
+        };
         let rollback = commit()?;
         let result = async {
             self.store_keys.persist(&ring)?;
-            if let Some(creation) = creation {
-                let (entry, replay) = crate::replay_entry(&local.log, creation);
-                self.database.apply_store_log(entry, replay).await?;
+            if let Some((entry, replay)) = applied {
+                self.database
+                    .apply_store_log::<crate::PendingRecord>(entry, replay)
+                    .await?;
             }
             Ok::<_, SyncError>(())
         }
@@ -230,6 +262,29 @@ impl StoreLogSync {
         }
         self.storage = Some(storage);
         Ok(())
+    }
+
+    // Candidate-provider reads and acquired keys belong to this setup attempt.
+    // Final custody remains unchanged until setup commits.
+    async fn catch_up_setup(
+        &self,
+        storage: Arc<dyn Storage>,
+        ring: StoreKeyring,
+    ) -> Result<StoreKeyring, SyncError> {
+        let staged_keys = Arc::new(KeySession::store(Arc::new(InMemoryCustody::new(ring)))?);
+        let candidate = Self::new(
+            storage,
+            self.database.clone(),
+            staged_keys.clone(),
+            self.member_keys.clone(),
+            self.clock.clone(),
+            self.ids.clone(),
+            self.directory.clone(),
+        );
+        candidate.catch_up().await?;
+        Ok(staged_keys
+            .read()?
+            .expect("setup retains the opened keyring"))
     }
 }
 

@@ -1,4 +1,4 @@
-//! The immutable facts a replay needs from an entry's recorded past (§9).
+//! Immutable landing and author-view checks retained for replay (§9).
 
 use std::collections::BTreeMap;
 
@@ -8,13 +8,15 @@ use coven_foundation::id_source::CircleId;
 
 use crate::DbError;
 
-/// An entry and the checks computed by sync against exactly its recorded past.
-/// Both are immutable once the database applies the entry.
+/// An entry, its first publication time and checks against stored history and
+/// its recorded past. These are immutable once the database applies the entry.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReplayEntry {
     /// The checked entry, stored using format's encoding.
     pub entry: StoreLogEntry,
-    /// Authority and the author-view facts needed by effects and conflicts.
+    /// Provider time of the first complete publication; retries cannot replace it.
+    pub stored_at: std::time::SystemTime,
+    /// Permanent landing exclusion, or the authority and author-view facts used by replay.
     pub check: StoreLogCheck,
 }
 
@@ -27,10 +29,13 @@ pub enum CircleRemoval {
     Circle,
 }
 
-/// The result of checking an entry against its author's immutable view.
+/// The landing verdict or checks against an admitted entry's immutable author view.
 /// This retains only facts needed during later replays, not the whole past state.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum StoreLogCheck {
+    /// Permanently excluded by the landing check against complete stored history.
+    /// No author-view facts are derived for this entry.
+    LandedTooLate,
     /// Authorized; this change needs no further facts from its author's view.
     Allowed,
     /// The author's view did not allow the change.
@@ -56,6 +61,7 @@ impl StoreLogCheck {
     // the payload's shape; invalid or noncanonical bytes fail the database read.
     pub(crate) fn encode(&self) -> Vec<u8> {
         match self {
+            Self::LandedTooLate => vec![4],
             Self::Allowed => vec![0],
             Self::NotAllowed => vec![1],
             Self::DeviceOwner(owner) => {
@@ -79,6 +85,7 @@ impl StoreLogCheck {
 
     pub(crate) fn decode(bytes: &[u8]) -> Result<Self, DbError> {
         match bytes {
+            [4] => Ok(Self::LandedTooLate),
             [0] => Ok(Self::Allowed),
             [1] => Ok(Self::NotAllowed),
             [2, owner @ ..] if owner.len() == 32 => Ok(Self::DeviceOwner(

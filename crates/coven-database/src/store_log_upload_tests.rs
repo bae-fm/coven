@@ -1,4 +1,5 @@
 use super::*;
+use crate::pending::tests::Record as PendingRecord;
 use crate::{
     tests::TestStore,
     write::tests::{notes, records, sql, NOTES},
@@ -114,6 +115,7 @@ async fn applying_entry_and_retiring_the_queue_roll_back_together() {
     let pending = db.local_store_log().await.unwrap().upload.unwrap();
     let checked = crate::ReplayEntry {
         entry: pending.entry.clone(),
+        stored_at: UNIX_EPOCH,
         check: crate::StoreLogCheck::Allowed,
     };
     // Replay is caller-supplied data at this database boundary.
@@ -129,14 +131,17 @@ async fn applying_entry_and_retiring_the_queue_roll_back_together() {
         )
     });
     assert!(matches!(
-        db.apply_store_log(checked.clone(), result.clone()).await,
+        db.apply_store_log::<PendingRecord>(checked.clone(), result.clone())
+            .await,
         Err(DbError::Sqlite(_))
     ));
     let state = db.local_store_log().await.unwrap();
     assert!(state.log.entries.is_empty());
     assert_eq!(state.upload, Some(pending));
     db.inspect_writer(|sql| sql.batch("DROP TRIGGER reject_retirement").unwrap());
-    db.apply_store_log(checked, result).await.unwrap();
+    db.apply_store_log::<PendingRecord>(checked, result)
+        .await
+        .unwrap();
     let state = db.local_store_log().await.unwrap();
     assert!(state.upload.is_none());
     assert_eq!(state.log.entries.len(), 1);
@@ -227,6 +232,7 @@ async fn entry_copies_and_operation_commit_or_roll_back_as_one_reservation() {
     let upload = db.local_store_log().await.unwrap().upload.unwrap();
     let checked = crate::ReplayEntry {
         entry: upload.entry,
+        stored_at: UNIX_EPOCH,
         check: crate::StoreLogCheck::Allowed,
     };
     let replay = crate::StoreLogReplay {
@@ -234,14 +240,16 @@ async fn entry_copies_and_operation_commit_or_roll_back_as_one_reservation() {
         ..Default::default()
     };
     assert!(db
-        .apply_store_log(checked.clone(), replay.clone())
+        .apply_store_log::<PendingRecord>(checked.clone(), replay.clone())
         .await
         .is_err());
     assert!(db.local_store_log().await.unwrap().log.entries.is_empty());
     for copy in copies {
         db.complete_key_upload(copy).await.unwrap();
     }
-    db.apply_store_log(checked, replay).await.unwrap();
+    db.apply_store_log::<PendingRecord>(checked, replay)
+        .await
+        .unwrap();
     assert!(db.local_store_log().await.unwrap().upload.is_none());
     let next = db
         .prepare_key_upload(|_| Ok::<_, DbError>(vec![5]))

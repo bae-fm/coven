@@ -5,7 +5,7 @@ use coven_format::pending::RefusalCode;
 fn checked_log(entries: &[StoreLogEntry]) -> StoreLog {
     let mut log = StoreLog::default();
     for entry in entries {
-        let (checked, replay) = crate::replay_entry(&log, entry.clone());
+        let (checked, replay) = crate::replay::tests::replay_entry(&log, entry.clone());
         log.entries.push(checked);
         log.replay = replay;
     }
@@ -93,7 +93,7 @@ fn a_dropped_registration_does_not_prevent_registering_again() {
     h.all(1, 1, history::device(1));
     let candidate = h.entries.last().unwrap();
     assert!(object::ready(&log, candidate, store(1)).unwrap());
-    let (_, replay) = crate::replay_entry(&log, candidate.clone());
+    let (_, replay) = crate::replay::tests::replay_entry(&log, candidate.clone());
     assert_eq!(replay.entries[&candidate.position], EntryOutcome::Kept);
     assert_eq!(replay.state.devices[&DeviceId(1)].member, candidate.author);
 }

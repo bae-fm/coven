@@ -23,8 +23,8 @@ pub(crate) fn positions(
 /// Applied entries and their replay, read from one committed state (§9).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct StoreLog {
-    /// Every applied entry, including dropped entries, and its immutable author-view
-    /// check, in timestamp order.
+    /// Every applied entry, including dropped entries, with its first publication
+    /// time and immutable checks, in timestamp order.
     pub entries: Vec<ReplayEntry>,
     /// The result computed by sync for exactly these entries.
     pub replay: StoreLogReplay,
@@ -147,7 +147,7 @@ pub struct StoreVersion {
 pub enum EntryOutcome {
     /// Applied, including a change already in place.
     Kept,
-    /// Ignored for this replay and reported to its author.
+    /// Ignored by replay and reported to its author.
     Dropped(DropReason),
 }
 
@@ -165,6 +165,9 @@ pub enum EntryTarget {
 /// Why replay dropped an entry (§9, E5).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DropReason {
+    /// First publication was more than thirty days after an unread stored entry.
+    /// This entry is consumed and excluded permanently, including from author views.
+    LandedTooLate,
     /// A conflicting concurrent entry beat it, even if that entry later dropped.
     BeatenBy(EntryId),
     /// A member, device or circle needed at its place in replay did not exist.
@@ -175,7 +178,7 @@ pub enum DropReason {
     NotAllowed,
 }
 
-pub(crate) fn apply(
+pub(crate) fn apply<P: crate::PendingValue>(
     database: &DatabaseConnection,
     schema: &WriteSchema,
     incoming: ReplayEntry,
@@ -184,7 +187,12 @@ pub(crate) fn apply(
     operations: &[crate::NewOperation],
     updates: &[crate::OperationUpdate],
 ) -> Result<(), DbError> {
-    let ReplayEntry { entry, check } = incoming;
+    let ReplayEntry {
+        entry,
+        stored_at,
+        check,
+    } = incoming;
+    let stored_at = crate::user_file::encode_time(stored_at);
     let author_view = check.encode();
     let bytes = Object::StoreLog(entry.clone()).encode().map_err(|error| {
         DbError::InvalidStoreLogEntry {
@@ -193,15 +201,15 @@ pub(crate) fn apply(
         }
     })?;
     database.transaction(|database| {
-        for (record, view) in database.query(
-            "SELECT record,author_view FROM _coven_store_log WHERE device=?1 AND number=?2",
+        for (record, view, time) in database.query(
+            "SELECT record,author_view,stored_at FROM _coven_store_log WHERE device=?1 AND number=?2",
             (
                 entry.position.device.0.to_be_bytes().as_slice(),
                 entry.position.number.to_be_bytes().as_slice(),
             ),
-            |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?)),
+            |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?, row.get::<_, Vec<u8>>(2)?)),
         )? {
-            if record != bytes || view != author_view {
+            if record != bytes || view != author_view || time != stored_at {
                 return Err(DbError::StoreLogEntryChanged(entry.position));
             }
         }
@@ -224,13 +232,15 @@ pub(crate) fn apply(
             return Err(DbError::StoreLogEntriesChanged);
         }
         database.internal_execute(
-            "INSERT INTO _coven_store_log(device,number,record,author_view,outcome)
-             VALUES(?1,?2,?3,?4,'kept') ON CONFLICT(device,number) DO NOTHING",
+            "INSERT INTO _coven_store_log(device,number,record,author_view,stored_at,outcome)
+             VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(device,number) DO NOTHING",
             (
                 entry.position.device.0.to_be_bytes().as_slice(),
                 entry.position.number.to_be_bytes().as_slice(),
                 &bytes,
                 &author_view,
+                &stored_at,
+                if check == crate::StoreLogCheck::LandedTooLate { "late" } else { "kept" },
             ),
         )?;
         crate::store_log_upload::retire(database, entry.position, &bytes)?;
@@ -259,7 +269,25 @@ pub(crate) fn apply(
         for operation in operations {
             crate::operation::insert(database, operation)?;
         }
-        crate::pending::clear_log(database, crate::LogObject::Entry(entry.position))?;
+        let own = database.pending_device().ok_or(DbError::DamagedDatabase)?;
+        for (id, outcome) in &replay.entries {
+            // A reset can clear a report without changing the entry's fate.
+            // Only a changed replay outcome creates or removes that report.
+            if id.device != own || outcomes.get(id) == Some(outcome) {
+                continue;
+            }
+            match outcome {
+                EntryOutcome::Kept => {
+                    crate::pending::clear_log(database, crate::LogObject::Entry(*id))?;
+                }
+                EntryOutcome::Dropped(reason) => {
+                    crate::pending::save(database, &P::dropped_entry(*id, reason.clone()))?;
+                }
+            }
+        }
+        if entry.position.device != own {
+            crate::pending::clear_log(database, crate::LogObject::Entry(entry.position))?;
+        }
         Ok(())
     })
 }

@@ -158,8 +158,7 @@ pub(crate) fn retire(
         ),
         |row| row.get::<_, Vec<u8>>(0),
     )? {
-        let format = coven_format::FormatVersion::decode(&stored)?;
-        if stored != Object::decode(record)?.encode_in(format)? {
+        if stored != record {
             return Err(DbError::StoreLogEntryChanged(id));
         }
     }

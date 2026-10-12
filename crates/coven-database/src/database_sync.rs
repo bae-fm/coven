@@ -363,20 +363,20 @@ impl Database {
         .await
     }
 
-    /// Commit one entry, its immutable author-view check, every kept/dropped mark,
-    /// and sync's whole replay result in one transaction (§9).
+    /// Commit one entry, its first publication time and immutable checks, every
+    /// kept/dropped mark, local drop reports and the whole replay result together (§9).
     ///
     /// The database stores the supplied result without replaying. Circle deletions
     /// and reversals recompute row visibility in the same transaction. A result for
     /// a stale or different applied-entry set is refused with
     /// [`DbError::StoreLogEntriesChanged`]; changing an applied entry's bytes or
-    /// author-view check is refused with [`DbError::StoreLogEntryChanged`].
-    pub async fn apply_store_log(
+    /// publication time or check is refused with [`DbError::StoreLogEntryChanged`].
+    pub async fn apply_store_log<P: crate::PendingValue>(
         &self,
         entry: crate::ReplayEntry,
         replay: crate::StoreLogReplay,
     ) -> Result<(), DbError> {
-        self.apply_store_log_operations(entry, replay, Vec::new(), Vec::new())
+        self.apply_store_log_operations::<P>(entry, replay, Vec::new(), Vec::new())
             .await
     }
 

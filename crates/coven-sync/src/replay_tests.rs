@@ -18,12 +18,33 @@ use coven_foundation::{
 };
 use coven_merge::{Audience, Timestamp};
 
-use crate::{replay, replay_entry};
-
 #[path = "../tests/fixtures/replay_history.rs"]
 mod history;
 pub(crate) use history::realistic_history;
 use MemberRole::{Admin, Member};
+
+// Untimed membership fixtures all land at the same provider tick. They still
+// exercise production admission and replay, with no alternate replay engine.
+pub(crate) fn replay(entries: &[StoreLogEntry]) -> StoreLogReplay {
+    let publications = entries
+        .iter()
+        .map(|e| (e.position, std::time::UNIX_EPOCH))
+        .collect();
+    super::replay(entries, &publications)
+}
+
+pub(crate) fn replay_entry(
+    log: &StoreLog,
+    entry: StoreLogEntry,
+) -> (coven_database::ReplayEntry, StoreLogReplay) {
+    let publications = log
+        .entries
+        .iter()
+        .map(|e| (e.entry.position, e.stored_at))
+        .chain([(entry.position, std::time::UNIX_EPOCH)])
+        .collect();
+    super::replay_entry(log, entry, &publications)
+}
 
 pub(crate) fn keys(n: u8) -> MemberPublicKeys {
     let mut bytes = b"CVMK\x01".to_vec();
@@ -190,7 +211,7 @@ impl History {
             order.push(entry.clone());
             let prefix = replay(order);
             assert_eq!(prefix.entries.len(), order.len());
-            let (checked, incremental) = crate::replay_entry(applied, entry.clone());
+            let (checked, incremental) = crate::replay::tests::replay_entry(applied, entry.clone());
             assert_eq!(incremental, prefix);
             let mut next = applied.clone();
             next.entries.push(checked);
@@ -921,7 +942,7 @@ async fn replay_cost() {
         // checked, with at most its past and the resulting received set replayed.
         work.assert_bounded(1, 2 * count - 1, count - 1, count, writers);
         database
-            .apply_store_log(checked.clone(), replay.clone())
+            .apply_store_log::<crate::PendingRecord>(checked.clone(), replay.clone())
             .await
             .unwrap();
         applied.entries.push(checked);

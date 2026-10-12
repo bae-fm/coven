@@ -6,9 +6,9 @@ use crate::{
 };
 
 impl Database {
-    /// Apply an entry and record work caused by its kept effects atomically.
-    /// The sync owner supplies the operation data; the database does not interpret it.
-    pub async fn apply_store_log_operations(
+    /// Apply an entry, update local drop reports and record work caused by its
+    /// kept effects atomically. Sync supplies the operation data and pending type.
+    pub async fn apply_store_log_operations<P: crate::PendingValue>(
         &self,
         entry: crate::ReplayEntry,
         replay: crate::StoreLogReplay,
@@ -17,7 +17,7 @@ impl Database {
     ) -> Result<(), DbError> {
         self.call(move |inner| {
             inner.with_files(Vec::new(), |writer, files| {
-                crate::store_log::apply(
+                crate::store_log::apply::<P>(
                     writer,
                     &inner.access.write_schema,
                     entry,

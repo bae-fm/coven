@@ -347,7 +347,7 @@ fn independent_changes_commute_in_timestamp_and_arrival_order() {
             .iter()
             .map(|h| {
                 let base = h.entries.len() - 2;
-                let view = crate::replay(&h.entries[..base]).state;
+                let view = crate::replay::tests::replay(&h.entries[..base]).state;
                 let a = &h.entries[base];
                 let b = &h.entries[base + 1];
                 let va = crate::effects::check(&view, a);
@@ -434,7 +434,7 @@ fn contradictory_membership_changes_keep_the_removal_in_either_timestamp_order()
 #[test]
 fn removing_a_member_contradicts_only_changes_requiring_that_member() {
     let base = two_circles();
-    let view = crate::replay(&base.entries).state;
+    let view = crate::replay::tests::replay(&base.entries).state;
     for (author, change, contradicts) in [
         (1, device(8), true),
         (0, role(1, Admin), true),

@@ -7,6 +7,8 @@ use serde::{de::DeserializeOwned, Serialize};
 /// Sync supplies its complete typed record; the database owns its atomic lifetime.
 /// The associated subject is the stable key, independent of the reason.
 pub trait PendingValue: Serialize + DeserializeOwned + Send + 'static {
+    /// Report a local entry rejected by committed replay.
+    fn dropped_entry(entry: crate::EntryId, reason: crate::DropReason) -> Self;
     /// Stable identity, ordered as the app presents it.
     type Subject: Serialize + Ord;
     /// The work that cannot advance.

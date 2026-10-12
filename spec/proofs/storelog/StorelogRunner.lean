@@ -72,7 +72,7 @@ private def sorted (xs : List Nat) : List Nat := xs.mergeSort (fun a b => decide
 private def byKey {α : Type} (xs : List (Nat × α)) : List (Nat × α) :=
   xs.mergeSort (fun a b => decide (a.1 ≤ b.1))
 
-private def project (r : Result) (causes : List (List Nat)) : Json := Id.run do
+private def project (r : Result) (causes : List (List Nat)) (late : List Nat) : Json := Id.run do
   let members := (byKey r.state.members).map fun (m, role) => toJson [m, roleNumber role]
   let access := (byKey r.state.access).map fun (m, a) => Json.arr #[toJson m, toJson a]
   let devices := (byKey r.state.devices).map fun (d, m) => toJson [d, m]
@@ -83,7 +83,7 @@ private def project (r : Result) (causes : List (List Nat)) : Json := Id.run do
   let resets := byKey (r.state.resets.map fun (a, s) => (audienceNumber a, s))
   let resets := resets.map fun (a, s) => toJson [a, s]
   return (Json.mkObj [
-    ("created", toJson r.state.created), ("members", toJson members), ("access", toJson access),
+    ("landed_too_late", toJson (sorted late)), ("created", toJson r.state.created), ("members", toJson members), ("access", toJson access),
     ("devices", toJson devices), ("circles", toJson circles),
     ("versions", toJson versions), ("resets", toJson resets),
     ("kept", toJson (sorted r.kept)), ("dropped", toJson (sorted r.dropped)),
@@ -125,7 +125,9 @@ private def run (j : Json) : Except String Json := do
       (entrySet subset) views
     let causes := circles.filterMap fun c =>
       (CurrentReplay.deletionCause H.log views r c).map fun e => [c, e]
-    project (CurrentReplay.finish r) causes))
+    let late := (List.range entries.size).filter fun e =>
+      e ∈ subset && Finality.tooLate H.membership window entries.size (fun _ => true) e
+    project (CurrentReplay.finish r) causes late))
 
 def main : IO UInt32 := do
   let stdin ← IO.getStdin

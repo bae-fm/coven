@@ -497,8 +497,11 @@ async fn reserved_copy_settles_even_after_another_supplier_or_recipient_removal(
                 .find(|entry| entry.entry.position == id)
                 .unwrap()
                 .entry;
-            let (entry, replay) = crate::replay_entry(&ana.log().await, entry);
-            ana.db.apply_store_log(entry, replay).await.unwrap();
+            let (entry, replay) = crate::replay::tests::replay_entry(&ana.log().await, entry);
+            ana.db
+                .apply_store_log::<crate::PendingRecord>(entry, replay)
+                .await
+                .unwrap();
         }
         ana.restart(storage.clone()).await;
         ana.sync().await;

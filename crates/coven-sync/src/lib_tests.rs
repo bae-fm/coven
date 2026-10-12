@@ -23,10 +23,8 @@ use serde_json::{json, Value};
 
 use crate::{
     effects::tests::{raise, rotation, snapshot},
-    replay,
     replay::circles::tests::circle_history,
     replay::tests::*,
-    replay_entry,
 };
 
 struct Generator(u64);
@@ -49,7 +47,7 @@ impl Generator {
         // Arbitrary actions use a complete past. Concurrent branches exercise
         // boundaries, renames, deletion and rotations, whose policies agree.
         // Independent membership changes and removal tiers are compared below;
-        // late admission retains explicit counterexamples.
+        // publication boundaries are compared separately.
         for _ in 0..3 {
             let author = self.pick(5) as u8;
             let change = self.action(&replay(&h.entries).state);
@@ -191,8 +189,9 @@ fn role_number(role: MemberRole) -> u64 {
     }
 }
 
-fn input(h: &History, stored: &[u64], received: &[Vec<usize>]) -> Value {
+pub(crate) fn input(h: &History, stored: &[u64], received: &[Vec<usize>]) -> Value {
     assert_eq!(stored.len(), h.entries.len());
+    let publications = publication_times(h, stored);
     let entries: Vec<_> = h.entries.iter().enumerate().map(|(i,entry)| {
         if let StoreChange::RaiseSchema { snapshot, .. } | StoreChange::Reset { snapshot } = &entry.change {
             assert_eq!(snapshot.device, DeviceId(900), "snapshot numbers identify one fixture writer");
@@ -208,7 +207,7 @@ fn input(h: &History, stored: &[u64], received: &[Vec<usize>]) -> Value {
                 json!({"kind":4,"member":member_number(&entry.author),"device":device.0})
             },
             StoreChange::RemoveDevice { device } => {
-                let view = replay(&past.iter().map(|&i| h.entries[i].clone()).collect::<Vec<_>>()).state;
+                let view = crate::replay(&past.iter().map(|&i| h.entries[i].clone()).collect::<Vec<_>>(), &publications).state;
                 let owner = &view.devices[device];
                 assert!(!owner.removed, "generator may remove only an observed device");
                 json!({"kind":5,"member":member_number(&owner.member),"device":device.0})
@@ -230,7 +229,7 @@ fn input(h: &History, stored: &[u64], received: &[Vec<usize>]) -> Value {
     json!({"entries":entries,"window":30,"received":received})
 }
 
-fn projected(h: &History, replay: &StoreLogReplay) -> Value {
+pub(crate) fn projected(h: &History, replay: &StoreLogReplay) -> Value {
     let state = &replay.state;
     let mut members: Vec<_> = state
         .members
@@ -299,7 +298,17 @@ fn projected(h: &History, replay: &StoreLogReplay) -> Value {
             .then_some(i)
         })
         .collect();
-    json!({"created":state.store.is_some(),"members":members,"access":access,"devices":devices,"circles":circles,"versions":versions,"resets":resets,"kept":kept,"dropped":dropped,"circle_causes":circle_causes})
+    let late: Vec<_> = h
+        .entries
+        .iter()
+        .enumerate()
+        .filter_map(|(i, e)| {
+            (replay.entries.get(&e.position)
+                == Some(&EntryOutcome::Dropped(DropReason::LandedTooLate)))
+            .then_some(i)
+        })
+        .collect();
+    json!({"landed_too_late":late,"created":state.store.is_some(),"members":members,"access":access,"devices":devices,"circles":circles,"versions":versions,"resets":resets,"kept":kept,"dropped":dropped,"circle_causes":circle_causes})
 }
 
 fn key_number(id: coven_foundation::id_source::KeyId) -> u64 {
@@ -324,7 +333,7 @@ fn run_lean(input: &Value) -> std::process::Output {
     child.wait_with_output().unwrap()
 }
 
-fn lean_results(inputs: &[Value]) -> Vec<Vec<Value>> {
+pub(crate) fn lean_results(inputs: &[Value]) -> Vec<Vec<Value>> {
     let output = run_lean(&json!({"histories": inputs}));
     assert!(
         output.status.success(),
@@ -364,22 +373,52 @@ fn arrival_order(h: &History, mut pick: impl FnMut(usize) -> usize) -> Vec<usize
     order
 }
 
-fn received_prefixes(orders: &[Vec<usize>]) -> Vec<Vec<usize>> {
+pub(crate) fn received_prefixes(orders: &[Vec<usize>]) -> Vec<Vec<usize>> {
     orders
         .iter()
         .flat_map(|order| (0..=order.len()).map(|n| order[..n].to_vec()))
         .collect()
 }
 
-fn compare_arrivals(h: &History, orders: &[Vec<usize>], actual: &[Value], context: &Value) {
+pub(crate) fn publication_times(
+    h: &History,
+    stored: &[u64],
+) -> std::collections::BTreeMap<coven_format::value::EntryId, std::time::SystemTime> {
+    assert_eq!(h.entries.len(), stored.len());
+    h.entries
+        .iter()
+        .zip(stored)
+        .map(|(e, day)| {
+            (
+                e.position,
+                std::time::UNIX_EPOCH + std::time::Duration::from_secs(day * 86400),
+            )
+        })
+        .collect()
+}
+
+pub(crate) fn compare_arrivals(
+    h: &History,
+    orders: &[Vec<usize>],
+    actual: &[Value],
+    context: &Value,
+) {
+    let stored: Vec<_> = context["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["stored"].as_u64().unwrap())
+        .collect();
+    let publications = publication_times(h, &stored);
     assert_eq!(actual.len(), orders.len() * (h.entries.len() + 1));
     for (order, results) in orders.iter().zip(actual.chunks_exact(h.entries.len() + 1)) {
         let mut log = StoreLog::default();
         assert_eq!(results[0], projected(h, &log.replay));
         for (n, &i) in order.iter().enumerate() {
             let entries: Vec<_> = order[..=n].iter().map(|&j| h.entries[j].clone()).collect();
-            let result = replay(&entries);
-            let (checked, incremental) = replay_entry(&log, h.entries[i].clone());
+            let result = crate::replay(&entries, &publications);
+            let (checked, incremental) =
+                crate::replay_entry(&log, h.entries[i].clone(), &publications);
             assert_eq!(
                 incremental, result,
                 "cached replay, order {order:?}, prefix {n}"
@@ -393,7 +432,7 @@ fn compare_arrivals(h: &History, orders: &[Vec<usize>], actual: &[Value], contex
             log.entries.push(checked);
             log.replay = incremental;
         }
-        assert_eq!(log.replay, replay(&h.entries));
+        assert_eq!(log.replay, crate::replay(&h.entries, &publications));
     }
 }
 
@@ -434,7 +473,7 @@ fn lean_differential_generated() {
     }
 }
 
-fn orders(h: &History) -> Vec<Vec<usize>> {
+pub(crate) fn orders(h: &History) -> Vec<Vec<usize>> {
     vec![arrival_order(h, |_| 0), arrival_order(h, |n| n - 1)]
 }
 
@@ -568,24 +607,6 @@ fn lean_differential_checked_examples() {
     }
 }
 
-// Each discrepancy asserts the complete model result, the complete Rust
-// projection, and the Rust-only reason. No arbitrary mismatch is accepted.
-fn counterexample(
-    h: &History,
-    stored: &[u64],
-    received: Vec<usize>,
-    expected_rust: Value,
-    expected_lean: Value,
-) {
-    let entries: Vec<_> = received.iter().map(|&i| h.entries[i].clone()).collect();
-    let rust = projected(h, &replay(&entries));
-    let query = input(h, stored, &[received]);
-    let actual = lean_results(&[query]);
-    assert_eq!(rust, expected_rust);
-    assert_eq!(actual, vec![vec![expected_lean.clone()]]);
-    assert_ne!(rust, expected_lean);
-}
-
 fn expected(
     members: &[[u64; 2]],
     access_members: &[u64],
@@ -599,7 +620,7 @@ fn expected(
     })
     .unwrap();
     let access: Vec<_> = access_members.iter().map(|m| json!([m, access])).collect();
-    json!({"created":true,"members":members,"access":access,"devices":devices,
+    json!({"landed_too_late":[],"created":true,"members":members,"access":access,"devices":devices,
         "circles":circles,"versions":[],"resets":[],"kept":kept,"dropped":dropped,"circle_causes":[]})
 }
 
@@ -622,106 +643,6 @@ fn lean_differential_circle_replay() {
         let input = input(&h, &sequential_times(&h), &received_prefixes(&orders));
         let actual = lean_results(std::slice::from_ref(&input));
         compare_arrivals(&h, &orders, &actual[0], &input);
-    }
-}
-
-#[test]
-#[ignore = "requires COVEN_STORELOG_LEAN, supplied by scripts/check.sh"]
-fn lean_differential_storage_admission() {
-    // Earlier author timestamp, later storage arrival. The unread witness is
-    // outside [0, 1], so admission must inspect the complete storage history.
-    let mut h = History::new();
-    h.push(
-        0,
-        1,
-        &[0],
-        StoreChange::Reset {
-            snapshot: snapshot(10, Audience::Store),
-        },
-    );
-    h.push(
-        0,
-        2,
-        &[0],
-        StoreChange::Reset {
-            snapshot: snapshot(20, Audience::Store),
-        },
-    );
-    let subsets = vec![
-        vec![],
-        vec![0],
-        vec![0, 1],
-        vec![0, 2],
-        vec![0, 1, 2],
-        vec![2, 0, 1],
-    ];
-    let mut rust = expected(&[[0, 0]], &[0], &[[0, 0]], json!([]), &[0, 1], &[]);
-    rust["resets"] = json!([[0, 10]]);
-    for (landing, too_late) in [(1, false), (31, false), (32, true)] {
-        let stored = [0, landing, 1];
-        let results = lean_results(&[input(&h, &stored, &subsets)]);
-        for (subset, actual) in subsets.iter().zip(&results[0]) {
-            let entries: Vec<_> = subset.iter().map(|&i| h.entries[i].clone()).collect();
-            if !too_late || !subset.contains(&1) {
-                assert_eq!(*actual, projected(&h, &replay(&entries)));
-            } else {
-                let mut expected = expected(&[[0, 0]], &[0], &[[0, 0]], json!([]), &[0], &[1]);
-                if subset.contains(&2) {
-                    expected["kept"] = json!([0, 2]);
-                    expected["resets"] = json!([[0, 20]]);
-                }
-                assert_eq!(*actual, expected);
-                assert_ne!(*actual, projected(&h, &replay(&entries)));
-            }
-        }
-    }
-    let late = expected(&[[0, 0]], &[0], &[[0, 0]], json!([]), &[0], &[1]);
-    counterexample(&h, &[0, 32, 1], vec![0, 1], rust, late);
-
-    // A rejected outsider entry is still a storage-time witness. Excluding
-    // the late addition must also exclude it from a later author's view.
-    let mut authority = History::new();
-    authority.push(0, 1, &[0], add(1, MemberRole::Member));
-    authority.push(4, 2, &[0], rotation(Audience::Store, 21));
-    authority.push(1, 3, &[0, 1, 2], device(3));
-    counterexample(
-        &authority,
-        &[0, 32, 1, 32],
-        vec![0, 1, 2, 3],
-        expected(
-            &[[0, 0], [1, 1]],
-            &[0, 1],
-            &[[0, 0], [3, 1]],
-            json!([]),
-            &[0, 1, 3],
-            &[2],
-        ),
-        expected(&[[0, 0]], &[0], &[[0, 0]], json!([]), &[0], &[1, 2, 3]),
-    );
-    assert_eq!(
-        replay(&authority.entries).entries[&authority.entries[2].position],
-        EntryOutcome::Dropped(DropReason::NotAllowed)
-    );
-
-    // HorizonExamples.currentTied: equal storage times stay equal, and the
-    // day-40 reset drops for its landing; Rust drops it for a concurrent reset.
-    let mut tied = History::new();
-    for i in 1..=3 {
-        tied.push(
-            0,
-            i,
-            &[0],
-            StoreChange::Reset {
-                snapshot: snapshot(i, Audience::Store),
-            },
-        );
-    }
-    let subsets = vec![vec![0, 1, 2], vec![0, 1, 2, 3]];
-    let results = lean_results(&[input(&tied, &[0, 1, 1, 40], &subsets)]);
-    for (subset, result) in subsets.iter().zip(&results[0]) {
-        let entries: Vec<_> = subset.iter().map(|&i| tied.entries[i].clone()).collect();
-        assert_eq!(*result, projected(&tied, &replay(&entries)));
-        assert_eq!(result["kept"], json!([0, 1]));
     }
 }
 
@@ -863,7 +784,7 @@ async fn cached_author_views_survive_reopening_and_a_deletions_reversal() {
         let previous = log.entries.clone();
         let (entry, result) = replay_entry(&log, h.entries[i].clone());
         database
-            .apply_store_log(entry, result.clone())
+            .apply_store_log::<crate::PendingRecord>(entry, result.clone())
             .await
             .unwrap();
         log = database.store_log().await.unwrap();
@@ -914,7 +835,7 @@ async fn every_author_view_check_is_durable_and_reused_after_reopening() {
         let (checked, result) = replay_entry(&log, entry.clone());
         assert_eq!(result, replay(&h.entries[..=index]));
         database
-            .apply_store_log(checked.clone(), result.clone())
+            .apply_store_log::<crate::PendingRecord>(checked.clone(), result.clone())
             .await
             .unwrap();
         log.entries.push(checked);

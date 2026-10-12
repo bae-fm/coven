@@ -267,14 +267,14 @@ proofs() {
 
     if proof_selected storelog || crate_selected coven-sync; then
         runner=$(runner storelog storelogRunner)
-        step "Rust / Lean CurrentReplay: agreement and policy counterexamples"
+        step "Rust / Lean CurrentReplay agreement"
         local storelog_tests test
         storelog_tests=$(cargo test -p coven-sync --all-features lean_differential -- --list)
         for test in \
             tests::lean_differential_generated \
             tests::lean_differential_checked_examples \
             tests::lean_differential_circle_replay \
-            tests::lean_differential_storage_admission \
+            replay::landing::tests::lean_differential_storage_admission \
             tests::lean_differential_rejects_invalid_inputs; do
             if ! printf '%s\n' "$storelog_tests" | grep -qxF "$test: test"; then
                 echo "the Rust test binary is missing $test" >&2

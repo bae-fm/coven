@@ -83,6 +83,7 @@ pub(crate) enum Target {
 #[derive(Serialize, Deserialize)]
 #[serde(remote = "coven_database::DropReason")]
 pub(crate) enum Drop {
+    LandedTooLate,
     BeatenBy(#[serde(with = "entry")] coven_format::value::EntryId),
     TargetGone(#[serde(with = "Target")] coven_database::EntryTarget),
     NoAdminLeft,

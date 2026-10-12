@@ -374,7 +374,7 @@ an explicit injectivity hypothesis, not a proof of SHA-256 security.
 - Correspondence between these Lean functions and Rust is not proved.
   `scripts/check.sh` builds `storelogRunner` and runs Rust's generated
   differential test against `CurrentReplay.resolve` and `circleCause`, comparing
-  state, kept entries, dropped entries and deleted-circle causes. State includes
+  state, kept entries, dropped entries, permanent late verdicts and deleted-circle causes. State includes
   the current access of active and removed members; generated histories include
   access updates and repeated access values.
   Arbitrary generated actions read the complete past; concurrent branches cover
@@ -383,12 +383,14 @@ an explicit injectivity hypothesis, not a proof of SHA-256 security.
   audience's selected versions and snapshots; generated histories also cover
   different versions of one audience,
   equal versions of different audiences, and circle deletions against raises.
-- Rust retains each applied entry's author-view check, observed device owner,
+- Rust retains each applied entry's first publication time and permanent late
+  verdict. Entries admitted by storage time retain their author-view check, observed device owner,
   and each removal's affected circles and sole-member classification with its
   immutable bytes. The recorded past is closed before application and never
   changes, so reusing these facts is the
   same check as rebuilding that view. The complete received set still settles
-  with fresh dropped marks on every arrival; a previous result is reused as
+  with fresh replay drops on every arrival, preserving late exclusions even in
+  author views; a previous result is reused as
   the new entry's author view only when that entry has read the entire set.
   The differential test compares both batch and incremental Rust replay with
   Lean, and the Rust examples compare every causal arrival order through both
@@ -412,15 +414,16 @@ an explicit injectivity hypothesis, not a proof of SHA-256 security.
   agree in both timestamp orders, as do contradictory membership additions and
   removals. Duration units are days; generated landings include ties and
   remain within the 30-day window. Separate cases exercise exactly 30 days,
-  31 days, and witnesses outside the received set.
+  31 days, tied publication times, and dropped witnesses outside the received set.
+  Both Rust replay paths compare admission against the entire supplied storage history,
+  including implicit earlier entries on the author's own device.
 - Rust uses C11's contradiction predicate, five priority tiers and finishing of
   collectively empty circles. Agreement cases cover concurrent refilling, tier
   boundaries, latest kept removal causes (including unchanged removals), dropped
   deletion restoration, and a kept deletion whose circle creation dropped.
-  Missing storage-time admission retains exact counterexamples for unread
-  late-drop witnesses. Those compare complete expected states and fates on both
-  sides; a passing check does not claim agreement on storage-time admission.
-- Drop reasons, retained device names and public keys, cryptographic bytes,
+  Storage-time admission agrees with `Finality` through `CurrentReplay`, including
+  late additions excluded from the author views of their recipients' later entries.
+- Other drop reasons, retained device names and public keys, cryptographic bytes,
   and codecs have separate Rust assertions. The model compares active
   membership, retained access, audience boundaries and entry fates. Replacement
   registrations are outside `CurrentReplay.Action`; the adapter rejects them
@@ -721,8 +724,8 @@ queues or physical deletion. The fresh-introduction sealing exception and
 identical attempted retries are outside this first-attempt selection model.
 Copies made after the listing remain §11's accepted residual window. All
 named current-policy, key and example results are audited in `Axioms.lean`;
-Rust correspondence is checked by the current-policy differential and explicit
-counterexamples described in C9; this replay adapter does not test key selection
+Rust correspondence is checked by the current-policy differential
+described in C9; this replay adapter does not test key selection
 or cryptographic operations.
 
 ### C13 Stable members and replaceable keys — checked proposal

@@ -168,6 +168,11 @@ impl StoreLogSync {
         if let Some(damaged) = damages.into_iter().next() {
             return Err(damaged.into());
         }
+        if let Some(coven_database::EntryOutcome::Dropped(reason)) =
+            local.log.replay.entries.get(&id)
+        {
+            return Err(SyncError::Rejected(reason.clone()));
+        }
         Ok(id)
     }
 
@@ -205,6 +210,7 @@ impl StoreLogSync {
             .ok_or(SyncError::NoStorage)?
             .list(&ObjectPrefix::store_logs(self.directory.id()))
             .await?;
+        let publications = crate::store_log_landing::publication_times(&local.log, &paths)?;
         let mut entries = BTreeMap::new();
         for stored in paths {
             let (device, number) = stored.path.store_log_position().ok_or(
@@ -302,8 +308,15 @@ impl StoreLogSync {
                 };
                 match object::ready(&local.log, &entry, local.store) {
                     Ok(true) => {
-                        self.apply(&mut local, entry, &member, &mut ring, &mut damages)
-                            .await?
+                        self.apply(
+                            &mut local,
+                            entry,
+                            &publications,
+                            &member,
+                            &mut ring,
+                            &mut damages,
+                        )
+                        .await?
                     }
                     Ok(false) => continue,
                     Err(failure) => {
@@ -477,7 +490,16 @@ impl StoreLogSync {
                 &bytes,
             )
             .await?;
-            self.apply(local, upload.entry, member, ring, damages)
+            // Observe all landing witnesses after publication, before retaining
+            // this entry's author-view checks.
+            let publications = crate::store_log_landing::observe_publication(
+                self.directory.id(),
+                self.storage.as_deref(),
+                &local.log,
+                upload.entry.position,
+            )
+            .await?;
+            self.apply(local, upload.entry, &publications, member, ring, damages)
                 .await?;
         }
         Ok(())
@@ -487,11 +509,12 @@ impl StoreLogSync {
         &self,
         local: &mut LocalStoreLog,
         entry: StoreLogEntry,
+        publications: &BTreeMap<EntryId, std::time::SystemTime>,
         member: &MemberKeys,
         ring: &mut Option<StoreKeyring>,
         damages: &mut Vec<DamagedObject>,
     ) -> Result<(), SyncError> {
-        let (entry, replay) = crate::replay_entry(&local.log, entry);
+        let (entry, replay) = crate::replay_entry(&local.log, entry, publications);
         let mut operations = self
             .removal_work(&local.log, &entry, &replay, member)
             .await?;
@@ -550,7 +573,12 @@ impl StoreLogSync {
             }
         }
         self.database
-            .apply_store_log_operations(entry.clone(), replay.clone(), operations, updates)
+            .apply_store_log_operations::<crate::PendingRecord>(
+                entry.clone(),
+                replay.clone(),
+                operations,
+                updates,
+            )
             .await?;
         local.log.entries.push(entry);
         local.log.entries.sort_by_key(|e| e.entry.timestamp);

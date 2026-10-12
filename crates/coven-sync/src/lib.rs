@@ -21,6 +21,7 @@ mod object_author;
 mod object_range;
 mod posted_positions;
 mod store_log_keys;
+mod store_log_landing;
 mod store_log_object;
 mod store_log_sync;
 pub use coven_database::{DropReason, EntryTarget};

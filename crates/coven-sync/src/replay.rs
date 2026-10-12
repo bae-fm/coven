@@ -1,6 +1,7 @@
 //! Appendix C: `authorViews`, `scan`, and `settle`.
 
 use std::collections::BTreeMap;
+use std::time::SystemTime;
 
 use coven_database::{
     DropReason, EntryOutcome, ReplayEntry, StoreLog, StoreLogCheck, StoreLogReplay, StoreLogState,
@@ -9,6 +10,10 @@ use coven_format::{store_log::StoreLogEntry, value::EntryId};
 use coven_foundation::id_source::DeviceId;
 
 use crate::{conflicts, effects};
+
+#[path = "replay_landing.rs"]
+mod landing;
+use landing::landed_too_late;
 
 #[path = "replay_circles.rs"]
 pub(crate) mod circles;
@@ -25,11 +30,20 @@ pub(crate) mod circles;
 /// dropped marks, not errors or partial state. Circle-deleting removals use the
 /// author's view; collectively empty circles finish after replay. None of those
 /// facts can be established by decoding one store-log frame.
-pub fn replay(entries: &[StoreLogEntry]) -> StoreLogReplay {
+/// `publications` includes every stored entry, even entries outside this received
+/// set and entries whose replay drops. Complete the storage scan before calling.
+pub fn replay(
+    entries: &[StoreLogEntry],
+    publications: &BTreeMap<EntryId, SystemTime>,
+) -> StoreLogReplay {
     let mut entries: Vec<_> = entries.iter().collect();
     entries.sort_by_key(|entry| entry.timestamp);
     let mut views = Vec::with_capacity(entries.len());
     for (index, entry) in entries.iter().enumerate() {
+        if landed_too_late(entry, publications) {
+            views.push(StoreLogCheck::LandedTooLate);
+            continue;
+        }
         let past = (0..index)
             .filter(|&prior| had_read(entry, entries[prior]))
             .collect::<Vec<_>>();
@@ -45,8 +59,14 @@ pub fn replay(entries: &[StoreLogEntry]) -> StoreLogReplay {
 /// must be new and have its entire recorded past in that log. The returned entry
 /// and the whole result for the previous entries plus this entry are passed
 /// together to [`coven_database::Database::apply_store_log`]. This function is pure;
-/// past checks never change, and kept/dropped marks are recomputed from scratch.
-pub fn replay_entry(log: &StoreLog, entry: StoreLogEntry) -> (ReplayEntry, StoreLogReplay) {
+/// past checks never change; replay recomputes all other kept/dropped marks.
+/// `publications` contains the complete stored history through this entry's
+/// landing, including dropped entries and writers not yet applied in `log`.
+pub fn replay_entry(
+    log: &StoreLog,
+    entry: StoreLogEntry,
+    publications: &BTreeMap<EntryId, SystemTime>,
+) -> (ReplayEntry, StoreLogReplay) {
     let mut prior: Vec<_> = log.entries.iter().collect();
     prior.sort_by_key(|applied| applied.entry.timestamp);
     let mut entries: Vec<_> = prior.iter().map(|applied| &applied.entry).collect();
@@ -54,7 +74,9 @@ pub fn replay_entry(log: &StoreLog, entry: StoreLogEntry) -> (ReplayEntry, Store
     let past: Vec<_> = (0..entries.len())
         .filter(|&i| had_read(&entry, entries[i]))
         .collect();
-    let check = if past.len() == entries.len() {
+    let check = if landed_too_late(&entry, publications) {
+        StoreLogCheck::LandedTooLate
+    } else if past.len() == entries.len() {
         effects::check(&log.replay.state, &entry)
     } else {
         effects::check(&settle(&entries, &views, &past).state, &entry)
@@ -63,7 +85,15 @@ pub fn replay_entry(log: &StoreLog, entry: StoreLogEntry) -> (ReplayEntry, Store
     entries.insert(index, &entry);
     views.insert(index, check.clone());
     let result = settle(&entries, &views, &(0..entries.len()).collect::<Vec<_>>());
-    (ReplayEntry { entry, check }, result)
+    let stored_at = publications[&entry.position];
+    (
+        ReplayEntry {
+            entry,
+            stored_at,
+            check,
+        },
+        result,
+    )
 }
 
 pub(crate) fn had_read(entry: &StoreLogEntry, prior: &StoreLogEntry) -> bool {
@@ -100,7 +130,13 @@ fn settle(
     views: &[StoreLogCheck],
     selected: &[usize],
 ) -> StoreLogReplay {
-    let mut dropped = BTreeMap::<EntryId, DropReason>::new();
+    let mut dropped: BTreeMap<_, _> = selected
+        .iter()
+        .filter_map(|&i| {
+            (views[i] == StoreLogCheck::LandedTooLate)
+                .then_some((entries[i].position, DropReason::LandedTooLate))
+        })
+        .collect();
     // Each restart drops at least one kept entry. Exhausting this bound is an
     // implementation defect, never a reason to publish an unfinished replay.
     for _ in 0..=selected.len() {

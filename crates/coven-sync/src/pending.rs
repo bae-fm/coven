@@ -227,7 +227,7 @@ pub enum Retry {
 }
 impl PendingRecord {
     /// Derive retry policy from the reason and its subject. A dropped entry or
-    /// write is final, but an operation whose attempt replay dropped runs again
+    /// write is recomputed by replay; an operation whose attempt replay dropped runs again
     /// on an explicit retry, validating against the current replay (§18).
     pub fn retry(&self) -> Retry {
         match (&self.subject, &self.reason) {
@@ -263,6 +263,13 @@ impl PendingReason {
 }
 
 impl PendingValue for PendingRecord {
+    fn dropped_entry(entry: EntryId, reason: DropReason) -> Self {
+        Self {
+            subject: PendingSubject::Entry(entry),
+            reason: PendingReason::Dropped(reason),
+            reported_by: entry.device,
+        }
+    }
     type Subject = PendingSubject;
     fn subject(&self) -> &PendingSubject {
         &self.subject

@@ -248,10 +248,18 @@ impl StoreLogSync {
                 }
                 n if n == data.entry_step_number(3) => {
                     let mut ring = self.store_keys.read()?;
+                    let publications = crate::store_log_landing::observe_publication(
+                        self.directory.id(),
+                        self.storage.as_deref(),
+                        &local.log,
+                        entry.position,
+                    )
+                    .await?;
                     match self
                         .apply(
                             &mut local,
                             entry.clone(),
+                            &publications,
                             &member,
                             &mut ring,
                             &mut Vec::new(),
@@ -283,7 +291,9 @@ impl StoreLogSync {
                     .advance_operation(data.update(&current, data.entry_step_number(5))?)
                     .await?
             }
-            Some(EntryOutcome::Dropped(_)) if matches!(&data, Data::Entry(work) if matches!(work.intent, Intent::Reset { .. })) =>
+            Some(EntryOutcome::Dropped(reason))
+                if *reason != coven_database::DropReason::LandedTooLate
+                    && matches!(&data, Data::Entry(work) if matches!(work.intent, Intent::Reset { .. })) =>
             {
                 // A competing reset settles this request. Reauthoring it after
                 // reading the winner would override §19.3's timestamp choice.
