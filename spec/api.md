@@ -31,8 +31,18 @@ impl From<Vec<rusqlite::types::Value>> for RowKey { /* any key width */ }
 /// One install of the app, by its 64-bit device id (§10).
 pub struct DeviceId(/* private */);
 
-/// A member, by the public half of their Ed25519 key pair (§11.1).
-pub struct MemberId(/* private */);
+/// A member's random stable UUID, independent of their keys (§9).
+pub struct MemberId(pub Uuid);
+
+/// A validated Ed25519 public key; invalid and weak points are refused.
+pub struct SigningKey(/* private */);
+
+/// An X25519 public key (§11.1).
+pub struct SealingKey(/* private */);
+
+/// The public pair from D2, re-exported without duplicating its type:
+/// `signing: SigningKey`, `sealing: SealingKey`.
+pub use coven_format::MemberKeys as MemberPublicKeys;
 
 /// One write: the device that made it and its number in that device's log (§6).
 pub struct WriteId {
@@ -76,7 +86,8 @@ pub enum Audience {
 - *Key custody* is where this device keeps the store keys and circle keys
   it has opened ([§11](coven.md#11-keys)): every key it has used, so it reads
   writes made under older ones.
-- *Identity custody* is where this device keeps its member's two key pairs
+- *Identity custody* keeps the stable member id and held private pairs,
+  including historical credentials and a pending replacement candidate
   ([§11.1](coven.md#111-cryptography)).
 - The app's `CloudKitOps` maps paths to stable record names in the configured
   container, owner and zone; all bytes it receives are encrypted.
@@ -168,6 +179,11 @@ impl Passphrase {
 
 /// The member's Ed25519 and X25519 pairs, erased when dropped (§11.1).
 pub struct MemberKeys { /* private fields */ }
+
+/// Stable member id and held private pairs, including historical credentials
+/// and a durable replacement candidate. Replay selects current authority (§11).
+/// Private material is erased when dropped.
+pub struct MemberIdentity { /* private fields */ }
 
 /// Every opened store and circle key, including older keys (§11, §14.3).
 pub struct StoreKeyring { /* private fields */ }
@@ -361,6 +377,9 @@ pub enum DbError {
     NotInCircle(CircleId),
     /// A required reset, schema or skipped-history reload has not committed.
     AudienceReloading(Audience),
+    /// Self-replacement has paused app writes while queued objects settle
+    /// and the new binding and custody are installed (§10, E9).
+    MemberKeysChanging,
     /// An inserted row's independent key holds no UUID (§8.5).
     KeyNotUuid { table: String, key: RowKey },
     /// A downloaded write fails the merge's checks, such as a timestamp no
@@ -662,7 +681,7 @@ pub enum CryptoError {
     /// The X25519 public key has low order.
     WeakSealingKey,
     /// The Ed25519 public key is invalid or weak.
-    InvalidMemberId,
+    InvalidSigningKey,
     /// The member's signature did not verify.
     Signature,
     /// Authenticated key material had the wrong shape.
