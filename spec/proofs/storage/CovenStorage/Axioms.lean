@@ -124,3 +124,13 @@ import CovenStorage
 #print axioms CovenStorage.RowAuthorship.Examples.merged_cells_need_original
 #print axioms CovenStorage.RowAuthorship.Examples.one_row_proof_required
 #print axioms CovenStorage.RowAuthorship.Examples.signature_security_allows_two_bodies
+#print axioms CovenStorage.RowAuthorship.leaves_per_change
+#print axioms CovenStorage.RowAuthorship.cell_complete
+#print axioms CovenStorage.RowAuthorship.creation_complete
+#print axioms CovenStorage.RowAuthorship.overwritten_not_opened
+#print axioms CovenStorage.RowAuthorship.openAt_spec
+#print axioms CovenStorage.RowAuthorship.every_leaf_openable
+#print axioms CovenStorage.RowAuthorship.per_cell_overhead
+#print axioms CovenStorage.RowAuthorship.Examples.overwritten_value_needs_no_opening
+#print axioms CovenStorage.RowAuthorship.Examples.creation_without_initial_values
+#print axioms CovenStorage.RowAuthorship.Examples.kind_bound

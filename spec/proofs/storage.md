@@ -354,8 +354,8 @@ require the [other models' hypotheses](../coven.md#3-guarantees).
 
 `RowAuthorship` is a proposal for the owner-table decision, without normative
 spec or format edits. It models one audience part of a contributing write:
-a nonempty tree of its original row changes, verification of that part's root
-in the signed header, and a snapshot multiproof. The decided header lists one
+a nonempty tree of its original cell and operation leaves, verification of
+that part's root in the signed header, and a snapshot multiproof. The decided header lists one
 keyed Merkle root per part. `Hashing` is supplied for a fixed audience-key
 context; `Signatures.verifies` abstracts header verification and selection of
 that part's authenticated root. Each readable part instantiates the argument.
@@ -386,54 +386,72 @@ result with signature verification. `owned_row_true_author` requires an
 opened creation leaf for the claimed row identity, rather than trusting a
 creator field or an opaque hash. It proves the claimed member is that
 creating write's author. `cell_true_author` checks a surviving cell against
-its original writer's opened change and exact column/value projection.
+its original writer's opened cell leaf, binding the exact row, column, value,
+generation and insert/update kind.
 The caller must apply these checks to every owned row and required setter.
 Selecting the canonical creation for competing insertions of one logical key
 uses the merge admission rule described in B18; authenticating
 one creation does not prove it was the first or winning creation.
 
-**Completeness and hash minimality are proved for original leaves.**
-`prune` reveals requested original changes and replaces each maximal absent
-subtree with one hash. `prune_root` reconstructs the exact signed root.
-`multiproof_complete` gives exactly the requested leaves;
-`all_present_checkable` verifies all of them with one shared proof and the
-original signature. “Present” here means that original change is available
-for opening, which can include retained creator or old-setter evidence as
-well as displayed cells.
+**Each cell change is a separate leaf.** `Change` has distinct creation,
+cell and deletion constructors. `insertLeaves` in `CellProof.lean` expands an
+insert to one creation marker plus one leaf per written column/value pair.
+Updates have only cell leaves;
+deletes have one deletion marker. `leaves_per_change` proves those counts.
+Thus a part has `L = C + I + D` leaves for C written cells, I inserted rows
+and D deleted rows. The row key includes table and audience; generation
+and change kind are inside the authenticated leaf. Creation markers contain
+no scalar payload, and a delete cannot masquerade as a cell or creation.
+Canonical column ordering, uniqueness of columns and parity validation remain
+format/admission obligations.
 
-`multiproof_minimal` proves no proof in the same fixed-tree format, revealing
-exactly that set of leaves, uses fewer hashes. `hashes_le_absent` bounds it by
-one hash per absent original row change. `untouched_no_hashes` gives zero
-when every original leaf is available. `absent_subtree_one_hash` compresses a
-whole missing subtree to one digest. Checked examples distinguish two
-adjacent leaves forming a subtree (one hash) from two adjacent leaves crossing
-the root's split (two hashes). Thus not every contiguous range takes one hash.
-The bound excludes signatures, identities, tree positions, framing and
-retained original payloads; it is not an information-theoretic lower bound
-against other encodings. A write contributing no needed leaf can be omitted
-from this snapshot rather than represented by a root-only proof.
+**Completeness and hash minimality hold at cell granularity.** `prune` reveals
+requested leaves and replaces each maximal absent subtree by one hash.
+`prune_root` reconstructs the signed root; `multiproof_complete` gives exactly
+the requested leaves, and `all_present_checkable` verifies them with the
+original signature. These generic theorems apply to the new `Change` type.
+`cell_complete` and `creation_complete` check the independent selection of
+current cells and permanent creator evidence. `overwritten_not_opened` proves
+that an unrequested old scalar is absent from the openings. Old values still
+needed by loss records or provenance are a separate retention obligation.
 
-**Final merged rows plus hashes only for absent rows are insufficient.**
-The checked `merged_cells_need_original` history has one row: a creation
-writes cells `(7, 8)`, then an edit changes the second cell, leaving `(7, 9)`.
-The first cell still needs the creation's authorship, but the final row is not
-that creation's leaf. There are zero absent rows of the creating write, so
-the advertised absent-row hashes add nothing. Hashing the final row fails
-verification. `one_row_proof_required` proves this for every changed original
-payload; an unchanged original verifies by `prune_root`. The literal Lean
-example checks the changed pair. A hash hiding the entire original leaf also
-cannot prove the creator-to-row association: it opens no row at all.
+`multiproof_minimal` proves that no proof in this fixed-tree format revealing
+exactly the same leaves has fewer hashes. `hashes_le_absent` bounds the proof
+by one digest per absent **leaf**, including overwritten cells and unneeded
+operation markers. `untouched_no_hashes` gives zero when all leaves are open.
+`absent_subtree_one_hash` replaces a missing subtree by one digest. Adjacent
+leaves crossing a tree split can need separate hashes; adjacency alone is
+insufficient. This is not a lower bound against other encodings or external
+dictionaries. A write contributing no needed leaf need not appear at all.
 
-The corrected reading used for the positive proofs retains complete original
-changes needed for creator/cell proofs, or requires a further authenticated
-cell-level proof format. The model implements the former as revealed leaves.
-It does not prove the latter format, nor a zero-extra-payload claim for the
-former. Creator evidence may be needed even after every creation value has
-been overwritten; changes contributing only losses or provenance can also
-need openings. This evidence is independent of dismissible loss records.
+**A surviving cell needs no overwritten sibling values.** The checked
+`overwritten_value_needs_no_opening` example uses creation values `(7, 8)`
+with only the first still needed. Its proof opens the creation marker and 7,
+hides 8 with one hash, and reconstructs the exact creation root.
+`creation_without_initial_values` retains only the marker after both cells
+are overwritten. `kind_bound` checks that changing the insert/update tag
+changes the root. The older `merged_cells_need_original` example remains a
+counterexample to row-sized leaves, not to this format.
 
-**Format boundaries remain explicit.** D5/D7 must define original-change
-retention, creation and setter identity, proof positions and malformed-proof
+**Per-cell authentication overhead is proved in tree levels.** `openAt`
+opens one position or rejects a malformed path. `openAt_spec` proves that it
+reveals only that leaf, reconstructs the root and uses exactly h sibling
+hashes for depth h. `every_leaf_openable` covers every leaf; `per_cell_overhead`
+gives **64 + 32h bytes** for an isolated proof using a 64-byte write signature
+and 32-byte hashes. For a format choosing a balanced tree with height
+`ceil(log2 L)`, that is at most `64 + 32 ceil(log2 L)` bytes. The proved bound
+uses actual height; no balancing algorithm is implemented here.
+
+The signature is shared per contributing write, and a multiproof shares
+sibling hashes, so this is not a charge of 64 bytes for every cell in a
+snapshot. With S contributing writes and H hidden subtrees, signature and
+hash material totals `64S + 32H` bytes. Positions, row/column identities,
+generation/kind tags, the current values and signed header/root-list framing
+are additional; their encoding is not fixed by this model. A creation marker
+is additional evidence per row, not an extra copy of its initial values.
+
+**Format boundaries remain explicit.** D5/D7 must define cell/creation/delete
+encoding, creation and setter identity, proof positions and malformed-proof
 rejection. D9/D11 must bind metadata and the ordered part-root list without
 weakening ciphertext/path authentication. The decided format stores 32 bytes
 per part, keys each root with its audience key to prevent outsiders testing

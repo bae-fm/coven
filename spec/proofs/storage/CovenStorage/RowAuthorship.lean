@@ -1,10 +1,10 @@
 import Std
 
-/-! One audience part's original row changes under its authenticated root.
+/-! One audience part's original cell, creation and deletion leaves under its authenticated root.
 The write signs a header containing that root; verification below selects
 this part's entry. Hashing is supplied for a fixed audience-key context.
 Hash and signature security are hypotheses, not new axioms. A leaf is an
-original change, never a merged SQL row. -/
+original cell or operation, never a merged SQL row. -/
 namespace CovenStorage.RowAuthorship
 
 inductive Tree (Row : Type) where
@@ -232,13 +232,18 @@ theorem absent_subtree_one_hash (h : Hashing Row Digest) (keep : Row → Bool)
     (t : Tree Row) (empty : visible keep t = false) :
     hashes (prune h keep t) = 1 := by rw [prune.eq_def]; simp [empty, hashes]
 
-/-- An original row change has its row identity and creation operation inside
-its signed leaf. `Payload` also includes generation, provenance and old/new
-columns in a concrete encoding. -/
-structure Change (Key Payload : Type) where
-  key : Key
-  creates : Bool
-  payload : Payload
+/-- Only inserts and updates set cells. Deletions have their own leaf. -/
+inductive CellKind where
+  | insert | update
+  deriving DecidableEq, Repr
+
+/-- `Key` includes table and audience. A cell payload is one column/value
+pair, not a row's old/new values. Generation and operation tags are signed.
+Creation remains openable after every inserted value has been overwritten. -/
+inductive Change (Key Payload : Type) where
+  | creation (key : Key) (generation : Nat)
+  | cell (key : Key) (generation : Nat) (kind : CellKind) (payload : Payload)
+  | deletion (key : Key) (generation : Nat)
   deriving DecidableEq, Repr
 
 /-- The caller cannot authenticate a creator using an opaque digest. It must
@@ -249,7 +254,7 @@ def AcceptsCreator {Key Payload Member WriteId Signature : Type}
     (key : Key) (member : Member) (write : WriteId) (signature : Signature)
     (proof : Proof (Change Key Payload) Digest) : Prop :=
   s.verifies member write (proofRoot h proof) signature ∧
-    ∃ change ∈ revealed proof, change.key = key ∧ change.creates = true
+    ∃ generation, Change.creation key generation ∈ revealed proof
 
 theorem owned_row_true_author {Key Payload Member WriteId Signature : Type}
     (h : Hashing (Change Key Payload) Digest)
@@ -258,26 +263,28 @@ theorem owned_row_true_author {Key Payload Member WriteId Signature : Type}
     (proof : Proof (Change Key Payload) Digest)
     (accepted : AcceptsCreator h s key member write signature proof) :
     member = s.author write ∧ ∃ original, s.signed write original ∧
-      ∃ change ∈ leaves original, change.key = key ∧ change.creates = true := by
-  obtain ⟨signed, change, present, keyEq, creates⟩ := accepted
+      ∃ generation, Change.creation key generation ∈ leaves original := by
+  obtain ⟨signed, generation, present⟩ := accepted
   obtain ⟨author, original, authored, authentic⟩ := snapshot_authorship h s member write signature proof signed
-  exact ⟨author, original, authored, change, authentic change present, keyEq, creates⟩
+  exact ⟨author, original, authored, generation, authentic _ present⟩
 
-/-- The exact cell payload also comes from the claimed writer's original
-change. Projection to a column/value may be any deterministic read function. -/
-theorem cell_true_author {Member WriteId Signature Cell Value : Type}
-    (h : Hashing Row Digest) (s : Signatures Member WriteId Row Digest Signature h)
-    (member : Member) (write : WriteId) (signature : Signature) (proof : Proof Row Digest)
-    (read : Row → Cell → Option Value) (row : Row) (cell : Cell) (value : Value)
+/-- An accepted cell binds its row, column, value, generation and change
+kind to the actual signing history. No other cell value is an input. -/
+theorem cell_true_author {Member WriteId Signature Key Column Value : Type}
+    (h : Hashing (Change Key (Column × Value)) Digest)
+    (s : Signatures Member WriteId (Change Key (Column × Value)) Digest Signature h)
+    (member : Member) (write : WriteId) (signature : Signature)
+    (proof : Proof (Change Key (Column × Value)) Digest)
+    (key : Key) (generation : Nat) (kind : CellKind) (column : Column) (value : Value)
     (signed : s.verifies member write (proofRoot h proof) signature)
-    (present : row ∈ revealed proof) (valueEq : read row cell = some value) :
+    (present : Change.cell key generation kind (column, value) ∈ revealed proof) :
     member = s.author write ∧ ∃ original, s.signed write original ∧
-      ∃ change ∈ leaves original, read change cell = some value := by
+      Change.cell key generation kind (column, value) ∈ leaves original := by
   obtain ⟨author, original, authored, authentic⟩ := snapshot_authorship h s member write signature proof signed
-  exact ⟨author, original, authored, row, authentic row present, valueEq⟩
+  exact ⟨author, original, authored, authentic _ present⟩
 
 /-- Every requested original leaf can be checked with the same multiproof
-and signature. No separate authentication path is needed for each row. -/
+and signature. No separate authentication path is needed for each cell. -/
 theorem all_present_checkable {Member WriteId Signature : Type}
     (h : Hashing Row Digest) (s : Signatures Member WriteId Row Digest Signature h)
     (member : Member) (write : WriteId) (signature : Signature) (keep : Row → Bool)
