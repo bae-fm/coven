@@ -2713,7 +2713,8 @@ Carol's tablet:
 ### 12.1 A person's new device
 
 - A person's new device needs their *restore code*, which holds:
-  - their member key, which gets it the store key ([§11](#11-keys));
+  - their stable member id and current private signing/sealing pair, which
+    gets it the store key ([§11](#11-keys));
   - the store's id and name;
   - the storage location only, never storage credentials.
 - On S3, the person keeps their access key separately, such as in a
@@ -2733,14 +2734,18 @@ Carol's tablet:
   asks coven to sign in to the person's own account first, through the builder's
   presenter. Restore and join use coven's held tokens. Restore codes never
   carry OAuth tokens.
-- The new device then adds itself to the store log, signing with the
-  member key ([§9](#9-members-and-roles)).
-  It catches up before reserving its entry and follows the same landing
+- The new device catches up and requires the code's id and public pair to
+  match an active member's current binding. An old code cannot bind its keys
+  back to that id: report `MemberKeysReplaced` and require current keys or
+  a new admin-approved replacement invite. It then adds itself to the store
+  log, signing with the current member key (§9), and follows the same landing
   rule as existing devices; finality does not depend on knowing it in advance.
 - The person writes the code down when they create or join a store, as
   part of setup.
 - On Apple platforms, coven writes the code to iCloud Keychain whenever it
-  changes, including when the person creates or joins a store. Changing an
+  changes, including when the person creates or joins a store or replaces
+  member keys. Member-key replacement refreshes private custody and the
+  written restore code; the app asks the person to keep the new code. Changing an
   S3 key updates the separately held credentials; it does not change the
   restore code or require the person to write it down again
   ([E9](api.md#e9-members-and-devices)).
@@ -2753,19 +2758,23 @@ Carol's tablet:
 - An admin adds a person with an *invite*, a code shown as a QR code,
   holding:
   - the store's id, name and location;
-  - the invite's id, a one-time *invite secret*, the initial store key id
+  - the invite's id, the chosen stable member id, a one-time *invite secret*, the initial store key id
     from the creation entry, the inviting writer's device id, and that
     writer's last published key-copy number when making the invite;
   - on S3, an access key the admin made for the new person in the
     provider's console and entered.
+- The admin fixes the member id before showing the invite. For a new person
+  coven generates a fresh id and the admin chooses a role. For recovery the
+  admin selects an existing active member; its role and circle memberships
+  are preserved. The requester cannot select a different replacement target.
 - E.g. Ana adds Carol, on Google Drive:
   1. Ana enters Carol's Google account email and picks her role; her phone
      shares the store's folder with that account and shows the invite.
   2. Carol's phone scans it, signs in to her own Google account, makes
      Carol's member keys, and writes a join request to storage, holding
-     her public key and her device's name.
+     the invite id, its chosen member id, both new public keys and her device's name.
   3. Ana's phone shows the request, and Ana approves it.
-  4. Ana's phone seals every store key to Carol's public key
+  4. Ana's phone seals every store key it holds to Carol's new sealing key
      ([§11](#11-keys)), then writes "add member Carol" to the store log.
      - Every key, so Carol reads a late write made under an older one.
   5. Carol's phone opens the store key, adds itself to the store log, and
@@ -2774,16 +2783,24 @@ Carol's tablet:
   - It is encrypted with a key derived from the invite secret, and signed
     with Carol's new member key.
   - Ana's device holds the secret too, so it opens and checks the request.
+    Verify with the supplied new signing key, require the member id to match
+    the invite, and validate both keys as fresh. Approval binds the exact
+    checked pair: Add member for a fresh id, Replace member keys for an
+    existing one. A changed request requires new approval.
   - The provider sees only an encrypted object under the invite's id.
 - The invite only lets a device ask; Ana's approval is what lets Carol in.
 - Only the device that made the invite holds its secret, so only it shows
   and approves the invite's requests.
 - Carol starts at the inviting writer's key-copy number plus one, GETting
   new copies whole under the shared backoff. Their clear prefixes let her
-  skip other recipients and audiences without opening their boxes. She
+  match both her member id and sealing key, skipping other credentials and
+  audiences without opening their boxes. She
   retains her progress and stops each attempt at the next-number miss.
   The approving device publishes her initial-key copy after the invite's
-  number and before the membership entry, even if the store has rotated.
+  number, plus its available historical store and authorized circle keys,
+  before the binding entry, even if the store has rotated. The initial key
+  is required; if unavailable approval waits. Each prerequisite copy names
+  the validated new sealing credential, even before its binding is current.
   No polling iteration scans every device's entry 1 while she waits.
   - Ana's invite names K1, her phone and copy 12. Copy 13 goes to Ben;
     Carol reads its prefix and keeps looking from 14. Ana approves with
@@ -2793,18 +2810,23 @@ Carol's tablet:
     from 1, reusing copies already retained. Copies before the invite still
     determine exposure; the polling position cannot certify that history.
 - Carol's phone learns the outcome from storage:
-  - her store key sealed to her, then the store log entry adding her:
-    she's in;
+  - her store key sealed to the exact new credential, then a kept binding
+    from the approving writer for her member id and both requested keys:
+    she can register her new device;
   - her request deleted with no key sealed to her: declined or expired.
   - It reads the store log again after observing a deleted request: approval
     may have happened after its preceding observation. First refresh the
     inviting writer's copy log through a miss after the deletion; the
     approval copy may also have raced the earlier probe. Sealed keys without an
-    effective membership entry keep it waiting; a dropped membership entry
-    reaches the app with its replay reason.
+    effective matching binding keep it waiting; a dropped addition or
+    replacement reaches the app with its replay reason. A losing replacement
+    is a rejected join even when copies exist and its target remains active.
+    Neither existing membership nor another writer's equal-payload winner
+    changes the fate of that approval. The invite already names its writer;
+    no requester-chosen author or target is accepted.
 - Before sending, Carol's phone keeps its new member keys and exact request
   bytes in its unpublished local directory, encrypted with the invite secret
-  and bound to the store and invite. Restarting with the same invite and
+  and bound to the store, invite and chosen member id. Restarting with the same invite and
   device name reuses them and the device id. These are not final key custody.
   - It records the publication attempt before issuing it. If the attempt's
     reply is lost and neither a request nor sealed keys exist on retry, it
@@ -2812,14 +2834,21 @@ Carol's tablet:
     invite the admin already declined. An admin can issue another invite.
   - Provider permission failures reach the app even when revocation followed
     decline or expiry; an unreadable request is not an absent request.
-- The entry adding Carol records how she reaches storage, her provider
+- The entry adding a new Carol records how she reaches storage, her provider
   account or the id of the S3 key made for her, so any admin can take it
   back later ([§13](#13-removing-members-and-devices)).
+- Rebinding an existing id changes no access record or device id. The new
+  installation registers its own fresh device after the binding is kept.
+  Any changed provider access is separate work under §13, with its own
+  recorded access entry; a key replacement never implies provider cut-off.
 - Once the request is approved or declined, or the invite expires, Ana's
   device deletes the request object.
 - Declining the request, or letting the invite expire after a day, takes
   back the storage access it granted; on S3, coven tells the admin to
   delete the key in the provider's console.
+  Replacement-invite cleanup revokes only that invite's new grants; it
+  cannot revoke the existing active member's retained access. Provider
+  shared-account and retained-grant checks still apply (§13).
   - A day is by the inviting device's clock, and the invite expires when
     that device is next online after it.
 
@@ -2827,8 +2856,12 @@ Carol's tablet:
 
 - An admin re-invites a person who lost every device and their restore
   code.
-  - They join with new member keys; their old identity stays a member
-    until an admin removes it, like any member.
+  - The invite selects their existing active member id and binds their new
+    keys to it after approval. Their role, circles and existing device ids
+    stay attached to that id. Old credentials are exposed (§11), and old-key
+    writes and entries obey their own landing windows without rescue (§10).
+  - A removed member cannot be restored by replacing keys. Adding a new
+    person instead uses a fresh id and the ordinary admission rules.
 - Losing every member's devices and restore codes loses the store for good,
   since everything is encrypted.
 
