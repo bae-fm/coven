@@ -183,14 +183,15 @@ are those of [§2](#2-threat-model); the write-ups state their additional limits
 - **Convergence:** every device ends up with the same data:
   - a write made after seeing another wins over it on every device
     ([merge: `write_after_read_wins`](proofs/merge.md#b6-proof-for-the-merged-state));
-  - no device sees a write before the writes its author had seen — the
-    [receive proofs](proofs/merge.md#b17-receive-order-progress-and-the-retirement-gap)
+  - no device consumes a write before the positions its author had read — the
+    [receive proofs](proofs/merge.md#b17-receive-order-progress-and-dropping-by-data)
     derive causal application from receive steps, distinguishing consumed
-    positions from retained effects. The checked retirement counterexamples
-    leave an open limit: the rule for writes that depend on a write excluded
-    by its author's retirement deadline is undecided. The
-    [queue verdict proofs](proofs/queue.md#what-is-proved) check discarded
-    inputs under resets and schema changes;
+    positions from retained effects. An otherwise eligible change whose
+    generation source or replaced setter was dropped is recorded as a frozen
+    loss of the original change (§8); its write's unrelated changes apply.
+    A directly dropped retirement write or reset-ignored part has no effects
+    or losses. The [queue verdict proofs](proofs/queue.md#what-is-proved)
+    connect the same per-change rule to schema conversion and row merge;
   - when a concurrent write replaces or deletes a value, that value is
     recorded, not silently dropped. Values computed by a breaking migration
     that lost to a concurrent one are replaced by the winner's (§17.1).
