@@ -2296,13 +2296,24 @@ Carol's tablet:
     publish later. A multipart session can last longer, but every subsequent
     request needs the gate again. This is a provider-duration assumption,
     not a claim that a client timeout cancels remote work.
-  - Once a kept retiring entry is final (§9), its kept status cannot change.
-    A catch-up started after that finality observes the retirement and stops
-    the old id. Earlier catch-ups permit sends for less than five further
-    minutes, and each request settles within one day. No publication can
-    occur at or after one day and five minutes after finality. Measure from
-    finality, not the entry's publication: replay can drop and restore the
-    retirement before it is final.
+  - Each request also requires the sending installation's signing credential
+    to be current in that completed catch-up. For a signed object its signer
+    must be current too, including a snapshot, positions or clock retry.
+    A write or entry retry must still use its fixed signing key; current
+    custody cannot re-sign an old object or change its recorded past to pass
+    this gate. Creation authenticates its supplied initial pair (§9), and a
+    join request authenticates its invite-bound candidate pair (§12). These
+    bootstrap exceptions grant no ordinary sending authority before a kept
+    binding; registering a new device requires that binding's current key.
+  - Once a retiring entry and its preceding prefix are final (§9), a
+    catch-up started after finality observes the retirement and refuses the
+    old device id or signing credential. Earlier catch-ups permit sends for
+    less than five further minutes, and each request settles within one day.
+    No such publication occurs at or after finality plus one day and five
+    minutes. Measure from finality, not the entry's publication: replay can
+    drop and restore the retirement before it is final. Key replacement
+    bounds old-credential publication; it does not end the member's device
+    logs. Devices using the new credentials continue those logs.
 - A stale copy resets as a new device using storage and saved custody.
   - Stop its local writes and transfers. Discard its database and pending
     local work; do not salvage or renumber waiting writes.
@@ -2373,8 +2384,9 @@ Carol's tablet:
   - Two live copies can pass the check together and send different bytes
     to one path. Content-bound nonces separate their encryption (§11.1);
     the byte check still resets the losing copy and discards its unsent edits.
-- Every write record is signed with the key of the member whose device
-  wrote it, so who wrote what is authentic.
+- Every write record is signed with the current signing key of its device's
+  stable owner in the replay of its `store_log_read`. The device path and
+  that recorded view supply the author and key; the write adds neither field.
 - This is about authenticity, not trust.
 - A write counts only if its author was a member, and its device one of
   theirs, in the store log the write had read ([§7.1](#71-causality)), so
@@ -2382,8 +2394,8 @@ Carol's tablet:
 - For every kept entry retiring a write's device, the write counts only if
   its `store_log_read` does not include that entry and storage published the
   complete write no more than 30 days after the entry's storage time.
-  Retirement is removal of the device, removal of its member, or replacement
-  of its id. Exactly 30 days is allowed. Ordinary authority, causality,
+  Device retirement is removal of the device, removal of its member, or
+  replacement of its id. Exactly 30 days is allowed. Ordinary authority, causality,
   schema and reset checks still apply.
   - Use first complete publication times, never authored timestamps or
     device clocks. Retries change neither bytes nor storage time (§4).
@@ -2425,6 +2437,37 @@ Carol's tablet:
     record, even if it carries no scalar values.
 - A device that reads its own removal, or its member's, stops syncing for
   good and tells the app ([E5](api.md#e5-storage-and-sync)).
+- Replacing member keys preserves the member and all device ids. A device
+  with the old credentials stops sending and reports `MemberKeysReplaced`;
+  it cannot publish queued old-key objects under the new key. Restoring with
+  the current code installs a new device (§12.1); it does not renumber or
+  rescue that old queue. A self-replacement first pauses local app writes
+  and confirms its queued writes and entries, then publishes the replacement.
+- A write signed with replaced keys must first pass the recorded-view
+  authentication above. For every unread kept Replace member keys entry
+  targeting its owner and installing a different signing key, the write
+  counts only if its first complete publication is no later than the entry's
+  storage time plus 30 days. Equality counts; an earlier publication already
+  meets that deadline. Check every such entry, including when the write used
+  keys from a losing replacement. A replacement already read does not retire
+  a later key current in that recorded view.
+  - An admitted reader never rescues an excluded write or entry, including
+    through implicit earlier own writes. The old-key write is consumed
+    without effects or losses; its author sees `Dropped(LandedTooLate)`.
+    An otherwise admitted row change using its data instead becomes a
+    per-change loss under `DataDependency.dependsOnDropped` (§8). Unrelated
+    changes in the same write remain eligible.
+  - Entry rejection stays permanent under §9's comparison with every unread
+    stored entry, kept or dropped. A write's read cannot rescue a late entry.
+  - Old-key window admission is final when one kept retiring replacement and
+    the complete preceding entry prefix through its storage time are final,
+    including tied storage times. Later replacements cannot reverse that
+    window verdict; schema, reset and other admission rules remain separate.
+    Until then, preserve original inputs and rebuild admission, source
+    verdicts, rows and losses atomically on a replacement decision change.
+  - This grace period admits qualifying old signatures. It is neither
+    immediate signature revocation nor a theft-recovery guarantee; provider
+    cut-off remains separate (§13).
 - Removing a device takes away its storage access, so nothing it writes
   after confirmed cut-off can reach other devices. Until then, readers
   enforce the admission and landing rules above (§13).
