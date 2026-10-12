@@ -312,6 +312,11 @@ fn dropbox_failure(value: &Value) -> Option<StorageFailure> {
     if let Some(summary) = value["error_summary"].as_str() {
         names.extend(summary.trim_end_matches('.').split('/'));
     }
+    // Dropbox reports its monthly data-transport quota as this AccessError.
+    // Other invalid-account-type cases still describe unavailable permissions.
+    let transport_limit = names.starts_with(&["invalid_account_type", "feature"])
+        || (value["error"][".tag"].as_str() == Some("invalid_account_type")
+            && value["error"]["invalid_account_type"][".tag"].as_str() == Some("feature"));
     tags(&value["error"], &mut names);
     tags(&value["failed"], &mut names);
     // Specific native failures take precedence over HTTP 409's many meanings.
@@ -322,6 +327,9 @@ fn dropbox_failure(value: &Value) -> Option<StorageFailure> {
         )
     }) {
         Some(StorageFailure::RateLimited)
+    } else if names.contains(&"missing_scope") {
+        // Refreshing the same authorization cannot add a required scope.
+        Some(StorageFailure::InvalidConfiguration)
     } else if names
         .iter()
         .any(|name| matches!(*name, "expired_access_token" | "invalid_access_token"))
@@ -330,11 +338,26 @@ fn dropbox_failure(value: &Value) -> Option<StorageFailure> {
     } else if names.iter().any(|name| {
         matches!(
             *name,
-            "no_permission" | "access_denied" | "not_a_member" | "invalid_member"
+            "no_permission"
+                | "no_write_permission"
+                | "access_denied"
+                | "not_a_member"
+                | "invalid_member"
+                | "user_suspended"
         )
     }) {
         Some(StorageFailure::PermissionDenied)
-    } else if names.contains(&"insufficient_space") {
+    } else if transport_limit
+        || names.iter().any(|name| {
+            matches!(
+                *name,
+                "insufficient_space"
+                    | "team_folder_insufficient_space"
+                    | "member_folder_insufficient_space"
+                    | "upload_traffic_limit_reached"
+            )
+        })
+    {
         Some(StorageFailure::QuotaExceeded)
     } else if names.contains(&"conflict") {
         Some(StorageFailure::AlreadyExists)

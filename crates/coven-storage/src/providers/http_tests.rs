@@ -145,6 +145,254 @@ fn dropbox_protocol_states_are_not_create_conflicts() {
 }
 
 #[test]
+fn dropbox_native_failures_in_tags_and_summary_prefixes() {
+    use serde_json::json;
+
+    let cases = [
+        (
+            409,
+            "path/no_write_permission",
+            json!({".tag":"path","path":{"reason":{".tag":"no_write_permission"},"upload_session_id":"session"}}),
+            StorageFailure::PermissionDenied,
+        ),
+        (
+            409,
+            "path/upload_traffic_limit_reached",
+            json!({".tag":"path","path":{".tag":"upload_traffic_limit_reached"}}),
+            StorageFailure::QuotaExceeded,
+        ),
+        (
+            409,
+            "path/team_folder_insufficient_space",
+            json!({".tag":"path","path":{".tag":"team_folder_insufficient_space"}}),
+            StorageFailure::QuotaExceeded,
+        ),
+        (
+            409,
+            "path/member_folder_insufficient_space",
+            json!({".tag":"path","path":{".tag":"member_folder_insufficient_space"}}),
+            StorageFailure::QuotaExceeded,
+        ),
+        (
+            409,
+            "path/insufficient_space",
+            json!({".tag":"path","path":{".tag":"insufficient_space"}}),
+            StorageFailure::QuotaExceeded,
+        ),
+        (
+            403,
+            "invalid_account_type/feature",
+            json!({".tag":"invalid_account_type","invalid_account_type":{".tag":"feature"}}),
+            StorageFailure::QuotaExceeded,
+        ),
+        (
+            403,
+            "invalid_account_type/endpoint",
+            json!({".tag":"invalid_account_type","invalid_account_type":{".tag":"endpoint"}}),
+            StorageFailure::PermissionDenied,
+        ),
+        (
+            401,
+            "user_suspended",
+            json!({".tag":"user_suspended"}),
+            StorageFailure::PermissionDenied,
+        ),
+        (
+            401,
+            "missing_scope",
+            json!({".tag":"missing_scope","required_scope":"files.content.write"}),
+            StorageFailure::InvalidConfiguration,
+        ),
+        (
+            401,
+            "expired_access_token",
+            json!({".tag":"expired_access_token"}),
+            StorageFailure::Authentication,
+        ),
+        (
+            401,
+            "invalid_access_token",
+            json!({".tag":"invalid_access_token"}),
+            StorageFailure::Authentication,
+        ),
+        (
+            409,
+            "rate_limit",
+            json!({".tag":"rate_limit"}),
+            StorageFailure::RateLimited,
+        ),
+        (
+            409,
+            "path/too_many_write_operations",
+            json!({".tag":"path","path":{".tag":"too_many_write_operations"}}),
+            StorageFailure::RateLimited,
+        ),
+        (
+            429,
+            "too_many_requests",
+            json!({"reason":{".tag":"too_many_requests"},"retry_after":37}),
+            StorageFailure::RateLimited,
+        ),
+    ];
+    for (status, summary, error, expected) in cases {
+        let mut bodies = vec![json!({"error":error})];
+        for suffix in ["", ".", "/...", "/detail/..."] {
+            bodies.push(json!({"error_summary":format!("{summary}{suffix}")}));
+        }
+        for body in bodies {
+            assert_eq!(
+                classify(CloudProvider::Dropbox, status, body.to_string().as_bytes()),
+                expected,
+                "HTTP {status}: {body}"
+            );
+        }
+    }
+}
+
+#[test]
+fn dropbox_category_precedence_preserves_specific_failures() {
+    use serde_json::json;
+
+    for (status, body, expected) in [
+        (
+            409,
+            json!({"error_summary":"path/conflict/file/...","error":{".tag":"path","path":{".tag":"no_write_permission"}}}),
+            StorageFailure::PermissionDenied,
+        ),
+        (
+            409,
+            json!({"error_summary":"path/conflict/file/...","error":{".tag":"path","path":{".tag":"team_folder_insufficient_space"}}}),
+            StorageFailure::QuotaExceeded,
+        ),
+        (
+            401,
+            json!({"error_summary":"expired_access_token/...","error":{".tag":"missing_scope","required_scope":"files.content.write"}}),
+            StorageFailure::InvalidConfiguration,
+        ),
+        (
+            409,
+            json!({"error_summary":"path/no_write_permission/...","error":{".tag":"rate_limit"}}),
+            StorageFailure::RateLimited,
+        ),
+        (
+            200,
+            json!({".tag":"failed","failed":{".tag":"remove_folder_member_error","remove_folder_member_error":{".tag":"access_error","access_error":{".tag":"no_permission"}}}}),
+            StorageFailure::PermissionDenied,
+        ),
+        (
+            409,
+            json!({"error_summary":"path/conflict/file/..."}),
+            StorageFailure::AlreadyExists,
+        ),
+        (
+            409,
+            json!({"error_summary":"path/no_write_permission_extra/..."}),
+            StorageFailure::Refused,
+        ),
+        (
+            409,
+            json!({"error_summary":"path/unknown_error/..."}),
+            StorageFailure::Refused,
+        ),
+        (
+            403,
+            json!({"error_summary":"invalid_account_type/feature_extra/..."}),
+            StorageFailure::PermissionDenied,
+        ),
+        (
+            403,
+            json!({"error":{".tag":"invalid_account_type","invalid_account_type":{".tag":"endpoint"},"detail":{".tag":"feature"}}}),
+            StorageFailure::PermissionDenied,
+        ),
+    ] {
+        assert_eq!(
+            classify(CloudProvider::Dropbox, status, body.to_string().as_bytes()),
+            expected,
+            "HTTP {status}: {body}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn dropbox_native_classification_preserves_provider_wait_and_cause() {
+    use serde_json::json;
+
+    for (status, body, expected, retryable) in [
+        (
+            409,
+            json!({"error_summary":"rate_limit/...","error":{".tag":"rate_limit"},"retry_after":86400}),
+            StorageFailure::RateLimited,
+            true,
+        ),
+        (
+            429,
+            json!({"error":{"reason":{".tag":"too_many_requests"},"retry_after":37}}),
+            StorageFailure::RateLimited,
+            true,
+        ),
+        (
+            409,
+            json!({"error":{".tag":"path","path":{".tag":"upload_traffic_limit_reached"}},"retry_after":86400}),
+            StorageFailure::QuotaExceeded,
+            false,
+        ),
+        (
+            403,
+            json!({"error":{".tag":"invalid_account_type","invalid_account_type":{".tag":"feature"}},"retry_after":86400}),
+            StorageFailure::QuotaExceeded,
+            false,
+        ),
+        (
+            401,
+            json!({"error":{".tag":"user_suspended"}}),
+            StorageFailure::PermissionDenied,
+            false,
+        ),
+        (
+            401,
+            json!({"error":{".tag":"missing_scope","required_scope":"files.content.write"}}),
+            StorageFailure::InvalidConfiguration,
+            false,
+        ),
+    ] {
+        let body = body.to_string();
+        let reply = body.clone();
+        let server = TestServer::new(Router::new().fallback(move || {
+            let reply = reply.clone();
+            async move {
+                axum::http::Response::builder()
+                    .status(status)
+                    .header("Retry-After", "86400")
+                    .header("X-Dropbox-Request-Id", "secret-request-id")
+                    .body(axum::body::Body::from(reply))
+                    .unwrap()
+            }
+        }))
+        .await;
+        let response = client().unwrap().get(&server.url).send().await.unwrap();
+        let error = checked(CloudProvider::Dropbox, response).await.unwrap_err();
+        assert_eq!(error.failure(), expected, "{body}");
+        assert_eq!(error.retryable(), retryable, "{body}");
+        assert!(!format!("{error} {error:?}").contains("secret-request-id"));
+        let StorageError::Provider {
+            provider, source, ..
+        } = error
+        else {
+            panic!("native response discarded")
+        };
+        assert_eq!(provider, CloudProvider::Dropbox);
+        let response = source.downcast_ref::<ProviderResponse>().unwrap();
+        assert_eq!(response.status(), status);
+        assert_eq!(response.headers()["retry-after"], "86400");
+        assert_eq!(
+            response.headers()["x-dropbox-request-id"],
+            "secret-request-id"
+        );
+        assert_eq!(response.body(), body.as_bytes());
+    }
+}
+
+#[test]
 fn malformed_range_replies_are_provider_errors() {
     for header in ["bytes 0-3/8", "bytes 3-6/6", "bytes 3-6/*", "bytes 3-6/bad"] {
         assert_eq!(
