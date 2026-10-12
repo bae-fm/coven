@@ -393,6 +393,27 @@ Selecting the canonical creation for competing insertions of one logical key
 uses the merge admission rule described in B18; authenticating
 one creation does not prove it was the first or winning creation.
 
+**Withholding a removal preserves the later signed incarnation.** The merge
+proposal in [B18](merge.md#b18-owner-tables-and-row-authenticity) keeps earlier
+deletes as generation evidence when a later incarnation exists. Its trial
+therefore retains the original insertion and update setters, without altering
+their signed row, generation, kind or scalar. Actual rejection still excludes
+changes using rejected evidence and records their losses. The storage model
+and leaf format are unchanged: `snapshot_authorship`, `cell_true_author`,
+`multiproof_complete` and `multiproof_minimal` apply to the same original
+leaves. The original creation marker remains the owner evidence.
+
+The merge proof preserves every present row's generation and winning cells
+for every valid causal history. It checks Ben's parent deletion becoming
+a loss while Ana's reinserted child remains visible, plus reference-update,
+audience-transfer and third-row cascade histories. This does not imply final
+owner visibility under every ordinary removal rule: B18 retains a checked
+three-row, four-write set-null/unique counterexample. Authentication and proof
+completeness do not prevent a valid merge rule from hiding an authentic row.
+Historical generation and setter evidence needed for these trials must remain
+available independently of dismissible losses; this package does not prove
+snapshot retention supplies all of it.
+
 **Each cell change is a separate leaf.** `Change` has distinct creation,
 cell and deletion constructors. `insertLeaves` in `CellProof.lean` expands an
 insert to one creation marker plus one leaf per written column/value pair.
