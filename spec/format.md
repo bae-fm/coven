@@ -170,6 +170,13 @@
   losses (§8). Replay recomputes admission, source verdicts and losses
   atomically. Retirement admission is final with its deciding kept entry
   and §10's send gate. Publication time remains provider metadata.
+- Authenticate a write with the current signing key of the path device's
+  stable owner in the replay of `store_log_read`; add no author or key field.
+  Each unread kept member-key replacement installing a different signing
+  key imposes the same inclusive 30-day deadline, including for a signer
+  from a losing replacement. A replacement already read cannot retire a
+  later key current in that past (§10). Later readers, including implicit
+  own predecessors, cannot rescue an excluded write or entry.
 - A part's stream is its records, one frame each, in increasing `RowId`
   order, each of the part's audience; `length` counts every byte of them,
   including each seven-byte frame prefix. Record counts and total stream
