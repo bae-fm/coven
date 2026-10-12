@@ -1450,8 +1450,10 @@ Carol's tablet:
 - A foreign key makes one row point at another, its parent: e.g.
   attachment 9's `note_id` points at note 43, so note 43 is attachment 9's
   parent.
-- Every device applies a parent's insert before the row pointing at it,
-  through causality alone ([§7.1](#71-causality)):
+- For changes in different writes, every device consumes the parent's
+  insert position before processing a change that points at it, through
+  causality alone ([§7.1](#71-causality)). When both changes are retained,
+  it applies them in that order:
 
   ```
   Ana's phone    write 5: insert note 43
