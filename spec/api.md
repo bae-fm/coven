@@ -1426,6 +1426,11 @@ while let Ok(values) = lost.next().await {
   a path already occupied before the check is left untouched. A failed check
   returns `StorageSetupError::ProviderCheck`, naming the operation and its
   classified cause; the error retains a cleanup failure too if both fail.
+- S3 services are selected by endpoint (§4): no endpoint means AWS S3;
+  `storage.googleapis.com` means GCS XML, using generation conditions and
+  conditional copy to publish multipart uploads. Other endpoints use AWS's
+  protocol and are accepted only after all setup checks pass. An endpoint that
+  overwrites on create fails `CreateOnce`; setup preserves the prior connection.
 - Setup commits the storage credentials, keys, location and restore code only
   once the connection is ready. Failure preserves their previous values and
   the previous connection. The fixed first-entry or access-update attempt stays
@@ -1539,7 +1544,8 @@ pub enum StorageConfig {
         bucket: String,
         /// The signing region.
         region: String,
-        /// A compatible provider's endpoint, or None for AWS's regional endpoint.
+        /// None selects AWS; storage.googleapis.com selects GCS XML (§4).
+        /// Other endpoints use AWS's protocol and must pass every setup check.
         endpoint: Option<Url>,
         /// The base prefix, without leading or trailing slashes; paths add the store id.
         prefix: String,

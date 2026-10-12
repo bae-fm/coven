@@ -503,6 +503,53 @@ the file's ranges under `F`.
   - E.g. Ben sets his laptop clock back a year. Its token still works until
     the provider rejects it; one refresh lets the waiting request continue.
 - On S3, each member has their own access key.
+  - Coven recognizes services by endpoint: no endpoint selects **AWS S3**;
+    the exact host `storage.googleapis.com` selects **Google Cloud Storage
+    (GCS)** through its XML API. Service differences live in the S3 adapter,
+    not app-supplied capability flags.
+  - AWS S3 creates once with `If-None-Match: *` on `PutObject` and
+    `CompleteMultipartUpload`; an occupied destination returns HTTP 412
+    `PreconditionFailed`, mapped to `AlreadyExists`. Conditional replacements
+    use `If-Match` with the observed ETag. Multipart parts remain unpublished
+    until completion. Listing uses `ListObjectsV2`, an exact prefix and every
+    continuation token; immediate device discovery also uses delimiter `/`.
+  - GCS ignores `If-None-Match: *` on PUT. Create-once PUT instead sends
+    `x-goog-if-generation-match: 0`. An occupied destination returns HTTP 412
+    `PreconditionFailed`, mapped to `AlreadyExists`, without changing its
+    bytes or publication time. Conditional replacements use the observed
+    generation in `x-goog-if-generation-match`; each replacement's revision
+    is its new `x-goog-generation`, including equal-byte replacements.
+    Unconditional replacement remains available for a device's own positions.
+    Requests use Google V4 HMAC authentication and `x-goog-*` headers: GCS
+    refuses requests mixing Google and AWS extension headers.
+  - GCS XML multipart initiation rejects generation conditions and completion
+    does not enforce create-once. Coven therefore uploads unconditionally to
+    `<prefix>/<store>/.coven-uploads/<session>`, where `<session>` is the
+    upload's coven-generated UUID, recorded alongside the native multipart id
+    before sending any parts. This reserved namespace is distinct from every
+    coven object path in D10. Retrying or resuming that recording derives the
+    same name, including after multipart completion or a lost copy reply.
+  - GCS publishes the assembled temporary with one server-side `CopyObject`
+    to the destination, carrying `x-goog-if-generation-match: 0`. The
+    destination's publication time is the copy's completion, never temporary
+    creation or multipart initiation. An occupied destination stays untouched;
+    the session marker distinguishes this session's lost successful reply
+    from another object's occupation. Successful and definitively refused copies
+    delete the temporary before reporting completion or the refusal.
+    Network failures and retryable responses retain it for the same session.
+    A failed deletion fails the call and retains the recording for retry;
+    an operation error and deletion error are both preserved.
+  - Aborting a GCS session aborts its native multipart upload and deletes its
+    temporary, including when the native upload has already completed.
+    A crashed device's recorded session therefore remains usable by the same
+    abandonment cleanup. Temporaries remain discoverable in the reserved
+    namespace but are excluded from published-object listings. GCS uses
+    `ListObjectsV2` with the requested prefix, continuation tokens and delimiter
+    as AWS does; published objects retain the server's `LastModified`.
+  - Unknown S3-compatible endpoints use AWS's headers and multipart protocol.
+    Setup refuses them unless every provider check below passes, including
+    `CreateOnce`. Accepting a second create is a protocol failure, even if the
+    service claims compatibility. AWS and GCS pass the same setup check too.
   - `RequestTimeTooSkewed` means the device clock is off, not that access
     was denied. Retry the request once with the server offset the SDK
     learned from the response.

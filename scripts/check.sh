@@ -232,9 +232,9 @@ runner() {
     echo "$path"
 }
 
-# Merge, replay and clocks have Rust differential tests. Data coupling also has
-# checked counterexamples (spec/proofs/storelog-data.md). Each runs when its
-# Lean package or the Rust crate it compares is selected.
+# Merge, replay, clocks and create-once uploads have Rust differential tests.
+# Data coupling also has checked counterexamples (spec/proofs/storelog-data.md).
+# Each runs when its Lean package or the Rust crate it compares is selected.
 proofs() {
     lean_proof "the merge" spec/proofs/merge CovenMerge covenMerge
     lean_proof "the store log" spec/proofs/storelog CovenStorelog covenStorelog
@@ -288,6 +288,12 @@ proofs() {
         runner=$(runner storage clockRunner)
         step "Rust / Lean differential clock test"
         COVEN_CLOCK_LEAN="$runner" cargo test -p coven-database --all-features lean_differential_clocks -- --ignored
+    fi
+
+    if proof_selected storage || crate_selected coven-storage; then
+        runner=$(runner storage createRunner)
+        step "Rust / Lean differential S3 create-once test"
+        COVEN_CREATE_LEAN="$runner" cargo test -p coven-storage --all-features lean_differential_s3_create -- --ignored
     fi
 
     if proof_selected merge || crate_selected coven-database; then

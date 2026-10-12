@@ -37,7 +37,8 @@ pub enum StorageConfig {
         bucket: String,
         /// Signing region.
         region: String,
-        /// A compatible provider's endpoint, or AWS's regional endpoint.
+        /// None selects AWS; storage.googleapis.com selects GCS XML.
+        /// Other endpoints use AWS's protocol and must pass the setup check.
         endpoint: Option<url::Url>,
         /// The store's prefix, without leading or trailing slashes.
         prefix: String,

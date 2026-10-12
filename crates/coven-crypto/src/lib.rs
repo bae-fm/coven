@@ -13,6 +13,7 @@ mod keys;
 mod member;
 mod object_digest;
 mod randomness;
+mod s3_signing;
 mod secret;
 mod wire;
 
@@ -29,6 +30,7 @@ pub use member::{
     seal_circle_key, seal_store_key, MemberId, MemberKeys, SealingPublicKey, Signature,
 };
 pub use object_digest::{ObjectDigest, ObjectHasher};
+pub use s3_signing::{gcs_request_signature, s3_request_hash};
 pub use secret::{SecretBytes, SecretText};
 
 #[cfg(test)]

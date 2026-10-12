@@ -1,6 +1,7 @@
 //! Storage providers, encrypted objects at paths, and recorded upload sessions (§4).
 //!
-//! This crate handles bytes without encrypting, hashing or signing them. The
+//! This crate handles encrypted objects without performing coven's object
+//! cryptography. Provider adapters authenticate their native requests. The
 //! caller records upload sessions and commits credentials to key custody only
 //! after setup succeeds. Providers never read the database.
 mod config;

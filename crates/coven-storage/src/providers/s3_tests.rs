@@ -23,6 +23,12 @@ struct PendingUpload {
 }
 #[derive(Default)]
 struct Remote {
+    gcs: bool,
+    fail_copy_reply: bool,
+    refuse_copy: bool,
+    copies: usize,
+    refuse_temporary_delete: bool,
+    lose_temporary_delete_reply: bool,
     objects: BTreeMap<String, Vec<u8>>,
     uploads: BTreeMap<String, PendingUpload>,
     next_upload: u64,
@@ -53,6 +59,15 @@ fn respond(
     body: Bytes,
 ) -> Response<Body> {
     let mut state = state.lock().unwrap();
+    if state.gcs {
+        assert!(headers["authorization"]
+            .to_str()
+            .unwrap()
+            .starts_with("GOOG4-HMAC-SHA256 "));
+        assert!(!headers
+            .keys()
+            .any(|name| name.as_str().starts_with("x-amz-")));
+    }
     if let Some((code, status)) = state.forced_error {
         return response(
             status,
@@ -62,13 +77,21 @@ fn respond(
     let q = query(&uri);
     let key = uri.path().strip_prefix("/bucket/").unwrap_or("").to_owned();
     if q.contains_key("uploads") {
+        let token = headers[if state.gcs {
+            "x-goog-meta-coven-upload"
+        } else {
+            "x-amz-meta-coven-upload"
+        }]
+        .to_str()
+        .unwrap()
+        .to_owned();
         state.next_upload += 1;
         let id = state.next_upload.to_string();
         state.uploads.insert(
             id.clone(),
             PendingUpload {
                 key,
-                token: headers["x-amz-meta-coven-upload"].to_str().unwrap().into(),
+                token,
                 parts: BTreeMap::new(),
             },
         );
@@ -116,8 +139,13 @@ fn respond(
             );
         }
         if method == Method::POST {
-            assert_eq!(headers["if-none-match"], "*");
-            if state.objects.contains_key(&key) {
+            if state.gcs {
+                assert!(!headers.contains_key("x-goog-if-generation-match"));
+                assert!(!headers.contains_key("if-none-match"));
+            } else {
+                assert_eq!(headers["if-none-match"], "*");
+            }
+            if !state.gcs && state.objects.contains_key(&key) {
                 return response(412, "<Error><Code>PreconditionFailed</Code></Error>");
             }
             let upload = state.uploads.remove(id).unwrap();
@@ -133,6 +161,27 @@ fn respond(
         assert_eq!(method, Method::DELETE);
         state.uploads.remove(id);
         return response(204, Vec::new());
+    }
+    if let Some(source) = headers.get("x-goog-copy-source") {
+        assert!(state.gcs);
+        assert_eq!(method, Method::PUT);
+        assert_eq!(headers["x-goog-if-generation-match"], "0");
+        state.copies += 1;
+        if state.refuse_copy {
+            return response(403, "<Error><Code>AccessDenied</Code></Error>");
+        }
+        if state.objects.contains_key(&key) {
+            return response(412, "<Error><Code>PreconditionFailed</Code></Error>");
+        }
+        let source = source.to_str().unwrap().strip_prefix("/bucket/").unwrap();
+        let bytes = state.objects[source].clone();
+        let token = state.metadata[source].clone();
+        state.objects.insert(key.clone(), bytes);
+        state.metadata.insert(key, token);
+        if std::mem::replace(&mut state.fail_copy_reply, false) {
+            return response(503, "<Error><Code>ServiceUnavailable</Code></Error>");
+        }
+        return response(200, "<CopyObjectResult><ETag>\"copied\"</ETag><LastModified>2026-10-06T00:00:02Z</LastModified></CopyObjectResult>");
     }
     if q.contains_key("list-type") {
         if state.broken_check == Some(StorageCheck::List) {
@@ -170,7 +219,14 @@ fn respond(
             if state.broken_check == Some(StorageCheck::Create) {
                 return response(403, "<Error><Code>AccessDenied</Code></Error>");
             }
-            if headers.get("if-none-match").is_some()
+            let create = if state.gcs {
+                headers
+                    .get("x-goog-if-generation-match")
+                    .is_some_and(|value| value == "0")
+            } else {
+                headers.get("if-none-match").is_some()
+            };
+            if create
                 && state.objects.contains_key(&key)
                 && state.broken_check != Some(StorageCheck::CreateOnce)
             {
@@ -205,7 +261,11 @@ fn respond(
             Some(bytes) => Response::builder()
                 .header("content-length", bytes.len())
                 .header(
-                    "x-amz-meta-coven-upload",
+                    if state.gcs {
+                        "x-goog-meta-coven-upload"
+                    } else {
+                        "x-amz-meta-coven-upload"
+                    },
                     state
                         .metadata
                         .get(&key)
@@ -218,17 +278,30 @@ fn respond(
         },
         Method::DELETE => {
             state.deletions += 1;
-            if state.refuse_delete {
+            if state.refuse_delete
+                || (state.refuse_temporary_delete && key.contains("/.coven-uploads/"))
+            {
                 return response(403, "<Error><Code>AccessDenied</Code></Error>");
             }
             if state.broken_check != Some(StorageCheck::Delete) {
-                state.objects.remove(&key);
+                let removed = state.objects.remove(&key);
+                if state.gcs && removed.is_none() {
+                    return response(404, "<Error><Code>NoSuchKey</Code></Error>");
+                }
+                if key.contains("/.coven-uploads/")
+                    && std::mem::replace(&mut state.lose_temporary_delete_reply, false)
+                {
+                    return response(503, "<Error><Code>ServiceUnavailable</Code></Error>");
+                }
             }
             response(204, Vec::new())
         }
         _ => panic!("unexpected S3 request: {uri}"),
     }
 }
+
+#[path = "s3_gcs_upload_tests.rs"]
+mod gcs;
 fn provider(url: &str) -> StorageConnection<S3Storage> {
     let storage = S3Storage::new(
         StorageConfig::S3 {
@@ -770,68 +843,8 @@ async fn provider_check_preserves_unrelated_contents() {
     );
 }
 
-/// Conformance against a real S3-compatible service. Ignored by default: run with
-/// `COVEN_LIVE_S3_ENV=<file> cargo test -p coven-storage --all-features --lib s3_live -- --ignored`.
-/// The file holds `COVEN_LIVE_S3_{BUCKET,REGION,ENDPOINT,ACCESS_KEY_ID,SECRET_ACCESS_KEY}`;
-/// each run uses a fresh store id under the `coven-live/` prefix.
-mod live {
-    use super::*;
-    use coven_crypto::SecretText;
-    use coven_foundation::{
-        clock::SystemClock,
-        id_source::{StoreId, UuidIds},
-    };
-    use std::{collections::BTreeMap, sync::Arc};
-
-    fn settings() -> BTreeMap<String, String> {
-        let path = std::env::var("COVEN_LIVE_S3_ENV")
-            .expect("COVEN_LIVE_S3_ENV names the credentials file");
-        std::fs::read_to_string(&path)
-            .expect("credentials file")
-            .lines()
-            .filter_map(|line| line.split_once('='))
-            .map(|(key, value)| (key.trim().to_owned(), value.trim().to_owned()))
-            .collect()
-    }
-
-    fn live() -> StorageConnection<S3Storage> {
-        let settings = settings();
-        let value = |key: &str| {
-            settings
-                .get(key)
-                .unwrap_or_else(|| panic!("{key} missing"))
-                .clone()
-        };
-        let storage = S3Storage::new(
-            StorageConfig::S3 {
-                bucket: value("COVEN_LIVE_S3_BUCKET"),
-                region: value("COVEN_LIVE_S3_REGION"),
-                endpoint: settings
-                    .get("COVEN_LIVE_S3_ENDPOINT")
-                    .map(|url| url.parse().unwrap()),
-                prefix: "coven-live".into(),
-            },
-            S3Credentials {
-                access_key_id: value("COVEN_LIVE_S3_ACCESS_KEY_ID"),
-                secret_access_key: SecretText::new(value("COVEN_LIVE_S3_SECRET_ACCESS_KEY")),
-            },
-            Arc::new(SystemClock),
-            Arc::new(UuidIds),
-        )
-        .unwrap();
-        StorageConnection::from_provider(Arc::new(storage))
-    }
-
-    #[tokio::test]
-    #[ignore]
-    async fn s3_live_conformance() {
-        let store = StoreId(uuid::Uuid::new_v4());
-        crate::test_utils::Conformance::new(Arc::new(live()), store)
-            .run()
-            .await
-            .unwrap();
-    }
-}
-
 #[path = "s3_error_tests.rs"]
 mod errors;
+
+#[path = "s3_gcs_signing_tests.rs"]
+mod live;

@@ -13,10 +13,13 @@ pub(crate) const ONEDRIVE_PART_SIZE: usize = 24 * 320 * 1024;
 /// Record it before sending parts and after each confirmed part. After a crash,
 /// call `resume_upload` to discover bytes accepted before a reply was lost. The
 /// bytes of this value include an upload capability: keep them secret. Dropping
-/// a session never aborts it; explicit abort abandons its pending bytes. Providers
-/// may retain closed session data until their expiry, without publishing it.
-/// When a provider discarded the session after publishing but its reply was
-/// lost, resumption resets the confirmed offset to zero. Feed the encrypted
+/// a session never aborts it; explicit abort abandons its pending bytes.
+/// On GCS the recorded token names the temporary object as well as identifying
+/// publication. Abort deletes it even after native multipart completion; failed
+/// copy or cleanup keeps the recording incomplete so it can be retried.
+/// Providers may retain closed session data until their expiry, without publishing it.
+/// When recovery requires complete-byte comparison with a published object,
+/// resumption resets the confirmed offset to zero. Feed the encrypted
 /// bytes through `upload_part` again: they are compared to the published object,
 /// without uploading them. Only a complete match confirms publication.
 #[derive(Clone, Serialize, Deserialize)]

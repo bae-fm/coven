@@ -17,7 +17,11 @@ the resulting plaintexts without relying on that detection.
 All named results are audited by `CovenStorage/Axioms.lean`. The package uses
 Lean 4.34.1 and its standard library, without additional axioms or unfinished
 proofs. `scripts/check.sh` builds it and runs the audit alongside the other
-proofs. There is no Rust comparison for this package.
+proofs. `clockRunner` and `createRunner` expose the model to the Rust
+differential tests run by that script. The create-once comparison drives
+the S3 adapter against the test server with AWS and GCS protocols,
+checking occupied-path refusals and stored bytes for single-request and
+multipart uploads.
 
 ## Restore, another live copy, and writes
 

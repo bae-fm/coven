@@ -23,6 +23,8 @@ open.workspace = true
 aws-sdk-s3 = { workspace = true, features = ["rt-tokio", "default-https-client", "rustls"] }
 aws-credential-types.workspace = true
 aws-smithy-async.workspace = true
+aws-smithy-runtime-api.workspace = true
+hex.workspace = true
 
 [dev-dependencies]
 coven-format = { workspace = true, features = ["test-utils"] }

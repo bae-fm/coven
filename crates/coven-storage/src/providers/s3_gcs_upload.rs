@@ -1,0 +1,156 @@
+use super::*;
+
+const TEMPORARIES: &str = ".coven-uploads";
+
+impl S3Storage {
+    pub(super) fn upload_key(
+        &self,
+        path: &ObjectPath,
+        token: &SecretText,
+    ) -> Result<String, StorageError> {
+        match self.service {
+            S3Service::Aws | S3Service::Compatible => Ok(path.under(&self.prefix)),
+            S3Service::Gcs => {
+                let id = uuid::Uuid::parse_str(token.as_str())
+                    .map_err(|source| StorageFailure::SessionMismatch.with_source(source))?;
+                Ok(format!(
+                    "{}{TEMPORARIES}/{id}",
+                    ObjectPrefix::all(path.store()).under(&self.prefix)
+                ))
+            }
+        }
+    }
+
+    pub(super) fn session_key(&self, session: &UploadSession) -> Result<String, StorageError> {
+        let SessionState::S3 { token, .. } = &session.state else {
+            return Err(StorageFailure::SessionMismatch.into());
+        };
+        self.upload_key(&session.path, token)
+    }
+
+    pub(super) async fn recover_completed_upload(
+        &self,
+        session: &mut UploadSession,
+    ) -> Result<(), StorageError> {
+        if self.service != S3Service::Gcs {
+            return self.completed(session).await;
+        }
+        // NoSuchUpload leaves exactly one unknown: did assembly create the
+        // temporary? If not, only this session's already-published object counts.
+        match self
+            .client
+            .head_object()
+            .bucket(&self.bucket)
+            .key(self.session_key(session)?)
+            .send()
+            .await
+            .map_err(s3_error)
+        {
+            Ok(response) => {
+                let SessionState::S3 { token, .. } = &session.state else {
+                    return Err(StorageFailure::SessionMismatch.into());
+                };
+                let total = i64::try_from(session.total)
+                    .map_err(|source| StorageFailure::InvalidPart.with_source(source))?;
+                if response.content_length() != Some(total)
+                    || response
+                        .metadata()
+                        .and_then(|metadata| metadata.get("coven-upload"))
+                        .map(String::as_str)
+                        != Some(token.as_str())
+                {
+                    return Err(StorageFailure::Protocol
+                        .with_source("GCS upload temporary disagrees with session"));
+                }
+                self.publish_gcs(session).await
+            }
+            Err(error) if error.failure() == StorageFailure::NotFound => {
+                self.completed(session).await
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    pub(super) async fn publish_gcs(
+        &self,
+        session: &mut UploadSession,
+    ) -> Result<(), StorageError> {
+        let source = format!("/{}/{}", self.bucket, self.session_key(session)?);
+        let result = self
+            .client
+            .copy_object()
+            .bucket(&self.bucket)
+            .key(session.path.under(&self.prefix))
+            .copy_source(source)
+            .customize()
+            .mutate_request(|request| {
+                request
+                    .headers_mut()
+                    .insert("x-goog-if-generation-match", "0");
+            })
+            .send()
+            .await
+            .map_err(s3_error);
+        let result = match result {
+            Ok(_) => Ok(()),
+            Err(error) if error.failure() == StorageFailure::AlreadyExists => {
+                match self.confirm_published(session).await {
+                    Ok(()) => Ok(()),
+                    Err(confirmation)
+                        if confirmation.failure() == StorageFailure::AlreadyExists =>
+                    {
+                        Err(error)
+                    }
+                    Err(confirmation) => Err(confirmation),
+                }
+            }
+            // A lost reply or retryable failure leaves the temporary available
+            // to the recorded session. A definitive refusal releases it.
+            Err(error) if error.retryable() => return Err(error),
+            Err(error) => Err(error),
+        };
+        with_cleanup(result, self.delete_gcs_temporary(session).await)?;
+        session.confirmed = session.total;
+        session.state = SessionState::Complete;
+        Ok(())
+    }
+
+    pub(super) async fn delete_gcs_temporary(
+        &self,
+        session: &UploadSession,
+    ) -> Result<(), StorageError> {
+        self.delete_key(&self.session_key(session)?).await
+    }
+}
+
+pub(super) fn with_cleanup(
+    operation: Result<(), StorageError>,
+    cleanup: Result<(), StorageError>,
+) -> Result<(), StorageError> {
+    match (operation, cleanup) {
+        (Ok(()), result) | (result, Ok(())) => result,
+        (Err(operation), Err(cleanup)) => Err(StorageError::Cleanup {
+            operation: Box::new(operation),
+            cleanup: Box::new(cleanup),
+        }),
+    }
+}
+
+pub(super) fn is_temporary(relative: &str, prefix: &ObjectPrefix) -> Result<bool, StorageError> {
+    let directory = format!(
+        "{}{TEMPORARIES}/",
+        ObjectPrefix::all(prefix.store()).as_str()
+    );
+    let Some(id) = relative.strip_prefix(&directory) else {
+        return Ok(false);
+    };
+    if !relative.starts_with(prefix.as_str()) {
+        return Err(StorageFailure::Protocol.with_source("GCS listed temporary outside prefix"));
+    }
+    let parsed =
+        uuid::Uuid::parse_str(id).map_err(|source| StorageFailure::Protocol.with_source(source))?;
+    if parsed.to_string() != id {
+        return Err(StorageFailure::Protocol.with_source("GCS listed malformed upload temporary"));
+    }
+    Ok(true)
+}

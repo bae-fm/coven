@@ -137,9 +137,10 @@ pub struct StoredObject {
     pub size: u64,
     /// Provider timestamp, never the uploading device's clock: Drive's createdTime,
     /// OneDrive's createdDateTime, Dropbox's server_modified, CloudKit's server
-    /// publication time, or S3's Last-Modified. S3 reports multipart initiation
+    /// publication time, or S3's Last-Modified. AWS reports multipart initiation
     /// time, including for device logs uploaded through recorded sessions; this
-    /// timestamp therefore does not establish their publication age.
+    /// timestamp therefore does not establish their publication age. GCS multipart
+    /// objects are published by conditional copy; their time is copy completion.
     pub stored_at: std::time::SystemTime,
 }
 
@@ -288,7 +289,12 @@ pub trait Storage: Send + Sync {
     /// deletes later copies from this writer.
     async fn create_once(&self, path: &ObjectPath, bytes: &[u8]) -> Result<(), StorageError> {
         match self.create(path, bytes).await {
-            Err(error) if error.failure() == crate::StorageFailure::AlreadyExists => Ok(()),
+            Err(error)
+                if error.failure() == crate::StorageFailure::AlreadyExists
+                    && !matches!(error, StorageError::Cleanup { .. }) =>
+            {
+                Ok(())
+            }
             result => result,
         }
     }

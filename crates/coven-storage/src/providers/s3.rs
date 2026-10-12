@@ -16,6 +16,13 @@ use std::fmt;
 #[path = "s3_error.rs"]
 mod error;
 use error::s3_error;
+#[path = "s3_service.rs"]
+mod service;
+use service::S3Service;
+#[path = "s3_gcs_signing.rs"]
+mod gcs_signing;
+#[path = "s3_gcs_upload.rs"]
+mod gcs_upload;
 
 /// S3 and compatible endpoints, using only object operations and manually supplied keys.
 pub(crate) struct S3Storage {
@@ -25,6 +32,9 @@ pub(crate) struct S3Storage {
     bucket: String,
     prefix: String,
     ids: IdSourceRef,
+    service: S3Service,
+    #[cfg(test)]
+    single_request_limit: u64,
 }
 struct SigningClock(ClockRef);
 #[derive(Clone)]
@@ -86,6 +96,7 @@ impl S3Storage {
         let credentials = SigningCredentials(std::sync::Arc::new(std::sync::RwLock::new(
             aws_credentials(credentials),
         )));
+        let service = S3Service::for_endpoint(endpoint.as_ref());
         let mut builder = aws_sdk_s3::config::Builder::new()
             .behavior_version_latest()
             .region(Region::new(region.clone()))
@@ -96,6 +107,13 @@ impl S3Storage {
             .retry_config(aws_sdk_s3::config::retry::RetryConfig::disabled())
             .request_checksum_calculation(RequestChecksumCalculation::WhenRequired)
             .response_checksum_validation(ResponseChecksumValidation::WhenRequired);
+        if service == S3Service::Gcs {
+            builder = builder
+                .push_auth_scheme(gcs_signing::GcsSigning {
+                    region: region.clone(),
+                })
+                .interceptor(gcs_signing::GcsResponseHeaders);
+        }
         if let Some(endpoint) = endpoint {
             builder = builder.endpoint_url(endpoint.as_str());
         }
@@ -107,6 +125,9 @@ impl S3Storage {
             prefix: prefix.clone(),
             config,
             ids,
+            service,
+            #[cfg(test)]
+            single_request_limit: 5 * 1024 * 1024 * 1024,
         })
     }
     async fn put(&self, path: &ObjectPath, bytes: &[u8], create: bool) -> Result<(), StorageError> {
@@ -116,10 +137,22 @@ impl S3Storage {
             .bucket(&self.bucket)
             .key(path.under(&self.prefix))
             .body(ByteStream::from(bytes.to_vec()));
-        if create {
+        if create && self.service != S3Service::Gcs {
             request = request.if_none_match("*");
         }
-        request.send().await.map_err(s3_error)?;
+        let service = self.service;
+        request
+            .customize()
+            .mutate_request(move |request| {
+                if create && service == S3Service::Gcs {
+                    request
+                        .headers_mut()
+                        .insert("x-goog-if-generation-match", "0");
+                }
+            })
+            .send()
+            .await
+            .map_err(s3_error)?;
         Ok(())
     }
     async fn get(
@@ -173,6 +206,12 @@ impl S3Storage {
         }
     }
     async fn completed(&self, session: &mut UploadSession) -> Result<(), StorageError> {
+        self.confirm_published(session).await?;
+        session.confirmed = session.total;
+        session.state = SessionState::Complete;
+        Ok(())
+    }
+    async fn confirm_published(&self, session: &UploadSession) -> Result<(), StorageError> {
         let SessionState::S3 { token, .. } = &session.state else {
             return Err(StorageFailure::SessionMismatch.into());
         };
@@ -203,9 +242,24 @@ impl S3Storage {
         {
             return Err(StorageFailure::AlreadyExists.into());
         }
-        session.confirmed = session.total;
-        session.state = SessionState::Complete;
         Ok(())
+    }
+    async fn delete_key(&self, key: &str) -> Result<(), StorageError> {
+        match self
+            .client
+            .delete_object()
+            .bucket(&self.bucket)
+            .key(key)
+            .send()
+            .await
+        {
+            Ok(_) => Ok(()),
+            Err(error) if matches!(error.code(), Some("NoSuchKey" | "NotFound")) => {
+                tracing::debug!("S3 object already absent");
+                Ok(())
+            }
+            Err(error) => Err(s3_error(error)),
+        }
     }
 }
 
@@ -227,7 +281,14 @@ impl ProviderOps for S3Storage {
         self.config.clone()
     }
     fn single_request_limit(&self) -> u64 {
-        5 * 1024 * 1024 * 1024
+        #[cfg(test)]
+        {
+            self.single_request_limit
+        }
+        #[cfg(not(test))]
+        {
+            5 * 1024 * 1024 * 1024
+        }
     }
     async fn create(&self, path: &ObjectPath, bytes: &[u8]) -> Result<(), StorageError> {
         self.put(path, bytes, true).await
@@ -272,6 +333,10 @@ impl ProviderOps for S3Storage {
                 let relative = key
                     .strip_prefix(&root)
                     .ok_or(StorageFailure::Protocol.with_source("S3 listed another location"))?;
+                if self.service == S3Service::Gcs && gcs_upload::is_temporary(relative, &prefix)? {
+                    tracing::debug!("GCS upload temporary retained for session cleanup");
+                    continue;
+                }
                 let path = ObjectPath::parse(relative)?;
                 if !prefix.contains(&path) {
                     return Err(StorageFailure::Protocol.with_source("S3 listed outside prefix"));
@@ -309,21 +374,7 @@ impl ProviderOps for S3Storage {
         Ok(())
     }
     async fn delete(&self, path: &ObjectPath) -> Result<(), StorageError> {
-        match self
-            .client
-            .delete_object()
-            .bucket(&self.bucket)
-            .key(path.under(&self.prefix))
-            .send()
-            .await
-        {
-            Ok(_) => Ok(()),
-            Err(error) if matches!(error.code(), Some("NoSuchKey" | "NotFound")) => {
-                tracing::debug!(path = path.as_str(), "S3 object already absent");
-                Ok(())
-            }
-            Err(error) => Err(s3_error(error)),
-        }
+        self.delete_key(&path.under(&self.prefix)).await
     }
     async fn grant_access(&self, _account: &str) -> Result<AccessGrant, StorageError> {
         Ok(AccessGrant::CreateAccessKey)
@@ -349,11 +400,12 @@ impl ProviderOps for S3Storage {
     ) -> Result<UploadSession, StorageError> {
         let part_size = crate::session::s3_part_size(total)?;
         let token = SecretText::new(self.ids.new_id().to_string());
+        let key = self.upload_key(path, &token)?;
         let response = self
             .client
             .create_multipart_upload()
             .bucket(&self.bucket)
-            .key(path.under(&self.prefix))
+            .key(key)
             .metadata("coven-upload", token.as_str())
             .send()
             .await
@@ -386,7 +438,7 @@ impl ProviderOps for S3Storage {
                 .client
                 .list_parts()
                 .bucket(&self.bucket)
-                .key(session.path.under(&self.prefix))
+                .key(self.session_key(session)?)
                 .upload_id(id.as_str())
                 .set_part_number_marker(marker)
                 .send()
@@ -394,7 +446,7 @@ impl ProviderOps for S3Storage {
             {
                 Ok(response) => response,
                 Err(error) if error.code() == Some("NoSuchUpload") => {
-                    return self.completed(session).await
+                    return self.recover_completed_upload(session).await
                 }
                 Err(error) => return Err(s3_error(error)),
             };
@@ -462,7 +514,7 @@ impl ProviderOps for S3Storage {
             .client
             .upload_part()
             .bucket(&self.bucket)
-            .key(session.path.under(&self.prefix))
+            .key(self.session_key(session)?)
             .upload_id(id)
             .part_number(number)
             .body(ByteStream::from(bytes.to_vec()))
@@ -501,37 +553,41 @@ impl ProviderOps for S3Storage {
                     .build()
             })
             .collect();
-        let result = self
+        let mut request = self
             .client
             .complete_multipart_upload()
             .bucket(&self.bucket)
-            .key(session.path.under(&self.prefix))
+            .key(self.session_key(session)?)
             .upload_id(id)
-            .if_none_match("*")
             .multipart_upload(
                 CompletedMultipartUpload::builder()
                     .set_parts(Some(completed))
                     .build(),
-            )
-            .send()
-            .await;
+            );
+        if self.service != S3Service::Gcs {
+            request = request.if_none_match("*");
+        }
+        let result = request.send().await;
         match result {
             Ok(_) => {
+                if self.service == S3Service::Gcs {
+                    return self.publish_gcs(session).await;
+                }
                 session.state = SessionState::Complete;
                 Ok(())
             }
             Err(error) if matches!(error.code(), Some("NoSuchUpload" | "PreconditionFailed")) => {
-                self.completed(session).await
+                self.recover_completed_upload(session).await
             }
             Err(error) => Err(s3_error(error)),
         }
     }
     async fn abort_upload(&self, session: &UploadSession) -> Result<(), StorageError> {
-        match self
+        let result = match self
             .client
             .abort_multipart_upload()
             .bucket(&self.bucket)
-            .key(session.path.under(&self.prefix))
+            .key(self.session_key(session)?)
             .upload_id(self.upload_id(session)?)
             .send()
             .await
@@ -542,6 +598,11 @@ impl ProviderOps for S3Storage {
                 Ok(())
             }
             Err(error) => Err(s3_error(error)),
+        };
+        if self.service == S3Service::Gcs {
+            gcs_upload::with_cleanup(result, self.delete_gcs_temporary(session).await)
+        } else {
+            result
         }
     }
 }
