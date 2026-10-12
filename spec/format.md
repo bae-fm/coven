@@ -736,14 +736,16 @@
   `coven/join-request/v1`.
 - A sealed key at `<store>/keys/<writer>/<n>` has D9's clear prefix and box:
   - The shared secret is X25519 of a fresh ephemeral key and the member's
-    sealing key; a contribution of all zeros is refused.
+    exact sealing key named in D9's prefix; a contribution of all zeros is
+    refused. The prefix must match the recipient key actually used by the box.
   - Its key is HKDF-SHA256 of the shared secret with the context of
     `coven/sealed-box/v1`, `store` or `circle`, the path, the exact D9
     clear prefix, the ephemeral key and the member's sealing key, in that
     order; that context is also the associated data.
   - The plaintext is `key:uuid | key bytes:32` for a store key, and
     `circle:uuid | key:uuid | key bytes:32` for a circle key. The recipient
-    must match the prefix's member and check the opened audience and key id
+    must match the prefix's member and sealing credential, opening with that
+    historical private key rather than trying the latest binding, and check the opened audience and key id
     against its prefix. It checks SHA-256 of the 32 key bytes against the
     authorized D6 introduction; a mismatch is invalid, not another value
     under that key id.
