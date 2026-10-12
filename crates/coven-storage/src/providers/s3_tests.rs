@@ -848,3 +848,7 @@ mod errors;
 
 #[path = "s3_gcs_signing_tests.rs"]
 mod live;
+
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
+#[path = "s3_live.rs"]
+mod listing_live;

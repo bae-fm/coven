@@ -521,7 +521,7 @@ pub(crate) async fn live_drive_tokens(clock: coven_foundation::clock::ClockRef) 
 
 /// Read live credentials without exposing their contents in diagnostics.
 #[cfg(not(any(target_os = "ios", target_os = "android")))]
-fn live_settings(variable: &str) -> std::collections::BTreeMap<String, SecretText> {
+pub(crate) fn live_settings(variable: &str) -> std::collections::BTreeMap<String, SecretText> {
     let path = std::env::var(variable)
         .expect("live credentials environment variable names the credentials file");
     let text = SecretText::new(std::fs::read_to_string(path).expect("credentials file"));
@@ -554,4 +554,134 @@ fn live_settings(variable: &str) -> std::collections::BTreeMap<String, SecretTex
         );
     }
     settings
+}
+
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
+pub(crate) mod listing_lag {
+    //! Live measurements, with monotonic request bounds and no provider response dumps.
+    use crate::StorageError;
+    use std::{
+        future::Future,
+        time::{Duration, SystemTime},
+    };
+    use tokio::time::{Instant, MissedTickBehavior};
+
+    pub(crate) const TRIALS: u64 = 20;
+    pub(crate) const POLL: Duration = Duration::from_millis(250);
+    pub(crate) const LIMIT: Duration = Duration::from_secs(300);
+
+    pub(crate) struct Sample {
+        appeared: Option<Duration>,
+        omissions: usize,
+    }
+
+    /// Start the timer at the create reply, before fetching any extra metadata.
+    /// Request start/end bracket each listing observation, not visibility's onset.
+    pub(crate) async fn observe<Fut: Future<Output = Result<bool, StorageError>>>(
+        label: &str,
+        trial: u64,
+        replied: Instant,
+        stored_at: SystemTime,
+        mut listed: impl FnMut() -> Fut,
+    ) -> Sample {
+        let mut omissions = 0;
+        let mut interval = tokio::time::interval(POLL);
+        interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        let deadline = replied + LIMIT;
+        loop {
+            let observation = tokio::time::timeout_at(deadline, async {
+                interval.tick().await;
+                let started = replied.elapsed();
+                let present = listed().await.unwrap();
+                (started, replied.elapsed(), present)
+            })
+            .await;
+            match observation {
+                Ok((start, end, present)) => {
+                    println!(
+                        "listing_lag provider_case={label} trial={trial} stored_at={stored_at:?} list_start_s={:.9} list_end_s={:.9} present={present}",
+                        start.as_secs_f64(),
+                        end.as_secs_f64()
+                    );
+                    if present {
+                        return Sample {
+                            appeared: Some(end),
+                            omissions,
+                        };
+                    }
+                    omissions += 1;
+                }
+                Err(_) => {
+                    println!(
+                        "listing_lag provider_case={label} trial={trial} stored_at={stored_at:?} timeout_s=300 omissions={omissions}"
+                    );
+                    return Sample {
+                        appeared: None,
+                        omissions,
+                    };
+                }
+            }
+        }
+    }
+
+    pub(crate) fn report(label: &str, samples: &[Sample]) {
+        assert!(!samples.is_empty());
+        let mut times: Vec<_> = samples
+            .iter()
+            .filter_map(|sample| sample.appeared)
+            .collect();
+        times.sort();
+        let omitted = samples.iter().filter(|sample| sample.omissions > 0).count();
+        let timeouts = samples.len() - times.len();
+        if !times.is_empty() {
+            let middle = times.len() / 2;
+            let median = if times.len().is_multiple_of(2) {
+                (times[middle - 1] + times[middle]) / 2
+            } else {
+                times[middle]
+            };
+            println!(
+                "listing_lag SUMMARY provider_case={label} trials={} min_s={:.9} median_s={:.9} max_s={:.9} omitted_trials={omitted} timeouts={timeouts}",
+                samples.len(),
+                times[0].as_secs_f64(),
+                median.as_secs_f64(),
+                times[times.len() - 1].as_secs_f64()
+            );
+        } else {
+            println!(
+                "listing_lag SUMMARY provider_case={label} trials={} min_s=unobserved median_s=unobserved max_s=unobserved omitted_trials={omitted} timeouts={timeouts}",
+                samples.len()
+            );
+        }
+        assert_eq!(timeouts, 0, "objects did not appear within five minutes");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn poll_records_omissions_without_delaying_the_first_request() {
+        let attempts = std::cell::Cell::new(0);
+        let replied = Instant::now();
+        let sample = observe("fixture", 1, replied, SystemTime::UNIX_EPOCH, || {
+            let attempt = attempts.get();
+            assert_eq!(replied.elapsed(), POLL * attempt);
+            attempts.set(attempt + 1);
+            std::future::ready(Ok(attempt == 2))
+        })
+        .await;
+        assert_eq!(attempts.get(), 3);
+        assert_eq!(sample.omissions, 2);
+        assert_eq!(sample.appeared, Some(POLL * 2));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn poll_deadline_cancels_an_unfinished_listing() {
+        let replied = Instant::now();
+        let sample = observe("fixture", 1, replied, SystemTime::UNIX_EPOCH, || async {
+            tokio::time::sleep(LIMIT + POLL).await;
+            Ok(true)
+        })
+        .await;
+        assert!(sample.appeared.is_none());
+        assert_eq!(sample.omissions, 0);
+        assert!(replied.elapsed() >= LIMIT && replied.elapsed() < LIMIT + POLL);
+    }
 }
