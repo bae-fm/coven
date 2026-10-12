@@ -332,10 +332,13 @@ phase taking five minutes or more supplies no permission to send.
 
 ## Phase 2: make keys and access match
 
-For each audience, retire keys whose observed copies include someone now
-excluded. Use an existing usable replacement; if none is held, acquire one
-or have a current member's device rotate. Share historical keys with current
-members who lack them. Complete a needed rotation's copies and entry before
+For each audience, retire keys whose observed copies name an excluded
+member, a retired sealing credential, or a credential that is not current
+for its named member, including a losing replacement candidate. Derive
+retired credentials from each kept replacement's recorded view (§11). Use an
+existing usable replacement; if none is held, acquire one or have a current
+audience member's device rotate. Share historical keys with current members
+who lack copies for their current non-retired sealing credential. Complete a needed rotation's copies and entry before
 first sending data with its key. If no usable key can be acquired or made,
 that audience's sends wait with their first reason; app writes still commit.
 
@@ -385,8 +388,12 @@ While this device has open invites and a request check is due, list
 **`<store>/join-requests/` once**, serving all its invites. Read only newly
 present requests or those lacking retained checked bytes. An already
 decoded request waiting for the person's decision needs no more GETs.
-Approval creates key copies and the membership entry before deleting the
-request; decline or expiry deletes the request and settles access under
+Approval requires the invite's fixed member id and exact new pair, and
+confirms prerequisite copies to that candidate before publishing Add member
+or Replace member keys (§12). A losing replacement reports rejection without
+restarting against the winner. Self-replacement pauses app writes, confirms
+its queued writes/entries in step 6, and finishes custody before releasing
+the pause (§18). Approval deletes the request after its binding is kept; decline or expiry deletes the request and settles access under
 §12.2. No open invite means no join-request scan.
 
 A required reload first settles attempted uploads as §18.1 requires, then
