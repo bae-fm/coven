@@ -2,15 +2,27 @@
 # Every check of §20.4, in order. CI runs the code checks on every platform
 # and the proofs once, on Linux: a proof checks the same everywhere.
 #
-#   scripts/check.sh           everything
-#   scripts/check.sh code      the code checks only
-#   scripts/check.sh proofs    the Lean proofs and their differential tests
+#   scripts/check.sh                  everything
+#   scripts/check.sh code             the code checks only
+#   scripts/check.sh proofs           the Lean proofs and their differential tests
+#   scripts/check.sh changed [base]   the same checks, limited to what differs from
+#                                     base (default origin/main): changed crates and
+#                                     the crates that depend on them, changed proof
+#                                     packages and the packages that require them,
+#                                     and every differential whose Lean package or
+#                                     Rust crate is in either set. Local work uses
+#                                     it; CI runs everything on every push.
 set -euo pipefail
 
+base=
 case "${1-all}:$#" in
     all:0 | code:1 | proofs:1) part=${1-all} ;;
+    changed:1 | changed:2)
+        part=changed
+        base=${2-origin/main}
+        ;;
     *)
-        echo "usage: scripts/check.sh [code | proofs]" >&2
+        echo "usage: scripts/check.sh [code | proofs | changed [base]]" >&2
         exit 2
         ;;
 esac
@@ -19,45 +31,153 @@ cd "$(dirname "$0")/.."
 
 step() { echo ""; echo "── $1"; }
 
+# The workspace crates and proof packages this run checks. A full run checks
+# all of them; `changed` selects from the files that differ from its base.
+crates=()
+proof_packages=()
+select_all() {
+    crates=(all)
+    proof_packages=(merge storelog storelog-data storage queue io)
+}
+select_changed() {
+    local files
+    files=$({ git diff --name-only "$base"; git ls-files --others --exclude-standard; } | sort -u)
+    step "changed since $base: $(printf '%s\n' "$files" | grep -c . || true) files"
+    # Crates: those owning a changed file, then every member that depends on one.
+    # A change to the workspace manifest, lockfile or toolchain selects them all.
+    local selected
+    selected=$(cargo metadata --format-version 1 --no-deps | FILES="$files" python3 -c '
+import json, os, sys
+meta = json.load(sys.stdin)
+root = meta["workspace_root"] + "/"
+files = [f for f in os.environ["FILES"].splitlines() if f]
+members = {}
+for package in meta["packages"]:
+    directory = os.path.dirname(package["manifest_path"])[len(root):] + "/"
+    members[package["name"]] = (directory, {d["name"] for d in package["dependencies"] if d.get("path")})
+if any(f in ("Cargo.toml", "Cargo.lock", "rust-toolchain.toml") or f.startswith(".cargo/") for f in files):
+    print("\n".join(sorted(members)))
+    sys.exit()
+chosen = {name for name, (directory, _) in members.items() if any(f.startswith(directory) for f in files)}
+while True:
+    more = {name for name, (_, deps) in members.items() if deps & chosen} - chosen
+    if not more:
+        break
+    chosen |= more
+print("\n".join(sorted(chosen)))
+')
+    crates=()
+    local crate
+    for crate in $selected; do
+        crates+=("$crate")
+    done
+    # Proof packages: those holding a changed file, then every package that
+    # requires one through a lakefile path dependency.
+    local package required changed=1
+    proof_packages=()
+    for package in merge storelog storelog-data storage queue io; do
+        if printf '%s\n' "$files" | grep -q "^spec/proofs/$package/"; then
+            proof_packages+=("$package")
+        fi
+    done
+    while [ "$changed" = 1 ]; do
+        changed=0
+        for package in merge storelog storelog-data storage queue io; do
+            proof_selected "$package" && continue
+            for required in $(grep -A2 '\[\[require\]\]' "spec/proofs/$package/lakefile.toml" | sed -n 's/.*path = "\.\.\/\(.*\)"/\1/p'); do
+                if proof_selected "$required"; then
+                    proof_packages+=("$package")
+                    changed=1
+                    break
+                fi
+            done
+        done
+    done
+    echo "crates: ${crates[*]:-none}"
+    echo "proof packages: ${proof_packages[*]:-none}"
+}
+crate_selected() {
+    local crate
+    for crate in ${crates[@]+"${crates[@]}"}; do
+        [ "$crate" = all ] || [ "$crate" = "$1" ] && return 0
+    done
+    return 1
+}
+proof_selected() {
+    local package
+    for package in ${proof_packages[@]+"${proof_packages[@]}"}; do
+        [ "$package" = "$1" ] && return 0
+    done
+    return 1
+}
+# Cargo's package arguments for the selected crates.
+cargo_packages() {
+    if [ "${crates[0]-}" = all ]; then
+        echo --workspace
+    else
+        printf -- '-p %s ' "${crates[@]}"
+    fi
+}
+
 code_checks() {
     # Build the structural checker before the crates whose graph it validates (§20.4).
+    # It reads the whole workspace and runs in seconds, so every run includes it.
     step "owner-construction-check: §20.1 dependencies, §20.2 capabilities and owners, §20.3 conventions"
     cargo run --quiet -p owner-construction-check -- .
 
     step "cargo fmt --check"
     cargo fmt --all --check
 
-    step "cargo clippy --all-targets --all-features"
-    cargo clippy --workspace --all-targets --all-features -- -D warnings
+    if [ ${#crates[@]} = 0 ]; then
+        return
+    fi
+    local packages
+    packages=$(cargo_packages)
+
+    step "cargo clippy --all-targets --all-features ($packages)"
+    # shellcheck disable=SC2086
+    cargo clippy $packages --all-targets --all-features -- -D warnings
 
     step "cargo doc (broken links denied)"
+    # shellcheck disable=SC2086
     RUSTDOCFLAGS="-D rustdoc::broken_intra_doc_links -D warnings" \
-        cargo doc --workspace --no-deps --all-features
+        cargo doc $packages --no-deps --all-features
 
     # Default targets — every library and binary, no tests — with production
     # features only, so an item only test code or a test-only feature uses shows
     # up as dead. (`--lib` alone would skip the binaries, and fails outright while
     # the workspace holds no library.)
     step "every crate built without test code"
-    cargo check --workspace
+    # shellcheck disable=SC2086
+    cargo check $packages
 
     step "cargo test --all-features"
-    cargo test --workspace --all-features
+    # shellcheck disable=SC2086
+    cargo test $packages --all-features
 
     step "cargo test --no-default-features"
-    cargo test --workspace --no-default-features
+    # shellcheck disable=SC2086
+    cargo test $packages --no-default-features
 
-    step "release store-log replay cost (2,000 entries)"
-    cargo test -p coven-sync --release replay_cost -- --ignored --nocapture
+    if crate_selected coven-sync; then
+        step "release store-log replay cost (2,000 entries)"
+        cargo test -p coven-sync --release replay_cost -- --ignored --nocapture
+    fi
 }
 
-# A Lean proof, built from scratch: every module is imported by its root, so
-# none can drop out of the build; no `sorry`, and no axiom beyond Lean's own.
+# A Lean proof, built from scratch in a full run and incrementally in a changed
+# one: every module is imported by its root, so none can drop out of the build;
+# no `sorry`, and no axiom beyond Lean's own.
 lean_proof() {
     local what=$1 proof=$2 lib=$3 package=$4
+    proof_selected "${proof#spec/proofs/}" || return 0
     step "Lean proof of $what"
     # Path dependencies are checked separately; preserve their runner binaries.
-    (cd "$proof" && lake clean "$package" && lake build)
+    if [ "$part" = changed ]; then
+        (cd "$proof" && lake build)
+    else
+        (cd "$proof" && lake clean "$package" && lake build)
+    fi
     local module
     for module in "$proof/$lib"/*.lean; do
         module=$(basename "$module" .lean)
@@ -97,8 +217,24 @@ lean_proof() {
     fi
 }
 
+# The path of a proof package's runner. A package this run did not select is
+# brought up to date first, so a differential never runs a stale runner.
+runner() {
+    local package=$1 exe=$2
+    if ! proof_selected "$package"; then
+        (cd "spec/proofs/$package" && lake build "$exe" > /dev/null)
+    fi
+    local path
+    path="$(cd "spec/proofs/$package" && pwd)/.lake/build/bin/$exe"
+    if [ -f "$path.exe" ]; then
+        path="$path.exe"
+    fi
+    echo "$path"
+}
+
 # Merge, replay and clocks have Rust differential tests. Data coupling also has
-# checked counterexamples (spec/proofs/storelog-data.md).
+# checked counterexamples (spec/proofs/storelog-data.md). Each runs when its
+# Lean package or the Rust crate it compares is selected.
 proofs() {
     lean_proof "the merge" spec/proofs/merge CovenMerge covenMerge
     lean_proof "the store log" spec/proofs/storelog CovenStorelog covenStorelog
@@ -107,65 +243,70 @@ proofs() {
     lean_proof "device upload queues" spec/proofs/queue CovenQueue covenQueue
     lean_proof "sync IO and discovery" spec/proofs/io CovenIO covenIO
 
-    step "Rust / Lean Boolean merge differential"
-    runner="$(cd spec/proofs/merge && pwd)/.lake/build/bin/mergeRunner"
-    if [ -f "$runner.exe" ]; then
-        runner="$runner.exe"
+    local runner
+    if proof_selected merge || crate_selected coven-merge; then
+        runner=$(runner merge mergeRunner)
+        step "Rust / Lean Boolean merge differential"
+        COVEN_MERGE_LEAN="$runner" cargo test -p coven-merge --all-features lean_differential -- --ignored
+
+        step "Rust / Lean circle-entry counterexample"
+        COVEN_MERGE_LEAN="$runner" cargo test -p coven-merge --all-features entry_differential_counterexample -- --ignored
     fi
-    COVEN_MERGE_LEAN="$runner" cargo test -p coven-merge --all-features lean_differential -- --ignored
 
-    step "Rust / Lean circle-entry counterexample"
-    COVEN_MERGE_LEAN="$runner" cargo test -p coven-merge --all-features entry_differential_counterexample -- --ignored
+    if proof_selected merge || crate_selected coven-database; then
+        runner=$(runner merge mergeRunner)
+        step "Rust / Lean reset counterexample"
+        COVEN_MERGE_LEAN="$runner" cargo test -p coven-database --all-features reset_differential_counterexample -- --ignored
 
-    step "Rust / Lean reset counterexample"
-    COVEN_MERGE_LEAN="$runner" cargo test -p coven-database --all-features reset_differential_counterexample -- --ignored
+        step "Rust / Lean schema-boundary differential"
+        COVEN_MERGE_LEAN="$runner" cargo test -p coven-database --all-features schema_differential_histories -- --ignored
 
-    step "Rust / Lean schema-boundary differential"
-    COVEN_MERGE_LEAN="$runner" cargo test -p coven-database --all-features schema_differential_histories -- --ignored
-
-    step "Rust / Lean migration-selection counterexample"
-    COVEN_MERGE_LEAN="$runner" cargo test -p coven-database --all-features migration_differential_counterexample -- --ignored
-
-    step "Rust / Lean CurrentReplay: agreement and policy counterexamples"
-    runner="$(cd spec/proofs/storelog && pwd)/.lake/build/bin/storelogRunner"
-    if [ -f "$runner.exe" ]; then
-        runner="$runner.exe"
+        step "Rust / Lean migration-selection counterexample"
+        COVEN_MERGE_LEAN="$runner" cargo test -p coven-database --all-features migration_differential_counterexample -- --ignored
     fi
-    local storelog_tests test
-    storelog_tests=$(cargo test -p coven-sync --all-features lean_differential -- --list)
-    for test in \
-        tests::lean_differential_generated \
-        tests::lean_differential_checked_examples \
-        tests::lean_differential_circle_replay \
-        tests::lean_differential_storage_admission \
-        tests::lean_differential_rejects_invalid_inputs; do
-        if ! printf '%s\n' "$storelog_tests" | grep -qxF "$test: test"; then
-            echo "the Rust test binary is missing $test" >&2
+
+    if proof_selected storelog || crate_selected coven-sync; then
+        runner=$(runner storelog storelogRunner)
+        step "Rust / Lean CurrentReplay: agreement and policy counterexamples"
+        local storelog_tests test
+        storelog_tests=$(cargo test -p coven-sync --all-features lean_differential -- --list)
+        for test in \
+            tests::lean_differential_generated \
+            tests::lean_differential_checked_examples \
+            tests::lean_differential_circle_replay \
+            tests::lean_differential_storage_admission \
+            tests::lean_differential_rejects_invalid_inputs; do
+            if ! printf '%s\n' "$storelog_tests" | grep -qxF "$test: test"; then
+                echo "the Rust test binary is missing $test" >&2
+                exit 1
+            fi
+        done
+        COVEN_STORELOG_LEAN="$runner" cargo test -p coven-sync --all-features lean_differential -- --ignored
+    fi
+
+    if proof_selected storage || crate_selected coven-database; then
+        runner=$(runner storage clockRunner)
+        step "Rust / Lean differential clock test"
+        COVEN_CLOCK_LEAN="$runner" cargo test -p coven-database --all-features lean_differential_clocks -- --ignored
+    fi
+
+    if proof_selected merge || crate_selected coven-database; then
+        runner=$(runner merge receiveRunner)
+        step "Rust / Lean differential causal receive test"
+        if ! cargo test -p coven-database --all-features lean_differential_receive -- --list |
+            grep -x 'download::tests::lean_differential_receive: test' > /dev/null; then
+            echo "the Rust test binary is missing the causal receive differential" >&2
             exit 1
         fi
-    done
-    COVEN_STORELOG_LEAN="$runner" cargo test -p coven-sync --all-features lean_differential -- --ignored
-
-    step "Rust / Lean differential clock test"
-    runner="$(cd spec/proofs/storage && pwd)/.lake/build/bin/clockRunner"
-    if [ -f "$runner.exe" ]; then
-        runner="$runner.exe"
+        COVEN_RECEIVE_LEAN="$runner" cargo test -p coven-database --all-features lean_differential_receive -- --ignored
     fi
-    COVEN_CLOCK_LEAN="$runner" cargo test -p coven-database --all-features lean_differential_clocks -- --ignored
-
-    step "Rust / Lean differential causal receive test"
-    runner="$(cd spec/proofs/merge && pwd)/.lake/build/bin/receiveRunner"
-    if [ -f "$runner.exe" ]; then
-        runner="$runner.exe"
-    fi
-    if ! cargo test -p coven-database --all-features lean_differential_receive -- --list |
-        grep -x 'download::tests::lean_differential_receive: test' > /dev/null; then
-        echo "the Rust test binary is missing the causal receive differential" >&2
-        exit 1
-    fi
-    COVEN_RECEIVE_LEAN="$runner" cargo test -p coven-database --all-features lean_differential_receive -- --ignored
 }
 
+if [ "$part" = changed ]; then
+    select_changed
+else
+    select_all
+fi
 if [ "$part" != proofs ]; then
     code_checks
 fi
