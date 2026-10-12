@@ -1841,28 +1841,33 @@ Carol's tablet:
 ## 9. Members and roles
 
 - A member is a person in the store, using it from one or more devices.
-  - Each member has their own keys, which identify them ([§11](#11-keys)).
-  - An admin adds a member by writing their public key to the store log.
+  - Each has a random 16-byte UUID, `MemberId`, independent of their keys,
+    like a circle id. Device ownership and circle membership name that id.
+  - Each member has current signing and sealing keys ([§11](#11-keys)).
+    An admin adds the id and both public keys to the store log.
 - The *store log* records changes to the store itself, separate from the
   app's writes.
   - Each change is one *entry*: add or remove a member, change a role, add
-    or remove a device, make, rename or delete a circle
+    or remove a device, replace a member's keys, make, rename or delete a circle
     ([§14](#14-audiences)) or change its members, rotate an audience's key,
     raise the store's or a circle's schema version, or reset the store or a circle to a
     snapshot ([§15](#15-snapshots)).
   - An entry names the store log entries its author had read, and is
-    signed with its author's member key.
+    signed with the current signing key of its `author:MemberId` in that
+    recorded view. Retain historical public bindings to check older objects.
   - Entries live at `<store>/store-log/<device>/<n>`, numbered like a device's
     writes ([§6](#6-syncing-writes)).
   - The device in the path is only where the entry was written from.
   - Each device numbers its own entries, so no two entries ever get the
     same path. There is no shared sequence or cross-device slot to claim.
-  - Whose entry it is comes from its signature: an entry signed with Ana's
-    key is Ana's, whichever of her devices wrote it.
+  - Verify the signature against that stable author's keys in the replay of
+    `had_read`, including implicit own entries. The device path is not an
+    alternative author. Creation supplies its author's initial pair in its
+    payload and its id in the header; verify both the signature and store path.
 
     ```
     <store>/store-log/ana-phone/1      create the store, Ana as admin       signed with Ana's key
-    <store>/store-log/ana-phone/2      add member Ben, with his public key  signed with Ana's key
+    <store>/store-log/ana-phone/2      add Ben's id and public key pair    signed with Ana's key
                                had read: ana-phone 1
     <store>/store-log/ben-laptop/1     add device ben-phone                 signed with Ben's key
                                had read: ana-phone 2
@@ -1880,7 +1885,8 @@ Carol's tablet:
   - Without storage, or if the catch-up fails, return the typed failure
     without reserving an entry or starting an operation.
   - An already-started operation keeps its durable progress after a
-    connection failure; its immutable attempted entries still retry (§18).
+    connection failure; its immutable attempted entries retry while the
+    current-credential send gate permits them (§10, §18).
     An entry that lands too late is dropped under the rule below. Its
     publication is settled, but its requested change has not succeeded.
   - Two online devices can still act concurrently: each can finish reading
@@ -1895,6 +1901,10 @@ Carol's tablet:
 - Roles:
   - several equal admins;
   - only admins add and remove members, and change roles;
+  - a member replaces their own keys, or an admin replaces another member's
+    keys. Authority uses the current signing key and role in the entry's
+    recorded view. Both signing and sealing keys must be fresh: neither may
+    reuse a key established for any member earlier in that view or the replay;
   - each member adds and removes their own devices, with their own key, and
     admins can remove any device;
   - each member records their own new storage access, such as a replaced S3
@@ -1937,7 +1947,8 @@ Carol's tablet:
     a gap that hides later copies. Failure reaches the caller and remains visible;
     prerequisite copies must be confirmed before their entry is published;
   - the replay's result: `_coven_members` (every member a kept entry
-    added, their public keys and role, and whether they were removed),
+    added, their stable ids, current public key pairs and role, and whether
+    they were removed),
     `_coven_devices` (every device a kept entry added, its member and name,
     and whether it is active, removed or replaced),
     `_coven_circles` (every circle a kept entry made and its name),
@@ -1956,9 +1967,10 @@ Carol's tablet:
   - Ana's directory settings name “Recipes” while its first entry is being
     published. Once that entry is checked, reads derive “Recipes” from it;
     a conflicting setting fails opening rather than choosing another name.
-  - Keys themselves are only ever in key custody (§11). Key selection uses
+  - Private member keys and audience key bytes are only ever in key custody
+    (§11). Audience-key selection uses
     introductions in the received entries and the pass's new-copy observation
-    (§11). There is no shared current-key field or local retired-key table;
+    (§11). There is no shared current-audience-key field or local retired-key table;
     permanent sealed copies are the shared record of who can hold each key.
   - Removed members and removed or replaced devices stay. Their stored
     writes still count when their authority and landing checks pass, using their keys
@@ -2129,8 +2141,11 @@ Carol's tablet:
   judged from its recorded store-log past (§10).
 - Then, an entry whose change is already in place applies and changes
   nothing.
-  - E.g. Ana and Ben both add Dan: both apply, Dan is added once, and
-    neither is dropped.
+  - E.g. Ana and Ben both add the same Dan id, keys, role and access: both
+    apply, Dan is added once, and neither is dropped. An addition cannot
+    change an active member's keys; use Replace member keys instead.
+  - Replace member keys never takes this shortcut. Concurrent replacements
+    of the same id conflict even when their key pairs are identical.
 - Otherwise it applies only if:
   - what it needs exists: the member it changes, the device it removes,
     the member a new device belongs to, the circle it changes, the circle
@@ -2157,12 +2172,15 @@ Carol's tablet:
   - two raises to the same audience and version with different snapshots,
     two resets of one audience with different snapshots, or a reset and
     raise of that same audience.
-- Sharing a member id or changing keys is not itself a conflict.
+- Sharing a member id or rotating audience keys is not itself a conflict.
   - Ben's two device additions, his new storage access and his circle
     addition can all apply.
   - Adding Carol and removing Dan both apply. Carol receives every key
     she needs; keys that reached Dan are retired for new sealing (§11).
   - Adding Carol to Gifts and removing Ben from Gifts both apply too.
+  - A member-key replacement conflicts with another replacement of that id
+    or removal of that member; it creates no conflict with role, access,
+    device or circle changes. Replacements of different members do not conflict.
   - Two removals of different members both apply if an admin remains.
     Two removals of the same member are the same membership result.
   - Renames use their existing latest-timestamp rule (§14.3), and raises
@@ -2173,7 +2191,7 @@ Carol's tablet:
   member. This classification does not change on later replay.
 - Deletion conflicts with changes requiring the circle because they cannot
   both take effect on an existing circle. The deletion wins by the tiers
-  below; sharing a key or changing keys is not itself a conflict.
+  below; sharing or rotating an audience key is not itself a conflict.
 - Of two conflicting entries, the one that beats the other is:
   1. removing a member or device from the store;
   2. deleting a circle, including removing its last member in the author's view;
@@ -2182,6 +2200,23 @@ Carol's tablet:
   5. making someone an admin.
   - A lower-numbered tier wins; within a tier, the smaller timestamp wins.
   - These tiers compare conflicting entries only.
+- For concurrent replacements of the same member's keys, another admin
+  beats self-replacement; otherwise the earlier timestamp wins. Classify by
+  stable ids: author equal to target is self-replacement even when that
+  member is an admin. Removing the target member beats every replacement.
+  The target must exist both in the recorded view and at its replay position;
+  replacement cannot restore a removed member. An equal-payload winner may
+  retain the pair already installed by its defeated contender; this is the
+  same replacement, not permission to reuse a historical key.
+- Replace member keys carries only the target id and the new public pair.
+  It preserves role, storage access, circle memberships and every device id.
+  Audience keys rotate separately when their copies expose them (§11).
+- An old-key write's window becomes final with a kept replacement and the
+  final entry prefix through its storage time, including ties (§10).
+  Before then, replacement decisions and dependent rows, source verdicts
+  and losses change in the same replay transaction. The checked member-key
+  proofs assume this final prefix; the general horizon theorem has not been
+  extended to keyed replay ([C13](proofs/storelog.md#c13-stable-members-and-replaceable-keys--checked-proposal)).
 - Concurrent entries, and what applies:
 
   ```
