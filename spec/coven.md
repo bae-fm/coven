@@ -142,6 +142,8 @@ are those of [§2](#2-threat-model); the write-ups state their additional limits
     enforce local SQL access rules. These are local validity checks, not waits
     for schema publication. A migrated app's writes can commit before the raise
     is published; publication gates upload (§17.1).
+  - Self-replacement pauses app writes with `MemberKeysChanging` while this
+    installation confirms its queue and installs its new binding/custody (§10).
   - `ClockOutOfRange` and `TooLarge` enforce timestamp and representation limits
     (§6, §7.2). File attachment checks can reject absent/changed sources, wrong
     sizes or references, missing bytes, invalid file declarations/keys/columns,
@@ -223,6 +225,8 @@ are those of [§2](#2-threat-model); the write-ups state their additional limits
     from the first step with a new entry number and, for a rotation, a fresh
     key. Old copies and the entry remain in storage
     ([checked history: `restart_changes_key`](proofs/queue.md#checked-histories-and-limits)).
+    A rejected member-key replacement reports its reason without restarting;
+    overriding the winner requires a new explicit call or approved invite (§18).
     Finishing does not promise recovery from permanent rejection without
     the applicable update or app action (§19.1).
   These model results assume durable local artifacts and atomic journal commits;
@@ -232,8 +236,10 @@ are those of [§2](#2-threat-model); the write-ups state their additional limits
   start, then seals with the newest usable key. Every send also requires
   that completed catch-up to have started less than five minutes ago (§10).
   For an audience the sending member still belongs to, selection excludes
-  keys known to have reached an excluded member
-  ([queue proof: `first_key_excludes_known_recipient`](proofs/queue.md#what-is-proved)).
+  keys known to have reached an excluded member or a retired or noncurrent
+  sealing credential (§11)
+  ([queue proof: `first_key_excludes_known_recipient`](proofs/queue.md#what-is-proved),
+  [credential exposure proof](proofs/storelog-data.md#member-key-replacement)).
   An excluded member cannot read writes first sent by a remaining audience
   member's device that already knew of their exclusion, provided no copy of
   the sealing key is made for them after that pass's copy observation (§11;
@@ -244,9 +250,17 @@ are those of [§2](#2-threat-model); the write-ups state their additional limits
   check the catch-up deadline given the clock and observation inputs.
   - A tried write retains its first attempt's key and bytes on every retry
     ([queue proof: `Run.retries_identical`](proofs/queue.md#what-is-proved)).
-    Nothing is dropped or rewritten for revocation; storage access is cut
-    off separately (§13). The retry proof assumes a deterministic sealer;
+    Retries cannot rewrite those bytes; replaced signing credentials stop
+    sending under §10, and receivers enforce each object's window. Storage
+    access is cut off separately (§13). The retry proof assumes a deterministic sealer;
     provider cut-off is assumed.
+  - Replacing member keys preserves the member id. Its previous sealing
+    credential and losing candidates' copies expose audience keys even
+    while the member remains active. Selection avoids those observed copies;
+    later copies retain §11's residual window. Old signing-key admission has
+    a grace period, not immediate revocation or theft recovery. Its window
+    becomes final with a kept replacement and its final preceding prefix,
+    including ties; the keyed proofs assume that prefix (§9, §10).
   - The removed member's own pre-removal circle writes are outside this
     promise (§14.6). E.g. Ben queues a Gifts edit, then learns Ana removed
     him. He may still first-send that edit with the old key he already has;
