@@ -410,6 +410,19 @@
   Retained inputs for undoing a non-final entry's effects are local state;
   they are not lost merely because a snapshot replaces the visible state.
   `LostValue.pending_entries` is computed from replay and finality, not encoded.
+- Snapshot evidence must preserve original change identities, actual
+  generation/setter sources and their own admission facts independently of
+  dismissible losses and consumed positions. Old-key window exclusions feed
+  the same per-change rule as schema and device-retirement exclusions (D5).
+  Dependent changes retain their original generation, operation, column names
+  and values, even an empty-valued delete. Their dependency cause names failed
+  sources in generation-then-setter role order, retaining repeated ids.
+  A later reader, conversion, loss dismissal or snapshot reload cannot turn
+  that excluded source into retained data. Preserve originals until deciding
+  replacement prefixes are final and the other retention checks pass.
+  The compact five-section layout above does not itself supply the shared
+  data evidence or dependency-loss encoding required by
+  [B17](proofs/merge.md#b17-receive-order-progress-and-dropping-by-data).
 
 ### D8 Small frames
 
