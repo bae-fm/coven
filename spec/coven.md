@@ -2890,8 +2890,17 @@ Carol's tablet:
     on one device. She keeps the key separately and supplies it to her other
     devices, directly or through a QR scan from one of her own devices, then
     deletes the old key in the console. Her restore code does not change.
-- No keys change: the phone still holds Ana's key, but can't reach storage
+- Device removal alone changes no member keys: the phone still holds Ana's
+  private pair, but can't reach storage
   to read or write anything new.
+- Replace member keys is a separate store-log entry. It preserves the
+  member's access record and all device ids; it neither drains their logs nor
+  certifies their file folders closed. Its old-key write deadline and send
+  bound are §10's credential rules. Stored entries keep §9's permanent rule.
+  Rotate exposed audience keys under §11 and handle provider credentials
+  separately. Recovery with changed S3 credentials records a separate
+  set-access entry under the rebound member's new signing key; until it is
+  kept, the invite retains the new grant for failure/decline revocation.
 - Removing a member is a store-log entry naming that member. It removes
   them and their devices; it contains no store key or circle-key list.
   Replay still derives deletion of circles whose sole member the author
