@@ -124,7 +124,8 @@ theorem move_recorded {W Col Table : Type} [DecidableEq W]
     (by rw [verdict, reason]), rfl, rfl, owned, unreadable⟩
 
 /-! A single completed-view comparison exhibits masking counterexamples.
-The delete guard itself enumerates contexts in `OwnerDeleteContexts`. -/
+The member-context delete guard is in `OwnerDeleteRule`;
+`OwnerDeleteContexts` retains the exhaustive comparison model. -/
 namespace ViewComparison
 
 /-- Supplied merged inputs for a proposed deletion trial, including

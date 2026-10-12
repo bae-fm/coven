@@ -1,4 +1,4 @@
-import CovenMerge.OwnerDeleteContexts
+import CovenMerge.OwnerDeleteRule
 
 namespace CovenMerge.Ownership.DeleteExamples
 
@@ -62,8 +62,12 @@ def inputs (st : St Write Bool Unit) : EntryInputs Bool Unit where
   claims _ := []
   rank r := if r then 1 else 0
 
-def trial := deleteTrial policy [false, true] inputs
-  (fun w _ => decide (w = .leftDelete ∨ w = .rightDelete))
+def graph (st : St Write Bool Unit) : ReferenceGraph (Bool × Nat) where
+  rows := [(false, st.gen false), (true, st.gen true)]
+  present node := decide (st.gen node.1 % 2 = 1)
+  parents node := if node.1 then [(false, 1)] else []
+
+def trial := deleteTrial history policy graph
 
 def candidates : List (Write × Bool) := [(.leftDelete, false), (.rightDelete, false)]
 

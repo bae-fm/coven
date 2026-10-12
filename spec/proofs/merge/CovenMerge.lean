@@ -34,3 +34,8 @@ import CovenMerge.OwnerExamples
 import CovenMerge.OwnerFilterExamples
 import CovenMerge.OwnerDeleteExamples
 import CovenMerge.OwnerReinsertExamples
+import CovenMerge.OwnerDeleteRule
+import CovenMerge.OwnerDeleteCost
+import CovenMerge.OwnerDeleteRuleExamples
+import CovenMerge.OwnerCellAccounting
+import CovenMerge.OwnerDeleteGenerationExample

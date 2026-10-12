@@ -1,6 +1,6 @@
 import CovenMerge.OwnerEvaluation
 
-/-! Delete protection through the complete removal passes. Testing every
+/-! The all-contexts comparison model through the complete removal passes. Testing every
 surviving foreign-delete context prevents concurrent deletes from masking
 each other, including effects of null substitution on unique claims. -/
 namespace CovenMerge.Ownership
@@ -194,19 +194,5 @@ theorem all_deletes_preserve (s : DeleteContexts Row K Member Op) (active : List
     intro d
     exact ⟨fun h => (List.mem_append.mp h).elim id (baseSub d), List.mem_append_left _⟩)] at shown
   exact shown
-variable {Col Table : Type} [DecidableEq W]
-
-/-- Bind both protection views to one authenticated policy and one actual
-original-write rebuild. SQL extraction supplies generation-aware removal
-inputs for each context, including delete/reinsert dependencies. -/
-def deleteTrial (P : Policy W Row Table Member) (rows : List Row)
-    (inputs : St W Row Col → EntryInputs Row K) (isDelete : W → Row → Bool)
-    (build : List (W × Row) → St W Row Col) (active : List (W × Row))
-    (w : W) (r : Row) : Option (Cause W Member Row) :=
-  let owners := fun row => if P.owned (P.table row) then some (owner P row) else none
-  contextDeleteReason
-    ⟨rows, owners, fun op => P.author op.1, fun op => isDelete op.1 op.2,
-      fun context => (inputs (build context)).erase⟩
-    active (w, r)
 
 end CovenMerge.Ownership
