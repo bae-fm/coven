@@ -631,7 +631,7 @@ observations and provider cooldown with the pass. Each upload uses its
 captured reference, fixed file key and source checks (§16.5), without
 selecting an audience key.
 Before every request, including a retry, part or session completion, check
-§10's catch-up freshness. Expiry waits for the next pass without changing
+§10's catch-up freshness and current signing credentials. Expiry waits for the next pass without changing
 the fixed reference, key or confirmed session progress.
 
 Use one create within the provider's single-request limit; crossing a
