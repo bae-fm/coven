@@ -44,6 +44,7 @@ impl Database {
         F: FnOnce(
                 &crate::StoreLog,
                 &coven_format::store_log::StoreLogEntry,
+                crate::KeyUploadBatch,
             ) -> Result<(crate::StoreLogSealing, OperationUpdate), E>
             + Send
             + 'static,
@@ -53,12 +54,13 @@ impl Database {
             inner.with_writer(|writer| {
                 crate::store_log_upload::prepare(
                     writer,
+                    inner.access.directory.id(),
                     inner.access.device,
                     inner.clock.now(),
                     author,
                     change,
-                    move |log, entry| {
-                        seal(log, entry).map(|(sealed, update)| (sealed, Some(update)))
+                    move |log, entry, copies| {
+                        seal(log, entry, copies).map(|(sealed, update)| (sealed, Some(update)))
                     },
                 )
             })

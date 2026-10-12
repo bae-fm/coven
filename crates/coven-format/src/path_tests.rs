@@ -3,22 +3,30 @@ use crate::test_utils::STORE_ID;
 
 #[test]
 fn storage_paths_require_a_canonical_store_id() {
-    let member = crate::test_utils::member().signing;
     for tail in [
-        "devices/1/1".to_owned(), "store-log/1/1".to_owned(), "positions/1".to_owned(),
-        "snapshots/store/1/1".to_owned(), "files/1/11111111-1111-1111-1111-111111111111".to_owned(),
+        "devices/1/1".to_owned(),
+        "store-log/1/1".to_owned(),
+        "positions/1".to_owned(),
+        "snapshots/store/1/1".to_owned(),
+        "files/1/11111111-1111-1111-1111-111111111111".to_owned(),
         "join-requests/11111111-1111-1111-1111-111111111111".to_owned(),
-        format!("keys/store/11111111-1111-1111-1111-111111111111/{member}"),
-        format!("keys/circles/11111111-1111-1111-1111-111111111111/11111111-1111-1111-1111-111111111111/{member}"),
+        "keys/1/1".to_owned(),
     ] {
         let scoped = ObjectPath::parse(&format!("{STORE_ID}/{tail}")).unwrap();
         assert_eq!(scoped.store(), STORE_ID);
         assert!(ObjectPrefix::all(STORE_ID).contains(&scoped));
         assert!(ObjectPath::parse(&tail).is_err(), "{tail}");
-        for bad in ["", "not-a-store", "00112233445566778899aabbccddeeff", "00112233-4455-6677-8899-AABBCCDDEEFF", "../", "/"] {
+        for bad in [
+            "",
+            "not-a-store",
+            "00112233445566778899aabbccddeeff",
+            "00112233-4455-6677-8899-AABBCCDDEEFF",
+            "../",
+            "/",
+        ] {
             assert!(ObjectPath::parse(&format!("{bad}/{tail}")).is_err());
         }
-        let other = StoreId(uuid::Uuid::from_bytes([0x20;16]));
+        let other = StoreId(uuid::Uuid::from_bytes([0x20; 16]));
         let other_path = ObjectPath::parse(&format!("{other}/{tail}")).unwrap();
         assert_ne!(scoped, other_path);
         assert!(!ObjectPrefix::all(STORE_ID).contains(&other_path));
@@ -127,16 +135,13 @@ fn prefixes_find_every_device_and_snapshots_retain_the_device() {
 fn every_layout_round_trips_without_aliases() {
     let device = DeviceId(42);
     let number = NonZeroU64::new(3).unwrap();
-    let key = KeyId(uuid::Uuid::from_bytes([0xab; 16]));
     let id = uuid::Uuid::from_u128(17);
-    let member = coven_crypto::MemberKeys::generate().unwrap().member_id();
     for path in [
         ObjectPath::device_log(STORE_ID, device, number),
         ObjectPath::store_log(STORE_ID, device, number),
         ObjectPath::snapshot(STORE_ID, Audience::Store, device, number),
         ObjectPath::positions(STORE_ID, device),
-        ObjectPath::store_key(STORE_ID, key, &member),
-        ObjectPath::circle_key(STORE_ID, CircleId(id), key, &member),
+        ObjectPath::key_copy(STORE_ID, device, number),
         ObjectPath::join_request(STORE_ID, InviteId(id)),
         ObjectPath::file(STORE_ID, device, FileId(uuid::Uuid::from_bytes([0xab; 16]))),
     ] {
@@ -159,14 +164,14 @@ fn every_layout_round_trips_without_aliases() {
         ObjectPath::snapshot(STORE_ID, Audience::Store, device, number).as_str(),
         "10101010-1010-1010-1010-101010101010/snapshots/store/42/3"
     );
+    let copy = ObjectPath::key_copy(STORE_ID, device, number);
     assert_eq!(
-        ObjectPath::store_key(STORE_ID, key, &member).as_str(),
-        format!("10101010-1010-1010-1010-101010101010/keys/store/abababab-abab-abab-abab-abababababab/{member}")
+        copy.as_str(),
+        "10101010-1010-1010-1010-101010101010/keys/42/3"
     );
-    assert_eq!(
-        ObjectPath::circle_key(STORE_ID, CircleId(id), key, &member).as_str(),
-        format!("10101010-1010-1010-1010-101010101010/keys/circles/{id}/abababab-abab-abab-abab-abababababab/{member}")
-    );
+    assert_eq!(copy.key_copy_position(), Some((device, number)));
+    assert_eq!(copy.device(), Some(device));
+    assert!(!copy.is_replaceable());
     for path in [
         "10101010-1010-1010-1010-101010101010/devices/42/0",
         "10101010-1010-1010-1010-101010101010/devices/042/1",
@@ -184,54 +189,27 @@ fn every_layout_round_trips_without_aliases() {
     }
     assert!(!ObjectPrefix::device_log(STORE_ID, DeviceId(4))
         .contains(&ObjectPath::device_log(STORE_ID, device, number)));
-    for path in [
-        format!(
-            "10101010-1010-1010-1010-101010101010/keys/store/{key}/{}",
-            "00".repeat(32)
-        ),
-        format!(
-            "10101010-1010-1010-1010-101010101010/keys/circles/{id}/{key}/{}",
-            "00".repeat(32)
-        ),
-        format!(
-            "10101010-1010-1010-1010-101010101010/keys/store/{key}/{}",
-            member.to_string().to_uppercase()
-        ),
-        format!(
-            "10101010-1010-1010-1010-101010101010/files/{}",
-            "AB".repeat(32)
-        ),
-        format!("10101010-1010-1010-1010-101010101010/keys/store/1/{member}"),
-        format!(
-            "10101010-1010-1010-1010-101010101010/keys/store/{}/{member}",
-            key.0.simple()
-        ),
-        format!(
-            "10101010-1010-1010-1010-101010101010/keys/circles/{id}/{}/{member}",
-            key.0.simple()
-        ),
-        format!("10101010-1010-1010-1010-101010101010/keys/store/{{{key}}}/{member}"),
-        format!("10101010-1010-1010-1010-101010101010/keys/circles/{id}/urn:uuid:{key}/{member}"),
-        format!("10101010-1010-1010-1010-101010101010/keys/circles/{id}/1/{member}"),
-        format!(
-            "10101010-1010-1010-1010-101010101010/keys/store/{}/{member}",
-            key.to_string().to_uppercase()
-        ),
-        format!(
-            "10101010-1010-1010-1010-101010101010/keys/circles/{id}/{}/{member}",
-            key.to_string().to_uppercase()
-        ),
-        format!(
-            "10101010-1010-1010-1010-101010101010/keys/store/{}/{member}",
-            "a".repeat(31)
-        ),
-        format!(
-            "10101010-1010-1010-1010-101010101010/keys/circles/{id}/{}/{member}",
-            "a".repeat(33)
-        ),
+    for tail in [
+        "keys/42/0",
+        "keys/042/1",
+        "keys/42/01",
+        "keys/42/1/extra",
+        "keys/+42/1",
+        "keys/42/18446744073709551616",
+        "keys/18446744073709551616/1",
+        "keys/store/11111111-1111-1111-1111-111111111111/member",
+        "keys/circles/11111111-1111-1111-1111-111111111111/key/member",
+        "files/ABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABAB",
     ] {
-        assert!(ObjectPath::parse(&path).is_err(), "{path}");
+        assert!(
+            ObjectPath::parse(&format!("{STORE_ID}/{tail}")).is_err(),
+            "{tail}"
+        );
     }
+    assert!(ObjectPath::parse(&format!(
+        "{STORE_ID}/keys/18446744073709551615/18446744073709551615"
+    ))
+    .is_ok());
 }
 
 #[test]

@@ -461,6 +461,17 @@ pub enum DbError {
     /// An operation no longer has the state expected by its caller.
     #[error("operation {0:?} changed or is absent")]
     OperationChanged(crate::OperationId),
+    /// This writer has reserved every key-copy number.
+    #[error("key-copy numbers exhausted")]
+    KeyCopyNumberExhausted,
+    /// Reservation or confirmation cannot skip a number or change fixed bytes.
+    #[error("key copy {writer:?}/{number} is not the next fixed upload")]
+    KeyUploadChanged {
+        /// Writer whose sequence must remain contiguous.
+        writer: coven_foundation::id_source::DeviceId,
+        /// Copy whose reservation or confirmation was rejected.
+        number: std::num::NonZeroU64,
+    },
     /// This device has used every store-log number.
     #[error("store-log entry numbers exhausted")]
     StoreLogNumberExhausted,

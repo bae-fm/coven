@@ -586,13 +586,13 @@ async fn callback_panics_release_the_writer_and_reserve_nothing() {
                     call.prepare_store_log(
                         entry.author,
                         entry.change,
-                        |_, _| -> Result<_, DbError> { std::panic::panic_any(123_u64) },
+                        |_, _, _| -> Result<_, DbError> { std::panic::panic_any(123_u64) },
                     )
                     .await
                     .unwrap();
                 }
                 "key upload" => {
-                    call.prepare_key_upload("key".into(), || -> Result<Vec<u8>, DbError> {
+                    call.prepare_key_upload(|_| -> Result<Vec<u8>, DbError> {
                         std::panic::panic_any(123_u64)
                     })
                     .await
@@ -602,7 +602,7 @@ async fn callback_panics_release_the_writer_and_reserve_nothing() {
                     call.prepare_operation_entry(
                         entry.author,
                         entry.change,
-                        |_, _| -> Result<_, DbError> { std::panic::panic_any(123_u64) },
+                        |_, _, _| -> Result<_, DbError> { std::panic::panic_any(123_u64) },
                     )
                     .await
                     .unwrap();
@@ -625,9 +625,10 @@ async fn callback_panics_release_the_writer_and_reserve_nothing() {
             assert!(db.local_store_log().await.unwrap().upload.is_none());
             assert!(db.operations().await.unwrap().is_empty());
             assert_eq!(
-                db.prepare_key_upload("key".into(), || Ok::<_, DbError>(vec![7]))
+                db.prepare_key_upload(|_| Ok::<_, DbError>(vec![7]))
                     .await
-                    .unwrap(),
+                    .unwrap()
+                    .bytes,
                 vec![7]
             );
             db.write(|_| Ok(())).await.unwrap();

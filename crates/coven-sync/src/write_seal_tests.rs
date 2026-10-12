@@ -461,11 +461,17 @@ async fn reversed_removal_parts(
         .await
         .unwrap();
     let rotation_key = KeyId(Uuid::from_u128(2));
-    let copy =
-        crate::store_log_keys::path(STORE_ID, &audience, rotation_key, &identity(4).member_id());
-    assert!(matches!(
-        storage.read(&copy).await,
-        Err(error) if error.failure() == coven_storage::StorageFailure::NotFound
+    let has_copy = |copies: Vec<crate::store_log_keys::ObservedCopy>| {
+        copies.into_iter().any(|copy| {
+            copy.prefix.audience == audience
+                && copy.prefix.key == rotation_key
+                && copy.prefix.member == identity(4).member_id()
+        })
+    };
+    assert!(!has_copy(
+        crate::store_log_keys::read_copies(storage.as_ref(), STORE_ID, &mut Vec::new())
+            .await
+            .unwrap()
     ));
     if ben_reads_before_copy {
         ben.sync.sync_store_log().await.unwrap();
@@ -517,7 +523,11 @@ async fn reversed_removal_parts(
 
     // Carol owns K2 and shares it through StoreLogSync when she learns the drop.
     carol.sync.sync_store_log().await.unwrap();
-    assert!(!storage.read(&copy).await.unwrap().is_empty());
+    assert!(has_copy(
+        crate::store_log_keys::read_copies(storage.as_ref(), STORE_ID, &mut Vec::new())
+            .await
+            .unwrap()
+    ));
     assert!(matches!(
         carol.db.store_log().await.unwrap().replay.entries[&dropped],
         coven_database::EntryOutcome::Dropped(coven_database::DropReason::NoAdminLeft)

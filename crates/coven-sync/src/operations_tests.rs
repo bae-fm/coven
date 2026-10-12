@@ -260,7 +260,7 @@ async fn restart_after_each_step_uses_the_committed_entry_and_keys() {
         let record = a.db.operations().await.unwrap().remove(0);
         if let Some(upload) = &before {
             for key in &upload.sealing.keys {
-                let stored = storage.read(&ObjectPath::parse(&key.path).unwrap()).await;
+                let stored = storage.read(&key.path(store(1))).await;
                 if record.last_step >= 2 {
                     assert_eq!(stored.unwrap(), key.bytes);
                 } else {
@@ -297,13 +297,7 @@ async fn restart_after_each_step_uses_the_committed_entry_and_keys() {
                 expected.unwrap()
             );
             for key in before.sealing.keys {
-                assert_eq!(
-                    storage
-                        .read(&ObjectPath::parse(&key.path).unwrap())
-                        .await
-                        .unwrap(),
-                    key.bytes
-                );
+                assert_eq!(storage.read(&key.path(store(1))).await.unwrap(), key.bytes);
             }
         }
         assert_eq!(a.log().await.entries.len(), 3);
@@ -489,7 +483,7 @@ async fn permanent_storage_failure_preserves_fixed_bytes_for_retry_and_discard()
         let copy = &fixed.sealing.keys[0];
         let material = coven_format::sealed_key::SealedKey::decode(&copy.bytes)
             .unwrap()
-            .open_circle_key(&a.member, &copy.path)
+            .open_circle_key(&a.member, copy.path(store(1)).as_str())
             .unwrap();
         assert_eq!(
             (material.circle(), material.id(), material.hash()),

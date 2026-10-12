@@ -696,13 +696,12 @@ async fn a_migration_waits_for_an_operation_that_already_reserved_the_entry_numb
                 .await
                 .unwrap();
         } else {
+            let (started, waiting) = tokio::sync::oneshot::channel();
+            let (resume, held) = tokio::sync::oneshot::channel();
             storage
-                .set_faults(Faults {
-                    fail_next: 1,
-                    ..Faults::none()
-                })
+                .hold_next_creation(ObjectPrefix::keys(STORE_ID), started, held)
                 .await;
-            assert!(device
+            let publication = device
                 .sync
                 .make_and_upload_entry(StoreChange::CreateCircle {
                     circle: coven_foundation::id_source::CircleId(Uuid::from_u128(77)),
@@ -710,13 +709,16 @@ async fn a_migration_waits_for_an_operation_that_already_reserved_the_entry_numb
                     key: KeyId(Uuid::from_u128(77)),
                     key_hash: device.sync.test_key(
                         coven_merge::Audience::Circle(coven_foundation::id_source::CircleId(
-                            Uuid::from_u128(77)
+                            Uuid::from_u128(77),
                         )),
-                        KeyId(Uuid::from_u128(77))
+                        KeyId(Uuid::from_u128(77)),
                     ),
-                })
-                .await
-                .is_err());
+                });
+            let (result, ()) = tokio::join!(publication, async {
+                waiting.await.unwrap();
+                drop(resume);
+            });
+            assert!(matches!(result, Err(SyncError::Storage(_))));
         }
         assert!(device.db.local_store_log().await.unwrap().upload.is_some());
         update(&mut device, storage.clone(), true, true).await;

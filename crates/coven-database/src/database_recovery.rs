@@ -47,7 +47,7 @@ pub(crate) fn salvage(
             for table in [
                 "_coven_operations",
                 "_coven_store_log_uploads",
-                "_coven_store_log_key_uploads",
+                "_coven_key_publications",
                 "_coven_key_uploads",
                 "_coven_access_keys_to_delete",
                 "_coven_file_uploads",

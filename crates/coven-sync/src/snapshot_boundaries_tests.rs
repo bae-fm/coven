@@ -171,12 +171,11 @@ async fn queued_entries_wait_for_reload_and_finishing_a_queued_reset_blocks_new_
     let mut a = notes_device(storage.clone(), 1).await;
     a.create(key(1)).await;
     let reset = a.sync.write_snapshot(Audience::Store).await.unwrap();
-    storage
-        .set_faults(Faults {
-            fail_next: 1,
-            ..Faults::none()
-        })
-        .await;
+    a.sync.storage = Some(key_distribution::failing_creation(
+        storage.clone(),
+        ObjectPath::store_log(store(1), DeviceId(1), 2.try_into().unwrap()),
+        false,
+    ));
     assert!(matches!(
         a.sync
             .make_and_upload_entry(StoreChange::Reset { snapshot: reset })
@@ -200,12 +199,11 @@ async fn queued_entries_wait_for_reload_and_finishing_a_queued_reset_blocks_new_
         .devices
         .contains_key(&DeviceId(77)));
     a.sync.sync_store_log().await.unwrap();
-    storage
-        .set_faults(Faults {
-            fail_next: 1,
-            ..Faults::none()
-        })
-        .await;
+    a.sync.storage = Some(key_distribution::failing_creation(
+        storage.clone(),
+        ObjectPath::store_log(store(1), DeviceId(1), 3.try_into().unwrap()),
+        false,
+    ));
     assert!(matches!(
         a.sync.make_and_upload_entry(change).await,
         Err(SyncError::Storage(_))

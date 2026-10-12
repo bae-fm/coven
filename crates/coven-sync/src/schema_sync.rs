@@ -166,13 +166,14 @@ impl StoreLogSync {
             .prepare_operation_entry(
                 member.member_id(),
                 StoreChange::RaiseSchema { version, snapshot },
-                move |log, entry| {
+                move |log, entry, copies| {
                     let sealed = crate::store_log_keys::seal(
-                        local.store,
+                        copies,
                         log,
                         entry,
                         ring.as_ref(),
                         &member,
+                        &[],
                     )?;
                     data.set_entry(Some(entry.clone()))?;
                     Ok::<_, SyncError>((sealed, data.update(&record, data.entry_step_number(1))?))

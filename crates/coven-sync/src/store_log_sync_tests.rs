@@ -52,6 +52,35 @@ fn public(member: &MemberKeys) -> MemberPublicKeys {
 fn storage() -> Arc<MemoryStorage> {
     Arc::new(MemoryStorage::builder().build().unwrap())
 }
+async fn find_copy(
+    storage: &dyn Storage,
+    audience: Audience,
+    key: KeyId,
+    member: &coven_crypto::MemberId,
+) -> Option<keys::ObservedCopy> {
+    keys::read_copies(storage, store(1), &mut Vec::new())
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|copy| {
+            copy.prefix.audience == audience
+                && copy.prefix.key == key
+                && &copy.prefix.member == member
+        })
+}
+
+async fn copy_path(
+    storage: &dyn Storage,
+    audience: Audience,
+    key: KeyId,
+    member: &coven_crypto::MemberId,
+) -> ObjectPath {
+    find_copy(storage, audience, key, member)
+        .await
+        .expect("stored copy")
+        .path
+}
+
 async fn device(storage: Arc<MemoryStorage>, n: u64, member: MemberKeys, store: StoreId) -> Device {
     Device::new(
         storage,
@@ -368,13 +397,11 @@ async fn fixed_bytes_survive_restart_and_lost_create_reply() {
         let storage = storage();
         let mut a = device(storage.clone(), 1, member(1), store(1)).await;
         a.create(key(1)).await;
-        storage
-            .set_faults(Faults {
-                fail_next: usize::from(!lost_reply),
-                lose_completion_reply: lost_reply,
-                ..Faults::none()
-            })
-            .await;
+        a.sync.storage = Some(key_distribution::failing_creation(
+            storage.clone(),
+            ObjectPath::store_log(store(1), DeviceId(1), 2.try_into().unwrap()),
+            lost_reply,
+        ));
         let result = a
             .sync
             .make_and_upload_entry(StoreChange::AddDevice {
@@ -473,13 +500,10 @@ async fn removal_then_rotations_share_keys_only_with_remaining_members() {
         (Audience::Store, key(3)),
         (Audience::Circle(circle(1)), key(4)),
     ] {
-        assert_eq!(
-            storage
-                .read(&keys::path(store(1), &audience, key, &b.member.member_id()))
+        assert!(
+            find_copy(storage.as_ref(), audience, key, &b.member.member_id())
                 .await
-                .unwrap_err()
-                .failure(),
-            StorageFailure::NotFound
+                .is_none()
         );
     }
     assert_eq!(a.log().await, c.log().await);
@@ -517,7 +541,13 @@ async fn far_future_entry_waits_for_missing_or_damaged_sealed_keys() {
     let mut a = device(storage.clone(), 1, member(1), store(1)).await;
     a.clock.set(UNIX_EPOCH + Duration::from_secs(365 * 86400));
     a.create(key(1)).await;
-    let path = ObjectPath::store_key(store(1), key(1), &a.member.member_id());
+    let path = copy_path(
+        storage.as_ref(),
+        Audience::Store,
+        key(1),
+        &a.member.member_id(),
+    )
+    .await;
     let original = storage.read(&path).await.unwrap();
     storage.delete(&path).await.unwrap();
     let mut b = device(storage.clone(), 2, member(1), store(1)).await;
@@ -550,10 +580,12 @@ async fn far_future_entry_waits_for_missing_or_damaged_sealed_keys() {
         .unwrap();
         let wrong = prefix.encode_box(&wrong).unwrap();
         storage.create(&path, &wrong).await.unwrap();
-        assert!(matches!(
-            b.sync.step().await.unwrap()[0].failure,
-            Refusal::WrongIdentity { .. }
-        ));
+        let damages = b.sync.step().await.unwrap();
+        if claimed_key == key(1) {
+            assert!(matches!(damages[0].failure, Refusal::WrongIdentity { .. }));
+        } else {
+            assert!(damages.is_empty());
+        }
         assert!(b.custody.read().unwrap().is_none());
         storage.delete(&path).await.unwrap();
     }
@@ -656,10 +688,7 @@ async fn key_objects_are_fixed_and_published_before_the_entry() {
     ));
     let sealed_key = &pending.sealing.keys[0];
     assert_eq!(
-        storage
-            .read(&ObjectPath::parse(&sealed_key.path).unwrap())
-            .await
-            .unwrap(),
+        storage.read(&sealed_key.path(store(1))).await.unwrap(),
         sealed_key.bytes
     );
     a.restart(storage.clone()).await;
@@ -675,10 +704,7 @@ async fn key_objects_are_fixed_and_published_before_the_entry() {
         expected
     );
     assert_eq!(
-        storage
-            .read(&ObjectPath::parse(&sealed_key.path).unwrap())
-            .await
-            .unwrap(),
+        storage.read(&sealed_key.path(store(1))).await.unwrap(),
         sealed_key.bytes
     );
     assert!(a.custody.read().unwrap().unwrap().store_key(key(1)).is_ok());
@@ -770,7 +796,13 @@ async fn only_newer_envelopes_require_an_update() {
             let mut a = device(storage.clone(), 1, member(1), store(1)).await;
             let first = a.create(key(1)).await;
             let path = if sealed_key {
-                ObjectPath::store_key(store(1), key(1), &a.member.member_id())
+                copy_path(
+                    storage.as_ref(),
+                    Audience::Store,
+                    key(1),
+                    &a.member.member_id(),
+                )
+                .await
             } else {
                 object::path(store(1), first)
             };

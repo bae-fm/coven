@@ -296,6 +296,7 @@ impl Database {
         F: FnOnce(
                 &crate::StoreLog,
                 &coven_format::store_log::StoreLogEntry,
+                crate::KeyUploadBatch,
             ) -> Result<crate::StoreLogSealing, E>
             + Send
             + 'static,
@@ -305,37 +306,50 @@ impl Database {
             inner.with_writer(|writer| {
                 crate::store_log_upload::prepare(
                     writer,
+                    inner.access.directory.id(),
                     inner.access.device,
                     inner.clock.now(),
                     author,
                     change,
-                    move |log, entry| seal(log, entry).map(|sealed| (sealed, None)),
+                    move |log, entry, copies| seal(log, entry, copies).map(|sealed| (sealed, None)),
                 )
             })
         })
         .await
     }
 
-    /// Fix a sealed key copy before its first storage attempt. An existing path
-    /// returns its original bytes without calling `seal`, including after reopen.
-    /// The callback receives no database capability; failure reserves nothing.
-    /// Paths are opaque here: the sync owner chooses recipients from its replay.
-    pub async fn prepare_key_upload<F, E>(&self, path: String, seal: F) -> Result<Vec<u8>, E>
+    /// Reserve one historical copy with its next writer number and fixed bytes.
+    /// The caller chooses a still-unmet need from its latest replay and copy observation.
+    /// Once committed this copy must settle even if that need disappears.
+    pub async fn prepare_key_upload<F, E>(&self, seal: F) -> Result<crate::KeyUpload, E>
     where
-        F: FnOnce() -> Result<Vec<u8>, E> + Send + 'static,
+        F: FnOnce(&coven_format::path::ObjectPath) -> Result<Vec<u8>, E> + Send + 'static,
         E: From<DbError> + Send + 'static,
     {
         self.call(move |inner| {
-            inner.with_writer(|writer| crate::key_upload::prepare(writer, &path, seal))
+            inner.with_writer(|writer| {
+                crate::key_upload::prepare(
+                    writer,
+                    inner.access.directory.id(),
+                    inner.access.device,
+                    seal,
+                )
+            })
         })
         .await
     }
 
-    /// Retire a fixed sealed copy only after storage accepted it or its path was
-    /// already occupied. Retrying retirement is safe after an uncertain reply.
-    pub async fn complete_key_upload(&self, path: String) -> Result<(), DbError> {
+    /// Every unconfirmed fixed copy in writer/number order, including abandoned operations.
+    pub async fn key_uploads(&self) -> Result<Vec<crate::KeyUpload>, DbError> {
+        self.call(move |inner| inner.with_writer(crate::key_upload::read))
+            .await
+    }
+
+    /// Confirm the writer's next copy after storage accepted its exact bytes.
+    /// Confirmation and queue retirement commit together; repetitions are idempotent.
+    pub async fn complete_key_upload(&self, copy: crate::KeyUpload) -> Result<(), DbError> {
         self.call(move |inner| {
-            inner.with_writer(|writer| crate::key_upload::complete(writer, &path))
+            inner.with_writer(|writer| crate::key_upload::complete(writer, &copy))
         })
         .await
     }

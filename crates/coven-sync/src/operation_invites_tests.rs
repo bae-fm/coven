@@ -85,7 +85,7 @@ async fn approve_seals_store_history_and_removes_the_request() {
         Err(error) if error.failure() == StorageFailure::NotFound
     ));
     for key in expected {
-        let path = ObjectPath::store_key(store(1), key, &keys.member_id());
+        let path = copy_path(&joining, Audience::Store, key, &keys.member_id()).await;
         assert_eq!(
             coven_format::sealed_key::SealedKey::decode(&joining.read(&path).await.unwrap())
                 .unwrap()

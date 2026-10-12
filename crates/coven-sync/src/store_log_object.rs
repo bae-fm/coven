@@ -2,7 +2,7 @@
 
 use crate::{write_object::invalid, Refusal, SyncError};
 use coven_crypto::{MemberKeys, ObjectHasher, StoreKey, StoreKeyring};
-use coven_database::{DbError, StoreLog, StoreLogKeyUpload, StoreLogUpload};
+use coven_database::{Database, StoreLog, StoreLogUpload};
 use coven_format::{
     sealed_key::SealedKey,
     sealed_single::{SingleChunkObject, SingleChunkPrefix},
@@ -27,19 +27,24 @@ pub(crate) fn seal_upload(
     let id = upload.sealing.key;
     let creation;
     let key = if let StoreChange::CreateStore { key_hash, .. } = &upload.entry.change {
-        // Creation precedes custody: its queued sealed copy holds the key.
-        let path = ObjectPath::store_key(store, id, &upload.entry.author);
-        let copy = upload
-            .sealing
-            .keys
-            .iter()
-            .find(|key| key.path == path.as_str())
-            .ok_or(DbError::DamagedDatabase)?;
-        creation = SealedKey::decode(&copy.bytes)?.open_store_key(member, path.as_str())?;
-        creation.check_hash(key_hash)?;
-        if creation.id() != id {
-            return Err(DbError::DamagedDatabase.into());
+        // Before custody commits, creation can recover its key from the queue.
+        // After confirmation the caller acquires the published copy into `ring`.
+        if let Some(copy) = upload.sealing.keys.first() {
+            if upload.sealing.keys.len() != 1 {
+                return Err(coven_database::DbError::DamagedDatabase.into());
+            }
+            creation = SealedKey::decode(&copy.bytes)?
+                .open_store_key(member, copy.path(store).as_str())?;
+        } else {
+            creation = ring
+                .ok_or(SyncError::KeyUnavailable(id))?
+                .store_key(id)?
+                .clone();
         }
+        if creation.id() != id {
+            return Err(coven_database::DbError::DamagedDatabase.into());
+        }
+        creation.check_hash(key_hash)?;
         &creation
     } else {
         ring.ok_or(SyncError::KeyUnavailable(id))?.store_key(id)?
@@ -51,10 +56,11 @@ pub(crate) fn seal_upload(
 pub(crate) async fn upload(
     store: StoreId,
     storage: Option<&dyn Storage>,
+    database: &Database,
     upload: &StoreLogUpload,
     bytes: &[u8],
 ) -> Result<(), SyncError> {
-    upload_keys(storage, &upload.sealing.keys).await?;
+    upload_keys(store, storage, database).await?;
     storage
         .ok_or(SyncError::NoStorage)?
         .create_once(&path(store, upload.entry.position), bytes)
@@ -62,19 +68,30 @@ pub(crate) async fn upload(
     Ok(())
 }
 
-/// Journaled operations commit this step separately from entry publication.
+/// Settle every reserved copy in writer/number order, regardless of its current
+/// recipient or initiating operation. Each confirmation commits before the next send.
 pub(crate) async fn upload_keys(
+    store: StoreId,
     storage: Option<&dyn Storage>,
-    keys: &[StoreLogKeyUpload],
+    database: &Database,
 ) -> Result<(), SyncError> {
-    for key in keys {
-        storage
-            .ok_or(SyncError::NoStorage)?
-            .create_once(
-                &ObjectPath::parse(&key.path).map_err(coven_storage::StorageError::from)?,
-                &key.bytes,
-            )
-            .await?;
+    for copy in database.key_uploads().await? {
+        let storage = storage.ok_or(SyncError::NoStorage)?;
+        let path = copy.path(store);
+        match storage.create(&path, &copy.bytes).await {
+            Ok(()) => (),
+            Err(error @ coven_storage::StorageError::Cleanup { .. }) => return Err(error.into()),
+            Err(error) if error.failure() == coven_storage::StorageFailure::AlreadyExists => {
+                if storage.read(&path).await? != copy.bytes {
+                    return Err(crate::write_object::damaged(
+                        &path,
+                        Refusal::WrongIdentity { cause: None },
+                    ));
+                }
+            }
+            Err(error) => return Err(error.into()),
+        }
+        database.complete_key_upload(copy).await?;
     }
     Ok(())
 }

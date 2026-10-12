@@ -396,12 +396,28 @@ pub(crate) async fn posted(device: &Device) -> coven_format::objects::PostedPosi
     else {
         panic!("positions object")
     };
-    let key_path = ObjectPath::store_key(device.store, *key, &member.id);
-    let key =
-        coven_format::sealed_key::SealedKey::decode(&device.storage.read(&key_path).await.unwrap())
-            .unwrap()
-            .open_store_key(&code.member_keys, key_path.as_str())
-            .unwrap();
+    let mut opened = None;
+    for copy in device
+        .storage
+        .list(&ObjectPrefix::keys(device.store))
+        .await
+        .unwrap()
+    {
+        let bytes = device.storage.read(&copy.path).await.unwrap();
+        let sealed = coven_format::sealed_key::SealedKey::decode(&bytes).unwrap();
+        if sealed.prefix().audience == coven_merge::Audience::Store
+            && sealed.prefix().key == *key
+            && sealed.prefix().member == member.id
+        {
+            opened = Some(
+                sealed
+                    .open_store_key(&code.member_keys, copy.path.as_str())
+                    .unwrap(),
+            );
+            break;
+        }
+    }
+    let key = opened.expect("member's published store key");
     let mut hash = coven_crypto::ObjectHasher::new();
     hash.update(&bytes[..bytes.len() - 64]);
     member

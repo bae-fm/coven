@@ -293,8 +293,8 @@ async fn queued_creation_rejects_a_copy_with_the_right_identity_and_wrong_materi
     object::seal_upload(store(1), &upload, None, &a.member).unwrap();
     let wrong = StoreKey::from_bytes(key(1), [0x91; 32]);
     assert_ne!(wrong.hash(), key_hash);
-    upload.sealing.keys[0] = keys::store_copy(
-        store(1),
+    upload.sealing.keys[0].bytes = keys::store_copy(
+        &upload.sealing.keys[0].path(store(1)),
         &wrong,
         &a.member.member_id(),
         &a.member.sealing_public_key(),
@@ -625,7 +625,13 @@ async fn damaged_entries_block_only_their_device_and_retain_each_cause() {
         );
         let before = storage.reads().await;
         c.sync().await;
-        assert_eq!(storage.reads().await, before);
+        let entry_reads = |reads: Vec<(ObjectPath, u64, u64)>| {
+            reads
+                .into_iter()
+                .filter(|(path, _, _)| path.store_log_position().is_some())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(entry_reads(storage.reads().await), entry_reads(before));
         c.writes().post_positions().await.unwrap();
         a.writes().download_writes().await.unwrap();
         assert_eq!(

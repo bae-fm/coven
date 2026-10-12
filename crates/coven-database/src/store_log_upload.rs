@@ -11,23 +11,13 @@ use coven_foundation::id_source::{DeviceId, KeyId, StoreId};
 
 use crate::{sqlite::DatabaseConnection, write_encoding::decoded, DbError, EntryId, StoreLog};
 
-/// A prerequisite object whose bytes are fixed with its store-log entry.
-/// Paths are opaque to the database; sync validates and interprets them.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct StoreLogKeyUpload {
-    /// The member's sealed-key storage path.
-    pub path: String,
-    /// The complete sealed-key envelope, including its ephemeral key and nonce.
-    pub bytes: Vec<u8>,
-}
-
 /// Sealing choices committed before any storage call.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StoreLogSealing {
     /// The store key used to re-seal the entry on every attempt.
     pub key: KeyId,
-    /// Every sealed key that must be stored before this entry.
-    pub keys: Vec<StoreLogKeyUpload>,
+    /// The remaining sealed copies that must be confirmed before this entry.
+    pub keys: Vec<crate::KeyUpload>,
 }
 
 /// A locally authored entry waiting for publication and atomic replay application.
@@ -78,17 +68,14 @@ pub(crate) fn read(database: &DatabaseConnection) -> Result<Option<StoreLogUploa
         .into_iter()
         .next();
     if let Some(upload) = &mut upload {
-        upload.sealing.keys = database.query(
-            "SELECT path,bytes FROM _coven_store_log_key_uploads WHERE device=?1 AND number=?2 ORDER BY path",
-            (upload.entry.position.device.0.to_be_bytes().as_slice(), upload.entry.position.number.to_be_bytes().as_slice()),
-            |row| Ok(StoreLogKeyUpload { path: row.get(0)?, bytes: row.get(1)? }),
-        )?;
+        upload.sealing.keys = crate::key_upload::before_entry(database, upload.entry.position)?;
     }
     Ok(upload)
 }
 
 pub(crate) fn prepare<F, E>(
     database: &DatabaseConnection,
+    store: StoreId,
     device: DeviceId,
     now: SystemTime,
     author: MemberId,
@@ -99,6 +86,7 @@ where
     F: FnOnce(
         &StoreLog,
         &StoreLogEntry,
+        crate::KeyUploadBatch,
     ) -> Result<(StoreLogSealing, Option<crate::OperationUpdate>), E>,
     E: From<DbError>,
 {
@@ -136,17 +124,18 @@ where
             error,
         }
     })?;
-    let (sealed, operation) = seal(&log, &entry)?;
+    let copies = crate::KeyUploadBatch::new(database, store, device, Some(entry.position))?;
+    let (sealed, operation) = seal(&log, &entry, copies)?;
     database.transaction(|database| {
         database.internal_execute(
             "INSERT INTO _coven_store_log_uploads(device,number,record,sealing_key) VALUES(?1,?2,?3,?4)",
             (device.0.to_be_bytes().as_slice(), number.to_be_bytes().as_slice(), &record, sealed.key.0.as_bytes().as_slice()),
         )?;
         for key in &sealed.keys {
-            database.internal_execute(
-                "INSERT INTO _coven_store_log_key_uploads(device,number,path,bytes) VALUES(?1,?2,?3,?4)",
-                (device.0.to_be_bytes().as_slice(), number.to_be_bytes().as_slice(), &key.path, &key.bytes),
-            )?;
+            if key.writer != device || key.before_entry != Some(entry.position) {
+                return Err(DbError::DamagedDatabase);
+            }
+            crate::key_upload::insert(database, key)?;
         }
         if let Some(update) = &operation { crate::operation::advance(database, update)?; }
         Ok(())

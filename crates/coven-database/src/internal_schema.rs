@@ -67,21 +67,24 @@ macro_rules! coven_tables {
             ) STRICT, WITHOUT ROWID;
             CREATE UNIQUE INDEX _coven_one_store_log_upload ON _coven_store_log_uploads ((1));
         ");
-        $visit!(_coven_store_log_key_uploads, "
-            CREATE TABLE _coven_store_log_key_uploads (
-                device BLOB NOT NULL,
-                number BLOB NOT NULL,
-                path TEXT NOT NULL,
-                bytes BLOB NOT NULL,
-                PRIMARY KEY(device,number,path),
-                FOREIGN KEY(device,number) REFERENCES _coven_store_log_uploads(device,number) ON DELETE CASCADE
+        $visit!(_coven_key_publications, "
+            CREATE TABLE _coven_key_publications (
+                writer BLOB PRIMARY KEY NOT NULL CHECK(length(writer)=8),
+                number BLOB NOT NULL CHECK(length(number)=8 AND number>x'0000000000000000')
             ) STRICT, WITHOUT ROWID;
         ");
         $visit!(_coven_key_uploads, "
             CREATE TABLE _coven_key_uploads (
-                path TEXT PRIMARY KEY NOT NULL,
-                bytes BLOB NOT NULL
+                writer BLOB NOT NULL CHECK(length(writer)=8),
+                number BLOB NOT NULL CHECK(length(number)=8 AND number>x'0000000000000000'),
+                bytes BLOB NOT NULL,
+                before_device BLOB CHECK(length(before_device)=8),
+                before_number BLOB CHECK(length(before_number)=8 AND before_number>x'0000000000000000'),
+                PRIMARY KEY(writer,number),
+                CHECK((before_device IS NULL)=(before_number IS NULL)),
+                FOREIGN KEY(before_device,before_number) REFERENCES _coven_store_log_uploads(device,number)
             ) STRICT, WITHOUT ROWID;
+            CREATE INDEX _coven_key_uploads_before ON _coven_key_uploads(before_device,before_number);
         ");
         $visit!(_coven_members, "
             CREATE TABLE _coven_members (

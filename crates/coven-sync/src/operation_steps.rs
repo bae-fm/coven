@@ -176,15 +176,26 @@ impl StoreLogSync {
                 }
             }
             crate::store_log_keys::check_shared_keys(&local.log, &change, &ring)?;
+            let mut damages = Vec::new();
+            let observed = crate::store_log_keys::read_copies(
+                self.storage.as_deref().ok_or(SyncError::NoStorage)?,
+                local.store,
+                &mut damages,
+            )
+            .await?;
+            if let Some(damaged) = damages.into_iter().next() {
+                return Err(damaged.into());
+            }
             let record = record.clone();
             self.database
-                .prepare_operation_entry(member.member_id(), change, move |log, entry| {
+                .prepare_operation_entry(member.member_id(), change, move |log, entry, copies| {
                     let sealed = crate::store_log_keys::seal(
-                        local.store,
+                        copies,
                         log,
                         entry,
                         ring.as_ref(),
                         &member,
+                        &observed,
                     )?;
                     data.set_entry(Some(entry.clone()))?;
                     Ok::<_, SyncError>((sealed, data.update(&record, data.entry_step_number(1))?))
@@ -205,8 +216,9 @@ impl StoreLogSync {
             match record.last_step {
                 n if n == data.entry_step_number(1) => {
                     crate::store_log_object::upload_keys(
+                        self.directory.id(),
                         self.storage.as_deref(),
-                        &upload.sealing.keys,
+                        &self.database,
                     )
                     .await?;
                     self.database

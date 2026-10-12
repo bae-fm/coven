@@ -506,7 +506,7 @@ mod recovery {
             sync.write_snapshot(Audience::Store).await.unwrap();
             storage
                 .set_faults(coven_storage::test_utils::Faults {
-                    fail_next: 1,
+                    drop_part: true,
                     ..coven_storage::test_utils::Faults::none()
                 })
                 .await;
@@ -519,6 +519,16 @@ mod recovery {
                 .await,
                 Err(SyncError::Storage(_))
             ));
+            let queued = db.local_store_log().await.unwrap().upload.unwrap();
+            let path = ObjectPath::store_log(
+                directory.id(),
+                queued.entry.position.device,
+                queued.entry.position.number.try_into().unwrap(),
+            );
+            assert_eq!(
+                storage.read(&path).await.unwrap_err().failure(),
+                StorageFailure::NotFound
+            );
             db.write(|sql| {
                 sql.execute("INSERT INTO notes VALUES('waiting','offline')", [])?;
                 Ok(())

@@ -4,8 +4,7 @@
 //! prefixes here. The app's CloudKit bridge only passes them through, using
 //! `parse`, `as_str` and `is_replaceable` (Appendix E1).
 
-use coven_crypto::MemberId;
-use coven_foundation::id_source::{CircleId, DeviceId, FileId, InviteId, KeyId, StoreId};
+use coven_foundation::id_source::{CircleId, DeviceId, FileId, InviteId, StoreId};
 use coven_merge::Audience;
 use serde::{Deserialize, Serialize};
 use std::num::NonZeroU64;
@@ -86,13 +85,18 @@ impl ObjectPath {
     pub fn positions(store: StoreId, device: DeviceId) -> Self {
         Self(format!("{store}/positions/{}", device.0))
     }
-    /// A sealed store key for a member's lowercase hexadecimal public key (§11).
-    pub fn store_key(store: StoreId, key: KeyId, member: &MemberId) -> Self {
-        Self(format!("{store}/keys/store/{key}/{member}"))
+    /// A writer's sealed key copy, across all audiences and recipients (§11).
+    pub fn key_copy(store: StoreId, writer: DeviceId, number: NonZeroU64) -> Self {
+        Self(format!("{store}/keys/{}/{number}", writer.0))
     }
-    /// A sealed circle key for a member (§14.3).
-    pub fn circle_key(store: StoreId, circle: CircleId, key: KeyId, member: &MemberId) -> Self {
-        Self(format!("{store}/keys/circles/{circle}/{key}/{member}"))
+    /// The writer and positive copy number of a sealed-key path.
+    pub fn key_copy_position(&self) -> Option<(DeviceId, NonZeroU64)> {
+        let rest = self.relative().strip_prefix("keys/")?;
+        let (writer, number) = rest.split_once('/').expect("validated key-copy path");
+        Some((
+            DeviceId(writer.parse().expect("validated writer")),
+            number.parse().expect("validated copy number"),
+        ))
     }
     /// Encrypted file bytes named by a random UUID (§16.2).
     pub fn file(store: StoreId, device: DeviceId, name: FileId) -> Self {
@@ -121,11 +125,11 @@ impl ObjectPath {
     pub fn is_replaceable(&self) -> bool {
         self.relative().starts_with("positions/")
     }
-    /// The device named by log, snapshot, file or position paths.
+    /// The device named by log, key-copy, snapshot, file or position paths.
     pub fn device(&self) -> Option<DeviceId> {
         let parts: Vec<_> = self.relative().split('/').collect();
         match parts.as_slice() {
-            ["devices" | "store-log" | "files", device, _]
+            ["devices" | "store-log" | "files" | "keys", device, _]
             | ["positions", device]
             | ["snapshots", _, device, _] => {
                 Some(DeviceId(device.parse().expect("validated device id")))
@@ -170,19 +174,15 @@ impl TryFrom<String> for ObjectPath {
         }
         let parts: Vec<_> = relative.split('/').collect();
         let valid = match parts.as_slice() {
-            ["devices" | "store-log", device, n] => decimal(device, false) && decimal(n, true),
+            ["devices" | "store-log" | "keys", device, n] => {
+                decimal(device, false) && decimal(n, true)
+            }
             ["snapshots", audience, device, n] => {
                 (*audience == "store" || canonical_uuid(audience))
                     && decimal(device, false)
                     && decimal(n, true)
             }
             ["positions", device] => decimal(device, false),
-            ["keys", "store", key, member] => {
-                canonical_uuid(key) && member.parse::<MemberId>().is_ok()
-            }
-            ["keys", "circles", circle, key, member] => {
-                canonical_uuid(circle) && canonical_uuid(key) && member.parse::<MemberId>().is_ok()
-            }
             ["files", device, name] => decimal(device, false) && canonical_uuid(name),
             ["join-requests", invite] => canonical_uuid(invite),
             _ => false,
@@ -281,15 +281,11 @@ pub fn validate_directory(value: &str) -> Result<(), PathError> {
         [] => true,
         ["devices" | "store-log" | "positions" | "snapshots" | "keys" | "files"
         | "join-requests"] => true,
-        ["devices" | "store-log" | "files", device] => decimal(device, false),
+        ["devices" | "store-log" | "files" | "keys", device] => decimal(device, false),
         ["snapshots", audience] => *audience == "store" || canonical_uuid(audience),
         ["snapshots", audience, device] => {
             (*audience == "store" || canonical_uuid(audience)) && decimal(device, false)
         }
-        ["keys", "store" | "circles"] => true,
-        ["keys", "store", key] => canonical_uuid(key),
-        ["keys", "circles", circle] => canonical_uuid(circle),
-        ["keys", "circles", circle, key] => canonical_uuid(circle) && canonical_uuid(key),
         _ => false,
     };
     if !valid {

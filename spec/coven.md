@@ -1162,6 +1162,9 @@ Two mechanisms order writes:
   Confirmed copies leave this queue; applying a published entry and its replay
   removes its entry row atomically (§9, §18). Occupancy of this writer's path
   requires §10's byte comparison, not an assumption that another writer won.
+- `_coven_key_publications` retains each writer's last confirmed copy number.
+  Confirmation advances it atomically with removing that copy's queue row,
+  so an empty queue cannot restart the writer's numbering.
 - The store log's effects that the database applies are kept with it:
   - `_coven_circle_deletions` records each deleted circle's responsible kept
     entry; local writes, downloaded writes and row recomputation all read

@@ -28,6 +28,7 @@ mod fingerprint;
 mod internal_schema;
 mod key_scope;
 mod key_upload;
+pub use key_upload::{KeyUpload, KeyUploadBatch};
 mod live_query;
 mod log_refusal;
 mod loss_record;
@@ -115,7 +116,7 @@ pub use store_log::{
     StoreLogState, StoreMember, StoreVersion,
 };
 pub use store_log_check::{CircleRemoval, ReplayEntry, StoreLogCheck};
-pub use store_log_upload::{LocalStoreLog, StoreLogKeyUpload, StoreLogSealing, StoreLogUpload};
+pub use store_log_upload::{LocalStoreLog, StoreLogSealing, StoreLogUpload};
 pub use upload::{UploadBytes, UploadParts, UploadReadError, WaitingUpload};
 pub use user_file::{prepare_user_file, PreparedUserFile, UserFile};
 pub use write::SqlContext;

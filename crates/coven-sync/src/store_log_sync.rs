@@ -139,11 +139,21 @@ impl StoreLogSync {
             }
         }
         keys::check_shared_keys(&local.log, &change, &ring)?;
+        let mut damages = Vec::new();
+        let observed = keys::read_copies(
+            self.storage.as_deref().ok_or(SyncError::NoStorage)?,
+            local.store,
+            &mut damages,
+        )
+        .await?;
+        if let Some(damaged) = damages.into_iter().next() {
+            return Err(damaged.into());
+        }
         let author = member.clone();
         let id = self
             .database
-            .prepare_store_log(member.member_id(), change, move |log, entry| {
-                keys::seal(local.store, log, entry, ring.as_ref(), &author)
+            .prepare_store_log(member.member_id(), change, move |log, entry, copies| {
+                keys::seal(copies, log, entry, ring.as_ref(), &author, &observed)
             })
             .await?;
         // Re-read the committed queue, so the first attempt uses the same path as
@@ -379,10 +389,31 @@ impl StoreLogSync {
         damages: &mut Vec<DamagedObject>,
     ) -> Result<(), SyncError> {
         if let Some(upload) = local.upload.take() {
+            if let StoreChange::CreateStore { key_hash, .. } = &upload.entry.change {
+                if upload.sealing.keys.is_empty()
+                    && !keys::holds(ring.as_ref(), &Audience::Store, upload.sealing.key)
+                {
+                    let key = keys::read_store_key(
+                        self.storage.as_deref().ok_or(SyncError::NoStorage)?,
+                        self.directory.id(),
+                        upload.sealing.key,
+                        member,
+                    )
+                    .await?;
+                    key.check_hash(key_hash)?;
+                    match ring {
+                        Some(ring) => ring.insert_store_key(key)?,
+                        None => *ring = Some(StoreKeyring::new(key)),
+                    }
+                    self.store_keys
+                        .persist(ring.as_ref().expect("recovered creation key"))?;
+                }
+            }
             let bytes = object::seal_upload(self.directory.id(), &upload, ring.as_ref(), member)?;
             object::upload(
                 self.directory.id(),
                 self.storage.as_deref(),
+                &self.database,
                 &upload,
                 &bytes,
             )
@@ -479,64 +510,60 @@ impl StoreLogSync {
         for (audience, key) in keys::needed(log) {
             self.acquire(&audience, key, member, ring, damages).await?;
         }
-        self.share_rotation_keys(log, ring).await
+        self.share_keys(log, ring, damages).await
     }
 
-    async fn share_rotation_keys(
+    async fn share_keys(
         &self,
         log: &StoreLog,
         ring: &Option<StoreKeyring>,
+        damages: &mut Vec<DamagedObject>,
     ) -> Result<(), SyncError> {
-        for applied in &log.entries {
-            if log.replay.entries[&applied.entry.position] != coven_database::EntryOutcome::Kept {
-                continue;
-            }
-            let StoreChange::RotateKey { audience, key, .. } = &applied.entry.change else {
-                continue;
-            };
-            let key = *key;
-            if !keys::holds(ring.as_ref(), audience, key) {
+        // Reserved copies precede all new sharing decisions. An observed duplicate
+        // or removed recipient must never erase a writer's already reserved number.
+        object::upload_keys(self.directory.id(), self.storage.as_deref(), &self.database).await?;
+        let needs = keys::needed(log);
+        if needs.is_empty() {
+            return Ok(());
+        }
+        let storage = self.storage.as_deref().ok_or(SyncError::NoStorage)?;
+        let copies = keys::read_copies(storage, self.directory.id(), damages).await?;
+        for (audience, key) in needs {
+            if !keys::holds(ring.as_ref(), &audience, key) {
                 tracing::debug!(?audience, ?key, "historical key has not arrived");
                 continue;
             }
             let ring = ring.as_ref().expect("held key has a keyring");
-            for (member, recipient) in keys::recipients(log, audience) {
-                let store = self.directory.id();
-                let path = keys::path(store, audience, key, member);
-                if self.read(&path).await?.is_none() {
-                    let recipient = *recipient;
-                    let member = member.clone();
-                    let bytes = match *audience {
-                        Audience::Store => {
-                            let key = ring.store_key(key)?.clone();
-                            self.database
-                                .prepare_key_upload(path.as_str().into(), move || {
-                                    Ok::<_, SyncError>(
-                                        keys::store_copy(store, &key, &member, &recipient)?.bytes,
-                                    )
-                                })
-                                .await?
-                        }
-                        Audience::Circle(circle) => {
-                            let key = ring.circle_key(circle, key)?.clone();
-                            self.database
-                                .prepare_key_upload(path.as_str().into(), move || {
-                                    Ok::<_, SyncError>(
-                                        keys::circle_copy(store, &key, &member, &recipient)?.bytes,
-                                    )
-                                })
-                                .await?
-                        }
-                    };
-                    // This path may have another writer: any first copy of the
-                    // same key counts, even when its random sealed bytes differ.
-                    self.storage
-                        .as_deref()
-                        .ok_or(SyncError::NoStorage)?
-                        .create_once(&path, &bytes)
-                        .await?;
+            for (member, recipient) in keys::recipients(log, &audience) {
+                if copies.iter().any(|copy| {
+                    copy.prefix.audience == audience
+                        && copy.prefix.key == key
+                        && copy.prefix.member == *member
+                }) {
+                    tracing::debug!(?audience, ?key, ?member, "key copy already observed");
+                    continue;
                 }
-                self.database.complete_key_upload(path.into()).await?;
+                let recipient = *recipient;
+                let member = member.clone();
+                match audience {
+                    Audience::Store => {
+                        let key = ring.store_key(key)?.clone();
+                        self.database
+                            .prepare_key_upload(move |path| {
+                                keys::store_copy(path, &key, &member, &recipient)
+                            })
+                            .await?;
+                    }
+                    Audience::Circle(circle) => {
+                        let key = ring.circle_key(circle, key)?.clone();
+                        self.database
+                            .prepare_key_upload(move |path| {
+                                keys::circle_copy(path, &key, &member, &recipient)
+                            })
+                            .await?;
+                    }
+                }
+                object::upload_keys(self.directory.id(), Some(storage), &self.database).await?;
             }
         }
         Ok(())
@@ -570,97 +597,92 @@ impl StoreLogSync {
         if keys::holds(ring.as_ref(), audience, key) {
             return Ok(true);
         }
-        let path = keys::path(self.directory.id(), audience, key, &member.member_id());
-        if damages.iter().any(|damage| damage.path == path.as_str()) {
-            return Ok(false);
-        }
-        let Some(bytes) = self.read(&path).await? else {
-            return Ok(false);
-        };
-        let envelope = match SealedKey::decode(&bytes) {
-            Ok(envelope) => envelope,
-            Err(error) => {
-                Self::damage(
-                    damages,
-                    &path,
-                    Refusal::Parse {
-                        cause: Some(Arc::new(error)),
-                    },
-                )?;
-                return Ok(false);
+        let storage = self.storage.as_deref().ok_or(SyncError::NoStorage)?;
+        for copy in keys::read_copies(storage, self.directory.id(), damages).await? {
+            if copy.prefix.audience != *audience
+                || copy.prefix.key != key
+                || copy.prefix.member != member.member_id()
+            {
+                continue;
             }
-        };
-        let opened = match audience {
-            Audience::Store => envelope
-                .open_store_key(member, path.as_str())
-                .map(|opened| {
-                    if opened.id() != key {
-                        return Err(Refusal::WrongIdentity { cause: None });
-                    }
-                    match ring {
-                        Some(ring) => {
-                            ring.insert_store_key(opened)
+            let path = copy.path;
+            if damages.iter().any(|damage| damage.path == path.as_str()) {
+                continue;
+            }
+            let envelope = SealedKey::decode(&copy.bytes)?;
+            let opened = match audience {
+                Audience::Store => envelope
+                    .open_store_key(member, path.as_str())
+                    .map(|opened| {
+                        if opened.id() != key {
+                            return Err(Refusal::WrongIdentity { cause: None });
+                        }
+                        match ring {
+                            Some(ring) => {
+                                ring.insert_store_key(opened)
+                                    .map_err(|e| Refusal::WrongIdentity {
+                                        cause: Some(Arc::new(e)),
+                                    })
+                            }
+                            None => {
+                                *ring = Some(StoreKeyring::new(opened));
+                                Ok(())
+                            }
+                        }
+                    }),
+                Audience::Circle(circle) => {
+                    envelope
+                        .open_circle_key(member, path.as_str())
+                        .map(|opened| {
+                            if opened.id() != key || opened.circle() != *circle {
+                                return Err(Refusal::WrongIdentity { cause: None });
+                            }
+                            // A circle introduction follows an opened store-log entry.
+                            ring.as_mut()
+                                .expect("circle key follows an opened store key")
+                                .insert_circle_key(opened)
                                 .map_err(|e| Refusal::WrongIdentity {
                                     cause: Some(Arc::new(e)),
                                 })
-                        }
-                        None => {
-                            *ring = Some(StoreKeyring::new(opened));
-                            Ok(())
-                        }
-                    }
-                }),
-            Audience::Circle(circle) => {
-                envelope
-                    .open_circle_key(member, path.as_str())
-                    .map(|opened| {
-                        if opened.id() != key || opened.circle() != *circle {
-                            return Err(Refusal::WrongIdentity { cause: None });
-                        }
-                        // A circle introduction follows an opened store-log entry.
-                        ring.as_mut()
-                            .expect("circle key follows an opened store key")
-                            .insert_circle_key(opened)
-                            .map_err(|e| Refusal::WrongIdentity {
-                                cause: Some(Arc::new(e)),
-                            })
-                    })
-            }
-        };
-        match opened {
-            Err(error @ coven_crypto::CryptoError::KeyIdentity) => {
-                Self::damage(
-                    damages,
-                    &path,
-                    Refusal::WrongIdentity {
-                        cause: Some(Arc::new(error)),
-                    },
-                )?;
-                Ok(false)
-            }
-            Err(error) => {
-                Self::damage(
-                    damages,
-                    &path,
-                    Refusal::Decryption {
-                        cause: Some(Arc::new(error)),
-                    },
-                )?;
-                Ok(false)
-            }
-            Ok(Err(failure)) => {
-                Self::damage(damages, &path, failure)?;
-                Ok(false)
-            }
-            Ok(Ok(())) => {
-                self.store_keys
-                    .persist(ring.as_ref().expect("opened keyring"))?;
-                Ok(true)
+                        })
+                }
+            };
+            match opened {
+                Err(error @ coven_crypto::CryptoError::KeyIdentity) => {
+                    Self::damage(
+                        damages,
+                        &path,
+                        Refusal::WrongIdentity {
+                            cause: Some(Arc::new(error)),
+                        },
+                    )?;
+                    continue;
+                }
+                Err(error) => {
+                    Self::damage(
+                        damages,
+                        &path,
+                        Refusal::Decryption {
+                            cause: Some(Arc::new(error)),
+                        },
+                    )?;
+                    continue;
+                }
+                Ok(Err(failure)) => {
+                    Self::damage(damages, &path, failure)?;
+                    continue;
+                }
+                Ok(Ok(())) => {
+                    self.store_keys
+                        .persist(ring.as_ref().expect("opened keyring"))?;
+                    return Ok(true);
+                }
             }
         }
+        Ok(false)
     }
 
-    fn damage(
+    pub(crate) fn damage(
         damages: &mut Vec<DamagedObject>,
         path: &ObjectPath,
         failure: Refusal,

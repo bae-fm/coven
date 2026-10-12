@@ -4,7 +4,6 @@ use super::{keys, object, StoreLogSync};
 use crate::{StorageCommit, SyncError};
 use coven_crypto::{MemberKeys, StoreKey, StoreKeyring};
 use coven_format::{
-    sealed_key::SealedKey,
     sealed_single::SingleChunkObject,
     store_log::{MemberPublicKeys, StoreChange, StoreLogEntry},
 };
@@ -91,8 +90,8 @@ impl StoreLogSync {
                 let author = member.clone();
                 let ring = StoreKeyring::new(key);
                 self.database
-                    .prepare_store_log(member.member_id(), change, move |log, entry| {
-                        keys::seal(store_id, log, entry, Some(&ring), &author)
+                    .prepare_store_log(member.member_id(), change, move |log, entry, copies| {
+                        keys::seal(copies, log, entry, Some(&ring), &author, &[])
                     })
                     .await?;
                 local = self.database.local_store_log().await?;
@@ -113,8 +112,25 @@ impl StoreLogSync {
                         .into())
                 }
             }
-            let bytes = object::seal_upload(store_id, upload, previous.as_ref(), &member)?;
-            object::upload(store_id, Some(storage.as_ref()), upload, &bytes).await?;
+            let recovered;
+            let sealing_ring = if upload.sealing.keys.is_empty() && previous.is_none() {
+                recovered = StoreKeyring::new(
+                    keys::read_store_key(storage.as_ref(), store_id, upload.sealing.key, &member)
+                        .await?,
+                );
+                Some(&recovered)
+            } else {
+                previous.as_ref()
+            };
+            let bytes = object::seal_upload(store_id, upload, sealing_ring, &member)?;
+            object::upload(
+                store_id,
+                Some(storage.as_ref()),
+                &self.database,
+                upload,
+                &bytes,
+            )
+            .await?;
             // Read what storage actually retained, including a lost-reply retry.
             let path = object::path(store_id, upload.entry.position);
             read_setup_entry(storage.as_ref(), &path, &member).await?
@@ -142,15 +158,8 @@ impl StoreLogSync {
         };
         let mut creation = Some(entry);
         if let Some(store) = &local.log.replay.state.store {
-            let key_path = ObjectPath::store_key(store_id, store.key, &member.member_id());
-            let opened = SealedKey::decode(&storage.read(&key_path).await?)?
-                .open_store_key(&member, key_path.as_str())?;
-            if opened.id() != store.key {
-                return Err(crate::write_object::damaged(
-                    &key_path,
-                    crate::Refusal::WrongIdentity { cause: None },
-                ));
-            }
+            let opened =
+                keys::read_store_key(storage.as_ref(), store_id, store.key, &member).await?;
             ring.insert_store_key(opened)?;
             let current = local
                 .log
@@ -177,9 +186,13 @@ impl StoreLogSync {
                         let author = member.clone();
                         let keys = ring.clone();
                         self.database
-                            .prepare_store_log(member.member_id(), change, move |log, entry| {
-                                keys::seal(store_id, log, entry, Some(&keys), &author)
-                            })
+                            .prepare_store_log(
+                                member.member_id(),
+                                change,
+                                move |log, entry, copies| {
+                                    keys::seal(copies, log, entry, Some(&keys), &author, &[])
+                                },
+                            )
                             .await?;
                         local = self.database.local_store_log().await?;
                     }
@@ -233,9 +246,7 @@ async fn read_setup_entry(
             crate::write_object::invalid("expected a store-log envelope"),
         ));
     };
-    let key_path = ObjectPath::store_key(path.store(), *key, &member.member_id());
-    let key = SealedKey::decode(&storage.read(&key_path).await?)?
-        .open_store_key(member, key_path.as_str())?;
+    let key = keys::read_store_key(storage, path.store(), *key, member).await?;
     let entry = object::open(&envelope, path, &key).map_err(|failure| crate::DamagedObject {
         path: path.as_str().into(),
         failure,
