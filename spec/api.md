@@ -3099,9 +3099,19 @@ pub enum IdentityError {
 }
 
 impl MemberKeys {
+    /// The public pair bound to a stable member id by the store log.
+    pub fn public_keys(&self) -> MemberPublicKeys;
     /// Encodes both private seeds for custody or a restore code (§12.1).
     pub fn to_secret_bytes(&self) -> SecretBytes;
     /// Restores both pairs from custody or a restore code.
+    pub fn from_secret_bytes(bytes: &[u8]) -> Result<Self, MaterialError>;
+}
+
+impl MemberIdentity {
+    pub fn member(&self) -> MemberId;
+    /// Encodes the id and every held private pair, including pending and
+    /// historical credentials. This custody encoding is not a restore code.
+    pub fn to_secret_bytes(&self) -> SecretBytes;
     pub fn from_secret_bytes(bytes: &[u8]) -> Result<Self, MaterialError>;
 }
 
@@ -3113,7 +3123,7 @@ impl StoreKeyring {
 }
 
 impl CovenHandle {
-    /// Makes this member's two key pairs and puts them in identity custody,
+    /// Generates an independent member UUID and two key pairs in identity custody,
     /// for the person creating a store. Fails if custody already holds keys.
     /// Joining and restoring put the keys there themselves.
     pub fn initialize_identity(&self) -> Result<MemberId, IdentityError>;
@@ -3161,11 +3171,11 @@ pub trait StoreKeyCustody: Send + Sync {
     fn close(&self);
 }
 
-/// The app's own store for this member's keys.
+/// The app's own store for the stable id and held member credentials.
 pub trait MemberKeyCustody: Send + Sync {
     /// Called once at open; persistence reuses the held session capability.
-    fn unlock(&self) -> Result<Option<MemberKeys>, KeyError>;
-    fn persist(&self, keys: &MemberKeys) -> Result<(), KeyError>;
+    fn unlock(&self) -> Result<Option<MemberIdentity>, KeyError>;
+    fn persist(&self, identity: &MemberIdentity) -> Result<(), KeyError>;
     fn forget(&self) -> Result<(), KeyError>;
     /// Erases held memory after users finish; performs no persistence or IO.
     /// Fallible saves complete through persist before dependent work starts.
