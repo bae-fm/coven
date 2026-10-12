@@ -728,13 +728,17 @@ File uploads run in their own worker (§16.5); a pass does not wait for them.
 - The first attempt records the header's and each part's sealing key ids
   in `_coven_uploads`, in the transaction marking the attempt. For an audience
   the member still belongs to, it chooses the newest usable key under §11,
-  excluding keys known to have reached an excluded member
-  ([queue proof: `first_key_excludes_known_recipient`](proofs/queue.md#what-is-proved)).
+  excluding keys known to have reached an excluded member or a retired or
+  noncurrent sealing credential
+  ([queue proof: `first_key_excludes_known_recipient`](proofs/queue.md#what-is-proved),
+  [credential exposure proof](proofs/storelog-data.md#member-key-replacement)).
   A removed circle member's pre-removal parts may instead use a key they
   already received (§14.6;
   [checked history: `departed_member_counterexample`](proofs/queue.md#checked-histories-and-limits)).
   Every attempt re-seals the plaintext with those keys and signs with the
-  device's member key. Each chunk's nonce is derived from its encryption
+  signing key current for the device's stable owner in the write's recorded
+  `store_log_read`. That key is fixed for retries too; §10 refuses sending
+  it once the current catch-up replaces it. Each chunk's nonce is derived from its encryption
   key, path, cleartext prefix, section, index and the SHA-256 of that
   chunk's plaintext ([D11](format.md#d11-keys-contexts-and-fingerprints));
   Ed25519 signatures are deterministic, so retries produce identical bytes.
@@ -775,9 +779,11 @@ File uploads run in their own worker (§16.5); a pass does not wait for them.
     unless they describe exactly those positions.
   - Store-log positions count consumed entries, kept or dropped. They do
     not establish finality; that uses storage times and recorded reads (§9).
-  - The object's member signature is checked against the member the received
-    store log names for its device. An unknown device waits for registration;
-    a wrong or missing signature is refused (§19.1).
+  - Check its signature with the device owner's signing key current in the
+    object's signed `store_log` view. Unverified view fields are lookup hints
+    only. An unknown device waits for registration; a wrong or missing
+    signature is refused (§19.1). Historical positions remain usable under
+    D9's explicit policy after key replacement; they grant no current authority.
 - A missing prerequisite or failed read gets a pending record. A complete
   immutable write or entry that fails a permanent check stops its log at
   that object. Independent logs continue (§19.1).
