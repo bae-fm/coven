@@ -349,3 +349,37 @@ open CovenMerge
 #print axioms Ownership.DeleteDependents.guard_reason
 #print axioms Ownership.DeleteDependents.protected_final
 #print axioms Ownership.DeleteDependents.move_source_stays_deleted
+
+-- Full-effects deletion trials and the remaining same-member masking history.
+#print axioms Ownership.effects_reason_exact
+#print axioms Ownership.effects_safe
+#print axioms Ownership.delete_trial_reference_safe
+#print axioms Ownership.delete_trial_effects_safe
+#print axioms Ownership.before_delete_current
+#print axioms Ownership.context_retains
+#print axioms Ownership.context_no_new_change
+#print axioms Ownership.context_setters
+#print axioms Ownership.context_generations
+#print axioms Ownership.context_current
+#print axioms Ownership.rule_scan_bound
+#print axioms Ownership.rule_closure_bound
+#print axioms Ownership.close_query_bound
+#print axioms Ownership.rival_work_bound
+#print axioms Ownership.unique_query_bound
+#print axioms Ownership.shown_work_polynomial
+#print axioms Ownership.effects_work_polynomial
+#print axioms Ownership.full_context_checks_polynomial
+#print axioms Ownership.DeleteEffectsExamples.unique_delete_blocked
+#print axioms Ownership.DeleteEffectsExamples.guard_reason
+#print axioms Ownership.DeleteEffectsExamples.unique_delete_recorded
+#print axioms Ownership.DeleteEffectsMasking.valid
+#print axioms Ownership.DeleteEffectsMasking.retained
+#print axioms Ownership.DeleteEffectsMasking.causal
+#print axioms Ownership.DeleteEffectsMasking.each_delete_masks_the_other
+#print axioms Ownership.DeleteEffectsMasking.guards_empty
+#print axioms Ownership.DeleteEffectsMasking.foreign_row_hidden
+#print axioms Ownership.DeleteEffectsMasking.final_owner_protection_refuted
+#print axioms Ownership.DeleteEffectsMasking.reductions
+#print axioms Ownership.DeleteEffectsPaths.indirect_effect_blocked
+#print axioms Ownership.DeleteEffectsPaths.multiple_claims_judged_together
+#print axioms Ownership.DeleteEffectsPaths.audience_source_protected

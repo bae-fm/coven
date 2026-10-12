@@ -82,7 +82,7 @@ def graph (st : St Write Bool Unit) : ReferenceGraph (Bool × Nat) where
 
 def candidates : List (Write × Bool) := [(.childDelete, true), (.parentDelete, false)]
 def received : List Write := [.parent, .oldChild, .childDelete, .newChild, .parentDelete]
-def trial := deleteTrial history policy graph
+def trial := deleteTrial history policy graph inputs
 
 def kept (admission : Write → Bool → Bool) : Write → Bool → Bool
   | .parent, false => admission .parent false

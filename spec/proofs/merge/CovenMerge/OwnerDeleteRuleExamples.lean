@@ -92,24 +92,27 @@ def policy : Policy Write Row Bool Bool where
   creator | .parent => .parent | .child => .child | .rival => .rival
   author w := w == .rival
 
-def inputs (st : St Write Row Unit) : EntryInputs Row Nat where
+def nullUniqueInputs {W : Type} (st : St W Row Unit) (childStamp rivalStamp : Nat) : EntryInputs Row Nat where
   rows := [.parent, .child, .rival]
   present r := decide (st.gen r % 2 = 1)
   refs r := if r = .child ∧ st.gen .parent < 2 then [⟨.parent, false⟩] else []
   checkFails _ := false
   inDeletedCircle _ := none
   claims r :=
-    if r = .child then [⟨⟨["coalesce(parent_id, -1)"], none⟩, if st.gen .parent < 2 then 1 else 0, 1, false⟩]
-    else if r = .rival then [⟨⟨["coalesce(parent_id, -1)"], none⟩, 0, 2, false⟩] else []
+    if r = .child then [⟨⟨["coalesce(parent_id, -1)"], none⟩, if st.gen .parent < 2 then 1 else 0, childStamp, false⟩]
+    else if r = .rival then [⟨⟨["coalesce(parent_id, -1)"], none⟩, 0, rivalStamp, false⟩] else []
   rank | .parent => 0 | .child => 1 | .rival => 2
 
-def graph (st : St Write Row Unit) : ReferenceGraph (Row × Nat) where
+def inputs {W : Type} (st : St W Row Unit) : EntryInputs Row Nat := nullUniqueInputs st 1 2
+
+def graph {W : Type} (st : St W Row Unit) : ReferenceGraph (Row × Nat) where
   rows := [.parent, .child, .rival].map fun r => (r, st.gen r)
   present node := decide (st.gen node.1 % 2 = 1)
   -- Keep the authored reference even when its displayed value is null.
   parents node := if node.1 = .child then [(.parent, 1)] else []
 
-def trial := deleteTrial history policy graph
+/-- Reference-only comparison retained to state the rejected rule precisely. -/
+def trial := referenceDeleteTrial history policy graph
 
 def candidates : List (Write × Row) := [(.erase, .parent)]
 def received : List Write := [.parent, .child, .rival, .erase]

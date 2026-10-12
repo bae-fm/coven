@@ -67,7 +67,7 @@ def graph (st : St Write Bool Unit) : ReferenceGraph (Bool × Nat) where
   present node := decide (st.gen node.1 % 2 = 1)
   parents node := if node.1 then [(false, 1)] else []
 
-def trial := deleteTrial history policy graph
+def trial := deleteTrial history policy graph inputs
 
 def candidates : List (Write × Bool) := [(.leftDelete, false), (.rightDelete, false)]
 

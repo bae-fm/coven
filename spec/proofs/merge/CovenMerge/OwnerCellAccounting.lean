@@ -35,13 +35,14 @@ all final removal passes. No visibility promise is inferred from accounting. -/
 theorem delete_value_accounted (M : Writes W Row Col) (valid : Valid M)
     (p : DataDependency.Authored M) (P : Policy W Row Table Member)
     (candidates : List (W × Row)) (graph : St W Row Col → ReferenceGraph (Row × Nat))
+    (inputs : St W Row Col → EntryInputs Row K)
     (values : W → Row → Col → Option W) (received : List W) (causal : CausalOrder M received)
     (I : EntryInputs Row K)
     (present : ∀ r, I.present r = decide ((merged M valid p P
-      (settledGuard M valid p P candidates (deleteTrial M P graph) received) received).gen r % 2 = 1))
+      (settledGuard M valid p P candidates (deleteTrial M P graph inputs) received) received).gen r % 2 = 1))
     (w : W) (r : Row) (c : Col) (k : Nat)
     (setter : Setter M (fun a => a ∈ received) r c w k) (written : values w r c = some w) :
-    let guard := settledGuard M valid p P candidates (deleteTrial M P graph) received
+    let guard := settledGuard M valid p P candidates (deleteTrial M P graph inputs) received
     CovenMerge.ValueAccounted (DataDependency.effective M valid p (base P guard)) (fun a => a ∈ received)
       (merged M valid p P guard received) I r c w k ∨
     ∃ record, loss M valid p P guard values received w r = some record ∧ record.values c = some w :=

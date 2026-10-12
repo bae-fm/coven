@@ -167,7 +167,7 @@ theorem retained (s : Scenario) (admission : Write → Row → Bool) (w : Write)
   cases s <;> cases w <;> cases r <;> rw [DataDependency.retained_eq] <;>
     simp_all [DataDependency.authoredState, history, provenance, DataDependency.Provenance.sources, kept]
 
-def trial (s : Scenario) := deleteTrial (history s) policy (graph s)
+def trial (s : Scenario) := deleteTrial (history s) policy (graph s) (inputs s)
 def rebuilt (s : Scenario) (active : List (Write × Row)) :=
   roundState (history s) (valid s) (provenance s) policy (candidates s) active (received s)
 
