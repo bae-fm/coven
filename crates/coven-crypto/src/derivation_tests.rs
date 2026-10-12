@@ -87,7 +87,7 @@ fn retry_nonces_are_pinned_and_separate_keys_paths_sections_and_chunks() {
     // Independently calculated with Python's hashlib/hmac and D11's encoding.
     assert_eq!(
         hex::encode(&sealed[..24]),
-        "beb724c5788fe7d64e72564554dbed771e0e6ec5dacdaea6"
+        "9ee2b2bf9cdd2e4b609f10628507dd610a44c6e5185d5781"
     );
     assert_eq!(
         sealed,
@@ -130,4 +130,66 @@ fn retry_nonces_are_pinned_and_separate_keys_paths_sections_and_chunks() {
         key.open_object_chunk(path, b"changed prefix", 1, 2, &sealed),
         Err(CryptoError::Authentication)
     ));
+}
+
+#[test]
+fn changed_plaintext_at_the_same_chunk_position_changes_the_nonce() {
+    let key = DerivedKeys::new(&[17; 32]);
+    let path = "10101010-1010-1010-1010-101010101010/devices/1/3";
+    let first = key.reseal_object_chunk(path, b"prefix", 1, 2, b"payload");
+    let changed = key.reseal_object_chunk(path, b"prefix", 1, 2, b"payloae");
+    assert_ne!(first[..24], changed[..24]);
+    assert_eq!(
+        hex::encode(&changed[..24]),
+        "555e6c3798346d2671ef7e89dc86dd9ac45d38b2749aa311"
+    );
+}
+
+#[test]
+fn changed_clear_prefix_at_the_same_chunk_position_changes_the_nonce() {
+    let key = DerivedKeys::new(&[17; 32]);
+    let path = "10101010-1010-1010-1010-101010101010/devices/1/3";
+    let first = key.reseal_object_chunk(path, b"prefix", 1, 2, b"payload");
+    let changed = key.reseal_object_chunk(path, b"prefiy", 1, 2, b"payload");
+    assert_ne!(first[..24], changed[..24]);
+    assert_eq!(
+        hex::encode(&changed[..24]),
+        "15aa0a84d82e41793b0361ad13837207b80c002b87596d0c"
+    );
+}
+
+#[test]
+fn retry_nonce_vectors_pin_binary_fields_and_big_endian_u64_coordinates() {
+    // Independently calculated with Python hashlib/hmac, including SHA-256
+    // of the complete plaintext and each field's separate u64 length prefix.
+    let key = DerivedKeys::new(&[17; 32]);
+    let path = "10101010-1010-1010-1010-101010101010/devices/1/3";
+    for (prefix, section, index, plain, expected) in [
+        (
+            b"\x20\x00\x01\xff\x00".as_slice(),
+            0x0102030405060708,
+            0x1112131415161718,
+            b"\x00\xff\x80\x00".as_slice(),
+            "8c886b9f9901c6fcbda0e3cbf502b915a41bfd2c9e6c5dc3",
+        ),
+        (
+            b"",
+            0,
+            0,
+            b"",
+            "a5983baa739401fe568e54f7adf6422ea949d0783f6097a6",
+        ),
+    ] {
+        let sealed = key.reseal_object_chunk(path, prefix, section, index, plain);
+        assert_eq!(hex::encode(&sealed[..24]), expected);
+        assert_eq!(
+            sealed,
+            key.reseal_object_chunk(path, prefix, section, index, plain)
+        );
+        assert_eq!(
+            key.open_object_chunk(path, prefix, section, index, &sealed)
+                .unwrap(),
+            plain
+        );
+    }
 }

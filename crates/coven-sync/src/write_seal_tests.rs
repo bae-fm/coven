@@ -106,6 +106,92 @@ async fn count(db: &Database) -> i64 {
 }
 
 #[tokio::test]
+async fn write_sealing_binds_each_chunks_plaintext_and_the_complete_prefix() {
+    use coven_format::sealed_write::WriteObjectPrefix;
+
+    async fn seal(device: &Device, header_key: u128, changed_header: bool) -> Vec<Vec<u8>> {
+        let mut ring = StoreKeyring::new(StoreKey::from_bytes(KeyId(Uuid::from_u128(1)), [7; 32]));
+        ring.insert_store_key(StoreKey::from_bytes(KeyId(Uuid::from_u128(2)), [7; 32]))
+            .unwrap();
+        device
+            .db
+            .read_oldest_upload(move |mut upload| {
+                upload.keys = Some(WriteObjectPrefix {
+                    format: coven_format::FormatVersion::CURRENT,
+                    store_key: KeyId(Uuid::from_u128(header_key)),
+                    part_keys: vec![KeyId(Uuid::from_u128(1)); upload.header.parts.len()],
+                });
+                if changed_header {
+                    upload.header.header.timestamp =
+                        coven_merge::Timestamp::new(2000, 0, DeviceId(1)).unwrap();
+                    upload.header_frame = upload.header.encode().unwrap();
+                }
+                let mut pieces = Vec::new();
+                crate::write_seal::seal(STORE_ID, upload, &ring, &member(), &mut |piece| {
+                    pieces.push(piece.to_vec());
+                    Ok(())
+                })?;
+                Ok::<_, SyncError>(pieces)
+            })
+            .await
+            .unwrap()
+            .unwrap()
+    }
+
+    let mut sealed = Vec::new();
+    for first_byte in [b'A', b'B'] {
+        // Two copies use the same device, write number, clock and encryption key.
+        let device = device(storage(), 1).await;
+        device
+            .db
+            .write(move |sql| {
+                let mut body = vec![b'A'; 3 * coven_format::chunks::CHUNK_SIZE];
+                body[0] = first_byte;
+                sql.execute(
+                    "INSERT INTO notes VALUES('one','title',?1)",
+                    [String::from_utf8(body).unwrap()],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let first = seal(&device, 1, false).await;
+        assert_eq!(first, seal(&device, 1, false).await);
+        assert!(
+            first.len() > 4,
+            "prefix, header, multiple part chunks, signature"
+        );
+        let header = seal(&device, 1, true).await;
+        assert_eq!(first[0], header[0]);
+        assert_ne!(first[1][4..28], header[1][4..28]);
+        assert_eq!(first[2..first.len() - 1], header[2..header.len() - 1]);
+        let prefix = seal(&device, 2, false).await;
+        assert_ne!(first[0], prefix[0]);
+        for (a, b) in first[1..first.len() - 1]
+            .iter()
+            .zip(&prefix[1..prefix.len() - 1])
+        {
+            assert_ne!(
+                a[4..28],
+                b[4..28],
+                "changed prefix must separate every chunk"
+            );
+        }
+        sealed.push(first);
+    }
+    assert_eq!(sealed[0][..2], sealed[1][..2], "same prefix and header");
+    assert_ne!(
+        sealed[0][2][4..28],
+        sealed[1][2][4..28],
+        "changed part plaintext"
+    );
+    assert_eq!(
+        sealed[0][3..sealed[0].len() - 1],
+        sealed[1][3..sealed[1].len() - 1]
+    );
+}
+
+#[tokio::test]
 async fn unreadable_circle_parts_are_skipped_but_missing_members_keys_wait() {
     let storage = storage();
     let mut devices = household(storage.clone()).await;

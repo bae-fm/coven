@@ -83,9 +83,10 @@ fn walk_snapshot(
 
 // These bytes were produced independently with Python hashlib/hmac and libsodium.
 // Store/circle key bytes are 0x11/0x12, signing seeds 0x33, and all nonces are
-// fixed public test material. Payloads are the existing plaintext fixture frames.
+// public test material. Writes and entries use D11's content-bound nonces;
+// fixtures/generate-deterministic.py reproduces them from plaintext fixtures.
 #[test]
-fn sealed_write_fixture_opens_both_parts_and_reencodes_all_random_bytes() {
+fn sealed_write_fixture_opens_both_parts_and_reseals_identically() {
     let bytes = hex(include_str!("../fixtures/sealed-write.hex"));
     let prefix_length = WriteObjectPrefix::length(&bytes).unwrap();
     let prefix_bytes = &bytes[..prefix_length];
@@ -134,6 +135,16 @@ fn sealed_write_fixture_opens_both_parts_and_reencodes_all_random_bytes() {
                 sealed,
             )
             .unwrap();
+        assert_eq!(
+            keys.reseal_object_chunk(
+                WRITE_PATH,
+                prefix_bytes,
+                coordinate.section,
+                coordinate.index,
+                &opened,
+            ),
+            sealed,
+        );
         if coordinate.section == 0 {
             assert_eq!(opened, header_bytes);
         } else {
@@ -284,6 +295,12 @@ fn single_chunk_fixtures_open_with_their_own_keys_and_authors() {
                 assert_eq!(kind, 33);
                 assert_eq!(prefix.len(), 19);
                 assert_eq!(entry, test_utils::store_log());
+                assert_eq!(
+                    store_key()
+                        .derive()
+                        .reseal_object_chunk(path, &prefix, 0, 0, &plain),
+                    object.chunk(),
+                );
                 entry.author
             }
             Object::JoinRequest(request) => {

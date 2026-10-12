@@ -2,7 +2,7 @@
 
 use hkdf::Hkdf;
 use hmac::{Hmac, KeyInit, Mac};
-use sha2::Sha256;
+use sha2::{Digest, Sha256};
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::{cipher, CryptoError, FingerprintHasher};
@@ -105,8 +105,10 @@ impl DerivedKeys {
     }
 
     /// Re-seal a write or store-log chunk identically on every attempt (D9/D11).
-    /// The path must be used once: plaintext, prefix and key choices must never
-    /// change after the first attempt. Section and index identify one chunk.
+    /// The nonce binds the path, complete cleartext prefix, section, index and
+    /// SHA-256 of the complete chunk plaintext, including any frame bytes.
+    /// Different content at a reused path has different nonce inputs. Retries
+    /// fix plaintext, prefix and key choices to reproduce the same bytes.
     /// Snapshots, positions and join requests use `seal_object_chunk` instead.
     pub fn reseal_object_chunk(
         &self,
@@ -119,10 +121,12 @@ impl DerivedKeys {
         let key = &self.encryption.0;
         let mut nonce = mac(key);
         nonce.update(&cipher::context(&[
-            b"coven/object-nonce/v1",
+            b"coven/object-nonce/v2",
             cipher::storage_path(path),
+            prefix,
             &section.to_be_bytes(),
             &index.to_be_bytes(),
+            &Sha256::digest(plaintext),
         ]));
         let nonce = nonce.finalize().into_bytes();
         let nonce: &[u8; 24] = nonce[..24].try_into().expect("24-byte nonce");

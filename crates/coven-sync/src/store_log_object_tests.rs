@@ -13,6 +13,46 @@ fn checked_log(entries: &[StoreLogEntry]) -> StoreLog {
 }
 
 #[test]
+fn entry_sealing_reproduces_the_fixture_and_binds_plaintext_and_prefix() {
+    let bytes =
+        hex::decode(include_str!("../../coven-format/fixtures/sealed-store-log.hex").trim())
+            .unwrap();
+    let store = StoreId(Uuid::from_bytes([0x10; 16]));
+    let key = StoreKey::from_bytes(KeyId(Uuid::from_bytes([1; 16])), [17; 32]);
+    let member = member(0x33);
+    let envelope = SingleChunkObject::decode(&bytes).unwrap();
+    let path = ObjectPath::store_log(store, DeviceId(1), 1.try_into().unwrap());
+    let entry = object::open(&envelope, &path, &key).unwrap();
+    let seal = |entry: &StoreLogEntry, key: &StoreKey| {
+        object::seal(
+            store,
+            entry,
+            coven_format::FormatVersion::CURRENT,
+            key,
+            &member,
+        )
+        .unwrap()
+    };
+    assert_eq!(seal(&entry, &key), bytes);
+    assert_eq!(seal(&entry, &key), seal(&entry, &key));
+
+    let mut changed = entry.clone();
+    let StoreChange::CreateStore { name, .. } = &mut changed.change else {
+        panic!("creation fixture")
+    };
+    *name = "Another store name".into();
+    // The second key changes only the clear key id, retaining the encryption key.
+    let other_key = StoreKey::from_bytes(KeyId(Uuid::from_bytes([2; 16])), [17; 32]);
+    for (entry, key) in [(&changed, &key), (&entry, &other_key)] {
+        let changed = seal(entry, key);
+        let other = SingleChunkObject::decode(&changed).unwrap();
+        assert_ne!(envelope.chunk()[..24], other.chunk()[..24]);
+        assert_eq!(object::open(&other, &path, key).unwrap(), *entry);
+        assert_eq!(changed, seal(entry, key));
+    }
+}
+
+#[test]
 fn folder_ownership_includes_implicit_own_registration_and_waits_for_it() {
     use crate::replay::tests as history;
     let mut h = history::History::new();
