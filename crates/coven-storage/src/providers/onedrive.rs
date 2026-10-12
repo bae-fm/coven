@@ -59,8 +59,11 @@ impl OneDriveStorage {
         url: &str,
         body: Body,
     ) -> Result<reqwest::Response, StorageError> {
-        let headers = if matches!(body, Body::Bytes(_)) {
-            vec![("Content-Type", "application/octet-stream".into())]
+        let headers = if let Body::Bytes(bytes) = &body {
+            vec![
+                ("Content-Type", "application/octet-stream".into()),
+                ("Content-Length", bytes.len().to_string()),
+            ]
         } else {
             Vec::new()
         };
@@ -316,6 +319,7 @@ impl ProviderOps for OneDriveStorage {
                     &[
                         ("If-None-Match", "*".into()),
                         ("Content-Type", "application/octet-stream".into()),
+                        ("Content-Length", bytes.len().to_string()),
                     ],
                     Body::Bytes(bytes.to_vec()),
                     true,

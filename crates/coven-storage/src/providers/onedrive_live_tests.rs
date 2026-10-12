@@ -158,11 +158,9 @@ fn run(test: impl AsyncFnOnce(&mut Live<'_>)) {
 }
 
 #[test]
-#[ignore = "requires COVEN_LIVE_ONEDRIVE_ENV; failing: live conformance returns HTTP 411"]
+#[ignore = "requires COVEN_LIVE_ONEDRIVE_ENV and a live personal OneDrive"]
 fn onedrive_live_conformance() {
     run(async |live| {
-        // Observed on personal OneDrive: Conformance::run returns Refused with
-        // native HTTP 411. Preserve the failure rather than weakening the suite.
         crate::test_utils::Conformance::new(live.storage.clone(), live.store)
             .run()
             .await

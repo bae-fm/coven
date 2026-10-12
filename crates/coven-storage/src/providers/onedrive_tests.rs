@@ -349,6 +349,48 @@ fn remote() -> Arc<Mutex<Remote>> {
     Arc::new(Mutex::new(remote))
 }
 #[tokio::test]
+async fn content_uploads_declare_their_length_including_empty_objects() {
+    let state = remote();
+    let lengths = Arc::new(Mutex::new(Vec::new()));
+    let received = lengths.clone();
+    let server = TestServer::new(Router::new().fallback(
+        move |method: Method, uri: Uri, headers: HeaderMap, body: Bytes| {
+            let state = state.clone();
+            let received = received.clone();
+            async move {
+                if method == Method::PUT {
+                    received
+                        .lock()
+                        .unwrap()
+                        .push((body.len(), headers.get("content-length").cloned()));
+                }
+                endpoint(State(state), method, uri, headers, body).await
+            }
+        },
+    ))
+    .await;
+    let storage = provider(&server.url);
+    let immutable = ObjectPath::store_log(
+        STORE_ID,
+        coven_foundation::id_source::DeviceId(31),
+        std::num::NonZeroU64::MIN,
+    );
+    let mutable = ObjectPath::positions(STORE_ID, coven_foundation::id_source::DeviceId(31));
+    for bytes in [b"".as_slice(), b"data"] {
+        storage.create(&immutable, bytes).await.unwrap();
+        storage.delete(&immutable).await.unwrap();
+        storage.replace(&mutable, bytes).await.unwrap();
+    }
+    let lengths = lengths.lock().unwrap();
+    assert_eq!(lengths.len(), 4);
+    for (length, header) in lengths.iter() {
+        assert_eq!(
+            header.as_ref().map(|value| value.to_str().unwrap()),
+            Some(length.to_string().as_str())
+        );
+    }
+}
+#[tokio::test]
 async fn missing_session_and_destination_is_expired() {
     let state = remote();
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
