@@ -139,8 +139,13 @@
     interpretation, never a transmitted disposition: tried and untried
     uploads keep their original schema, disposition and plaintext, and
     readers derive conversion or loss from the kept boundary and the
-    write's inputs (§17.1;
+    row changes' actual data sources (§8, §17.1;
     [`conversions_preserve_uploads`, `receive_losses_converge`](proofs/queue/CovenQueue/Conversion.lean)).
+    Without a converter, the received interpretation retains each original
+    change as a frozen schema loss. Exclusion is never inherited through
+    `had_read`, including implicit own reads. With a converter, one received
+    part can contain converted changes and frozen dependent originals;
+    the original log object retains the layout below.
   - E.g. Ben's untried old-schema `title` edit uploads unchanged after he
     migrates; the receiving callback can interpret it as a `name` edit
     without rewriting that object
@@ -154,8 +159,11 @@
   For each kept removal or replacement retiring its device, §10 requires
   `store_log_read` not to contain that entry and publication no more than
   30 storage days after it. Exactly 30 days is allowed. A too-late write's
-  position is consumed without its effects; the verdict is recomputed when
-  retirement replay changes. No timestamp or verdict is added to these bytes.
+  position is consumed without effects or losses; later readers cannot
+  rescue it. Otherwise eligible dependent changes have their own frozen
+  losses (§8). Replay recomputes admission, source verdicts and losses
+  atomically. Retirement admission is final with its deciding kept entry
+  and §10's send gate. Publication time remains provider metadata.
 - A part's stream is its records, one frame each, in increasing `RowId`
   order, each of the part's audience; `length` counts every byte of them,
   including each seven-byte frame prefix. Record counts and total stream
@@ -175,6 +183,31 @@
     the `old` map's count, including an insert's zero count. Generations and
     references obey merge's parity, advancement without overflow, and
     parent-generation/audience checks (§8).
+  - Each row change requires authenticated evidence of the actual
+    generation-source write and the setter of every cell it replaced on the
+    authoring device (§8). Sources name changes at the same table, key and
+    audience; generation zero has no source. Validate that sources were
+    read, precede the change's timestamp and establish the stated generation
+    or cell in that incarnation. Unavailable evidence waits; invalid evidence
+    is refused. Numeric generations, old scalar values, read frontiers and
+    the current canonical generation winner cannot substitute for it.
+    The compact fields above do not themselves encode these source identities.
+  - Source evidence and received frozen-change representations must preserve
+    original write, row and column identities through conversion and renaming.
+    A frozen dependent change keeps its generation, operation, old names and
+    scalar values, with failed source identities in authored role order:
+    generation first, then replaced setters. Keep repeated identities when
+    one write supplied several roles. Frozen display values have no live
+    parent links; their original source evidence is retained separately.
+    A delete with no scalar values still retains its write/row identity and cause.
+  - One row change, including all its columns, is the unit of loss. Converted
+    changes and frozen originals can share a received part; frozen originals
+    never enter conversion callbacks or current removal rules. Their values
+    and original causes survive later raises and snapshot reloads.
+    Source identities and per-change verdicts remain separate from dismissible
+    losses and consumed positions. Snapshot records, fingerprints and the loss
+    API must preserve that evidence and dependency causes (§8, §17.1);
+    the compact D7 layout alone does not supply this evidence either.
   - A dismissal (kind 3) names a lost cell the app dismissed
     ([E4](api.md#e4-reading)):
 
