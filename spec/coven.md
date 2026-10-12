@@ -3257,11 +3257,23 @@ Carol's tablet:
   - A snapshot is one object, encrypted in chunks like a write
     ([§6](#6-syncing-writes)), and written and loaded a chunk at a time.
     Its author's member key signs both its prefix and its complete sealed
-    bytes. Every read verifies the prefix against the member the applied
-    store log names for the device in its path; loading also verifies the
+    bytes. Every read resolves the device's owner and current signing key
+    in the snapshot's signed `store_log` view for both signatures. Until
+    verified that view is only a lookup hint. Loading also verifies the
     complete object's signature before applying anything from it (D9).
+    Key replacement alone does not invalidate a historical signature or
+    impose a 30-day snapshot deadline. The signed catch-up-time deadline and
+    every coverage/retention check still apply. This snapshot policy is
+    separate from the proved entry/write window rule.
   - A snapshot *covers* a write when the write is within its positions:
     `<store>/snapshots/store/ana-phone/3` covers ana-phone's writes 1 to 40.
+- Snapshot loading preserves each change's actual generation/setter sources,
+  own admission evidence and original-value losses (§8, D7). Consumed
+  coverage is not evidence that a covered change survived. Dismissal cannot
+  remove source evidence. A changed replacement decision rebuilds admission,
+  rows and losses in the loading transaction; retain original inputs until
+  the deciding replacement prefix is final and independent retention checks
+  pass. A snapshot cannot rescue an old-key write by covering it.
 - Snapshots are discovered by listing `<store>/snapshots/<audience>/`,
   never by GETting the next snapshot number. Retention can delete snapshot
   2 while leaving 3. List the audience's retained snapshots and check their
