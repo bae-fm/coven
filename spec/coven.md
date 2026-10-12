@@ -3004,8 +3004,13 @@ Carol's tablet:
     if another store admin remains, and Gifts is empty and hidden.
   - Carol's concurrent addition to Gifts, if it arrives, can leave it with
     Carol instead. The rows return and Carol reloads their history (§14.4).
-- A write Ben made to the circle before he had read his removal still
-  counts, as with any concurrent entry ([§9](#9-members-and-roles)).
+- A write Ben made to the circle before he had read his removal passes
+  this circle-membership check, as with a concurrent entry (§9). It still
+  follows §10's device-retirement checks, §17.1's schema rules and §8's
+  per-change data rule.
+  - Leaving a circle does not retire a device or start a device-retirement
+    window. A separate removal of Ben or his device, or replacement of its
+    id, does (§10).
   - Ben is still in the store, so storage access doesn't stop him sending
     his own pre-removal edits, including their first attempts, with the old
     circle key he already received (§6). This exposes no new circle data
