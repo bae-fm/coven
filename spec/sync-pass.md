@@ -763,9 +763,10 @@ immediately. An app retry can override ordinary backoff, never this cooldown.
 A joiner keeps its encrypted request, writer-copy download position,
 downloaded copies and entries across polling iterations. It does not run a
 complete store sync on every wait. The invite names the initial key, inviting
-writer and last published key-copy number at invite time. Each due attempt
+writer, fixed member id and last published key-copy number at invite time. Each due attempt
 GETs the next number, reading whole copies and inspecting their clear prefixes
-until its own initial-key copy appears or a miss ends the attempt. Hits can
+until an initial-key copy naming both its fixed id and new sealing key
+appears or a miss ends the attempt. Hits can
 fetch ahead within the transfer limit, without advancing across a gap.
 Retain other recipients' routing facts and every completed copy so reopening
 does not start again at the invite's number.
@@ -780,7 +781,9 @@ reads, with provider lookup overhead counted separately. After observing
 request deletion, refresh the inviting writer's copies through a miss and
 check membership as §12.2 requires before deciding the outcome. A copy may
 have arrived between the earlier miss and deletion. Key bytes alone cannot
-admit a member without replay.
+admit a member without replay. Bootstrap requires the approving writer's
+kept binding for the exact id and requested pair; another writer's equal
+pair cannot rescue a dropped approval (§12).
 
 **Ana's open invite.** While Carol has not sent her request, Ana's device
 backs off the shared request check. Once it arrives, the checked request
