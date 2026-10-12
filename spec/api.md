@@ -2487,6 +2487,17 @@ match stream.read_at(resume_at, 256 * 1024).await {
 - Only admins add and remove members, and change roles; each member removes
   their own devices, and admins any device ([§9](coven.md#9-members-and-roles)).
 - Administrative calls require an online store-log catch-up (§9, E6).
+- A member can replace their own signing/sealing pair; any admin can publish
+  a prepared pair for an existing member with `replace_member_keys_for`.
+  Replacement invites provide the approval/bootstrap flow (E10), subject to
+  their provider-access requirements. Another
+  admin's concurrent replacement wins over self-replacement, even when self
+  is an admin. Member removal wins. A rejected replacement returns its replay
+  reason, never restarts to overrule the winner. Keys must both be fresh.
+- Replacement preserves the id, role, circle memberships and device ids.
+  Historical public bindings remain available for signature checks. Old
+  sealing credentials expose their audience keys (§11); storage access is
+  a separate operation. Neither a restore code nor a key copy proves approval.
 - Removing a member publishes one entry. It returns `()` once replay keeps
   it; applying entries is the single path that records provider access work.
 - The pending list describes unresolved access work. Each owner's device
@@ -2511,6 +2522,34 @@ impl CovenHandle {
 
     /// The same internal query, live (E4).
     pub fn subscribe_members(&self) -> LiveQuery<Vec<MemberInfo>>;
+
+    /// Replaces this member's signing and sealing keys (§9, §11).
+    /// Pauses local app writes and confirms this installation's queued writes
+    /// and entries first; attempted app writes return DbError::MemberKeysChanging.
+    /// Keeps a fresh private pair durably before sending
+    /// prerequisite key copies and the entry signed by the current pair.
+    /// Failures retain both pairs and recorded progress for idempotent retry;
+    /// no local writes resume under an uncommitted binding or failed custody.
+    /// Returns once the binding is kept and custody and restore code refreshed.
+    /// The app asks the person to keep the new restore code. Other devices
+    /// holding old credentials report MemberKeysReplaced and need current keys.
+    pub async fn replace_member_keys(&self) -> Result<(), SyncError>;
+
+    /// Publishes a prepared public pair for an active member under §9's
+    /// authority rules. The target retains its private pair before this call;
+    /// this call receives no private keys and changes no local private custody.
+    /// Confirms the initial and held historical audience-key copies before
+    /// publishing the replacement; returns once replay keeps it.
+    /// Any admin may replace another member, independently of provider ownership.
+    /// A self target is still self-replacement, even for an admin; callers
+    /// replacing this installation's own pair use replace_member_keys instead.
+    /// Rejection is reported without restarting against the winner. Provider
+    /// access and installing the prepared private pair are separate work.
+    pub async fn replace_member_keys_for(
+        &self,
+        member: &MemberId,
+        keys: MemberPublicKeys,
+    ) -> Result<(), SyncError>;
 
     /// On S3: switches this member to the access key they made in the
     /// provider's console and records the new key's id in the store log (§9).
@@ -2586,6 +2625,7 @@ pub enum RetainedAccessReason {
 
 pub struct MemberInfo {
     pub id: MemberId,
+    pub keys: MemberPublicKeys,
     pub role: MemberRole,
     pub devices: Vec<DeviceInfo>,
     /// Whether this is the member using this device.
