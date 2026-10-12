@@ -868,8 +868,9 @@ Two mechanisms order writes:
   log.
   - Ana's write 3 had read Ben's log up to 8;
   - and Carol's tablet's log up to 1.
-- A device applies a write only after it has applied everything that
-  write's device had read.
+- A device consumes a write only after consuming every position its author
+  had read. Consuming a position need not apply its data (§8, §10, §17.1,
+  §19.3); the position and the change's verdict are separate facts.
 - Every write also records how far its device had read the store log
   ([§9](#9-members-and-roles)), and is applied only after those entries.
   - So a device knows a write's circles, members and keys before it opens
@@ -891,15 +892,16 @@ Two mechanisms order writes:
     and a write from a device whose addition a later entry drops still
     passes this authority check if its author had read that addition.
     A kept removal or replacement also imposes §10's landing deadline.
-- A device has always read its own earlier writes, except effects explicitly
-  discarded by an adopted reset or breaking-change snapshot (§17.1, §19.3).
-  Their numbers are passed; their discarded values are not new writes' inputs.
-- So no device ever sees an effect before its cause:
-  - cause: every write a write's device had read when making it;
-  - effect: the write itself;
+- A device has always read its own earlier write positions, including ones
+  consumed without applying their effects (§10, §17.1, §19.3). These recorded
+  reads govern receive order; actual data sources govern dependence (§8).
+- So no device processes an effect before its recorded causes:
+  - cause: every write position its device had read when making it;
+  - effect: the write's eligible changes;
   - Ana creates note 43 in her write 5. Ben's phone reads it, and Ben adds
     attachment 9 to the note in his write 12.
-  - No device ever has Ben's attachment without Ana's note.
+  - Every device processes Ana's note before Ben's attachment. Dropped data
+    follows §8's loss and removal rules instead of being applied.
 - Two writes are concurrent when neither device had read the other's:
   - Carol's tablet goes offline before Ben's write 9. Its write 2, at
     14:00, had read Ben's log only up to 8.
