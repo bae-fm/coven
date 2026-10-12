@@ -556,11 +556,27 @@ fn s3_error<E>(error: SdkError<E>) -> StorageError
 where
     E: ProvideErrorMetadata + std::error::Error + Send + Sync + 'static,
 {
-    let status = match &error {
-        SdkError::ServiceError(service) => Some(service.raw().status().as_u16()),
-        _ => None,
+    let failure = match &error {
+        SdkError::ConstructionFailure(_) => StorageFailure::InvalidConfiguration,
+        SdkError::ResponseError(_) => StorageFailure::Protocol,
+        SdkError::TimeoutError(_) | SdkError::DispatchFailure(_) => StorageFailure::Network,
+        SdkError::ServiceError(service) => {
+            s3_service_failure(service.err(), service.raw().status().as_u16())
+        }
+        _ => StorageFailure::Protocol,
     };
-    let failure = match error.code() {
+    StorageError::Provider {
+        provider: CloudProvider::S3,
+        failure,
+        source: Box::new(S3ResponseError(error)),
+    }
+}
+
+fn s3_service_failure(
+    error: &(impl ProvideErrorMetadata + std::error::Error),
+    status: u16,
+) -> StorageFailure {
+    match error.code() {
         Some(
             "InvalidAccessKeyId"
             | "SignatureDoesNotMatch"
@@ -584,24 +600,31 @@ where
             | "IncorrectEndpoint"
             | "IllegalLocationConstraintException",
         ) => StorageFailure::RegionMismatch,
-        Some("OverQuota" | "QuotaExceeded" | "InsufficientStorage") => {
+        Some("OverQuota" | "QuotaExceeded" | "InsufficientStorage" | "XMinioStorageFull") => {
             StorageFailure::QuotaExceeded
         }
+        Some("RequestTimeout") => StorageFailure::Network,
+        Some("InvalidObjectState") => StorageFailure::Refused,
         Some("InvalidRange") => StorageFailure::InvalidRange,
+        // The SDK also wraps XML decoding failures in ServiceError. A parsed
+        // response without an error code (including HEAD) has ErrorMetadata as
+        // its source; a decoding failure retains the parser's native error.
+        None if error
+            .source()
+            .is_some_and(|source| !source.is::<aws_sdk_s3::error::ErrorMetadata>()) =>
+        {
+            StorageFailure::Protocol
+        }
         _ => match status {
-            Some(401) => StorageFailure::Authentication,
-            Some(403) => StorageFailure::PermissionDenied,
-            Some(404) => StorageFailure::NotFound,
-            Some(412) => StorageFailure::AlreadyExists,
-            Some(429) => StorageFailure::RateLimited,
-            Some(408 | 500..=599) | None => StorageFailure::Network,
+            401 => StorageFailure::Authentication,
+            403 => StorageFailure::PermissionDenied,
+            404 => StorageFailure::NotFound,
+            412 => StorageFailure::AlreadyExists,
+            429 => StorageFailure::RateLimited,
+            507 => StorageFailure::QuotaExceeded,
+            408 | 500..=599 => StorageFailure::Network,
             _ => StorageFailure::Refused,
         },
-    };
-    StorageError::Provider {
-        provider: CloudProvider::S3,
-        failure,
-        source: Box::new(S3ResponseError(error)),
     }
 }
 
