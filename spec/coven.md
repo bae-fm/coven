@@ -2239,7 +2239,7 @@ Carol's tablet:
     A catch-up started after that finality observes the retirement and stops
     the old id. Earlier catch-ups permit sends for less than five further
     minutes, and each request settles within one day. No publication can
-    occur more than one day and five minutes after finality. Measure from
+    occur at or after one day and five minutes after finality. Measure from
     finality, not the entry's publication: replay can drop and restore the
     retirement before it is final.
 - A stale copy resets as a new device using storage and saved custody.
@@ -2326,18 +2326,42 @@ Carol's tablet:
   schema and reset checks still apply.
   - Use first complete publication times, never authored timestamps or
     device clocks. Retries change neither bytes nor storage time (§4).
-  - A later write is dropped as `Dropped(LandedTooLate)` for its write
-    subject. Consume its position without its effects; this is not a
+  - A write made after reading its own kept retirement is refused before
+    its position passes (§7.1). A pre-retirement write published outside its
+    window is instead dropped as `Dropped(LandedTooLate)` for its write
+    subject. Consume its position without effects or losses; this is not a
     permanent refusal and does not stop the log. Retain its original inputs
     and storage facts while a replay could restore it.
-  - This write verdict depends on kept retirements. Recompute it with replay
-    and rebuild affected data atomically (§9). If the retiring entry drops,
-    this exclusion disappears; another kept retirement can still exclude it.
-    Equal storage times, recorded reads and kept entries give equal verdicts.
+  - Judge each write by its own publication window. Later readers cannot
+    rescue an outside-window write, whether their own changes apply or lose.
+    Otherwise eligible changes built on its dropped row changes become
+    recorded losses under §8; their write's unrelated changes still apply.
+  - Recompute this verdict with replay and rebuild affected rows, source
+    verdicts and losses in the same transaction (§9), including contributions
+    already in snapshots. If the retiring entry drops, this exclusion
+    disappears; another kept retirement can still exclude it. A failed
+    rebuild leaves the prior state intact and reports the failure.
+  - With the send gate above, this retirement verdict is final once its
+    deciding kept retiring entry is final (§9). Its preceding store-log
+    prefix, including storage-time ties, is then stable. Later retirements
+    cannot reverse either window verdict: an admitted write already met the
+    final entry's earlier deadline. This needs no future reader or drained
+    reader log. Schema and reset still decide their own independent verdicts.
+    The one-day-and-five-minute wait bounds discovery, not admission finality.
+    [B17 proves both results](proofs/merge.md#b17-receive-order-progress-and-dropping-by-data).
   - Entries instead keep §9's permanent rule: more than 30 days after any
     unread entry excludes them, whether that entry is kept or dropped.
     Dropping a retirement can restore a write, never an entry that landed
     too late. Neither landing rule relies on §10's request-duration assumption.
+- E.g. Ana's removed phone publishes a note one second outside its window.
+  The removal was temporarily dropped, so Ben could read and edit that note
+  before replay restores the removal. Ben's same write renames a playlist
+  whose generation and replaced setter survive.
+  - Ana's late note is dropped on every device. Ben's note edit is a frozen
+    loss naming its dropped sources; his playlist rename applies.
+  - The result is the same whether Ben's edit arrives before or after a
+    concurrent delete of the note. That dependent delete also has a loss
+    record, even if it carries no scalar values.
 - A device that reads its own removal, or its member's, stops syncing for
   good and tells the app ([E5](api.md#e5-storage-and-sync)).
 - Removing a device takes away its storage access, so nothing it writes
