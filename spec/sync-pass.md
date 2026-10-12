@@ -89,7 +89,8 @@ These local records survive reopening and have no pass-end expiry:
   in the same transaction; an active device is polled again. These marks
   never enter snapshots or posts.
 - **Sealed-key presence:** retain each whole copy and its clear audience,
-  key id and recipient by writer and number. Copies are never deleted.
+  key id, stable recipient id and exact sealing public key by writer and
+  number. Copies are never deleted.
   Observed presence and a successfully opened member copy are different
   facts; secrets stay in custody. Key selection combines this permanent
   evidence with each writer's newly read copies and current replay.
