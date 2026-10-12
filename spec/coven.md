@@ -4343,11 +4343,17 @@ Carol's tablet:
     [queue proof: `Operations.fixed_data`, `publication_retries_identical`](proofs/queue.md#what-is-proved)).
   - Deleting an object that is already gone succeeds.
 - A store log entry takes its number when its plaintext and key id commit.
-  It is always uploaded, even if the operation is abandoned, and the replay
-  judges it like any entry, since a device's later entries had read it.
+  While its signing credential remains current it is uploaded even if the
+  operation is abandoned; replay judges it like any entry, since the device's
+  later entries had read it. Replacement blocks old-credential sends (§10);
+  it cannot skip a queued number or rewrite the entry.
 - An operation that writes a store log entry finishes only once the replay
   keeps it; if the replay drops it, the operation starts over from its
   first step, against the member list it then has.
+  - A member-key replacement is an exception: a losing attempt reports its
+    replay reason and does not restart with a new entry to overrule the
+    winner. Replacing again requires a new explicit call or approved invite.
+    Publication retries of the same attempt retain its exact keys and bytes.
   - Unless the drop leaves nothing to do, such as removing a member a
     concurrent entry already removed.
   - Starting over repeats §9's online catch-up and validation. This also
@@ -4472,10 +4478,26 @@ Carol's tablet:
   There is no preceding write or wait for row uploads.
 - Inviting a person ([§12.2](#122-adding-a-person)):
   1. share the storage with their account, or record the S3 key the admin
-     made in the provider's console, and record the invite;
-  2. once an admin approves the request, seal the store key to them, then
-     write the store log entry adding them;
-  3. on decline or expiry, take back the access instead.
+     made in the provider's console, and record the invite's chosen stable id;
+  2. once an admin approves the exact id and new public pair, confirm the
+     initial and held historical audience-key copies to that credential,
+     then publish Add member or Replace member keys as the invite specifies;
+  3. bootstrap waits for the kept matching binding before registering the
+     device and recording any separate access change. A losing replacement
+     reports rejection; it does not restart against the winning pair;
+  4. on decline or expiry, take back only the invite's new access instead.
+- Self-replacement of member keys (§10, §11) pauses local app writes and
+  confirms queued writes/entries first. Persist the candidate private pair,
+  publish its required key copies, then its replacement signed by the current
+  key. After the binding is kept, refresh custody and the restore code before
+  resuming app writes. Publication or custody failure retains the attempt and
+  both pairs, reports its cause and resumes that same attempt on retry. Replay
+  rejection reports its reason without creating another replacement.
+  Discarding work cannot clear the
+  pause while a reserved replacement still needs settlement or the current
+  binding needs custody installed. Before any replacement entry is reserved,
+  cancellation may release the pause only if held keys still match replay.
+  Other installations keep their ids but cannot send with the old credentials.
 - Uploading a write or a file is not an operation: it waits in its queue
   until stored ([§6](#6-syncing-writes), [§16.5](#165-uploads-and-deletion)).
   Writes are sent by the pass; files by the separate upload worker.
