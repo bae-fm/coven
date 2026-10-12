@@ -3078,7 +3078,8 @@ Carol's tablet:
   ([§8.2](#82-concurrent-writes-to-one-row)). A rename that has read another
   has a later timestamp. Renames still conflict with deleting the circle
   ([§9](#9-members-and-roles)).
-- Each circle has its own key, sealed to each of its members' public keys,
+- Each circle has its own key, sealed to each member's current non-retired
+  sealing key, with both member id and sealing key authenticated in each copy,
   like the store key ([§11](#11-keys)).
   - Its sealed copies live at `<store>/keys/<writer>/<n>`, with the circle,
     key id and recipient in the clear prefix ([§11](#11-keys)).
