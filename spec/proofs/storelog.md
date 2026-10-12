@@ -883,23 +883,28 @@ No Rust correspondence is claimed for the new keyed interface.
 
 ### C14 Spec and format checklist for stable members
 
-These are proposed changes; `spec/coven.md` and `spec/format.md` are unedited.
-The list distinguishes the chosen layouts from properties that the proofs
-show cannot be promised.
+The normative member-key rules and layouts are in `spec/coven.md`,
+`spec/format.md` and `spec/api.md`. Checked boxes below record specification
+coverage, not a Rust implementation or a new theorem. The fixture regeneration
+in the last item belongs to the queued format implementation; existing Rust
+fixtures still encode their earlier layouts. Format 1 is the first unreleased
+format; D9 and D14 no longer name version 2. The shared data-evidence encoding
+remains an implementation obligation from merge B17. The list distinguishes
+the chosen rules from properties the proofs do not establish.
 
-- [ ] **§9, §11 and D2:** define `MemberId` as a random 16-byte UUID, like a
+- [x] **§9, §11 and D2:** define `MemberId` as a random 16-byte UUID, like a
   circle id, independent of keys. Add `SigningKey = 32-byte Ed25519 public
   key` with the existing invalid/weak-point checks. Change `MemberKeys` to
   `signing:SigningKey | sealing:SealingKey`. Keep `SealingKey` as 32-byte
   X25519. All member references and their byte ordering use the UUID.
-- [ ] **D6 author and creation:** retain `author:MemberId` in the entry
+- [x] **D6 author and creation:** retain `author:MemberId` in the entry
   header, now 16 bytes. Creation's existing `admin:MemberKeys` supplies that
   author's initial keys; the header supplies its stable id, so no duplicate
   admin-id field is needed. Verify creation against those keys and the store
   path. For other entries, replay `had_read`, resolve `author` there, and
   verify with that member's current signing key. The model's `signer` is
   verified evidence, not an additional wire field.
-- [ ] **D6 addition and replacement:** tag 1 becomes
+- [x] **D6 addition and replacement:** tag 1 becomes
   `member:MemberId | keys:MemberKeys | role:u8 | access:MemberAccess`.
   Add tag **16**, Replace member keys:
   `member:MemberId | keys:MemberKeys`. Leave tag 12 unused and retain all
@@ -907,7 +912,7 @@ show cannot be promised.
   or device changes. Creation/addition establish keys; replacement is the
   only operation changing an active member's keys. Reject reusing previous
   signing or sealing keys.
-- [ ] **§9 authority/conflicts:** allow the target's current signature or a
+- [x] **§9 authority/conflicts:** allow the target's current signature or a
   current admin's signature in the recorded view. Classify by stable ids:
   author equal to target is self-replacement even for an admin; a different
   authorized author is an admin replacement. All concurrent replacements of one id
@@ -915,7 +920,7 @@ show cannot be promised.
   earlier timestamp wins. A removal of that member wins. Require the target
   in both the recorded view and replay state; replacement never re-adds it.
   Keep role, last-admin, device and circle rules otherwise unchanged.
-- [ ] **§7.1, §10, §13 and D5/D6/D9:** authenticate writes from the device's
+- [x] **§7.1, §10, §13 and D5/D6/D9:** authenticate writes from the device's
   stable owner and the current signing key in `store_log_read`; D5 needs no
   extra author or key field. Retain historical public bindings for checking
   past objects. Count an old-key write only within 30 storage days of every
@@ -925,14 +930,14 @@ show cannot be promised.
   unread winner's installed key, not only its preceding binding. Earlier
   replacements already read do not retire later keys current in that past.
   Preserve entry rejection under §9; a write's read cannot revive a too-late entry.
-- [ ] **§10, §15, §16.5, §17 and D5/D7:** feed old-key exclusion into the
+- [x] **§10, §15, §16.5, §17 and D5/D7:** feed old-key exclusion into the
   shared `DataDependency.dependsOnDropped` rule. An otherwise admitted change
   built on dropped data becomes a recorded loss for that change, preserving
   its original identity and values. Unrelated changes in the same write stay
   eligible. Use actual generation/setter sources, never recorded-read
   frontiers; preserve that evidence through snapshots and conversion as
   described in [the shared data checklist](merge.md#b17-receive-order-progress-and-dropping-by-data).
-- [ ] **§3, §9, §10, §15, §16.5 and §19:** state that old-key window admission
+- [x] **§3, §9, §10, §15, §16.5 and §19:** state that old-key window admission
   is final with a kept retiring replacement and its preceding final entry
   prefix, including ties. Before finality, rebuild admission, rows and losses
   atomically when replacement decisions change. Apply the send gate to old
@@ -943,7 +948,7 @@ show cannot be promised.
   Keep independent schema/reset, snapshot coverage and file-retention checks.
   Describe the signing-key grace period accurately; it is not immediate
   signature revocation or a theft-recovery guarantee.
-- [ ] **§11, D9 and D11 key copies:** keep `member:MemberId` as stable routing
+- [x] **§11, D9 and D11 key copies:** keep `member:MemberId` as stable routing
   identity and add the exact recipient `sealing:SealingKey` to the clear
   prefix, after `member`. The complete layout is
   `37:u8 | version:u16 | audience:Audience | key:uuid | member:MemberId |
@@ -952,7 +957,7 @@ show cannot be promised.
   key to match the recipient key actually used by the box. Discovery retains
   both member and sealing key; opening an old copy uses its named credential,
   not a guess from the latest binding. Historical copies never disappear.
-- [ ] **§11 exposure/selection and §12 sharing:** every kept replacement
+- [x] **§11 exposure/selection and §12 sharing:** every kept replacement
   exposes its previous sealing credential regardless of motive. Copies to it
   retire their store/circle keys for first attempts even though the member is
   still present. Catch-up precedes new sealing; route ordinary historical
@@ -965,11 +970,11 @@ show cannot be promised.
   to the new key does not make the old exposed audience key safe again.
   Retried pre-existing ciphertext and copies arriving after observation retain
   §11's residual-window limits.
-- [ ] **D8 key-copy reports:** distinguish credentials in the report subject:
+- [x] **D8 key-copy reports:** distinguish credentials in the report subject:
   `audience:Audience | key:uuid | member:MemberId | sealing:SealingKey`, ordered
   in that field order. A report about an old copy must not satisfy a wait for
   a copy to the replacement key.
-- [ ] **§12.2–12.3 and D8/D13 invites:** bind a chosen stable id into the
+- [x] **§12.2–12.3 and D8/D13 invites:** bind a chosen stable id into the
   invite. For a new person the admin generates a fresh id; for recovery the
   admin chooses an existing active member. Add `member:MemberId` after
   `invite:uuid` in both the invite code and the signed join request. The
@@ -978,19 +983,19 @@ show cannot be promised.
   its member id to match the invite. Approval emits Add member for a new id,
   or Replace member keys for the existing id, using the request's exact keys.
   Do not let the requester choose which existing person to replace.
-- [ ] **§12 bootstrap and §13 access:** seal the initial and available
+- [x] **§12 bootstrap and §13 access:** seal the initial and available
   historical audience keys to the approved new sealing key before publishing
   its binding entry. Bootstrap waits for a kept matching id-and-keys binding,
   then registers the new device under that id. A losing replacement remains
   a rejected join even if its prerequisite copies exist. Rebinding preserves
   role, circle memberships and existing device ids; storage-credential changes
   remain a separate access operation and require provider handling.
-- [ ] **§12.1 and D13 restore:** put `member:MemberId` after `name:name` in a
+- [x] **§12.1 and D13 restore:** put `member:MemberId` after `name:name` in a
   restore-code frame, before `member_keys:bytes`. Keep the existing private
   signing/sealing key blob, now explicitly associated with that id. Refresh
   restore codes and custody after replacement. An old code cannot bind its
   old keys back to the id; recovery requires current keys or admin approval.
-- [ ] **D7–D9 other signatures:** use the snapshot's signed `store_log`
+- [x] **D7–D9 other signatures:** use the snapshot's signed `store_log`
   coverage as its key lookup view for both signatures, and posted positions'
   signed `store_log` for their signer lookup. Add `store_log_read:EntryPositions`
   after `device` in the clock frame so its signature also identifies a key
@@ -998,7 +1003,7 @@ show cannot be promised.
   verification succeeds. Join requests remain authenticated by their supplied
   keys. Admission/retention rules for old-key snapshots, positions and clock
   objects are outside the checked entry/write rule and must be stated explicitly.
-- [ ] **D10:** render member ids as canonical lowercase hyphenated UUIDs,
+- [x] **D10:** render member ids as canonical lowercase hyphenated UUIDs,
   replacing public-key hex wherever a member is spelled. Keep writer-specific
   key-copy paths and their gap-free sequence; key versions do not create a
   second log or overwrite old copies.
