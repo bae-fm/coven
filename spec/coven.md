@@ -3857,8 +3857,9 @@ Carol's tablet:
 - For each breaking change, the app supplies a *migration* in two parts:
   - one changes the database, e.g. `ALTER TABLE notes RENAME COLUMN title
     TO name`;
-  - optionally, one changes a write made in the old version, e.g. turns
-    "note 43, title: X" into "note 43, name: X".
+  - optionally, one converts an eligible row change of a received late
+    old-version write, e.g. turns "note 43, title: X" into
+    "note 43, name: X". It never changes an upload record.
 - An update runs every pending migration in one transaction, then checks
   the schema rules against the tables the app declares, which describe
   only the newest version; if a rule fails, nothing changes.
@@ -3993,45 +3994,61 @@ Carol's tablet:
     and send 3 once a raise is kept
     ([`raise_publishes_with_new_tail`](proofs/queue/CovenQueue/RaiseExamples.lean)).
 - Conversion is for received late old-schema writes from other devices,
-  not for rewriting one's own upload queue; after a competing raise wins,
-  its author uses that same receive rule to rebuild local state from the
-  unchanged original records
+  including already-attempted writes that arrive after the raise. After a
+  competing raise wins, the original write's author uses that same receive
+  rule to rebuild local state from the unchanged records
   ([`reload_matches_receiver`, `conversions_preserve_uploads`](proofs/queue/CovenQueue/Conversion.lean)).
   - Let S be the kept breaking-change snapshot for the audience: S supplies
-    covered effects, while eligible uncovered ordinary old-schema writes
-    use the supplied conversions in version and causal order, independently
-    of whether their upload was tried
+    covered effects, with consumed positions and retained source verdicts
+    kept separately (§8). Eligible uncovered ordinary old-schema changes
+    use the winning raise's supplied conversions in version and causal
+    order, independently of whether their upload was tried
     ([`receive_matches_evaluation`, `receive_agreement`](proofs/queue/CovenQueue/Conversion.lean)).
-  - Convert only when the inputs survive; without a callback, or with an
-    excluded input, pass the number without applying it and retain its
-    original values as frozen losses locally, leaving every upload byte
-    unchanged
-    ([`excluded_input_not_converted`, `excluded_records_loss`, `conversions_preserve_uploads`](proofs/queue/CovenQueue/Conversion.lean)).
-  - Earlier own writes are implicit inputs too, so an excluded predecessor
-    excludes its successors until they adopt the responsible boundary;
-    later conversions cannot revive the excluded interpretation
-    ([`no_applied_discarded_input`](proofs/queue/CovenQueue/Verdicts.lean),
-    [`lost_never_reconverted`](proofs/queue/CovenQueue/Conversion.lean)).
-  - “Read” means input to the state on which the write was made: a new write
-    after adopting the boundary does not use effects discarded at that
-    adoption, even though its log position passed them, and its
-    `store_log_read` records the adoption
-    ([`no_applied_discarded_read`](proofs/queue/CovenQueue/Verdicts.lean)).
-  - Keep those adoption and exclusion facts separately from dismissible
-    loss values, reconstructing them from retained boundary and log inputs
-    while replay can change; reset-ignored parts and migration markers
-    create no schema loss
-    ([`retained_verdicts_justified`](proofs/queue/CovenQueue/Verdicts.lean),
-    [`receivedLoss`](proofs/queue/CovenQueue/Conversion.lean)).
-  - E.g. Ana's kept snapshot covers Ben through 8; Ben's attempted 9 and
-    untried 10, which read 9, both upload unchanged: without conversion
-    both become losses, but an eligible conversion can interpret 9 and
-    then 10 on every device, including Ben's reload
-    ([`concurrent_raise_old_write`](proofs/queue/CovenQueue/RaiseExamples.lean),
-    [`receive_losses_converge`](proofs/queue/CovenQueue/Conversion.lean)).
-  - Ben's write 11 after adopting that snapshot uses the winning state and
-    can apply even when 9 and 10 were excluded
-    ([`no_applied_discarded_read`](proofs/queue/CovenQueue/Verdicts.lean)).
+  - First determine candidate schema admission without changing values,
+    then resolve each change's original data sources under §8. Invoke the
+    callback only on eligible changes. A dependent change stays frozen in
+    its original shape with its failed sources as the cause; unrelated
+    changes in the same write, even the same part, can convert and apply
+    ([`dependent_change_not_converted`, `independent_change_converted`, `converted_change_matches_receiver`](proofs/queue/CovenQueue/Conversion.lean)).
+  - Without a converter, exclude the old-version interpretation: retain
+    each original change as a frozen loss naming the breaking version,
+    including a delete with no scalar values, and pass the position.
+    Already frozen changes keep their original values and cause through
+    later raises; no callback rewrites any tried or untried upload
+    ([`missing_converter_preserves_values`, `conversions_preserve_frozen`, `lost_never_reconverted`](proofs/queue/CovenQueue/Conversion.lean)).
+  - Recorded reads, including implicit own predecessors, govern receive
+    order, not exclusion. No adoption-exclusion list is needed. Keep the
+    selected raise/reset, snapshot coverage and `store_log_read` for their
+    own boundary checks, and retain per-change source verdicts independently
+    of dismissible losses. A later snapshot covering an excluded position
+    does not turn its dropped data into a source
+    ([`recorded_reads_do_not_exclude`](proofs/queue/CovenQueue/Model.lean),
+    [`snapshot_drop_stays_dropped`, `snapshot_loss_preserves_cause`](proofs/queue/CovenQueue/Verdicts.lean)).
+  - Reset-ignored parts follow §19.3 before schema exclusion; they and
+    losing migration markers create no schema loss. Otherwise eligible
+    changes built on a reset-ignored source follow §8's data rule.
+  - Commit interpreted changes, frozen originals, source verdicts, merged
+    rows and consumed positions together. A failed conversion or reload
+    preserves the preceding committed state and reports the failure.
+- E.g. Ana's kept snapshot covers Ben through 8. His already-attempted
+  old-schema write 9 arrives after the raise and creates a note. With the
+  supplied converter, every device converts it on receipt, including Ben
+  after a competing raise; the upload's original bytes stay unchanged
+  ([`concurrent_raise_old_write`](proofs/queue/CovenQueue/RaiseExamples.lean)).
+  - If 9 has already been excluded without a converter, a later callback
+    cannot revive it. Ben's old-schema 10 edits that note and renames an
+    unrelated playlist whose generation and replaced setter survive.
+    With a converter for 10, its note edit is a frozen dependency loss and
+    its playlist rename converts and applies on every device
+    ([`mixed_write`, `own_reads_do_not_exclude`](proofs/queue/CovenQueue/DataExamples.lean)).
+  - The same holds if the note's generation survived but the cell setter
+    that 10 replaced came from excluded 9. Later changes built on 10's
+    playlist rename can apply; changes built on its frozen note edit lose
+    ([`actual_setter_decides`, `partial_write_chain`](proofs/queue/CovenQueue/DataExamples.lean)).
+  - Without a converter for either write, both keep their original changes
+    as schema losses. Ben's write 11 after the atomic reload uses the
+    winning state; reading the passed positions of 9 and 10 alone does not
+    exclude it.
 - Loading a winning snapshot replaces the local values computed by a losing
   migration; those values become no shared losses, while ordinary excluded
   writes retain their original-value losses
