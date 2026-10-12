@@ -900,8 +900,11 @@ Two mechanisms order writes:
   - E.g. Ana's phone makes Gifts and pins note 4 in it. Her tablet holds
     the pin back until it has the entry making Gifts, then opens the pin
     with Gifts' key.
-- A write counts only if its author was a member, and its device one of
-  theirs, in the store log the write had read, judged like an entry's
+- Resolve the device's stable owner in `store_log_read` and verify with
+  that member's current signing key in the replay of that view. A wrong
+  signature is a signature refusal (§19.1), not a membership verdict.
+- A write counts only if its author was a member and its device one of
+  theirs in that recorded view, judged like an entry's
   authority ([§9](#9-members-and-roles)). Otherwise refuse it as
   `NotAuthorized` and block its device's log at that number (§19.1).
   - It creates no lost values: the app must not be able to restore an
