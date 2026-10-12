@@ -39,7 +39,7 @@ pub trait ProviderOps: Send + Sync {
     }
     /// Create in one request, including native duplicate cleanup on retries.
     async fn create(&self, path: &ObjectPath, bytes: &[u8]) -> Result<(), StorageError>;
-    /// Replace a checked positions path in one request.
+    /// Replace a checked positions or clock path in one request.
     async fn replace(&self, path: &ObjectPath, bytes: &[u8]) -> Result<(), StorageError>;
     /// Read the complete object.
     async fn read(&self, path: &ObjectPath) -> Result<Vec<u8>, StorageError>;

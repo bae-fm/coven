@@ -85,6 +85,10 @@ impl ObjectPath {
     pub fn positions(store: StoreId, device: DeviceId) -> Self {
         Self(format!("{store}/positions/{}", device.0))
     }
+    /// A device's storage-time probe, replaced when a time check is due (§9).
+    pub fn clock(store: StoreId, device: DeviceId) -> Self {
+        Self(format!("{store}/clock/{}", device.0))
+    }
     /// A writer's sealed key copy, across all audiences and recipients (§11).
     pub fn key_copy(store: StoreId, writer: DeviceId, number: NonZeroU64) -> Self {
         Self(format!("{store}/keys/{}/{number}", writer.0))
@@ -121,16 +125,19 @@ impl ObjectPath {
     pub fn as_str(&self) -> &str {
         &self.0
     }
-    /// Only posted positions are replaced; logs, keys, files and snapshots are create-once.
+    /// Only posted positions and clock observations can be replaced (D10).
     pub fn is_replaceable(&self) -> bool {
-        self.relative().starts_with("positions/")
+        matches!(
+            self.relative().split_once('/'),
+            Some(("positions" | "clock", _))
+        )
     }
-    /// The device named by log, key-copy, snapshot, file or position paths.
+    /// The device named by log, key-copy, snapshot, file, position or clock paths.
     pub fn device(&self) -> Option<DeviceId> {
         let parts: Vec<_> = self.relative().split('/').collect();
         match parts.as_slice() {
             ["devices" | "store-log" | "files" | "keys", device, _]
-            | ["positions", device]
+            | ["positions" | "clock", device]
             | ["snapshots", _, device, _] => {
                 Some(DeviceId(device.parse().expect("validated device id")))
             }
@@ -182,7 +189,7 @@ impl TryFrom<String> for ObjectPath {
                     && decimal(device, false)
                     && decimal(n, true)
             }
-            ["positions", device] => decimal(device, false),
+            ["positions" | "clock", device] => decimal(device, false),
             ["files", device, name] => decimal(device, false) && canonical_uuid(name),
             ["join-requests", invite] => canonical_uuid(invite),
             _ => false,
@@ -279,7 +286,7 @@ pub fn validate_directory(value: &str) -> Result<(), PathError> {
     let parts: Vec<_> = parts.collect();
     let valid = match parts.as_slice() {
         [] => true,
-        ["devices" | "store-log" | "positions" | "snapshots" | "keys" | "files"
+        ["devices" | "store-log" | "positions" | "clock" | "snapshots" | "keys" | "files"
         | "join-requests"] => true,
         ["devices" | "store-log" | "files" | "keys", device] => decimal(device, false),
         ["snapshots", audience] => *audience == "store" || canonical_uuid(audience),

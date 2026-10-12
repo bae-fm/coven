@@ -263,6 +263,11 @@ fn single_chunk_fixtures_open_with_their_own_keys_and_authors() {
             35,
         ),
         (
+            include_str!("../fixtures/sealed-clock.hex"),
+            "10101010-1010-1010-1010-101010101010/clock/1",
+            39,
+        ),
+        (
             include_str!("../fixtures/sealed-join-request.hex"),
             "10101010-1010-1010-1010-101010101010/join-requests/55555555-5555-5555-5555-555555555555",
             36,
@@ -280,7 +285,8 @@ fn single_chunk_fixtures_open_with_their_own_keys_and_authors() {
                 .open_object_chunk(path, &prefix, 0, 0, object.chunk())
                 .unwrap(),
             SingleChunkObject::StoreLog { key, .. }
-            | SingleChunkObject::PostedPositions { key, .. } => {
+            | SingleChunkObject::PostedPositions { key, .. }
+            | SingleChunkObject::ClockObservation { key, .. } => {
                 assert_eq!(*key, store_key().id());
                 store_key()
                     .derive()
@@ -309,6 +315,11 @@ fn single_chunk_fixtures_open_with_their_own_keys_and_authors() {
             }
             Object::PostedPositions(_) => {
                 assert_eq!(kind, 35);
+                test_utils::member().signing
+            }
+            Object::ClockObservation(clock) => {
+                assert_eq!(kind, 39);
+                assert_eq!(clock.device, coven_foundation::id_source::DeviceId(1));
                 test_utils::member().signing
             }
         };

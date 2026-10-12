@@ -24,6 +24,10 @@ fn each_single_frame_envelope_authenticates_its_routing_and_signature() {
                 SingleChunkPrefix::JoinRequest,
                 crate::path::ObjectPath::join_request(STORE_ID, request.invite),
             ),
+            Object::ClockObservation(clock) => (
+                SingleChunkPrefix::ClockObservation(key.id()),
+                crate::path::ObjectPath::clock(STORE_ID, clock.device),
+            ),
         };
         let path = path.as_str();
         let plain = object.encode().unwrap();
@@ -68,6 +72,11 @@ fn each_single_frame_envelope_authenticates_its_routing_and_signature() {
                 chunk: &chunk,
                 signature,
             },
+            SingleChunkPrefix::ClockObservation(key) => SingleChunkObject::ClockObservation {
+                key: *key,
+                chunk: &chunk,
+                signature,
+            },
         };
         let bytes = object.encode().unwrap();
         let decoded = SingleChunkObject::decode(&bytes).unwrap();
@@ -83,6 +92,10 @@ fn each_single_frame_envelope_authenticates_its_routing_and_signature() {
                     Object::PostedPositions(_)
                 )
                 | (SingleChunkPrefix::JoinRequest, Object::JoinRequest(_))
+                | (
+                    SingleChunkPrefix::ClockObservation(_),
+                    Object::ClockObservation(_)
+                )
         ));
         test_utils::member()
             .signing

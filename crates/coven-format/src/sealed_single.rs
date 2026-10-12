@@ -18,6 +18,8 @@ pub enum SingleChunkPrefix {
     PostedPositions(KeyId),
     /// Kind 36; the invite key is identified by the object's path.
     JoinRequest,
+    /// Kind 39 and the store key sealing its clock observation.
+    ClockObservation(KeyId),
 }
 impl SingleChunkPrefix {
     /// The complete cleartext prefix used as associated data.
@@ -33,11 +35,14 @@ impl SingleChunkPrefix {
             Self::StoreLog { .. } => 33u8,
             Self::PostedPositions(_) => 35,
             Self::JoinRequest => 36,
+            Self::ClockObservation(_) => 39,
         };
         kind.put(&mut out)?;
         format.number().put(&mut out)?;
         match self {
-            Self::StoreLog { key } | Self::PostedPositions(key) => key.put(&mut out)?,
+            Self::StoreLog { key } | Self::PostedPositions(key) | Self::ClockObservation(key) => {
+                key.put(&mut out)?
+            }
             Self::JoinRequest => (),
         }
         Ok(out.bytes)
@@ -90,6 +95,15 @@ pub enum SingleChunkObject<'a> {
         /// Signature by the member whose keys the opened frame carries.
         signature: Signature,
     },
+    /// A device's clock observation, signed by its member.
+    ClockObservation {
+        /// The store key sealing this observation.
+        key: KeyId,
+        /// Stored nonce, ciphertext and tag, without the length field.
+        chunk: &'a [u8],
+        /// Signature over the prefix and entire encoded chunk.
+        signature: Signature,
+    },
 }
 
 impl<'a> SingleChunkObject<'a> {
@@ -98,7 +112,7 @@ impl<'a> SingleChunkObject<'a> {
         let kind = *bytes.first().ok_or(Error::Truncated)?;
         sealed::prefix(bytes, kind)?;
         let prefix_length = match kind {
-            33 | 35 => 19,
+            33 | 35 | 39 => 19,
             36 => 3,
             tag => {
                 return Err(Error::UnknownTag {
@@ -125,18 +139,23 @@ impl<'a> SingleChunkObject<'a> {
         let mut input = Decoder::new(&bytes[3..prefix_length])?;
         let key = KeyId::get(&mut input)?;
         input.finish()?;
-        Ok(if kind == 33 {
-            Self::StoreLog {
+        Ok(match kind {
+            33 => Self::StoreLog {
                 key,
                 chunk,
                 signature,
-            }
-        } else {
-            Self::PostedPositions {
+            },
+            35 => Self::PostedPositions {
                 key,
                 chunk,
                 signature,
-            }
+            },
+            39 => Self::ClockObservation {
+                key,
+                chunk,
+                signature,
+            },
+            _ => unreachable!("single-chunk kind checked above"),
         })
     }
 
@@ -146,6 +165,7 @@ impl<'a> SingleChunkObject<'a> {
             Self::StoreLog { key, .. } => SingleChunkPrefix::StoreLog { key: *key },
             Self::PostedPositions { key, .. } => SingleChunkPrefix::PostedPositions(*key),
             Self::JoinRequest { .. } => SingleChunkPrefix::JoinRequest,
+            Self::ClockObservation { key, .. } => SingleChunkPrefix::ClockObservation(*key),
         }
     }
 
@@ -154,6 +174,7 @@ impl<'a> SingleChunkObject<'a> {
         match self {
             Self::StoreLog { chunk, .. }
             | Self::PostedPositions { chunk, .. }
+            | Self::ClockObservation { chunk, .. }
             | Self::JoinRequest { chunk, .. } => chunk,
         }
     }
@@ -163,6 +184,7 @@ impl<'a> SingleChunkObject<'a> {
         match self {
             Self::StoreLog { signature, .. }
             | Self::JoinRequest { signature, .. }
+            | Self::ClockObservation { signature, .. }
             | Self::PostedPositions { signature, .. } => signature,
         }
     }

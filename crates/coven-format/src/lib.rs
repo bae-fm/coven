@@ -6,6 +6,7 @@
 //! Appendix D of `spec/format.md` specifies stored bytes.
 
 pub mod chunks;
+pub mod clock;
 pub mod codes;
 pub mod dismissal;
 pub mod error;
@@ -40,11 +41,11 @@ pub use error::Error;
 pub use version::FormatVersion;
 
 use error::bound;
-use objects::{JoinRequest, PostedPositions};
+use objects::{ClockObservation, JoinRequest, PostedPositions};
 use store_log::StoreLogEntry;
 use wire::{decode_frame, Encoder, Wire, MAX_OBJECT};
 
-/// The newest object format written by coven; readers retain older versions (§17.2).
+/// The object format written and read by coven (Appendix D).
 pub const FORMAT_VERSION: u16 = FormatVersion::CURRENT.number();
 /// The fixed prefix length: kind, format version, payload length.
 pub const FRAME_PREFIX_LEN: usize = 7;
@@ -60,6 +61,8 @@ pub enum Object {
     JoinRequest(JoinRequest),
     /// A device's positions and keyed fingerprints (§6, §19.1).
     PostedPositions(PostedPositions),
+    /// A device's storage-time probe, carrying only its device id (§9).
+    ClockObservation(ClockObservation),
 }
 
 impl Object {
@@ -76,6 +79,7 @@ impl Object {
             Self::StoreLog(v) => encode_frame_in(4, format, |out| v.put(out)),
             Self::JoinRequest(v) => encode_frame_in(9, format, |out| v.put(out)),
             Self::PostedPositions(v) => encode_frame_in(8, format, |out| v.put(out)),
+            Self::ClockObservation(v) => encode_frame_in(12, format, |out| v.put(out)),
         }
     }
     /// Decodes exactly one bounded frame, refusing unknown tags/versions, trailing
@@ -87,6 +91,7 @@ impl Object {
             4 => Self::StoreLog(Wire::get(&mut input)?),
             9 => Self::JoinRequest(Wire::get(&mut input)?),
             8 => Self::PostedPositions(Wire::get(&mut input)?),
+            12 => Self::ClockObservation(Wire::get(&mut input)?),
             tag => {
                 return Err(Error::UnknownTag {
                     field: "object kind",
@@ -103,6 +108,7 @@ impl Object {
             Self::StoreLog(v) => v.validate(),
             Self::JoinRequest(v) => v.validate(),
             Self::PostedPositions(v) => v.validate(),
+            Self::ClockObservation(_) => Ok(()),
         }
     }
 }
@@ -112,7 +118,7 @@ impl Object {
 /// are ignored here; [`Object::decode`] requires exactly one complete frame.
 pub fn frame_length(prefix: &[u8]) -> Result<usize, Error> {
     let bytes = prefix.get(..3).ok_or(Error::Truncated)?;
-    if !matches!(bytes[0], 1..=11) {
+    if !matches!(bytes[0], 1..=12) {
         return Err(Error::UnknownTag {
             field: "object kind",
             tag: bytes[0],

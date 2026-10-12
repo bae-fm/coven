@@ -25,6 +25,7 @@ aws-credential-types.workspace = true
 aws-smithy-async.workspace = true
 
 [dev-dependencies]
+coven-format = { workspace = true, features = ["test-utils"] }
 coven-foundation = { workspace = true, features = ["test-utils"] }
 coven-crypto = { workspace = true, features = ["test-utils"] }
 tokio = { workspace = true, features = ["macros", "rt", "test-util"] }

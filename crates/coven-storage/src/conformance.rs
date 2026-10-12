@@ -90,15 +90,6 @@ impl Conformance {
         {
             return Err(StorageFailure::Protocol.with_source("deleted object read"));
         }
-        let positions = ObjectPath::positions(self.store, DeviceId(31));
-        if !matches!(
-            self.storage.begin_upload(&positions, 1).await,
-            Err(error) if error.failure() == StorageFailure::InvalidPath
-        ) {
-            return Err(
-                StorageFailure::Protocol.with_source("positions accepted a recorded upload")
-            );
-        }
         if !matches!(
             self.storage.replace(&path, data).await,
             Err(error) if error.failure() == StorageFailure::InvalidPath
@@ -107,12 +98,35 @@ impl Conformance {
                 StorageFailure::Protocol.with_source("immutable object accepted replacement")
             );
         }
-        self.storage.replace(&positions, b"first positions").await?;
-        self.storage.replace(&positions, b"next positions").await?;
-        if self.storage.read(&positions).await? != b"next positions" {
-            return Err(StorageFailure::Protocol.with_source("posted positions replacement"));
+        for path in [
+            ObjectPath::positions(self.store, DeviceId(31)),
+            ObjectPath::clock(self.store, DeviceId(31)),
+        ] {
+            if !matches!(
+                self.storage.begin_upload(&path, 1).await,
+                Err(error) if error.failure() == StorageFailure::InvalidPath
+            ) {
+                return Err(StorageFailure::Protocol
+                    .with_source("replaceable object accepted a recorded upload"));
+            }
+            self.storage.replace(&path, b"first record").await?;
+            self.storage.replace(&path, b"next record").await?;
+            if self.storage.read(&path).await? != b"next record" {
+                return Err(StorageFailure::Protocol.with_source("object replacement"));
+            }
+            if !self
+                .storage
+                .list(&ObjectPrefix::all(self.store))
+                .await?
+                .iter()
+                .any(|object| object.path == path && object.size == b"next record".len() as u64)
+            {
+                return Err(
+                    StorageFailure::Protocol.with_source("replaced object missing from listing")
+                );
+            }
+            self.storage.delete(&path).await?;
         }
-        self.storage.delete(&positions).await?;
         self.storage.create(&path, &[]).await?;
         self.storage.create_once(&path, &[]).await?;
         if !self.storage.read(&path).await?.is_empty() {

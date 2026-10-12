@@ -2,6 +2,17 @@ use super::*;
 use crate::error::Rule;
 use zeroize::Zeroizing;
 
+#[test]
+fn clock_frame_contains_only_its_device() {
+    let bytes = hex(include_str!("../fixtures/clock.hex"));
+    assert_eq!(frame_length(&bytes).unwrap(), 15);
+    let clock = Object::ClockObservation(ClockObservation {
+        device: coven_foundation::id_source::DeviceId(1),
+    });
+    assert_eq!(Object::decode(&bytes).unwrap(), clock);
+    assert_eq!(clock.encode().unwrap(), bytes);
+}
+
 pub(super) fn hex(text: &str) -> Vec<u8> {
     let bytes = text.trim().as_bytes();
     assert_eq!(bytes.len() % 2, 0);
@@ -156,7 +167,7 @@ fn arbitrary_truncated_and_bit_flipped_inputs_never_panic() {
         decode_or_typed_error(&bytes);
         if bytes.len() >= 7 {
             // Reach the payload decoder as well as the prefix checks.
-            bytes[0] = 1 + source.next() as u8 % 11;
+            bytes[0] = 1 + source.next() as u8 % 12;
             bytes[1..3].copy_from_slice(&1u16.to_be_bytes());
             let len = (bytes.len() - 7) as u32;
             bytes[3..7].copy_from_slice(&len.to_be_bytes());

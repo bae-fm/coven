@@ -8,7 +8,7 @@ pub(crate) const DROPBOX_PART_SIZE: usize = 8 * 1024 * 1024;
 pub(crate) const ONEDRIVE_PART_SIZE: usize = 24 * 320 * 1024;
 
 /// A create-once provider upload recorded by the caller's operation (§16.5, §18).
-/// Posted positions cannot have recorded upload sessions.
+/// Posted positions and clock objects cannot have recorded upload sessions.
 ///
 /// Record it before sending parts and after each confirmed part. After a crash,
 /// call `resume_upload` to discover bytes accepted before a reply was lost. The
@@ -146,7 +146,7 @@ impl UploadSession {
     }
     /// Read a recording only if its provider, destination, state and progress agree.
     /// Validation covers the location, state variant, nonempty identifiers, part
-    /// counts and sizes, and confirmed byte offset; positions paths are refused.
+    /// counts and sizes, and confirmed byte offset; replaceable paths are refused.
     /// The adapter also checks that it names the adapter's location before any request.
     pub fn decode(bytes: &[u8]) -> Result<Self, StorageError> {
         let value: RecordedUploadSession = serde_json::from_slice(bytes)

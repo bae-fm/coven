@@ -109,7 +109,7 @@ impl DerivedKeys {
     /// SHA-256 of the complete chunk plaintext, including any frame bytes.
     /// Different content at a reused path has different nonce inputs. Retries
     /// fix plaintext, prefix and key choices to reproduce the same bytes.
-    /// Snapshots, positions and join requests use `seal_object_chunk` instead.
+    /// Snapshots, positions, clocks and join requests use `seal_object_chunk` instead.
     pub fn reseal_object_chunk(
         &self,
         path: &str,

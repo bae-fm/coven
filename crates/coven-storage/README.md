@@ -12,7 +12,8 @@ commit key custody or database state.
 Every path and listing prefix begins with the canonical store UUID. Stores can
 share a provider location without sharing object names. Every path has one writer. `create` refuses an occupied path; `create_once`
 accepts an identical retry after comparing the stored bytes. Only posted
-positions can be replaced. Files use foundation `FileId` UUIDs. Prefixes include
+positions and per-device clock objects can be replaced. Files use foundation
+`FileId` UUIDs. Prefixes include
 all device logs and all store-log entries. A range is half-open and must fit
 inside the complete object; callers may combine neighbouring encrypted chunks
 in a request up to 1 MiB.
@@ -27,7 +28,7 @@ measurements of server enforcement.
 Larger creates use
 resumable or multipart transfer for every object family, including writes and
 snapshots. Transfer failure aborts the unfinished session; `StorageError::Cleanup`
-retains both causes if abort fails too. Positions remain one request and an
+retains both causes if abort fails too. Positions and clock objects use one request; an
 oversized replacement returns `SingleRequestTooLarge`.
 For crash continuation, callers begin a session, commit its secret
 recording, and retain the bytes. Resume asks the provider for confirmed progress;
@@ -36,7 +37,7 @@ after expiry, with zero confirmed bytes; a completed session cannot restart.
 Decoding validates the provider, location, state variant, nonempty identifiers,
 part counts/sizes and confirmed offset. A session for another location is
 refused before a request.
-Sessions cannot target positions. Lost completion replies are checked against
+Sessions cannot target positions or clock objects. Lost completion replies are checked against
 the immutable destination or the provider's publication identity. Abort accepts
 already closed or absent sessions and preserves published objects.
 
@@ -65,7 +66,7 @@ removes them from the store's folder. A refusal retains its native cause.
 
 Each provider has a sibling `_tests.rs` suite using local HTTP, except CloudKit,
 whose injected app calls are stubbed. The shared conformance suite exercises
-creation and identical retries, immutable replacement refusal, positions,
+creation and identical retries, immutable replacement refusal, positions and clocks,
 whole and range reads, prefix listing, repeated deletion, and independent stores
 using the same device and entry numbers in one location.
 Provider-specific suites exercise recorded sessions, lost replies, expiry,
@@ -74,10 +75,10 @@ server-side guarantee.
 
 | Provider | Objects and listing | Recorded uploads | Sharing and recipient access |
 | --- | --- | --- | --- |
-| [S3](src/providers/s3.rs) | Conditional `PutObject`, unconditional positions PUT, `GetObject`/Range, paged `ListObjectsV2`, `DeleteObject`. | Native multipart ID, part ETags and unique publication metadata; paged `ListParts`, conditional completion and HEAD recovery. | Explicit member access key; grant/revoke/sign-out return console instructions. No IAM calls or credential discovery. |
+| [S3](src/providers/s3.rs) | Conditional `PutObject`, unconditional positions/clock PUT, `GetObject`/Range, paged `ListObjectsV2`, `DeleteObject`. | Native multipart ID, part ETags and unique publication metadata; paged `ListParts`, conditional completion and HEAD recovery. | Explicit member access key; grant/revoke/sign-out return console instructions. No IAM calls or credential discovery. |
 | [Drive](src/providers/google_drive.rs) | Full path as filename; multipart/related create, media PATCH, media GET/Range, paged `files.list`. Retry retains earliest createdTime then ID and deletes this writer's later copies. Owned objects are deleted; others are removed from the folder. | Generated file ID and resumable URL; PUT chunks/status; completion checked by native ID. | Folder-owner check; paged native permissions, direct create/update/delete; inherited/group/public/unknown access is retained and reported. Recipient uses its own OAuth account. |
 | [Dropbox](src/providers/dropbox.rs) | Namespace-scoped strict add or overwrite, download/Range, recursive paged listing, delete. | Start/append/finish, offset recovery, immutable-byte completion verification; close for cancellation. | Owner check; direct/inherited member pages; in-place viewer update; asynchronous removal with native failure retained. Recipient mounts the invited shared folder. |
-| [OneDrive](src/providers/onedrive.rs) | Path parents, conflict-refusing content PUT, positions PUT, preauthenticated download/Range without bearer, recursive paged children, delete. | Native upload URL, bounded/multiple missing ranges, immutable-byte completion verification; DELETE cancellation. | Account-drive ownership check, permission pages and account identity resolution; only exclusive target-account permissions deleted. Invite carries native share token for recipient redemption. |
+| [OneDrive](src/providers/onedrive.rs) | Path parents, conflict-refusing content PUT, positions/clock PUT, preauthenticated download/Range without bearer, recursive paged children, delete. | Native upload URL, bounded/multiple missing ranges, immutable-byte completion verification; DELETE cancellation. | Account-drive ownership check, permission pages and account identity resolution; only exclusive target-account permissions deleted. Invite carries native share token for recipient redemption. |
 | [CloudKit](src/providers/cloudkit.rs) | The app-call contract requires stable records, atomic saves, bounded asset reads, native paging and publication timestamps. Rust checks returned paths/range lengths. | App calls own durable parts and session identity; Rust records/validates progress. | Native owner check, grant/revoke, share URL and recipient metadata validation/acceptance through app calls. |
 
 OAuth uses each device's account and one presenter-based flow. The presenter

@@ -4,6 +4,41 @@ use crate::test_utils::STORE_ID;
 use coven_foundation::id_source::DeviceId;
 
 #[tokio::test]
+async fn clock_replacement_guards_preserve_the_previous_object() {
+    let storage = MemoryStorage::builder().build().unwrap();
+    let path = ObjectPath::clock(STORE_ID, DeviceId(31));
+    storage.replace(&path, b"clock").await.unwrap();
+    let before = storage.request_count();
+    assert_eq!(
+        storage
+            .replace(&path, &[0; 17])
+            .await
+            .unwrap_err()
+            .failure(),
+        StorageFailure::SingleRequestTooLarge {
+            size: 17,
+            limit: 16
+        }
+    );
+    assert!(matches!(
+        storage.begin_upload(&path, 4).await,
+        Err(error) if error.failure() == StorageFailure::InvalidPath
+    ));
+    assert_eq!(storage.request_count(), before);
+    assert_eq!(storage.read(&path).await.unwrap(), b"clock");
+    let immutable = ObjectPath::store_log(STORE_ID, DeviceId(31), std::num::NonZeroU64::MIN);
+    let session = storage.begin_upload(&immutable, 4).await.unwrap();
+    let mut recorded: serde_json::Value =
+        serde_json::from_slice(session.encode().unwrap().as_bytes()).unwrap();
+    recorded["path"] = serde_json::Value::String(path.as_str().to_owned());
+    assert!(matches!(
+        UploadSession::decode(&serde_json::to_vec(&recorded).unwrap()),
+        Err(error) if error.failure() == StorageFailure::InvalidPath
+    ));
+    storage.abort_upload(&session).await.unwrap();
+}
+
+#[tokio::test]
 async fn wrong_location_and_invalid_part_keep_the_provider_refusal_order() {
     for (config, expected) in [
         (

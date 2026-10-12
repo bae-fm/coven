@@ -108,6 +108,10 @@ pub fn write() -> WriteRecord {
 pub fn store_key() -> coven_crypto::StoreKey {
     coven_crypto::StoreKey::from_bytes(KeyId(Uuid::from_bytes([1; 16])), [17; 32])
 }
+/// A signed clock object for device one, with public fixture key and nonce material.
+pub fn sealed_clock() -> Vec<u8> {
+    hex::decode(include_str!("../fixtures/sealed-clock.hex").trim()).unwrap()
+}
 /// The first store-log entry.
 pub fn store_log() -> StoreLogEntry {
     StoreLogEntry {
@@ -562,6 +566,9 @@ pub fn objects() -> Vec<Object> {
                 }))
             }),
     );
+    objects.push(Object::ClockObservation(ClockObservation {
+        device: DeviceId(1),
+    }));
     objects
 }
 /// A two-audience write with a row frame spanning three chunks.

@@ -49,7 +49,7 @@ pub trait CloudKitOps: Send + Sync {
         path: &ObjectPath,
         bytes: &[u8],
     ) -> Result<(), StorageError>;
-    /// Replace a complete posted-positions object atomically.
+    /// Replace complete posted positions or a clock object atomically.
     async fn replace(
         &self,
         location: &StorageConfig,

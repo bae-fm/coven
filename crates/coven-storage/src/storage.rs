@@ -181,7 +181,7 @@ pub trait Storage: Send + Sync {
     /// path, including writes and snapshots. A failed transfer aborts the session;
     /// if abort fails too, [`StorageError::Cleanup`] retains both causes.
     async fn create(&self, path: &ObjectPath, bytes: &[u8]) -> Result<(), StorageError>;
-    /// Replace a device's posted positions; immutable paths are refused.
+    /// Replace a device's posted positions or clock object; immutable paths are refused.
     /// Always one request; an oversized body returns [`StorageFailure::SingleRequestTooLarge`].
     async fn replace(&self, path: &ObjectPath, bytes: &[u8]) -> Result<(), StorageError>;
     /// Read the whole encrypted object.
@@ -248,7 +248,7 @@ pub trait Storage: Send + Sync {
     /// preserving its failure cause; group and parent access remain reported.
     async fn revoke_access(&self, member: &MemberAccess) -> Result<MemberRemoval, StorageError>;
     /// Begin a create-once upload, returning the value to record before parts are sent.
-    /// Posted positions are refused: replacement always sends complete bytes in one request.
+    /// Positions and clock objects are refused: replacement sends complete bytes in one request.
     async fn begin_upload(
         &self,
         path: &ObjectPath,

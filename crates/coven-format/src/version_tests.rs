@@ -32,8 +32,9 @@ fn recorded_entry_format_encodes_both_its_frame_and_envelope() {
 #[test]
 fn unsupported_formats_are_reported_before_version_specific_fields() {
     type Decode = fn(&[u8]) -> Result<(), Error>;
-    let decoders: [(u8, Decode); 7] = [
+    let decoders: [(u8, Decode); 9] = [
         (4, |bytes| Object::decode(bytes).map(|_| ())),
+        (12, |bytes| Object::decode(bytes).map(|_| ())),
         (32, |bytes| WriteObjectPrefix::decode(bytes).map(|_| ())),
         (33, |bytes| {
             crate::sealed_single::SingleChunkObject::decode(bytes).map(|_| ())
@@ -49,6 +50,9 @@ fn unsupported_formats_are_reported_before_version_specific_fields() {
         }),
         (38, |bytes| {
             crate::file::FileHeader::decode(bytes).map(|_| ())
+        }),
+        (39, |bytes| {
+            crate::sealed_single::SingleChunkObject::decode(bytes).map(|_| ())
         }),
     ];
     for version in [2, u16::MAX, 0] {

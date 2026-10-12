@@ -1,4 +1,4 @@
-//! Join requests and posted positions (§6, §11, §12, §16, §19).
+//! Join requests, posted positions and clock observations (D8).
 
 use crate::error::{require, Error, Rule};
 use crate::pending::{PendingReport, PendingSubject};
@@ -7,6 +7,15 @@ use crate::value::{name, EntryPositions, WritePositions};
 use crate::wire::wire_struct;
 use coven_foundation::id_source::{DeviceId, InviteId};
 use coven_merge::Audience;
+
+/// A device's storage-time probe (§9, D8). Its publication time is provider
+/// metadata; the frame asserts no time, positions, fingerprints or reports.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ClockObservation {
+    /// The publishing device, which must match the clock object's path.
+    pub device: DeviceId,
+}
+wire_struct!(ClockObservation, device);
 
 /// A new person's request, encrypted with the invite-derived key and signed (§12.2).
 #[derive(Clone, Debug, PartialEq, Eq)]

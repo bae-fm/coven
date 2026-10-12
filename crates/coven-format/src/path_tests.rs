@@ -2,11 +2,44 @@ use super::*;
 use crate::test_utils::STORE_ID;
 
 #[test]
+fn clock_paths_are_replaceable_device_objects() {
+    let path = ObjectPath::parse(&format!("{STORE_ID}/clock/42")).unwrap();
+    assert_eq!(path.device(), Some(DeviceId(42)));
+    assert!(path.is_replaceable());
+    validate_directory(&format!("{STORE_ID}/clock")).unwrap();
+    assert!(validate_directory(path.as_str()).is_err());
+    assert_eq!(path, ObjectPath::clock(STORE_ID, DeviceId(42)));
+    for device in [0, u64::MAX] {
+        let path = ObjectPath::clock(STORE_ID, DeviceId(device));
+        assert_eq!(ObjectPath::parse(path.as_str()).unwrap(), path);
+        assert_eq!(path.device(), Some(DeviceId(device)));
+    }
+    for tail in [
+        "clock",
+        "clock/",
+        "clock/01",
+        "clock/+1",
+        "clock/-1",
+        "clock/a",
+        "clock/18446744073709551616",
+        "clock/1/extra",
+        "clock/../1",
+        "clocks/1",
+    ] {
+        assert!(
+            ObjectPath::parse(&format!("{STORE_ID}/{tail}")).is_err(),
+            "{tail}"
+        );
+    }
+}
+
+#[test]
 fn storage_paths_require_a_canonical_store_id() {
     for tail in [
         "devices/1/1".to_owned(),
         "store-log/1/1".to_owned(),
         "positions/1".to_owned(),
+        "clock/1".to_owned(),
         "snapshots/store/1/1".to_owned(),
         "files/1/11111111-1111-1111-1111-111111111111".to_owned(),
         "join-requests/11111111-1111-1111-1111-111111111111".to_owned(),
@@ -136,16 +169,24 @@ fn every_layout_round_trips_without_aliases() {
     let device = DeviceId(42);
     let number = NonZeroU64::new(3).unwrap();
     let id = uuid::Uuid::from_u128(17);
-    for path in [
-        ObjectPath::device_log(STORE_ID, device, number),
-        ObjectPath::store_log(STORE_ID, device, number),
-        ObjectPath::snapshot(STORE_ID, Audience::Store, device, number),
-        ObjectPath::positions(STORE_ID, device),
-        ObjectPath::key_copy(STORE_ID, device, number),
-        ObjectPath::join_request(STORE_ID, InviteId(id)),
-        ObjectPath::file(STORE_ID, device, FileId(uuid::Uuid::from_bytes([0xab; 16]))),
+    for (path, replaceable) in [
+        (ObjectPath::device_log(STORE_ID, device, number), false),
+        (ObjectPath::store_log(STORE_ID, device, number), false),
+        (
+            ObjectPath::snapshot(STORE_ID, Audience::Store, device, number),
+            false,
+        ),
+        (ObjectPath::positions(STORE_ID, device), true),
+        (ObjectPath::clock(STORE_ID, device), true),
+        (ObjectPath::key_copy(STORE_ID, device, number), false),
+        (ObjectPath::join_request(STORE_ID, InviteId(id)), false),
+        (
+            ObjectPath::file(STORE_ID, device, FileId(uuid::Uuid::from_bytes([0xab; 16]))),
+            false,
+        ),
     ] {
         assert_eq!(ObjectPath::parse(path.as_str()).unwrap(), path);
+        assert_eq!(path.is_replaceable(), replaceable, "{}", path.as_str());
         assert!(validate_directory(path.as_str()).is_err());
         let parts = path.components();
         for end in 1..parts.len() {
