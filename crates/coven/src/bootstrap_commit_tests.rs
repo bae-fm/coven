@@ -200,7 +200,9 @@ async fn publication_failure_rolls_back_settings_and_custody() {
     scoped.set_synced_s3_credentials(&old_s3_key).unwrap();
     scoped.set_synced_restore_code(&old_code).unwrap();
     let old_location = StorageConfig::Dropbox {
-        namespace_id: "previous-location".into(),
+        location: coven_storage::DropboxLocation::SharedFolder {
+            namespace_id: "previous-location".into(),
+        },
     };
     settings.commit(&old_location).unwrap();
     let marker = root

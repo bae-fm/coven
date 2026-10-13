@@ -4,6 +4,48 @@ use crate::test_utils::STORE_ID;
 use coven_foundation::id_source::DeviceId;
 
 #[tokio::test]
+async fn replacement_tokens_cannot_change_dropbox_access_or_provider() {
+    for location in [
+        DropboxLocation::AppFolder,
+        DropboxLocation::SharedFolder {
+            namespace_id: "namespace".into(),
+        },
+    ] {
+        let required = OAuthAccess::Dropbox(location.access());
+        let storage = MemoryStorage::builder()
+            .location(StorageConfig::Dropbox { location })
+            .build()
+            .unwrap();
+        let path = ObjectPath::device_log(STORE_ID, DeviceId(31), std::num::NonZeroU64::MIN);
+        storage.create(&path, b"retained").await.unwrap();
+        for access in [
+            OAuthAccess::Dropbox(DropboxAccess::AppFolder),
+            OAuthAccess::Dropbox(DropboxAccess::FullDropbox),
+            OAuthAccess::GoogleDrive(GoogleDriveAccess::Full),
+        ] {
+            let result = storage
+                .set_oauth_tokens(OAuthTokens {
+                    client_id: "client".into(),
+                    access,
+                    access_token: coven_crypto::SecretText::new("token".into()),
+                    refresh_token: None,
+                    expires_at: None,
+                })
+                .await;
+            if access == required {
+                result.unwrap();
+            } else {
+                assert_eq!(
+                    result.unwrap_err().failure(),
+                    StorageFailure::AccessNotGranted { required }
+                );
+            }
+            assert_eq!(storage.read(&path).await.unwrap(), b"retained");
+        }
+    }
+}
+
+#[tokio::test]
 async fn clock_replacement_guards_preserve_the_previous_object() {
     let storage = MemoryStorage::builder().build().unwrap();
     let path = ObjectPath::clock(STORE_ID, DeviceId(31));
@@ -66,7 +108,9 @@ async fn wrong_location_and_invalid_part_keep_the_provider_refusal_order() {
         ),
         (
             StorageConfig::Dropbox {
-                namespace_id: "namespace".into(),
+                location: crate::DropboxLocation::SharedFolder {
+                    namespace_id: "namespace".into(),
+                },
             },
             StorageFailure::SessionMismatch,
         ),
@@ -82,7 +126,9 @@ async fn wrong_location_and_invalid_part_keep_the_provider_refusal_order() {
         let path = ObjectPath::device_log(STORE_ID, DeviceId(31), std::num::NonZeroU64::MIN);
         let mut session = storage.begin_upload(&path, 4).await.unwrap();
         session.location = StorageConfig::Dropbox {
-            namespace_id: "another".into(),
+            location: crate::DropboxLocation::SharedFolder {
+                namespace_id: "another".into(),
+            },
         };
         let before = storage.request_count();
         assert_eq!(
@@ -136,7 +182,9 @@ async fn guards_and_completed_sessions_do_not_issue_provider_calls() {
     }
     let mut foreign = session.clone();
     foreign.location = StorageConfig::Dropbox {
-        namespace_id: "another".into(),
+        location: crate::DropboxLocation::SharedFolder {
+            namespace_id: "another".into(),
+        },
     };
     for error in [
         storage.resume_upload(&mut foreign).await.err().unwrap(),

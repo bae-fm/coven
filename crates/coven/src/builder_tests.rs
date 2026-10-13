@@ -280,7 +280,9 @@ mod recovery {
                 prefix: "recovery".into(),
             },
             StorageConfig::Dropbox {
-                namespace_id: "recovery".into(),
+                location: coven_storage::DropboxLocation::SharedFolder {
+                    namespace_id: "recovery".into(),
+                },
             },
             StorageConfig::CloudKit {
                 container: "test".into(),
@@ -330,8 +332,11 @@ mod recovery {
                     .setup_cloudkit_storage("test", "Original")
                     .await
                     .unwrap(),
-                provider => {
-                    handle.authenticate(provider).await.unwrap();
+                _ => {
+                    handle
+                        .authenticate(config.oauth_access().unwrap())
+                        .await
+                        .unwrap();
                     handle
                         .setup_oauth_storage(config.clone(), "Original")
                         .await

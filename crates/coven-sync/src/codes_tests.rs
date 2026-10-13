@@ -20,6 +20,47 @@ fn credentials() -> S3Credentials {
 }
 
 #[test]
+fn restore_metadata_retains_the_creation_access_choice() {
+    for (location, access) in [
+        (
+            StorageConfig::GoogleDrive {
+                folder_id: "folder".into(),
+            },
+            OAuthAccess::GoogleDrive(GoogleDriveAccess::File),
+        ),
+        (
+            StorageConfig::Dropbox {
+                location: coven_storage::DropboxLocation::AppFolder,
+            },
+            OAuthAccess::Dropbox(coven_storage::DropboxAccess::AppFolder),
+        ),
+        (
+            StorageConfig::Dropbox {
+                location: coven_storage::DropboxLocation::SharedFolder {
+                    namespace_id: "namespace".into(),
+                },
+            },
+            OAuthAccess::Dropbox(coven_storage::DropboxAccess::FullDropbox),
+        ),
+    ] {
+        let code = RestoreCode {
+            store: StoreId(uuid::Uuid::from_u128(1)),
+            name: "Personal".into(),
+            member_keys: MemberKeys::generate().unwrap(),
+            storage: location.encode().unwrap(),
+        }
+        .to_text()
+        .unwrap();
+        assert_eq!(decode_code_info(&code).unwrap().oauth_access, Some(access));
+        let decoded = read_restore_code(&code).unwrap();
+        assert_eq!(
+            StorageConfig::decode(decoded.storage.as_bytes()).unwrap(),
+            location
+        );
+    }
+}
+
+#[test]
 fn metadata_validates_kind_checksum_and_storage_without_exposing_secrets() {
     let restore = RestoreCode {
         store: StoreId(uuid::Uuid::from_u128(1)),
@@ -59,7 +100,7 @@ fn metadata_validates_kind_checksum_and_storage_without_exposing_secrets() {
                 store_id: restore.store,
                 store_name: "Household".into(),
                 cloud_provider: CloudProvider::S3,
-                needs_oauth: false
+                oauth_access: None
             }
         );
         assert!(!format!("{:?}", decode_code_info(text).unwrap()).contains("secret"));

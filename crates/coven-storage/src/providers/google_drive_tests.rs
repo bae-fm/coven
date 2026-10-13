@@ -42,6 +42,16 @@ fn provider_for_device(url: &str, device: DeviceId) -> StorageConnection<GoogleD
     StorageConnection::from_provider(Arc::new(storage))
 }
 
+fn tokens(access: GoogleDriveAccess) -> OAuthTokens {
+    OAuthTokens {
+        client_id: "test-client".into(),
+        access: OAuthAccess::GoogleDrive(access),
+        access_token: coven_crypto::SecretText::new("token".into()),
+        refresh_token: None,
+        expires_at: None,
+    }
+}
+
 #[tokio::test]
 async fn known_object_status_and_reads_do_not_depend_on_listings() {
     let state = Arc::new(Mutex::new(Remote::default()));
@@ -397,10 +407,28 @@ async fn listing_uses_the_same_copy_as_reads_and_refuses_missing_metadata() {
 mod access_tests;
 
 #[tokio::test]
-async fn missing_container_is_not_an_empty_store_or_a_missing_object() {
-    for (status, expected) in [
-        (404, StorageFailure::ContainerNotFound),
-        (403, StorageFailure::PermissionDenied),
+async fn folder_visibility_errors_are_not_an_empty_store_or_a_missing_object() {
+    for (access, status, expected) in [
+        (
+            GoogleDriveAccess::File,
+            404,
+            StorageFailure::GoogleDriveFolderNotVisible,
+        ),
+        (
+            GoogleDriveAccess::File,
+            403,
+            StorageFailure::PermissionDenied,
+        ),
+        (
+            GoogleDriveAccess::Full,
+            404,
+            StorageFailure::ContainerNotFound,
+        ),
+        (
+            GoogleDriveAccess::Full,
+            403,
+            StorageFailure::PermissionDenied,
+        ),
     ] {
         let server = TestServer::new(Router::new().fallback(move |uri: Uri| async move {
             if uri.path().ends_with("/folder") {
@@ -413,6 +441,7 @@ async fn missing_container_is_not_an_empty_store_or_a_missing_object() {
         }))
         .await;
         let storage = provider(&server.url);
+        storage.set_oauth_tokens(tokens(access)).await.unwrap();
         let path = ObjectPath::store_log(
             STORE_ID,
             coven_foundation::id_source::DeviceId(31),
@@ -721,3 +750,113 @@ async fn upload_confirmation_uses_its_returned_id_when_search_omits_the_publicat
 #[cfg(not(any(target_os = "ios", target_os = "android")))]
 #[path = "google_drive_live.rs"]
 mod live;
+
+#[tokio::test]
+async fn narrow_drive_access_works_until_folder_sharing_requires_full_access() {
+    let state = Arc::new(Mutex::new(Remote::default()));
+    let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
+    let storage = provider(&server.url);
+    storage
+        .set_oauth_tokens(tokens(GoogleDriveAccess::File))
+        .await
+        .unwrap();
+    let path = ObjectPath::device_log(STORE_ID, DeviceId(31), std::num::NonZeroU64::MIN);
+    storage.create(&path, b"personal").await.unwrap();
+    let before = storage.status(&path).await.unwrap().unwrap();
+    assert_eq!(
+        storage.list(&ObjectPrefix::all(STORE_ID)).await.unwrap(),
+        std::slice::from_ref(&before)
+    );
+    let required = OAuthAccess::GoogleDrive(GoogleDriveAccess::Full);
+    assert!(
+        matches!(storage.grant_access("member@example.test").await, Err(error) if error.failure() == StorageFailure::AccessNotGranted { required })
+    );
+    assert!(state.lock().unwrap().permission_mutations.is_empty());
+    state.lock().unwrap().shared = true;
+    assert!(
+        matches!(storage.list(&ObjectPrefix::all(STORE_ID)).await, Err(error) if error.failure() == StorageFailure::AccessNotGranted { required })
+    );
+    storage
+        .set_oauth_tokens(tokens(GoogleDriveAccess::Full))
+        .await
+        .unwrap();
+    assert_eq!(
+        storage.list(&ObjectPrefix::all(STORE_ID)).await.unwrap(),
+        std::slice::from_ref(&before)
+    );
+    assert_eq!(
+        storage.read_object(&path, None).await.unwrap().metadata,
+        before
+    );
+    assert_eq!(storage.read(&path).await.unwrap(), b"personal");
+    storage.grant_access("member@example.test").await.unwrap();
+    assert_eq!(state.lock().unwrap().permission_mutations.len(), 1);
+}
+
+#[tokio::test]
+async fn narrow_drive_access_requires_full_access_for_a_shared_drive_folder() {
+    let server = TestServer::new(Router::new().fallback(|uri: Uri| async move {
+        assert_eq!(uri.path(), "/drive/files/folder");
+        reply(json!({
+            "id": "folder",
+            "mimeType": "application/vnd.google-apps.folder",
+            "driveId": "shared-drive"
+        }))
+    }))
+    .await;
+    let storage = provider(&server.url);
+    storage
+        .set_oauth_tokens(tokens(GoogleDriveAccess::File))
+        .await
+        .unwrap();
+    assert_eq!(
+        storage
+            .list(&ObjectPrefix::all(STORE_ID))
+            .await
+            .unwrap_err()
+            .failure(),
+        StorageFailure::AccessNotGranted {
+            required: OAuthAccess::GoogleDrive(GoogleDriveAccess::Full)
+        }
+    );
+}
+
+#[tokio::test]
+async fn folder_visibility_uses_the_grant_sent_with_the_request() {
+    let started = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let server = TestServer::new(Router::new().fallback({
+        let started = started.clone();
+        let release = release.clone();
+        move |uri: Uri| {
+            let started = started.clone();
+            let release = release.clone();
+            async move {
+                assert_eq!(uri.path(), "/drive/files/folder");
+                started.notify_one();
+                release.notified().await;
+                response(404, "native-folder-cause")
+            }
+        }
+    }))
+    .await;
+    let storage = Arc::new(provider(&server.url));
+    storage
+        .set_oauth_tokens(tokens(GoogleDriveAccess::File))
+        .await
+        .unwrap();
+    let listing = tokio::spawn({
+        let storage = storage.clone();
+        async move { storage.list(&ObjectPrefix::all(STORE_ID)).await }
+    });
+    started.notified().await;
+    storage
+        .set_oauth_tokens(tokens(GoogleDriveAccess::Full))
+        .await
+        .unwrap();
+    release.notify_one();
+    assert_eq!(
+        listing.await.unwrap().unwrap_err().failure(),
+        StorageFailure::GoogleDriveFolderNotVisible
+    );
+}

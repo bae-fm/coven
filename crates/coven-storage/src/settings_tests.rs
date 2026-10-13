@@ -20,11 +20,13 @@ fn settings_use_the_reserved_atomic_file_and_refuse_corrupt_values() {
     let settings = StorageSettings::new(directory);
     assert_eq!(settings.read().unwrap(), None);
     let config = StorageConfig::Dropbox {
-        namespace_id: "namespace".into(),
+        location: crate::DropboxLocation::SharedFolder {
+            namespace_id: "namespace".into(),
+        },
     };
     settings.commit(&config).unwrap();
     assert_eq!(settings.read().unwrap(), Some(config));
-    file.replace(br#"{"Dropbox":{"namespace_id":"","secret_access_key":"forbidden"}}"#)
+    file.replace(br#"{"Dropbox":{"location":{"SharedFolder":{"namespace_id":"namespace"}},"secret_access_key":"forbidden"}}"#)
         .unwrap();
     let error = settings.read().unwrap_err();
     assert_eq!(error.failure(), StorageFailure::Encoding);

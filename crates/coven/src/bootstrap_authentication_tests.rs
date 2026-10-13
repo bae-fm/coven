@@ -8,7 +8,12 @@ async fn restore_and_keychain_restore_use_builder_sign_in_without_returning_toke
         let install = Installation::new();
         let sign_in = SignIn::new(owner.clock.clone()).await;
         let mut builder = sign_in.configure(install.builder(&owner, owner.storage.clone()));
-        builder.authenticate(CloudProvider::Dropbox).await.unwrap();
+        builder
+            .authenticate(coven_storage::OAuthAccess::Dropbox(
+                coven_storage::DropboxAccess::FullDropbox,
+            ))
+            .await
+            .unwrap();
         install.absent(owner.directory.id()).await;
         let (_, cancel) = watch::channel(false);
         let handle = if from_keychain {
@@ -76,6 +81,32 @@ async fn bootstrap_requires_explicit_sign_in_and_never_presents_ui() {
 }
 
 #[tokio::test]
+async fn google_join_requires_full_access_before_contacting_storage() {
+    let owner = Owner::new(CloudProvider::GoogleDrive, false).await;
+    let invite = owner.invite().await;
+    let install = Installation::new();
+    let sign_in = SignIn::new(owner.clock.clone()).await;
+    let recipient = Arc::new(owner.recipient().for_device());
+    let mut builder = sign_in.configure(install.builder(&owner, recipient.clone()));
+    builder
+        .authenticate(OAuthAccess::GoogleDrive(GoogleDriveAccess::File))
+        .await
+        .unwrap();
+    let before = recipient.request_count();
+    let (_, cancel) = watch::channel(false);
+    let required = OAuthAccess::GoogleDrive(GoogleDriveAccess::Full);
+    assert!(matches!(
+        join_with_invite(builder, &invite.code, "New phone", |_| {}, &cancel).await,
+        Err(BootstrapError::Sync(SyncError::Storage(error)))
+            if error.failure() == StorageFailure::AccessNotGranted { required }
+    ));
+    assert_eq!(recipient.request_count(), before);
+    assert_eq!(sign_in.presentation_count(), 1);
+    install.absent(owner.directory.id()).await;
+    owner.close().await;
+}
+
+#[tokio::test]
 async fn join_refreshes_while_waiting_and_publishes_the_refreshed_credentials() {
     let owner = Owner::new(CloudProvider::Dropbox, false).await;
     let invite = owner.invite().await;
@@ -89,7 +120,12 @@ async fn join_refreshes_while_waiting_and_publishes_the_refreshed_credentials() 
         resume: resumed,
     });
     let mut builder = sign_in.configure(install.builder(&owner, owner.recipient()).clock(clock));
-    builder.authenticate(CloudProvider::Dropbox).await.unwrap();
+    builder
+        .authenticate(coven_storage::OAuthAccess::Dropbox(
+            coven_storage::DropboxAccess::FullDropbox,
+        ))
+        .await
+        .unwrap();
     let (_, cancel) = watch::channel(false);
     let join = join_with_invite(builder, &invite.code, "New phone", |_| {}, &cancel);
     let (joined, _) = join_and_approve(&owner.handle, join, |_| async {

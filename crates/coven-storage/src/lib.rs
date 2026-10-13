@@ -5,6 +5,8 @@
 //! caller records upload sessions and commits credentials to key custody only
 //! after setup succeeds. Providers never read the database.
 mod config;
+mod provider_access;
+pub use provider_access::*;
 mod connection;
 mod connection_credentials;
 mod credentials;

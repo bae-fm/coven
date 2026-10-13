@@ -312,6 +312,11 @@ pub(crate) const POLICY: Policy = Policy {
             "update_credentials",
         ),
         (
+            "crates/coven-sync/src/restore_codes.rs",
+            "RestoreCodes",
+            "install_oauth",
+        ),
+        (
             "crates/coven-sync/src/store_log_sync.rs",
             "StoreLogSync",
             "disconnected",

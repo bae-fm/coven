@@ -111,10 +111,12 @@ impl CovenBuilder {
 
     /// Sign in and keep tokens in session custody for restore, join or opening.
     /// Replaces the prior sign-in only on success. Dropping the future cancels it.
-    pub async fn authenticate(&mut self, provider: CloudProvider) -> Result<(), OAuthError> {
-        let flow = self.oauth_flow().ok_or(OAuthError::Unavailable(provider))?;
-        let tokens = flow.authenticate(provider).await?;
-        self.authentication = Some(Authentication { provider, tokens });
+    pub async fn authenticate(&mut self, access: OAuthAccess) -> Result<(), OAuthError> {
+        let flow = self
+            .oauth_flow()
+            .ok_or(OAuthError::Unavailable(access.provider()))?;
+        let tokens = flow.authenticate(access).await?;
+        self.authentication = Some(Authentication { tokens });
         Ok(())
     }
 

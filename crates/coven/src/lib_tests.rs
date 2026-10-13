@@ -119,7 +119,10 @@ impl Network {
         ) {
             let sign_in = crate::authentication::SignIn::new(clock.clone()).await;
             let mut builder = sign_in.configure(builder);
-            builder.authenticate(provider).await.unwrap();
+            builder
+                .authenticate(storage.config().oauth_access().unwrap())
+                .await
+                .unwrap();
             (builder, Some(sign_in))
         } else {
             (builder, None)

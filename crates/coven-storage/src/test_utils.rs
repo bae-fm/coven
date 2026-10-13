@@ -627,12 +627,6 @@ impl ProviderOps for MemoryProvider {
         if account.is_empty() {
             return Err(StorageFailure::InvalidConfiguration.with_source("empty sharing account"));
         }
-        self.state
-            .lock()
-            .await
-            .accounts
-            .entry(account.to_ascii_lowercase())
-            .or_insert(AccountAccess::Invited);
         let invitation = match self.config.provider() {
             CloudProvider::CloudKit => StorageInvitation::new(
                 self.config(),
@@ -648,6 +642,12 @@ impl ProviderOps for MemoryProvider {
             )?,
             _ => StorageInvitation::for_account(self.config())?,
         };
+        self.state
+            .lock()
+            .await
+            .accounts
+            .entry(account.to_ascii_lowercase())
+            .or_insert(AccountAccess::Invited);
         Ok(AccessGrant::Granted { invitation })
     }
     async fn join(&self, invitation: &StorageInvitation) -> Result<(), StorageError> {

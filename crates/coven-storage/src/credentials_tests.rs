@@ -4,6 +4,8 @@ use coven_crypto::SecretText;
 #[test]
 fn credentials_encode_without_capacity_growth() {
     let credentials = StorageCredentials::OAuth(OAuthTokens {
+        client_id: "dropbox".into(),
+        access: crate::OAuthAccess::Dropbox(crate::DropboxAccess::FullDropbox),
         access_token: SecretText::new("access\"\\\n\0雪".repeat(200)),
         refresh_token: Some(SecretText::new("refresh\"\\\n\0雪".repeat(300))),
         expires_at: None,

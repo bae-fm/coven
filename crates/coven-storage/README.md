@@ -99,7 +99,7 @@ the test objects and folders.
 | --- | --- | --- | --- |
 | [S3](src/providers/s3.rs) | Conditional `PutObject`, unconditional positions/clock PUT, `GetObject`/Range, paged `ListObjectsV2`, `DeleteObject`. | Native multipart ID, part ETags and unique publication metadata; paged `ListParts`, conditional completion and HEAD recovery. | Explicit member access key; grant/revoke/sign-out return console instructions. No IAM calls or credential discovery. |
 | [Drive](src/providers/google_drive.rs) | Real folders and exact leaf names; multipart/related create, media PATCH, media GET/Range, scoped paged `files.list`. Retry retains earliest createdTime then ID and deletes this writer's later copies. Owned objects are deleted; others are removed from their parent folder. | Generated file ID and resumable URL; PUT chunks/status; completion checked by native ID. | Folder-owner check; paged native permissions, direct create/update/delete; inherited/group/public/unknown access is retained and reported. Recipient uses its own OAuth account. |
-| [Dropbox](src/providers/dropbox.rs) | Namespace-scoped strict add or overwrite, download/Range, recursive paged listing, delete. | Start/append/finish, offset recovery, immutable-byte completion verification; close for cancellation. | Owner check; direct/inherited member pages; in-place viewer update; asynchronous removal with native failure retained. Recipient mounts the invited shared folder. |
+| [Dropbox](src/providers/dropbox.rs) | App-folder-relative or namespace-scoped strict add or overwrite, download/Range, recursive paged listing, delete. | Start/append/finish, offset recovery, immutable-byte completion verification; close for cancellation. | App folders reject sharing. Shared namespaces use owner checks, direct/inherited member pages, viewer updates and asynchronous removal. Recipient mounts the invited shared folder. |
 | [OneDrive](src/providers/onedrive.rs) | Path parents, conflict-refusing content PUT, positions/clock PUT, preauthenticated download/Range without bearer, recursive paged children excluding temporaries, delete. | Recorded temporary UUID and native upload URL, bounded/multiple missing ranges, conditional copy and monitor, immutable-byte recovery verification; cancellation and temporary deletion. | Account-drive ownership check, permission pages and account identity resolution; only exclusive target-account permissions deleted. Invite carries native share token for recipient redemption. |
 | [CloudKit](src/providers/cloudkit.rs) | Canonical paths as record names in a custom zone; create-once and replacement save policies, bounded CKAsset reads, paged prefix queries and server publication dates. | Recorded session UUID and 8 MiB asset parts; each part and confirmed boundary saved atomically; destination creation and session publication saved atomically. | Current account compared with zone owner; private read/write zone CKShare, participant removal, share metadata validation and native acceptance. |
 
@@ -108,9 +108,29 @@ opens an authorization URL and returns the complete redirect or cancellation;
 state-bound PKCE, redirect checks, code exchange and refresh stay inside coven.
 The desktop presenter opens the system browser and owns the loopback listener.
 iOS and Android apps supply their native sign-in sheet. Restore codes carry
-provider locations and S3 keys, never OAuth tokens. Microsoft uses the common authority for personal and
+provider locations, never S3 keys or OAuth tokens. Microsoft uses the common authority for personal and
 work/school accounts. After custody commits refreshed tokens, the owner calls
 `set_oauth_tokens`; tests verify the next request on the same adapter uses them.
+
+Google creation requests `drive.file`. The first invitation requests full `drive`
+on the same client with incremental authorization, verifies the account and
+grant, and commits credentials before sharing. Apps registered only for
+`drive.file` receive `AccessNotRegistered` before a provider change. A narrow
+connection refuses a shared folder with `AccessNotGranted` to avoid incomplete
+listings of other members' objects. A folder hidden from `drive.file` returns
+`GoogleDriveFolderNotVisible`, preserving its native 404; full access is needed
+to inspect that folder without assuming it has been deleted.
+Dropbox creation explicitly selects `DropboxLocation::AppFolder` or
+`SharedFolder`; the app supplies the corresponding registered key. App-folder
+paths omit `Dropbox-API-Path-Root` and cannot be shared. Changing that choice
+requires relocation, which this API does not perform. Token custody records
+the issuing client and granted access; refresh uses the same registration.
+
+The opt-in `provider_access_live_google_upgrade` test uses
+`COVEN_LIVE_GOOGLE_CLIENT_JSON` and two browser sign-ins to compare an object's
+bytes and metadata before and after upgrading. `provider_access_live_dropbox_app_folder`
+uses `COVEN_LIVE_DROPBOX_ENV` to create, reopen and remove a store with an
+App-folder app. Both use the production OAuth flow and adapters.
 
 Sharing is per account. Sync must keep an account shared while a member or an
 owner's open invite still needs it. Storage retains grants that also reach other

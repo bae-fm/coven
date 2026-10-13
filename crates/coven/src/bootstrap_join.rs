@@ -40,6 +40,17 @@ pub(super) async fn prepare_request<'a>(
         location: invitation.location().clone(),
         credentials,
     };
+    data.validate().map_err(SyncError::from)?;
+    if let StorageCredentials::OAuth(tokens) = &data.credentials {
+        let required = if data.location.provider() == CloudProvider::GoogleDrive {
+            OAuthAccess::GoogleDrive(GoogleDriveAccess::Full)
+        } else {
+            data.location.oauth_access().expect("OAuth location")
+        };
+        if !tokens.access.permits(required) {
+            return Err(SyncError::from(StorageFailure::AccessNotGranted { required }).into());
+        }
+    }
     Ok((
         Joining {
             identity,

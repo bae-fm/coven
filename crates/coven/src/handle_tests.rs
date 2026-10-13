@@ -336,7 +336,9 @@ async fn closed_storage_calls_keep_their_public_errors_on_every_clone() {
         handle
             .setup_oauth_storage(
                 StorageConfig::Dropbox {
-                    namespace_id: "folder".into()
+                    location: coven_storage::DropboxLocation::SharedFolder {
+                        namespace_id: "folder".into()
+                    }
                 },
                 "Device"
             )
@@ -348,7 +350,11 @@ async fn closed_storage_calls_keep_their_public_errors_on_every_clone() {
         Err(StorageSetupError::SecureStorage(KeyError::StoreClosed))
     ));
     assert!(matches!(
-        handle.authenticate(CloudProvider::Dropbox).await,
+        handle
+            .authenticate(coven_storage::OAuthAccess::Dropbox(
+                coven_storage::DropboxAccess::FullDropbox
+            ))
+            .await,
         Err(StorageSetupError::SecureStorage(KeyError::StoreClosed))
     ));
     assert!(matches!(

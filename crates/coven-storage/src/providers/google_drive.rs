@@ -250,25 +250,56 @@ impl GoogleDriveStorage {
         }
     }
     async fn folder_metadata(&self) -> Result<Value, StorageError> {
-        let value = http::json(
-            PROVIDER,
-            self.send(
+        let response = self
+            .send(
                 Method::GET,
                 &self.url(
                     &["files", &self.folder],
-                    &[("fields", "id,mimeType,trashed,ownedByMe,driveId")],
+                    &[("fields", "id,mimeType,trashed,ownedByMe,driveId,shared")],
                 )?,
                 Body::Empty,
             )
-            .await?,
-        )
-        .await
-        .map_err(http::container_error)?;
+            .await?;
+        let access = *response
+            .extensions()
+            .get::<OAuthAccess>()
+            .expect("OAuthSession records the access used by an authenticated request");
+        let value = http::json(PROVIDER, response).await.map_err(|error| {
+            let mut error = http::container_error(error);
+            match &mut error {
+                StorageError::Provider { failure, .. }
+                    if *failure == StorageFailure::ContainerNotFound
+                        && access == OAuthAccess::GoogleDrive(GoogleDriveAccess::File) =>
+                {
+                    *failure = StorageFailure::GoogleDriveFolderNotVisible;
+                }
+                _ => {}
+            }
+            error
+        })?;
         if http::string(&value, "id")? != self.folder
             || value["mimeType"].as_str() != Some("application/vnd.google-apps.folder")
             || value["trashed"].as_bool() == Some(true)
         {
             return Err(StorageFailure::InvalidPath.into());
+        }
+        if access == OAuthAccess::GoogleDrive(GoogleDriveAccess::File) {
+            // Drive omits `shared` for shared-drive items; `driveId` identifies them.
+            let in_shared_drive = value["driveId"].as_str().is_some_and(|id| !id.is_empty());
+            match (in_shared_drive, value["shared"].as_bool()) {
+                (false, Some(false)) => {}
+                (true, _) | (false, Some(true)) => {
+                    return Err(StorageFailure::AccessNotGranted {
+                        required: OAuthAccess::GoogleDrive(GoogleDriveAccess::Full),
+                    }
+                    .into())
+                }
+                (false, None) => {
+                    return Err(
+                        StorageFailure::Protocol.with_source("Drive omitted folder sharing state")
+                    )
+                }
+            }
         }
         Ok(value)
     }
@@ -279,6 +310,13 @@ impl GoogleDriveStorage {
         } else {
             Err(StorageFailure::NotStoreOwner.into())
         }
+    }
+    async fn require_full_access(&self) -> Result<(), StorageError> {
+        let required = OAuthAccess::GoogleDrive(GoogleDriveAccess::Full);
+        if !self.session.access().await.permits(required) {
+            return Err(StorageFailure::AccessNotGranted { required }.into());
+        }
+        Ok(())
     }
     async fn permissions(&self) -> Result<Vec<Value>, StorageError> {
         let mut token = None::<String>;
@@ -463,6 +501,7 @@ impl ProviderOps for GoogleDriveStorage {
         Ok(())
     }
     async fn grant_access(&self, account: &str) -> Result<AccessGrant, StorageError> {
+        self.require_full_access().await?;
         self.require_owner().await?;
         let permissions = self.permissions().await?;
         if permissions
@@ -521,6 +560,7 @@ impl ProviderOps for GoogleDriveStorage {
         &self,
         member: &MemberAccess,
     ) -> Result<ProviderRevocation, StorageError> {
+        self.require_full_access().await?;
         let MemberAccess::ProviderAccount(email) = member else {
             return Err(
                 StorageFailure::InvalidConfiguration.with_source("Drive requires an account")

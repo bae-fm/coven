@@ -45,6 +45,63 @@ pub(crate) struct StorageConnections {
 }
 
 impl StorageConnections {
+    pub(crate) async fn prepare_invite(&self) -> Result<(), SyncError> {
+        // Keep sign-in cancellable. Only credential installation and the existing
+        // invitation operation retain their work after their awaiting future drops.
+        let _call = self.lock_open().await?;
+        let location = self.codes.location().await?.ok_or(SyncError::NoStorage)?;
+        match location {
+            StorageConfig::Dropbox {
+                location: DropboxLocation::AppFolder,
+            } => {
+                return Err(StorageFailure::DropboxAppFolderNotShareable.into());
+            }
+            StorageConfig::GoogleDrive { .. } => {
+                let required = OAuthAccess::GoogleDrive(GoogleDriveAccess::Full);
+                let flow = self.oauth.as_ref().ok_or_else(|| {
+                    SyncError::from(StorageFailure::AccessNotRegistered { required })
+                })?;
+                flow.require_access(required)
+                    .map_err(|error| oauth_error(required.provider(), error))?;
+                let data = self.connection().await?.ok_or(SyncError::NoStorage)?;
+                let StorageCredentials::OAuth(previous) = &data.credentials else {
+                    return Err(StorageFailure::InvalidConfiguration
+                        .with_source("Drive credentials must be OAuth")
+                        .into());
+                };
+                if !previous.access.permits(required) {
+                    flow.require_client(previous)
+                        .map_err(|error| oauth_error(required.provider(), error))?;
+                    let before = self
+                        .connector
+                        .connect(data.location.clone(), data.credentials.clone(), self.device)
+                        .await?;
+                    let account = before.account().await?;
+                    let mut tokens = flow
+                        .authenticate(required)
+                        .await
+                        .map_err(|error| oauth_error(required.provider(), error))?;
+                    if tokens.refresh_token.is_none() {
+                        tokens.refresh_token = previous.refresh_token.clone();
+                    }
+                    let candidate = self
+                        .connector
+                        .connect(
+                            data.location,
+                            StorageCredentials::OAuth(tokens.clone()),
+                            self.device,
+                        )
+                        .await?;
+                    if candidate.account().await? != account {
+                        return Err(StorageFailure::AccountMismatch.into());
+                    }
+                    self.codes.install_oauth(tokens).await?;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
     pub(crate) fn new(
         codes: coven_sync::RestoreCodes,
         initial_name: String,
@@ -144,18 +201,14 @@ impl StorageConnections {
         .await
     }
 
-    pub(crate) async fn authenticate(
-        &self,
-        provider: CloudProvider,
-    ) -> Result<(), StorageSetupError> {
+    pub(crate) async fn authenticate(&self, access: OAuthAccess) -> Result<(), StorageSetupError> {
         let _call = self.lock_open().await?;
         let flow = self
             .oauth
             .as_ref()
-            .ok_or(OAuthError::Unavailable(provider))?;
-        let tokens = flow.authenticate(provider).await?;
-        *self.authentication.lock().await =
-            Some(crate::authentication::Authentication { provider, tokens });
+            .ok_or(OAuthError::Unavailable(access.provider()))?;
+        let tokens = flow.authenticate(access).await?;
+        *self.authentication.lock().await = Some(crate::authentication::Authentication { tokens });
         Ok(())
     }
 
@@ -367,3 +420,15 @@ impl StorageConnections {
 #[cfg(test)]
 #[path = "storage_tests.rs"]
 mod tests;
+
+fn oauth_error(provider: CloudProvider, error: OAuthError) -> SyncError {
+    match error {
+        OAuthError::Storage(error) => error.into(),
+        error => coven_storage::StorageError::Provider {
+            provider,
+            failure: StorageFailure::Authentication,
+            source: Box::new(error),
+        }
+        .into(),
+    }
+}

@@ -6,6 +6,23 @@ use coven_crypto::custody::KeyError;
 pub enum StorageFailure {
     /// The platform or OS version cannot use this built-in provider.
     ProviderUnavailable,
+    /// The app did not register the access required by this operation.
+    AccessNotRegistered {
+        /// Access the app must register before this operation is available.
+        required: crate::OAuthAccess,
+    },
+    /// The authorization did not grant the required access.
+    AccessNotGranted {
+        /// Access the account must authorize.
+        required: crate::OAuthAccess,
+    },
+    /// Drive's File grant cannot see the folder; Full access is needed to inspect it.
+    /// This does not establish whether the folder is absent or shared by another person.
+    GoogleDriveFolderNotVisible,
+    /// An App-folder store cannot be shared without relocating it.
+    DropboxAppFolderNotShareable,
+    /// An incremental sign-in selected a different provider account.
+    AccountMismatch,
     /// No route to the provider, a timeout, or an interrupted response.
     Network,
     /// Credentials were refused or must be refreshed.

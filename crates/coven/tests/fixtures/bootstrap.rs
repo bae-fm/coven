@@ -183,7 +183,13 @@ impl Installation {
         ) {
             let sign_in = crate::authentication::SignIn::new(owner.clock.clone()).await;
             builder = sign_in.configure(builder);
-            builder.authenticate(provider).await.unwrap();
+            builder
+                .authenticate(match provider {
+                    CloudProvider::GoogleDrive => OAuthAccess::GoogleDrive(GoogleDriveAccess::Full),
+                    _ => owner.storage.config().oauth_access().unwrap(),
+                })
+                .await
+                .unwrap();
         }
         builder
     }

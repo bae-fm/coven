@@ -9,10 +9,9 @@ use reqwest::Method;
 use serde_json::{json, Value};
 const PROVIDER: CloudProvider = CloudProvider::Dropbox;
 
-/// Dropbox objects reached through the shared namespace, independent of mount names.
+/// Dropbox objects rooted in the app folder or a shared namespace.
 pub(crate) struct DropboxStorage {
     config: StorageConfig,
-    namespace: String,
     session: OAuthSession,
     api: String,
     content: String,
@@ -22,16 +21,15 @@ pub(crate) struct DropboxStorage {
 impl DropboxStorage {
     /// Construct with this device's own Dropbox sign-in.
     pub(crate) fn new(config: StorageConfig, session: OAuthSession) -> Result<Self, StorageError> {
-        let StorageConfig::Dropbox { namespace_id } = &config else {
+        let StorageConfig::Dropbox { .. } = &config else {
             return Err(
-                StorageFailure::InvalidConfiguration.with_source("expected Dropbox namespace")
+                StorageFailure::InvalidConfiguration.with_source("expected Dropbox location")
             );
         };
         if session.provider() != PROVIDER {
             return Err(StorageFailure::InvalidConfiguration.with_source("wrong OAuth provider"));
         }
         Ok(Self {
-            namespace: namespace_id.clone(),
             config,
             session,
             api: "https://api.dropboxapi.com/2".into(),
@@ -40,8 +38,51 @@ impl DropboxStorage {
             removal_poll_interval: std::time::Duration::from_secs(1),
         })
     }
-    fn root(&self) -> String {
-        json!({".tag":"namespace_id","namespace_id":self.namespace}).to_string()
+    fn namespace(&self) -> Result<&str, StorageError> {
+        match &self.config {
+            StorageConfig::Dropbox {
+                location: DropboxLocation::SharedFolder { namespace_id },
+            } => Ok(namespace_id),
+            StorageConfig::Dropbox {
+                location: DropboxLocation::AppFolder,
+            } => Err(StorageFailure::DropboxAppFolderNotShareable.into()),
+            _ => unreachable!("Dropbox location checked at construction"),
+        }
+    }
+    fn root_headers(&self) -> Vec<(&'static str, String)> {
+        match &self.config {
+            StorageConfig::Dropbox {
+                location: DropboxLocation::SharedFolder { namespace_id },
+            } => vec![(
+                "Dropbox-API-Path-Root",
+                json!({".tag":"namespace_id","namespace_id":namespace_id}).to_string(),
+            )],
+            StorageConfig::Dropbox {
+                location: DropboxLocation::AppFolder,
+            } => Vec::new(),
+            _ => unreachable!("Dropbox location checked at construction"),
+        }
+    }
+    async fn check_root(&self) -> Result<(), StorageError> {
+        match &self.config {
+            StorageConfig::Dropbox {
+                location: DropboxLocation::AppFolder,
+            } => {
+                self.rpc("users/get_current_account", Value::Null).await?;
+            }
+            StorageConfig::Dropbox {
+                location: DropboxLocation::SharedFolder { namespace_id },
+            } => {
+                self.rpc(
+                    "sharing/get_folder_metadata",
+                    json!({"shared_folder_id":namespace_id}),
+                )
+                .await
+                .map_err(http::container_error)?;
+            }
+            _ => unreachable!("Dropbox location checked at construction"),
+        }
+        Ok(())
     }
     async fn rpc(&self, method: &str, value: Value) -> Result<Value, StorageError> {
         http::json(PROVIDER, self.rpc_response(method, value).await?).await
@@ -53,7 +94,7 @@ impl DropboxStorage {
     ) -> Result<reqwest::Response, StorageError> {
         let url = http::endpoint(&self.api, &method.split('/').collect::<Vec<_>>(), &[])?;
         let headers = if method.starts_with("files/") {
-            vec![("Dropbox-API-Path-Root", self.root())]
+            self.root_headers()
         } else {
             Vec::new()
         };
@@ -69,11 +110,11 @@ impl DropboxStorage {
         data: Vec<u8>,
         range: Option<ByteRange>,
     ) -> Result<reqwest::Response, StorageError> {
-        let mut headers = vec![
-            ("Dropbox-API-Path-Root", self.root()),
+        let mut headers = self.root_headers();
+        headers.extend([
             ("Dropbox-API-Arg", ascii_json(&arg)),
             ("Content-Type", "application/octet-stream".into()),
-        ];
+        ]);
         if let Some(range) = range {
             headers.push(("Range", range.header()));
         }
@@ -97,7 +138,7 @@ impl DropboxStorage {
         let value = self
             .rpc(
                 "sharing/get_folder_metadata",
-                json!({"shared_folder_id":self.namespace}),
+                json!({"shared_folder_id":self.namespace()?}),
             )
             .await?;
         if http::string(&value["access_type"], ".tag")? != "owner" {
@@ -107,9 +148,9 @@ impl DropboxStorage {
     }
     async fn members(&self, email: &str, inherited: bool) -> Result<FolderMembers, StorageError> {
         let mut method = "sharing/list_folder_members";
-        let mut request = json!({"shared_folder_id":self.namespace});
+        let mut request = json!({"shared_folder_id":self.namespace()?});
         if inherited {
-            request["path"] = json!(format!("ns:{}", self.namespace));
+            request["path"] = json!(format!("ns:{}", self.namespace()?));
         }
         let mut seen = Pagination::new();
         let mut members = FolderMembers::default();
@@ -126,7 +167,7 @@ impl DropboxStorage {
         }
     }
     async fn remove_member(&self, member: &MemberId) -> Result<Vec<RetainedAccess>, StorageError> {
-        let value = self.rpc("sharing/remove_folder_member",json!({"shared_folder_id":self.namespace,"member":member.selector(),"leave_a_copy":false})).await?;
+        let value = self.rpc("sharing/remove_folder_member",json!({"shared_folder_id":self.namespace()?,"member":member.selector(),"leave_a_copy":false})).await?;
         if http::string(&value, ".tag")? != "async_job_id" {
             return Err(StorageFailure::Protocol.with_source("invalid Dropbox remove launch"));
         }
@@ -255,12 +296,7 @@ impl ProviderOps for DropboxStorage {
         {
             Ok(item) => Ok(Some(super::object_metadata::dropbox(path, &item)?)),
             Err(error) if error.failure() == StorageFailure::NotFound => {
-                self.rpc(
-                    "sharing/get_folder_metadata",
-                    json!({"shared_folder_id":self.namespace}),
-                )
-                .await
-                .map_err(http::container_error)?;
+                self.check_root().await?;
                 Ok(None)
             }
             Err(error) => Err(error),
@@ -307,13 +343,7 @@ impl ProviderOps for DropboxStorage {
                     if method == "files/list_folder"
                         && error.failure() == StorageFailure::NotFound =>
                 {
-                    // An absent store folder is empty only while its configured namespace exists.
-                    self.rpc(
-                        "sharing/get_folder_metadata",
-                        json!({"shared_folder_id":self.namespace}),
-                    )
-                    .await
-                    .map_err(http::container_error)?;
+                    self.check_root().await?;
                     return Ok(());
                 }
                 Err(error) => return Err(error),
@@ -335,9 +365,9 @@ impl ProviderOps for DropboxStorage {
                     }
                 }
                 let path = ObjectPath::parse(
-                    http::string(entry, "path_lower")?.strip_prefix('/').ok_or(
-                        StorageFailure::Protocol.with_source("Dropbox path outside namespace"),
-                    )?,
+                    http::string(entry, "path_lower")?
+                        .strip_prefix('/')
+                        .ok_or(StorageFailure::Protocol.with_source("Dropbox path outside root"))?,
                 )?;
                 if prefix.contains(&path) {
                     let object = super::object_metadata::dropbox(&path, entry)?;
@@ -391,11 +421,11 @@ impl ProviderOps for DropboxStorage {
             .iter()
             .find(|member| matches!(member.id, MemberId::Account(_)))
         {
-            self.rpc("sharing/update_folder_member", json!({"shared_folder_id":self.namespace,"member":member.id.selector(),"access_level":{".tag":"editor"}})).await?;
+            self.rpc("sharing/update_folder_member", json!({"shared_folder_id":self.namespace()?,"member":member.id.selector(),"access_level":{".tag":"editor"}})).await?;
         } else if !members.direct.is_empty() {
             return Err(StorageFailure::AccountIdUnavailable.into());
         } else {
-            self.rpc("sharing/add_folder_member", json!({"shared_folder_id":self.namespace,"members":[{"member":{".tag":"email","email":account},"access_level":{".tag":"editor"}}],"quiet":false})).await?;
+            self.rpc("sharing/add_folder_member", json!({"shared_folder_id":self.namespace()?,"members":[{"member":{".tag":"email","email":account},"access_level":{".tag":"editor"}}],"quiet":false})).await?;
         }
         let members = self.members(account, false).await?;
         if !members.direct.iter().any(|member| member.role == "editor")
@@ -414,12 +444,12 @@ impl ProviderOps for DropboxStorage {
         let response = self
             .rpc_response(
                 "sharing/mount_folder",
-                json!({"shared_folder_id":self.namespace}),
+                json!({"shared_folder_id":self.namespace()?}),
             )
             .await?;
         if response.status().is_success() {
             let value = http::json(PROVIDER, response).await?;
-            if http::string(&value, "shared_folder_id")? != self.namespace {
+            if http::string(&value, "shared_folder_id")? != self.namespace()? {
                 return Err(StorageFailure::InvitationMismatch.into());
             }
         } else {

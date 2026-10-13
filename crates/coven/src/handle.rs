@@ -78,8 +78,8 @@ impl CovenHandle {
     /// Present provider sign-in and keep tokens in coven's session custody.
     /// Call setup to attach the chosen account to storage and persist credentials.
     /// Dropping the future cancels sign-in without replacing the previous tokens.
-    pub async fn authenticate(&self, provider: CloudProvider) -> Result<(), StorageSetupError> {
-        self.storage.authenticate(provider).await
+    pub async fn authenticate(&self, access: OAuthAccess) -> Result<(), StorageSetupError> {
+        self.storage.authenticate(access).await
     }
     /// Check provider operations and set up OAuth storage using coven's held sign-in.
     pub async fn setup_oauth_storage(
@@ -202,6 +202,7 @@ impl CovenHandle {
         role: MemberRole,
         access: InviteAccess,
     ) -> Result<Invite, SyncError> {
+        self.storage.prepare_invite().await?;
         self.operations.create_invite(role, access).await
     }
     /// Checked join requests, starting with the current list.

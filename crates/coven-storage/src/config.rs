@@ -43,15 +43,15 @@ pub enum StorageConfig {
         /// The store's prefix, without leading or trailing slashes.
         prefix: String,
     },
-    /// The shared Google Drive folder.
+    /// The Google Drive folder holding the store.
     GoogleDrive {
-        /// Folder id shared with members' Google accounts.
+        /// Folder id; inviting another person shares it with their Google account.
         folder_id: String,
     },
-    /// A Dropbox shared folder namespace, independent of each member's mount path.
+    /// Dropbox's access and location, fixed when cloud storage is created.
     Dropbox {
-        /// The shared folder's namespace id.
-        namespace_id: String,
+        /// Required choice: not-shared App folder or a shared-capable namespace.
+        location: crate::DropboxLocation,
     },
     /// The shared OneDrive folder.
     OneDrive {
@@ -72,6 +72,18 @@ pub enum StorageConfig {
 }
 
 impl StorageConfig {
+    /// Access required to open this location. Shared Google invites require Full
+    /// in addition to the File grant sufficient for a personal restore.
+    pub fn oauth_access(&self) -> Option<crate::OAuthAccess> {
+        match self {
+            Self::GoogleDrive { .. } => Some(crate::OAuthAccess::GoogleDrive(
+                crate::GoogleDriveAccess::File,
+            )),
+            Self::Dropbox { location } => Some(crate::OAuthAccess::Dropbox(location.access())),
+            Self::OneDrive { .. } => Some(crate::OAuthAccess::OneDrive),
+            Self::S3 { .. } | Self::CloudKit { .. } => None,
+        }
+    }
     /// The provider of this location.
     pub fn provider(&self) -> CloudProvider {
         match self {
@@ -106,7 +118,12 @@ impl StorageConfig {
                 vec![bucket, region]
             }
             Self::GoogleDrive { folder_id } => vec![folder_id],
-            Self::Dropbox { namespace_id } => vec![namespace_id],
+            Self::Dropbox {
+                location: crate::DropboxLocation::AppFolder,
+            } => vec![],
+            Self::Dropbox {
+                location: crate::DropboxLocation::SharedFolder { namespace_id },
+            } => vec![namespace_id],
             Self::OneDrive {
                 drive_id,
                 folder_id,

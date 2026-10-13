@@ -1,4 +1,5 @@
 use super::*;
+use crate::providers::tests::full_access;
 use crate::providers::tests::{json, response, TestServer};
 use axum::{body::Bytes, extract::State, Router};
 use coven_foundation::clock::FixedClock;
@@ -8,6 +9,7 @@ use std::{collections::BTreeMap, sync::Mutex, time::SystemTime};
 struct Provider {
     requests: Vec<BTreeMap<String, String>>,
     error_response: Option<(u16, String)>,
+    scope: Option<String>,
 }
 async fn token(State(state): State<Arc<Mutex<Provider>>>, body: Bytes) -> axum::response::Response {
     let mut state = state.lock().unwrap();
@@ -24,7 +26,12 @@ async fn token(State(state): State<Arc<Mutex<Provider>>>, body: Bytes) -> axum::
             .insert("x-request-id", "secret-request-id".parse().unwrap());
         return reply;
     }
-    json(serde_json::json!({"access_token":"new-token","token_type":"Bearer","expires_in":3600}))
+    let mut reply =
+        serde_json::json!({"access_token":"new-token","token_type":"Bearer","expires_in":3600});
+    if let Some(scope) = &state.scope {
+        reply["scope"] = serde_json::json!(scope);
+    }
+    json(reply)
 }
 struct Presenter {
     reply: String,
@@ -51,8 +58,13 @@ impl OAuthPresenter for Presenter {
 }
 fn clients(clock: Arc<FixedClock>) -> OAuthClients {
     OAuthClients::new(
-        Some("google".into()),
-        Some("dropbox".into()),
+        Some(GoogleDriveClient::new(
+            "google".into(),
+            GoogleDriveAccess::Full,
+        )),
+        Some(DropboxClients::FullDropbox {
+            app_key: "dropbox".into(),
+        }),
         Some("onedrive".into()),
         clock,
     )
@@ -96,7 +108,11 @@ async fn redirect_provider_errors_keep_their_classification_and_original_callbac
                     .with_token_endpoint(server.url.clone()),
                 presenter.clone(),
             );
-            let error = flow.authenticate(provider).await.err().unwrap();
+            let error = flow
+                .authenticate(full_access(provider))
+                .await
+                .err()
+                .unwrap();
             assert!(!format!("{error} {error:?}").contains("secret"));
             let original = if code == "access_denied" {
                 let OAuthError::Denied(original) = error else {
@@ -151,7 +167,7 @@ async fn presenter_flow_binds_state_redirect_and_pkce_for_each_provider() {
         CloudProvider::Dropbox,
         CloudProvider::OneDrive,
     ] {
-        let tokens = flow.authenticate(provider).await.unwrap();
+        let tokens = flow.authenticate(full_access(provider)).await.unwrap();
         assert_eq!(
             tokens.expires_at,
             Some(SystemTime::UNIX_EPOCH + Duration::from_secs(3700))
@@ -174,7 +190,7 @@ async fn presenter_flow_binds_state_redirect_and_pkce_for_each_provider() {
         if provider == CloudProvider::OneDrive {
             assert_eq!(url.path(), "/common/oauth2/v2.0/authorize");
             assert_eq!(
-                flow.clients.config(provider).unwrap().2,
+                flow.clients.config(full_access(provider)).unwrap().2,
                 "https://login.microsoftonline.com/common/oauth2/v2.0/token"
             );
         }
@@ -240,7 +256,9 @@ async fn invalid_or_denied_redirects_never_reach_the_token_endpoint() {
             .with_token_endpoint(server.url.clone());
         let flow = OAuthFlow::new(clients, presenter(reply));
         let error = flow
-            .authenticate(CloudProvider::Dropbox)
+            .authenticate(crate::OAuthAccess::Dropbox(
+                crate::DropboxAccess::FullDropbox,
+            ))
             .await
             .err()
             .unwrap();
@@ -269,12 +287,18 @@ async fn refresh_retains_unrotated_token() {
         presenter("cancel"),
     );
     let previous = OAuthTokens {
+        client_id: "dropbox".into(),
+        access: full_access(CloudProvider::Dropbox),
         access_token: SecretText::new("old".into()),
         refresh_token: Some(SecretText::new("refresh".into())),
         expires_at: None,
     };
     let refreshed = flow
-        .refresh(CloudProvider::Dropbox, &previous)
+        .refresh(
+            &previous.client_id,
+            previous.access,
+            previous.refresh_token.as_ref().unwrap(),
+        )
         .await
         .unwrap();
     assert_eq!(refreshed.refresh_token.unwrap().as_str(), "refresh");
@@ -298,13 +322,15 @@ async fn google_client_secret_reaches_only_google_token_exchanges() {
         CloudProvider::Dropbox,
         CloudProvider::OneDrive,
     ] {
-        flow.authenticate(provider).await.unwrap();
-        let saved = OAuthTokens {
-            access_token: SecretText::new(String::new()),
-            refresh_token: Some(refresh_token.clone()),
-            expires_at: None,
-        };
-        let refreshed = flow.refresh(provider, &saved).await.unwrap();
+        flow.authenticate(full_access(provider)).await.unwrap();
+        let refreshed = flow
+            .refresh(
+                flow.clients.config(full_access(provider)).unwrap().0,
+                full_access(provider),
+                &refresh_token,
+            )
+            .await
+            .unwrap();
         assert_eq!(refreshed.refresh_token.unwrap().as_str(), "refresh");
         let requests = std::mem::take(&mut state.lock().unwrap().requests);
         assert_eq!(requests.len(), 2);
@@ -348,16 +374,19 @@ async fn token_errors_retain_the_original_response_during_sign_in_and_refresh() 
             .with_token_endpoint(server.url.clone()),
         presenter("https://callback.example?code=code&state=STATE"),
     );
-    let previous = OAuthTokens {
-        access_token: SecretText::new("old".into()),
-        refresh_token: Some(SecretText::new("refresh".into())),
-        expires_at: None,
-    };
+
     for provider in [
         CloudProvider::GoogleDrive,
         CloudProvider::Dropbox,
         CloudProvider::OneDrive,
     ] {
+        let previous = OAuthTokens {
+            client_id: flow.clients.config(full_access(provider)).unwrap().0.into(),
+            access: full_access(provider),
+            access_token: SecretText::new("old".into()),
+            refresh_token: Some(SecretText::new("refresh".into())),
+            expires_at: None,
+        };
         for (status, code, expected) in [
             (400, "invalid_grant", StorageFailure::Authentication),
             (400, "invalid_client", StorageFailure::InvalidConfiguration),
@@ -387,8 +416,13 @@ async fn token_errors_retain_the_original_response_during_sign_in_and_refresh() 
             );
             state.lock().unwrap().error_response = Some((status, body.clone()));
             for result in [
-                flow.authenticate(provider).await,
-                flow.refresh(provider, &previous).await,
+                flow.authenticate(full_access(provider)).await,
+                flow.refresh(
+                    &previous.client_id,
+                    previous.access,
+                    previous.refresh_token.as_ref().unwrap(),
+                )
+                .await,
             ] {
                 let error = result.err().unwrap();
                 assert!(!format!("{error} {error:?}").contains("secret"));
@@ -431,7 +465,9 @@ async fn presentation_timeout_uses_the_injected_clock() {
     use std::{future::Future, task::Poll};
     let clock = Arc::new(FixedClock::new(SystemTime::UNIX_EPOCH));
     let flow = OAuthFlow::new(clients(clock.clone()), presenter("wait"));
-    let mut pending = Box::pin(flow.authenticate(CloudProvider::Dropbox));
+    let mut pending = Box::pin(flow.authenticate(crate::OAuthAccess::Dropbox(
+        crate::DropboxAccess::FullDropbox,
+    )));
     for seconds in [0, 299] {
         clock.set(SystemTime::UNIX_EPOCH + Duration::from_secs(seconds));
         std::future::poll_fn(|cx| {
@@ -449,4 +485,207 @@ async fn presentation_timeout_uses_the_injected_clock() {
         Poll::Ready(())
     })
     .await;
+}
+
+mod access_tests {
+    use super::*;
+
+    const FILE: OAuthAccess = OAuthAccess::GoogleDrive(GoogleDriveAccess::File);
+    const FULL: OAuthAccess = OAuthAccess::GoogleDrive(GoogleDriveAccess::Full);
+
+    #[tokio::test]
+    async fn google_requests_file_then_incremental_full_on_the_same_client() {
+        let state = Arc::new(Mutex::new(Provider::default()));
+        let server = TestServer::new(Router::new().fallback(token).with_state(state.clone())).await;
+        let presenter = presenter("https://callback.example?code=code&state=STATE");
+        let flow = OAuthFlow::new(
+            clients(Arc::new(FixedClock::new(SystemTime::UNIX_EPOCH)))
+                .with_token_endpoint(server.url.clone()),
+            presenter.clone(),
+        );
+        for access in [FILE, FULL] {
+            state.lock().unwrap().scope = Some(access.scope().into());
+            let tokens = flow.authenticate(access).await.unwrap();
+            assert_eq!(tokens.access, access);
+            assert_eq!(tokens.client_id, "google");
+        }
+        let urls = presenter.requests.lock().unwrap();
+        for (index, access) in [FILE, FULL].into_iter().enumerate() {
+            let url = url::Url::parse(&urls[index]).unwrap();
+            let params: BTreeMap<_, _> = url.query_pairs().into_owned().collect();
+            assert_eq!(params["scope"], access.scope());
+            assert_eq!(params["client_id"], "google");
+            assert_eq!(
+                params.get("include_granted_scopes").map(String::as_str),
+                (access == FULL).then_some("true")
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn google_unregistered_or_ungranted_full_access_is_typed() {
+        let clock = Arc::new(FixedClock::new(SystemTime::UNIX_EPOCH));
+        let presenter = presenter("https://callback.example?code=code&state=STATE");
+        let flow = OAuthFlow::new(
+            OAuthClients::new(
+                Some(GoogleDriveClient::new(
+                    "google".into(),
+                    GoogleDriveAccess::File,
+                )),
+                None,
+                None,
+                clock.clone(),
+            ),
+            presenter.clone(),
+        );
+        assert!(
+            matches!(flow.authenticate(FULL).await, Err(OAuthError::Storage(error)) if error.failure() == StorageFailure::AccessNotRegistered { required: FULL })
+        );
+        assert!(presenter.requests.lock().unwrap().is_empty());
+        let state = Arc::new(Mutex::new(Provider {
+            scope: Some(FILE.scope().into()),
+            ..Provider::default()
+        }));
+        let server = TestServer::new(Router::new().fallback(token).with_state(state.clone())).await;
+        let flow = OAuthFlow::new(
+            clients(clock).with_token_endpoint(server.url.clone()),
+            presenter,
+        );
+        assert!(
+            matches!(flow.authenticate(FULL).await, Err(OAuthError::Storage(error)) if error.failure() == StorageFailure::AccessNotGranted { required: FULL })
+        );
+        state.lock().unwrap().scope = Some(format!("{} {}", FILE.scope(), FULL.scope()));
+        assert_eq!(flow.authenticate(FULL).await.unwrap().access, FULL);
+    }
+
+    #[tokio::test]
+    async fn dropbox_choice_selects_its_app_key_scopes_and_refresh_client() {
+        let state = Arc::new(Mutex::new(Provider::default()));
+        let server = TestServer::new(Router::new().fallback(token).with_state(state.clone())).await;
+        let presenter = presenter("https://callback.example?code=code&state=STATE");
+        let clock = Arc::new(FixedClock::new(SystemTime::UNIX_EPOCH));
+        let flow = OAuthFlow::new(
+            OAuthClients::new(
+                None,
+                Some(DropboxClients::Both {
+                    app_folder_key: "folder-key".into(),
+                    full_dropbox_key: "full-key".into(),
+                }),
+                None,
+                clock.clone(),
+            )
+            .with_token_endpoint(server.url.clone()),
+            presenter.clone(),
+        );
+        for (access, key) in [
+            (DropboxAccess::AppFolder, "folder-key"),
+            (DropboxAccess::FullDropbox, "full-key"),
+        ] {
+            let access = OAuthAccess::Dropbox(access);
+            state.lock().unwrap().scope = Some(access.scope().into());
+            let mut tokens = flow.authenticate(access).await.unwrap();
+            assert_eq!(tokens.access, access);
+            assert_eq!(tokens.client_id, key);
+            tokens.refresh_token = Some(SecretText::new("refresh".into()));
+            assert_eq!(
+                flow.refresh(
+                    &tokens.client_id,
+                    tokens.access,
+                    tokens.refresh_token.as_ref().unwrap()
+                )
+                .await
+                .unwrap()
+                .access,
+                access
+            );
+            let requests = std::mem::take(&mut state.lock().unwrap().requests);
+            assert_eq!(requests.len(), 2);
+            assert!(requests.iter().all(|request| request["client_id"] == key));
+            let url = url::Url::parse(presenter.requests.lock().unwrap().last().unwrap()).unwrap();
+            let params: BTreeMap<_, _> = url.query_pairs().into_owned().collect();
+            assert_eq!(params["scope"], access.scope());
+            assert_eq!(params["client_id"], key);
+        }
+        for (registered, absent) in [
+            (
+                DropboxClients::AppFolder {
+                    app_key: "folder-key".into(),
+                },
+                DropboxAccess::FullDropbox,
+            ),
+            (
+                DropboxClients::FullDropbox {
+                    app_key: "full-key".into(),
+                },
+                DropboxAccess::AppFolder,
+            ),
+        ] {
+            let flow = OAuthFlow::new(
+                OAuthClients::new(None, Some(registered), None, clock.clone()),
+                presenter.clone(),
+            );
+            let required = OAuthAccess::Dropbox(absent);
+            assert!(
+                matches!(flow.authenticate(required).await, Err(OAuthError::Storage(error)) if error.failure() == StorageFailure::AccessNotRegistered { required })
+            );
+        }
+        assert_eq!(presenter.requests.lock().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn refresh_preserves_omitted_scopes_and_refuses_reduced_grants() {
+        let state = Arc::new(Mutex::new(Provider::default()));
+        let server = TestServer::new(Router::new().fallback(token).with_state(state.clone())).await;
+        let flow = OAuthFlow::new(
+            clients(Arc::new(FixedClock::new(SystemTime::UNIX_EPOCH)))
+                .with_token_endpoint(server.url.clone()),
+            presenter("cancel"),
+        );
+        let refresh = SecretText::new("refresh".into());
+        for (client, access, reduced) in [
+            ("google", FULL, FILE.scope()),
+            ("google", FILE, ""),
+            (
+                "dropbox",
+                OAuthAccess::Dropbox(DropboxAccess::FullDropbox),
+                OAuthAccess::Dropbox(DropboxAccess::AppFolder).scope(),
+            ),
+        ] {
+            state.lock().unwrap().scope = None;
+            let tokens = flow.refresh(client, access, &refresh).await.unwrap();
+            assert_eq!(tokens.access, access);
+            assert_eq!(tokens.client_id, client);
+            state.lock().unwrap().scope = Some(reduced.into());
+            assert!(matches!(
+                flow.refresh(client, access, &refresh).await,
+                Err(OAuthError::Storage(error))
+                    if error.failure() == StorageFailure::AccessNotGranted { required: access }
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn changed_client_cannot_refresh_or_increment_the_held_authorization() {
+        let state = Arc::new(Mutex::new(Provider::default()));
+        let server = TestServer::new(Router::new().fallback(token).with_state(state.clone())).await;
+        let flow = OAuthFlow::new(
+            clients(Arc::new(FixedClock::new(SystemTime::UNIX_EPOCH)))
+                .with_token_endpoint(server.url.clone()),
+            presenter("cancel"),
+        );
+        let tokens = OAuthTokens {
+            client_id: "another-client".into(),
+            access: FILE,
+            access_token: SecretText::new("token".into()),
+            refresh_token: Some(SecretText::new("refresh".into())),
+            expires_at: None,
+        };
+        assert!(
+            matches!(flow.require_client(&tokens), Err(OAuthError::Storage(error)) if error.failure() == StorageFailure::InvalidConfiguration)
+        );
+        assert!(
+            matches!(flow.refresh(&tokens.client_id, tokens.access, tokens.refresh_token.as_ref().unwrap()).await, Err(OAuthError::Storage(error)) if error.failure() == StorageFailure::InvalidConfiguration)
+        );
+        assert!(state.lock().unwrap().requests.is_empty());
+    }
 }

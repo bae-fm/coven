@@ -20,9 +20,11 @@ fn restore_storage_is_exactly_the_location_for_every_provider() {
         ),
         (
             StorageConfig::Dropbox {
-                namespace_id: "folder".into(),
+                location: crate::DropboxLocation::SharedFolder {
+                    namespace_id: "folder".into(),
+                },
             },
-            r#"{"Dropbox":{"namespace_id":"folder"}}"#,
+            r#"{"Dropbox":{"location":{"SharedFolder":{"namespace_id":"folder"}}}}"#,
         ),
         (
             StorageConfig::OneDrive {
@@ -68,7 +70,7 @@ fn restore_storage_is_exactly_the_location_for_every_provider() {
 fn credential_bearing_restore_payloads_are_refused_without_an_alternate_reader() {
     for bytes in [
         br#"{"S3":{"location":{"S3":{"bucket":"bucket","region":"region","endpoint":null,"prefix":"store"}},"credentials":{"access_key_id":"key","secret_access_key":"secret"}}}"#.as_slice(),
-        br#"{"Account":{"Dropbox":{"namespace_id":"folder"}}}"#,
+        br#"{"Account":{"Dropbox":{"location":{"SharedFolder":{"namespace_id":"folder"}}}}}"#,
         br#"{"S3":{"bucket":"bucket","region":"region","endpoint":"https://key:secret@storage.example","prefix":"store"}}"#,
         br#"{"S3":{"bucket":"","region":"region","endpoint":null,"prefix":"store"}}"#,
     ] {

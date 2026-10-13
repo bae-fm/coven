@@ -13,7 +13,7 @@
 use super::{DropboxStorage, PROVIDER};
 use crate::providers::http::{self, Body, OAuthSession};
 use crate::providers::tests::live_settings;
-use crate::providers::{OAuthClients, OAuthError, OAuthFlow, OAuthPresenter};
+use crate::providers::{DropboxClients, OAuthClients, OAuthError, OAuthFlow, OAuthPresenter};
 use crate::*;
 use async_trait::async_trait;
 use coven_crypto::SecretText;
@@ -57,31 +57,27 @@ struct Live {
 
 async fn tokens(variable: &str, clock: ClockRef) -> OAuthTokens {
     let mut settings = live_settings(variable);
+    let client_id = settings
+        .remove("DROPBOX_APP_KEY")
+        .expect("DROPBOX_APP_KEY missing")
+        .as_str()
+        .to_owned();
+    let refresh_token = settings
+        .remove("DROPBOX_REFRESH_TOKEN")
+        .expect("DROPBOX_REFRESH_TOKEN missing");
     let clients = OAuthClients::new(
         None,
-        Some(
-            settings
-                .remove("DROPBOX_APP_KEY")
-                .expect("DROPBOX_APP_KEY missing")
-                .as_str()
-                .into(),
-        ),
+        Some(DropboxClients::FullDropbox {
+            app_key: client_id.clone(),
+        }),
         None,
-        clock.clone(),
+        clock,
     );
     OAuthFlow::new(clients, Arc::new(NoPresentation))
         .refresh(
-            PROVIDER,
-            &OAuthTokens {
-                // A refresh exchange needs only the refresh token and app key.
-                access_token: SecretText::new(String::new()),
-                refresh_token: Some(
-                    settings
-                        .remove("DROPBOX_REFRESH_TOKEN")
-                        .expect("DROPBOX_REFRESH_TOKEN missing"),
-                ),
-                expires_at: None,
-            },
+            &client_id,
+            OAuthAccess::Dropbox(DropboxAccess::FullDropbox),
+            &refresh_token,
         )
         .await
         .expect("Dropbox OAuth refresh")
@@ -178,7 +174,13 @@ impl Live {
         let namespace_id = http::string(&shared, "shared_folder_id").unwrap().into();
         let session = OAuthSession::new(PROVIDER, self.tokens.clone(), self.clock.clone()).unwrap();
         Arc::new(StorageConnection::from_provider(Arc::new(
-            DropboxStorage::new(StorageConfig::Dropbox { namespace_id }, session).unwrap(),
+            DropboxStorage::new(
+                StorageConfig::Dropbox {
+                    location: DropboxLocation::SharedFolder { namespace_id },
+                },
+                session,
+            )
+            .unwrap(),
         )))
     }
 

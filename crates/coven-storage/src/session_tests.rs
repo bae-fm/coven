@@ -6,7 +6,9 @@ use coven_crypto::SecretText;
 fn upload_sessions_encode_without_capacity_growth() {
     let session = UploadSession {
         location: StorageConfig::Dropbox {
-            namespace_id: "namespace".into(),
+            location: crate::DropboxLocation::SharedFolder {
+                namespace_id: "namespace".into(),
+            },
         },
         path: ObjectPath::store_log(
             STORE_ID,
@@ -40,7 +42,9 @@ fn recorded_upload_refuses_positions_even_when_complete() {
     ] {
         let session = UploadSession {
             location: StorageConfig::Dropbox {
-                namespace_id: "namespace".into(),
+                location: crate::DropboxLocation::SharedFolder {
+                    namespace_id: "namespace".into(),
+                },
             },
             path: ObjectPath::positions(STORE_ID, coven_foundation::id_source::DeviceId(1)),
             total: 1,
@@ -125,7 +129,9 @@ fn session_states_must_match_their_provider_and_have_nonempty_ids() {
         ),
         (
             StorageConfig::Dropbox {
-                namespace_id: "namespace".into(),
+                location: crate::DropboxLocation::SharedFolder {
+                    namespace_id: "namespace".into(),
+                },
             },
             SessionState::Dropbox {
                 id: SecretText::new("session".into()),
@@ -244,7 +250,9 @@ fn restarting_s3_session_keeps_only_cleanup_identifiers_and_zero_progress() {
     assert_invalid_recording(&session);
     session.confirmed = 0;
     session.location = StorageConfig::Dropbox {
-        namespace_id: "namespace".into(),
+        location: crate::DropboxLocation::SharedFolder {
+            namespace_id: "namespace".into(),
+        },
     };
     assert_invalid_recording(&session);
     session.location = s3_recording().location;
@@ -310,7 +318,9 @@ fn completed_and_verifying_recordings_still_obey_their_provider() {
 
     let mut session = recording(
         StorageConfig::Dropbox {
-            namespace_id: "namespace".into(),
+            location: crate::DropboxLocation::SharedFolder {
+                namespace_id: "namespace".into(),
+            },
         },
         SessionState::VerifyPublished,
         8 * 1024 * 1024,
@@ -323,9 +333,7 @@ fn completed_and_verifying_recordings_still_obey_their_provider() {
     assert_invalid_recording(&session);
     session.part_size = 8 * 1024 * 1024;
     assert!(matches!(
-        session.check(&StorageConfig::Dropbox {
-            namespace_id: "another".into()
-        }),
+        session.check(&StorageConfig::Dropbox { location: crate::DropboxLocation::SharedFolder { namespace_id: "another".into() } }),
         Err(error) if error.failure() == StorageFailure::SessionMismatch
     ));
 }

@@ -77,13 +77,9 @@ async fn tokens(clock: ClockRef) -> OAuthTokens {
         Arc::new(RefreshOnly),
     )
     .refresh(
-        PROVIDER,
-        &OAuthTokens {
-            // Refresh reads only refresh_token; no access token has been obtained yet.
-            access_token: SecretText::new(String::new()),
-            refresh_token: Some(refresh_token),
-            expires_at: None,
-        },
+        client_id.as_str(),
+        crate::OAuthAccess::OneDrive,
+        &refresh_token,
     )
     .await
     .expect("refresh OneDrive credentials through coven OAuth")

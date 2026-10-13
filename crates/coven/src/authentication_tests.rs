@@ -11,6 +11,7 @@ use std::sync::{
 pub(crate) struct Presenter {
     pub(crate) cancel: AtomicBool,
     pub(crate) calls: AtomicUsize,
+    requests: std::sync::Mutex<Vec<std::collections::BTreeMap<String, String>>>,
 }
 #[async_trait::async_trait]
 impl OAuthPresenter for Presenter {
@@ -25,6 +26,7 @@ impl OAuthPresenter for Presenter {
         let url = url::Url::parse(authorization_url).unwrap();
         let params: std::collections::BTreeMap<_, _> = url.query_pairs().into_owned().collect();
         assert_eq!(params["redirect_uri"], "coven-app://sign-in");
+        self.requests.lock().unwrap().push(params.clone());
         Ok(SecretText::new(format!(
             "coven-app://sign-in?code=app-code&state={}",
             params["state"]
@@ -32,20 +34,30 @@ impl OAuthPresenter for Presenter {
     }
 }
 
+struct TokenServerState {
+    requests: AtomicUsize,
+    scope: std::sync::Mutex<Option<String>>,
+}
+
 pub(crate) struct SignIn {
     endpoint: String,
     clock: ClockRef,
     presenter: Arc<Presenter>,
-    requests: Arc<AtomicUsize>,
+    server: Arc<TokenServerState>,
     task: tokio::task::JoinHandle<()>,
 }
 impl SignIn {
     pub(crate) async fn new(clock: ClockRef) -> Self {
-        let requests = Arc::new(AtomicUsize::new(0));
-        let router = Router::new().fallback(|State(requests): State<Arc<AtomicUsize>>| async move {
-            let n = requests.fetch_add(1, Ordering::SeqCst);
-            Json(serde_json::json!({"access_token": format!("access-{n}"), "refresh_token": format!("refresh-{n}"), "token_type": "Bearer", "expires_in": 3600}))
-        }).with_state(requests.clone());
+        let server = Arc::new(TokenServerState {
+            requests: AtomicUsize::new(0),
+            scope: std::sync::Mutex::new(None),
+        });
+        let router = Router::new().fallback(|State(server): State<Arc<TokenServerState>>| async move {
+            let n = server.requests.fetch_add(1, Ordering::SeqCst);
+            let mut reply = serde_json::json!({"access_token": format!("access-{n}"), "refresh_token": format!("refresh-{n}"), "token_type": "Bearer", "expires_in": 3600});
+            if let Some(scope) = &*server.scope.lock().unwrap() { reply["scope"] = serde_json::json!(scope); }
+            Json(reply)
+        }).with_state(server.clone());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let endpoint = format!("http://{}", listener.local_addr().unwrap());
         let task = tokio::spawn(async move {
@@ -57,8 +69,9 @@ impl SignIn {
             presenter: Arc::new(Presenter {
                 cancel: AtomicBool::new(false),
                 calls: AtomicUsize::new(0),
+                requests: std::sync::Mutex::new(Vec::new()),
             }),
-            requests,
+            server,
             task,
         }
     }
@@ -71,12 +84,18 @@ impl SignIn {
         self.presenter.calls.load(Ordering::SeqCst)
     }
     pub(crate) fn request_count(&self) -> usize {
-        self.requests.load(Ordering::SeqCst)
+        self.server.requests.load(Ordering::SeqCst)
     }
     pub(crate) fn clients(&self) -> OAuthClients {
+        self.clients_with_google_access(GoogleDriveAccess::Full)
+    }
+    fn clients_with_google_access(&self, registered: GoogleDriveAccess) -> OAuthClients {
         OAuthClients::new(
-            Some("google".into()),
-            Some("dropbox".into()),
+            Some(GoogleDriveClient::new("google".into(), registered)),
+            Some(DropboxClients::Both {
+                app_folder_key: "dropbox-folder".into(),
+                full_dropbox_key: "dropbox".into(),
+            }),
             Some("onedrive".into()),
             self.clock.clone(),
         )
@@ -144,12 +163,21 @@ async fn handle_sign_in_setup_refresh_and_reopen_keep_tokens_in_coven() {
         )))
     ));
     assert_eq!(sign_in.presenter.calls.load(Ordering::SeqCst), 0);
-    handle.authenticate(CloudProvider::Dropbox).await.unwrap();
+    handle
+        .authenticate(coven_storage::OAuthAccess::Dropbox(
+            coven_storage::DropboxAccess::FullDropbox,
+        ))
+        .await
+        .unwrap();
     assert!(scoped.storage_credentials().unwrap().is_none());
     // A failed or cancelled replacement preserves the prior successful sign-in.
     sign_in.presenter.cancel.store(true, Ordering::SeqCst);
     assert!(matches!(
-        handle.authenticate(CloudProvider::Dropbox).await,
+        handle
+            .authenticate(coven_storage::OAuthAccess::Dropbox(
+                coven_storage::DropboxAccess::FullDropbox
+            ))
+            .await,
         Err(StorageSetupError::OAuth(OAuthError::Cancelled))
     ));
     sign_in.presenter.cancel.store(false, Ordering::SeqCst);
@@ -207,7 +235,7 @@ async fn handle_sign_in_setup_refresh_and_reopen_keep_tokens_in_coven() {
         code,
         "refresh does not change the restore code"
     );
-    assert_eq!(sign_in.requests.load(Ordering::SeqCst), 2);
+    assert_eq!(sign_in.request_count(), 2);
     assert_eq!(sign_in.presenter.calls.load(Ordering::SeqCst), 2);
     handle.disconnect_storage().await.unwrap();
     assert!(scoped.storage_credentials().unwrap().is_none());
@@ -219,7 +247,11 @@ async fn handle_sign_in_setup_refresh_and_reopen_keep_tokens_in_coven() {
     ));
     handle.close().await.unwrap();
     assert!(matches!(
-        handle.authenticate(CloudProvider::Dropbox).await,
+        handle
+            .authenticate(coven_storage::OAuthAccess::Dropbox(
+                coven_storage::DropboxAccess::FullDropbox
+            ))
+            .await,
         Err(StorageSetupError::SecureStorage(KeyError::StoreClosed))
     ));
 }
@@ -245,7 +277,9 @@ async fn builder_sign_in_is_provider_bound_and_refreshes_before_setup() {
     );
     let mut builder = builder(layout, keychain, clock.clone(), storage.clone(), &sign_in);
     builder
-        .authenticate(CloudProvider::GoogleDrive)
+        .authenticate(coven_storage::OAuthAccess::GoogleDrive(
+            coven_storage::GoogleDriveAccess::File,
+        ))
         .await
         .unwrap();
     let handle = builder.open(directory.id()).await.unwrap();
@@ -256,13 +290,282 @@ async fn builder_sign_in_is_provider_bound_and_refreshes_before_setup() {
             CloudProvider::Dropbox
         )))
     ));
-    handle.authenticate(CloudProvider::Dropbox).await.unwrap();
+    handle
+        .authenticate(coven_storage::OAuthAccess::Dropbox(
+            coven_storage::DropboxAccess::FullDropbox,
+        ))
+        .await
+        .unwrap();
     clock.set(clock.now() + std::time::Duration::from_secs(3600));
     handle
         .setup_oauth_storage(storage.config(), "Laptop")
         .await
         .unwrap();
-    assert_eq!(sign_in.requests.load(Ordering::SeqCst), 3);
+    assert_eq!(sign_in.request_count(), 3);
     assert_eq!(sign_in.presenter.calls.load(Ordering::SeqCst), 2);
     handle.close().await.unwrap();
+}
+
+mod provider_access_tests {
+    use super::*;
+    use coven_storage::providers::StorageConnector;
+
+    const FILE: OAuthAccess = OAuthAccess::GoogleDrive(GoogleDriveAccess::File);
+    const FULL: OAuthAccess = OAuthAccess::GoogleDrive(GoogleDriveAccess::Full);
+
+    struct Fixture {
+        _root: tempfile::TempDir,
+        layout: StoreLayout,
+        directory: StoreDir,
+        keychain: Arc<Keychain>,
+        clock: ClockRef,
+        sign_in: SignIn,
+        storage: Arc<MemoryStorage>,
+    }
+    impl Fixture {
+        async fn new(location: StorageConfig) -> Self {
+            let root = tempfile::tempdir().unwrap();
+            let layout = StoreLayout::new(root.path().into());
+            let directory = TestCoven::new()
+                .create_store(&layout, "Account", Arc::new(UuidIds))
+                .await
+                .unwrap();
+            let keychain = Keychain::in_memory("provider-access").unwrap();
+            let clock: ClockRef = Arc::new(FixedClock::new(std::time::UNIX_EPOCH));
+            let sign_in = SignIn::new(clock.clone()).await;
+            let storage = Arc::new(
+                MemoryStorage::builder()
+                    .location(location)
+                    .clock(clock.clone())
+                    .build()
+                    .unwrap(),
+            );
+            Self {
+                _root: root,
+                layout,
+                directory,
+                keychain,
+                clock,
+                sign_in,
+                storage,
+            }
+        }
+        fn builder(&self) -> CovenBuilder {
+            builder(
+                self.layout.clone(),
+                self.keychain.clone(),
+                self.clock.clone(),
+                self.storage.clone(),
+                &self.sign_in,
+            )
+        }
+        async fn setup(&self, builder: CovenBuilder) -> CovenHandle {
+            let handle = builder.open(self.directory.id()).await.unwrap();
+            handle.initialize_identity().unwrap();
+            handle
+                .authenticate(self.storage.config().oauth_access().unwrap())
+                .await
+                .unwrap();
+            handle
+                .setup_oauth_storage(self.storage.config(), "Laptop")
+                .await
+                .unwrap();
+            handle
+        }
+        fn credentials(&self) -> SecretBytes {
+            StoreKeychain::new(self.keychain.clone(), self.directory.id())
+                .storage_credentials()
+                .unwrap()
+                .unwrap()
+        }
+    }
+    fn member() -> InviteAccess {
+        InviteAccess::ProviderAccount {
+            email: "member@example.test".into(),
+        }
+    }
+    fn google() -> StorageConfig {
+        StorageConfig::GoogleDrive {
+            folder_id: "folder".into(),
+        }
+    }
+    fn assert_access(bytes: &SecretBytes, expected: OAuthAccess) {
+        let StorageCredentials::OAuth(tokens) =
+            StorageCredentials::decode(bytes.as_bytes()).unwrap()
+        else {
+            panic!("OAuth credentials expected")
+        };
+        assert_eq!(tokens.access, expected);
+    }
+
+    #[tokio::test]
+    async fn unregistered_drive_and_app_folder_invites_fail_before_provider_requests() {
+        for (location, expected) in [
+            (
+                google(),
+                StorageFailure::AccessNotRegistered { required: FULL },
+            ),
+            (
+                StorageConfig::Dropbox {
+                    location: DropboxLocation::AppFolder,
+                },
+                StorageFailure::DropboxAppFolderNotShareable,
+            ),
+        ] {
+            let fixture = Fixture::new(location).await;
+            let handle = fixture
+                .setup(
+                    fixture.builder().oauth_clients(
+                        fixture
+                            .sign_in
+                            .clients_with_google_access(GoogleDriveAccess::File),
+                    ),
+                )
+                .await;
+            let before = fixture.storage.request_count();
+            let credentials = fixture.credentials();
+            assert!(
+                matches!(handle.create_invite(MemberRole::Member, member()).await, Err(SyncError::Storage(error)) if error.failure() == expected)
+            );
+            assert_eq!(fixture.storage.request_count(), before);
+            assert_eq!(fixture.sign_in.presentation_count(), 1);
+            assert_eq!(fixture.credentials().as_bytes(), credentials.as_bytes());
+            handle.close().await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn first_google_invite_upgrades_once_and_reopen_keeps_the_grant() {
+        let fixture = Fixture::new(google()).await;
+        let handle = fixture.setup(fixture.builder()).await;
+        assert_access(&fixture.credentials(), FILE);
+        let code = handle.restore_code().await.unwrap();
+        let invite = handle
+            .create_invite(MemberRole::Member, member())
+            .await
+            .unwrap();
+        assert_access(&fixture.credentials(), FULL);
+        assert_eq!(
+            decode_code_info(&invite.code).unwrap().oauth_access,
+            Some(FULL)
+        );
+        assert_eq!(fixture.sign_in.presentation_count(), 2);
+        assert_eq!(handle.restore_code().await.unwrap(), code);
+        {
+            let requests = fixture.sign_in.presenter.requests.lock().unwrap();
+            assert_eq!(
+                requests[0]["scope"],
+                "https://www.googleapis.com/auth/drive.file"
+            );
+            assert_eq!(
+                requests[1]["scope"],
+                "https://www.googleapis.com/auth/drive"
+            );
+            assert_eq!(requests[1]["include_granted_scopes"], "true");
+            assert_eq!(requests[0]["client_id"], requests[1]["client_id"]);
+        }
+        handle.close().await.unwrap();
+        let handle = fixture
+            .builder()
+            .open(fixture.directory.id())
+            .await
+            .unwrap();
+        handle.start_sync().await.unwrap();
+        handle
+            .create_invite(
+                MemberRole::Member,
+                InviteAccess::ProviderAccount {
+                    email: "other@example.test".into(),
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(fixture.sign_in.presentation_count(), 2);
+        handle.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn cancelled_and_insufficient_google_upgrades_preserve_credentials_and_objects() {
+        let fixture = Fixture::new(google()).await;
+        let handle = fixture.setup(fixture.builder()).await;
+        let credentials = fixture.credentials();
+        let prefix = coven_storage::ObjectPrefix::all(fixture.directory.id());
+        let objects = fixture.storage.list(&prefix).await.unwrap();
+        fixture
+            .sign_in
+            .presenter
+            .cancel
+            .store(true, Ordering::SeqCst);
+        let Err(SyncError::Storage(coven_storage::StorageError::Provider { source, .. })) =
+            handle.create_invite(MemberRole::Member, member()).await
+        else {
+            panic!("cancelled upgrade expected")
+        };
+        assert!(matches!(
+            source.downcast_ref::<OAuthError>(),
+            Some(OAuthError::Cancelled)
+        ));
+        fixture
+            .sign_in
+            .presenter
+            .cancel
+            .store(false, Ordering::SeqCst);
+        *fixture.sign_in.server.scope.lock().unwrap() =
+            Some("https://www.googleapis.com/auth/drive.file".into());
+        assert!(
+            matches!(handle.create_invite(MemberRole::Member, member()).await, Err(SyncError::Storage(error)) if error.failure() == StorageFailure::AccessNotGranted { required: FULL })
+        );
+        assert_eq!(fixture.credentials().as_bytes(), credentials.as_bytes());
+        assert_eq!(fixture.storage.list(&prefix).await.unwrap(), objects);
+        *fixture.sign_in.server.scope.lock().unwrap() = None;
+        handle
+            .create_invite(MemberRole::Member, member())
+            .await
+            .unwrap();
+        assert_access(&fixture.credentials(), FULL);
+        handle.close().await.unwrap();
+    }
+
+    struct ChangedAccount(Arc<MemoryStorage>);
+    #[async_trait::async_trait]
+    impl StorageConnector for ChangedAccount {
+        async fn connect(
+            &self,
+            config: StorageConfig,
+            credentials: StorageCredentials,
+            device: DeviceId,
+        ) -> Result<Arc<coven_storage::StorageConnection>, coven_storage::StorageError> {
+            if matches!(&credentials, StorageCredentials::OAuth(tokens) if tokens.access == FULL) {
+                MemoryStorage::for_recipient(&self.0, "another@example.test")?
+                    .connect(config, credentials, device)
+                    .await
+            } else {
+                self.0.connect(config, credentials, device).await
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn google_upgrade_refuses_another_account_before_committing_credentials() {
+        let fixture = Fixture::new(google()).await;
+        // This account can reach the folder but must not replace the owner's identity.
+        fixture
+            .storage
+            .grant_access("another@example.test")
+            .await
+            .unwrap();
+        let handle = fixture
+            .setup(
+                fixture
+                    .builder()
+                    .storage_connector(Arc::new(ChangedAccount(fixture.storage.clone()))),
+            )
+            .await;
+        let credentials = fixture.credentials();
+        assert!(
+            matches!(handle.create_invite(MemberRole::Member, member()).await, Err(SyncError::Storage(error)) if error.failure() == StorageFailure::AccountMismatch)
+        );
+        assert_eq!(fixture.credentials().as_bytes(), credentials.as_bytes());
+        handle.close().await.unwrap();
+    }
 }

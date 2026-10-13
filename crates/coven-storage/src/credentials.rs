@@ -40,6 +40,10 @@ impl S3Credentials {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OAuthTokens {
+    /// The app client that issued these tokens; refresh must use this client.
+    pub client_id: String,
+    /// Access confirmed by the provider's token response.
+    pub access: crate::OAuthAccess,
     /// The token authorizing requests.
     pub access_token: SecretText,
     /// The token used to obtain a new access token, when issued.

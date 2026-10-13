@@ -20,7 +20,14 @@ impl ConnectionCredentials {
             (
                 CloudProvider::GoogleDrive | CloudProvider::Dropbox | CloudProvider::OneDrive,
                 StorageCredentials::OAuth(tokens),
-            ) if !tokens.access_token.as_str().is_empty() => Ok(()),
+            ) if !tokens.access_token.as_str().is_empty() && !tokens.client_id.is_empty() => {
+                let required = self.location.oauth_access().expect("OAuth location");
+                if tokens.access.permits(required) {
+                    Ok(())
+                } else {
+                    Err(StorageFailure::AccessNotGranted { required }.into())
+                }
+            }
             (CloudProvider::CloudKit, StorageCredentials::CloudKit) => Ok(()),
             _ => Err(StorageFailure::InvalidConfiguration
                 .with_source("credentials do not match provider")),

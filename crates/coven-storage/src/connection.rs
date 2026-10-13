@@ -117,6 +117,11 @@ impl<P: ProviderOps + ?Sized> Storage for StorageConnection<P> {
         self.provider.set_s3_credentials(credentials).await
     }
     async fn set_oauth_tokens(&self, tokens: OAuthTokens) -> Result<(), StorageError> {
+        ConnectionCredentials {
+            location: self.config(),
+            credentials: StorageCredentials::OAuth(tokens.clone()),
+        }
+        .validate()?;
         self.provider.set_oauth_tokens(tokens).await
     }
     async fn account(&self) -> Result<String, StorageError> {

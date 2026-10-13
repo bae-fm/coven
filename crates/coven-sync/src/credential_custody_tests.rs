@@ -172,11 +172,15 @@ fn commit_and_rollback_failures_both_reach_the_initiator_and_retry_commits_every
 fn switching_to_account_storage_removes_the_separate_s3_key_and_can_roll_back() {
     let (keychain, store, mut code) = fixture(true);
     code.storage = StorageConfig::Dropbox {
-        namespace_id: "folder".into(),
+        location: coven_storage::DropboxLocation::SharedFolder {
+            namespace_id: "folder".into(),
+        },
     }
     .encode()
     .unwrap();
     let oauth = StorageCredentials::OAuth(OAuthTokens {
+        client_id: "dropbox".into(),
+        access: coven_storage::OAuthAccess::Dropbox(coven_storage::DropboxAccess::FullDropbox),
         access_token: SecretText::new("account-token".into()),
         refresh_token: None,
         expires_at: None,
@@ -199,6 +203,8 @@ fn switching_to_account_storage_removes_the_separate_s3_key_and_can_roll_back() 
 fn oauth_commit_and_compensation_touch_only_device_credentials() {
     let (keychain, store, _) = fixture(true);
     let oauth = StorageCredentials::OAuth(OAuthTokens {
+        client_id: "dropbox".into(),
+        access: coven_storage::OAuthAccess::Dropbox(coven_storage::DropboxAccess::FullDropbox),
         access_token: SecretText::new("new-access".into()),
         refresh_token: Some(SecretText::new("new-refresh".into())),
         expires_at: None,

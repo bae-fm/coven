@@ -27,6 +27,8 @@ struct BufferedUpload {
 }
 #[derive(Default)]
 struct Remote {
+    app_folder: bool,
+    requests: usize,
     non_owner: bool,
     missing_namespace: bool,
     mounted: BTreeSet<String>,
@@ -65,7 +67,9 @@ async fn endpoint(
     let token = headers["authorization"].to_str().unwrap();
     let recipient = token.strip_prefix("Bearer recipient:");
     assert!(token == "Bearer token" || recipient.is_some());
-    if uri.path().starts_with("/2/files/") {
+    let mut state = state.lock().unwrap();
+    state.requests += 1;
+    if !state.app_folder && uri.path().starts_with("/2/files/") {
         assert_eq!(
             headers["dropbox-api-path-root"],
             r#"{".tag":"namespace_id","namespace_id":"namespace"}"#
@@ -73,7 +77,6 @@ async fn endpoint(
     } else {
         assert!(!headers.contains_key("dropbox-api-path-root"));
     }
-    let mut state = state.lock().unwrap();
     let arg: Value = match headers.get("dropbox-api-arg") {
         Some(arg) => serde_json::from_str(arg.to_str().unwrap()).unwrap(),
         None => serde_json::from_slice(&body).unwrap(),
@@ -97,7 +100,14 @@ async fn endpoint(
             );
         }
     }
+    if state.app_folder {
+        assert!(!uri.path().starts_with("/2/sharing/"));
+        if let Some(path) = arg["path"].as_str() {
+            assert!(path.starts_with(&format!("/{STORE_ID}/")) || path == format!("/{STORE_ID}"));
+        }
+    }
     match uri.path() {
+        "/2/users/get_current_account" => reply(json!({"email":"owner@example.test"})),
         "/2/sharing/mount_folder" => {
             assert_eq!(arg["shared_folder_id"], "namespace");
             state.mount_requests += 1;
@@ -415,7 +425,9 @@ async fn lost_completion_requires_byte_verification() {
 fn provider(url: &str) -> StorageConnection<DropboxStorage> {
     let mut storage = DropboxStorage::new(
         StorageConfig::Dropbox {
-            namespace_id: "namespace".into(),
+            location: crate::DropboxLocation::SharedFolder {
+                namespace_id: "namespace".into(),
+            },
         },
         session(PROVIDER),
     )
@@ -773,6 +785,8 @@ async fn recipient_join_mounts_the_invited_namespace_and_retries_a_lost_reply() 
     let recipient = provider(&server.url);
     recipient
         .set_oauth_tokens(OAuthTokens {
+            client_id: "dropbox".into(),
+            access: crate::OAuthAccess::Dropbox(crate::DropboxAccess::FullDropbox),
             access_token: SecretText::new("recipient:member".into()),
             refresh_token: None,
             expires_at: None,
@@ -784,7 +798,9 @@ async fn recipient_join_mounts_the_invited_namespace_and_retries_a_lost_reply() 
         StorageFailure::PermissionDenied
     );
     let elsewhere = StorageInvitation::for_account(StorageConfig::Dropbox {
-        namespace_id: "elsewhere".into(),
+        location: crate::DropboxLocation::SharedFolder {
+            namespace_id: "elsewhere".into(),
+        },
     })
     .unwrap();
     assert!(matches!(

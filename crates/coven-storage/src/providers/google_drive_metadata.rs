@@ -10,12 +10,18 @@ pub(super) type FolderIds = BTreeSet<(SystemTime, String)>;
 impl GoogleDriveStorage {
     async fn directory(&self, path: &str, create: bool) -> Result<Vec<String>, StorageError> {
         coven_format::path::validate_directory(path)?;
-        self.root_checked
-            .get_or_try_init(|| async {
-                self.folder_metadata().await?;
-                Ok::<_, StorageError>(())
-            })
-            .await?;
+        if self.session.access().await == OAuthAccess::GoogleDrive(GoogleDriveAccess::File) {
+            // Sharing can change on another device. A narrow grant must not
+            // mistake its partial view of a shared folder for a complete listing.
+            self.folder_metadata().await?;
+        } else {
+            self.root_checked
+                .get_or_try_init(|| async {
+                    self.folder_metadata().await?;
+                    Ok::<_, StorageError>(())
+                })
+                .await?;
+        }
         // Serialize folder creation, including callers publishing different paths.
         // Refresh every ancestor: a cached folder is not proof that no sibling
         // appeared after it was discovered.

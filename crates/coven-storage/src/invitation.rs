@@ -57,6 +57,14 @@ impl StorageInvitation {
         acceptance: InvitationAcceptance,
     ) -> Result<Self, StorageError> {
         location.validate()?;
+        if matches!(
+            location,
+            StorageConfig::Dropbox {
+                location: crate::DropboxLocation::AppFolder
+            }
+        ) {
+            return Err(StorageFailure::DropboxAppFolderNotShareable.into());
+        }
         match (location.provider(), &acceptance) {
             (
                 CloudProvider::S3 | CloudProvider::GoogleDrive | CloudProvider::OneDrive,

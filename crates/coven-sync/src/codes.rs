@@ -2,7 +2,10 @@
 
 use coven_format::codes::{InviteCode, RestoreCode};
 use coven_foundation::id_source::StoreId;
-use coven_storage::{CloudProvider, ConnectionCredentials, InviteStorage, StorageConfig};
+use coven_storage::{
+    CloudProvider, ConnectionCredentials, GoogleDriveAccess, InviteStorage, OAuthAccess,
+    StorageConfig,
+};
 
 /// The two codes that can open a store on a new device.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -25,8 +28,8 @@ pub struct CodeInfo {
     pub store_name: String,
     /// The storage provider.
     pub cloud_provider: CloudProvider,
-    /// Whether the new device needs its own OAuth sign-in.
-    pub needs_oauth: bool,
+    /// The sign-in required by this code; S3 and CloudKit do not use OAuth.
+    pub oauth_access: Option<OAuthAccess>,
 }
 
 /// A malformed code or one intended for the other operation.
@@ -47,7 +50,7 @@ pub enum CodeError {
 
 /// Decode and validate the complete code before returning public metadata.
 pub fn decode_code_info(code: &str) -> Result<CodeInfo, CodeError> {
-    let (code, cloud_provider) = decode(code)?;
+    let (code, location) = decode(code)?;
     let (kind, store_id, store_name) = match code {
         DecodedCode::Restore(code) => (CodeKind::Restore, code.store, code.name),
         DecodedCode::Invite(code) => (CodeKind::Invite, code.store, code.name),
@@ -56,11 +59,14 @@ pub fn decode_code_info(code: &str) -> Result<CodeInfo, CodeError> {
         kind,
         store_id,
         store_name,
-        cloud_provider,
-        needs_oauth: matches!(
-            cloud_provider,
-            CloudProvider::GoogleDrive | CloudProvider::Dropbox | CloudProvider::OneDrive
-        ),
+        cloud_provider: location.provider(),
+        oauth_access: if kind == CodeKind::Invite
+            && location.provider() == CloudProvider::GoogleDrive
+        {
+            Some(OAuthAccess::GoogleDrive(GoogleDriveAccess::Full))
+        } else {
+            location.oauth_access()
+        },
     })
 }
 
@@ -92,21 +98,21 @@ enum DecodedCode {
     Invite(InviteCode),
 }
 
-fn decode(text: &str) -> Result<(DecodedCode, CloudProvider), CodeError> {
+fn decode(text: &str) -> Result<(DecodedCode, StorageConfig), CodeError> {
     if text.starts_with("CVR1-") {
         let code = RestoreCode::from_text(text).map_err(|_| CodeError::Invalid)?;
         let storage =
             StorageConfig::decode(code.storage.as_bytes()).map_err(|_| CodeError::Invalid)?;
-        Ok((DecodedCode::Restore(code), storage.provider()))
+        Ok((DecodedCode::Restore(code), storage))
     } else if text.starts_with("CVI1-") {
         let code = InviteCode::from_text(text).map_err(|_| CodeError::Invalid)?;
         let storage =
             InviteStorage::decode(code.storage.as_bytes()).map_err(|_| CodeError::Invalid)?;
-        let provider = match storage {
+        let location = match storage {
             InviteStorage::Account(invitation)
                 if invitation.location().provider() != CloudProvider::S3 =>
             {
-                invitation.location().provider()
+                invitation.location().clone()
             }
             InviteStorage::S3 {
                 invitation,
@@ -117,11 +123,11 @@ fn decode(text: &str) -> Result<(DecodedCode, CloudProvider), CodeError> {
                     credentials: coven_storage::StorageCredentials::S3(credentials),
                 };
                 storage.validate().map_err(|_| CodeError::Invalid)?;
-                storage.location.provider()
+                storage.location
             }
             _ => return Err(CodeError::Invalid),
         };
-        Ok((DecodedCode::Invite(code), provider))
+        Ok((DecodedCode::Invite(code), location))
     } else {
         Err(CodeError::Invalid)
     }

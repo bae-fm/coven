@@ -246,3 +246,80 @@ async fn granting_an_owner_does_not_downgrade_their_access() {
     assert_eq!(state.lock().unwrap().members["owner@example.test"], "owner");
     assert!(state.lock().unwrap().sharing_mutations.is_empty());
 }
+
+mod app_folder_tests {
+    use super::*;
+
+    async fn app_folder(url: &str) -> StorageConnection<DropboxStorage> {
+        let session = session(PROVIDER);
+        session
+            .set_tokens(OAuthTokens {
+                client_id: "folder-key".into(),
+                access: OAuthAccess::Dropbox(DropboxAccess::AppFolder),
+                access_token: SecretText::new("token".into()),
+                refresh_token: None,
+                expires_at: None,
+            })
+            .await;
+        let mut provider = DropboxStorage::new(
+            StorageConfig::Dropbox {
+                location: DropboxLocation::AppFolder,
+            },
+            session,
+        )
+        .unwrap();
+        provider.api = format!("{url}/2");
+        provider.content = provider.api.clone();
+        StorageConnection::from_provider(Arc::new(provider))
+    }
+
+    #[tokio::test]
+    async fn app_folder_objects_and_sessions_use_relative_paths_without_namespace_headers() {
+        let state = Arc::new(Mutex::new(Remote {
+            app_folder: true,
+            ..Remote::default()
+        }));
+        let server =
+            TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
+        let storage = Arc::new(app_folder(&server.url).await);
+        crate::test_utils::Conformance::new(storage.clone(), STORE_ID)
+            .run()
+            .await
+            .unwrap();
+        let path = ObjectPath::device_log(
+            STORE_ID,
+            coven_foundation::id_source::DeviceId(31),
+            std::num::NonZeroU64::MIN,
+        );
+        assert!(storage.status(&path).await.unwrap().is_none());
+        let mut upload = storage.begin_upload(&path, 4).await.unwrap();
+        storage.upload_part(&mut upload, b"data").await.unwrap();
+        let mut upload = UploadSession::decode(upload.encode().unwrap().as_bytes()).unwrap();
+        storage.resume_upload(&mut upload).await.unwrap();
+        storage.finish_upload(&mut upload).await.unwrap();
+        assert_eq!(storage.read(&path).await.unwrap(), b"data");
+        assert_eq!(storage.config(), upload.location);
+        assert!(state.lock().unwrap().objects.contains_key(&path.absolute()));
+    }
+
+    #[tokio::test]
+    async fn app_folder_sharing_fails_before_any_provider_request() {
+        let state = Arc::new(Mutex::new(Remote {
+            app_folder: true,
+            ..Remote::default()
+        }));
+        let server =
+            TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
+        let storage = app_folder(&server.url).await;
+        assert!(
+            matches!(storage.grant_access("member@example.test").await, Err(error) if error.failure() == StorageFailure::DropboxAppFolderNotShareable)
+        );
+        assert!(
+            matches!(storage.revoke_access(&MemberAccess::ProviderAccount("member@example.test".into())).await, Err(error) if error.failure() == StorageFailure::DropboxAppFolderNotShareable)
+        );
+        assert!(
+            matches!(StorageInvitation::for_account(storage.config()), Err(error) if error.failure() == StorageFailure::DropboxAppFolderNotShareable)
+        );
+        assert_eq!(state.lock().unwrap().requests, 0);
+    }
+}

@@ -5,7 +5,10 @@ mod oauth;
 mod object_metadata;
 mod pagination;
 pub use http::{OAuthSession, ProviderResponse};
-pub use oauth::{OAuthClients, OAuthError, OAuthFlow, OAuthPresenter, OAuthRedirectError};
+pub use oauth::{
+    DropboxClients, GoogleDriveClient, OAuthClients, OAuthError, OAuthFlow, OAuthPresenter,
+    OAuthRedirectError,
+};
 #[cfg(not(any(target_os = "ios", target_os = "android")))]
 mod desktop_oauth;
 #[cfg(not(any(target_os = "ios", target_os = "android")))]

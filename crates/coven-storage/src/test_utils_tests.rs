@@ -446,6 +446,8 @@ async fn the_same_fake_uses_committed_replacement_tokens() {
     storage.create(&path, b"data").await.unwrap();
     storage
         .set_oauth_tokens(OAuthTokens {
+            client_id: "dropbox".into(),
+            access: crate::OAuthAccess::Dropbox(crate::DropboxAccess::FullDropbox),
             access_token: SecretText::new("expired".into()),
             refresh_token: None,
             expires_at: Some(SystemTime::UNIX_EPOCH),
@@ -458,6 +460,8 @@ async fn the_same_fake_uses_committed_replacement_tokens() {
     );
     storage
         .set_oauth_tokens(OAuthTokens {
+            client_id: "dropbox".into(),
+            access: crate::OAuthAccess::Dropbox(crate::DropboxAccess::FullDropbox),
             access_token: SecretText::new("refreshed".into()),
             refresh_token: None,
             expires_at: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(20)),
@@ -515,7 +519,9 @@ fn sharing_configs() -> [StorageConfig; 4] {
             folder_id: "folder".into(),
         },
         StorageConfig::Dropbox {
-            namespace_id: "namespace".into(),
+            location: crate::DropboxLocation::SharedFolder {
+                namespace_id: "namespace".into(),
+            },
         },
         StorageConfig::OneDrive {
             drive_id: "drive".into(),
@@ -629,6 +635,8 @@ async fn recipients_keep_their_own_tokens_while_clones_share_the_same_sign_in() 
     let another_sign_in = MemoryStorage::for_recipient(&owner, "member").unwrap();
     member
         .set_oauth_tokens(OAuthTokens {
+            client_id: "dropbox".into(),
+            access: crate::OAuthAccess::Dropbox(crate::DropboxAccess::FullDropbox),
             access_token: coven_crypto::SecretText::new("expired".into()),
             refresh_token: None,
             expires_at: Some(std::time::SystemTime::UNIX_EPOCH),
@@ -650,6 +658,8 @@ async fn recipients_keep_their_own_tokens_while_clones_share_the_same_sign_in() 
         .unwrap();
     member
         .set_oauth_tokens(OAuthTokens {
+            client_id: "dropbox".into(),
+            access: crate::OAuthAccess::Dropbox(crate::DropboxAccess::FullDropbox),
             access_token: coven_crypto::SecretText::new("refreshed".into()),
             refresh_token: None,
             expires_at: None,
@@ -661,11 +671,21 @@ async fn recipients_keep_their_own_tokens_while_clones_share_the_same_sign_in() 
 
 #[tokio::test]
 async fn invalid_account_grants_leave_the_fake_unchanged() {
-    for config in sharing_configs() {
+    let invalid = sharing_configs()
+        .into_iter()
+        .map(|config| (config, "", StorageFailure::InvalidConfiguration))
+        .chain([(
+            StorageConfig::Dropbox {
+                location: crate::DropboxLocation::AppFolder,
+            },
+            "member",
+            StorageFailure::DropboxAppFolderNotShareable,
+        )]);
+    for (config, account, failure) in invalid {
         let owner = MemoryStorage::builder().location(config).build().unwrap();
         assert!(matches!(
-            owner.grant_access("").await,
-            Err(error) if error.failure() == StorageFailure::InvalidConfiguration
+            owner.grant_access(account).await,
+            Err(error) if error.failure() == failure
         ));
         assert!(owner.provider.state.lock().await.accounts.is_empty());
         assert!(
@@ -684,6 +704,8 @@ async fn a_candidate_connection_does_not_replace_the_active_connections_tokens()
         .unwrap();
     let tokens = |expires_at| {
         StorageCredentials::OAuth(OAuthTokens {
+            client_id: "dropbox".into(),
+            access: crate::OAuthAccess::Dropbox(crate::DropboxAccess::FullDropbox),
             access_token: coven_crypto::SecretText::new("token".into()),
             refresh_token: None,
             expires_at,

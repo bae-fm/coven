@@ -4,7 +4,6 @@ use crate::{CloudProvider, OAuthError};
 use coven_storage::{providers::OAuthFlow, OAuthTokens, StorageCredentials};
 
 pub(crate) struct Authentication {
-    pub(crate) provider: CloudProvider,
     pub(crate) tokens: OAuthTokens,
 }
 
@@ -15,11 +14,18 @@ impl Authentication {
         flow: &OAuthFlow,
         now: std::time::SystemTime,
     ) -> Result<StorageCredentials, OAuthError> {
-        if self.provider != provider {
+        if self.tokens.access.provider() != provider {
             return Err(OAuthError::Reauthorize(provider));
         }
         if self.tokens.expires_at.is_some_and(|expiry| now >= expiry) {
-            self.tokens = flow.refresh(provider, &self.tokens).await?;
+            let refresh_token = self
+                .tokens
+                .refresh_token
+                .as_ref()
+                .ok_or(OAuthError::Reauthorize(provider))?;
+            self.tokens = flow
+                .refresh(&self.tokens.client_id, self.tokens.access, refresh_token)
+                .await?;
         }
         Ok(StorageCredentials::OAuth(self.tokens.clone()))
     }

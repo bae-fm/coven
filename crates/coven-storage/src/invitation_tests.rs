@@ -4,7 +4,9 @@ use serde_json::json;
 #[test]
 fn invitation_recordings_are_bound_to_a_valid_provider_and_location() {
     let location = StorageConfig::Dropbox {
-        namespace_id: "store".into(),
+        location: crate::DropboxLocation::SharedFolder {
+            namespace_id: "store".into(),
+        },
     };
     let invitation = StorageInvitation::for_account(location.clone()).unwrap();
     let recorded = invitation.encode().unwrap();
@@ -12,9 +14,7 @@ fn invitation_recordings_are_bound_to_a_valid_provider_and_location() {
     assert_eq!(decoded.location(), &location);
     decoded.check(&location).unwrap();
     assert!(matches!(
-        decoded.check(&StorageConfig::Dropbox {
-            namespace_id: "other".into()
-        }),
+        decoded.check(&StorageConfig::Dropbox { location: crate::DropboxLocation::SharedFolder { namespace_id: "other".into() } }),
         Err(error) if error.failure() == StorageFailure::InvitationMismatch
     ));
     let valid: serde_json::Value = serde_json::from_slice(recorded.as_bytes()).unwrap();

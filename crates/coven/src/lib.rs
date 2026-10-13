@@ -61,11 +61,12 @@ pub use coven_foundation::id_source::{
 };
 pub use coven_merge::{Audience, MergeError};
 pub use coven_storage::providers::{
-    OAuthClients, OAuthError, OAuthPresenter, OAuthRedirectError, ProviderResponse,
+    DropboxClients, GoogleDriveClient, OAuthClients, OAuthError, OAuthPresenter,
+    OAuthRedirectError, ProviderResponse,
 };
 pub use coven_storage::{
-    ByteRange, CloudProvider, ObjectPath, ObjectPrefix, S3Credentials, StorageConfig, StorageError,
-    StorageFailure,
+    ByteRange, CloudProvider, DropboxAccess, DropboxLocation, GoogleDriveAccess, OAuthAccess,
+    ObjectPath, ObjectPrefix, S3Credentials, StorageConfig, StorageError, StorageFailure,
 };
 
 #[cfg(any(test, feature = "test-utils"))]

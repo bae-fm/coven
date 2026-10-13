@@ -82,6 +82,9 @@ impl OAuthSession {
     pub async fn set_tokens(&self, tokens: OAuthTokens) {
         *self.tokens.write().await = tokens;
     }
+    pub(crate) async fn access(&self) -> crate::OAuthAccess {
+        self.tokens.read().await.access
+    }
     pub(crate) fn provider(&self) -> CloudProvider {
         self.provider
     }
@@ -97,7 +100,7 @@ impl OAuthSession {
         authenticated: bool,
     ) -> Result<Response, StorageError> {
         let mut request = self.client.request(method, url);
-        if authenticated {
+        let access = if authenticated {
             let tokens = self.tokens.read().await;
             if tokens
                 .expires_at
@@ -110,7 +113,10 @@ impl OAuthSession {
                 });
             }
             request = request.bearer_auth(tokens.access_token.as_str());
-        }
+            Some(tokens.access)
+        } else {
+            None
+        };
         for (name, value) in headers {
             request = request.header(*name, value);
         }
@@ -119,10 +125,15 @@ impl OAuthSession {
             Body::Json(value) => request.json(&value),
             Body::Bytes(bytes) => request.body(bytes),
         };
-        request
+        let mut response = request
             .send()
             .await
-            .map_err(|e| transport(self.provider, e))
+            .map_err(|e| transport(self.provider, e))?;
+        // Token replacement must not relabel a request already in flight.
+        if let Some(access) = access {
+            response.extensions_mut().insert(access);
+        }
+        Ok(response)
     }
 }
 pub(crate) enum Body {
