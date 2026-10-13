@@ -68,8 +68,11 @@ impl TableRules {
             for constraint in definition.constraints {
                 match &constraint.constraint {
                     ColumnConstraint::Check(_) => {
-                        let expression = source.node_body(&constraint.constraint).text().to_owned();
-                        checks.push((check_name(&constraint.name, &expression), expression));
+                        let expression = source.node_body(&constraint.constraint);
+                        checks.push((
+                            check_name(&constraint.name, &expression),
+                            expression.text().to_owned(),
+                        ));
                     }
                     ColumnConstraint::Collate { collation_name } => {
                         collation = name(collation_name.0);
@@ -99,8 +102,11 @@ impl TableRules {
         for constraint in constraints.into_iter().flatten() {
             match &constraint.constraint {
                 TableConstraint::Check(_, _) => {
-                    let expression = source.node_body(&constraint.constraint).text().to_owned();
-                    checks.push((check_name(&constraint.name, &expression), expression));
+                    let expression = source.node_body(&constraint.constraint);
+                    checks.push((
+                        check_name(&constraint.name, &expression),
+                        expression.text().to_owned(),
+                    ));
                 }
                 TableConstraint::Unique { columns, .. } => {
                     let body = source.node_body(&constraint.constraint);
@@ -289,10 +295,19 @@ fn automatic_column(table: &TableSchema, mut expr: &Expr<'_>) -> (String, Option
     }
 }
 
-fn check_name(named: &Option<Name<'_>>, expression: &str) -> String {
+fn check_name(named: &Option<Name<'_>>, expression: &SchemaSource<'_>) -> String {
     match named {
         Some(named) => name(named.0),
-        None => expression.to_owned(),
+        None => {
+            let text = expression.text().trim_ascii();
+            // SQLite trims the span, then dequotes its first token if quoted,
+            // even when the expression continues after that token.
+            if matches!(text.as_bytes()[0], b'[' | b'\'' | b'"' | b'`') {
+                name(expression.first_token())
+            } else {
+                text.to_owned()
+            }
+        }
     }
 }
 

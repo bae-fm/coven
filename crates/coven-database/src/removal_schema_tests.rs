@@ -3,6 +3,52 @@ use crate::{tests::TestStore, RowIdentity, SyncedTable};
 use coven_merge::UniqueConstraint;
 
 #[tokio::test]
+async fn unnamed_check_identity_matches_sqlites_failure_name() {
+    for table_constraint in [false, true] {
+        for expression in [
+            " n > 0 ",
+            "\t\n n > 0 \r\u{000c}",
+            " /* first */ n > 0 /* last */ ",
+            " \"n\" > 0 ",
+            " [n] > 0 ",
+            " `n` > 0 ",
+            " '0''quoted' != '0''quoted' ",
+        ] {
+            let fixture = TestStore::new();
+            let schema = format!(
+                "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,n INT{} CHECK({expression}))",
+                if table_constraint { "," } else { "" }
+            );
+            let db = fixture
+                .builder(
+                    vec![SyncedTable::new("notes", RowIdentity::SharedKey)],
+                    vec![crate::Migration::run(1, "check", move |sql| {
+                        sql.execute_batch(&schema)?;
+                        Ok(())
+                    })],
+                )
+                .open()
+                .await
+                .unwrap();
+            let error = sql(&db, "INSERT INTO notes VALUES('n',0)")
+                .await
+                .unwrap_err();
+            let crate::DbError::Sqlite(rusqlite::Error::SqliteFailure(_, Some(message))) = error
+            else {
+                panic!("expected SQLite CHECK failure: {error:?}")
+            };
+            let reported = message.strip_prefix("CHECK constraint failed: ").unwrap();
+            db.inspect_writer_schema(|_, schema| {
+                let (identity, evaluation) = &schema.rules["notes"].checks[0];
+                assert_eq!(identity, reported);
+                assert_eq!(evaluation, expression);
+            });
+            db.close().await.unwrap();
+        }
+    }
+}
+
+#[tokio::test]
 async fn parsed_constraints_keep_names_expressions_collations_and_generated_values() {
     let fixture = TestStore::new();
     let db = fixture
@@ -34,7 +80,7 @@ async fn parsed_constraints_keep_names_expressions_collations_and_generated_valu
                 ("body\"valid".into(), " length(body) > 0 ".into()),
                 ("body NOT NULL".into(), "body NOT NULL".into()),
                 (
-                    " active IN (0, /* comma , */ 1) ".into(),
+                    "active IN (0, /* comma , */ 1)".into(),
                     " active IN (0, /* comma , */ 1) ".into()
                 ),
                 ("folded_ok".into(), "folded = lower(title)".into()),
