@@ -530,10 +530,18 @@ the file's ranges under `F`.
     supplies revision identity and changes on every save, including equal-byte
     replacements. Missing size, date or revision is a protocol error.
   - [CKQuery](https://developer.apple.com/documentation/cloudkit/ckquery) uses
-    `path BEGINSWITH` the exact requested prefix, in the configured zone, on
-    the published-object record type. Its schema indexes `path`, store,
-    object kind and log number. Metadata queries exclude asset fields through
-    `desiredKeys` and follow every
+    equality on the exact directory named by the requested prefix, in the
+    configured zone, on `CovenObject`. Each publication atomically stores indexed
+    string fields `directory1` through `directory4` for its existing ancestor
+    directories, without trailing slashes: store, store/kind, store/kind/scope,
+    and the snapshot writer directory. A prefix selects the field at its depth,
+    so even `all`, `store_logs` and `snapshots` each use one equality query.
+    CloudKit limits prefix-filter values to 30 characters, shorter than a store
+    UUID; directory equality avoids that limit. Store-log records also index
+    `number` as a decimal string. Writer discovery queries
+    `directory2 == "<store>/store-log" AND number == "1"`, requesting only
+    `path`. Object metadata queries request only `path` and `size`; both exclude
+    assets and follow every
     [CKQueryOperation cursor](https://developer.apple.com/documentation/cloudkit/ckqueryoperation).
     The common listing margin is `M = 1 hour`: a query at storage time `T`
     establishes completeness only for publications before `T - M`. This is
@@ -802,13 +810,13 @@ the file's ranges under `F`.
 - On Drive, Dropbox and OneDrive, every directory component in D10 is a
   real provider folder. List that folder directly, never the configured
   root followed by client-side filtering. S3 uses the exact key prefix;
-  CloudKit queries records under that exact path prefix in the selected zone.
+  CloudKit queries the exact indexed ancestor directory in the selected zone.
   Folder ids and known path-to-object ids stay with the connection. An
   unknown Drive object uses an exact parent/name query; its id is then cached.
   Failed discovery never installs a partial catalog as complete.
   - On S3, device discovery lists `store-log/` with delimiter `/`. Drive,
     Dropbox and OneDrive list its immediate children, without recursion.
-    CloudKit queries the indexed store, object kind and number for entry 1
+    CloudKit queries the indexed store-log directory and number for entry 1
     of each writer; those permanent records represent its device folders.
     No adapter downloads the history to derive the set of writers locally.
   - S3 and Dropbox downloads include their metadata without a preliminary

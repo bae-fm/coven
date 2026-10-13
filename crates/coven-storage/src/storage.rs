@@ -195,6 +195,16 @@ pub trait Storage: Send + Sync {
     /// Missing or malformed metadata fails the call. Drive returns the earliest
     /// stored copy of each path, breaking creation-time ties by native id.
     async fn list(&self, prefix: &ObjectPrefix) -> Result<Vec<StoredObject>, StorageError>;
+    /// Discover store-log writers across every native page without reading history.
+    /// Completeness has the same one-hour margin as object listings, measured
+    /// from each writer's permanent entry one. Errors never mean an empty set.
+    /// Adapters without native writer discovery refuse the call.
+    async fn list_writers(
+        &self,
+        _store: coven_foundation::id_source::StoreId,
+    ) -> Result<Vec<coven_foundation::id_source::DeviceId>, StorageError> {
+        Err(StorageFailure::Refused.with_source("native writer discovery unavailable"))
+    }
     /// Delete an object; on Drive, remove it from the folder when this account is not its owner.
     /// An already absent object succeeds, making operation retries safe.
     /// Sync chooses the deleting device under §15; storage exposes no deletion-rights

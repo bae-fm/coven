@@ -2,15 +2,17 @@ use super::record::{
     check_prefix, failure, native_error, part_name, publication_metadata, record_name, upload_name,
 };
 use super::*;
-use coven_foundation::id_source::{DeviceId, FileId, StoreId, UuidIds};
+use coven_foundation::id_source::{CircleId, DeviceId, FileId, InviteId, StoreId, UuidIds};
+use coven_merge::Audience;
 use objc2_cloud_kit::{
-    CKErrorCode, CKErrorDomain, CKPartialErrorsByItemIDKey, CKRecordChangedErrorClientRecordKey,
-    CKRecordID,
+    CKErrorCode, CKErrorDomain, CKPartialErrorsByItemIDKey, CKQueryOperation, CKRecord,
+    CKRecordChangedErrorClientRecordKey, CKRecordID,
 };
 use objc2_foundation::{NSError, NSString};
 use std::{
+    collections::BTreeSet,
     num::NonZeroU64,
-    sync::Arc,
+    sync::{Arc, Mutex},
     time::{Duration, SystemTime},
 };
 
@@ -20,6 +22,18 @@ fn path() -> ObjectPath {
         DeviceId(7),
         NonZeroU64::MIN,
     )
+}
+
+#[test]
+fn listing_uses_equality_for_directories_longer_than_cloudkits_prefix_limit() {
+    let prefix = ObjectPrefix::device_log(path().store(), DeviceId(7));
+    assert!(prefix.as_str().len() > 30);
+    let predicate = query::Selection::Objects(prefix)
+        .predicate()
+        .predicateFormat()
+        .to_string();
+    assert!(!predicate.contains("BEGINSWITH"), "{predicate}");
+    assert!(predicate.contains(" == "), "{predicate}");
 }
 
 #[test]
@@ -314,14 +328,14 @@ async fn cloudkit_live() {
         .replace(&positions, b"publication clock")
         .await
         .unwrap();
-    let before_publication = native
+    let positions_metadata = native
         .fetch(positions.as_str(), record::OBJECT_KEYS)
         .wait()
         .await
         .unwrap()
         .metadata()
-        .unwrap()
-        .stored_at;
+        .unwrap();
+    let before_publication = positions_metadata.stored_at;
     restarted.finish_upload(&mut resumed).await.unwrap();
     let published = storage.status(&large).await.unwrap().unwrap();
     assert_eq!(published.object_id, large.as_str());
@@ -365,10 +379,23 @@ async fn cloudkit_live() {
     let other = ObjectPath::positions(StoreId(native.ids.new_id()), DeviceId(7));
     storage.replace(&other, b"another store").await.unwrap();
 
+    let discovery = Discovery::prepare(&native, store).await;
     // Queries are complete only beyond the common one-hour listing margin.
     tokio::time::sleep(Duration::from_secs(3601)).await;
+    clear_pages(&native);
     let listed = storage.list(&ObjectPrefix::all(store)).await.unwrap();
-    assert_eq!(listed.len(), pages.len() + 4);
+    check_pages(&native, &["path", "size"], listed.len());
+    assert_eq!(listed.len(), pages.len() + 4 + discovery.objects().len());
+    for object in discovery.objects() {
+        assert_eq!(
+            listed
+                .iter()
+                .find(|listed| listed.path == object.path)
+                .unwrap(),
+            object
+        );
+    }
+    discovery.check(&native, store, &listed).await;
     assert!(pages
         .iter()
         .all(|path| listed.iter().any(|object| &object.path == path)));
@@ -380,6 +407,17 @@ async fn cloudkit_live() {
         listed.iter().find(|object| object.path == first).unwrap(),
         &first_metadata
     );
+    assert_eq!(
+        listed
+            .iter()
+            .find(|object| object.path == positions)
+            .unwrap(),
+        &positions_metadata
+    );
+    assert_eq!(
+        listed.iter().find(|object| object.path == clock).unwrap(),
+        &changed_clock.metadata
+    );
     for path in [&first, &positions, &clock, &large] {
         storage.delete(path).await.unwrap();
         storage.delete(path).await.unwrap();
@@ -389,6 +427,7 @@ async fn cloudkit_live() {
             StorageFailure::NotFound
         );
     }
+    discovery.delete_zone().await;
     super::zone::delete(&native).wait().await.unwrap();
 }
 
@@ -527,5 +566,263 @@ fn atomic_destination_conflicts_differ_from_session_conflicts() {
             super::record::save_error(&partial, Some(path.as_str())).failure(),
             expected
         );
+    }
+}
+
+pub(super) struct Discovery {
+    objects: Vec<StoredObject>,
+    writers: Vec<DeviceId>,
+    pending: Vec<UploadSession>,
+    other_zone: CloudKitStorage,
+    history_store: StoreId,
+}
+
+impl Discovery {
+    pub(super) async fn prepare(native: &Arc<CloudKitStorage>, store: StoreId) -> Self {
+        let storage = StorageConnection::from_provider(native.clone());
+        let mut paths = Vec::new();
+        let mut writers = vec![DeviceId(7)];
+        for device in 100..100 + native::QUERY_PAGE_SIZE as u64 {
+            let device = DeviceId(device);
+            let path = ObjectPath::store_log(store, device, NonZeroU64::MIN);
+            storage.create(&path, b"writer").await.unwrap();
+            paths.push(path);
+            writers.push(device);
+        }
+        let circle = Audience::Circle(CircleId(native.ids.new_id()));
+        for device in [DeviceId(7), DeviceId(70)] {
+            for path in [
+                ObjectPath::device_log(store, device, NonZeroU64::MIN),
+                ObjectPath::key_copy(store, device, NonZeroU64::MIN),
+                ObjectPath::snapshot(store, Audience::Store, device, NonZeroU64::MIN),
+                ObjectPath::snapshot(store, circle.clone(), device, NonZeroU64::MIN),
+                ObjectPath::file(store, device, FileId(native.ids.new_id())),
+            ] {
+                storage.create(&path, b"scoped").await.unwrap();
+                paths.push(path);
+            }
+        }
+        // A later entry, positions and other log kinds cannot stand in for entry one.
+        let no_first = ObjectPath::store_log(store, DeviceId(70), NonZeroU64::new(2).unwrap());
+        storage.create(&no_first, b"no first entry").await.unwrap();
+        paths.push(no_first);
+        let positions = ObjectPath::positions(store, DeviceId(70));
+        storage.replace(&positions, b"positions").await.unwrap();
+        paths.push(positions);
+        let join = ObjectPath::join_request(store, InviteId(native.ids.new_id()));
+        storage.create(&join, b"join").await.unwrap();
+        paths.push(join);
+
+        let mut pending = Vec::new();
+        for path in [
+            ObjectPath::store_log(store, DeviceId(71), NonZeroU64::MIN),
+            ObjectPath::file(store, DeviceId(71), FileId(native.ids.new_id())),
+        ] {
+            let mut session = storage
+                .begin_upload(&path, PART_SIZE as u64 + 1)
+                .await
+                .unwrap();
+            storage
+                .upload_part(&mut session, &vec![42; PART_SIZE])
+                .await
+                .unwrap();
+            assert!(storage.status(&path).await.unwrap().is_none());
+            pending.push(session);
+        }
+
+        // Another store has more than a page of history but exactly one writer.
+        let history_store = StoreId(native.ids.new_id());
+        for number in 1..=native::QUERY_PAGE_SIZE + 1 {
+            let path = ObjectPath::store_log(
+                history_store,
+                DeviceId(900),
+                NonZeroU64::new(number as u64).unwrap(),
+            );
+            storage.create(&path, b"other store history").await.unwrap();
+        }
+        let config = zone::prepare(&native.container_id, StoreId(native.ids.new_id()))
+            .await
+            .unwrap();
+        let other_zone = CloudKitStorage::new(config, native.ids.clone())
+            .await
+            .unwrap();
+        // Same store id and an extra writer in another zone must stay invisible.
+        other_zone
+            .create(
+                &ObjectPath::store_log(store, DeviceId(901), NonZeroU64::MIN),
+                b"other zone",
+            )
+            .await
+            .unwrap();
+        other_zone
+            .replace(
+                &ObjectPath::positions(store, DeviceId(7)),
+                b"other zone revision",
+            )
+            .await
+            .unwrap();
+
+        let mut objects = Vec::new();
+        for path in paths {
+            objects.push(storage.status(&path).await.unwrap().unwrap());
+        }
+        Self {
+            objects,
+            writers,
+            pending,
+            other_zone,
+            history_store,
+        }
+    }
+
+    pub(super) fn objects(&self) -> &[StoredObject] {
+        &self.objects
+    }
+
+    pub(super) async fn check(
+        &self,
+        native: &Arc<CloudKitStorage>,
+        store: StoreId,
+        all: &[StoredObject],
+    ) {
+        let storage = StorageConnection::from_provider(native.clone());
+        let circle = self
+            .objects
+            .iter()
+            .find_map(|object| match object.path.snapshot_id() {
+                Some(id) if matches!(id.audience, Audience::Circle(_)) => Some(id.audience),
+                _ => None,
+            })
+            .unwrap();
+        for prefix in [
+            ObjectPrefix::device_logs(store),
+            ObjectPrefix::device_log(store, DeviceId(7)),
+            ObjectPrefix::store_logs(store),
+            ObjectPrefix::store_log(store, DeviceId(7)),
+            ObjectPrefix::snapshots(store),
+            ObjectPrefix::audience_snapshots(store, &Audience::Store),
+            ObjectPrefix::audience_snapshots(store, &circle),
+            ObjectPrefix::files(store),
+            ObjectPrefix::keys(store),
+            ObjectPrefix::positions(store),
+            ObjectPrefix::join_requests(store),
+        ] {
+            clear_pages(native);
+            let listed = storage.list(&prefix).await.unwrap();
+            let expected: Vec<_> = all
+                .iter()
+                .filter(|object| prefix.contains(&object.path))
+                .cloned()
+                .collect();
+            assert_eq!(listed, expected, "{}", prefix.as_str());
+            check_pages(native, &["path", "size"], listed.len());
+        }
+        clear_pages(native);
+        assert_eq!(storage.list_writers(store).await.unwrap(), self.writers);
+        check_pages(native, &["path"], self.writers.len());
+        clear_pages(native);
+        assert_eq!(
+            storage.list_writers(self.history_store).await.unwrap(),
+            [DeviceId(900)]
+        );
+        check_pages(native, &["path"], 1);
+        assert_eq!(
+            native.query_pages.lock().unwrap().len(),
+            1,
+            "discovery must not page through history"
+        );
+        clear_pages(native);
+        assert!(storage
+            .list_writers(StoreId(native.ids.new_id()))
+            .await
+            .unwrap()
+            .is_empty());
+        check_pages(native, &["path"], 0);
+        assert_eq!(native.query_pages.lock().unwrap().len(), 1);
+        for session in &self.pending {
+            assert!(storage.status(session.path()).await.unwrap().is_none());
+            storage.abort_upload(session).await.unwrap();
+        }
+    }
+
+    pub(super) async fn delete_zone(&self) {
+        zone::delete(&self.other_zone).wait().await.unwrap();
+    }
+}
+
+pub(super) fn clear_pages(native: &CloudKitStorage) {
+    native.query_pages.lock().unwrap().clear();
+}
+
+pub(super) fn check_pages(native: &CloudKitStorage, keys: &[&str], records: usize) {
+    let pages = native.query_pages.lock().unwrap();
+    assert!(!pages.is_empty());
+    assert_eq!(
+        pages.iter().map(|page| page.records).sum::<usize>(),
+        records
+    );
+    assert!(pages.len() >= records.div_ceil(native::QUERY_PAGE_SIZE));
+    let ids: BTreeSet<_> = pages.iter().map(|page| &page.operation_id).collect();
+    assert_eq!(ids.len(), pages.len());
+    for (index, page) in pages.iter().enumerate() {
+        assert_eq!(page.zone, native.zone);
+        assert_eq!(page.owner, native.owner);
+        assert_eq!(page.keys, keys);
+        assert_eq!(page.continuation, index != 0);
+        assert!(page.records <= native::QUERY_PAGE_SIZE);
+        assert_eq!(
+            page.asset_records, 0,
+            "metadata queries must not fetch assets"
+        );
+        assert!(!page.operation_id.is_empty());
+        // Correlate native operations with CloudKit Console's server request logs.
+        tracing::info!(?page, "CloudKit query page");
+    }
+}
+
+#[derive(Debug)]
+pub(super) struct Page {
+    pub(super) operation_id: String,
+    pub(super) zone: String,
+    pub(super) owner: String,
+    pub(super) keys: Vec<String>,
+    pub(super) continuation: bool,
+    pub(super) records: usize,
+    pub(super) asset_records: usize,
+}
+
+pub(super) type Pages = Arc<Mutex<Vec<Page>>>;
+
+pub(super) fn query_enqueued(pages: &Pages, operation: &CKQueryOperation) -> usize {
+    let mut pages = pages.lock().unwrap();
+    let index = pages.len();
+    // The caller still owns configuration exclusively, before addOperation.
+    unsafe {
+        let zone = operation.zoneID().unwrap();
+        pages.push(Page {
+            operation_id: operation.operationID().to_string(),
+            zone: zone.zoneName().to_string(),
+            owner: zone.ownerName().to_string(),
+            keys: operation
+                .desiredKeys()
+                .unwrap()
+                .iter()
+                .map(|key| key.to_string())
+                .collect(),
+            continuation: operation.cursor().is_some(),
+            records: 0,
+            asset_records: 0,
+        });
+    }
+    index
+}
+
+pub(super) fn query_matched(pages: &Pages, index: usize, record: Option<&CKRecord>) {
+    let mut pages = pages.lock().unwrap();
+    pages[index].records += 1;
+    if record
+        .is_some_and(|record| unsafe { record.objectForKey(&NSString::from_str("data")).is_some() })
+    {
+        pages[index].asset_records += 1;
     }
 }

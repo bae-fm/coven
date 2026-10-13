@@ -174,6 +174,12 @@ impl<P: ProviderOps + ?Sized> Storage for StorageConnection<P> {
     async fn list(&self, prefix: &ObjectPrefix) -> Result<Vec<StoredObject>, StorageError> {
         self.observed(self.list_checked(prefix).await)
     }
+    async fn list_writers(
+        &self,
+        store: coven_foundation::id_source::StoreId,
+    ) -> Result<Vec<coven_foundation::id_source::DeviceId>, StorageError> {
+        self.observed(self.provider.list_writers(store).await)
+    }
     async fn delete(&self, path: &ObjectPath) -> Result<(), StorageError> {
         self.observed(self.provider.delete(path).await)
     }

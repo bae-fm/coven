@@ -1,9 +1,10 @@
 //! CloudKit operation ownership and completion callbacks.
 
+use super::query::Selection;
 use super::record::{native_error, Record};
 use crate::{StorageError, StorageFailure};
 use block2::RcBlock;
-use objc2::{rc::Retained, runtime::AnyObject, AnyThread};
+use objc2::{rc::Retained, AnyThread};
 use objc2_cloud_kit::{
     CKContainer, CKDatabase, CKFetchRecordsOperation, CKModifyRecordsOperation, CKQuery,
     CKQueryCursor, CKQueryOperation, CKRecord, CKRecordID, CKRecordSavePolicy, CKRecordZoneID,
@@ -225,12 +226,14 @@ pub(super) struct Cursor(Retained<CKQueryCursor>);
 // from its completion to one subsequent query, with no concurrent mutation.
 unsafe impl Send for Cursor {}
 
-pub(super) fn query(
+pub(super) fn query<T: Send + 'static>(
     database: &CKDatabase,
     zone: &CKRecordZoneID,
-    prefix: crate::ObjectPrefix,
+    selection: Selection,
     cursor: Option<Cursor>,
-) -> CloudKitRequest<(Vec<crate::StoredObject>, Option<Cursor>)> {
+    convert: impl Fn(Record) -> Result<T, StorageError> + Send + Sync + 'static,
+    #[cfg(test)] pages: super::tests::Pages,
+) -> CloudKitRequest<(Vec<T>, Option<Cursor>)> {
     let (complete, result) = completion();
     let records = Arc::new(Mutex::new(Vec::new()));
     let matched = records.clone();
@@ -238,14 +241,7 @@ pub(super) fn query(
         let operation = match cursor {
             Some(cursor) => CKQueryOperation::initWithCursor(CKQueryOperation::alloc(), &cursor.0),
             None => {
-                // The prefix is a validated ASCII D10 path. Using argumentArray
-                // still makes it data rather than predicate syntax.
-                let value = NSString::from_str(prefix.as_str());
-                let args = NSArray::<AnyObject>::from_slice(&[&value]);
-                let predicate = objc2_foundation::NSPredicate::predicateWithFormat_argumentArray(
-                    &NSString::from_str("path BEGINSWITH %@"),
-                    Some(&args),
-                );
+                let predicate = selection.predicate();
                 let query = CKQuery::initWithRecordType_predicate(
                     CKQuery::alloc(),
                     &NSString::from_str("CovenObject"),
@@ -256,14 +252,18 @@ pub(super) fn query(
         };
         operation.setZoneID(Some(zone));
         operation.setResultsLimit(QUERY_PAGE_SIZE);
-        operation.setDesiredKeys(Some(&strings(&["path", "size"])));
+        operation.setDesiredKeys(Some(&strings(selection.keys())));
+        #[cfg(test)]
+        let page_index = super::tests::query_enqueued(&pages, &operation);
         let block = RcBlock::new(
             move |_id: NonNull<CKRecordID>, record: *mut CKRecord, failure: *mut NSError| {
+                #[cfg(test)]
+                super::tests::query_matched(&pages, page_index, record.as_ref());
                 let response = if let Some(error) = error(failure) {
                     Err(error)
                 } else {
                     match record.as_ref() {
-                        Some(record) => Record::from_callback(record).listed(&prefix),
+                        Some(record) => convert(Record::from_callback(record)),
                         None => Err(StorageFailure::Protocol
                             .with_source("CloudKit query omitted matched record")),
                     }

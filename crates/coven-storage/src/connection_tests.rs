@@ -46,6 +46,19 @@ async fn replacement_tokens_cannot_change_dropbox_access_or_provider() {
 }
 
 #[tokio::test]
+async fn unavailable_writer_discovery_never_falls_back_to_history_listing() {
+    let storage = MemoryStorage::builder().build().unwrap();
+    let path = ObjectPath::store_log(STORE_ID, DeviceId(7), std::num::NonZeroU64::MIN);
+    storage.create(&path, b"entry").await.unwrap();
+    let before = storage.request_count();
+    assert_eq!(
+        storage.list_writers(STORE_ID).await.unwrap_err().failure(),
+        StorageFailure::Refused
+    );
+    assert_eq!(storage.request_count(), before);
+}
+
+#[tokio::test]
 async fn clock_replacement_guards_preserve_the_previous_object() {
     let storage = MemoryStorage::builder().build().unwrap();
     let path = ObjectPath::clock(STORE_ID, DeviceId(31));

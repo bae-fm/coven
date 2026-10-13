@@ -98,6 +98,27 @@ impl Record {
     pub(super) fn set_number(&mut self, key: &str, value: u64) {
         self.set_text(key, &value.to_string());
     }
+    pub(super) fn set_object_fields(&mut self, path: &ObjectPath, size: u64) {
+        self.set_text("path", path.as_str());
+        self.set_number("size", size);
+        for (field, directory) in super::query::directories(path) {
+            self.set_text(field, directory);
+        }
+        if let Some((_, number)) = path.store_log_position() {
+            self.set_number("number", number.get());
+        }
+    }
+    pub(super) fn writer(
+        &self,
+        store: coven_foundation::id_source::StoreId,
+    ) -> Result<coven_foundation::id_source::DeviceId, StorageError> {
+        if unsafe { self.0.recordType() }.to_string() != "CovenObject" {
+            return Err(
+                StorageFailure::Protocol.with_source("CloudKit returned an unpublished writer")
+            );
+        }
+        super::query::writer_id(&self.name(), &self.text("path")?, store)
+    }
     pub(super) fn metadata(&self) -> Result<StoredObject, StorageError> {
         objc2::rc::autoreleasepool(|_| unsafe {
             if self.0.recordType().to_string() != "CovenObject" {

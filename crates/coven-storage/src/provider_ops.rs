@@ -51,6 +51,15 @@ pub trait ProviderOps: Send + Sync {
     /// Consume native pages into the connection's checked listing. Drive selects
     /// its earliest copy before adding each object.
     async fn list(&self, listing: &mut ObjectListing) -> Result<(), StorageError>;
+    /// List immediate store-log writer identities, never the log contents.
+    /// CloudKit selects permanent entry-one records in its configured zone.
+    /// The default refuses the call without enumerating objects.
+    async fn list_writers(
+        &self,
+        _store: coven_foundation::id_source::StoreId,
+    ) -> Result<Vec<coven_foundation::id_source::DeviceId>, StorageError> {
+        Err(StorageFailure::Refused.with_source("native writer discovery unavailable"))
+    }
     /// Delete, accepting an already absent object.
     async fn delete(&self, path: &ObjectPath) -> Result<(), StorageError>;
     /// Grant account access, or return S3's console instructions.

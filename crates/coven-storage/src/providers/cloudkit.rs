@@ -4,6 +4,8 @@
 mod access;
 #[path = "cloudkit_native.rs"]
 mod native;
+#[path = "cloudkit_query.rs"]
+mod query;
 #[path = "cloudkit_record.rs"]
 mod record;
 #[path = "cloudkit_upload.rs"]
@@ -11,7 +13,7 @@ mod upload;
 #[path = "cloudkit_zone.rs"]
 mod zone;
 use crate::*;
-use coven_foundation::id_source::IdSourceRef;
+use coven_foundation::id_source::{DeviceId, IdSourceRef, StoreId};
 use objc2::{rc::Retained, AnyThread};
 use objc2_cloud_kit::{CKContainer, CKDatabase, CKRecordID, CKRecordSavePolicy, CKRecordZoneID};
 use objc2_foundation::NSString;
@@ -31,6 +33,8 @@ pub(crate) struct CloudKitStorage {
     files: std::sync::Arc<coven_foundation::files::AssetFiles>,
     owner: String,
     zone: String,
+    #[cfg(test)]
+    query_pages: tests::Pages,
 }
 impl CloudKitStorage {
     pub(crate) async fn new(config: StorageConfig, ids: IdSourceRef) -> Result<Self, StorageError> {
@@ -69,6 +73,8 @@ impl CloudKitStorage {
             container,
             database,
             ids,
+            #[cfg(test)]
+            query_pages: Default::default(),
             files: std::sync::Arc::new(
                 coven_foundation::files::AssetFiles::new()
                     .map_err(|error| StorageFailure::File.with_source(error))?,
@@ -98,8 +104,7 @@ impl CloudKitStorage {
     }
     fn object(&self, path: &ObjectPath, size: u64) -> Record {
         let mut record = Record::new("CovenObject", &self.record_id(record::record_name(path)));
-        record.set_text("path", path.as_str());
-        record.set_number("size", size);
+        record.set_object_fields(path, size);
         record
     }
     async fn save_bytes(
@@ -251,11 +256,15 @@ impl ProviderOps for CloudKitStorage {
     async fn list(&self, listing: &mut ObjectListing) -> Result<(), StorageError> {
         let mut cursor = None;
         loop {
+            let prefix = listing.prefix().clone();
             let request = native::query(
                 &self.database,
                 &self.zone_id(),
-                listing.prefix().clone(),
+                query::Selection::Objects(prefix.clone()),
                 cursor,
+                move |record| record.listed(&prefix),
+                #[cfg(test)]
+                self.query_pages.clone(),
             );
             let (records, next) = request.wait().await?;
             for object in records {
@@ -264,6 +273,31 @@ impl ProviderOps for CloudKitStorage {
             match next {
                 Some(next) => cursor = Some(next),
                 None => return Ok(()),
+            }
+        }
+    }
+    async fn list_writers(&self, store: StoreId) -> Result<Vec<DeviceId>, StorageError> {
+        let mut writers = std::collections::BTreeSet::new();
+        let mut cursor = None;
+        loop {
+            let request = native::query(
+                &self.database,
+                &self.zone_id(),
+                query::Selection::Writers(store),
+                cursor,
+                move |record| record.writer(store),
+                #[cfg(test)]
+                self.query_pages.clone(),
+            );
+            let (page, next) = request.wait().await?;
+            for writer in page {
+                if !writers.insert(writer) {
+                    return Err(StorageFailure::Protocol.with_source("CloudKit repeated a writer"));
+                }
+            }
+            match next {
+                Some(next) => cursor = Some(next),
+                None => return Ok(writers.into_iter().collect()),
             }
         }
     }
