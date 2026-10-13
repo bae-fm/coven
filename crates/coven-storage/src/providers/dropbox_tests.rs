@@ -26,11 +26,11 @@ struct BufferedUpload {
     closed: bool,
 }
 #[derive(Default)]
-struct Remote {
+pub(super) struct Remote {
     app_folder: bool,
     requests: usize,
     non_owner: bool,
-    missing_namespace: bool,
+    pub(super) missing_namespace: bool,
     mounted: BTreeSet<String>,
     mount_requests: usize,
     lose_mount_reply: bool,
@@ -39,7 +39,7 @@ struct Remote {
     groups: Vec<Value>,
     lose_remove_reply: bool,
     removal_job: Option<RemovalJob>,
-    objects: BTreeMap<String, Vec<u8>>,
+    pub(super) objects: BTreeMap<String, Vec<u8>>,
     revisions: BTreeMap<String, u64>,
     uploads: BTreeMap<String, BufferedUpload>,
     next_upload: u64,
@@ -50,15 +50,15 @@ struct Remote {
     refuse_share: bool,
     lose_update_reply: bool,
     range_reads: usize,
-    folders: BTreeSet<String>,
+    pub(super) folders: BTreeSet<String>,
     list_prefix: String,
 }
-fn file_metadata(path: &str, bytes: &[u8], state: &Remote) -> Value {
+pub(super) fn file_metadata(path: &str, bytes: &[u8], state: &Remote) -> Value {
     json!({".tag":"file", "path_lower":path, "size":bytes.len(), "id":format!("id:{path}"),
         "rev":state.revisions.get(path).copied().unwrap_or(1).to_string(),
         "server_modified":"2026-10-06T00:00:00Z", "client_modified":"2000-01-01T00:00:00Z"})
 }
-async fn endpoint(
+pub(super) async fn endpoint(
     State(state): State<Arc<Mutex<Remote>>>,
     uri: Uri,
     headers: HeaderMap,
@@ -422,7 +422,7 @@ async fn lost_completion_requires_byte_verification() {
     assert!(upload.is_complete());
     assert!(state.lock().unwrap().uploads.is_empty());
 }
-fn provider(url: &str) -> StorageConnection<DropboxStorage> {
+pub(super) fn provider(url: &str) -> StorageConnection<DropboxStorage> {
     let mut storage = DropboxStorage::new(
         StorageConfig::Dropbox {
             location: crate::DropboxLocation::SharedFolder {

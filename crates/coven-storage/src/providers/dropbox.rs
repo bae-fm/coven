@@ -334,63 +334,7 @@ impl ProviderOps for DropboxStorage {
         Ok(ObjectRead { metadata, bytes })
     }
     async fn list(&self, listing: &mut ObjectListing) -> Result<(), StorageError> {
-        let prefix = listing.prefix().clone();
-        let mut method = "files/list_folder";
-        let mut request = json!({"path":format!("/{}", prefix.store()),"recursive":true,"include_deleted":false,"limit":2000});
-        let mut seen = Pagination::new();
-        loop {
-            let value = match self.rpc(method, request).await {
-                Ok(value) => value,
-                Err(error)
-                    if method == "files/list_folder"
-                        && error.failure() == StorageFailure::NotFound =>
-                {
-                    self.check_root().await?;
-                    return Ok(());
-                }
-                Err(error) => return Err(error),
-            };
-            for entry in http::array(&value, "entries")? {
-                match http::string(entry, ".tag")? {
-                    "folder" => {
-                        crate::path::validate_directory(
-                            http::string(entry, "path_lower")?
-                                .strip_prefix('/')
-                                .ok_or(StorageFailure::InvalidPath)?,
-                        )?;
-                        continue;
-                    }
-                    "file" => {}
-                    _ => {
-                        return Err(StorageFailure::Protocol
-                            .with_source("unexpected Dropbox listing entry"))
-                    }
-                }
-                let path = ObjectPath::parse(
-                    http::string(entry, "path_lower")?
-                        .strip_prefix('/')
-                        .ok_or(StorageFailure::Protocol.with_source("Dropbox path outside root"))?,
-                )?;
-                if prefix.contains(&path) {
-                    let object = super::object_metadata::dropbox(&path, entry)?;
-                    listing.insert(object)?;
-                }
-            }
-            match value["has_more"].as_bool() {
-                Some(false) => break,
-                Some(true) => {}
-                None => {
-                    return Err(
-                        StorageFailure::Protocol.with_source("Dropbox omitted pagination state")
-                    )
-                }
-            }
-            let cursor = http::string(&value, "cursor")?;
-            seen.check(cursor)?;
-            method = "files/list_folder/continue";
-            request = json!({"cursor":cursor});
-        }
-        Ok(())
+        self.list_objects(listing).await
     }
     async fn delete(&self, path: &ObjectPath) -> Result<(), StorageError> {
         match self
@@ -625,6 +569,9 @@ impl ProviderOps for DropboxStorage {
         }
     }
 }
+
+#[path = "dropbox_listing.rs"]
+mod listing;
 
 #[cfg(test)]
 #[path = "dropbox_tests.rs"]
