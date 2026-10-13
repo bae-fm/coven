@@ -64,26 +64,25 @@ impl Database {
                         return Err(DbError::DamagedDatabase);
                     }
                 }
-                let previous = crate::pending::read::<P>(writer)?
+                let previous: Vec<_> = crate::pending::read::<P>(writer)?
                     .into_iter()
                     .filter(|r| r.reported_by() != inner.access.device)
-                    .map(|r| serde_json::to_vec(&r).map_err(DbError::PendingEncoding))
+                    .collect();
+                let previous_values = previous
+                    .iter()
+                    .map(|r| serde_json::to_vec(r).map_err(DbError::PendingEncoding))
                     .collect::<Result<std::collections::BTreeSet<_>, _>>()?;
                 let next = reports
                     .iter()
                     .map(|r| serde_json::to_vec(r).map_err(DbError::PendingEncoding))
                     .collect::<Result<std::collections::BTreeSet<_>, _>>()?;
-                if previous == next {
+                if previous_values == next {
                     return Ok(());
                 }
                 writer.pending_transaction(|db| {
-                    db.pending_change(|| {
-                        db.internal_execute(
-                            "DELETE FROM _coven_pending WHERE reporter!=?1",
-                            [inner.access.device.0.to_be_bytes().as_slice()],
-                        )?;
-                        Ok(())
-                    })?;
+                    for report in previous {
+                        crate::pending::clear(db, report.subject(), report.reported_by())?;
+                    }
                     for report in reports {
                         crate::pending::save(db, &report)?;
                     }

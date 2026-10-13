@@ -15,9 +15,11 @@ use coven_foundation::id_source::DeviceId;
 use coven_merge::{Audience, ColumnValue, WriteId};
 
 const COLUMNS: &str = "SELECT c.table_name,c.column_name FROM _coven_columns c
-    WHERE EXISTS (SELECT 1 FROM _coven_cells v JOIN _coven_rows r ON r.id=v.row_id
-                  WHERE v.column_id=c.id AND r.audience=?1)
-       OR EXISTS (SELECT 1 FROM _coven_lost l WHERE l.column_id=c.id AND l.audience=?1)";
+    WHERE c.id IN (
+        SELECT v.column_id FROM _coven_rows r JOIN _coven_cells v ON v.row_id=r.id
+        WHERE r.audience=?1
+        UNION SELECT column_id FROM _coven_lost
+        WHERE audience=?1 AND column_id IS NOT NULL)";
 
 /// A snapshot failed to read, encode or reach its plaintext consumer.
 #[derive(Debug, thiserror::Error)]

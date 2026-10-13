@@ -12,6 +12,10 @@
 //! by its audience parts' row-frame streams. Its first attempt fixes the format
 //! and key ids in `sealing_keys`, encoded as the D9 write prefix. A queued store-log
 //! entry keeps its format in `record`'s frame prefix. No ciphertext is kept for either.
+//! `_coven_uploads` retains its rowid for queue order and incremental BLOB reads.
+//! Cell keys start with the row; column-wide cell edits occur only in migrations.
+//! Write-id indexes serve SQLite's incoming foreign-key checks on INSERT with
+//! RETURNING, which EXPLAIN QUERY PLAN includes alongside explicit lookups.
 
 pub(crate) const VERSION: u32 = 1;
 pub(crate) const CACHE_HEADER: i64 = -1;
@@ -39,7 +43,6 @@ macro_rules! coven_tables {
                 PRIMARY KEY(subject,reporter)
             ) STRICT, WITHOUT ROWID;
             CREATE INDEX _coven_pending_object ON _coven_pending(object,reporter);
-            CREATE INDEX _coven_pending_reporter ON _coven_pending(reporter);
             CREATE UNIQUE INDEX _coven_pending_operation ON _coven_pending(operation) WHERE operation IS NOT NULL;
         ");
         $visit!(_coven_store_log, "
@@ -91,7 +94,7 @@ macro_rules! coven_tables {
                 CHECK((before_device IS NULL)=(before_number IS NULL)),
                 FOREIGN KEY(before_device,before_number) REFERENCES _coven_store_log_uploads(device,number)
             ) STRICT, WITHOUT ROWID;
-            CREATE INDEX _coven_key_uploads_before ON _coven_key_uploads(before_device,before_number);
+            CREATE INDEX _coven_key_uploads_before ON _coven_key_uploads(before_device,before_number) WHERE before_device IS NOT NULL;
         ");
         $visit!(_coven_members, "
             CREATE TABLE _coven_members (
@@ -109,6 +112,7 @@ macro_rules! coven_tables {
                 name TEXT NOT NULL,
                 removed INTEGER NOT NULL CHECK(removed IN (0,1))
             ) STRICT, WITHOUT ROWID;
+            CREATE INDEX _coven_devices_member ON _coven_devices(member);
         ");
         $visit!(_coven_circles, "
             CREATE TABLE _coven_circles (
@@ -131,6 +135,7 @@ macro_rules! coven_tables {
                 member BLOB NOT NULL REFERENCES _coven_members(member),
                 PRIMARY KEY(circle,member)
             ) STRICT, WITHOUT ROWID;
+            CREATE INDEX _coven_circle_members_member ON _coven_circle_members(member);
         ");
         $visit!(_coven_store, "
             CREATE TABLE _coven_store (
@@ -231,15 +236,16 @@ macro_rules! coven_tables {
                 UNIQUE(table_name, key, audience, generation)
             ) STRICT;
             CREATE INDEX _coven_rows_audience ON _coven_rows(audience,table_name,key,generation);
+            CREATE INDEX _coven_rows_write ON _coven_rows(write_id);
         ");
         $visit!(_coven_cells, "
             CREATE TABLE _coven_cells (
                 column_id INTEGER NOT NULL REFERENCES _coven_columns(id),
                 row_id INTEGER NOT NULL REFERENCES _coven_rows(id),
                 write_id INTEGER NOT NULL REFERENCES _coven_writes(id),
-                PRIMARY KEY(column_id, row_id)
-            ) STRICT;
-            CREATE INDEX _coven_cells_row ON _coven_cells(row_id,column_id);
+                PRIMARY KEY(row_id, column_id)
+            ) STRICT, WITHOUT ROWID;
+            CREATE INDEX _coven_cells_write ON _coven_cells(write_id);
         ");
         $visit!(_coven_foreign_keys, "
             CREATE TABLE _coven_foreign_keys (
@@ -254,7 +260,7 @@ macro_rules! coven_tables {
                 column_id INTEGER NOT NULL,
                 row_id INTEGER NOT NULL,
                 value ANY,
-                PRIMARY KEY(column_id,row_id),
+                PRIMARY KEY(row_id,column_id),
                 FOREIGN KEY(column_id,row_id) REFERENCES _coven_cells(column_id,row_id) ON DELETE CASCADE ON UPDATE CASCADE
             ) STRICT, WITHOUT ROWID;
         ");
@@ -307,7 +313,7 @@ macro_rules! coven_tables {
                 CHECK((replacement_kind='write') = (column_id IS NOT NULL)),
                 CHECK(replacement_kind!='excluded' OR retired=1)
             ) STRICT;
-            CREATE INDEX _coven_lost_row ON _coven_lost(table_name,key,audience,generation,column_id);
+            CREATE INDEX _coven_lost_row ON _coven_lost(audience,table_name,key,generation,column_id);
             CREATE UNIQUE INDEX _coven_lost_live_cell ON _coven_lost(table_name,key,audience,column_id,set_by) WHERE retired=0 AND replacement_kind='write';
             CREATE INDEX _coven_lost_removed ON _coven_lost(table_name,key,audience) WHERE retired=0 AND replacement_kind='rules';
             CREATE INDEX _coven_lost_column ON _coven_lost(column_id);
@@ -346,7 +352,7 @@ macro_rules! coven_tables {
             CREATE TABLE _coven_file_removals (
                 path TEXT NOT NULL,
                 area TEXT NOT NULL DEFAULT 'files' CHECK(area IN ('files','cache')),
-                PRIMARY KEY(area,path)
+                PRIMARY KEY(path,area)
             ) STRICT, WITHOUT ROWID;
         ");
         $visit!(_coven_device_files, "
@@ -365,7 +371,8 @@ macro_rules! coven_tables {
                 access_key_id TEXT PRIMARY KEY NOT NULL,
                 member BLOB,
                 confirmed INTEGER NOT NULL DEFAULT 0 CHECK(confirmed IN (0,1))
-            );
+            ) WITHOUT ROWID;
+            CREATE INDEX _coven_access_keys_unconfirmed ON _coven_access_keys_to_delete(confirmed) WHERE confirmed=0;
         ");
         $visit!(_coven_file_uploads, "
             CREATE TABLE _coven_file_uploads (
@@ -416,6 +423,7 @@ macro_rules! coven_tables {
                 PRIMARY KEY(namespace,file_id,chunk)
             ) STRICT, WITHOUT ROWID;
             CREATE INDEX _coven_cache_lru ON _coven_cache(namespace,pinned,last_read);
+            CREATE INDEX _coven_cache_recency ON _coven_cache(last_read);
         ");
         $visit!(_coven_cache_budgets, "
             CREATE TABLE _coven_cache_budgets (
@@ -431,6 +439,7 @@ macro_rules! coven_tables {
                 data BLOB NOT NULL,
                 started_by TEXT NOT NULL
             );
+            CREATE INDEX _coven_operations_kind ON _coven_operations(kind);
         ");
     };
 }
