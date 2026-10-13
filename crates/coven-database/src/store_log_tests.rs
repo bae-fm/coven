@@ -482,7 +482,7 @@ async fn stale_results_and_changed_entry_bytes_cannot_replace_the_applied_set() 
         Err(DbError::StoreLogEntryChanged(id)) if id == first.position
     ));
     let mut changed_time = checked(first.clone());
-    changed_time.stored_at += Duration::from_nanos(1);
+    changed_time.stored_at += Duration::from_millis(1);
     assert!(matches!(
         db.apply_store_log::<PendingRecord>(changed_time, initial.clone()).await,
         Err(DbError::StoreLogEntryChanged(id)) if id == first.position
@@ -570,7 +570,7 @@ async fn late_verdict_and_first_publication_commit_together_and_cannot_be_revers
         Err(DbError::StoreLogEntryChanged(_))
     ));
     let mut changed = late;
-    changed.stored_at += Duration::from_nanos(1);
+    changed.stored_at += Duration::from_millis(1);
     assert!(matches!(
         db.apply_store_log::<PendingRecord>(changed, result).await,
         Err(DbError::StoreLogEntryChanged(_))

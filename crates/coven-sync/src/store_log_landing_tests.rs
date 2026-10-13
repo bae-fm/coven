@@ -97,7 +97,7 @@ async fn stale_registration_is_consumed_after_an_unknown_devices_entry() {
         })
         .await
         .unwrap();
-    clock.set(UNIX_EPOCH + Duration::from_secs(31 * 86400) + Duration::from_nanos(1));
+    clock.set(UNIX_EPOCH + Duration::from_secs(31 * 86400) + Duration::from_millis(1));
     b.sync().await;
     let log = b.log().await;
     assert!(!log.replay.state.devices.contains_key(&DeviceId(2)));
@@ -638,7 +638,7 @@ async fn retained_publication_time_survives_absence_and_refuses_a_changed_listin
         .await
         .unwrap();
     assert_eq!(super::publication_times(&log, &listed).unwrap(), retained);
-    listed[0].stored_at += Duration::from_nanos(1);
+    listed[0].stored_at += Duration::from_millis(1);
     let error = super::publication_times(&log, &listed).unwrap_err();
     let SyncError::Failed {
         failure: crate::LocalFailure::Database,
