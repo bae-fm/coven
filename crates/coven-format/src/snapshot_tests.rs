@@ -170,6 +170,34 @@ fn empty_snapshot_requires_an_exact_end_frame() {
     reader.frame(&end, &oracle).unwrap();
     reader.finish().unwrap();
 }
+
+#[test]
+fn eof_before_the_end_marker_is_truncation_at_every_record_boundary() {
+    let header = test_utils::snapshot_header();
+    let frames = test_utils::snapshot_frames();
+    let mut reader =
+        SnapshotDecoder::start(&frames[0], &test_utils::snapshot_prefix(&header)).unwrap();
+    assert_eq!(reader.finish(), Err(Error::Truncated));
+    for frame in &frames[1..frames.len() - 1] {
+        reader.frame(frame, &test_utils::oracle()).unwrap();
+        assert_eq!(reader.finish(), Err(Error::Truncated));
+    }
+    reader
+        .frame(frames.last().unwrap(), &test_utils::oracle())
+        .unwrap();
+    assert_eq!(reader.finish(), Ok(()));
+
+    let mut empty = header;
+    empty.counts = [0; 5];
+    let (mut writer, first) = SnapshotEncoder::start(empty).unwrap();
+    let mut reader =
+        SnapshotDecoder::start(&first, &test_utils::snapshot_prefix(writer.header())).unwrap();
+    assert_eq!(reader.finish(), Err(Error::Truncated));
+    reader
+        .frame(&writer.finish().unwrap(), &test_utils::oracle())
+        .unwrap();
+    assert_eq!(reader.finish(), Ok(()));
+}
 #[test]
 fn synced_rows_use_merges_written_reference_validation() {
     let circle = Audience::Circle(CircleId(Uuid::from_bytes([1; 16])));

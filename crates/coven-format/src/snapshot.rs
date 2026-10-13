@@ -309,7 +309,11 @@ impl SnapshotDecoder {
     }
     /// Refuse truncation, including EOF between records without an end marker.
     pub fn finish(&self) -> Result<(), Error> {
-        require(self.0.ended, "snapshot end marker", Rule::SnapshotSequence)
+        if self.0.ended {
+            Ok(())
+        } else {
+            Err(Error::Truncated)
+        }
     }
 }
 
