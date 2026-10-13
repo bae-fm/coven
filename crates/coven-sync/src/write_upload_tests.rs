@@ -199,6 +199,7 @@ async fn write_publication_records_invalidated_session_before_returning_abort_fa
             budget: 64 * 1024 + 44,
             largest: AtomicUsize::new(0),
             conflict_on_finish: true,
+            cleanup_failure: std::sync::Mutex::new(None),
         }),
         devices[0].db.clone(),
         devices[0].custody.clone(),
@@ -262,6 +263,7 @@ async fn recorded_publication_saves_invalidated_session_on_finish_and_resume_fai
         budget: 64 * 1024 + 44,
         largest: AtomicUsize::new(0),
         conflict_on_finish: true,
+        cleanup_failure: std::sync::Mutex::new(None),
     };
     let path = ObjectPath::device_log(STORE_ID, DeviceId(1), std::num::NonZeroU64::MIN);
     let mut source = Source {
@@ -319,6 +321,7 @@ async fn occupied_publication_with_failed_cleanup_keeps_the_write_pending() {
             budget: 64 * 1024 + 44,
             largest: AtomicUsize::new(0),
             cleanup_failure: std::sync::Mutex::new(Some(call)),
+            conflict_on_finish: false,
         });
         devices[0].writes = DeviceLogSync::new(
             faulty.clone(),

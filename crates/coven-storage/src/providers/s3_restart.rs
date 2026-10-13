@@ -15,6 +15,6 @@ impl S3Storage {
         }
         // Retain the native identifiers until abort and temporary deletion both
         // succeed. No completion or copy may reuse this rejected publication.
-        gcs_upload::with_cleanup(Err(cause), self.abort_upload(session).await)
+        crate::transfer::with_cleanup(Err(cause), self.abort_upload(session).await)
     }
 }
