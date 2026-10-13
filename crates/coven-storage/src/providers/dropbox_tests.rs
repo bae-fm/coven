@@ -11,6 +11,11 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     sync::{Arc, Mutex},
 };
+
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
+#[path = "dropbox_live.rs"]
+mod live;
+
 struct RemovalJob {
     member: String,
     statuses: std::collections::VecDeque<Value>,
