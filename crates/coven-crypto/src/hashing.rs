@@ -64,7 +64,8 @@ impl FingerprintHasher {
     pub(crate) fn new(key: &[u8; 32]) -> Self {
         Self(crate::derivation::mac(key))
     }
-    /// Feed the next canonical bytes of rows, generations, writers or lost values.
+    /// Feed D11's root label, audience text and 32-byte agreement sum, in order,
+    /// without context length prefixes. The database computes the leaf sum.
     pub fn update(&mut self, bytes: &[u8]) {
         self.0.update(bytes);
     }

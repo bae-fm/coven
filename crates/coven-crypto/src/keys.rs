@@ -76,7 +76,7 @@ impl fmt::Debug for StoreKey {
     }
 }
 
-/// One circle's identified 32-byte key, replaced when someone leaves (§14.3).
+/// One circle's identified 32-byte key, introduced by creation or rotation (§11).
 /// Cloning supplies an independent unlocked snapshot to in-memory custody.
 #[derive(Clone, Debug)]
 pub struct CircleKey {
@@ -101,7 +101,7 @@ impl CircleKey {
         }
     }
 
-    /// The circle whose rows and files this key protects.
+    /// The circle whose rows this key protects; file keys travel inside those rows.
     pub fn circle(&self) -> CircleId {
         self.circle
     }
@@ -201,7 +201,7 @@ impl StoreKeyring {
         self.stores.keys().copied()
     }
 
-    /// All held keys for a circle, including its earlier membership epochs.
+    /// All held keys for a circle, including concurrent and historical rotations.
     pub fn circle_key_ids(&self, circle: CircleId) -> impl Iterator<Item = KeyId> + '_ {
         self.circles
             .keys()
