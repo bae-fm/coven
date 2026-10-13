@@ -10,7 +10,9 @@ pub(crate) const ONEDRIVE_PART_SIZE: usize = 24 * 320 * 1024;
 /// A create-once provider upload recorded by the caller's operation (§16.5, §18).
 /// Posted positions and clock objects cannot have recorded upload sessions.
 ///
-/// Record it before sending parts and after each confirmed part. After a crash,
+/// Record it before sending parts and after each call, including failed calls:
+/// a publication conflict invalidates the native session even if abort fails.
+/// After a crash,
 /// call `resume_upload` to discover bytes accepted before a reply was lost. The
 /// bytes of this value include an upload capability: keep them secret. Dropping
 /// a session never aborts it; explicit abort abandons its pending bytes.
@@ -69,6 +71,10 @@ pub(crate) enum SessionState {
         id: SecretText,
         token: SecretText,
         parts: Vec<S3Part>,
+    },
+    S3Restart {
+        id: SecretText,
+        token: SecretText,
     },
     GoogleDrive {
         url: SecretText,
@@ -186,6 +192,13 @@ impl UploadSession {
                     }
                 }
                 if confirmed != self.confirmed {
+                    return Err(StorageFailure::InvalidPart.into());
+                }
+            }
+            SessionState::S3Restart { id, token } if provider == CloudProvider::S3 => {
+                nonempty(id)?;
+                nonempty(token)?;
+                if self.confirmed != 0 {
                     return Err(StorageFailure::InvalidPart.into());
                 }
             }

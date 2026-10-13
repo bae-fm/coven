@@ -22,8 +22,9 @@ impl S3Storage {
     }
 
     pub(super) fn session_key(&self, session: &UploadSession) -> Result<String, StorageError> {
-        let SessionState::S3 { token, .. } = &session.state else {
-            return Err(StorageFailure::SessionMismatch.into());
+        let token = match &session.state {
+            SessionState::S3 { token, .. } | SessionState::S3Restart { token, .. } => token,
+            _ => return Err(StorageFailure::SessionMismatch.into()),
         };
         self.upload_key(&session.path, token)
     }
@@ -89,8 +90,23 @@ impl S3Storage {
                     .insert("x-goog-if-generation-match", "0");
             })
             .send()
-            .await
-            .map_err(s3_error);
+            .await;
+        let result = match result {
+            Err(error)
+                if matches!(
+                    error.code(),
+                    Some("ConditionalRequestConflict" | "OperationAborted")
+                ) =>
+            {
+                return self
+                    .require_restart(
+                        session,
+                        StorageFailure::SessionExpired.with_source(s3_error(error)),
+                    )
+                    .await;
+            }
+            result => result.map_err(s3_error),
+        };
         let result = match result {
             Ok(_) => Ok(()),
             Err(error) if error.failure() == StorageFailure::AlreadyExists => {

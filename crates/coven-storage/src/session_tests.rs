@@ -230,6 +230,31 @@ fn s3_recording_parts_agree_with_progress_and_provider_limits() {
     }
     UploadSession::decode(valid.encode().unwrap().as_bytes()).unwrap();
 }
+
+#[test]
+fn restarting_s3_session_keeps_only_cleanup_identifiers_and_zero_progress() {
+    let mut session = s3_recording();
+    session.state = SessionState::S3Restart {
+        id: SecretText::new("native-upload".into()),
+        token: SecretText::new("token".into()),
+    };
+    UploadSession::decode(session.encode().unwrap().as_bytes()).unwrap();
+    session.confirmed = 1;
+    assert_invalid_recording(&session);
+    session.confirmed = 0;
+    session.location = StorageConfig::Dropbox {
+        namespace_id: "namespace".into(),
+    };
+    assert_invalid_recording(&session);
+    session.location = s3_recording().location;
+    for (id, token) in [("", "token"), ("id", "")] {
+        session.state = SessionState::S3Restart {
+            id: SecretText::new(id.into()),
+            token: SecretText::new(token.into()),
+        };
+        assert_invalid_recording(&session);
+    }
+}
 #[test]
 fn session_urls_and_unknown_state_fields_are_refused() {
     let mut session = recording(

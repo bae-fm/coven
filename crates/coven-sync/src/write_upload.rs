@@ -5,7 +5,7 @@ use crate::SyncError;
 use coven_database::{DbError, UploadReadError};
 use coven_format::chunks::CHUNK_SIZE;
 use coven_merge::WriteId;
-use coven_storage::{StorageFailure, UploadSession};
+use coven_storage::{StorageError, StorageFailure, UploadSession};
 use tokio::sync::mpsc;
 
 impl DeviceLogSync {
@@ -41,10 +41,22 @@ impl DeviceLogSync {
                 if session.path() != &path || session.total_bytes() != total {
                     return Err(StorageFailure::SessionMismatch.into());
                 }
-                match storage.resume_upload(&mut session).await {
+                let resumed = match storage.resume_upload(&mut session).await {
+                    Ok(()) => Ok(()),
+                    Err(error) => Err(self.record_upload_failure(write, &session, error).await),
+                };
+                match resumed {
                     Ok(()) => (),
-                    Err(error) if error.failure() == StorageFailure::AlreadyExists => return Ok(()),
-                    Err(error) if error.failure() == StorageFailure::SessionExpired => {
+                    Err(SyncError::Storage(error))
+                        if error.failure() == StorageFailure::AlreadyExists
+                            && !matches!(error, StorageError::Cleanup { .. }) =>
+                    {
+                        return Ok(())
+                    }
+                    Err(SyncError::Storage(error))
+                        if error.failure() == StorageFailure::SessionExpired
+                            && !matches!(error, StorageError::Cleanup { .. }) =>
+                    {
                         session = match storage.restart_upload(&session).await {
                             Ok(session) => session,
                             Err(error) if error.failure() == StorageFailure::AlreadyExists => {
@@ -53,7 +65,7 @@ impl DeviceLogSync {
                             Err(error) => return Err(error.into()),
                         };
                     }
-                    Err(error) => return Err(error.into()),
+                    Err(error) => return Err(error),
                 }
                 Some(session)
             }
@@ -106,7 +118,11 @@ impl DeviceLogSync {
                             || session.confirmed_bytes() + part.len() as u64 == total
                         {
                             let previous = session.confirmed_bytes();
-                            storage.upload_part(session, &part).await?;
+                            if let Err(error) = storage.upload_part(session, &part).await {
+                                return Err(self
+                                    .record_upload_failure(write, session, error)
+                                    .await);
+                            }
                             if session.confirmed_bytes() <= previous {
                                 return Err(StorageFailure::Protocol
                                     .with_source("write upload did not advance")
@@ -125,7 +141,9 @@ impl DeviceLogSync {
                 if session.confirmed_bytes() != total || !part.is_empty() {
                     return Err(StorageFailure::InvalidPart.into());
                 }
-                storage.finish_upload(session).await?;
+                if let Err(error) = storage.finish_upload(session).await {
+                    return Err(self.record_upload_failure(write, session, error).await);
+                }
             } else {
                 let mut bytes = Vec::with_capacity(total as usize);
                 while let Some(piece) = receiver.recv().await {
@@ -148,10 +166,38 @@ impl DeviceLogSync {
             }
         }
         match sent {
-            Err(SyncError::Storage(error)) if error.failure() == StorageFailure::AlreadyExists => {
+            Err(SyncError::Storage(error))
+                if error.failure() == StorageFailure::AlreadyExists
+                    && !matches!(error, StorageError::Cleanup { .. }) =>
+            {
                 Ok(())
             }
             result => result,
+        }
+    }
+
+    async fn record_upload_failure(
+        &self,
+        write: WriteId,
+        session: &UploadSession,
+        operation: StorageError,
+    ) -> SyncError {
+        let recorded = async {
+            self.database
+                .keep_write_upload_session(write, session.encode()?.as_bytes().to_vec())
+                .await?;
+            Ok::<_, SyncError>(())
+        }
+        .await;
+        match recorded {
+            Ok(()) => operation.into(),
+            Err(cleanup) => SyncError::Failed {
+                failure: crate::LocalFailure::Database,
+                source: std::sync::Arc::new(SyncError::Cleanup {
+                    operation: Box::new(operation.into()),
+                    cleanup: Box::new(cleanup),
+                }),
+            },
         }
     }
 }

@@ -540,7 +540,7 @@ the file's ranges under `F`.
     the session marker distinguishes this session's lost successful reply
     from another object's occupation. Successful and definitively refused copies
     delete the temporary before reporting completion or the refusal.
-    Network failures and retryable responses retain it for the same session.
+    Network failures and throttling retain it for the same session.
     A failed deletion fails the call and retains the recording for retry;
     an operation error and deletion error are both preserved.
   - Aborting a GCS session aborts its native multipart upload and deletes its
@@ -550,6 +550,16 @@ the file's ranges under `F`.
     namespace but are excluded from published-object listings. GCS uses
     `ListObjectsV2` with the requested prefix, continuation tokens and delimiter
     as AWS does; published objects retain the server's `LastModified`.
+  - AWS `ConditionalRequestConflict` and GCS `OperationAborted` indicate a
+    concurrent mutation, never throttling.
+    A single-request PUT can retry its fixed bytes. At AWS multipart completion
+    or GCS copy publication, it invalidates the recorded session instead:
+    discard its part list, abort the native upload and delete any GCS temporary.
+    Preserve both causes if abort or deletion also fails. Record the invalidated
+    session even on failure; it retains only the identifiers needed for cleanup
+    and cannot complete or copy again. A replacement session starts only after
+    cleanup succeeds, at offset zero with the same path, size and fixed bytes.
+    An occupied destination still requires complete-byte comparison (§10).
   - Unknown S3-compatible endpoints use AWS's headers and multipart protocol.
     Setup refuses them unless every provider check below passes, including
     `CreateOnce`. Accepting a second create is a protocol failure, even if the

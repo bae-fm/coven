@@ -250,6 +250,7 @@ impl PendingReason {
             | Self::Storage {
                 failure:
                     StorageFailure::Network
+                    | StorageFailure::Conflict
                     | StorageFailure::RateLimited
                     | StorageFailure::NotFound
                     | StorageFailure::SessionExpired,

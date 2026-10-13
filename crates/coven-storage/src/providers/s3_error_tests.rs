@@ -5,7 +5,7 @@ use aws_sdk_s3::{
 };
 use std::error::Error;
 
-fn sdk_error<E: Error + Send + Sync + 'static>(error: &StorageError) -> &SdkError<E> {
+pub(super) fn sdk_error<E: Error + Send + Sync + 'static>(error: &StorageError) -> &SdkError<E> {
     assert!(matches!(
         error,
         StorageError::Provider {
@@ -24,9 +24,13 @@ fn sdk_error<E: Error + Send + Sync + 'static>(error: &StorageError) -> &SdkErro
 
 #[tokio::test]
 async fn timeout_and_storage_full_responses_preserve_their_classification_and_cause() {
-    use StorageFailure::{Network, PermissionDenied, QuotaExceeded, RateLimited, Refused};
+    use StorageFailure::{
+        Conflict, Network, PermissionDenied, QuotaExceeded, RateLimited, Refused,
+    };
     let cases = [
         ("RequestTimeout", 400, Network, true),
+        ("ConditionalRequestConflict", 409, Conflict, true),
+        ("OperationAborted", 409, Conflict, true),
         ("OverQuota", 403, QuotaExceeded, false),
         ("QuotaExceeded", 403, QuotaExceeded, false),
         ("InsufficientStorage", 507, QuotaExceeded, false),

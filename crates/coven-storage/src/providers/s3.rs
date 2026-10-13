@@ -25,6 +25,8 @@ mod gcs_signing;
 mod gcs_upload;
 #[path = "s3_metadata.rs"]
 mod metadata;
+#[path = "s3_restart.rs"]
+mod restart;
 
 /// S3 and compatible endpoints, using only object operations and manually supplied keys.
 pub(crate) struct S3Storage {
@@ -209,7 +211,7 @@ impl S3Storage {
     }
     fn upload_id<'a>(&self, session: &'a UploadSession) -> Result<&'a str, StorageError> {
         match &session.state {
-            SessionState::S3 { id, .. } => Ok(id.as_str()),
+            SessionState::S3 { id, .. } | SessionState::S3Restart { id, .. } => Ok(id.as_str()),
             _ => Err(StorageFailure::SessionMismatch.into()),
         }
     }
@@ -496,6 +498,11 @@ impl ProviderOps for S3Storage {
         })
     }
     async fn resume_upload(&self, session: &mut UploadSession) -> Result<(), StorageError> {
+        if matches!(session.state, SessionState::S3Restart { .. }) {
+            return self
+                .require_restart(session, StorageFailure::SessionExpired.into())
+                .await;
+        }
         let id = SecretText::new(self.upload_id(session)?.to_owned());
         let mut marker = None;
         let mut seen = Pagination::new();
@@ -569,6 +576,9 @@ impl ProviderOps for S3Storage {
         bytes: &[u8],
         end: u64,
     ) -> Result<(), StorageError> {
+        if matches!(session.state, SessionState::S3Restart { .. }) {
+            return Err(StorageFailure::SessionExpired.into());
+        }
         let id = self.upload_id(session)?;
         let SessionState::S3 { parts, .. } = &session.state else {
             return Err(StorageFailure::SessionMismatch.into());
@@ -605,6 +615,11 @@ impl ProviderOps for S3Storage {
         Ok(())
     }
     async fn finish_upload(&self, session: &mut UploadSession) -> Result<(), StorageError> {
+        if matches!(session.state, SessionState::S3Restart { .. }) {
+            return self
+                .require_restart(session, StorageFailure::SessionExpired.into())
+                .await;
+        }
         if session.confirmed != session.total {
             return Err(StorageFailure::InvalidPart.into());
         }
@@ -646,6 +661,13 @@ impl ProviderOps for S3Storage {
             }
             Err(error) if matches!(error.code(), Some("NoSuchUpload" | "PreconditionFailed")) => {
                 self.recover_completed_upload(session).await
+            }
+            Err(error) if error.code() == Some("ConditionalRequestConflict") => {
+                self.require_restart(
+                    session,
+                    StorageFailure::SessionExpired.with_source(s3_error(error)),
+                )
+                .await
             }
             Err(error) => Err(s3_error(error)),
         }

@@ -897,6 +897,9 @@ async fn provider_check_preserves_unrelated_contents() {
 #[path = "s3_error_tests.rs"]
 mod errors;
 
+#[path = "s3_restart_tests.rs"]
+mod restart;
+
 #[path = "s3_gcs_signing_tests.rs"]
 mod live;
 

@@ -4,7 +4,7 @@ use coven_storage::{ObjectPath, Storage, StorageError, StorageFailure, UploadSes
 
 /// Repeatable byte reads, durable session progress, and a caller's pause state.
 pub(crate) trait UploadSource: Send {
-    type Error: From<StorageError>;
+    type Error: From<StorageError> + std::error::Error + Send + Sync + 'static;
     fn read(
         &mut self,
         offset: u64,
@@ -34,10 +34,15 @@ pub(crate) async fn upload<S: UploadSource>(
             if session.is_at(&storage.config()) {
                 match storage.resume_upload(&mut session).await {
                     Ok(()) => (),
-                    Err(error) if error.failure() == StorageFailure::SessionExpired => {
+                    Err(error) => {
+                        let error = save_failure(source, session.clone(), error).await?;
+                        if error.failure() != StorageFailure::SessionExpired
+                            || matches!(error, StorageError::Cleanup { .. })
+                        {
+                            return Err(error.into());
+                        }
                         session = storage.restart_upload(&session).await?;
                     }
-                    Err(error) => return Err(error.into()),
                 }
             } else {
                 // A location move copies published objects, but provider sessions
@@ -62,15 +67,36 @@ pub(crate) async fn upload<S: UploadSource>(
         let offset = session.confirmed_bytes();
         let length = (session.part_size() as u64 - offset % session.part_size() as u64)
             .min(total - offset) as usize;
-        storage
+        if let Err(error) = storage
             .upload_part(&mut session, &source.read(offset, length).await?)
-            .await?;
+            .await
+        {
+            return Err(save_failure(source, session, error).await?.into());
+        }
         source.save(session.clone()).await?;
     }
     if !source.keep_going() {
         return Ok(false);
     }
-    storage.finish_upload(&mut session).await?;
+    if let Err(error) = storage.finish_upload(&mut session).await {
+        return Err(save_failure(source, session, error).await?.into());
+    }
     source.save(session).await?;
     Ok(true)
+}
+
+async fn save_failure<S: UploadSource>(
+    source: &mut S,
+    session: UploadSession,
+    operation: StorageError,
+) -> Result<StorageError, S::Error> {
+    match source.save(session).await {
+        Ok(()) => Ok(operation),
+        Err(error) => Err(StorageFailure::File
+            .with_source(StorageError::Cleanup {
+                operation: Box::new(operation),
+                cleanup: Box::new(StorageFailure::File.with_source(error)),
+            })
+            .into()),
+    }
 }

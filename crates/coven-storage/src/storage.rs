@@ -253,7 +253,9 @@ pub trait Storage: Send + Sync {
         path: &ObjectPath,
         total: u64,
     ) -> Result<UploadSession, StorageError>;
-    /// Begin a fresh recorded session after `resume_upload` reports `SessionExpired`.
+    /// Begin a fresh recorded session after resumption or publication reports
+    /// `SessionExpired`. A conflicted S3 session must be aborted first; failed
+    /// cleanup prevents a replacement from starting.
     /// The destination and total stay fixed; the caller records the returned value
     /// and supplies the retained encrypted bytes again, starting at offset zero.
     async fn restart_upload(&self, expired: &UploadSession) -> Result<UploadSession, StorageError> {
@@ -261,10 +263,17 @@ pub trait Storage: Send + Sync {
         if expired.is_complete() {
             return Err(StorageFailure::InvalidPart.into());
         }
+        if matches!(
+            expired.state,
+            crate::session::SessionState::S3Restart { .. }
+        ) {
+            self.abort_upload(expired).await?;
+        }
         self.begin_upload(expired.path(), expired.total_bytes())
             .await
     }
     /// Refresh a recorded session from the provider after interruption.
+    /// Persist the returned state even on failure, as with `finish_upload`.
     async fn resume_upload(&self, session: &mut UploadSession) -> Result<(), StorageError>;
     /// Send the next part, advancing the value only after confirmation. After
     /// a lost publication reply this verifies the stored bytes instead; see
@@ -275,6 +284,8 @@ pub trait Storage: Send + Sync {
         bytes: &[u8],
     ) -> Result<(), StorageError>;
     /// Publish all stored parts at the destination. A repeated completion is safe.
+    /// Persist the session even on failure. `SessionExpired` requires a fresh
+    /// session with the same bytes; a `Cleanup` error must not bypass failed abort.
     async fn finish_upload(&self, session: &mut UploadSession) -> Result<(), StorageError>;
     /// Explicitly abandon an upload. Dropping a recorded value does not abort it.
     /// Already closed or absent sessions succeed; published objects are preserved.

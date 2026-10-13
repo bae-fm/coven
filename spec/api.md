@@ -1622,6 +1622,9 @@ pub enum StorageFailure {
     NotFound,
     /// A create-once path is occupied.
     AlreadyExists,
+    /// A concurrent mutation defeated a conditional request; retry fixed bytes.
+    /// Invalidated multipart publication reports SessionExpired instead (§4).
+    Conflict,
     /// The bucket, folder or zone is absent.
     ContainerNotFound,
     /// The S3 endpoint or signing region is wrong.
@@ -1652,7 +1655,7 @@ pub enum StorageFailure {
     InvitationMismatch,
     /// The session belongs to another provider or location.
     SessionMismatch,
-    /// The provider no longer retains the recorded upload.
+    /// The recorded upload expired or a publication conflict invalidated it.
     SessionExpired,
     /// A part disagrees with the session's offset, size or alignment.
     InvalidPart,
@@ -1665,7 +1668,7 @@ pub enum StorageFailure {
     },
     /// Parsing recorded provider data failed.
     Encoding,
-    /// Persisting provider settings failed.
+    /// Persisting provider settings or upload progress failed.
     File,
     /// This installation has no member keys in custody.
     MemberKeysMissing,
@@ -1945,7 +1948,7 @@ pub enum Retry {
 impl PendingRecord {
     /// Automatic: missing objects, prerequisites, keys, pending provider/owner
     /// work, shared-account waits, invalid replaceable positions, and storage
-    /// Network/RateLimited/NotFound/SessionExpired.
+    /// Network/Conflict/RateLimited/NotFound/SessionExpired.
     /// AfterUpdate: Refused and UpdateRequired.
     /// Never: a dropped entry or write, or this device's removal.
     /// An operation whose attempt replay dropped is AppAction: an explicit

@@ -14,6 +14,8 @@ pub enum StorageFailure {
     NotFound,
     /// A create-once path is occupied.
     AlreadyExists,
+    /// A concurrent storage mutation defeated a conditional request.
+    Conflict,
     /// The bucket, folder or zone is absent.
     ContainerNotFound,
     /// The S3 endpoint or signing region is wrong.
@@ -40,7 +42,7 @@ pub enum StorageFailure {
     InvitationMismatch,
     /// The session belongs to another provider or location.
     SessionMismatch,
-    /// The provider no longer retains the recorded upload.
+    /// The recorded upload expired or a publication conflict invalidated it.
     SessionExpired,
     /// A part disagrees with the session's offset, size or alignment.
     InvalidPart,
@@ -53,7 +55,7 @@ pub enum StorageFailure {
     },
     /// Parsing recorded provider data failed.
     Encoding,
-    /// Persisting provider settings failed.
+    /// Persisting provider settings or upload progress failed.
     File,
     /// This installation has no member keys in custody.
     MemberKeysMissing,
@@ -91,7 +93,7 @@ pub enum StorageError {
         /// The original failure.
         #[source]
         operation: Box<StorageError>,
-        /// Failure removing the setup test object or unfinished upload.
+        /// Failure removing temporary data or recording the failed upload state.
         cleanup: Box<StorageError>,
     },
 }
@@ -106,11 +108,11 @@ impl StorageError {
         }
     }
 
-    /// Only transport interruptions and provider throttling invite automatic retry.
+    /// Transport interruptions, conditional conflicts and throttling invite retry.
     pub fn retryable(&self) -> bool {
         matches!(
             self.failure(),
-            StorageFailure::Network | StorageFailure::RateLimited
+            StorageFailure::Network | StorageFailure::Conflict | StorageFailure::RateLimited
         )
     }
 }

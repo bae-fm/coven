@@ -226,6 +226,12 @@ impl<P: ProviderOps + ?Sized> Storage for StorageConnection<P> {
             if expired.is_complete() {
                 return Err(StorageFailure::InvalidPart.into());
             }
+            if matches!(
+                expired.state,
+                crate::session::SessionState::S3Restart { .. }
+            ) {
+                self.abort_upload_checked(expired).await?;
+            }
             self.begin_upload_checked(expired.path(), expired.total_bytes())
                 .await
         }

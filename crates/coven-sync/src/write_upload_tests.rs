@@ -1,8 +1,8 @@
 use super::*;
 use async_trait::async_trait;
 use coven_storage::{
-    AccessGrant, ByteRange, MemberAccess, MemberRemoval, StorageConfig, StorageError, StoredObject,
-    UploadSession,
+    AccessGrant, ByteRange, MemberAccess, MemberRemoval, StorageConfig, StorageError,
+    StorageFailure, StoredObject, UploadSession,
 };
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -10,6 +10,7 @@ struct BudgetStorage {
     provider: Arc<MemoryStorage>,
     budget: usize,
     largest: AtomicUsize,
+    conflict_on_finish: bool,
 }
 impl BudgetStorage {
     fn check(&self, length: usize) {
@@ -69,6 +70,9 @@ impl Storage for BudgetStorage {
         self.provider.begin_upload(path, total).await
     }
     async fn resume_upload(&self, session: &mut UploadSession) -> Result<(), StorageError> {
+        if self.conflict_on_finish {
+            return Err(conflict(session));
+        }
         self.provider.resume_upload(session).await
     }
     async fn upload_part(
@@ -80,6 +84,9 @@ impl Storage for BudgetStorage {
         self.provider.upload_part(session, bytes).await
     }
     async fn finish_upload(&self, session: &mut UploadSession) -> Result<(), StorageError> {
+        if self.conflict_on_finish {
+            return Err(conflict(session));
+        }
         self.provider.finish_upload(session).await
     }
     async fn abort_upload(&self, session: &UploadSession) -> Result<(), StorageError> {
@@ -96,6 +103,7 @@ async fn a_write_exceeds_the_transfer_budget_on_upload_and_download() {
         provider: storage.clone(),
         budget: BUDGET,
         largest: AtomicUsize::new(0),
+        conflict_on_finish: false,
     });
     for device in &mut devices {
         device.writes = DeviceLogSync::new(
@@ -139,6 +147,128 @@ async fn a_write_exceeds_the_transfer_budget_on_upload_and_download() {
             .unwrap(),
         (512, 512 * 16 * 1024)
     );
+}
+
+// Inject the provider's failed-call state change; the real upload consumers
+// must record it before returning either failure to their initiator.
+fn conflict(session: &mut UploadSession) -> StorageError {
+    let mut recording = serde_json::to_value(&*session).unwrap();
+    recording["confirmed"] = serde_json::json!(0);
+    recording["part_size"] = serde_json::json!(8 * 1024 * 1024);
+    recording["state"] = serde_json::json!({"S3Restart": {"id": "upload", "token": "token"}});
+    *session = UploadSession::decode(&serde_json::to_vec(&recording).unwrap()).unwrap();
+    StorageError::Cleanup {
+        operation: Box::new(StorageFailure::SessionExpired.into()),
+        cleanup: Box::new(StorageFailure::PermissionDenied.into()),
+    }
+}
+
+fn assert_restart_recorded(session: &UploadSession) {
+    assert_eq!(session.confirmed_bytes(), 0);
+    let value = serde_json::to_value(session).unwrap();
+    assert!(value["state"].get("S3Restart").is_some());
+}
+
+#[tokio::test]
+async fn write_publication_records_invalidated_session_before_returning_abort_failure() {
+    let storage = storage();
+    let mut devices = group(storage.clone(), 1).await;
+    devices[0].writes = DeviceLogSync::new(
+        Arc::new(BudgetStorage {
+            provider: storage,
+            budget: 64 * 1024 + 44,
+            largest: AtomicUsize::new(0),
+            conflict_on_finish: true,
+        }),
+        devices[0].db.clone(),
+        devices[0].custody.clone(),
+        devices[0].identity.clone(),
+    );
+    devices[0]
+        .db
+        .write(|sql| {
+            sql.execute(
+                "INSERT INTO notes VALUES('one','title',?1)",
+                ["x".repeat(100_000)],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let write = WriteId {
+        device: DeviceId(1),
+        number: 1,
+    };
+    for _ in 0..2 {
+        assert!(matches!(
+            devices[0].writes.upload_writes().await,
+            Err(SyncError::Storage(StorageError::Cleanup { .. }))
+        ));
+        let recording = devices[0]
+            .db
+            .write_upload_session(write)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_restart_recorded(&UploadSession::decode(&recording).unwrap());
+    }
+}
+
+#[tokio::test]
+async fn recorded_publication_saves_invalidated_session_on_finish_and_resume_failure() {
+    use crate::recorded_upload::{upload, UploadSource};
+    struct Source {
+        saved: Option<UploadSession>,
+        fail_save: bool,
+    }
+    impl UploadSource for Source {
+        type Error = StorageError;
+        async fn read(&mut self, _offset: u64, length: usize) -> Result<Vec<u8>, Self::Error> {
+            Ok(vec![7; length])
+        }
+        async fn save(&mut self, session: UploadSession) -> Result<(), Self::Error> {
+            if self.fail_save {
+                return Err(StorageFailure::File.into());
+            }
+            self.saved = Some(session);
+            Ok(())
+        }
+        fn keep_going(&self) -> bool {
+            true
+        }
+    }
+    let storage = BudgetStorage {
+        provider: storage(),
+        budget: 64 * 1024 + 44,
+        largest: AtomicUsize::new(0),
+        conflict_on_finish: true,
+    };
+    let path = ObjectPath::device_log(STORE_ID, DeviceId(1), std::num::NonZeroU64::MIN);
+    let mut source = Source {
+        saved: None,
+        fail_save: false,
+    };
+    for _ in 0..2 {
+        let recorded = source.saved.take();
+        let error = upload(&storage, &path, 4, recorded, &mut source)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, StorageError::Cleanup { operation, cleanup }
+            if operation.failure() == StorageFailure::SessionExpired && cleanup.failure() == StorageFailure::PermissionDenied));
+        assert_restart_recorded(source.saved.as_ref().unwrap());
+    }
+    source.fail_save = true;
+    let recorded = source.saved.take();
+    let error = upload(&storage, &path, 4, recorded, &mut source)
+        .await
+        .unwrap_err();
+    assert_eq!(error.failure(), StorageFailure::File);
+    let error = std::error::Error::source(&error)
+        .unwrap()
+        .downcast_ref::<StorageError>()
+        .unwrap();
+    assert!(matches!(error, StorageError::Cleanup { operation, cleanup }
+        if matches!(**operation, StorageError::Cleanup { .. }) && cleanup.failure() == StorageFailure::File));
 }
 
 #[tokio::test]
