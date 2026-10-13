@@ -645,10 +645,11 @@ the file's ranges under `F`.
   - Services are const `S3Profile` entries in the adapter's
     [`s3_profile.rs`](../crates/coven-storage/src/providers/s3_profile.rs).
     Each profile selects behaviors implemented once: endpoint host or host
-    suffix, AWS SigV4 or Google HMAC signing, single PUT create-once condition,
-    conditional multipart completion or copy publication with its destination
-    condition, native multipart timestamp (completion or start), stated checksum
-    scope or ignoring unstated scope, listing V2 or V1, ETag or generation
+    suffix (none for a self-hosted service), AWS SigV4 or Google HMAC signing,
+    single PUT create-once condition, conditional multipart completion or copy
+    publication with its destination condition, native multipart timestamp
+    (completion or start), stated checksum scope, ignoring unstated scope or no
+    checksum returned, listing V2 or V1, ETag or generation
     revision, and the date and suite version of its last certification. Bucket
     checks, response-header translation and checksum requests are also profile
     fields. A service-specific operation may be a plain function pointer in
@@ -667,18 +668,26 @@ the file's ranges under `F`.
     Catalogued hosts require `https`; other endpoints may use plain `http`, as
     a self-hosted server on the same machine or a private network can. A
     contradicting name or a plain-`http` catalogued host fails validation with
-    `InvalidConfiguration` before any request.
-  - Certification suite version 1 passed GCS and R2 on **2026-10-13**. AWS is
+    `InvalidConfiguration` before any request. The self-hosted profiles are
+    **Garage**, **RustFS** and **SeaweedFS**; no hostname selects them.
+  - Certification suite version 1 passed GCS and R2 on **2026-10-13**, and
+    suite version 2 passed RustFS and SeaweedFS the same day. AWS is
     **uncertified**: there is no live account, and its native multipart start
-    time remains a known publication gap. The table's selected behaviors are:
+    time remains a known publication gap. Garage is **uncertified** (below).
+    The table's selected behaviors are:
 
     | Profile | Signing | Single PUT | Multipart publication | Native multipart time | Checksums | Listing | Revision | Bucket check |
     | --- | --- | --- | --- | --- | --- | --- | --- | --- |
     | AWS (uncertified) | AWS SigV4 | `If-None-Match: *` | Conditional completion | Start | Scope stated | V2 | ETag | HEAD |
     | GCS (certified) | Google HMAC | `x-goog-if-generation-match: 0` | Copy with the same generation condition | Completion | Scope stated | V2 | Generation | Zero-entry LIST |
     | R2 (certified) | AWS SigV4 | `If-None-Match: *` | Conditional completion | Completion | Unstated scope ignored | V2 | ETag | HEAD |
+    | Garage (uncertified) | AWS SigV4 | `If-None-Match: *`, not enforced | Conditional completion, not enforced | Start | Scope stated | V2 | ETag | HEAD |
+    | RustFS (certified) | AWS SigV4 | `If-None-Match: *` | Conditional completion | Completion | None returned | V2 | ETag | HEAD |
+    | SeaweedFS (certified) | AWS SigV4 | `If-None-Match: *` | Conditional completion | Completion | None returned | V2 | ETag | HEAD |
 
-    AWS and R2 request checksums and consume S3 response headers. GCS supplies
+    AWS, R2 and Garage request checksums; every profile but GCS consumes S3
+    response headers. RustFS and SeaweedFS are not asked for checksums they
+    never return. GCS supplies
     its hashes without a checksum-mode request; the adapter translates Google
     headers. The ETag revision behavior uses native versions or `coven-revision`
     metadata for replaceable objects, as specified below.
@@ -692,7 +701,12 @@ the file's ranges under `F`.
     copy behavior; its destination condition must refuse an occupied name and
     preserve its bytes and time. The candidate then runs the adapter's full
     live contracts, including setup, reads, ranges, resumption, replacement
-    revisions and listing lag. Each §4 requirement prints PASS or FAIL, and
+    revisions and listing lag. A service that returns no checksum on any probe,
+    even with checksum mode, is recorded as returning none: §4 permits a missing
+    checksum, so suite version 2 accepts that observation where version 1
+    failed detection. Detection runs every probe even after a behavior is
+    missing, prints each missing behavior, and prints the detected entry as
+    uncertified. Each §4 requirement prints PASS or FAIL, and
     cleanup removes the run's objects, temporaries and uploads even after a
     failed assertion. The suite prints a Rust profile entry with the passing
     date and suite version; commit it only after every check passes, alongside
@@ -766,6 +780,16 @@ the file's ranges under `F`.
     document `cf-copy-destination-if-none-match`. The R2 profile does not use
     that extension because native conditional completion passed. Profile values
     come from the live suite, rather than a compatibility claim.
+  - Garage v2.4.1 has no create-once route: it ignored both single-PUT
+    conditions, conditional multipart completion and both copy destination
+    conditions, and its multipart `Last-Modified` records initiation. No
+    behavior in this menu covers it; the setup check refuses it with
+    `CreateOnce`. RustFS and SeaweedFS refused occupied names with HTTP 412 on
+    PUT and multipart completion, preserving bytes and times, and their
+    multipart `Last-Modified` fell between the completion markers, so they use
+    conditional completion without a copy. Neither returned a checksum, even
+    with checksum mode; their profiles do not request one and rely on the
+    complete-byte comparison required for a missing checksum (below).
   - `RequestTimeTooSkewed` means the device clock is off, not that access
     was denied. Retry the request once with the server offset the SDK
     learned from the response.
@@ -898,7 +922,10 @@ the file's ranges under `F`.
   Drive exposes MD5, Dropbox its block-based content hash, OneDrive SHA-1 or
   QuickXorHash, and S3 its explicitly returned checksum and scope. GCS's
   CRC32C is a whole-object checksum. R2's unscoped checksum is absent from
-  coven's metadata; its scope is never guessed. A missing checksum requires the byte
+  coven's metadata; its scope is never guessed. RustFS and SeaweedFS return
+  none; a checksum returned under their profile, scoped or not, contradicts
+  the certified observation and fails as a protocol error rather than being
+  used. A missing checksum requires the byte
   comparison; a composite cannot confirm a whole-object digest. Metadata and
   downloaded bytes must describe the same revision: Drive and OneDrive
   recheck replaceable metadata after download and fail if it changed.
@@ -926,7 +953,9 @@ the file's ranges under `F`.
     cut-off assumption; nondecreasing publication times alone do not imply it.
 - Native publication gaps remain visible in the profiles and certification.
   GCS conditional-copy timestamps and R2 single-PUT and multipart timestamps
-  passed the completion checks. AWS single-request PUT timestamps describe
+  passed the completion checks, as did RustFS and SeaweedFS single-PUT and
+  multipart timestamps. Garage multipart `Last-Modified` records initiation.
+  AWS single-request PUT timestamps describe
   completion; AWS multipart `Last-Modified` instead records initiation
   ([system metadata](https://docs.aws.amazon.com/AmazonS3/latest/userguide/UsingMetadata.html)).
   That AWS multipart path does not satisfy the complete-publication requirement

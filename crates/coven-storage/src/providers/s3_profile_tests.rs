@@ -7,6 +7,12 @@ fn profile_table_records_certification_and_publication_requirements() {
         if let Certification::Passed { date, suite } = profile.certification {
             assert_eq!(date.len(), 10);
             assert!(suite > 0);
+            if profile.checksums == Checksums::Absent {
+                assert!(
+                    !profile.request_checksums,
+                    "a service returning no checksum is not asked for one"
+                );
+            }
             if profile.multipart_timestamp == MultipartTimestamp::Start {
                 assert!(
                     profile.multipart.uses_copy(),
@@ -243,6 +249,9 @@ fn explicit_name_selects_its_profile_for_an_uncatalogued_endpoint() {
         (Some(S3ProfileName::Aws), S3ProfileName::Aws),
         (Some(S3ProfileName::Gcs), S3ProfileName::Gcs),
         (Some(S3ProfileName::R2), S3ProfileName::R2),
+        (Some(S3ProfileName::Garage), S3ProfileName::Garage),
+        (Some(S3ProfileName::RustFs), S3ProfileName::RustFs),
+        (Some(S3ProfileName::SeaweedFs), S3ProfileName::SeaweedFs),
     ] {
         let profile = S3Profile::select(Some(&endpoint), name).unwrap();
         assert_eq!(profile.name, expected);
@@ -294,4 +303,91 @@ async fn explicit_gcs_name_drives_the_adapter_at_an_uncatalogued_endpoint() {
         StorageFailure::AlreadyExists
     );
     assert_eq!(storage.read(&path).await.unwrap(), b"original");
+}
+
+#[test]
+fn self_hosted_profiles_are_selected_only_by_name_at_their_own_endpoint() {
+    for name in [
+        S3ProfileName::Garage,
+        S3ProfileName::RustFs,
+        S3ProfileName::SeaweedFs,
+    ] {
+        let profile = PROFILES.iter().find(|p| p.name == name).unwrap();
+        assert_eq!(profile.endpoint, None);
+        assert_eq!(
+            profile.certification == Certification::Uncertified,
+            name == S3ProfileName::Garage
+        );
+        assert_eq!(
+            S3Profile::select(None, Some(name)).unwrap_err().failure(),
+            StorageFailure::InvalidConfiguration
+        );
+        assert_eq!(
+            S3Profile::select(
+                Some(&"https://storage.googleapis.com".parse().unwrap()),
+                Some(name)
+            )
+            .unwrap_err()
+            .failure(),
+            StorageFailure::InvalidConfiguration
+        );
+    }
+    for host in [
+        "http://localhost:3900",
+        "http://localhost:9000",
+        "http://localhost:8333",
+    ] {
+        assert_eq!(
+            S3Profile::select(Some(&host.parse().unwrap()), None)
+                .unwrap()
+                .name,
+            S3ProfileName::Aws
+        );
+    }
+}
+
+#[tokio::test]
+async fn absent_policy_reads_without_a_checksum_and_refuses_any_returned_one() {
+    let state = Arc::new(Mutex::new(Remote::default()));
+    let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
+    let mut profile = PROFILES[0];
+    profile.checksums = Checksums::Absent;
+    profile.request_checksums = false;
+    let storage = profile_provider(&server.url, profile);
+    let path = ObjectPath::positions(STORE_ID, coven_foundation::id_source::DeviceId(31));
+    storage.replace(&path, b"bytes").await.unwrap();
+    assert_eq!(storage.status(&path).await.unwrap().unwrap().checksum, None);
+    let read = storage.read_object(&path, None).await.unwrap();
+    assert_eq!(read.metadata.checksum, None);
+    assert_eq!(read.bytes, b"bytes");
+    for headers in [
+        vec![(
+            "x-amz-checksum-sha256",
+            "J3CJ2RwL308uaGK6fkoHYFEZQx9dE/cm3TUrBvGyBqk=",
+        )],
+        vec![
+            ("x-amz-checksum-type", "FULL_OBJECT"),
+            (
+                "x-amz-checksum-sha256",
+                "J3CJ2RwL308uaGK6fkoHYFEZQx9dE/cm3TUrBvGyBqk=",
+            ),
+        ],
+    ] {
+        state.lock().unwrap().response_headers = headers
+            .into_iter()
+            .map(|(name, value)| (name.into(), value.into()))
+            .collect();
+        assert_eq!(
+            storage.status(&path).await.unwrap_err().failure(),
+            StorageFailure::Protocol
+        );
+        assert_eq!(
+            storage
+                .read_object(&path, None)
+                .await
+                .unwrap_err()
+                .failure(),
+            StorageFailure::Protocol
+        );
+    }
 }

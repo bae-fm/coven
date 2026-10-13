@@ -37,6 +37,12 @@ pub enum S3ProfileName {
     Gcs,
     /// Cloudflare R2.
     R2,
+    /// Garage, self-hosted.
+    Garage,
+    /// RustFS, self-hosted.
+    RustFs,
+    /// SeaweedFS's S3 gateway, self-hosted.
+    SeaweedFs,
 }
 
 /// The store's location; credentials are kept separately in key custody.

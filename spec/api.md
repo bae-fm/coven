@@ -1408,12 +1408,13 @@ while let Ok(values) = lost.next().await {
   conditional copy to publish multipart uploads. Hosts ending in
   `.r2.cloudflarestorage.com` select R2, using conditional PUT and multipart
   completion and ignoring checksums without stated scope. Unknown endpoints
-  without a name use AWS's profile. A name contradicting a catalogued host, a
-  name other than AWS without an endpoint, or plain `http` to a catalogued
-  host is `InvalidConfiguration`; other endpoints may use `http`. Every
-  connection is accepted only after all setup checks pass, including those
-  using certified profiles. An endpoint that overwrites on create fails
-  `CreateOnce`; setup preserves the prior connection.
+  without a name use AWS's profile; the self-hosted Garage, RustFS and
+  SeaweedFS profiles are selected only by name. A name contradicting a
+  catalogued host, a name other than AWS without an endpoint, or plain `http`
+  to a catalogued host is `InvalidConfiguration`; other endpoints may use
+  `http`. Every connection is accepted only after all setup checks pass,
+  including those using certified profiles. An endpoint that overwrites on
+  create fails `CreateOnce`; setup preserves the prior connection.
 - Setup commits the storage credentials, keys, location and restore code only
   once the connection is ready. Failure preserves their previous values and
   the previous connection. The fixed first-entry or access-update attempt stays
@@ -1563,6 +1564,12 @@ pub enum S3ProfileName {
     Gcs,
     /// Cloudflare R2.
     R2,
+    /// Garage, self-hosted.
+    Garage,
+    /// RustFS, self-hosted.
+    RustFs,
+    /// SeaweedFS's S3 gateway, self-hosted.
+    SeaweedFs,
 }
 
 /// Dropbox's location fixes its access level at cloud-store creation (§4).

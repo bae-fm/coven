@@ -120,11 +120,13 @@ pub(super) async fn detect(
             .map_err(|_| StorageFailure::Network)?;
     }
     let facts = facts.0.lock().expect("header facts lock").clone();
-    require(
-        facts.checksum,
-        "checksum scope detection needs a returned checksum",
-    )?;
-    profile.checksums = if facts.unstated {
+    // §4 permits a missing checksum: the complete-byte comparison replaces
+    // it. No checksum on any probe, including with checksum mode, is recorded
+    // as such, and the adapter stops requesting what the service never returns.
+    profile.checksums = if !facts.checksum {
+        profile.request_checksums = false;
+        Checksums::Absent
+    } else if facts.unstated {
         Checksums::UnstatedIgnored
     } else {
         Checksums::ScopeStated

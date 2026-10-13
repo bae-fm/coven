@@ -1,5 +1,5 @@
 //! S3's ETag, replacement revision and checksum are separate facts.
-use super::{Revision, S3Storage};
+use super::{Checksums, Revision, S3Storage};
 use crate::*;
 use aws_sdk_s3::{
     operation::{get_object::GetObjectOutput, head_object::HeadObjectOutput},
@@ -46,12 +46,18 @@ fn revision(
 }
 
 fn checksum(
+    policy: Checksums,
     kind: Option<&ChecksumType>,
     value: Option<ChecksumValue>,
 ) -> Result<Option<ObjectChecksum>, StorageError> {
     let Some(value) = value else {
         return Ok(None);
     };
+    if policy == Checksums::Absent {
+        return Err(
+            StorageFailure::Protocol.with_source("S3 returned a checksum its profile lacks")
+        );
+    }
     match kind {
         Some(ChecksumType::FullObject) => Ok(Some(ObjectChecksum::FullObject(value))),
         Some(ChecksumType::Composite) => Ok(Some(ObjectChecksum::Composite(value))),
@@ -105,7 +111,11 @@ macro_rules! observation {
                 response.version_id(),
                 response.metadata(),
             )?,
-            checksum: checksum(response.checksum_type(), checksum_value)?,
+            checksum: checksum(
+                $storage.profile.checksums,
+                response.checksum_type(),
+                checksum_value,
+            )?,
         })
     }};
 }

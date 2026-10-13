@@ -6,7 +6,8 @@ use coven_foundation::id_source::{DeviceId, StoreId};
 use profile::*;
 use std::{future::Future, time::Duration};
 
-pub(super) const SUITE_VERSION: u32 = 1;
+/// Version 2 records an absent checksum as a detected behavior (§4).
+pub(super) const SUITE_VERSION: u32 = 2;
 
 fn path(store: StoreId, number: u64) -> ObjectPath {
     ObjectPath::device_log(store, DeviceId(91), number.try_into().unwrap())
@@ -204,7 +205,7 @@ async fn keys(
     Ok((objects, folders))
 }
 
-async fn single_put(s: &S3Storage, store: StoreId) -> Result<SinglePut, StorageError> {
+async fn single_put(s: &S3Storage, store: StoreId) -> Result<Option<SinglePut>, StorageError> {
     let mut detected = None;
     for (i, condition) in [SinglePut::IfNoneMatch, SinglePut::GenerationMatch]
         .into_iter()
@@ -232,7 +233,7 @@ async fn single_put(s: &S3Storage, store: StoreId) -> Result<SinglePut, StorageE
             detected = Some(condition);
         }
     }
-    detected.ok_or(StorageFailure::Protocol.with_source("no create-once PUT behavior passed"))
+    Ok(detected)
 }
 async fn multipart_native(
     s: &S3Storage,
@@ -309,7 +310,7 @@ async fn multipart_native(
     println!("native conditional_completion taken={result_label} preserved={preserved} enforced={conditional}");
     Ok((conditional, timestamp))
 }
-async fn copy_condition(s: &S3Storage, store: StoreId) -> Result<Multipart, StorageError> {
+async fn copy_condition(s: &S3Storage, store: StoreId) -> Result<Option<Multipart>, StorageError> {
     let source = path(store, 30).under(&s.prefix);
     put(s, &source, b"original", None).await?;
     let source_time = time(&head(s, &source).await?)?;
@@ -357,7 +358,7 @@ async fn copy_condition(s: &S3Storage, store: StoreId) -> Result<Multipart, Stor
         put(s, &source, b"original", None).await?;
         tokio::time::sleep(Duration::from_secs(2)).await;
     }
-    detected.ok_or(StorageFailure::Protocol.with_source("no conditional copy behavior passed"))
+    Ok(detected)
 }
 
 #[path = "s3_checksum_headers_tests.rs"]
@@ -370,16 +371,25 @@ async fn detect(
     let s = &s.provider;
     let mut profile = s.profile;
     profile.certification = Certification::Uncertified;
+    // Every probe runs even after a behavior is missing, so an uncertified
+    // service's evidence names each missing behavior, not only the first.
+    let mut missing = Vec::new();
     let prefix = ObjectPrefix::all(store).under(&s.prefix);
     profile.listing = native_listing(s, &prefix).await?;
-    profile.single_put = single_put(s, store).await?;
+    match single_put(s, store).await? {
+        Some(condition) => profile.single_put = condition,
+        None => missing.push("create-once PUT"),
+    }
     let (conditional, timestamp) = multipart_native(s, store, profile.listing).await?;
     profile.multipart_timestamp = timestamp;
-    profile.multipart = if conditional && timestamp == MultipartTimestamp::Completion {
-        Multipart::ConditionalCompletion
+    if conditional && timestamp == MultipartTimestamp::Completion {
+        profile.multipart = Multipart::ConditionalCompletion;
     } else {
-        copy_condition(s, store).await?
-    };
+        match copy_condition(s, store).await? {
+            Some(copy) => profile.multipart = copy,
+            None => missing.push("conditional copy publication"),
+        }
+    }
     let prefix = ObjectPrefix::all(store).under(&s.prefix);
     let v1 = keys(s, Listing::V1, &prefix, None).await?;
     if profile.listing == Listing::V2 {
@@ -392,6 +402,11 @@ async fn detect(
         v1.0.len()
     );
     headers::detect(s, store, &mut profile).await?;
+    if !missing.is_empty() {
+        println!("native missing={}", missing.join(", "));
+        print_profile(profile, &s.config, None);
+        return Err(StorageFailure::Protocol.with_source("native behaviors missing"));
+    }
     Ok(profile)
 }
 
@@ -663,10 +678,17 @@ fn print_profile(p: S3Profile, config: &StorageConfig, date: Option<&str>) {
     };
     // Only the hostname is source data, never a URL's credentials, path or query.
     let (name, endpoint) = match endpoint.as_ref().and_then(url::Url::host_str) {
-        Some(host) if !p.endpoint.matches(host) => {
-            ("Uncatalogued".into(), format!("Host({host:?})"))
-        }
-        _ => (format!("{:?}", p.name), format!("{:?}", p.endpoint)),
+        Some(host) if !p.endpoint.is_some_and(|known| known.matches(host)) => (
+            "Uncatalogued".into(),
+            format!("Some(EndpointMatch::Host({host:?}))"),
+        ),
+        _ => (
+            format!("{:?}", p.name),
+            match p.endpoint {
+                Some(known) => format!("Some(EndpointMatch::{known:?})"),
+                None => "None".into(),
+            },
+        ),
     };
     let certification = match date {
         Some(date) => format!(
@@ -678,7 +700,7 @@ fn print_profile(p: S3Profile, config: &StorageConfig, date: Option<&str>) {
         ),
         None => "Uncertified".into(),
     };
-    println!("S3Profile {{\n    name: S3ProfileName::{name},\n    endpoint: EndpointMatch::{endpoint},\n    signing: Signing::{:?},\n    single_put: SinglePut::{:?},\n    multipart: Multipart::{:?},\n    multipart_timestamp: MultipartTimestamp::{:?},\n    checksums: Checksums::{:?},\n    listing: Listing::{:?},\n    revision: Revision::{:?},\n    bucket_check: BucketCheck::{:?},\n    response_headers: ResponseHeaders::{:?},\n    request_checksums: {},\n    certification: Certification::{certification},\n}},", p.signing, p.single_put, p.multipart, p.multipart_timestamp, p.checksums, p.listing, p.revision, p.bucket_check, p.response_headers, p.request_checksums);
+    println!("S3Profile {{\n    name: S3ProfileName::{name},\n    endpoint: {endpoint},\n    signing: Signing::{:?},\n    single_put: SinglePut::{:?},\n    multipart: Multipart::{:?},\n    multipart_timestamp: MultipartTimestamp::{:?},\n    checksums: Checksums::{:?},\n    listing: Listing::{:?},\n    revision: Revision::{:?},\n    bucket_check: BucketCheck::{:?},\n    response_headers: ResponseHeaders::{:?},\n    request_checksums: {},\n    certification: Certification::{certification},\n}},", p.signing, p.single_put, p.multipart, p.multipart_timestamp, p.checksums, p.listing, p.revision, p.bucket_check, p.response_headers, p.request_checksums);
 }
 
 pub(super) async fn conformance(connected: Arc<StorageConnection<S3Storage>>, store: StoreId) {
