@@ -110,8 +110,8 @@ theorem permanent_observed {α : Type} (states : Nat → Provider)
     exact List.mem_append_right _ (observed_hit pass kind decode writer known time number object value read decoded)
 
 /-- §9's final old prefix is supplied by actual entry scans and retained
-receipts. The provider sample precedes these scans; a full provider tick is
-subtracted. Authentication and the mapping to immutable paths are explicit. -/
+receipts. The provider sample precedes these scans; the listing margin and
+a provider tick are subtracted. Authentication and immutable paths are explicit. -/
 theorem caughtUp_complete_old (H : CurrentReplay.History) (bound unit : Nat)
     (clock future : Provider) (storageTime : ProviderRun clock future) (positiveUnit : 0 < unit)
     (states : Nat → Provider) (pass : CompletedPass (fun t => (states t).objects))

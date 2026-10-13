@@ -201,14 +201,29 @@ theorem writer_discovered (world : World) (before listed : Nat) (writers : List 
     (permanent : world listed (.log .entry writer 1) = world before (.log .entry writer 1)) :
     writer ∈ writers := complete writer o (permanent.trans registered)
 
-/-- Subtract a positive provider unit. With nonnegative times, a clock
-before its first complete unit cannot certify a nonempty old prefix. -/
-def observationTime (clockTime unit : Nat) : Nat := clockTime - unit
+/-- §4: every provider uses the same one-hour listing margin, in seconds. -/
+def listingMargin : Nat := 60 * 60
+
+/-- §9: the inclusive endpoint precedes the strict listing boundary by one
+positive provider unit. Underflow cannot certify a nonempty old prefix. -/
+def observationTime (clockTime unit : Nat) : Nat := clockTime - listingMargin - unit
+
+/-- A completed listing may omit recent objects, including those exactly
+one margin old. The clock sample may precede this listing's provider time. -/
+def ListingComplete (s : Provider) (folder : Folder) (paths : List Path) : Prop :=
+  ∀ p o, folder.contains p = true → s.objects p = some o →
+    o.value.storedAt < s.time - listingMargin → p ∈ paths
+
+theorem observation_before_listing (clockTime unit : Nat) (positive : 0 < unit)
+    (enough : listingMargin + unit ≤ clockTime) :
+    observationTime clockTime unit < clockTime - listingMargin := by
+  unfold observationTime
+  omega
 
 /-- Earlier stored times were already present at the clock publication.
 This follows from provider transitions, without a publication-fence premise. -/
 theorem through_time {clock future : Provider} (run : ProviderRun clock future)
-    (unit : Nat) (positive : 0 < unit) (enough : unit ≤ clock.time)
+    (unit : Nat) (positive : 0 < unit) (enough : listingMargin + unit ≤ clock.time)
     (p : Path) (o : Object) (fixed : permanent p = true)
     (published : future.objects p = some o)
     (old : o.value.storedAt ≤ observationTime clock.time unit) : clock.objects p = some o := by

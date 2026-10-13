@@ -390,14 +390,16 @@ theorem positions_not_index :
 
 example : observe writeNine [] (.get (.log .write 0 9)) = .object (some ⟨⟨[9], 1⟩, 0⟩) := by decide
 
-/-- A later entry in the clock's tick is outside the preceding-unit cutoff. -/
+/-- A later entry in the clock's tick is outside the finality endpoint,
+even when subtracting the margin and provider unit does not underflow. -/
 def tiedTime : World := fun event =>
-  if event < 2 then empty else put empty (.log .entry 7 1) [7] 10
+  if event < 2 then empty else put empty (.log .entry 7 1) [7] (listingMargin + 10)
 
 theorem timestamp_not_frontier :
     tiedTime 1 (.log .entry 7 1) = none ∧
-    tiedTime 2 (.log .entry 7 1) = some ⟨⟨[7], 10⟩, 0⟩ ∧
-    ¬ (10 : Nat) ≤ observationTime 10 1 := by decide
+    tiedTime 2 (.log .entry 7 1) = some ⟨⟨[7], listingMargin + 10⟩, 0⟩ ∧
+    observationTime (listingMargin + 10) 1 = 9 ∧
+    ¬ listingMargin + 10 ≤ observationTime (listingMargin + 10) 1 := by decide
 
 /-- A permanent check failure is a successful GET but stops later reads. -/
 theorem no_request_error_insufficient :

@@ -24,7 +24,7 @@ def prior : KeyPhases.CaughtUp :=
 def removed : KeyPhases.CaughtUp := ⟨[0, 1, 2, 3, 4], prior.observation⟩
 def attempt : KeySelection.Attempt := ⟨key, [7]⟩
 def finalTime := month + 5
-def finalAt := finalTime + 1
+def finalAt := finalTime + listingMargin + 1
 
 def entryWriter (e : Nat) : Nat := if e = 1 ∨ e = 3 then 1 else 0
 def entryNumber (e : Nat) : Nat := match e with | 0 | 1 => 1 | 2 | 3 => 2 | _ => 3

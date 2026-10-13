@@ -6,6 +6,123 @@ It uses Appendix B's Lean 4.34.1 toolchain and the standard library, without
 Mathlib. `CovenIO/Axioms.lean` audits every named theorem; `scripts/check.sh`
 builds the package and rejects unfinished proofs and additional axioms.
 
+**Finality with delayed listings — proved under the provider requirement.**
+`listingMargin` is one hour for every provider. `observationTime` is
+`T′ = T − M − δ`, with `M = 1 hour` and positive provider unit δ.
+`ListingComplete` requires every object in the queried folder stored strictly
+before the listing's provider time minus M. For device discovery that means
+the permanent entry 1 records, without listing log contents. The listing may
+occur after the clock sample T.
+
+[`ListingFinality`](io/CovenIO/ListingFinality.lean) connects that requirement
+to completed exact reads. `completed_prefix` obtains each old writer's entry 1
+from the listing and every subsequent number from a terminal scan or retained
+receipt. It proves receipt of **every entry at or before T′**, including entries
+at the inclusive window endpoint. The hypotheses name gap-free ordered
+publication, immutable paths, provider evolution, completed scans and validated
+receipt. Recent writers may be missing. No read-after-write listing is assumed.
+
+`quiet_agrees` proves that the received entries give exactly the full history's
+inclusive quiet-window verdict. `complete_old` supplies the actual store-log
+horizon's receipt premise; `finality_safe` invokes its current replay stability
+theorem, including kept and dropped dispositions. `qualifying_window` requires a
+quiet window in the full history, and `at_or_after_horizon_not_final` excludes
+entries at or after H. Underflow certifies no final entry. Provider units are
+positive duration values; the one-hour policy accommodates units up to an hour.
+
+**Why the extra provider tick is required.**
+[`ListingMarginExamples.Endpoint`](io/CovenIO/ListingMarginExamples.lean)
+preserves the checked counterexample to using T minus M alone. Creation lands
+at 0, registration A at second 1, and registration B at day 30 plus 2 seconds.
+B has not read A, so it is late and permanently dropped. A conforming listing
+at day 30 plus one hour plus 2 seconds may omit B at exactly one hour old.
+Using T minus M would mark A final without any qualifying window in the full
+history. `no_earlier_qualifying_window` rules out an earlier certificate too.
+
+`revised_prefix_from_scans` applies the general discovery theorem to those
+actual scans. `revised_prefix_from_retained` checks the same prefix using
+cached receipts with no new reads; a complete drained history needs no scan.
+`revised_endpoint_safe` checks T′ one second earlier: A remains
+outside the strict horizon. `next_tick_sees_late` checks that B must appear on
+the next tick and blocks that window. The original example never reversed A's
+replay result; it exposed a false qualifying-window claim.
+
+**One-hour listing margin — the unconditional “never judged late” claim
+fails even for a conforming provider.**
+[`ListingMarginExamples.Conforming`](io/CovenIO/ListingMarginExamples.lean)
+checks creation at second 0 and two first-entry device registrations:
+
+- A lands at 01:00:01, having read creation.
+- B catches up at 01:00:02. The listing shows only creation's writer;
+  its exact entry reads reach a terminal miss. A's folder is still hidden.
+  B reads creation and lands at 01:00:02 without reading A.
+- At T = 01:00:03 a reader's listing omits both registrations. Both are newer
+  than T′ = 00:00:02. At 02:00:03 the reader returns; its listing and exact
+  GETs expose both. B is at the new inclusive cutoff 01:00:02 and is late because
+  A landed earlier and B did not read it.
+
+Every listing uses a five-second visibility delay. `listing_conforms`
+proves that this rule contains every object stored before T minus one hour;
+`conforming_observations` applies it to the author and both reader samples.
+`provider_history`, `entries_represented`, `causal_history` and
+`author_catchup` check the actual provider transitions, immutable times,
+causal log and exact scan. The author follows the permitted delayed listing;
+the stronger assumption that an online attempt reads every earlier landing
+does not hold under that provider contract.
+
+`recent_omission_can_be_late` uses the existing `Finality.late`,
+`Finality.tooLate` and `Horizon.quiet`. A stays non-late after delayed receipt.
+B is late, but it is not rejected by the thirty-day landing deadline;
+replay keeps both registrations.
+The margin keeps B outside the initial observation; it does not remove B's
+late verdict when the endpoint reaches B's stored time. B blocks the quiet
+window through its stored time plus thirty days, including equality. The
+first later qualifying provider sample is B's stored time plus thirty days
+plus one hour plus two seconds. Receipt time does not restart that wait.
+
+Creation plus these two changes is enough: one change supplies the unread
+earlier entry and the other lacks its read. This is a real late entry under
+§9, caused by allowed listing lag during catch-up, not a late verdict caused
+solely by delayed receipt. The literal claim that a recently omitted entry
+is never judged late is therefore false. `one_tick_misses_prefix` also checks
+that the same conforming five-second
+lag omits an entry inside the prefix claimed by T minus one provider tick.
+The one-hour margin excludes that entry from the earlier certificate.
+
+**Why the provider requirement is necessary.** `ListingMarginExamples`
+also checks creation plus two concurrent resets: A lands on day 1, B on day 2,
+and both read only creation. A wins their conflict when both are received.
+At provider time day 32 plus one hour plus two seconds, subtracting the margin
+and one provider tick gives an observation at day 32 plus one second and a
+horizon at day 2 plus
+one second. The thirty-day window is quiet, and B is strictly before the
+horizon. If the listing omits A's device, the receiver keeps B. Receiving A
+afterward drops B. This changes a result treated as final; it does not merely
+delay advancement of the horizon.
+
+`provider_history`, `entries_represented`, `causal_history`, `online_attempts`
+and `causal_receipts` check publication, immutable storage times, recorded
+reads and both receipt orders. `missing_old_folder` uses the actual IO listing
+and exact-read functions: the listing omits an object older than the margin,
+although an exact GET finds it and the known writer's next-number GET misses.
+`listing_violation_reverses_final` and the literal Lean `example` use the
+existing `Horizon` and `CurrentReplay` functions, including the strict old
+boundary. Neither reset is rejected by the thirty-day landing rule.
+
+`missing_required_prefix` identifies the failed premise of
+`Horizon.current_stability`: receipt of every old entry. The window is truly
+quiet even with A present, so quietness alone cannot repair the missing
+receipt. Creation plus one change cannot give this missing-conflict history:
+receiving that change requires its creation, leaving no third entry to arrive.
+This is a counterexample to tolerating a listing-contract violation, not to
+the conditional stability theorem or to a provider that honors the margin.
+
+Existing retention deadlines require finality as an input; these histories
+do not disprove those conditional bounds. The shifted bounds are stated below.
+Native provider measurements, persistence
+and cleanup are outside these histories. The IO package has no Rust
+differential runner.
+
 The common-cut reload proposal stages all readable audiences, fills their parts
 to the maximum selected positions, and installs them together. It terminates
 after deletions stop, with at most one further replacement per audience.
@@ -376,26 +493,58 @@ unconditional recent-return claim fails. `snapshot_next_number_wrong` and
 `away_write_miss` retain the independent reasons that old snapshots and writes
 cannot be discovered by next number after deletion.
 
-**5. Finality input (item 21) — proved without a publication fence.**
-`observationTime` subtracts one positive provider unit from the clock object's
-storage time. `old_immutable_present` proves backward through `ProviderRun`
-that an immutable object with an earlier timestamp was already present at
-that clock publication. It permits arbitrarily many equal-time publications.
-`through_time` consequently supplies all permanent objects through the
-preceding-unit cutoff from completed discovery of that publication frontier.
+**5. Finality input — proved with the one-hour listing requirement.**
+`observationTime` subtracts the one-hour margin and one positive provider unit
+from the clock object's storage time. `old_immutable_present` proves backward
+through `ProviderRun` that an immutable object with an earlier timestamp was
+already present. Arbitrarily many publications may share a provider tick.
+`through_time` supplies objects at or before the revised endpoint.
 
-`Refinement.finality_precondition` constructs the actual
-`CovenStorelog.Horizon.CompleteOld` input of `Horizon.current_stability` in
-[C10](storelog.md#c10-finality-by-storage-time). It takes immutable path/time
-representation and completed entry receipt, with no separate timestamp fence.
-`Examples.timestamp_not_frontier` checks that the later time-10 entry is
-outside the corrected cutoff 9, so that example no longer contradicts it.
-If natural-number subtraction underflows, the old prefix is empty; no finality
-is certified for an entry. Provider units are positive multiples of the model's
-base time unit. Subsecond adapter representation remains outside the model.
-The quiet-window test, causal validity, decoding and complete paginated
-folder/entry reads are still required; this proof does not infer them from a
-successful clock request alone.
+`Refinement.finality_precondition` constructs
+`CovenStorelog.Horizon.CompleteOld` from completed receipts.
+`ListingFinality.completed_prefix` derives those receipts from a conforming
+listing and completed scans, including the entire inclusive recent window;
+`quiet_agrees` supplies the full-history quiet test needed by
+[C10](storelog.md#c10-finality-by-storage-time). These results require causal
+validity and authenticated receipt, not a successful clock request alone.
+`Examples.timestamp_not_frontier` still excludes same-tick later publication.
+Underflow certifies no old entry. Native subsecond timestamp representation
+and provider conformance remain implementation obligations.
+
+`shifted_age` proves `stored + duration < T′` exactly when
+`stored + duration + M + δ < T`. `sample_shift` proves that the same endpoint
+needs M more provider-time units than the preceding-unit rule.
+`quiet_after_last_late` gives the corresponding conditional finality bound:
+after the last late entry at L, the window is quiet when
+`T > L + 30 days + M + δ`. Later genuine concurrency can still delay it.
+
+`storage_complete` supplies the data package's actual complete-prefix check.
+`retained_inputs_bound` applies `StorageFinality.bounded_storage` when every
+dependency satisfies `stored + 30 days + M + δ < T`, the observed window
+is quiet and the other retention checks pass. Exactly the inputs still
+required remain; the bound relative to required data is unchanged.
+
+All conditional storage bounds above take G from actual established finality
+and the reader/age gate. With that gate shifted from G to `G + M`:
+
+- Already covered writes use `max(G + M, B + day + 1) + P + D`.
+- Witnessed writes needing coverage use `max(G + M, B + day + 1) + 3P + U + D`.
+- First witnesses use `H_a = max(G + M, O_a, W + 1)`, then
+  `B_a = H_a + 2P + U`; audience coverage is ready by
+  `H_a + 4P + 2U + day + 1`.
+- Whole-write deletion uses `B = max_a B_a` and
+  `max(G + M, B + day + 1) + 3P + U + D`.
+
+`covered_deadline_shift`, `witnessed_deadline_shift`,
+`first_witness_deadline_shift`, `audience_deadline_shift` and
+`storage_deadline_shift` prove that each formula increases by at most M.
+These retain the existing successful-service and reader-availability premises;
+no unconditional storage deadline is introduced. The provider tick is already
+in the original observation delay and is retained in the revised rule.
+`retired_publication_shift` keeps the post-finality drain bound at established
+finality plus one day and five minutes; shifting that finality time by M shifts
+its deadline by M. Snapshot maturity, thirty-day write admission, and the
+29-day recent-return check use their original storage times and do not shift.
 
 **6. Positions as discovery bounds — checked counterexample.**
 `Examples.positions_not_index` uploads write 9 while the confirmed post
@@ -554,7 +703,7 @@ The named hypotheses make the boundaries explicit:
   removal's strict old age and kept verdict, and both observations containing
   the complete old prefix. `caughtUp_complete_old` supplies the catch-up's
   prefix through `Refinement.finality_precondition`, using a positive provider
-  unit and a clock sample preceding the entry reads. Finality's storage cutoff
+  unit, the one-hour margin and a clock sample preceding the entry reads. Finality's storage cutoff
   and the monotonic instant of its establishment are separate parameters.
   No later kept addition may restore the removed membership.
 - **Sending:** the actual gate has accepted identity and active status, the
@@ -728,7 +877,8 @@ no Rust behavior.
   posting. Read-only identity discovery precedes clock replacement and is reused.
   Exercise concurrent snapshot publication, a selection becoming stale during
   reload, per-miss expiry and provider clock advance. Same-tick publications
-  must stay outside the preceding-unit finality observation.
+  must stay outside the finality observation. Check omissions at exactly
+  T minus M and receipt through T minus M minus δ.
 - Exercise due-only snapshot growth/coverage, unchanged waits with backoff,
   indexed cached header facts, multiple audiences and atomic common-point reloads.
   Share retained inputs across consumers and verify authors before applying data.
@@ -798,7 +948,7 @@ Current retention coverage and first witnesses are derived from reader services;
 reader availability and bounds on passes, complete counting publication and
 deletion remain explicit. Whole-object deadlines require every part audience.
 A write miss is recent only at its own observation, with a strict 29-day limit and an explicit
-provider/elapsed-time bound. Finality uses the preceding provider unit, with
+provider/elapsed-time bound. Finality uses T minus one hour minus a positive provider unit, with
 underflow certifying no old entries. Retirement timing begins at finality and
 uses a shared duration scale. Dropping one retirement restores admission only
 when no other kept retirement blocks it. Out-of-band file work means uploads;
