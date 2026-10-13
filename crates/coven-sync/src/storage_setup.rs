@@ -19,6 +19,8 @@ impl StoreLogSync {
         storage: Arc<dyn Storage>,
     ) -> Result<(), SyncError> {
         let previous = self.storage.replace(storage);
+        let previous_finality =
+            std::mem::take(self.finality.get_mut().expect("finality lock poisoned"));
         let result = async {
             let damages = self.sync_store_log().await?;
             if let Some(damage) = damages.into_iter().next() {
@@ -43,6 +45,7 @@ impl StoreLogSync {
         .await;
         if result.is_err() {
             self.storage = previous;
+            *self.finality.get_mut().expect("finality lock poisoned") = previous_finality;
         }
         result
     }
@@ -261,6 +264,7 @@ impl StoreLogSync {
             return Err(compensate(error, rollback()));
         }
         self.storage = Some(storage);
+        *self.finality.get_mut().expect("finality lock poisoned") = Default::default();
         Ok(())
     }
 

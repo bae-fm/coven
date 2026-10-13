@@ -465,8 +465,17 @@ async fn a_failed_invite_is_retained_and_expiry_finishes_on_reconnect() {
     })
     .await;
     observed.await.unwrap();
-    storage.set_online(false);
+    // Let the preflight finish, then interrupt the journaled grant's catch-up.
+    let (started, observed) = tokio::sync::oneshot::channel();
+    let (resume_grant, held) = tokio::sync::oneshot::channel();
+    storage
+        .hold_next_listing(ObjectPrefix::store_logs(store(1)), started, held)
+        .await;
     resume.send(()).unwrap();
+    observed.await.unwrap();
+    assert_eq!(a.db.operations().await.unwrap().len(), 1);
+    storage.set_online(false);
+    resume_grant.send(()).unwrap();
     operations.get_members().await.unwrap();
     assert!(matches!(
         pending.await,

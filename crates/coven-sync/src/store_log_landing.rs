@@ -23,18 +23,35 @@ pub(crate) async fn observe_publication(
     let mut objects = storage
         .list(&coven_storage::ObjectPrefix::store_logs(store))
         .await?;
-    if let Some(listed) = objects.iter().find(|object| object.path == path) {
-        if listed.object_id != published.object_id
-            || listed.revision != published.revision
-            || listed.stored_at != published.stored_at
-            || listed.size != published.size
-        {
-            return Err(DbError::StoreLogEntryChanged(entry).into());
-        }
-    }
-    objects.retain(|object| object.path != path);
-    objects.push(published);
+    add_observation(&mut objects, published)?;
     publication_times(log, &objects)
+}
+
+/// Exact status and a listing must identify the same immutable publication.
+pub(crate) fn add_observation(
+    objects: &mut Vec<coven_storage::StoredObject>,
+    observed: coven_storage::StoredObject,
+) -> Result<(), SyncError> {
+    if let Some(listed) = objects.iter().find(|object| object.path == observed.path) {
+        if listed.object_id != observed.object_id
+            || listed.revision != observed.revision
+            || listed.stored_at != observed.stored_at
+            || listed.size != observed.size
+        {
+            let (device, number) = observed
+                .path
+                .store_log_position()
+                .ok_or(coven_storage::StorageFailure::InvalidPath)?;
+            return Err(DbError::StoreLogEntryChanged(EntryId {
+                device,
+                number: number.get(),
+            })
+            .into());
+        }
+    } else {
+        objects.push(observed);
+    }
+    Ok(())
 }
 
 /// Landing witnesses come from the complete listing, not the kept replay or

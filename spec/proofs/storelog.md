@@ -545,6 +545,9 @@ The definition enumerates integer time units as a mathematical description,
 not an implementation requirement. `earlier_window_recovered` checks that
 retained history through day 40 recovers day 39's quiet cutoff, even though
 the device did not check then and a late entry blocks day 40's own window.
+Rust uses the sample's provider resolution for these endpoints too: a late
+entry at time L permits the preceding endpoint L−δ, not an instant between
+provider ticks.
 
 **The saved prefix has stable replay results.** `horizon_stability` applies
 the membership engine's `ReplayPolicy` rules; `key_free_horizon_stability`
@@ -573,9 +576,16 @@ drops before they cross this horizon. Storage times are nonnegative integer
 duration units. A successful check means all entries through its observation
 time were read and judged, including unknown devices' logs. The model does
 not prove provider clock behavior, listing completeness, persistence of the
-saved number, physical cleanup, or Rust correspondence. All named horizon
-results are included in `Axioms.lean`; the Rust comparison exercises current
-replay state and fates, not horizon persistence.
+saved number, or physical cleanup. All named horizon results are included
+in `Axioms.lean`. The Rust differential compares recovered cutoffs against
+`Horizon.recovered` on integral-day histories with a one-day provider tick,
+including tied times and permanently dropped late entries. Cutoffs compare
+exactly in that shared unit. Separate Rust tests pin the strict provider-tick boundary,
+absence versus zero, failed and interrupted scans, and SQLite persistence.
+The IO differential compares `observationTime` and the provider observations
+underlying `through_time` with the endpoint supplied to Rust's horizon.
+Store-log entries are bounded one-request publications; this is the provider
+time assumption needed here, and does not extend to multipart objects.
 
 ### C11 Key-free removals and circles left empty after replay
 

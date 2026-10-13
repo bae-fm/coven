@@ -621,7 +621,11 @@ async fn a_late_operation_revalidates_changed_authority_before_a_new_number() {
             b.step(id).await,
             Err(SyncError::Rejected(coven_database::DropReason::NotAllowed))
         ));
-        assert_eq!(b.db.local_store_log().await.unwrap(), before);
+        let after = b.db.local_store_log().await.unwrap();
+        assert_eq!(after.log.entries, before.log.entries);
+        assert_eq!(after.log.replay, before.log.replay);
+        assert_eq!(after.upload, before.upload);
+        assert!(after.log.horizon >= before.log.horizon);
     }
 }
 
@@ -649,4 +653,31 @@ async fn retained_publication_time_survives_absence_and_refuses_a_changed_listin
     };
     assert!(matches!(source.downcast_ref::<coven_database::DbError>(),
         Some(coven_database::DbError::StoreLogEntryChanged(id)) if *id == created));
+}
+
+#[tokio::test]
+async fn exact_observation_cannot_replace_conflicting_listing_evidence() {
+    let storage = Arc::new(MemoryStorage::builder().build().unwrap());
+    let mut a = device(storage.clone(), 1, member(1), store(1)).await;
+    let id = a.create(key(1)).await;
+    let observed = storage
+        .status(&object::path(store(1), id))
+        .await
+        .unwrap()
+        .unwrap();
+    let mut objects = vec![observed.clone()];
+    super::add_observation(&mut objects, observed.clone()).unwrap();
+    assert_eq!(objects.len(), 1);
+    for field in 0..4 {
+        let mut changed = observed.clone();
+        match field {
+            0 => changed.object_id.push('x'),
+            1 => changed.revision.push('x'),
+            2 => changed.stored_at += Duration::from_millis(1),
+            3 => changed.size += 1,
+            _ => unreachable!(),
+        }
+        assert!(super::add_observation(&mut objects, changed).is_err());
+        assert_eq!(objects, std::slice::from_ref(&observed));
+    }
 }

@@ -67,6 +67,13 @@ macro_rules! coven_tables {
                    OR (outcome!='beaten' AND beaten_device IS NULL AND beaten_number IS NULL))
             ) STRICT, WITHOUT ROWID;
         ");
+        $visit!(_coven_finality, "
+            CREATE TABLE _coven_finality (
+                singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+                horizon BLOB CHECK(horizon IS NULL OR length(horizon)=12)
+            ) STRICT;
+            INSERT INTO _coven_finality VALUES(1,NULL);
+        ");
         $visit!(_coven_store_log_uploads, "
             CREATE TABLE _coven_store_log_uploads (
                 device BLOB NOT NULL CHECK(length(device)=8),

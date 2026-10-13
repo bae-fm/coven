@@ -59,8 +59,42 @@ async fn unavailable_writer_discovery_never_falls_back_to_history_listing() {
 }
 
 #[tokio::test]
+async fn store_log_entries_never_use_recorded_sessions() {
+    let storage = MemoryStorage::builder()
+        .transfer_limits(16, 4)
+        .build()
+        .unwrap();
+    let path = ObjectPath::store_log(STORE_ID, DeviceId(31), std::num::NonZeroU64::MIN);
+    assert!(matches!(
+        storage.begin_upload(&path, 4).await,
+        Err(error) if error.failure() == StorageFailure::InvalidPath
+    ));
+    assert_eq!(storage.request_count(), 0);
+    assert!(matches!(
+        storage.create(&path, &[1; 17]).await,
+        Err(error) if error.failure() == StorageFailure::SingleRequestTooLarge { size: 17, limit: 16 }
+    ));
+    assert_eq!(storage.request_count(), 0);
+    storage.create(&path, &[1; 16]).await.unwrap();
+    assert_eq!(storage.request_count(), 1);
+    let other = ObjectPath::device_log(STORE_ID, DeviceId(31), std::num::NonZeroU64::MIN);
+    let session = storage.begin_upload(&other, 4).await.unwrap();
+    let mut recorded: serde_json::Value =
+        serde_json::from_slice(session.encode().unwrap().as_bytes()).unwrap();
+    recorded["path"] = serde_json::Value::String(path.as_str().to_owned());
+    assert!(matches!(
+        UploadSession::decode(&serde_json::to_vec(&recorded).unwrap()),
+        Err(error) if error.failure() == StorageFailure::InvalidPath
+    ));
+    storage.abort_upload(&session).await.unwrap();
+}
+
+#[tokio::test]
 async fn clock_replacement_guards_preserve_the_previous_object() {
-    let storage = MemoryStorage::builder().build().unwrap();
+    let storage = MemoryStorage::builder()
+        .transfer_limits(16, 4)
+        .build()
+        .unwrap();
     let path = ObjectPath::clock(STORE_ID, DeviceId(31));
     storage.replace(&path, b"clock").await.unwrap();
     let before = storage.request_count();
@@ -81,7 +115,7 @@ async fn clock_replacement_guards_preserve_the_previous_object() {
     ));
     assert_eq!(storage.request_count(), before);
     assert_eq!(storage.read(&path).await.unwrap(), b"clock");
-    let immutable = ObjectPath::store_log(STORE_ID, DeviceId(31), std::num::NonZeroU64::MIN);
+    let immutable = ObjectPath::device_log(STORE_ID, DeviceId(31), std::num::NonZeroU64::MIN);
     let session = storage.begin_upload(&immutable, 4).await.unwrap();
     let mut recorded: serde_json::Value =
         serde_json::from_slice(session.encode().unwrap().as_bytes()).unwrap();
@@ -161,6 +195,7 @@ async fn wrong_location_and_invalid_part_keep_the_provider_refusal_order() {
 async fn guards_and_completed_sessions_do_not_issue_provider_calls() {
     let storage = MemoryStorage::builder()
         .provider(CloudProvider::Dropbox)
+        .transfer_limits(16, 4)
         .build()
         .unwrap();
     let path = ObjectPath::device_log(STORE_ID, DeviceId(31), std::num::NonZeroU64::MIN);

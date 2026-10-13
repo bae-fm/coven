@@ -10,7 +10,7 @@ fn upload_sessions_encode_without_capacity_growth() {
                 namespace_id: "namespace".into(),
             },
         },
-        path: ObjectPath::store_log(
+        path: ObjectPath::device_log(
             STORE_ID,
             coven_foundation::id_source::DeviceId(1),
             std::num::NonZeroU64::MIN,

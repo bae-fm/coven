@@ -2334,6 +2334,10 @@ Carol's tablet:
     recorded view. Retain historical public bindings to check older objects.
   - Entries live at `<store>/store-log/<device>/<n>`, numbered like a device's
     writes ([§6](#6-syncing-writes)).
+  - Every entry is a single-chunk object of at most 4 MiB, published in one
+    request; entries never use recorded upload sessions. Finality relies on
+    this: the provider timestamp of a one-request publication is its completion
+    time. Multipart data writes and files do not establish entry finality.
   - The device in the path is only where the entry was written from.
   - Each device numbers its own entries, so no two entries ever get the
     same path. There is no shared sequence or cross-device slot to claim.
@@ -2513,7 +2517,9 @@ Carol's tablet:
   - this test advances finality only after more than 30 days without a
     late entry. An entry once final stays final; later races cannot reopen it.
     The retained store log also lets a device establish finality from an
-    earlier qualifying window.
+    earlier qualifying window. Recovered endpoints use the sample's provider
+    ticks at resolution δ: the last endpoint before a late entry is its
+    storage time minus δ, never an instant between provider ticks.
   - For each qualifying window ending at `T′`, atomically save
     `H = max(previous H, T′ - 30 days)` with the replay and changes to
     queries that depend on finality. With no previous H, use that cutoff.
@@ -2538,6 +2544,8 @@ Carol's tablet:
   supply the rest of its prefix. This also follows in the
   [IO proof](proofs/io/CovenIO/ListingFinality.lean).
   Newer entries may be absent and do not enter this certified window.
+  Unreadable entries newer than `T′` remain pending outside this certificate;
+  they still prevent a complete catch-up.
   Received newer entries still use their actual recorded reads for lateness;
   a writer whose listing missed another entry can genuinely be late.
   Read and judge the complete prefix through T′ before advancing finality.

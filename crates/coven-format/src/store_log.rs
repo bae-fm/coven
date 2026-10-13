@@ -11,6 +11,18 @@ use coven_crypto::{MemberId, SealingPublicKey};
 use coven_foundation::id_source::{CircleId, DeviceId, KeyId, StoreId};
 use coven_merge::{Audience, Timestamp};
 
+/// Complete encrypted store-log object limit, including routing and signature.
+/// Every provider must publish these single-chunk objects in one request (§9).
+pub const MAX_STORE_LOG_OBJECT: usize = 4 * 1024 * 1024;
+
+pub(crate) fn check_frame_length(length: usize) -> Result<(), Error> {
+    crate::error::bound(
+        length + 19 + 4 + coven_crypto::SEALED_OBJECT_CHUNK_OVERHEAD + 64,
+        MAX_STORE_LOG_OBJECT,
+        "store-log object",
+    )
+}
+
 /// The signing and sealed-box public keys of a member (§11.1).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MemberPublicKeys {

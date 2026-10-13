@@ -233,10 +233,19 @@ pub(crate) fn get_name_map<V: Wire>(input: &mut Decoder<'_>) -> Result<BTreeMap<
 }
 
 pub(crate) fn get_name(input: &mut Decoder<'_>) -> Result<String, Error> {
+    let value = get_text(input, 1024, "name")?;
+    crate::value::name(&value)?;
+    Ok(value)
+}
+
+pub(crate) fn get_text(
+    input: &mut Decoder<'_>,
+    maximum: usize,
+    field: &'static str,
+) -> Result<String, Error> {
     let length = u32::get(input)? as usize;
-    bound(length, 1024, "name")?;
+    bound(length, maximum, field)?;
     let text = std::str::from_utf8(input.take(length)?).map_err(|_| Error::Utf8)?;
-    crate::value::name(text)?;
     let mut value = String::new();
     value
         .try_reserve_exact(length)

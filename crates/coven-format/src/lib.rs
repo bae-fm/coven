@@ -76,7 +76,11 @@ impl Object {
         self.validate()?;
         let FormatVersion::V1 = format;
         match self {
-            Self::StoreLog(v) => encode_frame_in(4, format, |out| v.put(out)),
+            Self::StoreLog(v) => {
+                let bytes = encode_frame_in(4, format, |out| v.put(out))?;
+                store_log::check_frame_length(bytes.len())?;
+                Ok(bytes)
+            }
             Self::JoinRequest(v) => encode_frame_in(9, format, |out| v.put(out)),
             Self::PostedPositions(v) => encode_frame_in(8, format, |out| v.put(out)),
             Self::ClockObservation(v) => encode_frame_in(12, format, |out| v.put(out)),
@@ -87,6 +91,9 @@ impl Object {
     /// and checks requiring other writes or a database belong to their owners.
     pub fn decode(bytes: &[u8]) -> Result<Self, Error> {
         let (kind, mut input) = decode_frame(bytes)?;
+        if kind == 4 {
+            store_log::check_frame_length(bytes.len())?;
+        }
         let object = match kind {
             4 => Self::StoreLog(Wire::get(&mut input)?),
             9 => Self::JoinRequest(Wire::get(&mut input)?),

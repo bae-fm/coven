@@ -367,3 +367,112 @@ fn first_entry_and_versions_are_checked() {
     assert!(Object::StoreLog(entry.clone()).encode().is_err());
     assert!(Object::decode(&encode_frame(4, &entry).unwrap()).is_err());
 }
+
+#[test]
+fn every_change_fits_one_request_at_its_field_bounds() {
+    for mut change in test_utils::store_changes() {
+        match &mut change {
+            StoreChange::CreateStore {
+                name,
+                device_name,
+                access,
+                ..
+            } => {
+                *name = "n".repeat(1024);
+                *device_name = "d".repeat(1024);
+                *access = crate::MemberAccess::ProviderAccount("a".repeat(1024));
+            }
+            StoreChange::AddMember { access, .. } | StoreChange::SetAccess { access } => {
+                *access = crate::MemberAccess::S3AccessKey {
+                    access_key_id: "a".repeat(1024),
+                };
+            }
+            StoreChange::AddDevice { name, .. }
+            | StoreChange::CreateCircle { name, .. }
+            | StoreChange::RenameCircle { name, .. } => *name = "n".repeat(1024),
+            _ => (),
+        }
+        let mut entry = test_utils::store_log();
+        if !matches!(change, StoreChange::CreateStore { .. }) {
+            entry.had_read = EntryPositions(
+                (2..=65_537)
+                    .map(|device| EntryId {
+                        device: DeviceId(device),
+                        number: 1,
+                    })
+                    .collect(),
+            );
+        }
+        entry.change = change;
+        let object = Object::StoreLog(entry);
+        let frame = object.encode().unwrap();
+        let size = frame.len() + 19 + 4 + coven_crypto::SEALED_OBJECT_CHUNK_OVERHEAD + 64;
+        assert!(size <= MAX_STORE_LOG_OBJECT);
+        assert_eq!(Object::decode(&frame).unwrap(), object);
+    }
+}
+
+#[test]
+fn member_access_bound_applies_before_decoding_its_declared_bytes() {
+    for tag in [0, 1] {
+        let access = if tag == 0 {
+            crate::MemberAccess::ProviderAccount("a".repeat(1025))
+        } else {
+            crate::MemberAccess::S3AccessKey {
+                access_key_id: "a".repeat(1025),
+            }
+        };
+        assert!(matches!(
+            frame(StoreChange::SetAccess { access }).encode(),
+            Err(Error::Limit {
+                field: "member access",
+                actual: 1025,
+                maximum: 1024
+            })
+        ));
+        let mut bytes = frame(StoreChange::SetAccess {
+            access: crate::MemberAccess::ProviderAccount(String::new()),
+        })
+        .encode()
+        .unwrap();
+        bytes[76] = tag;
+        bytes[77..81].copy_from_slice(&1025u32.to_be_bytes());
+        assert!(matches!(
+            Object::decode(&bytes),
+            Err(Error::Limit {
+                field: "member access",
+                actual: 1025,
+                maximum: 1024
+            })
+        ));
+    }
+}
+
+#[test]
+fn encrypted_entry_limit_counts_every_envelope_byte() {
+    use crate::sealed_single::{SingleChunkObject, SingleChunkPrefix};
+    let prefix = SingleChunkPrefix::StoreLog {
+        key: KeyId(uuid::Uuid::nil()),
+    };
+    let chunk = vec![0; MAX_STORE_LOG_OBJECT - 19 - 4 - 64];
+    let mut bytes = prefix.encode_chunk(&chunk).unwrap();
+    bytes.extend([0; 64]);
+    assert_eq!(bytes.len(), MAX_STORE_LOG_OBJECT);
+    SingleChunkObject::decode(&bytes).unwrap();
+    bytes.push(0);
+    assert!(matches!(
+        SingleChunkObject::decode(&bytes),
+        Err(Error::Limit {
+            field: "store-log object",
+            ..
+        })
+    ));
+    let oversized = vec![0; chunk.len() + 1];
+    assert!(matches!(
+        prefix.encode_chunk(&oversized),
+        Err(Error::Limit {
+            field: "store-log object",
+            ..
+        })
+    ));
+}

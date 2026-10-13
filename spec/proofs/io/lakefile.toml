@@ -1,5 +1,5 @@
 name = "covenIO"
-defaultTargets = ["CovenIO"]
+defaultTargets = ["CovenIO", "finalityRunner"]
 
 [[require]]
 name = "covenStorage"
@@ -11,3 +11,7 @@ path = "../storelog-data"
 
 [[lean_lib]]
 name = "CovenIO"
+
+[[lean_exe]]
+name = "finalityRunner"
+root = "FinalityRunner"

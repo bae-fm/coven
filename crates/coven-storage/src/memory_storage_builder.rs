@@ -5,6 +5,7 @@ use coven_foundation::clock::FixedClock;
 pub struct MemoryStorageBuilder {
     config: StorageConfig,
     clock: ClockRef,
+    time_resolution: Duration,
     single_limit: u64,
     part_size: usize,
 }
@@ -14,8 +15,9 @@ impl MemoryStorageBuilder {
         Self {
             config: location(CloudProvider::S3),
             clock: Arc::new(FixedClock::new(std::time::UNIX_EPOCH)),
-            single_limit: 16,
-            part_size: 4,
+            time_resolution: Duration::from_nanos(1),
+            single_limit: coven_format::store_log::MAX_STORE_LOG_OBJECT as u64,
+            part_size: 64 * 1024,
         }
     }
 
@@ -34,6 +36,11 @@ impl MemoryStorageBuilder {
         self.clock = clock;
         self
     }
+    /// Choose the reported provider tick. Set the fixture clock on this grid.
+    pub fn time_resolution(mut self, resolution: Duration) -> Self {
+        self.time_resolution = resolution;
+        self
+    }
     /// Choose the single-request threshold and resumable part size.
     pub fn transfer_limits(mut self, single_limit: u64, part_size: usize) -> Self {
         self.single_limit = single_limit;
@@ -45,10 +52,14 @@ impl MemoryStorageBuilder {
         let Self {
             config,
             clock,
+            time_resolution,
             single_limit,
             part_size,
         } = self;
         config.validate()?;
+        if time_resolution.is_zero() {
+            return Err(StorageFailure::InvalidConfiguration.with_source("zero provider time unit"));
+        }
         if single_limit == 0 || part_size == 0 {
             return Err(StorageFailure::InvalidPart.into());
         }
@@ -62,6 +73,7 @@ impl MemoryStorageBuilder {
             active_requests: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             peak_requests: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             clock,
+            time_resolution,
             tokens: Arc::new(Mutex::new(None)),
             s3_key: Arc::new(Mutex::new(None)),
             account: Account::Owner,

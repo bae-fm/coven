@@ -315,15 +315,15 @@ fn key_number(id: coven_foundation::id_source::KeyId) -> u64 {
     u64::try_from(id.0.as_u128()).unwrap()
 }
 
-fn run_lean(input: &Value) -> std::process::Output {
-    let runner = std::env::var_os("COVEN_STORELOG_LEAN")
-        .expect("COVEN_STORELOG_LEAN must name storelogRunner");
+pub(crate) fn run_lean(variable: &str, input: &Value) -> std::process::Output {
+    let runner =
+        std::env::var_os(variable).unwrap_or_else(|| panic!("{variable} must name a Lean runner"));
     let mut child = Command::new(runner)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("start storelogRunner");
+        .expect("start Lean runner");
     child
         .stdin
         .take()
@@ -334,7 +334,7 @@ fn run_lean(input: &Value) -> std::process::Output {
 }
 
 pub(crate) fn lean_results(inputs: &[Value]) -> Vec<Vec<Value>> {
-    let output = run_lean(&json!({"histories": inputs}));
+    let output = run_lean("COVEN_STORELOG_LEAN", &json!({"histories": inputs}));
     assert!(
         output.status.success(),
         "Lean runner failed: {}",
@@ -656,7 +656,7 @@ fn lean_differential_rejects_invalid_inputs() {
         for hash in [json!([1]), json!(vec![256; 32])] {
             let mut bad = valid.clone();
             bad["entries"][index]["action"]["key_hash"] = hash;
-            let output = run_lean(&json!({"histories":[bad]}));
+            let output = run_lean("COVEN_STORELOG_LEAN", &json!({"histories":[bad]}));
             assert!(!output.status.success());
             assert!(
                 String::from_utf8_lossy(&output.stderr).contains("key hash must contain 32 bytes")
@@ -675,7 +675,7 @@ fn lean_differential_rejects_invalid_inputs() {
     ] {
         let mut bad = valid.clone();
         bad["entries"][index][field] = value;
-        let output = run_lean(&json!({"histories":[bad]}));
+        let output = run_lean("COVEN_STORELOG_LEAN", &json!({"histories":[bad]}));
         assert!(!output.status.success());
         assert!(String::from_utf8_lossy(&output.stderr).contains(reason));
     }
@@ -686,7 +686,7 @@ fn lean_differential_rejects_invalid_inputs() {
     ] {
         let mut bad = valid.clone();
         bad[field] = value;
-        let output = run_lean(&json!({"histories":[bad]}));
+        let output = run_lean("COVEN_STORELOG_LEAN", &json!({"histories":[bad]}));
         assert!(!output.status.success());
         assert!(String::from_utf8_lossy(&output.stderr).contains(reason));
     }

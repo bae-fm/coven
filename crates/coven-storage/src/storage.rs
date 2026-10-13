@@ -156,7 +156,8 @@ pub trait Storage: Send + Sync {
         Err(StorageFailure::InvalidConfiguration.with_source("provider has no sharing account"))
     }
     /// Largest complete encrypted body sent in one request, in bytes. Larger
-    /// create-once objects use resumable or multipart uploads, for every path kind.
+    /// create-once objects use resumable or multipart uploads. Store-log entries
+    /// always use one request and reject an oversized body.
     /// Callers retaining sessions across crashes use `begin_upload` and record them.
     /// S3 uses 5 GiB, Drive 5,000,000 bytes, Dropbox 150 MiB and OneDrive
     /// 250,000,000 bytes. CloudKit uses bounded 8 MiB assets.
@@ -167,8 +168,9 @@ pub trait Storage: Send + Sync {
         Err(StorageFailure::InvalidConfiguration.with_source("provider does not use OAuth"))
     }
     /// Create a complete encrypted object, refusing an occupied path.
-    /// Bodies above [`Self::single_request_limit`] use a session for any immutable
-    /// path, including writes and snapshots. A failed transfer aborts the session;
+    /// Bodies above [`Self::single_request_limit`] use a session for immutable
+    /// paths other than store-log entries, whose bodies must fit one request.
+    /// A failed transfer aborts the session;
     /// if abort fails too, [`StorageError::Cleanup`] retains both causes.
     async fn create(&self, path: &ObjectPath, bytes: &[u8]) -> Result<(), StorageError>;
     /// Replace a device's posted positions or clock object; immutable paths are refused.
@@ -262,7 +264,7 @@ pub trait Storage: Send + Sync {
     /// preserving its failure cause; group and parent access remain reported.
     async fn revoke_access(&self, member: &MemberAccess) -> Result<MemberRemoval, StorageError>;
     /// Begin a create-once upload, returning the value to record before parts are sent.
-    /// Positions and clock objects are refused: replacement sends complete bytes in one request.
+    /// Store-log entries, positions and clocks are refused: all require one request.
     async fn begin_upload(
         &self,
         path: &ObjectPath,

@@ -559,7 +559,7 @@ mod recovery {
             let (started, observed) = tokio::sync::oneshot::channel();
             let (resume, held) = tokio::sync::oneshot::channel();
             storage
-                .hold_next_listing(ObjectPrefix::store_logs(directory.id()), started, held)
+                .hold_next_creation(ObjectPrefix::keys(directory.id()), started, held)
                 .await;
             let mut pending = Box::pin(operations.create_circle("Waiting operation"));
             std::future::poll_fn(|cx| {
@@ -568,28 +568,33 @@ mod recovery {
             })
             .await;
             observed.await.unwrap();
-            storage.set_online(false);
-            resume.send(()).unwrap();
+            drop(resume);
             operations.get_members().await.unwrap();
             assert_eq!(db.operations().await.unwrap().len(), 1);
             drop(pending);
             operations.close().await.unwrap();
-            storage.set_online(true);
+            // Retain the operation journal after publishing its reserved entry.
+            db.retry_operation(db.operations().await.unwrap()[0].id)
+                .await
+                .unwrap();
+            sync.sync_store_log().await.unwrap();
+            let (started, observed) = tokio::sync::oneshot::channel();
+            let (resume, held) = tokio::sync::oneshot::channel();
             storage
-                .set_faults(coven_storage::test_utils::Faults {
-                    drop_part: true,
-                    ..coven_storage::test_utils::Faults::none()
-                })
+                .hold_next_creation(ObjectPrefix::store_logs(directory.id()), started, held)
                 .await;
-            assert!(matches!(
+            let (publication, ()) = tokio::join!(
                 sync.make_and_upload_entry(StoreChange::AddDevice {
                     device: DeviceId(77),
                     name: "Waiting entry".into(),
                     replaces: None,
-                })
-                .await,
-                Err(SyncError::Storage(_))
-            ));
+                }),
+                async {
+                    observed.await.unwrap();
+                    drop(resume);
+                }
+            );
+            assert!(matches!(publication, Err(SyncError::Storage(_))));
             let queued = db.local_store_log().await.unwrap().upload.unwrap();
             let path = ObjectPath::store_log(
                 directory.id(),

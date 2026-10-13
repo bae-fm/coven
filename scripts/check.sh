@@ -275,13 +275,20 @@ proofs() {
             tests::lean_differential_checked_examples \
             tests::lean_differential_circle_replay \
             replay::landing::tests::lean_differential_storage_admission \
-            tests::lean_differential_rejects_invalid_inputs; do
+            tests::lean_differential_rejects_invalid_inputs \
+            finality::tests::lean_differential_finality_horizon; do
             if ! printf '%s\n' "$storelog_tests" | grep -qxF "$test: test"; then
                 echo "the Rust test binary is missing $test" >&2
                 exit 1
             fi
         done
         COVEN_STORELOG_LEAN="$runner" cargo test -p coven-sync --all-features lean_differential -- --ignored
+    fi
+
+    if proof_selected io || crate_selected coven-sync; then
+        runner=$(runner io finalityRunner)
+        step "Rust / Lean finality observation endpoint"
+        COVEN_IO_LEAN="$runner" cargo test -p coven-sync --all-features io_differential_finality -- --ignored
     fi
 
     if proof_selected storage || crate_selected coven-database; then

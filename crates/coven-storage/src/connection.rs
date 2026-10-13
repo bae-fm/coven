@@ -55,7 +55,7 @@ impl<P: ProviderOps + ?Sized> StorageConnection<P> {
         path: &ObjectPath,
         total: u64,
     ) -> Result<UploadSession, StorageError> {
-        if path.is_replaceable() {
+        if path.is_replaceable() || path.store_log_position().is_some() {
             return Err(StorageFailure::InvalidPath.into());
         }
         if total == 0 {

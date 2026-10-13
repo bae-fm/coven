@@ -6,6 +6,7 @@ use coven_foundation::id_source::DeviceId;
 
 fn storage() -> MemoryStorage {
     MemoryStorage::builder()
+        .transfer_limits(16, 4)
         .provider(crate::CloudProvider::Dropbox)
         .build()
         .unwrap()

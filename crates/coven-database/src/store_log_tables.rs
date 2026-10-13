@@ -72,10 +72,41 @@ pub(crate) fn deleted_circles(
         .collect())
 }
 
+pub(crate) fn encode_horizon(horizon: std::time::Duration) -> Vec<u8> {
+    let mut bytes = horizon.as_secs().to_be_bytes().to_vec();
+    bytes.extend(horizon.subsec_nanos().to_be_bytes());
+    bytes
+}
+
+fn decode_horizon(bytes: &[u8]) -> Result<std::time::Duration, DbError> {
+    if bytes.len() != 12 {
+        return Err(DbError::DamagedDatabase);
+    }
+    let seconds = u64::from_be_bytes(bytes[..8].try_into().expect("checked horizon width"));
+    let nanos = u32::from_be_bytes(bytes[8..].try_into().expect("checked horizon width"));
+    if nanos >= 1_000_000_000 {
+        return Err(DbError::DamagedDatabase);
+    }
+    Ok(std::time::Duration::new(seconds, nanos))
+}
+
 pub(crate) fn read(database: &DatabaseConnection) -> Result<StoreLog, DbError> {
     #[cfg(any(test, feature = "test-utils"))]
     database.record_work(|work| work.full_log_decodes += 1);
-    let mut log = StoreLog::default();
+    let mut log = StoreLog {
+        horizon: database.query_row(
+            "SELECT horizon FROM _coven_finality WHERE singleton=1",
+            [],
+            |row| {
+                row.get::<_, Option<Vec<u8>>>(0)?
+                    .map(|bytes| {
+                        decode_horizon(&bytes).map_err(|error| decode_failure(0, Type::Blob, error))
+                    })
+                    .transpose()
+            },
+        )?,
+        ..StoreLog::default()
+    };
     for (entry, outcome) in database.query(
         "SELECT record,outcome,beaten_device,beaten_number,target,author_view,stored_at FROM _coven_store_log",
         [],

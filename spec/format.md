@@ -66,8 +66,14 @@
 | `Unique` | `terms:[text] \| predicate:Option<text>` | Nonempty terms; each is a column or an expression as written. Terms and predicates use `text`, not `name`. |
 | `ColumnValue` | `value:Value \| parents:map<ForeignKey, Parent>` | |
 | `MemberKeys` | `signing:SigningKey \| sealing:SealingKey` | Public pair, independent of `MemberId`. |
-| `MemberAccess` | `0 \| account:text`, or `1 \| access_key_id:text` | A provider account, or an S3 key's public id. |
+| `MemberAccess` | `0 \| account:text`, or `1 \| access_key_id:text` | A provider account, or an S3 key's public id; at most 1,024 UTF-8 bytes. |
 
+- A complete sealed store-log entry, including its cleartext prefix, chunk
+  framing, nonce, authentication tag and signature, is at most 4 MiB
+  (4,194,304 bytes). D6's bounded names, member access and positions ensure
+  every valid entry fits. Reject an oversized change before reserving its
+  entry number or key copies. This bound permits one-request publication on
+  every provider, including Drive's 5,000,000-byte request limit.
 - Identifiers order as their bytes, except where a row says otherwise. Names
   order by UTF-8 bytes; `RowId` orders by table, encoded key, then audience.
   A `Value` retains its SQLite storage class: an integer and an integral real

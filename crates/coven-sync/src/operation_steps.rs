@@ -594,6 +594,7 @@ impl StoreLogSync {
                 .chain(std::iter::once(incoming.clone()))
                 .collect(),
             replay: replay.clone(),
+            horizon: previous.horizon,
         };
         if !self.owns_storage(&log, &member.member_id()) {
             return Ok(Vec::new());

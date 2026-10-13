@@ -55,6 +55,7 @@ async fn memory_conforms() {
         ));
         let storage = Arc::new(
             MemoryStorage::builder()
+                .transfer_limits(16, 4)
                 .location(config)
                 .clock(clock.clone())
                 .build()
@@ -107,7 +108,11 @@ async fn memory_conforms() {
 }
 #[tokio::test]
 async fn crash_after_accepted_part_and_dropped_part_resumes() {
-    let provider = MemoryStorage::builder().location(config()).build().unwrap();
+    let provider = MemoryStorage::builder()
+        .transfer_limits(16, 4)
+        .location(config())
+        .build()
+        .unwrap();
     let path = ObjectPath::file(
         STORE_ID,
         coven_foundation::id_source::DeviceId(31),
@@ -200,7 +205,11 @@ async fn faults_are_counted_and_delay_is_awaited() {
 
 #[tokio::test]
 async fn failed_automatic_upload_is_aborted_without_publishing() {
-    let storage = MemoryStorage::builder().location(config()).build().unwrap();
+    let storage = MemoryStorage::builder()
+        .transfer_limits(16, 4)
+        .location(config())
+        .build()
+        .unwrap();
     storage
         .set_faults(Faults {
             lose_part_reply: true,
@@ -332,7 +341,11 @@ async fn listing_records_publication_time_and_keeps_it_on_retry() {
 #[tokio::test]
 async fn recorded_sessions_cannot_redirect_or_regress_provider_state() {
     use coven_foundation::id_source::DeviceId;
-    let storage = MemoryStorage::builder().location(config()).build().unwrap();
+    let storage = MemoryStorage::builder()
+        .transfer_limits(16, 4)
+        .location(config())
+        .build()
+        .unwrap();
     let path = ObjectPath::device_log(STORE_ID, DeviceId(31), std::num::NonZeroU64::MIN);
     let mut upload = storage.begin_upload(&path, 8).await.unwrap();
     storage.upload_part(&mut upload, b"data").await.unwrap();

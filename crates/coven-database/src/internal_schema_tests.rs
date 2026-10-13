@@ -112,6 +112,7 @@ async fn only_the_spec_tables_are_created() {
                 "_coven_file_removals",
                 "_coven_file_upload_chunks",
                 "_coven_file_uploads",
+                "_coven_finality",
                 "_coven_fingerprint_leaves",
                 "_coven_fingerprint_sums",
                 "_coven_foreign_keys",

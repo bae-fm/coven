@@ -37,6 +37,8 @@ pub struct Faults {
     pub overwrite_create: bool,
     /// Hide published objects from listings while exact reads and status still see them.
     pub hide_listings: bool,
+    /// Hide objects no older than this lag; exact reads still see publication.
+    pub listing_lag: Option<Duration>,
     /// Refuse a duplicate create but fail to abort its upload session.
     pub fail_duplicate_cleanup: bool,
 }
@@ -54,6 +56,7 @@ impl Faults {
             overwrite_create: false,
             fail_duplicate_cleanup: false,
             hide_listings: false,
+            listing_lag: None,
         }
     }
 }
@@ -65,12 +68,12 @@ struct Object {
     revision: u64,
 }
 impl Object {
-    fn metadata(&self, path: &ObjectPath) -> StoredObject {
+    fn metadata(&self, path: &ObjectPath, time_resolution: Duration) -> StoredObject {
         StoredObject {
             path: path.clone(),
             size: self.bytes.len() as u64,
             stored_at: self.stored_at,
-            time_resolution: Duration::from_nanos(1),
+            time_resolution,
             object_id: path.as_str().into(),
             revision: self.revision.to_string(),
             checksum: None,
@@ -184,6 +187,7 @@ pub struct MemoryProvider {
     peak_requests: Arc<std::sync::atomic::AtomicUsize>,
     account: Account,
     clock: ClockRef,
+    time_resolution: Duration,
     tokens: Arc<Mutex<Option<OAuthTokens>>>,
     s3_key: Arc<Mutex<Option<S3Credentials>>>,
     state: Arc<Mutex<State>>,
@@ -195,8 +199,8 @@ impl Clone for MemoryStorage {
 }
 
 impl MemoryStorage {
-    /// An S3 test location at the Unix epoch, with sixteen-byte single requests
-    /// and four-byte parts. Override only the choices relevant to the scenario.
+    /// An S3 test location at the Unix epoch, with four-MiB single requests
+    /// and 64-KiB parts. Override only the choices relevant to the scenario.
     pub fn builder() -> MemoryStorageBuilder {
         MemoryStorageBuilder::new()
     }
@@ -219,6 +223,7 @@ impl MemoryStorage {
             peak_requests: owner.provider.peak_requests.clone(),
             account: Account::Recipient(email.to_ascii_lowercase()),
             clock: owner.provider.clock.clone(),
+            time_resolution: owner.provider.time_resolution,
             tokens: Arc::new(Mutex::new(None)),
             s3_key: Arc::new(Mutex::new(None)),
             state: owner.provider.state.clone(),
@@ -538,6 +543,9 @@ impl ProviderOps for MemoryProvider {
                 stored_at: self.clock.now(),
             },
         );
+        if std::mem::replace(&mut state.faults.lose_completion_reply, false) {
+            return Err(StorageFailure::Network.into());
+        }
         Ok(())
     }
 
@@ -564,7 +572,7 @@ impl ProviderOps for MemoryProvider {
             .await
             .objects
             .get(path)
-            .map(|object| object.metadata(path)))
+            .map(|object| object.metadata(path, self.time_resolution)))
     }
     async fn read_object(
         &self,
@@ -575,7 +583,7 @@ impl ProviderOps for MemoryProvider {
             .await?;
         let mut state = self.state.lock().await;
         let object = state.objects.get(path).ok_or(StorageFailure::NotFound)?;
-        let metadata = object.metadata(path);
+        let metadata = object.metadata(path, self.time_resolution);
         let bytes = match range {
             Some(range) => range.select(&object.bytes)?,
             None => object.bytes.clone(),
@@ -593,12 +601,20 @@ impl ProviderOps for MemoryProvider {
     async fn list(&self, listing: &mut ObjectListing) -> Result<(), StorageError> {
         let prefix = listing.prefix();
         self.before(MemoryRequest::List(prefix.clone())).await?;
+        let now = self.clock.now();
         let mut state = self.state.lock().await;
         let objects: Vec<_> = state
             .objects
             .iter()
-            .filter(|(path, _)| !state.faults.hide_listings && prefix.contains(path))
-            .map(|(path, object)| object.metadata(path))
+            .filter(|(path, object)| {
+                !state.faults.hide_listings
+                    && prefix.contains(path)
+                    && state.faults.listing_lag.is_none_or(|lag| {
+                        now.duration_since(object.stored_at)
+                            .is_ok_and(|age| age > lag)
+                    })
+            })
+            .map(|(path, object)| object.metadata(path, self.time_resolution))
             .collect();
         let hold = if state
             .held_listing

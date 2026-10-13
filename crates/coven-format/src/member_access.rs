@@ -18,6 +18,11 @@ pub enum MemberAccess {
 
 impl Wire for MemberAccess {
     fn put(&self, out: &mut Encoder) -> Result<(), Error> {
+        let text = match self {
+            Self::ProviderAccount(account) => account,
+            Self::S3AccessKey { access_key_id } => access_key_id,
+        };
+        crate::error::bound(text.len(), 1024, "member access")?;
         match self {
             Self::ProviderAccount(account) => {
                 0u8.put(out)?;
@@ -31,9 +36,13 @@ impl Wire for MemberAccess {
     }
     fn get(input: &mut Decoder<'_>) -> Result<Self, Error> {
         match u8::get(input)? {
-            0 => Ok(Self::ProviderAccount(String::get(input)?)),
+            0 => Ok(Self::ProviderAccount(crate::wire::get_text(
+                input,
+                1024,
+                "member access",
+            )?)),
             1 => Ok(Self::S3AccessKey {
-                access_key_id: String::get(input)?,
+                access_key_id: crate::wire::get_text(input, 1024, "member access")?,
             }),
             tag => Err(Error::UnknownTag {
                 field: "member access",

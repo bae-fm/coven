@@ -10,6 +10,17 @@ pub(crate) async fn upload_bytes(
     bytes: &[u8],
     single_request: impl Future<Output = Result<(), StorageError>> + Send,
 ) -> Result<(), StorageError> {
+    if path.store_log_position().is_some() {
+        // Finality relies on completion-time metadata from one-request entry
+        // publication. Never substitute a multipart initiation timestamp.
+        check_single_request(
+            bytes.len() as u64,
+            storage
+                .single_request_limit()
+                .min(coven_format::store_log::MAX_STORE_LOG_OBJECT as u64),
+        )?;
+        return single_request.await;
+    }
     if bytes.len() as u64 <= storage.single_request_limit() {
         return single_request.await;
     }

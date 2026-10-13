@@ -28,9 +28,27 @@ pub struct StoreLog {
     pub entries: Vec<ReplayEntry>,
     /// The result computed by sync for exactly these entries.
     pub replay: StoreLogReplay,
+    /// Greatest certified cutoff since the Unix epoch. Absence differs from a
+    /// certified empty prefix. Duration preserves the provider tick's precision
+    /// even on platforms whose SystemTime has coarser precision.
+    pub horizon: Option<std::time::Duration>,
 }
 
 impl StoreLog {
+    /// Finality is a strict comparison with the one persisted horizon (§9).
+    pub fn is_final(&self, entry: EntryId) -> bool {
+        self.horizon.is_some_and(|horizon| {
+            self.entries.iter().any(|applied| {
+                applied.entry.position == entry
+                    && applied
+                        .stored_at
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .expect("nonnegative provider time")
+                        < horizon
+            })
+        })
+    }
+
     /// Applied positions represented by these entries, including dropped entries.
     pub fn positions(&self) -> coven_format::value::EntryPositions {
         let mut positions = BTreeMap::new();

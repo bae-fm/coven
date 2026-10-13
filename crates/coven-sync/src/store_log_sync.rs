@@ -27,6 +27,7 @@ use std::sync::Arc;
 pub struct StoreLogSync {
     #[cfg(test)]
     received_entry_decodes: Option<Arc<std::sync::atomic::AtomicUsize>>,
+    finality: std::sync::Mutex<crate::finality::Observation>,
     reads: crate::pass_reads::PassReads,
     storage: Option<Arc<dyn Storage>>,
     database: Database,
@@ -51,6 +52,7 @@ impl StoreLogSync {
         Self {
             #[cfg(test)]
             received_entry_decodes: None,
+            finality: std::sync::Mutex::default(),
             reads: crate::pass_reads::PassReads::default(),
             storage: Some(storage),
             database,
@@ -74,6 +76,7 @@ impl StoreLogSync {
         Self {
             #[cfg(test)]
             received_entry_decodes: None,
+            finality: std::sync::Mutex::default(),
             reads: crate::pass_reads::PassReads::default(),
             storage: None,
             database,
@@ -194,10 +197,15 @@ impl StoreLogSync {
         self.scan_store_log(false).await
     }
 
-    async fn scan_store_log(
+    async fn scan_store_log_once(
         &self,
         require_complete: bool,
-    ) -> Result<Vec<DamagedObject>, SyncError> {
+    ) -> Result<(Vec<DamagedObject>, bool), SyncError> {
+        let through = self
+            .finality
+            .lock()
+            .expect("finality lock poisoned")
+            .through();
         let mut local = self.database.local_store_log().await?;
         let member = self
             .member_keys
@@ -210,13 +218,59 @@ impl StoreLogSync {
             .await?;
         self.publish(&mut local, &member, &mut ring, &mut damages)
             .await?;
-        let paths = self
+        let mut paths = self
             .storage
             .as_deref()
             .ok_or(SyncError::NoStorage)?
             .list(&ObjectPrefix::store_logs(self.directory.id()))
             .await?;
+        // Listing discovers writers. Exact status reads establish each writer's
+        // terminal miss; a listed suffix beyond a gap cannot certify finality.
+        let writers: BTreeSet<_> = local
+            .log
+            .entries
+            .iter()
+            .map(|entry| entry.entry.position.device)
+            .chain(local.log.replay.state.devices.keys().copied())
+            .chain(
+                paths
+                    .iter()
+                    .filter_map(|object| object.path.store_log_position().map(|p| p.0)),
+            )
+            .collect();
+        for device in writers {
+            let mut number = local
+                .log
+                .entries
+                .iter()
+                .filter(|entry| entry.entry.position.device == device)
+                .map(|entry| entry.entry.position.number)
+                .max()
+                .unwrap_or(0);
+            loop {
+                number = number.checked_add(1).ok_or_else(|| {
+                    StorageFailure::Protocol.with_source("store-log sequence exhausted")
+                })?;
+                let path = object::path(local.store, EntryId { device, number });
+                let Some(stored) = self
+                    .storage
+                    .as_deref()
+                    .ok_or(SyncError::NoStorage)?
+                    .status(&path)
+                    .await?
+                else {
+                    break;
+                };
+                crate::store_log_landing::add_observation(&mut paths, stored)?;
+            }
+        }
         let publications = crate::store_log_landing::publication_times(&local.log, &paths)?;
+        for object in &paths {
+            self.finality
+                .lock()
+                .expect("finality lock poisoned")
+                .observe(object);
+        }
         let mut entries = BTreeMap::new();
         for stored in paths {
             let (device, number) = stored.path.store_log_position().ok_or(
@@ -360,7 +414,38 @@ impl StoreLogSync {
                     .into());
             }
         }
-        Ok(damages)
+        let complete_through = |through: Option<std::time::Duration>| {
+            let includes = |time: &std::time::SystemTime| {
+                through.is_none_or(|end| {
+                    time.duration_since(std::time::UNIX_EPOCH)
+                        .expect("nonnegative provider time")
+                        <= end
+                })
+            };
+            publications
+                .iter()
+                .filter(|(_, time)| includes(time))
+                .all(|(id, _)| local.log.replay.entries.contains_key(id))
+                && stuck.iter().all(|refusal| match refusal.object {
+                    coven_database::LogObject::Entry(id) => {
+                        publications.get(&id).is_some_and(|time| !includes(time))
+                    }
+                    coven_database::LogObject::Write(_) => true,
+                })
+        };
+        let complete = complete_through(None);
+        if let Some((through, unit)) = through {
+            if complete_through(Some(through)) {
+                if let Some(horizon) = crate::finality::horizon(&local.log, through, unit) {
+                    if local.log.horizon != Some(horizon) {
+                        self.database
+                            .advance_store_log_horizon(local.log, horizon)
+                            .await?;
+                    }
+                }
+            }
+        }
+        Ok((damages, complete))
     }
 
     async fn read_entry(
@@ -827,3 +912,6 @@ mod bootstrap;
 mod storage_setup;
 
 pub use bootstrap::JoinOutcome;
+
+#[path = "store_log_finality.rs"]
+mod store_log_finality;

@@ -384,6 +384,34 @@ impl Database {
         self.read(|sql| sql.store_log()).await
     }
 
+    /// Save a completed scan's horizon against exactly the replay it checked.
+    /// The writer transaction rejects stale inputs and preserves monotonicity.
+    /// An unchanged cutoff performs no write and emits no query notification.
+    pub async fn advance_store_log_horizon(
+        &self,
+        checked: crate::StoreLog,
+        horizon: std::time::Duration,
+    ) -> Result<(), DbError> {
+        self.call(move |inner| {
+            inner.with_writer(|writer| {
+                writer.transaction(|database| {
+                    let current = crate::store_log_tables::read(database)?;
+                    if current.entries != checked.entries || current.replay != checked.replay {
+                        return Err(DbError::StoreLogEntriesChanged);
+                    }
+                    if current.horizon.is_none_or(|previous| horizon > previous) {
+                        database.internal_execute(
+                            "UPDATE _coven_finality SET horizon=?1 WHERE singleton=1",
+                            [crate::store_log_tables::encode_horizon(horizon)],
+                        )?;
+                    }
+                    Ok(())
+                })
+            })
+        })
+        .await
+    }
+
     /// Read the schema version, positions and fingerprints from one committed state.
     /// Supply fresh hashers derived from the store or circle keys. Audiences whose
     /// keys are unavailable can be omitted without interrupting sum maintenance.

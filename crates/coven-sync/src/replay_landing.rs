@@ -1,11 +1,8 @@
 //! Permanent admission against every unread stored entry (§9, C10).
 
-use super::had_read_position;
+use super::{had_read_position, ENTRY_WINDOW};
 use coven_format::{store_log::StoreLogEntry, value::EntryId};
-use std::{
-    collections::BTreeMap,
-    time::{Duration, SystemTime},
-};
+use std::{collections::BTreeMap, time::SystemTime};
 
 pub(crate) fn landed_too_late(
     entry: &StoreLogEntry,
@@ -15,7 +12,7 @@ pub(crate) fn landed_too_late(
     publications.iter().any(|(prior, time)| {
         stored_at
             .duration_since(*time)
-            .is_ok_and(|elapsed| elapsed > Duration::from_secs(30 * 24 * 60 * 60))
+            .is_ok_and(|elapsed| elapsed > ENTRY_WINDOW)
             && !had_read_position(entry, *prior)
     })
 }

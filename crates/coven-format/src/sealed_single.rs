@@ -60,6 +60,13 @@ impl SingleChunkPrefix {
         chunk: &[u8],
     ) -> Result<Vec<u8>, Error> {
         check_frame_length(chunk)?;
+        if matches!(self, Self::StoreLog { .. }) {
+            bound(
+                chunk.len() + 19 + 4 + 64,
+                crate::store_log::MAX_STORE_LOG_OBJECT,
+                "store-log object",
+            )?;
+        }
         let mut bytes = self.encode_in(format)?;
         bytes.extend_from_slice(&sealed::encode_chunk(chunk)?);
         Ok(bytes)
@@ -111,6 +118,13 @@ impl<'a> SingleChunkObject<'a> {
     pub fn decode(bytes: &'a [u8]) -> Result<Self, Error> {
         let kind = *bytes.first().ok_or(Error::Truncated)?;
         sealed::prefix(bytes, kind)?;
+        if kind == 33 {
+            bound(
+                bytes.len(),
+                crate::store_log::MAX_STORE_LOG_OBJECT,
+                "store-log object",
+            )?;
+        }
         let prefix_length = match kind {
             33 | 35 | 39 => 19,
             36 => 3,

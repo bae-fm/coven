@@ -1,7 +1,7 @@
 //! Appendix C: `authorViews`, `scan`, and `settle`.
 
 use std::collections::BTreeMap;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use coven_database::{
     DropReason, EntryOutcome, ReplayEntry, StoreLog, StoreLogCheck, StoreLogReplay, StoreLogState,
@@ -10,6 +10,9 @@ use coven_format::{store_log::StoreLogEntry, value::EntryId};
 use coven_foundation::id_source::DeviceId;
 
 use crate::{conflicts, effects};
+
+/// The landing deadline and finality's quiet window must use the same duration (§9).
+pub(crate) const ENTRY_WINDOW: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 
 #[path = "replay_landing.rs"]
 mod landing;

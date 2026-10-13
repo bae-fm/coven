@@ -1,4 +1,5 @@
 import CovenStorelog.CurrentReplay
+import CovenStorelog.Horizon
 import CovenStorelog.ExamplesSupport
 import Lean
 
@@ -105,6 +106,9 @@ private def run (j : Json) : Except String Json := do
     if attempted[i]! > stored[i]! then throw "attempt follows storage time"
     for p in (H.log i).past do
       if stored[p]! > attempted[i]! then throw "recorded read follows attempt time"
+  if (← j.getObj?).contains "checks" then
+    let checks ← j.getObjValAs? (Array Nat) "checks"
+    return toJson (checks.map fun T => Horizon.recovered H.membership window entries.size T)
   let views := CurrentReplay.authorViews H window entries.size entries.size
   for i in List.range entries.size do
     match (H.log i).action with

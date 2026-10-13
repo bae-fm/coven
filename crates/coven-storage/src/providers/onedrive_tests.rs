@@ -542,7 +542,7 @@ async fn resume_accepts_bounded_and_multiple_missing_ranges() {
     let state = remote();
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     let storage = provider(&server.url);
-    let path = ObjectPath::store_log(
+    let path = ObjectPath::device_log(
         STORE_ID,
         coven_foundation::id_source::DeviceId(1),
         std::num::NonZeroU64::MIN,
@@ -561,7 +561,7 @@ async fn malformed_missing_ranges_keep_the_response_and_recorded_progress() {
     let state = remote();
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     let storage = provider(&server.url);
-    let path = ObjectPath::store_log(
+    let path = ObjectPath::device_log(
         STORE_ID,
         coven_foundation::id_source::DeviceId(1),
         std::num::NonZeroU64::MIN,

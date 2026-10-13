@@ -600,13 +600,13 @@ async fn resumed_upload_and_non_owner_deletion_use_the_objects_actual_folder() {
     ))
     .await;
     let storage = provider(&server.url);
-    let path = ObjectPath::store_log(STORE_ID, DeviceId(31), std::num::NonZeroU64::MIN);
+    let path = ObjectPath::device_log(STORE_ID, DeviceId(31), std::num::NonZeroU64::MIN);
     let mut upload = storage.begin_upload(&path, 4).await.unwrap();
     let recorded = upload.encode().unwrap();
     let parent = {
         let mut remote = state.lock().unwrap();
-        let parent = remote.directory(&format!("{STORE_ID}/store-log/31"));
-        let logs = remote.directory(&format!("{STORE_ID}/store-log"));
+        let parent = remote.directory(&format!("{STORE_ID}/devices/31"));
+        let logs = remote.directory(&format!("{STORE_ID}/devices"));
         folder(
             &mut remote,
             &logs,

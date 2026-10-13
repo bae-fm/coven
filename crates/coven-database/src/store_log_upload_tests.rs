@@ -12,6 +12,37 @@ use std::{
 };
 
 #[tokio::test]
+async fn oversized_access_reserves_neither_an_entry_nor_key_copies() {
+    let store = TestStore::new();
+    let db = store.builder(vec![], vec![]).open().await.unwrap();
+    let entry = coven_format::test_utils::store_log();
+    let result = db
+        .prepare_store_log(
+            entry.author.clone(),
+            StoreChange::SetAccess {
+                access: coven_format::MemberAccess::ProviderAccount("a".repeat(4 * 1024 * 1024)),
+            },
+            |_, _, _| -> Result<StoreLogSealing, DbError> {
+                panic!("an oversized change cannot reach key-copy preparation")
+            },
+        )
+        .await;
+    assert!(matches!(result, Err(DbError::InvalidStoreLogEntry { .. })));
+    assert!(db.local_store_log().await.unwrap().upload.is_none());
+    assert!(db.key_uploads().await.unwrap().is_empty());
+    let next = db
+        .prepare_store_log(entry.author, entry.change, |_, _, copies| {
+            Ok::<_, DbError>(StoreLogSealing {
+                key: KeyId(uuid::Uuid::from_u128(1)),
+                keys: copies.into_uploads(),
+            })
+        })
+        .await
+        .unwrap();
+    assert_eq!(next.number, 1);
+}
+
+#[tokio::test]
 async fn local_write_follows_fixed_entry_even_after_clock_moves_back() {
     let store = TestStore::new();
     let clock = Arc::new(FixedClock::new(UNIX_EPOCH + Duration::from_secs(100)));

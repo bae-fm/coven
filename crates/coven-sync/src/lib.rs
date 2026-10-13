@@ -3,6 +3,7 @@
 mod conflicts;
 mod device_log_sync;
 mod effects;
+mod finality;
 mod pass_reads;
 mod replay;
 mod replay_cache;
