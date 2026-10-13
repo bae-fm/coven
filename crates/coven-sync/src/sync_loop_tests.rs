@@ -603,7 +603,7 @@ async fn scenario(scenario: Scenario) -> Counts {
 // listings return revisions directly, so M=0: 2 + 3*3 = 11. S3's 14-request
 // example adds three native HEADs that this provider does not perform.
 #[tokio::test]
-#[ignore = "idle requests exceed the stated 11 (2 LIST, 9 next-number misses, 0 PUT)"]
+#[ignore = "observed 22 requests (12 LIST, 6 GET, 3 status, 1 PUT); stated 11 (2 LIST, 9 next-number misses, 0 PUT)"]
 async fn io_counts_idle_requests() {
     let counts = scenario(Scenario::Idle).await;
     assert_eq!(
@@ -625,13 +625,13 @@ async fn io_counts_idle_requests() {
 }
 
 #[tokio::test]
-#[ignore = "idle passes acquire the writer and commit unchanged state"]
+#[ignore = "observed 54 writer holds and 9 commits; stated 0 of each on warm idle passes (saved-log decodes are already 0)"]
 async fn io_counts_idle_local_work() {
     assert_eq!(scenario(Scenario::Idle).await.work, WorkCounts::default());
 }
 
 #[tokio::test]
-#[ignore = "requests exceed the stated 13 with one transfer at a time: idle 11 + one write GET + one positions PUT"]
+#[ignore = "observed 29 requests; stated 13 with one transfer at a time: idle 11 + one write GET + one positions PUT"]
 async fn io_counts_one_write_requests() {
     let counts = scenario(Scenario::OneWrite).await;
     assert_eq!(
@@ -717,7 +717,7 @@ async fn io_counts_one_write_local_baseline() {
 async fn io_counts_first_catchup_baseline() {
     // Includes admission bootstrap, this device's registration and its first
     // complete pass. No fixed aggregate request/transaction count is stated
-    // for initialization; assert the observed fixture counts.
+    // for initialization; include finality status probes in the observed counts.
     let counts = scenario(Scenario::FirstCatchup).await;
     assert_eq!(
         (counts.requests, counts.requests_by_kind()),
@@ -788,7 +788,8 @@ async fn io_counts_warm_download_reuse() {
 async fn io_counts_file_fetch_baseline() {
     let counts = scenario(Scenario::FileFetch).await;
     // No fixed whole-pass count is stated for an arrival carrying a file.
-    // This fixture publishes a row write and the upload's location write.
+    // This fixture publishes a row write and the upload's location write,
+    // and checks the three writers' terminal store-log slots for finality.
     assert_eq!(
         (counts.requests, counts.requests_by_kind()),
         (
@@ -855,7 +856,7 @@ async fn io_counts_file_chunks_survive_consumers_passes_and_reopen() {
 async fn io_counts_reopen_baseline() {
     let counts = scenario(Scenario::Reopen).await;
     // Reopening has additional identity/initialization work; the spec states
-    // no fixed total for that first pass. Assert this fixture's observed total.
+    // no fixed total for that first pass. Include the finality status probes.
     assert_eq!(
         (counts.requests, counts.requests_by_kind()),
         (

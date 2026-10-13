@@ -251,7 +251,7 @@ mod query_plans {
                   CAST(x'00' || device || n AS BLOB),'1' FROM fixture;
          INSERT INTO _coven_store_log(device,number,record,timestamp,author_view,stored_at,outcome)
            SELECT device,n,zeroblob(128),CAST(n || device AS BLOB),x'00',zeroblob(13),'kept' FROM fixture;
-         INSERT INTO _coven_store_log_uploads VALUES(counter(1),counter(1),zeroblob(128),zeroblob(16),zeroblob(16));
+         INSERT INTO _coven_store_log_uploads VALUES(counter(1),counter(1),zeroblob(128),CAST(counter(1) || counter(1) AS BLOB),zeroblob(16));
          INSERT INTO _coven_key_publications SELECT n,n FROM fixture;
          INSERT INTO _coven_key_uploads
            SELECT device,n,zeroblob(128),CASE WHEN i%4=0 THEN counter(1) END,
@@ -441,8 +441,6 @@ mod query_plans {
             Some("the queue reader lists every waiting write in insertion order"),
         ("write_boundary.rs", "SELECT b.kind,b.version,b.audience,b.snapshot_device,b.snapshot_number,b.entry_device,b.entry_number,b.included,b.applied FROM _coven_store_log l JOIN _coven_boundaries b ON b.entry_device=l.device AND b.entry_number=l.number WHERE l.outcome='kept' ORDER BY l.timestamp", "l") =>
             Some("boundary selection reads every kept boundary in replay order"),
-        ("write_encoding.rs", "SELECT record FROM _coven_store_log UNION ALL SELECT record FROM _coven_store_log_uploads", "_coven_store_log" | "_coven_store_log_uploads") =>
-            Some("clock construction considers every applied and queued entry timestamp"),
         ("migration_snapshot.rs", "SELECT DISTINCT lower(table_name) FROM _coven_columns", "_coven_columns") =>
             Some("once per migration: discover every table with retained column metadata"),
         ("migration_writes.rs", "SELECT device,number,record FROM _coven_uploads WHERE sealing_keys IS NULL ORDER BY device,number", "_coven_uploads") =>
