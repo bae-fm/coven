@@ -206,3 +206,20 @@ fn member_ids_are_validated_by_crypto_in_every_wire_context() {
         ));
     }
 }
+
+#[test]
+fn value_tags_preserve_equal_integer_and_real_storage_classes() {
+    for (value, expected) in [
+        (Value::Null, "00"),
+        (Value::Integer(1), "010000000000000001"),
+        (Value::Real(1.0f64.to_bits()), "023ff0000000000000"),
+        (Value::Text("\0".into()), "030000000100"),
+        (Value::Blob(vec![0]), "040000000100"),
+    ] {
+        let encoded = crate::tests::hex(expected);
+        assert_eq!(bytes(&value), encoded);
+        let mut input = Decoder::new(&encoded).unwrap();
+        assert_eq!(Value::get(&mut input).unwrap(), value);
+        input.finish().unwrap();
+    }
+}

@@ -71,3 +71,45 @@ fn malformed_or_duplicate_dismissals_and_reversed_frames_are_refused() {
         }
     });
 }
+
+#[test]
+fn dismissals_require_explicit_peer_reads_or_implicit_own_predecessors() {
+    let original = test_utils::write();
+    for (device, number, accepted) in [
+        (1, 2, true),
+        (1, 3, false),
+        (2, 1, true),
+        (2, 2, false),
+        (3, 1, false),
+    ] {
+        let mut record = original.clone();
+        record.parts[0].dismissals = vec![Dismissal {
+            write: coven_merge::WriteId {
+                device: coven_foundation::id_source::DeviceId(device),
+                number,
+            },
+            ..dismissal("x")
+        }];
+        let encoded = test_utils::write_plaintext(&record);
+        assert_eq!(encoded.is_ok(), accepted);
+        // Preserve the part length while replacing a covered identity in a valid stream.
+        let mut covered = original.clone();
+        covered.parts[0].dismissals = vec![dismissal("x")];
+        let mut bytes = test_utils::write_plaintext(&covered).unwrap();
+        let end = bytes.len();
+        bytes[end - 16..end - 8].copy_from_slice(&device.to_be_bytes());
+        bytes[end - 8..].copy_from_slice(&number.to_be_bytes());
+        let decoded = decode_plaintext(&bytes);
+        if accepted {
+            assert_eq!(decoded.unwrap(), record);
+        } else {
+            assert_eq!(
+                decoded,
+                Err(Error::Invalid {
+                    field: "dismissed write",
+                    rule: Rule::Coverage
+                })
+            );
+        }
+    }
+}

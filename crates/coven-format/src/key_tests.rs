@@ -175,3 +175,74 @@ fn arbitrary_key_bytes_are_rejected_or_reencode_identically() {
         }
     }
 }
+
+#[test]
+fn ordered_key_example_and_escaped_zero_bytes_match_d3() {
+    let values = [Value::Integer(7), Value::Text("a".into())];
+    let expected = crate::tests::hex("130434e00000000000000020610000");
+    assert_eq!(encode_key(&values).unwrap(), expected);
+    assert_eq!(decode_key(&expected).unwrap(), values);
+    let values = [Value::Text("\0".into()), Value::Blob(vec![0, 255])];
+    let expected = crate::tests::hex("2000ff00003000ffff0000");
+    assert_eq!(encode_key(&values).unwrap(), expected);
+    assert_eq!(decode_key(&expected).unwrap(), values);
+}
+
+#[test]
+fn key_component_budget_is_independent_of_frame_collections() {
+    let values = vec![Value::Integer(0); MAX_ITEMS];
+    let bytes = encode_key(&values).unwrap();
+    assert_eq!(bytes, vec![0x12; MAX_ITEMS]);
+    assert_eq!(decode_key(&bytes).unwrap(), values);
+    let mut row = crate::test_utils::write().parts.remove(0).rows.remove(0);
+    row.row.key = bytes;
+    assert_eq!(
+        crate::write::RowChange::decode(&row.encode().unwrap()).unwrap(),
+        row
+    );
+    let mut values = values;
+    values.push(Value::Integer(0));
+    let expected = || Error::Limit {
+        field: "key components",
+        actual: MAX_ITEMS + 1,
+        maximum: MAX_ITEMS,
+    };
+    assert_eq!(encode_key(&values), Err(expected()));
+    assert_eq!(decode_key(&vec![0x12; MAX_ITEMS + 1]), Err(expected()));
+}
+
+#[test]
+fn encoded_key_byte_bound_includes_tags_escaping_and_terminators() {
+    for value in [
+        Value::Text("x".repeat(MAX_BYTES - 3)),
+        Value::Blob(vec![1; MAX_BYTES - 3]),
+    ] {
+        let values = [value];
+        let bytes = encode_key(&values).unwrap();
+        assert_eq!(bytes.len(), MAX_BYTES);
+        assert_eq!(decode_key(&bytes).unwrap(), values);
+        let mut oversized = bytes;
+        oversized.push(0x12);
+        assert_eq!(
+            decode_key(&oversized),
+            Err(Error::Limit {
+                field: "key bytes",
+                actual: MAX_BYTES + 1,
+                maximum: MAX_BYTES,
+            })
+        );
+    }
+    for value in [
+        Value::Blob(vec![1; MAX_BYTES - 2]),
+        Value::Blob(vec![0; MAX_BYTES / 2 - 1]),
+    ] {
+        assert_eq!(
+            encode_key(&[value]),
+            Err(Error::Limit {
+                field: "key bytes",
+                actual: MAX_BYTES + 1,
+                maximum: MAX_BYTES,
+            })
+        );
+    }
+}

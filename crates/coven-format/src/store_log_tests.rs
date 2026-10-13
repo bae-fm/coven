@@ -476,3 +476,32 @@ fn encrypted_entry_limit_counts_every_envelope_byte() {
         })
     ));
 }
+
+#[test]
+fn entry_numbers_timestamps_and_creation_past_are_checked() {
+    for (number, device, reads, rule) in [
+        (0, DeviceId(1), vec![], Rule::Required),
+        (1, DeviceId(2), vec![], Rule::TimestampDevice),
+        (2, DeviceId(1), vec![], Rule::OwnPosition),
+        (
+            1,
+            DeviceId(1),
+            vec![EntryId {
+                device: DeviceId(2),
+                number: 1,
+            }],
+            Rule::OwnPosition,
+        ),
+    ] {
+        let mut entry = test_utils::store_log();
+        entry.position.number = number;
+        entry.timestamp = Timestamp::new(1, 0, device).unwrap();
+        entry.had_read = EntryPositions(reads);
+        for result in [
+            Object::StoreLog(entry.clone()).encode().map(|_| ()),
+            Object::decode(&encode_frame(4, &entry).unwrap()).map(|_| ()),
+        ] {
+            assert!(matches!(result, Err(Error::Invalid { rule: actual, .. }) if actual == rule));
+        }
+    }
+}

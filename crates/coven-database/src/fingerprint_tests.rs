@@ -348,3 +348,58 @@ async fn sums_agree_in_every_order_of_concurrent_and_excluded_writes() {
         db.close().await.unwrap();
     }
 }
+
+#[tokio::test]
+async fn root_bytes_match_independent_hmac_vectors() {
+    use coven_foundation::id_source::CircleId;
+    use coven_merge::Audience;
+
+    let store = TestStore::new();
+    let db = store.schema(notes(), NOTES).await.unwrap();
+    let key = coven_crypto::StoreKey::from_bytes(KeyId(uuid::Uuid::from_bytes([1; 16])), [7; 32])
+        .derive();
+    // Python hashlib/hmac: no-salt HKDF with context("coven/fingerprints/v1"),
+    // then HMAC of the raw root label, audience text and 32-byte sum.
+    for (audience, empty, populated) in [
+        (
+            Audience::Store,
+            "cd7228383ff4e643bcd175865a4498d96306b09fe08613bb1f550b3d12840e9d",
+            "f827adcbd7decc82891b24e3524a1a3870572c428881247e3d25d61b37c6904e",
+        ),
+        (
+            Audience::Circle(CircleId(uuid::Uuid::from_bytes([1; 16]))),
+            "730b973b198ba16495ebf71ac3d7c50c3816579d38746124bf1cc8bf207860f0",
+            "902f2fda1a025e49e220e779bef1c671cf9dc297804ba49fc3fd53c448d01cb4",
+        ),
+    ] {
+        for (sum, expected) in [
+            (None, empty),
+            (
+                Some(std::array::from_fn::<_, 32, _>(|i| i as u8)),
+                populated,
+            ),
+        ] {
+            db.commit_writer(|connection| {
+                if let Some(sum) = sum {
+                    connection
+                        .internal_execute(
+                            "INSERT INTO _coven_fingerprint_sums(audience,sum) VALUES(?1,?2)",
+                            rusqlite::params![
+                                crate::write_encoding::audience_text(&audience),
+                                sum.as_slice()
+                            ],
+                        )
+                        .unwrap();
+                }
+                let actual = super::read(connection, &audience, key.fingerprint_hasher()).unwrap();
+                let expected: Vec<_> = expected
+                    .as_bytes()
+                    .chunks_exact(2)
+                    .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
+                    .collect();
+                assert_eq!(actual.as_bytes().as_slice(), expected);
+            });
+        }
+    }
+    db.close().await.unwrap();
+}

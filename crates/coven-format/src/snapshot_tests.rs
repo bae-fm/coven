@@ -415,3 +415,33 @@ fn snapshot_positions_are_bounded_in_the_prefix_independently_of_the_frame() {
             .is_err()
     );
 }
+
+#[test]
+fn applied_write_identity_timestamp_and_past_are_checked() {
+    let write = test_utils::oracle().writes.into_values().next().unwrap();
+    let mut cases = Vec::new();
+    let mut invalid = write.clone();
+    invalid.id.number = 0;
+    cases.push((invalid, Rule::Required));
+    let mut invalid = write.clone();
+    invalid.timestamp = Timestamp::new(1, 0, DeviceId(9)).unwrap();
+    cases.push((invalid, Rule::TimestampDevice));
+    let mut invalid = write;
+    invalid.had_read.0.push(invalid.id);
+    cases.push((invalid, Rule::OwnPosition));
+    for (write, rule) in cases {
+        let (mut writer, first) =
+            SnapshotEncoder::start(single_header(1, Audience::Store, 1)).unwrap();
+        let mut reader =
+            SnapshotDecoder::start(&first, &test_utils::snapshot_prefix(writer.header())).unwrap();
+        let record = SnapshotRecord::Write(write);
+        for result in [
+            writer.record(record.clone()).map(|_| ()),
+            reader
+                .frame(&raw(&record), &test_utils::oracle())
+                .map(|_| ()),
+        ] {
+            assert!(matches!(result, Err(Error::Invalid { rule: actual, .. }) if actual == rule));
+        }
+    }
+}

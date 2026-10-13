@@ -434,3 +434,35 @@ fn check_and_unique_expressions_have_text_bounds() {
         }
     }
 }
+
+#[test]
+fn constraint_order_is_logical_with_absent_predicates_first() {
+    use coven_merge::{ForeignKey, UniqueConstraint};
+    let foreign = [
+        ForeignKey::new(["aa"], "z", ["z"]),
+        ForeignKey::new(["b"], "aa", ["z"]),
+        ForeignKey::new(["b"], "b", ["aa"]),
+        ForeignKey::new(["b"], "b", ["b"]),
+    ];
+    assert!(foreign.windows(2).all(|p| p[0] < p[1]));
+    let unique = [
+        UniqueConstraint::from(["aa"]),
+        UniqueConstraint::from(["b"]),
+        UniqueConstraint {
+            terms: vec!["b".into()],
+            partial: Some(String::new()),
+        },
+        UniqueConstraint {
+            terms: vec!["b".into()],
+            partial: Some("active=1".into()),
+        },
+    ];
+    assert!(unique.windows(2).all(|p| p[0] < p[1]));
+    let rules = foreign
+        .into_iter()
+        .map(Rule::ForeignKey)
+        .chain(unique.into_iter().map(Rule::Unique))
+        .collect();
+    let bytes = encode_rules(&rules).unwrap();
+    assert_eq!(decode_rules(&bytes).unwrap(), rules);
+}
