@@ -469,3 +469,134 @@ async fn lean_differential_clocks() {
         source.close().await.unwrap();
     }
 }
+
+#[test]
+fn stored_scalar_fields_pin_sqlite_classes_and_primitive_bytes() {
+    use rusqlite::types::ValueRef;
+    for (sql, expected) in [
+        (ValueRef::Null, &[0][..]),
+        (
+            ValueRef::Integer(-2),
+            &[1, 255, 255, 255, 255, 255, 255, 255, 254],
+        ),
+        (ValueRef::Integer(i64::MIN), &[1, 128, 0, 0, 0, 0, 0, 0, 0]),
+        (
+            ValueRef::Integer(i64::MAX),
+            &[1, 127, 255, 255, 255, 255, 255, 255, 255],
+        ),
+        (ValueRef::Real(1.5), &[2, 63, 248, 0, 0, 0, 0, 0, 0]),
+        (
+            ValueRef::Text("é\0".as_bytes()),
+            &[3, 0, 0, 0, 3, 195, 169, 0],
+        ),
+        (
+            ValueRef::Text("e\u{301}".as_bytes()),
+            &[3, 0, 0, 0, 3, 101, 204, 129],
+        ),
+        (ValueRef::Text(b""), &[3, 0, 0, 0, 0]),
+        (ValueRef::Blob(&[0, 255]), &[4, 0, 0, 0, 2, 0, 255]),
+    ] {
+        let value = coven_merge::ColumnValue {
+            value: super::value(sql).unwrap(),
+            parents: std::collections::BTreeMap::new(),
+        };
+        // A stored ColumnValue follows its scalar with an empty parent map.
+        let bytes = [expected, &[0, 0, 0, 0]].concat();
+        assert_eq!(
+            coven_format::merge_fields::encode_column_value(&value).unwrap(),
+            bytes
+        );
+        assert_eq!(
+            coven_format::merge_fields::decode_column_value(&bytes).unwrap(),
+            value
+        );
+    }
+}
+
+#[tokio::test]
+async fn queued_row_frames_pin_operation_tags_and_delete_field_omission() {
+    let store = TestStore::new();
+    let db = store
+        .schema(
+            vec![crate::SyncedTable::new("t", crate::RowIdentity::SharedKey)],
+            "CREATE TABLE t(id TEXT NOT NULL PRIMARY KEY,v INTEGER)",
+        )
+        .await
+        .unwrap();
+    for statement in [
+        "INSERT INTO t VALUES('k',1)",
+        "UPDATE t SET v=2",
+        "DELETE FROM t",
+    ] {
+        sql(&db, statement).await.unwrap();
+    }
+    let records: Vec<Vec<u8>> = db.inspect_writer(|db| {
+        db.query(
+            "SELECT record FROM _coven_uploads ORDER BY number",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap()
+    });
+    // D5 frames: insert tag 0/new id+v/empty old; update tag 1/new+old v;
+    // delete tag 2/old id+v. A delete has no new-column count at all.
+    // Each frame is kind 2, format 1, payload length, then its row change.
+    let expected: &[&[u8]] = &[
+        &[
+            2, 0, 1, 0, 0, 0, 65, 0, 0, 0, 1, 116, 0, 0, 0, 4, 32, 107, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 2, 105, 100, 3, 0, 0, 0, 1, 107, 0, 0, 0, 0, 0, 0, 0, 1,
+            118, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0,
+        ],
+        &[
+            2, 0, 1, 0, 0, 0, 63, 0, 0, 0, 1, 116, 0, 0, 0, 4, 32, 107, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 1, 1, 0, 0, 0, 1, 0, 0, 0, 1, 118, 1, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0,
+            1, 0, 0, 0, 1, 118, 1, 0, 0, 0, 0, 0, 0, 0, 1,
+        ],
+        &[
+            2, 0, 1, 0, 0, 0, 53, 0, 0, 0, 1, 116, 0, 0, 0, 4, 32, 107, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 1, 2, 0, 0, 0, 2, 0, 0, 0, 2, 105, 100, 3, 0, 0, 0, 1, 107, 0, 0, 0, 1, 118, 1, 0,
+            0, 0, 0, 0, 0, 0, 2,
+        ],
+    ];
+    assert_eq!(records.len(), expected.len());
+    for (record, expected) in records.iter().zip(expected) {
+        let header = coven_format::frame_length(record).unwrap();
+        assert_eq!(&record[header..], *expected);
+    }
+    db.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn schema_version_zero_round_trips_through_streamed_receive() {
+    let store = TestStore::new();
+    let db = store.builder(vec![], vec![]).open().await.unwrap();
+    let device = DeviceId(99);
+    let record = WriteRecord {
+        header: coven_format::write::WriteHeader {
+            position: WriteId { device, number: 1 },
+            timestamp: Timestamp::new(1_000, 0, device).unwrap(),
+            store_log_read: EntryPositions(vec![]),
+            had_read: coven_format::value::WritePositions(vec![]),
+            schema_version: 0,
+            disposition: coven_format::write::WriteDisposition::Migration,
+        },
+        parts: vec![],
+    };
+    let mut input = stream(&record);
+    input.header =
+        coven_format::write_stream::WriteHeaderFrame::decode(&input.header.encode().unwrap())
+            .unwrap();
+    assert_eq!(input.header.header, record.header);
+    assert_eq!(
+        db.apply_downloaded_stream(input, EntryPositions(vec![]), || Ok(()))
+            .await
+            .unwrap(),
+        ApplyOutcome::Applied
+    );
+    db.close().await.unwrap();
+    let db = store.builder(vec![], vec![]).open().await.unwrap();
+    let state = db.sync_state(vec![]).await.unwrap();
+    assert_eq!(state.schema_version, 0);
+    assert_eq!(state.positions.0, [record.header.position]);
+    db.close().await.unwrap();
+}

@@ -403,3 +403,56 @@ async fn root_bytes_match_independent_hmac_vectors() {
     }
     db.close().await.unwrap();
 }
+
+#[tokio::test]
+async fn row_fingerprint_pins_generations_setters_written_parents_and_visible_values() {
+    use crate::{RowIdentity, SyncedTable};
+    let store = TestStore::new();
+    let db = store.schema(
+        vec![SyncedTable::new("parents", RowIdentity::SharedKey), SyncedTable::new("children", RowIdentity::SharedKey)],
+        "CREATE TABLE parents(id TEXT NOT NULL PRIMARY KEY); CREATE TABLE children(id TEXT NOT NULL PRIMARY KEY,parent TEXT REFERENCES parents(id) ON DELETE SET NULL,value TEXT)",
+    ).await.unwrap();
+    assert_eq!(db.local_store_log().await.unwrap().device.0, 2);
+    // Independently calculated from D2/D3/D11 with Python hashlib. The
+    // written-parent map includes only parent; visible maps have no links.
+    // The deleted row keeps both generations and encodes empty cell maps.
+    let identity: [u8; 32] = [
+        253, 146, 165, 112, 142, 243, 210, 89, 231, 109, 229, 181, 166, 91, 65, 5, 236, 57, 82,
+        111, 83, 18, 242, 139, 182, 100, 236, 175, 70, 48, 77, 248,
+    ];
+    for (statement, expected) in [
+        (
+            "INSERT INTO parents VALUES('p'); INSERT INTO children VALUES('c','p','v')",
+            [
+                144, 125, 246, 166, 30, 172, 22, 114, 194, 139, 164, 8, 225, 70, 225, 58, 87, 131,
+                228, 174, 37, 27, 161, 50, 159, 219, 192, 37, 198, 148, 129, 194,
+            ],
+        ),
+        (
+            "UPDATE children SET value='w' WHERE id='c'",
+            [
+                218, 251, 107, 72, 14, 182, 218, 10, 98, 172, 227, 84, 198, 250, 196, 152, 36, 208,
+                2, 4, 54, 209, 100, 216, 214, 150, 192, 226, 28, 165, 225, 175,
+            ],
+        ),
+        (
+            "DELETE FROM children WHERE id='c'",
+            [
+                8, 67, 13, 43, 206, 195, 4, 138, 15, 252, 72, 197, 15, 30, 184, 231, 157, 168, 190,
+                216, 58, 252, 192, 89, 217, 95, 137, 18, 185, 41, 139, 68,
+            ],
+        ),
+    ] {
+        sql(&db, statement).await.unwrap();
+        let hash = db.inspect_writer(|db| {
+            db.query_row(
+                "SELECT hash FROM _coven_fingerprint_leaves WHERE audience='store' AND key=?1",
+                [identity.as_slice()],
+                |row| row.get::<_, [u8; 32]>(0),
+            )
+            .unwrap()
+        });
+        assert_eq!(hash, expected, "{statement}");
+    }
+    db.close().await.unwrap();
+}

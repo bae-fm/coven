@@ -229,3 +229,78 @@ async fn cancelled_batch_caller_cannot_leave_the_decoded_log_behind_its_commit()
     assert_eq!(current.replay, expected);
     assert_eq!(db.store_log().await.unwrap(), current);
 }
+
+#[cfg(test)]
+mod conformance {
+    use crate::{tests::TestStore, AccessKeyToDelete, DbError, NewOperation, OperationUpdate};
+
+    #[tokio::test]
+    async fn access_key_confirmation_survives_repeated_notices_and_reopening() {
+        let store = TestStore::new();
+        let db = store.builder(vec![], vec![]).open().await.unwrap();
+        db.confirm_access_key_deleted("confirmed-first".into())
+            .await
+            .unwrap();
+        db.close().await.unwrap();
+        for replayed in [false, true] {
+            let db = store.builder(vec![], vec![]).open().await.unwrap();
+            let id = db
+                .start_operation(NewOperation {
+                    kind: "provider-access".into(),
+                    data: vec![1],
+                    started_by: "cancel_invite".into(),
+                })
+                .await
+                .unwrap();
+            let keys = ["confirmed-first", "confirmed-after"]
+                .map(|key| AccessKeyToDelete {
+                    access_key_id: key.into(),
+                    member: None,
+                })
+                .to_vec();
+            // A failed journal update must not leave a deletion notice behind.
+            let error = db
+                .record_access_key_deletions::<crate::pending::tests::Record>(
+                    OperationUpdate {
+                        id,
+                        previous: 1,
+                        last_step: 2,
+                        data: vec![2],
+                    },
+                    keys.clone(),
+                    None,
+                )
+                .await
+                .unwrap_err();
+            assert!(matches!(error, DbError::OperationChanged(changed) if changed == id));
+            assert!(db.access_keys_to_delete().await.unwrap().is_empty());
+            assert_eq!(db.operation(id).await.unwrap().unwrap().last_step, 0);
+            db.record_access_key_deletions::<crate::pending::tests::Record>(
+                OperationUpdate {
+                    id,
+                    previous: 0,
+                    last_step: 1,
+                    data: vec![2],
+                },
+                keys,
+                None,
+            )
+            .await
+            .unwrap();
+            let pending = db.access_keys_to_delete().await.unwrap();
+            assert_eq!(pending.len(), usize::from(!replayed));
+            assert!(pending
+                .iter()
+                .all(|key| key.access_key_id == "confirmed-after"));
+            db.confirm_access_key_deleted("confirmed-after".into())
+                .await
+                .unwrap();
+            db.confirm_access_key_deleted("confirmed-after".into())
+                .await
+                .unwrap();
+            assert!(db.access_keys_to_delete().await.unwrap().is_empty());
+            db.finish_operation(id).await.unwrap();
+            db.close().await.unwrap();
+        }
+    }
+}

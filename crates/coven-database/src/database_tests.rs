@@ -698,3 +698,37 @@ async fn journal_lookups_read_current_steps_and_keep_failed_rows_in_order() {
         .is_none());
     db.close().await.unwrap();
 }
+
+#[tokio::test]
+async fn finished_operation_ids_cannot_address_a_new_operation_after_reopening() {
+    fn operation() -> crate::NewOperation {
+        crate::NewOperation {
+            kind: "reload-snapshots".into(),
+            data: vec![1],
+            started_by: "coven".into(),
+        }
+    }
+    let store = TestStore::new();
+    let db = store.builder(vec![], vec![]).open().await.unwrap();
+    let old = db.start_operation(operation()).await.unwrap();
+    db.finish_operation(old).await.unwrap();
+    db.close().await.unwrap();
+    let db = store.builder(vec![], vec![]).open().await.unwrap();
+    let new = db.start_operation(operation()).await.unwrap();
+    assert!(new > old);
+    assert!(matches!(
+        db.advance_operation(crate::OperationUpdate {
+            id: old,
+            previous: 0,
+            last_step: 1,
+            data: vec![2],
+        })
+        .await,
+        Err(DbError::OperationChanged(id)) if id == old
+    ));
+    db.finish_operation(old).await.unwrap();
+    let current = db.operation(new).await.unwrap().unwrap();
+    assert_eq!(current.last_step, 0);
+    assert_eq!(current.data, [1]);
+    db.close().await.unwrap();
+}

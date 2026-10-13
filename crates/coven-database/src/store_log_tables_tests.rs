@@ -2,11 +2,12 @@ use crate::pending::tests::Record as PendingRecord;
 use crate::store_log::tests::{checked, circle_history};
 use crate::tests::TestStore;
 use crate::{
-    Database, DropReason, EntryOutcome, RemovalRule, Replacement, RowIdentity, SyncedTable,
+    Database, DbError, DropReason, EntryOutcome, RemovalRule, Replacement, RowIdentity, SyncedTable,
 };
 use coven_format::value::{EntryId, Value};
 use coven_foundation::id_source::{CircleId, DeviceId};
 use coven_merge::{RowId, RowState, Timestamp};
+use std::time::Duration;
 
 async fn open(store: &TestStore) -> Database {
     store
@@ -143,4 +144,90 @@ async fn replacing_and_dropping_circle_causes_preserves_generations_and_setters(
     assert!(crate::write::tests::records(&db).is_empty());
     author.close().await.unwrap();
     db.close().await.unwrap();
+}
+
+#[test]
+fn horizon_encoding_preserves_provider_ticks_and_rejects_noncanonical_fractions() {
+    for (duration, expected) in [
+        (Duration::ZERO, vec![0; 12]),
+        (
+            Duration::new(0x0102_0304_0506_0708, 0x0506_0708),
+            vec![1, 2, 3, 4, 5, 6, 7, 8, 5, 6, 7, 8],
+        ),
+        (
+            Duration::MAX,
+            vec![255, 255, 255, 255, 255, 255, 255, 255, 59, 154, 201, 255],
+        ),
+    ] {
+        assert_eq!(super::encode_horizon(duration), expected);
+        assert_eq!(super::decode_horizon(&expected).unwrap(), duration);
+    }
+    for bytes in [
+        vec![],
+        vec![0; 11],
+        vec![0; 13],
+        [vec![0; 8], 1_000_000_000u32.to_be_bytes().to_vec()].concat(),
+        [vec![0; 8], u32::MAX.to_be_bytes().to_vec()].concat(),
+    ] {
+        assert!(matches!(
+            super::decode_horizon(&bytes),
+            Err(DbError::DamagedDatabase)
+        ));
+    }
+}
+
+#[tokio::test]
+async fn horizon_persists_and_failed_or_stale_transactions_preserve_it() {
+    use std::time::UNIX_EPOCH;
+    let store = TestStore::new();
+    let db = store.builder(vec![], vec![]).open().await.unwrap();
+    let absent = db.local_store_log().await.unwrap().log;
+    assert_eq!(absent.horizon, None);
+    db.advance_store_log_horizon(absent.clone(), Duration::ZERO)
+        .await
+        .unwrap();
+    db.advance_store_log_horizon(absent, Duration::ZERO)
+        .await
+        .unwrap();
+    let zero = db.local_store_log().await.unwrap().log;
+    assert_eq!(zero.horizon, Some(Duration::ZERO));
+    let mut different = zero.clone();
+    different.entries.push(crate::ReplayEntry {
+        entry: coven_format::test_utils::store_log(),
+        stored_at: UNIX_EPOCH,
+        check: crate::StoreLogCheck::Allowed,
+    });
+    assert!(matches!(
+        db.advance_store_log_horizon(different, Duration::ZERO)
+            .await,
+        Err(DbError::StoreLogEntriesChanged)
+    ));
+    db.inspect_writer(|sql| {
+        sql.fail_at(
+            "reject_horizon",
+            "BEFORE UPDATE ON _coven_finality",
+            "horizon failed",
+        )
+    });
+    db.advance_store_log_horizon(zero.clone(), Duration::ZERO)
+        .await
+        .unwrap();
+    let later = Duration::from_secs(1) - Duration::from_nanos(1);
+    assert!(db
+        .advance_store_log_horizon(zero.clone(), later)
+        .await
+        .is_err());
+    assert_eq!(db.local_store_log().await.unwrap().log, zero);
+    db.inspect_writer(|sql| sql.batch("DROP TRIGGER reject_horizon").unwrap());
+    db.advance_store_log_horizon(zero.clone(), later)
+        .await
+        .unwrap();
+    let saved = db.local_store_log().await.unwrap().log;
+    assert_eq!(saved.horizon, Some(later));
+    db.advance_store_log_horizon(zero, Duration::ZERO)
+        .await
+        .unwrap();
+    db.close().await.unwrap();
+    let reopened = store.builder(vec![], vec![]).open().await.unwrap();
+    assert_eq!(reopened.local_store_log().await.unwrap().log, saved);
 }

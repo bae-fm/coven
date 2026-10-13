@@ -9,6 +9,43 @@ const ANA: &str = "00000000-0000-4000-8000-00000000000a";
 const BEN: &str = "00000000-0000-4000-8000-00000000000b";
 const NOTE: &str = "00000000-0000-4000-8000-000000000042";
 
+#[test]
+fn ordered_key_component_and_byte_limits_keep_the_exact_boundary() {
+    use coven_format::value::Value;
+    let components = 65_536;
+    let mut values = vec![Value::Integer(0); components];
+    let collations = vec!["BINARY".to_owned(); components + 1];
+    assert_eq!(
+        super::equality_key(&values, &collations[..components]).unwrap(),
+        vec![0x12; components]
+    );
+    values.push(Value::Integer(0));
+    assert!(matches!(
+        super::equality_key(&values, &collations),
+        Err(DbError::TooLarge {
+            field: "key components",
+            actual: 65_537,
+            maximum: 65_536
+        })
+    ));
+    let maximum = 8 * 1024 * 1024;
+    // A blob component has one tag and a two-byte terminator. Nonzero
+    // payload bytes need no escaping, so this exercises the encoded limit.
+    for length in [maximum - 3, maximum - 2] {
+        let result = super::equality_key(&[Value::Blob(vec![1; length])], &["BINARY".to_owned()]);
+        if length == maximum - 3 {
+            let key = result.unwrap();
+            assert_eq!(key.len(), maximum);
+            assert_eq!(key[0], 0x30);
+            assert_eq!(&key[maximum - 2..], [0, 0]);
+        } else {
+            assert!(matches!(result,
+                Err(DbError::TooLarge { field: "key bytes", actual, maximum: bound })
+                    if actual == maximum as u64 + 1 && bound == maximum as u64));
+        }
+    }
+}
+
 fn tables() -> Vec<SyncedTable> {
     vec![
         SyncedTable::new("notes", RowIdentity::IndependentUuid).audience_column("audience"),
@@ -226,4 +263,33 @@ async fn references_use_the_parents_affinity_before_and_after_cascade() {
         coven_format::value::Value::Text("1".into())
     );
     db.close().await.unwrap();
+}
+
+#[test]
+fn row_id_order_keeps_table_key_and_audience_precedence() {
+    use coven_format::value::Value;
+    let circle = |id| Audience::Circle(CircleId(uuid::Uuid::from_u128(id)));
+    let ordered = [
+        ("a", 2, circle(u128::MAX)),
+        ("b", 1, circle(u128::MAX)),
+        ("b", 2, Audience::Store),
+        ("b", 2, circle(1)),
+        ("b", 2, circle(2)),
+    ]
+    .map(|(table, key, audience)| {
+        let key_value = Value::Integer(key);
+        let encoded =
+            super::equality_key(std::slice::from_ref(&key_value), &["BINARY".into()]).unwrap();
+        super::row_id(
+            &(table.into(), encoded),
+            &super::AppRow {
+                values: [("id".into(), key_value)].into(),
+                audience,
+                parents: Default::default(),
+            },
+        )
+    });
+    for pair in ordered.windows(2) {
+        assert!(pair[0] < pair[1], "{pair:?}");
+    }
 }
