@@ -151,6 +151,13 @@ pub enum StorageCheck {
     List,
     /// Delete the object and confirm it is absent.
     Delete,
+    /// S3: multipart publication refuses an occupied name with its bytes and
+    /// time unchanged, and conditional completion hides unfinished uploads.
+    MultipartCreateOnce,
+    /// S3: multipart objects are dated by complete publication, as recorded.
+    PublicationTime,
+    /// S3: another setting agrees with the service's observed behavior.
+    Behavior,
 }
 
 /// A failed setup commits no local storage settings or credentials.

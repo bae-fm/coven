@@ -2,7 +2,8 @@
 
 use super::{DropboxStorage, GoogleDriveStorage, OAuthSession, OneDriveStorage, S3Storage};
 use crate::{
-    ProviderOps, StorageConfig, StorageConnection, StorageCredentials, StorageError, StorageFailure,
+    ProviderOps, S3Credentials, S3Detection, StorageConfig, StorageConnection, StorageCredentials,
+    StorageError, StorageFailure,
 };
 use coven_foundation::{
     clock::ClockRef,
@@ -31,6 +32,17 @@ pub trait StorageConnector: Send + Sync {
         credentials: StorageCredentials,
         device: DeviceId,
     ) -> Result<Arc<StorageConnection>, StorageError>;
+    /// Probe an S3 location's service (§4), writing only fresh objects under
+    /// the store's `.coven-check` prefix and deleting them, also on failure.
+    /// A connector without native S3 refuses this capability.
+    async fn detect_s3(
+        &self,
+        _config: StorageConfig,
+        _credentials: S3Credentials,
+        _store: StoreId,
+    ) -> Result<S3Detection, StorageError> {
+        Err(StorageFailure::ProviderUnavailable.into())
+    }
 }
 
 /// The provider composition root retains the supplied clock and id source.
@@ -105,6 +117,26 @@ impl StorageConnector for ProviderConnector {
             }
         };
         Ok(Arc::new(StorageConnection::from_provider(provider)))
+    }
+    async fn detect_s3(
+        &self,
+        config: StorageConfig,
+        credentials: S3Credentials,
+        store: StoreId,
+    ) -> Result<S3Detection, StorageError> {
+        crate::ConnectionCredentials {
+            location: config.clone(),
+            credentials: StorageCredentials::S3(credentials.clone()),
+        }
+        .validate()?;
+        super::detect_s3(
+            config,
+            credentials,
+            store,
+            self.clock.clone(),
+            self.ids.clone(),
+        )
+        .await
     }
 }
 

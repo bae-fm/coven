@@ -1,5 +1,5 @@
 //! S3's ETag, replacement revision and checksum are separate facts.
-use super::{Checksums, Revision, S3Storage};
+use super::S3Storage;
 use crate::*;
 use aws_sdk_s3::{
     operation::{get_object::GetObjectOutput, head_object::HeadObjectOutput},
@@ -25,9 +25,9 @@ fn revision(
     if !path.is_replaceable() {
         return Ok(required(etag, "S3 omitted ETag")?.into());
     }
-    match storage.profile.revision {
-        Revision::Generation => Ok(required(version, "GCS omitted generation")?.into()),
-        Revision::ETag => match version.filter(|version| *version != "null") {
+    match storage.settings.revision {
+        S3Revision::Generation => Ok(required(version, "GCS omitted generation")?.into()),
+        S3Revision::ETag => match version.filter(|version| *version != "null") {
             Some(version) => Ok(format!(
                 "version:{}",
                 required(Some(version), "S3 omitted version")?
@@ -46,14 +46,14 @@ fn revision(
 }
 
 fn checksum(
-    policy: Checksums,
+    policy: S3Checksums,
     kind: Option<&ChecksumType>,
     value: Option<ChecksumValue>,
 ) -> Result<Option<ObjectChecksum>, StorageError> {
     let Some(value) = value else {
         return Ok(None);
     };
-    if policy == Checksums::Absent {
+    if policy == S3Checksums::Absent {
         return Err(
             StorageFailure::Protocol.with_source("S3 returned a checksum its profile lacks")
         );
@@ -112,7 +112,7 @@ macro_rules! observation {
                 response.metadata(),
             )?,
             checksum: checksum(
-                $storage.profile.checksums,
+                $storage.settings.checksums,
                 response.checksum_type(),
                 checksum_value,
             )?,

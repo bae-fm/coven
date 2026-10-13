@@ -1,5 +1,5 @@
 use super::*;
-use crate::ProviderSignOut;
+use crate::*;
 
 #[test]
 fn sign_out_instructions_depend_only_on_the_provider() {
@@ -48,36 +48,52 @@ fn endpoints_allow_http_but_refuse_credentials_queries_and_fragments() {
 #[test]
 fn catalogued_hosts_require_https_and_their_own_profile_name() {
     use S3ProfileName::{Aws, Gcs, R2};
+    let custom = Some(S3Profile::Custom(S3Settings {
+        signing: S3Signing::AwsSigV4,
+        single_put: S3SinglePut::IfNoneMatch,
+        multipart: S3Multipart::ConditionalCompletion,
+        multipart_timestamp: S3MultipartTimestamp::Completion,
+        checksums: S3Checksums::Absent,
+        listing: S3Listing::V1,
+        revision: S3Revision::ETag,
+        bucket_check: S3BucketCheck::Head,
+        response_headers: S3ResponseHeaders::S3,
+        request_checksums: false,
+    }));
+    let named = |name| Some(S3Profile::Named(name));
     for (endpoint, profile, accepted) in [
         (None, None, true),
-        (None, Some(Aws), true),
-        (None, Some(Gcs), false),
-        (None, Some(R2), false),
+        (None, named(Aws), true),
+        (None, named(Gcs), false),
+        (None, named(R2), false),
         (Some("http://s3.us-east-1.amazonaws.com"), None, false),
-        (Some("http://storage.googleapis.com"), Some(Gcs), false),
+        (Some("http://storage.googleapis.com"), named(Gcs), false),
         (Some("http://account.r2.cloudflarestorage.com"), None, false),
-        (Some("https://s3.us-east-1.amazonaws.com"), Some(Aws), true),
-        (Some("https://s3.us-east-1.amazonaws.com"), Some(R2), false),
-        (Some("https://storage.googleapis.com"), Some(Gcs), true),
-        (Some("https://storage.googleapis.com"), Some(Aws), false),
+        (Some("https://s3.us-east-1.amazonaws.com"), named(Aws), true),
+        (Some("https://s3.us-east-1.amazonaws.com"), named(R2), false),
+        (Some("https://storage.googleapis.com"), named(Gcs), true),
+        (Some("https://storage.googleapis.com"), named(Aws), false),
         (
             Some("https://account.r2.cloudflarestorage.com"),
-            Some(R2),
+            named(R2),
             true,
         ),
         (
             Some("https://account.r2.cloudflarestorage.com"),
-            Some(Gcs),
+            named(Gcs),
             false,
         ),
         (Some("http://localhost:3900"), None, true),
-        (Some("http://localhost:3900"), Some(Aws), true),
+        (Some("http://localhost:3900"), named(Aws), true),
         (
             Some("https://storage-private.p.googleapis.com"),
-            Some(Gcs),
+            named(Gcs),
             true,
         ),
-        (Some("http://192.168.1.20:9000"), Some(R2), true),
+        (Some("http://192.168.1.20:9000"), named(R2), true),
+        (Some("http://192.168.1.20:9000"), custom, true),
+        (Some("https://storage.googleapis.com"), custom, false),
+        (None, custom, false),
     ] {
         let config = StorageConfig::S3 {
             bucket: "bucket".into(),

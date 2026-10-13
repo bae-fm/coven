@@ -145,7 +145,8 @@ fn respond(
             );
         }
         if method == Method::POST {
-            if state.gcs {
+            // Copy publication assembles its temporary unconditionally.
+            if state.gcs || key.contains("/.coven-uploads/") {
                 assert!(!headers.contains_key("x-goog-if-generation-match"));
                 assert!(!headers.contains_key("if-none-match"));
             } else {
@@ -168,10 +169,16 @@ fn respond(
         state.uploads.remove(id);
         return response(204, Vec::new());
     }
-    if let Some(source) = headers.get("x-goog-copy-source") {
-        assert!(state.gcs);
+    if let Some(source) = headers
+        .get("x-goog-copy-source")
+        .or(headers.get("x-amz-copy-source"))
+    {
         assert_eq!(method, Method::PUT);
-        assert_eq!(headers["x-goog-if-generation-match"], "0");
+        if state.gcs {
+            assert_eq!(headers["x-goog-if-generation-match"], "0");
+        } else {
+            assert_eq!(headers["if-none-match"], "*");
+        }
         state.copies += 1;
         if state.refuse_copy {
             return response(403, "<Error><Code>AccessDenied</Code></Error>");
@@ -356,7 +363,7 @@ fn provider(url: &str) -> StorageConnection<S3Storage> {
             bucket: "bucket".into(),
             region: "us-east-1".into(),
             endpoint: Some(url.parse().unwrap()),
-            profile: None,
+            profile: Some(crate::S3Profile::Custom(profile::PLAIN)),
             prefix: "store".into(),
         },
         S3Credentials {

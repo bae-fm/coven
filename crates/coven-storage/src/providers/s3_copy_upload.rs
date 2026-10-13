@@ -9,9 +9,9 @@ impl S3Storage {
         path: &ObjectPath,
         token: &SecretText,
     ) -> Result<String, StorageError> {
-        match self.profile.multipart {
-            Multipart::ConditionalCompletion => Ok(path.under(&self.prefix)),
-            Multipart::Copy { .. } => {
+        match self.settings.multipart {
+            S3Multipart::ConditionalCompletion => Ok(path.under(&self.prefix)),
+            S3Multipart::Copy(_) => {
                 let id = uuid::Uuid::parse_str(token.as_str())
                     .map_err(|source| StorageFailure::SessionMismatch.with_source(source))?;
                 Ok(format!(
@@ -34,7 +34,7 @@ impl S3Storage {
         &self,
         session: &mut UploadSession,
     ) -> Result<(), StorageError> {
-        if !self.profile.multipart.uses_copy() {
+        if !self.settings.multipart.uses_copy() {
             return self.completed(session).await;
         }
         // NoSuchUpload leaves exactly one unknown: did assembly create the
@@ -77,11 +77,12 @@ impl S3Storage {
         &self,
         session: &mut UploadSession,
     ) -> Result<(), StorageError> {
-        let Multipart::Copy { header, value } = self.profile.multipart else {
+        let S3Multipart::Copy(condition) = self.settings.multipart else {
             return Err(
                 StorageFailure::Protocol.with_source("copy publication requires a copy profile")
             );
         };
+        let (header, value) = condition.header();
         let source = format!("/{}/{}", self.bucket, self.session_key(session)?);
         let result = self
             .client

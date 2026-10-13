@@ -39,16 +39,27 @@ impl LiveS3 {
             credentials,
         }
     }
-    pub(super) fn connect(&self, profile: Option<S3Profile>) -> StorageConnection<S3Storage> {
+    /// Production detection from the env location, under a fresh store.
+    pub(super) async fn detect(&self) -> Result<crate::S3Detection, StorageError> {
+        super::detect(
+            self.config.clone(),
+            self.credentials.clone(),
+            StoreId(coven_foundation::id_source::IdSource::new_id(&UuidIds)),
+            Arc::new(SystemClock),
+            Arc::new(UuidIds),
+        )
+        .await
+    }
+    pub(super) fn connect(&self, settings: Option<S3Settings>) -> StorageConnection<S3Storage> {
         let config = self.config.clone();
         let credentials = self.credentials.clone();
-        let mut provider = match profile {
-            Some(profile) => S3Storage::with_profile(
+        let mut provider = match settings {
+            Some(settings) => S3Storage::with_settings(
                 config,
                 credentials,
                 Arc::new(SystemClock),
                 Arc::new(UuidIds),
-                profile,
+                settings,
             ),
             None => S3Storage::new(
                 config,
@@ -124,7 +135,7 @@ pub(super) async fn cleanup(storage: &S3Storage, store: StoreId) -> Result<(), S
     loop {
         // V1 is probed before writes, so cleanup does not depend on V2 support.
         let page = storage
-            .list_page(profile::Listing::V1, &prefix, None, marker, None)
+            .list_page(S3Listing::V1, &prefix, None, marker, None)
             .await?;
         for object in page.contents {
             keys.push(metadata::required(object.key(), "cleanup listing omitted key")?.to_owned());
@@ -150,7 +161,7 @@ pub(super) async fn cleanup(storage: &S3Storage, store: StoreId) -> Result<(), S
     }
     cleanup_result?;
     let objects = storage
-        .list_page(profile::Listing::V1, &prefix, None, None, Some(1))
+        .list_page(S3Listing::V1, &prefix, None, None, Some(1))
         .await?;
     assert!(objects.contents.is_empty());
     let uploads = storage

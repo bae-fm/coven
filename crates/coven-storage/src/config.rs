@@ -27,24 +27,6 @@ impl CloudProvider {
     }
 }
 
-/// An S3 service whose adapter profile a location names explicitly (§4).
-/// Self-hosted services have arbitrary endpoints, so no hostname identifies them.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum S3ProfileName {
-    /// Amazon S3.
-    Aws,
-    /// Google Cloud Storage through its XML API.
-    Gcs,
-    /// Cloudflare R2.
-    R2,
-    /// Garage, self-hosted.
-    Garage,
-    /// RustFS, self-hosted.
-    RustFs,
-    /// SeaweedFS's S3 gateway, self-hosted.
-    SeaweedFs,
-}
-
 /// The store's location; credentials are kept separately in key custody.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -57,11 +39,13 @@ pub enum StorageConfig {
         region: String,
         /// None is AWS's own endpoint. Catalogued hosts (§4) require https.
         endpoint: Option<url::Url>,
-        /// Some selects that service's profile; it must agree with a catalogued
-        /// endpoint host. None selects by host: storage.googleapis.com is GCS
-        /// XML, hosts ending in .r2.cloudflarestorage.com are R2, and every
-        /// other endpoint uses AWS's profile. All run the setup check.
-        profile: Option<S3ProfileName>,
+        /// A catalogued service's name or custom settings; either must agree
+        /// with a catalogued endpoint host. None selects by host:
+        /// storage.googleapis.com is GCS XML, hosts ending in
+        /// .r2.cloudflarestorage.com are R2, no endpoint or .amazonaws.com is
+        /// AWS, and setup detects any other endpoint's settings, recording
+        /// them as Custom. All run the setup checks.
+        profile: Option<crate::S3Profile>,
         /// The base prefix, without leading or trailing slashes; paths add the store id.
         prefix: String,
     },
@@ -137,7 +121,7 @@ impl StorageConfig {
                         );
                     }
                 }
-                crate::providers::check_s3_profile(endpoint.as_ref(), *profile)?;
+                crate::providers::check_s3_profile(endpoint.as_ref(), profile.as_ref())?;
                 crate::path::validate_root(prefix)?;
                 vec![bucket, region]
             }

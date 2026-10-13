@@ -7,28 +7,34 @@ fn profile_table_records_certification_and_publication_requirements() {
         if let Certification::Passed { date, suite } = profile.certification {
             assert_eq!(date.len(), 10);
             assert!(suite > 0);
-            if profile.checksums == Checksums::Absent {
-                assert!(
-                    !profile.request_checksums,
-                    "a service returning no checksum is not asked for one"
-                );
-            }
-            if profile.multipart_timestamp == MultipartTimestamp::Start {
-                assert!(
-                    profile.multipart.uses_copy(),
-                    "a certified start-time service needs copy publication"
-                );
-            }
+        }
+        let settings = profile.settings;
+        if settings.checksums == S3Checksums::Absent {
+            assert!(
+                !settings.request_checksums,
+                "a service returning no checksum is not asked for one"
+            );
+        }
+        if settings.multipart_timestamp == S3MultipartTimestamp::Start {
+            assert!(
+                settings.multipart.uses_copy(),
+                "a catalogued start-time service needs copy publication"
+            );
         }
     }
+    assert_eq!(PROFILES[0].name, S3ProfileName::Aws);
     assert_eq!(PROFILES[0].certification, Certification::Uncertified);
+    assert_eq!(
+        PROFILES[0].settings.multipart,
+        S3Multipart::Copy(S3CopyCondition::IfNoneMatch)
+    );
 }
 
 #[tokio::test]
 async fn scope_policy_controls_head_and_get_without_inferring_a_checksum() {
     for (policy, expected) in [
-        (Checksums::ScopeStated, false),
-        (Checksums::UnstatedIgnored, true),
+        (S3Checksums::ScopeStated, false),
+        (S3Checksums::UnstatedIgnored, true),
     ] {
         let state = Arc::new(Mutex::new(Remote {
             response_headers: BTreeMap::from([(
@@ -38,9 +44,13 @@ async fn scope_policy_controls_head_and_get_without_inferring_a_checksum() {
             ..Remote::default()
         }));
         let server = TestServer::new(Router::new().fallback(endpoint).with_state(state)).await;
-        let mut profile = PROFILES[0];
-        profile.checksums = policy;
-        let storage = profile_provider(&server.url, profile);
+        let storage = profile_provider(
+            &server.url,
+            S3Settings {
+                checksums: policy,
+                ..PLAIN
+            },
+        );
         let target = ObjectPath::positions(STORE_ID, coven_foundation::id_source::DeviceId(31));
         storage.replace(&target, b"bytes").await.unwrap();
         let head = storage.status(&target).await;
@@ -79,7 +89,10 @@ async fn listing_profile_selects_v1_and_follows_key_markers() {
         }
     })).await;
     let mut storage = provider(&server.url);
-    Arc::get_mut(&mut storage.provider).unwrap().profile.listing = Listing::V1;
+    Arc::get_mut(&mut storage.provider)
+        .unwrap()
+        .settings
+        .listing = S3Listing::V1;
     assert_eq!(
         storage
             .list(&ObjectPrefix::all(STORE_ID))
@@ -97,9 +110,13 @@ async fn unstated_scope_skips_checksum_parsing_but_keeps_required_metadata() {
         ..Remote::default()
     }));
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
-    let mut profile = PROFILES[0];
-    profile.checksums = Checksums::UnstatedIgnored;
-    let storage = profile_provider(&server.url, profile);
+    let storage = profile_provider(
+        &server.url,
+        S3Settings {
+            checksums: S3Checksums::UnstatedIgnored,
+            ..PLAIN
+        },
+    );
     let path = ObjectPath::positions(STORE_ID, coven_foundation::id_source::DeviceId(31));
     storage.replace(&path, b"data").await.unwrap();
     assert_eq!(storage.status(&path).await.unwrap().unwrap().checksum, None);
@@ -144,9 +161,9 @@ async fn unstated_scope_skips_checksum_parsing_but_keeps_required_metadata() {
     );
 }
 
-pub(super) fn profile_provider(url: &str, profile: S3Profile) -> StorageConnection<S3Storage> {
+pub(super) fn profile_provider(url: &str, settings: S3Settings) -> StorageConnection<S3Storage> {
     StorageConnection::from_provider(Arc::new(
-        S3Storage::with_profile(
+        S3Storage::with_settings(
             StorageConfig::S3 {
                 bucket: "bucket".into(),
                 region: "us-east-1".into(),
@@ -160,7 +177,7 @@ pub(super) fn profile_provider(url: &str, profile: S3Profile) -> StorageConnecti
             },
             Arc::new(FixedClock::new(SystemTime::UNIX_EPOCH)),
             Arc::new(SequentialIds::new()),
-            profile,
+            settings,
         )
         .unwrap(),
     ))
@@ -168,24 +185,27 @@ pub(super) fn profile_provider(url: &str, profile: S3Profile) -> StorageConnecti
 
 #[test]
 fn r2_profile_matches_account_hosts_without_matching_lookalikes() {
-    use S3ProfileName::{Aws, R2};
-    for (endpoint, name) in [
-        ("https://account.r2.cloudflarestorage.com", R2),
-        ("https://ACCOUNT.R2.CLOUDFLARESTORAGE.COM/", R2),
-        ("https://account.eu.r2.cloudflarestorage.com", R2),
-        ("https://r2.cloudflarestorage.com", Aws),
-        ("https://account.notr2.cloudflarestorage.com", Aws),
+    for (endpoint, r2) in [
+        ("https://account.r2.cloudflarestorage.com", true),
+        ("https://ACCOUNT.R2.CLOUDFLARESTORAGE.COM/", true),
+        ("https://account.eu.r2.cloudflarestorage.com", true),
+        ("https://r2.cloudflarestorage.com", false),
+        ("https://account.notr2.cloudflarestorage.com", false),
         (
             "https://account.r2.cloudflarestorage.com.attacker.test",
-            Aws,
+            false,
         ),
-        ("https://other.test/account.r2.cloudflarestorage.com", Aws),
+        ("https://other.test/account.r2.cloudflarestorage.com", false),
     ] {
+        let endpoint: url::Url = endpoint.parse().unwrap();
         assert_eq!(
-            S3Profile::select(Some(&endpoint.parse().unwrap()), None)
-                .unwrap()
-                .name,
-            name
+            CataloguedProfile::hosting(&endpoint).map(|profile| profile.name),
+            r2.then_some(S3ProfileName::R2)
+        );
+        // A lookalike is uncatalogued: setup detects it, with no AWS fallback.
+        assert_eq!(
+            settings(Some(&endpoint), None).unwrap(),
+            r2.then_some(CataloguedProfile::named(S3ProfileName::R2).settings)
         );
     }
 }
@@ -243,23 +263,69 @@ async fn r2_endpoint_ignores_unscoped_checksums_on_status_and_reads() {
 
 #[test]
 fn explicit_name_selects_its_profile_for_an_uncatalogued_endpoint() {
-    let endpoint: url::Url = "http://localhost:3900".parse().unwrap();
-    for (name, expected) in [
-        (None, S3ProfileName::Aws),
-        (Some(S3ProfileName::Aws), S3ProfileName::Aws),
-        (Some(S3ProfileName::Gcs), S3ProfileName::Gcs),
-        (Some(S3ProfileName::R2), S3ProfileName::R2),
-        (Some(S3ProfileName::Garage), S3ProfileName::Garage),
-        (Some(S3ProfileName::RustFs), S3ProfileName::RustFs),
-        (Some(S3ProfileName::SeaweedFs), S3ProfileName::SeaweedFs),
-    ] {
-        let profile = S3Profile::select(Some(&endpoint), name).unwrap();
-        assert_eq!(profile.name, expected);
+    let endpoint: url::Url = "http://localhost:9000".parse().unwrap();
+    assert_eq!(settings(Some(&endpoint), None).unwrap(), None);
+    for profile in PROFILES {
         assert_eq!(
-            profile,
-            *PROFILES.iter().find(|p| p.name == expected).unwrap()
+            settings(Some(&endpoint), Some(&S3Profile::Named(profile.name))).unwrap(),
+            Some(profile.settings)
         );
     }
+}
+
+#[test]
+fn custom_settings_need_an_uncatalogued_endpoint() {
+    let custom = S3Profile::Custom(S3Settings {
+        listing: S3Listing::V1,
+        ..PLAIN
+    });
+    assert_eq!(
+        settings(
+            Some(&"http://localhost:9000".parse().unwrap()),
+            Some(&custom)
+        )
+        .unwrap(),
+        Some(S3Settings {
+            listing: S3Listing::V1,
+            ..PLAIN
+        })
+    );
+    for endpoint in [
+        None,
+        Some("https://storage.googleapis.com"),
+        Some("https://s3.us-east-1.amazonaws.com"),
+        Some("https://account.r2.cloudflarestorage.com"),
+    ] {
+        let endpoint: Option<url::Url> = endpoint.map(|url| url.parse().unwrap());
+        assert_eq!(
+            settings(endpoint.as_ref(), Some(&custom))
+                .unwrap_err()
+                .failure(),
+            StorageFailure::InvalidConfiguration
+        );
+    }
+}
+
+#[test]
+fn an_uncatalogued_endpoint_without_settings_connects_only_after_detection() {
+    let error = S3Storage::new(
+        StorageConfig::S3 {
+            bucket: "bucket".into(),
+            region: "us-east-1".into(),
+            endpoint: Some("http://localhost:9000".parse().unwrap()),
+            profile: None,
+            prefix: "store".into(),
+        },
+        S3Credentials {
+            access_key_id: "access".into(),
+            secret_access_key: SecretText::new("secret".into()),
+        },
+        Arc::new(FixedClock::new(SystemTime::UNIX_EPOCH)),
+        Arc::new(SequentialIds::new()),
+    )
+    .err()
+    .unwrap();
+    assert_eq!(error.failure(), StorageFailure::InvalidConfiguration);
 }
 
 #[tokio::test]
@@ -275,7 +341,7 @@ async fn explicit_gcs_name_drives_the_adapter_at_an_uncatalogued_endpoint() {
                 bucket: "bucket".into(),
                 region: "auto".into(),
                 endpoint: Some(server.url.parse().unwrap()),
-                profile: Some(S3ProfileName::Gcs),
+                profile: Some(S3Profile::Named(S3ProfileName::Gcs)),
                 prefix: "store".into(),
             },
             S3Credentials {
@@ -287,7 +353,10 @@ async fn explicit_gcs_name_drives_the_adapter_at_an_uncatalogued_endpoint() {
         )
         .unwrap(),
     ));
-    assert_eq!(storage.provider.profile.name, S3ProfileName::Gcs);
+    assert_eq!(
+        storage.provider.settings,
+        CataloguedProfile::named(S3ProfileName::Gcs).settings
+    );
     let path = ObjectPath::device_log(
         STORE_ID,
         coven_foundation::id_source::DeviceId(31),
@@ -307,42 +376,27 @@ async fn explicit_gcs_name_drives_the_adapter_at_an_uncatalogued_endpoint() {
 
 #[test]
 fn self_hosted_profiles_are_selected_only_by_name_at_their_own_endpoint() {
-    for name in [
-        S3ProfileName::Garage,
-        S3ProfileName::RustFs,
-        S3ProfileName::SeaweedFs,
-    ] {
-        let profile = PROFILES.iter().find(|p| p.name == name).unwrap();
+    for name in [S3ProfileName::RustFs, S3ProfileName::SeaweedFs] {
+        let profile = CataloguedProfile::named(name);
         assert_eq!(profile.endpoint, None);
+        assert_ne!(profile.certification, Certification::Uncertified);
+        let named = S3Profile::Named(name);
         assert_eq!(
-            profile.certification == Certification::Uncertified,
-            name == S3ProfileName::Garage
-        );
-        assert_eq!(
-            S3Profile::select(None, Some(name)).unwrap_err().failure(),
+            settings(None, Some(&named)).unwrap_err().failure(),
             StorageFailure::InvalidConfiguration
         );
         assert_eq!(
-            S3Profile::select(
+            settings(
                 Some(&"https://storage.googleapis.com".parse().unwrap()),
-                Some(name)
+                Some(&named)
             )
             .unwrap_err()
             .failure(),
             StorageFailure::InvalidConfiguration
         );
     }
-    for host in [
-        "http://localhost:3900",
-        "http://localhost:9000",
-        "http://localhost:8333",
-    ] {
-        assert_eq!(
-            S3Profile::select(Some(&host.parse().unwrap()), None)
-                .unwrap()
-                .name,
-            S3ProfileName::Aws
-        );
+    for host in ["http://localhost:9000", "http://localhost:8333"] {
+        assert_eq!(settings(Some(&host.parse().unwrap()), None).unwrap(), None);
     }
 }
 
@@ -350,10 +404,14 @@ fn self_hosted_profiles_are_selected_only_by_name_at_their_own_endpoint() {
 async fn absent_policy_reads_without_a_checksum_and_refuses_any_returned_one() {
     let state = Arc::new(Mutex::new(Remote::default()));
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
-    let mut profile = PROFILES[0];
-    profile.checksums = Checksums::Absent;
-    profile.request_checksums = false;
-    let storage = profile_provider(&server.url, profile);
+    let storage = profile_provider(
+        &server.url,
+        S3Settings {
+            checksums: S3Checksums::Absent,
+            request_checksums: false,
+            ..PLAIN
+        },
+    );
     let path = ObjectPath::positions(STORE_ID, coven_foundation::id_source::DeviceId(31));
     storage.replace(&path, b"bytes").await.unwrap();
     assert_eq!(storage.status(&path).await.unwrap().unwrap().checksum, None);

@@ -18,10 +18,33 @@ fn restore_storage_is_exactly_the_location_for_every_provider() {
                 bucket: "bucket".into(),
                 region: "region".into(),
                 endpoint: Some("http://localhost:9000".parse().unwrap()),
-                profile: Some(crate::S3ProfileName::Gcs),
+                profile: Some(crate::S3Profile::Named(crate::S3ProfileName::Gcs)),
                 prefix: "store".into(),
             },
-            r#"{"S3":{"bucket":"bucket","region":"region","endpoint":"http://localhost:9000/","profile":"Gcs","prefix":"store"}}"#,
+            r#"{"S3":{"bucket":"bucket","region":"region","endpoint":"http://localhost:9000/","profile":{"Named":"Gcs"},"prefix":"store"}}"#,
+        ),
+        (
+            StorageConfig::S3 {
+                bucket: "bucket".into(),
+                region: "region".into(),
+                endpoint: Some("http://localhost:9000".parse().unwrap()),
+                profile: Some(crate::S3Profile::Custom(crate::S3Settings {
+                    signing: crate::S3Signing::AwsSigV4,
+                    single_put: crate::S3SinglePut::IfNoneMatch,
+                    multipart: crate::S3Multipart::Copy(
+                        crate::S3CopyCondition::CloudflareIfNoneMatch,
+                    ),
+                    multipart_timestamp: crate::S3MultipartTimestamp::Start,
+                    checksums: crate::S3Checksums::Absent,
+                    listing: crate::S3Listing::V1,
+                    revision: crate::S3Revision::ETag,
+                    bucket_check: crate::S3BucketCheck::List,
+                    response_headers: crate::S3ResponseHeaders::S3,
+                    request_checksums: false,
+                })),
+                prefix: "store".into(),
+            },
+            r#"{"S3":{"bucket":"bucket","region":"region","endpoint":"http://localhost:9000/","profile":{"Custom":{"signing":"AwsSigV4","single_put":"IfNoneMatch","multipart":{"Copy":"CloudflareIfNoneMatch"},"multipart_timestamp":"Start","checksums":"Absent","listing":"V1","revision":"ETag","bucket_check":"List","response_headers":"S3","request_checksums":false}},"prefix":"store"}}"#,
         ),
         (
             StorageConfig::GoogleDrive {

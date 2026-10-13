@@ -63,7 +63,9 @@ impl CovenHandle {
         self.files.set_transfer_limits(limits);
     }
 
-    /// Check provider operations, then set up S3 using this member's own access key.
+    /// Check S3 safety and provider operations, then set up S3 using this
+    /// member's own access key. The returned location is the recorded one,
+    /// carrying detected settings when the endpoint needed them.
     pub async fn setup_s3_storage(
         &self,
         storage: StorageConfig,
@@ -73,6 +75,19 @@ impl CovenHandle {
     ) -> Result<ConnectedStorage, StorageSetupError> {
         self.storage
             .setup_s3(storage, device_name, access_key_id, secret_access_key)
+            .await
+    }
+    /// Probe the S3 service at this location with this member's key (§4),
+    /// writing only fresh objects under the store's `.coven-check` prefix and
+    /// deleting them, also on failure. Commits nothing.
+    pub async fn detect_s3_settings(
+        &self,
+        storage: StorageConfig,
+        access_key_id: String,
+        secret_access_key: SecretText,
+    ) -> Result<S3Detection, StorageSetupError> {
+        self.storage
+            .detect_s3(storage, access_key_id, secret_access_key)
             .await
     }
     /// Present provider sign-in and keep tokens in coven's session custody.

@@ -6,6 +6,9 @@ pub(super) fn s3_error<E>(error: SdkError<E>) -> StorageError
 where
     E: ProvideErrorMetadata + std::error::Error + Send + Sync + 'static,
 {
+    let status = error
+        .raw_response()
+        .map(|response| response.status().as_u16());
     let failure = match &error {
         SdkError::ConstructionFailure(_) => StorageFailure::InvalidConfiguration,
         SdkError::ResponseError(_) => StorageFailure::Protocol,
@@ -18,7 +21,20 @@ where
     StorageError::Provider {
         provider: CloudProvider::S3,
         failure,
-        source: Box::new(S3ResponseError(error)),
+        source: Box::new(S3ResponseError {
+            status,
+            error: Box::new(error),
+        }),
+    }
+}
+
+/// The native HTTP status behind an S3 adapter error, when a response arrived.
+pub(super) fn native_status(error: &StorageError) -> Option<u16> {
+    match error {
+        StorageError::Provider { source, .. } => source
+            .downcast_ref::<S3ResponseError>()
+            .and_then(|response| response.status),
+        _ => None,
     }
 }
 
@@ -80,19 +96,22 @@ fn s3_service_failure(
 // SDK service errors can echo credentials in their message or response body.
 // Keep the original typed cause available through Error::source, but do not
 // include it in ordinary storage error formatting.
-struct S3ResponseError<E>(SdkError<E>);
-impl<E> fmt::Debug for S3ResponseError<E> {
+struct S3ResponseError {
+    status: Option<u16>,
+    error: Box<dyn std::error::Error + Send + Sync>,
+}
+impl fmt::Debug for S3ResponseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("S3ResponseError")
     }
 }
-impl<E> fmt::Display for S3ResponseError<E> {
+impl fmt::Display for S3ResponseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("S3 request failed")
     }
 }
-impl<E: std::error::Error + Send + Sync + 'static> std::error::Error for S3ResponseError<E> {
+impl std::error::Error for S3ResponseError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        Some(&self.0)
+        Some(self.error.as_ref())
     }
 }

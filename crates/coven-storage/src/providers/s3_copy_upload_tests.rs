@@ -6,12 +6,12 @@ async fn lean_differential_s3_create() {
     for profile in profile::PROFILES {
         for limit in [3, 5 * 1024 * 1024 * 1024] {
             let state = Arc::new(Mutex::new(Remote {
-                gcs: profile.signing == Signing::GoogleHmac,
+                gcs: profile.settings.signing == S3Signing::GoogleHmac,
                 ..Remote::default()
             }));
             let server =
                 TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
-            let mut storage = profile_tests::profile_provider(&server.url, *profile);
+            let mut storage = profile_tests::profile_provider(&server.url, profile.settings);
             Arc::get_mut(&mut storage.provider)
                 .unwrap()
                 .single_request_limit = limit;
@@ -78,21 +78,18 @@ async fn gcs_create_preserves_an_occupied_path() {
 
 #[test]
 fn profile_uses_the_endpoint_host_exactly() {
-    assert_eq!(S3Profile::select(None, None).unwrap(), profile::PROFILES[0]);
+    let aws = Some(profile::PROFILES[0].settings);
+    let gcs = Some(profile::PROFILES[1].settings);
+    assert_eq!(profile::settings(None, None).unwrap(), aws);
     for (url, expected) in [
-        ("https://storage.googleapis.com", profile::PROFILES[1]),
-        ("https://STORAGE.GOOGLEAPIS.COM/", profile::PROFILES[1]),
-        (
-            "https://storage.googleapis.com.attacker.test",
-            profile::PROFILES[0],
-        ),
-        (
-            "https://other.test/storage.googleapis.com",
-            profile::PROFILES[0],
-        ),
+        ("https://storage.googleapis.com", gcs),
+        ("https://STORAGE.GOOGLEAPIS.COM/", gcs),
+        ("https://s3.us-east-1.amazonaws.com", aws),
+        ("https://storage.googleapis.com.attacker.test", None),
+        ("https://other.test/storage.googleapis.com", None),
     ] {
         assert_eq!(
-            S3Profile::select(Some(&url.parse().unwrap()), None).unwrap(),
+            profile::settings(Some(&url.parse().unwrap()), None).unwrap(),
             expected
         );
     }

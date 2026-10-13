@@ -1,6 +1,5 @@
 //! One page representation for the two S3 listing protocols.
 use super::*;
-use profile::Listing;
 
 pub(super) struct Page {
     pub(super) contents: Vec<aws_sdk_s3::types::Object>,
@@ -10,13 +9,13 @@ pub(super) struct Page {
 impl S3Storage {
     pub(super) async fn list_page(
         &self,
-        protocol: Listing,
+        protocol: S3Listing,
         prefix: &str,
         delimiter: Option<&str>,
         marker: Option<String>,
         max_keys: Option<i32>,
     ) -> Result<Page, StorageError> {
-        let (contents, folders, truncated, next) = if protocol == Listing::V1 {
+        let (contents, folders, truncated, next) = if protocol == S3Listing::V1 {
             let page = self
                 .client
                 .list_objects()

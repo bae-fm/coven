@@ -882,6 +882,96 @@ impl crate::providers::StorageConnector for MemoryStorage {
             .await?
             .shared_connection())
     }
+    /// Memory behaves as any settings demand: the detection conforms to the
+    /// location's own settings, or to plain S3 settings for detection.
+    async fn detect_s3(
+        &self,
+        config: StorageConfig,
+        _credentials: crate::S3Credentials,
+        _store: coven_foundation::id_source::StoreId,
+    ) -> Result<S3Detection, StorageError> {
+        let StorageConfig::S3 {
+            endpoint, profile, ..
+        } = &config
+        else {
+            return Err(StorageFailure::InvalidConfiguration.with_source("expected S3"));
+        };
+        Ok(conforming_detection(
+            crate::providers::s3_settings(endpoint.as_ref(), profile.as_ref())?
+                .unwrap_or(DETECTED_S3_SETTINGS),
+        ))
+    }
+}
+
+/// What memory's detection reports where the location needs detection.
+pub const DETECTED_S3_SETTINGS: S3Settings = S3Settings {
+    signing: S3Signing::AwsSigV4,
+    single_put: S3SinglePut::IfNoneMatch,
+    multipart: S3Multipart::ConditionalCompletion,
+    multipart_timestamp: S3MultipartTimestamp::Completion,
+    checksums: S3Checksums::Absent,
+    listing: S3Listing::V2,
+    revision: S3Revision::ETag,
+    bucket_check: S3BucketCheck::Head,
+    response_headers: S3ResponseHeaders::S3,
+    request_checksums: false,
+};
+
+/// A detection whose every observation agrees with these settings.
+pub fn conforming_detection(settings: S3Settings) -> S3Detection {
+    let completion = settings.multipart_timestamp == S3MultipartTimestamp::Completion;
+    let observations = [
+        (S3Probe::Signing(settings.signing), true),
+        (S3Probe::SinglePut(settings.single_put), true),
+        (S3Probe::PartialUploadHidden, true),
+        (
+            S3Probe::ConditionalCompletion,
+            settings.multipart == S3Multipart::ConditionalCompletion,
+        ),
+        (S3Probe::CompletionTimestamp, completion),
+        (S3Probe::CopyTimestamp, true),
+        (S3Probe::Listing(S3Listing::V1), true),
+        (S3Probe::Listing(settings.listing), true),
+        (S3Probe::ChecksumMode, settings.request_checksums),
+        (
+            S3Probe::ChecksumReturned,
+            settings.checksums != S3Checksums::Absent,
+        ),
+        (
+            S3Probe::ChecksumScopeStated,
+            settings.checksums != S3Checksums::UnstatedIgnored,
+        ),
+        (
+            S3Probe::GoogleGeneration,
+            settings.revision == S3Revision::Generation,
+        ),
+        (
+            S3Probe::GoogleHeaders,
+            settings.response_headers == S3ResponseHeaders::Google,
+        ),
+        (
+            match settings.bucket_check {
+                S3BucketCheck::Head => S3Probe::BucketHead,
+                S3BucketCheck::List => S3Probe::BucketList,
+            },
+            true,
+        ),
+    ]
+    .into_iter()
+    .chain(match settings.multipart {
+        S3Multipart::Copy(condition) => Some((S3Probe::CopyPublication(condition), true)),
+        S3Multipart::ConditionalCompletion => None,
+    })
+    .map(|(probe, held)| S3Observation {
+        probe,
+        held,
+        detail: "memory".into(),
+    })
+    .collect();
+    S3Detection {
+        settings,
+        observations,
+    }
 }
 
 #[path = "memory_storage_builder.rs"]

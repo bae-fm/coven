@@ -119,6 +119,14 @@ impl StorageConnector for TrackingConnector {
         self.clients.lock().unwrap().push(Arc::downgrade(&client));
         Ok(client)
     }
+    async fn detect_s3(
+        &self,
+        config: StorageConfig,
+        credentials: coven_storage::S3Credentials,
+        store: StoreId,
+    ) -> Result<coven_storage::S3Detection, StorageError> {
+        self.storage.detect_s3(config, credentials, store).await
+    }
 }
 
 #[tokio::test]
@@ -536,6 +544,14 @@ impl StorageConnector for Locations {
             .ok_or(StorageFailure::InvalidConfiguration.with_source("unknown test location"))?;
         storage.connect(config, credentials, device).await
     }
+    async fn detect_s3(
+        &self,
+        config: StorageConfig,
+        credentials: coven_storage::S3Credentials,
+        store: StoreId,
+    ) -> Result<coven_storage::S3Detection, StorageError> {
+        self.0[0].detect_s3(config, credentials, store).await
+    }
 }
 
 #[tokio::test]
@@ -945,3 +961,6 @@ async fn reconnect_checks_the_provider_and_preserves_the_previous_connection() {
 
 #[path = "storage_credentials_tests.rs"]
 mod credential_changes;
+
+#[path = "storage_s3_tests.rs"]
+mod s3_setup;

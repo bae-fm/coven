@@ -18,11 +18,13 @@ mod error;
 use error::s3_error;
 #[path = "s3_profile.rs"]
 mod profile;
-use profile::{BucketCheck, Checksums, Multipart, ResponseHeaders, Revision, S3Profile, Signing};
+pub(crate) use profile::settings as s3_settings;
 #[path = "s3_checksum_headers.rs"]
 mod checksum_headers;
 #[path = "s3_copy_upload.rs"]
 mod copy_upload;
+#[path = "s3_detect.rs"]
+mod detect;
 #[path = "s3_gcs_signing.rs"]
 mod gcs_signing;
 #[path = "s3_listing.rs"]
@@ -31,13 +33,14 @@ mod listing;
 mod metadata;
 #[path = "s3_restart.rs"]
 mod restart;
+pub(crate) use detect::detect;
 
-/// Refuses a profile name or plain-http endpoint that contradicts the endpoint (§4).
+/// Refuses a profile or plain-http endpoint that contradicts the endpoint (§4).
 pub(crate) fn check_s3_profile(
     endpoint: Option<&url::Url>,
-    name: Option<crate::S3ProfileName>,
+    profile: Option<&crate::S3Profile>,
 ) -> Result<(), StorageError> {
-    S3Profile::select(endpoint, name).map(|_| ())
+    profile::settings(endpoint, profile).map(|_| ())
 }
 
 /// S3 and compatible endpoints, using only object operations and manually supplied keys.
@@ -48,7 +51,7 @@ pub(crate) struct S3Storage {
     bucket: String,
     prefix: String,
     ids: IdSourceRef,
-    profile: S3Profile,
+    settings: S3Settings,
     #[cfg(test)]
     single_request_limit: u64,
 }
@@ -102,15 +105,19 @@ impl S3Storage {
                 StorageFailure::InvalidConfiguration.with_source("expected S3 configuration")
             );
         };
-        let profile = S3Profile::select(endpoint.as_ref(), *profile)?;
-        Self::with_profile(config, credentials, clock, ids, profile)
+        let settings = profile::settings(endpoint.as_ref(), profile.as_ref())?.ok_or(
+            StorageFailure::InvalidConfiguration
+                .with_source("an uncatalogued S3 endpoint needs settings detected at setup"),
+        )?;
+        Self::with_settings(config, credentials, clock, ids, settings)
     }
-    fn with_profile(
+    /// Connect with explicit settings; detection probes candidates this way.
+    fn with_settings(
         config: StorageConfig,
         credentials: S3Credentials,
         clock: ClockRef,
         ids: IdSourceRef,
-        profile: S3Profile,
+        settings: S3Settings,
     ) -> Result<Self, StorageError> {
         let StorageConfig::S3 {
             bucket,
@@ -141,15 +148,15 @@ impl S3Storage {
             .retry_config(aws_sdk_s3::config::retry::RetryConfig::disabled())
             .request_checksum_calculation(RequestChecksumCalculation::WhenRequired)
             .response_checksum_validation(ResponseChecksumValidation::WhenRequired);
-        if profile.signing == Signing::GoogleHmac {
+        if settings.signing == S3Signing::GoogleHmac {
             builder = builder.push_auth_scheme(gcs_signing::GcsSigning {
                 region: region.clone(),
             });
         }
-        if profile.response_headers == ResponseHeaders::Google {
+        if settings.response_headers == S3ResponseHeaders::Google {
             builder = builder.interceptor(gcs_signing::GcsResponseHeaders);
         }
-        if profile.checksums == Checksums::UnstatedIgnored {
+        if settings.checksums == S3Checksums::UnstatedIgnored {
             builder = builder.interceptor(checksum_headers::UnstatedChecksumHeaders);
         }
         if let Some(endpoint) = endpoint {
@@ -163,7 +170,7 @@ impl S3Storage {
             prefix: prefix.clone(),
             config,
             ids,
-            profile,
+            settings,
             #[cfg(test)]
             single_request_limit: 5 * 1024 * 1024 * 1024,
         })
@@ -175,10 +182,10 @@ impl S3Storage {
             .bucket(&self.bucket)
             .key(path.under(&self.prefix))
             .body(ByteStream::from(bytes.to_vec()));
-        if path.is_replaceable() && self.profile.revision == Revision::ETag {
+        if path.is_replaceable() && self.settings.revision == S3Revision::ETag {
             request = request.metadata("coven-revision", self.ids.new_id().to_string());
         }
-        let condition = self.profile.single_put;
+        let condition = self.settings.single_put;
         request
             .customize()
             .mutate_request(move |request| {
@@ -205,7 +212,7 @@ impl S3Storage {
         if let Some(range) = range {
             request = request.range(range.header());
         }
-        if self.profile.request_checksums {
+        if self.settings.request_checksums {
             request = request.checksum_mode(aws_sdk_s3::types::ChecksumMode::Enabled);
         }
         let response = request.send().await.map_err(s3_error)?;
@@ -342,7 +349,7 @@ impl ProviderOps for S3Storage {
             .head_object()
             .bucket(&self.bucket)
             .key(path.under(&self.prefix));
-        if self.profile.request_checksums {
+        if self.settings.request_checksums {
             request = request.checksum_mode(aws_sdk_s3::types::ChecksumMode::Enabled);
         }
         match request.send().await.map_err(s3_error) {
@@ -352,10 +359,10 @@ impl ProviderOps for S3Storage {
                 // GCS HEAD Bucket requires bucket-metadata permission beyond the
                 // object access Coven uses. A zero-entry listing checks the bucket
                 // using the existing object-list permission, not object absence.
-                match self.profile.bucket_check {
-                    BucketCheck::List => self
+                match self.settings.bucket_check {
+                    S3BucketCheck::List => self
                         .list_page(
-                            self.profile.listing,
+                            self.settings.listing,
                             &path.under(&self.prefix),
                             None,
                             None,
@@ -363,7 +370,7 @@ impl ProviderOps for S3Storage {
                         )
                         .await
                         .map(|_| ()),
-                    BucketCheck::Head => self
+                    S3BucketCheck::Head => self
                         .client
                         .head_bucket()
                         .bucket(&self.bucket)
@@ -397,7 +404,7 @@ impl ProviderOps for S3Storage {
         let mut seen = Pagination::new();
         loop {
             let response = self
-                .list_page(self.profile.listing, &full, None, marker, None)
+                .list_page(self.settings.listing, &full, None, marker, None)
                 .await?;
             if !response.folders.is_empty() {
                 return Err(
@@ -411,10 +418,14 @@ impl ProviderOps for S3Storage {
                 let relative = key
                     .strip_prefix(&root)
                     .ok_or(StorageFailure::Protocol.with_source("S3 listed another location"))?;
-                if self.profile.multipart.uses_copy()
+                if self.settings.multipart.uses_copy()
                     && copy_upload::is_temporary(relative, &prefix)?
                 {
                     tracing::debug!("S3 upload temporary retained for session cleanup");
+                    continue;
+                }
+                if detect::is_probe(relative, &prefix)? {
+                    tracing::debug!("S3 detection probe outside published objects");
                     continue;
                 }
                 let path = ObjectPath::parse(relative)?;
@@ -670,13 +681,13 @@ impl ProviderOps for S3Storage {
                     .set_parts(Some(completed))
                     .build(),
             );
-        if self.profile.multipart == Multipart::ConditionalCompletion {
+        if self.settings.multipart == S3Multipart::ConditionalCompletion {
             request = request.if_none_match("*");
         }
         let result = request.send().await;
         match result {
             Ok(_) => {
-                if self.profile.multipart.uses_copy() {
+                if self.settings.multipart.uses_copy() {
                     return self.publish_copy(session).await;
                 }
                 session.state = SessionState::Complete;
@@ -712,7 +723,7 @@ impl ProviderOps for S3Storage {
             }
             Err(error) => Err(s3_error(error)),
         };
-        if self.profile.multipart.uses_copy() {
+        if self.settings.multipart.uses_copy() {
             crate::transfer::with_cleanup(result, self.delete_temporary(session).await)
         } else {
             result

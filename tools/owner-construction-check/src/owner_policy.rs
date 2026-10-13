@@ -230,7 +230,13 @@ pub(crate) const POLICY: Policy = Policy {
         (
             "crates/coven-storage/src/providers/s3.rs",
             "S3Storage",
-            "with_profile",
+            "with_settings",
+        ),
+        // Detection connects one candidate per signer, then its probe runner.
+        (
+            "crates/coven-storage/src/providers/s3_detect.rs",
+            "<free>",
+            "detect",
         ),
         (
             "crates/coven-storage/src/settings.rs",

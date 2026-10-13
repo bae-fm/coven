@@ -178,29 +178,6 @@ impl StorageConnections {
         )
     }
 
-    pub(crate) async fn setup_s3(
-        self: &Arc<Self>,
-        storage: StorageConfig,
-        device_name: &str,
-        access_key_id: String,
-        secret_access_key: SecretText,
-    ) -> Result<ConnectedStorage, StorageSetupError> {
-        if storage.provider() != CloudProvider::S3 {
-            return Err(StorageFailure::InvalidConfiguration
-                .with_source("expected S3 storage")
-                .into());
-        }
-        self.setup(
-            storage,
-            device_name,
-            StorageCredentials::S3(S3Credentials {
-                access_key_id,
-                secret_access_key,
-            }),
-        )
-        .await
-    }
-
     pub(crate) async fn authenticate(&self, access: OAuthAccess) -> Result<(), StorageSetupError> {
         let _call = self.lock_open().await?;
         let flow = self
@@ -281,22 +258,6 @@ impl StorageConnections {
             };
             owner.setup_connection(storage, &device_name, StorageCredentials::CloudKit).await
         }).await
-    }
-
-    async fn setup(
-        self: &Arc<Self>,
-        config: StorageConfig,
-        device_name: &str,
-        credentials: StorageCredentials,
-    ) -> Result<ConnectedStorage, StorageSetupError> {
-        let device_name = device_name.to_owned();
-        self.call(move |owner| async move {
-            owner.check_location(&config).await?;
-            owner
-                .setup_connection(config, &device_name, credentials)
-                .await
-        })
-        .await
     }
 
     async fn check_location(&self, config: &StorageConfig) -> Result<(), StorageSetupError> {
@@ -416,6 +377,9 @@ impl StorageConnections {
         drop(keys);
     }
 }
+
+#[path = "storage_s3.rs"]
+mod s3;
 
 #[cfg(test)]
 #[path = "storage_tests.rs"]
