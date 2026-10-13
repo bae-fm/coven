@@ -37,16 +37,17 @@ impl Storage for BudgetStorage {
         self.check(bytes.len());
         self.provider.replace(path, bytes).await
     }
-    async fn read(&self, _: &ObjectPath) -> Result<Vec<u8>, StorageError> {
-        panic!("write download must use bounded ranges")
+    async fn status(&self, path: &ObjectPath) -> Result<Option<StoredObject>, StorageError> {
+        self.provider.status(path).await
     }
-    async fn read_range(
+    async fn read_object(
         &self,
         path: &ObjectPath,
-        range: ByteRange,
-    ) -> Result<Vec<u8>, StorageError> {
+        range: Option<ByteRange>,
+    ) -> Result<coven_storage::ObjectRead, StorageError> {
+        let range = range.expect("write download must use bounded ranges");
         self.check(range.len() as usize);
-        self.provider.read_range(path, range).await
+        self.provider.read_object(path, Some(range)).await
     }
     async fn list(&self, prefix: &ObjectPrefix) -> Result<Vec<StoredObject>, StorageError> {
         self.provider.list(prefix).await

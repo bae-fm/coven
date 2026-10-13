@@ -37,6 +37,38 @@ fn provider(url: &str) -> StorageConnection<GoogleDriveStorage> {
 }
 
 #[tokio::test]
+async fn known_object_status_and_reads_do_not_depend_on_listings() {
+    let state = Arc::new(Mutex::new(Remote::default()));
+    let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
+    let storage = provider(&server.url);
+    let path = ObjectPath::positions(STORE_ID, DeviceId(31));
+    storage.replace(&path, b"first").await.unwrap();
+    let before = storage.status(&path).await.unwrap().unwrap();
+    state.lock().unwrap().hide_listings = true;
+    assert!(storage
+        .list(&ObjectPrefix::all(STORE_ID))
+        .await
+        .unwrap()
+        .is_empty());
+    assert_eq!(storage.status(&path).await.unwrap(), Some(before));
+    storage.replace(&path, b"other").await.unwrap();
+    assert_eq!(
+        storage.read_object(&path, None).await.unwrap().bytes,
+        b"other"
+    );
+    assert_eq!(state.lock().unwrap().files.len(), 1);
+    state.lock().unwrap().replace_during_read = true;
+    assert_eq!(
+        storage
+            .read_object(&path, None)
+            .await
+            .unwrap_err()
+            .failure(),
+        StorageFailure::Protocol
+    );
+}
+
+#[tokio::test]
 async fn session_reopens_and_only_uploader_deletes() {
     let state = Arc::new(Mutex::new(Remote::default()));
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;

@@ -140,15 +140,31 @@ impl<P: ProviderOps + ?Sized> Storage for StorageConnection<P> {
         .await;
         self.observed(result)
     }
-    async fn read(&self, path: &ObjectPath) -> Result<Vec<u8>, StorageError> {
-        self.observed(self.provider.read(path).await)
+    async fn status(&self, path: &ObjectPath) -> Result<Option<StoredObject>, StorageError> {
+        self.observed(
+            async {
+                let object = self.provider.status(path).await?;
+                if let Some(object) = &object {
+                    object.check(path)?;
+                }
+                Ok(object)
+            }
+            .await,
+        )
     }
-    async fn read_range(
+    async fn read_object(
         &self,
         path: &ObjectPath,
-        range: ByteRange,
-    ) -> Result<Vec<u8>, StorageError> {
-        self.observed(self.provider.read_range(path, range).await)
+        range: Option<ByteRange>,
+    ) -> Result<ObjectRead, StorageError> {
+        self.observed(
+            async {
+                let read = self.provider.read_object(path, range).await?;
+                read.check(path, range)?;
+                Ok(read)
+            }
+            .await,
+        )
     }
     async fn list(&self, prefix: &ObjectPrefix) -> Result<Vec<StoredObject>, StorageError> {
         self.observed(self.list_checked(prefix).await)

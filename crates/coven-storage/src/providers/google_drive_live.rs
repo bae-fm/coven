@@ -32,14 +32,12 @@ impl Drive {
             number.try_into().unwrap(),
         )
     }
-    async fn listed(&self, path: &ObjectPath) -> StoredObject {
+    async fn observed(&self, path: &ObjectPath) -> StoredObject {
         self.storage
-            .list(&ObjectPrefix::all(self.store))
+            .status(path)
             .await
             .unwrap()
-            .into_iter()
-            .find(|item| &item.path == path)
-            .expect("published object listed")
+            .expect("published object status")
     }
     async fn metadata(&self, path: &ObjectPath) -> Value {
         let found = self

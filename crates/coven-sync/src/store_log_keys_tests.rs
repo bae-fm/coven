@@ -157,18 +157,18 @@ impl Storage for CopyStorage {
     async fn replace(&self, path: &ObjectPath, bytes: &[u8]) -> Result<(), StorageError> {
         self.storage.replace(path, bytes).await
     }
-    async fn read(&self, path: &ObjectPath) -> Result<Vec<u8>, StorageError> {
+    async fn status(&self, path: &ObjectPath) -> Result<Option<StoredObject>, StorageError> {
+        self.storage.status(path).await
+    }
+    async fn read_object(
+        &self,
+        path: &ObjectPath,
+        range: Option<ByteRange>,
+    ) -> Result<coven_storage::ObjectRead, StorageError> {
         if self.paths.contains(path) && matches!(self.action, CopyAttempt::FailComparison) {
             return Err(StorageFailure::Network.into());
         }
-        self.storage.read(path).await
-    }
-    async fn read_range(
-        &self,
-        path: &ObjectPath,
-        range: ByteRange,
-    ) -> Result<Vec<u8>, StorageError> {
-        self.storage.read_range(path, range).await
+        self.storage.read_object(path, range).await
     }
     async fn list(&self, prefix: &ObjectPrefix) -> Result<Vec<StoredObject>, StorageError> {
         self.storage.list(prefix).await

@@ -8,8 +8,10 @@ stated condition holds.
 
 ## What survives a pass
 
-A read or listing supplies paths, encrypted sizes and storage publication
-times. The device keeps a local catalog of these observations. Within a pass,
+A read, exact status or listing supplies paths, encrypted sizes, revisions,
+storage publication times and their native resolution. Reads and exact status
+also carry available provider checksums, distinguishing whole-object digests
+from multipart composites. The device keeps a local catalog of these observations. Within a pass,
 every consumer shares each completed observation; no consumer repeats it
 under its own name. A failed or incomplete listing establishes neither
 absence nor a complete view of storage. Keep the preceding committed catalog
@@ -434,6 +436,8 @@ sealed keys use distinct writer paths under §11. For a lost reply or occupied
 path, reuse cached stored bytes when they establish the comparison, or
 make the one needed comparison read. Metadata cannot replace that byte comparison. Record returned metadata;
 where a provider omits it, use the single-object status call, counted here.
+Own-entry publication is confirmed by exact status, including after a lost
+reply. A folder listing miss cannot establish that this publication is absent.
 Never invent a publication time from the device clock.
 
 ## Phase 3: sync data
@@ -701,7 +705,9 @@ in a warm idle pass with usable credentials:
 
 ```
 D_p = L_p(store-log device folders) + L_p(positions/) + 3 * N
-R_idle,p = D_p
+R_idle,p = D_p + M_p
+M_S3 = number of listed positions objects (one exact HEAD each)
+M_other = 0
 ```
 
 The three misses per device are its next store-log entry, write and key
@@ -709,8 +715,11 @@ copy. A missing folder also establishes the miss; it needs no body request.
 Drained devices contribute no such probes. Their permanent folders and
 positions can still occupy listing pages, counted in `L_p`.
 Each folder listing enumerates devices, never log contents. Positions hold
-one object per device. If each listing fits one page, `R_idle = 2 + 3 * N`
-on S3, Google Drive, Dropbox, OneDrive and CloudKit. There are no idle body
+one object per device. If each listing fits one page, `D = 2 + 3 * N`.
+S3 adds one exact HEAD per listed positions object because `ListObjectsV2`
+omits the replacement version and user metadata; this includes positions of
+drained devices still present in storage. Other providers return the revision
+in their listing, so `R_idle = D`. There are no idle body
 bytes, publications, snapshot queries or file queries. Additional pages
 scale with devices, not with historical objects or attached files.
 
@@ -726,11 +735,11 @@ counts; an incomplete Drive search is a failure, never an idle miss.
 
 **Ben receives one note.** Household has Ana's phone, Ben's laptop and
 Carol's tablet. Each discovery listing fits one S3 page. An idle pass uses
-**two LISTs and nine GET misses: 11 requests**, regardless of their history.
+**two LISTs, three position HEADs and nine GET misses: 14 requests**, regardless of their history.
 With a transfer limit of one, one new readable note and no other due work
-adds its GET and one changed-positions PUT: **13 requests**. Fetch-ahead
+adds its GET and one changed-positions PUT: **16 requests**. Fetch-ahead
 with a higher limit may leave extra probes in flight after the first miss;
-charge those requests too. A second positions page makes these 12 and 14.
+charge those requests too. A second positions page makes these 15 and 17.
 
 A due clock observation adds a replacement and status call, plus any
 identity refresh and subsequent discovery needed to use that time.

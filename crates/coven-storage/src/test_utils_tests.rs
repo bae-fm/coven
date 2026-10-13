@@ -10,6 +10,43 @@ fn config() -> StorageConfig {
     }
 }
 #[tokio::test]
+async fn equal_size_and_time_replacements_have_distinct_identity() {
+    let storage = MemoryStorage::builder().build().unwrap();
+    let path = ObjectPath::positions(STORE_ID, coven_foundation::id_source::DeviceId(31));
+    let prefix = ObjectPrefix::positions(STORE_ID);
+    storage.replace(&path, b"first").await.unwrap();
+    let mut first = storage.list(&prefix).await.unwrap().remove(0);
+    for bytes in [b"other", b"other"] {
+        storage.replace(&path, bytes).await.unwrap();
+        let next = storage.list(&prefix).await.unwrap().remove(0);
+        assert_eq!(first.size, next.size);
+        assert_eq!(first.stored_at, next.stored_at);
+        assert_ne!(first, next, "replacement identity must include a revision");
+        first = next;
+    }
+}
+
+#[tokio::test]
+async fn failed_status_is_not_absence_and_does_not_supply_reachability() {
+    let storage = MemoryStorage::builder().build().unwrap();
+    let path = ObjectPath::positions(STORE_ID, coven_foundation::id_source::DeviceId(31));
+    assert_eq!(storage.status(&path).await.unwrap(), None);
+    assert!(storage.reached());
+    storage.reset_reachability();
+    storage
+        .set_faults(Faults {
+            fail_next: 1,
+            failure: StorageFailure::Network,
+            ..Faults::none()
+        })
+        .await;
+    assert_eq!(
+        storage.status(&path).await.unwrap_err().failure(),
+        StorageFailure::Network
+    );
+    assert!(!storage.reached());
+}
+#[tokio::test]
 async fn memory_conforms() {
     for config in std::iter::once(config()).chain(sharing_configs()) {
         let clock = Arc::new(coven_foundation::clock::FixedClock::new(
@@ -258,18 +295,27 @@ async fn listing_records_publication_time_and_keeps_it_on_retry() {
         .await
         .unwrap()
         .is_empty());
+    assert_eq!(storage.status(&path).await.unwrap(), None);
+    assert_eq!(
+        storage
+            .read_object(&path, None)
+            .await
+            .unwrap_err()
+            .failure(),
+        StorageFailure::NotFound
+    );
     clock.set(published);
     storage.finish_upload(&mut upload).await.unwrap();
+    let initial = storage.status(&path).await.unwrap().unwrap();
+    assert_eq!(initial.stored_at, published);
     clock.set(published + Duration::from_secs(30));
     storage.create_once(&path, b"data").await.unwrap();
-    assert_eq!(
-        storage.list(&ObjectPrefix::all(STORE_ID)).await.unwrap(),
-        [StoredObject {
-            path,
-            size: 4,
-            stored_at: published
-        }]
-    );
+    assert_eq!(storage.status(&path).await.unwrap(), Some(initial));
+    let listed = storage.list(&ObjectPrefix::all(STORE_ID)).await.unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].path, path);
+    assert_eq!(listed[0].size, 4);
+    assert_eq!(listed[0].stored_at, published);
     let positions = ObjectPath::positions(STORE_ID, DeviceId(31));
     storage.replace(&positions, b"old").await.unwrap();
     clock.set(published + Duration::from_secs(40));

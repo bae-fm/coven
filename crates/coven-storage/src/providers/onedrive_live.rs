@@ -116,14 +116,12 @@ impl Live<'_> {
     fn path(&self, number: u64) -> ObjectPath {
         ObjectPath::device_log(self.store, DeviceId(31), number.try_into().unwrap())
     }
-    async fn listed(&self, path: &ObjectPath) -> StoredObject {
+    async fn observed(&self, path: &ObjectPath) -> StoredObject {
         self.storage
-            .list(&ObjectPrefix::all(self.store))
+            .status(path)
             .await
             .unwrap()
-            .into_iter()
-            .find(|object| &object.path == path)
-            .expect("published object listed")
+            .expect("published object status")
     }
     async fn marker(&self, number: u64) -> (String, SystemTime) {
         let path = self.path(number);
@@ -134,7 +132,7 @@ impl Live<'_> {
         let native = self.storage.provider.metadata(&path).await.unwrap();
         let raw = http::string(&native, "createdDateTime").unwrap().to_owned();
         let time = http::timestamp(&native, "createdDateTime").unwrap();
-        assert_eq!(self.listed(&path).await.stored_at, time);
+        assert_eq!(self.observed(&path).await.stored_at, time);
         (raw, time)
     }
     async fn begin(&mut self, path: &ObjectPath) -> UploadSession {

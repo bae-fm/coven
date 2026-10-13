@@ -155,6 +155,8 @@ pub(crate) mod google_drive {
     #[derive(Default)]
     pub(crate) struct Remote {
         pub(crate) next: u64,
+        pub(crate) hide_listings: bool,
+        pub(crate) replace_during_read: bool,
         pub(crate) non_owner: bool,
         pub(crate) single_uploads: usize,
         pub(crate) files: BTreeMap<String, (Value, Vec<u8>)>,
@@ -173,6 +175,9 @@ pub(crate) mod google_drive {
         value["capabilities"] = json!({"canDelete":true,"canRemoveMyDriveParent":true});
         value["ownedByMe"] = json!(true);
         value["createdTime"] = json!("2026-10-06T00:00:00Z");
+        value["modifiedTime"] = json!("2026-10-06T00:00:00Z");
+        value["version"] = json!("1");
+        value["headRevisionId"] = json!("content-1");
         value
     }
     pub(crate) async fn endpoint(
@@ -421,6 +426,9 @@ pub(crate) mod google_drive {
                 state.files.insert(id, (value.clone(), Vec::new()));
                 return reply(value);
             }
+            if state.hide_listings {
+                return reply(json!({"files":[]}));
+            }
             let filter = q["q"]
                 .split("name = '")
                 .nth(1)
@@ -459,6 +467,8 @@ pub(crate) mod google_drive {
                 }
                 return response(204, Vec::new());
             }
+            let change_version = q.get("alt").map(String::as_str) == Some("media")
+                && std::mem::take(&mut state.replace_during_read);
             let Some((value, bytes)) = state.files.get_mut(id) else {
                 return response(404, "{}");
             };
@@ -468,10 +478,18 @@ pub(crate) mod google_drive {
                 } else {
                     *bytes = body.to_vec();
                     value["size"] = json!(bytes.len().to_string());
+                    let version: u64 = value["version"].as_str().unwrap().parse().unwrap();
+                    value["version"] = json!((version + 1).to_string());
+                    value["headRevisionId"] = json!(format!("content-{}", version + 1));
                 }
                 return reply(value.clone());
             }
             if q.get("alt").map(String::as_str) == Some("media") {
+                if change_version {
+                    let version: u64 = value["version"].as_str().unwrap().parse().unwrap();
+                    value["version"] = json!((version + 1).to_string());
+                    value["headRevisionId"] = json!(format!("content-{}", version + 1));
+                }
                 return read(bytes, headers);
             }
             return reply(value.clone());

@@ -10,6 +10,8 @@ use coven_foundation::id_source::DeviceId;
 use reqwest::Method;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
+#[path = "google_drive_metadata.rs"]
+mod metadata;
 const PROVIDER: CloudProvider = CloudProvider::GoogleDrive;
 
 /// Encrypted objects named by their full coven path in a shared Drive folder.
@@ -21,6 +23,7 @@ pub(crate) struct GoogleDriveStorage {
     api: String,
     upload_api: String,
     create_lock: tokio::sync::Mutex<()>,
+    object_ids: tokio::sync::Mutex<BTreeMap<ObjectPath, String>>,
 }
 impl GoogleDriveStorage {
     /// Construct with this device's own Google sign-in and upload identity.
@@ -45,6 +48,7 @@ impl GoogleDriveStorage {
             api: "https://www.googleapis.com/drive/v3".into(),
             upload_api: "https://www.googleapis.com/upload/drive/v3".into(),
             create_lock: tokio::sync::Mutex::new(()),
+            object_ids: tokio::sync::Mutex::new(BTreeMap::new()),
         })
     }
     async fn send(
@@ -81,25 +85,9 @@ impl GoogleDriveStorage {
                 .await?,
         )
         .await?;
-        self.ensure_unique(path, http::string(&item, "id")?).await
-    }
-    async fn copies(&self, path: &ObjectPath) -> Result<Vec<Value>, StorageError> {
-        let query = format!(
-            "'{}' in parents and name = '{}' and trashed = false",
-            escape(&self.folder),
-            escape(path.as_str())
-        );
-        let mut copies = Vec::new();
-        for item in self.pages(&query).await? {
-            let stored = http::timestamp(&item, "createdTime")?;
-            let id = http::string(&item, "id")?.to_owned();
-            copies.push(((stored, id), item));
-        }
-        copies.sort_by(|(left, _), (right, _)| left.cmp(right));
-        Ok(copies.into_iter().map(|(_, item)| item).collect())
-    }
-    async fn find(&self, path: &ObjectPath) -> Result<Option<Value>, StorageError> {
-        Ok(self.copies(path).await?.into_iter().next())
+        let id = http::string(&item, "id")?;
+        self.object_ids.lock().await.insert(path.clone(), id.into());
+        self.ensure_unique(path, id).await
     }
     async fn remove_own_duplicates(
         &self,
@@ -126,67 +114,46 @@ impl GoogleDriveStorage {
                 http::checked(PROVIDER, response).await?;
             }
         }
-        Ok(copies.into_iter().next())
-    }
-    async fn pages(&self, query: &str) -> Result<Vec<Value>, StorageError> {
-        self.folder_metadata().await?;
-        let mut token = None::<String>;
-        let mut seen = Pagination::new();
-        let mut files = Vec::new();
-        loop {
-            let mut parameters = vec![("q", query), ("fields", "nextPageToken,incompleteSearch,files(id,name,mimeType,size,createdTime,parents,properties,ownedByMe,driveId)"), ("includeItemsFromAllDrives", "true"), ("pageSize", "1000")];
-            if let Some(token) = &token {
-                parameters.push(("pageToken", token));
-            }
-            let value = http::json(
-                PROVIDER,
-                self.send(
-                    Method::GET,
-                    &self.url(&["files"], &parameters)?,
-                    Body::Empty,
-                )
-                .await?,
-            )
-            .await?;
-            if let Some(incomplete) = value.get("incompleteSearch") {
-                if incomplete.as_bool() != Some(false) {
-                    return Err(StorageFailure::Protocol.with_source("Drive search was incomplete"));
-                }
-            }
-            files.extend(http::array(&value, "files")?.iter().cloned());
-            match value.get("nextPageToken") {
-                None => break,
-                Some(value) => {
-                    let next = value
-                        .as_str()
-                        .filter(|s| !s.is_empty())
-                        .ok_or(StorageFailure::Protocol.with_source("invalid Drive page token"))?
-                        .to_owned();
-                    seen.check(&next)?;
-                    token = Some(next);
-                }
-            }
+        let first = copies.into_iter().next();
+        if let Some(item) = &first {
+            self.object_ids
+                .lock()
+                .await
+                .insert(path.clone(), http::string(item, "id")?.into());
         }
-        Ok(files)
+        Ok(first)
     }
-    async fn read_object(
+    async fn get(
         &self,
         path: &ObjectPath,
         range: Option<ByteRange>,
-    ) -> Result<Vec<u8>, StorageError> {
+    ) -> Result<ObjectRead, StorageError> {
         let item = self.find(path).await?.ok_or(StorageFailure::NotFound)?;
         let url = self.url(&["files", http::string(&item, "id")?], &[("alt", "media")])?;
         let headers = range
             .map(|range| vec![("Range", range.header())])
             .unwrap_or_default();
-        http::bytes(
+        let metadata = super::object_metadata::drive(path, &item)?;
+        let bytes = http::bytes(
             PROVIDER,
             self.session
                 .send(Method::GET, &url, &headers, Body::Empty, true)
                 .await?,
             range,
         )
-        .await
+        .await?;
+        if path.is_replaceable() {
+            let after = self
+                .file_metadata(path, &metadata.object_id)
+                .await?
+                .ok_or(StorageFailure::NotFound)?;
+            if super::object_metadata::drive(path, &after)? != metadata {
+                return Err(
+                    StorageFailure::Protocol.with_source("Drive object changed during read")
+                );
+            }
+        }
+        Ok(ObjectRead { metadata, bytes })
     }
     async fn verify_completed(&self, session: &mut UploadSession) -> Result<(), StorageError> {
         let SessionState::GoogleDrive { file_id, .. } = &session.state else {
@@ -223,6 +190,10 @@ impl GoogleDriveStorage {
         {
             return Err(StorageFailure::Protocol.with_source("Drive completed another object"));
         }
+        self.object_ids
+            .lock()
+            .await
+            .insert(session.path.clone(), file_id.as_str().into());
         self.ensure_unique(&session.path, file_id.as_str()).await?;
         session.confirmed = session.total;
         session.state = SessionState::Complete;
@@ -436,15 +407,18 @@ impl ProviderOps for GoogleDriveStorage {
         .await?;
         Ok(())
     }
-    async fn read(&self, path: &ObjectPath) -> Result<Vec<u8>, StorageError> {
-        self.read_object(path, None).await
+    async fn status(&self, path: &ObjectPath) -> Result<Option<StoredObject>, StorageError> {
+        self.find(path)
+            .await?
+            .map(|item| super::object_metadata::drive(path, &item))
+            .transpose()
     }
-    async fn read_range(
+    async fn read_object(
         &self,
         path: &ObjectPath,
-        range: ByteRange,
-    ) -> Result<Vec<u8>, StorageError> {
-        self.read_object(path, Some(range)).await
+        range: Option<ByteRange>,
+    ) -> Result<ObjectRead, StorageError> {
+        self.get(path, range).await
     }
     async fn list(&self, listing: &mut ObjectListing) -> Result<(), StorageError> {
         let prefix = listing.prefix().clone();
@@ -463,24 +437,23 @@ impl ProviderOps for GoogleDriveStorage {
             }
             let path = ObjectPath::parse(http::string(&item, "name")?)?;
             if prefix.contains(&path) {
-                let object = StoredObject {
-                    path: path.clone(),
-                    size: http::string(&item, "size")?
-                        .parse()
-                        .map_err(|error| StorageFailure::Protocol.with_source(error))?,
-                    stored_at: http::timestamp(&item, "createdTime")?,
-                };
+                let object = super::object_metadata::drive(&path, &item)?;
                 let id = http::string(&item, "id")?.to_owned();
-                let keep = paths
-                    .entry(path)
-                    .or_insert_with(|| (id.clone(), object.clone()));
-                if (object.stored_at, &id) < (keep.1.stored_at, &keep.0) {
-                    *keep = (id, object);
+                let keep = paths.entry(path).or_insert((
+                    id.clone(),
+                    object.clone(),
+                    http::timestamp(&item, "createdTime")?,
+                ));
+                if (http::timestamp(&item, "createdTime")?, &id) < (keep.2, &keep.0) {
+                    *keep = (id, object, http::timestamp(&item, "createdTime")?);
                 }
             }
         }
-        for (_, object) in paths.into_values() {
+        let mut known = self.object_ids.lock().await;
+        for (id, object, _) in paths.into_values() {
+            let path = object.path.clone();
             listing.insert(object)?;
+            known.insert(path, id);
         }
         Ok(())
     }
@@ -502,6 +475,7 @@ impl ProviderOps for GoogleDriveStorage {
                 http::checked(PROVIDER, response).await?;
             }
         }
+        self.object_ids.lock().await.remove(path);
         Ok(())
     }
     async fn grant_access(&self, account: &str) -> Result<AccessGrant, StorageError> {
@@ -663,6 +637,10 @@ impl ProviderOps for GoogleDriveStorage {
             .ok_or(StorageFailure::Protocol.with_source("Drive omitted upload URL"))?
             .to_owned();
         http::same_origin(&self.upload_api, &url)?;
+        self.object_ids
+            .lock()
+            .await
+            .insert(path.clone(), file_id.clone());
         Ok(UploadSession {
             location: self.config(),
             path: path.clone(),

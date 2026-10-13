@@ -63,7 +63,7 @@ async fn lean_differential_s3_create() {
     }
 }
 
-fn gcs_provider(url: &str) -> StorageConnection<S3Storage> {
+pub(super) fn gcs_provider(url: &str) -> StorageConnection<S3Storage> {
     let mut storage = S3Storage::new(
         StorageConfig::S3 {
             bucket: "bucket".into(),

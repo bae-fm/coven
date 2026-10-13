@@ -192,6 +192,18 @@ impl Intercept for GcsResponseHeaders {
         for (name, value) in metadata {
             headers.try_insert(name, value)?;
         }
+        if let Some(generation) = headers.get("x-goog-generation").map(str::to_owned) {
+            headers.try_insert("x-amz-version-id", generation)?;
+        }
+        let hashes: Vec<_> = headers.get_all("x-goog-hash").map(str::to_owned).collect();
+        for hashes in hashes {
+            for hash in hashes.split(',').map(str::trim) {
+                if let Some(crc32c) = hash.strip_prefix("crc32c=") {
+                    headers.try_insert("x-amz-checksum-crc32c", crc32c.to_owned())?;
+                    headers.try_insert("x-amz-checksum-type", "FULL_OBJECT")?;
+                }
+            }
+        }
         Ok(())
     }
 }

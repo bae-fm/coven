@@ -122,6 +122,8 @@ async fn s3_live_multipart_create_once_and_copy_publication_time() {
             .upload_part(&mut session, &bytes[..part_size])
             .await
             .unwrap();
+        assert_eq!(connected.status(&path).await.unwrap(), None, "unfinished multipart upload is absent from exact status");
+        assert_eq!(connected.read(&path).await.unwrap_err().failure(), StorageFailure::NotFound);
         let mut resumed = UploadSession::decode(recording.as_bytes()).unwrap();
         connected.resume_upload(&mut resumed).await.unwrap();
         assert_eq!(resumed.confirmed_bytes(), session.part_size() as u64);
@@ -196,7 +198,13 @@ async fn s3_live_multipart_create_once_and_copy_publication_time() {
             connected.resume_upload(&mut stale).await.unwrap();
             assert!(stale.is_complete());
         } else {
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            let marker = ObjectPath::clock(store, coven_foundation::id_source::DeviceId(41));
+            connected.replace(&marker, b"before completion").await.unwrap();
+            let before = connected.status(&marker).await.unwrap().unwrap();
             connected.finish_upload(&mut resumed).await.unwrap();
+            let published = connected.status(&path).await.unwrap().unwrap();
+            assert!(published.stored_at >= before.stored_at, "AWS multipart Last-Modified reports initiation rather than complete publication: published={:?}, before completion={:?}", published.stored_at, before.stored_at);
         }
         connected.finish_upload(&mut resumed).await.unwrap();
     })

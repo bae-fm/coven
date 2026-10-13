@@ -245,37 +245,55 @@ impl ProviderOps for DropboxStorage {
     async fn replace(&self, path: &ObjectPath, bytes: &[u8]) -> Result<(), StorageError> {
         self.write(path, bytes, "overwrite").await
     }
-    async fn read(&self, path: &ObjectPath) -> Result<Vec<u8>, StorageError> {
-        http::bytes(
-            PROVIDER,
-            self.content(
-                "files/download",
-                json!({"path":path.absolute()}),
-                Vec::new(),
-                None,
+    async fn status(&self, path: &ObjectPath) -> Result<Option<StoredObject>, StorageError> {
+        match self
+            .rpc(
+                "files/get_metadata",
+                json!({"path":path.absolute(), "include_deleted":false}),
             )
-            .await?,
-            None,
-        )
-        .await
+            .await
+        {
+            Ok(item) => Ok(Some(super::object_metadata::dropbox(path, &item)?)),
+            Err(error) if error.failure() == StorageFailure::NotFound => {
+                self.rpc(
+                    "sharing/get_folder_metadata",
+                    json!({"shared_folder_id":self.namespace}),
+                )
+                .await
+                .map_err(http::container_error)?;
+                Ok(None)
+            }
+            Err(error) => Err(error),
+        }
     }
-    async fn read_range(
+    async fn read_object(
         &self,
         path: &ObjectPath,
-        range: ByteRange,
-    ) -> Result<Vec<u8>, StorageError> {
-        http::bytes(
+        range: Option<ByteRange>,
+    ) -> Result<ObjectRead, StorageError> {
+        let response = http::checked(
             PROVIDER,
             self.content(
                 "files/download",
                 json!({"path":path.absolute()}),
                 Vec::new(),
-                Some(range),
+                range,
             )
             .await?,
-            Some(range),
         )
-        .await
+        .await?;
+        let value: Value = serde_json::from_str(
+            response
+                .headers()
+                .get("Dropbox-API-Result")
+                .ok_or(StorageFailure::Protocol.with_source("Dropbox omitted download metadata"))?
+                .to_str()
+                .map_err(|e| StorageFailure::Protocol.with_source(e))?,
+        )
+        .map_err(|e| StorageFailure::Protocol.with_source(e))?;
+        let metadata = super::object_metadata::dropbox(path, &value)?;
+        let bytes = http::bytes(PROVIDER, response, range).await?;
+        Ok(ObjectRead { metadata, bytes })
     }
     async fn list(&self, listing: &mut ObjectListing) -> Result<(), StorageError> {
         let prefix = listing.prefix().clone();
@@ -322,13 +340,7 @@ impl ProviderOps for DropboxStorage {
                     )?,
                 )?;
                 if prefix.contains(&path) {
-                    let object = StoredObject {
-                        path,
-                        size: entry["size"].as_u64().ok_or(
-                            StorageFailure::Protocol.with_source("Dropbox omitted object size"),
-                        )?,
-                        stored_at: http::timestamp(entry, "server_modified")?,
-                    };
+                    let object = super::object_metadata::dropbox(&path, entry)?;
                     listing.insert(object)?;
                 }
             }

@@ -199,8 +199,8 @@ fn publication_time(pause: Duration) {
         let complete_after = live.marker(5).await;
         let native = live.storage.provider.metadata(&path).await.unwrap();
         let raw = http::string(&native, "createdDateTime").unwrap();
-        let listed = live.listed(&path).await;
-        println!("onedrive_live publication pause={}s elapsed={elapsed:?}: start_before={} start_after={} complete_before={} createdDateTime={raw} complete_after={} listed={:?}; local_session_start={session_started:?} local_session_return={session_returned:?} local_completion_start={completion_started:?} local_completed={completed:?}", pause.as_secs(), start_before.0, start_after.0, complete_before.0, complete_after.0, listed.stored_at);
+        let observed = live.observed(&path).await;
+        println!("onedrive_live publication pause={}s elapsed={elapsed:?}: start_before={} start_after={} complete_before={} createdDateTime={raw} complete_after={} observed={:?}; local_session_start={session_started:?} local_session_return={session_returned:?} local_completion_start={completion_started:?} local_completed={completed:?}", pause.as_secs(), start_before.0, start_after.0, complete_before.0, complete_after.0, observed.stored_at);
         assert!(elapsed >= pause);
         assert!(start_before.1 <= start_after.1);
         assert!(
@@ -208,16 +208,16 @@ fn publication_time(pause: Duration) {
             "markers must distinguish session start from completion"
         );
         assert_eq!(
-            listed.stored_at,
+            observed.stored_at,
             http::timestamp(&native, "createdDateTime").unwrap()
         );
         assert!(
-            complete_before.1 <= listed.stored_at && listed.stored_at <= complete_after.1,
-            "§4 requires complete-publication time, inside completion markers"
+            complete_before.1 <= observed.stored_at && observed.stored_at <= complete_after.1,
+            "OneDrive createdDateTime reports session start; §4 requires complete-publication time inside completion markers"
         );
         assert!(upload.is_complete());
         bytes.push(b'z');
-        assert_eq!(listed.size, bytes.len() as u64);
+        assert_eq!(observed.size, bytes.len() as u64);
         assert!(
             live.storage.read(&path).await.unwrap() == bytes,
             "complete upload bytes changed"
@@ -258,6 +258,7 @@ fn onedrive_live_unfinished_upload_is_absent() {
             .await
             .unwrap();
         let read = live.storage.read(&path).await;
+        let status = live.storage.status(&path).await.unwrap();
         println!(
             "onedrive_live unfinished: confirmed={} total={} listed={} read_failure={:?}",
             upload.confirmed_bytes(),
@@ -266,13 +267,17 @@ fn onedrive_live_unfinished_upload_is_absent() {
             read.as_ref().err().map(StorageError::failure)
         );
         assert!(!upload.is_complete());
+        assert!(
+            status.is_none(),
+            "OneDrive native upload exposes unfinished exact status: {status:?}"
+        );
         assert!(!listed.iter().any(|object| object.path == path));
         assert_eq!(read.unwrap_err().failure(), StorageFailure::NotFound);
     });
 }
 
 #[test]
-#[ignore = "requires COVEN_LIVE_ONEDRIVE_ENV; failing: the adapter exposes no replacement revision"]
+#[ignore = "requires COVEN_LIVE_ONEDRIVE_ENV and a live personal OneDrive"]
 fn onedrive_live_replacement_revision() {
     run(async |live| {
         let path = ObjectPath::positions(live.store, DeviceId(31));
@@ -287,17 +292,13 @@ fn onedrive_live_replacement_revision() {
             let etag = http::string(&native, "eTag").unwrap().to_owned();
             let ctag = http::string(&native, "cTag").unwrap().to_owned();
             let modified = http::string(&native, "lastModifiedDateTime").unwrap();
-            let listed = live.listed(&path).await;
-            // Destructure exhaustively: adding an adapter revision must require
-            // updating this evidence to compare that field on both replacements.
-            let StoredObject {
-                path: _,
-                size,
-                stored_at,
-            } = &listed;
-            println!("onedrive_live revision {label}: eTag={etag:?} cTag={ctag:?} lastModifiedDateTime={modified} adapter_revision=absent adapter_size={size} adapter_stored_at={stored_at:?}");
-            assert_eq!(*size, bytes.len() as u64);
-            assert_eq!(live.storage.read(&path).await.unwrap(), bytes);
+            let observed = live.observed(&path).await;
+            println!("onedrive_live revision {label}: eTag={etag:?} cTag={ctag:?} lastModifiedDateTime={modified} adapter_revision={:?}", observed.revision);
+            assert_eq!(observed.size, bytes.len() as u64);
+            assert_eq!(observed.revision, etag);
+            let read = live.storage.read_object(&path, None).await.unwrap();
+            assert_eq!(read.bytes, bytes);
+            assert_eq!(read.metadata, observed);
             etags.push(etag);
         }
         assert_ne!(
@@ -308,14 +309,6 @@ fn onedrive_live_replacement_revision() {
             etags[1], etags[2],
             "native eTag must change on same-size replacement"
         );
-        // Failing evidence: Storage has no status/revision operation and
-        // StoredObject contains only path, size and createdDateTime.
-        // Native eTag and cTag both advanced through suffixes 1, 2, 3 for the
-        // initial, equal-byte and different-byte posts. They cannot serve
-        // callers when the adapter discards them.
-        panic!(
-            "§4 replacement revision is absent from the adapter; native eTag/cTag printed above"
-        );
     });
 }
 
@@ -325,15 +318,15 @@ fn onedrive_live_immutable_time_is_stable() {
     run(async |live| {
         let path = live.path(1);
         live.storage.create(&path, b"immutable").await.unwrap();
-        let first = live.listed(&path).await;
+        let first = live.observed(&path).await;
         let before = live.storage.provider.metadata(&path).await.unwrap();
         live.clock.sleep(Duration::from_secs(3)).await;
         live.marker(2).await;
         assert_eq!(live.storage.read(&path).await.unwrap(), b"immutable");
-        let second = live.listed(&path).await;
+        let second = live.observed(&path).await;
         let after = live.storage.provider.metadata(&path).await.unwrap();
         println!(
-            "onedrive_live immutable time: before={} after={} listed_before={:?} listed_after={:?}",
+            "onedrive_live immutable time: before={} after={} observed_before={:?} observed_after={:?}",
             http::string(&before, "createdDateTime").unwrap(),
             http::string(&after, "createdDateTime").unwrap(),
             first.stored_at,
@@ -357,10 +350,10 @@ fn onedrive_live_create_once() {
     run(async |live| {
         let path = live.path(1);
         live.storage.create(&path, b"first").await.unwrap();
-        let before = live.listed(&path).await;
+        let before = live.observed(&path).await;
         let result = live.storage.create(&path, b"other").await;
         let bytes = live.storage.read(&path).await.unwrap();
-        let after = live.listed(&path).await;
+        let after = live.observed(&path).await;
         println!("onedrive_live create-once: failure={:?} retained_bytes={bytes:?} before={:?} after={:?}", result.as_ref().err().map(StorageError::failure), before.stored_at, after.stored_at);
         assert_eq!(result.unwrap_err().failure(), StorageFailure::AlreadyExists);
         assert_eq!(bytes, b"first");

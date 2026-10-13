@@ -125,13 +125,19 @@ impl CloudKitOps for Bridge {
         location: &StorageConfig,
         path: &ObjectPath,
         range: Option<ByteRange>,
-    ) -> Result<Vec<u8>, StorageError> {
+    ) -> Result<ObjectRead, StorageError> {
         assert_eq!(location, &config());
         self.authorize().await?;
-        match range {
-            Some(range) => self.memory.read_range(path, range).await,
-            None => self.memory.read(path).await,
-        }
+        self.memory.read_object(path, range).await
+    }
+    async fn status(
+        &self,
+        location: &StorageConfig,
+        path: &ObjectPath,
+    ) -> Result<Option<StoredObject>, StorageError> {
+        assert_eq!(location, &config());
+        self.authorize().await?;
+        self.memory.status(path).await
     }
     async fn list(
         &self,
@@ -465,6 +471,10 @@ async fn listing_refuses_duplicate_paths_and_objects_outside_the_requested_prefi
         path,
         size: 4,
         stored_at: std::time::SystemTime::UNIX_EPOCH,
+        time_resolution: std::time::Duration::from_millis(1),
+        object_id: "record".into(),
+        revision: "change-tag".into(),
+        checksum: None,
     };
     for listed in [vec![object.clone()], vec![object.clone(), object.clone()]] {
         let mut bridge = Bridge::new(MemoryStorage::builder().location(config()).build().unwrap());

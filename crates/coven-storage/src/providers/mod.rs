@@ -2,6 +2,7 @@
 mod access;
 mod http;
 mod oauth;
+mod object_metadata;
 mod pagination;
 pub use http::{OAuthSession, ProviderResponse};
 pub use oauth::{OAuthClients, OAuthError, OAuthFlow, OAuthPresenter, OAuthRedirectError};

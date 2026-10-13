@@ -20,6 +20,48 @@ use std::{
 };
 
 #[tokio::test]
+async fn own_publication_is_observed_even_when_the_listing_lags() {
+    let storage = Arc::new(MemoryStorage::builder().build().unwrap());
+    let mut a = device(storage.clone(), 1, member(1), store(1)).await;
+    a.create(key(1)).await;
+    storage
+        .set_faults(Faults {
+            hide_listings: true,
+            ..Faults::none()
+        })
+        .await;
+    let created = a
+        .sync
+        .make_and_upload_entry(StoreChange::AddDevice {
+            device: DeviceId(2),
+            name: "new device".into(),
+            replaces: None,
+        })
+        .await
+        .unwrap();
+    let log = a.log().await;
+    assert_eq!(
+        log.entries.last().unwrap().stored_at,
+        storage
+            .status(&object::path(store(1), created))
+            .await
+            .unwrap()
+            .unwrap()
+            .stored_at
+    );
+    storage
+        .delete(&object::path(store(1), created))
+        .await
+        .unwrap();
+    assert!(
+        super::observe_publication(store(1), Some(storage.as_ref()), &log, created)
+            .await
+            .is_err(),
+        "retained history cannot substitute for exact status"
+    );
+}
+
+#[tokio::test]
 async fn stale_registration_is_consumed_after_an_unknown_devices_entry() {
     let clock = Arc::new(FixedClock::new(UNIX_EPOCH));
     let storage = Arc::new(

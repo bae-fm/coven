@@ -14,17 +14,27 @@ pub(crate) async fn observe_publication(
     log: &StoreLog,
     entry: EntryId,
 ) -> Result<BTreeMap<EntryId, SystemTime>, SyncError> {
-    let objects = storage
-        .ok_or(SyncError::NoStorage)?
+    let storage = storage.ok_or(SyncError::NoStorage)?;
+    let path = crate::store_log_object::path(store, entry);
+    let published = storage.status(&path).await?.ok_or_else(|| {
+        coven_storage::StorageFailure::NotFound
+            .with_source("published store-log entry is absent from exact status")
+    })?;
+    let mut objects = storage
         .list(&coven_storage::ObjectPrefix::store_logs(store))
         .await?;
-    let times = publication_times(log, &objects)?;
-    if !times.contains_key(&entry) {
-        return Err(coven_storage::StorageFailure::NotFound
-            .with_source("published store-log entry is absent from its listing")
-            .into());
+    if let Some(listed) = objects.iter().find(|object| object.path == path) {
+        if listed.object_id != published.object_id
+            || listed.revision != published.revision
+            || listed.stored_at != published.stored_at
+            || listed.size != published.size
+        {
+            return Err(DbError::StoreLogEntryChanged(entry).into());
+        }
     }
-    Ok(times)
+    objects.retain(|object| object.path != path);
+    objects.push(published);
+    publication_times(log, &objects)
 }
 
 /// Landing witnesses come from the complete listing, not the kept replay or

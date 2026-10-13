@@ -476,7 +476,7 @@ pub(crate) async fn bytes(
     }
     Ok(data)
 }
-pub(crate) fn validate_content_range(header: &str, range: ByteRange) -> Result<(), StorageError> {
+pub(crate) fn validate_content_range(header: &str, range: ByteRange) -> Result<u64, StorageError> {
     let (bounds, total) = header
         .strip_prefix("bytes ")
         .and_then(|h| h.split_once('/'))
@@ -493,7 +493,7 @@ pub(crate) fn validate_content_range(header: &str, range: ByteRange) -> Result<(
     if bounds != format!("{}-{}", range.start(), range.end() - 1) || range.end() > total {
         return Err(StorageFailure::Protocol.with_source("Content-Range disagrees with request"));
     }
-    Ok(())
+    Ok(total)
 }
 
 pub(crate) async fn verify_published_part(
@@ -502,10 +502,10 @@ pub(crate) async fn verify_published_part(
     bytes: &[u8],
     end: u64,
 ) -> Result<(), StorageError> {
-    let actual = storage
-        .read_range(&session.path, ByteRange::new(session.confirmed, end)?)
-        .await?;
-    if actual != bytes {
+    let range = ByteRange::new(session.confirmed, end)?;
+    let actual = storage.read_object(&session.path, Some(range)).await?;
+    actual.check(&session.path, Some(range))?;
+    if actual.metadata.size != session.total || actual.bytes != bytes {
         return Err(StorageFailure::AlreadyExists.into());
     }
     session.confirmed = end;

@@ -19,6 +19,8 @@ mod live;
 struct Remote {
     dirs: BTreeMap<String, String>,
     files: BTreeMap<String, Vec<u8>>,
+    revisions: BTreeMap<String, u64>,
+    replace_during_read: bool,
     uploads: BTreeMap<String, (String, Vec<u8>)>,
     next: u64,
     non_owner: bool,
@@ -35,8 +37,8 @@ struct Remote {
     deleted_permissions: Vec<String>,
     lose_permission_reply: bool,
 }
-fn file(path: &str, bytes: &[u8], host: &str) -> Value {
-    json!({"id":format!("file:{path}"),"name":path.rsplit('/').next().unwrap(),"size":bytes.len(),"file":{},"createdDateTime":"2026-10-06T00:00:00Z","fileSystemInfo":{"createdDateTime":"2000-01-01T00:00:00Z"},"@microsoft.graph.downloadUrl":format!("http://{host}/download/{path}")})
+fn file(path: &str, bytes: &[u8], host: &str, state: &Remote) -> Value {
+    json!({"id":format!("file:{path}"),"name":path.rsplit('/').next().unwrap(),"size":bytes.len(),"file":{},"eTag":state.revisions[path].to_string(),"lastModifiedDateTime":"2026-10-06T00:00:00Z","createdDateTime":"2026-10-06T00:00:00Z","fileSystemInfo":{"createdDateTime":"2000-01-01T00:00:00Z"},"@microsoft.graph.downloadUrl":format!("http://{host}/download/{path}")})
 }
 async fn endpoint(
     State(state): State<Arc<Mutex<Remote>>>,
@@ -50,6 +52,9 @@ async fn endpoint(
     let host = headers["host"].to_str().unwrap();
     if let Some(path) = uri.path().strip_prefix("/download/") {
         assert!(headers.get("authorization").is_none());
+        if std::mem::take(&mut state.replace_during_read) {
+            *state.revisions.get_mut(path).unwrap() += 1;
+        }
         return match state.files.get(path) {
             Some(bytes) => read(bytes, &headers),
             None => response(404, "{}"),
@@ -96,7 +101,8 @@ async fn endpoint(
                 );
             }
             let (_, bytes) = state.uploads.remove(id).unwrap();
-            let value = file(&path, &bytes, host);
+            *state.revisions.entry(path.clone()).or_insert(0) += 1;
+            let value = file(&path, &bytes, host, &state);
             state.files.insert(path, bytes);
             if std::mem::replace(&mut state.fail_reply, false) {
                 return response(503, "{}");
@@ -196,14 +202,15 @@ async fn endpoint(
                     );
                 }
             }
+            *state.revisions.entry(path.clone()).or_insert(0) += 1;
             state.files.insert(path.clone(), body.to_vec());
-            return reply(file(&path, &body, host));
+            return reply(file(&path, &body, host, &state));
         }
         if let Some((id, _)) = state.dirs.iter().find(|(_, p)| *p == &path) {
             return reply(json!({"id":id,"folder":{},"name":relative}));
         }
         return match state.files.get(&path) {
-            Some(bytes) => reply(file(&path, bytes, host)),
+            Some(bytes) => reply(file(&path, bytes, host, &state)),
             None => response(404, json!({"error":{"code":"itemNotFound"}}).to_string()),
         };
     }
@@ -247,7 +254,7 @@ async fn endpoint(
         for (path, bytes) in &state.files {
             if let Some(name) = path.strip_prefix(&prefix) {
                 if !name.contains('/') {
-                    entries.push(file(path, bytes, host));
+                    entries.push(file(path, bytes, host, &state));
                 }
             }
         }
@@ -808,5 +815,23 @@ async fn listing_refuses_native_items_that_are_not_object_files() {
     assert!(
         matches!(provider(&server.url).list(&ObjectPrefix::all(STORE_ID)).await,
         Err(error) if error.failure() == StorageFailure::InvalidPath)
+    );
+}
+
+#[tokio::test]
+async fn replacement_during_download_does_not_return_mismatched_metadata() {
+    let state = remote();
+    let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
+    let storage = provider(&server.url);
+    let path = ObjectPath::positions(STORE_ID, coven_foundation::id_source::DeviceId(31));
+    storage.replace(&path, b"first").await.unwrap();
+    state.lock().unwrap().replace_during_read = true;
+    assert_eq!(
+        storage
+            .read_object(&path, None)
+            .await
+            .unwrap_err()
+            .failure(),
+        StorageFailure::Protocol
     );
 }

@@ -33,6 +33,7 @@ struct Remote {
     lose_remove_reply: bool,
     removal_job: Option<RemovalJob>,
     objects: BTreeMap<String, Vec<u8>>,
+    revisions: BTreeMap<String, u64>,
     uploads: BTreeMap<String, BufferedUpload>,
     next_upload: u64,
     fail_reply: bool,
@@ -44,6 +45,11 @@ struct Remote {
     range_reads: usize,
     folders: BTreeSet<String>,
     list_prefix: String,
+}
+fn file_metadata(path: &str, bytes: &[u8], state: &Remote) -> Value {
+    json!({".tag":"file", "path_lower":path, "size":bytes.len(), "id":format!("id:{path}"),
+        "rev":state.revisions.get(path).copied().unwrap_or(1).to_string(),
+        "server_modified":"2026-10-06T00:00:00Z", "client_modified":"2000-01-01T00:00:00Z"})
 }
 async fn endpoint(
     State(state): State<Arc<Mutex<Remote>>>,
@@ -117,6 +123,7 @@ async fn endpoint(
             }
             assert_eq!(arg["autorename"], false);
             assert_eq!(arg["strict_conflict"], true);
+            *state.revisions.entry(path.clone()).or_insert(0) += 1;
             state.objects.insert(path.clone(), body.to_vec());
             reply(json!({"path_lower":path,"size":body.len(),"id":"id:file"}))
         }
@@ -125,7 +132,17 @@ async fn endpoint(
                 state.range_reads += 1;
             }
             match state.objects.get(&path) {
-                Some(bytes) => read(bytes, &headers),
+                Some(bytes) => {
+                    let mut response = read(bytes, &headers);
+                    response.headers_mut().insert(
+                        "dropbox-api-result",
+                        file_metadata(&path, bytes, &state)
+                            .to_string()
+                            .parse()
+                            .unwrap(),
+                    );
+                    response
+                }
                 None => error("path/not_found/..."),
             }
         }
@@ -141,14 +158,19 @@ async fn endpoint(
             let all: Vec<_> = state
                 .objects
                 .iter()
-                .map(|(path, bytes)| json!({".tag":"file","path_lower":path,"size":bytes.len(),"server_modified":"2026-10-06T00:00:00Z","client_modified":"2000-01-01T00:00:00Z"}))
+                .map(|(path, bytes)| file_metadata(path, bytes, &state))
                 .chain(
                     state
                         .folders
                         .iter()
                         .map(|path| json!({".tag":"folder","path_lower":path})),
                 )
-                .filter(|entry| entry["path_lower"].as_str().unwrap().starts_with(&state.list_prefix))
+                .filter(|entry| {
+                    entry["path_lower"]
+                        .as_str()
+                        .unwrap()
+                        .starts_with(&state.list_prefix)
+                })
                 .collect();
             if uri.path() == "/2/files/list_folder" && all.is_empty() {
                 return error("path/not_found/...");
@@ -163,9 +185,7 @@ async fn endpoint(
             None => error("path_lookup/not_found/..."),
         },
         "/2/files/get_metadata" => match state.objects.get(&path) {
-            Some(bytes) => reply(
-                json!({"path_lower":path,"size":bytes.len(),"server_modified":"2026-10-06T00:00:00Z","client_modified":"2000-01-01T00:00:00Z"}),
-            ),
+            Some(bytes) => reply(file_metadata(&path, bytes, &state)),
             None => error("path/not_found/..."),
         },
         "/2/files/upload_session/start" => {

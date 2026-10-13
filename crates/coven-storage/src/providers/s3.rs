@@ -23,6 +23,8 @@ use service::S3Service;
 mod gcs_signing;
 #[path = "s3_gcs_upload.rs"]
 mod gcs_upload;
+#[path = "s3_metadata.rs"]
+mod metadata;
 
 /// S3 and compatible endpoints, using only object operations and manually supplied keys.
 pub(crate) struct S3Storage {
@@ -137,6 +139,9 @@ impl S3Storage {
             .bucket(&self.bucket)
             .key(path.under(&self.prefix))
             .body(ByteStream::from(bytes.to_vec()));
+        if path.is_replaceable() && self.service != S3Service::Gcs {
+            request = request.metadata("coven-revision", self.ids.new_id().to_string());
+        }
         if create && self.service != S3Service::Gcs {
             request = request.if_none_match("*");
         }
@@ -159,7 +164,7 @@ impl S3Storage {
         &self,
         path: &ObjectPath,
         range: Option<ByteRange>,
-    ) -> Result<Vec<u8>, StorageError> {
+    ) -> Result<ObjectRead, StorageError> {
         let mut request = self
             .client
             .get_object()
@@ -168,18 +173,21 @@ impl S3Storage {
         if let Some(range) = range {
             request = request.range(range.header());
         }
-        let response = request.send().await.map_err(s3_error)?;
-        if let Some(range) = range {
-            super::http::validate_content_range(
-                response
-                    .content_range()
-                    .ok_or(StorageFailure::Protocol.with_source("S3 ignored byte range"))?,
-                range,
-            )?;
+        if self.service != S3Service::Gcs {
+            request = request.checksum_mode(aws_sdk_s3::types::ChecksumMode::Enabled);
         }
+        let response = request.send().await.map_err(s3_error)?;
         let length = response
             .content_length()
             .ok_or(StorageFailure::Protocol.with_source("S3 omitted content length"))?;
+        let complete_size = match range {
+            Some(range) => super::http::validate_content_range(
+                response.content_range().ok_or(StorageFailure::Protocol)?,
+                range,
+            )?,
+            None => u64::try_from(length).map_err(|e| StorageFailure::Protocol.with_source(e))?,
+        };
+        let metadata = metadata::get(self, path, &response, complete_size)?;
         let bytes = response
             .body
             .collect()
@@ -197,7 +205,7 @@ impl S3Storage {
         {
             return Err(StorageFailure::Protocol.with_source("short S3 body"));
         }
-        Ok(bytes)
+        Ok(ObjectRead { metadata, bytes })
     }
     fn upload_id<'a>(&self, session: &'a UploadSession) -> Result<&'a str, StorageError> {
         match &session.state {
@@ -296,15 +304,54 @@ impl ProviderOps for S3Storage {
     async fn replace(&self, path: &ObjectPath, bytes: &[u8]) -> Result<(), StorageError> {
         self.put(path, bytes, false).await
     }
-    async fn read(&self, path: &ObjectPath) -> Result<Vec<u8>, StorageError> {
-        self.get(path, None).await
+    async fn status(&self, path: &ObjectPath) -> Result<Option<StoredObject>, StorageError> {
+        let mut request = self
+            .client
+            .head_object()
+            .bucket(&self.bucket)
+            .key(path.under(&self.prefix));
+        if self.service != S3Service::Gcs {
+            request = request.checksum_mode(aws_sdk_s3::types::ChecksumMode::Enabled);
+        }
+        match request.send().await.map_err(s3_error) {
+            Ok(response) => Ok(Some(metadata::head(self, path, &response)?)),
+            Err(error) if error.failure() == StorageFailure::NotFound => {
+                // HEAD's 404 has no body: distinguish the object from its bucket.
+                // GCS HEAD Bucket requires bucket-metadata permission beyond the
+                // object access Coven uses. A zero-entry listing checks the bucket
+                // using the existing object-list permission, not object absence.
+                match self.service {
+                    S3Service::Gcs => self
+                        .client
+                        .list_objects_v2()
+                        .bucket(&self.bucket)
+                        .prefix(path.under(&self.prefix))
+                        .max_keys(0)
+                        .send()
+                        .await
+                        .map(|_| ())
+                        .map_err(s3_error),
+                    _ => self
+                        .client
+                        .head_bucket()
+                        .bucket(&self.bucket)
+                        .send()
+                        .await
+                        .map(|_| ())
+                        .map_err(s3_error),
+                }
+                .map_err(super::http::container_error)?;
+                Ok(None)
+            }
+            Err(error) => Err(error),
+        }
     }
-    async fn read_range(
+    async fn read_object(
         &self,
         path: &ObjectPath,
-        range: ByteRange,
-    ) -> Result<Vec<u8>, StorageError> {
-        self.get(path, Some(range)).await
+        range: Option<ByteRange>,
+    ) -> Result<ObjectRead, StorageError> {
+        self.get(path, range).await
     }
     async fn list(&self, listing: &mut ObjectListing) -> Result<(), StorageError> {
         let prefix = listing.prefix().clone();
@@ -345,17 +392,38 @@ impl ProviderOps for S3Storage {
                     .size()
                     .and_then(|size| u64::try_from(size).ok())
                     .ok_or(StorageFailure::Protocol.with_source("S3 omitted object size"))?;
-                let stored_at = (*object
+                let stored_at = object
                     .last_modified()
-                    .ok_or(StorageFailure::Protocol.with_source("S3 omitted storage time"))?)
-                .try_into()
-                .map_err(|error| StorageFailure::Encoding.with_source(error))?;
-                let object = StoredObject {
-                    path,
-                    size,
-                    stored_at,
-                };
-                listing.insert(object)?;
+                    .ok_or(StorageFailure::Protocol.with_source("S3 omitted storage time"))?;
+                // HEAD and GET use whole-second HTTP dates. GCS's XML listings
+                // include fractions; use the same precision for every observation
+                // so listing an immutable object cannot change its publication time.
+                let stored_at = aws_sdk_s3::primitives::DateTime::from_secs(stored_at.secs())
+                    .try_into()
+                    .map_err(|error| StorageFailure::Encoding.with_source(error))?;
+                if path.is_replaceable() {
+                    // ListObjectsV2 has neither native versions nor user metadata.
+                    // Exact status supplies the replacement revision; an intervening
+                    // deletion is absence, while a failed lookup fails the listing.
+                    if let Some(current) = self.status(&path).await? {
+                        listing.insert(current)?;
+                    } else {
+                        tracing::debug!(
+                            path = path.as_str(),
+                            "S3 listed object was deleted before exact status"
+                        );
+                    }
+                } else {
+                    listing.insert(StoredObject {
+                        object_id: key.into(),
+                        revision: metadata::required(object.e_tag(), "S3 omitted ETag")?.into(),
+                        path,
+                        size,
+                        stored_at,
+                        time_resolution: std::time::Duration::from_secs(1),
+                        checksum: None,
+                    })?;
+                }
             }
             if !response
                 .is_truncated()

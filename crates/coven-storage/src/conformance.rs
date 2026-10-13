@@ -43,14 +43,34 @@ impl Conformance {
         let path = ObjectPath::device_log(self.store, DeviceId(31), std::num::NonZeroU64::MIN);
         let other = ObjectPath::device_log(self.store, DeviceId(32), std::num::NonZeroU64::MIN);
         let data = b"encrypted bytes";
+        if self.storage.status(&path).await?.is_some() {
+            return Err(StorageFailure::Protocol.with_source("absent exact status"));
+        }
         self.storage.create(&path, data).await?;
         self.storage.create(&other, b"other").await?;
-        if self.storage.read(&path).await? != data {
+        let first = self
+            .storage
+            .status(&path)
+            .await?
+            .ok_or(StorageFailure::NotFound)?;
+        let read = self.storage.read_object(&path, None).await?;
+        if read.metadata != first {
+            return Err(
+                StorageFailure::Protocol.with_source("read metadata differs from exact status")
+            );
+        }
+        if read.bytes != data {
             return Err(StorageFailure::Protocol.with_source("whole read"));
         }
         for (start, end) in [(0, 3), (4, 8), (12, 15)] {
             let range = ByteRange::new(start, end)?;
-            if self.storage.read_range(&path, range).await? != range.select(data)? {
+            let read = self.storage.read_object(&path, Some(range)).await?;
+            if read.metadata.size != first.size || read.metadata.revision != first.revision {
+                return Err(
+                    StorageFailure::Protocol.with_source("range omitted complete-object metadata")
+                );
+            }
+            if read.bytes != range.select(data)? {
                 return Err(StorageFailure::Protocol.with_source("range read"));
             }
         }
@@ -71,20 +91,44 @@ impl Conformance {
             return Err(StorageFailure::Protocol.with_source("create-once refusal"));
         }
         self.storage.create_once(&path, data).await?;
-        if self
+        if self.storage.status(&path).await?.as_ref() != Some(&first) {
+            return Err(StorageFailure::Protocol
+                .with_source("immutable retry changed publication metadata"));
+        }
+        let listed = self
             .storage
             .list(&ObjectPrefix::device_log(self.store, DeviceId(31)))
             .await?
             .into_iter()
-            .map(|object| (object.path, object.size))
-            .collect::<Vec<_>>()
-            != [(path.clone(), data.len() as u64)]
+            .map(|object| {
+                (
+                    object.path,
+                    object.size,
+                    object.stored_at,
+                    object.object_id,
+                    object.revision,
+                )
+            })
+            .collect::<Vec<_>>();
+        if listed
+            != [(
+                path.clone(),
+                first.size,
+                first.stored_at,
+                first.object_id.clone(),
+                first.revision.clone(),
+            )]
         {
-            return Err(StorageFailure::Protocol.with_source("prefix listing"));
+            return Err(StorageFailure::Protocol.with_source(format!(
+                "prefix listing metadata: listed={listed:?}, status={first:?}"
+            )));
         }
         self.storage.delete(&path).await?;
         self.storage.delete(&path).await?;
         self.storage.delete(&other).await?;
+        if self.storage.status(&path).await?.is_some() {
+            return Err(StorageFailure::Protocol.with_source("deleted exact status"));
+        }
         if self.storage.read(&path).await.err().map(|e| e.failure())
             != Some(StorageFailure::NotFound)
         {
@@ -109,9 +153,27 @@ impl Conformance {
                 return Err(StorageFailure::Protocol
                     .with_source("replaceable object accepted a recorded upload"));
             }
-            self.storage.replace(&path, b"first record").await?;
-            self.storage.replace(&path, b"next record").await?;
-            if self.storage.read(&path).await? != b"next record" {
+            self.storage.replace(&path, b"last record").await?;
+            let mut previous = self
+                .storage
+                .status(&path)
+                .await?
+                .ok_or(StorageFailure::NotFound)?;
+            for bytes in [b"next record", b"last record"] {
+                self.storage.replace(&path, bytes).await?;
+                let next = self
+                    .storage
+                    .status(&path)
+                    .await?
+                    .ok_or(StorageFailure::NotFound)?;
+                if previous.revision == next.revision {
+                    return Err(
+                        StorageFailure::Protocol.with_source("replacement did not change revision")
+                    );
+                }
+                previous = next;
+            }
+            if self.storage.read(&path).await? != b"last record" {
                 return Err(StorageFailure::Protocol.with_source("object replacement"));
             }
             if !self
@@ -119,11 +181,14 @@ impl Conformance {
                 .list(&ObjectPrefix::all(self.store))
                 .await?
                 .iter()
-                .any(|object| object.path == path && object.size == b"next record".len() as u64)
+                .any(|object| {
+                    object.path == path
+                        && object.size == previous.size
+                        && object.revision == previous.revision
+                })
             {
-                return Err(
-                    StorageFailure::Protocol.with_source("replaced object missing from listing")
-                );
+                return Err(StorageFailure::Protocol
+                    .with_source("replaced object metadata differs from listing"));
             }
             self.storage.delete(&path).await?;
         }
@@ -180,24 +245,16 @@ impl Conformance {
         let second = ObjectPath::device_log(self.store, DeviceId(32), std::num::NonZeroU64::MIN);
         storage.create_once(&first, b"first").await.unwrap();
         storage.create_once(&second, b"second").await.unwrap();
-        let expected = vec![
-            StoredObject {
-                path: first.clone(),
-                size: 5,
-                stored_at,
-            },
-            StoredObject {
-                path: second.clone(),
-                size: 6,
-                stored_at,
-            },
-        ];
+        let expected = storage
+            .list(&ObjectPrefix::device_logs(self.store))
+            .await
+            .unwrap();
         assert_eq!(
-            storage
-                .list(&ObjectPrefix::device_logs(self.store))
-                .await
-                .unwrap(),
             expected
+                .iter()
+                .map(|object| (&object.path, object.size, object.stored_at))
+                .collect::<Vec<_>>(),
+            [(&first, 5, stored_at), (&second, 6, stored_at)]
         );
         advance.await;
         storage.create_once(&first, b"first").await.unwrap();
@@ -325,6 +382,7 @@ impl Conformance {
             storage.create(&path, b"data").await.err().unwrap(),
             storage.replace(&positions, b"data").await.err().unwrap(),
             storage.read(&path).await.err().unwrap(),
+            storage.status(&path).await.err().unwrap(),
             storage
                 .read_range(&path, ByteRange::new(0, 1).unwrap())
                 .await

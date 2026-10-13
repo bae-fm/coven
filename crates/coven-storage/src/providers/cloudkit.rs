@@ -62,7 +62,14 @@ pub trait CloudKitOps: Send + Sync {
         location: &StorageConfig,
         path: &ObjectPath,
         range: Option<ByteRange>,
-    ) -> Result<Vec<u8>, StorageError>;
+    ) -> Result<ObjectRead, StorageError>;
+    /// Fetch the exact publication record. Missing is None; native failures
+    /// preserve their cause. Pending assets have no complete-object status.
+    async fn status(
+        &self,
+        location: &StorageConfig,
+        path: &ObjectPath,
+    ) -> Result<Option<StoredObject>, StorageError>;
     /// Follow every native query cursor. Return encrypted size and server publication
     /// time of each complete object; pending assets are not listed.
     async fn list(
@@ -186,19 +193,15 @@ impl ProviderOps for CloudKitStorage {
     async fn replace(&self, path: &ObjectPath, bytes: &[u8]) -> Result<(), StorageError> {
         self.ops.replace(&self.config, path, bytes).await
     }
-    async fn read(&self, path: &ObjectPath) -> Result<Vec<u8>, StorageError> {
-        self.ops.read(&self.config, path, None).await
+    async fn status(&self, path: &ObjectPath) -> Result<Option<StoredObject>, StorageError> {
+        self.ops.status(&self.config, path).await
     }
-    async fn read_range(
+    async fn read_object(
         &self,
         path: &ObjectPath,
-        range: ByteRange,
-    ) -> Result<Vec<u8>, StorageError> {
-        let bytes = self.ops.read(&self.config, path, Some(range)).await?;
-        if bytes.len() as u64 != range.len() {
-            return Err(StorageFailure::Protocol.with_source("CloudKit returned a short range"));
-        }
-        Ok(bytes)
+        range: Option<ByteRange>,
+    ) -> Result<ObjectRead, StorageError> {
+        self.ops.read(&self.config, path, range).await
     }
     async fn list(&self, listing: &mut ObjectListing) -> Result<(), StorageError> {
         for object in self.ops.list(&self.config, listing.prefix()).await? {

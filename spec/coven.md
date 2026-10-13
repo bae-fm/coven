@@ -397,7 +397,10 @@ a zero-body pass cannot hide a listing of the whole history.
     eviction are reported separately with the same terms. An arrival that
     causes a snapshot or historical-key sharing contributes to `P`, not an
     unspecified constant per arrival. A file's length contributes to `F`.
-- **Idle requests:** `O = F = P = X = A = M = E = 0`, so `R = D`.
+- **Idle requests:** `O = F = P = X = A = E = 0`, so `R = D + M`.
+  S3 positions listings require one HEAD per listed object to obtain its
+  replacement revision: `ListObjectsV2` omits versions and user metadata.
+  These HEADs contribute to `M`; other providers return revisions in listings.
   List store-log device folders and `positions/`, and make one next-number
   miss per polled device for each of three logs: store-log entries, writes
   and key copies. `N` is active devices plus retired devices not yet drained
@@ -405,7 +408,8 @@ a zero-body pass cannot hide a listing of the whole history.
   `D = 2 + 3 * N` on every provider. Folder ids are already known in this
   warm count. All extra pages, initialization lookups and retries are charged.
   Drive's unknown-name miss is one exact parent/name query; a hit needs
-  that query plus the download (§4). Neither lists historical log objects.
+  that query, exact metadata and the download (§4). Metadata requests and
+  replacement rechecks contribute to `M`. Neither lists historical log objects.
 - **New objects:** checked immutable facts and retained bytes are reused.
   Charge only newly needed versions to `O`; changed positions count as new
   versions. Work induced by them stays in its own term above.
@@ -571,8 +575,10 @@ the file's ranges under `F`.
     their contents. This discovers unknown writers, not pages of history;
   - get one object's status by its exact path: absent, or its complete
     encrypted size, first publication or replacement time, object id and
-    revision. A revision changes on every replacement, even when size and
-    timestamp match. An error is never absence;
+    revision. A revision changes when replacement changes the encrypted bytes,
+    even when size and timestamp match. Identical-byte writes may retain a
+    revision (Dropbox does); they do not change a reader's retained bytes.
+    An error is never absence;
   - delete;
   - grant and revoke a member's access, where the provider can: Google
     Drive, Dropbox, OneDrive and iCloud share with an account.
@@ -588,11 +594,15 @@ the file's ranges under `F`.
     CloudKit queries the indexed store, object kind and number for entry 1
     of each writer; those permanent records represent its device folders.
     No adapter downloads the history to derive the set of writers locally.
-  - An exact-name GET needs no preliminary status request. On Drive, an
+  - S3 and Dropbox downloads include their metadata without a preliminary
+    status request. Drive and OneDrive fetch exact metadata before downloading.
+    Their replaceable objects also require a metadata recheck after downloading
+    to reject a concurrent replacement. On Drive, an
     unknown file id requires one [parent/name query](https://developers.google.com/workspace/drive/api/guides/search-files).
-    An empty complete result is the miss; a hit adds one
+    An empty complete result is the miss; a hit adds exact metadata and one
     [file download](https://developers.google.com/workspace/drive/api/reference/rest/v3/files/get).
-    Count query pages and redirects when they occur; an incomplete search
+    Count metadata requests, query pages and redirects in `M` unless already
+    counted as a discovery miss; an incomplete search
     or provider error is not absence. Cache the id for subsequent reads.
   - Ana's `files/` folder can hold 20,000 photos. Reading `store-log/`
     never enumerates those photos or another store's objects.
@@ -600,6 +610,10 @@ the file's ranges under `F`.
   unit `δ` for §9 comes from the returned timestamp's representation:
   - S3 HEAD: `Last-Modified`, in whole seconds, so `δ = 1 second`
     ([HeadObject](https://docs.aws.amazon.com/AmazonS3/latest/API/API_HeadObject.html)).
+    S3 listings use that same precision: truncate fractional XML listing times
+    to whole seconds. GCS listings include milliseconds while HEAD and GET
+    omit them; keeping both representations would give one immutable publication
+    different times depending on the observation call.
   - Drive file metadata, with an exact name lookup when its id is unknown:
     `createdTime` for creation and `modifiedTime` for replacement, retaining
     their RFC 3339 fractional-second precision
@@ -620,8 +634,31 @@ the file's ranges under `F`.
   millisecond. Preserve the returned precision in comparisons; do not round
   a fractional timestamp to seconds or invent an order within an equal time.
 
+  Exact status and reads carry the complete encrypted size, native object id,
+  revision, timestamp and its resolution, plus any returned checksum. A ranged
+  read still describes the complete object. Drive uses `headRevisionId` (its file `version` can also change on reads), OneDrive
+  uses `eTag`, and Dropbox uses `rev`. CloudKit's bridge supplies its record
+  change tag. On replaceable S3 paths, GCS uses its generation; AWS uses a
+  version id when versioning is enabled, otherwise a fresh `coven-revision`
+  value stored atomically in the replacement's user metadata. Immutable S3
+  objects use their ETag. S3 listings fetch exact status for replaceable paths
+  because `ListObjectsV2` contains neither versions nor user metadata.
+
+  Checksums name their algorithm, encoding and scope: whole-object or
+  multipart composite. An ETag or revision is never inferred to be a checksum.
+  Drive exposes MD5, Dropbox its block-based content hash, OneDrive SHA-1 or
+  QuickXorHash, and S3 its explicitly returned checksum and scope. GCS's
+  CRC32C is a whole-object checksum. A missing checksum requires the byte
+  comparison; a composite cannot confirm a whole-object digest. Metadata and
+  downloaded bytes must describe the same revision: Drive and OneDrive
+  recheck replaceable metadata after download and fail if it changed.
+
   File status and upload confirmation use this call, not a folder listing.
-  Count any name lookup separately. A revision proves freshness, not byte
+  Count any name lookup and missing-container check separately. S3 HEAD's
+  bodyless 404 requires a bucket check: HEAD Bucket on AWS, a zero-entry
+  ListObjectsV2 on GCS (whose HEAD Bucket requires additional bucket-metadata
+  permission). Object absence comes from the exact HEAD, never from that listing.
+  A revision proves freshness, not byte
   equality: occupied immutable paths still require §10's complete comparison.
   Snapshot confirmation still checks the complete-object checksum (§15).
   - Ben replaces his positions twice within one storage clock tick with
@@ -637,6 +674,15 @@ the file's ranges under `F`.
     while the recent-return check holds. This is an environmental
     assumption, alongside §10's request-duration bound and §13's storage
     cut-off assumption; nondecreasing publication times alone do not imply it.
+- Native publication gaps remain visible in the live provider checks. AWS
+  single-request PUT timestamps and GCS conditional-copy timestamps describe
+  completion. AWS multipart `Last-Modified` instead records initiation
+  ([system metadata](https://docs.aws.amazon.com/AmazonS3/latest/userguide/UsingMetadata.html)).
+  OneDrive's native session uploads expose unfinished objects, and their
+  `createdDateTime` records session start. These paths do not satisfy the
+  complete-publication requirement above; adapters expose native observations
+  without inventing a later time. CloudKit's native guarantees depend on the
+  bridge and require live verification.
 - Device paths have one intended writer: the device they name. Retrying
   that writer uses fixed bytes. A copied identity can violate this;
   the checks in §10 detect it before sending or when a path is occupied.

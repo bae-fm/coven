@@ -24,12 +24,15 @@ struct PendingUpload {
 #[derive(Default)]
 struct Remote {
     gcs: bool,
+    response_headers: BTreeMap<String, String>,
     fail_copy_reply: bool,
     refuse_copy: bool,
     copies: usize,
     refuse_temporary_delete: bool,
     lose_temporary_delete_reply: bool,
     objects: BTreeMap<String, Vec<u8>>,
+    revisions: BTreeMap<String, String>,
+    generation: u64,
     uploads: BTreeMap<String, PendingUpload>,
     next_upload: u64,
     part_pages: usize,
@@ -73,6 +76,9 @@ fn respond(
             status,
             format!("<Error><Code>{code}</Code><Message>credential-echo</Message></Error>"),
         );
+    }
+    if method == Method::HEAD && uri.path() == "/bucket/" {
+        return response(if state.gcs { 403 } else { 200 }, Vec::new());
     }
     let q = query(&uri);
     let key = uri.path().strip_prefix("/bucket/").unwrap_or("").to_owned();
@@ -205,16 +211,21 @@ fn respond(
         } else {
             "<IsTruncated>false</IsTruncated>".into()
         };
+        let listed_time = if state.gcs {
+            "2026-10-06T00:00:00.751Z"
+        } else {
+            "2026-10-06T00:00:00Z"
+        };
         let entry = entries
             .first()
-            .map(|key| format!("<Contents><Key>{key}</Key><Size>{}</Size><LastModified>2026-10-06T00:00:00Z</LastModified></Contents>",state.objects[*key].len()))
+            .map(|key| format!("<Contents><Key>{key}</Key><Size>{}</Size><LastModified>{listed_time}</LastModified><ETag>etag</ETag></Contents>",state.objects[*key].len()))
             .unwrap_or_default();
         return response(
             200,
             format!("<ListBucketResult>{entry}{next}</ListBucketResult>"),
         );
     }
-    match method {
+    let result = match method {
         Method::PUT => {
             if state.broken_check == Some(StorageCheck::Create) {
                 return response(403, "<Error><Code>AccessDenied</Code></Error>");
@@ -232,7 +243,17 @@ fn respond(
             {
                 return response(412, "<Error><Code>PreconditionFailed</Code></Error>");
             }
-            state.objects.insert(key, body.to_vec());
+            state.generation += 1;
+            let revision = if state.gcs {
+                state.generation.to_string()
+            } else {
+                headers
+                    .get("x-amz-meta-coven-revision")
+                    .map(|value| value.to_str().unwrap().to_owned())
+                    .unwrap_or_else(|| "immutable".into())
+            };
+            state.revisions.insert(key.clone(), revision);
+            state.objects.insert(key.clone(), body.to_vec());
             if std::mem::replace(&mut state.lose_create_reply, false) {
                 return response(503, "<Error><Code>ServiceUnavailable</Code></Error>");
             }
@@ -297,9 +318,39 @@ fn respond(
             response(204, Vec::new())
         }
         _ => panic!("unexpected S3 request: {uri}"),
+    };
+    let mut result = result;
+    if result.status().is_success() && matches!(method, Method::GET | Method::HEAD) {
+        result.headers_mut().insert(
+            "last-modified",
+            "Tue, 06 Oct 2026 00:00:00 GMT".parse().unwrap(),
+        );
+        result.headers_mut().insert("etag", "etag".parse().unwrap());
+        if let Some(revision) = state.revisions.get(&key) {
+            result.headers_mut().insert(
+                if state.gcs {
+                    "x-goog-generation"
+                } else {
+                    "x-amz-meta-coven-revision"
+                },
+                revision.parse().unwrap(),
+            );
+        }
     }
+    if result.status().is_success() && matches!(method, Method::GET | Method::HEAD) {
+        for (name, value) in &state.response_headers {
+            result.headers_mut().insert(
+                axum::http::HeaderName::from_bytes(name.as_bytes()).unwrap(),
+                value.parse().unwrap(),
+            );
+        }
+    }
+    result
 }
 
+#[path = "s3_metadata_tests.rs"]
+mod metadata_tests;
+use gcs::gcs_provider;
 #[path = "s3_gcs_upload_tests.rs"]
 mod gcs;
 fn provider(url: &str) -> StorageConnection<S3Storage> {
@@ -533,7 +584,7 @@ async fn duplicate_listing_entries_merge_or_fail_before_fetching_another_page() 
             let key = key.clone();
             async move {
                 let contents = if page == 0 {
-                    format!("<IsTruncated>true</IsTruncated><NextContinuationToken>next</NextContinuationToken><Contents><Key>{key}</Key><Size>4</Size><LastModified>2026-10-06T00:00:00Z</LastModified></Contents><Contents><Key>{key}</Key><Size>{size}</Size><LastModified>2026-10-06T00:00:00Z</LastModified></Contents>")
+                    format!("<IsTruncated>true</IsTruncated><NextContinuationToken>next</NextContinuationToken><Contents><Key>{key}</Key><Size>4</Size><LastModified>2026-10-06T00:00:00Z</LastModified><ETag>etag</ETag></Contents><Contents><Key>{key}</Key><Size>{size}</Size><LastModified>2026-10-06T00:00:00Z</LastModified><ETag>etag</ETag></Contents>")
                 } else {
                     "<IsTruncated>false</IsTruncated>".into()
                 };
@@ -630,7 +681,7 @@ async fn interrupted_ranged_body_retains_the_sdk_cause() {
         let (mut socket, _) = listener.accept().await.unwrap();
         let mut request = [0; 4096];
         assert!(socket.read(&mut request).await.unwrap() > 0);
-        socket.write_all(b"HTTP/1.1 206 Partial Content\r\nContent-Length: 4\r\nContent-Range: bytes 3-6/8\r\nConnection: close\r\n\r\nx").await.unwrap();
+        socket.write_all(b"HTTP/1.1 206 Partial Content\r\nContent-Length: 4\r\nContent-Range: bytes 3-6/8\r\nLast-Modified: Tue, 06 Oct 2026 00:00:00 GMT\r\nETag: etag\r\nConnection: close\r\n\r\nx").await.unwrap();
         socket.shutdown().await.unwrap();
     });
     let storage = provider(&format!("http://{address}"));

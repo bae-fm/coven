@@ -136,8 +136,7 @@ async fn created(drive: &Drive, parent: &str, name: &str) -> (Instant, Value) {
         ],
     )
     .unwrap();
-    // The adapter performs a name query after upload and can fail on listing lag.
-    // Measure from the native upload reply, before that query could hide the lag.
+    // Measure from the native upload reply, before adapter duplicate checks.
     let value = http::json(
         PROVIDER,
         provider
@@ -220,19 +219,19 @@ async fn drive_live_complete_publication_time() {
             drive.storage.finish_upload(&mut upload).await.unwrap();
             let completed = drive.clock.now();
             let after = drive.marker(first_marker + 3).await;
-            let listed = drive.listed(&path).await;
+            let observed = drive.observed(&path).await;
             let native = drive.metadata(&path).await;
-            println!("Drive publication pause={pause}s, start={started:?}, session_ready={session_ready:?}, completing={completing:?}, completed={completed:?}, between_parts={:?}, listed={:?}; before={before}; before_final={before_final}; after={after}; object={native}", between_parts, listed.stored_at);
+            println!("Drive publication pause={pause}s, start={started:?}, session_ready={session_ready:?}, completing={completing:?}, completed={completed:?}, between_parts={:?}, observed={:?}; before={before}; before_final={before_final}; after={after}; object={native}", between_parts, observed.stored_at);
             assert!(between_parts >= Duration::from_secs(pause));
-            assert_eq!(listed.size, part.len() as u64 + 1);
+            assert_eq!(observed.size, part.len() as u64 + 1);
             let mut expected = part;
             expected.push(b'z');
             assert_eq!(drive.storage.read(&path).await.unwrap(), expected);
-            assert_eq!(listed.stored_at, http::timestamp(&native, "createdTime").unwrap());
+            assert_eq!(observed.stored_at, http::timestamp(&native, "createdTime").unwrap());
             assert!(http::timestamp(&before_final, "createdTime").unwrap() > http::timestamp(&before, "createdTime").unwrap());
-            assert!(listed.stored_at >= http::timestamp(&before_final, "createdTime").unwrap(),
+            assert!(observed.stored_at >= http::timestamp(&before_final, "createdTime").unwrap(),
                 "§4 requires first complete publication, after the delayed final part starts");
-            assert!(listed.stored_at <= http::timestamp(&after, "createdTime").unwrap());
+            assert!(observed.stored_at <= http::timestamp(&after, "createdTime").unwrap());
         }
     }).await;
 }
@@ -280,35 +279,41 @@ async fn drive_live_unfinished_upload_is_invisible() {
             "unfinished bytes must not be readable by native file ID"
         );
         assert!(listed.is_empty(), "unfinished bytes must not be listed");
+        assert_eq!(drive.storage.status(&path).await.unwrap(), None);
         assert!(matches!(read, Err(error) if error.failure() == StorageFailure::NotFound));
     })
     .await;
 }
 
 #[tokio::test]
-#[ignore = "fails §4: adapter exposes no revision; requires COVEN_LIVE_DRIVE_ENV"]
+#[ignore = "requires COVEN_LIVE_DRIVE_ENV and a real Google Drive account"]
 async fn drive_live_replacement_revision() {
     run(|drive| async move {
         let path = ObjectPath::positions(drive.store, drive.storage.provider.device);
-        let mut listed = Vec::new();
+        let mut observed = Vec::new();
         let mut native = Vec::new();
         for bytes in [b"first".as_slice(), b"first", b"other"] {
             drive.storage.replace(&path, bytes).await.unwrap();
-            listed.push(drive.listed(&path).await);
+            observed.push(drive.observed(&path).await);
             native.push(drive.metadata(&path).await);
             assert_eq!(drive.storage.read(&path).await.unwrap(), bytes);
         }
-        println!("Drive replacement listed={listed:?}; native={native:?}");
+        println!("Drive replacement status={observed:?}; native={native:?}");
         for pair in native.windows(2) {
-            assert_ne!(http::string(&pair[0], "version").unwrap(), http::string(&pair[1], "version").unwrap(), "native version must change even for identical bytes");
+            assert_ne!(
+                http::string(&pair[0], "headRevisionId").unwrap(),
+                http::string(&pair[1], "headRevisionId").unwrap(),
+                "native content revision must change even for identical bytes"
+            );
         }
-        // Observed live: native version 1 -> 4 -> 5, with a new headRevisionId each time.
-        // StoredObject exposes only path, size=5 and createdTime=2026-10-12T12:29:35.747Z;
-        // all three remain identical. §4 requires the replacement revision to reach callers.
-        for pair in listed.windows(2) {
-            assert_ne!(pair[0], pair[1], "§4 requires a changing revision; adapter metadata cannot identify this replacement");
+        for pair in observed.windows(2) {
+            assert_ne!(
+                pair[0].revision, pair[1].revision,
+                "replacement revision must reach callers"
+            );
         }
-    }).await;
+    })
+    .await;
 }
 
 #[tokio::test]
@@ -317,14 +322,14 @@ async fn drive_live_immutable_time_is_stable() {
     run(|drive| async move {
         let path = drive.path(1);
         drive.storage.create(&path, b"immutable").await.unwrap();
-        let first = drive.listed(&path).await;
+        let first = drive.observed(&path).await;
         let native_first = drive.metadata(&path).await;
         assert_eq!(drive.storage.read(&path).await.unwrap(), b"immutable");
         drive.clock.sleep(Duration::from_secs(5)).await;
         let later = drive.marker(2).await;
         drive.storage.create_once(&path, b"immutable").await.unwrap();
         assert_eq!(drive.storage.read(&path).await.unwrap(), b"immutable");
-        let last = drive.listed(&path).await;
+        let last = drive.observed(&path).await;
         let native_last = drive.metadata(&path).await;
         println!("Drive immutable first={first:?}, last={last:?}; native_first={native_first}; native_last={native_last}; later={later}");
         assert_eq!(first, last);
@@ -339,10 +344,10 @@ async fn drive_live_create_once_preserves_bytes() {
     run(|drive| async move {
         let path = drive.path(1);
         drive.storage.create(&path, b"original").await.unwrap();
-        let first = drive.listed(&path).await;
+        let first = drive.observed(&path).await;
         let second = drive.storage.create(&path, b"replaced").await;
         let bytes = drive.storage.read(&path).await.unwrap();
-        let last = drive.listed(&path).await;
+        let last = drive.observed(&path).await;
         println!(
             "Drive create-once result={second:?}, bytes={bytes:?}, first={first:?}, last={last:?}"
         );

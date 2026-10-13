@@ -31,6 +31,8 @@ pub struct Faults {
     pub expire_uploads: bool,
     /// Accept creates at occupied paths, violating the provider contract.
     pub overwrite_create: bool,
+    /// Hide published objects from listings while exact reads and status still see them.
+    pub hide_listings: bool,
     /// Refuse a duplicate create but fail to abort its upload session.
     pub fail_duplicate_cleanup: bool,
 }
@@ -47,6 +49,7 @@ impl Faults {
             expire_uploads: false,
             overwrite_create: false,
             fail_duplicate_cleanup: false,
+            hide_listings: false,
         }
     }
 }
@@ -55,6 +58,20 @@ struct Object {
     upload_id: Option<u64>,
     bytes: Vec<u8>,
     stored_at: std::time::SystemTime,
+    revision: u64,
+}
+impl Object {
+    fn metadata(&self, path: &ObjectPath) -> StoredObject {
+        StoredObject {
+            path: path.clone(),
+            size: self.bytes.len() as u64,
+            stored_at: self.stored_at,
+            time_resolution: Duration::from_nanos(1),
+            object_id: path.as_str().into(),
+            revision: self.revision.to_string(),
+            checksum: None,
+        }
+    }
 }
 struct Pending {
     path: ObjectPath,
@@ -117,6 +134,16 @@ struct State {
     largest_part: usize,
     held_listing: Option<HeldRequest>,
     held_creation: Option<HeldRequest>,
+}
+
+impl State {
+    fn next_id(&mut self) -> Result<u64, StorageError> {
+        let id = self.next;
+        self.next = id
+            .checked_add(1)
+            .ok_or(StorageFailure::Protocol.with_source("memory ids exhausted"))?;
+        Ok(id)
+    }
 }
 
 struct HeldRequest {
@@ -490,9 +517,11 @@ impl ProviderOps for MemoryProvider {
             }
             return Err(StorageFailure::AlreadyExists.into());
         }
+        let revision = state.next_id()?;
         state.objects.insert(
             path.clone(),
             Object {
+                revision,
                 upload_id: None,
                 bytes: bytes.to_vec(),
                 stored_at: self.clock.now(),
@@ -503,9 +532,12 @@ impl ProviderOps for MemoryProvider {
 
     async fn replace(&self, path: &ObjectPath, bytes: &[u8]) -> Result<(), StorageError> {
         self.before().await?;
-        self.state.lock().await.objects.insert(
+        let mut state = self.state.lock().await;
+        let revision = state.next_id()?;
+        state.objects.insert(
             path.clone(),
             Object {
+                revision,
                 upload_id: None,
                 bytes: bytes.to_vec(),
                 stored_at: self.clock.now(),
@@ -513,34 +545,38 @@ impl ProviderOps for MemoryProvider {
         );
         Ok(())
     }
-    async fn read(&self, path: &ObjectPath) -> Result<Vec<u8>, StorageError> {
+    async fn status(&self, path: &ObjectPath) -> Result<Option<StoredObject>, StorageError> {
         self.before().await?;
-        let mut state = self.state.lock().await;
-        let bytes = state
+        Ok(self
+            .state
+            .lock()
+            .await
             .objects
             .get(path)
-            .map(|object| object.bytes.clone())
-            .ok_or(StorageFailure::NotFound)?;
-        state.reads.push((path.clone(), 0, bytes.len() as u64));
-        Ok(bytes)
+            .map(|object| object.metadata(path)))
     }
-    async fn read_range(
+    async fn read_object(
         &self,
         path: &ObjectPath,
-        range: ByteRange,
-    ) -> Result<Vec<u8>, StorageError> {
+        range: Option<ByteRange>,
+    ) -> Result<ObjectRead, StorageError> {
         self.before().await?;
         let mut state = self.state.lock().await;
-        let bytes = range.select(
-            &state
-                .objects
-                .get(path)
-                .ok_or(StorageFailure::NotFound)?
-                .bytes,
-        )?;
-        state.ranges.push(range);
-        state.reads.push((path.clone(), range.start(), range.len()));
-        Ok(bytes)
+        let object = state.objects.get(path).ok_or(StorageFailure::NotFound)?;
+        let metadata = object.metadata(path);
+        let bytes = match range {
+            Some(range) => range.select(&object.bytes)?,
+            None => object.bytes.clone(),
+        };
+        if let Some(range) = range {
+            state.ranges.push(range);
+        }
+        state.reads.push((
+            path.clone(),
+            range.map_or(0, ByteRange::start),
+            bytes.len() as u64,
+        ));
+        Ok(ObjectRead { metadata, bytes })
     }
     async fn list(&self, listing: &mut ObjectListing) -> Result<(), StorageError> {
         let prefix = listing.prefix();
@@ -549,12 +585,8 @@ impl ProviderOps for MemoryProvider {
         let objects: Vec<_> = state
             .objects
             .iter()
-            .filter(|(path, _)| prefix.contains(path))
-            .map(|(path, object)| StoredObject {
-                path: path.clone(),
-                size: object.bytes.len() as u64,
-                stored_at: object.stored_at,
-            })
+            .filter(|(path, _)| !state.faults.hide_listings && prefix.contains(path))
+            .map(|(path, object)| object.metadata(path))
             .collect();
         let hold = if state
             .held_listing
@@ -687,10 +719,7 @@ impl ProviderOps for MemoryProvider {
         if state.objects.contains_key(path) && !state.faults.overwrite_create {
             return Err(StorageFailure::AlreadyExists.into());
         }
-        let id = state.next;
-        state.next = id
-            .checked_add(1)
-            .ok_or(StorageFailure::Protocol.with_source("session ids exhausted"))?;
+        let id = state.next_id()?;
         state.uploads.insert(
             id,
             Pending {
@@ -773,6 +802,7 @@ impl ProviderOps for MemoryProvider {
         if state.objects.contains_key(&session.path) && !state.faults.overwrite_create {
             return Err(StorageFailure::AlreadyExists.into());
         }
+        let revision = state.next_id()?;
         let pending = state
             .uploads
             .remove(&id)
@@ -780,6 +810,7 @@ impl ProviderOps for MemoryProvider {
         state.objects.insert(
             pending.path,
             Object {
+                revision,
                 bytes: pending.bytes,
                 stored_at: self.clock.now(),
                 upload_id: Some(id),

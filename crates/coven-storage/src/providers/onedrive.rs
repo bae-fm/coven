@@ -138,21 +138,31 @@ impl OneDriveStorage {
         &self,
         path: &ObjectPath,
         range: Option<ByteRange>,
-    ) -> Result<Vec<u8>, StorageError> {
+    ) -> Result<ObjectRead, StorageError> {
         let value = self.metadata(path).await?;
         let url = http::string(&value, "@microsoft.graph.downloadUrl")?;
         validate_download_url(&self.api, url)?;
         let headers = range
             .map(|range| vec![("Range", range.header())])
             .unwrap_or_default();
-        http::bytes(
+        let metadata = super::object_metadata::onedrive(path, &value)?;
+        let bytes = http::bytes(
             PROVIDER,
             self.session
                 .send(Method::GET, url, &headers, Body::Empty, false)
                 .await?,
             range,
         )
-        .await
+        .await?;
+        if path.is_replaceable() {
+            let after = super::object_metadata::onedrive(path, &self.metadata(path).await?)?;
+            if after != metadata {
+                return Err(
+                    StorageFailure::Protocol.with_source("OneDrive object changed during read")
+                );
+            }
+        }
+        Ok(ObjectRead { metadata, bytes })
     }
     fn upload_url<'a>(&self, session: &'a UploadSession) -> Result<&'a str, StorageError> {
         let SessionState::OneDrive { url } = &session.state else {
@@ -344,15 +354,19 @@ impl ProviderOps for OneDriveStorage {
         .await?;
         Ok(())
     }
-    async fn read(&self, path: &ObjectPath) -> Result<Vec<u8>, StorageError> {
-        self.get(path, None).await
+    async fn status(&self, path: &ObjectPath) -> Result<Option<StoredObject>, StorageError> {
+        match self.metadata(path).await {
+            Ok(item) => Ok(Some(super::object_metadata::onedrive(path, &item)?)),
+            Err(error) if error.failure() == StorageFailure::NotFound => Ok(None),
+            Err(error) => Err(error),
+        }
     }
-    async fn read_range(
+    async fn read_object(
         &self,
         path: &ObjectPath,
-        range: ByteRange,
-    ) -> Result<Vec<u8>, StorageError> {
-        self.get(path, Some(range)).await
+        range: Option<ByteRange>,
+    ) -> Result<ObjectRead, StorageError> {
+        self.get(path, range).await
     }
     async fn list(&self, listing: &mut ObjectListing) -> Result<(), StorageError> {
         let prefix = listing.prefix().clone();
@@ -400,14 +414,7 @@ impl ProviderOps for OneDriveStorage {
                     } else if item["file"].is_object() {
                         let path = ObjectPath::from_components(&names, name)?;
                         if prefix.contains(&path) {
-                            let object = StoredObject {
-                                path,
-                                size: item["size"].as_u64().ok_or(
-                                    StorageFailure::Protocol
-                                        .with_source("OneDrive omitted object size"),
-                                )?,
-                                stored_at: http::timestamp(item, "createdDateTime")?,
-                            };
+                            let object = super::object_metadata::onedrive(&path, item)?;
                             listing.insert(object)?;
                         }
                     } else {

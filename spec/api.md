@@ -237,8 +237,36 @@ pub struct StoredObject {
     /// Immutable objects retain their first stored time across retries. Replaced
     /// positions and clock objects carry their replacement time (§9).
     pub stored_at: SystemTime,
-    /// Opaque native identity that changes on every replacement (§4).
+    /// Timestamp resolution; S3 uses its whole-second HEAD/GET representation (§4).
+    pub time_resolution: Duration,
+    /// Native object id, or the complete S3 key.
+    pub object_id: String,
+    /// Opaque identity that changes when replaced encrypted bytes change (§4).
+    /// It is not a checksum or proof of byte equality.
     pub revision: String,
+    /// Native checksum, including its algorithm, encoding and scope.
+    pub checksum: Option<ObjectChecksum>,
+}
+
+/// A checksum of all encrypted bytes or a multipart composite.
+pub enum ObjectChecksum {
+    /// Compare using the named algorithm over the complete encrypted object.
+    FullObject(ChecksumValue),
+    /// A digest derived from part digests; not a complete-object checksum.
+    Composite(ChecksumValue),
+}
+
+/// Native checksum algorithm and encoding; never inferred from an ETag.
+pub enum ChecksumValue {
+    Md5Hex(String),
+    Sha1Hex(String),
+    DropboxContentHash(String),
+    QuickXorBase64(String),
+    Sha256Base64(String),
+    Crc64NvmeBase64(String),
+    Crc32cBase64(String),
+    Crc32Base64(String),
+    Sha1Base64(String),
 }
 
 /// Encrypted response bytes with bounded buffering (§4).

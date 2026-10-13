@@ -26,6 +26,7 @@ impl ObjectListing {
     /// Merge a native entry. HTTP pages may repeat identical entries; CloudKit's
     /// bridge promises unique paths. Conflicting metadata always fails.
     pub fn insert(&mut self, object: StoredObject) -> Result<(), StorageError> {
+        object.check(&object.path)?;
         if !self.prefix.contains(&object.path) {
             return Err(StorageFailure::Protocol.with_source("provider listed outside prefix"));
         }

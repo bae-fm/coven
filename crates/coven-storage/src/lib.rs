@@ -11,6 +11,8 @@ mod credentials;
 mod error;
 mod invitation;
 mod object_listing;
+mod object_metadata;
+pub use object_metadata::*;
 mod path;
 pub use object_listing::ObjectListing;
 mod provider_check;

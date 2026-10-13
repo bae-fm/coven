@@ -1,6 +1,6 @@
 use crate::{
-    CloudProvider, ObjectPath, ObjectPrefix, StorageConfig, StorageError, StorageFailure,
-    UploadSession,
+    CloudProvider, ObjectPath, ObjectPrefix, ObjectRead, StorageConfig, StorageError,
+    StorageFailure, StoredObject, UploadSession,
 };
 use async_trait::async_trait;
 
@@ -128,22 +128,6 @@ pub enum RetainedAccessReason {
     StoreOwner,
 }
 
-/// One complete object listed by its provider.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct StoredObject {
-    /// Validated path relative to the store's location.
-    pub path: ObjectPath,
-    /// Complete encrypted length in bytes.
-    pub size: u64,
-    /// Provider timestamp, never the uploading device's clock: Drive's createdTime,
-    /// OneDrive's createdDateTime, Dropbox's server_modified, CloudKit's server
-    /// publication time, or S3's Last-Modified. AWS reports multipart initiation
-    /// time, including for device logs uploaded through recorded sessions; this
-    /// timestamp therefore does not establish their publication age. GCS multipart
-    /// objects are published by conditional copy; their time is copy completion.
-    pub stored_at: std::time::SystemTime,
-}
-
 /// The operations coven needs from a provider (§4).
 ///
 /// Implementations are capabilities assembled at composition roots. They own no
@@ -185,14 +169,28 @@ pub trait Storage: Send + Sync {
     /// Replace a device's posted positions or clock object; immutable paths are refused.
     /// Always one request; an oversized body returns [`StorageFailure::SingleRequestTooLarge`].
     async fn replace(&self, path: &ObjectPath, bytes: &[u8]) -> Result<(), StorageError>;
-    /// Read the whole encrypted object.
-    async fn read(&self, path: &ObjectPath) -> Result<Vec<u8>, StorageError>;
+    /// Exact lookup. None means confirmed absence; failed lookups remain errors.
+    /// Pending multipart assets must not be reported as complete objects.
+    async fn status(&self, path: &ObjectPath) -> Result<Option<StoredObject>, StorageError>;
+    /// Read bytes and metadata from the same object revision. A range still
+    /// reports the complete encrypted size and whole-object checksum semantics.
+    async fn read_object(
+        &self,
+        path: &ObjectPath,
+        range: Option<ByteRange>,
+    ) -> Result<ObjectRead, StorageError>;
+    /// Read the whole encrypted object when the caller needs only bytes.
+    async fn read(&self, path: &ObjectPath) -> Result<Vec<u8>, StorageError> {
+        Ok(self.read_object(path, None).await?.bytes)
+    }
     /// Fetch only the requested bytes; never silently shorten a range.
     async fn read_range(
         &self,
         path: &ObjectPath,
         range: ByteRange,
-    ) -> Result<Vec<u8>, StorageError>;
+    ) -> Result<Vec<u8>, StorageError> {
+        Ok(self.read_object(path, Some(range)).await?.bytes)
+    }
     /// List every object under the prefix, across all pages.
     /// Missing or malformed metadata fails the call. Drive returns the earliest
     /// stored copy of each path, breaking creation-time ties by native id.

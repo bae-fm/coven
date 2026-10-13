@@ -41,14 +41,14 @@ pub trait ProviderOps: Send + Sync {
     async fn create(&self, path: &ObjectPath, bytes: &[u8]) -> Result<(), StorageError>;
     /// Replace a checked positions or clock path in one request.
     async fn replace(&self, path: &ObjectPath, bytes: &[u8]) -> Result<(), StorageError>;
-    /// Read the complete object.
-    async fn read(&self, path: &ObjectPath) -> Result<Vec<u8>, StorageError>;
-    /// Read exactly the requested range.
-    async fn read_range(
+    /// Exact native lookup; only a confirmed missing object returns None.
+    async fn status(&self, path: &ObjectPath) -> Result<Option<StoredObject>, StorageError>;
+    /// Read complete bytes or a range, retaining metadata for those exact bytes.
+    async fn read_object(
         &self,
         path: &ObjectPath,
-        range: ByteRange,
-    ) -> Result<Vec<u8>, StorageError>;
+        range: Option<ByteRange>,
+    ) -> Result<ObjectRead, StorageError>;
     /// Consume native pages into the connection's checked listing. Drive selects
     /// its earliest copy before adding each object.
     async fn list(&self, listing: &mut ObjectListing) -> Result<(), StorageError>;
