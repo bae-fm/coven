@@ -10,6 +10,9 @@ use axum::{
 };
 use std::sync::{Arc, Mutex};
 
+#[path = "google_drive_metadata_tests.rs"]
+mod metadata_tests;
+
 #[tokio::test]
 async fn missing_session_and_destination_is_expired() {
     let state = Arc::new(Mutex::new(Remote::default()));
@@ -23,11 +26,14 @@ async fn missing_session_and_destination_is_expired() {
     assert!(std::error::Error::source(&error).is_some());
 }
 fn provider(url: &str) -> StorageConnection<GoogleDriveStorage> {
+    provider_for_device(url, DeviceId(31))
+}
+fn provider_for_device(url: &str, device: DeviceId) -> StorageConnection<GoogleDriveStorage> {
     let mut storage = GoogleDriveStorage::new(
         StorageConfig::GoogleDrive {
             folder_id: "folder".into(),
         },
-        DeviceId(31),
+        device,
         session(PROVIDER),
     )
     .unwrap();
@@ -56,7 +62,7 @@ async fn known_object_status_and_reads_do_not_depend_on_listings() {
         storage.read_object(&path, None).await.unwrap().bytes,
         b"other"
     );
-    assert_eq!(state.lock().unwrap().files.len(), 1);
+    assert_eq!(state.lock().unwrap().object_ids().len(), 1);
     state.lock().unwrap().replace_during_read = true;
     assert_eq!(
         storage
@@ -86,7 +92,13 @@ async fn session_reopens_and_only_uploader_deletes() {
     let mut lost_reply = UploadSession::decode(before_final.as_bytes()).unwrap();
     storage.resume_upload(&mut lost_reply).await.unwrap();
     assert!(lost_reply.is_complete());
-    let id = state.lock().unwrap().files.keys().next().unwrap().clone();
+    let id = state
+        .lock()
+        .unwrap()
+        .object_ids()
+        .into_iter()
+        .next()
+        .unwrap();
     state.lock().unwrap().files.get_mut(&id).unwrap().0["ownedByMe"] = json!(false);
     storage.delete(&path).await.unwrap();
     assert!(storage
@@ -153,15 +165,20 @@ async fn interrupted_part_continues_at_the_confirmed_byte() {
 #[tokio::test]
 async fn refreshed_tokens_reach_the_same_adapter() {
     crate::providers::tests::assert_token_refresh(
-        |url| Arc::new(provider(url)),
+        |url| {
+            let storage = provider(url);
+            storage.provider.root_checked.set(()).unwrap();
+            Arc::new(storage)
+        },
         json!({"files":[],"id":"folder","mimeType":"application/vnd.google-apps.folder"}),
     )
     .await;
 }
 
 fn duplicate(state: &mut Remote, path: &ObjectPath, id: &str, created: &str, device: u64) {
+    let parent = state.directory(path.as_str().rsplit_once('/').unwrap().0);
     let mut value = metadata(
-        json!({"id":id,"name":path.as_str(),"parents":["folder"],"properties":{"covenDevice":device.to_string()}}),
+        json!({"id":id,"name":path.file_name(),"parents":[parent],"properties":{"covenDevice":device.to_string()}}),
         4,
     );
     value["createdTime"] = json!(created);
@@ -188,13 +205,7 @@ async fn retry_keeps_earliest_own_copy_and_leaves_other_devices_copies() {
     let storage = provider(&server.url);
     storage.create_once(&path, b"data").await.unwrap();
     assert_eq!(
-        state
-            .lock()
-            .unwrap()
-            .files
-            .keys()
-            .cloned()
-            .collect::<Vec<_>>(),
+        state.lock().unwrap().object_ids(),
         ["other-device", "z-first"]
     );
     assert!(state.lock().unwrap().uploads.is_empty());
@@ -220,16 +231,7 @@ async fn duplicate_time_ties_use_ids_after_normalizing_timezones() {
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     let storage = provider(&server.url);
     storage.create_once(&path, b"data").await.unwrap();
-    assert_eq!(
-        state
-            .lock()
-            .unwrap()
-            .files
-            .keys()
-            .cloned()
-            .collect::<Vec<_>>(),
-        ["a-first"]
-    );
+    assert_eq!(state.lock().unwrap().object_ids(), ["a-first"]);
 }
 
 #[tokio::test]
@@ -255,16 +257,7 @@ async fn duplicate_cleanup_failure_is_reported_and_the_retry_finishes() {
     );
     assert!(state.lock().unwrap().files.contains_key("z-first"));
     storage.create_once(&path, b"data").await.unwrap();
-    assert_eq!(
-        state
-            .lock()
-            .unwrap()
-            .files
-            .keys()
-            .cloned()
-            .collect::<Vec<_>>(),
-        ["z-first"]
-    );
+    assert_eq!(state.lock().unwrap().object_ids(), ["z-first"]);
 }
 
 #[tokio::test]
@@ -328,12 +321,15 @@ async fn create_switches_to_a_session_above_the_multipart_request_limit() {
 }
 
 #[tokio::test]
-async fn listing_refuses_a_folder_even_when_its_name_is_an_object_path() {
+async fn listing_refuses_a_folder_at_an_object_path() {
     let state = Arc::new(Mutex::new(Remote::default()));
-    state.lock().unwrap().files.insert("directory".into(), (metadata(json!({"id":"directory","name":"10101010-1010-1010-1010-101010101010/devices/31/1","mimeType":"application/vnd.google-apps.folder","parents":["folder"]}), 0), Vec::new()));
+    let parent = state
+        .lock()
+        .unwrap()
+        .directory(&format!("{STORE_ID}/devices/31"));
+    state.lock().unwrap().files.insert("directory".into(), (metadata(json!({"id":"directory","name":"1","mimeType":"application/vnd.google-apps.folder","parents":[parent]}), 0), Vec::new()));
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     let storage = provider(&server.url);
-    assert_eq!(state.lock().unwrap().files.len(), 1);
     assert!(matches!(
         storage.list(&ObjectPrefix::all(STORE_ID)).await,
         Err(error) if error.failure() == StorageFailure::InvalidPath
@@ -528,7 +524,20 @@ async fn listing_refuses_native_documents_and_shortcuts_named_like_objects() {
         "application/vnd.google-apps.shortcut",
     ] {
         let state = Arc::new(Mutex::new(Remote::default()));
-        state.lock().unwrap().files.insert("native".into(),(metadata(json!({"id":"native","name":"10101010-1010-1010-1010-101010101010/devices/31/1","mimeType":kind,"parents":["folder"]}),0),Vec::new()));
+        let parent = state
+            .lock()
+            .unwrap()
+            .directory(&format!("{STORE_ID}/devices/31"));
+        state.lock().unwrap().files.insert(
+            "native".into(),
+            (
+                metadata(
+                    json!({"id":"native","name":"1","mimeType":kind,"parents":[parent]}),
+                    0,
+                ),
+                Vec::new(),
+            ),
+        );
         let server = TestServer::new(Router::new().fallback(endpoint).with_state(state)).await;
         assert!(matches!(
             provider(&server.url).list(&ObjectPrefix::all(STORE_ID)).await,
@@ -577,8 +586,32 @@ async fn upload_start_refuses_empty_ids_and_cross_origin_session_urls() {
             }))
             .await;
         let path = ObjectPath::device_log(STORE_ID, DeviceId(31), std::num::NonZeroU64::MIN);
+        let storage = provider(&server.url);
+        storage.provider.folder_ids.lock().await.extend([
+            (
+                STORE_ID.to_string(),
+                std::collections::BTreeSet::from([(
+                    std::time::SystemTime::UNIX_EPOCH,
+                    "store".into(),
+                )]),
+            ),
+            (
+                format!("{STORE_ID}/devices"),
+                std::collections::BTreeSet::from([(
+                    std::time::SystemTime::UNIX_EPOCH,
+                    "devices".into(),
+                )]),
+            ),
+            (
+                format!("{STORE_ID}/devices/31"),
+                std::collections::BTreeSet::from([(
+                    std::time::SystemTime::UNIX_EPOCH,
+                    "writer".into(),
+                )]),
+            ),
+        ]);
         assert_eq!(
-            provider(&server.url)
+            storage
                 .begin_upload(&path, 4)
                 .await
                 .err()
@@ -593,8 +626,98 @@ async fn upload_start_refuses_empty_ids_and_cross_origin_session_urls() {
     }
 }
 
+#[tokio::test]
+async fn replacement_on_a_new_connection_removes_its_own_duplicate_copies() {
+    let state = Arc::new(Mutex::new(Remote::default()));
+    let path = ObjectPath::positions(STORE_ID, DeviceId(31));
+    {
+        let mut remote = state.lock().unwrap();
+        duplicate(&mut remote, &path, "first", "2026-10-06T00:00:00Z", 31);
+        duplicate(&mut remote, &path, "later", "2026-10-06T00:00:01Z", 31);
+    }
+    let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
+    let storage = provider(&server.url);
+    storage.replace(&path, b"next").await.unwrap();
+    assert_eq!(state.lock().unwrap().object_ids(), ["first"]);
+    assert_eq!(storage.read(&path).await.unwrap(), b"next");
+}
+
+#[tokio::test]
+async fn failed_duplicate_cleanup_does_not_leave_a_provisional_replacement_id() {
+    let state = Arc::new(Mutex::new(Remote::default()));
+    let path = ObjectPath::positions(STORE_ID, DeviceId(31));
+    let remote = state.clone();
+    let destination = path.clone();
+    let reject_delete = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let server = TestServer::new(Router::new().fallback(
+        move |method: Method, uri: Uri, headers: HeaderMap, body: Bytes| {
+            let remote = remote.clone();
+            let path = destination.clone();
+            let reject = reject_delete.clone();
+            async move {
+                if method == Method::DELETE
+                    && reject.swap(false, std::sync::atomic::Ordering::SeqCst)
+                {
+                    return response(503, "duplicate deletion failed");
+                }
+                let reply = respond(&remote, &method, &uri, &headers, &body);
+                if method == Method::POST && uri.path() == "/upload/files" {
+                    duplicate(
+                        &mut remote.lock().unwrap(),
+                        &path,
+                        "earlier",
+                        "2026-10-05T00:00:00Z",
+                        31,
+                    );
+                }
+                reply
+            }
+        },
+    ))
+    .await;
+    let storage = provider(&server.url);
+    assert_eq!(
+        storage.replace(&path, b"next").await.unwrap_err().failure(),
+        StorageFailure::Network
+    );
+    assert!(!storage.provider.object_ids.lock().await.contains_key(&path));
+    storage.replace(&path, b"next").await.unwrap();
+    assert_eq!(state.lock().unwrap().object_ids(), ["earlier"]);
+    assert_eq!(storage.read(&path).await.unwrap(), b"next");
+}
+
+#[tokio::test]
+async fn upload_confirmation_uses_its_returned_id_when_search_omits_the_publication() {
+    let state = Arc::new(Mutex::new(Remote::default()));
+    let remote = state.clone();
+    let server = TestServer::new(Router::new().fallback(
+        move |method: Method, uri: Uri, headers: HeaderMap, body: Bytes| {
+            let remote = remote.clone();
+            async move {
+                if crate::providers::tests::query(&uri)
+                    .get("q")
+                    .is_some_and(|q| q.contains("name = '1'"))
+                {
+                    reply(json!({"files":[]}))
+                } else {
+                    respond(&remote, &method, &uri, &headers, &body)
+                }
+            }
+        },
+    ))
+    .await;
+    let storage = provider(&server.url);
+    let path = ObjectPath::store_log(STORE_ID, DeviceId(31), std::num::NonZeroU64::MIN);
+    storage.create(&path, b"data").await.unwrap();
+    storage.create_once(&path, b"data").await.unwrap();
+    assert_eq!(storage.read(&path).await.unwrap(), b"data");
+    assert_eq!(state.lock().unwrap().object_ids().len(), 1);
+    storage.delete(&path).await.unwrap();
+    assert!(state.lock().unwrap().object_ids().is_empty());
+}
+
 /// Live Drive checks. Run with `COVEN_LIVE_DRIVE_ENV=<file> cargo test -p
-/// coven-storage --all-features --lib drive_live -- --ignored --nocapture`.
+/// coven-storage --all-features --lib google_drive::tests::live -- --ignored --nocapture`.
 #[cfg(not(any(target_os = "ios", target_os = "android")))]
 #[path = "google_drive_live.rs"]
 mod live;

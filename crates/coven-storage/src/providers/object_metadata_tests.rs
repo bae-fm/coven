@@ -10,7 +10,7 @@ fn provider_times_retain_precision_and_replaceable_paths_use_modification() {
         DeviceId(1),
         std::num::NonZeroU64::MIN,
     );
-    let mut drive_item = json!({"id":"native", "name":positions.as_str(), "size":"4", "createdTime":"2026-10-06T00:00:00.001Z", "modifiedTime":"2026-10-06T00:00:00.1234567Z", "version":"7", "headRevisionId":"content-7", "md5Checksum":"0123456789abcdef0123456789abcdef"});
+    let mut drive_item = json!({"id":"native", "name":positions.file_name(), "size":"4", "createdTime":"2026-10-06T00:00:00.001Z", "modifiedTime":"2026-10-06T00:00:00.1234567Z", "version":"7", "headRevisionId":"content-7", "md5Checksum":"0123456789abcdef0123456789abcdef"});
     let replaced = drive(&positions, &drive_item).unwrap();
     drive_item["version"] = json!("8");
     assert_eq!(drive(&positions, &drive_item).unwrap(), replaced);
@@ -23,7 +23,7 @@ fn provider_times_retain_precision_and_replaceable_paths_use_modification() {
         replaced.checksum,
         Some(ObjectChecksum::FullObject(ChecksumValue::Md5Hex(_)))
     ));
-    drive_item["name"] = json!(immutable.as_str());
+    drive_item["name"] = json!(immutable.file_name());
     let first = drive(&immutable, &drive_item).unwrap();
     assert_eq!(first.time_resolution, Duration::from_millis(1));
     assert!(first.stored_at < replaced.stored_at);

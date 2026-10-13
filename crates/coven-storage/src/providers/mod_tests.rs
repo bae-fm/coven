@@ -170,6 +170,38 @@ pub(crate) mod google_drive {
         pub(crate) lose_share_reply: bool,
         pub(crate) lose_delete_reply: bool,
     }
+    impl Remote {
+        pub(crate) fn directory(&mut self, path: &str) -> String {
+            let mut parent = "folder".to_owned();
+            for name in path.split('/') {
+                let found = self
+                    .files
+                    .values()
+                    .find(|(item, _)| item["name"] == name && item["parents"] == json!([parent]));
+                parent = match found {
+                    Some((item, _)) => item["id"].as_str().unwrap().to_owned(),
+                    None => {
+                        self.next += 1;
+                        let id = format!("dir{}", self.next);
+                        let item = metadata(
+                            json!({"id":id,"name":name,"parents":[parent],"mimeType":"application/vnd.google-apps.folder"}),
+                            0,
+                        );
+                        self.files.insert(id.clone(), (item, Vec::new()));
+                        id
+                    }
+                };
+            }
+            parent
+        }
+        pub(crate) fn object_ids(&self) -> Vec<String> {
+            self.files
+                .iter()
+                .filter(|(_, (item, _))| item["mimeType"] != "application/vnd.google-apps.folder")
+                .map(|(id, _)| id.clone())
+                .collect()
+        }
+    }
     pub(crate) fn metadata(mut value: Value, size: usize) -> Value {
         value["size"] = json!(size.to_string());
         value["capabilities"] = json!({"canDelete":true,"canRemoveMyDriveParent":true});
@@ -426,25 +458,36 @@ pub(crate) mod google_drive {
                 state.files.insert(id, (value.clone(), Vec::new()));
                 return reply(value);
             }
-            if state.hide_listings {
+            if state.hide_listings && !q["q"].contains("name = '") {
                 return reply(json!({"files":[]}));
             }
             let filter = q["q"]
                 .split("name = '")
                 .nth(1)
                 .map(|s| s.split('\'').next().unwrap());
-            let prefix = q["q"]
-                .split("name contains '")
-                .nth(1)
-                .map(|s| s.split('\'').next().unwrap());
+            let parents: Vec<_> = q["q"]
+                .split(" and ")
+                .next()
+                .unwrap()
+                .trim_start_matches('(')
+                .trim_end_matches(')')
+                .split(" or ")
+                .map(|term| {
+                    term.strip_prefix('\'')
+                        .unwrap()
+                        .strip_suffix("' in parents")
+                        .unwrap()
+                })
+                .collect();
             let files: Vec<_> = state
                 .files
                 .values()
                 .filter(|(v, _)| {
-                    v["parents"].as_array().unwrap().contains(&json!("folder"))
+                    parents
+                        .iter()
+                        .any(|parent| v["parents"].as_array().unwrap().contains(&json!(parent)))
                         && filter.is_none_or(|name| v["name"] == name)
-                        && prefix
-                            .is_none_or(|prefix| v["name"].as_str().unwrap().starts_with(prefix))
+                        && v["trashed"] != true
                 })
                 .map(|(v, _)| v.clone())
                 .collect();

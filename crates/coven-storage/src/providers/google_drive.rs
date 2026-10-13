@@ -1,6 +1,7 @@
 use super::access::PermissionAccess;
 use super::google_drive_access as access;
 use super::http::{self, Body, OAuthSession};
+use super::object_metadata;
 use super::pagination::Pagination;
 use crate::session::SessionState;
 use crate::*;
@@ -14,7 +15,7 @@ use std::collections::BTreeMap;
 mod metadata;
 const PROVIDER: CloudProvider = CloudProvider::GoogleDrive;
 
-/// Encrypted objects named by their full coven path in a shared Drive folder.
+/// Encrypted objects beneath real coven path folders in a shared Drive folder.
 pub(crate) struct GoogleDriveStorage {
     config: StorageConfig,
     folder: String,
@@ -24,6 +25,8 @@ pub(crate) struct GoogleDriveStorage {
     upload_api: String,
     create_lock: tokio::sync::Mutex<()>,
     object_ids: tokio::sync::Mutex<BTreeMap<ObjectPath, String>>,
+    folder_ids: tokio::sync::Mutex<BTreeMap<String, metadata::FolderIds>>,
+    root_checked: tokio::sync::OnceCell<()>,
 }
 impl GoogleDriveStorage {
     /// Construct with this device's own Google sign-in and upload identity.
@@ -49,6 +52,8 @@ impl GoogleDriveStorage {
             upload_api: "https://www.googleapis.com/upload/drive/v3".into(),
             create_lock: tokio::sync::Mutex::new(()),
             object_ids: tokio::sync::Mutex::new(BTreeMap::new()),
+            folder_ids: tokio::sync::Mutex::new(BTreeMap::new()),
+            root_checked: tokio::sync::OnceCell::new(),
         })
     }
     async fn send(
@@ -65,7 +70,8 @@ impl GoogleDriveStorage {
         http::endpoint(&self.api, segments, &query)
     }
     async fn create_request(&self, path: &ObjectPath, bytes: &[u8]) -> Result<(), StorageError> {
-        let metadata = json!({"name": path.as_str(), "parents": [&self.folder], "properties": {"covenDevice": self.device.0.to_string()}});
+        let parent = self.create_parent(path).await?;
+        let metadata = json!({"name": path.file_name(), "parents": [parent], "properties": {"covenDevice": self.device.0.to_string()}});
         let (content_type, body) = multipart_content(&metadata, bytes)?;
         let url = http::endpoint(
             &self.upload_api,
@@ -86,14 +92,14 @@ impl GoogleDriveStorage {
         )
         .await?;
         let id = http::string(&item, "id")?;
-        self.object_ids.lock().await.insert(path.clone(), id.into());
         self.ensure_unique(path, id).await
     }
     async fn remove_own_duplicates(
         &self,
         path: &ObjectPath,
+        uploaded_id: Option<&str>,
     ) -> Result<Option<Value>, StorageError> {
-        let copies = self.copies(path).await?;
+        let copies = self.copies(path, uploaded_id).await?;
         let device = self.device.0.to_string();
         let mut own = copies
             .iter()
@@ -133,7 +139,7 @@ impl GoogleDriveStorage {
         let headers = range
             .map(|range| vec![("Range", range.header())])
             .unwrap_or_default();
-        let metadata = super::object_metadata::drive(path, &item)?;
+        let metadata = object_metadata::drive(path, &item)?;
         let bytes = http::bytes(
             PROVIDER,
             self.session
@@ -147,7 +153,7 @@ impl GoogleDriveStorage {
                 .file_metadata(path, &metadata.object_id)
                 .await?
                 .ok_or(StorageFailure::NotFound)?;
-            if super::object_metadata::drive(path, &after)? != metadata {
+            if object_metadata::drive(path, &after)? != metadata {
                 return Err(
                     StorageFailure::Protocol.with_source("Drive object changed during read")
                 );
@@ -179,38 +185,33 @@ impl GoogleDriveStorage {
             }
             Err(error) => return Err(error),
         };
-        if http::string(&item, "name")? != session.path.as_str()
+        let parents = self.parent(&session.path).await?;
+        if parents.is_empty() {
+            return Err(StorageFailure::SessionExpired.into());
+        }
+        metadata::check_child(&item, &parents, session.path.file_name())?;
+        if http::string(&item, "id")? != file_id.as_str()
             || http::string(&item, "size")?
                 .parse::<u64>()
                 .map_err(|error| StorageFailure::Protocol.with_source(error))?
                 != session.total
-            || !http::array(&item, "parents")?
-                .iter()
-                .any(|p| p.as_str() == Some(&self.folder))
         {
             return Err(StorageFailure::Protocol.with_source("Drive completed another object"));
         }
-        self.object_ids
-            .lock()
-            .await
-            .insert(session.path.clone(), file_id.as_str().into());
         self.ensure_unique(&session.path, file_id.as_str()).await?;
         session.confirmed = session.total;
         session.state = SessionState::Complete;
         Ok(())
     }
     async fn ensure_unique(&self, path: &ObjectPath, file_id: &str) -> Result<(), StorageError> {
-        match self.remove_own_duplicates(path).await {
-            Ok(Some(found)) if http::string(&found, "id")? == file_id => {}
-            Ok(Some(_)) => return Err(StorageFailure::AlreadyExists.into()),
-            Err(error) => return Err(error),
-            _ => {
-                return Err(
-                    StorageFailure::Protocol.with_source("Drive upload is absent from its path")
-                )
+        match self.remove_own_duplicates(path, Some(file_id)).await {
+            Ok(Some(found)) if found["id"].as_str() == Some(file_id) => Ok(()),
+            Ok(Some(_)) => Err(StorageFailure::AlreadyExists.into()),
+            Err(error) => Err(error),
+            Ok(None) => {
+                Err(StorageFailure::Protocol.with_source("Drive upload is absent from its path"))
             }
         }
-        Ok(())
     }
     fn upload_url<'a>(&self, session: &'a UploadSession) -> Result<&'a str, StorageError> {
         let SessionState::GoogleDrive { url, .. } = &session.state else {
@@ -377,14 +378,19 @@ impl ProviderOps for GoogleDriveStorage {
         5_000_000
     }
     async fn create(&self, path: &ObjectPath, bytes: &[u8]) -> Result<(), StorageError> {
-        if self.remove_own_duplicates(path).await?.is_some() {
+        if self.remove_own_duplicates(path, None).await?.is_some() {
             return Err(StorageFailure::AlreadyExists.into());
         }
         self.create_request(path, bytes).await
     }
 
     async fn replace(&self, path: &ObjectPath, bytes: &[u8]) -> Result<(), StorageError> {
-        let Some(item) = self.remove_own_duplicates(path).await? else {
+        let _guard = self.create_lock.lock().await;
+        let item = match self.cached(path).await? {
+            Some(item) => Some(item),
+            None => self.remove_own_duplicates(path, None).await?,
+        };
+        let Some(item) = item else {
             return self.create_request(path, bytes).await;
         };
         let url = http::endpoint(
@@ -410,7 +416,7 @@ impl ProviderOps for GoogleDriveStorage {
     async fn status(&self, path: &ObjectPath) -> Result<Option<StoredObject>, StorageError> {
         self.find(path)
             .await?
-            .map(|item| super::object_metadata::drive(path, &item))
+            .map(|item| object_metadata::drive(path, &item))
             .transpose()
     }
     async fn read_object(
@@ -421,52 +427,30 @@ impl ProviderOps for GoogleDriveStorage {
         self.get(path, range).await
     }
     async fn list(&self, listing: &mut ObjectListing) -> Result<(), StorageError> {
-        let prefix = listing.prefix().clone();
-        let query = format!(
-            "'{}' in parents and trashed = false and name contains '{}'",
-            escape(&self.folder),
-            escape(prefix.as_str())
-        );
-        let mut paths = BTreeMap::new();
-        for item in self.pages(&query).await? {
-            if item["mimeType"]
-                .as_str()
-                .is_some_and(|kind| kind.starts_with("application/vnd.google-apps."))
-            {
-                return Err(StorageFailure::InvalidPath.into());
-            }
-            let path = ObjectPath::parse(http::string(&item, "name")?)?;
-            if prefix.contains(&path) {
-                let object = super::object_metadata::drive(&path, &item)?;
-                let id = http::string(&item, "id")?.to_owned();
-                let keep = paths.entry(path).or_insert((
-                    id.clone(),
-                    object.clone(),
-                    http::timestamp(&item, "createdTime")?,
-                ));
-                if (http::timestamp(&item, "createdTime")?, &id) < (keep.2, &keep.0) {
-                    *keep = (id, object, http::timestamp(&item, "createdTime")?);
-                }
-            }
-        }
-        let mut known = self.object_ids.lock().await;
-        for (id, object, _) in paths.into_values() {
-            let path = object.path.clone();
-            listing.insert(object)?;
-            known.insert(path, id);
-        }
-        Ok(())
+        self.list_folder(listing).await
     }
     async fn delete(&self, path: &ObjectPath) -> Result<(), StorageError> {
-        for item in self.copies(path).await? {
+        for item in self.copies(path, None).await? {
             let id = http::string(&item, "id")?;
             let response = if owned_by_account(&item)? {
                 self.send(Method::DELETE, &self.url(&["files", id], &[])?, Body::Empty)
                     .await?
             } else {
+                let parents = self.parent(path).await?;
+                let actual = http::array(&item, "parents")?;
+                let parent = parents
+                    .iter()
+                    .filter(|parent| {
+                        actual
+                            .iter()
+                            .any(|value| value.as_str() == Some(parent.as_str()))
+                    })
+                    .map(String::as_str)
+                    .collect::<Vec<_>>()
+                    .join(",");
                 self.send(
                     Method::PATCH,
-                    &self.url(&["files", id], &[("removeParents", &self.folder)])?,
+                    &self.url(&["files", id], &[("removeParents", &parent)])?,
                     Body::Json(json!({})),
                 )
                 .await?
@@ -586,7 +570,7 @@ impl ProviderOps for GoogleDriveStorage {
         path: &ObjectPath,
         total: u64,
     ) -> Result<UploadSession, StorageError> {
-        if self.remove_own_duplicates(path).await?.is_some() {
+        if self.remove_own_duplicates(path, None).await?.is_some() {
             return Err(StorageFailure::AlreadyExists.into());
         }
         let generated = http::json(
@@ -608,7 +592,8 @@ impl ProviderOps for GoogleDriveStorage {
             .filter(|id| !id.is_empty())
             .ok_or(StorageFailure::Protocol.with_source("Drive omitted generated id"))?
             .to_owned();
-        let body = json!({"id":file_id,"name":path.as_str(),"parents":[&self.folder],"properties":{"covenDevice":self.device.0.to_string()}});
+        let parent = self.create_parent(path).await?;
+        let body = json!({"id":file_id,"name":path.file_name(),"parents":[parent],"properties":{"covenDevice":self.device.0.to_string()}});
         let url = http::endpoint(
             &self.upload_api,
             &["files"],
@@ -637,10 +622,6 @@ impl ProviderOps for GoogleDriveStorage {
             .ok_or(StorageFailure::Protocol.with_source("Drive omitted upload URL"))?
             .to_owned();
         http::same_origin(&self.upload_api, &url)?;
-        self.object_ids
-            .lock()
-            .await
-            .insert(path.clone(), file_id.clone());
         Ok(UploadSession {
             location: self.config(),
             path: path.clone(),

@@ -43,7 +43,8 @@ already closed or absent sessions and preserves published objects.
 
 `list` follows every provider page and returns path, encrypted byte size and
 provider storage time, rejecting missing or malformed metadata. Drive uses
-`createdTime` (earliest copy, ties by id), Dropbox `server_modified`, OneDrive
+`createdTime` for immutable objects and `modifiedTime` for replacements
+(earliest created copy, ties by id), Dropbox `server_modified`, OneDrive
 `createdDateTime`, CloudKit the publication record's server time, and S3
 `LastModified`. S3's multipart timestamp is upload initiation time, but the
 30-day deletion rule applies only to device-log objects (§15). Writes are at
@@ -60,7 +61,18 @@ even after an unconfirmed create and retains both operation and cleanup failures
 Changing an established store's location returns `LocationChangeUnsupported`.
 Storage exposes `delete`, not a deletion-rights query: sync chooses the deleting
 device under §15. Drive deletes objects owned by the account and otherwise
-removes them from the store's folder. A refusal retains its native cause.
+removes them from their immediate parent folder. A refusal retains its native cause.
+
+Drive represents every directory component as a real folder, lists only the
+requested subtree and retains folder and object IDs with the connection. Unknown
+names use complete paginated parent/name queries; known objects use exact metadata
+by ID. Listing omissions never erase known IDs or establish object absence.
+Same-name folders form one directory: listings and exact lookups combine their
+children, applying the object duplicate rule across folders. New objects and
+subfolders use the oldest folder by `createdTime`, then ID. Listings and creation
+refresh the directory's ancestors to discover concurrent siblings; direct reads
+and warm exact-name misses use cached IDs. No folder is moved or removed to resolve
+a name collision.
 
 ## Provider operations and test evidence
 
@@ -73,11 +85,14 @@ using the same device and entry numbers in one location.
 Provider-specific suites exercise recorded sessions, lost replies, expiry,
 sharing authority and error causes. Passing a stub does not prove a provider's
 server-side guarantee.
+The live Drive duplicate-folder test creates siblings directly, verifies their
+combined listing and reads, checks the parent of a new publication, and deletes
+the test objects and folders.
 
 | Provider | Objects and listing | Recorded uploads | Sharing and recipient access |
 | --- | --- | --- | --- |
 | [S3](src/providers/s3.rs) | Conditional `PutObject`, unconditional positions/clock PUT, `GetObject`/Range, paged `ListObjectsV2`, `DeleteObject`. | Native multipart ID, part ETags and unique publication metadata; paged `ListParts`, conditional completion and HEAD recovery. | Explicit member access key; grant/revoke/sign-out return console instructions. No IAM calls or credential discovery. |
-| [Drive](src/providers/google_drive.rs) | Full path as filename; multipart/related create, media PATCH, media GET/Range, paged `files.list`. Retry retains earliest createdTime then ID and deletes this writer's later copies. Owned objects are deleted; others are removed from the folder. | Generated file ID and resumable URL; PUT chunks/status; completion checked by native ID. | Folder-owner check; paged native permissions, direct create/update/delete; inherited/group/public/unknown access is retained and reported. Recipient uses its own OAuth account. |
+| [Drive](src/providers/google_drive.rs) | Real folders and exact leaf names; multipart/related create, media PATCH, media GET/Range, scoped paged `files.list`. Retry retains earliest createdTime then ID and deletes this writer's later copies. Owned objects are deleted; others are removed from their parent folder. | Generated file ID and resumable URL; PUT chunks/status; completion checked by native ID. | Folder-owner check; paged native permissions, direct create/update/delete; inherited/group/public/unknown access is retained and reported. Recipient uses its own OAuth account. |
 | [Dropbox](src/providers/dropbox.rs) | Namespace-scoped strict add or overwrite, download/Range, recursive paged listing, delete. | Start/append/finish, offset recovery, immutable-byte completion verification; close for cancellation. | Owner check; direct/inherited member pages; in-place viewer update; asynchronous removal with native failure retained. Recipient mounts the invited shared folder. |
 | [OneDrive](src/providers/onedrive.rs) | Path parents, conflict-refusing content PUT, positions/clock PUT, preauthenticated download/Range without bearer, recursive paged children, delete. | Native upload URL, bounded/multiple missing ranges, immutable-byte completion verification; DELETE cancellation. | Account-drive ownership check, permission pages and account identity resolution; only exclusive target-account permissions deleted. Invite carries native share token for recipient redemption. |
 | [CloudKit](src/providers/cloudkit.rs) | Canonical paths as record names in a custom zone; create-once and replacement save policies, bounded CKAsset reads, paged prefix queries and server publication dates. | Recorded session UUID and 8 MiB asset parts; each part and confirmed boundary saved atomically; destination creation and session publication saved atomically. | Current account compared with zone owner; private read/write zone CKShare, participant removal, share metadata validation and native acceptance. |
@@ -155,8 +170,8 @@ does not implement provider HTTP or substitute for the provider suites.
   deadline. The native operations and account sharing require the ignored
   [live tests](cloudkit-live.md); those have not been run.
 
-No live accounts, S3 console policies or SigV4 principal isolation, real browser
-consent, arbitrary account aliases, mobile/non-macOS execution, or provider
-versioned-bucket cleanup were checked. Database/sync and key-custody transactions,
+Not checked: S3 console policies or SigV4 principal isolation, real browser
+consent, arbitrary account aliases, mobile/non-macOS execution, and provider
+versioned-bucket cleanup. Database/sync and key-custody transactions,
 retention scheduling, chunk authentication/cache and chunk grouping are outside
 this crate's audit.

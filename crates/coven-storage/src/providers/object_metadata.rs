@@ -6,7 +6,7 @@ use serde_json::Value;
 use std::time::Duration;
 
 pub(super) fn drive(path: &ObjectPath, item: &Value) -> Result<StoredObject, StorageError> {
-    if http::string(item, "name")? != path.as_str()
+    if http::string(item, "name")? != path.file_name()
         || item["trashed"].as_bool() == Some(true)
         || item["mimeType"]
             .as_str()

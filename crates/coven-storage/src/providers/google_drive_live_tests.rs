@@ -360,6 +360,65 @@ async fn drive_live_create_once_preserves_bytes() {
 
 #[tokio::test]
 #[ignore = "requires COVEN_LIVE_DRIVE_ENV; creates and deletes live objects"]
+async fn drive_live_duplicate_folders() {
+    run(|drive| async move {
+        let provider = &drive.storage.provider;
+        let (store, _, _) = folder(&drive, &provider.folder, &drive.store.to_string()).await;
+        let (first, _, first_time) = folder(&drive, &store, "positions").await;
+        let (second, _, second_time) = folder(&drive, &store, "positions").await;
+        let (_, a) = created(&drive, &first, "31").await;
+        let (_, b) = created(&drive, &second, "32").await;
+        let prefix = ObjectPrefix::positions(drive.store);
+        let listed = drive.storage.list(&prefix).await.unwrap();
+        assert_eq!(listed.len(), 2);
+        assert_eq!(listed[0].object_id, http::string(&a, "id").unwrap());
+        assert_eq!(listed[1].object_id, http::string(&b, "id").unwrap());
+        for device in [31, 32] {
+            let path = ObjectPath::positions(drive.store, DeviceId(device));
+            assert_eq!(
+                drive.storage.read(&path).await.unwrap(),
+                b"listing visibility"
+            );
+        }
+        let expected = if (first_time, &first) < (second_time, &second) {
+            &first
+        } else {
+            &second
+        };
+        let path = ObjectPath::positions(drive.store, DeviceId(33));
+        drive
+            .storage
+            .replace(&path, b"new publication")
+            .await
+            .unwrap();
+        let published = drive.observed(&path).await;
+        let native = drive
+            .json(
+                Method::GET,
+                &["files", &published.object_id],
+                "id,parents",
+                RequestBody::Empty,
+            )
+            .await;
+        assert_eq!(native["parents"], json!([expected]));
+        assert_eq!(drive.storage.list(&prefix).await.unwrap().len(), 3);
+        for id in [&first, &second] {
+            let native = drive
+                .json(
+                    Method::GET,
+                    &["files", id],
+                    "id,parents",
+                    RequestBody::Empty,
+                )
+                .await;
+            assert_eq!(native["parents"], json!([store]));
+        }
+    })
+    .await;
+}
+
+#[tokio::test]
+#[ignore = "requires COVEN_LIVE_DRIVE_ENV; creates and deletes live objects"]
 async fn drive_live_listing_lag() {
     run(|drive| async move {
         let provider = &drive.storage.provider;
@@ -372,7 +431,8 @@ async fn drive_live_listing_lag() {
         };
         let prefix = ObjectPrefix::store_log(drive.store, provider.device);
         let seed = path(1);
-        let (replied, native) = created(&drive, &provider.folder, seed.as_str()).await;
+        let writer = provider.create_parent(&seed).await.unwrap();
+        let (replied, native) = created(&drive, &writer, seed.file_name()).await;
         let warm = observe(
             "Drive_setup",
             0,
@@ -392,7 +452,7 @@ async fn drive_live_listing_lag() {
         let mut samples = Vec::new();
         for trial in 1..=TRIALS {
             let path = path(trial + 1);
-            let (replied, native) = created(&drive, &provider.folder, path.as_str()).await;
+            let (replied, native) = created(&drive, &writer, path.file_name()).await;
             samples.push(
                 observe(
                     "Drive_object",
@@ -412,9 +472,11 @@ async fn drive_live_listing_lag() {
             );
         }
         report("Drive_object", &samples);
-        // The adapter stores flat path names. Exercise the native immediate-folder
-        // query separately because §9 discovers new writers through real folders.
-        let (parent, _, _) = folder(&drive, &provider.folder, "store-log").await;
+        let parent = provider.folder_ids.lock().await[&format!("{}/store-log", drive.store)]
+            .first()
+            .unwrap()
+            .1
+            .clone();
         let (device, folder_reply, folder_time) = folder(&drive, &parent, "32").await;
         let (folder_sample, (object, discovery)) = tokio::join!(
             observe(

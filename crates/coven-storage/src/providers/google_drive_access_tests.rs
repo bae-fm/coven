@@ -242,7 +242,7 @@ async fn deleting_a_path_removes_its_copies_and_preserves_unlinked_bytes() {
         .is_empty());
     storage.delete(&path).await.unwrap();
     let remote = state.lock().unwrap();
-    assert_eq!(remote.files.len(), 1);
+    assert_eq!(remote.object_ids().len(), 1);
     assert_eq!(remote.files["other-account"].1, b"data");
     assert_eq!(remote.files["other-account"].0["parents"], json!([]));
 }
@@ -277,10 +277,9 @@ async fn deletion_refusal_does_not_unlink_an_owned_object() {
             panic!()
         };
         assert!(source.downcast_ref::<http::ProviderResponse>().is_some());
-        assert_eq!(
-            state.lock().unwrap().files["object"].0["parents"],
-            json!(["folder"])
-        );
+        let mut remote = state.lock().unwrap();
+        let parent = remote.directory(path.as_str().rsplit_once('/').unwrap().0);
+        assert_eq!(remote.files["object"].0["parents"], json!([parent]));
     }
 }
 
@@ -323,15 +322,14 @@ async fn deletion_uses_ownership_without_capability_guesses() {
         let result = provider(&server.url).delete(&path).await;
         if let Some(failure) = expected {
             assert_eq!(result.unwrap_err().failure(), failure);
-            assert_eq!(
-                state.lock().unwrap().files["object"].0["parents"],
-                json!(["folder"])
-            );
+            let mut remote = state.lock().unwrap();
+            let parent = remote.directory(path.as_str().rsplit_once('/').unwrap().0);
+            assert_eq!(remote.files["object"].0["parents"], json!([parent]));
         } else {
             result.unwrap();
             let remote = state.lock().unwrap();
             if owner == true {
-                assert!(remote.files.is_empty());
+                assert!(remote.object_ids().is_empty());
             } else {
                 assert_eq!(remote.files["object"].0["parents"], json!([]));
             }

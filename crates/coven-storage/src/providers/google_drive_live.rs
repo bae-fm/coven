@@ -127,6 +127,16 @@ impl Drive {
             .into_iter()
             .rev()
             .collect();
+        objects.extend(provider.object_ids.lock().await.values().cloned());
+        objects.extend(
+            provider
+                .folder_ids
+                .lock()
+                .await
+                .values()
+                .rev()
+                .flat_map(|folders| folders.iter().map(|(_, id)| id.clone())),
+        );
         objects.extend(match self.children().await {
             Ok(objects) => objects,
             Err(error) => {
