@@ -1402,18 +1402,35 @@ while let Ok(values) = lost.next().await {
   a path already occupied before the check is left untouched. A failed check
   returns `StorageSetupError::ProviderCheck`, naming the operation and its
   classified cause; the error retains a cleanup failure too if both fail.
-- S3 service profiles are selected by `S3ProfileName` when the location names
-  one, otherwise by endpoint (§4): no endpoint means AWS S3;
-  `storage.googleapis.com` means GCS XML, using generation conditions and
-  conditional copy to publish multipart uploads. Hosts ending in
-  `.r2.cloudflarestorage.com` select R2, using conditional PUT and multipart
-  completion and ignoring checksums without stated scope. Unknown endpoints
-  without a name use AWS's profile; the self-hosted Garage, RustFS and
-  SeaweedFS profiles are selected only by name. A name contradicting a
-  catalogued host, a name other than AWS without an endpoint, or plain `http`
-  to a catalogued host is `InvalidConfiguration`; other endpoints may use
-  `http`. Every connection is accepted only after all setup checks pass,
-  including those using certified profiles. An endpoint that overwrites on
+- An S3 location's behaviors are `S3Settings` (§4). Its `S3Profile` names a
+  catalogued service or carries custom settings; with no profile, the
+  endpoint selects (§4): no endpoint means AWS S3; `storage.googleapis.com`
+  means GCS XML, using generation conditions and conditional copy to publish
+  multipart uploads. Hosts ending in `.r2.cloudflarestorage.com` select R2,
+  using conditional PUT and multipart completion and ignoring checksums
+  without stated scope. The self-hosted RustFS and SeaweedFS profiles
+  are selected only by name. A name or custom profile contradicting a
+  catalogued host, a name other than AWS or any custom profile without an
+  endpoint, or plain `http` to a catalogued host is `InvalidConfiguration`;
+  other endpoints may use `http`.
+- An endpoint matching no catalogued host and naming no profile has no AWS
+  fallback: setup detects its settings and returns and records the location
+  with them as a custom profile. Reconnecting with that same location and no
+  profile reuses the recorded settings.
+- `detect_s3_settings` runs the same detection for an app that offers
+  advanced settings: it probes the bucket with the supplied key, writing only
+  fresh objects under the store's `.coven-check` prefix and deleting them,
+  also on failure. Its `S3Detection` holds the detected settings and one
+  observation per probe; the app may prefill and override them, and
+  `S3Detection::check` tells whether an override agrees with what was observed.
+- Every S3 setup runs detection and checks the effective settings, detected,
+  named or custom, against its observations before the provider check:
+  `CreateOnce`, `MultipartCreateOnce`, `PublicationTime` and `Behavior` name the
+  first failure. An override that contradicts an observation is refused, never
+  accepted. A service that no setting makes safe is refused too: a server that
+  accepts writes to an occupied name, e.g. Garage, fails `CreateOnce`. Every
+  connection is accepted only after all setup checks pass, including those
+  using certified profiles. An endpoint that overwrites on
   create fails `CreateOnce`; setup preserves the prior connection.
 - Setup commits the storage credentials, keys, location and restore code only
   once the connection is ready. Failure preserves their previous values and
@@ -1530,11 +1547,13 @@ pub enum StorageConfig {
         region: String,
         /// None is AWS's own endpoint. Catalogued hosts require https (§4).
         endpoint: Option<Url>,
-        /// Some selects that service's profile; it must agree with a catalogued
-        /// endpoint host. None selects by host: storage.googleapis.com is GCS
-        /// XML, hosts ending in .r2.cloudflarestorage.com are R2, and every
-        /// other endpoint uses AWS's profile. All run the setup check.
-        profile: Option<S3ProfileName>,
+        /// A catalogued service's name or custom settings; either must agree
+        /// with a catalogued endpoint host. None selects by host:
+        /// storage.googleapis.com is GCS XML, hosts ending in
+        /// .r2.cloudflarestorage.com are R2, no endpoint or .amazonaws.com is
+        /// AWS, and setup detects any other endpoint's settings, recording
+        /// them as Custom. All run the setup checks.
+        profile: Option<S3Profile>,
         /// The base prefix, without leading or trailing slashes; paths add the store id.
         prefix: String,
     },
@@ -1555,7 +1574,127 @@ pub enum StorageConfig {
     },
 }
 
-/// An S3 service whose adapter profile a location names explicitly (§4).
+/// An S3 location's behaviors: a catalogued service's, or its own (§4).
+pub enum S3Profile {
+    /// The catalogued service's settings.
+    Named(S3ProfileName),
+    /// Settings detected at setup or chosen by the app; restore codes carry them.
+    Custom(S3Settings),
+}
+
+/// Every S3 behavior the adapter varies, one value each (§4).
+pub struct S3Settings {
+    pub signing: S3Signing,
+    /// The condition a create-once single PUT sends.
+    pub single_put: S3SinglePut,
+    /// How a multipart upload is published.
+    pub multipart: S3Multipart,
+    /// What the native multipart `Last-Modified` dates.
+    pub multipart_timestamp: S3MultipartTimestamp,
+    pub checksums: S3Checksums,
+    pub listing: S3Listing,
+    /// Where a replaceable object's revision comes from.
+    pub revision: S3Revision,
+    /// How a bodyless HEAD 404 is told apart from a missing bucket.
+    pub bucket_check: S3BucketCheck,
+    pub response_headers: S3ResponseHeaders,
+    /// Whether HEAD and GET request checksum mode.
+    pub request_checksums: bool,
+}
+
+pub enum S3Signing { AwsSigV4, GoogleHmac }
+/// `If-None-Match: *` or `x-goog-if-generation-match: 0`.
+pub enum S3SinglePut { IfNoneMatch, GenerationMatch }
+pub enum S3Multipart {
+    /// `If-None-Match: *` on CompleteMultipartUpload.
+    ConditionalCompletion,
+    /// Upload to a reserved temporary, then copy it with this destination condition.
+    Copy(S3CopyCondition),
+}
+/// `If-None-Match: *` (AWS), `x-goog-if-generation-match: 0` (GCS) or
+/// `cf-copy-destination-if-none-match: *` (R2).
+pub enum S3CopyCondition { IfNoneMatch, GenerationMatch, CloudflareIfNoneMatch }
+pub enum S3MultipartTimestamp { Completion, Start }
+pub enum S3Checksums {
+    /// Returned checksums state their scope.
+    ScopeStated,
+    /// Checksums without a stated scope are discarded.
+    UnstatedIgnored,
+    /// None are returned; any returned checksum is a protocol error.
+    Absent,
+}
+pub enum S3Listing { V2, V1 }
+/// ETag uses native versions or `coven-revision` metadata for replacements.
+pub enum S3Revision { ETag, Generation }
+/// HEAD Bucket, or a zero-entry listing.
+pub enum S3BucketCheck { Head, List }
+pub enum S3ResponseHeaders { S3, Google }
+
+/// What detection observed at one location (§4).
+pub struct S3Detection {
+    /// Settings derived from the observations; prefill advanced settings with them.
+    pub settings: S3Settings,
+    /// One observation per probe, in the order run.
+    pub observations: Vec<S3Observation>,
+}
+
+impl S3Detection {
+    /// Whether this probe's behavior held; an unrun probe did not.
+    pub fn held(&self, probe: S3Probe) -> bool;
+    /// Refuses settings that contradict the observations, naming the first
+    /// failed check as setup would: CreateOnce, MultipartCreateOnce,
+    /// PublicationTime, then Behavior.
+    pub fn check(&self, settings: &S3Settings) -> Result<(), StorageSetupError>;
+    /// The location setup records, after checking its effective settings:
+    /// an uncatalogued endpoint naming no profile gets these settings as its
+    /// custom profile; any other location is kept as given.
+    pub fn resolve(&self, location: StorageConfig) -> Result<StorageConfig, StorageSetupError>;
+}
+
+pub struct S3Observation {
+    pub probe: S3Probe,
+    /// Whether the behavior held, as described on each probe.
+    pub held: bool,
+    /// Native outcome; names no key, endpoint or object.
+    pub detail: String,
+}
+
+pub enum S3Probe {
+    /// A read-only listing is accepted with this signer.
+    Signing(S3Signing),
+    /// The condition refuses an occupied name, leaving its bytes and time.
+    SinglePut(S3SinglePut),
+    /// An unfinished multipart upload is absent from HEAD, GET and listing.
+    PartialUploadHidden,
+    /// Conditional completion refuses an occupied name, leaving bytes, ETag and time.
+    ConditionalCompletion,
+    /// Native multipart `Last-Modified` dates completion; otherwise it dates start.
+    CompletionTimestamp,
+    /// A copy with this condition refuses an occupied name, leaving bytes and time.
+    CopyPublication(S3CopyCondition),
+    /// A copy is dated later than its source.
+    CopyTimestamp,
+    /// This protocol lists every probe object; V2 must also agree with V1.
+    Listing(S3Listing),
+    /// HEAD with checksum mode is accepted.
+    ChecksumMode,
+    /// A checksum arrives without checksum mode.
+    PassiveChecksum,
+    /// Some probe returned a checksum.
+    ChecksumReturned,
+    /// Every returned checksum stated its scope.
+    ChecksumScopeStated,
+    /// GCS's `x-goog-generation` arrived.
+    GoogleGeneration,
+    /// GCS's `x-goog-hash` or generation arrived.
+    GoogleHeaders,
+    /// HEAD Bucket is accepted.
+    BucketHead,
+    /// A zero-entry listing is accepted.
+    BucketList,
+}
+
+/// An S3 service whose catalogued profile a location names (§4).
 /// Self-hosted services have arbitrary endpoints, so no hostname identifies them.
 pub enum S3ProfileName {
     /// Amazon S3.
@@ -1564,8 +1703,6 @@ pub enum S3ProfileName {
     Gcs,
     /// Cloudflare R2.
     R2,
-    /// Garage, self-hosted.
-    Garage,
     /// RustFS, self-hosted.
     RustFs,
     /// SeaweedFS's S3 gateway, self-hosted.
@@ -1747,6 +1884,13 @@ pub enum StorageCheck {
     List,
     /// Delete the object and confirm it is absent.
     Delete,
+    /// S3: multipart publication refuses an occupied name with its bytes and
+    /// time unchanged, and conditional completion hides unfinished uploads.
+    MultipartCreateOnce,
+    /// S3: multipart objects are dated by complete publication, as recorded.
+    PublicationTime,
+    /// S3: another setting agrees with the service's observed behavior.
+    Behavior,
 }
 
 /// Opening the member's sealed store key failed (§11, E5).
@@ -1991,7 +2135,9 @@ pub enum DropReason {
 }
 
 impl CovenHandle {
-    /// Sets up storage on S3 with this member's access key (§4).
+    /// Sets up storage on S3 with this member's access key (§4), after the
+    /// safety check. `ConnectedStorage::storage` is the recorded location,
+    /// carrying detected settings when the endpoint needed them.
     pub async fn setup_s3_storage(
         &self,
         storage: StorageConfig,
@@ -1999,6 +2145,16 @@ impl CovenHandle {
         access_key_id: String,
         secret_access_key: SecretText,
     ) -> Result<ConnectedStorage, StorageSetupError>;
+
+    /// Probes the S3 service at this location with this member's key (§4),
+    /// writing only fresh objects under the store's `.coven-check` prefix and
+    /// deleting them, also on failure. Commits nothing.
+    pub async fn detect_s3_settings(
+        &self,
+        storage: StorageConfig,
+        access_key_id: String,
+        secret_access_key: SecretText,
+    ) -> Result<S3Detection, StorageSetupError>;
 
     /// Runs sign-in through the builder's presenter and commits the tokens to
     /// session custody. Setup attaches this sign-in and persists credentials.
@@ -2131,6 +2287,15 @@ pub enum StoreKeyState {
 Example:
 
 ```rust
+// Optional: an advanced-settings screen prefilled from detection.
+let detection = handle
+    .detect_s3_settings(storage.clone(), access_key_id.clone(), SecretText::new(secret_access_key.clone()))
+    .await?;
+let settings = edit_advanced_settings(detection.settings, &detection.observations);
+detection.check(&settings)?;
+let StorageConfig::S3 { profile, .. } = &mut storage else { unreachable!() };
+*profile = Some(S3Profile::Custom(settings));
+
 match handle.setup_s3_storage(storage, device_name, access_key_id, SecretText::new(secret_access_key)).await {
     Ok(connected) => remember(connected.storage),
     Err(error) => return show_setup_error(error),

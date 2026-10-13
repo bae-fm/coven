@@ -642,50 +642,144 @@ the file's ranges under `F`.
   - E.g. Ben sets his laptop clock back a year. Its token still works until
     the provider rejects it; one refresh lets the waiting request continue.
 - On S3, each member has their own access key.
-  - Services are const `S3Profile` entries in the adapter's
-    [`s3_profile.rs`](../crates/coven-storage/src/providers/s3_profile.rs).
-    Each profile selects behaviors implemented once: endpoint host or host
-    suffix (none for a self-hosted service), AWS SigV4 or Google HMAC signing,
-    single PUT create-once condition, conditional multipart completion or copy
-    publication with its destination condition, native multipart timestamp
-    (completion or start), stated checksum scope, ignoring unstated scope or no
-    checksum returned, listing V2 or V1, ETag or generation
-    revision, and the date and suite version of its last certification. Bucket
-    checks, response-header translation and checksum requests are also profile
-    fields. A service-specific operation may be a plain function pointer in
-    this const data; apps do not supply capability flags or service branches.
+  - An S3 service's behaviors are data, the public `S3Settings`
+    ([E5](api.md#e5-storage-and-sync)), one enum value each: AWS SigV4 or
+    Google HMAC signing; the single-PUT create-once condition
+    (`If-None-Match: *` or `x-goog-if-generation-match: 0`); multipart
+    publication by conditional completion, or by copy with a destination
+    condition (`If-None-Match: *`, `x-goog-if-generation-match: 0` or
+    `cf-copy-destination-if-none-match: *`); the native multipart timestamp
+    (completion or start); the checksum policy (scope stated, unstated scope
+    ignored, or none returned); listing V2 or V1; ETag or generation revision;
+    HEAD or zero-entry LIST bucket check; S3 or Google response headers; and
+    whether reads request checksums. Each behavior is implemented once in the
+    adapter; apps do not supply capability flags or service branches.
+  - A location's profile is one of three: none, selecting by endpoint host; a
+    catalogued service's name; or a custom profile carrying its own complete
+    `S3Settings`. The location records it as given, so restore codes and every
+    other device use identical behavior.
+  - Catalogued services are const entries in the adapter's
+    [`s3_profile.rs`](../crates/coven-storage/src/providers/s3_profile.rs):
+    name, endpoint host or host suffix (none for a self-hosted service), the
+    settings they fill, and the date and suite version of their last
+    certification.
   - No endpoint selects **AWS S3**. Host suffix `.amazonaws.com` selects AWS;
     exact host `storage.googleapis.com` selects **Google Cloud Storage (GCS)**
     through its XML API; suffix `.r2.cloudflarestorage.com` selects
     **Cloudflare R2**, including jurisdiction-specific account hosts. Suffixes
     include the separating dot and require a preceding host component.
   - Self-hosted services have arbitrary endpoints, so no hostname identifies
-    them. The S3 location therefore takes an optional profile name. A named
-    profile is used as is; without a name, the hostname rules above apply and
-    every other endpoint uses AWS's profile. A name never overrides a
-    catalogued host: such an endpoint admits only its own profile's name.
-    Without an endpoint, requests reach AWS, so only AWS may be named.
-    Catalogued hosts require `https`; other endpoints may use plain `http`, as
-    a self-hosted server on the same machine or a private network can. A
-    contradicting name or a plain-`http` catalogued host fails validation with
+    them. A named profile is used as is. A name or custom profile never
+    overrides a catalogued host: such an endpoint admits only its own
+    profile's name. Without an endpoint, requests reach AWS, so only AWS may
+    be named and no custom profile is accepted. Catalogued hosts require
+    `https`; other endpoints may use plain `http`, as a self-hosted server on
+    the same machine or a private network can. A contradicting name or custom
+    profile, or a plain-`http` catalogued host, fails validation with
     `InvalidConfiguration` before any request. The self-hosted profiles are
-    **Garage**, **RustFS** and **SeaweedFS**; no hostname selects them.
+    **RustFS** and **SeaweedFS**; no hostname selects them.
+  - An endpoint that matches no catalogued host and names no profile has no
+    AWS fallback. Setup detects its behaviors (below) and records them as the
+    location's custom profile; the returned and recorded location carries
+    those settings. Connecting such a location outside setup fails with
+    `InvalidConfiguration`. Reconnecting this device with the same location
+    and no profile reuses the recorded location's settings, which every other
+    device already uses, rather than detecting again.
+  - **Detection** is a production operation the app may also run before setup
+    to prefill advanced settings
+    ([`detect_s3_settings`](api.md#e5-storage-and-sync)). It runs native
+    probes against the user's bucket with the supplied key, writing only fresh
+    objects under the store's provider-check prefix
+    `<prefix>/<store>/.coven-check/<run>/`, where `<run>` is a fresh
+    coven-generated UUID. This reserved namespace is distinct from every D10
+    path; S3 listings exclude it, so a probe left behind by a killed process
+    never reaches a published-object listing. Detection deletes its objects
+    and aborts its multipart uploads afterwards, also after a failed probe;
+    a failed cleanup fails the call, retaining both causes. The result is the
+    detected `S3Settings` and one typed observation per probe, each saying
+    whether the behavior held, with a native outcome that names no key,
+    endpoint or object. The probes:
+    - both signers, with a read-only zero-entry listing;
+    - both single-PUT conditions: the first PUT must be accepted, a second
+      refused as `AlreadyExists`, leaving the original bytes and time;
+    - an unfinished multipart upload, which must be absent from HEAD, GET and
+      listing;
+    - conditional completion, accepted on a free name and refused on an
+      occupied one with bytes, ETag and time unchanged;
+    - the native multipart timestamp, bracketed by marker objects written
+      before and after initiation and before and after completion;
+    - each copy destination condition, accepted on a free name and refused on
+      an occupied one with bytes and time unchanged, and whether the copy's
+      time is later than its source's;
+    - V2 against paginated V1 listing of the probe objects;
+    - checksum mode, returned checksums and their scope, Google generation
+      and hash headers, and HEAD Bucket against a zero-entry listing.
+  - Detection pauses only where elapsed time distinguishes outcomes. Times
+    are whole-second `Last-Modified` values, so it waits 1 second after the
+    marker written after initiation, then rewrites a marker, pausing 250 ms
+    between attempts, until the server dates it a later second than that
+    marker; completion follows. A completion dated in the initiation bracket
+    is a start timestamp. The copy probes run after that wait, so a copy dated
+    later than its source is the copy's own time. Listing probes poll
+    immediately and after each 250 ms pause until the listing shows every
+    probe object. Both stop after 40 pauses, 10 seconds of waiting, beyond the
+    worst listing lag measured (5.5 seconds): a marker that never advances
+    fails detection, and a listing that never completes is a failed listing
+    observation. Pauses use the store's clock capability. No other probe
+    waits.
+  - Detected settings take the first enforced single-PUT condition in the
+    order above; conditional completion when it is enforced, unfinished
+    uploads are hidden and multipart times date completion; otherwise the
+    first enforced copy condition in the order `x-goog-if-generation-match`,
+    `If-None-Match`, `cf-copy-destination-if-none-match`; the observed
+    multipart timestamp; no checksum policy when none was returned on any
+    probe, unstated-scope ignoring when one arrived without its scope, and
+    stated scope otherwise; checksum requests only when checksum mode is
+    accepted and checksums do not arrive without it; generation revision and
+    Google headers when GCS's headers arrive; V2 when it agrees with V1; and
+    HEAD Bucket unless only the listing is permitted or the catalogued entry
+    uses the listing. Where no behavior holds, the setting keeps the plain
+    S3 value and the setup check below names the failure.
+  - **Every S3 setup checks safety against the server** before the provider
+    check below, whatever selected its settings: detection runs, and the
+    effective settings, detected, named or custom, must agree with what it
+    observed. In order, setup refuses with `StorageSetupError::ProviderCheck`
+    naming the first failed check:
+    - `CreateOnce`: the single-PUT condition was not enforced, or changed the
+      occupied object's bytes or time;
+    - `MultipartCreateOnce`: the multipart publication method did not refuse
+      an occupied name with its bytes and time unchanged, or, for conditional
+      completion, an unfinished upload was visible;
+    - `PublicationTime`: published multipart objects are not dated by
+      complete publication (conditional completion with a start timestamp,
+      or a copy not dated later than its source), or the recorded multipart
+      timestamp contradicts the observed one;
+    - `Behavior`: another setting contradicts an observation: a signer the
+      service refused, a listing protocol that failed or disagreed, no
+      checksum policy where one was returned, stated scope where scope was
+      missing, checksum requests the service refused, generation revision or
+      Google headers without GCS's headers, S3 headers where GCS's arrived,
+      or a bucket check the service refused.
+    A manual override contradicting the observations is refused this way and
+    never silently accepted. Where no setting in the menu makes a check hold,
+    no override can either: a server that accepts writes to an occupied
+    name, e.g. Garage, is refused at setup with `CreateOnce`.
   - Certification suite version 1 passed GCS and R2 on **2026-10-13**, and
-    suite version 2 passed RustFS and SeaweedFS the same day. AWS is
-    **uncertified**: there is no live account, and its native multipart start
-    time remains a known publication gap. Garage is **uncertified** (below).
-    The table's selected behaviors are:
+    suite version 2 passed RustFS and SeaweedFS the same day. Suite version 3
+    detects with the production probes; the same day it reproduced each of
+    those four entries and passed their setup safety check. AWS is
+    **uncertified**: there is no live account. The table's selected behaviors
+    are:
 
     | Profile | Signing | Single PUT | Multipart publication | Native multipart time | Checksums | Listing | Revision | Bucket check |
     | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-    | AWS (uncertified) | AWS SigV4 | `If-None-Match: *` | Conditional completion | Start | Scope stated | V2 | ETag | HEAD |
+    | AWS (uncertified) | AWS SigV4 | `If-None-Match: *` | Copy with `If-None-Match: *` | Start | Scope stated | V2 | ETag | HEAD |
     | GCS (certified) | Google HMAC | `x-goog-if-generation-match: 0` | Copy with the same generation condition | Completion | Scope stated | V2 | Generation | Zero-entry LIST |
     | R2 (certified) | AWS SigV4 | `If-None-Match: *` | Conditional completion | Completion | Unstated scope ignored | V2 | ETag | HEAD |
-    | Garage (uncertified) | AWS SigV4 | `If-None-Match: *`, not enforced | Conditional completion, not enforced | Start | Scope stated | V2 | ETag | HEAD |
     | RustFS (certified) | AWS SigV4 | `If-None-Match: *` | Conditional completion | Completion | None returned | V2 | ETag | HEAD |
     | SeaweedFS (certified) | AWS SigV4 | `If-None-Match: *` | Conditional completion | Completion | None returned | V2 | ETag | HEAD |
 
-    AWS, R2 and Garage request checksums; every profile but GCS consumes S3
+    AWS and R2 request checksums; every profile but GCS consumes S3
     response headers. RustFS and SeaweedFS are not asked for checksums they
     never return. GCS supplies
     its hashes without a checksum-mode request; the adapter translates Google
@@ -694,30 +788,33 @@ the file's ranges under `F`.
   - To certify a service, put its bucket, region, endpoint and HMAC keys in an
     env file using `COVEN_LIVE_S3_{BUCKET,REGION,ENDPOINT,ACCESS_KEY_ID,SECRET_ACCESS_KEY}`.
     Run `COVEN_LIVE_S3_ENV=<file> cargo test -p coven-storage s3_certification -- --ignored --nocapture`.
-    The ignored test probes both signers, both single-PUT conditions,
-    conditional multipart completion, partial-upload visibility, native times
-    bracketed by marker objects, raw checksum headers and V2 against paginated
-    V1. A start timestamp or unenforced completion condition requires the shared
-    copy behavior; its destination condition must refuse an occupied name and
-    preserve its bytes and time. The candidate then runs the adapter's full
-    live contracts, including setup, reads, ranges, resumption, replacement
-    revisions and listing lag. A service that returns no checksum on any probe,
-    even with checksum mode, is recorded as returning none: §4 permits a missing
-    checksum, so suite version 2 accepts that observation where version 1
-    failed detection. Detection runs every probe even after a behavior is
-    missing, prints each missing behavior, and prints the detected entry as
-    uncertified. Each §4 requirement prints PASS or FAIL, and
-    cleanup removes the run's objects, temporaries and uploads even after a
-    failed assertion. The suite prints a Rust profile entry with the passing
-    date and suite version; commit it only after every check passes, alongside
+    The ignored test runs production detection from the location's settings,
+    or the plain S3 settings where detection must supply them, and prints
+    every observation. A detected entry that fails the setup safety
+    check above prints as uncertified with each failed check. The candidate
+    then runs the adapter's full live contracts, including setup, reads,
+    ranges, resumption, replacement revisions and listing lag. A service that
+    returns no checksum on any probe, even with checksum mode, is recorded as
+    returning none: §4 permits a missing checksum, so suite version 2 accepts
+    that observation where version 1 failed detection. Each §4 requirement
+    prints PASS or FAIL, and cleanup removes the run's objects, temporaries
+    and uploads even after a failed assertion. The suite prints a Rust profile
+    entry with the passing date and suite version; commit it only after every
+    check passes, alongside
     the [raw certification evidence](s3-certification.md). Never publish the
     env file or credentials. A live sample measures lag; it does not prove M.
-  - AWS S3 creates once with `If-None-Match: *` on `PutObject` and
-    `CompleteMultipartUpload`; an occupied destination returns HTTP 412
-    `PreconditionFailed`, mapped to `AlreadyExists`. Conditional replacements
-    use `If-Match` with the observed ETag. Multipart parts remain unpublished
-    until completion. Listing uses `ListObjectsV2`, an exact prefix and every
-    continuation token; immediate device discovery also uses delimiter `/`.
+  - AWS S3 creates once with `If-None-Match: *` on `PutObject`; an occupied
+    destination returns HTTP 412 `PreconditionFailed`, mapped to
+    `AlreadyExists`. Conditional replacements use `If-Match` with the observed
+    ETag. Multipart parts remain unpublished until completion. AWS enforces
+    `If-None-Match: *` on `CompleteMultipartUpload` too, but its multipart
+    `Last-Modified` records initiation, so the AWS profile publishes multipart
+    uploads by copy with `If-None-Match: *` on `CopyObject`, which
+    [AWS documents](https://docs.aws.amazon.com/AmazonS3/latest/userguide/conditional-writes.html)
+    since October 2025. That profile is uncertified; the setup safety check
+    verifies it against the account's bucket. Listing uses `ListObjectsV2`, an
+    exact prefix and every continuation token; immediate device discovery also
+    uses delimiter `/`.
   - GCS ignores `If-None-Match: *` on PUT. Create-once PUT instead sends
     `x-goog-if-generation-match: 0`. An occupied destination returns HTTP 412
     `PreconditionFailed`, mapped to `AlreadyExists`, without changing its
@@ -729,14 +826,16 @@ the file's ranges under `F`.
     refuses requests mixing Google and AWS extension headers.
   - GCS XML multipart initiation rejects generation conditions and completion
     does not enforce create-once, even though its measured native timestamp is
-    completion. Coven therefore uploads unconditionally to
+    completion. Coven therefore publishes by copy. Every copy-publication
+    profile uploads unconditionally to
     `<prefix>/<store>/.coven-uploads/<session>`, where `<session>` is the
     upload's coven-generated UUID, recorded alongside the native multipart id
     before sending any parts. This reserved namespace is distinct from every
     coven object path in D10. Retrying or resuming that recording derives the
     same name, including after multipart completion or a lost copy reply.
-  - GCS publishes the assembled temporary with one server-side `CopyObject`
-    to the destination, carrying `x-goog-if-generation-match: 0`. The
+  - Copy publication sends the assembled temporary with one server-side
+    `CopyObject` to the destination, carrying the profile's destination
+    condition (`x-goog-if-generation-match: 0` for GCS). The
     destination's publication time is the copy's completion, never temporary
     creation or multipart initiation. An occupied destination stays untouched;
     the session marker distinguishes this session's lost successful reply
@@ -745,8 +844,8 @@ the file's ranges under `F`.
     Network failures and throttling retain it for the same session.
     A failed deletion fails the call and retains the recording for retry;
     an operation error and deletion error are both preserved.
-  - Aborting a GCS session aborts its native multipart upload and deletes its
-    temporary, including when the native upload has already completed.
+  - Aborting a copy-publication session aborts its native multipart upload
+    and deletes its temporary, including when the native upload has already completed.
     A crashed device's recorded session therefore remains usable by the same
     abandonment cleanup. Temporaries remain discoverable in the reserved
     namespace but are excluded from published-object listings. GCS uses
@@ -754,20 +853,20 @@ the file's ranges under `F`.
     as AWS does; published objects retain the server's `LastModified`.
   - AWS `ConditionalRequestConflict` and GCS `OperationAborted` indicate a
     concurrent mutation, never throttling.
-    A single-request PUT can retry its fixed bytes. At AWS multipart completion
-    or GCS copy publication, it invalidates the recorded session instead:
-    discard its part list, abort the native upload and delete any GCS temporary.
+    A single-request PUT can retry its fixed bytes. At conditional multipart
+    completion or copy publication, it invalidates the recorded session
+    instead: discard its part list, abort the native upload and delete any
+    copy temporary.
     Preserve both causes if abort or deletion also fails. Record the invalidated
     session even on failure; it retains only the identifiers needed for cleanup
     and cannot complete or copy again. A replacement session starts only after
     cleanup succeeds, at offset zero with the same path, size and fixed bytes.
     An occupied destination still requires complete-byte comparison (§10).
-  - Unknown S3-compatible endpoints without a profile name use AWS's headers
-    and multipart protocol.
-    Setup refuses them unless every provider check below passes, including
+  - Every S3 location, catalogued, named, custom or detected, runs the setup
+    safety check above and every provider check below, including
     `CreateOnce`. Accepting a second create is a protocol failure, even if the
-    service claims compatibility. Every known profile also runs that setup
-    check; certification does not exempt a connection from it.
+    service claims compatibility; certification does not exempt a connection
+    from either check.
   - R2's live certification selected conditional completion without a copy:
     both single PUT and multipart completion refused occupied names with HTTP
     412 and preserved their bytes and times. Unfinished uploads were absent
@@ -780,11 +879,7 @@ the file's ranges under `F`.
     document `cf-copy-destination-if-none-match`. The R2 profile does not use
     that extension because native conditional completion passed. Profile values
     come from the live suite, rather than a compatibility claim.
-  - Garage v2.4.1 has no create-once route: it ignored both single-PUT
-    conditions, conditional multipart completion and both copy destination
-    conditions, and its multipart `Last-Modified` records initiation. No
-    behavior in this menu covers it; the setup check refuses it with
-    `CreateOnce`. RustFS and SeaweedFS refused occupied names with HTTP 412 on
+  - RustFS and SeaweedFS refused occupied names with HTTP 412 on
     PUT and multipart completion, preserving bytes and times, and their
     multipart `Last-Modified` fell between the completion markers, so they use
     conditional completion without a copy. Neither returned a checksum, even
@@ -954,14 +1049,16 @@ the file's ranges under `F`.
 - Native publication gaps remain visible in the profiles and certification.
   GCS conditional-copy timestamps and R2 single-PUT and multipart timestamps
   passed the completion checks, as did RustFS and SeaweedFS single-PUT and
-  multipart timestamps. Garage multipart `Last-Modified` records initiation.
+  multipart timestamps.
   AWS single-request PUT timestamps describe
   completion; AWS multipart `Last-Modified` instead records initiation
   ([system metadata](https://docs.aws.amazon.com/AmazonS3/latest/userguide/UsingMetadata.html)).
-  That AWS multipart path does not satisfy the complete-publication requirement
-  above; its adapter exposes the native observation without inventing a later
-  time. Its profile remains uncertified; certifying a start-time service requires
-  a proven conditional copy that timestamps complete publication. OneDrive
+  That native AWS multipart path does not satisfy the complete-publication
+  requirement above, so the AWS profile publishes multipart uploads by
+  conditional copy instead; the adapter never invents a later time. A
+  start-time service needs a conditional copy that dates complete
+  publication, and the setup safety check refuses any S3 location whose
+  multipart objects are not dated that way. OneDrive
   publishes session uploads by conditional copy as described
   above. CloudKit's atomic publication and asset-session guarantees require live
   verification through a signed, entitled host.
@@ -1009,11 +1106,12 @@ the file's ranges under `F`.
   whole and ranged reads, and requires its scoped listing query to succeed.
   If that query returns the fresh probe, its size must agree; absence inside
   `M` is permitted and establishes no completeness claim. The check then deletes
-  the object and verifies absence by exact-id read. A failure names the failed
-  check and preserves the previous connection
-  ([E5](api.md#e5-storage-and-sync)).
+  the object and verifies absence by exact-id read. On S3 the safety check
+  above runs first. A failure names the failed check and preserves the
+  previous connection ([E5](api.md#e5-storage-and-sync)).
 - Every storage path starts with the store's id, including the provider
-  check's temporary object ([D10](format.md#d10-paths)).
+  check's temporary objects and S3 detection's reserved
+  `<store>/.coven-check/` probes ([D10](format.md#d10-paths)).
   - Several stores can share one bucket prefix, folder or zone.
   - Setup reads and writes only this store's prefix; other stores and
     unrelated objects outside it do not compete with this store.

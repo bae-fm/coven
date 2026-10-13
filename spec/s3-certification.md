@@ -4,8 +4,10 @@ Suite version 1 passed GCS and R2 on 2026-10-13, and suite version 2 passed
 RustFS and SeaweedFS the same day. Version 2 differs only in recording a
 service that returns no checksum as such, which §4 permits; version 1 failed
 detection for it. AWS is uncertified because no live account is available.
-Garage ran suite 1 on 2026-10-13 and is uncertified; its section names the
-failed checks.
+Suite version 3 runs the production detection that setup uses (§4); on
+2026-10-13 it reproduced the GCS, R2, RustFS and SeaweedFS entries and passed
+the setup safety check at each, and the full suite 3 passed RustFS. Its output
+is in [Detection](#detection-suite-3).
 The selected entries are in
 [`s3_profile.rs`](../crates/coven-storage/src/providers/s3_profile.rs); the
 contract and certification procedure are in [§4](coven.md#4-storage-providers-and-access).
@@ -229,151 +231,7 @@ Each service ran as one local podman container on the test machine, reached
 over plain `http` with path-style requests and selected without a profile
 name, so the suite started from AWS's profile and printed the detected entry as
 `Uncatalogued`; the committed entries use their own names and no endpoint
-match. For Garage, native detection ran every probe and listed each missing
-behavior on its `native missing=` line before printing that entry, and the
-adapter cases after the failed detection used AWS's profile.
-
-### Garage
-
-Garage v2.4.1 (`dxflrs/garage:v2.4.1`), single node, region `garage`, under
-suite 1. Uncertified. Suite 2 would record its absent checksum, but not its
-missing create-once behavior. Every create-once route the adapter has was ignored: both
-single-PUT conditions, conditional multipart completion and both copy
-destination conditions replaced the occupied object. Multipart
-`Last-Modified` recorded initiation, not completion. No checksum was returned.
-No behavior in §4's menu covers this: certification needs a create-once
-condition that Garage enforces on single PUT, plus either enforced conditional
-completion with a completion timestamp or an enforced conditional copy. The
-setup check refuses Garage with `CreateOnce`.
-
-```text
-native signing=GoogleHmac result=Refused HTTP 400
-native signing=AwsSigV4 result=accepted
-native single_put IfNoneMatch empty=accepted taken=accepted preserved=false
-native single_put GenerationMatch empty=accepted taken=accepted preserved=false
-native partial_upload HEAD=NotFound HTTP 404 GET=NotFound HTTP 404 listed=false
-§4 native partial_uploads_hidden PASS
-native conditional_completion empty=accepted
-native multipart_timestamp=Start start_before=SystemTime { tv_sec: 1791918000, tv_nsec: 0 } start_after=SystemTime { tv_sec: 1791918000, tv_nsec: 0 } completion_before=SystemTime { tv_sec: 1791918003, tv_nsec: 0 } completion_after=SystemTime { tv_sec: 1791918003, tv_nsec: 0 } published=SystemTime { tv_sec: 1791918000, tv_nsec: 0 }
-native conditional_completion taken=accepted preserved=false enforced=false
-native copy header=x-goog-if-generation-match empty=accepted taken=accepted preserved=false later_than_source=true
-native copy header=cf-copy-destination-if-none-match empty=accepted taken=accepted preserved=false later_than_source=true
-native listing=V2 objects=8 pages_forced_at=1
-native checksum_mode=accepted
-native bucket_head=accepted bucket_list=accepted selected=Head
-native checksum_present=false checksum_scope=ScopeStated revision=ETag response_headers=S3 bucket_check=Head
-native missing=create-once PUT, conditional copy publication, returned checksum
-S3Profile {
-    name: S3ProfileName::Uncatalogued,
-    endpoint: Some(EndpointMatch::Host("localhost")),
-    signing: Signing::AwsSigV4,
-    single_put: SinglePut::IfNoneMatch,
-    multipart: Multipart::ConditionalCompletion,
-    multipart_timestamp: MultipartTimestamp::Start,
-    checksums: Checksums::ScopeStated,
-    listing: Listing::V2,
-    revision: Revision::ETag,
-    bucket_check: BucketCheck::Head,
-    response_headers: ResponseHeaders::S3,
-    request_checksums: true,
-    certification: Certification::Uncertified,
-},
-§4 native_behavior_detection cause=Protocol: native behaviors missing
-§4 native_behavior_detection FAIL cleanup=PASS
-
-thread 'providers::s3::tests::live_tests::s3_certification' (203489727) panicked at crates/coven-storage/src/providers/s3_live_tests.rs:709:10:
-called `Result::unwrap()` on an `Err` value: Caused { failure: Protocol, source: "create-once refusal" }
-note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
-§4 create_once_single_put, whole_object_reads, ranged_reads, prefix_listing, exact_status, deletion, setup_provider_check assertion_failed
-§4 create_once_single_put FAIL cleanup=PASS
-§4 whole_object_reads FAIL cleanup=PASS
-§4 ranged_reads FAIL cleanup=PASS
-§4 prefix_listing FAIL cleanup=PASS
-§4 exact_status FAIL cleanup=PASS
-§4 deletion FAIL cleanup=PASS
-§4 setup_provider_check FAIL cleanup=PASS
-
-thread 'providers::s3::tests::live_tests::s3_certification' (203489727) panicked at crates/coven-storage/src/providers/s3_live_tests.rs:736:10:
-called `Result::unwrap_err()` on an `Ok` value: ()
-§4 create_once_multipart, partial_uploads_hidden, multipart_resume assertion_failed
-§4 create_once_multipart FAIL cleanup=PASS
-§4 partial_uploads_hidden FAIL cleanup=PASS
-§4 multipart_resume FAIL cleanup=PASS
-publication multipart=false before=SystemTime { tv_sec: 1791918009, tv_nsec: 0 } published=SystemTime { tv_sec: 1791918009, tv_nsec: 0 } after=SystemTime { tv_sec: 1791918009, tv_nsec: 0 }
-publication multipart=true before=SystemTime { tv_sec: 1791918011, tv_nsec: 0 } published=SystemTime { tv_sec: 1791918009, tv_nsec: 0 } after=SystemTime { tv_sec: 1791918011, tv_nsec: 0 }
-§4 single_put_timestamp_equals_completion, multipart_timestamp_equals_completion cause=Protocol: publication outside completion markers
-§4 single_put_timestamp_equals_completion FAIL cleanup=PASS
-§4 multipart_timestamp_equals_completion FAIL cleanup=PASS
-replacement changed=true same_size=true same_tick=true
-replacement changed=true same_size=true same_tick=true
-replacement changed=true same_size=true same_tick=true
-replacement changed=true same_size=true same_tick=true
-§4 revision_changes_on_replace PASS cleanup=PASS
-listing_lag provider_case=S3_new_device_folder trial=1 stored_at=SystemTime { tv_sec: 1791918011, tv_nsec: 0 } list_start_s=0.001803584 list_end_s=0.002517667 present=true
-listing_lag provider_case=S3_object trial=1 stored_at=SystemTime { tv_sec: 1791918011, tv_nsec: 0 } list_start_s=0.001870750 list_end_s=0.003163209 present=true
-listing_lag SUMMARY provider_case=S3_new_device_folder trials=1 min_s=0.002517667 median_s=0.002517667 max_s=0.002517667 omitted_trials=0 timeouts=0
-listing_lag provider_case=S3_object trial=2 stored_at=SystemTime { tv_sec: 1791918011, tv_nsec: 0 } list_start_s=0.001787333 list_end_s=0.002573708 present=true
-listing_lag provider_case=S3_new_device_folder trial=2 stored_at=SystemTime { tv_sec: 1791918011, tv_nsec: 0 } list_start_s=0.001737875 list_end_s=0.002982125 present=true
-listing_lag SUMMARY provider_case=S3_new_device_folder trials=1 min_s=0.002982125 median_s=0.002982125 max_s=0.002982125 omitted_trials=0 timeouts=0
-listing_lag provider_case=S3_object trial=3 stored_at=SystemTime { tv_sec: 1791918011, tv_nsec: 0 } list_start_s=0.001756542 list_end_s=0.002455459 present=true
-listing_lag provider_case=S3_new_device_folder trial=3 stored_at=SystemTime { tv_sec: 1791918011, tv_nsec: 0 } list_start_s=0.001711584 list_end_s=0.002761917 present=true
-listing_lag SUMMARY provider_case=S3_new_device_folder trials=1 min_s=0.002761917 median_s=0.002761917 max_s=0.002761917 omitted_trials=0 timeouts=0
-listing_lag provider_case=S3_object trial=4 stored_at=SystemTime { tv_sec: 1791918011, tv_nsec: 0 } list_start_s=0.001678459 list_end_s=0.002369959 present=true
-listing_lag provider_case=S3_new_device_folder trial=4 stored_at=SystemTime { tv_sec: 1791918011, tv_nsec: 0 } list_start_s=0.001633750 list_end_s=0.002732042 present=true
-listing_lag SUMMARY provider_case=S3_new_device_folder trials=1 min_s=0.002732042 median_s=0.002732042 max_s=0.002732042 omitted_trials=0 timeouts=0
-listing_lag provider_case=S3_object trial=5 stored_at=SystemTime { tv_sec: 1791918011, tv_nsec: 0 } list_start_s=0.001666042 list_end_s=0.002404958 present=true
-listing_lag provider_case=S3_new_device_folder trial=5 stored_at=SystemTime { tv_sec: 1791918011, tv_nsec: 0 } list_start_s=0.001623083 list_end_s=0.002761250 present=true
-listing_lag SUMMARY provider_case=S3_new_device_folder trials=1 min_s=0.002761250 median_s=0.002761250 max_s=0.002761250 omitted_trials=0 timeouts=0
-listing_lag provider_case=S3_object trial=6 stored_at=SystemTime { tv_sec: 1791918011, tv_nsec: 0 } list_start_s=0.001798625 list_end_s=0.002541750 present=true
-listing_lag provider_case=S3_new_device_folder trial=6 stored_at=SystemTime { tv_sec: 1791918011, tv_nsec: 0 } list_start_s=0.001751791 list_end_s=0.003046083 present=true
-listing_lag SUMMARY provider_case=S3_new_device_folder trials=1 min_s=0.003046083 median_s=0.003046083 max_s=0.003046083 omitted_trials=0 timeouts=0
-listing_lag provider_case=S3_object trial=7 stored_at=SystemTime { tv_sec: 1791918011, tv_nsec: 0 } list_start_s=0.001759125 list_end_s=0.002449000 present=true
-listing_lag provider_case=S3_new_device_folder trial=7 stored_at=SystemTime { tv_sec: 1791918011, tv_nsec: 0 } list_start_s=0.001716916 list_end_s=0.003013375 present=true
-listing_lag SUMMARY provider_case=S3_new_device_folder trials=1 min_s=0.003013375 median_s=0.003013375 max_s=0.003013375 omitted_trials=0 timeouts=0
-listing_lag provider_case=S3_object trial=8 stored_at=SystemTime { tv_sec: 1791918011, tv_nsec: 0 } list_start_s=0.001684667 list_end_s=0.002383750 present=true
-listing_lag provider_case=S3_new_device_folder trial=8 stored_at=SystemTime { tv_sec: 1791918011, tv_nsec: 0 } list_start_s=0.001644709 list_end_s=0.002907292 present=true
-listing_lag SUMMARY provider_case=S3_new_device_folder trials=1 min_s=0.002907292 median_s=0.002907292 max_s=0.002907292 omitted_trials=0 timeouts=0
-listing_lag provider_case=S3_object trial=9 stored_at=SystemTime { tv_sec: 1791918011, tv_nsec: 0 } list_start_s=0.001654917 list_end_s=0.002390167 present=true
-listing_lag provider_case=S3_new_device_folder trial=9 stored_at=SystemTime { tv_sec: 1791918011, tv_nsec: 0 } list_start_s=0.001619000 list_end_s=0.002861333 present=true
-listing_lag SUMMARY provider_case=S3_new_device_folder trials=1 min_s=0.002861333 median_s=0.002861333 max_s=0.002861333 omitted_trials=0 timeouts=0
-listing_lag provider_case=S3_object trial=10 stored_at=SystemTime { tv_sec: 1791918011, tv_nsec: 0 } list_start_s=0.001651958 list_end_s=0.002346916 present=true
-listing_lag provider_case=S3_new_device_folder trial=10 stored_at=SystemTime { tv_sec: 1791918011, tv_nsec: 0 } list_start_s=0.001595833 list_end_s=0.002804166 present=true
-listing_lag SUMMARY provider_case=S3_new_device_folder trials=1 min_s=0.002804166 median_s=0.002804166 max_s=0.002804166 omitted_trials=0 timeouts=0
-listing_lag provider_case=S3_object trial=11 stored_at=SystemTime { tv_sec: 1791918011, tv_nsec: 0 } list_start_s=0.001699500 list_end_s=0.002399083 present=true
-listing_lag provider_case=S3_new_device_folder trial=11 stored_at=SystemTime { tv_sec: 1791918011, tv_nsec: 0 } list_start_s=0.001652333 list_end_s=0.002811291 present=true
-listing_lag SUMMARY provider_case=S3_new_device_folder trials=1 min_s=0.002811291 median_s=0.002811291 max_s=0.002811291 omitted_trials=0 timeouts=0
-listing_lag provider_case=S3_object trial=12 stored_at=SystemTime { tv_sec: 1791918011, tv_nsec: 0 } list_start_s=0.001686834 list_end_s=0.002433750 present=true
-listing_lag provider_case=S3_new_device_folder trial=12 stored_at=SystemTime { tv_sec: 1791918011, tv_nsec: 0 } list_start_s=0.001638417 list_end_s=0.002839459 present=true
-listing_lag SUMMARY provider_case=S3_new_device_folder trials=1 min_s=0.002839459 median_s=0.002839459 max_s=0.002839459 omitted_trials=0 timeouts=0
-listing_lag provider_case=S3_object trial=13 stored_at=SystemTime { tv_sec: 1791918011, tv_nsec: 0 } list_start_s=0.002087375 list_end_s=0.002820584 present=true
-listing_lag provider_case=S3_new_device_folder trial=13 stored_at=SystemTime { tv_sec: 1791918011, tv_nsec: 0 } list_start_s=0.002013000 list_end_s=0.003261792 present=true
-listing_lag SUMMARY provider_case=S3_new_device_folder trials=1 min_s=0.003261792 median_s=0.003261792 max_s=0.003261792 omitted_trials=0 timeouts=0
-listing_lag provider_case=S3_object trial=14 stored_at=SystemTime { tv_sec: 1791918011, tv_nsec: 0 } list_start_s=0.001792041 list_end_s=0.002522791 present=true
-listing_lag provider_case=S3_new_device_folder trial=14 stored_at=SystemTime { tv_sec: 1791918011, tv_nsec: 0 } list_start_s=0.001740583 list_end_s=0.003056833 present=true
-listing_lag SUMMARY provider_case=S3_new_device_folder trials=1 min_s=0.003056833 median_s=0.003056833 max_s=0.003056833 omitted_trials=0 timeouts=0
-listing_lag provider_case=S3_object trial=15 stored_at=SystemTime { tv_sec: 1791918011, tv_nsec: 0 } list_start_s=0.001708417 list_end_s=0.002652000 present=true
-listing_lag provider_case=S3_new_device_folder trial=15 stored_at=SystemTime { tv_sec: 1791918011, tv_nsec: 0 } list_start_s=0.001671875 list_end_s=0.003219583 present=true
-listing_lag SUMMARY provider_case=S3_new_device_folder trials=1 min_s=0.003219583 median_s=0.003219583 max_s=0.003219583 omitted_trials=0 timeouts=0
-listing_lag provider_case=S3_object trial=16 stored_at=SystemTime { tv_sec: 1791918011, tv_nsec: 0 } list_start_s=0.002134000 list_end_s=0.003287167 present=true
-listing_lag provider_case=S3_new_device_folder trial=16 stored_at=SystemTime { tv_sec: 1791918011, tv_nsec: 0 } list_start_s=0.002018459 list_end_s=0.003915542 present=true
-listing_lag SUMMARY provider_case=S3_new_device_folder trials=1 min_s=0.003915542 median_s=0.003915542 max_s=0.003915542 omitted_trials=0 timeouts=0
-listing_lag provider_case=S3_object trial=17 stored_at=SystemTime { tv_sec: 1791918011, tv_nsec: 0 } list_start_s=0.002133417 list_end_s=0.003046750 present=true
-listing_lag provider_case=S3_new_device_folder trial=17 stored_at=SystemTime { tv_sec: 1791918011, tv_nsec: 0 } list_start_s=0.002012792 list_end_s=0.003455375 present=true
-listing_lag SUMMARY provider_case=S3_new_device_folder trials=1 min_s=0.003455375 median_s=0.003455375 max_s=0.003455375 omitted_trials=0 timeouts=0
-listing_lag provider_case=S3_object trial=18 stored_at=SystemTime { tv_sec: 1791918011, tv_nsec: 0 } list_start_s=0.001751042 list_end_s=0.002588834 present=true
-listing_lag provider_case=S3_new_device_folder trial=18 stored_at=SystemTime { tv_sec: 1791918011, tv_nsec: 0 } list_start_s=0.001691000 list_end_s=0.002814500 present=true
-listing_lag SUMMARY provider_case=S3_new_device_folder trials=1 min_s=0.002814500 median_s=0.002814500 max_s=0.002814500 omitted_trials=0 timeouts=0
-listing_lag provider_case=S3_object trial=19 stored_at=SystemTime { tv_sec: 1791918011, tv_nsec: 0 } list_start_s=0.001761000 list_end_s=0.002518917 present=true
-listing_lag provider_case=S3_new_device_folder trial=19 stored_at=SystemTime { tv_sec: 1791918011, tv_nsec: 0 } list_start_s=0.001718334 list_end_s=0.003051584 present=true
-listing_lag SUMMARY provider_case=S3_new_device_folder trials=1 min_s=0.003051584 median_s=0.003051584 max_s=0.003051584 omitted_trials=0 timeouts=0
-listing_lag provider_case=S3_object trial=20 stored_at=SystemTime { tv_sec: 1791918011, tv_nsec: 0 } list_start_s=0.001713250 list_end_s=0.002424458 present=true
-listing_lag provider_case=S3_new_device_folder trial=20 stored_at=SystemTime { tv_sec: 1791918011, tv_nsec: 0 } list_start_s=0.001672500 list_end_s=0.002837833 present=true
-listing_lag SUMMARY provider_case=S3_new_device_folder trials=1 min_s=0.002837833 median_s=0.002837833 max_s=0.002837833 omitted_trials=0 timeouts=0
-listing_lag SUMMARY provider_case=S3_object trials=20 min_s=0.002346916 median_s=0.002487188 max_s=0.003287167 omitted_trials=0 timeouts=0
-§4 listing_lag PASS cleanup=PASS
-§4 immediate_device_folders PASS cleanup=PASS
-certification suite=1 FAIL
-```
+match.
 
 ### RustFS
 
@@ -621,4 +479,130 @@ S3Profile {
     certification: Certification::Passed { date: "2026-10-13", suite: 2 },
 },
 certification suite=2 PASS
+```
+
+## Detection (suite 3)
+
+`s3_detection` ran production detection from each env location: from the
+catalogued GCS and R2 hosts' own settings, and from the plain S3 settings for
+the self-hosted servers, which name no profile. Each run printed every
+observation, the derived settings, the setup safety check's verdict for that
+location, and the catalogued entries the settings reproduce. RustFS and
+SeaweedFS have identical entries, so each reproduces both. Both also enforced
+`If-None-Match: *` on `CopyObject`, which their entries do not need.
+
+### GCS detection
+
+```text
+detect Signing(GoogleHmac) held=true accepted
+detect Signing(AwsSigV4) held=true accepted
+detect SinglePut(IfNoneMatch) held=false empty=accepted taken=accepted preserved=false
+detect SinglePut(GenerationMatch) held=true empty=accepted taken=AlreadyExists HTTP 412 preserved=true
+detect PartialUploadHidden held=true HEAD=NotFound HTTP 404 GET=NotFound HTTP 404 listed=false
+detect CompletionTimestamp held=true start=1791920579..1791920579 completion=1791920580..1791920581 published=1791920581
+detect ConditionalCompletion held=false empty=accepted taken=accepted preserved=false
+detect CopyPublication(GenerationMatch) held=true empty=accepted taken=AlreadyExists HTTP 412 preserved=true
+detect CopyPublication(IfNoneMatch) held=false empty=accepted taken=accepted preserved=false
+detect CopyPublication(CloudflareIfNoneMatch) held=false empty=accepted taken=accepted preserved=false
+detect CopyTimestamp held=true condition=GenerationMatch source=1791920578 copy=1791920581
+detect ChecksumMode held=true accepted
+detect PassiveChecksum held=true checksum=true unstated=false google_hash=true generation=true
+detect ChecksumReturned held=true checksum=true unstated=false google_hash=true generation=true
+detect ChecksumScopeStated held=true checksum=true unstated=false google_hash=true generation=true
+detect GoogleGeneration held=true checksum=true unstated=false google_hash=true generation=true
+detect GoogleHeaders held=true checksum=true unstated=false google_hash=true generation=true
+detect BucketHead held=true accepted
+detect BucketList held=true accepted
+detect Listing(V1) held=true objects=10 pages_forced_at=1
+detect Listing(V2) held=true objects=10 pages_forced_at=1 agrees_with_v1=true
+detected S3Settings { signing: GoogleHmac, single_put: GenerationMatch, multipart: Copy(GenerationMatch), multipart_timestamp: Completion, checksums: ScopeStated, listing: V2, revision: Generation, bucket_check: List, response_headers: Google, request_checksums: false }
+setup_safety_check PASS
+catalogued entries reproduced: [Gcs]
+```
+
+### R2 detection
+
+```text
+detect Signing(GoogleHmac) held=false Refused HTTP 400
+detect Signing(AwsSigV4) held=true accepted
+detect SinglePut(IfNoneMatch) held=true empty=accepted taken=AlreadyExists HTTP 412 preserved=true
+detect SinglePut(GenerationMatch) held=false empty=accepted taken=accepted preserved=false
+detect PartialUploadHidden held=true HEAD=NotFound HTTP 404 GET=NotFound HTTP 404 listed=false
+detect CompletionTimestamp held=true start=1791920590..1791920591 completion=1791920593..1791920594 published=1791920594
+detect ConditionalCompletion held=true empty=accepted taken=AlreadyExists HTTP 412 preserved=true
+detect CopyPublication(GenerationMatch) held=false empty=accepted taken=accepted preserved=false
+detect CopyPublication(IfNoneMatch) held=false empty=accepted taken=accepted preserved=false
+detect CopyPublication(CloudflareIfNoneMatch) held=true empty=accepted taken=AlreadyExists HTTP 412 preserved=true
+detect CopyTimestamp held=true condition=GenerationMatch source=1791920588 copy=1791920596
+detect ChecksumMode held=true accepted
+detect PassiveChecksum held=false checksum=true unstated=true google_hash=false generation=false
+detect ChecksumReturned held=true checksum=true unstated=true google_hash=false generation=false
+detect ChecksumScopeStated held=false checksum=true unstated=true google_hash=false generation=false
+detect GoogleGeneration held=false checksum=true unstated=true google_hash=false generation=false
+detect GoogleHeaders held=false checksum=true unstated=true google_hash=false generation=false
+detect BucketHead held=true accepted
+detect BucketList held=true accepted
+detect Listing(V1) held=true objects=10 pages_forced_at=1
+detect Listing(V2) held=true objects=10 pages_forced_at=1 agrees_with_v1=true
+detected S3Settings { signing: AwsSigV4, single_put: IfNoneMatch, multipart: ConditionalCompletion, multipart_timestamp: Completion, checksums: UnstatedIgnored, listing: V2, revision: ETag, bucket_check: Head, response_headers: S3, request_checksums: true }
+setup_safety_check PASS
+catalogued entries reproduced: [R2]
+```
+
+### RustFS detection
+
+```text
+detect Signing(GoogleHmac) held=false Refused HTTP 400
+detect Signing(AwsSigV4) held=true accepted
+detect SinglePut(IfNoneMatch) held=true empty=accepted taken=AlreadyExists HTTP 412 preserved=true
+detect SinglePut(GenerationMatch) held=false empty=accepted taken=accepted preserved=false
+detect PartialUploadHidden held=true HEAD=NotFound HTTP 404 GET=NotFound HTTP 404 listed=false
+detect CompletionTimestamp held=true start=1791920609..1791920609 completion=1791920610..1791920610 published=1791920610
+detect ConditionalCompletion held=true empty=accepted taken=AlreadyExists HTTP 412 preserved=true
+detect CopyPublication(GenerationMatch) held=false empty=accepted taken=accepted preserved=false
+detect CopyPublication(IfNoneMatch) held=true empty=accepted taken=AlreadyExists HTTP 412 preserved=true
+detect CopyPublication(CloudflareIfNoneMatch) held=false empty=accepted taken=accepted preserved=false
+detect CopyTimestamp held=true condition=GenerationMatch source=1791920609 copy=1791920610
+detect ChecksumMode held=true accepted
+detect PassiveChecksum held=false checksum=false unstated=false google_hash=false generation=false
+detect ChecksumReturned held=false checksum=false unstated=false google_hash=false generation=false
+detect ChecksumScopeStated held=true checksum=false unstated=false google_hash=false generation=false
+detect GoogleGeneration held=false checksum=false unstated=false google_hash=false generation=false
+detect GoogleHeaders held=false checksum=false unstated=false google_hash=false generation=false
+detect BucketHead held=true accepted
+detect BucketList held=true accepted
+detect Listing(V1) held=true objects=10 pages_forced_at=1
+detect Listing(V2) held=true objects=10 pages_forced_at=1 agrees_with_v1=true
+detected S3Settings { signing: AwsSigV4, single_put: IfNoneMatch, multipart: ConditionalCompletion, multipart_timestamp: Completion, checksums: Absent, listing: V2, revision: ETag, bucket_check: Head, response_headers: S3, request_checksums: false }
+setup_safety_check PASS
+catalogued entries reproduced: [RustFs, SeaweedFs]
+```
+
+### SeaweedFS detection
+
+```text
+detect Signing(GoogleHmac) held=false PermissionDenied HTTP 403
+detect Signing(AwsSigV4) held=true accepted
+detect SinglePut(IfNoneMatch) held=true empty=accepted taken=AlreadyExists HTTP 412 preserved=true
+detect SinglePut(GenerationMatch) held=false empty=accepted taken=accepted preserved=false
+detect PartialUploadHidden held=true HEAD=NotFound HTTP 404 GET=NotFound HTTP 404 listed=false
+detect CompletionTimestamp held=true start=1791920612..1791920612 completion=1791920613..1791920613 published=1791920613
+detect ConditionalCompletion held=true empty=accepted taken=AlreadyExists HTTP 412 preserved=true
+detect CopyPublication(GenerationMatch) held=false empty=accepted taken=accepted preserved=false
+detect CopyPublication(IfNoneMatch) held=true empty=accepted taken=AlreadyExists HTTP 412 preserved=true
+detect CopyPublication(CloudflareIfNoneMatch) held=false empty=accepted taken=accepted preserved=false
+detect CopyTimestamp held=true condition=GenerationMatch source=1791920612 copy=1791920613
+detect ChecksumMode held=true accepted
+detect PassiveChecksum held=false checksum=false unstated=false google_hash=false generation=false
+detect ChecksumReturned held=false checksum=false unstated=false google_hash=false generation=false
+detect ChecksumScopeStated held=true checksum=false unstated=false google_hash=false generation=false
+detect GoogleGeneration held=false checksum=false unstated=false google_hash=false generation=false
+detect GoogleHeaders held=false checksum=false unstated=false google_hash=false generation=false
+detect BucketHead held=true accepted
+detect BucketList held=true accepted
+detect Listing(V1) held=true objects=10 pages_forced_at=1
+detect Listing(V2) held=true objects=10 pages_forced_at=1 agrees_with_v1=true
+detected S3Settings { signing: AwsSigV4, single_put: IfNoneMatch, multipart: ConditionalCompletion, multipart_timestamp: Completion, checksums: Absent, listing: V2, revision: ETag, bucket_check: Head, response_headers: S3, request_checksums: false }
+setup_safety_check PASS
+catalogued entries reproduced: [RustFs, SeaweedFs]
 ```
