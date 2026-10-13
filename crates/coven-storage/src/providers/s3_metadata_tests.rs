@@ -78,23 +78,46 @@ async fn native_metadata_keeps_revision_checksum_and_time_separate() {
         assert_eq!(next.metadata, storage.status(&path).await.unwrap().unwrap());
         first = next.metadata;
     }
-    for scope in ["FULL_OBJECT", "COMPOSITE"] {
-        state.lock().unwrap().response_headers = BTreeMap::from([
-            ("x-amz-checksum-sha256".into(), "digest".into()),
-            ("x-amz-checksum-type".into(), scope.into()),
-            ("x-amz-version-id".into(), "native-version".into()),
-        ]);
-        let observed = storage.status(&path).await.unwrap().unwrap();
-        assert_eq!(observed.revision, "version:native-version");
-        let digest = ChecksumValue::Sha256Base64("digest".into());
-        assert_eq!(
-            observed.checksum,
-            Some(if scope == "FULL_OBJECT" {
-                ObjectChecksum::FullObject(digest)
-            } else {
-                ObjectChecksum::Composite(digest)
-            })
-        );
+    for (header, digest) in [
+        (
+            "x-amz-checksum-sha256",
+            ChecksumValue::Sha256Base64("digest".into()),
+        ),
+        (
+            "x-amz-checksum-crc64nvme",
+            ChecksumValue::Crc64NvmeBase64("digest".into()),
+        ),
+        (
+            "x-amz-checksum-crc32c",
+            ChecksumValue::Crc32cBase64("digest".into()),
+        ),
+        (
+            "x-amz-checksum-crc32",
+            ChecksumValue::Crc32Base64("digest".into()),
+        ),
+        (
+            "x-amz-checksum-sha1",
+            ChecksumValue::Sha1Base64("digest".into()),
+        ),
+    ] {
+        for scope in ["FULL_OBJECT", "COMPOSITE"] {
+            state.lock().unwrap().response_headers = BTreeMap::from([
+                (header.into(), "digest".into()),
+                ("x-amz-checksum-type".into(), scope.into()),
+                ("x-amz-version-id".into(), "native-version".into()),
+            ]);
+            let observed = storage.status(&path).await.unwrap().unwrap();
+            assert_eq!(observed.revision, "version:native-version");
+            assert_eq!(
+                observed.checksum,
+                Some(if scope == "FULL_OBJECT" {
+                    ObjectChecksum::FullObject(digest.clone())
+                } else {
+                    ObjectChecksum::Composite(digest.clone())
+                }),
+                "{header}: {scope}"
+            );
+        }
     }
     state
         .lock()

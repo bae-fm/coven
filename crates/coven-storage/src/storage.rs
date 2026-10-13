@@ -10,6 +10,11 @@ pub struct ByteRange {
     start: u64,
     end: u64,
 }
+
+#[cfg(test)]
+#[path = "storage_tests.rs"]
+mod tests;
+
 impl ByteRange {
     /// Validate the bounds before issuing a ranged request.
     pub fn new(start: u64, end: u64) -> Result<Self, StorageError> {
