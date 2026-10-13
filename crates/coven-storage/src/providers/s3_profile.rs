@@ -141,6 +141,27 @@ pub(super) const PROFILES: &[S3Profile] = &[
             suite: 1,
         },
     },
+    // Detected by certification suite 1; the raw observations are in spec/s3-certification.md.
+    // Cloudflare documents the API differences at https://developers.cloudflare.com/r2/api/s3/api/.
+    // Native completion passed create-once and completion-time checks, so no copy is needed.
+    S3Profile {
+        name: "R2",
+        endpoint: EndpointMatch::HostSuffix(".r2.cloudflarestorage.com"),
+        signing: Signing::AwsSigV4,
+        single_put: SinglePut::IfNoneMatch,
+        multipart: Multipart::ConditionalCompletion,
+        multipart_timestamp: MultipartTimestamp::Completion,
+        checksums: Checksums::UnstatedIgnored,
+        listing: Listing::V2,
+        revision: Revision::ETag,
+        bucket_check: BucketCheck::Head,
+        response_headers: ResponseHeaders::S3,
+        request_checksums: true,
+        certification: Certification::Passed {
+            date: "2026-10-13",
+            suite: 1,
+        },
+    },
 ];
 impl S3Profile {
     pub(super) fn for_endpoint(endpoint: Option<&Url>) -> Self {

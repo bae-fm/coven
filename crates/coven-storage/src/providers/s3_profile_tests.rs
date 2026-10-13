@@ -138,7 +138,7 @@ async fn unstated_scope_skips_checksum_parsing_but_keeps_required_metadata() {
     );
 }
 
-fn profile_provider(url: &str, profile: S3Profile) -> StorageConnection<S3Storage> {
+pub(super) fn profile_provider(url: &str, profile: S3Profile) -> StorageConnection<S3Storage> {
     StorageConnection::from_provider(Arc::new(
         S3Storage::with_profile(
             StorageConfig::S3 {
@@ -157,4 +157,75 @@ fn profile_provider(url: &str, profile: S3Profile) -> StorageConnection<S3Storag
         )
         .unwrap(),
     ))
+}
+
+#[test]
+fn r2_profile_matches_account_hosts_without_matching_lookalikes() {
+    for (endpoint, name) in [
+        ("https://account.r2.cloudflarestorage.com", "R2"),
+        ("https://ACCOUNT.R2.CLOUDFLARESTORAGE.COM/", "R2"),
+        ("https://account.eu.r2.cloudflarestorage.com", "R2"),
+        ("https://r2.cloudflarestorage.com", "AWS"),
+        ("https://account.notr2.cloudflarestorage.com", "AWS"),
+        (
+            "https://account.r2.cloudflarestorage.com.attacker.test",
+            "AWS",
+        ),
+        ("https://other.test/account.r2.cloudflarestorage.com", "AWS"),
+    ] {
+        assert_eq!(
+            S3Profile::for_endpoint(Some(&endpoint.parse().unwrap())).name,
+            name
+        );
+    }
+}
+
+#[tokio::test]
+async fn r2_endpoint_ignores_unscoped_checksums_on_status_and_reads() {
+    let state = Arc::new(Mutex::new(Remote {
+        response_headers: BTreeMap::from([(
+            "x-amz-checksum-sha256".into(),
+            "J3CJ2RwL308uaGK6fkoHYFEZQx9dE/cm3TUrBvGyBqk=".into(),
+        )]),
+        ..Remote::default()
+    }));
+    let server = TestServer::new(Router::new().fallback(endpoint).with_state(state)).await;
+    let mut storage = S3Storage::new(
+        StorageConfig::S3 {
+            bucket: "bucket".into(),
+            region: "auto".into(),
+            endpoint: Some("https://account.r2.cloudflarestorage.com".parse().unwrap()),
+            prefix: "store".into(),
+        },
+        S3Credentials {
+            access_key_id: "access".into(),
+            secret_access_key: SecretText::new("secret".into()),
+        },
+        Arc::new(FixedClock::new(SystemTime::UNIX_EPOCH)),
+        Arc::new(SequentialIds::new()),
+    )
+    .unwrap();
+    storage.client = Client::from_conf(
+        storage
+            .client
+            .config()
+            .to_builder()
+            .endpoint_url(&server.url)
+            .build(),
+    );
+    let storage = StorageConnection::from_provider(Arc::new(storage));
+    let path = ObjectPath::positions(STORE_ID, coven_foundation::id_source::DeviceId(31));
+    storage.replace(&path, b"bytes").await.unwrap();
+    let status = storage.status(&path).await.unwrap().unwrap();
+    assert_eq!(status.checksum, None);
+    for (range, expected) in [
+        (None, b"bytes".as_slice()),
+        (Some(ByteRange::new(1, 4).unwrap()), b"yte".as_slice()),
+    ] {
+        let read = storage.read_object(&path, range).await.unwrap();
+        assert_eq!(read.metadata.checksum, None);
+        assert_eq!(read.metadata.size, 5);
+        assert_eq!(read.metadata.revision, status.revision);
+        assert_eq!(read.bytes, expected);
+    }
 }
