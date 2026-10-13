@@ -177,7 +177,7 @@ fn file_sizes_and_chunk_lengths_are_checked_before_opening() {
 #[test]
 fn file_fixture_opens_reencodes_and_decodes_every_mutation() {
     let bytes = crate::tests::hex(include_str!("../fixtures/file.hex"));
-    let mut reference = include_str!("../fixtures/uploaded-file.txt").lines();
+    let mut reference = include_str!("../fixtures/file-reference.txt").lines();
     assert_eq!(reference.next().unwrap(), PATH);
     let reference =
         crate::file_reference::FileReference::decode(reference.next().unwrap()).unwrap();

@@ -134,7 +134,7 @@ fn references_and_diagnostics_never_disclose_local_paths_or_keys() {
 
 #[test]
 fn file_reference_matches_the_pinned_text_and_path() {
-    let mut fixture = include_str!("../fixtures/uploaded-file.txt").lines();
+    let mut fixture = include_str!("../fixtures/file-reference.txt").lines();
     let path = fixture.next().unwrap();
     let text = fixture.next().unwrap();
     assert!(fixture.next().is_none());

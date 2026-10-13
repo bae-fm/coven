@@ -222,7 +222,7 @@ async fn fixed_file_references_are_found_by_eager_reads_and_retention() {
     ];
     let db = store.schema(declarations, SCHEMA).await.unwrap();
     attach(&db, b"original".to_vec(), true).await;
-    let text = include_str!("../../coven-format/fixtures/uploaded-file.txt")
+    let text = include_str!("../../coven-format/fixtures/file-reference.txt")
         .lines()
         .nth(1)
         .unwrap();

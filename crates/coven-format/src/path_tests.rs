@@ -68,7 +68,7 @@ fn storage_paths_require_a_canonical_store_id() {
 
 #[test]
 fn uploaded_file_fixture_keeps_its_device_in_the_path() {
-    let fixture = include_str!("../fixtures/uploaded-file.txt");
+    let fixture = include_str!("../fixtures/file-reference.txt");
     let path = ObjectPath::parse(fixture.lines().next().unwrap()).unwrap();
     let reference =
         crate::file_reference::FileReference::decode(fixture.lines().nth(1).unwrap()).unwrap();
