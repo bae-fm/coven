@@ -8,6 +8,7 @@ fn location() -> StorageConfig {
         bucket: "bucket".into(),
         region: "region".into(),
         endpoint: None,
+        profile: None,
         prefix: "store".into(),
     }
 }
@@ -130,7 +131,7 @@ fn metadata_validates_kind_checksum_and_storage_without_exposing_secrets() {
         decode_code_info(&invalid.to_text().unwrap()),
         Err(CodeError::Invalid)
     ));
-    invalid.storage = SecretBytes::new(br#"{"S3":{"location":{"S3":{"bucket":"bucket","region":"region","endpoint":null,"prefix":"store"}},"credentials":{"access_key_id":"access","secret_access_key":"secret"}}}"#.to_vec());
+    invalid.storage = SecretBytes::new(br#"{"S3":{"location":{"S3":{"bucket":"bucket","region":"region","endpoint":null,"profile":null,"prefix":"store"}},"credentials":{"access_key_id":"access","secret_access_key":"secret"}}}"#.to_vec());
     assert!(matches!(
         read_restore_code(&invalid.to_text().unwrap()),
         Err(CodeError::Invalid)

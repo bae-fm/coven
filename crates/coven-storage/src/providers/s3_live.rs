@@ -26,6 +26,7 @@ impl LiveS3 {
             bucket: take("COVEN_LIVE_S3_BUCKET").as_str().to_owned(),
             region: take("COVEN_LIVE_S3_REGION").as_str().to_owned(),
             endpoint,
+            profile: None,
             prefix: "coven-live".into(),
         };
         let credentials = S3Credentials {

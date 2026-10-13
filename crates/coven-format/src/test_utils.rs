@@ -402,7 +402,7 @@ pub fn restore() -> RestoreCode {
         name: "S".into(),
         member_keys: member_keys(),
         storage: SecretBytes::new(
-            br#"{"S3":{"bucket":"bucket","region":"region","endpoint":null,"prefix":"store"}}"#
+            br#"{"S3":{"bucket":"bucket","region":"region","endpoint":null,"profile":null,"prefix":"store"}}"#
                 .to_vec(),
         ),
     }

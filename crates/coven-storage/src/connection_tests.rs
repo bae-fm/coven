@@ -101,6 +101,7 @@ async fn wrong_location_and_invalid_part_keep_the_provider_refusal_order() {
                 bucket: "bucket".into(),
                 region: "region".into(),
                 endpoint: None,
+                profile: None,
                 prefix: "store".into(),
             },
             StorageFailure::InvalidPart,

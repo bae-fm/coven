@@ -658,6 +658,16 @@ the file's ranges under `F`.
     through its XML API; suffix `.r2.cloudflarestorage.com` selects
     **Cloudflare R2**, including jurisdiction-specific account hosts. Suffixes
     include the separating dot and require a preceding host component.
+  - Self-hosted services have arbitrary endpoints, so no hostname identifies
+    them. The S3 location therefore takes an optional profile name. A named
+    profile is used as is; without a name, the hostname rules above apply and
+    every other endpoint uses AWS's profile. A name never overrides a
+    catalogued host: such an endpoint admits only its own profile's name.
+    Without an endpoint, requests reach AWS, so only AWS may be named.
+    Catalogued hosts require `https`; other endpoints may use plain `http`, as
+    a self-hosted server on the same machine or a private network can. A
+    contradicting name or a plain-`http` catalogued host fails validation with
+    `InvalidConfiguration` before any request.
   - Certification suite version 1 passed GCS and R2 on **2026-10-13**. AWS is
     **uncertified**: there is no live account, and its native multipart start
     time remains a known publication gap. The table's selected behaviors are:
@@ -738,7 +748,8 @@ the file's ranges under `F`.
     and cannot complete or copy again. A replacement session starts only after
     cleanup succeeds, at offset zero with the same path, size and fixed bytes.
     An occupied destination still requires complete-byte comparison (§10).
-  - Unknown S3-compatible endpoints use AWS's headers and multipart protocol.
+  - Unknown S3-compatible endpoints without a profile name use AWS's headers
+    and multipart protocol.
     Setup refuses them unless every provider check below passes, including
     `CreateOnce`. Accepting a second create is a protocol failure, even if the
     service claims compatibility. Every known profile also runs that setup

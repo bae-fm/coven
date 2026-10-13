@@ -32,6 +32,14 @@ mod metadata;
 #[path = "s3_restart.rs"]
 mod restart;
 
+/// Refuses a profile name or plain-http endpoint that contradicts the endpoint (§4).
+pub(crate) fn check_s3_profile(
+    endpoint: Option<&url::Url>,
+    name: Option<crate::S3ProfileName>,
+) -> Result<(), StorageError> {
+    S3Profile::select(endpoint, name).map(|_| ())
+}
+
 /// S3 and compatible endpoints, using only object operations and manually supplied keys.
 pub(crate) struct S3Storage {
     client: Client,
@@ -86,12 +94,15 @@ impl S3Storage {
         clock: ClockRef,
         ids: IdSourceRef,
     ) -> Result<Self, StorageError> {
-        let StorageConfig::S3 { endpoint, .. } = &config else {
+        let StorageConfig::S3 {
+            endpoint, profile, ..
+        } = &config
+        else {
             return Err(
                 StorageFailure::InvalidConfiguration.with_source("expected S3 configuration")
             );
         };
-        let profile = S3Profile::for_endpoint(endpoint.as_ref());
+        let profile = S3Profile::select(endpoint.as_ref(), *profile)?;
         Self::with_profile(config, credentials, clock, ids, profile)
     }
     fn with_profile(
@@ -106,6 +117,7 @@ impl S3Storage {
             region,
             endpoint,
             prefix,
+            ..
         } = &config
         else {
             return Err(

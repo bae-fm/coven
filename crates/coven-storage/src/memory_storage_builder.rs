@@ -88,6 +88,7 @@ fn location(provider: CloudProvider) -> StorageConfig {
             bucket: "test".into(),
             region: "us-east-1".into(),
             endpoint: None,
+            profile: None,
             prefix: "store".into(),
         },
         CloudProvider::GoogleDrive => StorageConfig::GoogleDrive {

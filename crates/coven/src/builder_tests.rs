@@ -277,6 +277,7 @@ mod recovery {
                 bucket: "test".into(),
                 region: "us-east-1".into(),
                 endpoint: None,
+                profile: None,
                 prefix: "recovery".into(),
             },
             StorageConfig::Dropbox {

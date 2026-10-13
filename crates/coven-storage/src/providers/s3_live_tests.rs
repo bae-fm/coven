@@ -663,8 +663,10 @@ fn print_profile(p: S3Profile, config: &StorageConfig, date: Option<&str>) {
     };
     // Only the hostname is source data, never a URL's credentials, path or query.
     let (name, endpoint) = match endpoint.as_ref().and_then(url::Url::host_str) {
-        Some(host) if !p.endpoint.matches(host) => ("Uncatalogued", format!("Host({host:?})")),
-        _ => (p.name, format!("{:?}", p.endpoint)),
+        Some(host) if !p.endpoint.matches(host) => {
+            ("Uncatalogued".into(), format!("Host({host:?})"))
+        }
+        _ => (format!("{:?}", p.name), format!("{:?}", p.endpoint)),
     };
     let certification = match date {
         Some(date) => format!(
@@ -676,7 +678,7 @@ fn print_profile(p: S3Profile, config: &StorageConfig, date: Option<&str>) {
         ),
         None => "Uncertified".into(),
     };
-    println!("S3Profile {{\n    name: {name:?},\n    endpoint: EndpointMatch::{endpoint},\n    signing: Signing::{:?},\n    single_put: SinglePut::{:?},\n    multipart: Multipart::{:?},\n    multipart_timestamp: MultipartTimestamp::{:?},\n    checksums: Checksums::{:?},\n    listing: Listing::{:?},\n    revision: Revision::{:?},\n    bucket_check: BucketCheck::{:?},\n    response_headers: ResponseHeaders::{:?},\n    request_checksums: {},\n    certification: Certification::{certification},\n}},", p.signing, p.single_put, p.multipart, p.multipart_timestamp, p.checksums, p.listing, p.revision, p.bucket_check, p.response_headers, p.request_checksums);
+    println!("S3Profile {{\n    name: S3ProfileName::{name},\n    endpoint: EndpointMatch::{endpoint},\n    signing: Signing::{:?},\n    single_put: SinglePut::{:?},\n    multipart: Multipart::{:?},\n    multipart_timestamp: MultipartTimestamp::{:?},\n    checksums: Checksums::{:?},\n    listing: Listing::{:?},\n    revision: Revision::{:?},\n    bucket_check: BucketCheck::{:?},\n    response_headers: ResponseHeaders::{:?},\n    request_checksums: {},\n    certification: Certification::{certification},\n}},", p.signing, p.single_put, p.multipart, p.multipart_timestamp, p.checksums, p.listing, p.revision, p.bucket_check, p.response_headers, p.request_checksums);
 }
 
 pub(super) async fn conformance(connected: Arc<StorageConnection<S3Storage>>, store: StoreId) {

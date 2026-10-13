@@ -35,6 +35,7 @@ fn fixture(present: bool) -> (Arc<Keychain>, StoreKeychain, RestoreCode) {
             bucket: "bucket".into(),
             region: "region".into(),
             endpoint: None,
+            profile: None,
             prefix: "store".into(),
         }
         .encode()

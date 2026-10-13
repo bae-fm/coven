@@ -145,6 +145,7 @@ pub(super) fn profile_provider(url: &str, profile: S3Profile) -> StorageConnecti
                 bucket: "bucket".into(),
                 region: "us-east-1".into(),
                 endpoint: Some(url.parse().unwrap()),
+                profile: None,
                 prefix: "store".into(),
             },
             S3Credentials {
@@ -161,20 +162,23 @@ pub(super) fn profile_provider(url: &str, profile: S3Profile) -> StorageConnecti
 
 #[test]
 fn r2_profile_matches_account_hosts_without_matching_lookalikes() {
+    use S3ProfileName::{Aws, R2};
     for (endpoint, name) in [
-        ("https://account.r2.cloudflarestorage.com", "R2"),
-        ("https://ACCOUNT.R2.CLOUDFLARESTORAGE.COM/", "R2"),
-        ("https://account.eu.r2.cloudflarestorage.com", "R2"),
-        ("https://r2.cloudflarestorage.com", "AWS"),
-        ("https://account.notr2.cloudflarestorage.com", "AWS"),
+        ("https://account.r2.cloudflarestorage.com", R2),
+        ("https://ACCOUNT.R2.CLOUDFLARESTORAGE.COM/", R2),
+        ("https://account.eu.r2.cloudflarestorage.com", R2),
+        ("https://r2.cloudflarestorage.com", Aws),
+        ("https://account.notr2.cloudflarestorage.com", Aws),
         (
             "https://account.r2.cloudflarestorage.com.attacker.test",
-            "AWS",
+            Aws,
         ),
-        ("https://other.test/account.r2.cloudflarestorage.com", "AWS"),
+        ("https://other.test/account.r2.cloudflarestorage.com", Aws),
     ] {
         assert_eq!(
-            S3Profile::for_endpoint(Some(&endpoint.parse().unwrap())).name,
+            S3Profile::select(Some(&endpoint.parse().unwrap()), None)
+                .unwrap()
+                .name,
             name
         );
     }
@@ -195,6 +199,7 @@ async fn r2_endpoint_ignores_unscoped_checksums_on_status_and_reads() {
             bucket: "bucket".into(),
             region: "auto".into(),
             endpoint: Some("https://account.r2.cloudflarestorage.com".parse().unwrap()),
+            profile: None,
             prefix: "store".into(),
         },
         S3Credentials {
@@ -228,4 +233,65 @@ async fn r2_endpoint_ignores_unscoped_checksums_on_status_and_reads() {
         assert_eq!(read.metadata.revision, status.revision);
         assert_eq!(read.bytes, expected);
     }
+}
+
+#[test]
+fn explicit_name_selects_its_profile_for_an_uncatalogued_endpoint() {
+    let endpoint: url::Url = "http://localhost:3900".parse().unwrap();
+    for (name, expected) in [
+        (None, S3ProfileName::Aws),
+        (Some(S3ProfileName::Aws), S3ProfileName::Aws),
+        (Some(S3ProfileName::Gcs), S3ProfileName::Gcs),
+        (Some(S3ProfileName::R2), S3ProfileName::R2),
+    ] {
+        let profile = S3Profile::select(Some(&endpoint), name).unwrap();
+        assert_eq!(profile.name, expected);
+        assert_eq!(
+            profile,
+            *PROFILES.iter().find(|p| p.name == expected).unwrap()
+        );
+    }
+}
+
+#[tokio::test]
+async fn explicit_gcs_name_drives_the_adapter_at_an_uncatalogued_endpoint() {
+    let state = Arc::new(Mutex::new(Remote {
+        gcs: true,
+        ..Remote::default()
+    }));
+    let server = TestServer::new(Router::new().fallback(endpoint).with_state(state)).await;
+    let storage = StorageConnection::from_provider(Arc::new(
+        S3Storage::new(
+            StorageConfig::S3 {
+                bucket: "bucket".into(),
+                region: "auto".into(),
+                endpoint: Some(server.url.parse().unwrap()),
+                profile: Some(S3ProfileName::Gcs),
+                prefix: "store".into(),
+            },
+            S3Credentials {
+                access_key_id: "access".into(),
+                secret_access_key: SecretText::new("secret".into()),
+            },
+            Arc::new(FixedClock::new(SystemTime::UNIX_EPOCH)),
+            Arc::new(SequentialIds::new()),
+        )
+        .unwrap(),
+    ));
+    assert_eq!(storage.provider.profile.name, S3ProfileName::Gcs);
+    let path = ObjectPath::device_log(
+        STORE_ID,
+        coven_foundation::id_source::DeviceId(31),
+        std::num::NonZeroU64::MIN,
+    );
+    storage.create(&path, b"original").await.unwrap();
+    assert_eq!(
+        storage
+            .create(&path, b"replacement")
+            .await
+            .unwrap_err()
+            .failure(),
+        StorageFailure::AlreadyExists
+    );
+    assert_eq!(storage.read(&path).await.unwrap(), b"original");
 }

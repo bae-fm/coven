@@ -1402,14 +1402,18 @@ while let Ok(values) = lost.next().await {
   a path already occupied before the check is left untouched. A failed check
   returns `StorageSetupError::ProviderCheck`, naming the operation and its
   classified cause; the error retains a cleanup failure too if both fail.
-- S3 service profiles are selected by endpoint (§4): no endpoint means AWS S3;
+- S3 service profiles are selected by `S3ProfileName` when the location names
+  one, otherwise by endpoint (§4): no endpoint means AWS S3;
   `storage.googleapis.com` means GCS XML, using generation conditions and
   conditional copy to publish multipart uploads. Hosts ending in
   `.r2.cloudflarestorage.com` select R2, using conditional PUT and multipart
   completion and ignoring checksums without stated scope. Unknown endpoints
-  use AWS's profile. Every connection is accepted only after all setup checks
-  pass, including those using certified profiles. An endpoint that
-  overwrites on create fails `CreateOnce`; setup preserves the prior connection.
+  without a name use AWS's profile. A name contradicting a catalogued host, a
+  name other than AWS without an endpoint, or plain `http` to a catalogued
+  host is `InvalidConfiguration`; other endpoints may use `http`. Every
+  connection is accepted only after all setup checks pass, including those
+  using certified profiles. An endpoint that overwrites on create fails
+  `CreateOnce`; setup preserves the prior connection.
 - Setup commits the storage credentials, keys, location and restore code only
   once the connection is ready. Failure preserves their previous values and
   the previous connection. The fixed first-entry or access-update attempt stays
@@ -1523,10 +1527,13 @@ pub enum StorageConfig {
         bucket: String,
         /// The signing region.
         region: String,
-        /// None selects AWS; storage.googleapis.com selects GCS XML;
-        /// hosts ending in .r2.cloudflarestorage.com select R2 (§4).
-        /// Unknown endpoints use AWS's profile. All run the setup check.
+        /// None is AWS's own endpoint. Catalogued hosts require https (§4).
         endpoint: Option<Url>,
+        /// Some selects that service's profile; it must agree with a catalogued
+        /// endpoint host. None selects by host: storage.googleapis.com is GCS
+        /// XML, hosts ending in .r2.cloudflarestorage.com are R2, and every
+        /// other endpoint uses AWS's profile. All run the setup check.
+        profile: Option<S3ProfileName>,
         /// The base prefix, without leading or trailing slashes; paths add the store id.
         prefix: String,
     },
@@ -1545,6 +1552,17 @@ pub enum StorageConfig {
         /// The custom zone containing the store.
         zone: String,
     },
+}
+
+/// An S3 service whose adapter profile a location names explicitly (§4).
+/// Self-hosted services have arbitrary endpoints, so no hostname identifies them.
+pub enum S3ProfileName {
+    /// Amazon S3.
+    Aws,
+    /// Google Cloud Storage through its XML API.
+    Gcs,
+    /// Cloudflare R2.
+    R2,
 }
 
 /// Dropbox's location fixes its access level at cloud-store creation (§4).

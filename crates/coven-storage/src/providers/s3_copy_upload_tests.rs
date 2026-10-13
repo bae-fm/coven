@@ -28,6 +28,7 @@ pub(super) fn gcs_provider(url: &str) -> StorageConnection<S3Storage> {
             bucket: "bucket".into(),
             region: "auto".into(),
             endpoint: Some("https://storage.googleapis.com".parse().unwrap()),
+            profile: None,
             prefix: "store".into(),
         },
         S3Credentials {
@@ -77,7 +78,7 @@ async fn gcs_create_preserves_an_occupied_path() {
 
 #[test]
 fn profile_uses_the_endpoint_host_exactly() {
-    assert_eq!(S3Profile::for_endpoint(None), profile::PROFILES[0]);
+    assert_eq!(S3Profile::select(None, None).unwrap(), profile::PROFILES[0]);
     for (url, expected) in [
         ("https://storage.googleapis.com", profile::PROFILES[1]),
         ("https://STORAGE.GOOGLEAPIS.COM/", profile::PROFILES[1]),
@@ -91,7 +92,7 @@ fn profile_uses_the_endpoint_host_exactly() {
         ),
     ] {
         assert_eq!(
-            S3Profile::for_endpoint(Some(&url.parse().unwrap())),
+            S3Profile::select(Some(&url.parse().unwrap()), None).unwrap(),
             expected
         );
     }

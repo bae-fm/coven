@@ -80,6 +80,7 @@ fn s3_recording() -> UploadSession {
             bucket: "bucket".into(),
             region: "region".into(),
             endpoint: None,
+            profile: None,
             prefix: "store".into(),
         },
         SessionState::S3 {
@@ -312,6 +313,7 @@ fn completed_and_verifying_recordings_still_obey_their_provider() {
         bucket: String::new(),
         region: "region".into(),
         endpoint: None,
+        profile: None,
         prefix: "store".into(),
     };
     assert_invalid_recording(&session);

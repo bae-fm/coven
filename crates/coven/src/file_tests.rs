@@ -503,6 +503,7 @@ async fn uploaded_files_pins_and_read_only_ranges_use_the_composed_owner() {
                 bucket: "other".into(),
                 region: "test".into(),
                 endpoint: None,
+                profile: None,
                 prefix: "uploaded".into(),
             })
             .clock(Arc::new(SystemClock))

@@ -6,6 +6,7 @@ fn config() -> StorageConfig {
         bucket: "test".into(),
         region: "us-east-1".into(),
         endpoint: None,
+        profile: None,
         prefix: "store".into(),
     }
 }

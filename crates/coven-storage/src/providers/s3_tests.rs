@@ -356,6 +356,7 @@ fn provider(url: &str) -> StorageConnection<S3Storage> {
             bucket: "bucket".into(),
             region: "us-east-1".into(),
             endpoint: Some(url.parse().unwrap()),
+            profile: None,
             prefix: "store".into(),
         },
         S3Credentials {

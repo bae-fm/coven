@@ -58,6 +58,7 @@ impl Fixture {
                     region: "test".into(),
                     prefix: "store".into(),
                     endpoint: None,
+                    profile: None,
                 })
                 .clock(clock.clone())
                 .transfer_limits(8 * 1024 * 1024, 65536)

@@ -66,7 +66,8 @@ pub use coven_storage::providers::{
 };
 pub use coven_storage::{
     ByteRange, CloudProvider, DropboxAccess, DropboxLocation, GoogleDriveAccess, OAuthAccess,
-    ObjectPath, ObjectPrefix, S3Credentials, StorageConfig, StorageError, StorageFailure,
+    ObjectPath, ObjectPrefix, S3Credentials, S3ProfileName, StorageConfig, StorageError,
+    StorageFailure,
 };
 
 #[cfg(any(test, feature = "test-utils"))]

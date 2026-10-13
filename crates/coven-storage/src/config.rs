@@ -27,6 +27,18 @@ impl CloudProvider {
     }
 }
 
+/// An S3 service whose adapter profile a location names explicitly (§4).
+/// Self-hosted services have arbitrary endpoints, so no hostname identifies them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum S3ProfileName {
+    /// Amazon S3.
+    Aws,
+    /// Google Cloud Storage through its XML API.
+    Gcs,
+    /// Cloudflare R2.
+    R2,
+}
+
 /// The store's location; credentials are kept separately in key custody.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -37,10 +49,13 @@ pub enum StorageConfig {
         bucket: String,
         /// Signing region.
         region: String,
-        /// None selects AWS; storage.googleapis.com selects GCS XML;
-        /// hosts ending in .r2.cloudflarestorage.com select R2.
-        /// Unknown endpoints use AWS's profile. All run the setup check.
+        /// None is AWS's own endpoint. Catalogued hosts (§4) require https.
         endpoint: Option<url::Url>,
+        /// Some selects that service's profile; it must agree with a catalogued
+        /// endpoint host. None selects by host: storage.googleapis.com is GCS
+        /// XML, hosts ending in .r2.cloudflarestorage.com are R2, and every
+        /// other endpoint uses AWS's profile. All run the setup check.
+        profile: Option<S3ProfileName>,
         /// The store's prefix, without leading or trailing slashes.
         prefix: String,
     },
@@ -103,6 +118,7 @@ impl StorageConfig {
                 bucket,
                 region,
                 endpoint,
+                profile,
                 prefix,
             } => {
                 if let Some(endpoint) = endpoint {
@@ -115,6 +131,7 @@ impl StorageConfig {
                         );
                     }
                 }
+                crate::providers::check_s3_profile(endpoint.as_ref(), *profile)?;
                 crate::path::validate_root(prefix)?;
                 vec![bucket, region]
             }
