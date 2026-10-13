@@ -387,7 +387,7 @@ async fn listing_uses_the_same_copy_as_reads_and_refuses_missing_metadata() {
         ("size", json!(null), StorageFailure::Protocol),
         ("size", json!("-1"), StorageFailure::Protocol),
         ("createdTime", json!(null), StorageFailure::Protocol),
-        ("createdTime", json!("not-time"), StorageFailure::Encoding),
+        ("createdTime", json!("not-time"), StorageFailure::Protocol),
     ] {
         let old = state.lock().unwrap().files["a-later"].0[field].clone();
         state.lock().unwrap().files.get_mut("a-later").unwrap().0[field] = invalid;

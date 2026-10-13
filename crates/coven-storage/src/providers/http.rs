@@ -419,10 +419,10 @@ pub(crate) fn string<'a>(value: &'a Value, field: &str) -> Result<&'a str, Stora
 pub(crate) fn timestamp(value: &Value, field: &str) -> Result<std::time::SystemTime, StorageError> {
     use aws_sdk_s3::primitives::{DateTime, DateTimeFormat};
     let timestamp = DateTime::from_str(string(value, field)?, DateTimeFormat::DateTimeWithOffset)
-        .map_err(|error| StorageFailure::Encoding.with_source(error))?;
+        .map_err(|error| StorageFailure::Protocol.with_source(error))?;
     timestamp
         .try_into()
-        .map_err(|error| StorageFailure::Encoding.with_source(error))
+        .map_err(|error| StorageFailure::Protocol.with_source(error))
 }
 pub(crate) fn array<'a>(value: &'a Value, field: &str) -> Result<&'a Vec<Value>, StorageError> {
     value[field]

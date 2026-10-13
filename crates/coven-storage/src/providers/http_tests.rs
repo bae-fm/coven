@@ -3,6 +3,27 @@ use crate::providers::tests::{response, TestServer};
 use axum::Router;
 
 #[test]
+fn malformed_provider_timestamps_are_protocol_failures_with_the_parse_cause() {
+    use std::error::Error;
+
+    fn check_cause<E: Error + 'static>(error: &StorageError, expected: E) {
+        let cause = error.source().unwrap().downcast_ref::<E>().unwrap();
+        assert_eq!(cause.to_string(), expected.to_string());
+    }
+
+    for value in ["not-a-timestamp", "2026-99-06T00:00:00Z"] {
+        let error = timestamp(&serde_json::json!({"stored_at": value}), "stored_at").unwrap_err();
+        assert_eq!(error.failure(), StorageFailure::Protocol);
+        let cause = aws_sdk_s3::primitives::DateTime::from_str(
+            value,
+            aws_sdk_s3::primitives::DateTimeFormat::DateTimeWithOffset,
+        )
+        .unwrap_err();
+        check_cause(&error, cause);
+    }
+}
+
+#[test]
 fn oauth_error_codes_determine_the_action_before_http_status() {
     for provider in [
         CloudProvider::GoogleDrive,
