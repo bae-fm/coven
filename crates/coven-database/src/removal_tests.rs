@@ -161,6 +161,200 @@ async fn deleted_note_43_nulls_link_6_but_takes_out_stale_children() {
 }
 
 #[tokio::test]
+async fn local_parent_deletion_records_cascade_and_null_as_ordinary_changes() {
+    let store = TestStore::new();
+    let db = store.schema(vec![table("notes"), table("attachments"), table("links")], "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY); CREATE TABLE attachments(id TEXT NOT NULL PRIMARY KEY,note_id TEXT REFERENCES notes(id) ON DELETE CASCADE); CREATE TABLE links(id TEXT NOT NULL PRIMARY KEY,note_id TEXT REFERENCES notes(id) ON DELETE SET NULL)").await.unwrap();
+    sql(&db, "INSERT INTO notes VALUES('43'); INSERT INTO attachments VALUES('8','43'); INSERT INTO links VALUES('5','43')").await.unwrap();
+    sql(&db, "DELETE FROM notes").await.unwrap();
+    let record = records(&db).pop().unwrap();
+    let rows = &record.parts[0].rows;
+    assert_eq!(rows.len(), 3);
+    for table in ["notes", "attachments"] {
+        let row = rows.iter().find(|r| r.row.table == table).unwrap();
+        assert_eq!(row.change.generation, 1);
+        assert!(matches!(row.change.operation, Operation::Delete));
+    }
+    let link = rows.iter().find(|r| r.row.table == "links").unwrap();
+    assert_eq!(link.change.generation, 1);
+    let Operation::Update(columns) = &link.change.operation else {
+        panic!("set null update")
+    };
+    assert_eq!(columns.len(), 1);
+    assert_eq!(columns["note_id"].value, Value::Null);
+    assert!(columns["note_id"].parents.is_empty());
+    assert_eq!(link.old["note_id"], Value::Text("43".into()));
+    assert!(db.lost_values().await.unwrap().is_empty());
+    db.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn local_restrict_and_no_action_children_refuse_parent_deletion_atomically() {
+    for action in ["RESTRICT", "NO ACTION"] {
+        let store = TestStore::new();
+        let schema = format!("CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY); CREATE TABLE links(id TEXT NOT NULL PRIMARY KEY,note_id TEXT REFERENCES notes(id) ON DELETE {action})");
+        let db = store
+            .builder(
+                vec![table("notes"), table("links")],
+                vec![crate::Migration::run(1, "references", move |context| {
+                    context.execute_batch(&schema)?;
+                    Ok(())
+                })],
+            )
+            .open()
+            .await
+            .unwrap();
+        sql(
+            &db,
+            "INSERT INTO notes VALUES('43'); INSERT INTO links VALUES('6','43')",
+        )
+        .await
+        .unwrap();
+        let before = crate::tests::contents(&db);
+        assert!(
+            matches!(
+                sql(&db, "DELETE FROM notes").await,
+                Err(crate::DbError::Sqlite(_))
+            ),
+            "{action}"
+        );
+        assert_eq!(crate::tests::contents(&db), before, "{action}");
+        db.close().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn a_check_that_forbids_null_preserves_the_written_reference_as_a_removed_row() {
+    let ids = coven_foundation::id_source::SequentialIds::new();
+    let source_store = TestStore::with_ids(&ids);
+    let store = TestStore::with_ids(&ids);
+    let tables = || vec![table("notes"), table("links")];
+    let schema = "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY); CREATE TABLE links(id TEXT NOT NULL PRIMARY KEY,note_id TEXT REFERENCES notes(id) ON DELETE SET NULL, CONSTRAINT has_parent CHECK(note_id IS NOT NULL))";
+    let source = source_store.schema(tables(), schema).await.unwrap();
+    let db = store.schema(tables(), schema).await.unwrap();
+    sql(&source, "INSERT INTO notes VALUES('43'),('44')")
+        .await
+        .unwrap();
+    db.apply_downloaded(records(&source)[0].clone().into())
+        .await
+        .unwrap();
+    sql(&db, "INSERT INTO links VALUES('6','43')")
+        .await
+        .unwrap();
+    let initial = records(&db).pop().unwrap();
+    sql(&source, "DELETE FROM notes WHERE id='43'")
+        .await
+        .unwrap();
+    db.apply_downloaded(records(&source)[1].clone().into())
+        .await
+        .unwrap();
+
+    assert_eq!(count(&db, "links"), 0);
+    let removed = losses(&db);
+    let foreign_key = ForeignKey::new(["note_id"], "notes", ["id"]);
+    assert_eq!(removed.len(), 1);
+    assert_eq!(removed[0].0, "links");
+    assert_eq!(removed[0].2, [Rule::ForeignKey(foreign_key.clone())].into());
+    assert_eq!(removed[0].1["note_id"].value, Value::Text("43".into()));
+    assert_eq!(removed[0].1["note_id"].parents[&foreign_key].generation, 1);
+    db.inspect_writer_schema(|db, schema| {
+        let app = crate::write_rows::AppView::after(db, schema);
+        let merge = crate::merge_store::MergeStore::new(db, &app);
+        let link = initial.parts[0]
+            .rows
+            .iter()
+            .find(|r| r.row.table == "links")
+            .unwrap();
+        let state = merge.row(&link.row).unwrap().state;
+        assert_eq!(state.generation(), 1);
+        assert_eq!(state.cells()["note_id"].write, initial.header.position);
+    });
+
+    sql(&db, "INSERT INTO links VALUES('6','44')")
+        .await
+        .unwrap();
+    assert!(losses(&db).is_empty());
+    assert_eq!(
+        db.inspect_writer(|db| db
+            .query_row("SELECT note_id FROM links", [], |r| r.get::<_, String>(0))
+            .unwrap()),
+        "44"
+    );
+    let record = records(&db).pop().unwrap();
+    assert_eq!(record.parts[0].rows[0].change.generation, 1);
+    assert!(matches!(
+        record.parts[0].rows[0].change.operation,
+        Operation::Update(_)
+    ));
+    db.close().await.unwrap();
+    source.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn concurrent_composite_reference_columns_without_a_parent_roll_back_apply() {
+    let ids = coven_foundation::id_source::SequentialIds::new();
+    let a_store = TestStore::with_ids(&ids);
+    let b_store = TestStore::with_ids(&ids);
+    let tables = || vec![table("parents").key_columns(["a", "b"]), table("children")];
+    let schema = "CREATE TABLE parents(a TEXT NOT NULL,b TEXT NOT NULL,PRIMARY KEY(a,b)); CREATE TABLE children(id TEXT NOT NULL PRIMARY KEY,a TEXT,b TEXT,FOREIGN KEY(a,b) REFERENCES parents(a,b))";
+    let a = a_store.schema(tables(), schema).await.unwrap();
+    let b = b_store.schema(tables(), schema).await.unwrap();
+    sql(&a, "INSERT INTO children VALUES('child',NULL,NULL)")
+        .await
+        .unwrap();
+    b.apply_downloaded(records(&a)[0].clone().into())
+        .await
+        .unwrap();
+    sql(&a, "UPDATE children SET a='a'").await.unwrap();
+    sql(&b, "UPDATE children SET b='b'").await.unwrap();
+    let a_write = records(&a).pop().unwrap();
+    let b_write = records(&b).pop().unwrap();
+    // Neither authored tuple names a parent. Their merged tuple ('a','b')
+    // has no parent metadata for removal, and SQLite refuses it.
+    for (db, write) in [(&a, b_write), (&b, a_write)] {
+        let before = crate::tests::contents(db);
+        let error = db.apply_downloaded(write.into()).await.unwrap_err();
+        let crate::DbError::PendingPersistence(cause) = &error else {
+            panic!("expected deferred foreign-key failure: {error:?}")
+        };
+        assert!(
+            matches!(cause.as_ref(), crate::DbError::Sqlite(rusqlite::Error::SqliteFailure(e, _))
+            if e.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_FOREIGNKEY),
+            "{error:?}"
+        );
+        assert_eq!(crate::tests::contents(db), before);
+    }
+    a.close().await.unwrap();
+    b.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_check_on_one_generated_column_can_fail_when_its_inputs_merge() {
+    let ids = coven_foundation::id_source::SequentialIds::new();
+    let a_store = TestStore::with_ids(&ids);
+    let b_store = TestStore::with_ids(&ids);
+    let schema = "CREATE TABLE ranges(id TEXT NOT NULL PRIMARY KEY,start INT,end INT,width INT GENERATED ALWAYS AS(end-start),CONSTRAINT nonnegative CHECK(width>=0))";
+    let a = a_store.schema(vec![table("ranges")], schema).await.unwrap();
+    let b = b_store.schema(vec![table("ranges")], schema).await.unwrap();
+    sql(&a, "INSERT INTO ranges(id,start,end) VALUES('r',0,1)")
+        .await
+        .unwrap();
+    b.apply_downloaded(records(&a)[0].clone().into())
+        .await
+        .unwrap();
+    sql(&a, "UPDATE ranges SET start=1").await.unwrap();
+    sql(&b, "UPDATE ranges SET end=0").await.unwrap();
+    let a_write = records(&a).pop().unwrap();
+    let b_write = records(&b).pop().unwrap();
+    for (db, write) in [(&a, b_write), (&b, a_write)] {
+        db.apply_downloaded(write.into()).await.unwrap();
+        assert_eq!(count(db, "ranges"), 0);
+        assert_eq!(losses(db)[0].2, [Rule::Check("nonnegative".into())].into());
+    }
+    a.close().await.unwrap();
+    b.close().await.unwrap();
+}
+
+#[tokio::test]
 async fn every_final_check_and_foreign_key_reason_is_retained() {
     let store = TestStore::new();
     let db = store.schema(vec![table("lists"), table("todos")], "CREATE TABLE lists(id TEXT NOT NULL PRIMARY KEY); CREATE TABLE todos(id TEXT NOT NULL PRIMARY KEY,list_id TEXT REFERENCES lists(id),start INT,end INT,CONSTRAINT ordered CHECK(start <= end),CONSTRAINT nonnegative CHECK(start >= 0))").await.unwrap();
@@ -213,6 +407,16 @@ async fn expression_partial_and_collated_unique_claims_use_sqlite_equality() {
         .await
         .unwrap();
     sql(&db, "INSERT INTO notes VALUES('46','Shopping','Work ',1,0); INSERT INTO notes VALUES('47',NULL,'Work',1,0)").await.unwrap();
+    let before = crate::tests::contents(&db);
+    let error = sql(&db, "UPDATE notes SET title='GROCERIES' WHERE id='46'")
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, crate::DbError::Sqlite(rusqlite::Error::SqliteFailure(e, _))
+        if e.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE),
+        "{error:?}"
+    );
+    assert_eq!(crate::tests::contents(&db), before);
     crate::tests::remote_update(
         &db,
         "notes",
@@ -610,6 +814,43 @@ async fn unique_indexes_with_the_same_columns_keep_each_claim() {
 }
 
 #[tokio::test]
+async fn generated_unique_claim_uses_the_write_that_set_its_generated_value() {
+    let fixture = TestStore::new();
+    let db = fixture
+        .schema(
+            vec![table("notes")],
+            "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,title TEXT,folded TEXT AS(lower(title)) UNIQUE)",
+        )
+        .await
+        .unwrap();
+    sql(&db, "INSERT INTO notes(id,title) VALUES('n','Draft')")
+        .await
+        .unwrap();
+    sql(&db, "UPDATE notes SET title='Plan'").await.unwrap();
+    let writes = records(&db);
+    assert!(writes[1].header.timestamp > writes[0].header.timestamp);
+    db.inspect_writer_schema(|db, schema| {
+        let row = &writes[0].parts[0].rows[0].row;
+        let app = crate::write_rows::AppView::after(db, schema);
+        let store = crate::merge_store::MergeStore::new(db, &app);
+        let updates = BTreeMap::new();
+        let deleted = BTreeSet::new();
+        let view = crate::removal_view::DatabaseRemovalView::new(
+            db, &store, schema, &app, &updates, &deleted, None,
+        )
+        .unwrap();
+        let evaluated = view.evaluated(row).unwrap();
+        assert_eq!(evaluated.values["folded"], Value::Text("plan".into()));
+        assert_eq!(
+            evaluated.constraints.unique[&coven_merge::UniqueConstraint::from(["folded"])]
+                .timestamp,
+            writes[1].header.timestamp
+        );
+    });
+    db.close().await.unwrap();
+}
+
+#[tokio::test]
 async fn a_constant_unique_index_keeps_its_expression_term() {
     let store = TestStore::new();
     let db=store.schema(vec![table("notes")],"CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY); CREATE UNIQUE INDEX one_note ON notes((1))").await.unwrap();
@@ -634,6 +875,62 @@ async fn a_constant_unique_index_keeps_its_expression_term() {
         BTreeSet::from([Rule::Unique(["(1)"].into())])
     );
     db.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn concurrent_change_to_a_referenced_nonkey_column_depends_on_arrival_order() {
+    let ids = coven_foundation::id_source::SequentialIds::new();
+    let a_store = TestStore::with_ids(&ids);
+    let b_store = TestStore::with_ids(&ids);
+    let tables = || vec![table("parents"), table("children")];
+    let schema = "CREATE TABLE parents(id TEXT NOT NULL PRIMARY KEY,code TEXT UNIQUE); CREATE TABLE children(id TEXT NOT NULL PRIMARY KEY,parent TEXT REFERENCES parents(code) ON UPDATE CASCADE)";
+    let a = a_store.schema(tables(), schema).await.unwrap();
+    let b = b_store.schema(tables(), schema).await.unwrap();
+    sql(&a, "INSERT INTO parents VALUES('p','old')")
+        .await
+        .unwrap();
+    b.apply_downloaded(records(&a)[0].clone().into())
+        .await
+        .unwrap();
+    sql(&a, "UPDATE parents SET code='new'").await.unwrap();
+    sql(&b, "INSERT INTO children VALUES('c','old')")
+        .await
+        .unwrap();
+    let parent_write = records(&a).pop().unwrap();
+    let child_write = records(&b).pop().unwrap();
+    let before = crate::tests::contents(&a);
+    let error = a
+        .apply_downloaded(child_write.clone().into())
+        .await
+        .unwrap_err();
+    let crate::DbError::PendingPersistence(cause) = &error else {
+        panic!("expected deferred foreign-key failure: {error:?}")
+    };
+    assert!(
+        matches!(cause.as_ref(), crate::DbError::Sqlite(rusqlite::Error::SqliteFailure(e, _))
+        if e.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_FOREIGNKEY)
+    );
+    assert_eq!(crate::tests::contents(&a), before);
+
+    b.apply_downloaded(parent_write.into()).await.unwrap();
+    b.inspect_writer_schema(|db, schema| {
+        let app = crate::write_rows::AppView::after(db, schema);
+        let store = crate::merge_store::MergeStore::new(db, &app);
+        let child = &child_write.parts[0].rows[0];
+        let Operation::Insert(written) = &child.change.operation else {
+            panic!("child insert")
+        };
+        assert_eq!(written["parent"].value, Value::Text("old".into()));
+        let state = store.row(&child.row).unwrap().state;
+        assert_eq!(state.cells()["parent"].write, child_write.header.position);
+        assert_eq!(
+            state.cells()["parent"].value.value,
+            Value::Text("new".into())
+        );
+        assert!(state.lost().is_empty());
+    });
+    a.close().await.unwrap();
+    b.close().await.unwrap();
 }
 
 pub(crate) fn materialize_deleted(

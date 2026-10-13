@@ -394,11 +394,30 @@ async fn uniqueness_and_shared_keys_are_scoped_to_the_audience() {
 }
 
 #[tokio::test]
-async fn unguarded_shared_triggers_are_schema_errors() {
+async fn unguarded_shared_triggers_are_refused_on_open_and_after_migrating() {
     for schema in [
         "CREATE TABLE notes (id TEXT NOT NULL PRIMARY KEY, title TEXT); CREATE TRIGGER edited AFTER UPDATE ON notes BEGIN SELECT 1; END",
         "CREATE TABLE notes (id TEXT NOT NULL PRIMARY KEY, title TEXT); CREATE TRIGGER edited AFTER UPDATE ON notes WHEN NOT coven_applying() OR 1 BEGIN SELECT 1; END",
-    ] { rejects(schema, vec![independent("notes").shared_trigger("edited")], SchemaError::SharedTriggerGuard { table: "notes".into(), trigger: "edited".into() }).await; }
+    ] {
+        let tables = || vec![independent("notes").shared_trigger("edited")];
+        let expected = SchemaError::SharedTriggerGuard {
+            table: "notes".into(), trigger: "edited".into()
+        };
+        rejects(schema, tables(), expected.clone()).await;
+        let store = TestStore::new();
+        let db = store.builder(vec![], vec![]).open().await.unwrap();
+        db.inspect_writer(|db| db.batch(schema).unwrap());
+        db.close().await.unwrap();
+        for read_only in [false, true] {
+            let builder = store.builder(tables(), vec![]);
+            let error = if read_only {
+                builder.open_read_only().await.map(|_| ())
+            } else {
+                builder.open().await.map(|_| ())
+            }.expect_err("unguarded shared trigger must fail open");
+            assert!(matches!(database_error(error), DbError::Schema(found) if found == expected));
+        }
+    }
 }
 
 #[tokio::test]

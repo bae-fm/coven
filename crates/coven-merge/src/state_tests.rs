@@ -195,6 +195,46 @@ fn second_delete_can_clear_a_lost_title_or_change_its_replacer() {
 }
 
 #[test]
+fn reading_a_loss_only_acknowledges_it_when_replacing_the_same_cell_and_incarnation() {
+    let writes = vec![
+        write(1, 1, &[], vec![(row(42), change(0, 0, &[("0", "first")]))]),
+        write(2, 2, &[1], vec![(row(42), change(1, 1, &[("0", "lost")]))]),
+        write(
+            3,
+            3,
+            &[1],
+            vec![(row(42), change(1, 1, &[("0", "winner")]))],
+        ),
+        write(4, 4, &[1, 2, 3], vec![]),
+        write(
+            5,
+            5,
+            &[1, 2, 3, 4],
+            vec![(row(42), change(1, 1, &[("1", "body")]))],
+        ),
+        write(6, 6, &[1, 3], vec![(row(42), change(1, 2, &[]))]),
+        write(
+            7,
+            7,
+            &[1, 2, 3, 4, 5, 6],
+            vec![(row(42), change(2, 0, &[("0", "re-added")]))],
+        ),
+    ];
+    let lost = LostKey {
+        column: "0".into(),
+        write: id(2),
+    };
+    for order in [&[0, 1, 2, 3][..], &[0, 1, 2, 3, 4][..]] {
+        let states = fold(&writes, order);
+        assert_eq!(states[&row(42)].lost()[&lost].replaced_by, id(3));
+    }
+    let states = agree(&writes, &[&[0, 1, 2, 3, 4, 5, 6], &[0, 2, 5, 1, 3, 4, 6]]);
+    assert_eq!(value(&states, &row(42), "0"), "re-added");
+    assert_eq!(states[&row(42)].lost()[&lost].incarnation, 1);
+    assert_eq!(states[&row(42)].lost()[&lost].replaced_by, id(6));
+}
+
+#[test]
 fn shared_inserts_merge_and_a_never_seen_insert_loses_to_a_delete() {
     let mut writes = vec![
         write(1, 1, &[], vec![(row(42), change(0, 0, &[("0", "urgent")]))]),
@@ -341,5 +381,25 @@ fn compact_state_loading_rejects_damaged_records() {
             &oracle
         ),
         Err(MergeError::InvalidLostValue(_))
+    ));
+    assert!(matches!(
+        RowState::<String>::from_parts(
+            row(1),
+            [(1, id(4)), (2, id(1))].into(),
+            Default::default(),
+            Default::default(),
+            &oracle
+        ),
+        Err(MergeError::GenerationTimestamp(2))
+    ));
+    assert!(matches!(
+        RowState::from_parts(
+            row(1),
+            [(1, id(4))].into(),
+            state.cells().clone(),
+            Default::default(),
+            &oracle
+        ),
+        Err(MergeError::CellBeforeIncarnation(column)) if column == "0"
     ));
 }
