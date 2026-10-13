@@ -11,8 +11,24 @@ struct BudgetStorage {
     budget: usize,
     largest: AtomicUsize,
     conflict_on_finish: bool,
+    cleanup_failure: std::sync::Mutex<Option<UploadCall>>,
+}
+#[derive(Clone, Copy, PartialEq)]
+enum UploadCall {
+    Begin,
+    Resume,
+    Finish,
 }
 impl BudgetStorage {
+    fn check_cleanup(&self, call: UploadCall) -> Result<(), StorageError> {
+        if *self.cleanup_failure.lock().unwrap() == Some(call) {
+            return Err(StorageError::Cleanup {
+                operation: Box::new(coven_storage::StorageFailure::AlreadyExists.into()),
+                cleanup: Box::new(coven_storage::StorageFailure::PermissionDenied.into()),
+            });
+        }
+        Ok(())
+    }
     fn check(&self, length: usize) {
         assert!(
             length <= self.budget,
@@ -67,12 +83,14 @@ impl Storage for BudgetStorage {
         path: &ObjectPath,
         total: u64,
     ) -> Result<UploadSession, StorageError> {
+        self.check_cleanup(UploadCall::Begin)?;
         self.provider.begin_upload(path, total).await
     }
     async fn resume_upload(&self, session: &mut UploadSession) -> Result<(), StorageError> {
         if self.conflict_on_finish {
             return Err(conflict(session));
         }
+        self.check_cleanup(UploadCall::Resume)?;
         self.provider.resume_upload(session).await
     }
     async fn upload_part(
@@ -87,6 +105,7 @@ impl Storage for BudgetStorage {
         if self.conflict_on_finish {
             return Err(conflict(session));
         }
+        self.check_cleanup(UploadCall::Finish)?;
         self.provider.finish_upload(session).await
     }
     async fn abort_upload(&self, session: &UploadSession) -> Result<(), StorageError> {
@@ -104,6 +123,7 @@ async fn a_write_exceeds_the_transfer_budget_on_upload_and_download() {
         budget: BUDGET,
         largest: AtomicUsize::new(0),
         conflict_on_finish: false,
+        cleanup_failure: std::sync::Mutex::new(None),
     });
     for device in &mut devices {
         device.writes = DeviceLogSync::new(
@@ -269,6 +289,62 @@ async fn recorded_publication_saves_invalidated_session_on_finish_and_resume_fai
         .unwrap();
     assert!(matches!(error, StorageError::Cleanup { operation, cleanup }
         if matches!(**operation, StorageError::Cleanup { .. }) && cleanup.failure() == StorageFailure::File));
+}
+
+#[tokio::test]
+async fn occupied_publication_with_failed_cleanup_keeps_the_write_pending() {
+    for call in [UploadCall::Begin, UploadCall::Resume, UploadCall::Finish] {
+        let storage = storage();
+        let mut devices = group(storage.clone(), 2).await;
+        devices[0]
+            .db
+            .write(|sql| {
+                sql.execute(
+                    "INSERT INTO notes VALUES('one','title',?1)",
+                    ["x".repeat(100_000)],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        if call == UploadCall::Resume {
+            let mut faults = Faults::none();
+            faults.lose_part_reply = true;
+            storage.set_faults(faults).await;
+            assert!(devices[0].writes.upload_writes().await.is_err());
+            storage.set_faults(Faults::none()).await;
+        }
+        let faulty = Arc::new(BudgetStorage {
+            provider: storage.clone(),
+            budget: 64 * 1024 + 44,
+            largest: AtomicUsize::new(0),
+            cleanup_failure: std::sync::Mutex::new(Some(call)),
+        });
+        devices[0].writes = DeviceLogSync::new(
+            faulty.clone(),
+            devices[0].db.clone(),
+            devices[0].custody.clone(),
+            devices[0].identity.clone(),
+        );
+        assert!(matches!(
+            devices[0].writes.upload_writes().await,
+            Err(SyncError::Storage(StorageError::Cleanup { .. }))
+        ));
+        let write = WriteId {
+            device: DeviceId(1),
+            number: 1,
+        };
+        if call != UploadCall::Begin {
+            assert!(devices[0]
+                .db
+                .write_upload_session(write)
+                .await
+                .unwrap()
+                .is_some());
+        }
+        *faulty.cleanup_failure.lock().unwrap() = None;
+        assert_eq!(devices[0].writes.upload_writes().await.unwrap(), [write]);
+    }
 }
 
 #[tokio::test]

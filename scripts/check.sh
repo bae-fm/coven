@@ -292,8 +292,9 @@ proofs() {
 
     if proof_selected storage || crate_selected coven-storage; then
         runner=$(runner storage createRunner)
-        step "Rust / Lean differential S3 create-once test"
+        step "Rust / Lean differential provider create-once tests"
         COVEN_CREATE_LEAN="$runner" cargo test -p coven-storage --all-features lean_differential_s3_create -- --ignored
+        COVEN_CREATE_LEAN="$runner" cargo test -p coven-storage --all-features lean_differential_onedrive_create -- --ignored
     fi
 
     if proof_selected merge || crate_selected coven-database; then

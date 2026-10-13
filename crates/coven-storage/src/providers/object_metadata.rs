@@ -37,11 +37,9 @@ pub(super) fn onedrive(path: &ObjectPath, item: &Value) -> Result<StoredObject, 
     if !item["file"].is_object() || http::string(item, "name")? != path.file_name() {
         return Err(StorageFailure::Protocol.with_source("OneDrive returned another object"));
     }
-    let field = if path.is_replaceable() {
-        "lastModifiedDateTime"
-    } else {
-        "createdDateTime"
-    };
+    // Copy retains session-start creation time. Published immutable objects are
+    // never modified; the server's modification time records their publication.
+    let field = "lastModifiedDateTime";
     let hashes = &item["file"]["hashes"];
     let checksum = if hashes.get("sha1Hash").is_some() {
         checksum(hashes, "sha1Hash", ChecksumValue::Sha1Hex)?

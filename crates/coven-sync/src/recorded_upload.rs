@@ -49,7 +49,10 @@ pub(crate) async fn upload<S: UploadSource>(
                 // belong to the old location. Send the same bytes in a new one.
                 match storage.begin_upload(path, total).await {
                     Ok(replacement) => session = replacement,
-                    Err(error) if error.failure() == StorageFailure::AlreadyExists => {
+                    Err(error)
+                        if error.failure() == StorageFailure::AlreadyExists
+                            && !matches!(error, StorageError::Cleanup { .. }) =>
+                    {
                         return Ok(true)
                     }
                     Err(error) => return Err(error.into()),

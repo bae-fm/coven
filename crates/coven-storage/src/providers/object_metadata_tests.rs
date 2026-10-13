@@ -3,6 +3,22 @@ use coven_foundation::id_source::DeviceId;
 use serde_json::json;
 
 #[test]
+fn onedrive_immutable_publication_uses_copy_modification_time() {
+    let path = ObjectPath::device_log(
+        crate::test_utils::STORE_ID,
+        DeviceId(31),
+        std::num::NonZeroU64::MIN,
+    );
+    let item = json!({"id":"copied", "name":path.file_name(), "file":{}, "size":4, "createdDateTime":"2026-10-06T00:00:00Z", "lastModifiedDateTime":"2026-10-06T00:10:00.123Z", "eTag":"copied-revision"});
+    let observed = onedrive(&path, &item).unwrap();
+    assert_eq!(
+        observed.stored_at,
+        http::timestamp(&item, "lastModifiedDateTime").unwrap()
+    );
+    assert_eq!(observed.time_resolution, Duration::from_millis(1));
+}
+
+#[test]
 fn provider_times_retain_precision_and_replaceable_paths_use_modification() {
     let positions = ObjectPath::positions(crate::test_utils::STORE_ID, DeviceId(1));
     let immutable = ObjectPath::store_log(

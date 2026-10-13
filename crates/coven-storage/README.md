@@ -40,16 +40,22 @@ refused before a request.
 Sessions cannot target positions or clock objects. Lost completion replies are checked against
 the immutable destination or the provider's publication identity. Abort accepts
 already closed or absent sessions and preserves published objects.
+OneDrive records a temporary UUID under `<store>/.coven-uploads/`, uploads there,
+then publishes with a conflict-refusing server-side copy and waits for its monitor.
+Successful and definitively refused copies delete the temporary; failed deletion
+keeps the recording incomplete. Abort deletes it as part of session cleanup.
+Published-object listings exclude this reserved namespace.
 
 `list` follows every provider page and returns path, encrypted byte size and
 provider storage time, rejecting missing or malformed metadata. Drive uses
 `createdTime` for immutable objects and `modifiedTime` for replacements
 (earliest created copy, ties by id), Dropbox `server_modified`, OneDrive
-`createdDateTime`, CloudKit the publication record's server time, and S3
-`LastModified`. S3's multipart timestamp is upload initiation time, but the
-30-day deletion rule applies only to device-log objects (§15). Writes are at
-most 1 GB (§6), below S3's 5 GiB single-request limit, so their retention age
-does not depend on multipart completion time.
+the top-level `lastModifiedDateTime`, CloudKit the publication record's server
+time, and S3 `LastModified`. OneDrive copy preserves the temporary's creation
+time, so its modification time records publication. AWS's native multipart
+timestamp records initiation and remains a publication-time limitation (§4).
+Writes are at most 1 GB (§6), below S3's 5 GiB single-request limit, so their
+retention age does not depend on multipart completion time.
 [AWS metadata documentation](https://docs.aws.amazon.com/AmazonS3/latest/userguide/UsingMetadata.html).
 
 Setup reconnects using the store's known creation-entry path and authenticates
@@ -94,7 +100,7 @@ the test objects and folders.
 | [S3](src/providers/s3.rs) | Conditional `PutObject`, unconditional positions/clock PUT, `GetObject`/Range, paged `ListObjectsV2`, `DeleteObject`. | Native multipart ID, part ETags and unique publication metadata; paged `ListParts`, conditional completion and HEAD recovery. | Explicit member access key; grant/revoke/sign-out return console instructions. No IAM calls or credential discovery. |
 | [Drive](src/providers/google_drive.rs) | Real folders and exact leaf names; multipart/related create, media PATCH, media GET/Range, scoped paged `files.list`. Retry retains earliest createdTime then ID and deletes this writer's later copies. Owned objects are deleted; others are removed from their parent folder. | Generated file ID and resumable URL; PUT chunks/status; completion checked by native ID. | Folder-owner check; paged native permissions, direct create/update/delete; inherited/group/public/unknown access is retained and reported. Recipient uses its own OAuth account. |
 | [Dropbox](src/providers/dropbox.rs) | Namespace-scoped strict add or overwrite, download/Range, recursive paged listing, delete. | Start/append/finish, offset recovery, immutable-byte completion verification; close for cancellation. | Owner check; direct/inherited member pages; in-place viewer update; asynchronous removal with native failure retained. Recipient mounts the invited shared folder. |
-| [OneDrive](src/providers/onedrive.rs) | Path parents, conflict-refusing content PUT, positions/clock PUT, preauthenticated download/Range without bearer, recursive paged children, delete. | Native upload URL, bounded/multiple missing ranges, immutable-byte completion verification; DELETE cancellation. | Account-drive ownership check, permission pages and account identity resolution; only exclusive target-account permissions deleted. Invite carries native share token for recipient redemption. |
+| [OneDrive](src/providers/onedrive.rs) | Path parents, conflict-refusing content PUT, positions/clock PUT, preauthenticated download/Range without bearer, recursive paged children excluding temporaries, delete. | Recorded temporary UUID and native upload URL, bounded/multiple missing ranges, conditional copy and monitor, immutable-byte recovery verification; cancellation and temporary deletion. | Account-drive ownership check, permission pages and account identity resolution; only exclusive target-account permissions deleted. Invite carries native share token for recipient redemption. |
 | [CloudKit](src/providers/cloudkit.rs) | Canonical paths as record names in a custom zone; create-once and replacement save policies, bounded CKAsset reads, paged prefix queries and server publication dates. | Recorded session UUID and 8 MiB asset parts; each part and confirmed boundary saved atomically; destination creation and session publication saved atomically. | Current account compared with zone owner; private read/write zone CKShare, participant removal, share metadata validation and native acceptance. |
 
 OAuth uses each device's account and one presenter-based flow. The presenter
@@ -170,8 +176,12 @@ does not implement provider HTTP or substitute for the provider suites.
   deadline. The native operations and account sharing require the ignored
   [live tests](cloudkit-live.md); those have not been run.
 
-Not checked: S3 console policies or SigV4 principal isolation, real browser
-consent, arbitrary account aliases, mobile/non-macOS execution, and provider
-versioned-bucket cleanup. Database/sync and key-custody transactions,
+The opt-in OneDrive live suite checks a personal account: conditional copy above
+the single-request threshold, exact bytes, publication time bracketed by markers,
+time stability for at least ten minutes, hidden unfinished uploads, temporary
+cleanup, create-once behavior, replacement revisions and listings.
+Not checked: OneDrive Business accounts, S3 console policies or SigV4 principal
+isolation, real browser consent, arbitrary account aliases, mobile/non-macOS
+execution, and provider versioned-bucket cleanup. Database/sync and key-custody transactions,
 retention scheduling, chunk authentication/cache and chunk grouping are outside
 this crate's audit.

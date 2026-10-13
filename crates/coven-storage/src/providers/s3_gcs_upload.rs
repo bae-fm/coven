@@ -1,4 +1,5 @@
 use super::*;
+use crate::transfer::with_cleanup;
 
 const TEMPORARIES: &str = ".coven-uploads";
 
@@ -136,19 +137,6 @@ impl S3Storage {
         session: &UploadSession,
     ) -> Result<(), StorageError> {
         self.delete_key(&self.session_key(session)?).await
-    }
-}
-
-pub(super) fn with_cleanup(
-    operation: Result<(), StorageError>,
-    cleanup: Result<(), StorageError>,
-) -> Result<(), StorageError> {
-    match (operation, cleanup) {
-        (Ok(()), result) | (result, Ok(())) => result,
-        (Err(operation), Err(cleanup)) => Err(StorageError::Cleanup {
-            operation: Box::new(operation),
-            cleanup: Box::new(cleanup),
-        }),
     }
 }
 

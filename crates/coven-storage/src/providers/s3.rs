@@ -690,7 +690,7 @@ impl ProviderOps for S3Storage {
             Err(error) => Err(s3_error(error)),
         };
         if self.service == S3Service::Gcs {
-            gcs_upload::with_cleanup(result, self.delete_gcs_temporary(session).await)
+            crate::transfer::with_cleanup(result, self.delete_gcs_temporary(session).await)
         } else {
             result
         }

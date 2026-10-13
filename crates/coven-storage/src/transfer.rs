@@ -34,13 +34,23 @@ pub(crate) async fn upload_bytes(
     .await;
     match upload {
         Ok(()) => Ok(()),
-        Err(operation) => match storage.abort_upload_checked(&session).await {
-            Ok(()) => Err(operation),
-            Err(cleanup) => Err(StorageError::Cleanup {
-                operation: Box::new(operation),
-                cleanup: Box::new(cleanup),
-            }),
-        },
+        Err(operation) => {
+            with_cleanup(Err(operation), storage.abort_upload_checked(&session).await)
+        }
+    }
+}
+
+pub(crate) fn with_cleanup<T>(
+    operation: Result<T, StorageError>,
+    cleanup: Result<(), StorageError>,
+) -> Result<T, StorageError> {
+    match (operation, cleanup) {
+        (Ok(value), Ok(())) => Ok(value),
+        (Err(error), Ok(())) | (Ok(_), Err(error)) => Err(error),
+        (Err(operation), Err(cleanup)) => Err(StorageError::Cleanup {
+            operation: Box::new(operation),
+            cleanup: Box::new(cleanup),
+        }),
     }
 }
 

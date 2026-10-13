@@ -1,15 +1,20 @@
 use super::access::PermissionAccess;
 use super::http::{self, Body, OAuthSession};
+use super::object_metadata;
 use super::onedrive_access::AccountPermissions;
 use super::pagination::Pagination;
-use crate::session::SessionState;
+use crate::session::{OneDriveUpload, SessionState};
 use crate::*;
 use async_trait::async_trait;
 use coven_crypto::SecretText;
+use coven_foundation::id_source::IdSourceRef;
 use reqwest::Method;
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
 const PROVIDER: CloudProvider = CloudProvider::OneDrive;
+
+#[path = "onedrive_upload.rs"]
+mod upload;
 
 /// OneDrive objects under the store's shared folder, reached with each member's account.
 pub(crate) struct OneDriveStorage {
@@ -17,12 +22,17 @@ pub(crate) struct OneDriveStorage {
     drive: String,
     folder: String,
     session: OAuthSession,
+    ids: IdSourceRef,
     api: String,
     single_request_limit: u64,
 }
 impl OneDriveStorage {
     /// Construct at a composition root with the device's own provider sign-in.
-    pub(crate) fn new(config: StorageConfig, session: OAuthSession) -> Result<Self, StorageError> {
+    pub(crate) fn new(
+        config: StorageConfig,
+        session: OAuthSession,
+        ids: IdSourceRef,
+    ) -> Result<Self, StorageError> {
         let StorageConfig::OneDrive {
             drive_id,
             folder_id,
@@ -40,6 +50,7 @@ impl OneDriveStorage {
             folder: folder_id.clone(),
             config,
             session,
+            ids,
             api: "https://graph.microsoft.com/v1.0".into(),
             single_request_limit: 250_000_000,
         })
@@ -97,11 +108,14 @@ impl OneDriveStorage {
         }
         result
     }
-    async fn parents(&self, path: &ObjectPath) -> Result<(), StorageError> {
+    async fn parents(&self, path: &ObjectPath) -> Result<String, StorageError> {
+        let parts = path.components();
+        self.directory(&parts[..parts.len() - 1]).await
+    }
+    async fn directory(&self, parts: &[&str]) -> Result<String, StorageError> {
         self.check_folder().await?;
         let mut id = self.folder.clone();
-        let parts = path.components();
-        for name in &parts[..parts.len() - 1] {
+        for name in parts {
             let value = http::json(
                 PROVIDER,
                 self.send(
@@ -132,7 +146,7 @@ impl OneDriveStorage {
             }
             id = http::string(&value, "id")?.into();
         }
-        Ok(())
+        Ok(id)
     }
     async fn get(
         &self,
@@ -145,7 +159,7 @@ impl OneDriveStorage {
         let headers = range
             .map(|range| vec![("Range", range.header())])
             .unwrap_or_default();
-        let metadata = super::object_metadata::onedrive(path, &value)?;
+        let metadata = object_metadata::onedrive(path, &value)?;
         let bytes = http::bytes(
             PROVIDER,
             self.session
@@ -155,7 +169,7 @@ impl OneDriveStorage {
         )
         .await?;
         if path.is_replaceable() {
-            let after = super::object_metadata::onedrive(path, &self.metadata(path).await?)?;
+            let after = object_metadata::onedrive(path, &self.metadata(path).await?)?;
             if after != metadata {
                 return Err(
                     StorageFailure::Protocol.with_source("OneDrive object changed during read")
@@ -163,73 +177,6 @@ impl OneDriveStorage {
             }
         }
         Ok(ObjectRead { metadata, bytes })
-    }
-    fn upload_url<'a>(&self, session: &'a UploadSession) -> Result<&'a str, StorageError> {
-        let SessionState::OneDrive { url } = &session.state else {
-            return Err(StorageFailure::SessionMismatch.into());
-        };
-        validate_download_url(&self.api, url.as_str())?;
-        Ok(url.as_str())
-    }
-    async fn progress(
-        &self,
-        session: &mut UploadSession,
-        response: reqwest::Response,
-    ) -> Result<(), StorageError> {
-        if response.status().as_u16() == 404 {
-            let mut error = http::response_error(PROVIDER, response).await;
-            if let StorageError::Provider {
-                failure: failure @ StorageFailure::NotFound,
-                ..
-            } = &mut error
-            {
-                *failure = StorageFailure::SessionExpired;
-            }
-            return Err(error);
-        }
-        let response = http::checked(PROVIDER, response).await?;
-        let status = response.status().as_u16();
-        let headers = response.headers().clone();
-        let body = response
-            .bytes()
-            .await
-            .map_err(|e| http::transport(PROVIDER, e))?;
-        let invalid = || http::invalid_response(PROVIDER, status, headers.clone(), body.to_vec());
-        let value: Value = serde_json::from_slice(&body).map_err(|_| invalid())?;
-        if let Some(ranges) = value.get("nextExpectedRanges") {
-            let ranges = ranges.as_array().ok_or_else(invalid)?;
-            let mut first: Option<u64> = None;
-            for range in ranges {
-                let (start, end) = range
-                    .as_str()
-                    .and_then(|s| s.split_once('-'))
-                    .ok_or_else(invalid)?;
-                let start = start.parse::<u64>().map_err(|_| invalid())?;
-                if start < session.confirmed || start >= session.total {
-                    return Err(invalid());
-                }
-                if !end.is_empty() {
-                    let end = end.parse::<u64>().map_err(|_| invalid())?;
-                    if end < start || end >= session.total {
-                        return Err(invalid());
-                    }
-                }
-                first = Some(match first {
-                    Some(previous) => previous.min(start),
-                    None => start,
-                });
-            }
-            session.confirmed = first.ok_or_else(invalid)?;
-        } else {
-            if value["size"].as_u64() != Some(session.total)
-                || http::string(&value, "name")? != session.path.file_name()
-            {
-                return Err(StorageFailure::Protocol.with_source("OneDrive completed another file"));
-            }
-            session.confirmed = session.total;
-            session.state = SessionState::Complete;
-        }
-        Ok(())
     }
     async fn require_owner(&self) -> Result<(), StorageError> {
         let url = http::endpoint(&self.api, &["me", "drive"], &[("$select", "id")])?;
@@ -356,7 +303,7 @@ impl ProviderOps for OneDriveStorage {
     }
     async fn status(&self, path: &ObjectPath) -> Result<Option<StoredObject>, StorageError> {
         match self.metadata(path).await {
-            Ok(item) => Ok(Some(super::object_metadata::onedrive(path, &item)?)),
+            Ok(item) => Ok(Some(object_metadata::onedrive(path, &item)?)),
             Err(error) if error.failure() == StorageFailure::NotFound => Ok(None),
             Err(error) => Err(error),
         }
@@ -406,6 +353,14 @@ impl ProviderOps for OneDriveStorage {
                             StorageFailure::Protocol.with_source("invalid OneDrive item kind")
                         );
                     }
+                    if names.len() == 1 && name == upload::TEMPORARIES {
+                        if !item["folder"].is_object() {
+                            return Err(StorageFailure::Protocol
+                                .with_source("OneDrive upload namespace is not a folder"));
+                        }
+                        tracing::debug!("OneDrive upload temporaries retained for session cleanup");
+                        continue;
+                    }
                     if item["folder"].is_object() {
                         let mut parts = names.clone();
                         parts.push(name.to_owned());
@@ -414,7 +369,7 @@ impl ProviderOps for OneDriveStorage {
                     } else if item["file"].is_object() {
                         let path = ObjectPath::from_components(&names, name)?;
                         if prefix.contains(&path) {
-                            let object = super::object_metadata::onedrive(&path, item)?;
+                            let object = object_metadata::onedrive(&path, item)?;
                             listing.insert(object)?;
                         }
                     } else {
@@ -548,53 +503,10 @@ impl ProviderOps for OneDriveStorage {
         path: &ObjectPath,
         total: u64,
     ) -> Result<UploadSession, StorageError> {
-        self.parents(path).await?;
-        let value=http::json(PROVIDER,self.send(Method::POST,&self.by_path(path,"/createUploadSession")?,Body::Json(json!({"item":{"@microsoft.graph.conflictBehavior":"fail","name":path.file_name()}}))).await?).await?;
-        let url = http::string(&value, "uploadUrl")?;
-        validate_download_url(&self.api, url)?;
-        Ok(UploadSession {
-            location: self.config(),
-            path: path.clone(),
-            total,
-            confirmed: 0,
-            part_size: crate::session::ONEDRIVE_PART_SIZE,
-            state: SessionState::OneDrive {
-                url: SecretText::new(url.into()),
-            },
-        })
+        self.begin_temporary(path, total).await
     }
     async fn resume_upload(&self, session: &mut UploadSession) -> Result<(), StorageError> {
-        if matches!(session.state, SessionState::VerifyPublished) {
-            return Ok(());
-        }
-        let response = self
-            .session
-            .send(
-                Method::GET,
-                self.upload_url(session)?,
-                &[],
-                Body::Empty,
-                false,
-            )
-            .await?;
-        if response.status().as_u16() == 404 {
-            let value = match self.metadata(&session.path).await {
-                Ok(value) => value,
-                Err(error) if error.failure() == StorageFailure::NotFound => {
-                    return Err(StorageFailure::SessionExpired.with_source(error))
-                }
-                Err(error) => return Err(error),
-            };
-            if value["size"].as_u64() != Some(session.total)
-                || http::string(&value, "name")? != session.path.file_name()
-            {
-                return Err(StorageFailure::AlreadyExists.into());
-            }
-            session.confirmed = 0;
-            session.state = SessionState::VerifyPublished;
-            return Ok(());
-        }
-        self.progress(session, response).await
+        self.resume_temporary(session).await
     }
     async fn upload_part(
         &self,
@@ -602,58 +514,13 @@ impl ProviderOps for OneDriveStorage {
         bytes: &[u8],
         end: u64,
     ) -> Result<(), StorageError> {
-        if matches!(session.state, SessionState::VerifyPublished) {
-            return http::verify_published_part(self, session, bytes, end).await;
-        }
-        let response = self
-            .session
-            .send(
-                Method::PUT,
-                self.upload_url(session)?,
-                &[
-                    (
-                        "Content-Range",
-                        format!("bytes {}-{}/{}", session.confirmed, end - 1, session.total),
-                    ),
-                    ("Content-Type", "application/octet-stream".into()),
-                ],
-                Body::Bytes(bytes.to_vec()),
-                false,
-            )
-            .await?;
-        self.progress(session, response).await?;
-        if session.confirmed < end {
-            return Err(
-                StorageFailure::Protocol.with_source("OneDrive did not store the entire part")
-            );
-        }
-        Ok(())
+        self.send_part(session, bytes, end).await
     }
     async fn finish_upload(&self, session: &mut UploadSession) -> Result<(), StorageError> {
-        self.resume_upload(session).await?;
-        if !session.is_complete() {
-            return Err(StorageFailure::InvalidPart.into());
-        }
-        Ok(())
+        self.publish_temporary(session).await
     }
     async fn abort_upload(&self, session: &UploadSession) -> Result<(), StorageError> {
-        if matches!(session.state, SessionState::VerifyPublished) {
-            return Ok(());
-        }
-        let response = self
-            .session
-            .send(
-                Method::DELETE,
-                self.upload_url(session)?,
-                &[],
-                Body::Empty,
-                false,
-            )
-            .await?;
-        if response.status().as_u16() != 404 {
-            http::checked(PROVIDER, response).await?;
-        }
-        Ok(())
+        self.abort_temporary(session).await
     }
 }
 fn writable(value: &Value) -> bool {

@@ -59,7 +59,10 @@ impl DeviceLogSync {
                     {
                         session = match storage.restart_upload(&session).await {
                             Ok(session) => session,
-                            Err(error) if error.failure() == StorageFailure::AlreadyExists => {
+                            Err(error)
+                                if error.failure() == StorageFailure::AlreadyExists
+                                    && !matches!(error, StorageError::Cleanup { .. }) =>
+                            {
                                 return Ok(())
                             }
                             Err(error) => return Err(error.into()),
@@ -72,7 +75,12 @@ impl DeviceLogSync {
             None if total <= CHUNK_SIZE as u64 && total <= storage.single_request_limit() => None,
             None => match storage.begin_upload(&path, total).await {
                 Ok(session) => Some(session),
-                Err(error) if error.failure() == StorageFailure::AlreadyExists => return Ok(()),
+                Err(error)
+                    if error.failure() == StorageFailure::AlreadyExists
+                        && !matches!(error, StorageError::Cleanup { .. }) =>
+                {
+                    return Ok(())
+                }
                 Err(error) => return Err(error.into()),
             },
         };

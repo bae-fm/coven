@@ -3,27 +3,6 @@ use super::*;
 #[tokio::test]
 #[ignore]
 async fn lean_differential_s3_create() {
-    use std::io::Write;
-    use std::process::{Command, Stdio};
-    let runner = std::env::var("COVEN_CREATE_LEAN").expect("COVEN_CREATE_LEAN names createRunner");
-    let attempts: Vec<_> = (0..32u8).map(|i| {
-        serde_json::json!({"path": u64::from(i % 4) + 1, "bytes": vec![i; usize::from((i * 3) % 7)]})
-    }).collect();
-    let mut process = Command::new(runner)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .spawn()
-        .unwrap();
-    process
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(&serde_json::to_vec(&attempts).unwrap())
-        .unwrap();
-    let output = process.wait_with_output().unwrap();
-    assert!(output.status.success());
-    let expected: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(expected.len(), attempts.len());
     for gcs in [false, true] {
         for limit in [3, 5 * 1024 * 1024 * 1024] {
             let state = Arc::new(Mutex::new(Remote {
@@ -40,23 +19,7 @@ async fn lean_differential_s3_create() {
             Arc::get_mut(&mut storage.provider)
                 .unwrap()
                 .single_request_limit = limit;
-            for (attempt, expected) in attempts.iter().zip(&expected) {
-                let path = ObjectPath::device_log(
-                    STORE_ID,
-                    coven_foundation::id_source::DeviceId(31),
-                    std::num::NonZeroU64::new(attempt["path"].as_u64().unwrap()).unwrap(),
-                );
-                let bytes: Vec<u8> = serde_json::from_value(attempt["bytes"].clone()).unwrap();
-                match storage.create(&path, &bytes).await {
-                    Ok(()) => assert_eq!(expected["occupied"], false),
-                    Err(error) => {
-                        assert_eq!(error.failure(), StorageFailure::AlreadyExists);
-                        assert_eq!(expected["occupied"], true);
-                    }
-                }
-                let bytes: Vec<u8> = serde_json::from_value(expected["bytes"].clone()).unwrap();
-                assert_eq!(storage.read(&path).await.unwrap(), bytes);
-            }
+            crate::providers::tests::compare_create_model(&storage).await;
             assert!(state.lock().unwrap().uploads.is_empty());
             assert_eq!(state.lock().unwrap().objects.len(), 4);
         }

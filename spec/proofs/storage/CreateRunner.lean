@@ -1,7 +1,7 @@
 import CovenStorage.Objects
 import Lean
 
-/-! JSON adapter for testing S3 publication against the existing create-once model. -/
+/-! JSON adapter for testing provider publication against the existing create-once model. -/
 
 open Lean CovenStorage
 

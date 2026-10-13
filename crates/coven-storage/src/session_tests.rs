@@ -137,9 +137,7 @@ fn session_states_must_match_their_provider_and_have_nonempty_ids() {
                 drive_id: "drive".into(),
                 folder_id: "folder".into(),
             },
-            SessionState::OneDrive {
-                url: SecretText::new("https://upload.onedrive.com/session".into()),
-            },
+            onedrive_state("https://upload.onedrive.com/session"),
             24 * 320 * 1024,
         ),
         (
@@ -166,7 +164,10 @@ fn session_states_must_match_their_provider_and_have_nonempty_ids() {
             SessionState::Dropbox { id } | SessionState::CloudKit { id } => {
                 *id = SecretText::new(String::new())
             }
-            SessionState::OneDrive { url } => *url = SecretText::new(String::new()),
+            SessionState::OneDrive {
+                upload: OneDriveUpload::Receiving { url },
+                ..
+            } => *url = SecretText::new(String::new()),
             _ => unreachable!(),
         }
         assert_invalid_recording(&invalid);
@@ -262,18 +263,14 @@ fn session_urls_and_unknown_state_fields_are_refused() {
             drive_id: "drive".into(),
             folder_id: "folder".into(),
         },
-        SessionState::OneDrive {
-            url: SecretText::new("https://upload.example/session".into()),
-        },
+        onedrive_state("https://upload.example/session"),
         24 * 320 * 1024,
     );
     for url in [
         "http://localhost/session?token=1",
         "https://upload.example/session?token=1",
     ] {
-        session.state = SessionState::OneDrive {
-            url: SecretText::new(url.into()),
-        };
+        session.state = onedrive_state(url);
         UploadSession::decode(session.encode().unwrap().as_bytes()).unwrap();
     }
     for url in [
@@ -283,9 +280,7 @@ fn session_urls_and_unknown_state_fields_are_refused() {
         "https://user:password@upload.example/session",
         "https://upload.example/session#fragment",
     ] {
-        session.state = SessionState::OneDrive {
-            url: SecretText::new(url.into()),
-        };
+        session.state = onedrive_state(url);
         assert_invalid_recording(&session);
     }
     let mut value = serde_json::to_value(s3_recording()).unwrap();
@@ -333,4 +328,67 @@ fn completed_and_verifying_recordings_still_obey_their_provider() {
         }),
         Err(error) if error.failure() == StorageFailure::SessionMismatch
     ));
+}
+
+fn onedrive_state(url: &str) -> SessionState {
+    SessionState::OneDrive {
+        temporary: uuid::Uuid::from_bytes([7; 16]),
+        upload: OneDriveUpload::Receiving {
+            url: SecretText::new(url.into()),
+        },
+    }
+}
+
+#[test]
+fn onedrive_publication_phases_require_their_real_progress_and_capability() {
+    let location = StorageConfig::OneDrive {
+        drive_id: "drive".into(),
+        folder_id: "folder".into(),
+    };
+    for upload in [
+        OneDriveUpload::Uploaded {
+            item: "item".into(),
+        },
+        OneDriveUpload::Copying {
+            monitor: SecretText::new("https://monitor.example/copy".into()),
+        },
+        OneDriveUpload::Published,
+        OneDriveUpload::Refused,
+    ] {
+        let mut session = recording(
+            location.clone(),
+            SessionState::OneDrive {
+                temporary: uuid::Uuid::from_bytes([7; 16]),
+                upload,
+            },
+            ONEDRIVE_PART_SIZE,
+        );
+        assert_invalid_recording(&session);
+        session.confirmed = session.total;
+        UploadSession::decode(session.encode().unwrap().as_bytes()).unwrap();
+        let SessionState::OneDrive { upload, .. } = &mut session.state else {
+            unreachable!()
+        };
+        match upload {
+            OneDriveUpload::Uploaded { item } => item.clear(),
+            OneDriveUpload::Copying { monitor } => {
+                *monitor = SecretText::new("file:///copy".into())
+            }
+            OneDriveUpload::Published | OneDriveUpload::Refused => {
+                *upload = OneDriveUpload::VerifyPublished
+            }
+            _ => unreachable!(),
+        }
+        assert_invalid_recording(&session);
+    }
+    let mut session = recording(
+        location,
+        onedrive_state("https://upload.example/session"),
+        ONEDRIVE_PART_SIZE,
+    );
+    session.confirmed = session.total;
+    assert_invalid_recording(&session);
+    session.confirmed = 0;
+    session.state = SessionState::VerifyPublished;
+    assert_invalid_recording(&session);
 }

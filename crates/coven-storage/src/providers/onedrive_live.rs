@@ -111,6 +111,7 @@ struct Live<'a> {
     store: StoreId,
     clock: ClockRef,
     uploads: &'a mut Vec<(Connection, UploadSession)>,
+    native_uploads: &'a mut Vec<SecretText>,
 }
 impl Live<'_> {
     fn path(&self, number: u64) -> ObjectPath {
@@ -130,8 +131,10 @@ impl Live<'_> {
             .await
             .unwrap();
         let native = self.storage.provider.metadata(&path).await.unwrap();
-        let raw = http::string(&native, "createdDateTime").unwrap().to_owned();
-        let time = http::timestamp(&native, "createdDateTime").unwrap();
+        let raw = http::string(&native, "lastModifiedDateTime")
+            .unwrap()
+            .to_owned();
+        let time = http::timestamp(&native, "lastModifiedDateTime").unwrap();
         assert_eq!(self.observed(&path).await.stored_at, time);
         (raw, time)
     }
@@ -145,6 +148,115 @@ impl Live<'_> {
         self.uploads.push((self.storage.clone(), upload.clone()));
         upload
     }
+    async fn assert_temporaries_deleted(&self) {
+        let provider = &self.storage.provider;
+        let root = provider.item(&provider.folder, &[]).unwrap();
+        assert!(!self.uploads.is_empty());
+        for (_, recorded) in self.uploads.iter() {
+            let SessionState::OneDrive { temporary, .. } = &recorded.state else {
+                panic!("expected the original OneDrive recording")
+            };
+            let response = provider
+                .send(
+                    Method::GET,
+                    &format!("{root}:/{}/.coven-uploads/{temporary}:", self.store),
+                    Body::Empty,
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status().as_u16(), 404);
+        }
+    }
+}
+
+async fn native(provider: &OneDriveStorage, method: Method, url: &str, body: Body) -> Value {
+    http::json(PROVIDER, provider.send(method, url, body).await.unwrap())
+        .await
+        .unwrap()
+}
+
+async fn children(provider: &OneDriveStorage, parent: &str) -> Vec<Value> {
+    let mut url = provider.item(parent, &["children"]).unwrap();
+    let mut pages = Pagination::new();
+    let mut items = Vec::new();
+    loop {
+        pages.check(&url).unwrap();
+        http::same_origin(&provider.api, &url).unwrap();
+        let value = native(provider, Method::GET, &url, Body::Empty).await;
+        items.extend(http::array(&value, "value").unwrap().iter().cloned());
+        match value.get("@odata.nextLink") {
+            Some(_) => url = http::string(&value, "@odata.nextLink").unwrap().into(),
+            None => return items,
+        }
+    }
+}
+
+async fn copy_response(
+    provider: &OneDriveStorage,
+    source: &str,
+    parent: &str,
+    name: &str,
+) -> reqwest::Response {
+    let url = format!(
+        "{}?@microsoft.graph.conflictBehavior=fail",
+        provider.item(source, &["copy"]).unwrap()
+    );
+    provider
+        .send(
+            Method::POST,
+            &url,
+            Body::Json(
+                json!({"parentReference":{"driveId":provider.drive,"id":parent},"name":name}),
+            ),
+        )
+        .await
+        .unwrap()
+}
+
+fn pattern(offset: usize, length: usize) -> Vec<u8> {
+    (offset..offset + length)
+        .map(|i| ((i * 7) % 251) as u8)
+        .collect()
+}
+
+async fn exact_bytes(provider: &OneDriveStorage, item: &Value, total: usize) {
+    let url = http::string(item, "@microsoft.graph.downloadUrl").unwrap();
+    validate_download_url(&provider.api, url).unwrap();
+    let mut response = http::checked(
+        PROVIDER,
+        provider
+            .session
+            .send(Method::GET, url, &[], Body::Empty, false)
+            .await
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    let mut offset = 0;
+    while let Some(bytes) = response
+        .chunk()
+        .await
+        .map_err(|error| error.without_url())
+        .unwrap()
+    {
+        assert!(
+            offset + bytes.len() <= total,
+            "copied body exceeds promised size"
+        );
+        assert!(
+            bytes.as_ref() == pattern(offset, bytes.len()),
+            "copied bytes differ at offset {offset}"
+        );
+        offset += bytes.len();
+    }
+    assert_eq!(offset, total, "copied body was truncated");
+}
+
+fn report_item(label: &str, item: &Value) {
+    println!(
+        "onedrive_copy {label}: size={} createdDateTime={} lastModifiedDateTime={} fileSystemInfo.lastModifiedDateTime={} eTag={}",
+        item["size"], item["createdDateTime"], item["lastModifiedDateTime"], item["fileSystemInfo"]["lastModifiedDateTime"], item["eTag"]
+    );
 }
 
 #[cfg(test)]

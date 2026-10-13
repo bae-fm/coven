@@ -10,10 +10,9 @@ pub struct StoredObject {
     pub path: ObjectPath,
     /// Complete encrypted length, including for ranged reads.
     pub size: u64,
-    /// Provider creation time for immutable objects, replacement time otherwise.
-    /// AWS multipart Last-Modified and OneDrive session createdDateTime report
-    /// initiation, not complete publication. The adapter preserves those native
-    /// values; the live publication checks expose the unmet provider guarantee.
+    /// Provider publication time for immutable objects, replacement time otherwise.
+    /// OneDrive uses the copy's lastModifiedDateTime. AWS multipart Last-Modified
+    /// still reports initiation; its live check exposes that unmet guarantee.
     pub stored_at: SystemTime,
     /// Timestamp resolution. S3 uses its whole-second HEAD/GET representation
     /// for listings too; other providers retain their returned fractional digits.

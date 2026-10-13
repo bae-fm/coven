@@ -15,6 +15,36 @@ use std::{
 #[path = "onedrive_live.rs"]
 mod live;
 
+#[tokio::test]
+async fn completed_parts_wait_for_publication_and_temporaries_are_not_listed() {
+    let state = remote();
+    let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
+    let storage = provider(&server.url);
+    let path = ObjectPath::device_log(
+        STORE_ID,
+        coven_foundation::id_source::DeviceId(31),
+        std::num::NonZeroU64::MIN,
+    );
+    let mut upload = storage.begin_upload(&path, 4).await.unwrap();
+    storage.upload_part(&mut upload, b"data").await.unwrap();
+    assert!(!upload.is_complete());
+    assert_eq!(upload.confirmed_bytes(), 4);
+    assert!(storage.status(&path).await.unwrap().is_none());
+    assert!(storage
+        .list(&ObjectPrefix::all(STORE_ID))
+        .await
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        storage.read(&path).await.unwrap_err().failure(),
+        StorageFailure::NotFound
+    );
+    storage.finish_upload(&mut upload).await.unwrap();
+    assert!(upload.is_complete());
+    assert_eq!(storage.read(&path).await.unwrap(), b"data");
+    assert_eq!(state.lock().unwrap().files.len(), 1);
+}
+
 #[derive(Default)]
 struct Remote {
     dirs: BTreeMap<String, String>,
@@ -31,6 +61,14 @@ struct Remote {
     single_uploads: usize,
     session_starts: usize,
     fail_reply: bool,
+    copies: usize,
+    copied: BTreeSet<String>,
+    fail_copy_reply: bool,
+    refuse_copy: bool,
+    fail_monitor: bool,
+    monitor_replies: std::collections::VecDeque<(u16, Value)>,
+    refuse_temporary_delete: bool,
+    lose_temporary_delete_reply: bool,
     expected_ranges: Option<Value>,
     members: BTreeSet<String>,
     permissions: BTreeMap<String, Value>,
@@ -38,7 +76,12 @@ struct Remote {
     lose_permission_reply: bool,
 }
 fn file(path: &str, bytes: &[u8], host: &str, state: &Remote) -> Value {
-    json!({"id":format!("file:{path}"),"name":path.rsplit('/').next().unwrap(),"size":bytes.len(),"file":{},"eTag":state.revisions[path].to_string(),"lastModifiedDateTime":"2026-10-06T00:00:00Z","createdDateTime":"2026-10-06T00:00:00Z","fileSystemInfo":{"createdDateTime":"2000-01-01T00:00:00Z"},"@microsoft.graph.downloadUrl":format!("http://{host}/download/{path}")})
+    let modified = if state.copied.contains(path) {
+        "2026-10-06T00:10:00Z"
+    } else {
+        "2026-10-06T00:00:00Z"
+    };
+    json!({"id":format!("file:{path}"),"name":path.rsplit('/').next().unwrap(),"size":bytes.len(),"file":{},"eTag":state.revisions[path].to_string(),"lastModifiedDateTime":modified,"createdDateTime":"2026-10-06T00:00:00Z","fileSystemInfo":{"createdDateTime":"2000-01-01T00:00:00Z"},"@microsoft.graph.downloadUrl":format!("http://{host}/download/{path}")})
 }
 async fn endpoint(
     State(state): State<Arc<Mutex<Remote>>>,
@@ -50,6 +93,16 @@ async fn endpoint(
     let mut state = state.lock().unwrap();
     let q = query(&uri);
     let host = headers["host"].to_str().unwrap();
+    if uri.path().starts_with("/copy-monitor/") {
+        assert!(headers.get("authorization").is_none());
+        if let Some((status, body)) = state.monitor_replies.pop_front() {
+            return response(status, body.to_string());
+        }
+        if std::mem::take(&mut state.fail_monitor) {
+            return response(503, "{}");
+        }
+        return reply(json!({"status":"completed"}));
+    }
     if let Some(path) = uri.path().strip_prefix("/download/") {
         assert!(headers.get("authorization").is_none());
         if std::mem::take(&mut state.replace_during_read) {
@@ -63,7 +116,8 @@ async fn endpoint(
     if let Some(id) = uri.path().strip_prefix("/session/") {
         assert!(headers.get("authorization").is_none());
         if method == Method::DELETE {
-            let status = if state.uploads.remove(id).is_some() {
+            let status = if let Some((path, _)) = state.uploads.remove(id) {
+                state.files.remove(&path);
                 204
             } else {
                 404
@@ -93,13 +147,8 @@ async fn endpoint(
         bytes.extend_from_slice(&body);
         let path = path.clone();
         let size = bytes.len();
+        let partial = bytes.clone();
         if size == total {
-            if state.files.contains_key(&path) {
-                return response(
-                    409,
-                    json!({"error":{"code":"nameAlreadyExists"}}).to_string(),
-                );
-            }
             let (_, bytes) = state.uploads.remove(id).unwrap();
             *state.revisions.entry(path.clone()).or_insert(0) += 1;
             let value = file(&path, &bytes, host, &state);
@@ -109,6 +158,8 @@ async fn endpoint(
             }
             return reply(value);
         }
+        state.revisions.entry(path.clone()).or_insert(1);
+        state.files.insert(path, partial);
         if std::mem::replace(&mut state.fail_reply, false) {
             return response(503, "{}");
         }
@@ -167,6 +218,51 @@ async fn endpoint(
     } else {
         serde_json::from_slice(&body).unwrap()
     };
+    if let Some(source) = tail.strip_suffix("/copy") {
+        assert_eq!(method, Method::POST);
+        assert_eq!(q["@microsoft.graph.conflictBehavior"], "fail");
+        assert_eq!(value["parentReference"]["driveId"], "drive");
+        state.copies += 1;
+        if state.refuse_copy {
+            return response(403, json!({"error":{"code":"accessDenied"}}).to_string());
+        }
+        let source = url::form_urlencoded::parse(source.as_bytes())
+            .next()
+            .unwrap()
+            .0;
+        let source = source.strip_prefix("file:").unwrap();
+        let parent = value["parentReference"]["id"].as_str().unwrap();
+        let path = format!("{}/{}", state.dirs[parent], value["name"].as_str().unwrap());
+        if state.files.contains_key(&path) {
+            return response(
+                409,
+                json!({"error":{"code":"nameAlreadyExists"}}).to_string(),
+            );
+        }
+        let Some(bytes) = state.files.get(source).cloned() else {
+            return response(404, json!({"error":{"code":"itemNotFound"}}).to_string());
+        };
+        let failed = state
+            .monitor_replies
+            .iter()
+            .any(|(_, value)| matches!(value["status"].as_str(), Some("failed" | "deleteFailed")));
+        if !failed {
+            state.files.insert(path.clone(), bytes);
+            state.revisions.insert(path.clone(), 1);
+            state.copied.insert(path);
+        }
+        if std::mem::take(&mut state.fail_copy_reply) {
+            return response(503, "{}");
+        }
+        return Response::builder()
+            .status(202)
+            .header(
+                "location",
+                format!("http://{host}/copy-monitor/{}", state.copies),
+            )
+            .body(Body::empty())
+            .unwrap();
+    }
     if let Some((parent, tail)) = tail.split_once(":/") {
         let (relative, suffix) = tail.rsplit_once(':').unwrap();
         let base = state.dirs.get(parent).unwrap();
@@ -178,13 +274,27 @@ async fn endpoint(
         if suffix == "/createUploadSession" {
             state.session_starts += 1;
             assert_eq!(value["item"]["@microsoft.graph.conflictBehavior"], "fail");
+            if state.files.contains_key(&path) {
+                return response(
+                    409,
+                    json!({"error":{"code":"nameAlreadyExists"}}).to_string(),
+                );
+            }
             state.next += 1;
             let id = state.next.to_string();
             state.uploads.insert(id.clone(), (path, Vec::new()));
             return reply(json!({"uploadUrl":format!("http://{host}/session/{id}")}));
         }
         if method == Method::DELETE {
+            if path.contains("/.coven-uploads/") && state.refuse_temporary_delete {
+                return response(403, json!({"error":{"code":"accessDenied"}}).to_string());
+            }
             state.files.remove(&path);
+            if path.contains("/.coven-uploads/")
+                && std::mem::take(&mut state.lose_temporary_delete_reply)
+            {
+                return response(503, "{}");
+            }
             return response(204, Vec::new());
         }
         if method == Method::PUT {
@@ -309,35 +419,6 @@ async fn endpoint(
     }
 }
 
-#[tokio::test]
-async fn lost_completion_requires_byte_verification() {
-    let state = remote();
-    let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
-    let storage = provider(&server.url);
-    let path = ObjectPath::file(
-        STORE_ID,
-        coven_foundation::id_source::DeviceId(31),
-        coven_foundation::id_source::FileId(uuid::Uuid::from_bytes([0xff; 16])),
-    );
-    let mut upload = storage.begin_upload(&path, 4).await.unwrap();
-    let recorded = upload.encode().unwrap();
-    state.lock().unwrap().fail_reply = true;
-    assert!(storage.upload_part(&mut upload, b"data").await.is_err());
-    let storage = provider(&server.url);
-    let mut upload = UploadSession::decode(recorded.as_bytes()).unwrap();
-    storage.resume_upload(&mut upload).await.unwrap();
-    assert!(!upload.is_complete());
-    assert!(matches!(
-        storage.upload_part(&mut upload, b"else").await,
-        Err(error) if error.failure() == StorageFailure::AlreadyExists
-    ));
-    assert_eq!(upload.confirmed_bytes(), 0);
-    let mut upload = UploadSession::decode(upload.encode().unwrap().as_bytes()).unwrap();
-    storage.resume_upload(&mut upload).await.unwrap();
-    storage.upload_part(&mut upload, b"data").await.unwrap();
-    storage.finish_upload(&mut upload).await.unwrap();
-    assert!(upload.is_complete());
-}
 fn provider(url: &str) -> StorageConnection<OneDriveStorage> {
     let mut storage = OneDriveStorage::new(
         StorageConfig::OneDrive {
@@ -345,6 +426,7 @@ fn provider(url: &str) -> StorageConnection<OneDriveStorage> {
             folder_id: "root".into(),
         },
         session(PROVIDER),
+        Arc::new(coven_foundation::id_source::SequentialIds::new()),
     )
     .unwrap();
     storage.api = format!("{url}/graph");
@@ -521,6 +603,7 @@ async fn abort_retries_after_cancellation_and_preserves_published_objects() {
     let mut upload = storage.begin_upload(&path, 4).await.unwrap();
     let recorded = upload.encode().unwrap();
     storage.upload_part(&mut upload, b"data").await.unwrap();
+    storage.finish_upload(&mut upload).await.unwrap();
     let unconfirmed = UploadSession::decode(recorded.as_bytes()).unwrap();
     storage.abort_upload(&unconfirmed).await.unwrap();
     storage.abort_upload(&unconfirmed).await.unwrap();
@@ -772,9 +855,26 @@ async fn permission_failures_reach_every_object_and_upload_caller() {
             denied.store(true, Ordering::SeqCst);
         })
         .await;
+    fn native_refusal(error: &StorageError) {
+        match error {
+            StorageError::Provider { source, .. } => {
+                let response = source.downcast_ref::<http::ProviderResponse>().unwrap();
+                assert_eq!(response.status(), 403);
+                assert_eq!(response.body(), b"native-refusal");
+            }
+            StorageError::Cleanup { operation, cleanup } => {
+                native_refusal(operation);
+                native_refusal(cleanup);
+            }
+            _ => panic!("native permission failure was discarded"),
+        }
+    }
     assert!(errors
         .iter()
-        .all(|error| matches!(error, StorageError::Provider { .. })));
+        .any(|error| matches!(error, StorageError::Cleanup { .. })));
+    for error in &errors {
+        native_refusal(error);
+    }
 }
 
 #[tokio::test]
@@ -835,3 +935,6 @@ async fn replacement_during_download_does_not_return_mismatched_metadata() {
         StorageFailure::Protocol
     );
 }
+
+#[path = "onedrive_upload_tests.rs"]
+mod upload_tests;

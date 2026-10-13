@@ -1,0 +1,489 @@
+//! Transfer to an unpublished name, then publish once through Graph copy.
+use super::*;
+use crate::transfer::with_cleanup;
+use std::time::Duration;
+
+pub(super) const TEMPORARIES: &str = ".coven-uploads";
+
+fn temporary(session: &UploadSession) -> Result<uuid::Uuid, StorageError> {
+    match &session.state {
+        SessionState::OneDrive { temporary, .. } => Ok(*temporary),
+        _ => Err(StorageFailure::SessionMismatch.into()),
+    }
+}
+fn upload(session: &UploadSession) -> Result<&OneDriveUpload, StorageError> {
+    match &session.state {
+        SessionState::OneDrive { upload, .. } => Ok(upload),
+        _ => Err(StorageFailure::SessionMismatch.into()),
+    }
+}
+fn set_upload(session: &mut UploadSession, next: OneDriveUpload) -> Result<(), StorageError> {
+    match &mut session.state {
+        SessionState::OneDrive { upload, .. } => {
+            *upload = next;
+            Ok(())
+        }
+        _ => Err(StorageFailure::SessionMismatch.into()),
+    }
+}
+
+impl OneDriveStorage {
+    fn temporary_url(
+        &self,
+        store: coven_foundation::id_source::StoreId,
+        id: uuid::Uuid,
+    ) -> Result<String, StorageError> {
+        Ok(format!(
+            "{}:/{store}/{TEMPORARIES}/{id}:",
+            self.item(&self.folder, &[])?
+        ))
+    }
+    async fn delete_temporary(&self, session: &UploadSession) -> Result<(), StorageError> {
+        self.delete_temporary_at(session.path.store(), temporary(session)?)
+            .await
+    }
+    async fn delete_temporary_at(
+        &self,
+        store: coven_foundation::id_source::StoreId,
+        id: uuid::Uuid,
+    ) -> Result<(), StorageError> {
+        let response = self
+            .send(Method::DELETE, &self.temporary_url(store, id)?, Body::Empty)
+            .await?;
+        if response.status().as_u16() == 404 {
+            self.check_folder().await?;
+        } else {
+            http::checked(PROVIDER, response).await?;
+        }
+        Ok(())
+    }
+    pub(super) async fn begin_temporary(
+        &self,
+        path: &ObjectPath,
+        total: u64,
+    ) -> Result<UploadSession, StorageError> {
+        self.directory(&[&path.store().to_string(), TEMPORARIES])
+            .await?;
+        let temporary = self.ids.new_id();
+        let started = async {
+            let url = format!(
+                "{}/createUploadSession",
+                self.temporary_url(path.store(), temporary)?
+            );
+            let response = self
+                .send(
+                    Method::POST,
+                    &url,
+                    Body::Json(json!({"item": {
+                        "@microsoft.graph.conflictBehavior": "fail",
+                        "name": temporary.to_string()
+                    }})),
+                )
+                .await?;
+            let value = http::json(PROVIDER, response).await?;
+            let url = http::string(&value, "uploadUrl")?;
+            validate_download_url(&self.api, url)?;
+            Ok::<_, StorageError>(SecretText::new(url.into()))
+        }
+        .await;
+        let url = match started {
+            Ok(url) => url,
+            Err(error) => {
+                // No parts have been sent and no recording can be returned.
+                // Remove an item even if initiation's response was lost.
+                return with_cleanup(
+                    Err(error),
+                    self.delete_temporary_at(path.store(), temporary).await,
+                );
+            }
+        };
+        Ok(UploadSession {
+            location: self.config(),
+            path: path.clone(),
+            total,
+            confirmed: 0,
+            part_size: crate::session::ONEDRIVE_PART_SIZE,
+            state: SessionState::OneDrive {
+                temporary,
+                upload: OneDriveUpload::Receiving { url },
+            },
+        })
+    }
+
+    pub(super) async fn resume_temporary(
+        &self,
+        session: &mut UploadSession,
+    ) -> Result<(), StorageError> {
+        match upload(session)? {
+            OneDriveUpload::Receiving { url } => {
+                validate_download_url(&self.api, url.as_str())?;
+                let response = self
+                    .session
+                    .send(Method::GET, url.as_str(), &[], Body::Empty, false)
+                    .await?;
+                if response.status().as_u16() == 404 {
+                    return self.recover_temporary(session).await;
+                }
+                self.progress(session, response).await
+            }
+            OneDriveUpload::Uploaded { .. } | OneDriveUpload::Refused => {
+                self.recover_temporary(session).await
+            }
+            OneDriveUpload::Copying { .. } => self.await_copy(session).await,
+            OneDriveUpload::VerifyPublished => Ok(()),
+            OneDriveUpload::Published => self.finish_cleanup(session).await,
+        }
+    }
+
+    async fn recover_temporary(&self, session: &mut UploadSession) -> Result<(), StorageError> {
+        // A recording may precede the final part, copy, or deletion reply.
+        // The native upload is closed; resolve whether its temporary survived.
+        let url = self.temporary_url(session.path.store(), temporary(session)?)?;
+        let response = self.send(Method::GET, &url, Body::Empty).await?;
+        if response.status().as_u16() == 404 {
+            self.check_folder().await?;
+            let object = self.status(&session.path).await?.ok_or(
+                StorageFailure::SessionExpired
+                    .with_source("OneDrive session and destination are absent"),
+            )?;
+            return self.verify_existing(session, object).await;
+        }
+        let value = http::json(PROVIDER, response).await?;
+        if http::string(&value, "name")? != temporary(session)?.to_string()
+            || !value["file"].is_object()
+        {
+            return Err(
+                StorageFailure::Protocol.with_source("OneDrive returned another upload temporary")
+            );
+        }
+        let size = value["size"]
+            .as_u64()
+            .ok_or(StorageFailure::Protocol.with_source("OneDrive temporary omitted size"))?;
+        if size < session.total {
+            // Do not return SessionExpired until cleanup succeeds: callers
+            // replace expired recordings, losing their temporary identity.
+            self.delete_temporary(session).await?;
+            return Err(StorageFailure::SessionExpired
+                .with_source("OneDrive expired an unfinished temporary"));
+        }
+        if size != session.total {
+            return Err(StorageFailure::Protocol
+                .with_source("OneDrive temporary size disagrees with session"));
+        }
+        // The saved upload can predate a successful copy reply. An occupied
+        // destination must be compared before either identity is forgotten.
+        if let Some(object) = self.status(&session.path).await? {
+            return self.verify_existing(session, object).await;
+        }
+        let item = http::string(&value, "id")?.to_owned();
+        set_upload(session, OneDriveUpload::Uploaded { item })?;
+        session.confirmed = session.total;
+        Ok(())
+    }
+
+    async fn verify_existing(
+        &self,
+        session: &mut UploadSession,
+        object: StoredObject,
+    ) -> Result<(), StorageError> {
+        if object.size != session.total {
+            return with_cleanup(
+                Err(StorageFailure::AlreadyExists.into()),
+                self.delete_temporary(session).await,
+            );
+        }
+        set_upload(session, OneDriveUpload::VerifyPublished)?;
+        session.confirmed = 0;
+        Ok(())
+    }
+
+    pub(super) async fn send_part(
+        &self,
+        session: &mut UploadSession,
+        bytes: &[u8],
+        end: u64,
+    ) -> Result<(), StorageError> {
+        match upload(session)? {
+            OneDriveUpload::VerifyPublished => {
+                if let Err(error) = http::compare_published_part(self, session, bytes, end).await {
+                    if error.failure() == StorageFailure::AlreadyExists {
+                        return with_cleanup(Err(error), self.delete_temporary(session).await);
+                    }
+                    return Err(error);
+                }
+                session.confirmed = end;
+                if end == session.total {
+                    set_upload(session, OneDriveUpload::Published)?;
+                    self.finish_cleanup(session).await?;
+                }
+                Ok(())
+            }
+            OneDriveUpload::Receiving { url } => {
+                validate_download_url(&self.api, url.as_str())?;
+                let response = self
+                    .session
+                    .send(
+                        Method::PUT,
+                        url.as_str(),
+                        &[
+                            (
+                                "Content-Range",
+                                format!(
+                                    "bytes {}-{}/{}",
+                                    session.confirmed,
+                                    end - 1,
+                                    session.total
+                                ),
+                            ),
+                            ("Content-Type", "application/octet-stream".into()),
+                        ],
+                        Body::Bytes(bytes.to_vec()),
+                        false,
+                    )
+                    .await?;
+                self.progress(session, response).await?;
+                if session.confirmed < end {
+                    return Err(StorageFailure::Protocol
+                        .with_source("OneDrive did not store the entire part"));
+                }
+                Ok(())
+            }
+            _ => Err(StorageFailure::InvalidPart.into()),
+        }
+    }
+
+    pub(super) async fn publish_temporary(
+        &self,
+        session: &mut UploadSession,
+    ) -> Result<(), StorageError> {
+        match upload(session)? {
+            OneDriveUpload::Published => return self.finish_cleanup(session).await,
+            OneDriveUpload::Copying { .. } | OneDriveUpload::Refused => {
+                return self.finish_copy(session).await
+            }
+            OneDriveUpload::VerifyPublished | OneDriveUpload::Receiving { .. } => {
+                return Err(StorageFailure::InvalidPart.into())
+            }
+            OneDriveUpload::Uploaded { .. } => {}
+        }
+        let OneDriveUpload::Uploaded { item } = upload(session)? else {
+            unreachable!()
+        };
+        let parent = self.parents(&session.path).await?;
+        let url = format!(
+            "{}?@microsoft.graph.conflictBehavior=fail",
+            self.item(item, &["copy"])?
+        );
+        let response = self
+            .send(
+                Method::POST,
+                &url,
+                Body::Json(json!({
+                    "parentReference": {"driveId": self.drive, "id": parent},
+                    "name": session.path.file_name()
+                })),
+            )
+            .await?;
+        if !response.status().is_success() {
+            let error = http::response_error(PROVIDER, response).await;
+            if error.retryable() {
+                return Err(error);
+            }
+            return self.copy_refused(session, error).await;
+        }
+        if response.status().as_u16() != 202 {
+            return Err(StorageFailure::Protocol
+                .with_source("OneDrive copy omitted asynchronous acceptance"));
+        }
+        let monitor = response
+            .headers()
+            .get("location")
+            .and_then(|v| v.to_str().ok())
+            .ok_or(StorageFailure::Protocol.with_source("OneDrive copy omitted monitor URL"))?;
+        validate_download_url(&self.api, monitor)?;
+        set_upload(
+            session,
+            OneDriveUpload::Copying {
+                monitor: SecretText::new(monitor.into()),
+            },
+        )?;
+        self.finish_copy(session).await
+    }
+
+    async fn finish_copy(&self, session: &mut UploadSession) -> Result<(), StorageError> {
+        match upload(session)? {
+            OneDriveUpload::Copying { .. } => self.await_copy(session).await?,
+            OneDriveUpload::Refused => self.recover_temporary(session).await?,
+            _ => return Err(StorageFailure::SessionMismatch.into()),
+        }
+        if !session.is_complete() {
+            return Err(
+                StorageFailure::Network.with_source("OneDrive copy requires session resumption")
+            );
+        }
+        Ok(())
+    }
+
+    async fn copy_refused(
+        &self,
+        session: &mut UploadSession,
+        error: StorageError,
+    ) -> Result<(), StorageError> {
+        set_upload(session, OneDriveUpload::Refused)?;
+        with_cleanup(Err(error), self.delete_temporary(session).await)
+    }
+
+    async fn await_copy(&self, session: &mut UploadSession) -> Result<(), StorageError> {
+        let OneDriveUpload::Copying { monitor } = upload(session)? else {
+            return Err(StorageFailure::SessionMismatch.into());
+        };
+        validate_download_url(&self.api, monitor.as_str())?;
+        let monitor = monitor.clone();
+        let copying = async {
+            loop {
+                let response = self
+                    .session
+                    .send(Method::GET, monitor.as_str(), &[], Body::Empty, false)
+                    .await?;
+                if response.status().as_u16() == 404 {
+                    // Monitor expiry does not establish publication. Complete
+                    // bytes must be supplied again before confirming a name.
+                    return self.recover_temporary(session).await;
+                }
+                let completed = if response.status().as_u16() == 303 {
+                    true
+                } else {
+                    if !response.status().is_success() {
+                        let error = http::response_error(PROVIDER, response).await;
+                        // A monitor request refusal is not a copy refusal: the
+                        // native copy can still be running, so retain its source.
+                        return Err(error);
+                    }
+                    let (value, receipt) = http::json_response(PROVIDER, response).await?;
+                    match http::string(&value, "status")? {
+                        "completed" => true,
+                        "notStarted" | "inProgress" | "waiting" => false,
+                        "failed" | "deleteFailed" => {
+                            return self
+                                .copy_refused(session, receipt.into_error(PROVIDER))
+                                .await
+                        }
+                        _ => {
+                            return Err(StorageFailure::Protocol
+                                .with_source("OneDrive returned unknown copy status"))
+                        }
+                    }
+                };
+                if completed {
+                    let value = self.metadata(&session.path).await?;
+                    let object = object_metadata::onedrive(&session.path, &value)?;
+                    if object.size != session.total {
+                        return Err(StorageFailure::Protocol
+                            .with_source("OneDrive copied an incomplete object"));
+                    }
+                    set_upload(session, OneDriveUpload::Published)?;
+                    return self.finish_cleanup(session).await;
+                }
+                self.session.sleep(Duration::from_secs(1)).await;
+            }
+        };
+        tokio::select! {
+            result = copying => result,
+            () = self.session.sleep(Duration::from_secs(300)) => {
+                Err(StorageFailure::Network.with_source("OneDrive copy monitor timed out"))
+            }
+        }
+    }
+
+    async fn finish_cleanup(&self, session: &mut UploadSession) -> Result<(), StorageError> {
+        self.delete_temporary(session).await?;
+        session.confirmed = session.total;
+        session.state = SessionState::Complete;
+        Ok(())
+    }
+
+    pub(super) async fn abort_temporary(
+        &self,
+        session: &UploadSession,
+    ) -> Result<(), StorageError> {
+        let cancellation = match upload(session)? {
+            OneDriveUpload::Receiving { url } => {
+                validate_download_url(&self.api, url.as_str())?;
+                async {
+                    let response = self
+                        .session
+                        .send(Method::DELETE, url.as_str(), &[], Body::Empty, false)
+                        .await?;
+                    if response.status().as_u16() != 404 {
+                        http::checked(PROVIDER, response).await?;
+                    }
+                    Ok(())
+                }
+                .await
+            }
+            _ => Ok(()),
+        };
+        with_cleanup(cancellation, self.delete_temporary(session).await)
+    }
+    async fn progress(
+        &self,
+        session: &mut UploadSession,
+        response: reqwest::Response,
+    ) -> Result<(), StorageError> {
+        if response.status().as_u16() == 404 {
+            let mut error = http::response_error(PROVIDER, response).await;
+            if let StorageError::Provider {
+                failure: failure @ StorageFailure::NotFound,
+                ..
+            } = &mut error
+            {
+                *failure = StorageFailure::SessionExpired;
+            }
+            return Err(error);
+        }
+        let response = http::checked(PROVIDER, response).await?;
+        let status = response.status().as_u16();
+        let headers = response.headers().clone();
+        let body = response
+            .bytes()
+            .await
+            .map_err(|e| http::transport(PROVIDER, e))?;
+        let invalid = || http::invalid_response(PROVIDER, status, headers.clone(), body.to_vec());
+        let value: Value = serde_json::from_slice(&body).map_err(|_| invalid())?;
+        if let Some(ranges) = value.get("nextExpectedRanges") {
+            let ranges = ranges.as_array().ok_or_else(invalid)?;
+            let mut first: Option<u64> = None;
+            for range in ranges {
+                let (start, end) = range
+                    .as_str()
+                    .and_then(|s| s.split_once('-'))
+                    .ok_or_else(invalid)?;
+                let start = start.parse::<u64>().map_err(|_| invalid())?;
+                if start < session.confirmed || start >= session.total {
+                    return Err(invalid());
+                }
+                if !end.is_empty() {
+                    let end = end.parse::<u64>().map_err(|_| invalid())?;
+                    if end < start || end >= session.total {
+                        return Err(invalid());
+                    }
+                }
+                first = Some(match first {
+                    Some(previous) => previous.min(start),
+                    None => start,
+                });
+            }
+            session.confirmed = first.ok_or_else(invalid)?;
+        } else {
+            if value["size"].as_u64() != Some(session.total)
+                || http::string(&value, "name")? != temporary(session)?.to_string()
+            {
+                return Err(StorageFailure::Protocol.with_source("OneDrive completed another file"));
+            }
+            let item = http::string(&value, "id")?.to_owned();
+            set_upload(session, OneDriveUpload::Uploaded { item })?;
+            session.confirmed = session.total;
+        }
+        Ok(())
+    }
+}

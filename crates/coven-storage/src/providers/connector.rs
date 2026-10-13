@@ -87,7 +87,7 @@ impl StorageConnector for ProviderConnector {
             }
             (StorageConfig::OneDrive { .. }, StorageCredentials::OAuth(tokens)) => {
                 let session = OAuthSession::new(config.provider(), tokens, self.clock.clone())?;
-                Arc::new(OneDriveStorage::new(config, session)?)
+                Arc::new(OneDriveStorage::new(config, session, self.ids.clone())?)
             }
             (StorageConfig::CloudKit { .. }, StorageCredentials::CloudKit) => {
                 #[cfg(target_vendor = "apple")]

@@ -502,15 +502,25 @@ pub(crate) async fn verify_published_part(
     bytes: &[u8],
     end: u64,
 ) -> Result<(), StorageError> {
+    compare_published_part(storage, session, bytes, end).await?;
+    session.confirmed = end;
+    if end == session.total {
+        session.state = crate::session::SessionState::Complete;
+    }
+    Ok(())
+}
+
+pub(crate) async fn compare_published_part(
+    storage: &dyn crate::ProviderOps,
+    session: &crate::UploadSession,
+    bytes: &[u8],
+    end: u64,
+) -> Result<(), StorageError> {
     let range = ByteRange::new(session.confirmed, end)?;
     let actual = storage.read_object(&session.path, Some(range)).await?;
     actual.check(&session.path, Some(range))?;
     if actual.metadata.size != session.total || actual.bytes != bytes {
         return Err(StorageFailure::AlreadyExists.into());
-    }
-    session.confirmed = end;
-    if end == session.total {
-        session.state = crate::session::SessionState::Complete;
     }
     Ok(())
 }

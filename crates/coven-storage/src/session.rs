@@ -21,6 +21,8 @@ pub(crate) const ONEDRIVE_PART_SIZE: usize = 24 * 320 * 1024;
 /// On GCS the recorded token names the temporary object as well as identifying
 /// publication. Abort deletes it even after native multipart completion; failed
 /// copy or cleanup keeps the recording incomplete so it can be retried.
+/// OneDrive records its temporary UUID through receipt, copying, verification
+/// and deletion; native transfer completion alone is not publication.
 /// Providers may retain closed session data until their expiry, without publishing it.
 /// When recovery requires complete-byte comparison with a published object,
 /// resumption resets the confirmed offset to zero. Feed the encrypted
@@ -86,7 +88,8 @@ pub(crate) enum SessionState {
         id: SecretText,
     },
     OneDrive {
-        url: SecretText,
+        temporary: uuid::Uuid,
+        upload: OneDriveUpload,
     },
     CloudKit {
         id: SecretText,
@@ -106,6 +109,20 @@ pub(crate) struct S3Part {
     pub(crate) number: i32,
     pub(crate) size: u64,
     pub(crate) etag: String,
+}
+
+/// Native transfer and publication are separate; every phase retains the
+/// temporary's identity until its deletion has succeeded.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) enum OneDriveUpload {
+    Receiving { url: SecretText },
+    Uploaded { item: String },
+    Copying { monitor: SecretText },
+    // The copy definitively failed; cleanup may already have removed its source.
+    Refused,
+    VerifyPublished,
+    Published,
 }
 
 impl S3Part {
@@ -141,7 +158,7 @@ impl UploadSession {
     pub fn part_size(&self) -> usize {
         self.part_size
     }
-    /// Whether the destination object has been published.
+    /// Whether publication and provider upload cleanup have succeeded.
     pub fn is_complete(&self) -> bool {
         match self.state {
             SessionState::Complete => true,
@@ -211,15 +228,42 @@ impl UploadSession {
                 nonempty(file_id)?;
             }
             SessionState::Dropbox { id } if provider == CloudProvider::Dropbox => nonempty(id)?,
-            SessionState::OneDrive { url } if provider == CloudProvider::OneDrive => {
-                transfer_url(url)?
+            SessionState::OneDrive { upload, .. } if provider == CloudProvider::OneDrive => {
+                match upload {
+                    OneDriveUpload::Receiving { url } => {
+                        transfer_url(url)?;
+                        if self.confirmed == self.total {
+                            return Err(StorageFailure::InvalidPart.into());
+                        }
+                    }
+                    OneDriveUpload::Uploaded { item } => {
+                        if item.is_empty() || self.confirmed != self.total {
+                            return Err(StorageFailure::InvalidPart.into());
+                        }
+                    }
+                    OneDriveUpload::Copying { monitor } => {
+                        transfer_url(monitor)?;
+                        if self.confirmed != self.total {
+                            return Err(StorageFailure::InvalidPart.into());
+                        }
+                    }
+                    OneDriveUpload::Published | OneDriveUpload::Refused
+                        if self.confirmed != self.total =>
+                    {
+                        return Err(StorageFailure::InvalidPart.into());
+                    }
+                    OneDriveUpload::VerifyPublished if self.confirmed == self.total => {
+                        return Err(StorageFailure::InvalidPart.into());
+                    }
+                    OneDriveUpload::VerifyPublished
+                    | OneDriveUpload::Published
+                    | OneDriveUpload::Refused => {}
+                }
             }
             SessionState::CloudKit { id } if provider == CloudProvider::CloudKit => {
                 check_cloudkit_id(id.as_str())?
             }
-            SessionState::VerifyPublished
-                if matches!(provider, CloudProvider::Dropbox | CloudProvider::OneDrive) =>
-            {
+            SessionState::VerifyPublished if provider == CloudProvider::Dropbox => {
                 if self.confirmed == self.total {
                     return Err(StorageFailure::InvalidPart.into());
                 }
