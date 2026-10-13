@@ -618,3 +618,247 @@ async fn closing_erases_custody_even_when_releasing_a_worker_fails() {
         Err(CovenError::Database(DbError::StoreClosed))
     ));
 }
+
+#[test]
+fn row_keys_preserve_column_order_and_sql_storage_classes() {
+    use types::Value;
+    assert_eq!(
+        RowKey::from("track").values(),
+        &[Value::Text("track".into())]
+    );
+    assert_eq!(
+        RowKey::from(("album".to_owned(), 7_i64)).values(),
+        &[Value::Text("album".into()), Value::Integer(7)]
+    );
+    let values = vec![
+        Value::Blob(vec![0, 255]),
+        Value::Integer(i64::MIN),
+        Value::Real(1.5),
+        Value::Text("track\0title".into()),
+        Value::Null,
+    ];
+    assert_eq!(RowKey::from(values.clone()).values(), values.as_slice());
+    assert!(RowKey::from(Vec::<Value>::new()).values().is_empty());
+}
+
+fn retry(reason: PendingReason) -> Retry {
+    PendingRecord {
+        subject: PendingSubject::Connection,
+        reason,
+        reported_by: DeviceId(1),
+    }
+    .retry()
+}
+
+#[test]
+fn missing_prerequisites_and_replaceable_positions_retry_automatically() {
+    let device = DeviceId(1);
+    let path = ObjectPath::clock(coven_storage::test_utils::STORE_ID, device);
+    for prerequisite in [
+        Prerequisite::Object(path.clone()),
+        Prerequisite::DeviceRegistration(device),
+        Prerequisite::SchemaPublication {
+            audience: Audience::Store,
+            version: 2,
+        },
+        Prerequisite::Reload(Audience::Store),
+        Prerequisite::OwnUploads,
+        Prerequisite::Positions(device),
+        Prerequisite::EntryFinality(EntryId { device, number: 1 }),
+    ] {
+        assert_eq!(retry(PendingReason::Waits(prerequisite)), Retry::Automatic);
+    }
+    for reason in [
+        PendingReason::Missing { path },
+        PendingReason::KeyUnavailable {
+            audience: Audience::Store,
+            key: KeyId(uuid::Uuid::from_u128(1)),
+        },
+        PendingReason::ProviderPending {
+            action: ProviderAccessAction::Grant,
+            account: "member@example.org".into(),
+        },
+        PendingReason::ProviderPending {
+            action: ProviderAccessAction::Revoke,
+            account: "member@example.org".into(),
+        },
+        PendingReason::PendingOwner {
+            account: "owner@example.org".into(),
+        },
+        PendingReason::AccountInUse {
+            account: "shared@example.org".into(),
+        },
+        PendingReason::InvalidPositions(Refusal::Signature { cause: None }),
+    ] {
+        assert_eq!(retry(reason.clone()), Retry::Automatic, "{reason:?}");
+    }
+}
+
+#[test]
+fn storage_pending_retry_distinguishes_transient_failures_from_app_actions() {
+    for (expected, failures) in [
+        (
+            Retry::Automatic,
+            vec![
+                StorageFailure::Network,
+                StorageFailure::Conflict,
+                StorageFailure::RateLimited,
+                StorageFailure::NotFound,
+                StorageFailure::SessionExpired,
+            ],
+        ),
+        (
+            Retry::AppAction,
+            vec![
+                StorageFailure::ProviderUnavailable,
+                StorageFailure::AccessNotRegistered {
+                    required: OAuthAccess::OneDrive,
+                },
+                StorageFailure::AccessNotGranted {
+                    required: OAuthAccess::OneDrive,
+                },
+                StorageFailure::GoogleDriveFolderNotVisible,
+                StorageFailure::DropboxAppFolderNotShareable,
+                StorageFailure::AccountMismatch,
+                StorageFailure::Authentication,
+                StorageFailure::PermissionDenied,
+                StorageFailure::AlreadyExists,
+                StorageFailure::ContainerNotFound,
+                StorageFailure::RegionMismatch,
+                StorageFailure::QuotaExceeded,
+                StorageFailure::InvalidConfiguration,
+                StorageFailure::Refused,
+                StorageFailure::Protocol,
+                StorageFailure::InvalidPath,
+                StorageFailure::InvalidRange,
+                StorageFailure::NotStoreOwner,
+                StorageFailure::AccountIdUnavailable,
+                StorageFailure::InvitationMismatch,
+                StorageFailure::SessionMismatch,
+                StorageFailure::InvalidPart,
+                StorageFailure::SingleRequestTooLarge { size: 2, limit: 1 },
+                StorageFailure::Encoding,
+                StorageFailure::File,
+                StorageFailure::MemberKeysMissing,
+            ],
+        ),
+    ] {
+        for failure in failures {
+            assert_eq!(
+                retry(PendingReason::Storage {
+                    provider: CloudProvider::S3,
+                    failure,
+                }),
+                expected,
+                "{failure:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn immutable_refusals_and_required_versions_wait_for_an_update() {
+    for refusal in [
+        Refusal::Decryption { cause: None },
+        Refusal::Signature { cause: None },
+        Refusal::Parse { cause: None },
+        Refusal::InvalidWrite { cause: None },
+        Refusal::NotAuthorized,
+        Refusal::InvalidCausality { cause: None },
+        Refusal::WrongIdentity { cause: None },
+        Refusal::ContentHash,
+    ] {
+        assert_eq!(retry(PendingReason::Refused(refusal)), Retry::AfterUpdate);
+    }
+    for update in [
+        RequiredUpdate::AppSchema { version: u32::MAX },
+        RequiredUpdate::CovenFormat { version: u16::MAX },
+    ] {
+        assert_eq!(
+            retry(PendingReason::UpdateRequired(update)),
+            Retry::AfterUpdate
+        );
+    }
+}
+
+#[test]
+fn local_and_access_failures_require_app_action() {
+    for reason in [
+        PendingReason::NoStorage,
+        PendingReason::AccessRemains {
+            account: "member@example.org".into(),
+            shares: vec![RetainedAccess {
+                provider_id: "parent-folder".into(),
+                reason: RetainedAccessReason::Inherited,
+            }],
+        },
+        PendingReason::DeleteAccessKey(AccessKeyToDelete {
+            access_key_id: "expired-invite-key".into(),
+            member: None,
+        }),
+        PendingReason::FileUnavailable(FileMissingReason::DeviceRemoved),
+        PendingReason::FileUnavailable(FileMissingReason::DeviceReplaced),
+        PendingReason::FileUnavailable(FileMissingReason::Source(FileSourceFailure::Missing)),
+        PendingReason::FileUnavailable(FileMissingReason::Source(FileSourceFailure::Changed)),
+        PendingReason::FileUnavailable(FileMissingReason::Source(FileSourceFailure::Integrity)),
+        PendingReason::Disagrees,
+        PendingReason::Failed(LocalFailure::Database),
+        PendingReason::Failed(LocalFailure::Disk),
+        PendingReason::Failed(LocalFailure::KeyCustody),
+        PendingReason::Failed(LocalFailure::Crypto),
+        PendingReason::Failed(LocalFailure::Operation),
+        PendingReason::Paused,
+    ] {
+        assert_eq!(retry(reason.clone()), Retry::AppAction, "{reason:?}");
+    }
+    assert_eq!(retry(PendingReason::Removed), Retry::Never);
+}
+
+#[test]
+fn replay_drops_are_final_for_logs_and_app_retriable_for_operations() {
+    for (subject, expected) in [
+        (
+            PendingSubject::Write(WriteId {
+                device: DeviceId(1),
+                number: 2,
+            }),
+            Retry::Never,
+        ),
+        (
+            PendingSubject::Entry(EntryId {
+                device: DeviceId(1),
+                number: 2,
+            }),
+            Retry::Never,
+        ),
+        (
+            PendingSubject::Operation {
+                id: OperationId(3),
+                kind: OperationKind::CreateCircle,
+            },
+            Retry::AppAction,
+        ),
+    ] {
+        for reason in [
+            DropReason::LandedTooLate,
+            DropReason::BeatenBy(EntryId {
+                device: DeviceId(2),
+                number: 1,
+            }),
+            DropReason::TargetGone(EntryTarget::Device(DeviceId(2))),
+            DropReason::TargetGone(EntryTarget::Circle(CircleId(uuid::Uuid::from_u128(1)))),
+            DropReason::TargetGone(EntryTarget::Member(
+                MemberKeys::generate().unwrap().member_id(),
+            )),
+            DropReason::NotAllowed,
+            DropReason::NoAdminLeft,
+        ] {
+            let record = PendingRecord {
+                subject: subject.clone(),
+                reason: PendingReason::Dropped(reason),
+                reported_by: DeviceId(1),
+            };
+            assert_eq!(record.retry(), expected, "{record:?}");
+        }
+    }
+}
