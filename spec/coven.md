@@ -576,6 +576,49 @@ the file's ranges under `F`.
     `partialFailure` is interpreted through `CKPartialErrorsByItemIDKey`, never
     as success; `CKErrorRetryAfterKey` supplies the provider's retry delay.
 - Every member reaches the storage using their own provider account.
+- Access starts at the least privilege that supports the store. Full-account
+  access exposes unrelated files and requires provider review; an app offering
+  only one-person stores need not register it.
+  - **Google Drive:** every new store requests
+    `https://www.googleapis.com/auth/drive.file`. The same person can use the
+    store across devices and across client ids in the app's Google Cloud project.
+    This permission does not let another person read the creator's files, even
+    after the folder is shared with them.
+  - At the first invite, coven requests
+    `https://www.googleapis.com/auth/drive` on the same client, with
+    `include_granted_scopes=true`. Only a confirmed full grant permits the
+    sharing request. Existing files remain in place with the same ids, bytes,
+    timestamps and revisions. Cancellation, denial or an insufficient grant
+    fails the invite without granting the recipient access.
+  - The app declares whether it registered full Drive access. A client registered
+    only for `drive.file` receives a typed missing-access error from
+    `create_invite` before any provider change. Joining a shared Drive store
+    requires full Drive access too. Full `drive` requires Google's restricted-scope
+    review; `drive.file` avoids that review.
+  - A restore initially requests `drive.file`. A shared folder visible under that
+    grant reports that full access is required; a folder returning 404 reports
+    that it is not visible under this grant, preserving the provider cause. The
+    app requests full access and retries. A narrow grant cannot establish that
+    another person's shared folder is absent.
+  - E.g. Ana creates Notes with `drive.file` and opens it on her laptop. Inviting
+    Carol asks Ana for full Drive access; accepting lets coven share the existing
+    folder. Carol signs in with full Drive access to read Ana's files.
+  - **Dropbox:** the app registers an App-folder key, a Full Dropbox key, or both.
+    The access level is fixed when the store is created on Dropbox. With both
+    keys, creation requires an explicit shared/not-shared choice, with no default.
+    With one key, that key determines the access level. A Full Dropbox store can
+    be shared even if it initially has only one person.
+  - An App-folder app addresses paths relative to its own folder, without a
+    shared-namespace path-root header. Dropbox refuses sharing inside that
+    folder: `create_invite` returns a typed error before changing the provider.
+    Sharing such a store later requires relocating it, which is outside this
+    access-level operation. Moving Dropbox files changes their server timestamps
+    and revisions, so switching keys is not an in-place access upgrade.
+    Full Dropbox apps require production review to serve beyond development use.
+  - E.g. Ana chooses not-shared for Notes and coven uses the App-folder key.
+    Inviting Carol reports that Notes needs relocation. Choosing shared when
+    creating Household uses the Full Dropbox key and permits later invitations.
+  - OneDrive, CloudKit and S3 retain their provider access rules below.
 - For Google Drive, Dropbox and OneDrive, the app triggers `authenticate` on
   the builder or open handle. Coven builds the sign-in request, checks the
   redirect, exchanges the code and holds the tokens; none pass through the app.

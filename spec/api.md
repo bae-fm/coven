@@ -72,6 +72,13 @@ pub enum Audience {
   settings: its id and name, this device's id, and its storage settings.
 - Creating, restoring or joining a store makes the directory and writes
   the settings, so the app never chooses a device id ([§10](coven.md#10-device-identity)).
+- Provider access is chosen when storage is first attached (E5), not when the
+  device-local directory is created. Google starts with `drive.file`.
+  Dropbox's required `DropboxLocation` selects not-shared (`AppFolder`) or
+  shared-capable (`SharedFolder`); it has no default. With one registered
+  Dropbox key only that key's location kind is available; with both the app
+  supplies the user's or its own explicit choice. The choice survives reopening
+  and restore and cannot be changed by reconnecting.
 - A `StoreLayout` says where an app's stores live on disk.
 - Store lock files live beside each store directory. Deletion holds the writer
   and reader locks while removing the directory, then releases and removes the
@@ -737,7 +744,7 @@ impl CovenBuilder {
     /// Sign in and commit tokens to coven's session custody for setup, restore
     /// or join. Dropping the future cancels sign-in; failure retains the prior
     /// sign-in. Success returns no tokens to the app.
-    pub async fn authenticate(&mut self, provider: CloudProvider) -> Result<(), OAuthError>;
+    pub async fn authenticate(&mut self, access: OAuthAccess) -> Result<(), OAuthError>;
 
     /// How many file uploads run at once. Defaults to one.
     pub fn max_concurrent_uploads(self, n: NonZeroUsize) -> Self;
@@ -822,6 +829,18 @@ let handle = Coven::builder(layout.clone())
     .migrations(migrations())                       // E13
     .open(store_dir.id())
     .await?;
+```
+
+Example, choosing a not-shared Dropbox store when both app keys are registered:
+
+```rust
+handle.authenticate(OAuthAccess::Dropbox(DropboxAccess::AppFolder)).await?;
+handle.setup_oauth_storage(
+    StorageConfig::Dropbox { location: DropboxLocation::AppFolder },
+    "Ana's phone",
+).await?;
+// A shared choice uses DropboxAccess::FullDropbox and
+// DropboxLocation::SharedFolder { namespace_id } instead.
 ```
 
 ### E2 Declaring synced tables
@@ -1368,7 +1387,7 @@ while let Ok(values) = lost.next().await {
     setup does not relocate a store already used by other devices.
   - Creating uploads the store's first entry and its key sealed to this
     member; waiting writes then go up through sync like any others.
-- The app calls `authenticate(provider)` on the handle before OAuth setup.
+- The app calls `authenticate(access)` on the handle before OAuth setup.
   Coven owns the request, checked redirect and code exchange. The builder's
   presenter opens the page and returns the redirect or cancellation; it receives
   no tokens. Sign-in is held in coven's session custody until setup succeeds.
@@ -1509,8 +1528,8 @@ pub enum StorageConfig {
     },
     /// A Google Drive folder; paths within it start with the store id.
     GoogleDrive { folder_id: String },
-    /// A Dropbox shared folder namespace, independent of each member's mount path.
-    Dropbox { namespace_id: String },
+    /// Required creation choice: an App folder or a shared-capable namespace.
+    Dropbox { location: DropboxLocation },
     /// A OneDrive folder; paths within it start with the store id.
     OneDrive { drive_id: String, folder_id: String },
     /// The CloudKit custom zone reached by the built-in adapter.
@@ -1524,9 +1543,19 @@ pub enum StorageConfig {
     },
 }
 
+/// Dropbox's location fixes its access level at cloud-store creation (§4).
+pub enum DropboxLocation {
+    /// Not-shared: paths are relative to the registered app's folder.
+    AppFolder,
+    /// Shared-capable: an existing shared namespace, independent of mount paths.
+    SharedFolder { namespace_id: String },
+}
+
 impl StorageConfig {
     /// The provider of this location.
     pub fn provider(&self) -> CloudProvider;
+    /// Initial sign-in for this location; shared Drive invites require Full (E10).
+    pub fn oauth_access(&self) -> Option<OAuthAccess>;
     /// Refuses missing or invalid location information before making a request.
     pub fn validate(&self) -> Result<(), StorageError>;
 }
@@ -1543,6 +1572,17 @@ pub struct TransferLimits {
 pub enum StorageFailure {
     /// This platform cannot use the selected built-in provider.
     ProviderUnavailable,
+    /// The app did not register the access needed by this operation.
+    AccessNotRegistered { required: OAuthAccess },
+    /// The sign-in lacks the access needed by this operation.
+    AccessNotGranted { required: OAuthAccess },
+    /// A folder is outside the Drive File grant's view; Full is needed to inspect it.
+    /// This does not establish that the folder has been deleted.
+    GoogleDriveFolderNotVisible,
+    /// Sharing an App-folder store requires relocation, outside this operation.
+    DropboxAppFolderNotShareable,
+    /// The incremental sign-in selected another account; the store keeps its prior credentials.
+    AccountMismatch,
     /// No route to the provider, a timeout, or an interrupted response.
     Network,
     /// Credentials were refused or must be refreshed.
@@ -1934,7 +1974,7 @@ impl CovenHandle {
     /// Runs sign-in through the builder's presenter and commits the tokens to
     /// session custody. Setup attaches this sign-in and persists credentials.
     /// Dropping the future cancels presentation without replacing held tokens.
-    pub async fn authenticate(&self, provider: CloudProvider) -> Result<(), StorageSetupError>;
+    pub async fn authenticate(&self, access: OAuthAccess) -> Result<(), StorageSetupError>;
 
     /// Sets up Google Drive, Dropbox or OneDrive using coven's held sign-in.
     /// Without a new sign-in, reconnects using this store's custody credentials.
@@ -2648,6 +2688,26 @@ pub enum ProviderSignOut {
   iCloud Keychain may also hold the S3 key separately alongside the code.
 - An admin adds a person with an invite, and approves their join request
   ([§12.2](coven.md#122-adding-a-person)).
+- Before `create_invite` makes any provider change, coven checks the registered
+  access. A Drive app registered only for `drive.file` fails with
+  `StorageFailure::AccessNotRegistered { required: OAuthAccess::GoogleDrive(GoogleDriveAccess::Full) }`.
+  An App-folder Dropbox store fails with `DropboxAppFolderNotShareable`:
+  sharing it requires store relocation, outside this operation.
+- On Drive, the first invite whose device still has narrow access presents
+  incremental authorization through the configured presenter, on the same client
+  with `include_granted_scopes=true`. Coven checks the granted scopes and the
+  signed-in account, commits the replacement credentials, then grants the
+  recipient access. A later invite reuses the held full grant. Consent denial,
+  cancellation, an insufficient grant or a different account fails before sharing
+  and preserves the previous credentials. Existing file ids and location stay
+  unchanged. Joining requires full Drive access too. A restored device initially
+  requests `drive.file`; if Drive reports the folder is shared, the adapter returns
+  `AccessNotGranted` requiring full access before listing its contents. A 404 for
+  the folder under `drive.file` instead returns `GoogleDriveFolderNotVisible`,
+  retaining the native error: another person's shared folder is outside that
+  grant's view, so this does not establish that the folder was deleted. The app
+  requests full access and retries restore to inspect the folder. It must not
+  treat an incomplete view of other members' files as an empty store.
 - A replacement invite fixes an existing active id before the requester
   generates keys. Approval binds the exact signed request's new pair after
   publishing the initial and available historical audience-key copies. The
@@ -2662,7 +2722,7 @@ pub enum ProviderSignOut {
   supplied S3 credentials. There is no second app-side open.
   - The builder supplies tables, migrations, custody, clock, id source,
     provider clients, sign-in presenter and file-transfer limits once. The app
-    calls `builder.authenticate(provider)` first where `needs_oauth` is true;
+    calls `builder.authenticate(access)` first when `oauth_access` is present;
     bootstrap uses that held sign-in and never opens UI. Session-only `InMemory`
     custody lives with the returned handle. OAuth sign-in tokens move from
     session custody into the device keychain on successful publication.
@@ -2707,8 +2767,9 @@ pub struct CodeInfo {
     pub member: MemberId,
     /// The provider holding the store.
     pub cloud_provider: CloudProvider,
-    /// Whether this provider requires sign-in before using the code.
-    pub needs_oauth: bool,
+    /// Sign-in request for this code: Drive File for a personal restore,
+    /// Drive Full for an invite, or the recorded Dropbox access level.
+    pub oauth_access: Option<OAuthAccess>,
 }
 
 /// The two codes used to open a store on a new device (§12).
@@ -2892,7 +2953,7 @@ pub struct S3Credentials {
 /// Opens the store on a new device from the person's restore code, scanned
 /// or typed. S3 requires Some(s3_credentials), entered separately or received
 /// alongside the code from one of the person's own devices. Other providers
-/// require None; the builder holds its own sign-in when `needs_oauth`.
+/// require None; the builder holds its own sign-in when `oauth_access` is present.
 /// Missing S3 credentials or credentials for another provider fail before
 /// bootstrap with BootstrapError::Sync carrying
 /// StorageFailure::InvalidConfiguration.
@@ -2939,16 +3000,45 @@ pub async fn join_with_invite(
 ) -> Result<Option<CovenHandle>, BootstrapError>;
 
 impl OAuthClients {
-    /// Sets client ids; None for providers the app does not offer.
+    /// Registers the access the app offers; None disables a provider.
     pub fn new(
-        google_drive_client_id: Option<String>,
-        dropbox_client_id: Option<String>,
+        google_drive: Option<GoogleDriveClient>,
+        dropbox: Option<DropboxClients>,
         onedrive_client_id: Option<String>,
+        clock: ClockRef,
     ) -> Self;
     /// Supplies a Google Desktop client's secret, which Google requires for code
     /// exchange and refresh; mobile clients have none. It is sent only to Google's
     /// token endpoint. Refused when no Google client id is set or the secret is empty.
     pub fn with_google_client_secret(self, secret: SecretText) -> Result<Self, OAuthError>;
+}
+
+/// Google's registered maximum, or the access requested by one sign-in.
+pub enum GoogleDriveAccess { File, Full }
+
+/// The Google client and its registered access; the client id stays private.
+pub struct GoogleDriveClient { /* private */ }
+impl GoogleDriveClient {
+    pub fn new(client_id: String, registered_access: GoogleDriveAccess) -> Self;
+}
+
+/// Dropbox access is fixed by the app registration, not an incremental scope.
+pub enum DropboxAccess { AppFolder, FullDropbox }
+
+/// One or both of the app's Dropbox registrations. There is no empty variant.
+pub enum DropboxClients {
+    AppFolder { app_key: String },
+    FullDropbox { app_key: String },
+    Both { app_folder_key: String, full_dropbox_key: String },
+}
+
+/// Access for this request. New Google stores request File; shared stores need Full.
+/// Dropbox callers supply the creation choice explicitly, using the only
+/// registered access when one key is configured.
+pub enum OAuthAccess {
+    GoogleDrive(GoogleDriveAccess),
+    Dropbox(DropboxAccess),
+    OneDrive,
 }
 ```
 
@@ -2971,6 +3061,24 @@ impl OAuthClients {
   provider-supplied details.
 - Refresh and S3 key replacement leave restore codes untouched. Restore
   codes carry the storage location, never S3 keys or OAuth tokens.
+- Google and Dropbox token custody retain the client id and granted access. Refresh uses that
+  registered client, including the chosen Dropbox key, and preserves granted
+  access only when the provider omits a scope field. A returned scope field is
+  authoritative: a missing required scope is `AccessNotGranted`, never a
+  successful upgrade.
+
+Example, a Google store's first invitation. The configured Google client has
+registered full access, but setup still signs in with `drive.file`:
+
+```rust
+handle.authenticate(OAuthAccess::GoogleDrive(GoogleDriveAccess::File)).await?;
+handle.setup_oauth_storage(StorageConfig::GoogleDrive { folder_id }, "Ana's phone").await?;
+// create_invite presents incremental full-Drive consent before sharing.
+let invite = handle.create_invite(
+    InviteTarget::NewMember { role: MemberRole::Member },
+    InviteAccess::ProviderAccount { email: "carol@example.com".into() },
+).await?;
+```
 
 Example, adding Ana's laptop. On her phone:
 
@@ -2989,8 +3097,8 @@ let mut builder = Coven::builder(layout.clone())
     .oauth_clients(oauth_clients.clone())
     .clock(clock.clone())
     .id_source(ids.clone());
-if info.needs_oauth {
-    builder.authenticate(info.cloud_provider).await?;
+if let Some(access) = info.oauth_access {
+    builder.authenticate(access).await?;
 }
 let s3_credentials = if info.cloud_provider == CloudProvider::S3 {
     Some(ask_for_s3_access_key().await?)
@@ -3042,7 +3150,7 @@ let mut builder = Coven::builder(layout.clone())
     .migrations(migrations())
     .oauth_clients(oauth_clients.clone())
     .oauth_presenter(platform_sign_in_sheet);
-builder.authenticate(CloudProvider::GoogleDrive).await?;
+builder.authenticate(OAuthAccess::GoogleDrive(GoogleDriveAccess::Full)).await?;
 match join_with_invite(
     builder,
     &scanned,
