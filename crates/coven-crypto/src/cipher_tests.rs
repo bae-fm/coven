@@ -13,6 +13,35 @@ fn context_lengths_are_big_endian_and_preserve_empty_components() {
     assert_ne!(context(&[b"ab", b"c"]), context(&[b"a", b"bc"]));
 }
 
+#[test]
+fn truncated_authentication_tags_are_malformed() {
+    let key = [17; 32];
+    let nonce = [19; 24];
+    let tag = seal(&key, &nonce, b"context", b"");
+    assert_eq!(tag.len(), 16);
+    for end in 0..tag.len() {
+        assert!(matches!(
+            open(&key, &nonce, b"context", &tag[..end]),
+            Err(CryptoError::Malformed)
+        ));
+    }
+    assert_eq!(open(&key, &nonce, b"context", &tag).unwrap(), b"");
+    let mut sealed = nonce.to_vec();
+    sealed.extend_from_slice(&tag);
+    for end in 0..sealed.len() {
+        assert!(matches!(
+            open_random(&key, b"context", &sealed[..end]),
+            Err(CryptoError::Malformed)
+        ));
+    }
+    assert_eq!(open_random(&key, b"context", &sealed).unwrap(), b"");
+    sealed[24] ^= 1;
+    assert!(matches!(
+        open_random(&key, b"context", &sealed),
+        Err(CryptoError::Authentication)
+    ));
+}
+
 struct RefusingCipher;
 
 impl AeadCore for RefusingCipher {

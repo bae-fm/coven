@@ -53,6 +53,9 @@ pub(crate) fn open(
     aad: &[u8],
     sealed: &[u8],
 ) -> Result<Vec<u8>, CryptoError> {
+    if sealed.len() < FILE_CHUNK_TAG_LEN {
+        return Err(CryptoError::Malformed);
+    }
     XChaCha20Poly1305::new(key.into())
         .decrypt(nonce.into(), Payload { msg: sealed, aad })
         .map_err(|_| CryptoError::Authentication)

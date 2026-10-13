@@ -91,7 +91,7 @@ fn object_chunks_bind_every_coordinate_and_use_stored_random_nonces() {
                 for end in 0..sealed.len() {
                     assert!(matches!(
                         (
-                            end < 24,
+                            end < SEALED_OBJECT_CHUNK_OVERHEAD,
                             keys.open_object_chunk(
                                 "10101010-1010-1010-1010-101010101010/devices/1/3",
                                 b"cleartext prefix",
