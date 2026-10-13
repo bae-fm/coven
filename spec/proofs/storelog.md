@@ -507,13 +507,16 @@ window [T−W, T]. W is 30 days in the examples. Late entries count in this
 check even when their changes have been permanently dropped. Provider times
 keep their duration meaning; equal times are allowed and never ordered by path.
 
-The model's observation parameter T is §9's `T′ = T - δ`: one provider
-time unit before the clock object's stored time. The later folder listing
-and numbered reads must supply every entry through that earlier endpoint.
-An unknown writer can publish in the clock object's own tick after the
-listing; that tick is outside the certified window. The horizon and stability
-theorems take the earlier endpoint unchanged; they do not prove this provider
-discovery condition.
+The model's observation parameter T is §9's `T′ = T - M - δ`, with one
+common `M = one hour` and positive provider unit δ. The provider guarantees
+listing visibility strictly before T minus M; the extra tick puts the
+inclusive window endpoint inside that guarantee. The later folder listing,
+numbered reads and retained receipts supply every entry through T′.
+The [IO listing proof](io/CovenIO/ListingFinality.lean) establishes that
+receipt and agreement of the observed quiet test with the full history,
+then invokes `current_stability`. Underflow certifies no final entry.
+The horizon model takes that endpoint unchanged; native provider conformance
+remains an assumption.
 
 **The final set is exactly one prefix.** `final_iff_before_horizon` equates
 two separately defined things: an entry was certified by at least one

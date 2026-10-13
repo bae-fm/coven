@@ -445,7 +445,8 @@
   - Positions are not finality acknowledgements. Their provider-assigned
     replacement time, observed after a changed post, can supply the storage
     sample T for §9's subsequent store-log check. That check uses
-    `T′ = T - δ`, one provider time unit earlier, as its inclusive endpoint.
+    `T′ = T - M - δ`, with one common `M = one hour` and positive provider
+    time unit δ, as its inclusive endpoint. Underflow cannot advance finality.
     Unchanged posts are not replaced to observe time; a quiet store instead
     replaces its clock object (§9).
   - Positions are not a log discovery index. A writer can crash after
@@ -508,9 +509,10 @@
   `device:DeviceId | store_log_read:EntryPositions`, with the device matching
   its path. It asserts no device time. Its sealed object's provider-assigned
   publication time is T. A subsequent complete store-log scan uses
-  `T′ = T - δ` for finality, with δ from §4; the tick at T is not certified
-  complete (§9). T and T′ are provider metadata and derived local evidence,
-  not fields in this object.
+  `T′ = T - M - δ` for finality, with `M = one hour` and δ from §4. The
+  inclusive endpoint precedes the strict listing boundary `T - M` (§9);
+  underflow cannot advance finality. T and T′ are provider metadata and
+  derived local evidence, not fields in this object.
   On return, T also supplies §15's elapsed-time check against the last
   completed pass's saved storage time. That check does not substitute T′.
 

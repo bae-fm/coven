@@ -151,9 +151,11 @@ read nor a save re-derives the passphrase key.
 once. Syncing a thousand objects uses those held keys. Stopping and starting
 sync does not unlock again; closing the handle erases the session.
 Choose an already observed storage time `T` before the store-log scan, if
-one is available. For finality use `T′ = T - δ`, one provider time unit
-earlier (§4, §9), as the inclusive observation endpoint. The provider's
-stored time T remains the age sample for retention, retirement drains and
+one is available. For finality use `T′ = T - M - δ`, with one common
+`M = one hour` and positive provider time unit δ (§4, §9), as the inclusive
+observation endpoint. If the subtraction underflows, this sample cannot
+advance finality. The provider's stored time T remains the age sample for
+retention, retirement drains and
 the return check. With no time sample yet, discovery and ordinary sync
 still proceed; finality and age-based deletion wait for qualifying evidence.
 From saved entry times and covered-log times, compute the next instant at
@@ -230,11 +232,13 @@ status probe is required.
 For finality, the folder listing starts after observing the stored time `T`.
 Each known undrained writer's entry discovery reaches its next-number miss
 after that listing. Together with retained entries, including completed
-retirement drains, this supplies every entry through `T′ = T - δ`.
-Discovery can include later entries too. A writer first publishing after
-the folder observation can have an entry stamped T, but cannot have one
-stored at or before T′. Never use the clock object's own tick as the
-inclusive finality endpoint.
+retirement drains, this supplies every entry through `T′ = T - M - δ`.
+§4 guarantees listing visibility strictly before `T - M`; the extra tick
+keeps the inclusive endpoint inside that guarantee. Every writer with an
+entry through T′ has an entry 1 old enough to be listed, and its exact reads
+supply the rest. Recent writers may be absent. Discovery can include later
+entries too, but they do not enter this window. Their recorded reads still
+decide lateness; the margin does not erase genuine concurrency.
 Judge landing times against this complete received history, then check
 author views and apply causally ready entries in batches. One batch needs
 one replay of the received set and one atomic commit, not one full replay and

@@ -317,6 +317,14 @@ are those of [§2](#2-threat-model); the write-ups state their additional limits
     bound is `R + P + D`
     ([`bounded_witnessed_storage`](proofs/io/CovenIO/RetentionDeadline.lean),
     [`scheduled_deletion_bound`](proofs/io/CovenIO/Reload.lean)).
+  - The finality gate uses §9's endpoint `T′ = T - M - δ`, with the
+    same `M = one hour` for every provider. G above includes that delay.
+    Increasing a gate from `G₀` to `G₀ + M` increases each deadline by at
+    most M, with the same reader and successful-service assumptions:
+    `H_a = max(G₀ + M, O_a, W + 1)` and `R = max(G₀ + M, B + one day + 1)`,
+    with B derived from those shifted `H_a` values. Snapshot maturity
+    still uses its own landing time
+    ([shifted retention bounds](proofs/io.md#discovery-obligations)).
   - E.g. the checked initially unsnapshotted write becomes gated and has a
     reader on day 30, with one-second pass spacing and immediate successful
     publication and deletion: the theorem bounds deletion by day 31 plus
@@ -337,9 +345,10 @@ are those of [§2](#2-threat-model); the write-ups state their additional limits
   - Superseded snapshots follow §15's separate deletion rules; the store
     log, sealed keys and still-required boundary snapshots remain.
   - An absent device does not hold finality back: racing admin decisions
-    settle once more than 30 storage days have passed since the last late
-    entry, given complete storage-time observations (§9;
-    [store-log finality](proofs/storelog.md#one-horizon-for-current-9)).
+    settle once the provider sample T is more than 30 storage days plus
+    one hour plus δ after the last late entry, given completed discovery
+    under §4's listing requirement (§9;
+    [`quiet_after_last_late`](proofs/io/CovenIO/ListingFinality.lean)).
 - **Nothing waits silently:** whatever coven cannot apply or deliver is in
   the pending list, with its subject and typed reason (§19.1).
   [Store-log/data pending proofs](proofs/storelog-data.md#results-and-their-assumptions)
@@ -616,6 +625,19 @@ the file's ranges under `F`.
     or provider error is not absence. Cache the id for subsequent reads.
   - Ana's `files/` folder can hold 20,000 photos. Reading `store-log/`
     never enumerates those photos or another store's objects.
+- Listings may lag publication. Every provider has the same listing margin
+  `M = one hour`. At provider time L, a completed listing must include every
+  still-existing object in its scope stored strictly before `L - M`.
+  Objects exactly one hour old or newer may be absent. The store-log device
+  listing must include each writer whose permanent entry 1 meets that age.
+  Exact-path reads and status must reflect already completed publication;
+  recent absence from a listing is not evidence of absence at an exact path.
+  - Violating this requirement can make a later entry wrongly final:
+    receiving the hidden older entry can reverse its replay result
+    ([checked example](proofs/io/CovenIO/ListingMarginExamples.lean)).
+  - Live provider tests measure listing lag separately from exact reads;
+    the worst observed lag is 5.5 seconds. Measurements do not prove the
+    one-hour bound; it remains a provider requirement.
 - Status uses these calls and provider timestamp granularities. The time
   unit `δ` for §9 comes from the returned timestamp's representation:
   - S3 HEAD: `Last-Modified`, in whole seconds, so `δ = 1 second`
@@ -643,6 +665,7 @@ the file's ranges under `F`.
   `δ = 10^(-p) seconds`: no fraction means one second, three digits one
   millisecond. Preserve the returned precision in comparisons; do not round
   a fractional timestamp to seconds or invent an order within an equal time.
+  The listing margin M is independent of that precision and is at least δ.
 
   Exact status and reads carry the complete encrypted size, native object id,
   revision, timestamp and its resolution, plus any returned checksum. A ranged
@@ -923,8 +946,9 @@ File uploads run in their own worker (§16.5); a pass does not wait for them.
   creation's prerequisite copies are also reachable through its writer.
 - Poll removed and replaced devices like active ones until a kept entry
   retiring them has been final for more than one day and five minutes (§9,
-  §10). Finality itself requires more than 30 storage days after that entry,
-  and can take longer while late entries arrive.
+  §10). Finality itself requires a provider sample more than 30 storage days
+  plus one hour plus δ after that entry, and can take longer while late
+  entries arrive.
 
   Retain the qualifying storage time `F` that established this retirement's
   finality in the local catalog, with its retiring entry and device id.
@@ -2149,25 +2173,31 @@ Carol's tablet:
     Carol's entry stored exactly on day 10 is not. A later qualifying
     window establishing H = day 11 makes Carol's entry final too.
 - Establish the provider's stored time `T` before listing the store-log
-  device folders. The finality observation is `T′ = T - δ`, one provider
-  time unit earlier (§4). If that earlier value cannot be represented,
+  device folders. The finality observation is `T′ = T - M - δ`, with
+  `M = one hour` for every provider and positive provider time unit δ (§4).
+  The extra tick puts the inclusive endpoint strictly before §4's listing
+  boundary `T - M`. If the subtraction cannot be represented,
   this sample cannot advance finality; never clamp it back to T.
 
   Then read each undrained writer from its next entry through a terminal miss,
   including newly discovered writers from entry 1. Permanent gap-free logs
   make these observations, together with retained entries, every entry
-  through `T′`; completed drains supply the retained retired-writer history
-  (§6). Every such entry has a stored time strictly before T, so it was
-  published before the object supplying T. The tick at T can still acquire
-  entries after the folder listing and is not certified complete.
+  at or before `T′`; completed drains supply the retained retired-writer
+  history (§6). Each such writer's entry 1 was stored strictly before
+  `T - M`, so §4 requires its folder to appear. Exact next-number reads
+  supply the rest of its prefix. This also follows in the
+  [IO proof](proofs/io/CovenIO/ListingFinality.lean).
+  Newer entries may be absent and do not enter this certified window.
+  Received newer entries still use their actual recorded reads for lateness;
+  a writer whose listing missed another entry can genuinely be late.
   Read and judge the complete prefix through T′ before advancing finality.
   A gap, unreadable entry or failed folder listing
   blocks that check and the cleanup that needs it (§19.1).
   - A provider-assigned stored time already observed is a lower bound on
     storage's current time. Reuse times from the pass's listings and
     successful publications, but only a time known before this store-log
-    scan can supply its T. Subtract its provider time unit before using it
-    for finality too; a later observation serves a later scan.
+    scan can supply its T. Subtract both M and its provider time unit before
+    using it for finality; a later observation serves a later scan.
   - Schedule a fresh time observation only when recorded storage times
     indicate that finality, a retirement drain (§6), or retention could
     cross its next threshold.
@@ -2188,12 +2218,11 @@ Carol's tablet:
     sync, which replaces her clock object and reads its status: two logical
     requests, plus any provider lookup or confirmation calls. If storage
     still says day 29, she keeps the log and schedules another check.
-  - **Ben's first entry shares Ana's clock tick.** Ana's S3 clock object
-    has stored time 12:00:10. Her folder listing finishes before Ben's new
-    phone publishes entry 1, also stamped 12:00:10 by storage. That listing
-    cannot certify all entries through 12:00:10. With one-second granularity,
-    her finality window ends at 12:00:09 instead. A later clock sample and
-    subsequent scan can include Ben's entry and certify its tick.
+  - **Ben's first entry is exactly one hour old.** Ana's S3 clock sample
+    is 12:00:10. Ben's new phone stored entry 1 at 11:00:10; a listing at
+    that sample's tick may still omit it. Ana's inclusive endpoint is
+    11:00:09. An entry stored at 11:00:09 must be discovered and read before
+    that window can qualify. At the next tick, Ben's entry must appear too.
   - No device's acknowledgement is required. A sleeping device or a
     concurrently registered one has the same landing deadline as any other.
 - Why this holds:
@@ -2215,7 +2244,7 @@ Carol's tablet:
     survives. C defeats B before B can defeat A; replay keeps A and C.
     C is late too, so the wait starts again.
   - Once T′ passes day 61, with no further late entry, all three results
-    are final.
+    are final: the provider sample T must pass day 61 plus one hour plus δ.
     Cleanup can release the inputs no longer needed by the winning reset.
     If C had instead landed after day 59, it would have missed B by more
     than 30 days and been dropped as “landed too late”.

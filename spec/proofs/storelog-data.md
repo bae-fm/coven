@@ -60,8 +60,9 @@ removal and complete old prefix at both observations; successful authenticated
 entry receipt and complete copy routing facts; custody; identity and freshness;
 no later kept membership addition; selection by `firstSend`; and copy coverage
 through the send, with no later copy of that key for that member. Provider
-publication times and the positive preceding-unit cutoff supply the old prefix
-in `caughtUp_complete_old`. The finality certificate's storage timestamp is
+publication times and the cutoff one hour plus a positive provider unit before
+the clock sample supply the old prefix in `caughtUp_complete_old`.
+The finality certificate's storage timestamp is
 distinct from the monotonic instant when it was established. The
 [IO write-up](io.md#joined-revocation) states the timing and decoding boundaries.
 
@@ -265,9 +266,13 @@ remains stored. `progress` proves that more than a window without a late
 landing advances finality, without device acknowledgements.
 The certificate checks that the complete prefix through the observation time
 has arrived; a missing entry blocks it. For §9, that endpoint is
-`T′ = T - δ`, one provider time unit before the clock object's stored time,
-so an unknown writer arriving later in the same tick cannot invalidate the
-claimed completeness. Provider discovery remains an input to this proof.
+`T′ = T - M - δ`, with one common `M = one hour` and positive provider
+unit δ. Underflow certifies no final entry. The
+[IO listing proof](io/CovenIO/ListingFinality.lean) supplies the complete
+prefix under §4's strict listing guarantee. Its `retained_inputs_bound`
+applies this package's bound with dependency ages
+`stored + 30 days + M + δ < T`; the retained-input bound is unchanged.
+Provider discovery remains an input to this package.
 Saved qualifying windows preserve previous finality when a later race starts.
 The specification represents their union by one monotonic horizon; this package
 still models saved certificates.
