@@ -8,15 +8,24 @@ const HEADER: [u8; 11] = [38, 0, 1, 0, 0, 0, 0, 0, 0, 0, 10];
 fn file_chunk_matches_an_independent_xchacha_vector() {
     // Python ctypes calling libsodium, with an independently encoded context.
     let key = FileKey::from_bytes([0x77; 32]);
-    let sealed = key.seal_chunk(PATH, &HEADER, 0, b"hello file");
-    assert_eq!(
-        hex::encode(&sealed),
-        "5621e82de767c089ad295c0569aaeded87f0bd359018efce5e88"
-    );
-    assert_eq!(
-        key.open_chunk(PATH, &HEADER, 0, &sealed).unwrap(),
-        b"hello file"
-    );
+    for (index, expected) in [
+        (0, "5621e82de767c089ad295c0569aaeded87f0bd359018efce5e88"),
+        (
+            0x0102030405060708,
+            "d5d9e703ac3c7b4ed9c4ad04db975b11a146e60e359153d8a547",
+        ),
+        (
+            u64::MAX,
+            "68ecc61fa73abb5153559f5eed563bf9e0e724dc9e4965833b70",
+        ),
+    ] {
+        let sealed = key.seal_chunk(PATH, &HEADER, index, b"hello file");
+        assert_eq!(hex::encode(&sealed), expected);
+        assert_eq!(
+            key.open_chunk(PATH, &HEADER, index, &sealed).unwrap(),
+            b"hello file"
+        );
+    }
     assert_eq!(nonce(0), [0; 24]);
     assert_eq!(
         hex::encode(nonce(0x0102030405060708)),

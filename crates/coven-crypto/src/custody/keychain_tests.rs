@@ -317,13 +317,26 @@ fn registration_is_atomic_and_cannot_switch_services() {
 #[test]
 fn native_errors_erase_malformed_secret_bytes_before_debugging() {
     let sentinel = b"secret-must-not-print";
-    let cause = KeychainError::from(keyring_core::Error::BadEncoding(sentinel.to_vec()));
-    let error = KeyError::from(cause);
-    assert!(!format!("{error:?}").contains(&format!("{sentinel:?}")));
-    let KeyError::Keychain(cause) = error else {
-        panic!("keychain error")
-    };
-    assert!(!format!("{:?}", std::error::Error::source(&cause).unwrap()).contains("115, 101, 99"));
+    for native in [
+        keyring_core::Error::BadEncoding(sentinel.to_vec()),
+        keyring_core::Error::BadDataFormat(sentinel.to_vec(), "invalid material".into()),
+    ] {
+        let expected_kind = std::mem::discriminant(&native);
+        let error = KeyError::from(KeychainError::from(native));
+        assert!(!format!("{error:?}").contains(&format!("{sentinel:?}")));
+        let KeyError::Keychain(cause) = error else {
+            panic!("keychain error")
+        };
+        let source = std::error::Error::source(&cause).unwrap();
+        assert!(!format!("{source:?}").contains("115, 101, 99"));
+        let source = source.downcast_ref::<keyring_core::Error>().unwrap();
+        assert_eq!(std::mem::discriminant(source), expected_kind);
+        match source {
+            keyring_core::Error::BadEncoding(bytes)
+            | keyring_core::Error::BadDataFormat(bytes, _) => assert!(bytes.is_empty()),
+            other => panic!("changed native error kind: {other:?}"),
+        }
+    }
 }
 
 #[test]

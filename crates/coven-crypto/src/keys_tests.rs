@@ -25,6 +25,33 @@ fn key_commitments_hash_only_the_exact_secret_bytes() {
 }
 
 #[test]
+fn every_commitment_byte_is_checked_with_the_audiences_typed_error() {
+    let id = KeyId(Uuid::from_u128(3));
+    let store = StoreKey::from_bytes(id, [17; 32]);
+    let circle = CircleKey::from_bytes(CircleId(Uuid::from_u128(2)), id, [17; 32]);
+    let expected = store.hash();
+    store.check_hash(&expected).unwrap();
+    circle.check_hash(&expected).unwrap();
+    for index in 0..expected.len() {
+        for bit in 0..8 {
+            let mut changed = expected;
+            changed[index] ^= 1 << bit;
+            assert_eq!(
+                store.check_hash(&changed),
+                Err(MaterialError::StoreKeyConflict(id))
+            );
+            assert_eq!(
+                circle.check_hash(&changed),
+                Err(MaterialError::CircleKeyConflict {
+                    circle: circle.circle(),
+                    key: id
+                })
+            );
+        }
+    }
+}
+
+#[test]
 fn concurrent_rotations_keep_both_generated_keys() {
     let key_ids = coven_foundation::id_source::SequentialIds::new();
     let mut ring = StoreKeyring::new(StoreKey::generate(KeyId(key_ids.new_id())).unwrap());
@@ -193,6 +220,48 @@ fn malformed_keyrings_are_encoding_errors() {
         StoreKeyring::from_secret_bytes(&duplicate),
         Err(MaterialError::Encoding)
     ));
+}
+
+#[test]
+fn circle_custody_rejects_duplicate_truncated_and_unbounded_material() {
+    let id = KeyId(Uuid::from_u128(3));
+    let mut ring = StoreKeyring::new(StoreKey::from_bytes(id, [17; 32]));
+    for n in [1, 2] {
+        ring.insert_circle_key(CircleKey::from_bytes(
+            CircleId(Uuid::from_u128(n)),
+            id,
+            [18; 32],
+        ))
+        .unwrap();
+    }
+    let encoded = ring.to_secret_bytes();
+    let bytes = encoded.as_bytes();
+    // The same key id in distinct circles is valid and survives custody.
+    assert_eq!(
+        StoreKeyring::from_secret_bytes(bytes)
+            .unwrap()
+            .to_secret_bytes()
+            .as_bytes(),
+        bytes
+    );
+    for end in 0..bytes.len() {
+        assert!(matches!(
+            StoreKeyring::from_secret_bytes(&bytes[..end]),
+            Err(MaterialError::Encoding)
+        ));
+    }
+    let mut duplicate = bytes.to_vec();
+    duplicate.copy_within(69..133, 133);
+    let mut excessive_count = bytes.to_vec();
+    excessive_count[61..69].copy_from_slice(&u64::MAX.to_le_bytes());
+    let mut trailing = bytes.to_vec();
+    trailing.push(0);
+    for malformed in [duplicate, excessive_count, trailing] {
+        assert!(matches!(
+            StoreKeyring::from_secret_bytes(&malformed),
+            Err(MaterialError::Encoding)
+        ));
+    }
 }
 
 #[test]

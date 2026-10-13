@@ -3,6 +3,136 @@ use crate::write::tests::{notes, sql, NOTES};
 use coven_foundation::id_source::KeyId;
 
 #[tokio::test]
+async fn fingerprint_leaves_pin_context_and_bind_both_hashes() {
+    let store = TestStore::new();
+    let db = store.schema(notes(), NOTES).await.unwrap();
+    // Independently calculated with Python hashlib and D11's length-prefixed
+    // context: leaf label, identity hash, value hash, in that order.
+    for (identity, value, expected) in [
+        (
+            1,
+            2,
+            [
+                0xb9, 0x40, 0xf0, 0x9f, 0xd7, 0xf8, 0xa6, 0x94, 0x8f, 0x86, 0xf1, 0x72, 0xca, 0x89,
+                0x14, 0x41, 0x56, 0x4a, 0x5c, 0x57, 0x41, 0x38, 0xce, 0xc1, 0xd5, 0x7d, 0x5c, 0xd4,
+                0xa5, 0x4b, 0xf7, 0xbf,
+            ],
+        ),
+        (
+            3,
+            2,
+            [
+                0x51, 0x0f, 0x59, 0x17, 0x83, 0x62, 0x1b, 0xaa, 0xca, 0xbb, 0xc0, 0xad, 0x35, 0x5e,
+                0x90, 0x1c, 0x97, 0x6f, 0xfc, 0x4e, 0x80, 0x76, 0x37, 0x72, 0x3c, 0x69, 0xcc, 0x43,
+                0xb0, 0x70, 0x93, 0x7d,
+            ],
+        ),
+        (
+            1,
+            4,
+            [
+                0xe1, 0x65, 0xb5, 0x81, 0x07, 0xbe, 0xc4, 0x70, 0xd4, 0xe0, 0x46, 0x12, 0xb6, 0x66,
+                0x75, 0x01, 0x4d, 0x98, 0x13, 0xb5, 0xc3, 0x39, 0x76, 0xc3, 0x3c, 0x17, 0xd5, 0x37,
+                0xac, 0xe9, 0x9b, 0xd2,
+            ],
+        ),
+    ] {
+        let identity = [identity; 32];
+        let stored: [u8; 32] = db.inspect_writer(|connection| {
+            super::put(
+                connection,
+                &coven_merge::Audience::Store,
+                identity,
+                [value; 32],
+                None,
+            )
+            .unwrap();
+            connection
+                .query_row(
+                    "SELECT hash FROM _coven_fingerprint_leaves WHERE audience='store' AND key=?1",
+                    [identity.as_slice()],
+                    |row| row.get(0),
+                )
+                .unwrap()
+        });
+        assert_eq!(stored, expected);
+    }
+    db.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn fingerprint_roots_pin_raw_audience_and_sum_bytes() {
+    use coven_foundation::id_source::CircleId;
+    use coven_merge::Audience;
+
+    let store = TestStore::new();
+    let db = store.schema(notes(), NOTES).await.unwrap();
+    let key = coven_crypto::StoreKey::from_bytes(KeyId(uuid::Uuid::from_bytes([1; 16])), [7; 32])
+        .derive();
+    // Independently calculated with Python hashlib/hmac: HKDF-SHA256 with
+    // D11's fingerprint label, then the raw root label, audience and sum.
+    for (audience, text, empty, populated) in [
+        (
+            Audience::Store,
+            "store",
+            [
+                0xcd, 0x72, 0x28, 0x38, 0x3f, 0xf4, 0xe6, 0x43, 0xbc, 0xd1, 0x75, 0x86, 0x5a, 0x44,
+                0x98, 0xd9, 0x63, 0x06, 0xb0, 0x9f, 0xe0, 0x86, 0x13, 0xbb, 0x1f, 0x55, 0x0b, 0x3d,
+                0x12, 0x84, 0x0e, 0x9d,
+            ],
+            [
+                0xf8, 0x27, 0xad, 0xcb, 0xd7, 0xde, 0xcc, 0x82, 0x89, 0x1b, 0x24, 0xe3, 0x52, 0x4a,
+                0x1a, 0x38, 0x70, 0x57, 0x2c, 0x42, 0x88, 0x81, 0x24, 0x7e, 0x3d, 0x25, 0xd6, 0x1b,
+                0x37, 0xc6, 0x90, 0x4e,
+            ],
+        ),
+        (
+            Audience::Circle(CircleId(uuid::Uuid::from_u128(
+                0x00112233445566778899aabbccddeeff,
+            ))),
+            "00112233-4455-6677-8899-aabbccddeeff",
+            [
+                0xb2, 0x8b, 0x8d, 0x16, 0x6b, 0x49, 0xf9, 0x6e, 0x06, 0xfa, 0x18, 0x5d, 0xd5, 0xb6,
+                0xd1, 0x24, 0x5d, 0x78, 0x2d, 0x0c, 0xde, 0x47, 0x39, 0xb2, 0x99, 0xd9, 0xb6, 0x0c,
+                0x82, 0x9e, 0x98, 0x35,
+            ],
+            [
+                0x1b, 0x08, 0xa5, 0xc9, 0x5c, 0x3d, 0xe7, 0x3c, 0x42, 0x33, 0x5a, 0xc1, 0x6f, 0x58,
+                0xcf, 0x00, 0xe6, 0x3d, 0x59, 0x6e, 0x5f, 0x79, 0xd2, 0x23, 0x5e, 0x4e, 0xf6, 0x8a,
+                0x7c, 0xf5, 0x28, 0xe6,
+            ],
+        ),
+    ] {
+        let read = || {
+            db.inspect_writer(|connection| {
+                super::read(connection, &audience, key.fingerprint_hasher()).unwrap()
+            })
+        };
+        assert_eq!(read().as_bytes(), &empty);
+        db.inspect_writer(|connection| {
+            connection
+                .internal_execute(
+                    "INSERT INTO _coven_fingerprint_sums(audience,sum) VALUES(?1,?2)",
+                    rusqlite::params![text, [0u8; 32].as_slice()],
+                )
+                .unwrap();
+        });
+        assert_eq!(read().as_bytes(), &empty);
+        let sum: [u8; 32] = std::array::from_fn(|i| i as u8);
+        db.inspect_writer(|connection| {
+            connection
+                .internal_execute(
+                    "UPDATE _coven_fingerprint_sums SET sum=?2 WHERE audience=?1",
+                    rusqlite::params![text, sum.as_slice()],
+                )
+                .unwrap();
+        });
+        assert_eq!(read().as_bytes(), &populated);
+    }
+    db.close().await.unwrap();
+}
+
+#[tokio::test]
 async fn changing_one_row_changes_only_one_leaf_and_its_audience_sum() {
     let store = TestStore::new();
     let db = store

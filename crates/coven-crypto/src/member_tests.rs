@@ -129,6 +129,43 @@ fn ed25519_rfc8032_vector_verifies() {
 }
 
 #[test]
+fn private_pair_encoding_pins_seed_order_and_independent_public_keys() {
+    // RFC 8032's first signing seed and a distinct X25519 secret, with public
+    // keys independently calculated using libsodium. D13 fixes this blob.
+    let bytes = hex::decode(concat!(
+        "43564d4b01",
+        "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60",
+        "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+    ))
+    .unwrap();
+    let keys = MemberKeys::from_secret_bytes(&bytes).unwrap();
+    assert_eq!(keys.to_secret_bytes().as_bytes(), bytes);
+    assert_eq!(
+        hex::encode(keys.member_id().to_bytes()),
+        "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a"
+    );
+    assert_eq!(
+        hex::encode(keys.sealing_public_key().as_bytes()),
+        "8f40c5adb68f25624ae5b214ea767a6ec94d829d3d7b5e1ad1ba6f3e2138285f"
+    );
+    assert_eq!(
+        hex::encode(keys.sign(b"").as_bytes()),
+        concat!(
+            "e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e06522490155",
+            "5fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b"
+        )
+    );
+    for offset in 0..5 {
+        let mut changed = bytes.clone();
+        changed[offset] ^= 1;
+        assert!(matches!(
+            MemberKeys::from_secret_bytes(&changed),
+            Err(MaterialError::Encoding)
+        ));
+    }
+}
+
+#[test]
 fn invalid_and_weak_member_ids_are_rejected() {
     for value in ["", "00", &"0".repeat(64), &"z".repeat(64), &"A".repeat(64)] {
         assert!(value.parse::<MemberId>().is_err());
@@ -138,6 +175,44 @@ fn invalid_and_weak_member_ids_are_rejected() {
     assert!(matches!(
         MemberId::from_bytes(identity),
         Err(CryptoError::InvalidMemberId)
+    ));
+    // Compressed y = 2 has no Ed25519 point, unlike the weak identity above.
+    let mut invalid = [0; 32];
+    invalid[0] = 2;
+    assert!(matches!(
+        MemberId::from_bytes(invalid),
+        Err(CryptoError::InvalidMemberId)
+    ));
+    assert!(matches!(
+        hex::encode(invalid).parse::<MemberId>(),
+        Err(CryptoError::InvalidMemberId)
+    ));
+}
+
+#[test]
+fn sealed_box_domains_are_checked_even_when_payload_lengths_match() {
+    let member = MemberKeys::generate().unwrap();
+    let recipient = member.sealing_public_key();
+    let path = "10101010-1010-1010-1010-101010101010/keys/7/9";
+    let prefix = b"clear routing prefix";
+    let key = StoreKey::from_bytes(KeyId(Uuid::from_u128(3)), [17; 32]);
+    let mut plaintext = Zeroizing::new(Vec::with_capacity(48));
+    key.encode_into(&mut plaintext);
+    // A correctly sized store payload sealed in the circle domain must fail
+    // authentication, independently of the envelope's length checks.
+    let sealed = seal_box(b"circle", &recipient, path, prefix, &plaintext).unwrap();
+    assert!(matches!(
+        member.open_store_key(path, prefix, &sealed),
+        Err(CryptoError::Authentication)
+    ));
+
+    let circle = CircleKey::from_bytes(CircleId(Uuid::from_u128(2)), key.id(), [18; 32]);
+    let mut plaintext = Zeroizing::new(Vec::with_capacity(64));
+    circle.encode_into(&mut plaintext);
+    let sealed = seal_box(b"store", &recipient, path, prefix, &plaintext).unwrap();
+    assert!(matches!(
+        member.open_circle_key(path, prefix, &sealed),
+        Err(CryptoError::Authentication)
     ));
 }
 
@@ -156,16 +231,15 @@ fn anonymous_store_boxes_bind_recipient_path_and_all_ciphertext_bytes() {
     )
     .unwrap();
     assert_eq!(sealed.len(), 120);
-    assert_ne!(
-        sealed,
-        seal_store_key(
-            &store,
-            &member.sealing_public_key(),
-            &path,
-            b"clear routing prefix"
-        )
-        .unwrap()
-    );
+    let repeated = seal_store_key(
+        &store,
+        &member.sealing_public_key(),
+        &path,
+        b"clear routing prefix",
+    )
+    .unwrap();
+    assert_ne!(&sealed[..32], &repeated[..32], "fresh ephemeral public key");
+    assert_ne!(&sealed[32..56], &repeated[32..56], "fresh random nonce");
     let opened = member
         .open_store_key(&path, b"clear routing prefix", &sealed)
         .unwrap();
