@@ -66,7 +66,10 @@ impl BootstrapStore {
             Ok(()) => Ok(()),
             Err(FileError::AfterRemove { source, .. }) => Err(StoreCreationError::Published {
                 id: self.id,
-                source,
+                // Directory removal retains the IO error from syncing its parent.
+                source: *source
+                    .downcast::<io::Error>()
+                    .expect("directory removal retains its IO cause"),
             }
             .into()),
             Err(error) => return Err(error.into()),

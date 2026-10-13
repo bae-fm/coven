@@ -36,3 +36,59 @@ fn setup_unlock_and_sync_preserve_the_storage_classification_and_cause() {
         }
     }
 }
+
+#[test]
+fn filesystem_and_settings_errors_accept_boxed_native_causes() {
+    use crate::{DiskError, SettingsError};
+    use std::{io, path::PathBuf};
+
+    for error in [
+        FileError::Io {
+            operation: "read file",
+            path: PathBuf::from("settings.json"),
+            source: Box::new(io::Error::from(io::ErrorKind::PermissionDenied)),
+        },
+        FileError::AfterReplace {
+            path: PathBuf::from("settings.json"),
+            source: Box::new(io::Error::from(io::ErrorKind::PermissionDenied)),
+        },
+        FileError::AfterRemove {
+            path: PathBuf::from("settings.json"),
+            source: Box::new(io::Error::from(io::ErrorKind::PermissionDenied)),
+        },
+    ] {
+        let disk: DiskError = error;
+        assert_eq!(
+            disk.source()
+                .unwrap()
+                .downcast_ref::<io::Error>()
+                .unwrap()
+                .kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        let original_message = disk.to_string();
+        let combined = FileError::Cleanup {
+            operation: Box::new(disk),
+            cleanup: Box::new(io::Error::from(io::ErrorKind::Interrupted)),
+        };
+        assert_eq!(combined.source().unwrap().to_string(), original_message);
+        let FileError::Cleanup { operation, cleanup } = combined else {
+            unreachable!()
+        };
+        assert_eq!(
+            operation
+                .source()
+                .unwrap()
+                .downcast_ref::<io::Error>()
+                .unwrap()
+                .kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        assert_eq!(
+            cleanup.downcast_ref::<io::Error>().unwrap().kind(),
+            io::ErrorKind::Interrupted
+        );
+    }
+    let corrupt = SettingsError::Corrupt(Box::new(std::fmt::Error));
+    assert!(corrupt.source().unwrap().is::<std::fmt::Error>());
+}

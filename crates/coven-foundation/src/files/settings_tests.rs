@@ -26,7 +26,10 @@ fn corruption_and_missing_fields_are_typed_errors() {
     );
     for invalid in [b"not json".as_slice(), b"{}", br#"{"id":"not-a-uuid","name":"x","device_id":3}"#, br#"{"id":"00000000-0000-0000-0000-00000000002a","name":"x","device_id":18446744073709551616}"#] {
         std::fs::write(directory.path().join(SETTINGS_FILE), invalid).unwrap();
-        assert!(matches!(read(directory.path(), id), Err(SettingsError::Corrupt(_))));
+        let SettingsError::Corrupt(source) = read(directory.path(), id).unwrap_err() else {
+            panic!("malformed settings must keep their parse error")
+        };
+        assert!(source.is::<serde_json::Error>());
     }
 }
 

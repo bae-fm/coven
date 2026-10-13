@@ -19,7 +19,7 @@ async fn readers_distinguish_missing_files_from_other_errors() {
             } else {
                 assert!(matches!(error,
                     ObservationError::File(FileError::Io { operation, path: found, source })
-                    if operation == expected && found == path && source.kind() == io::ErrorKind::InvalidInput
+                    if operation == expected && found == path && source.downcast_ref::<std::io::Error>().unwrap().kind() == io::ErrorKind::InvalidInput
                 ));
             }
         }

@@ -18,7 +18,7 @@ pub enum FileError {
         path: PathBuf,
         /// The operating system's error.
         #[source]
-        source: io::Error,
+        source: Box<dyn std::error::Error + Send + Sync>,
     },
     /// The new bytes are visible, but syncing the directory failed.
     #[error("sync directory after replacing {}: {source}", path.display())]
@@ -27,7 +27,7 @@ pub enum FileError {
         path: PathBuf,
         /// The operating system's error.
         #[source]
-        source: io::Error,
+        source: Box<dyn std::error::Error + Send + Sync>,
     },
     /// The file is absent, but syncing its directory failed.
     #[error("sync directory after removing {}: {source}", path.display())]
@@ -36,7 +36,7 @@ pub enum FileError {
         path: PathBuf,
         /// The operating system's error.
         #[source]
-        source: io::Error,
+        source: Box<dyn std::error::Error + Send + Sync>,
     },
     /// Removing an unpublished temporary file also failed.
     #[error("{operation}; removing temporary file failed: {cleanup}")]
@@ -45,7 +45,7 @@ pub enum FileError {
         #[source]
         operation: Box<FileError>,
         /// The error removing the temporary file.
-        cleanup: io::Error,
+        cleanup: Box<dyn std::error::Error + Send + Sync>,
     },
 }
 
@@ -59,7 +59,7 @@ impl FileError {
         Self::Io {
             operation,
             path: path.to_owned(),
-            source,
+            source: Box::new(source),
         }
     }
 }
@@ -239,7 +239,7 @@ pub(crate) fn remove(path: &Path) -> Result<(), FileError> {
         Err(source) => {
             return Err(FileError::AfterRemove {
                 path: path.to_owned(),
-                source,
+                source: Box::new(source),
             })
         }
     }
@@ -291,7 +291,7 @@ pub(crate) fn replace(path: &Path, bytes: &[u8]) -> Result<(), FileError> {
         }
         sync_directory(parent(path)).map_err(|source| FileError::AfterReplace {
             path: path.to_owned(),
-            source,
+            source: Box::new(source),
         })
     }
     #[cfg(windows)]
@@ -364,7 +364,7 @@ fn cleanup(temp: tempfile::NamedTempFile, operation: FileError) -> FileError {
         Ok(()) => operation,
         Err(cleanup) => FileError::Cleanup {
             operation: Box::new(operation),
-            cleanup,
+            cleanup: Box::new(cleanup),
         },
     }
 }
@@ -489,7 +489,7 @@ pub(super) fn sync_publication(path: &Path) -> Result<(), FileError> {
     #[cfg(unix)]
     sync_directory(parent(path)).map_err(|source| FileError::AfterReplace {
         path: path.to_owned(),
-        source,
+        source: Box::new(source),
     })?;
     // MoveFileExW uses WRITE_THROUGH; Unix needs the explicit parent barrier.
     #[cfg(windows)]

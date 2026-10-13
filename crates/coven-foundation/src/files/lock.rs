@@ -108,7 +108,7 @@ fn sync_removal(directory: &Path) -> Result<(), FileError> {
     crate::files::atomic_file::sync_directory(directory.parent().expect("store parent")).map_err(
         |source| FileError::AfterRemove {
             path: directory.to_owned(),
-            source,
+            source: Box::new(source),
         },
     )
 }

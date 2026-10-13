@@ -59,7 +59,7 @@ fn a_missing_store_is_an_io_error_and_is_not_created_by_locking() {
     let directory = tempfile::tempdir().unwrap();
     let store = StoreLayout::new(directory.path().to_owned()).store_dir(&StoreId(Uuid::nil()));
     assert!(
-        matches!(store.lock_exclusive(), Err(StoreLockError::File(FileError::Io { source, .. })) if source.kind() == std::io::ErrorKind::NotFound)
+        matches!(store.lock_exclusive(), Err(StoreLockError::File(FileError::Io { source, .. })) if source.downcast_ref::<std::io::Error>().unwrap().kind() == std::io::ErrorKind::NotFound)
     );
     assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
 }

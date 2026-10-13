@@ -14,7 +14,7 @@ fn existence_checks_directory_entries_and_preserves_inspection_errors() {
     assert!(matches!(
         exists("inspect store destination", &invalid),
         Err(FileError::Io { operation: "inspect store destination", path, source })
-            if path == invalid && source.kind() == io::ErrorKind::InvalidInput
+            if path == invalid && source.downcast_ref::<std::io::Error>().unwrap().kind() == io::ErrorKind::InvalidInput
     ));
     #[cfg(unix)]
     {
@@ -91,7 +91,7 @@ fn failed_rename_preserves_the_target_and_removes_the_stage() {
 fn a_directory_sync_error_reports_that_the_bytes_are_installed() {
     let error = FileError::AfterReplace {
         path: PathBuf::from("settings"),
-        source: io::Error::other("directory sync failed"),
+        source: Box::new(io::Error::other("directory sync failed")),
     };
     assert!(error.installed_new_bytes());
     assert!(std::error::Error::source(&error).is_some());
@@ -248,7 +248,7 @@ async fn streamed_creation_syncs_bytes_and_refuses_to_overwrite_a_kept_file() {
         .err()
         .unwrap();
     assert!(
-        matches!(error, FileError::Io {source, ..} if source.kind() == io::ErrorKind::AlreadyExists)
+        matches!(error, FileError::Io {source, ..} if source.downcast_ref::<std::io::Error>().unwrap().kind() == io::ErrorKind::AlreadyExists)
     );
     assert_eq!(file.read_optional().unwrap().unwrap(), bytes);
 }

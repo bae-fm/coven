@@ -30,7 +30,7 @@ pub enum SettingsError {
     Missing(StoreId),
     /// The settings do not contain the declared data.
     #[error("invalid store settings: {0}")]
-    Corrupt(#[source] serde_json::Error),
+    Corrupt(#[source] Box<dyn std::error::Error + Send + Sync>),
     /// A settings file belongs to a different directory's store.
     #[error("settings identify store {actual}, directory identifies {expected}")]
     WrongStore {
@@ -58,7 +58,8 @@ pub(crate) fn read(directory: &Path, id: StoreId) -> Result<StoreSettings, Setti
         Err(source) => return Err(FileError::at("inspect settings file", &path, source).into()),
     }
     let bytes = atomic_file::read_optional(&path)?.ok_or(SettingsError::Missing(id))?;
-    let settings: StoreSettings = serde_json::from_slice(&bytes).map_err(SettingsError::Corrupt)?;
+    let settings: StoreSettings = serde_json::from_slice(&bytes)
+        .map_err(|source| SettingsError::Corrupt(Box::new(source)))?;
     if settings.id != id {
         return Err(SettingsError::WrongStore {
             expected: id,
@@ -69,7 +70,8 @@ pub(crate) fn read(directory: &Path, id: StoreId) -> Result<StoreSettings, Setti
 }
 
 pub(crate) fn write(directory: &Path, settings: &StoreSettings) -> Result<(), SettingsError> {
-    let bytes = serde_json::to_vec(settings).map_err(SettingsError::Corrupt)?;
+    let bytes =
+        serde_json::to_vec(settings).map_err(|source| SettingsError::Corrupt(Box::new(source)))?;
     atomic_file::replace(&directory.join(SETTINGS_FILE), &bytes)?;
     Ok(())
 }
