@@ -634,10 +634,52 @@ the file's ranges under `F`.
   - E.g. Ben sets his laptop clock back a year. Its token still works until
     the provider rejects it; one refresh lets the waiting request continue.
 - On S3, each member has their own access key.
-  - Coven recognizes services by endpoint: no endpoint selects **AWS S3**;
-    the exact host `storage.googleapis.com` selects **Google Cloud Storage
-    (GCS)** through its XML API. Service differences live in the S3 adapter,
-    not app-supplied capability flags.
+  - Services are const `S3Profile` entries in the adapter's
+    [`s3_profile.rs`](../crates/coven-storage/src/providers/s3_profile.rs).
+    Each profile selects behaviors implemented once: endpoint host or host
+    suffix, AWS SigV4 or Google HMAC signing, single PUT create-once condition,
+    conditional multipart completion or copy publication with its destination
+    condition, native multipart timestamp (completion or start), stated checksum
+    scope or ignoring unstated scope, listing V2 or V1, ETag or generation
+    revision, and the date and suite version of its last certification. Bucket
+    checks, response-header translation and checksum requests are also profile
+    fields. A service-specific operation may be a plain function pointer in
+    this const data; apps do not supply capability flags or service branches.
+  - No endpoint selects **AWS S3**. Host suffix `.amazonaws.com` selects AWS;
+    exact host `storage.googleapis.com` selects **Google Cloud Storage (GCS)**
+    through its XML API; suffix `.r2.cloudflarestorage.com` selects
+    **Cloudflare R2**, including jurisdiction-specific account hosts. Suffixes
+    include the separating dot and require a preceding host component.
+  - Certification suite version 1 passed GCS and R2 on **2026-10-13**. AWS is
+    **uncertified**: there is no live account, and its native multipart start
+    time remains a known publication gap. The table's selected behaviors are:
+
+    | Profile | Signing | Single PUT | Multipart publication | Native multipart time | Checksums | Listing | Revision | Bucket check |
+    | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+    | AWS (uncertified) | AWS SigV4 | `If-None-Match: *` | Conditional completion | Start | Scope stated | V2 | ETag | HEAD |
+    | GCS (certified) | Google HMAC | `x-goog-if-generation-match: 0` | Copy with the same generation condition | Completion | Scope stated | V2 | Generation | Zero-entry LIST |
+    | R2 (certified) | AWS SigV4 | `If-None-Match: *` | Conditional completion | Completion | Unstated scope ignored | V2 | ETag | HEAD |
+
+    AWS and R2 request checksums and consume S3 response headers. GCS supplies
+    its hashes without a checksum-mode request; the adapter translates Google
+    headers. The ETag revision behavior uses native versions or `coven-revision`
+    metadata for replaceable objects, as specified below.
+  - To certify a service, put its bucket, region, endpoint and HMAC keys in an
+    env file using `COVEN_LIVE_S3_{BUCKET,REGION,ENDPOINT,ACCESS_KEY_ID,SECRET_ACCESS_KEY}`.
+    Run `COVEN_LIVE_S3_ENV=<file> cargo test -p coven-storage s3_certification -- --ignored --nocapture`.
+    The ignored test probes both signers, both single-PUT conditions,
+    conditional multipart completion, partial-upload visibility, native times
+    bracketed by marker objects, raw checksum headers and V2 against paginated
+    V1. A start timestamp or unenforced completion condition requires the shared
+    copy behavior; its destination condition must refuse an occupied name and
+    preserve its bytes and time. The candidate then runs the adapter's full
+    live contracts, including setup, reads, ranges, resumption, replacement
+    revisions and listing lag. Each §4 requirement prints PASS or FAIL, and
+    cleanup removes the run's objects, temporaries and uploads even after a
+    failed assertion. The suite prints a Rust profile entry with the passing
+    date and suite version; commit it only after every check passes, alongside
+    the [raw certification evidence](s3-certification.md). Never publish the
+    env file or credentials. A live sample measures lag; it does not prove M.
   - AWS S3 creates once with `If-None-Match: *` on `PutObject` and
     `CompleteMultipartUpload`; an occupied destination returns HTTP 412
     `PreconditionFailed`, mapped to `AlreadyExists`. Conditional replacements
@@ -654,7 +696,8 @@ the file's ranges under `F`.
     Requests use Google V4 HMAC authentication and `x-goog-*` headers: GCS
     refuses requests mixing Google and AWS extension headers.
   - GCS XML multipart initiation rejects generation conditions and completion
-    does not enforce create-once. Coven therefore uploads unconditionally to
+    does not enforce create-once, even though its measured native timestamp is
+    completion. Coven therefore uploads unconditionally to
     `<prefix>/<store>/.coven-uploads/<session>`, where `<session>` is the
     upload's coven-generated UUID, recorded alongside the native multipart id
     before sending any parts. This reserved namespace is distinct from every
@@ -690,7 +733,20 @@ the file's ranges under `F`.
   - Unknown S3-compatible endpoints use AWS's headers and multipart protocol.
     Setup refuses them unless every provider check below passes, including
     `CreateOnce`. Accepting a second create is a protocol failure, even if the
-    service claims compatibility. AWS and GCS pass the same setup check too.
+    service claims compatibility. Every known profile also runs that setup
+    check; certification does not exempt a connection from it.
+  - R2's live certification selected conditional completion without a copy:
+    both single PUT and multipart completion refused occupied names with HTTP
+    412 and preserved their bytes and times. Unfinished uploads were absent
+    from HEAD, GET and listing; multipart `Last-Modified` fell between the
+    completion markers. R2 returned a checksum without its scope, so the
+    adapter discards that checksum before metadata parsing and SDK body
+    validation. A stated scope remains usable; none is inferred from the
+    algorithm or ETag. Cloudflare's [S3 compatibility table](https://developers.cloudflare.com/r2/api/s3/api/)
+    documents operation and checksum differences; its [copy extensions](https://developers.cloudflare.com/r2/api/s3/extensions/#conditional-operations-in-copyobject-for-the-destination-object)
+    document `cf-copy-destination-if-none-match`. The R2 profile does not use
+    that extension because native conditional completion passed. Profile values
+    come from the live suite, rather than a compatibility claim.
   - `RequestTimeTooSkewed` means the device clock is off, not that access
     was denied. Retry the request once with the server offset the SDK
     learned from the response.
@@ -812,7 +868,7 @@ the file's ranges under `F`.
   Exact status and reads carry the complete encrypted size, native object id,
   revision, timestamp and its resolution, plus any returned checksum. A ranged
   read still describes the complete object. Drive uses `headRevisionId` (its file `version` can also change on reads), OneDrive
-  uses `eTag`, and Dropbox uses `rev`. CloudKit uses the record's `recordChangeTag`. On replaceable S3 paths, GCS uses its generation; AWS uses a
+  uses `eTag`, and Dropbox uses `rev`. CloudKit uses the record's `recordChangeTag`. On replaceable S3 paths, GCS uses its generation; AWS and R2 use a
   version id when versioning is enabled, otherwise a fresh `coven-revision`
   value stored atomically in the replacement's user metadata. Immutable S3
   objects use their ETag. S3 listings fetch exact status for replaceable paths
@@ -822,14 +878,15 @@ the file's ranges under `F`.
   multipart composite. An ETag or revision is never inferred to be a checksum.
   Drive exposes MD5, Dropbox its block-based content hash, OneDrive SHA-1 or
   QuickXorHash, and S3 its explicitly returned checksum and scope. GCS's
-  CRC32C is a whole-object checksum. A missing checksum requires the byte
+  CRC32C is a whole-object checksum. R2's unscoped checksum is absent from
+  coven's metadata; its scope is never guessed. A missing checksum requires the byte
   comparison; a composite cannot confirm a whole-object digest. Metadata and
   downloaded bytes must describe the same revision: Drive and OneDrive
   recheck replaceable metadata after download and fail if it changed.
 
   File status and upload confirmation use this call, not a folder listing.
   Count any name lookup and missing-container check separately. S3 HEAD's
-  bodyless 404 requires a bucket check: HEAD Bucket on AWS, a zero-entry
+  bodyless 404 requires a bucket check: HEAD Bucket on AWS and R2, a zero-entry
   ListObjectsV2 on GCS (whose HEAD Bucket requires additional bucket-metadata
   permission). Object absence comes from the exact HEAD, never from that listing.
   A revision proves freshness, not byte
@@ -848,13 +905,16 @@ the file's ranges under `F`.
     while the recent-return check holds. This is an environmental
     assumption, alongside §10's request-duration bound and §13's storage
     cut-off assumption; nondecreasing publication times alone do not imply it.
-- Native publication gaps remain visible in the live provider checks. AWS
-  single-request PUT timestamps and GCS conditional-copy timestamps describe
-  completion. AWS multipart `Last-Modified` instead records initiation
+- Native publication gaps remain visible in the profiles and certification.
+  GCS conditional-copy timestamps and R2 single-PUT and multipart timestamps
+  passed the completion checks. AWS single-request PUT timestamps describe
+  completion; AWS multipart `Last-Modified` instead records initiation
   ([system metadata](https://docs.aws.amazon.com/AmazonS3/latest/userguide/UsingMetadata.html)).
   That AWS multipart path does not satisfy the complete-publication requirement
   above; its adapter exposes the native observation without inventing a later
-  time. OneDrive publishes session uploads by conditional copy as described
+  time. Its profile remains uncertified; certifying a start-time service requires
+  a proven conditional copy that timestamps complete publication. OneDrive
+  publishes session uploads by conditional copy as described
   above. CloudKit's atomic publication and asset-session guarantees require live
   verification through a signed, entitled host.
 - Device paths have one intended writer: the device they name. Retrying

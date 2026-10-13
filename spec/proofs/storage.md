@@ -19,9 +19,9 @@ Lean 4.34.1 and its standard library, without additional axioms or unfinished
 proofs. `scripts/check.sh` builds it and runs the audit alongside the other
 proofs. `clockRunner` and `createRunner` expose the model to the Rust
 differential tests run by that script. The create-once comparison drives
-the S3 and OneDrive adapters against the test server with AWS, GCS and
-Graph protocols, checking occupied-path refusals and stored bytes for
-single-request and multipart uploads.
+the S3 adapter against the test server through every profile (AWS, GCS and R2),
+and the OneDrive adapter through Graph. It checks occupied-path refusals and
+stored bytes for single-request and multipart uploads.
 
 ## Restore, another live copy, and writes
 

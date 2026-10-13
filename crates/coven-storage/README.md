@@ -94,10 +94,16 @@ server-side guarantee.
 The live Drive duplicate-folder test creates siblings directly, verifies their
 combined listing and reads, checks the parent of a new publication, and deletes
 the test objects and folders.
+S3 selects shared behaviors from the const [profile table](src/providers/s3_profile.rs).
+The ignored `s3_certification` test reads `COVEN_LIVE_S3_ENV`, detects native
+behavior, exercises the adapter and deletes its live objects and uploads. GCS
+and R2 passed suite version 1 on 2026-10-13; AWS remains uncertified without a
+live account. See the [procedure](../../spec/coven.md#4-storage-providers-and-access)
+and [raw evidence](../../spec/s3-certification.md).
 
 | Provider | Objects and listing | Recorded uploads | Sharing and recipient access |
 | --- | --- | --- | --- |
-| [S3](src/providers/s3.rs) | Conditional `PutObject`, unconditional positions/clock PUT, `GetObject`/Range, paged `ListObjectsV2`, `DeleteObject`. | Native multipart ID, part ETags and unique publication metadata; paged `ListParts`, conditional completion and HEAD recovery. | Explicit member access key; grant/revoke/sign-out return console instructions. No IAM calls or credential discovery. |
+| [S3](src/providers/s3.rs) | Profile-selected conditional PUT, unconditional positions/clock PUT, `GetObject`/Range, paged listing V2 or V1, `DeleteObject`. R2 ignores checksums without stated scope. | Native multipart ID, part ETags and unique publication metadata; paged `ListParts`, conditional completion (AWS/R2) or conditional copy from a recorded temporary (GCS), and HEAD recovery. | Explicit member access key; grant/revoke/sign-out return console instructions. No IAM calls or credential discovery. |
 | [Drive](src/providers/google_drive.rs) | Real folders and exact leaf names; multipart/related create, media PATCH, media GET/Range, scoped paged `files.list`. Retry retains earliest createdTime then ID and deletes this writer's later copies. Owned objects are deleted; others are removed from their parent folder. | Generated file ID and resumable URL; PUT chunks/status; completion checked by native ID. | Folder-owner check; paged native permissions, direct create/update/delete; inherited/group/public/unknown access is retained and reported. Recipient uses its own OAuth account. |
 | [Dropbox](src/providers/dropbox.rs) | App-folder-relative or namespace-scoped strict add or overwrite, download/Range, recursive paged listing, delete. | Start/append/finish, offset recovery, immutable-byte completion verification; close for cancellation. | App folders reject sharing. Shared namespaces use owner checks, direct/inherited member pages, viewer updates and asynchronous removal. Recipient mounts the invited shared folder. |
 | [OneDrive](src/providers/onedrive.rs) | Path parents, conflict-refusing content PUT, positions/clock PUT, preauthenticated download/Range without bearer, recursive paged children excluding temporaries, delete. | Recorded temporary UUID and native upload URL, bounded/multiple missing ranges, conditional copy and monitor, immutable-byte recovery verification; cancellation and temporary deletion. | Account-drive ownership check, permission pages and account identity resolution; only exclusive target-account permissions deleted. Invite carries native share token for recipient redemption. |
