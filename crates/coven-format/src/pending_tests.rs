@@ -470,11 +470,16 @@ fn key_copy_reports_must_name_the_authenticated_posters_member() {
         PendingReason::Refused(RefusalCode::Decryption),
     );
     let posted = post(vec![pending]);
-    posted.validate_reporter(&member).unwrap();
+    let crate::store_log::StoreChange::CreateStore { store, .. } =
+        crate::test_utils::store_log().change
+    else {
+        panic!("fixture is the creation entry")
+    };
+    posted.validate_reporter(&member, store).unwrap();
     let other = "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a"
         .parse()
         .unwrap();
-    assert!(posted.validate_reporter(&other).is_err());
+    assert!(posted.validate_reporter(&other, store).is_err());
 }
 
 #[test]

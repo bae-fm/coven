@@ -23,6 +23,8 @@ pub enum Rule {
     DeviceReplacement,
     /// A part, row or removal rule named an audience it cannot contain or describe.
     Audience,
+    /// A reported storage path belongs to a different store.
+    Store,
     /// Old and new column values did not match the operation.
     ColumnOperation,
     /// A foreign key names different numbers of source and target columns.

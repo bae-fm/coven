@@ -1,11 +1,11 @@
 //! Join requests, posted positions and clock observations (D8).
 
 use crate::error::{require, Error, Rule};
-use crate::pending::{PendingReport, PendingSubject};
+use crate::pending::{PendingReason, PendingReport, PendingSubject, Prerequisite};
 use crate::store_log::MemberPublicKeys;
 use crate::value::{name, EntryPositions, WritePositions};
 use crate::wire::wire_struct;
-use coven_foundation::id_source::{DeviceId, InviteId};
+use coven_foundation::id_source::{DeviceId, InviteId, StoreId};
 use coven_merge::Audience;
 
 /// A device's storage-time probe (§9, D8). Its publication time is provider
@@ -104,9 +104,22 @@ impl PostedPositions {
         Ok(())
     }
 
-    /// Check key-copy recipients against the authenticated poster's member (D8).
-    /// The decoder checks syntax; the caller supplies membership after authentication.
-    pub fn validate_reporter(&self, member: &coven_crypto::MemberId) -> Result<(), Error> {
+    /// Check recipients and report paths against the authenticated member and store (D8).
+    /// The decoder checks syntax; the caller supplies this context after authentication.
+    pub fn validate_reporter(
+        &self,
+        member: &coven_crypto::MemberId,
+        store: StoreId,
+    ) -> Result<(), Error> {
+        for report in &self.pending {
+            match &report.reason {
+                PendingReason::Missing { path }
+                | PendingReason::Waits(Prerequisite::Object(path)) => {
+                    require(path.store() == store, "pending path store", Rule::Store)?
+                }
+                _ => {}
+            }
+        }
         require(
             self.pending.iter().all(|report| match &report.subject {
                 PendingSubject::KeyCopy {
