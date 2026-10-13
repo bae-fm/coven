@@ -4,11 +4,10 @@ use crate::*;
 
 /// Native revocation responses before the connection interprets remaining access.
 pub enum ProviderRevocation {
-    /// HTTP account providers return the grants still reaching the account.
+    /// Account providers return the grants still reaching the account.
     /// An empty list means all access was removed.
     Remaining(Vec<RetainedAccess>),
-    /// S3 supplies console instructions; the app's CloudKit bridge already
-    /// supplies the full result. Preserve those existing boundary types.
+    /// S3 supplies console instructions.
     Reported(MemberRemoval),
 }
 

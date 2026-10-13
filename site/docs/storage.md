@@ -267,10 +267,9 @@ The host selects one
 local `exact_upload_verification` policy: `upload_checksum`, `metadata_hash`,
 `readback`, or `unchecked`. Invitations and restore codes do not carry that
 choice. Upload-checksum enforcement is available on S3; Dropbox, Google Drive,
-OneDrive, and CloudKit reject that policy during setup. Metadata mode uses the
+and OneDrive reject that policy during setup. Metadata mode uses the
 provider's content identity: S3's `HeadObject` SHA-256, Drive's `md5Checksum`,
-Dropbox's `content_hash`, OneDrive's `sha1Hash`, or the hash in CloudKit's
-atomically committed manifest. Readback downloads and verifies the full body.
+Dropbox's `content_hash` or OneDrive's `sha1Hash`. Readback downloads and verifies the full body.
 Unchecked mode trusts only an observed successful create response. It cannot
 confirm that an occupied slot holds the same bytes or settle a lost response,
 so those cases fail the initiating operation instead of being accepted from
@@ -316,18 +315,18 @@ presence alone.
   locally and compares it with the provider's value and size. Sharing goes
   through `share_folder` to get a `shared_folder_id`.
 
-- **CloudKit**
-  (`CloudKitCloudHome`)
-  stores files in the user's iCloud private database. A `CKAsset` caps at 50 MB,
-  so an object larger than 10 MiB is split into 10 MiB part records at
-  deterministic names beside a hash-bearing manifest record at the object's own
-  slot. Manifest and parts are committed as one atomic record batch, so an
-  object is either wholly present or absent; a listing reports the manifest's
-  slot and never the part records behind it. The record operations are defined
-  by the [`CloudKitOps`](rustdoc:trait:coven::CloudKitOps) trait and implemented
-  in Swift through a UniFFI callback interface; coven cannot build this one from
-  Rust alone and returns a `Storage` error directing you to construct it through
-  your Swift layer.
+- **CloudKit** is built into `coven-storage` on Apple platforms through
+  `objc2-cloud-kit`. The app supplies its container identifier and iCloud
+  entitlement. Coven creates a custom zone and uses the owner's private database
+  or a participant's shared database. Canonical paths are record names;
+  create-once uses `ifServerRecordUnchanged`, and positions and clocks use
+  `allKeys` replacement. Encrypted bytes live in bounded 8 MiB assets. Recorded
+  uploads keep confirmed parts across restarts; an atomic save publishes the
+  destination only after all parts exist, so its server `creationDate` dates
+  complete publication. Prefix queries omit pending parts and follow every
+  cursor; completeness uses the common one-hour listing margin. Read/write
+  `CKShare` participation handles joining and access removal. Unsupported
+  platforms return `StorageFailure::ProviderUnavailable` during setup.
 
 - **In-memory**
   ([`InMemoryCloudHome`](rustdoc:struct:coven::InMemoryCloudHome),

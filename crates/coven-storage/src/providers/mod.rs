@@ -1,4 +1,4 @@
-//! Provider network implementations and the app's CloudKit bridge.
+//! Built-in provider network implementations.
 mod access;
 mod http;
 mod oauth;
@@ -21,9 +21,10 @@ pub(crate) use dropbox::DropboxStorage;
 mod onedrive;
 mod onedrive_access;
 pub(crate) use onedrive::OneDriveStorage;
+#[cfg(target_vendor = "apple")]
 mod cloudkit;
+#[cfg(target_vendor = "apple")]
 pub(crate) use cloudkit::CloudKitStorage;
-pub use cloudkit::{CloudKitOps, CloudKitUpload, CloudKitUploadStatus};
 
 #[cfg(test)]
 #[path = "mod_tests.rs"]

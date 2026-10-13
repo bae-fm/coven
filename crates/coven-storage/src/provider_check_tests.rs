@@ -111,3 +111,31 @@ async fn duplicate_upload_cleanup_failure_is_not_an_expected_refusal() {
         .unwrap()
         .is_empty());
 }
+
+#[tokio::test]
+async fn fresh_probe_may_be_omitted_from_setup_listing() {
+    use crate::CloudProvider;
+    for provider in [
+        CloudProvider::S3,
+        CloudProvider::GoogleDrive,
+        CloudProvider::Dropbox,
+        CloudProvider::OneDrive,
+        CloudProvider::CloudKit,
+    ] {
+        let storage = MemoryStorage::builder().provider(provider).build().unwrap();
+        storage
+            .set_faults(Faults {
+                hide_listings: true,
+                ..Faults::none()
+            })
+            .await;
+        let path = ObjectPath::file(STORE_ID, DeviceId(1), FileId(uuid::Uuid::from_u128(8)));
+        check_provider(&storage, &path, b"sealed test bytes")
+            .await
+            .unwrap();
+        assert_eq!(
+            storage.read(&path).await.unwrap_err().failure(),
+            StorageFailure::NotFound
+        );
+    }
+}

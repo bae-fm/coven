@@ -1,7 +1,7 @@
 # coven-storage
 
-Encrypted object storage for S3, Google Drive, Dropbox, OneDrive and the app's
-CloudKit calls. This crate owns provider requests, transfer sessions, account
+Encrypted object storage for S3, Google Drive, Dropbox, OneDrive and native
+CloudKit on Apple platforms. This crate owns provider requests, transfer sessions, account
 sharing and recipient acceptance. Sync owns writers, member/invite accounting,
 retention eligibility and adjacent-chunk grouping.
 Credentials and session recordings are supplied by owners; this crate does not
@@ -19,8 +19,8 @@ inside the complete object; callers may combine neighbouring encrypted chunks
 in a request up to 1 MiB.
 
 `single_request_limit` exposes the adapter's body threshold: S3 5 GiB,
-Drive 5,000,000 bytes, Dropbox 150 MiB, OneDrive 250,000,000 bytes, and CloudKit's
-app-supplied threshold. Drive and OneDrive use decimal byte counts conservatively
+Drive 5,000,000 bytes, Dropbox 150 MiB, OneDrive 250,000,000 bytes, and CloudKit
+8 MiB. Drive and OneDrive use decimal byte counts conservatively
 from their published MB values; these are adapter routing thresholds, not live
 measurements of server enforcement.
 [Drive uploads](https://developers.google.com/workspace/drive/api/guides/manage-uploads),
@@ -64,8 +64,9 @@ removes them from the store's folder. A refusal retains its native cause.
 
 ## Provider operations and test evidence
 
-Each provider has a sibling `_tests.rs` suite using local HTTP, except CloudKit,
-whose injected app calls are stubbed. The shared conformance suite exercises
+Each provider has a sibling `_tests.rs` suite. HTTP providers use local servers;
+CloudKit tests its real naming, metadata and NSError conversions, with ignored
+[signed-host conformance tests](cloudkit-live.md) for framework operations. The shared conformance suite exercises
 creation and identical retries, immutable replacement refusal, positions and clocks,
 whole and range reads, prefix listing, repeated deletion, and independent stores
 using the same device and entry numbers in one location.
@@ -79,7 +80,7 @@ server-side guarantee.
 | [Drive](src/providers/google_drive.rs) | Full path as filename; multipart/related create, media PATCH, media GET/Range, paged `files.list`. Retry retains earliest createdTime then ID and deletes this writer's later copies. Owned objects are deleted; others are removed from the folder. | Generated file ID and resumable URL; PUT chunks/status; completion checked by native ID. | Folder-owner check; paged native permissions, direct create/update/delete; inherited/group/public/unknown access is retained and reported. Recipient uses its own OAuth account. |
 | [Dropbox](src/providers/dropbox.rs) | Namespace-scoped strict add or overwrite, download/Range, recursive paged listing, delete. | Start/append/finish, offset recovery, immutable-byte completion verification; close for cancellation. | Owner check; direct/inherited member pages; in-place viewer update; asynchronous removal with native failure retained. Recipient mounts the invited shared folder. |
 | [OneDrive](src/providers/onedrive.rs) | Path parents, conflict-refusing content PUT, positions/clock PUT, preauthenticated download/Range without bearer, recursive paged children, delete. | Native upload URL, bounded/multiple missing ranges, immutable-byte completion verification; DELETE cancellation. | Account-drive ownership check, permission pages and account identity resolution; only exclusive target-account permissions deleted. Invite carries native share token for recipient redemption. |
-| [CloudKit](src/providers/cloudkit.rs) | The app-call contract requires stable records, atomic saves, bounded asset reads, native paging and publication timestamps. Rust checks returned paths/range lengths. | App calls own durable parts and session identity; Rust records/validates progress. | Native owner check, grant/revoke, share URL and recipient metadata validation/acceptance through app calls. |
+| [CloudKit](src/providers/cloudkit.rs) | Canonical paths as record names in a custom zone; create-once and replacement save policies, bounded CKAsset reads, paged prefix queries and server publication dates. | Recorded session UUID and 8 MiB asset parts; each part and confirmed boundary saved atomically; destination creation and session publication saved atomically. | Current account compared with zone owner; private read/write zone CKShare, participant removal, share metadata validation and native acceptance. |
 
 OAuth uses each device's account and one presenter-based flow. The presenter
 opens an authorization URL and returns the complete redirect or cancellation;
@@ -107,8 +108,8 @@ there, and native mutation refusals are preserved.
 per-invite grant identity; ordinary formatting redacts its secrets.
 
 Before changing sharing, adapters check Drive's folder `ownedByMe`, Dropbox's
-folder `access_type`, OneDrive's current-account drive id, or CloudKit's native
-`is_owner` call. A non-owner gets `NotStoreOwner` (`PermissionDenied`) before any
+folder `access_type`, OneDrive's current-account drive id, or CloudKit's current
+user record id compared with the recorded zone owner. A non-owner gets `NotStoreOwner` (`PermissionDenied`) before any
 mutation. S3's console-key instructions need no account-ownership check.
 Drive removes direct access without changing parent permissions and reports
 remaining inherited, group, domain or public access. It upgrades direct readers
@@ -146,9 +147,13 @@ does not implement provider HTTP or substitute for the provider suites.
   established in the current Drive upload documentation. Older GData and Cloud
   Storage documentation do not establish modern Drive behavior.
   [Drive upload guide](https://developers.google.com/workspace/drive/api/guides/manage-uploads).
-- CloudKit's real native durable implementation, bounded asset transfers and
-  share acceptance must satisfy `CloudKitOps`; this crate tests the bridge
-  contract, not an Apple account or app-process restart.
+- CloudKit calls Apple's framework through `objc2-cloud-kit` and `block2`, awaiting
+  completion handlers through oneshot channels. Setup takes the entitled container
+  identifier, obtains the owner and creates a store-specific custom zone. Other
+  platforms return `ProviderUnavailable`. Query completeness uses the common
+  one-hour listing margin; this is coven's assumption, not an Apple indexing
+  deadline. The native operations and account sharing require the ignored
+  [live tests](cloudkit-live.md); those have not been run.
 
 No live accounts, S3 console policies or SigV4 principal isolation, real browser
 consent, arbitrary account aliases, mobile/non-macOS execution, or provider

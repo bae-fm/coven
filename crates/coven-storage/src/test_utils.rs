@@ -844,6 +844,19 @@ mod tests;
 
 #[async_trait]
 impl crate::providers::StorageConnector for MemoryStorage {
+    async fn prepare_cloudkit(
+        &self,
+        container: &str,
+        _store: coven_foundation::id_source::StoreId,
+    ) -> Result<StorageConfig, StorageError> {
+        let config = self.config();
+        if !matches!(&config, StorageConfig::CloudKit { container: expected, .. } if expected == container)
+        {
+            return Err(StorageFailure::InvalidConfiguration
+                .with_source("memory connector container mismatch"));
+        }
+        Ok(config)
+    }
     async fn connect(
         &self,
         config: StorageConfig,

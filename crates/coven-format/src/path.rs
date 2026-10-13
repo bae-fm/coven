@@ -1,8 +1,8 @@
 //! Canonical object names and listing prefixes from Appendix D10.
 //!
 //! Crate-to-crate API: coven's format, storage and sync code build paths and
-//! prefixes here. The app's CloudKit bridge only passes them through, using
-//! `parse`, `as_str` and `is_replaceable` (Appendix E1).
+//! prefixes here. Native provider adapters map these validated paths into
+//! their provider's object names.
 
 use coven_foundation::id_source::{CircleId, DeviceId, FileId, InviteId, StoreId};
 use coven_merge::Audience;

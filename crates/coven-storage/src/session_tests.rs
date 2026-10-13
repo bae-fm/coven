@@ -149,9 +149,9 @@ fn session_states_must_match_their_provider_and_have_nonempty_ids() {
                 zone: "zone".into(),
             },
             SessionState::CloudKit {
-                id: SecretText::new("session".into()),
+                id: SecretText::new(uuid::Uuid::from_u128(1).to_string()),
             },
-            1024,
+            CLOUDKIT_PART_SIZE,
         ),
     ];
     for (location, state, size) in cases {

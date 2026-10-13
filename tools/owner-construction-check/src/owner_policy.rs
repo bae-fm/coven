@@ -464,6 +464,12 @@ pub(crate) const POLICY: Policy = Policy {
     // They do not acquire an unrelated directory or file for another owner.
     capability_factories: &[
         (
+            "crates/coven-foundation/src/files/asset_files.rs",
+            "AssetFiles",
+            "stage",
+            "AssetFile",
+        ),
+        (
             "crates/coven-foundation/src/files/layout.rs",
             "StoreLayout",
             "begin_bootstrap",
@@ -557,6 +563,8 @@ pub(crate) const POLICY: Policy = Policy {
         "AtomicFile",
         "FileWriter",
         "FileReader",
+        "AssetFiles",
+        "AssetFile",
         "StoreLock",
         "StoreReadLock",
         "StoreDeletionLock",
@@ -570,7 +578,6 @@ pub(crate) const POLICY: Policy = Policy {
         "StorageConnector",
         "Storage",
         "ProviderOps",
-        "CloudKitOps",
         "OAuthClients",
         "OAuthPresenter",
         "OAuthSession",
@@ -585,10 +592,11 @@ pub(crate) const POLICY: Policy = Policy {
         "StorageConnector",
         "Storage",
         "ProviderOps",
-        "CloudKitOps",
         "OAuthPresenter",
     ],
     construction_only_capability_types: &[
+        "AssetFiles",
+        "AssetFile",
         "BootstrapStore",
         "StoreDir",
         "StoreLock",
@@ -697,6 +705,12 @@ const CAPABILITIES: Capabilities = Capabilities {
         name: "network",
         homes: &["crates/coven-storage/src/providers/"],
         gates: &[
+            Gate {
+                kind: "CloudKit framework",
+                crates: &["objc2_cloud_kit"],
+                path_patterns: &[],
+                method_patterns: &[],
+            },
             Gate {
                 kind: "HTTP client (reqwest)",
                 crates: &["reqwest"],

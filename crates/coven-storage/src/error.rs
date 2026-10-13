@@ -4,6 +4,8 @@ use coven_crypto::custody::KeyError;
 /// Failures the app can distinguish and act on (§20.3).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum StorageFailure {
+    /// The platform or OS version cannot use this built-in provider.
+    ProviderUnavailable,
     /// No route to the provider, a timeout, or an interrupted response.
     Network,
     /// Credentials were refused or must be refreshed.
@@ -55,7 +57,7 @@ pub enum StorageFailure {
     },
     /// Parsing recorded provider data failed.
     Encoding,
-    /// Persisting provider settings or upload progress failed.
+    /// Local file access or persisting provider settings or upload progress failed.
     File,
     /// This installation has no member keys in custody.
     MemberKeysMissing,
@@ -83,7 +85,7 @@ pub enum StorageError {
         provider: CloudProvider,
         /// Actionable classification.
         failure: StorageFailure,
-        /// Original transport, SDK or bridge error.
+        /// Original transport, SDK or framework error.
         #[source]
         source: Box<dyn std::error::Error + Send + Sync>,
     },
@@ -128,7 +130,7 @@ pub enum StorageCheck {
     Read,
     /// Read exactly an interior byte range.
     ReadRange,
-    /// Include the object and its size in a listing.
+    /// Run the scoped query and check returned probe metadata; fresh objects may be omitted.
     List,
     /// Delete the object and confirm it is absent.
     Delete,

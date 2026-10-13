@@ -26,7 +26,6 @@ pub struct CovenBuilder {
     oauth: Option<OAuthClients>,
     presenter: Option<Arc<dyn OAuthPresenter>>,
     authentication: Option<Authentication>,
-    cloudkit: Option<Arc<dyn CloudKitOps>>,
     keys: KeyCustody,
     identity: IdentityCustody,
     #[cfg(any(test, feature = "test-utils"))]
@@ -51,7 +50,6 @@ impl CovenBuilder {
             presenter: None,
             authentication: None,
             limits: TransferLimits::default(),
-            cloudkit: None,
             keys: KeyCustody::Keyring,
             identity: IdentityCustody::Keyring,
             #[cfg(any(test, feature = "test-utils"))]
@@ -94,7 +92,6 @@ impl CovenBuilder {
                 Arc::new(coven_storage::providers::ProviderConnector::new(
                     self.clock.clone(),
                     self.ids.clone(),
-                    self.cloudkit.clone(),
                 ))
             })
             .clone()
@@ -123,12 +120,6 @@ impl CovenBuilder {
 
     fn oauth_flow(&self) -> Option<OAuthFlow> {
         Some(OAuthFlow::new(self.oauth.clone()?, self.presenter.clone()?))
-    }
-
-    /// Supply the app's native CloudKit bridge.
-    pub fn apply_cloudkit_ops(mut self, ops: Option<Arc<dyn CloudKitOps>>) -> Self {
-        self.cloudkit = ops;
-        self
     }
 
     /// Limit file uploads running together; defaults to one.

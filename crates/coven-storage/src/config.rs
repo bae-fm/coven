@@ -11,7 +11,7 @@ pub enum CloudProvider {
     Dropbox,
     /// OneDrive.
     OneDrive,
-    /// iCloud through the app's CloudKit bridge.
+    /// iCloud through coven-storage's native Apple-platform adapter.
     CloudKit,
 }
 
@@ -60,7 +60,7 @@ pub enum StorageConfig {
         /// Folder shared with members' Microsoft accounts.
         folder_id: String,
     },
-    /// The CloudKit zone reached by the app's bridge.
+    /// The custom zone reached by the built-in CloudKit adapter.
     CloudKit {
         /// App's CloudKit container.
         container: String,

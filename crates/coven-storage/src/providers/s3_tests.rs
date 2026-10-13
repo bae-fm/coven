@@ -190,12 +190,6 @@ fn respond(
         return response(200, "<CopyObjectResult><ETag>\"copied\"</ETag><LastModified>2026-10-06T00:00:02Z</LastModified></CopyObjectResult>");
     }
     if q.contains_key("list-type") {
-        if state.broken_check == Some(StorageCheck::List) {
-            return response(
-                200,
-                "<ListBucketResult><IsTruncated>false</IsTruncated></ListBucketResult>",
-            );
-        }
         let prefix = &q["prefix"];
         let after = q.get("continuation-token");
         let entries: Vec<_> = state
@@ -218,7 +212,10 @@ fn respond(
         };
         let entry = entries
             .first()
-            .map(|key| format!("<Contents><Key>{key}</Key><Size>{}</Size><LastModified>{listed_time}</LastModified><ETag>etag</ETag></Contents>",state.objects[*key].len()))
+            .map(|key| {
+                let size = state.objects[*key].len() + usize::from(state.broken_check == Some(StorageCheck::List));
+                format!("<Contents><Key>{key}</Key><Size>{size}</Size><LastModified>{listed_time}</LastModified><ETag>etag</ETag></Contents>")
+            })
             .unwrap_or_default();
         return response(
             200,

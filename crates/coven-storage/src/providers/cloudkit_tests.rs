@@ -1,621 +1,531 @@
-use super::*;
-use crate::test_utils::STORE_ID;
-use crate::test_utils::{Conformance, Faults, MemoryStorage};
-use coven_crypto::SecretText;
-use std::{
-    collections::BTreeMap,
-    sync::atomic::{AtomicU64, Ordering},
+use super::record::{
+    check_prefix, failure, native_error, part_name, publication_metadata, record_name, upload_name,
 };
-#[derive(Default)]
-struct Shares {
-    granted: std::collections::BTreeSet<String>,
-    accepted: std::collections::BTreeSet<String>,
-    accept_calls: usize,
-    lose_reply: bool,
-    retained: Vec<RetainedAccess>,
-}
-struct Bridge {
-    recipient: Option<String>,
-    denied: Arc<std::sync::atomic::AtomicBool>,
-    shares: Arc<tokio::sync::Mutex<Shares>>,
-    memory: MemoryStorage,
-    abort_failure: Option<StorageFailure>,
-    non_owner: bool,
-    listed: Option<Vec<StoredObject>>,
-    uploads: tokio::sync::Mutex<BTreeMap<String, UploadSession>>,
-    next_upload: Arc<AtomicU64>,
-}
-fn config() -> StorageConfig {
-    StorageConfig::CloudKit {
-        container: "container".into(),
-        owner: "owner".into(),
-        zone: "zone".into(),
-    }
-}
-fn provider(
-    config: StorageConfig,
-    ops: Arc<dyn CloudKitOps>,
-) -> Result<StorageConnection<CloudKitStorage>, StorageError> {
-    Ok(StorageConnection::from_provider(Arc::new(
-        CloudKitStorage::new(config, ops)?,
-    )))
-}
-impl Bridge {
-    fn new(memory: MemoryStorage) -> Self {
-        Self {
-            memory,
-            recipient: None,
-            denied: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            shares: Arc::new(tokio::sync::Mutex::new(Shares::default())),
-            abort_failure: None,
-            non_owner: false,
-            listed: None,
-            uploads: tokio::sync::Mutex::new(BTreeMap::new()),
-            next_upload: Arc::new(AtomicU64::new(1)),
-        }
-    }
-    fn recipient(&self, email: &str) -> Self {
-        Self {
-            recipient: Some(email.into()),
-            denied: self.denied.clone(),
-            shares: self.shares.clone(),
-            memory: self.memory.clone(),
-            abort_failure: None,
-            non_owner: true,
-            listed: None,
-            uploads: tokio::sync::Mutex::new(BTreeMap::new()),
-            next_upload: self.next_upload.clone(),
-        }
-    }
-    async fn authorize(&self) -> Result<(), StorageError> {
-        if self.denied.load(Ordering::SeqCst) {
-            return Err(permission_error());
-        }
-        if let Some(email) = &self.recipient {
-            let shares = self.shares.lock().await;
-            if !shares.granted.contains(email) || !shares.accepted.contains(email) {
-                return Err(permission_error());
-            }
-        }
-        Ok(())
-    }
-}
-#[async_trait]
-impl CloudKitOps for Bridge {
-    async fn account(&self, location: &StorageConfig) -> Result<String, StorageError> {
-        assert_eq!(location, &config());
-        Ok(match &self.recipient {
-            Some(account) => account.clone(),
-            None => "owner".into(),
-        })
-    }
-    async fn is_owner(&self, location: &StorageConfig) -> Result<bool, StorageError> {
-        assert_eq!(location, &config());
-        if self.denied.load(Ordering::SeqCst) {
-            return Err(permission_error());
-        }
-        Ok(!self.non_owner)
-    }
-    fn single_request_limit(&self) -> u64 {
-        16
-    }
-    async fn create(
-        &self,
-        location: &StorageConfig,
-        path: &ObjectPath,
-        bytes: &[u8],
-    ) -> Result<(), StorageError> {
-        assert_eq!(location, &config());
-        self.authorize().await?;
-        assert!(bytes.len() <= 16);
-        self.memory.create(path, bytes).await
-    }
-    async fn replace(
-        &self,
-        location: &StorageConfig,
-        path: &ObjectPath,
-        bytes: &[u8],
-    ) -> Result<(), StorageError> {
-        assert_eq!(location, &config());
-        self.authorize().await?;
-        self.memory.replace(path, bytes).await
-    }
-    async fn read(
-        &self,
-        location: &StorageConfig,
-        path: &ObjectPath,
-        range: Option<ByteRange>,
-    ) -> Result<ObjectRead, StorageError> {
-        assert_eq!(location, &config());
-        self.authorize().await?;
-        self.memory.read_object(path, range).await
-    }
-    async fn status(
-        &self,
-        location: &StorageConfig,
-        path: &ObjectPath,
-    ) -> Result<Option<StoredObject>, StorageError> {
-        assert_eq!(location, &config());
-        self.authorize().await?;
-        self.memory.status(path).await
-    }
-    async fn list(
-        &self,
-        location: &StorageConfig,
-        prefix: &ObjectPrefix,
-    ) -> Result<Vec<StoredObject>, StorageError> {
-        assert_eq!(location, &config());
-        self.authorize().await?;
-        if let Some(listed) = &self.listed {
-            return Ok(listed.clone());
-        }
-        self.memory.list(prefix).await
-    }
-    async fn delete(
-        &self,
-        location: &StorageConfig,
-        path: &ObjectPath,
-    ) -> Result<(), StorageError> {
-        assert_eq!(location, &config());
-        self.authorize().await?;
-        self.memory.delete(path).await
-    }
-    async fn grant_access(
-        &self,
-        location: &StorageConfig,
-        email: &str,
-    ) -> Result<SecretText, StorageError> {
-        assert_eq!(location, &config());
-        assert!(!self.non_owner, "sharing must check ownership first");
-        self.shares.lock().await.granted.insert(email.into());
-        Ok(SecretText::new("https://icloud.com/share/native".into()))
-    }
-    async fn revoke_access(
-        &self,
-        location: &StorageConfig,
-        email: &str,
-    ) -> Result<MemberRemoval, StorageError> {
-        assert_eq!(location, &config());
-        assert!(!self.non_owner, "sharing must check ownership first");
-        let mut shares = self.shares.lock().await;
-        shares.granted.remove(email);
-        shares.accepted.remove(email);
-        if shares.retained.is_empty() {
-            Ok(MemberRemoval::Revoked)
-        } else {
-            Ok(MemberRemoval::AccessRemains {
-                shares: shares.retained.clone(),
-            })
-        }
-    }
-    async fn accept_share(
-        &self,
-        location: &StorageConfig,
-        url: &SecretText,
-    ) -> Result<(), StorageError> {
-        assert_eq!(location, &config());
-        if url.as_str() != "https://icloud.com/share/native" {
-            return Err(StorageFailure::InvitationMismatch.into());
-        }
-        let email = self
-            .recipient
-            .as_ref()
-            .expect("acceptance runs as recipient");
-        let mut shares = self.shares.lock().await;
-        if !shares.granted.contains(email) {
-            return Err(permission_error());
-        }
-        shares.accept_calls += 1;
-        shares.accepted.insert(email.clone());
-        if std::mem::replace(&mut shares.lose_reply, false) {
-            return Err(StorageError::Failure(StorageFailure::Network));
-        }
-        Ok(())
-    }
-    async fn begin_upload(
-        &self,
-        location: &StorageConfig,
-        path: &ObjectPath,
-        total: u64,
-    ) -> Result<CloudKitUpload, StorageError> {
-        assert_eq!(location, &config());
-        self.authorize().await?;
-        let session = self.memory.begin_upload(path, total).await?;
-        let mut uploads = self.uploads.lock().await;
-        let id = self.next_upload.fetch_add(1, Ordering::Relaxed).to_string();
-        let part_size = session.part_size();
-        uploads.insert(id.clone(), session);
-        Ok(CloudKitUpload {
-            id: SecretText::new(id),
-            part_size,
-        })
-    }
-    async fn upload_status(
-        &self,
-        location: &StorageConfig,
-        id: &SecretText,
-    ) -> Result<CloudKitUploadStatus, StorageError> {
-        assert_eq!(location, &config());
-        self.authorize().await?;
-        let mut uploads = self.uploads.lock().await;
-        let session = uploads
-            .get_mut(id.as_str())
-            .ok_or(StorageFailure::SessionExpired)?;
-        self.memory.resume_upload(session).await?;
-        Ok(if session.is_complete() {
-            CloudKitUploadStatus::Complete
-        } else {
-            CloudKitUploadStatus::Uploading {
-                confirmed: session.confirmed,
-            }
-        })
-    }
-    async fn upload_part(
-        &self,
-        location: &StorageConfig,
-        id: &SecretText,
-        offset: u64,
-        bytes: &[u8],
-    ) -> Result<(), StorageError> {
-        assert_eq!(location, &config());
-        self.authorize().await?;
-        let mut uploads = self.uploads.lock().await;
-        let session = uploads
-            .get_mut(id.as_str())
-            .ok_or(StorageFailure::SessionExpired)?;
-        assert_eq!(session.confirmed, offset);
-        self.memory.upload_part(session, bytes).await
-    }
-    async fn finish_upload(
-        &self,
-        location: &StorageConfig,
-        id: &SecretText,
-    ) -> Result<(), StorageError> {
-        assert_eq!(location, &config());
-        self.authorize().await?;
-        self.memory
-            .finish_upload(
-                self.uploads
-                    .lock()
-                    .await
-                    .get_mut(id.as_str())
-                    .ok_or(StorageFailure::SessionExpired)?,
-            )
-            .await
-    }
-    async fn abort_upload(
-        &self,
-        location: &StorageConfig,
-        id: &SecretText,
-    ) -> Result<(), StorageError> {
-        assert_eq!(location, &config());
-        self.authorize().await?;
-        if let Some(failure) = self.abort_failure {
-            return Err(StorageError::Failure(failure));
-        }
-        self.memory
-            .abort_upload(
-                self.uploads
-                    .lock()
-                    .await
-                    .get(id.as_str())
-                    .ok_or(StorageFailure::SessionExpired)?,
-            )
-            .await
-    }
-}
-#[tokio::test]
-async fn bridge_conforms_and_retains_parts_across_adapter_restart() {
-    let bridge = Arc::new(Bridge::new(
-        MemoryStorage::builder().location(config()).build().unwrap(),
-    ));
-    let storage = Arc::new(provider(config(), bridge.clone()).unwrap());
-    Conformance::new(storage.clone(), STORE_ID)
-        .run()
-        .await
-        .unwrap();
-    Conformance::new(storage.clone(), STORE_ID)
-        .shared_location(coven_foundation::id_source::StoreId(
-            uuid::Uuid::from_bytes([0x20; 16]),
-        ))
-        .await;
-    Conformance::new(storage.clone(), STORE_ID)
-        .lost_part_reply(4, async {
-            bridge
-                .memory
-                .set_faults(Faults {
-                    lose_part_reply: true,
-                    ..Faults::none()
-                })
-                .await;
-        })
-        .await;
-    assert_eq!(
-        storage.config().provider().sign_out(),
-        ProviderSignOut::RemoveFromAppleAccount
-    );
-    let errors = Conformance::new(storage, STORE_ID)
-        .permission_failures(async {
-            bridge.denied.store(true, Ordering::SeqCst);
-        })
-        .await;
-    assert!(errors
-        .iter()
-        .all(|error| matches!(error, StorageError::Provider { .. })));
+use super::*;
+use coven_foundation::id_source::{DeviceId, FileId, StoreId, UuidIds};
+use objc2_cloud_kit::{
+    CKErrorCode, CKErrorDomain, CKPartialErrorsByItemIDKey, CKRecordChangedErrorClientRecordKey,
+    CKRecordID,
+};
+use objc2_foundation::{NSError, NSString};
+use std::{
+    num::NonZeroU64,
+    sync::Arc,
+    time::{Duration, SystemTime},
+};
+
+fn path() -> ObjectPath {
+    ObjectPath::device_log(
+        StoreId(uuid::Uuid::from_u128(1)),
+        DeviceId(7),
+        NonZeroU64::MIN,
+    )
 }
 
-#[tokio::test]
-async fn expired_bridge_session_restarts_from_retained_bytes() {
-    let bridge = Arc::new(Bridge::new(
-        MemoryStorage::builder().location(config()).build().unwrap(),
-    ));
-    let storage = Arc::new(provider(config(), bridge.clone()).unwrap());
-    Conformance::new(storage, STORE_ID)
-        .expired_session(async {
-            bridge
-                .memory
-                .set_faults(Faults {
-                    expire_uploads: true,
-                    ..Faults::none()
-                })
-                .await;
-        })
-        .await;
+#[test]
+fn record_names_preserve_canonical_paths_and_reserve_uploads() {
+    let path = path();
+    assert_eq!(record_name(&path), path.as_str());
+    assert!(record_name(&path).is_ascii());
+    assert!(record_name(&path).len() <= 255);
+    let token = uuid::Uuid::from_u128(9).to_string();
+    let upload = upload_name(&path, &token).unwrap();
+    let part = part_name(&upload, u64::MAX);
+    assert!(ObjectPath::parse(&upload).is_err());
+    assert!(ObjectPath::parse(&part).is_err());
+    assert!(part.is_ascii() && part.len() <= 255);
+    assert!(upload_name(&path, "../escape").is_err());
+    assert!(upload_name(&path, "00000000000000000000000000000009").is_err());
 }
 
-#[tokio::test]
-async fn abort_accepts_a_forgotten_session_and_keeps_published_objects() {
-    let bridge = Arc::new(Bridge::new(
-        MemoryStorage::builder().location(config()).build().unwrap(),
-    ));
-    let storage = provider(config(), bridge.clone()).unwrap();
-    let path = ObjectPath::device_log(
-        STORE_ID,
-        coven_foundation::id_source::DeviceId(31),
-        std::num::NonZeroU64::MIN,
-    );
-    let upload = storage.begin_upload(&path, 4).await.unwrap();
-    storage.abort_upload(&upload).await.unwrap();
-    bridge.uploads.lock().await.clear();
-    storage.abort_upload(&upload).await.unwrap();
-    let mut upload = storage.begin_upload(&path, 4).await.unwrap();
-    storage.upload_part(&mut upload, b"data").await.unwrap();
-    let unconfirmed = upload.clone();
-    storage.finish_upload(&mut upload).await.unwrap();
-    storage.abort_upload(&unconfirmed).await.unwrap();
-    bridge.uploads.lock().await.clear();
-    storage.abort_upload(&unconfirmed).await.unwrap();
-    assert_eq!(storage.read(&path).await.unwrap(), b"data");
-}
-
-#[tokio::test]
-async fn create_respects_the_bridges_single_request_limit() {
-    let bridge = Arc::new(Bridge::new(
-        MemoryStorage::builder().location(config()).build().unwrap(),
-    ));
-    let storage = provider(config(), bridge.clone()).unwrap();
-    assert_eq!(storage.single_request_limit(), 16);
-    let path = ObjectPath::device_log(
-        STORE_ID,
-        coven_foundation::id_source::DeviceId(31),
-        std::num::NonZeroU64::MIN,
-    );
-    storage.create(&path, &[1; 16]).await.unwrap();
-    assert!(bridge.uploads.lock().await.is_empty());
-    storage.delete(&path).await.unwrap();
-    storage.create(&path, &[2; 17]).await.unwrap();
-    assert_eq!(bridge.uploads.lock().await.len(), 1);
-    assert_eq!(storage.read(&path).await.unwrap(), [2; 17]);
-}
-
-#[tokio::test]
-async fn automatic_upload_keeps_both_transfer_and_abort_failures() {
-    let mut bridge = Bridge::new(MemoryStorage::builder().location(config()).build().unwrap());
-    bridge.abort_failure = Some(StorageFailure::PermissionDenied);
-    bridge
-        .memory
-        .set_faults(Faults {
-            lose_part_reply: true,
-            ..Faults::none()
-        })
-        .await;
-    let bridge = Arc::new(bridge);
-    let storage = provider(config(), bridge.clone()).unwrap();
-    let path = ObjectPath::device_log(
-        STORE_ID,
-        coven_foundation::id_source::DeviceId(31),
-        std::num::NonZeroU64::MIN,
-    );
-    let error = storage.create(&path, &[1; 17]).await.unwrap_err();
-    let StorageError::Cleanup { operation, cleanup } = error else {
-        panic!("lost one of the failures");
-    };
-    assert_eq!(operation.failure(), StorageFailure::Network);
-    assert_eq!(cleanup.failure(), StorageFailure::PermissionDenied);
-    assert!(storage
-        .list(&ObjectPrefix::all(STORE_ID))
-        .await
-        .unwrap()
-        .is_empty());
-}
-
-#[tokio::test]
-async fn sharing_requires_the_store_owners_account() {
-    let mut bridge = Bridge::new(MemoryStorage::builder().location(config()).build().unwrap());
-    bridge.non_owner = true;
-    let storage = provider(config(), Arc::new(bridge)).unwrap();
-    Conformance::new(Arc::new(storage), STORE_ID)
-        .owner_only_sharing()
-        .await;
-}
-
-#[tokio::test]
-async fn listing_keeps_the_native_publication_metadata() {
-    let bridge = Arc::new(Bridge::new(
-        MemoryStorage::builder().location(config()).build().unwrap(),
-    ));
-    let storage = provider(config(), bridge.clone()).unwrap();
-    Conformance::new(Arc::new(storage), STORE_ID)
-        .listing_times(std::time::SystemTime::UNIX_EPOCH, async {})
-        .await;
-}
-
-#[tokio::test]
-async fn listing_refuses_duplicate_paths_and_objects_outside_the_requested_prefix() {
-    let path = ObjectPath::device_log(
-        STORE_ID,
-        coven_foundation::id_source::DeviceId(31),
-        std::num::NonZeroU64::MIN,
-    );
-    let object = StoredObject {
-        path,
-        size: 4,
-        stored_at: std::time::SystemTime::UNIX_EPOCH,
-        time_resolution: std::time::Duration::from_millis(1),
-        object_id: "record".into(),
-        revision: "change-tag".into(),
-        checksum: None,
-    };
-    for listed in [vec![object.clone()], vec![object.clone(), object.clone()]] {
-        let mut bridge = Bridge::new(MemoryStorage::builder().location(config()).build().unwrap());
-        bridge.listed = Some(listed.clone());
-        let storage = provider(config(), Arc::new(bridge)).unwrap();
-        let prefix = if listed.len() == 1 {
-            ObjectPrefix::positions(STORE_ID)
-        } else {
-            ObjectPrefix::all(STORE_ID)
-        };
+#[test]
+fn prefix_conversion_rejects_another_writer_or_store() {
+    let path = path();
+    let prefix = ObjectPrefix::device_log(path.store(), DeviceId(7));
+    check_prefix(&prefix, &path).unwrap();
+    for other in [
+        ObjectPath::device_log(path.store(), DeviceId(8), NonZeroU64::MIN),
+        ObjectPath::device_log(
+            StoreId(uuid::Uuid::from_u128(2)),
+            DeviceId(7),
+            NonZeroU64::MIN,
+        ),
+        ObjectPath::positions(path.store(), DeviceId(7)),
+    ] {
         assert_eq!(
-            storage.list(&prefix).await.unwrap_err().failure(),
+            check_prefix(&prefix, &other).unwrap_err().failure(),
             StorageFailure::Protocol
         );
     }
 }
 
-fn permission_error() -> StorageError {
-    StorageError::Provider {
-        provider: CloudProvider::CloudKit,
-        failure: StorageFailure::PermissionDenied,
-        source: Box::new(std::io::Error::new(
-            std::io::ErrorKind::PermissionDenied,
-            "native CKShare participant missing",
-        )),
+#[test]
+fn metadata_uses_publication_and_replacement_dates() {
+    for (path, expected) in [
+        (path(), 20),
+        (ObjectPath::positions(path().store(), DeviceId(7)), 30),
+        (ObjectPath::clock(path().store(), DeviceId(7)), 30),
+    ] {
+        let object = publication_metadata(
+            path.as_str(),
+            path.as_str(),
+            "64",
+            Some(20.0),
+            Some(30.0),
+            Some("revision"),
+        )
+        .unwrap();
+        assert_eq!(object.path, path);
+        assert_eq!(object.size, 64);
+        assert_eq!(object.object_id, path.as_str());
+        assert_eq!(object.revision, "revision");
+        assert_eq!(object.time_resolution, Duration::from_millis(1));
+        assert_eq!(object.checksum, None);
+        assert_eq!(
+            object.stored_at,
+            SystemTime::UNIX_EPOCH + Duration::from_secs(expected)
+        );
     }
 }
 
+#[test]
+fn replacements_retain_change_tags_even_with_equal_sizes_and_dates() {
+    for path in [
+        ObjectPath::positions(path().store(), DeviceId(7)),
+        ObjectPath::clock(path().store(), DeviceId(7)),
+    ] {
+        let observed = ["first-change-tag", "second-change-tag"].map(|tag| {
+            publication_metadata(
+                path.as_str(),
+                path.as_str(),
+                "64",
+                Some(20.0),
+                Some(30.125),
+                Some(tag),
+            )
+            .unwrap()
+        });
+        assert_eq!(observed[0].object_id, observed[1].object_id);
+        assert_eq!(observed[0].size, observed[1].size);
+        assert_eq!(observed[0].stored_at, observed[1].stored_at);
+        assert_eq!(
+            observed[0].stored_at,
+            SystemTime::UNIX_EPOCH + Duration::from_millis(30_125)
+        );
+        assert_eq!(observed[0].revision, "first-change-tag");
+        assert_eq!(observed[1].revision, "second-change-tag");
+    }
+}
+
+#[test]
+fn metadata_requires_the_date_for_the_object_kind() {
+    for path in [
+        path(),
+        ObjectPath::positions(path().store(), DeviceId(7)),
+        ObjectPath::clock(path().store(), DeviceId(7)),
+    ] {
+        let (created, modified) = if path.is_replaceable() {
+            (Some(20.0), None)
+        } else {
+            (None, Some(30.0))
+        };
+        assert_eq!(
+            publication_metadata(
+                path.as_str(),
+                path.as_str(),
+                "64",
+                created,
+                modified,
+                Some("tag")
+            )
+            .unwrap_err()
+            .failure(),
+            StorageFailure::Protocol,
+        );
+    }
+}
+
+#[test]
+fn malformed_native_metadata_is_an_error() {
+    let path = path();
+    for (name, size, created, revision) in [
+        ("other", "64", Some(20.0), Some("tag")),
+        (path.as_str(), "not a size", Some(20.0), Some("tag")),
+        (path.as_str(), "64", None, Some("tag")),
+        (path.as_str(), "64", Some(f64::NAN), Some("tag")),
+        (path.as_str(), "64", Some(20.0), None),
+        (path.as_str(), "64", Some(20.0), Some("")),
+    ] {
+        assert_eq!(
+            publication_metadata(name, path.as_str(), size, created, Some(30.0), revision)
+                .unwrap_err()
+                .failure(),
+            StorageFailure::Protocol
+        );
+    }
+}
+
+#[test]
+fn native_failures_are_classified_without_discarding_their_cause() {
+    use std::error::Error;
+    for (code, expected) in [
+        (
+            CKErrorCode::ServerRecordChanged,
+            StorageFailure::AlreadyExists,
+        ),
+        (CKErrorCode::UnknownItem, StorageFailure::NotFound),
+        (CKErrorCode::ZoneNotFound, StorageFailure::ContainerNotFound),
+        (
+            CKErrorCode::NotAuthenticated,
+            StorageFailure::Authentication,
+        ),
+        (
+            CKErrorCode::PermissionFailure,
+            StorageFailure::PermissionDenied,
+        ),
+        (CKErrorCode::QuotaExceeded, StorageFailure::QuotaExceeded),
+        (CKErrorCode::NetworkFailure, StorageFailure::Network),
+        (CKErrorCode::RequestRateLimited, StorageFailure::RateLimited),
+        (CKErrorCode::ServiceUnavailable, StorageFailure::RateLimited),
+        (
+            CKErrorCode::AccountTemporarilyUnavailable,
+            StorageFailure::RateLimited,
+        ),
+        (
+            CKErrorCode::MissingEntitlement,
+            StorageFailure::InvalidConfiguration,
+        ),
+        (CKErrorCode::OperationCancelled, StorageFailure::Refused),
+    ] {
+        assert_eq!(failure(code), expected);
+        let error = NSError::new(code.0, unsafe { CKErrorDomain });
+        let mapped = native_error(&error);
+        assert_eq!(mapped.failure(), expected);
+        assert!(mapped.source().is_some());
+    }
+    let foreign = NSError::new(CKErrorCode::UnknownItem.0, &NSString::from_str("other"));
+    assert_eq!(native_error(&foreign).failure(), StorageFailure::Refused);
+}
+
+/// Run only from the entitled macOS app described in cloudkit-live.md.
 #[tokio::test]
-async fn recipient_join_accepts_the_native_share_before_reading_the_zone() {
-    let bridge = Arc::new(Bridge::new(
-        MemoryStorage::builder().location(config()).build().unwrap(),
-    ));
-    let owner = provider(config(), bridge.clone()).unwrap();
-    let path = ObjectPath::store_log(
-        STORE_ID,
-        coven_foundation::id_source::DeviceId(1),
-        std::num::NonZeroU64::MIN,
+#[ignore = "requires a signed CloudKit host and an iCloud account; waits one listing margin"]
+async fn cloudkit_live() {
+    let ids: IdSourceRef = Arc::new(UuidIds);
+    let store = StoreId(ids.new_id());
+    let config = super::zone::prepare("iCloud.fm.bae.desktop", store)
+        .await
+        .unwrap();
+    let native = Arc::new(
+        CloudKitStorage::new(config.clone(), ids.clone())
+            .await
+            .unwrap(),
     );
-    owner.create(&path, b"first").await.unwrap();
-    let AccessGrant::Granted { invitation } = owner.grant_access("member").await.unwrap() else {
-        panic!()
-    };
-    let invitation = StorageInvitation::decode(invitation.encode().unwrap().as_bytes()).unwrap();
-    let recipient = provider(config(), Arc::new(bridge.recipient("member"))).unwrap();
+    let storage = StorageConnection::from_provider(native.clone());
+    let first = ObjectPath::file(store, DeviceId(7), FileId(ids.new_id()));
+    let positions = ObjectPath::positions(store, DeviceId(7));
+    assert!(storage.status(&first).await.unwrap().is_none());
+    storage.create(&first, b"encrypted bytes").await.unwrap();
+    // Exact status must see publication immediately, independently of query indexing.
+    let first_metadata = storage.status(&first).await.unwrap().unwrap();
+    assert_eq!(first_metadata.object_id, first.as_str());
+    assert_eq!(first_metadata.size, 15);
+    assert_eq!(first_metadata.time_resolution, Duration::from_millis(1));
+    assert!(!first_metadata.revision.is_empty());
+    assert_eq!(first_metadata.checksum, None);
     assert_eq!(
-        recipient.read(&path).await.unwrap_err().failure(),
-        StorageFailure::PermissionDenied
-    );
-    let wrong = StorageInvitation::new(
-        config(),
-        crate::invitation::InvitationAcceptance::CloudKitShare {
-            url: SecretText::new("https://icloud.com/share/other".into()),
-        },
-    )
-    .unwrap();
-    assert!(matches!(
-        recipient.join(STORE_ID, &wrong).await,
-        Err(error) if error.failure() == StorageFailure::InvitationMismatch
-    ));
-    assert_eq!(bridge.shares.lock().await.accept_calls, 0);
-    bridge.shares.lock().await.lose_reply = true;
-    assert_eq!(
-        recipient
-            .join(STORE_ID, &invitation)
+        storage
+            .create(&first, b"changed")
             .await
             .unwrap_err()
             .failure(),
-        StorageFailure::Network
+        StorageFailure::AlreadyExists
     );
-    recipient.join(STORE_ID, &invitation).await.unwrap();
-    assert_eq!(recipient.read(&path).await.unwrap(), b"first");
-    owner
-        .revoke_access(&MemberAccess::ProviderAccount("member".into()))
+    assert_eq!(storage.read(&first).await.unwrap(), b"encrypted bytes");
+    assert_eq!(
+        storage.status(&first).await.unwrap().unwrap(),
+        first_metadata
+    );
+    let whole = storage.read_object(&first, None).await.unwrap();
+    assert_eq!(whole.metadata, first_metadata);
+    assert_eq!(whole.bytes, b"encrypted bytes");
+    let ranged = storage
+        .read_object(&first, Some(ByteRange::new(2, 7).unwrap()))
         .await
         .unwrap();
+    assert_eq!(ranged.metadata, first_metadata);
+    assert_eq!(ranged.bytes, b"crypt");
     assert_eq!(
-        recipient.read(&path).await.unwrap_err().failure(),
-        StorageFailure::PermissionDenied
+        storage
+            .read_range(&first, ByteRange::new(2, 7).unwrap())
+            .await
+            .unwrap(),
+        b"crypt"
     );
-    let error = recipient.join(STORE_ID, &invitation).await.unwrap_err();
-    assert_eq!(error.failure(), StorageFailure::PermissionDenied);
-    let StorageError::Provider { source, .. } = error else {
-        panic!()
-    };
+    storage.replace(&positions, b"one").await.unwrap();
+    let prior = storage.status(&positions).await.unwrap().unwrap();
+    storage.replace(&positions, b"one").await.unwrap();
+    let replaced = storage.status(&positions).await.unwrap().unwrap();
+    assert_ne!(replaced.revision, prior.revision);
+    assert_eq!(replaced.object_id, prior.object_id);
+    assert!(replaced.stored_at >= prior.stored_at);
+    storage.replace(&positions, b"two").await.unwrap();
+    let changed = storage.read_object(&positions, None).await.unwrap();
+    assert_eq!(changed.bytes, b"two");
+    assert_eq!(changed.metadata.size, replaced.size);
+    assert_ne!(changed.metadata.revision, replaced.revision);
     assert_eq!(
-        source.downcast_ref::<std::io::Error>().unwrap().kind(),
-        std::io::ErrorKind::PermissionDenied
+        storage.status(&positions).await.unwrap().unwrap(),
+        changed.metadata
     );
-}
+    let clock = ObjectPath::clock(store, DeviceId(7));
+    storage.replace(&clock, b"one").await.unwrap();
+    let prior_clock = storage.status(&clock).await.unwrap().unwrap();
+    storage.replace(&clock, b"two").await.unwrap();
+    let changed_clock = storage.read_object(&clock, None).await.unwrap();
+    assert_eq!(changed_clock.bytes, b"two");
+    assert_eq!(changed_clock.metadata.size, prior_clock.size);
+    assert_eq!(changed_clock.metadata.object_id, prior_clock.object_id);
+    assert_ne!(changed_clock.metadata.revision, prior_clock.revision);
+    assert!(changed_clock.metadata.stored_at >= prior_clock.stored_at);
 
-#[tokio::test]
-async fn bridge_retained_grants_reach_the_owner() {
-    let bridge = Arc::new(Bridge::new(
-        MemoryStorage::builder().location(config()).build().unwrap(),
-    ));
-    let retained = RetainedAccess {
-        provider_id: "native-owner-participant".into(),
-        reason: RetainedAccessReason::StoreOwner,
-    };
-    bridge.shares.lock().await.retained.push(retained.clone());
-    let owner = provider(config(), bridge).unwrap();
-    let MemberRemoval::AccessRemains { shares } = owner
-        .revoke_access(&MemberAccess::ProviderAccount("owner".into()))
+    let large = ObjectPath::file(store, DeviceId(7), FileId(ids.new_id()));
+    let mut session = storage
+        .begin_upload(&large, PART_SIZE as u64 + 3)
+        .await
+        .unwrap();
+    let before = session.encode().unwrap();
+    let part = vec![42; PART_SIZE];
+    storage.upload_part(&mut session, &part).await.unwrap();
+    assert!(storage.status(&large).await.unwrap().is_none());
+    // Discard the acknowledged recording, as after a process died before recording it.
+    let mut resumed = UploadSession::decode(before.as_bytes()).unwrap();
+    let restarted = CloudKitStorage::new(config, ids).await.unwrap();
+    let restarted = StorageConnection::from_provider(Arc::new(restarted));
+    restarted.resume_upload(&mut resumed).await.unwrap();
+    assert_eq!(resumed.confirmed_bytes(), PART_SIZE as u64);
+    assert_eq!(
+        storage.read(&large).await.unwrap_err().failure(),
+        StorageFailure::NotFound
+    );
+    restarted.upload_part(&mut resumed, b"end").await.unwrap();
+    let before_publish = resumed.encode().unwrap();
+    storage
+        .replace(&positions, b"publication clock")
+        .await
+        .unwrap();
+    let before_publication = native
+        .fetch(positions.as_str(), record::OBJECT_KEYS)
+        .wait()
         .await
         .unwrap()
-    else {
-        panic!("native retained access discarded")
+        .metadata()
+        .unwrap()
+        .stored_at;
+    restarted.finish_upload(&mut resumed).await.unwrap();
+    let published = storage.status(&large).await.unwrap().unwrap();
+    assert_eq!(published.object_id, large.as_str());
+    assert_eq!(published.size, PART_SIZE as u64 + 3);
+    assert!(published.stored_at >= before_publication);
+    let mut recovered = UploadSession::decode(before_publish.as_bytes()).unwrap();
+    storage.resume_upload(&mut recovered).await.unwrap();
+    assert!(recovered.is_complete());
+    storage.abort_upload(&recovered).await.unwrap();
+    assert_eq!(
+        storage
+            .read_range(
+                &large,
+                ByteRange::new(PART_SIZE as u64 - 1, PART_SIZE as u64 + 3).unwrap()
+            )
+            .await
+            .unwrap(),
+        [42, b'e', b'n', b'd']
+    );
+
+    let abandoned_path = ObjectPath::file(store, DeviceId(7), FileId(native.ids.new_id()));
+    let mut abandoned = storage
+        .begin_upload(&abandoned_path, PART_SIZE as u64 + 1)
+        .await
+        .unwrap();
+    storage.upload_part(&mut abandoned, &part).await.unwrap();
+    storage.abort_upload(&abandoned).await.unwrap();
+    storage.abort_upload(&abandoned).await.unwrap();
+    assert_eq!(
+        storage.read(&abandoned_path).await.unwrap_err().failure(),
+        StorageFailure::NotFound
+    );
+
+    let mut pages = Vec::new();
+    for number in 1..=native::QUERY_PAGE_SIZE + 1 {
+        let path =
+            ObjectPath::store_log(store, DeviceId(7), NonZeroU64::new(number as u64).unwrap());
+        storage.create(&path, b"page").await.unwrap();
+        pages.push(path);
+    }
+    let other = ObjectPath::positions(StoreId(native.ids.new_id()), DeviceId(7));
+    storage.replace(&other, b"another store").await.unwrap();
+
+    // Queries are complete only beyond the common one-hour listing margin.
+    tokio::time::sleep(Duration::from_secs(3601)).await;
+    let listed = storage.list(&ObjectPrefix::all(store)).await.unwrap();
+    assert_eq!(listed.len(), pages.len() + 4);
+    assert!(pages
+        .iter()
+        .all(|path| listed.iter().any(|object| &object.path == path)));
+    let large_metadata = listed.iter().find(|object| object.path == large).unwrap();
+    assert_eq!(large_metadata.size, PART_SIZE as u64 + 3);
+    assert!(large_metadata.stored_at >= before_publication);
+    assert_eq!(*large_metadata, published);
+    assert_eq!(
+        listed.iter().find(|object| object.path == first).unwrap(),
+        &first_metadata
+    );
+    for path in [&first, &positions, &clock, &large] {
+        storage.delete(path).await.unwrap();
+        storage.delete(path).await.unwrap();
+        assert!(storage.status(path).await.unwrap().is_none());
+        assert_eq!(
+            storage.read(path).await.unwrap_err().failure(),
+            StorageFailure::NotFound
+        );
+    }
+    super::zone::delete(&native).wait().await.unwrap();
+}
+
+#[test]
+fn partial_failures_keep_the_item_cause_and_do_not_hide_session_conflicts() {
+    use super::record::save_error;
+    use objc2::{runtime::AnyObject, AnyThread};
+    use objc2_foundation::NSDictionary;
+    for (codes, expected) in [
+        (
+            vec![
+                CKErrorCode::PermissionFailure,
+                CKErrorCode::BatchRequestFailed,
+            ],
+            StorageFailure::PermissionDenied,
+        ),
+        (
+            vec![CKErrorCode::QuotaExceeded, CKErrorCode::PermissionFailure],
+            StorageFailure::Refused,
+        ),
+        (
+            vec![CKErrorCode::BatchRequestFailed],
+            StorageFailure::Protocol,
+        ),
+    ] {
+        let keys: Vec<_> = (0..codes.len())
+            .map(|index| NSString::from_str(&index.to_string()))
+            .collect();
+        let errors: Vec<_> = codes
+            .iter()
+            .map(|code| NSError::new(code.0, unsafe { CKErrorDomain }))
+            .collect();
+        let items = NSDictionary::from_retained_objects(
+            &keys.iter().map(|key| &**key).collect::<Vec<_>>(),
+            &errors,
+        );
+        let info = NSDictionary::<NSString, AnyObject>::from_slices(
+            &[unsafe { CKPartialErrorsByItemIDKey }],
+            &[&items],
+        );
+        let partial = unsafe {
+            NSError::initWithDomain_code_userInfo(
+                NSError::alloc(),
+                CKErrorDomain,
+                CKErrorCode::PartialFailure.0,
+                Some(&info),
+            )
+        };
+        assert_eq!(native_error(&partial).failure(), expected);
+    }
+    let conflict = NSError::new(CKErrorCode::ServerRecordChanged.0, unsafe { CKErrorDomain });
+    assert_eq!(
+        save_error(&conflict, None).failure(),
+        StorageFailure::Refused
+    );
+    assert_eq!(
+        save_error(&conflict, Some(path().as_str())).failure(),
+        StorageFailure::Refused
+    );
+}
+
+#[test]
+fn destination_conflict_keeps_already_exists_for_create_once() {
+    use objc2::{runtime::AnyObject, AnyThread};
+    use objc2_foundation::NSDictionary;
+    let path = path();
+    let id = unsafe {
+        CKRecordID::initWithRecordName(CKRecordID::alloc(), &NSString::from_str(path.as_str()))
     };
-    assert_eq!(shares, [retained]);
+    let record = record::Record::new("CovenObject", &id);
+    let info = NSDictionary::<NSString, AnyObject>::from_slices(
+        &[unsafe { CKRecordChangedErrorClientRecordKey }],
+        &[record.raw()],
+    );
+    let conflict = unsafe {
+        NSError::initWithDomain_code_userInfo(
+            NSError::alloc(),
+            CKErrorDomain,
+            CKErrorCode::ServerRecordChanged.0,
+            Some(&info),
+        )
+    };
+    assert_eq!(
+        super::record::save_error(&conflict, Some(path.as_str())).failure(),
+        StorageFailure::AlreadyExists
+    );
+    assert_eq!(
+        super::record::save_error(&conflict, Some("other")).failure(),
+        StorageFailure::Refused
+    );
 }
 
-#[tokio::test]
-async fn forgotten_native_sessions_cannot_abort_their_replacements() {
-    let bridge = Arc::new(Bridge::new(
-        MemoryStorage::builder().location(config()).build().unwrap(),
-    ));
-    let storage = provider(config(), bridge.clone()).unwrap();
-    let path = ObjectPath::device_log(
-        STORE_ID,
-        coven_foundation::id_source::DeviceId(31),
-        std::num::NonZeroU64::MIN,
-    );
-    let expired = storage.begin_upload(&path, 4).await.unwrap();
-    storage.abort_upload(&expired).await.unwrap();
-    bridge.uploads.lock().await.clear();
-    let mut next = storage.restart_upload(&expired).await.unwrap();
-    assert_ne!(
-        storage.provider.id(&expired).unwrap().as_str(),
-        storage.provider.id(&next).unwrap().as_str()
-    );
-    storage.abort_upload(&expired).await.unwrap();
-    storage.upload_part(&mut next, b"data").await.unwrap();
-    storage.finish_upload(&mut next).await.unwrap();
-    storage.abort_upload(&expired).await.unwrap();
-    assert_eq!(storage.read(&path).await.unwrap(), b"data");
-}
-
-#[tokio::test]
-async fn account_identifies_the_signed_in_member_even_when_they_do_not_own_the_zone() {
-    let bridge = Bridge::new(MemoryStorage::builder().location(config()).build().unwrap());
-    let recipient = provider(config(), Arc::new(bridge.recipient("member"))).unwrap();
-    assert_eq!(recipient.account().await.unwrap(), "member");
+#[test]
+fn atomic_destination_conflicts_differ_from_session_conflicts() {
+    use objc2::{runtime::AnyObject, AnyThread};
+    use objc2_foundation::NSDictionary;
+    let path = path();
+    let root = upload_name(&path, &uuid::Uuid::from_u128(9).to_string()).unwrap();
+    let ids: Vec<_> = [path.as_str(), root.as_str()]
+        .iter()
+        .map(|name| unsafe {
+            CKRecordID::initWithRecordName(CKRecordID::alloc(), &NSString::from_str(name))
+        })
+        .collect();
+    for (changed, expected) in [
+        (0, StorageFailure::AlreadyExists),
+        (1, StorageFailure::Refused),
+    ] {
+        let errors: Vec<_> = (0..2)
+            .map(|index| {
+                let code = if index == changed {
+                    CKErrorCode::ServerRecordChanged
+                } else {
+                    CKErrorCode::BatchRequestFailed
+                };
+                NSError::new(code.0, unsafe { CKErrorDomain })
+            })
+            .collect();
+        let items = NSDictionary::from_retained_objects(
+            &ids.iter().map(|id| &**id).collect::<Vec<_>>(),
+            &errors,
+        );
+        let info = NSDictionary::<NSString, AnyObject>::from_slices(
+            &[unsafe { CKPartialErrorsByItemIDKey }],
+            &[&items],
+        );
+        let partial = unsafe {
+            NSError::initWithDomain_code_userInfo(
+                NSError::alloc(),
+                CKErrorDomain,
+                CKErrorCode::PartialFailure.0,
+                Some(&info),
+            )
+        };
+        assert_eq!(
+            super::record::save_error(&partial, Some(path.as_str())).failure(),
+            expected
+        );
+    }
 }

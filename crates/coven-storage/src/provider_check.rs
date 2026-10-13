@@ -52,14 +52,15 @@ pub async fn check_provider(
             return Err(StorageFailure::Protocol.with_source("range read disagrees with upload"));
         }
         check = StorageCheck::List;
-        if !storage
+        if storage
             .list(&ObjectPrefix::all(path.store()))
             .await?
             .iter()
-            .any(|object| &object.path == path && object.size == encrypted_bytes.len() as u64)
+            .any(|object| &object.path == path && object.size != encrypted_bytes.len() as u64)
         {
-            return Err(StorageFailure::Protocol
-                .with_source("test object missing or wrong size in listing"));
+            return Err(
+                StorageFailure::Protocol.with_source("test object has wrong size in listing")
+            );
         }
         Ok(())
     }

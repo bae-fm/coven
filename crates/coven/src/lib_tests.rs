@@ -137,7 +137,7 @@ impl Network {
                 .await
                 .unwrap(),
             CloudProvider::CloudKit => handle
-                .setup_cloudkit_storage(storage.config(), "Device 0")
+                .setup_cloudkit_storage("container", "Device 0")
                 .await
                 .unwrap(),
             _ => handle

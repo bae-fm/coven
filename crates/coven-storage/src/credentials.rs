@@ -55,7 +55,7 @@ pub enum StorageCredentials {
     S3(S3Credentials),
     /// A device's own provider sign-in.
     OAuth(OAuthTokens),
-    /// CloudKit uses the Apple account through the app's bridge.
+    /// CloudKit uses the Apple account through the built-in native adapter.
     CloudKit,
 }
 

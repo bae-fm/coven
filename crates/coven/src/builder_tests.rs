@@ -327,7 +327,7 @@ mod recovery {
                     .await
                     .unwrap(),
                 CloudProvider::CloudKit => handle
-                    .setup_cloudkit_storage(config.clone(), "Original")
+                    .setup_cloudkit_storage("test", "Original")
                     .await
                     .unwrap(),
                 provider => {

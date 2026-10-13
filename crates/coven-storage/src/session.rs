@@ -3,6 +3,8 @@ use coven_crypto::SecretBytes;
 use coven_crypto::SecretText;
 use serde::{Deserialize, Serialize};
 
+pub(crate) const CLOUDKIT_PART_SIZE: usize = 8 * 1024 * 1024;
+
 pub(crate) const GOOGLE_DRIVE_PART_SIZE: usize = 8 * 1024 * 1024;
 pub(crate) const DROPBOX_PART_SIZE: usize = 8 * 1024 * 1024;
 pub(crate) const ONEDRIVE_PART_SIZE: usize = 24 * 320 * 1024;
@@ -212,7 +214,9 @@ impl UploadSession {
             SessionState::OneDrive { url } if provider == CloudProvider::OneDrive => {
                 transfer_url(url)?
             }
-            SessionState::CloudKit { id } if provider == CloudProvider::CloudKit => nonempty(id)?,
+            SessionState::CloudKit { id } if provider == CloudProvider::CloudKit => {
+                check_cloudkit_id(id.as_str())?
+            }
             SessionState::VerifyPublished
                 if matches!(provider, CloudProvider::Dropbox | CloudProvider::OneDrive) =>
             {
@@ -236,7 +240,7 @@ impl UploadSession {
             CloudProvider::GoogleDrive => self.part_size == GOOGLE_DRIVE_PART_SIZE,
             CloudProvider::Dropbox => self.part_size == DROPBOX_PART_SIZE,
             CloudProvider::OneDrive => self.part_size == ONEDRIVE_PART_SIZE,
-            CloudProvider::CloudKit => true,
+            CloudProvider::CloudKit => self.part_size == CLOUDKIT_PART_SIZE,
         };
         if !valid_size {
             return Err(StorageFailure::InvalidPart.into());
@@ -274,6 +278,14 @@ pub(crate) fn s3_part_size(total: u64) -> Result<usize, StorageError> {
     }
     usize::try_from(total.div_ceil(10_000).div_ceil(unit) * unit)
         .map_err(|error| StorageFailure::InvalidPart.with_source(error))
+}
+pub(crate) fn check_cloudkit_id(value: &str) -> Result<(), StorageError> {
+    let id = uuid::Uuid::parse_str(value)
+        .map_err(|error| StorageFailure::SessionMismatch.with_source(error))?;
+    if id.to_string() != value {
+        return Err(StorageFailure::SessionMismatch.into());
+    }
+    Ok(())
 }
 fn nonempty(id: &SecretText) -> Result<(), StorageError> {
     if id.as_str().is_empty() {

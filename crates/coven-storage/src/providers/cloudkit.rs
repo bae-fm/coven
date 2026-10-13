@@ -1,289 +1,309 @@
-use crate::session::SessionState;
+//! Built-in CloudKit storage. All payloads reaching this adapter are encrypted.
+
+#[path = "cloudkit_access.rs"]
+mod access;
+#[path = "cloudkit_native.rs"]
+mod native;
+#[path = "cloudkit_record.rs"]
+mod record;
+#[path = "cloudkit_upload.rs"]
+mod upload;
+#[path = "cloudkit_zone.rs"]
+mod zone;
 use crate::*;
-use async_trait::async_trait;
-use coven_crypto::SecretText;
-use std::sync::Arc;
+use coven_foundation::id_source::IdSourceRef;
+use objc2::{rc::Retained, AnyThread};
+use objc2_cloud_kit::{CKContainer, CKDatabase, CKRecordID, CKRecordSavePolicy, CKRecordZoneID};
+use objc2_foundation::NSString;
+use record::{Record, PART_SIZE};
+pub(super) use zone::prepare;
 
-/// A durable upload prepared by the app's CloudKit bridge.
-pub struct CloudKitUpload {
-    /// The bridge's recorded session capability, erased on drop.
-    pub id: SecretText,
-    /// Bounded part size accepted by the bridge's CKAsset representation.
-    pub part_size: usize,
+enum Body {
+    Inline(Vec<u8>),
+    Parts(String),
 }
 
-/// CloudKit's confirmed state, independent of the caller's last recorded part.
-pub enum CloudKitUploadStatus {
-    /// Bytes stored in the durable session, before publishing the complete object.
-    Uploading {
-        /// The contiguous stored prefix.
-        confirmed: u64,
-    },
-    /// The exact session's object has been published in the zone.
-    Complete,
-}
-
-/// Native CloudKit calls implemented by the app (E1).
-///
-/// The bridge owns CKAssets and native record handling; all byte payloads it is
-/// given are already encrypted. It maps paths to stable record names, enforces
-/// create-only saves on the server, and makes each object visible as a whole.
-/// Large objects use bounded assets and a publication record committed after
-/// the parts. Upload ids and stored parts must survive an app restart. Bridge
-/// failures preserve native causes in `StorageError::Provider` with CloudKit's
-/// classification. None of these calls starts unowned background work.
-#[async_trait]
-pub trait CloudKitOps: Send + Sync {
-    /// The signed-in participant identity used by grants and store membership.
-    /// This identifies the caller even when another account owns the zone.
-    async fn account(&self, location: &StorageConfig) -> Result<String, StorageError>;
-    /// Whether the signed-in Apple account owns this store's shared zone.
-    async fn is_owner(&self, location: &StorageConfig) -> Result<bool, StorageError>;
-    /// Largest encrypted object this bridge saves in one native call. Must be
-    /// nonzero; larger objects use the bridge's durable bounded-asset upload.
-    fn single_request_limit(&self) -> u64;
-    /// Save complete encrypted bytes using the server's create-only policy.
-    async fn create(
-        &self,
-        location: &StorageConfig,
-        path: &ObjectPath,
-        bytes: &[u8],
-    ) -> Result<(), StorageError>;
-    /// Replace complete posted positions or a clock object atomically.
-    async fn replace(
-        &self,
-        location: &StorageConfig,
-        path: &ObjectPath,
-        bytes: &[u8],
-    ) -> Result<(), StorageError>;
-    /// Read complete bytes or only the asset parts covering a nonempty range.
-    async fn read(
-        &self,
-        location: &StorageConfig,
-        path: &ObjectPath,
-        range: Option<ByteRange>,
-    ) -> Result<ObjectRead, StorageError>;
-    /// Fetch the exact publication record. Missing is None; native failures
-    /// preserve their cause. Pending assets have no complete-object status.
-    async fn status(
-        &self,
-        location: &StorageConfig,
-        path: &ObjectPath,
-    ) -> Result<Option<StoredObject>, StorageError>;
-    /// Follow every native query cursor. Return encrypted size and server publication
-    /// time of each complete object; pending assets are not listed.
-    async fn list(
-        &self,
-        location: &StorageConfig,
-        prefix: &ObjectPrefix,
-    ) -> Result<Vec<StoredObject>, StorageError>;
-    /// Delete an object and its parts; repeat deletion succeeds when absent.
-    async fn delete(&self, location: &StorageConfig, path: &ObjectPath)
-        -> Result<(), StorageError>;
-    /// Save read/write CKShare participation and return its server-issued share URL.
-    async fn grant_access(
-        &self,
-        location: &StorageConfig,
-        email: &str,
-    ) -> Result<SecretText, StorageError>;
-    /// Remove only the named account. Preserve the owner and grants reaching other
-    /// accounts, returning those grants for owner action.
-    async fn revoke_access(
-        &self,
-        location: &StorageConfig,
-        email: &str,
-    ) -> Result<MemberRemoval, StorageError>;
-    /// Fetch CKShare metadata for this URL and verify its container, owner and zone
-    /// against location before accepting it with the signed-in recipient account.
-    /// Repeated acceptance succeeds; native permission errors retain their causes.
-    async fn accept_share(
-        &self,
-        location: &StorageConfig,
-        url: &SecretText,
-    ) -> Result<(), StorageError>;
-    /// Prepare a durable upload that has not yet published its destination.
-    async fn begin_upload(
-        &self,
-        location: &StorageConfig,
-        path: &ObjectPath,
-        total: u64,
-    ) -> Result<CloudKitUpload, StorageError>;
-    /// Return progress from the recorded upload, including accepted lost replies.
-    async fn upload_status(
-        &self,
-        location: &StorageConfig,
-        id: &SecretText,
-    ) -> Result<CloudKitUploadStatus, StorageError>;
-    /// Store a part at its absolute offset; retrying identical bytes is idempotent.
-    async fn upload_part(
-        &self,
-        location: &StorageConfig,
-        id: &SecretText,
-        offset: u64,
-        bytes: &[u8],
-    ) -> Result<(), StorageError>;
-    /// Publish all parts atomically at their reserved object path. Repeating a
-    /// completed session succeeds and never overwrites another object.
-    async fn finish_upload(
-        &self,
-        location: &StorageConfig,
-        id: &SecretText,
-    ) -> Result<(), StorageError>;
-    /// Discard pending parts without deleting a published object. Already closed
-    /// or absent sessions may return success or a classified not-found error.
-    async fn abort_upload(
-        &self,
-        location: &StorageConfig,
-        id: &SecretText,
-    ) -> Result<(), StorageError>;
-}
-
-/// iCloud storage through the app's native CloudKit bridge.
 pub(crate) struct CloudKitStorage {
-    config: StorageConfig,
-    ops: Arc<dyn CloudKitOps>,
+    container_id: String,
+    container: Retained<CKContainer>,
+    database: Retained<CKDatabase>,
+    ids: IdSourceRef,
+    files: std::sync::Arc<coven_foundation::files::AssetFiles>,
+    owner: String,
+    zone: String,
 }
 impl CloudKitStorage {
-    /// Bind the injected bridge to one store's zone at the composition root.
-    pub(crate) fn new(
-        config: StorageConfig,
-        ops: Arc<dyn CloudKitOps>,
-    ) -> Result<Self, StorageError> {
-        if !matches!(config, StorageConfig::CloudKit { .. }) {
-            return Err(StorageFailure::InvalidConfiguration.with_source("expected CloudKit zone"));
-        }
-        if ops.single_request_limit() == 0 {
+    pub(crate) async fn new(config: StorageConfig, ids: IdSourceRef) -> Result<Self, StorageError> {
+        native::check_available()?;
+        config.validate()?;
+        let StorageConfig::CloudKit {
+            container: container_id,
+            owner,
+            zone,
+        } = config
+        else {
             return Err(
-                StorageFailure::InvalidConfiguration.with_source("zero CloudKit request limit")
+                StorageFailure::InvalidConfiguration.with_source("expected CloudKit location")
             );
+        };
+        if zone == "_defaultZone" || owner == "__defaultOwner__" {
+            return Err(StorageFailure::InvalidConfiguration
+                .with_source("CloudKit requires a custom zone and stable owner identity"));
         }
-        Ok(Self { config, ops })
+        // CloudKit owns this process's entitled container and account context.
+        let container = objc2::rc::autoreleasepool(|_| unsafe {
+            CKContainer::containerWithIdentifier(&NSString::from_str(&container_id))
+        });
+        let account = native::current_account(&container).wait().await?;
+        let database = objc2::rc::autoreleasepool(|_| unsafe {
+            if account == owner {
+                container.privateCloudDatabase()
+            } else {
+                container.sharedCloudDatabase()
+            }
+        });
+        Ok(Self {
+            owner,
+            zone,
+            container_id,
+            container,
+            database,
+            ids,
+            files: std::sync::Arc::new(
+                coven_foundation::files::AssetFiles::new()
+                    .map_err(|error| StorageFailure::File.with_source(error))?,
+            ),
+        })
+    }
+    fn zone_id(&self) -> Retained<CKRecordZoneID> {
+        objc2::rc::autoreleasepool(|_| unsafe {
+            CKRecordZoneID::initWithZoneName_ownerName(
+                CKRecordZoneID::alloc(),
+                &NSString::from_str(&self.zone),
+                &NSString::from_str(&self.owner),
+            )
+        })
+    }
+    fn record_id(&self, name: &str) -> Retained<CKRecordID> {
+        objc2::rc::autoreleasepool(|_| unsafe {
+            CKRecordID::initWithRecordName_zoneID(
+                CKRecordID::alloc(),
+                &NSString::from_str(name),
+                &self.zone_id(),
+            )
+        })
+    }
+    fn fetch(&self, name: &str, keys: &[&str]) -> native::CloudKitRequest<Record> {
+        native::fetch(&self.database, &self.record_id(name), keys, Ok)
+    }
+    fn object(&self, path: &ObjectPath, size: u64) -> Record {
+        let mut record = Record::new("CovenObject", &self.record_id(record::record_name(path)));
+        record.set_text("path", path.as_str());
+        record.set_number("size", size);
+        record
+    }
+    async fn save_bytes(
+        &self,
+        path: &ObjectPath,
+        bytes: &[u8],
+        policy: CKRecordSavePolicy,
+    ) -> Result<(), StorageError> {
+        let mut record = self.object(path, bytes.len() as u64);
+        let asset = record.set_asset(&self.files, bytes)?;
+        native::modify(
+            &self.database,
+            vec![record],
+            &[],
+            policy,
+            Some(path.as_str()),
+            vec![asset],
+        )
+        .wait()
+        .await?;
+        Ok(())
     }
     async fn require_owner(&self) -> Result<(), StorageError> {
-        if !self.ops.is_owner(&self.config).await? {
+        if native::current_account(&self.container).wait().await? != self.owner {
             return Err(StorageFailure::NotStoreOwner.into());
         }
         Ok(())
     }
-    fn id<'a>(&self, session: &'a UploadSession) -> Result<&'a SecretText, StorageError> {
-        match &session.state {
-            SessionState::CloudKit { id } => Ok(id),
-            _ => Err(StorageFailure::SessionMismatch.into()),
+    async fn read_bytes(
+        &self,
+        path: &ObjectPath,
+        range: Option<ByteRange>,
+    ) -> Result<ObjectRead, StorageError> {
+        let files = self.files.clone();
+        let request = native::fetch(
+            &self.database,
+            &self.record_id(path.as_str()),
+            &["path", "size", "upload", "data"],
+            move |record| {
+                let metadata = record.metadata()?;
+                let body = match record.optional_text("upload")? {
+                    Some(token) => Body::Parts(token),
+                    None => Body::Inline(record.asset_bytes(&files)?),
+                };
+                Ok((metadata, body))
+            },
+        );
+        let (metadata, body) = request.wait().await?;
+        if metadata.path != *path {
+            return Err(StorageFailure::Protocol.into());
         }
+        let (start, end) = match range {
+            Some(range) if range.end() <= metadata.size => (range.start(), range.end()),
+            Some(_) => return Err(StorageFailure::InvalidRange.into()),
+            None => (0, metadata.size),
+        };
+        let token = match body {
+            Body::Inline(bytes) => {
+                if bytes.len() as u64 != metadata.size {
+                    return Err(StorageFailure::Protocol.into());
+                }
+                let bytes = match range {
+                    Some(range) => bytes[range.start() as usize..range.end() as usize].to_vec(),
+                    None => bytes,
+                };
+                return Ok(ObjectRead { metadata, bytes });
+            }
+            Body::Parts(token) => token,
+        };
+        let root = record::upload_name(path, &token)?;
+        let mut output = Vec::new();
+        let mut offset = start;
+        while offset < end {
+            let part_start = offset / PART_SIZE as u64 * PART_SIZE as u64;
+            let name = record::part_name(&root, part_start);
+            let files = self.files.clone();
+            let request = native::fetch(
+                &self.database,
+                &self.record_id(&name),
+                &["data"],
+                move |record| record.asset_bytes(&files),
+            );
+            let bytes = request.wait().await?;
+            let expected = (metadata.size - part_start).min(PART_SIZE as u64);
+            if bytes.len() as u64 != expected {
+                return Err(
+                    StorageFailure::Protocol.with_source("CloudKit returned an incomplete asset")
+                );
+            }
+            let within = usize::try_from(offset - part_start)
+                .map_err(|error| StorageFailure::InvalidRange.with_source(error))?;
+            let count = usize::try_from((end - offset).min(expected - (offset - part_start)))
+                .map_err(|error| StorageFailure::InvalidRange.with_source(error))?;
+            output.extend_from_slice(&bytes[within..within + count]);
+            offset += count as u64;
+        }
+        Ok(ObjectRead {
+            metadata,
+            bytes: output,
+        })
     }
 }
-#[async_trait]
+
+#[async_trait::async_trait]
 impl ProviderOps for CloudKitStorage {
-    async fn account(&self) -> Result<String, StorageError> {
-        let account = self.ops.account(&self.config).await?;
-        if account.is_empty() {
-            return Err(StorageFailure::AccountIdUnavailable.into());
-        }
-        Ok(account)
-    }
     fn config(&self) -> StorageConfig {
-        self.config.clone()
+        StorageConfig::CloudKit {
+            container: self.container_id.clone(),
+            owner: self.owner.clone(),
+            zone: self.zone.clone(),
+        }
     }
     fn single_request_limit(&self) -> u64 {
-        self.ops.single_request_limit()
+        PART_SIZE as u64
+    }
+    async fn account(&self) -> Result<String, StorageError> {
+        self.account_identity().await
     }
     async fn create(&self, path: &ObjectPath, bytes: &[u8]) -> Result<(), StorageError> {
-        self.ops.create(&self.config, path, bytes).await
+        self.save_bytes(path, bytes, CKRecordSavePolicy::IfServerRecordUnchanged)
+            .await
     }
     async fn replace(&self, path: &ObjectPath, bytes: &[u8]) -> Result<(), StorageError> {
-        self.ops.replace(&self.config, path, bytes).await
+        self.save_bytes(path, bytes, CKRecordSavePolicy::AllKeys)
+            .await
     }
     async fn status(&self, path: &ObjectPath) -> Result<Option<StoredObject>, StorageError> {
-        self.ops.status(&self.config, path).await
+        match self
+            .fetch(record::record_name(path), record::OBJECT_KEYS)
+            .wait()
+            .await
+        {
+            Ok(record) => {
+                let metadata = record.metadata()?;
+                metadata.check(path)?;
+                Ok(Some(metadata))
+            }
+            Err(error) if error.failure() == StorageFailure::NotFound => Ok(None),
+            Err(error) => Err(error),
+        }
     }
     async fn read_object(
         &self,
         path: &ObjectPath,
         range: Option<ByteRange>,
     ) -> Result<ObjectRead, StorageError> {
-        self.ops.read(&self.config, path, range).await
+        self.read_bytes(path, range).await
     }
     async fn list(&self, listing: &mut ObjectListing) -> Result<(), StorageError> {
-        for object in self.ops.list(&self.config, listing.prefix()).await? {
-            listing.insert(object)?;
+        let mut cursor = None;
+        loop {
+            let request = native::query(
+                &self.database,
+                &self.zone_id(),
+                listing.prefix().clone(),
+                cursor,
+            );
+            let (records, next) = request.wait().await?;
+            for object in records {
+                listing.insert(object)?;
+            }
+            match next {
+                Some(next) => cursor = Some(next),
+                None => return Ok(()),
+            }
         }
-        Ok(())
     }
-
     async fn delete(&self, path: &ObjectPath) -> Result<(), StorageError> {
-        self.ops.delete(&self.config, path).await
+        // Parts belong to the published record via native deleteSelf references.
+        let request = native::modify(
+            &self.database,
+            vec![],
+            &[self.record_id(path.as_str())],
+            CKRecordSavePolicy::IfServerRecordUnchanged,
+            None,
+            vec![],
+        );
+        match request.wait().await {
+            Ok(_) => Ok(()),
+            Err(error) if error.failure() == StorageFailure::NotFound => Ok(()),
+            Err(error) => Err(error),
+        }
     }
     async fn grant_access(&self, account: &str) -> Result<AccessGrant, StorageError> {
-        self.require_owner().await?;
-        let url = self.ops.grant_access(&self.config, account).await?;
-        Ok(AccessGrant::Granted {
-            invitation: StorageInvitation::new(
-                self.config(),
-                crate::invitation::InvitationAcceptance::CloudKitShare { url },
-            )?,
-        })
-    }
-    async fn join(&self, invitation: &StorageInvitation) -> Result<(), StorageError> {
-        let crate::invitation::InvitationAcceptance::CloudKitShare { url } = &invitation.acceptance
-        else {
-            return Err(StorageFailure::InvitationMismatch.into());
-        };
-        self.ops.accept_share(&self.config, url).await?;
-        Ok(())
+        self.grant(account).await
     }
     async fn revoke_access(
         &self,
         member: &MemberAccess,
     ) -> Result<ProviderRevocation, StorageError> {
-        let MemberAccess::ProviderAccount(email) = member else {
-            return Err(
-                StorageFailure::InvalidConfiguration.with_source("CloudKit requires an account")
-            );
-        };
-        self.require_owner().await?;
-        self.ops
-            .revoke_access(&self.config, email)
-            .await
-            .map(ProviderRevocation::Reported)
+        self.revoke(member).await.map(ProviderRevocation::Remaining)
+    }
+    async fn join(&self, invitation: &StorageInvitation) -> Result<(), StorageError> {
+        self.accept(invitation).await
     }
     async fn begin_upload(
         &self,
         path: &ObjectPath,
         total: u64,
     ) -> Result<UploadSession, StorageError> {
-        let upload = self.ops.begin_upload(&self.config, path, total).await?;
-        if upload.part_size == 0 || upload.id.as_str().is_empty() {
-            return Err(StorageFailure::Protocol.with_source("invalid CloudKit session"));
-        }
-        Ok(UploadSession {
-            location: self.config(),
-            path: path.clone(),
-            total,
-            confirmed: 0,
-            part_size: upload.part_size,
-            state: SessionState::CloudKit { id: upload.id },
-        })
+        self.prepare_upload(path, total)
     }
     async fn resume_upload(&self, session: &mut UploadSession) -> Result<(), StorageError> {
-        match self
-            .ops
-            .upload_status(&self.config, self.id(session)?)
-            .await?
-        {
-            CloudKitUploadStatus::Complete => {
-                session.confirmed = session.total;
-                session.state = SessionState::Complete;
-            }
-            CloudKitUploadStatus::Uploading { confirmed } => {
-                if confirmed < session.confirmed || confirmed > session.total {
-                    return Err(
-                        StorageFailure::Protocol.with_source("CloudKit lost confirmed parts")
-                    );
-                }
-                session.confirmed = confirmed;
-            }
-        }
-        Ok(())
+        self.resume(session).await
     }
     async fn upload_part(
         &self,
@@ -291,34 +311,13 @@ impl ProviderOps for CloudKitStorage {
         bytes: &[u8],
         end: u64,
     ) -> Result<(), StorageError> {
-        self.ops
-            .upload_part(&self.config, self.id(session)?, session.confirmed, bytes)
-            .await?;
-        session.confirmed = end;
-        Ok(())
+        self.save_part(session, bytes, end).await
     }
     async fn finish_upload(&self, session: &mut UploadSession) -> Result<(), StorageError> {
-        if session.confirmed != session.total {
-            return Err(StorageFailure::InvalidPart.into());
-        }
-        self.ops
-            .finish_upload(&self.config, self.id(session)?)
-            .await?;
-        session.state = SessionState::Complete;
-        Ok(())
+        self.publish(session).await
     }
     async fn abort_upload(&self, session: &UploadSession) -> Result<(), StorageError> {
-        match self.ops.abort_upload(&self.config, self.id(session)?).await {
-            Err(error)
-                if matches!(
-                    error.failure(),
-                    StorageFailure::NotFound | StorageFailure::SessionExpired
-                ) =>
-            {
-                Ok(())
-            }
-            result => result,
-        }
+        self.abort(session).await
     }
 }
 

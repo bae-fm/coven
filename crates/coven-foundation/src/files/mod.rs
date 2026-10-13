@@ -1,5 +1,10 @@
 //! Files on disk: the store layout, directory, settings and exclusive lock.
 
+#[cfg(target_vendor = "apple")]
+mod asset_files;
+#[cfg(target_vendor = "apple")]
+pub use asset_files::{AssetFile, AssetFiles};
+
 mod atomic_file;
 mod bootstrap;
 mod creation;

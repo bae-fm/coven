@@ -344,16 +344,7 @@ async fn closed_storage_calls_keep_their_public_errors_on_every_clone() {
         Err(StorageSetupError::SecureStorage(KeyError::StoreClosed))
     ));
     assert!(matches!(
-        handle
-            .setup_cloudkit_storage(
-                StorageConfig::CloudKit {
-                    container: "container".into(),
-                    owner: "owner".into(),
-                    zone: "zone".into(),
-                },
-                "Device"
-            )
-            .await,
+        handle.setup_cloudkit_storage("container", "Device").await,
         Err(StorageSetupError::SecureStorage(KeyError::StoreClosed))
     ));
     assert!(matches!(

@@ -16,4 +16,8 @@ This Cargo workspace is the implementation. Its design is
 [`spec/coven.md`](spec/coven.md), and every byte it
 writes to storage is in [`spec/format.md`](spec/format.md).
 
+CloudKit is built into the Apple-platform storage adapter. The app supplies its
+container identifier and iCloud entitlement. See the
+[signed macOS conformance host](crates/coven-storage/cloudkit-live.md) for live testing.
+
 Docs: <https://coven.bae.fm>

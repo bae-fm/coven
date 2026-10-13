@@ -89,13 +89,15 @@ impl CovenHandle {
     ) -> Result<ConnectedStorage, StorageSetupError> {
         self.storage.setup_oauth(storage, device_name).await
     }
-    /// Check provider operations and set up iCloud through the configured native bridge.
+    /// Set up native iCloud storage in the entitled container. Coven obtains the
+    /// owner and creates a custom zone; reconnects retain the recorded location.
+    /// Unsupported platforms return `StorageFailure::ProviderUnavailable`.
     pub async fn setup_cloudkit_storage(
         &self,
-        storage: StorageConfig,
+        container: &str,
         device_name: &str,
     ) -> Result<ConnectedStorage, StorageSetupError> {
-        self.storage.setup_cloudkit(storage, device_name).await
+        self.storage.setup_cloudkit(container, device_name).await
     }
     /// Open this member's sealed keys and connect without starting the loop.
     pub async fn unlock_store_key(&self) -> Result<ConnectedStorage, StoreKeyUnlockError> {

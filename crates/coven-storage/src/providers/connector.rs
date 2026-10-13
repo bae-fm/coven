@@ -1,23 +1,28 @@
 //! Provider construction from an explicit location and device credentials.
 
-use super::{
-    CloudKitOps, CloudKitStorage, DropboxStorage, GoogleDriveStorage, OAuthSession,
-    OneDriveStorage, S3Storage,
-};
+use super::{DropboxStorage, GoogleDriveStorage, OAuthSession, OneDriveStorage, S3Storage};
 use crate::{
     ProviderOps, StorageConfig, StorageConnection, StorageCredentials, StorageError, StorageFailure,
 };
 use coven_foundation::{
     clock::ClockRef,
-    id_source::{DeviceId, IdSourceRef},
+    id_source::{DeviceId, IdSourceRef, StoreId},
 };
 use std::sync::Arc;
 
-/// Constructs built-in provider connections without committing settings or credentials.
-/// Shared by coven's opening, setup and sync owners. Tests replace it with an
-/// in-memory provider through coven's `test-utils` builder hook.
+/// Constructs provider connections without committing settings or credentials.
+/// Tests replace the connection boundary with in-memory storage.
 #[async_trait::async_trait]
 pub trait StorageConnector: Send + Sync {
+    /// Create the owner's CloudKit location from the entitled container.
+    /// A connector without native CloudKit support refuses this capability.
+    async fn prepare_cloudkit(
+        &self,
+        _container: &str,
+        _store: StoreId,
+    ) -> Result<StorageConfig, StorageError> {
+        Err(StorageFailure::ProviderUnavailable.into())
+    }
     /// Validate settings and wrap the selected native provider once. The caller
     /// verifies the connection before publication.
     async fn connect(
@@ -28,27 +33,35 @@ pub trait StorageConnector: Send + Sync {
     ) -> Result<Arc<StorageConnection>, StorageError>;
 }
 
-/// The provider composition root, with every clock, id source and native bridge
-/// supplied by the application opening root.
+/// The provider composition root retains the supplied clock and id source.
 pub struct ProviderConnector {
     clock: ClockRef,
     ids: IdSourceRef,
-    cloudkit: Option<Arc<dyn CloudKitOps>>,
 }
-
 impl ProviderConnector {
     /// Retain the capabilities used to construct subsequent connections.
-    pub fn new(clock: ClockRef, ids: IdSourceRef, cloudkit: Option<Arc<dyn CloudKitOps>>) -> Self {
-        Self {
-            clock,
-            ids,
-            cloudkit,
-        }
+    pub fn new(clock: ClockRef, ids: IdSourceRef) -> Self {
+        Self { clock, ids }
     }
 }
 
 #[async_trait::async_trait]
 impl StorageConnector for ProviderConnector {
+    async fn prepare_cloudkit(
+        &self,
+        container: &str,
+        store: StoreId,
+    ) -> Result<StorageConfig, StorageError> {
+        #[cfg(target_vendor = "apple")]
+        {
+            super::cloudkit::prepare(container, store).await
+        }
+        #[cfg(not(target_vendor = "apple"))]
+        {
+            let _ = (container, store);
+            Err(StorageFailure::ProviderUnavailable.into())
+        }
+    }
     async fn connect(
         &self,
         config: StorageConfig,
@@ -77,10 +90,14 @@ impl StorageConnector for ProviderConnector {
                 Arc::new(OneDriveStorage::new(config, session)?)
             }
             (StorageConfig::CloudKit { .. }, StorageCredentials::CloudKit) => {
-                let ops = self.cloudkit.clone().ok_or(
-                    StorageFailure::InvalidConfiguration.with_source("CloudKit bridge is absent"),
-                )?;
-                Arc::new(CloudKitStorage::new(config, ops)?)
+                #[cfg(target_vendor = "apple")]
+                {
+                    Arc::new(super::CloudKitStorage::new(config, self.ids.clone()).await?)
+                }
+                #[cfg(not(target_vendor = "apple"))]
+                {
+                    return Err(StorageFailure::ProviderUnavailable.into());
+                }
             }
             _ => {
                 return Err(StorageFailure::InvalidConfiguration
@@ -90,3 +107,7 @@ impl StorageConnector for ProviderConnector {
         Ok(Arc::new(StorageConnection::from_provider(provider)))
     }
 }
+
+#[cfg(all(test, not(target_vendor = "apple")))]
+#[path = "connector_tests.rs"]
+mod tests;

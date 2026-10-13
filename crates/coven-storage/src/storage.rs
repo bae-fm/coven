@@ -154,7 +154,7 @@ pub trait Storage: Send + Sync {
     /// create-once objects use resumable or multipart uploads, for every path kind.
     /// Callers retaining sessions across crashes use `begin_upload` and record them.
     /// S3 uses 5 GiB, Drive 5,000,000 bytes, Dropbox 150 MiB and OneDrive
-    /// 250,000,000 bytes. CloudKit uses the app bridge's nonzero native-call limit.
+    /// 250,000,000 bytes. CloudKit uses bounded 8 MiB assets.
     fn single_request_limit(&self) -> u64;
     /// Install replacement OAuth tokens after the owner commits them to key custody.
     /// S3 and CloudKit refuse OAuth tokens; they use different account credentials.
@@ -203,7 +203,7 @@ pub trait Storage: Send + Sync {
     /// Share the store using its owner's account, or tell an S3 admin to create a key.
     /// A signed-in sharing account that does not own the location gets `NotStoreOwner`.
     /// Ownership comes from Drive's folder `ownedByMe`, Dropbox's folder `access_type`,
-    /// OneDrive's current-account drive id, or CloudKit's native `is_owner` call.
+    /// OneDrive's current-account drive id, or CloudKit's current user record id compared with the zone owner.
     /// S3's console-key instructions need no sharing-account check.
     ///
     /// Dropbox upgrades viewers in place with `update_folder_member`; a pending

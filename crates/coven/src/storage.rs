@@ -211,16 +211,23 @@ impl StorageConnections {
 
     pub(crate) async fn setup_cloudkit(
         self: &Arc<Self>,
-        storage: StorageConfig,
+        container: &str,
         device_name: &str,
     ) -> Result<ConnectedStorage, StorageSetupError> {
-        if storage.provider() != CloudProvider::CloudKit {
-            return Err(StorageFailure::InvalidConfiguration
-                .with_source("expected CloudKit storage")
-                .into());
-        }
-        self.setup(storage, device_name, StorageCredentials::CloudKit)
-            .await
+        let container = container.to_owned();
+        let device_name = device_name.to_owned();
+        self.call(move |owner| async move {
+            let storage = match owner.codes.location().await.map_err(setup_error)? {
+                Some(storage) => {
+                    if !matches!(&storage, StorageConfig::CloudKit { container: recorded, .. } if *recorded == container) {
+                        return Err(StorageSetupError::LocationChangeUnsupported);
+                    }
+                    storage
+                }
+                None => owner.connector.prepare_cloudkit(&container, owner.store).await?,
+            };
+            owner.setup_connection(storage, &device_name, StorageCredentials::CloudKit).await
+        }).await
     }
 
     async fn setup(
