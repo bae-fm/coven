@@ -1,5 +1,5 @@
 //! S3's ETag, replacement revision and checksum are separate facts.
-use super::{S3Service, S3Storage};
+use super::{Revision, S3Storage};
 use crate::*;
 use aws_sdk_s3::{
     operation::{get_object::GetObjectOutput, head_object::HeadObjectOutput},
@@ -25,9 +25,9 @@ fn revision(
     if !path.is_replaceable() {
         return Ok(required(etag, "S3 omitted ETag")?.into());
     }
-    match storage.service {
-        S3Service::Gcs => Ok(required(version, "GCS omitted generation")?.into()),
-        _ => match version.filter(|version| *version != "null") {
+    match storage.profile.revision {
+        Revision::Generation => Ok(required(version, "GCS omitted generation")?.into()),
+        Revision::ETag => match version.filter(|version| *version != "null") {
             Some(version) => Ok(format!(
                 "version:{}",
                 required(Some(version), "S3 omitted version")?

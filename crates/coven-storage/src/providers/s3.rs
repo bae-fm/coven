@@ -16,13 +16,17 @@ use std::fmt;
 #[path = "s3_error.rs"]
 mod error;
 use error::s3_error;
-#[path = "s3_service.rs"]
-mod service;
-use service::S3Service;
+#[path = "s3_profile.rs"]
+mod profile;
+use profile::{BucketCheck, Checksums, Multipart, ResponseHeaders, Revision, S3Profile, Signing};
+#[path = "s3_checksum_headers.rs"]
+mod checksum_headers;
+#[path = "s3_copy_upload.rs"]
+mod copy_upload;
 #[path = "s3_gcs_signing.rs"]
 mod gcs_signing;
-#[path = "s3_gcs_upload.rs"]
-mod gcs_upload;
+#[path = "s3_listing.rs"]
+mod listing;
 #[path = "s3_metadata.rs"]
 mod metadata;
 #[path = "s3_restart.rs"]
@@ -36,7 +40,7 @@ pub(crate) struct S3Storage {
     bucket: String,
     prefix: String,
     ids: IdSourceRef,
-    service: S3Service,
+    profile: S3Profile,
     #[cfg(test)]
     single_request_limit: u64,
 }
@@ -82,6 +86,21 @@ impl S3Storage {
         clock: ClockRef,
         ids: IdSourceRef,
     ) -> Result<Self, StorageError> {
+        let StorageConfig::S3 { endpoint, .. } = &config else {
+            return Err(
+                StorageFailure::InvalidConfiguration.with_source("expected S3 configuration")
+            );
+        };
+        let profile = S3Profile::for_endpoint(endpoint.as_ref());
+        Self::with_profile(config, credentials, clock, ids, profile)
+    }
+    fn with_profile(
+        config: StorageConfig,
+        credentials: S3Credentials,
+        clock: ClockRef,
+        ids: IdSourceRef,
+        profile: S3Profile,
+    ) -> Result<Self, StorageError> {
         let StorageConfig::S3 {
             bucket,
             region,
@@ -100,7 +119,6 @@ impl S3Storage {
         let credentials = SigningCredentials(std::sync::Arc::new(std::sync::RwLock::new(
             aws_credentials(credentials),
         )));
-        let service = S3Service::for_endpoint(endpoint.as_ref());
         let mut builder = aws_sdk_s3::config::Builder::new()
             .behavior_version_latest()
             .region(Region::new(region.clone()))
@@ -111,12 +129,16 @@ impl S3Storage {
             .retry_config(aws_sdk_s3::config::retry::RetryConfig::disabled())
             .request_checksum_calculation(RequestChecksumCalculation::WhenRequired)
             .response_checksum_validation(ResponseChecksumValidation::WhenRequired);
-        if service == S3Service::Gcs {
-            builder = builder
-                .push_auth_scheme(gcs_signing::GcsSigning {
-                    region: region.clone(),
-                })
-                .interceptor(gcs_signing::GcsResponseHeaders);
+        if profile.signing == Signing::GoogleHmac {
+            builder = builder.push_auth_scheme(gcs_signing::GcsSigning {
+                region: region.clone(),
+            });
+        }
+        if profile.response_headers == ResponseHeaders::Google {
+            builder = builder.interceptor(gcs_signing::GcsResponseHeaders);
+        }
+        if profile.checksums == Checksums::UnstatedIgnored {
+            builder = builder.interceptor(checksum_headers::UnstatedChecksumHeaders);
         }
         if let Some(endpoint) = endpoint {
             builder = builder.endpoint_url(endpoint.as_str());
@@ -129,7 +151,7 @@ impl S3Storage {
             prefix: prefix.clone(),
             config,
             ids,
-            service,
+            profile,
             #[cfg(test)]
             single_request_limit: 5 * 1024 * 1024 * 1024,
         })
@@ -141,20 +163,16 @@ impl S3Storage {
             .bucket(&self.bucket)
             .key(path.under(&self.prefix))
             .body(ByteStream::from(bytes.to_vec()));
-        if path.is_replaceable() && self.service != S3Service::Gcs {
+        if path.is_replaceable() && self.profile.revision == Revision::ETag {
             request = request.metadata("coven-revision", self.ids.new_id().to_string());
         }
-        if create && self.service != S3Service::Gcs {
-            request = request.if_none_match("*");
-        }
-        let service = self.service;
+        let condition = self.profile.single_put;
         request
             .customize()
             .mutate_request(move |request| {
-                if create && service == S3Service::Gcs {
-                    request
-                        .headers_mut()
-                        .insert("x-goog-if-generation-match", "0");
+                if create {
+                    let (name, value) = condition.header();
+                    request.headers_mut().insert(name, value);
                 }
             })
             .send()
@@ -175,7 +193,7 @@ impl S3Storage {
         if let Some(range) = range {
             request = request.range(range.header());
         }
-        if self.service != S3Service::Gcs {
+        if self.profile.request_checksums {
             request = request.checksum_mode(aws_sdk_s3::types::ChecksumMode::Enabled);
         }
         let response = request.send().await.map_err(s3_error)?;
@@ -312,7 +330,7 @@ impl ProviderOps for S3Storage {
             .head_object()
             .bucket(&self.bucket)
             .key(path.under(&self.prefix));
-        if self.service != S3Service::Gcs {
+        if self.profile.request_checksums {
             request = request.checksum_mode(aws_sdk_s3::types::ChecksumMode::Enabled);
         }
         match request.send().await.map_err(s3_error) {
@@ -322,18 +340,18 @@ impl ProviderOps for S3Storage {
                 // GCS HEAD Bucket requires bucket-metadata permission beyond the
                 // object access Coven uses. A zero-entry listing checks the bucket
                 // using the existing object-list permission, not object absence.
-                match self.service {
-                    S3Service::Gcs => self
-                        .client
-                        .list_objects_v2()
-                        .bucket(&self.bucket)
-                        .prefix(path.under(&self.prefix))
-                        .max_keys(0)
-                        .send()
+                match self.profile.bucket_check {
+                    BucketCheck::List => self
+                        .list_page(
+                            self.profile.listing,
+                            &path.under(&self.prefix),
+                            None,
+                            None,
+                            Some(0),
+                        )
                         .await
-                        .map(|_| ())
-                        .map_err(s3_error),
-                    _ => self
+                        .map(|_| ()),
+                    BucketCheck::Head => self
                         .client
                         .head_bucket()
                         .bucket(&self.bucket)
@@ -367,23 +385,24 @@ impl ProviderOps for S3Storage {
         let mut seen = Pagination::new();
         loop {
             let response = self
-                .client
-                .list_objects_v2()
-                .bucket(&self.bucket)
-                .prefix(&full)
-                .set_continuation_token(marker)
-                .send()
-                .await
-                .map_err(s3_error)?;
-            for object in response.contents() {
+                .list_page(self.profile.listing, &full, None, marker, None)
+                .await?;
+            if !response.folders.is_empty() {
+                return Err(
+                    StorageFailure::Protocol.with_source("S3 returned folders without a delimiter")
+                );
+            }
+            for object in &response.contents {
                 let key = object
                     .key()
                     .ok_or(StorageFailure::Protocol.with_source("S3 list entry omitted key"))?;
                 let relative = key
                     .strip_prefix(&root)
                     .ok_or(StorageFailure::Protocol.with_source("S3 listed another location"))?;
-                if self.service == S3Service::Gcs && gcs_upload::is_temporary(relative, &prefix)? {
-                    tracing::debug!("GCS upload temporary retained for session cleanup");
+                if self.profile.multipart.uses_copy()
+                    && copy_upload::is_temporary(relative, &prefix)?
+                {
+                    tracing::debug!("S3 upload temporary retained for session cleanup");
                     continue;
                 }
                 let path = ObjectPath::parse(relative)?;
@@ -427,17 +446,9 @@ impl ProviderOps for S3Storage {
                     })?;
                 }
             }
-            if !response
-                .is_truncated()
-                .ok_or(StorageFailure::Protocol.with_source("S3 omitted page completion"))?
-            {
+            let Some(next) = response.next else {
                 break;
-            }
-            let next = response
-                .next_continuation_token()
-                .filter(|value| !value.is_empty())
-                .ok_or(StorageFailure::Protocol.with_source("S3 omitted continuation token"))?
-                .to_owned();
+            };
             seen.check(&next)?;
             marker = Some(next);
         }
@@ -647,14 +658,14 @@ impl ProviderOps for S3Storage {
                     .set_parts(Some(completed))
                     .build(),
             );
-        if self.service != S3Service::Gcs {
+        if self.profile.multipart == Multipart::ConditionalCompletion {
             request = request.if_none_match("*");
         }
         let result = request.send().await;
         match result {
             Ok(_) => {
-                if self.service == S3Service::Gcs {
-                    return self.publish_gcs(session).await;
+                if self.profile.multipart.uses_copy() {
+                    return self.publish_copy(session).await;
                 }
                 session.state = SessionState::Complete;
                 Ok(())
@@ -689,8 +700,8 @@ impl ProviderOps for S3Storage {
             }
             Err(error) => Err(s3_error(error)),
         };
-        if self.service == S3Service::Gcs {
-            crate::transfer::with_cleanup(result, self.delete_gcs_temporary(session).await)
+        if self.profile.multipart.uses_copy() {
+            crate::transfer::with_cleanup(result, self.delete_temporary(session).await)
         } else {
             result
         }

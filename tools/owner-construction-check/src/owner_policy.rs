@@ -228,6 +228,11 @@ pub(crate) const POLICY: Policy = Policy {
             "new",
         ),
         (
+            "crates/coven-storage/src/providers/s3.rs",
+            "S3Storage",
+            "with_profile",
+        ),
+        (
             "crates/coven-storage/src/settings.rs",
             "StorageSettings",
             "new",

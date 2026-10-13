@@ -348,7 +348,7 @@ fn respond(
 #[path = "s3_metadata_tests.rs"]
 mod metadata_tests;
 use gcs::gcs_provider;
-#[path = "s3_gcs_upload_tests.rs"]
+#[path = "s3_copy_upload_tests.rs"]
 mod gcs;
 fn provider(url: &str) -> StorageConnection<S3Storage> {
     let storage = S3Storage::new(
@@ -897,9 +897,12 @@ mod errors;
 #[path = "s3_restart_tests.rs"]
 mod restart;
 
-#[path = "s3_gcs_signing_tests.rs"]
-mod live;
-
 #[cfg(not(any(target_os = "ios", target_os = "android")))]
 #[path = "s3_live.rs"]
-mod listing_live;
+mod live;
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
+#[path = "s3_live_tests.rs"]
+mod live_tests;
+
+#[path = "s3_profile_tests.rs"]
+mod profile_tests;

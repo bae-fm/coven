@@ -9,9 +9,9 @@ impl S3Storage {
         path: &ObjectPath,
         token: &SecretText,
     ) -> Result<String, StorageError> {
-        match self.service {
-            S3Service::Aws | S3Service::Compatible => Ok(path.under(&self.prefix)),
-            S3Service::Gcs => {
+        match self.profile.multipart {
+            Multipart::ConditionalCompletion => Ok(path.under(&self.prefix)),
+            Multipart::Copy { .. } => {
                 let id = uuid::Uuid::parse_str(token.as_str())
                     .map_err(|source| StorageFailure::SessionMismatch.with_source(source))?;
                 Ok(format!(
@@ -34,7 +34,7 @@ impl S3Storage {
         &self,
         session: &mut UploadSession,
     ) -> Result<(), StorageError> {
-        if self.service != S3Service::Gcs {
+        if !self.profile.multipart.uses_copy() {
             return self.completed(session).await;
         }
         // NoSuchUpload leaves exactly one unknown: did assembly create the
@@ -62,9 +62,9 @@ impl S3Storage {
                         != Some(token.as_str())
                 {
                     return Err(StorageFailure::Protocol
-                        .with_source("GCS upload temporary disagrees with session"));
+                        .with_source("S3 upload temporary disagrees with session"));
                 }
-                self.publish_gcs(session).await
+                self.publish_copy(session).await
             }
             Err(error) if error.failure() == StorageFailure::NotFound => {
                 self.completed(session).await
@@ -73,10 +73,15 @@ impl S3Storage {
         }
     }
 
-    pub(super) async fn publish_gcs(
+    pub(super) async fn publish_copy(
         &self,
         session: &mut UploadSession,
     ) -> Result<(), StorageError> {
+        let Multipart::Copy { header, value } = self.profile.multipart else {
+            return Err(
+                StorageFailure::Protocol.with_source("copy publication requires a copy profile")
+            );
+        };
         let source = format!("/{}/{}", self.bucket, self.session_key(session)?);
         let result = self
             .client
@@ -85,10 +90,8 @@ impl S3Storage {
             .key(session.path.under(&self.prefix))
             .copy_source(source)
             .customize()
-            .mutate_request(|request| {
-                request
-                    .headers_mut()
-                    .insert("x-goog-if-generation-match", "0");
+            .mutate_request(move |request| {
+                request.headers_mut().insert(header, value);
             })
             .send()
             .await;
@@ -126,13 +129,13 @@ impl S3Storage {
             Err(error) if error.retryable() => return Err(error),
             Err(error) => Err(error),
         };
-        with_cleanup(result, self.delete_gcs_temporary(session).await)?;
+        with_cleanup(result, self.delete_temporary(session).await)?;
         session.confirmed = session.total;
         session.state = SessionState::Complete;
         Ok(())
     }
 
-    pub(super) async fn delete_gcs_temporary(
+    pub(super) async fn delete_temporary(
         &self,
         session: &UploadSession,
     ) -> Result<(), StorageError> {
@@ -149,12 +152,12 @@ pub(super) fn is_temporary(relative: &str, prefix: &ObjectPrefix) -> Result<bool
         return Ok(false);
     };
     if !relative.starts_with(prefix.as_str()) {
-        return Err(StorageFailure::Protocol.with_source("GCS listed temporary outside prefix"));
+        return Err(StorageFailure::Protocol.with_source("S3 listed temporary outside prefix"));
     }
     let parsed =
         uuid::Uuid::parse_str(id).map_err(|source| StorageFailure::Protocol.with_source(source))?;
     if parsed.to_string() != id {
-        return Err(StorageFailure::Protocol.with_source("GCS listed malformed upload temporary"));
+        return Err(StorageFailure::Protocol.with_source("S3 listed malformed upload temporary"));
     }
     Ok(true)
 }

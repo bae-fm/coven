@@ -80,22 +80,22 @@ async fn gcs_create_preserves_an_occupied_path() {
 }
 
 #[test]
-fn service_uses_the_endpoint_host_exactly() {
-    assert_eq!(S3Service::for_endpoint(None), S3Service::Aws);
+fn profile_uses_the_endpoint_host_exactly() {
+    assert_eq!(S3Profile::for_endpoint(None), profile::PROFILES[0]);
     for (url, expected) in [
-        ("https://storage.googleapis.com", S3Service::Gcs),
-        ("https://STORAGE.GOOGLEAPIS.COM/", S3Service::Gcs),
+        ("https://storage.googleapis.com", profile::PROFILES[1]),
+        ("https://STORAGE.GOOGLEAPIS.COM/", profile::PROFILES[1]),
         (
             "https://storage.googleapis.com.attacker.test",
-            S3Service::Compatible,
+            profile::PROFILES[0],
         ),
         (
             "https://other.test/storage.googleapis.com",
-            S3Service::Compatible,
+            profile::PROFILES[0],
         ),
     ] {
         assert_eq!(
-            S3Service::for_endpoint(Some(&url.parse().unwrap())),
+            S3Profile::for_endpoint(Some(&url.parse().unwrap())),
             expected
         );
     }
