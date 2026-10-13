@@ -53,8 +53,8 @@ pub use coven_format::MemberAccess;
 pub use coven_foundation::clock::{Clock, ClockRef, SystemClock};
 pub use coven_foundation::files::FileError as DiskError;
 pub use coven_foundation::files::{
-    BootstrapDirectoryError, FileError, SettingsError, StoreDir, StoreInfo, StoreLayout,
-    StoreLayoutError, StoreLockError,
+    BootstrapDirectoryError, FileError, FileName, FileNameError, SettingsError, StoreDir,
+    StoreInfo, StoreLayout, StoreLayoutError, StoreLockError,
 };
 pub use coven_foundation::id_source::{
     CircleId, DeviceId, FileId, IdSource, IdSourceRef, InviteId, KeyId, StoreId, UuidIds,
@@ -65,11 +65,11 @@ pub use coven_storage::providers::{
     OAuthRedirectError, ProviderResponse,
 };
 pub use coven_storage::{
-    ByteRange, CloudProvider, DropboxAccess, DropboxLocation, GoogleDriveAccess, OAuthAccess,
-    ObjectPath, ObjectPrefix, S3BucketCheck, S3Checksums, S3CopyCondition, S3Credentials,
-    S3Detection, S3Listing, S3Multipart, S3MultipartTimestamp, S3Observation, S3Probe, S3Profile,
-    S3ProfileName, S3ResponseHeaders, S3Revision, S3Settings, S3Signing, S3SinglePut,
-    StorageConfig, StorageError, StorageFailure,
+    ByteRange, ChecksumValue, CloudProvider, DropboxAccess, DropboxLocation, GoogleDriveAccess,
+    OAuthAccess, ObjectChecksum, ObjectPath, ObjectPrefix, S3BucketCheck, S3Checksums,
+    S3CopyCondition, S3Credentials, S3Detection, S3Listing, S3Multipart, S3MultipartTimestamp,
+    S3Observation, S3Probe, S3Profile, S3ProfileName, S3ResponseHeaders, S3Revision, S3Settings,
+    S3Signing, S3SinglePut, StorageConfig, StorageError, StorageFailure, StoredObject,
 };
 
 #[cfg(any(test, feature = "test-utils"))]
@@ -79,7 +79,7 @@ pub use test_utils::TestCoven;
 
 mod circles;
 pub use circles::Circles;
-pub use coven_format::store_log::MemberRole;
+pub use coven_format::store_log::{MemberRole, SnapshotId};
 pub use coven_storage::{MemberRemoval, ProviderSignOut, RetainedAccess, RetainedAccessReason};
 pub use coven_sync::{
     AccessKeyToDelete, Circle, CircleMemberInfo, DamagedObject, FileMissingReason,

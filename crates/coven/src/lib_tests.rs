@@ -5,6 +5,45 @@ use std::{
     time::{Duration, UNIX_EPOCH},
 };
 
+#[test]
+fn file_name_error_fields_are_available_through_the_facade() {
+    let name: FileName = FileName::new("attachment.data").unwrap();
+    let error = DbError::FileNameReused { name };
+    let DbError::FileNameReused { name } = error else {
+        unreachable!()
+    };
+    assert_eq!(name.as_str(), "attachment.data");
+    let invalid: FileNameError = FileName::new("../outside").unwrap_err();
+    assert_eq!(invalid, FileNameError::Character);
+}
+
+#[tokio::test]
+async fn storage_metadata_and_snapshot_subjects_are_available_through_the_facade() {
+    let storage = MemoryStorage::builder().build().unwrap();
+    let store = coven_storage::test_utils::STORE_ID;
+    let device = DeviceId(7);
+    let path = ObjectPath::snapshot(store, Audience::Store, device, 3.try_into().unwrap());
+    storage.create(&path, b"snapshot").await.unwrap();
+    let object: StoredObject = storage.status(&path).await.unwrap().unwrap();
+    assert_eq!(object.path, path);
+    assert_eq!(object.size, 8);
+    let checksum: Option<ChecksumValue> = object.checksum.map(|checksum| match checksum {
+        ObjectChecksum::FullObject(value) | ObjectChecksum::Composite(value) => value,
+    });
+    assert_eq!(checksum, None);
+
+    let snapshot: SnapshotId = path.snapshot_id().unwrap();
+    assert_eq!(snapshot.device, device);
+    assert_eq!(snapshot.number, 3);
+    assert_eq!(snapshot.audience, Audience::Store);
+    let record = PendingRecord {
+        subject: PendingSubject::Snapshot(snapshot),
+        reason: PendingReason::Missing { path },
+        reported_by: device,
+    };
+    assert_eq!(record.retry(), Retry::Automatic);
+}
+
 #[cfg(test)]
 pub(crate) struct Device {
     app: TestCoven,
