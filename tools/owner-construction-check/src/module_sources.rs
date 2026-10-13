@@ -1,7 +1,7 @@
 //! Rust module identities, including modules whose files use `#[path]`.
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use crate::syntax::{is_test_only, is_test_source, RustFile};
 
@@ -144,19 +144,26 @@ fn collect_items(
     }
 }
 
+/// Source keys use `/` on every platform (sources.rs converts Windows separators),
+/// so a joined path is rebuilt from its components rather than printed natively.
 fn normalize(path: &Path) -> String {
-    let mut result = PathBuf::new();
+    let mut parts: Vec<&str> = Vec::new();
     for component in path.components() {
         match component {
             std::path::Component::ParentDir => {
-                result.pop();
+                parts.pop();
             }
             std::path::Component::CurDir => {}
-            part => result.push(part),
+            part => parts.push(
+                part.as_os_str()
+                    .to_str()
+                    .expect("Rust source path is UTF-8"),
+            ),
         }
     }
-    result
-        .to_str()
-        .expect("Rust source path is UTF-8")
-        .to_string()
+    parts.join("/")
 }
+
+#[cfg(test)]
+#[path = "module_sources_tests.rs"]
+mod tests;
