@@ -423,9 +423,10 @@ async fn rowid_policy_distinguishes_temporary_tables_and_declared_alias_columns(
         sql.execute_batch("CREATE TABLE items(id TEXT NOT NULL PRIMARY KEY, rowid INTEGER); INSERT INTO items VALUES('a',1); CREATE TEMP TABLE items(id INTEGER PRIMARY KEY); INSERT INTO items(rowid) VALUES(7); UPDATE items SET _rowid_=8; UPDATE main.items SET rowid=2;")?;
         assert_eq!(sql.query_row("SELECT rowid FROM temp.items",[],|r|r.get::<_,i64>(0))?,8);
         assert_eq!(sql.query_row("SELECT rowid FROM main.items",[],|r|r.get::<_,i64>(0))?,2);
-        sql.execute("UPDATE main.items SET oid=9",[])?;
+        let error = DbError::from(sql.execute("UPDATE main.items SET oid=9",[]).unwrap_err());
+        assert!(matches!(error, DbError::StatementForbidden { operation: "changing a hidden rowid" }));
         sql.execute("INSERT INTO main.items(_rowid_,id) VALUES(10,'b')",[])?;
-        assert_eq!(sql.query_row("SELECT oid FROM main.items WHERE id='a'",[],|r|r.get::<_,i64>(0))?,9);
+        assert_eq!(sql.query_row("SELECT oid FROM main.items WHERE id='a'",[],|r|r.get::<_,i64>(0))?,1);
         Ok(())
     })]).open().await.unwrap();
     db.close().await.unwrap();
@@ -570,7 +571,7 @@ async fn rowid_policy_refreshes_for_migrations_and_reopening() {
 }
 
 #[tokio::test]
-async fn rowid_policy_excludes_each_declared_alias_name() {
+async fn rowid_policy_allows_declared_alias_columns_without_exposing_hidden_addresses() {
     for alias in ["RoWiD", "_ROWID_", "OiD"] {
         let store = TestStore::new();
         let db=store.builder(vec![],vec![Migration::run(1,"declared column",move |sql| {
@@ -593,6 +594,112 @@ async fn rowid_policy_excludes_each_declared_alias_name() {
             .unwrap(),
             2
         );
+        for hidden in ["rowid", "_rowid_", "oid"] {
+            if hidden.eq_ignore_ascii_case(alias) {
+                continue;
+            }
+            for statement in [
+                format!("UPDATE items SET {hidden}=9"),
+                format!("UPDATE items SET ({hidden},id)=(9,'b') RETURNING id"),
+                format!(
+                    "INSERT INTO items(id) VALUES('a') ON CONFLICT(id) DO UPDATE SET {hidden}=9"
+                ),
+            ] {
+                let error = db
+                    .write(move |sql| {
+                        sql.execute_batch(&statement)?;
+                        Ok(())
+                    })
+                    .await
+                    .unwrap_err();
+                assert!(
+                    matches!(
+                        error,
+                        DbError::StatementForbidden {
+                            operation: "changing a hidden rowid"
+                        }
+                    ),
+                    "{alias}: {error:?}"
+                );
+            }
+        }
+        db.close().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn shadowed_rowid_guards_follow_schema_changes_nested_triggers_and_reopening() {
+    fn migrations() -> Vec<Migration> {
+        vec![Migration::run(1, "shadowed addresses", |sql| {
+            sql.execute_batch("CREATE TABLE items(id TEXT NOT NULL PRIMARY KEY, rowid INTEGER); INSERT INTO items VALUES('a',1); ALTER TABLE items ADD COLUMN _rowid_ INTEGER; UPDATE items SET rowid=2,_rowid_=3; CREATE TABLE source(id INTEGER PRIMARY KEY); CREATE TABLE middle(id INTEGER PRIMARY KEY); INSERT INTO middle VALUES(1); CREATE TRIGGER parent AFTER INSERT ON source BEGIN UPDATE middle SET id=2; END; CREATE TRIGGER child AFTER UPDATE ON middle BEGIN UPDATE items SET oid=8; END;")?;
+            let error = DbError::from(sql.execute("INSERT INTO source VALUES(1)", []).unwrap_err());
+            assert!(matches!(
+                error,
+                DbError::StatementForbidden {
+                    operation: "changing a hidden rowid"
+                }
+            ));
+            assert_eq!(
+                sql.query_row("SELECT count(*) FROM source", [], |r| r.get::<_, i64>(0))?,
+                0
+            );
+            assert_eq!(
+                sql.query_row("SELECT id FROM middle", [], |r| r.get::<_, i64>(0))?,
+                1
+            );
+            sql.execute_batch("ALTER TABLE items RENAME COLUMN rowid TO saved_rowid")?;
+            let error = DbError::from(sql.execute("UPDATE items SET rowid=8", []).unwrap_err());
+            assert!(matches!(
+                error,
+                DbError::StatementForbidden {
+                    operation: "changing a hidden rowid"
+                }
+            ));
+            sql.execute_batch("ALTER TABLE items RENAME COLUMN saved_rowid TO rowid")?;
+            Ok(())
+        })]
+    }
+    let store = TestStore::new();
+    for _ in 0..2 {
+        let db = store.builder(vec![], migrations()).open().await.unwrap();
+        let error = db
+            .write(|sql| {
+                sql.execute("UPDATE items SET oid=9", [])?;
+                Ok(())
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            DbError::StatementForbidden {
+                operation: "changing a hidden rowid"
+            }
+        ));
+        assert_eq!(
+            db.read(|sql| Ok(
+                sql.query_row("SELECT oid,rowid,_rowid_ FROM items", [], |r| {
+                    Ok((
+                        r.get::<_, i64>(0)?,
+                        r.get::<_, i64>(1)?,
+                        r.get::<_, i64>(2)?,
+                    ))
+                })?
+            ))
+            .await
+            .unwrap(),
+            (1, 2, 3)
+        );
+        db.commit_writer(|sql| {
+            let error = sql
+                .materialize(|sql| Ok(sql.app_execute("UPDATE items SET oid=8", [])?))
+                .unwrap_err();
+            assert!(matches!(
+                error,
+                DbError::StatementForbidden {
+                    operation: "changing a hidden rowid"
+                }
+            ));
+        });
         db.close().await.unwrap();
     }
 }

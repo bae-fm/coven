@@ -187,6 +187,24 @@ impl SqlAuthorization {
         ApplyingSql(self)
     }
 
+    pub(crate) fn rowid_changed_function(
+        &self,
+    ) -> impl Fn(&rusqlite::functions::Context<'_>) -> rusqlite::Result<bool> + Send + 'static {
+        let state = Arc::clone(&self.state);
+        move |_| {
+            let mut state = state.lock().expect("SQL authorization lock poisoned");
+            if state.internal {
+                return Ok(true);
+            }
+            state.denied = Some(DbError::StatementForbidden {
+                operation: "changing a hidden rowid",
+            });
+            Err(rusqlite::Error::UserFunctionError(
+                "changing a hidden rowid".into(),
+            ))
+        }
+    }
+
     pub(crate) fn observe_reads(&self) -> ReadColumns<'_> {
         let mut state = self.state.lock().expect("SQL authorization lock poisoned");
         assert!(state.columns.is_none(), "column observation cannot nest");

@@ -730,6 +730,13 @@ mod query_plans {
             if !sql.contains('{') {
                 return vec![sql.to_owned()];
             }
+            if file == "rowid_policy.rs"
+                && normalize(sql) == "CREATE TEMP TRIGGER {} BEFORE UPDATE ON {}.{} WHEN old.{alias} IS NOT new.{alias} BEGIN SELECT _coven_rowid_changed(); END"
+            {
+                // The guard compares an app row's addresses and calls a function;
+                // it reads no persistent internal table or index.
+                return Vec::new();
+            }
             if sql.contains("{metadata}") {
                 assert_eq!(file, "row_queries.rs");
                 return [

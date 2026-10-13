@@ -1,5 +1,7 @@
 //! The leaf SQLite capability. Its connection is never returned or borrowed out.
 
+#[path = "rowid_policy.rs"]
+mod rowid_policy;
 #[path = "stream_capture.rs"]
 mod stream_capture;
 #[path = "transaction_capture.rs"]
@@ -80,6 +82,12 @@ impl DatabaseConnection {
             0,
             FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_INNOCUOUS,
             authorization.applying_function(),
+        )?;
+        connection.create_scalar_function(
+            "_coven_rowid_changed",
+            0,
+            FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_INNOCUOUS,
+            authorization.rowid_changed_function(),
         )?;
         connection.create_scalar_function(
             "_coven_loss_order",
@@ -682,27 +690,6 @@ impl DatabaseConnection {
             observer,
             supplemental: Arc::new(crate::change_capture::supplemental_tables(self)?),
         });
-        Ok(())
-    }
-
-    fn refresh_hidden_rowids(&self) -> rusqlite::Result<()> {
-        let _scope = self.authorization.internal();
-        // A rowid table's declared primary key has its own index unless it is
-        // an INTEGER PRIMARY KEY alias. Declared alias names make SQLITE_UPDATE
-        // of ROWID ambiguous, so these tables are excluded from this policy.
-        let mut statement = self.connection.prepare(
-            "SELECT lower(schema),lower(name) FROM pragma_table_list AS t
-             WHERE schema IN ('main','temp') AND type IN ('table','shadow') AND wr=0
-             AND name NOT GLOB 'sqlite_*'
-             AND NOT EXISTS (SELECT 1 FROM pragma_table_xinfo(t.name,t.schema)
-                             WHERE lower(name) IN ('rowid','_rowid_','oid'))
-             AND (NOT EXISTS (SELECT 1 FROM pragma_table_xinfo(t.name,t.schema) WHERE pk>0)
-                  OR EXISTS (SELECT 1 FROM pragma_index_list(t.name,t.schema) WHERE origin='pk'))",
-        )?;
-        let tables = statement
-            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
-            .collect::<rusqlite::Result<BTreeSet<_>>>()?;
-        self.authorization.set_hidden_rowids(tables);
         Ok(())
     }
 
