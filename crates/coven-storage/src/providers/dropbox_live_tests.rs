@@ -13,9 +13,7 @@ fn dropbox_live_conformance() {
 }
 
 #[test]
-#[ignore = "known failure: Dropbox removal result decoding; requires COVEN_LIVE_DROPBOX_ENV and COVEN_LIVE_DROPBOX_B_ENV"]
-// Live recipient reads and writes succeed, but revoke_access reports Protocol:
-// "Dropbox omitted removal result". The awaited cleanup's revoke retry succeeds.
+#[ignore = "requires COVEN_LIVE_DROPBOX_ENV and COVEN_LIVE_DROPBOX_B_ENV and writes to Dropbox"]
 fn dropbox_live_account_sharing() {
     run(async |live, storage| {
         let recipient_tokens = tokens("COVEN_LIVE_DROPBOX_B_ENV", live.clock.clone()).await;

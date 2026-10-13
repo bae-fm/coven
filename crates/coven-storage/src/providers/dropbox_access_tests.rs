@@ -1,6 +1,164 @@
 use super::*;
 use crate::test_utils::STORE_ID;
 
+async fn removal_result(status: Value) -> Result<MemberRemoval, StorageError> {
+    let mut remote = Remote::default();
+    remote.members.insert("member".into(), "editor".into());
+    remote.removal_job = Some(RemovalJob {
+        member: "member".into(),
+        statuses: [status].into(),
+    });
+    let state = Arc::new(Mutex::new(remote));
+    let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
+    let result = provider(&server.url)
+        .revoke_access(&MemberAccess::ProviderAccount("member".into()))
+        .await;
+    assert_eq!(state.lock().unwrap().sharing_mutations, ["remove"]);
+    result
+}
+
+#[tokio::test]
+async fn removal_completion_without_parent_access_is_revoked() {
+    // Dropbox's check_remove_member_job_status example is {".tag":"complete"}.
+    // MemberAccessLevelResult's fields are all optional and live beside the tag.
+    for status in [
+        json!({".tag":"complete"}),
+        json!({".tag":"complete","access_level":null,"warning":null,"access_details":null}),
+        json!({".tag":"complete","warning":"","access_details":[]}),
+    ] {
+        assert_eq!(
+            removal_result(status).await.unwrap(),
+            MemberRemoval::Revoked
+        );
+    }
+}
+
+#[tokio::test]
+async fn removal_completion_reports_each_documented_parent_access_level() {
+    for level in [
+        "owner",
+        "editor",
+        "viewer",
+        "viewer_no_comment",
+        "traverse",
+        "no_access",
+    ] {
+        for details in [None, Some(Value::Null), Some(json!([]))] {
+            let mut status = json!({".tag":"complete","access_level":{".tag":level}});
+            if let Some(details) = details {
+                status["access_details"] = details;
+            }
+            assert_eq!(
+                removal_result(status).await.unwrap(),
+                MemberRemoval::AccessRemains {
+                    shares: vec![RetainedAccess {
+                        provider_id: "dbid:member".into(),
+                        reason: RetainedAccessReason::Inherited,
+                    }],
+                }
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn removal_completion_reports_parent_folders_from_access_details() {
+    // ParentFolderAccessInfo's documented example, repeated for two parents.
+    for level in [None, Some(Value::Null), Some(json!({".tag":"viewer"}))] {
+        let mut status = json!({".tag":"complete","warning":"Access through a parent folder",
+        "access_details":[
+            {"folder_name":"Shared Folder","shared_folder_id":"84528192421","permissions":[],"path":"/Shared Folder"},
+            {"folder_name":"Another Folder","shared_folder_id":"84528192422","permissions":[],"path":"/Another Folder"}
+        ]});
+        if let Some(level) = level {
+            status["access_level"] = level;
+        }
+        assert_eq!(
+            removal_result(status).await.unwrap(),
+            MemberRemoval::AccessRemains {
+                shares: vec![
+                    RetainedAccess {
+                        provider_id: "84528192421".into(),
+                        reason: RetainedAccessReason::Inherited
+                    },
+                    RetainedAccess {
+                        provider_id: "84528192422".into(),
+                        reason: RetainedAccessReason::Inherited
+                    },
+                ],
+            }
+        );
+    }
+}
+
+#[tokio::test]
+async fn removal_rejects_unknown_or_malformed_completion_results() {
+    for status in [
+        Value::Null,
+        json!("complete"),
+        json!({}),
+        json!({".tag":"unknown"}),
+        json!({".tag":"complete","complete":{}}),
+        json!({".tag":"complete","unexpected":{}}),
+        json!({".tag":"complete","access_level":{".tag":"unknown"}}),
+        json!({".tag":"complete","access_level":{}}),
+        json!({".tag":"complete","access_level":"viewer"}),
+        json!({".tag":"complete","warning":false}),
+        json!({".tag":"complete","access_details":{}}),
+        json!({".tag":"complete","access_details":[{}]}),
+        json!({".tag":"complete","access_details":[{"shared_folder_id":""}]}),
+    ] {
+        assert_eq!(
+            removal_result(status.clone()).await.unwrap_err().failure(),
+            StorageFailure::Protocol,
+            "{status}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn removal_launch_requires_the_documented_async_job_id() {
+    // remove_folder_member returns async.LaunchResultBase, with no sync variant:
+    // https://github.com/dropbox/dropbox-api-spec/blob/main/sharing.stone
+    for launch in [
+        Value::Null,
+        json!({}),
+        json!({".tag":"complete"}),
+        json!({".tag":"unknown"}),
+        json!({".tag":"async_job_id"}),
+        json!({".tag":"async_job_id","async_job_id":""}),
+    ] {
+        let state = Arc::new(Mutex::new(Remote::default()));
+        state
+            .lock()
+            .unwrap()
+            .members
+            .insert("member".into(), "editor".into());
+        let server = TestServer::new(
+            Router::new()
+                .route(
+                    "/2/sharing/remove_folder_member",
+                    axum::routing::post(move || {
+                        let launch = launch.clone();
+                        async move { reply(launch) }
+                    }),
+                )
+                .fallback(endpoint)
+                .with_state(state.clone()),
+        )
+        .await;
+        assert_eq!(
+            provider(&server.url)
+                .revoke_access(&MemberAccess::ProviderAccount("member".into()))
+                .await
+                .unwrap_err()
+                .failure(),
+            StorageFailure::Protocol
+        );
+        assert!(state.lock().unwrap().members.contains_key("member"));
+    }
+}
+
 #[tokio::test]
 async fn account_removal_preserves_parent_and_group_access() {
     let state = Arc::new(Mutex::new(Remote::default()));

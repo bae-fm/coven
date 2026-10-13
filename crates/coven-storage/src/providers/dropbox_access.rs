@@ -108,26 +108,49 @@ pub(super) fn remaining_parent_access(
     value: &Value,
     member: &MemberId,
 ) -> Result<Vec<RetainedAccess>, StorageError> {
-    if !value.is_object() {
-        return Err(StorageFailure::Protocol.with_source("Dropbox omitted removal result"));
+    let fields = value
+        .as_object()
+        .ok_or(StorageFailure::Protocol.with_source("invalid Dropbox removal result"))?;
+    if fields.keys().any(|field| {
+        !matches!(
+            field.as_str(),
+            ".tag" | "access_level" | "warning" | "access_details"
+        )
+    }) || fields
+        .get("warning")
+        .is_some_and(|warning| !warning.is_null() && !warning.is_string())
+    {
+        return Err(StorageFailure::Protocol.with_source("invalid Dropbox removal result"));
     }
-    let Some(level) = value.get("access_level") else {
-        return Ok(Vec::new());
+    let has_parent_access = match fields.get("access_level") {
+        None | Some(Value::Null) => false,
+        // Dropbox's no_access level still permits actions through a shared link;
+        // any reported level here describes access retained through a parent.
+        Some(level) => match http::string(level, ".tag")? {
+            "owner" | "editor" | "viewer" | "viewer_no_comment" | "traverse" | "no_access" => true,
+            _ => {
+                return Err(
+                    StorageFailure::Protocol.with_source("unknown Dropbox parent access level")
+                )
+            }
+        },
     };
-    http::string(level, ".tag")?;
     let mut retained = Vec::new();
-    if let Some(details) = value.get("access_details") {
-        for parent in details
-            .as_array()
-            .ok_or(StorageFailure::Protocol.with_source("invalid Dropbox parent access"))?
-        {
-            retained.push(RetainedAccess {
-                provider_id: http::string(parent, "shared_folder_id")?.into(),
-                reason: RetainedAccessReason::Inherited,
-            });
+    match fields.get("access_details") {
+        None | Some(Value::Null) => {}
+        Some(details) => {
+            for parent in details
+                .as_array()
+                .ok_or(StorageFailure::Protocol.with_source("invalid Dropbox parent access"))?
+            {
+                retained.push(RetainedAccess {
+                    provider_id: http::string(parent, "shared_folder_id")?.into(),
+                    reason: RetainedAccessReason::Inherited,
+                });
+            }
         }
     }
-    if retained.is_empty() {
+    if retained.is_empty() && has_parent_access {
         retained.push(RetainedAccess {
             provider_id: member.as_str().into(),
             reason: RetainedAccessReason::Inherited,

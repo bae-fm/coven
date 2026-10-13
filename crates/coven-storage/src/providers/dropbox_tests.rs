@@ -354,13 +354,13 @@ async fn endpoint(
             } else {
                 let complete = match state.inherited_members.get(email) {
                     Some(role) => {
-                        json!({"access_level":{".tag":role},"access_details":[{"shared_folder_id":"parent-folder","folder_name":"Parent","path":"/parent","permissions":[]}]})
+                        json!({".tag":"complete","access_level":{".tag":role},"access_details":[{"shared_folder_id":"parent-folder","folder_name":"Parent","path":"/parent","permissions":[]}]})
                     }
-                    None => json!({}),
+                    None => json!({".tag":"complete"}),
                 };
                 state.removal_job = Some(RemovalJob {
                     member: email.into(),
-                    statuses: [json!({".tag":"complete","complete":complete})].into(),
+                    statuses: [complete].into(),
                 });
             }
             if std::mem::replace(&mut state.lose_remove_reply, false) {
@@ -702,11 +702,7 @@ async fn asynchronous_removal_waits_for_publication_and_retries_after_completion
     storage.grant_access("member").await.unwrap();
     state.lock().unwrap().removal_job = Some(RemovalJob {
         member: "member".into(),
-        statuses: [
-            json!({".tag":"in_progress"}),
-            json!({".tag":"complete", "complete":{}}),
-        ]
-        .into(),
+        statuses: [json!({".tag":"in_progress"}), json!({".tag":"complete"})].into(),
     });
     storage
         .revoke_access(&MemberAccess::ProviderAccount("member".into()))
@@ -756,7 +752,7 @@ async fn asynchronous_removal_times_out_without_hiding_remaining_access() {
         [std::time::Duration::from_millis(1); 60]
     );
     state.lock().unwrap().removal_job.as_mut().unwrap().statuses =
-        [json!({".tag":"complete", "complete":{}})].into();
+        [json!({".tag":"complete"})].into();
     storage
         .revoke_access(&MemberAccess::ProviderAccount("member".into()))
         .await

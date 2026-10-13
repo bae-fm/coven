@@ -183,7 +183,9 @@ impl DropboxStorage {
             )
             .await?;
             match http::string(&value, ".tag")? {
-                "complete" => return remaining_parent_access(&value["complete"], member),
+                // MemberAccessLevelResult is a struct: Dropbox inlines its fields
+                // beside .tag, including when all optional fields are absent.
+                "complete" => return remaining_parent_access(&value, member),
                 "in_progress" => self.session.sleep(self.removal_poll_interval).await,
                 "failed" => return Err(original.into_error(PROVIDER)),
                 _ => {
