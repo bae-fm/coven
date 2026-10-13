@@ -372,7 +372,7 @@ impl Conformance {
         let mut pending = storage.begin_upload(&path, 4).await.unwrap();
         let mut ready = storage.begin_upload(&path, 4).await.unwrap();
         storage.upload_part(&mut ready, b"data").await.unwrap();
-        // Drive and OneDrive publish the final part immediately. Test finish by
+        // Drive publishes the final part immediately. Test finish by
         // recovering its still-incomplete recording after the reply was lost.
         if ready.is_complete() {
             ready = pending.clone();

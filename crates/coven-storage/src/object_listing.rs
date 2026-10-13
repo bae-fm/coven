@@ -18,7 +18,7 @@ impl ObjectListing {
         }
     }
 
-    /// Requested object namespace, relative to the configured store.
+    /// Requested object namespace, beginning with the store id within the provider location.
     pub fn prefix(&self) -> &ObjectPrefix {
         &self.prefix
     }

@@ -49,7 +49,7 @@ pub enum S3ProfileName {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub enum StorageConfig {
-    /// An existing S3 bucket and the prefix reserved for this store.
+    /// An existing S3 bucket and a base prefix that may hold several stores.
     S3 {
         /// Bucket name.
         bucket: String,
@@ -62,10 +62,10 @@ pub enum StorageConfig {
         /// XML, hosts ending in .r2.cloudflarestorage.com are R2, and every
         /// other endpoint uses AWS's profile. All run the setup check.
         profile: Option<S3ProfileName>,
-        /// The store's prefix, without leading or trailing slashes.
+        /// The base prefix, without leading or trailing slashes; paths add the store id.
         prefix: String,
     },
-    /// The Google Drive folder holding the store.
+    /// A Google Drive folder; paths within it start with the store id.
     GoogleDrive {
         /// Folder id; inviting another person shares it with their Google account.
         folder_id: String,
@@ -75,7 +75,7 @@ pub enum StorageConfig {
         /// Required choice: not-shared App folder or a shared-capable namespace.
         location: crate::DropboxLocation,
     },
-    /// The shared OneDrive folder.
+    /// A OneDrive folder; paths within it start with the store id.
     OneDrive {
         /// Drive containing the folder.
         drive_id: String,
