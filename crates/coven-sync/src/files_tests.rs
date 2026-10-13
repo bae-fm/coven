@@ -743,3 +743,14 @@ async fn waiting_files_name_the_attaching_device_until_its_automatic_upload() {
         a.close().await;
     }
 }
+
+impl Files {
+    pub(crate) async fn stop_background_for_counts(&self) {
+        // Isolate pass work from the independent file worker, retaining the real
+        // file owner used by sync_pass and explicit file consumers.
+        self.worker.stop.send_replace(true);
+        if let Some(task) = self.worker.task.lock().await.take() {
+            join(task).await;
+        }
+    }
+}

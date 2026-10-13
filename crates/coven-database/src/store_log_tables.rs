@@ -73,11 +73,15 @@ pub(crate) fn deleted_circles(
 }
 
 pub(crate) fn read(database: &DatabaseConnection) -> Result<StoreLog, DbError> {
+    #[cfg(any(test, feature = "test-utils"))]
+    database.record_work(|work| work.full_log_decodes += 1);
     let mut log = StoreLog::default();
     for (entry, outcome) in database.query(
         "SELECT record,outcome,beaten_device,beaten_number,target,author_view,stored_at FROM _coven_store_log",
         [],
         |row| {
+            #[cfg(any(test, feature = "test-utils"))]
+            database.record_work(|work| work.entry_decodes += 1);
             let Object::StoreLog(entry) = decoded(Object::decode(&row.get::<_, Vec<u8>>(0)?))?
             else {
                 return Err(rusqlite::Error::InvalidQuery);

@@ -176,6 +176,8 @@ impl DatabaseInner {
         run: impl FnOnce(&DatabaseConnection) -> Result<R, E>,
     ) -> Result<R, E> {
         with_connection(&self.access.writer, |writer| {
+            #[cfg(any(test, feature = "test-utils"))]
+            writer.record_work(|work| work.writer_holds += 1);
             if let Some(error) = self.observer.error() {
                 return Err(error.into());
             }

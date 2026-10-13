@@ -49,6 +49,8 @@ pub(crate) fn latest_timestamp(
         "SELECT record FROM _coven_store_log UNION ALL SELECT record FROM _coven_store_log_uploads",
         [],
         |row| {
+            #[cfg(any(test, feature = "test-utils"))]
+            database.record_work(|work| work.entry_decodes += 1);
             let coven_format::Object::StoreLog(entry) =
                 decoded(coven_format::Object::decode(&row.get::<_, Vec<u8>>(0)?))?
             else {

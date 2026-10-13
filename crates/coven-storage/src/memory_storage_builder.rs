@@ -58,6 +58,7 @@ impl MemoryStorageBuilder {
             single_limit,
             part_size,
             requests: Arc::new(tokio::sync::watch::channel(0).0),
+            request_trace: Arc::new(std::sync::Mutex::new(Vec::new())),
             active_requests: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             peak_requests: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             clock,

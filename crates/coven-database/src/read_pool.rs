@@ -12,6 +12,17 @@ pub(super) struct ReadPool {
 }
 
 impl ReadPool {
+    #[cfg(any(test, feature = "test-utils"))]
+    pub(super) fn test_track_work(&self, counter: &crate::test_utils::WorkCounter) {
+        for reader in &self.readers {
+            *reader
+                .lock()
+                .expect("reader connection lock poisoned")
+                .work
+                .borrow_mut() = Some(counter.clone());
+        }
+    }
+
     pub(super) fn new(readers: Vec<Mutex<DatabaseConnection>>) -> Self {
         Self {
             idle_readers: Mutex::new((0..readers.len()).collect()),

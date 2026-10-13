@@ -12,6 +12,10 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
 
+#[path = "memory_requests.rs"]
+mod memory_requests;
+pub use memory_requests::MemoryRequest;
+
 /// Faults applied to the next calls, including accepted parts with lost replies.
 #[derive(Clone)]
 pub struct Faults {
@@ -175,6 +179,7 @@ pub struct MemoryProvider {
     single_limit: u64,
     part_size: usize,
     requests: Arc<tokio::sync::watch::Sender<u64>>,
+    request_trace: Arc<std::sync::Mutex<Vec<MemoryRequest>>>,
     active_requests: Arc<std::sync::atomic::AtomicUsize>,
     peak_requests: Arc<std::sync::atomic::AtomicUsize>,
     account: Account,
@@ -209,6 +214,7 @@ impl MemoryStorage {
             single_limit: owner.provider.single_limit,
             part_size: owner.provider.part_size,
             requests: owner.provider.requests.clone(),
+            request_trace: owner.provider.request_trace.clone(),
             active_requests: owner.provider.active_requests.clone(),
             peak_requests: owner.provider.peak_requests.clone(),
             account: Account::Recipient(email.to_ascii_lowercase()),
@@ -226,6 +232,7 @@ impl MemoryStorage {
         device.tokens = Arc::new(Mutex::new(None));
         device.s3_key = Arc::new(Mutex::new(None));
         device.requests = Arc::new(tokio::sync::watch::channel(0).0);
+        device.request_trace = Arc::new(std::sync::Mutex::new(Vec::new()));
         device.active_requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         device.peak_requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         Self::from_provider(Arc::new(device))
@@ -374,14 +381,18 @@ impl MemoryStorage {
 }
 
 impl MemoryProvider {
-    async fn before_request(&self) -> Result<(), StorageError> {
+    async fn before_request(&self, request: MemoryRequest) -> Result<(), StorageError> {
         let active = self
             .active_requests
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
             + 1;
-        let _request = MemoryRequest(&self.active_requests);
+        let _request = ActiveMemoryRequest(&self.active_requests);
         self.peak_requests
             .fetch_max(active, std::sync::atomic::Ordering::SeqCst);
+        self.request_trace
+            .lock()
+            .expect("request trace poisoned")
+            .push(request);
         self.requests.send_modify(|count| *count += 1);
         if !self.online.load(std::sync::atomic::Ordering::SeqCst) {
             return Err(StorageFailure::Network
@@ -417,8 +428,8 @@ impl MemoryProvider {
             }
         }
     }
-    async fn before(&self) -> Result<(), StorageError> {
-        self.before_request().await?;
+    async fn before(&self, request: MemoryRequest) -> Result<(), StorageError> {
+        self.before_request(request).await?;
         if let Account::Recipient(email) = &self.account {
             let state = self.state.lock().await;
             let allowed = match state.accounts.get(email) {
@@ -442,8 +453,8 @@ impl MemoryProvider {
     }
 }
 
-struct MemoryRequest<'a>(&'a std::sync::atomic::AtomicUsize);
-impl Drop for MemoryRequest<'_> {
+struct ActiveMemoryRequest<'a>(&'a std::sync::atomic::AtomicUsize);
+impl Drop for ActiveMemoryRequest<'_> {
     fn drop(&mut self) {
         self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
     }
@@ -452,7 +463,7 @@ impl Drop for MemoryRequest<'_> {
 #[async_trait]
 impl ProviderOps for MemoryProvider {
     async fn account(&self) -> Result<String, StorageError> {
-        self.before().await?;
+        self.before(MemoryRequest::Other("account")).await?;
         Ok(match &self.account {
             Account::Owner => "owner@example.test".into(),
             Account::Recipient(account) => account.clone(),
@@ -487,7 +498,7 @@ impl ProviderOps for MemoryProvider {
         self.single_limit
     }
     async fn create(&self, path: &ObjectPath, bytes: &[u8]) -> Result<(), StorageError> {
-        self.before().await?;
+        self.before(MemoryRequest::Create(path.clone())).await?;
         let mut state = self.state.lock().await;
         let held = if state
             .held_creation
@@ -531,7 +542,7 @@ impl ProviderOps for MemoryProvider {
     }
 
     async fn replace(&self, path: &ObjectPath, bytes: &[u8]) -> Result<(), StorageError> {
-        self.before().await?;
+        self.before(MemoryRequest::Replace(path.clone())).await?;
         let mut state = self.state.lock().await;
         let revision = state.next_id()?;
         state.objects.insert(
@@ -546,7 +557,7 @@ impl ProviderOps for MemoryProvider {
         Ok(())
     }
     async fn status(&self, path: &ObjectPath) -> Result<Option<StoredObject>, StorageError> {
-        self.before().await?;
+        self.before(MemoryRequest::Status(path.clone())).await?;
         Ok(self
             .state
             .lock()
@@ -560,7 +571,8 @@ impl ProviderOps for MemoryProvider {
         path: &ObjectPath,
         range: Option<ByteRange>,
     ) -> Result<ObjectRead, StorageError> {
-        self.before().await?;
+        self.before(MemoryRequest::Read(path.clone(), range))
+            .await?;
         let mut state = self.state.lock().await;
         let object = state.objects.get(path).ok_or(StorageFailure::NotFound)?;
         let metadata = object.metadata(path);
@@ -580,7 +592,7 @@ impl ProviderOps for MemoryProvider {
     }
     async fn list(&self, listing: &mut ObjectListing) -> Result<(), StorageError> {
         let prefix = listing.prefix();
-        self.before().await?;
+        self.before(MemoryRequest::List(prefix.clone())).await?;
         let mut state = self.state.lock().await;
         let objects: Vec<_> = state
             .objects
@@ -612,12 +624,13 @@ impl ProviderOps for MemoryProvider {
         Ok(())
     }
     async fn delete(&self, path: &ObjectPath) -> Result<(), StorageError> {
-        self.before().await?;
+        self.before(MemoryRequest::Delete(path.clone())).await?;
         self.state.lock().await.objects.remove(path);
         Ok(())
     }
     async fn grant_access(&self, account: &str) -> Result<AccessGrant, StorageError> {
-        self.before_request().await?;
+        self.before_request(MemoryRequest::Other("grant_access"))
+            .await?;
         if self.config.provider() == CloudProvider::S3 {
             return Ok(AccessGrant::CreateAccessKey);
         }
@@ -651,7 +664,7 @@ impl ProviderOps for MemoryProvider {
         Ok(AccessGrant::Granted { invitation })
     }
     async fn join(&self, invitation: &StorageInvitation) -> Result<(), StorageError> {
-        self.before_request().await?;
+        self.before_request(MemoryRequest::Other("join")).await?;
         use crate::invitation::InvitationAcceptance as Acceptance;
         if matches!(invitation.acceptance, Acceptance::Granted) {
             return Ok(());
@@ -681,7 +694,8 @@ impl ProviderOps for MemoryProvider {
         &self,
         member: &MemberAccess,
     ) -> Result<ProviderRevocation, StorageError> {
-        self.before_request().await?;
+        self.before_request(MemoryRequest::Other("revoke_access"))
+            .await?;
         match (self.config.provider(), member) {
             (CloudProvider::S3, MemberAccess::S3AccessKey { access_key_id }) => Ok(
                 ProviderRevocation::Reported(MemberRemoval::DeleteAccessKey {
@@ -714,7 +728,7 @@ impl ProviderOps for MemoryProvider {
         path: &ObjectPath,
         total: u64,
     ) -> Result<UploadSession, StorageError> {
-        self.before().await?;
+        self.before(MemoryRequest::Other("begin_upload")).await?;
         let mut state = self.state.lock().await;
         if state.objects.contains_key(path) && !state.faults.overwrite_create {
             return Err(StorageFailure::AlreadyExists.into());
@@ -742,7 +756,7 @@ impl ProviderOps for MemoryProvider {
         })
     }
     async fn resume_upload(&self, session: &mut UploadSession) -> Result<(), StorageError> {
-        self.before().await?;
+        self.before(MemoryRequest::Other("resume_upload")).await?;
         let id = self.session_id(session)?;
         let state = self.state.lock().await;
         match state.uploads.get(&id) {
@@ -760,7 +774,7 @@ impl ProviderOps for MemoryProvider {
         bytes: &[u8],
         end: u64,
     ) -> Result<(), StorageError> {
-        self.before().await?;
+        self.before(MemoryRequest::Other("upload_part")).await?;
         let id = self.session_id(session)?;
         let mut state = self.state.lock().await;
         let pending = state
@@ -789,7 +803,7 @@ impl ProviderOps for MemoryProvider {
         Ok(())
     }
     async fn finish_upload(&self, session: &mut UploadSession) -> Result<(), StorageError> {
-        self.before().await?;
+        self.before(MemoryRequest::Other("finish_upload")).await?;
         let id = self.session_id(session)?;
         let mut state = self.state.lock().await;
         let Some(pending) = state.uploads.get(&id) else {
@@ -823,7 +837,7 @@ impl ProviderOps for MemoryProvider {
         Ok(())
     }
     async fn abort_upload(&self, session: &UploadSession) -> Result<(), StorageError> {
-        self.before().await?;
+        self.before(MemoryRequest::Other("abort_upload")).await?;
         let id = self.session_id(session)?;
         let mut state = self.state.lock().await;
         if let Some(pending) = state.uploads.get(&id) {

@@ -4,6 +4,23 @@ use super::Database;
 use crate::DbError;
 
 impl Database {
+    /// Count executed work on every connection without including counter reads.
+    /// Install while the database is quiescent, before starting the measured pass.
+    pub async fn test_track_work(
+        &self,
+        counter: crate::test_utils::WorkCounter,
+    ) -> Result<(), DbError> {
+        self.call(move |inner| {
+            inner.with_writer(|writer| {
+                *writer.work.borrow_mut() = Some(counter.clone());
+                Ok::<_, DbError>(())
+            })?;
+            inner.access.readers.test_track_work(&counter);
+            Ok(())
+        })
+        .await
+    }
+
     /// Observe transaction completion and file cleanup on the writer thread.
     /// Install after setup; the callback may terminate a subprocess to simulate
     /// a crash without Rust destructors or SQLite connection shutdown.

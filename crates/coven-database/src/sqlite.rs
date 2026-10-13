@@ -30,6 +30,8 @@ use crate::{
 };
 
 pub(crate) struct DatabaseConnection {
+    #[cfg(any(test, feature = "test-utils"))]
+    pub(crate) work: std::cell::RefCell<Option<crate::test_utils::WorkCounter>>,
     connection: Connection,
     authorization: SqlAuthorization,
     observation: Option<WriterObservation>,
@@ -50,6 +52,13 @@ struct WriterObservation {
 }
 
 impl DatabaseConnection {
+    #[cfg(any(test, feature = "test-utils"))]
+    pub(crate) fn record_work(&self, update: impl FnOnce(&mut crate::test_utils::WorkCounts)) {
+        if let Some(counter) = self.work.borrow().as_ref() {
+            counter.record(update);
+        }
+    }
+
     pub(crate) fn open(
         path: &Path,
         read_only: bool,
@@ -117,6 +126,8 @@ impl DatabaseConnection {
         )?;
         connection.authorizer(Some(authorization.callback()))?;
         let db = Self {
+            #[cfg(any(test, feature = "test-utils"))]
+            work: std::cell::RefCell::new(None),
             connection,
             authorization,
             observation: None,
@@ -823,6 +834,8 @@ impl DatabaseConnection {
                 }
             })?;
             self.batch("COMMIT")?;
+            #[cfg(any(test, feature = "test-utils"))]
+            self.record_work(|work| work.commits += 1);
             #[cfg(any(test, feature = "test-utils"))]
             self.checkpoint(crate::test_utils::WriteCheckpoint::Committed);
             if let Some(observation) = &self.observation {

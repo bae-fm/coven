@@ -2,6 +2,10 @@
 
 use crate::{Migration, RowIdentity, SyncedTable};
 
+#[path = "work_counts.rs"]
+mod work_counts;
+pub use work_counts::{WorkCounter, WorkCounts};
+
 pub(crate) type WriteCheckpointObserver = Box<dyn Fn(WriteCheckpoint) + Send>;
 
 /// Boundaries after a local write's durable commit, for process-crash tests.

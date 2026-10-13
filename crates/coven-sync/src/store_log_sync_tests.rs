@@ -100,6 +100,13 @@ pub(crate) async fn device(
 }
 
 impl StoreLogSync {
+    pub(crate) fn test_track_received_entries(
+        &mut self,
+        counter: Arc<std::sync::atomic::AtomicUsize>,
+    ) {
+        self.received_entry_decodes = Some(counter);
+    }
+
     pub(crate) async fn test_rotate(&mut self, audience: Audience, key: KeyId) -> EntryId {
         let key_hash = self.test_key(audience.clone(), key);
         self.make_and_upload_entry(StoreChange::RotateKey {

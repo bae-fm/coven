@@ -52,6 +52,8 @@ pub(crate) fn read(database: &DatabaseConnection) -> Result<Option<StoreLogUploa
             |row| {
                 let record = row.get::<_, Vec<u8>>(0)?;
                 let format = decoded(coven_format::FormatVersion::decode(&record))?;
+                #[cfg(any(test, feature = "test-utils"))]
+                database.record_work(|work| work.entry_decodes += 1);
                 let Object::StoreLog(entry) = decoded(Object::decode(&record))? else {
                     return Err(rusqlite::Error::InvalidQuery);
                 };

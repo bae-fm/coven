@@ -424,3 +424,7 @@ impl SyncRun {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "sync_loop_tests.rs"]
+mod tests;

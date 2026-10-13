@@ -25,6 +25,8 @@ use std::sync::Arc;
 /// Calls require exclusive access so one install never authors or applies two
 /// entries concurrently through this owner. The database also checks stale replay.
 pub struct StoreLogSync {
+    #[cfg(test)]
+    received_entry_decodes: Option<Arc<std::sync::atomic::AtomicUsize>>,
     reads: crate::pass_reads::PassReads,
     storage: Option<Arc<dyn Storage>>,
     database: Database,
@@ -47,6 +49,8 @@ impl StoreLogSync {
         directory: coven_foundation::files::StoreDir,
     ) -> Self {
         Self {
+            #[cfg(test)]
+            received_entry_decodes: None,
             reads: crate::pass_reads::PassReads::default(),
             storage: Some(storage),
             database,
@@ -68,6 +72,8 @@ impl StoreLogSync {
         directory: coven_foundation::files::StoreDir,
     ) -> Self {
         Self {
+            #[cfg(test)]
+            received_entry_decodes: None,
             reads: crate::pass_reads::PassReads::default(),
             storage: None,
             database,
@@ -293,6 +299,10 @@ impl StoreLogSync {
                         return Err(SyncError::KeyUnavailable(*key));
                     }
                     continue;
+                }
+                #[cfg(test)]
+                if let Some(counter) = &self.received_entry_decodes {
+                    counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 }
                 let entry = match object::open(
                     &envelope,
