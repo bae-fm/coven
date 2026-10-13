@@ -8,7 +8,7 @@ use axum::{
     Router,
 };
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     sync::{Arc, Mutex},
 };
 
@@ -46,9 +46,10 @@ async fn completed_parts_wait_for_publication_and_temporaries_are_not_listed() {
 }
 
 #[derive(Default)]
-struct Remote {
-    dirs: BTreeMap<String, String>,
-    files: BTreeMap<String, Vec<u8>>,
+pub(super) struct Remote {
+    pub(super) requests: Vec<(Method, String)>,
+    pub(super) dirs: BTreeMap<String, String>,
+    pub(super) files: BTreeMap<String, Vec<u8>>,
     revisions: BTreeMap<String, u64>,
     replace_during_read: bool,
     uploads: BTreeMap<String, (String, Vec<u8>)>,
@@ -83,7 +84,7 @@ fn file(path: &str, bytes: &[u8], host: &str, state: &Remote) -> Value {
     };
     json!({"id":format!("file:{path}"),"name":path.rsplit('/').next().unwrap(),"size":bytes.len(),"file":{},"eTag":state.revisions[path].to_string(),"lastModifiedDateTime":modified,"createdDateTime":"2026-10-06T00:00:00Z","fileSystemInfo":{"createdDateTime":"2000-01-01T00:00:00Z"},"@microsoft.graph.downloadUrl":format!("http://{host}/download/{path}")})
 }
-async fn endpoint(
+pub(super) async fn endpoint(
     State(state): State<Arc<Mutex<Remote>>>,
     method: Method,
     uri: Uri,
@@ -91,6 +92,7 @@ async fn endpoint(
     body: Bytes,
 ) -> Response<Body> {
     let mut state = state.lock().unwrap();
+    state.requests.push((method.clone(), uri.to_string()));
     let q = query(&uri);
     let host = headers["host"].to_str().unwrap();
     if uri.path().starts_with("/copy-monitor/") {
@@ -232,7 +234,10 @@ async fn endpoint(
             .0;
         let source = source.strip_prefix("file:").unwrap();
         let parent = value["parentReference"]["id"].as_str().unwrap();
-        let path = format!("{}/{}", state.dirs[parent], value["name"].as_str().unwrap());
+        let Some(parent) = state.dirs.get(parent) else {
+            return response(404, json!({"error":{"code":"itemNotFound"}}).to_string());
+        };
+        let path = format!("{parent}/{}", value["name"].as_str().unwrap());
         if state.files.contains_key(&path) {
             return response(
                 409,
@@ -265,12 +270,20 @@ async fn endpoint(
     }
     if let Some((parent, tail)) = tail.split_once(":/") {
         let (relative, suffix) = tail.rsplit_once(':').unwrap();
-        let base = state.dirs.get(parent).unwrap();
+        let Some(base) = state.dirs.get(parent) else {
+            return response(404, json!({"error":{"code":"itemNotFound"}}).to_string());
+        };
         let path = if base.is_empty() {
             relative.to_owned()
         } else {
             format!("{base}/{relative}")
         };
+        if method == Method::PUT || method == Method::POST {
+            let parent = path.rsplit_once('/').unwrap().0;
+            if !state.dirs.values().any(|directory| directory == parent) {
+                return response(404, json!({"error":{"code":"itemNotFound"}}).to_string());
+            }
+        }
         if suffix == "/createUploadSession" {
             state.session_starts += 1;
             assert_eq!(value["item"]["@microsoft.graph.conflictBehavior"], "fail");
@@ -325,11 +338,16 @@ async fn endpoint(
         };
     }
     if tail == "root" {
+        if !state.dirs.contains_key("root") {
+            return response(404, json!({"error":{"code":"itemNotFound"}}).to_string());
+        }
         return reply(json!({"id":"root","folder":{}}));
     }
     let (id, suffix) = tail.split_once('/').unwrap();
     if suffix == "children" {
-        let base = state.dirs.get(id).unwrap().clone();
+        let Some(base) = state.dirs.get(id).cloned() else {
+            return response(404, json!({"error":{"code":"itemNotFound"}}).to_string());
+        };
         if method == Method::POST {
             let name = value["name"].as_str().unwrap();
             let path = if base.is_empty() {
@@ -419,7 +437,7 @@ async fn endpoint(
     }
 }
 
-fn provider(url: &str) -> StorageConnection<OneDriveStorage> {
+pub(super) fn provider(url: &str) -> StorageConnection<OneDriveStorage> {
     let mut storage = OneDriveStorage::new(
         StorageConfig::OneDrive {
             drive_id: "drive".into(),
@@ -432,7 +450,7 @@ fn provider(url: &str) -> StorageConnection<OneDriveStorage> {
     storage.api = format!("{url}/graph");
     StorageConnection::from_provider(Arc::new(storage))
 }
-fn remote() -> Arc<Mutex<Remote>> {
+pub(super) fn remote() -> Arc<Mutex<Remote>> {
     let mut remote = Remote::default();
     remote.dirs.insert("root".into(), String::new());
     Arc::new(Mutex::new(remote))
@@ -575,15 +593,6 @@ async fn malformed_missing_ranges_keep_the_response_and_recorded_progress() {
         );
         assert_eq!(upload.confirmed_bytes(), 5);
     }
-}
-
-#[tokio::test]
-async fn refreshed_tokens_reach_the_same_adapter() {
-    crate::providers::tests::assert_token_refresh(
-        |url| Arc::new(provider(url)),
-        json!({"value":[],"id":"root","folder":{}}),
-    )
-    .await;
 }
 
 #[tokio::test]

@@ -86,7 +86,7 @@ impl OneDriveStorage {
             Ok::<_, StorageError>(SecretText::new(url.into()))
         }
         .await;
-        let url = match started {
+        let url = match self.checked_folder_operation(started).await {
             Ok(url) => url,
             Err(error) => {
                 // No parts have been sent and no recording can be returned.
@@ -330,7 +330,8 @@ impl OneDriveStorage {
         error: StorageError,
     ) -> Result<(), StorageError> {
         set_upload(session, OneDriveUpload::Refused)?;
-        with_cleanup(Err(error), self.delete_temporary(session).await)
+        let result = self.checked_folder_operation::<()>(Err(error)).await;
+        with_cleanup(result, self.delete_temporary(session).await)
     }
 
     async fn await_copy(&self, session: &mut UploadSession) -> Result<(), StorageError> {

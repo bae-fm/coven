@@ -813,3 +813,48 @@ fn onedrive_live_conditional_copy() {
         }
     });
 }
+
+#[test]
+#[ignore = "requires COVEN_LIVE_ONEDRIVE_ENV; creates and deletes live objects"]
+fn onedrive_live_cached_folders_and_scoped_listing() {
+    run(async |live| {
+        let first = live.path(1);
+        let second = live.path(2);
+        live.storage.create(&first, b"first").await.unwrap();
+        live.storage.create(&second, b"second").await.unwrap();
+        let positions = ObjectPath::positions(live.store, DeviceId(31));
+        live.storage
+            .replace(&positions, b"unrelated")
+            .await
+            .unwrap();
+        let prefix = ObjectPrefix::device_log(live.store, DeviceId(31));
+        let listed = live.storage.list(&prefix).await.unwrap();
+        assert!(listed.iter().all(|object| prefix.contains(&object.path)));
+        assert_eq!(live.storage.read(&second).await.unwrap(), b"second");
+        let native = live.storage.provider.metadata(&first).await.unwrap();
+        let parent = http::string(&native["parentReference"], "id").unwrap();
+        let provider = &live.storage.provider;
+        http::checked(
+            PROVIDER,
+            provider
+                .send(
+                    Method::DELETE,
+                    &provider.item(parent, &[]).unwrap(),
+                    Body::Empty,
+                )
+                .await
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            live.storage.list(&prefix).await.unwrap_err().failure(),
+            StorageFailure::NotFound
+        );
+        assert!(live.storage.list(&prefix).await.unwrap().is_empty());
+        live.storage.create(&first, b"recreated").await.unwrap();
+        assert_eq!(live.storage.read(&first).await.unwrap(), b"recreated");
+        assert_eq!(live.storage.read(&positions).await.unwrap(), b"unrelated");
+        println!("onedrive_live folders: scoped listing; warm create/read; disappeared folder refused; retry resolved and recreated parent; unrelated positions retained");
+    });
+}

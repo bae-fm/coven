@@ -10,9 +10,11 @@ use coven_crypto::SecretText;
 use coven_foundation::id_source::IdSourceRef;
 use reqwest::Method;
 use serde_json::{json, Value};
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 const PROVIDER: CloudProvider = CloudProvider::OneDrive;
 
+#[path = "onedrive_folder.rs"]
+mod folder;
 #[path = "onedrive_upload.rs"]
 mod upload;
 
@@ -25,6 +27,7 @@ pub(crate) struct OneDriveStorage {
     ids: IdSourceRef,
     api: String,
     single_request_limit: u64,
+    folder_ids: tokio::sync::Mutex<BTreeMap<String, String>>,
 }
 impl OneDriveStorage {
     /// Construct at a composition root with the device's own provider sign-in.
@@ -53,6 +56,7 @@ impl OneDriveStorage {
             ids,
             api: "https://graph.microsoft.com/v1.0".into(),
             single_request_limit: 250_000_000,
+            folder_ids: tokio::sync::Mutex::new(BTreeMap::new()),
         })
     }
     fn item(&self, id: &str, suffix: &[&str]) -> Result<String, StorageError> {
@@ -111,42 +115,6 @@ impl OneDriveStorage {
     async fn parents(&self, path: &ObjectPath) -> Result<String, StorageError> {
         let parts = path.components();
         self.directory(&parts[..parts.len() - 1]).await
-    }
-    async fn directory(&self, parts: &[&str]) -> Result<String, StorageError> {
-        self.check_folder().await?;
-        let mut id = self.folder.clone();
-        for name in parts {
-            let value = http::json(
-                PROVIDER,
-                self.send(
-                    Method::POST,
-                    &self.item(&id, &["children"])?,
-                    Body::Json(
-                        json!({"name":name,"folder":{},"@microsoft.graph.conflictBehavior":"fail"}),
-                    ),
-                )
-                .await?,
-            )
-            .await;
-            let value = match value {
-                Ok(value) => value,
-                Err(error) if error.failure() == StorageFailure::AlreadyExists => {
-                    let base = self.item(&id, &[])?;
-                    http::json(
-                        PROVIDER,
-                        self.send(Method::GET, &format!("{base}:/{name}:"), Body::Empty)
-                            .await?,
-                    )
-                    .await?
-                }
-                Err(error) => return Err(error),
-            };
-            if !value["folder"].is_object() {
-                return Err(StorageFailure::AlreadyExists.into());
-            }
-            id = http::string(&value, "id")?.into();
-        }
-        Ok(id)
     }
     async fn get(
         &self,
@@ -267,7 +235,7 @@ impl ProviderOps for OneDriveStorage {
             "{}?@microsoft.graph.conflictBehavior=fail",
             self.by_path(path, "/content")?
         );
-        http::checked(
+        let result = http::checked(
             PROVIDER,
             self.session
                 .send(
@@ -283,13 +251,14 @@ impl ProviderOps for OneDriveStorage {
                 )
                 .await?,
         )
-        .await?;
+        .await;
+        self.checked_folder_operation(result).await?;
         Ok(())
     }
 
     async fn replace(&self, path: &ObjectPath, bytes: &[u8]) -> Result<(), StorageError> {
         self.parents(path).await?;
-        http::checked(
+        let result = http::checked(
             PROVIDER,
             self.send(
                 Method::PUT,
@@ -298,7 +267,8 @@ impl ProviderOps for OneDriveStorage {
             )
             .await?,
         )
-        .await?;
+        .await;
+        self.checked_folder_operation(result).await?;
         Ok(())
     }
     async fn status(&self, path: &ObjectPath) -> Result<Option<StoredObject>, StorageError> {
@@ -316,81 +286,7 @@ impl ProviderOps for OneDriveStorage {
         self.get(path, range).await
     }
     async fn list(&self, listing: &mut ObjectListing) -> Result<(), StorageError> {
-        let prefix = listing.prefix().clone();
-        self.check_folder().await?;
-        let store = prefix.store().to_string();
-        let url = format!("{}:/{store}:", self.item(&self.folder, &[])?);
-        let folder =
-            match http::json(PROVIDER, self.send(Method::GET, &url, Body::Empty).await?).await {
-                Ok(folder) => folder,
-                Err(error) if error.failure() == StorageFailure::NotFound => return Ok(()),
-                Err(error) => return Err(error),
-            };
-        if !folder["folder"].is_object() || folder["file"].is_object() {
-            return Err(StorageFailure::InvalidPath.into());
-        }
-        let mut folders = vec![(http::string(&folder, "id")?.to_owned(), vec![store])];
-        let mut visited = BTreeSet::new();
-        while let Some((folder, names)) = folders.pop() {
-            if !visited.insert(folder.clone()) {
-                return Err(StorageFailure::Protocol.with_source("OneDrive folder cycle"));
-            }
-            let mut url = self.item(&folder, &["children"])?;
-            let mut pages = Pagination::new();
-            loop {
-                pages.check(&url)?;
-                http::same_origin(&self.api, &url)?;
-                let value =
-                    http::json(PROVIDER, self.send(Method::GET, &url, Body::Empty).await?).await?;
-                for item in http::array(&value, "value")? {
-                    let name = http::string(item, "name")?;
-                    if ["folder", "file"].iter().any(|facet| {
-                        item.get(*facet)
-                            .is_some_and(|value| !value.is_null() && !value.is_object())
-                    }) || (item["folder"].is_object() && item["file"].is_object())
-                    {
-                        return Err(
-                            StorageFailure::Protocol.with_source("invalid OneDrive item kind")
-                        );
-                    }
-                    if names.len() == 1 && name == upload::TEMPORARIES {
-                        if !item["folder"].is_object() {
-                            return Err(StorageFailure::Protocol
-                                .with_source("OneDrive upload namespace is not a folder"));
-                        }
-                        tracing::debug!("OneDrive upload temporaries retained for session cleanup");
-                        continue;
-                    }
-                    if item["folder"].is_object() {
-                        let mut parts = names.clone();
-                        parts.push(name.to_owned());
-                        crate::path::validate_directory(&parts.join("/"))?;
-                        folders.push((http::string(item, "id")?.into(), parts));
-                    } else if item["file"].is_object() {
-                        let path = ObjectPath::from_components(&names, name)?;
-                        if prefix.contains(&path) {
-                            let object = object_metadata::onedrive(&path, item)?;
-                            listing.insert(object)?;
-                        }
-                    } else {
-                        return Err(StorageFailure::InvalidPath.into());
-                    }
-                }
-                match value.get("@odata.nextLink") {
-                    None => break,
-                    Some(next) => {
-                        url = next
-                            .as_str()
-                            .ok_or(
-                                StorageFailure::Protocol
-                                    .with_source("invalid OneDrive listing link"),
-                            )?
-                            .into()
-                    }
-                }
-            }
-        }
-        Ok(())
+        self.list_folders(listing).await
     }
     async fn delete(&self, path: &ObjectPath) -> Result<(), StorageError> {
         let response = self
