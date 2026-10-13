@@ -50,6 +50,7 @@ macro_rules! coven_tables {
                 device BLOB NOT NULL CHECK(length(device)=8),
                 number BLOB NOT NULL CHECK(length(number)=8 AND number>x'0000000000000000'),
                 record BLOB NOT NULL,
+                timestamp BLOB NOT NULL CHECK(length(timestamp)=16),
                 author_view BLOB NOT NULL,
                 stored_at BLOB NOT NULL CHECK(length(stored_at)=13),
                 outcome TEXT NOT NULL CHECK(outcome IN ('kept','late','beaten','target-member','target-device','target-circle','admin','authority')),
@@ -66,6 +67,7 @@ macro_rules! coven_tables {
                 CHECK((outcome='beaten' AND beaten_device IS NOT NULL AND beaten_number IS NOT NULL)
                    OR (outcome!='beaten' AND beaten_device IS NULL AND beaten_number IS NULL))
             ) STRICT, WITHOUT ROWID;
+            CREATE INDEX _coven_store_log_timestamp ON _coven_store_log(timestamp);
         ");
         $visit!(_coven_finality, "
             CREATE TABLE _coven_finality (
@@ -79,6 +81,7 @@ macro_rules! coven_tables {
                 device BLOB NOT NULL CHECK(length(device)=8),
                 number BLOB NOT NULL CHECK(length(number)=8 AND number>x'0000000000000000'),
                 record BLOB NOT NULL,
+                timestamp BLOB NOT NULL CHECK(length(timestamp)=16),
                 sealing_key BLOB NOT NULL CHECK(length(sealing_key)=16),
                 PRIMARY KEY(device,number)
             ) STRICT, WITHOUT ROWID;

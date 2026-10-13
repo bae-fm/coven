@@ -663,6 +663,14 @@ async fn damaged_entries_block_only_their_device_and_retain_each_cause() {
             c.db.pending::<crate::PendingRecord>().await.unwrap(),
             vec![crate::PendingRecord::log_refusal(record, DeviceId(3))]
         );
+        let received = c.log().await;
+        assert!(received.replay.entries.contains_key(&independent));
+        assert!(received.replay.entries.contains_key(&EntryId {
+            number: broken.number - 1,
+            ..broken
+        }));
+        assert!(!received.replay.entries.contains_key(&broken));
+        assert!(!received.replay.entries.contains_key(&later));
         let before = storage.reads().await;
         c.sync().await;
         let entry_reads = |reads: Vec<(ObjectPath, u64, u64)>| {

@@ -53,6 +53,8 @@ pub struct Database {
 }
 
 struct DatabaseInner {
+    // Shared by the sync owner and its workers; only a committed replay replaces it.
+    store_log: Mutex<Option<crate::StoreLog>>,
     observer: CommitObserver,
     access: DatabaseAccess<StoreLock>,
     migrations: Vec<MigrationOutcome>,
@@ -130,16 +132,12 @@ impl<L> DatabaseAccess<L> {
     }
 }
 
-// SQLite rolls back before this boundary catches an unwind. Releasing the
-// connection outside unwinding preserves the mutex for the next caller.
-fn with_connection<R>(
-    connection: &Mutex<DatabaseConnection>,
-    run: impl FnOnce(&DatabaseConnection) -> R,
-) -> R {
-    let guard = connection
-        .lock()
-        .expect("database connection lock poisoned");
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(&guard)));
+// SQLite rolls back before this catches an unwind; decoded state changes only
+// after commit. Release each lock before propagating a callback panic so the
+// next caller can still use the committed state.
+fn with_locked<T, R>(value: &Mutex<T>, run: impl FnOnce(&mut T) -> R) -> R {
+    let mut guard = value.lock().expect("database state lock poisoned");
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(&mut guard)));
     drop(guard);
     match result {
         Ok(result) => result,
@@ -148,6 +146,20 @@ fn with_connection<R>(
 }
 
 impl DatabaseInner {
+    fn with_store_log<R, E: From<DbError>>(
+        &self,
+        run: impl FnOnce(&mut crate::StoreLog) -> Result<R, E>,
+    ) -> Result<R, E> {
+        with_locked(&self.store_log, |saved| {
+            if saved.is_none() {
+                *saved = Some(self.access.readers.acquire_reader().with_reader(|reader| {
+                    reader.read_transaction(|| crate::store_log_tables::read(reader))
+                })?);
+            }
+            run(saved.as_mut().expect("loaded store log"))
+        })
+    }
+
     fn call<R, E: From<DbError>>(&self, run: impl FnOnce(&Self) -> Result<R, E>) -> Result<R, E> {
         if let Some(error) = self.observer.error() {
             return Err(error.into());
@@ -175,7 +187,7 @@ impl DatabaseInner {
         &self,
         run: impl FnOnce(&DatabaseConnection) -> Result<R, E>,
     ) -> Result<R, E> {
-        with_connection(&self.access.writer, |writer| {
+        with_locked(&self.access.writer, |writer| {
             #[cfg(any(test, feature = "test-utils"))]
             writer.record_work(|work| work.writer_holds += 1);
             if let Some(error) = self.observer.error() {

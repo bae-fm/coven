@@ -6,26 +6,54 @@ use crate::{
 };
 
 impl Database {
-    /// Apply an entry, update local drop reports and record work caused by its
-    /// kept effects atomically. Sync supplies the operation data and pending type.
-    pub async fn apply_store_log_operations<P: crate::PendingValue>(
+    /// Install a ready batch and its replay, data effects, drop reports and operation
+    /// progress together. Reject a result prepared against another committed log.
+    /// The retained decoded value changes on the database thread after commit,
+    /// including when the awaiting caller is cancelled or subsequent cleanup fails.
+    pub async fn apply_store_log_batch<P: crate::PendingValue>(
         &self,
-        entry: crate::ReplayEntry,
+        checked: crate::StoreLog,
+        entries: Vec<crate::ReplayEntry>,
         replay: crate::StoreLogReplay,
         operations: Vec<crate::NewOperation>,
         updates: Vec<crate::OperationUpdate>,
     ) -> Result<(), DbError> {
         self.call(move |inner| {
-            inner.with_files(Vec::new(), |writer, files| {
-                crate::store_log::apply::<P>(
-                    writer,
-                    &inner.access.write_schema,
-                    entry,
-                    replay,
-                    files,
-                    &operations,
-                    &updates,
-                )
+            inner.with_store_log(|current| {
+                if *current != checked {
+                    return Err(DbError::StoreLogEntriesChanged);
+                }
+                let mut next = checked;
+                for entry in &entries {
+                    match next
+                        .entries
+                        .iter()
+                        .find(|old| old.entry.position == entry.entry.position)
+                    {
+                        Some(old) if old != entry => {
+                            return Err(DbError::StoreLogEntryChanged(entry.entry.position))
+                        }
+                        Some(_) => (),
+                        None => next.entries.push(entry.clone()),
+                    }
+                }
+                next.entries.sort_by_key(|entry| entry.entry.timestamp);
+                next.replay = replay;
+                inner.with_files(Vec::new(), |writer, files| {
+                    crate::store_log::apply::<P>(
+                        writer,
+                        &inner.access.write_schema,
+                        &entries,
+                        &next.replay,
+                        files,
+                        &operations,
+                        &updates,
+                    )?;
+                    *current = next;
+                    #[cfg(any(test, feature = "test-utils"))]
+                    writer.record_work(|work| work.store_log_commits += 1);
+                    Ok(())
+                })
             })
         })
         .await
@@ -51,18 +79,21 @@ impl Database {
         E: From<DbError> + Send + 'static,
     {
         self.call(move |inner| {
-            inner.with_writer(|writer| {
-                crate::store_log_upload::prepare(
-                    writer,
-                    inner.access.directory.id(),
-                    inner.access.device,
-                    inner.clock.now(),
-                    author,
-                    change,
-                    move |log, entry, copies| {
-                        seal(log, entry, copies).map(|(sealed, update)| (sealed, Some(update)))
-                    },
-                )
+            inner.with_store_log(|log| {
+                inner.with_writer(|writer| {
+                    crate::store_log_upload::prepare(
+                        writer,
+                        log,
+                        inner.access.directory.id(),
+                        inner.access.device,
+                        inner.clock.now(),
+                        author,
+                        change,
+                        move |log, entry, copies| {
+                            seal(log, entry, copies).map(|(sealed, update)| (sealed, Some(update)))
+                        },
+                    )
+                })
             })
         })
         .await

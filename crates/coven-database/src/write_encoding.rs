@@ -40,28 +40,19 @@ pub(crate) fn decode_failure(
 pub(crate) fn latest_timestamp(
     database: &crate::sqlite::DatabaseConnection,
 ) -> Result<Option<Timestamp>, DbError> {
-    let mut latest = database.query_row("SELECT max(timestamp) FROM _coven_writes", [], |row| {
-        row.get::<_, Option<Vec<u8>>>(0)?
-            .map(|bytes| decoded(coven_format::merge_fields::decode_timestamp(&bytes)))
-            .transpose()
-    })?;
-    for timestamp in database.query(
-        "SELECT record FROM _coven_store_log UNION ALL SELECT record FROM _coven_store_log_uploads",
+    // Applied writes and entries supply indexed maxima; the queue holds at most one entry.
+    database.query_row(
+        "SELECT max(timestamp) FROM (
+            SELECT max(timestamp) AS timestamp FROM _coven_writes UNION ALL
+            SELECT max(timestamp) FROM _coven_store_log UNION ALL
+            SELECT max(timestamp) FROM _coven_store_log_uploads)",
         [],
         |row| {
-            #[cfg(any(test, feature = "test-utils"))]
-            database.record_work(|work| work.entry_decodes += 1);
-            let coven_format::Object::StoreLog(entry) =
-                decoded(coven_format::Object::decode(&row.get::<_, Vec<u8>>(0)?))?
-            else {
-                return Err(rusqlite::Error::InvalidQuery);
-            };
-            Ok(entry.timestamp)
+            row.get::<_, Option<Vec<u8>>>(0)?
+                .map(|bytes| decoded(coven_format::merge_fields::decode_timestamp(&bytes)))
+                .transpose()
         },
-    )? {
-        latest = Some(latest.map_or(timestamp, |previous| previous.max(timestamp)));
-    }
-    Ok(latest)
+    )
 }
 
 pub(crate) fn timestamp(

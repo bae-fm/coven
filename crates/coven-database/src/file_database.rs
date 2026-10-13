@@ -70,7 +70,7 @@ impl FileDatabase {
             FileDatabaseAccess::Reader(database) => {
                 database
                     .call(move |inner| {
-                        super::with_connection(&inner.writer, |writer| {
+                        super::with_locked(&inner.writer, |writer| {
                             run(writer, &inner.write_schema, &inner.directory, inner.device)
                         })
                     })

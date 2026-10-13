@@ -582,7 +582,7 @@ impl StoreLogSync {
     pub(super) async fn removal_work(
         &self,
         previous: &StoreLog,
-        incoming: &ReplayEntry,
+        incoming: &[ReplayEntry],
         replay: &StoreLogReplay,
         member: &MemberKeys,
     ) -> Result<Vec<NewOperation>, SyncError> {
@@ -591,7 +591,7 @@ impl StoreLogSync {
                 .entries
                 .iter()
                 .cloned()
-                .chain(std::iter::once(incoming.clone()))
+                .chain(incoming.iter().cloned())
                 .collect(),
             replay: replay.clone(),
             horizon: previous.horizon,
@@ -629,9 +629,11 @@ impl StoreLogSync {
                 targets.insert(member.clone());
             }
         }
-        if let Some((target, _)) = recorded_access(&incoming.entry) {
-            if replay.state.members.get(target).is_some_and(|m| m.removed) {
-                targets.insert(target.clone());
+        for incoming in incoming {
+            if let Some((target, _)) = recorded_access(&incoming.entry) {
+                if replay.state.members.get(target).is_some_and(|m| m.removed) {
+                    targets.insert(target.clone());
+                }
             }
         }
         let mut operations = Vec::new();

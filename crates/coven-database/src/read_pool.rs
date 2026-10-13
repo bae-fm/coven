@@ -93,7 +93,7 @@ impl ReaderLease<'_> {
     }
 
     pub(super) fn with_reader<R>(&self, read: impl FnOnce(&DatabaseConnection) -> R) -> R {
-        super::with_connection(&self.database.readers[self.index], read)
+        super::with_locked(&self.database.readers[self.index], |reader| read(reader))
     }
 
     pub(super) fn schema_version(&self) -> Result<u32, DbError> {

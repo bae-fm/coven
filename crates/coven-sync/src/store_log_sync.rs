@@ -8,7 +8,6 @@ use coven_crypto::{custody::KeySession, MemberKeys, StoreKeyring};
 use coven_database::{Database, LocalStoreLog, StoreLog};
 use coven_format::{
     sealed_key::SealedKey,
-    sealed_single::SingleChunkObject,
     store_log::{StoreChange, StoreLogEntry},
     value::EntryId,
 };
@@ -17,7 +16,7 @@ use coven_foundation::{
     id_source::{IdSourceRef, KeyId},
 };
 use coven_merge::Audience;
-use coven_storage::{ObjectPath, ObjectPrefix, Storage, StorageFailure};
+use coven_storage::{ObjectPath, Storage, StorageFailure};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
@@ -197,257 +196,6 @@ impl StoreLogSync {
         self.scan_store_log(false).await
     }
 
-    async fn scan_store_log_once(
-        &self,
-        require_complete: bool,
-    ) -> Result<(Vec<DamagedObject>, bool), SyncError> {
-        let through = self
-            .finality
-            .lock()
-            .expect("finality lock poisoned")
-            .through();
-        let mut local = self.database.local_store_log().await?;
-        let member = self
-            .member_keys
-            .read()?
-            .ok_or(coven_storage::StorageFailure::MemberKeysMissing)?;
-        let mut ring = self.store_keys.read()?;
-        let mut damages = Vec::new();
-        self.check_stopped(&local, &member)?;
-        self.update_keys(&local.log, &member, &mut ring, &mut damages)
-            .await?;
-        self.publish(&mut local, &member, &mut ring, &mut damages)
-            .await?;
-        let mut paths = self
-            .storage
-            .as_deref()
-            .ok_or(SyncError::NoStorage)?
-            .list(&ObjectPrefix::store_logs(self.directory.id()))
-            .await?;
-        // Listing discovers writers. Exact status reads establish each writer's
-        // terminal miss; a listed suffix beyond a gap cannot certify finality.
-        let writers: BTreeSet<_> = local
-            .log
-            .entries
-            .iter()
-            .map(|entry| entry.entry.position.device)
-            .chain(local.log.replay.state.devices.keys().copied())
-            .chain(
-                paths
-                    .iter()
-                    .filter_map(|object| object.path.store_log_position().map(|p| p.0)),
-            )
-            .collect();
-        for device in writers {
-            let mut number = local
-                .log
-                .entries
-                .iter()
-                .filter(|entry| entry.entry.position.device == device)
-                .map(|entry| entry.entry.position.number)
-                .max()
-                .unwrap_or(0);
-            loop {
-                number = number.checked_add(1).ok_or_else(|| {
-                    StorageFailure::Protocol.with_source("store-log sequence exhausted")
-                })?;
-                let path = object::path(local.store, EntryId { device, number });
-                let Some(stored) = self
-                    .storage
-                    .as_deref()
-                    .ok_or(SyncError::NoStorage)?
-                    .status(&path)
-                    .await?
-                else {
-                    break;
-                };
-                crate::store_log_landing::add_observation(&mut paths, stored)?;
-            }
-        }
-        let publications = crate::store_log_landing::publication_times(&local.log, &paths)?;
-        for object in &paths {
-            self.finality
-                .lock()
-                .expect("finality lock poisoned")
-                .observe(object);
-        }
-        let mut entries = BTreeMap::new();
-        for stored in paths {
-            let (device, number) = stored.path.store_log_position().ok_or(
-                coven_storage::StorageFailure::Protocol
-                    .with_source("store-log listing returned another layout"),
-            )?;
-            entries.insert(
-                EntryId {
-                    device,
-                    number: number.get(),
-                },
-                stored,
-            );
-        }
-        let stuck = crate::pending_logs::local_refusals(&self.database).await?;
-        if require_complete {
-            if let Some(refusal) = stuck
-                .iter()
-                .find(|refusal| matches!(refusal.object, coven_database::LogObject::Entry(_)))
-            {
-                return Err(crate::pending_logs::required(&self.database, *refusal).await?);
-            }
-        }
-        entries.retain(|id, _| {
-            !stuck
-                .iter()
-                .any(|record| record.blocks(coven_database::LogObject::Entry(*id)))
-        });
-        let mut pending_devices = BTreeSet::new();
-        let mut cache = BTreeMap::new();
-        loop {
-            let mut advanced = false;
-            for (id, stored) in &entries {
-                let path = &stored.path;
-                if pending_devices.contains(&id.device) || local.log.replay.entries.contains_key(id)
-                {
-                    continue;
-                }
-                if id.number > 1
-                    && !local.log.replay.entries.contains_key(&EntryId {
-                        number: id.number - 1,
-                        ..*id
-                    })
-                {
-                    continue;
-                }
-                if !cache.contains_key(id) {
-                    let Some(bytes) = self.read_entry(stored, require_complete).await? else {
-                        pending_devices.insert(id.device);
-                        continue;
-                    };
-                    cache.insert(*id, bytes);
-                }
-                let envelope = match SingleChunkObject::decode(&cache[id]) {
-                    Ok(envelope) => envelope,
-                    Err(error) => {
-                        self.stuck_entry(*id, path, Refusal::from(error)).await?;
-                        pending_devices.insert(id.device);
-                        continue;
-                    }
-                };
-                let SingleChunkObject::StoreLog { key, .. } = &envelope else {
-                    self.stuck_entry(
-                        *id,
-                        path,
-                        crate::write_object::invalid("expected a store-log envelope"),
-                    )
-                    .await?;
-                    pending_devices.insert(id.device);
-                    continue;
-                };
-                if !self
-                    .acquire(&Audience::Store, *key, &member, &mut ring, &mut damages)
-                    .await?
-                {
-                    if require_complete {
-                        if let Some(damage) = damages.into_iter().next() {
-                            return Err(damage.into());
-                        }
-                        return Err(SyncError::KeyUnavailable(*key));
-                    }
-                    continue;
-                }
-                #[cfg(test)]
-                if let Some(counter) = &self.received_entry_decodes {
-                    counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                }
-                let entry = match object::open(
-                    &envelope,
-                    path,
-                    ring.as_ref().expect("acquired keyring").store_key(*key)?,
-                ) {
-                    Ok(entry) => entry,
-                    Err(failure) => {
-                        self.stuck_entry(*id, path, failure).await?;
-                        pending_devices.insert(id.device);
-                        continue;
-                    }
-                };
-                match object::ready(&local.log, &entry, local.store) {
-                    Ok(true) => {
-                        self.apply(
-                            &mut local,
-                            entry,
-                            &publications,
-                            &member,
-                            &mut ring,
-                            &mut damages,
-                        )
-                        .await?
-                    }
-                    Ok(false) => continue,
-                    Err(failure) => {
-                        self.stuck_entry(*id, path, failure).await?;
-                        pending_devices.insert(id.device);
-                        continue;
-                    }
-                }
-                advanced = true;
-            }
-            if !advanced {
-                break;
-            }
-        }
-        if require_complete {
-            if let Some(refusal) = crate::pending_logs::local_refusals(&self.database)
-                .await?
-                .into_iter()
-                .find(|refusal| matches!(refusal.object, coven_database::LogObject::Entry(_)))
-            {
-                return Err(crate::pending_logs::required(&self.database, refusal).await?);
-            }
-            if let Some(id) = entries.keys().find(|id| {
-                !local.log.replay.entries.contains_key(id) && !pending_devices.contains(&id.device)
-            }) {
-                return Err(StorageFailure::NotFound
-                    .with_source(format!(
-                        "store-log catch-up is missing an entry or its prerequisites at {}",
-                        object::path(self.directory.id(), *id).as_str()
-                    ))
-                    .into());
-            }
-        }
-        let complete_through = |through: Option<std::time::Duration>| {
-            let includes = |time: &std::time::SystemTime| {
-                through.is_none_or(|end| {
-                    time.duration_since(std::time::UNIX_EPOCH)
-                        .expect("nonnegative provider time")
-                        <= end
-                })
-            };
-            publications
-                .iter()
-                .filter(|(_, time)| includes(time))
-                .all(|(id, _)| local.log.replay.entries.contains_key(id))
-                && stuck.iter().all(|refusal| match refusal.object {
-                    coven_database::LogObject::Entry(id) => {
-                        publications.get(&id).is_some_and(|time| !includes(time))
-                    }
-                    coven_database::LogObject::Write(_) => true,
-                })
-        };
-        let complete = complete_through(None);
-        if let Some((through, unit)) = through {
-            if complete_through(Some(through)) {
-                if let Some(horizon) = crate::finality::horizon(&local.log, through, unit) {
-                    if local.log.horizon != Some(horizon) {
-                        self.database
-                            .advance_store_log_horizon(local.log, horizon)
-                            .await?;
-                    }
-                }
-            }
-        }
-        Ok((damages, complete))
-    }
-
     async fn read_entry(
         &self,
         object: &coven_storage::StoredObject,
@@ -519,6 +267,13 @@ impl StoreLogSync {
         ring: &mut Option<StoreKeyring>,
         damages: &mut Vec<DamagedObject>,
     ) -> Result<(), SyncError> {
+        if self.can_publish(local).await? {
+            self.publish_queued(local, member, ring, damages).await?;
+        }
+        Ok(())
+    }
+
+    async fn can_publish(&self, local: &LocalStoreLog) -> Result<bool, SyncError> {
         if let Some(upload) = &local.upload {
             // Recovery can retain a fixed entry before restoring its past.
             // Download that past before publishing or replaying the entry.
@@ -529,11 +284,11 @@ impl StoreLogSync {
                 })
             })? {
                 tracing::debug!(entry = ?upload.entry.position, "queued entry waits for its recorded past");
-                return Ok(());
+                return Ok(false);
             }
             if let Some(id) = self.pending_reload().await? {
                 tracing::debug!(?id, "store-log publication waits for snapshot reload");
-                return Ok(());
+                return Ok(false);
             }
             for record in self.database.operations().await? {
                 if !self.operation_can_retry(&record).await?
@@ -541,11 +296,11 @@ impl StoreLogSync {
                         .entry()?
                         .is_some_and(|entry| entry.position == upload.entry.position)
                 {
-                    return Ok(());
+                    return Ok(false);
                 }
             }
         }
-        self.publish_queued(local, member, ring, damages).await
+        Ok(true)
     }
 
     async fn publish_queued(
@@ -555,7 +310,29 @@ impl StoreLogSync {
         ring: &mut Option<StoreKeyring>,
         damages: &mut Vec<DamagedObject>,
     ) -> Result<(), SyncError> {
-        if let Some(upload) = local.upload.take() {
+        if let Some(entry) = self.upload_queued(local, member, ring).await? {
+            // Observe all landing witnesses after publication, before retaining
+            // this entry's author-view checks.
+            let publications = crate::store_log_landing::observe_publication(
+                self.directory.id(),
+                self.storage.as_deref(),
+                &local.log,
+                entry.position,
+            )
+            .await?;
+            self.apply(local, entry, &publications, member, ring, damages)
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn upload_queued(
+        &self,
+        local: &LocalStoreLog,
+        member: &MemberKeys,
+        ring: &mut Option<StoreKeyring>,
+    ) -> Result<Option<StoreLogEntry>, SyncError> {
+        if let Some(upload) = &local.upload {
             if let StoreChange::CreateStore { key_hash, .. } = &upload.entry.change {
                 if upload.sealing.keys.is_empty()
                     && !keys::holds(ring.as_ref(), &Audience::Store, upload.sealing.key)
@@ -576,28 +353,18 @@ impl StoreLogSync {
                         .persist(ring.as_ref().expect("recovered creation key"))?;
                 }
             }
-            let bytes = object::seal_upload(self.directory.id(), &upload, ring.as_ref(), member)?;
+            let bytes = object::seal_upload(self.directory.id(), upload, ring.as_ref(), member)?;
             object::upload(
                 self.directory.id(),
                 self.storage.as_deref(),
                 &self.database,
-                &upload,
+                upload,
                 &bytes,
             )
             .await?;
-            // Observe all landing witnesses after publication, before retaining
-            // this entry's author-view checks.
-            let publications = crate::store_log_landing::observe_publication(
-                self.directory.id(),
-                self.storage.as_deref(),
-                &local.log,
-                upload.entry.position,
-            )
-            .await?;
-            self.apply(local, upload.entry, &publications, member, ring, damages)
-                .await?;
+            return Ok(Some(upload.entry.clone()));
         }
-        Ok(())
+        Ok(None)
     }
 
     async fn apply(
@@ -610,8 +377,19 @@ impl StoreLogSync {
         damages: &mut Vec<DamagedObject>,
     ) -> Result<(), SyncError> {
         let (entry, replay) = crate::replay_entry(&local.log, entry, publications);
+        self.apply_batch(local, vec![entry], replay, member).await?;
+        self.update_keys(&local.log, member, ring, damages).await
+    }
+
+    async fn apply_batch(
+        &self,
+        local: &mut LocalStoreLog,
+        entries: Vec<coven_database::ReplayEntry>,
+        replay: coven_database::StoreLogReplay,
+        member: &MemberKeys,
+    ) -> Result<(), SyncError> {
         let mut operations = self
-            .removal_work(&local.log, &entry, &replay, member)
+            .removal_work(&local.log, &entries, &replay, member)
             .await?;
         let before = &local.log.replay.state;
         let after = &replay.state;
@@ -634,8 +412,8 @@ impl StoreLogSync {
             if !after.circle_deletions.contains_key(circle)
                 && current.members.contains(&member.member_id())
                 && before.circles.get(circle).is_some_and(|previous| {
-                    !before.circle_deletions.contains_key(circle)
-                        && !previous.members.contains(&member.member_id())
+                    before.circle_deletions.contains_key(circle)
+                        || !previous.members.contains(&member.member_id())
                 })
             {
                 changed.insert(Audience::Circle(*circle));
@@ -660,26 +438,26 @@ impl StoreLogSync {
             let data = crate::operation_data::Data::read(&record)?;
             if self.operation_can_retry(&record).await?
                 && record.last_step < data.entry_step_number(4)
-                && data
-                    .entry()?
-                    .is_some_and(|fixed| fixed.position == entry.entry.position)
+                && data.entry()?.is_some_and(|fixed| {
+                    entries
+                        .iter()
+                        .any(|entry| fixed.position == entry.entry.position)
+                })
             {
                 updates.push(data.update(&record, data.entry_step_number(4))?);
             }
         }
         self.database
-            .apply_store_log_operations::<crate::PendingRecord>(
-                entry.clone(),
-                replay.clone(),
+            .apply_store_log_batch::<crate::PendingRecord>(
+                local.log.clone(),
+                entries,
+                replay,
                 operations,
                 updates,
             )
             .await?;
-        local.log.entries.push(entry);
-        local.log.entries.sort_by_key(|e| e.entry.timestamp);
-        local.log.replay = replay;
-        self.check_stopped(local, member)?;
-        self.update_keys(&local.log, member, ring, damages).await
+        *local = self.database.local_store_log().await?;
+        self.check_stopped(local, member)
     }
 
     async fn update_keys(
@@ -689,10 +467,21 @@ impl StoreLogSync {
         ring: &mut Option<StoreKeyring>,
         damages: &mut Vec<DamagedObject>,
     ) -> Result<(), SyncError> {
+        self.acquire_keys(log, member, ring, damages).await?;
+        self.share_keys(log, ring, damages).await
+    }
+
+    async fn acquire_keys(
+        &self,
+        log: &StoreLog,
+        member: &MemberKeys,
+        ring: &mut Option<StoreKeyring>,
+        damages: &mut Vec<DamagedObject>,
+    ) -> Result<(), SyncError> {
         for (audience, key) in keys::needed(log) {
             self.acquire(&audience, key, member, ring, damages).await?;
         }
-        self.share_keys(log, ring, damages).await
+        Ok(())
     }
 
     async fn share_keys(
@@ -915,3 +704,6 @@ pub use bootstrap::JoinOutcome;
 
 #[path = "store_log_finality.rs"]
 mod store_log_finality;
+
+#[path = "store_log_batch.rs"]
+mod store_log_batch;

@@ -70,33 +70,108 @@ pub fn replay_entry(
     entry: StoreLogEntry,
     publications: &BTreeMap<EntryId, SystemTime>,
 ) -> (ReplayEntry, StoreLogReplay) {
-    let mut prior: Vec<_> = log.entries.iter().collect();
-    prior.sort_by_key(|applied| applied.entry.timestamp);
-    let mut entries: Vec<_> = prior.iter().map(|applied| &applied.entry).collect();
-    let mut views: Vec<_> = prior.iter().map(|applied| applied.check.clone()).collect();
-    let past: Vec<_> = (0..entries.len())
-        .filter(|&i| had_read(&entry, entries[i]))
-        .collect();
-    let check = if landed_too_late(&entry, publications) {
-        StoreLogCheck::LandedTooLate
-    } else if past.len() == entries.len() {
-        effects::check(&log.replay.state, &entry)
-    } else {
-        effects::check(&settle(&entries, &views, &past).state, &entry)
-    };
-    let index = entries.partition_point(|prior| prior.timestamp < entry.timestamp);
-    entries.insert(index, &entry);
-    views.insert(index, check.clone());
-    let result = settle(&entries, &views, &(0..entries.len()).collect::<Vec<_>>());
-    let stored_at = publications[&entry.position];
-    (
-        ReplayEntry {
+    let mut batch = ReplayBatch::new(log);
+    batch.push_checked(entry, publications);
+    let (mut entries, replay) = batch.finish().expect("one ready entry");
+    (entries.pop().expect("one entry"), replay)
+}
+
+/// Checked inputs for one transaction. Author views are immutable projections;
+/// no current membership state is exposed before the whole received set settles.
+pub(crate) struct ReplayBatch {
+    entries: Vec<ReplayEntry>,
+    received: Vec<ReplayEntry>,
+    views: BTreeMap<Vec<EntryId>, StoreLogReplay>,
+}
+
+impl ReplayBatch {
+    pub(crate) fn new(log: &StoreLog) -> Self {
+        let mut entries = log.entries.clone();
+        entries.sort_by_key(|entry| entry.entry.timestamp);
+        Self {
+            entries,
+            received: Vec::new(),
+            views: [(log.positions().0, log.replay.clone())].into(),
+        }
+    }
+
+    pub(crate) fn contains(&self, id: EntryId) -> bool {
+        self.entries.iter().any(|entry| entry.entry.position == id)
+    }
+
+    pub(crate) fn push(
+        &mut self,
+        entry: &StoreLogEntry,
+        publications: &BTreeMap<EntryId, SystemTime>,
+        store: coven_foundation::id_source::StoreId,
+    ) -> Result<bool, crate::Refusal> {
+        if !crate::store_log_object::causally_ready(&self.entries, entry, store)? {
+            return Ok(false);
+        }
+        if !crate::store_log_object::author_matches_view(&self.author_view(entry).state, entry) {
+            return Err(crate::Refusal::WrongIdentity { cause: None });
+        }
+        self.push_checked(entry.clone(), publications);
+        Ok(true)
+    }
+
+    fn author_view(&mut self, entry: &StoreLogEntry) -> &StoreLogReplay {
+        let positions = author_positions(entry);
+        crate::replay_cache::cached_view(&mut self.views, &self.entries, &positions)
+    }
+
+    pub(crate) fn push_checked(
+        &mut self,
+        entry: StoreLogEntry,
+        publications: &BTreeMap<EntryId, SystemTime>,
+    ) {
+        let check = if landed_too_late(&entry, publications) {
+            StoreLogCheck::LandedTooLate
+        } else {
+            effects::check(&self.author_view(&entry).state, &entry)
+        };
+        let incoming = ReplayEntry {
+            stored_at: publications[&entry.position],
             entry,
-            stored_at,
             check,
-        },
-        result,
-    )
+        };
+        let index = self
+            .entries
+            .partition_point(|prior| prior.entry.timestamp < incoming.entry.timestamp);
+        self.entries.insert(index, incoming.clone());
+        self.received.push(incoming);
+    }
+
+    pub(crate) fn finish(self) -> Option<(Vec<ReplayEntry>, StoreLogReplay)> {
+        if self.received.is_empty() {
+            return None;
+        }
+        let entries: Vec<_> = self.entries.iter().map(|entry| &entry.entry).collect();
+        let checks: Vec<_> = self
+            .entries
+            .iter()
+            .map(|entry| entry.check.clone())
+            .collect();
+        let replay = settle(&entries, &checks, &(0..entries.len()).collect::<Vec<_>>());
+        Some((self.received, replay))
+    }
+}
+
+pub(crate) fn author_positions(entry: &StoreLogEntry) -> coven_format::value::EntryPositions {
+    let mut positions = entry.had_read.clone();
+    if entry.position.number > 1 {
+        let index = positions
+            .0
+            .partition_point(|id| id.device < entry.position.device);
+        positions.0.insert(
+            index,
+            EntryId {
+                number: entry.position.number - 1,
+                ..entry.position
+            },
+        );
+    }
+    positions
 }
 
 pub(crate) fn had_read(entry: &StoreLogEntry, prior: &StoreLogEntry) -> bool {
@@ -109,7 +184,14 @@ pub(crate) fn at(
     log: &StoreLog,
     positions: &coven_format::value::EntryPositions,
 ) -> StoreLogReplay {
-    let mut prior: Vec<_> = log.entries.iter().collect();
+    at_entries(&log.entries, positions)
+}
+
+pub(crate) fn at_entries(
+    applied: &[ReplayEntry],
+    positions: &coven_format::value::EntryPositions,
+) -> StoreLogReplay {
+    let mut prior: Vec<_> = applied.iter().collect();
     prior.sort_by_key(|applied| applied.entry.timestamp);
     let entries: Vec<_> = prior.iter().map(|applied| &applied.entry).collect();
     let checks: Vec<_> = prior.iter().map(|applied| applied.check.clone()).collect();

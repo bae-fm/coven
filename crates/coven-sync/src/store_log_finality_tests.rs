@@ -3,6 +3,7 @@ use crate::store_log_sync::tests::{device, key, member, store};
 use coven_foundation::clock::FixedClock;
 use coven_foundation::id_source::DeviceId;
 use coven_storage::test_utils::{Faults, MemoryStorage};
+use coven_storage::ObjectPrefix;
 use std::time::{Duration, UNIX_EPOCH};
 
 mod listing {

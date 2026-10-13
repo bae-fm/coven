@@ -24,10 +24,20 @@ impl<'log> ReplayCache<'log> {
     /// `replay::at`, the caller checks presence and causal closure first; a cache
     /// hit does not replace the checks specific to each write's author or stamp.
     pub(crate) fn at(&mut self, positions: &EntryPositions) -> &StoreLogReplay {
-        self.views
-            .entry(positions.0.clone())
-            .or_insert_with(|| crate::replay::at(self.log, positions))
+        cached_view(&mut self.views, &self.log.entries, positions)
     }
+}
+
+/// A complete, causally closed frontier keeps the same view as checked inputs
+/// arrive beyond it. Both write checks and an entry batch reuse these projections.
+pub(crate) fn cached_view<'a>(
+    views: &'a mut BTreeMap<Vec<EntryId>, StoreLogReplay>,
+    entries: &[coven_database::ReplayEntry],
+    positions: &EntryPositions,
+) -> &'a StoreLogReplay {
+    views
+        .entry(positions.0.clone())
+        .or_insert_with(|| crate::replay::at_entries(entries, positions))
 }
 
 #[cfg(test)]

@@ -209,6 +209,7 @@ impl DatabaseBuilder {
             closing: Arc::new(lock.closing_guard()),
             file_tasks: Arc::new(tokio::sync::RwLock::new(())),
             inner: Arc::new(RwLock::new(Some(DatabaseInner {
+                store_log: Mutex::new(None),
                 observer,
                 access: DatabaseAccess {
                     writer: Mutex::new(writer),

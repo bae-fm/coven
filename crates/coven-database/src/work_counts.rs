@@ -9,10 +9,14 @@ pub struct WorkCounts {
     pub writer_holds: usize,
     /// Reconstructions of the saved store log, including empty logs.
     pub full_log_decodes: usize,
-    /// Saved or queued store-log entries passed to the plaintext decoder.
+    /// Applied store-log entries passed to the plaintext decoder.
     pub entry_decodes: usize,
+    /// Locally reserved entries decoded from the publication queue.
+    pub queued_entry_decodes: usize,
     /// Successful durable transaction commits, including unchanged transactions.
     pub commits: usize,
+    /// Successful atomic installations of a ready entry batch and its replay.
+    pub store_log_commits: usize,
 }
 
 /// Injected counter; clones observe the same database, never other test databases.

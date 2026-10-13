@@ -53,7 +53,7 @@ pub(crate) fn read(database: &DatabaseConnection) -> Result<Option<StoreLogUploa
                 let record = row.get::<_, Vec<u8>>(0)?;
                 let format = decoded(coven_format::FormatVersion::decode(&record))?;
                 #[cfg(any(test, feature = "test-utils"))]
-                database.record_work(|work| work.entry_decodes += 1);
+                database.record_work(|work| work.queued_entry_decodes += 1);
                 let Object::StoreLog(entry) = decoded(Object::decode(&record))? else {
                     return Err(rusqlite::Error::InvalidQuery);
                 };
@@ -77,6 +77,7 @@ pub(crate) fn read(database: &DatabaseConnection) -> Result<Option<StoreLogUploa
 
 pub(crate) fn prepare<F, E>(
     database: &DatabaseConnection,
+    log: &StoreLog,
     store: StoreId,
     device: DeviceId,
     now: SystemTime,
@@ -97,7 +98,6 @@ where
     if let Some(upload) = read(database)? {
         return Err(DbError::StoreLogUploadPending(upload.entry.position).into());
     }
-    let log = crate::store_log_tables::read(database)?;
     let mut positions = log.positions();
     // An absent prior entry starts this device at one.
     let previous = positions
@@ -127,11 +127,14 @@ where
         }
     })?;
     let copies = crate::KeyUploadBatch::new(database, store, device, Some(entry.position))?;
-    let (sealed, operation) = seal(&log, &entry, copies)?;
+    let (sealed, operation) = seal(log, &entry, copies)?;
+    let timestamp = crate::write_encoding::encoded(coven_format::merge_fields::encode_timestamp(
+        &entry.timestamp,
+    ))?;
     database.transaction(|database| {
         database.internal_execute(
-            "INSERT INTO _coven_store_log_uploads(device,number,record,sealing_key) VALUES(?1,?2,?3,?4)",
-            (device.0.to_be_bytes().as_slice(), number.to_be_bytes().as_slice(), &record, sealed.key.0.as_bytes().as_slice()),
+            "INSERT INTO _coven_store_log_uploads(device,number,record,sealing_key,timestamp) VALUES(?1,?2,?3,?4,?5)",
+            (device.0.to_be_bytes().as_slice(), number.to_be_bytes().as_slice(), &record, sealed.key.0.as_bytes().as_slice(), timestamp),
         )?;
         for key in &sealed.keys {
             if key.writer != device || key.before_entry != Some(entry.position) {

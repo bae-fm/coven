@@ -181,8 +181,12 @@ impl Database {
             + Send
             + 'static,
     {
-        self.call(move |inner| inner.with_writer(|writer| crate::upload::prepare(writer, select)))
-            .await
+        self.call(move |inner| {
+            inner.with_store_log(|log| {
+                inner.with_writer(|writer| crate::upload::prepare(writer, log, select))
+            })
+        })
+        .await
     }
     /// Apply one authenticated download, or report the prerequisite it awaits.
     /// Row changes, merge state, fingerprints and positions commit together.
@@ -266,15 +270,20 @@ impl Database {
             .await
     }
 
-    /// Read applied entries and the fixed publication queue under the writer lock.
+    /// Read the retained decoded log and its queue from a committed reader snapshot.
+    /// All clones share the value installed by the replay transaction.
     pub async fn local_store_log(&self) -> Result<crate::LocalStoreLog, DbError> {
         self.call(move |inner| {
-            inner.with_writer(|writer| {
-                Ok(crate::LocalStoreLog {
-                    store: inner.access.directory.id(),
-                    device: inner.access.device,
-                    log: crate::store_log_tables::read(writer)?,
-                    upload: crate::store_log_upload::read(writer)?,
+            inner.with_store_log(|log| {
+                inner.access.readers.acquire_reader().with_reader(|reader| {
+                    reader.read_transaction(|| {
+                        Ok(crate::LocalStoreLog {
+                            store: inner.access.directory.id(),
+                            device: inner.access.device,
+                            log: log.clone(),
+                            upload: crate::store_log_upload::read(reader)?,
+                        })
+                    })
                 })
             })
         })
@@ -302,16 +311,21 @@ impl Database {
         E: From<DbError> + Send + 'static,
     {
         self.call(move |inner| {
-            inner.with_writer(|writer| {
-                crate::store_log_upload::prepare(
-                    writer,
-                    inner.access.directory.id(),
-                    inner.access.device,
-                    inner.clock.now(),
-                    author,
-                    change,
-                    move |log, entry, copies| seal(log, entry, copies).map(|sealed| (sealed, None)),
-                )
+            inner.with_store_log(|log| {
+                inner.with_writer(|writer| {
+                    crate::store_log_upload::prepare(
+                        writer,
+                        log,
+                        inner.access.directory.id(),
+                        inner.access.device,
+                        inner.clock.now(),
+                        author,
+                        change,
+                        move |log, entry, copies| {
+                            seal(log, entry, copies).map(|sealed| (sealed, None))
+                        },
+                    )
+                })
             })
         })
         .await
@@ -375,7 +389,8 @@ impl Database {
         entry: crate::ReplayEntry,
         replay: crate::StoreLogReplay,
     ) -> Result<(), DbError> {
-        self.apply_store_log_operations::<P>(entry, replay, Vec::new(), Vec::new())
+        let checked = self.local_store_log().await?.log;
+        self.apply_store_log_batch::<P>(checked, vec![entry], replay, Vec::new(), Vec::new())
             .await
     }
 
@@ -393,18 +408,22 @@ impl Database {
         horizon: std::time::Duration,
     ) -> Result<(), DbError> {
         self.call(move |inner| {
-            inner.with_writer(|writer| {
-                writer.transaction(|database| {
-                    let current = crate::store_log_tables::read(database)?;
+            inner.with_store_log(|current| {
+                inner.with_writer(|writer| {
                     if current.entries != checked.entries || current.replay != checked.replay {
                         return Err(DbError::StoreLogEntriesChanged);
                     }
-                    if current.horizon.is_none_or(|previous| horizon > previous) {
+                    if current.horizon.is_some_and(|previous| horizon <= previous) {
+                        return Ok(());
+                    }
+                    writer.transaction(|database| {
                         database.internal_execute(
                             "UPDATE _coven_finality SET horizon=?1 WHERE singleton=1",
                             [crate::store_log_tables::encode_horizon(horizon)],
                         )?;
-                    }
+                        Ok(())
+                    })?;
+                    current.horizon = Some(horizon);
                     Ok(())
                 })
             })

@@ -178,22 +178,17 @@ pub(crate) fn author_matches_device(log: &StoreLog, entry: &StoreLogEntry) -> bo
     {
         &log.replay.state
     } else {
-        let mut positions = entry.had_read.clone();
-        if entry.position.number > 1 {
-            let index = positions
-                .0
-                .partition_point(|id| id.device < entry.position.device);
-            positions.0.insert(
-                index,
-                EntryId {
-                    number: entry.position.number - 1,
-                    ..entry.position
-                },
-            );
-        }
+        let positions = crate::replay::author_positions(entry);
         replay = crate::replay::at(log, &positions);
         &replay.state
     };
+    author_matches_view(view, entry)
+}
+
+pub(crate) fn author_matches_view(
+    view: &coven_database::StoreLogState,
+    entry: &StoreLogEntry,
+) -> bool {
     match view.devices.get(&entry.position.device) {
         Some(device) => device.member == entry.author,
         // Creation and self-registration establish an absent binding. Replay
@@ -212,7 +207,21 @@ pub(crate) fn ready(
     entry: &StoreLogEntry,
     store: StoreId,
 ) -> Result<bool, Refusal> {
-    let contains = |id: EntryId| log.replay.entries.contains_key(&id);
+    if !causally_ready(&log.entries, entry, store)? {
+        return Ok(false);
+    }
+    if !author_matches_device(log, entry) {
+        return Err(Refusal::WrongIdentity { cause: None });
+    }
+    Ok(true)
+}
+
+pub(crate) fn causally_ready(
+    entries: &[coven_database::ReplayEntry],
+    entry: &StoreLogEntry,
+    store: StoreId,
+) -> Result<bool, Refusal> {
+    let contains = |id: EntryId| entries.iter().any(|prior| prior.entry.position == id);
     if entry.position.number > 1
         && !contains(EntryId {
             number: entry.position.number - 1,
@@ -225,13 +234,12 @@ pub(crate) fn ready(
         return Ok(false);
     }
     if let StoreChange::CreateStore { store: id, .. } = &entry.change {
-        if *id != store || !log.entries.is_empty() {
+        if *id != store || !entries.is_empty() {
             return Err(Refusal::WrongIdentity { cause: None });
         }
         return Ok(true);
     }
-    let Some(creation) = log
-        .entries
+    let Some(creation) = entries
         .iter()
         .find(|applied| matches!(applied.entry.change, StoreChange::CreateStore { .. }))
     else {
@@ -240,7 +248,7 @@ pub(crate) fn ready(
     if !crate::replay::had_read(entry, &creation.entry) {
         return Err(Refusal::InvalidCausality { cause: None });
     }
-    for prior in &log.entries {
+    for prior in entries {
         let prior = &prior.entry;
         if crate::replay::had_read(entry, prior) {
             if prior.timestamp >= entry.timestamp {
@@ -257,9 +265,6 @@ pub(crate) fn ready(
                 return Err(Refusal::InvalidCausality { cause: None });
             }
         }
-    }
-    if !author_matches_device(log, entry) {
-        return Err(Refusal::WrongIdentity { cause: None });
     }
     Ok(true)
 }

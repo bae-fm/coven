@@ -77,6 +77,68 @@ async fn local_write_follows_fixed_entry_even_after_clock_moves_back() {
 }
 
 #[tokio::test]
+async fn batch_clock_uses_saved_and_queued_timestamps_without_decoding_entries() {
+    use crate::store_log::tests::{checked, circle_history};
+    let store = TestStore::new();
+    let clock = Arc::new(FixedClock::new(UNIX_EPOCH));
+    let db = store
+        .builder(notes(), vec![Migration::sql(1, "notes", NOTES)])
+        .clock(clock)
+        .open()
+        .await
+        .unwrap();
+    let history = circle_history(coven_foundation::id_source::CircleId(
+        uuid::Uuid::from_u128(2),
+    ));
+    let before = db.local_store_log().await.unwrap().log;
+    db.apply_store_log_batch::<PendingRecord>(
+        before,
+        history[..4]
+            .iter()
+            .map(|(entry, _)| checked(entry.clone()))
+            .collect(),
+        history[3].1.clone(),
+        vec![],
+        vec![],
+    )
+    .await
+    .unwrap();
+    let work = crate::test_utils::WorkCounter::default();
+    db.test_track_work(work.clone()).await.unwrap();
+    let entry = coven_format::test_utils::store_log();
+    db.prepare_store_log(
+        entry.author,
+        StoreChange::SetAccess {
+            access: coven_format::MemberAccess::ProviderAccount("account".into()),
+        },
+        move |_, entry, _| {
+            assert!(entry.timestamp > history[3].0.timestamp);
+            Ok::<_, DbError>(StoreLogSealing {
+                key: KeyId(uuid::Uuid::from_u128(1)),
+                keys: vec![],
+            })
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(work.take().entry_decodes, 0);
+    let fixed = db
+        .local_store_log()
+        .await
+        .unwrap()
+        .upload
+        .unwrap()
+        .entry
+        .timestamp;
+    work.take();
+    sql(&db, "INSERT INTO notes VALUES('a','title','body')")
+        .await
+        .unwrap();
+    assert_eq!(work.take().entry_decodes, 0);
+    assert!(records(&db)[0].header.timestamp > fixed);
+}
+
+#[tokio::test]
 async fn failed_sealing_reserves_nothing_and_pending_entry_blocks_another() {
     let store = TestStore::new();
     let db = store.builder(vec![], vec![]).open().await.unwrap();

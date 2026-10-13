@@ -586,7 +586,9 @@ async fn scenario(scenario: Scenario) -> Counts {
             counts.work.writer_holds += startup.writer_holds;
             counts.work.full_log_decodes += startup.full_log_decodes;
             counts.work.entry_decodes += startup.entry_decodes;
+            counts.work.queued_entry_decodes += startup.queued_entry_decodes;
             counts.work.commits += startup.commits;
+            counts.work.store_log_commits += startup.store_log_commits;
             assert_eq!(devices[0].data.notes().await, ["retained"]);
             counts
         }
@@ -601,7 +603,7 @@ async fn scenario(scenario: Scenario) -> Counts {
 // listings return revisions directly, so M=0: 2 + 3*3 = 11. S3's 14-request
 // example adds three native HEADs that this provider does not perform.
 #[tokio::test]
-#[ignore = "observed 19 requests (12 LIST, 6 GET, 1 PUT); stated 11 (2 LIST, 9 next-number misses, 0 PUT)"]
+#[ignore = "idle requests exceed the stated 11 (2 LIST, 9 next-number misses, 0 PUT)"]
 async fn io_counts_idle_requests() {
     let counts = scenario(Scenario::Idle).await;
     assert_eq!(
@@ -623,13 +625,13 @@ async fn io_counts_idle_requests() {
 }
 
 #[tokio::test]
-#[ignore = "observed 74 writer holds, 17 full-log/51 entry decodes and 9 commits; stated 0 of each on warm idle passes"]
+#[ignore = "idle passes acquire the writer and commit unchanged state"]
 async fn io_counts_idle_local_work() {
     assert_eq!(scenario(Scenario::Idle).await.work, WorkCounts::default());
 }
 
 #[tokio::test]
-#[ignore = "observed 26 requests; stated 13 with one transfer at a time: idle 11 + one write GET + one positions PUT"]
+#[ignore = "requests exceed the stated 13 with one transfer at a time: idle 11 + one write GET + one positions PUT"]
 async fn io_counts_one_write_requests() {
     let counts = scenario(Scenario::OneWrite).await;
     assert_eq!(
@@ -671,14 +673,13 @@ async fn io_counts_scan_and_fetch_ahead_cost() {
 }
 
 #[tokio::test]
-#[ignore = "observed 17 full-log/51 saved-entry decodes per warm write or file pass; stated 0 (keep the decoded log between passes)"]
 async fn io_counts_warm_pass_reuses_decoded_log() {
     let mut counts = Vec::new();
-    for case in [Scenario::OneWrite, Scenario::FileFetch] {
+    for case in [Scenario::Idle, Scenario::OneWrite, Scenario::FileFetch] {
         let work = scenario(case).await.work;
         counts.push((work.full_log_decodes, work.entry_decodes));
     }
-    assert_eq!(counts, [(0, 0); 2]);
+    assert_eq!(counts, [(0, 0); 3]);
 }
 
 #[tokio::test]
@@ -709,7 +710,7 @@ async fn io_counts_one_write_local_baseline() {
     assert_eq!(repeated_reads(&counts.reads, &[], false), 0);
     // No fixed total is stated for non-idle writer holds or commits. These
     // are observed baselines; the saved-log decode bound is tested separately.
-    assert_eq!((counts.work.writer_holds, counts.work.commits), (75, 11));
+    assert_eq!((counts.work.writer_holds, counts.work.commits), (58, 11));
 }
 
 #[tokio::test]
@@ -721,23 +722,27 @@ async fn io_counts_first_catchup_baseline() {
     assert_eq!(
         (counts.requests, counts.requests_by_kind()),
         (
-            67,
+            69,
             RequestCounts {
-                lists: 22,
-                gets: 28,
+                lists: 19,
+                gets: 22,
                 ranges: 14,
                 creates: 1,
                 replaces: 1,
-                statuses: 1,
+                statuses: 12,
                 ..Default::default()
             }
-        )
+        ),
+        "{counts:#?}"
     );
-    assert_eq!((counts.work.writer_holds, counts.work.commits), (104, 24));
+    assert_eq!((counts.work.writer_holds, counts.work.commits), (73, 18));
+    assert_eq!(
+        counts.work.store_log_commits, 2,
+        "catch-up batch and own registration"
+    );
 }
 
 #[tokio::test]
-#[ignore = "observed 22 full-log/106 saved-entry decodes during first catch-up; stated at most 1 full decode and 0 saved-entry decodes from an empty initial log"]
 async fn io_counts_first_catchup_saved_log() {
     let counts = scenario(Scenario::FirstCatchup).await;
     // The owner starts with no saved entries. Incoming entries are decoded once
@@ -747,10 +752,11 @@ async fn io_counts_first_catchup_saved_log() {
         "{:?}",
         counts.work
     );
+    assert_eq!(counts.work.queued_entry_decodes, 1, "own registration");
 }
 
 #[tokio::test]
-#[ignore = "observed 16 repeated key-copy downloads and 3 repeated position-version downloads; stated 0 duplicate downloads"]
+#[ignore = "observed 10 repeated key-copy downloads and 3 repeated position-version downloads; stated 0 duplicate downloads"]
 async fn io_counts_first_catchup_download_reuse() {
     let counts = scenario(Scenario::FirstCatchup).await;
     assert_eq!(
@@ -786,18 +792,20 @@ async fn io_counts_file_fetch_baseline() {
     assert_eq!(
         (counts.requests, counts.requests_by_kind()),
         (
-            35,
+            38,
             RequestCounts {
                 lists: 12,
                 gets: 6,
                 ranges: 16,
                 replaces: 1,
+                statuses: 3,
                 ..Default::default()
             }
-        )
+        ),
+        "{counts:#?}"
     );
     // No fixed non-idle writer/commit total is stated; observed counts.
-    assert_eq!((counts.work.writer_holds, counts.work.commits), (86, 25));
+    assert_eq!((counts.work.writer_holds, counts.work.commits), (69, 25));
 }
 
 #[tokio::test]
@@ -851,21 +859,22 @@ async fn io_counts_reopen_baseline() {
     assert_eq!(
         (counts.requests, counts.requests_by_kind()),
         (
-            23,
+            26,
             RequestCounts {
                 lists: 12,
                 gets: 6,
                 ranges: 4,
                 replaces: 1,
+                statuses: 3,
                 ..Default::default()
             }
-        )
+        ),
+        "{counts:#?}"
     );
-    assert_eq!((counts.work.writer_holds, counts.work.commits), (74, 9));
+    assert_eq!((counts.work.writer_holds, counts.work.commits), (57, 9));
 }
 
 #[tokio::test]
-#[ignore = "observed 17 full-log/51 saved-entry decodes after reopening; stated at most 1 full decode of the 3 saved entries"]
 async fn io_counts_reopen_saved_log() {
     let counts = scenario(Scenario::Reopen).await;
     assert!(

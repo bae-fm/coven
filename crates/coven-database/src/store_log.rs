@@ -199,36 +199,43 @@ pub enum DropReason {
 pub(crate) fn apply<P: crate::PendingValue>(
     database: &DatabaseConnection,
     schema: &WriteSchema,
-    incoming: ReplayEntry,
-    replay: StoreLogReplay,
+    incoming: &[ReplayEntry],
+    replay: &StoreLogReplay,
     files: &crate::file_write::FileWrite<'_>,
     operations: &[crate::NewOperation],
     updates: &[crate::OperationUpdate],
 ) -> Result<(), DbError> {
-    let ReplayEntry {
-        entry,
-        stored_at,
-        check,
-    } = incoming;
-    let stored_at = crate::user_file::encode_time(stored_at);
-    let author_view = check.encode();
-    let bytes = Object::StoreLog(entry.clone()).encode().map_err(|error| {
-        DbError::InvalidStoreLogEntry {
-            entry: entry.position,
-            error,
-        }
-    })?;
+    let encoded = incoming
+        .iter()
+        .map(|incoming| {
+            let bytes = Object::StoreLog(incoming.entry.clone())
+                .encode()
+                .map_err(|error| DbError::InvalidStoreLogEntry {
+                    entry: incoming.entry.position,
+                    error,
+                })?;
+            Ok((
+                incoming,
+                bytes,
+                incoming.check.encode(),
+                crate::user_file::encode_time(incoming.stored_at),
+                crate::write_encoding::encoded(coven_format::merge_fields::encode_timestamp(
+                    &incoming.entry.timestamp,
+                ))?,
+            ))
+        })
+        .collect::<Result<Vec<_>, DbError>>()?;
     database.transaction(|database| {
-        for (record, view, time) in database.query(
-            "SELECT record,author_view,stored_at FROM _coven_store_log WHERE device=?1 AND number=?2",
-            (
-                entry.position.device.0.to_be_bytes().as_slice(),
-                entry.position.number.to_be_bytes().as_slice(),
-            ),
-            |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?, row.get::<_, Vec<u8>>(2)?)),
-        )? {
-            if record != bytes || view != author_view || time != stored_at {
-                return Err(DbError::StoreLogEntryChanged(entry.position));
+        for (incoming, bytes, author_view, stored_at, _) in &encoded {
+            let id = incoming.entry.position;
+            for (record, view, time) in database.query(
+                "SELECT record,author_view,stored_at FROM _coven_store_log WHERE device=?1 AND number=?2",
+                (id.device.0.to_be_bytes().as_slice(), id.number.to_be_bytes().as_slice()),
+                |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?, row.get::<_, Vec<u8>>(2)?)),
+            )? {
+                if &record != bytes || &view != author_view || &time != stored_at {
+                    return Err(DbError::StoreLogEntryChanged(id));
+                }
             }
         }
         let outcomes: BTreeMap<_, _> = database
@@ -245,25 +252,23 @@ pub(crate) fn apply<P: crate::PendingValue>(
             .into_iter()
             .collect();
         let mut applied: BTreeSet<_> = outcomes.keys().copied().collect();
-        applied.insert(entry.position);
+        applied.extend(incoming.iter().map(|entry| entry.entry.position));
         if !applied.iter().eq(replay.entries.keys()) {
             return Err(DbError::StoreLogEntriesChanged);
         }
-        database.internal_execute(
-            "INSERT INTO _coven_store_log(device,number,record,author_view,stored_at,outcome)
-             VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(device,number) DO NOTHING",
-            (
-                entry.position.device.0.to_be_bytes().as_slice(),
-                entry.position.number.to_be_bytes().as_slice(),
-                &bytes,
-                &author_view,
-                &stored_at,
-                if check == crate::StoreLogCheck::LandedTooLate { "late" } else { "kept" },
-            ),
-        )?;
-        crate::store_log_upload::retire(database, entry.position, &bytes)?;
+        for (incoming, bytes, author_view, stored_at, timestamp) in &encoded {
+            let id = incoming.entry.position;
+            database.internal_execute(
+                "INSERT INTO _coven_store_log(device,number,record,author_view,stored_at,outcome,timestamp)
+                 VALUES(?1,?2,?3,?4,?5,?6,?7) ON CONFLICT(device,number) DO NOTHING",
+                (id.device.0.to_be_bytes().as_slice(), id.number.to_be_bytes().as_slice(),
+                 bytes, author_view, stored_at,
+                 if incoming.check == crate::StoreLogCheck::LandedTooLate { "late" } else { "kept" }, timestamp),
+            )?;
+            crate::store_log_upload::retire(database, id, bytes)?;
+        }
         let previous = crate::store_log_tables::deleted_circles(database)?;
-        crate::store_log_tables::replace(database, &replay, &outcomes)?;
+        crate::store_log_tables::replace(database, replay, &outcomes)?;
         let deleted = crate::store_log_tables::deleted_circles(database)?;
         let mut touched = BTreeSet::new();
         for circle in previous.symmetric_difference(&deleted) {
@@ -303,8 +308,10 @@ pub(crate) fn apply<P: crate::PendingValue>(
                 }
             }
         }
-        if entry.position.device != own {
-            crate::pending::clear_log(database, crate::LogObject::Entry(entry.position))?;
+        for entry in incoming {
+            if entry.entry.position.device != own {
+                crate::pending::clear_log(database, crate::LogObject::Entry(entry.entry.position))?;
+            }
         }
         Ok(())
     })

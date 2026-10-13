@@ -221,6 +221,7 @@ pub(crate) fn each_plaintext(
 
 pub(crate) fn prepare(
     database: &DatabaseConnection,
+    log: &crate::StoreLog,
     select: impl FnOnce(&crate::StoreLog, u32, &WriteHeaderFrame) -> Result<WriteObjectPrefix, DbError>,
 ) -> Result<Option<WriteId>, DbError> {
     database.stream_transaction(|database| {
@@ -231,8 +232,7 @@ pub(crate) fn prepare(
             return Ok(Some(entry.write));
         }
         let (header, _, _) = plaintext(database, &entry)?;
-        let log = crate::store_log_tables::read(database)?;
-        let keys = select(&log, database.schema_version()?, &header)?;
+        let keys = select(log, database.schema_version()?, &header)?;
         if keys.part_keys.len() != header.parts.len() {
             return Err(DbError::DamagedDatabase);
         }

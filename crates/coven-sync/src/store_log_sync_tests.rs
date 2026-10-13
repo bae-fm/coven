@@ -1,12 +1,14 @@
 use super::*;
 use coven_crypto::{custody::InMemoryCustody, MemberKeys, StoreKey};
 use coven_database::{DatabaseBuilder, EntryOutcome, Migration, SyncedTable};
+use coven_format::sealed_single::SingleChunkObject;
 use coven_format::store_log::{MemberPublicKeys, MemberRole};
 use coven_foundation::{
     clock::FixedClock,
     files::{StoreDir, StoreLayout},
     id_source::{CircleId, DeviceId, IdSource, SequentialIds, StoreId},
 };
+use coven_storage::ObjectPrefix;
 use coven_storage::{
     test_utils::{Faults, MemoryStorage},
     StorageConfig,

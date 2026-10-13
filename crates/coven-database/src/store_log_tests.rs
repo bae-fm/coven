@@ -37,7 +37,7 @@ fn entry(number: u64, change: StoreChange) -> StoreLogEntry {
     }
 }
 
-fn checked(entry: StoreLogEntry) -> ReplayEntry {
+pub(crate) fn checked(entry: StoreLogEntry) -> ReplayEntry {
     let check = match &entry.change {
         StoreChange::RemoveMember { .. } | StoreChange::RemoveCircleMember { .. } => {
             StoreLogCheck::MemberRemoval(BTreeMap::new())
@@ -52,7 +52,7 @@ fn checked(entry: StoreLogEntry) -> ReplayEntry {
 }
 
 // Supplied replay results are fixtures for the database boundary, not computed here.
-fn circle_history(circle: CircleId) -> Vec<(StoreLogEntry, StoreLogReplay)> {
+pub(crate) fn circle_history(circle: CircleId) -> Vec<(StoreLogEntry, StoreLogReplay)> {
     let ana = keys(1);
     let ben = keys(2);
     let store = StoreIdentity {
