@@ -15,7 +15,7 @@ pub struct PartHeader {
     pub audience: Audience,
     /// Number of change and dismissal frames, without a per-write collection bound.
     pub record_count: u64,
-    /// Sum of the complete row frames' lengths, including frame prefixes.
+    /// Sum of the complete change and dismissal frames' lengths, including frame prefixes.
     pub plaintext_length: u64,
 }
 wire_struct!(PartHeader, audience, record_count, plaintext_length);
@@ -76,9 +76,9 @@ impl WriteHeaderFrame {
     }
 }
 
-/// A borrowed write producer. Before emitting, it encodes one row at a time
+/// A borrowed write producer. Before emitting, it encodes one record at a time
 /// to measure each part's byte length and construct the header;
-/// emitting a part retains at most one row frame and one 64-KiB chunk.
+/// emitting a part retains at most one record frame and one 64-KiB chunk.
 pub struct WriteEncoder<'a> {
     record: &'a WriteRecord,
     header: WriteHeaderFrame,
@@ -156,7 +156,7 @@ impl<'a> WriteEncoder<'a> {
         Ok(())
     }
 
-    /// Cut the selected audience's row frames into canonical plaintext chunks.
+    /// Cut the selected audience's change and dismissal frames into canonical plaintext chunks.
     pub fn part_chunks(
         &self,
         index: usize,
@@ -177,7 +177,7 @@ fn add_length(a: u64, b: u64) -> Result<u64, Error> {
 }
 
 /// Decode opened chunks of one part in order, retaining only its unfinished
-/// frame and previous row identity. The caller stages yielded rows until the
+/// frame and previous record identity. The caller stages yielded records until the
 /// whole object and signature have been checked. `finish` checks the declared
 /// record count and byte length; frames crossing the part's end are refused
 /// before their allocation.
@@ -242,7 +242,7 @@ impl PartDecoder {
         Ok(rows)
     }
 
-    /// Refuse an unfinished frame, missing bytes, or a mismatched row count.
+    /// Refuse an unfinished frame, missing bytes, or a mismatched record count.
     pub fn finish(&self) -> Result<(), Error> {
         self.frames.finish()?;
         require(

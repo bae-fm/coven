@@ -1,4 +1,4 @@
-//! The where-column's canonical text (Appendix D12), with uploaded keys redacted.
+//! The where-column's file location, with uploaded keys redacted.
 
 use crate::DbError;
 use coven_crypto::SecretText;

@@ -1,6 +1,6 @@
-//! Failures to encode or decode a plaintext object.
+//! Failures to encode or decode a format object.
 
-/// A structural requirement a plaintext object did not meet.
+/// An invariant a format object did not meet.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Rule {
     /// A text code has the wrong prefix, or a frame has an unexpected kind.
@@ -35,11 +35,11 @@ pub enum Rule {
     NullKey,
     /// A key has a noncanonical numeric or escaped byte representation.
     KeyEncoding,
-    /// A snapshot record was outside the positions the snapshot covers.
+    /// A snapshot record or dismissal names a write outside its covered or read positions.
     Coverage,
     /// Snapshot sections, counts or their end marker did not match the header.
     SnapshotSequence,
-    /// A stream's declared byte length or row count disagrees with its frames.
+    /// A stream's declared byte length or record count disagrees with its frames.
     StreamLength,
     /// A chunk's index or byte length did not match its file header.
     Chunk,
