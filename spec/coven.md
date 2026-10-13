@@ -500,6 +500,81 @@ the file's ranges under `F`.
 
 - A store lives on one provider: S3, Google Drive, Dropbox, OneDrive, or
   iCloud through CloudKit.
+- CloudKit is built into `coven-storage` on Apple platforms, using
+  `objc2-cloud-kit` and `block2` completion handlers awaited through a oneshot
+  channel. The app supplies its container identifier and the iCloud entitlement
+  for that container. Other platforms refuse CloudKit at setup with
+  `StorageFailure::ProviderUnavailable`; they never panic or require app code
+  implementing provider calls.
+  - Setup takes the container identifier, obtains the current user's record id,
+    and creates the store's custom zone with
+    [CKModifyRecordZonesOperation](https://developer.apple.com/documentation/cloudkit/ckmodifyrecordzonesoperation).
+    The recorded location retains container, owner and zone for restore and joins.
+    Coven uses that zone in the owner's private database or the participant's
+    shared database. Its object record names are the complete
+    canonical D10 paths, including the store id. These ASCII names fit
+    [CKRecord.ID's 255-character limit](https://developer.apple.com/documentation/cloudkit/ckrecord/id).
+  - Create-once saves a **new** record with that id using
+    [ifServerRecordUnchanged](https://developer.apple.com/documentation/cloudkit/ckmodifyrecordsoperation/recordsavepolicy/ifserverrecordunchanged).
+    An occupied name returns `CKError.serverRecordChanged`, mapped to
+    `AlreadyExists`; coven never merges or overwrites that immutable record.
+    Positions and clock objects instead use
+    [allKeys](https://developer.apple.com/documentation/cloudkit/ckmodifyrecordsoperation/recordsavepolicy/allkeys)
+    for replacement; conditional replacement retains the fetched change tag
+    and uses `ifServerRecordUnchanged`.
+  - The publication record's server-assigned
+    [creationDate](https://developer.apple.com/documentation/cloudkit/ckrecord/creationdate)
+    is an immutable object's complete-publication time. Replacements use
+    [modificationDate](https://developer.apple.com/documentation/cloudkit/ckrecord/modificationdate).
+    [recordChangeTag](https://developer.apple.com/documentation/cloudkit/ckrecord/recordchangetag)
+    supplies revision identity and changes on every save, including equal-byte
+    replacements. Missing size, date or revision is a protocol error.
+  - [CKQuery](https://developer.apple.com/documentation/cloudkit/ckquery) uses
+    `path BEGINSWITH` the exact requested prefix, in the configured zone, on
+    the published-object record type. Its schema indexes `path`, store,
+    object kind and log number. Metadata queries exclude asset fields through
+    `desiredKeys` and follow every
+    [CKQueryOperation cursor](https://developer.apple.com/documentation/cloudkit/ckqueryoperation).
+    The common listing margin is `M = 1 hour`: a query at storage time `T`
+    establishes completeness only for publications before `T - M`. This is
+    coven's provider assumption, not an Apple guarantee of an indexing deadline.
+    Exact-id fetches establish status; only `CKError.unknownItem` means absent,
+    while `zoneNotFound` means `ContainerNotFound`.
+  - [CKAsset](https://developer.apple.com/documentation/cloudkit/ckasset) carries
+    encrypted bytes. Saving a record saves its assets too; coven never exposes
+    an incomplete asset as a complete object. Bounded asset parts support ranges
+    without downloading unrelated parts. CloudKit has no application-controlled
+    resumable byte upload: a recorded upload is coven's durable session id,
+    destination, total and confirmed part boundary. Each asset part and its
+    confirmed boundary are saved together in the custom zone using
+    [atomic modification](https://developer.apple.com/documentation/cloudkit/ckmodifyrecordsoperation/isatomic).
+    Resumption fetches that session by id, including after a lost reply, and
+    retains every confirmed part (§16.5).
+  - Large-object publication creates the destination record only after all
+    parts exist, atomically marking the session published. Its `creationDate`
+    therefore dates complete publication, never session creation or an early
+    part. Pending sessions and parts use separate record types and reserved
+    names outside D10; listings cannot mistake them for published objects.
+    The session id identifies a lost successful publication reply. Abort
+    preserves published objects; deletion removes the publication and its
+    owned parts. CloudKit's
+    [deleteSelf references](https://developer.apple.com/documentation/cloudkit/ckrecord/reference)
+    express ownership of those parts. Native atomic saves need no conditional
+    server-side copy to hide partial record uploads.
+  - Account sharing uses a private, read/write
+    [CKShare for the configured zone](https://developer.apple.com/documentation/cloudkit/ckshare).
+    Only the owner changes participants. Coven fetches the participant's native
+    identity, saves the share and puts its server-issued URL in the encrypted
+    invite. Joining fetches
+    [share metadata](https://developer.apple.com/documentation/cloudkit/ckfetchsharemetadataoperation),
+    verifies container, owner and zone, then calls
+    [CKAcceptSharesOperation](https://developer.apple.com/documentation/cloudkit/ckacceptsharesoperation).
+    Removing a member removes only that participant and saves the share;
+    owner, public or otherwise nonexclusive access is retained and reported.
+    `notAuthenticated`, `permissionFailure` and `quotaExceeded` preserve their
+    native causes as authentication, permission and quota failures respectively.
+    `partialFailure` is interpreted through `CKPartialErrorsByItemIDKey`, never
+    as success; `CKErrorRetryAfterKey` supplies the provider's retry delay.
 - Every member reaches the storage using their own provider account.
 - For Google Drive, Dropbox and OneDrive, the app triggers `authenticate` on
   the builder or open handle. Coven builds the sign-in request, checks the
@@ -670,8 +745,7 @@ the file's ranges under `F`.
   Exact status and reads carry the complete encrypted size, native object id,
   revision, timestamp and its resolution, plus any returned checksum. A ranged
   read still describes the complete object. Drive uses `headRevisionId` (its file `version` can also change on reads), OneDrive
-  uses `eTag`, and Dropbox uses `rev`. CloudKit's bridge supplies its record
-  change tag. On replaceable S3 paths, GCS uses its generation; AWS uses a
+  uses `eTag`, and Dropbox uses `rev`. CloudKit uses the record's `recordChangeTag`. On replaceable S3 paths, GCS uses its generation; AWS uses a
   version id when versioning is enabled, otherwise a fresh `coven-revision`
   value stored atomically in the replacement's user metadata. Immutable S3
   objects use their ETag. S3 listings fetch exact status for replaceable paths
@@ -714,8 +788,8 @@ the file's ranges under `F`.
   OneDrive's native session uploads expose unfinished objects, and their
   `createdDateTime` records session start. These paths do not satisfy the
   complete-publication requirement above; adapters expose native observations
-  without inventing a later time. CloudKit's native guarantees depend on the
-  bridge and require live verification.
+  without inventing a later time. CloudKit's atomic publication and asset-session guarantees require live
+  verification through a signed, entitled host.
 - Device paths have one intended writer: the device they name. Retrying
   that writer uses fixed bytes. A copied identity can violate this;
   the checks in §10 detect it before sending or when a path is occupied.
@@ -757,8 +831,11 @@ the file's ranges under `F`.
   candidate provider with the supplied credentials before reserving a store-log
   entry or committing credentials, keys, location or restore code. It creates a
   fresh sealed test object, requires a second create to be refused, verifies
-  whole and ranged reads and listing, then deletes the object and checks it is
-  absent. A failure names the failed check and preserves the previous connection
+  whole and ranged reads, and requires its scoped listing query to succeed.
+  If that query returns the fresh probe, its size must agree; absence inside
+  `M` is permitted and establishes no completeness claim. The check then deletes
+  the object and verifies absence by exact-id read. A failure names the failed
+  check and preserves the previous connection
   ([E5](api.md#e5-storage-and-sync)).
 - Every storage path starts with the store's id, including the provider
   check's temporary object ([D10](format.md#d10-paths)).
@@ -4964,7 +5041,7 @@ holds failures and rejected entries, without making either wait look completed.
 
 - Everything else reaches a capability through the object that owns it,
   given to it when it is built.
-  - The clock, the id source, key custody, the CloudKit calls and the
+  - The clock, the id source, key custody and the
     OAuth clients and presenter are all set on the builder ([E1](api.md#e1-opening)), so
     a test replaces each one.
   - E.g. the snapshot writer never calls the system clock; it asks the

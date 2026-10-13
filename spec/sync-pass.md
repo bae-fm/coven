@@ -689,8 +689,8 @@ reversible effect needs; record eviction and charge any later fetch to it.
 A disk failure fails the requesting work and records its reason. Never drop
 pending bytes or advance positions while reporting success.
 
-CloudKit streams bounded asset parts through E1's bridge. Each native asset
-request is counted as a transfer part; one logical stream is not a claim of
+CloudKit streams bounded asset parts through coven-storage's native adapter.
+Each native asset request is counted as a transfer part; one logical stream is not a claim of
 one native request for an object held in several assets.
 
 **Carol's import.** Retention has already checked Ana's write header.

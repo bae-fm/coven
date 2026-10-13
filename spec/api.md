@@ -89,15 +89,11 @@ pub enum Audience {
 - *Identity custody* keeps the stable member id and held private pairs,
   including historical credentials and a pending replacement candidate
   ([§11.1](coven.md#111-cryptography)).
-- The app's `CloudKitOps` maps paths to stable record names in the configured
-  container, owner and zone; all bytes it receives are encrypted.
-  Paths expose `as_str`, `parse` for returned names, and `is_replaceable`;
-  prefixes expose `as_str`. The bridge receives locations chosen by coven.
-- The bridge creates objects once and replaces posted positions and clock objects atomically.
-  Large uploads use bounded CKAssets, keep their ids and parts across
-  restarts, and publish a record only after all parts are stored.
-- Bridge failures keep their native cause in `StorageError::Provider`,
-  classified with `CloudProvider::CloudKit` and a `StorageFailure`.
+- CloudKit is a built-in provider on Apple platforms (§4). The app supplies
+  the container identifier and its iCloud entitlement; coven-storage calls
+  Apple's CloudKit framework through `objc2-cloud-kit`. Native failures retain
+  their cause in `StorageError::Provider`. On other platforms, setup returns
+  `StorageFailure::ProviderUnavailable`.
 
 ```rust
 /// A store's UUID, independent of its name and location (E1).
@@ -227,7 +223,7 @@ impl ByteRange {
     pub fn is_empty(self) -> bool;
 }
 
-/// Metadata of a complete object returned by CloudKit read, listing or status (§4).
+/// Metadata of a complete object returned by a provider read, listing or status (§4).
 pub struct StoredObject {
     /// Validated path relative to the store's location.
     pub path: ObjectPath,
@@ -279,69 +275,6 @@ impl StorageStream {
     /// The next bounded buffer, EOF, or the original typed storage failure.
     /// A native asset request is charged separately from this logical stream.
     pub async fn next(&mut self) -> Result<Option<Vec<u8>>, StorageError>;
-}
-
-/// A durable upload prepared by the app's CloudKit bridge (§16.5).
-pub struct CloudKitUpload {
-    /// The bridge's recorded session capability, erased on drop.
-    pub id: SecretText,
-    /// The maximum part size the bridge accepts.
-    pub part_size: usize,
-}
-
-/// The bridge's confirmed upload state (§16.5).
-pub enum CloudKitUploadStatus {
-    /// Bytes stored before publishing the complete object.
-    Uploading {
-        /// The contiguous stored prefix, in bytes.
-        confirmed: u64,
-    },
-    /// This session's object has been published in the zone.
-    Complete,
-}
-
-/// Native CloudKit calls implemented by the app (§4, E1).
-#[async_trait]
-pub trait CloudKitOps: Send + Sync {
-    /// Whether the signed-in Apple account owns this store's shared zone.
-    async fn is_owner(&self, location: &StorageConfig) -> Result<bool, StorageError>;
-    /// Maximum encrypted body in one native call; nonzero, set by the asset representation.
-    fn single_request_limit(&self) -> u64;
-    /// Creates complete encrypted bytes using the server's create-only policy.
-    async fn create(&self, location: &StorageConfig, path: &ObjectPath, bytes: &[u8]) -> Result<(), StorageError>;
-    /// Replaces complete posted positions or a clock object atomically (§6, §9).
-    async fn replace(&self, location: &StorageConfig, path: &ObjectPath, bytes: &[u8]) -> Result<(), StorageError>;
-    /// Reads the whole object or only the asset parts covering the range (§16.3).
-    async fn read(&self, location: &StorageConfig, path: &ObjectPath, range: Option<ByteRange>) -> Result<StorageStream, StorageError>;
-    /// Status for exactly this path; None means confirmed absent. A failure
-    /// must not return None. Pending assets are not complete objects (§4).
-    async fn status(&self, location: &StorageConfig, path: &ObjectPath) -> Result<Option<StoredObject>, StorageError>;
-    /// Lists complete objects with encrypted size, revision and server publication time,
-    /// following every native query cursor; pending assets are not listed.
-    async fn list(&self, location: &StorageConfig, prefix: &ObjectPrefix) -> Result<Vec<StoredObject>, StorageError>;
-    /// Lists store-log writers without enumerating history (§4). Query indexed
-    /// path components for this store's entry 1 records, one per writer;
-    /// these records are never deleted. Follow all native query pages.
-    async fn list_store_log_devices(&self, location: &StorageConfig, store: StoreId) -> Result<Vec<DeviceId>, StorageError>;
-    /// Deletes an object and its parts; an already absent object succeeds (§18).
-    async fn delete(&self, location: &StorageConfig, path: &ObjectPath) -> Result<(), StorageError>;
-    /// Saves read/write CKShare participation and returns its native share URL.
-    async fn grant_access(&self, location: &StorageConfig, email: &str) -> Result<SecretText, StorageError>;
-    /// Removes only this account, preserving the owner and grants reaching others.
-    async fn revoke_access(&self, location: &StorageConfig, email: &str) -> Result<Vec<RetainedAccess>, StorageError>;
-    /// Fetches share metadata, verifies container/owner/zone against location, then
-    /// accepts as the signed-in recipient. Repeating acceptance succeeds.
-    async fn accept_share(&self, location: &StorageConfig, url: &SecretText) -> Result<(), StorageError>;
-    /// Prepares a durable upload without publishing its destination (§16.5).
-    async fn begin_upload(&self, location: &StorageConfig, path: &ObjectPath, total: u64) -> Result<CloudKitUpload, StorageError>;
-    /// Returns confirmed progress, including parts whose replies were lost.
-    async fn upload_status(&self, location: &StorageConfig, id: &SecretText) -> Result<CloudKitUploadStatus, StorageError>;
-    /// Stores a part at its byte offset; retrying identical bytes is idempotent.
-    async fn upload_part(&self, location: &StorageConfig, id: &SecretText, offset: u64, bytes: &[u8]) -> Result<(), StorageError>;
-    /// Publishes all parts atomically; a retry succeeds without replacing another object.
-    async fn finish_upload(&self, location: &StorageConfig, id: &SecretText) -> Result<(), StorageError>;
-    /// Discards pending parts without deleting a published object.
-    async fn abort_upload(&self, location: &StorageConfig, id: &SecretText) -> Result<(), StorageError>;
 }
 
 /// A database or store call's result, retaining its typed cause (§20.3).
@@ -805,10 +738,6 @@ impl CovenBuilder {
     /// or join. Dropping the future cancels sign-in; failure retains the prior
     /// sign-in. Success returns no tokens to the app.
     pub async fn authenticate(&mut self, provider: CloudProvider) -> Result<(), OAuthError>;
-
-    /// The app's CloudKit calls, on Apple platforms. Every iCloud operation
-    /// goes through them.
-    pub fn apply_cloudkit_ops(self, ops: Option<Arc<dyn CloudKitOps>>) -> Self;
 
     /// How many file uploads run at once. Defaults to one.
     pub fn max_concurrent_uploads(self, n: NonZeroUsize) -> Self;
@@ -1560,7 +1489,7 @@ pub enum CloudProvider {
     Dropbox,
     /// OneDrive.
     OneDrive,
-    /// iCloud through the app's CloudKit calls.
+    /// iCloud through coven-storage's native Apple-platform adapter.
     CloudKit,
 }
 
@@ -1584,7 +1513,7 @@ pub enum StorageConfig {
     Dropbox { namespace_id: String },
     /// A OneDrive folder; paths within it start with the store id.
     OneDrive { drive_id: String, folder_id: String },
-    /// The CloudKit zone reached by the app's bridge.
+    /// The CloudKit custom zone reached by the built-in adapter.
     CloudKit {
         /// The app's CloudKit container.
         container: String,
@@ -1612,6 +1541,8 @@ pub struct TransferLimits {
 
 /// The single storage failure classification used by every app-facing error (§20.3).
 pub enum StorageFailure {
+    /// This platform cannot use the selected built-in provider.
+    ProviderUnavailable,
     /// No route to the provider, a timeout, or an interrupted response.
     Network,
     /// Credentials were refused or must be refreshed.
@@ -1668,7 +1599,7 @@ pub enum StorageFailure {
     },
     /// Parsing recorded provider data failed.
     Encoding,
-    /// Persisting provider settings or upload progress failed.
+    /// Local file access or persisting provider settings or upload progress failed.
     File,
     /// This installation has no member keys in custody.
     MemberKeysMissing,
@@ -1685,7 +1616,7 @@ pub enum StorageError {
     Failure(StorageFailure),
     /// A failure with its diagnostic or original local cause.
     Caused { failure: StorageFailure, source: Box<dyn std::error::Error + Send + Sync> },
-    /// A provider failure with its original transport, SDK or bridge cause.
+    /// A provider failure with its original transport, SDK or framework cause.
     Provider {
         provider: CloudProvider,
         failure: StorageFailure,
@@ -1743,7 +1674,7 @@ pub enum StorageCheck {
     Read,
     /// Read exactly an interior byte range.
     ReadRange,
-    /// Include the object and its size in a listing.
+    /// Run the scoped query and check returned probe metadata; fresh objects may be omitted.
     List,
     /// Delete the object and confirm it is absent.
     Delete,
@@ -2014,10 +1945,11 @@ impl CovenHandle {
         device_name: &str,
     ) -> Result<ConnectedStorage, StorageSetupError>;
 
-    /// Sets up storage on iCloud, through the builder's CloudKit calls.
+    /// Sets up iCloud through the built-in adapter; other platforms return ProviderUnavailable.
+    /// Coven obtains the current owner and creates the store's custom zone.
     pub async fn setup_cloudkit_storage(
         &self,
-        storage: StorageConfig,
+        container: &str,
         device_name: &str,
     ) -> Result<ConnectedStorage, StorageSetupError>;
 
@@ -2989,8 +2921,8 @@ pub async fn restore_from_keychain(
 ) -> Result<Option<CovenHandle>, BootstrapError>;
 
 /// Completes the provider's recipient acceptance using the encrypted invite
-/// code before sending the join request. CloudKit acceptance runs through the
-/// app's CloudKitOps calls. If access is removed while joining, the provider's
+/// code before sending the join request. CloudKit acceptance uses coven-storage's
+/// native adapter. If access is removed while joining, the provider's
 /// permission failure reaches the app and an admin can invite again. Keys and
 /// credentials are committed only after bootstrap succeeds.
 ///
@@ -3055,7 +2987,6 @@ let mut builder = Coven::builder(layout.clone())
     .synced_tables(tables())
     .migrations(migrations())
     .oauth_clients(oauth_clients.clone())
-    .apply_cloudkit_ops(cloudkit_ops.clone())
     .clock(clock.clone())
     .id_source(ids.clone());
 if info.needs_oauth {
