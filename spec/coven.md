@@ -656,6 +656,30 @@ the file's ranges under `F`.
   - E.g. Ben's laptop signs with yesterday's date. The first reply supplies
     the offset; its one retry uses it without asking Ben to change his keys.
 
+- OneDrive upload sessions expose unfinished items, so coven uploads to
+  `<store>/.coven-uploads/<session>` inside the configured folder. The reserved
+  namespace is distinct from every coven object path in D10. The session's
+  coven-generated UUID is recorded with its native upload capability before
+  sending parts; retries and resume derive the same temporary name.
+  - After all parts are stored, coven publishes with one server-side Graph
+    `copy` to the final parent and name, with
+    `@microsoft.graph.conflictBehavior=fail`. It follows the returned monitor
+    URL until the asynchronous copy completes. An occupied name keeps its
+    original bytes and time. Recovery after a lost publication reply requires
+    complete-byte verification before confirming an existing object.
+  - The copy retains the temporary's `createdDateTime`, which records session
+    start. Publication therefore uses the top-level `lastModifiedDateTime`,
+    assigned by the copy. Coven never modifies a published immutable object;
+    reads and listings retain that first publication time.
+  - Successful and definitively refused copies delete their temporary.
+    Transport failures and retryable responses retain it for the recorded
+    session. A failed deletion fails the call; operation and cleanup failures
+    are both preserved, and the recording remains available for retry.
+  - Abort cancels an open native session and deletes its temporary, including
+    after native upload completion. The same recorded-session abandonment
+    cleanup removes leftovers after a crash. Published-object listings exclude
+    the reserved temporary namespace, including unfinished uploads.
+
 - What coven needs from a provider:
   - create an object, refusing an existing path without replacing its bytes,
     in one request or, past the provider's single request limit, through its
@@ -728,8 +752,8 @@ the file's ranges under `F`.
   - Dropbox metadata: `server_modified`, in whole seconds, so
     `δ = 1 second`; never use `client_modified`
     ([timestamp format](https://github.com/dropbox/dropbox-api-spec/blob/main/common.stone)).
-  - OneDrive metadata: `createdDateTime` for creation and the top-level
-    `lastModifiedDateTime` for replacement, retaining the returned
+  - OneDrive metadata: the top-level `lastModifiedDateTime` for publication
+    and replacement, retaining the returned
     `DateTimeOffset` precision; never use the client's `fileSystemInfo` times
     ([driveItem](https://learn.microsoft.com/en-us/graph/api/resources/driveitem?view=graph-rest-1.0)).
   - CloudKit record fetch: the server's creation or modification date,
@@ -785,10 +809,10 @@ the file's ranges under `F`.
   single-request PUT timestamps and GCS conditional-copy timestamps describe
   completion. AWS multipart `Last-Modified` instead records initiation
   ([system metadata](https://docs.aws.amazon.com/AmazonS3/latest/userguide/UsingMetadata.html)).
-  OneDrive's native session uploads expose unfinished objects, and their
-  `createdDateTime` records session start. These paths do not satisfy the
-  complete-publication requirement above; adapters expose native observations
-  without inventing a later time. CloudKit's atomic publication and asset-session guarantees require live
+  That AWS multipart path does not satisfy the complete-publication requirement
+  above; its adapter exposes the native observation without inventing a later
+  time. OneDrive publishes session uploads by conditional copy as described
+  above. CloudKit's atomic publication and asset-session guarantees require live
   verification through a signed, entitled host.
 - Device paths have one intended writer: the device they name. Retrying
   that writer uses fixed bytes. A copied identity can violate this;
