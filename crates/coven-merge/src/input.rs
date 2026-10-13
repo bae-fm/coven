@@ -116,7 +116,7 @@ pub struct ColumnValue<V> {
     /// The app's value; the merge does not interpret SQL values.
     pub value: V,
     /// Foreign-key names and their parents for this column's written value.
-    /// For a composite reference the database combines the winning columns.
+    /// Each cell retains the complete parent identity recorded by its setter.
     pub parents: BTreeMap<ForeignKey, Parent>,
 }
 
@@ -198,7 +198,8 @@ pub struct Write<V, P = BTreeSet<WriteId>> {
     pub id: WriteId,
     /// Unique total-order timestamp (§7.2).
     pub timestamp: Timestamp,
-    /// Every write the author had applied, including its own earlier writes.
+    /// Every write position the author had consumed, including its own earlier
+    /// writes. Consuming a position does not imply retaining its row changes.
     /// A position frontier can represent the same relation without expansion.
     pub had_read: P,
     /// At most one change for each table, key and audience.
@@ -228,7 +229,7 @@ impl<V, P: WritePast> Write<V, P> {
 /// A frontier contains maximal writes covering the set: all covered writes
 /// have timestamps at most a frontier timestamp. Device logs are contiguous.
 pub trait WritePast {
-    /// Whether the writer had applied this write.
+    /// Whether the writer had consumed this write's position.
     fn contains(&self, write: &WriteId) -> bool;
     /// Writes whose causal pasts cover this entire past, including themselves.
     fn frontier(&self) -> impl Iterator<Item = &WriteId>;

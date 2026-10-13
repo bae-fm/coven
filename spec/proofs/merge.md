@@ -818,10 +818,9 @@ COVEN_MERGE_LEAN="$PWD/spec/proofs/merge/.lake/build/bin/mergeRunner" \
 
 ### B17 Receive order, progress, and dropping by data
 
-This is a proposal implementing the user principle: building on a dropped
-write does not make that write count. The normative spec files are unchanged;
-the edits required to align them are listed below and in [queue.md](queue.md).
-The reader-rescue model has been removed.
+This models the data rule in [§8](../coven.md#8-merge): building on a dropped
+change does not make that change count. Rust's remaining implementation
+obligations are listed below and in [queue.md](queue.md).
 
 **One data definition.** `DataDependency.dependsOnDropped` asks whether the
 change's recorded generation source or any cell setter it replaced has a
@@ -950,22 +949,11 @@ a downloaded write never attempted. Every changed replay decision requires an
 atomic rebuild of rows, provenance verdicts and losses; these functions model
 the completed transaction, not recovery by a later pass.
 
-**Spec edit checklist.** The normative files have not been edited.
-
-- §10: retain the inclusive per-write retirement window and hard post-read
-  refusal. Specify a consumed base drop, per-change dependency losses and
-  atomic recomputation when a non-final retiring entry changes. State that
-  the retirement verdict is final with its deciding entry; no reader rescues it.
-- §3: replace the undecided retirement-dependent-value wording with original
-  change accounting, distinguishing intentionally dropped bases from dependent
-  values kept as losses.
-- §17.1, E13 and D5: replace inherited read exclusion and whole queued-tail
-  loss with the shared data rule; the queue write-up gives the conversion cases.
-- D5/D7 and the loss API: retain authentic generation-source and old-setter
-  identities per row change, preserve original changes across conversion and
-  snapshots, and name dependency losses even for empty deletes. Decide the
-  concrete encoding; the Lean evidence is not an assertion that current bytes
-  already provide it. Keep consumed frontiers separate from applied data.
+**Normative rule and encoding.** §8 specifies per-change data dependence and
+original-change accounting. The Lean evidence is not an assertion that Rust's
+current write and snapshot encodings already retain those sources. Consumed
+frontiers remain separate from retained data; [queue.md](queue.md) describes
+the encoding and conversion obligations.
 
 **Rust obligations for the queue work.** Thread provider publication times and
 all kept retirements into admission. Capture and validate data provenance at
@@ -982,7 +970,7 @@ reload, dismissal and finality. Concrete conversion obligations are in
 readiness function. `lean_differential_receive` calls the real database
 prerequisite function across three logs and consumed prefixes. The Boolean,
 reset and schema runners retain their existing paths and comparison scope.
-No Rust implementation or differential for the data-loss proposal is added.
+This comparison does not cover a Rust implementation of per-change data losses.
 
 ### B18 Owner tables and row authenticity
 

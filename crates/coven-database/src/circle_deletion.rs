@@ -1,4 +1,4 @@
-//! A circle deletion’s explicit causal row write (§14.7).
+//! The explicit row write queued before publishing a circle deletion.
 
 use crate::{sqlite::DatabaseConnection, write_schema::WriteSchema, DbError};
 use coven_format::write::RowChange;
