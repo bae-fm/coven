@@ -773,7 +773,7 @@ retry bytes. These are counterexamples to removing those qualifications.
 
 Cryptographic sealing, decoding/authentication implementations, provider
 adapters, durable transactions and Rust equivalence remain outside these
-proofs. `IOTrace.checked` alone has no receipt payload; the bridge therefore
+proofs. `IOEvent.checked` alone has no receipt payload; the bridge therefore
 requires the completed scans and their time bounds explicitly. It does not
 infer successful reads from the event's name. The key/bytes association is the
 existing receipt model's `Attempt`, not a proof about actual ciphertext.
