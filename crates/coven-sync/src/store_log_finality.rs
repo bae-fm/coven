@@ -25,7 +25,7 @@ impl StoreLogSync {
 
     /// A complete catch-up precedes this publication. The following
     /// scan captures its status time before making any discovery request.
-    async fn observe_clock(&self, local: &LocalStoreLog) -> Result<(), SyncError> {
+    pub(super) async fn observe_clock(&self, local: &LocalStoreLog) -> Result<(), SyncError> {
         let member = self.operation_member()?;
         crate::write_seal::check_member(&local.log, &member, local.device)?;
         let newest = crate::key_introductions::newest(&local.log, &coven_merge::Audience::Store)

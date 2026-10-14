@@ -67,6 +67,7 @@ pub(crate) fn prefix(
     coven_format::sealed_snapshot::SnapshotObjectPrefix {
         audience: header.id.audience.clone(),
         key: coven_foundation::id_source::KeyId(uuid::Uuid::from_u128(1)),
+        caught_at: coven_format::value::StorageTime::new(1, 0).unwrap(),
         writes: header.writes.clone(),
         store_log: header.store_log.clone(),
     }

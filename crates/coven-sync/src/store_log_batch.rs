@@ -10,11 +10,10 @@ impl StoreLogSync {
     ) -> Result<(Vec<DamagedObject>, bool), SyncError> {
         let _scope = self.reads.enter();
         self.reads.reset_discovery();
-        let through = self
-            .finality
-            .lock()
-            .expect("finality lock poisoned")
-            .through();
+        let (through, sample) = {
+            let finality = self.finality.lock().expect("finality lock poisoned");
+            (finality.through(), finality.sample_time())
+        };
         let mut local = self.database.local_store_log().await?;
         let member = self
             .member_keys
@@ -273,6 +272,10 @@ impl StoreLogSync {
         };
         let complete = complete_through(None);
         if complete {
+            self.finality
+                .lock()
+                .expect("finality lock poisoned")
+                .complete_catch_up(sample);
             self.update_keys(&local.log, &member, &mut ring, &mut damages)
                 .await?;
         } else {

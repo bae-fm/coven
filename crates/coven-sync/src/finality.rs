@@ -18,10 +18,31 @@ pub(crate) const LISTING_MARGIN: Duration = Duration::from_secs(60 * 60);
 #[derive(Default)]
 pub(crate) struct Observation {
     sample: Option<(SystemTime, Duration)>,
+    /// The sample known before the reads of the latest complete catch-up.
+    caught_up: Option<SystemTime>,
     retry: Option<std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>>,
 }
 
 impl Observation {
+    /// The newest provider time known now, at its full precision.
+    pub(crate) fn sample_time(&self) -> Option<SystemTime> {
+        self.sample.map(|(time, _)| time)
+    }
+
+    /// Record the sample taken before a catch-up that has now completed. An
+    /// older sample is conservative for snapshot admission, so a catch-up
+    /// that started without one keeps the preceding value.
+    pub(crate) fn complete_catch_up(&mut self, sample: Option<SystemTime>) {
+        if sample.is_some() {
+            self.caught_up = sample;
+        }
+    }
+
+    /// The `T_c` a snapshot prepared now records (§15): never device time.
+    pub(crate) fn caught_up(&self) -> Option<SystemTime> {
+        self.caught_up
+    }
+
     pub(crate) fn through(&self) -> Option<(Duration, Duration)> {
         self.sample
             .and_then(|(time, unit)| observation_time(time, unit).map(|through| (through, unit)))

@@ -231,10 +231,6 @@ async fn io_differential_discovery() {
     use coven_database::LogInput;
     use coven_storage::test_utils::Faults;
     use serde_json::json;
-    use std::{
-        io::Write,
-        process::{Command, Stdio},
-    };
     let mut cases = Vec::new();
     let mut actual = Vec::new();
     for count in 0u64..=5 {
@@ -350,6 +346,15 @@ async fn io_differential_discovery() {
             }
         }
     }
+    assert_eq!(actual, io_runner(&cases));
+}
+
+/// Evaluate cases with the Lean IO runner that scripts/check.sh supplies.
+pub(crate) fn io_runner(cases: &[serde_json::Value]) -> Vec<serde_json::Value> {
+    use std::{
+        io::Write,
+        process::{Command, Stdio},
+    };
     let runner = std::env::var("COVEN_IO_RUNNER").expect("Lean IO runner");
     let mut child = Command::new(runner)
         .stdin(Stdio::piped())
@@ -360,12 +365,11 @@ async fn io_differential_discovery() {
         .stdin
         .take()
         .unwrap()
-        .write_all(&serde_json::to_vec(&cases).unwrap())
+        .write_all(&serde_json::to_vec(cases).unwrap())
         .unwrap();
     let output = child.wait_with_output().unwrap();
     assert!(output.status.success());
-    let expected: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(actual, expected);
+    serde_json::from_slice(&output.stdout).unwrap()
 }
 
 #[tokio::test]

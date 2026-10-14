@@ -419,14 +419,35 @@ impl StoreLogSync {
             .read()?
             .ok_or(SyncError::KeyUnavailable(key_id))?;
         let key = io::key(&ring, &id.audience, key_id)?;
+        let caught_at = self.catch_up_time().await?;
         let name = self
             .reserve_snapshot_files(record, &mut task, 1)
             .await?
             .remove(0);
-        self.seal_snapshot(id, key_id, key, member, path, &name)
+        self.seal_snapshot(id, key_id, caught_at, key, member, path, &name)
             .await?;
         self.save_snapshot_task(record, &task, 1).await?;
         Ok(Progress::Advanced)
+    }
+
+    /// §15's `T_c`: a fresh provider sample taken before a complete
+    /// catch-up. An older sample could already be more than a day old, so
+    /// every preparation observes storage time first; the device clock never
+    /// stands in for it.
+    async fn catch_up_time(&self) -> Result<coven_format::value::StorageTime, SyncError> {
+        self.observe_clock(&self.database.local_store_log().await?)
+            .await?;
+        self.catch_up().await?;
+        let sample = self
+            .finality
+            .lock()
+            .expect("finality lock poisoned")
+            .caught_up()
+            .ok_or_else(|| {
+                coven_storage::StorageFailure::Protocol
+                    .with_source("a complete catch-up recorded no storage time")
+            })?;
+        Ok(coven_format::value::StorageTime::from_system_time(sample)?)
     }
 
     async fn snapshot_grew(

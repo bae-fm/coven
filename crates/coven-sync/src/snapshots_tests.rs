@@ -176,6 +176,57 @@ async fn far_future_threshold_snapshot_and_later_writes_reload_on_a_new_device()
 }
 
 #[tokio::test]
+async fn the_signed_catch_up_time_is_a_provider_sample_never_device_time() {
+    let sampled = UNIX_EPOCH + Duration::new(1_760_400_000, 250_000_000);
+    let clock = Arc::new(coven_foundation::clock::FixedClock::new(sampled));
+    let storage = Arc::new(
+        MemoryStorage::builder()
+            .clock(clock.clone())
+            .time_resolution(Duration::from_millis(1))
+            .build()
+            .unwrap(),
+    );
+    let mut a = notes_device(storage.clone(), 1).await;
+    a.create(key(1)).await;
+    a.clock.set(sampled + Duration::from_secs(365 * 86400));
+    write_rows(&a, 0, 2, 17, Audience::Store).await;
+    upload(&a, &storage).await;
+    // Each preparation observes storage time first, including on a reopened
+    // owner and after storage time has moved on without new store objects.
+    for (reopen, later) in [(false, 0), (true, 0), (false, 2 * 86400)] {
+        if reopen {
+            a.reopen(storage.clone(), notes_tables(), notes_migrations())
+                .await;
+        }
+        let sampled = sampled + Duration::from_secs(later);
+        clock.set(sampled);
+        let expected = coven_format::value::StorageTime::from_system_time(sampled).unwrap();
+        let id = a.sync.write_snapshot(Audience::Store).await.unwrap();
+        let path = ObjectPath::snapshot(
+            store(1),
+            id.audience,
+            id.device,
+            NonZeroU64::new(id.number).unwrap(),
+        );
+        let bytes = storage.read(&path).await.unwrap();
+        use coven_format::sealed_snapshot::SnapshotObjectPrefix;
+        let length = SnapshotObjectPrefix::length(&bytes).unwrap();
+        let prefix = SnapshotObjectPrefix::decode(&bytes[..length]).unwrap();
+        assert_eq!(
+            prefix.caught_at, expected,
+            "reopened {reopen}, {later}s later"
+        );
+        assert_eq!(prefix.caught_at.nanos(), 250_000_000);
+        assert!(prefix.counts(
+            coven_format::value::StorageTime::from_system_time(
+                storage.status(&path).await.unwrap().unwrap().stored_at
+            )
+            .unwrap()
+        ));
+    }
+}
+
+#[tokio::test]
 async fn writing_resumes_after_each_recorded_step_with_identical_ciphertext() {
     'crashes: for crash_step in 0.. {
         let storage = snapshot_storage();

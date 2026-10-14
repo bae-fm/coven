@@ -16,6 +16,7 @@ impl StoreLogSync {
         &self,
         id: SnapshotId,
         key_id: KeyId,
+        caught_at: coven_format::value::StorageTime,
         key: DerivedKeys,
         member: &MemberKeys,
         path: &ObjectPath,
@@ -37,6 +38,7 @@ impl StoreLogSync {
                     .send(SnapshotObjectPrefix {
                         audience: header.id.audience.clone(),
                         key: key_id,
+                        caught_at,
                         writes: header.writes.clone(),
                         store_log: header.store_log.clone(),
                     })

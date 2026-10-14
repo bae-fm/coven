@@ -3,7 +3,7 @@
 use crate::chunks::CHUNK_SIZE;
 use crate::error::{bound, require, Error, Rule};
 use crate::sealed;
-use crate::value::{EntryPositions, WritePositions};
+use crate::value::{EntryPositions, StorageTime, WritePositions};
 use crate::wire::{Decoder, Encoder, Wire, MAX_ITEMS};
 use coven_crypto::{Signature, SEALED_OBJECT_CHUNK_OVERHEAD};
 use coven_foundation::id_source::KeyId;
@@ -18,12 +18,21 @@ pub struct SnapshotObjectPrefix {
     pub audience: Audience,
     /// The audience key sealing every chunk.
     pub key: KeyId,
+    /// The storage time `T_c` sampled before the catch-up this snapshot was
+    /// prepared from (§15). Fixed with the captured prefix across retries.
+    pub caught_at: StorageTime,
     /// Applied write positions, strictly increasing by device.
     pub writes: WritePositions,
     /// Applied store-log positions, strictly increasing by device.
     pub store_log: EntryPositions,
 }
 impl SnapshotObjectPrefix {
+    /// A snapshot counts only if its first complete publication is at most one
+    /// storage day after `caught_at`; readers ignore a later landing (§15).
+    pub fn counts(&self, landed: StorageTime) -> bool {
+        self.caught_at.within_day(landed)
+    }
+
     /// Next exclusive read boundary while fetching a signed prefix. Start with
     /// no bytes and append exactly the requested range until this equals the
     /// buffer length. Counts are bounded before reading their lists; these
@@ -59,7 +68,8 @@ impl SnapshotObjectPrefix {
         Ok(sealed - chunks * overhead)
     }
 
-    /// Encode kind 34, version, audience, key and both counted position lists.
+    /// Encode kind 34, version, audience, key, catch-up time and both counted
+    /// position lists.
     pub fn encode(&self) -> Result<Vec<u8>, Error> {
         self.writes.validate()?;
         self.store_log.validate()?;
@@ -68,6 +78,7 @@ impl SnapshotObjectPrefix {
         crate::FORMAT_VERSION.put(&mut out)?;
         self.audience.put(&mut out)?;
         self.key.put(&mut out)?;
+        self.caught_at.put(&mut out)?;
         // This unframed prefix has two independently bounded collections.
         let mut writes = Encoder::new();
         self.writes.put(&mut writes)?;
@@ -110,6 +121,7 @@ impl SnapshotObjectPrefix {
         let mut routing = Decoder::new(&bytes[3..writes_start])?;
         let audience = Audience::get(&mut routing)?;
         let key = KeyId::get(&mut routing)?;
+        let caught_at = StorageTime::get(&mut routing)?;
         routing.finish()?;
         let mut input = Decoder::new(&bytes[writes_start..entries_start])?;
         let writes = WritePositions::get(&mut input)?;
@@ -122,16 +134,18 @@ impl SnapshotObjectPrefix {
         Ok(Self {
             audience,
             key,
+            caught_at,
             writes,
             store_log,
         })
     }
 
+    /// Kind, version, audience, key and the 12-byte catch-up time.
     fn routing_length(bytes: &[u8]) -> Result<usize, Error> {
         sealed::prefix(bytes, 34)?;
         match *bytes.get(3).ok_or(Error::Truncated)? {
-            0 => Ok(20),
-            1 => Ok(36),
+            0 => Ok(32),
+            1 => Ok(48),
             tag => Err(Error::UnknownTag {
                 field: "audience",
                 tag,

@@ -194,4 +194,4 @@ pub(crate) async fn scan_tail(
 
 #[cfg(test)]
 #[path = "discovery_tests.rs"]
-mod tests;
+pub(crate) mod tests;

@@ -90,6 +90,65 @@ impl Wire for Audience {
 wire_struct!(WriteId, device, number);
 wire_struct!(EntryId, device, number);
 
+/// A provider storage sample: Unix seconds and a nanosecond fraction (D2).
+/// It keeps the sample's precision; ordering is time order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct StorageTime {
+    seconds: u64,
+    nanos: u32,
+}
+
+impl StorageTime {
+    /// One storage day, the upload allowance after a snapshot's catch-up (§15).
+    pub const DAY_SECONDS: u64 = 24 * 60 * 60;
+
+    /// A sample whose fraction is below one second.
+    pub fn new(seconds: u64, nanos: u32) -> Result<Self, Error> {
+        require(nanos < 1_000_000_000, "storage time", Rule::Nanoseconds)?;
+        Ok(Self { seconds, nanos })
+    }
+
+    /// The exact provider time, refusing one before the Unix epoch.
+    pub fn from_system_time(time: std::time::SystemTime) -> Result<Self, Error> {
+        let since = time
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| Error::Invalid {
+                field: "storage time",
+                rule: Rule::Range,
+            })?;
+        Self::new(since.as_secs(), since.subsec_nanos())
+    }
+
+    /// Whole Unix seconds.
+    pub fn seconds(self) -> u64 {
+        self.seconds
+    }
+
+    /// The fraction of a second, in nanoseconds.
+    pub fn nanos(self) -> u32 {
+        self.nanos
+    }
+
+    /// Whether `landed` is at most one storage day after this sample. A
+    /// deadline past the representable range admits every representable time.
+    pub fn within_day(self, landed: Self) -> bool {
+        match self.seconds.checked_add(Self::DAY_SECONDS) {
+            Some(seconds) => landed <= Self { seconds, ..self },
+            None => true,
+        }
+    }
+}
+
+impl Wire for StorageTime {
+    fn put(&self, out: &mut Encoder) -> Result<(), Error> {
+        self.seconds.put(out)?;
+        self.nanos.put(out)
+    }
+    fn get(input: &mut Decoder<'_>) -> Result<Self, Error> {
+        Self::new(Wire::get(input)?, Wire::get(input)?)
+    }
+}
+
 macro_rules! positions {
     ($ty:ident, $id:ty, $doc:literal) => {
         #[doc = $doc]

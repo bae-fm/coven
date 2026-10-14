@@ -43,6 +43,10 @@ pub enum Rule {
     StreamLength,
     /// A chunk's index or byte length did not match its file header.
     Chunk,
+    /// A storage time's fraction is one second or more.
+    Nanoseconds,
+    /// A storage time precedes the Unix epoch.
+    Range,
 }
 
 /// A typed failure, preserving the field and the failed structural requirement.

@@ -11,6 +11,7 @@ fn listed_snapshot_size_recovers_plaintext_at_chunk_boundaries() {
     let prefix = SnapshotObjectPrefix {
         audience: Audience::Store,
         key: KeyId(uuid::Uuid::from_bytes([1; 16])),
+        caught_at: test_utils::caught_at(),
         writes: crate::test_utils::snapshot_header().writes,
         store_log: crate::test_utils::snapshot_header().store_log,
     };
@@ -56,6 +57,7 @@ fn prefix_read_boundaries_stop_at_the_signature_and_bound_each_count() {
         let prefix = SnapshotObjectPrefix {
             audience,
             key: KeyId(uuid::Uuid::nil()),
+            caught_at: test_utils::caught_at(),
             writes: crate::test_utils::snapshot_header().writes,
             store_log: crate::test_utils::snapshot_header().store_log,
         };
@@ -89,6 +91,7 @@ fn sealed_snapshot_has_its_own_kind_outside_the_plaintext_frames() {
     let prefix = SnapshotObjectPrefix {
         audience: Audience::Store,
         key: KeyId(uuid::Uuid::from_bytes([1; 16])),
+        caught_at: test_utils::caught_at(),
         writes: crate::test_utils::snapshot_header().writes,
         store_log: crate::test_utils::snapshot_header().store_log,
     };
@@ -108,6 +111,7 @@ fn a_snapshot_is_sealed_opened_and_applied_a_chunk_at_a_time() {
     let prefix = SnapshotObjectPrefix {
         audience: Audience::Store,
         key: key.id(),
+        caught_at: test_utils::caught_at(),
         writes: crate::test_utils::snapshot_header().writes,
         store_log: crate::test_utils::snapshot_header().store_log,
     };
@@ -172,6 +176,7 @@ fn prefix_and_chunk_lengths_are_bounded_and_have_no_aliases() {
         let prefix = SnapshotObjectPrefix {
             audience,
             key: KeyId(uuid::Uuid::from_bytes([0xab; 16])),
+            caught_at: test_utils::caught_at(),
             writes: crate::test_utils::snapshot_header().writes,
             store_log: crate::test_utils::snapshot_header().store_log,
         };
@@ -222,6 +227,7 @@ fn positions_are_canonical_and_each_list_has_its_own_bound() {
     let mut prefix = SnapshotObjectPrefix {
         audience: Audience::Store,
         key: KeyId(uuid::Uuid::nil()),
+        caught_at: test_utils::caught_at(),
         writes: WritePositions(
             (0..MAX_ITEMS as u64)
                 .map(|i| WriteId {
@@ -250,12 +256,12 @@ fn positions_are_canonical_and_each_list_has_its_own_bound() {
     prefix.store_log.0.truncate(2);
     let bytes = prefix.encode().unwrap();
     let mut bad = bytes.clone();
-    bad[20..24].copy_from_slice(&u32::MAX.to_be_bytes());
+    bad[32..36].copy_from_slice(&u32::MAX.to_be_bytes());
     assert!(matches!(
         SnapshotObjectPrefix::decode(&bad),
         Err(Error::Limit { .. })
     ));
-    for offset in [24, 60] {
+    for offset in [36, 72] {
         let mut bad = bytes.clone();
         bad[offset..offset + 16].copy_from_slice(&bytes[offset + 16..offset + 32]);
         assert!(SnapshotObjectPrefix::decode(&bad).is_err());
@@ -263,4 +269,86 @@ fn positions_are_canonical_and_each_list_has_its_own_bound() {
         bad[offset + 8..offset + 16].fill(0);
         assert!(SnapshotObjectPrefix::decode(&bad).is_err());
     }
+}
+
+#[test]
+fn caught_at_follows_the_key_and_keeps_its_subsecond_sample() {
+    use crate::value::StorageTime;
+    let prefix = test_utils::snapshot_prefix(&test_utils::snapshot_header());
+    let bytes = prefix.encode().unwrap();
+    // kind, version, store audience and key, then seconds and nanoseconds.
+    assert_eq!(&bytes[20..28], &1_760_400_000u64.to_be_bytes());
+    assert_eq!(&bytes[28..32], &123_456_789u32.to_be_bytes());
+    assert_eq!(SnapshotObjectPrefix::decode(&bytes).unwrap(), prefix);
+    let sample = std::time::UNIX_EPOCH + std::time::Duration::new(1_760_400_000, 123_456_789);
+    assert_eq!(
+        StorageTime::from_system_time(sample).unwrap(),
+        test_utils::caught_at()
+    );
+    assert!(StorageTime::from_system_time(
+        std::time::UNIX_EPOCH - std::time::Duration::from_nanos(1)
+    )
+    .is_err());
+    for end in 20..32 {
+        assert_eq!(
+            SnapshotObjectPrefix::decode(&bytes[..end]),
+            Err(Error::Truncated)
+        );
+    }
+}
+
+#[test]
+fn a_fraction_of_one_second_or_more_is_refused() {
+    let bytes = test_utils::snapshot_prefix(&test_utils::snapshot_header())
+        .encode()
+        .unwrap();
+    for (nanos, valid) in [
+        (999_999_999u32, true),
+        (1_000_000_000, false),
+        (u32::MAX, false),
+    ] {
+        let mut changed = bytes.clone();
+        changed[28..32].copy_from_slice(&nanos.to_be_bytes());
+        let decoded = SnapshotObjectPrefix::decode(&changed);
+        if valid {
+            assert_eq!(decoded.unwrap().encode().unwrap(), changed);
+        } else {
+            assert_eq!(
+                decoded,
+                Err(Error::Invalid {
+                    field: "storage time",
+                    rule: crate::error::Rule::Nanoseconds,
+                })
+            );
+        }
+    }
+    assert!(crate::value::StorageTime::new(0, 1_000_000_000).is_err());
+}
+
+#[test]
+fn counting_admits_exactly_one_day_and_never_rounds_forward() {
+    use crate::value::StorageTime;
+    let time = |seconds, nanos| StorageTime::new(seconds, nanos).unwrap();
+    let mut prefix = test_utils::snapshot_prefix(&test_utils::snapshot_header());
+    prefix.caught_at = time(100, 500);
+    for (landed, counts) in [
+        (time(0, 0), true),
+        (time(100, 500), true),
+        (time(86_500, 499), true),
+        (time(86_500, 500), true),
+        (time(86_500, 501), false),
+        (time(86_501, 0), false),
+    ] {
+        assert_eq!(prefix.counts(landed), counts, "{landed:?}");
+    }
+    // `caught_at = (100, 0)` admits (86500, 0) but not (86501, 0) (D9).
+    prefix.caught_at = time(100, 0);
+    assert!(prefix.counts(time(86_500, 0)));
+    assert!(!prefix.counts(time(86_500, 1)));
+    // A deadline past the representable range admits every representable time.
+    prefix.caught_at = time(u64::MAX - 1, 0);
+    assert!(prefix.counts(time(u64::MAX, 999_999_999)));
+    prefix.caught_at = time(u64::MAX - StorageTime::DAY_SECONDS, 7);
+    assert!(prefix.counts(time(u64::MAX, 7)));
+    assert!(!prefix.counts(time(u64::MAX, 8)));
 }

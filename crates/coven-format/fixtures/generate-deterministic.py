@@ -1,4 +1,4 @@
-"""Generate D11 write/entry fixtures independently of Rust, using libsodium.
+"""Generate sealed write, entry and snapshot fixtures independently of Rust, using libsodium.
 
 Run with Python 3 and libsodium installed. All keys are public test material.
 The plaintext frames and clear prefix come from the checked-in format fixture.
@@ -29,6 +29,11 @@ def chunk(sodium, key, path, prefix, section, index, plaintext):
     fields = (path, prefix, section.to_bytes(8, "big"), index.to_bytes(8, "big"))
     digest = hashlib.sha256(plaintext).digest()
     nonce = hmac.digest(key, context(b"coven/object-nonce/v2", *fields, digest), "sha256")[:24]
+    return sealed_chunk(sodium, key, path, prefix, section, index, plaintext, nonce)
+
+
+def sealed_chunk(sodium, key, path, prefix, section, index, plaintext, nonce):
+    fields = (path, prefix, section.to_bytes(8, "big"), index.to_bytes(8, "big"))
     aad = context(b"coven/object-chunk/v1", *fields)
     ciphertext = c.create_string_buffer(len(plaintext) + 16)
     length = c.c_ulonglong()
@@ -40,18 +45,22 @@ def chunk(sodium, key, path, prefix, section, index, plaintext):
     return len(plaintext).to_bytes(4, "big") + nonce + ciphertext.raw
 
 
-def signed(sodium, path, body):
+def signature(sodium, message):
     public = c.create_string_buffer(32)
     secret = c.create_string_buffer(64)
     checked(sodium.crypto_sign_seed_keypair(public, secret, bytes([0x33]) * 32))
-    message = context(b"coven/object-signature/v1", path, hashlib.sha256(body).digest())
-    signature = c.create_string_buffer(64)
+    result = c.create_string_buffer(64)
     length = c.c_ulonglong()
     checked(sodium.crypto_sign_detached(
-        signature, c.byref(length), message, len(message), secret,
+        result, c.byref(length), message, len(message), secret,
     ))
     assert length.value == 64
-    return body + signature.raw
+    return result.raw
+
+
+def signed(sodium, path, body):
+    message = context(b"coven/object-signature/v1", path, hashlib.sha256(body).digest())
+    return body + signature(sodium, message)
 
 
 def main():
@@ -73,17 +82,19 @@ def main():
     frames = [bytes.fromhex(line) for line in (directory / "v1.hex").read_text().splitlines()]
     store = b"10101010-1010-1010-1010-101010101010/"
     path = store + b"devices/1/3"
-    # The write prefix follows the frame examples; its header and part chunks follow it.
-    first = next(i for i, frame in enumerate(frames) if frame[0] == 32)
-    prefix = frames[first]
-    assert frames[first + 1][0] == 1
+    # The write prefix (kind 32) follows the plaintext frames; its header and
+    # part chunks follow it, then the snapshot prefix (kind 34) and its chunks.
+    write_at = next(i for i, frame in enumerate(frames) if frame[0] == 32)
+    snapshot_at = next(i for i, frame in enumerate(frames) if frame[0] == 34)
+    prefix = frames[write_at]
+    assert frames[write_at + 1][0] == 1 and snapshot_at == write_at + 6
     body = prefix
     for frame, section, index, key in [
-        (frames[first + 1], 0, 0, encryption_key(17)),
-        (frames[first + 2], 1, 0, encryption_key(17)),
-        (frames[first + 3], 1, 1, encryption_key(17)),
-        (frames[first + 4], 1, 2, encryption_key(17)),
-        (frames[first + 5], 2, 0, encryption_key(18)),
+        (frames[write_at + 1], 0, 0, encryption_key(17)),
+        (frames[write_at + 2], 1, 0, encryption_key(17)),
+        (frames[write_at + 3], 1, 1, encryption_key(17)),
+        (frames[write_at + 4], 1, 2, encryption_key(17)),
+        (frames[write_at + 5], 2, 0, encryption_key(18)),
     ]:
         body += chunk(sodium, key, path, prefix, section, index, frame)
     write = signed(sodium, path, body)
@@ -93,7 +104,20 @@ def main():
     assert frames[0][0] == 4
     body = prefix + chunk(sodium, encryption_key(17), path, prefix, 0, 0, frames[0])
     entry = signed(sodium, path, body)
-    for name, data in [("sealed-write.hex", write), ("sealed-store-log.hex", entry)]:
+
+    # Snapshot chunks use random nonces; these fixed ones are public test data.
+    path = store + b"snapshots/store/1/1"
+    prefix = frames[snapshot_at]
+    body = prefix + signature(sodium, context(b"coven/prefix-signature/v1", path, prefix))
+    for index, frame in enumerate(frames[snapshot_at + 1:]):
+        body += sealed_chunk(sodium, encryption_key(17), path, prefix, 0, index, frame,
+                             bytes([0x60 + index]) * 24)
+    snapshot = signed(sodium, path, body)
+    for name, data in [
+        ("sealed-write.hex", write),
+        ("sealed-store-log.hex", entry),
+        ("sealed-snapshot.hex", snapshot),
+    ]:
         (directory / name).write_text(data.hex() + "\n")
 
 

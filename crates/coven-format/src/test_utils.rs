@@ -268,11 +268,16 @@ pub fn snapshot_header() -> SnapshotHeader {
         counts: [1, 4, 1, 1, 4],
     }
 }
+/// The fixture's catch-up storage time, with a subsecond fraction.
+pub fn caught_at() -> crate::value::StorageTime {
+    crate::value::StorageTime::new(1_760_400_000, 123_456_789).unwrap()
+}
 /// The sealed prefix carrying a snapshot's coverage, with a fixed test key.
 pub fn snapshot_prefix(header: &SnapshotHeader) -> crate::sealed_snapshot::SnapshotObjectPrefix {
     crate::sealed_snapshot::SnapshotObjectPrefix {
         audience: header.id.audience.clone(),
         key: KeyId(Uuid::from_bytes([1; 16])),
+        caught_at: caught_at(),
         writes: header.writes.clone(),
         store_log: header.store_log.clone(),
     }
@@ -667,6 +672,7 @@ pub fn encoded_examples() -> Vec<Zeroizing<Vec<u8>>> {
         crate::sealed_snapshot::SnapshotObjectPrefix {
             audience: Audience::Store,
             key: KeyId(Uuid::from_bytes([1; 16])),
+            caught_at: caught_at(),
             writes: crate::test_utils::snapshot_header().writes,
             store_log: crate::test_utils::snapshot_header().store_log,
         }

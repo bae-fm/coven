@@ -34,9 +34,18 @@ private def discovery (j : Json) : Except String Json := do
     ("requests", toJson requests),
     ("failed", toJson (result.stop == .failed .network))]
 
+/-- `Snapshot.counts`: a landing at most one day after the signed catch-up
+sample counts; a later one is ignored (`late_snapshot_ignored`). -/
+private def counts (j : Json) : Except String Json := do
+  let caught ← j.getObjValAs? Nat "caught"
+  let stored ← j.getObjValAs? Nat "stored"
+  let snapshot : Snapshot := ⟨0, 0, 1, stored, caught, []⟩
+  return toJson snapshot.counts
+
 private def run (j : Json) : Except String Json := do
   match ← j.getObjValAs? String "check" with
   | "discovery" => discovery j
+  | "counts" => counts j
   | check => throw s!"unknown IO check {check}"
 
 def main : IO UInt32 := do

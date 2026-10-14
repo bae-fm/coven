@@ -38,6 +38,7 @@ async fn unsigned_snapshot(device: &Device, id: coven_format::store_log::Snapsho
                         SnapshotObjectPrefix {
                             audience: header.id.audience.clone(),
                             key: key_id,
+                            caught_at: coven_format::value::StorageTime::new(1, 0).unwrap(),
                             writes: header.writes.clone(),
                             store_log: header.store_log.clone(),
                         }
@@ -391,4 +392,38 @@ async fn authors_must_be_in_the_applied_store_log_and_remain_known_after_removal
     for log in [registered, a.log().await] {
         crate::posted_positions::open(&bytes, &path, Some(&ring), &log).unwrap();
     }
+}
+
+/// IO `Snapshot.counts` and the late-landing rule: the real admission test
+/// against Lean on exact integer-second samples. Subsecond and overflow cases
+/// stay with the format's own tests.
+#[test]
+#[ignore = "scripts/check.sh supplies the Lean IO runner"]
+fn io_differential_snapshot_counts() {
+    use coven_format::value::StorageTime;
+    use serde_json::json;
+    const DAY: u64 = StorageTime::DAY_SECONDS;
+    let mut cases = Vec::new();
+    let mut actual = Vec::new();
+    for caught in [0, 1, 100, DAY, 1_760_400_000] {
+        for stored in [
+            0,
+            caught,
+            caught + DAY - 1,
+            caught + DAY,
+            caught + DAY + 1,
+            caught + 2 * DAY,
+        ] {
+            let prefix = SnapshotObjectPrefix {
+                audience: coven_merge::Audience::Store,
+                key: key(1),
+                caught_at: StorageTime::new(caught, 0).unwrap(),
+                writes: coven_format::value::WritePositions(Vec::new()),
+                store_log: coven_format::value::EntryPositions(Vec::new()),
+            };
+            cases.push(json!({"check": "counts", "caught": caught, "stored": stored}));
+            actual.push(json!(prefix.counts(StorageTime::new(stored, 0).unwrap())));
+        }
+    }
+    assert_eq!(actual, crate::discovery::tests::io_runner(&cases));
 }
