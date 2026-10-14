@@ -1,5 +1,6 @@
 import CovenStorage.Objects
 import CovenStorage.Identity
+import CovenStorage.IdentityCounters
 import CovenStorage.Files
 import CovenStorage.Clocks
 import CovenStorage.Examples

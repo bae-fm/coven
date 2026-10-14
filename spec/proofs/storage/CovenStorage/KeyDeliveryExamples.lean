@@ -23,7 +23,7 @@ provider: §13's "leaves no key unrecorded" fails, and nothing will delete it. -
 theorem restored_before_seal_orphans_key :
     let restored := run .random desktop beforeSealSteps
     let after := deliver restored 1
-    checkIdentity 7 ⟨⟨0, 1⟩, 0⟩ (some 7) (.ok ⟨⟨⟨0, 1⟩, 0⟩, ⟨0, 0⟩, ⟨0, 0⟩, false, false⟩) = .send ∧
+    checkIdentity 7 ⟨⟨0, 1⟩, 0, 0⟩ (some 7) (.ok ⟨⟨⟨0, 1⟩, 0, 0⟩, ⟨0, 0⟩, ⟨0, 0⟩, false, false⟩) = .send ∧
     restored.copies 1 = some ⟨7, some ⟨100, some 101, some [101, 103], false⟩⟩ ∧
     restored.storage 100 = some ⟨[101, 102], 7⟩ ∧
     Accounted restored ∧

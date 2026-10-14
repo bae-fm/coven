@@ -418,6 +418,8 @@ proofs() {
         step "Rust / Lean identity check and replacement read"
         COVEN_IDENTITY_LEAN="$runner" cargo test -p coven-sync --all-features st_differential_identity -- --ignored
         COVEN_IDENTITY_LEAN="$runner" cargo test -p coven-sync --all-features st_differential_replacement_read -- --ignored
+        COVEN_IDENTITY_LEAN="$runner" cargo test -p coven-sync --all-features st_differential_replacement_admission -- --ignored
+        COVEN_IDENTITY_LEAN="$runner" cargo test -p coven-sync --all-features st_differential_snapshot_sequence -- --ignored
         runner=$(runner storage filesRunner)
         step "Rust / Lean file attachment and upload completion"
         COVEN_FILES_LEAN="$runner" cargo test -p coven-sync --all-features st_differential_files -- --ignored

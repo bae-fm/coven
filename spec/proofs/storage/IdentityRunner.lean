@@ -1,8 +1,10 @@
 import CovenStorage.ReplacementRead
+import CovenStorage.IdentityCounters
 import Lean
 
 /-! JSON adapter comparing the Rust pre-send identity check, replacement
-observation and replacement admission with `checkIdentity` and `ReplacementRead`. -/
+observation and replacement admission with `checkIdentity` and `ReplacementRead`,
+and the reservation sequences and storage-less reset with `IdentityCounters`. -/
 
 open Lean CovenStorage
 
@@ -10,7 +12,7 @@ private def ends (j : Json) : Except String Ends := do
   pure ⟨← j.getObjValAs? Nat "writes", ← j.getObjValAs? Nat "entries"⟩
 
 private def counters (j : Json) : Except String Counters := do
-  pure ⟨← ends j, ← j.getObjValAs? Nat "snapshot"⟩
+  pure ⟨← ends j, ← j.getObjValAs? Nat "key_copies", ← j.getObjValAs? Nat "snapshot"⟩
 
 private def scan (j : Json) : Except String (Except ReadFailure Evidence) := do
   if (j.getObjVal? "error").isOk then return .error .network
@@ -62,10 +64,11 @@ private def replacement (j : Json) : Except String Json := do
 
 /-- Begin a reset from a working copy, retry it, then finish it: whether the
 installation is writable while resetting, and the finished device's id,
-queue length and first write number. -/
+queue length and first write number. A store that never set up storage
+finishes with `resetUnconnected`. -/
 private def reset (j : Json) : Except String Json := do
   let queued ← j.getObjValAs? Nat "queued"
-  let copy : Local := ⟨← j.getObjValAs? Nat "old", ⟨⟨queued, 0⟩, 0⟩,
+  let copy : Local := ⟨← j.getObjValAs? Nat "old", ⟨⟨queued, 0⟩, 0, 0⟩,
     (List.range queued).map fun n => .untried ⟨.write 0 (n + 1), []⟩, []⟩
   let r : Replacement := ⟨copy.device, ← j.getObjValAs? Nat "fresh", ⟨0, 0⟩, 1, .storageAhead⟩
   let mut state := beginReset copy r
@@ -73,10 +76,24 @@ private def reset (j : Json) : Except String Json := do
   for _ in List.range (← j.getObjValAs? Nat "retries") do
     state := retryReset state
     writable := writable.push (CovenStorage.writable state)
-  let finished := finishReset r []
+  let connected ← match j.getObjVal? "connected" with
+    | .ok value => fromJson? value
+    | .error _ => pure true
+  let finished :=
+    if connected then finishReset r [] else IdentityCounters.resetUnconnected r
   return Json.mkObj [("writable", toJson writable), ("device", toJson finished.device),
     ("queue", toJson finished.queue.length),
     ("first", toJson (commitWrite finished []).reserved.logs.writes)]
+
+/-- From a sequence at `last`, reserve operation ids in order, each a
+snapshot operation or another: the reservation the check compares (the
+sequence) and the greatest snapshot number among them. -/
+private def sequence (j : Json) : Except String Json := do
+  let steps ← j.getObjValAs? (Array Bool) "snapshots"
+  let start : IdentityCounters.Sequence := ⟨← j.getObjValAs? Nat "last", []⟩
+  let s := start.run steps.toList
+  return Json.mkObj [("last", toJson s.last),
+    ("snapshot", toJson (IdentityCounters.greatest s.kind))]
 
 private def entryPath (j : Json) : Except String Path := do
   pure (.entry (← j.getObjValAs? Nat "device") (← j.getObjValAs? Nat "number"))
@@ -110,6 +127,7 @@ private def run (j : Json) : Except String Json := do
     | "replacement" => replacement c
     | "reset" => reset c
     | "admission" => admission c
+    | "sequence" => sequence c
     | other => throw s!"unknown identity check {other}"
 
 def main : IO UInt32 := do

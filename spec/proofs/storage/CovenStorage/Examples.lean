@@ -5,8 +5,8 @@ namespace CovenStorage.Examples
 
 deriving instance DecidableEq for Except
 
-def registeredEvidence : Evidence := ⟨⟨⟨0, 1⟩, 0⟩, ⟨0, 0⟩, ⟨0, 0⟩, false, false⟩
-def installed : Local := ⟨7, ⟨⟨0, 1⟩, 0⟩, [], []⟩
+def registeredEvidence : Evidence := ⟨⟨⟨0, 1⟩, 0, 0⟩, ⟨0, 0⟩, ⟨0, 0⟩, false, false⟩
+def installed : Local := ⟨7, ⟨⟨0, 1⟩, 0, 0⟩, [], []⟩
 def pending : Local := commitWrite installed [42]
 def replacement : Replacement := ⟨7, 8, ⟨0, 1⟩, 1, .identityMismatch⟩
 
@@ -24,12 +24,12 @@ example : Path.write 7 1 ∈ pending.applied ∧
     Path.write 7 1 ∉ (finishReset replacement []).applied := by decide
 
 theorem restore_from_deleted_log_detected :
-    checkIdentity 7 ⟨⟨5, 1⟩, 0⟩ (some 7)
+    checkIdentity 7 ⟨⟨5, 1⟩, 0, 0⟩ (some 7)
       (.ok { registeredEvidence with covered := ⟨7, 1⟩ }) = .reset .storageAhead ∧
-    checkIdentity 7 ⟨⟨5, 1⟩, 0⟩ (some 7)
+    checkIdentity 7 ⟨⟨5, 1⟩, 0, 0⟩ (some 7)
       (.ok { registeredEvidence with posted := ⟨7, 1⟩ }) = .reset .storageAhead ∧
-    checkIdentity 7 ⟨⟨5, 1⟩, 2⟩ (some 7)
-      (.ok { registeredEvidence with listed := ⟨⟨5, 1⟩, 3⟩ }) = .reset .storageAhead := by decide
+    checkIdentity 7 ⟨⟨5, 1⟩, 0, 2⟩ (some 7)
+      (.ok { registeredEvidence with listed := ⟨⟨5, 1⟩, 0, 3⟩ }) = .reset .storageAhead := by decide
 
 /-- A successful upload whose acknowledgement was lost is still reserved. -/
 theorem outstanding_reservation_is_not_stale :

@@ -3127,6 +3127,10 @@ Carol's tablet:
   - A stored number beyond this database's last reserved number for that
     kind of object proves this is a stale copy. An outstanding local reservation is not stale
     merely because its upload succeeded before a crash.
+    - A writer's key copies compare with the greatest copy number it
+      reserved, confirmed or not. A live copy's stored copies never pass
+      that number, and a stored copy beyond it resets the copy
+      ([`live_copy_sends`, `key_copy_ahead_resets`](proofs/storage/CovenStorage/IdentityCounters.lean)).
   - The device id also lives in custody that backups do not copy. A missing
     or different custody id requires the same device reset.
   - Finish this check before sending writes, entries, snapshots, files,
@@ -3178,6 +3182,10 @@ Carol's tablet:
     local work; do not salvage or renumber waiting writes.
   - Use the existing new-device installation path (§12.1), with a fresh id.
     Load the stored history, then allow app writes again.
+  - A store that never set up storage has published nothing and has no
+    stored history. Its replacement is an empty database under the fresh
+    id, with the notice, and its first write takes a path no old write used
+    ([`unconnected_reset_is_new_device`, `unconnected_reset_empty`, `unconnected_first_write_new_path`](proofs/storage/CovenStorage/IdentityCounters.lean)).
   - Tell the app which old id was replaced and why, and that unsent edits
     were discarded. Store the `DeviceReset` record in `_coven_device_reset`
     in the replacement database before publishing its usable handle (E5).

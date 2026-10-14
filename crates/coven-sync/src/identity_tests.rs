@@ -154,7 +154,7 @@ fn scan_json(scan: &Result<Evidence, ()>) -> Value {
         Err(()) => json!({"error": true}),
         Ok(e) => json!({
             "listed": {"writes": e.listed.logs.writes, "entries": e.listed.logs.entries,
-                       "snapshot": e.listed.snapshots},
+                       "key_copies": e.listed.key_copies, "snapshot": e.listed.snapshots},
             "covered": ends_json(e.covered),
             "posted": ends_json(e.posted),
             "replaced": e.replaced,
@@ -167,7 +167,7 @@ fn scan_result(scan: &Result<Evidence, ()>) -> Result<Evidence, SyncError> {
     scan.map_err(|()| StorageFailure::Network.into())
 }
 
-fn identity_runner(cases: &[Value]) -> Vec<Value> {
+pub(crate) fn identity_runner(cases: &[Value]) -> Vec<Value> {
     use std::{
         io::Write,
         process::{Command, Stdio},
@@ -189,33 +189,36 @@ fn identity_runner(cases: &[Value]) -> Vec<Value> {
     serde_json::from_slice(&output.stdout).unwrap()
 }
 
-/// The model has no key-copy counter; those cases keep it equal on both sides.
+/// Every kind of evidence below, at, and beyond the reservations of
+/// `st_differential_identity`.
 fn scans() -> Vec<Result<Evidence, ()>> {
     let mut scans = vec![Err(())];
     for writes in [0, 2, 3] {
         for entries in [0, 1, 2] {
-            for snapshots in [0, 4, 5] {
-                for (covered, posted) in [(0, 0), (3, 0), (0, 2)] {
-                    for (replaced, removed) in
-                        [(false, false), (true, false), (false, true), (true, true)]
-                    {
-                        scans.push(Ok(Evidence {
-                            listed: Counters {
-                                logs: Ends { writes, entries },
-                                key_copies: 0,
-                                snapshots,
-                            },
-                            covered: Ends {
-                                writes: covered,
-                                entries: 0,
-                            },
-                            posted: Ends {
-                                writes: 0,
-                                entries: posted,
-                            },
-                            replaced,
-                            removed,
-                        }));
+            for key_copies in [0, 3, 4] {
+                for snapshots in [0, 4, 5] {
+                    for (covered, posted) in [(0, 0), (3, 0), (0, 2)] {
+                        for (replaced, removed) in
+                            [(false, false), (true, false), (false, true), (true, true)]
+                        {
+                            scans.push(Ok(Evidence {
+                                listed: Counters {
+                                    logs: Ends { writes, entries },
+                                    key_copies,
+                                    snapshots,
+                                },
+                                covered: Ends {
+                                    writes: covered,
+                                    entries: 0,
+                                },
+                                posted: Ends {
+                                    writes: 0,
+                                    entries: posted,
+                                },
+                                replaced,
+                                removed,
+                            }));
+                        }
                     }
                 }
             }
@@ -227,7 +230,7 @@ fn scans() -> Vec<Result<Evidence, ()>> {
 #[test]
 #[ignore = "requires COVEN_IDENTITY_LEAN"]
 fn st_differential_identity() {
-    let mine = reserved(2, 1, 0, 4);
+    let mine = reserved(2, 1, 3, 4);
     let mut cases = Vec::new();
     let mut actual = Vec::new();
     for custody in [None, Some(7), Some(8)] {
@@ -236,7 +239,7 @@ fn st_differential_identity() {
                 "check": "identity",
                 "device": 7,
                 "reserved": {"writes": mine.writes, "entries": mine.entries,
-                             "snapshot": mine.snapshots},
+                             "key_copies": mine.key_copies, "snapshot": mine.snapshots},
                 "custody": custody,
                 "scan": scan_json(&scan),
             }));
@@ -294,7 +297,7 @@ fn st_differential_replacement_read() {
                     "check": "replacement",
                     "device": 7,
                     "reserved": {"writes": mine.writes, "entries": mine.entries,
-                                 "snapshot": mine.snapshots},
+                                 "key_copies": mine.key_copies, "snapshot": mine.snapshots},
                     "events": events,
                 }));
                 actual.push(json!(results));

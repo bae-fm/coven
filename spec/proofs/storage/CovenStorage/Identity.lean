@@ -25,14 +25,19 @@ theorem ends_keep_both (a b : Ends) :
     a.entries ≤ (a.combine b).entries ∧ b.entries ≤ (a.combine b).entries := by
   exact ⟨Nat.le_max_left _ _, Nat.le_max_right _ _, Nat.le_max_left _ _, Nat.le_max_right _ _⟩
 
+/-- One number per kind of own object (§10): the greatest write and entry
+numbers, the greatest sealed key copy this device wrote, and the greatest own
+snapshot number. -/
 structure Counters where
   logs : Ends
+  keyCopies : Nat
   snapshot : Nat
   deriving DecidableEq, Repr
 
 def Counters.ahead (observed reserved : Counters) : Bool :=
   observed.logs.writes > reserved.logs.writes ||
-  observed.logs.entries > reserved.logs.entries || observed.snapshot > reserved.snapshot
+  observed.logs.entries > reserved.logs.entries ||
+  observed.keyCopies > reserved.keyCopies || observed.snapshot > reserved.snapshot
 
 /-- Complete listings and authenticated coverage/positions, §10. Numbers
 from a failed or partial scan cannot construct a successful observation. -/
@@ -45,7 +50,7 @@ structure Evidence where
   deriving DecidableEq, Repr
 
 def Evidence.observed (e : Evidence) : Counters :=
-  ⟨(e.listed.logs.combine e.covered).combine e.posted, e.listed.snapshot⟩
+  ⟨(e.listed.logs.combine e.covered).combine e.posted, e.listed.keyCopies, e.listed.snapshot⟩
 
 inductive ResetReason where
   | identityMismatch | storageAhead | slotMismatch | replaced | damage
@@ -106,18 +111,34 @@ theorem send_not_ahead (d : Nat) (r : Counters) (c : Option Nat)
 
 theorem send_covers_all_evidence (d : Nat) (r : Counters) (c : Option Nat)
     (e : Evidence) (h : checkIdentity d r c (.ok e) = .send) :
-    e.listed.snapshot ≤ r.snapshot ∧
+    e.listed.keyCopies ≤ r.keyCopies ∧ e.listed.snapshot ≤ r.snapshot ∧
     ∀ evidence ∈ [e.listed.logs, e.covered, e.posted],
       evidence.writes ≤ r.logs.writes ∧ evidence.entries ≤ r.logs.entries := by
   have safe := (send_not_ahead d r c e h).1
   simp only [Counters.ahead, Bool.or_eq_false_iff, decide_eq_false_iff_not,
     Nat.not_lt] at safe
-  constructor
-  · exact safe.2
-  · intro evidence member
-    simp only [List.mem_cons, List.not_mem_nil, or_false] at member
-    rcases member with rfl | rfl | rfl <;>
-      simp only [Evidence.observed, Ends.combine] at safe <;> omega
+  refine ⟨safe.1.2, safe.2, ?_⟩
+  intro evidence member
+  simp only [List.mem_cons, List.not_mem_nil, or_false] at member
+  rcases member with rfl | rfl | rfl <;>
+    simp only [Evidence.observed, Ends.combine] at safe <;> omega
+
+/-- The converse: with custody, no removal or replacement, and every kind of
+evidence within the reservations, the check sends. Equality is allowed. -/
+theorem send_of_within (d : Nat) (r : Counters) (e : Evidence)
+    (removed : e.removed = false) (replaced : e.replaced = false)
+    (keyCopies : e.listed.keyCopies ≤ r.keyCopies) (snapshot : e.listed.snapshot ≤ r.snapshot)
+    (logs : ∀ evidence ∈ [e.listed.logs, e.covered, e.posted],
+      evidence.writes ≤ r.logs.writes ∧ evidence.entries ≤ r.logs.entries) :
+    checkIdentity d r (some d) (.ok e) = .send := by
+  have l := logs e.listed.logs (by simp)
+  have c := logs e.covered (by simp)
+  have p := logs e.posted (by simp)
+  have within : e.observed.ahead r = false := by
+    simp only [Counters.ahead, Evidence.observed, Ends.combine, Bool.or_eq_false_iff,
+      decide_eq_false_iff_not, Nat.not_lt, gt_iff_lt, Nat.max_le]
+    omega
+  simp [checkIdentity, removed, replaced, within]
 
 /-- A replacement is accepted only for its member's old, distinct id (D6).
 Store-log authority and finality are supplied by replay, not redone here. -/
@@ -209,7 +230,7 @@ theorem reset_unavailable (l : Local) (r : Replacement) :
 Earlier registration attempts may have landed too late (§9, §10).
 Data writes and snapshots start from zero. -/
 def loadDevice (fresh registrationNumber : Nat) (loaded : Applied) : Local :=
-  ⟨fresh, ⟨⟨0, registrationNumber⟩, 0⟩, [], receiveAll [] loaded⟩
+  ⟨fresh, ⟨⟨0, registrationNumber⟩, 0, 0⟩, [], receiveAll [] loaded⟩
 
 def finishReset (r : Replacement) (loaded : Applied) : Local :=
   loadDevice r.fresh r.registrationNumber loaded

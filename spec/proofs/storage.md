@@ -12,7 +12,10 @@ Two claims fail without qualifications. Reset deliberately loses
 unsent edits. Also, §10's detection checks do not establish that every restored
 database gets a new device id. A backup can erase the record of an encryption
 attempt without leaving any evidence in storage. Content-bound nonces separate
-the resulting plaintexts without relying on that detection.
+the resulting plaintexts without relying on that detection. Comparing own
+snapshot numbers with the operation sequence, as the implementation does, is
+weaker still than §10's per-kind comparison
+(`operation_ids_hide_newer_snapshot`, below).
 
 A third result is a checked counterexample to a proposed rule: resetting on
 a mismatched S3 key delivery path can leave a made key live and unrecorded
@@ -179,17 +182,59 @@ never a successful partial scan. §6 and §15 obtain evidence through numbered
 log reads, positions and conditional snapshot discovery. Establishing that
 these requests supply the model's complete evidence, including after log
 deletion, is an [IO verification obligation](io.md#discovery-obligations).
-The model has no key-copy counter and does not prove that added check.
 `IdentityRunner` executes `checkIdentity` and `ReplacementRead.observe`/`gate`
-for the Rust differential tests of coven-sync's pre-send check; key-copy
-counters stay equal on both sides of those cases. It also runs `beginReset`,
-`retryReset`, `finishReset` and the first `commitWrite` against coven's
-recorded reset, failed `reset_device` retries and the published replacement.
+for the Rust differential tests of coven-sync's pre-send check, with every
+counter, key copies included, below, at and beyond its reservation. It also
+runs `beginReset`, `retryReset`, `finishReset` and the first `commitWrite`
+against coven's recorded reset, failed `reset_device` retries and the
+published replacement, and `resetUnconnected` against the reset of a store
+that never set up storage. Its `sequence` check runs `IdentityCounters.Sequence`
+against the snapshot reservation coven-database reads after starting and
+finishing snapshot and other operations.
 It executes `ReplacementRead.accepts` and `load` against coven-sync's write
 authority and entry replay for old-id objects whose recorded pasts read any
 subset of kept, concurrent and unauthorized replacements. Rust judges each object in its own
 recorded view, as §7.1 judges removal; those cases keep the same replacements
 in every view, so the model's single kept set applies to all of them.
+
+**Key copies, snapshot numbers and the storage-less reset.**
+[IdentityCounters](storage/CovenStorage/IdentityCounters.lean) models the
+local sequences the reservations come from. A sequence reserves the next
+number for an object of the counted kind or for something else, and storage
+lists only own objects published from reserved numbers; deletion only
+removes. `listed_within` proves a listing never passes the sequence, and
+`later_numbers_fresh` that every number reserved after a check exceeds
+everything listed then. `send_of_within` is the converse of
+`send_covers_all_evidence`: evidence within every reservation sends.
+
+- Key copies (proved). A writer reserves its copies gap-free from their own
+  sequence and confirms them in order, so its counter is that sequence
+  (`key_copies_counted`; Rust `key_upload::last_reserved`). `live_copy_sends`
+  proves that a live copy's own stored copies and snapshots never reset it,
+  whatever it deleted, and `key_copy_ahead_resets` that a stored copy beyond
+  the reservation does.
+- Snapshot numbers compared with the operation sequence (fails, checked).
+  Rust's snapshot reservation is `sqlite_sequence` of `_coven_operations`:
+  one sequence numbers every operation, and a snapshot takes its operation's
+  id. A live copy is never reset by it (`live_copy_sends`), but it is weaker
+  than §10's comparison with the last reserved snapshot number:
+  `operation_ids_hide_newer_snapshot`. Ana's backup holds operations 1 to 5.
+  Her live copy then writes store snapshots 6 and 7 and deletes 6, which 7
+  covers. Restored with custody intact, the backup starts a snapshot
+  operation (6) and another operation (7) before its first check. Storage
+  lists snapshot 7, which the restored copy never made, yet 7 does not pass
+  the sequence, so it sends; compared with its last snapshot number, 6, it
+  would reset. Its snapshot operation 6 then finds that path empty and
+  creates it: two different snapshots have had one path, and no byte
+  comparison sees it. §10 is unchanged; the rule is not stated there.
+- A store that never set up storage (proved). It published nothing and has
+  no stored history, so its reset is the new-device path with nothing to
+  load and no registration (`unconnected_reset_is_new_device`, Rust
+  `reset_unconnected`): an empty database under the fresh id
+  (`unconnected_reset_empty`) whose first write is number 1 at a path no old
+  write used (`unconnected_first_write_new_path`). Setting up storage
+  afterwards, including by another installation of the same store, is
+  outside the model.
 
 `Identity` also contains a separate model with recorded replacement ends.
 Its `ends_*`, `combined_end_keeps_completed` and `beyond_end_waits` results

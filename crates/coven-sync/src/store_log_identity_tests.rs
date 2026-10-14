@@ -243,3 +243,64 @@ async fn session_evidence_is_read_once_until_reconnecting() {
     device.catch_up().await;
     assert_eq!(listings(&storage.request_trace()[before..]), 1);
 }
+
+/// Lean `IdentityCounters.Sequence` against the snapshot reservation the
+/// check reads. Every operation, a snapshot write or another, takes the next
+/// id, and finishing one never lowers it (`sqlite_sequence`), so the
+/// reservation is the sequence, beyond the greatest snapshot number whenever
+/// a later operation is not a snapshot (`operation_ids_hide_newer_snapshot`).
+#[tokio::test]
+#[ignore = "requires COVEN_IDENTITY_LEAN"]
+async fn st_differential_snapshot_sequence() {
+    use crate::operation_data::Data;
+    use crate::snapshot_data::{SnapshotJob, SnapshotTask, SnapshotTrigger};
+    use serde_json::json;
+    let mut cases = Vec::new();
+    let mut actual = Vec::new();
+    for pattern in 0..1u32 << 5 {
+        let storage = storage();
+        let devices = group(storage.clone(), 1).await;
+        let device = &devices[0];
+        let own = device.db.local_store_log().await.unwrap().device;
+        let start = device.db.identity_reservations().await.unwrap().snapshots;
+        let mut steps = Vec::new();
+        let mut greatest = 0;
+        for bit in 0..5 {
+            let snapshot = pattern & (1 << bit) != 0;
+            let job = if snapshot {
+                SnapshotJob::Write {
+                    audience: coven_merge::Audience::Store,
+                    device: own,
+                    trigger: SnapshotTrigger::Requested,
+                    session: None,
+                }
+            } else {
+                SnapshotJob::Retain
+            };
+            let data = Data::Snapshots(SnapshotTask {
+                job,
+                temporary: Vec::new(),
+            });
+            let id = device
+                .db
+                .start_operation(data.new_operation("coven").unwrap())
+                .await
+                .unwrap();
+            if snapshot {
+                greatest = id.0 as u64;
+            }
+            // A finished operation keeps its id reserved.
+            if bit % 2 == 0 {
+                device.db.finish_operation(id).await.unwrap();
+            }
+            steps.push(snapshot);
+        }
+        let reserved = device.db.identity_reservations().await.unwrap().snapshots;
+        cases.push(json!({"check": "sequence", "last": start, "snapshots": steps}));
+        actual.push(json!({"last": reserved, "snapshot": greatest}));
+    }
+    assert_eq!(actual, crate::identity::tests::identity_runner(&cases));
+    assert!(actual
+        .iter()
+        .any(|a| a["snapshot"].as_u64() < a["last"].as_u64()));
+}
