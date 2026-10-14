@@ -379,3 +379,42 @@ fn low_order_x25519_keys_are_rejected_in_both_directions() {
         ));
     }
 }
+
+#[test]
+fn access_key_boxes_open_only_for_their_member_path_and_prefix() {
+    let ana = MemberKeys::generate().unwrap();
+    let ben = MemberKeys::generate().unwrap();
+    let plaintext = b"key id, secret and principal";
+    let sealed = seal_access_key(
+        plaintext,
+        &ana.sealing_public_key(),
+        "s/access-keys/a/1",
+        b"prefix",
+    )
+    .unwrap();
+    assert_eq!(
+        ana.open_access_key("s/access-keys/a/1", b"prefix", &sealed)
+            .unwrap()
+            .as_slice(),
+        plaintext
+    );
+    assert!(ben
+        .open_access_key("s/access-keys/a/1", b"prefix", &sealed)
+        .is_err());
+    assert!(ana
+        .open_access_key("s/access-keys/a/2", b"prefix", &sealed)
+        .is_err());
+    assert!(ana
+        .open_access_key("s/access-keys/a/1", b"other", &sealed)
+        .is_err());
+    assert!(ana
+        .open_access_key("s/access-keys/a/1", b"prefix", &sealed[..40])
+        .is_err());
+    assert!(seal_access_key(
+        &vec![0; MAX_ACCESS_KEY_BOX + 1],
+        &ana.sealing_public_key(),
+        "p",
+        b""
+    )
+    .is_err());
+}

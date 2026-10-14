@@ -46,7 +46,7 @@ async fn storage_metadata_and_snapshot_subjects_are_available_through_the_facade
 
 #[cfg(test)]
 pub(crate) struct Device {
-    app: TestCoven,
+    pub(crate) app: TestCoven,
     pub(crate) layout: StoreLayout,
     pub(crate) store: StoreId,
     pub(crate) handle: CovenHandle,
@@ -109,7 +109,7 @@ impl Clock for PollingClock {
 }
 
 impl Network {
-    async fn new(count: usize) -> Self {
+    pub(crate) async fn new(count: usize) -> Self {
         let mut network = Self::with_schema(CloudProvider::S3, tables(), migrations()).await;
         for device in 1..count {
             network.join(device).await;

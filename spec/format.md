@@ -48,7 +48,7 @@
 | `map<K, V>` | `count:u32 \| (K V)…` | Keys strictly increasing. |
 | `set<T>` | `count:u32 \| T…` | Strictly increasing. |
 | `Option<T>` | `0`, or `1 \| T` | |
-| `uuid` | 16 bytes | UUID byte order. Store, member, circle, invite, key and file ids. |
+| `uuid` | 16 bytes | UUID byte order. Store, member, circle, invite, key, attempt and file ids. |
 | `DeviceId` | `u64` | |
 | `MemberId` | `uuid` | Random stable member identity, independent of keys. |
 | `SigningKey` | 32 bytes | An Ed25519 public key; weak and invalid points refused. |
@@ -573,6 +573,27 @@
   key id, recipient id and exact sealing credential are public routing facts; the key and its hash are
   not exposed. D11 binds this prefix into the box's authentication.
 
+- A delivered S3 key ([§13](coven.md#13-removing-members-and-devices)) is
+  sealed to its member with the same box, then signed by its author:
+
+  ```
+  kind:u8 (40) | version:u16 | member:MemberId | sealing:SealingKey | author:MemberId |
+  box_length:u32 | ephemeral:32 bytes | nonce:24 bytes | ciphertext | tag:16 bytes |
+  signature:64 bytes
+  ```
+
+  - The clear prefix is `kind | version | member | sealing | author`; D11
+    binds it into the box. `box_length` counts the bytes from `ephemeral`
+    through `tag` and is at most 8 KiB plus the box's 72 bytes of overhead.
+  - The plaintext is `access_key_id:text | secret_access_key:text |
+    principal:S3Principal` (D6), each text at most 1,024 bytes and the whole at
+    most 8 KiB.
+  - `signature` is the author's `coven/object-signature/v1` signature over
+    every preceding byte. The recipient verifies it with the author's current
+    signing key, then opens the box only when `member` and `sealing` are its
+    own. It uses the key only if the author also authored a kept `SetAccess`
+    recording that key id as the member's current access.
+
 - Every store-log entry has the same 19-byte prefix including kind and
   version. The create-store frame supplies the first admin's signing key;
   decrypt it, verify the signature with that key, and require its store id
@@ -705,6 +726,7 @@
 | `<store>/clock/<device>` | A signed, sealed clock observation, replaced only for a due storage-time check |
 | `<store>/positions/<device>` | A device's posted positions and pending records, replaced as either changes |
 | `<store>/keys/<writer>/<n>` | A sealed store or circle key copy; audience, key and recipient are in its clear prefix |
+| `<store>/access-keys/<member>/<attempt>` | An S3 key delivered to a member, one per replacement attempt |
 | `<store>/files/<device>/<file>` | An uploaded file |
 | `<store>/join-requests/<invite>` | A join request |
 
@@ -715,8 +737,10 @@
   sequence across audiences and recipients. Store-log entries and key
   copies are never deleted. Snapshot numbers identify snapshots but are
   never discovery cursors; list their audience folder (§15).
-- Store, member, circle, key, invite and file ids are canonical lowercase
-  hyphenated UUIDs. A member spelling never encodes a public key.
+- Store, member, circle, key, invite, attempt and file ids are canonical
+  lowercase hyphenated UUIDs. A delivered key's path is written once and never
+  replaced; its attempt id is the replacement operation's. A member spelling
+  never encodes a public key.
   Replacing keys starts no second writer log and overwrites no old copy.
 - A path is used exactly as written here, with no other spelling, and is
   bound into its object's authentication.
@@ -766,7 +790,7 @@
     exact sealing key named in D9's prefix; a contribution of all zeros is
     refused. The prefix must match the recipient key actually used by the box.
   - Its key is HKDF-SHA256 of the shared secret with the context of
-    `coven/sealed-box/v1`, `store` or `circle`, the path, the exact D9
+    `coven/sealed-box/v1`, `store`, `circle` or `s3-key`, the path, the exact D9
     clear prefix, the ephemeral key and the member's sealing key, in that
     order; that context is also the associated data.
   - The plaintext is `key:uuid | key bytes:32` for a store key, and

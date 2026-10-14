@@ -110,6 +110,14 @@ impl ObjectPath {
     pub fn join_request(store: StoreId, invite: InviteId) -> Self {
         Self(format!("{store}/join-requests/{invite}"))
     }
+    /// A member's new S3 key, sealed to them, named by its mint attempt (§13).
+    pub fn access_key(
+        store: StoreId,
+        member: &coven_crypto::MemberId,
+        attempt: uuid::Uuid,
+    ) -> Self {
+        Self(format!("{store}/access-keys/{member}/{attempt}"))
+    }
     /// Parse a listed or recorded path without permitting traversal or other layouts.
     pub fn parse(value: &str) -> Result<Self, PathError> {
         value.to_owned().try_into()
@@ -192,6 +200,7 @@ impl TryFrom<String> for ObjectPath {
             ["positions" | "clock", device] => decimal(device, false),
             ["files", device, name] => decimal(device, false) && canonical_uuid(name),
             ["join-requests", invite] => canonical_uuid(invite),
+            ["access-keys", member, attempt] => member_id(member) && canonical_uuid(attempt),
             _ => false,
         };
         if !valid {
@@ -258,6 +267,10 @@ impl ObjectPrefix {
     pub fn positions(store: StoreId) -> Self {
         Self(format!("{store}/positions/"))
     }
+    /// The S3 keys delivered to one member (§13).
+    pub fn access_keys(store: StoreId, member: &coven_crypto::MemberId) -> Self {
+        Self(format!("{store}/access-keys/{member}/"))
+    }
     /// The store whose objects this prefix selects.
     pub fn store(&self) -> StoreId {
         store_id(&self.0)
@@ -287,7 +300,8 @@ pub fn validate_directory(value: &str) -> Result<(), PathError> {
     let valid = match parts.as_slice() {
         [] => true,
         ["devices" | "store-log" | "positions" | "clock" | "snapshots" | "keys" | "files"
-        | "join-requests"] => true,
+        | "join-requests" | "access-keys"] => true,
+        ["access-keys", member] => member_id(member),
         ["devices" | "store-log" | "files" | "keys", device] => decimal(device, false),
         ["snapshots", audience] => *audience == "store" || canonical_uuid(audience),
         ["snapshots", audience, device] => {
@@ -316,6 +330,9 @@ fn decimal(part: &str, nonzero: bool) -> bool {
         Ok(n) => (!nonzero || n != 0) && n.to_string() == part,
         Err(_) => false,
     }
+}
+fn member_id(value: &str) -> bool {
+    value.parse::<coven_crypto::MemberId>().is_ok()
 }
 fn canonical_uuid(value: &str) -> bool {
     match uuid::Uuid::parse_str(value) {

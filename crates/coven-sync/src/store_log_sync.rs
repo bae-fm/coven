@@ -575,6 +575,8 @@ impl StoreLogSync {
 #[path = "store_log_sync_tests.rs"]
 pub(crate) mod tests;
 
+#[path = "operation_access_keys.rs"]
+mod operation_access_keys;
 #[path = "operation_calls.rs"]
 mod operation_calls;
 #[path = "operation_invites.rs"]

@@ -5,6 +5,7 @@
 //! are bounded; writes and snapshots stream without an object-size bound.
 //! Appendix D of `spec/format.md` specifies stored bytes.
 
+pub mod access_key_delivery;
 pub mod chunks;
 pub mod clock;
 pub mod codes;

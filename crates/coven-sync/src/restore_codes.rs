@@ -124,6 +124,38 @@ impl RestoreCodes {
         .await
     }
 
+    /// Keep a key an admin delivered to this member, unless this device already
+    /// uses it. Custody commits it before the connection does (§13).
+    pub(crate) async fn adopt_delivered_key(
+        &self,
+        key: coven_format::access_key_delivery::DeliveredKey,
+    ) -> Result<(), SyncError> {
+        let inner = self.inner.clone();
+        crate::files::join(tokio::spawn(async move {
+            let guard = inner.lock().await;
+            let owner = guard.as_ref().ok_or(DbError::StoreClosed)?;
+            if let Some(ConnectionCredentials {
+                credentials: StorageCredentials::S3(current),
+                ..
+            }) = owner.connection()?
+            {
+                if current.access_key_id == key.access_key_id {
+                    return Ok(());
+                }
+            }
+            owner
+                .install_s3(
+                    S3Credentials {
+                        access_key_id: key.access_key_id,
+                        secret_access_key: key.secret_access_key,
+                    },
+                    false,
+                )
+                .await
+        }))
+        .await
+    }
+
     /// Read committed provider data without exposing custody or a connection.
     pub async fn connection(&self) -> Result<Option<ConnectionCredentials>, SyncError> {
         let guard = self.inner.lock().await;

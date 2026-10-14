@@ -210,6 +210,22 @@ impl CovenHandle {
     ) -> Result<(), SyncError> {
         self.operations.delete_access_key(operation, admin).await
     }
+    /// Replaces a member's S3 key with admin access (§13): makes the key and
+    /// checks it from the member's side, delivers it sealed to the member's
+    /// devices, records it for them in the store log, then deletes the old
+    /// key and reads it gone. The member's own key, or another member's as an
+    /// admin. The returned key is for the person to keep; the old key's
+    /// deletion outcome is reported, and a key it could not delete stays
+    /// pending.
+    pub async fn replace_member_access_key(
+        &self,
+        member: &MemberId,
+        admin: Arc<dyn AccessKeyAdmin>,
+    ) -> Result<AccessKeyReplacement, SyncError> {
+        self.operations
+            .replace_member_access_key(member, admin)
+            .await
+    }
     /// Resumes work waiting with `AdminAccessRequired`, holding this admin
     /// access for that operation only (§4).
     pub async fn retry_with_admin_access(

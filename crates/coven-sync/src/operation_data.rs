@@ -79,6 +79,22 @@ impl MintWork {
     }
 }
 
+/// An admin desktop replacing a member's S3 key (§13): make the key with admin
+/// access, deliver it sealed to the member, record it, then delete the old one.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct ReplaceKeyWork {
+    pub(crate) member: String,
+    /// The attempt naming the principal and the delivery.
+    pub(crate) attempt: uuid::Uuid,
+    pub(crate) mint: MintWork,
+    /// The sealed delivery's fixed bytes, retained for every retry.
+    pub(crate) delivery: Option<Vec<u8>>,
+    pub(crate) entry: Option<Vec<u8>>,
+    /// Discarded before any key was made: only rolling back what the attempt
+    /// may have made at the provider remains.
+    pub(crate) abandoned: bool,
+}
+
 /// How an invited person reaches storage, as the invite's journal keeps it.
 #[derive(Serialize, Deserialize)]
 pub(crate) enum InviteGrant {
@@ -148,6 +164,7 @@ pub(crate) enum Data {
     },
     /// One S3 key's deletion obligation; its pending notice lives on this row.
     DeleteAccessKey(#[serde(with = "crate::pending_encoding::AccessKey")] crate::AccessKeyToDelete),
+    ReplaceAccessKey(ReplaceKeyWork),
 }
 
 impl Data {
@@ -182,6 +199,7 @@ impl Data {
             Self::Invite(_) => OperationKind::Invite,
             Self::Revoke { .. } | Self::RetainedAccess { .. } => OperationKind::RevokeAccess,
             Self::DeleteAccessKey(_) => OperationKind::DeleteAccessKey,
+            Self::ReplaceAccessKey(_) => OperationKind::ReplaceAccessKey,
         }
     }
 
@@ -214,6 +232,7 @@ impl Data {
             Self::Revoke { .. } => "revoke-access",
             Self::RetainedAccess { .. } => "retained-access",
             Self::DeleteAccessKey(_) => "delete-access-key",
+            Self::ReplaceAccessKey(_) => "replace-access-key",
         }
     }
     pub(crate) fn new_operation(&self, started_by: &str) -> Result<NewOperation, SyncError> {
@@ -245,6 +264,8 @@ impl Data {
                 intent: Intent::Reset { .. },
                 ..
             }) => 3,
+            // Minting and delivery precede the entry.
+            Self::ReplaceAccessKey(_) => 2,
             _ => 0,
         }
     }
@@ -273,6 +294,7 @@ impl Data {
                 state: InviteState::Approving { entry, .. },
                 ..
             }) => entry.as_ref(),
+            Self::ReplaceAccessKey(work) => work.entry.as_ref(),
             _ => None,
         };
         bytes
@@ -300,6 +322,7 @@ impl Data {
                 state: InviteState::Approving { entry, .. },
                 ..
             }) => *entry = value,
+            Self::ReplaceAccessKey(work) => work.entry = value,
             _ => return Err(coven_database::DbError::DamagedDatabase.into()),
         }
         Ok(())
@@ -319,6 +342,7 @@ impl Data {
             || matches!(
                 self,
                 Self::Entry(_)
+                    | Self::ReplaceAccessKey(_)
                     | Self::Invite(InviteWork {
                         state: InviteState::Approving { .. },
                         ..

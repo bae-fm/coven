@@ -346,6 +346,11 @@ pub(crate) const POLICY: Policy = Policy {
             "install_oauth",
         ),
         (
+            "crates/coven-sync/src/restore_codes.rs",
+            "RestoreCodes",
+            "adopt_delivered_key",
+        ),
+        (
             "crates/coven-sync/src/store_log_sync.rs",
             "StoreLogSync",
             "disconnected",

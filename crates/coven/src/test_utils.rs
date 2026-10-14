@@ -64,6 +64,12 @@ impl TestCoven {
         StoreKeyCustody::persist(&KeyringCustody::new(keychain), keys)
     }
 
+    /// This installation's custody for one store, to read what it holds.
+    #[cfg(test)]
+    pub(crate) fn store_keychain(&self, store: StoreId) -> StoreKeychain {
+        StoreKeychain::new(self.keychain.clone(), store)
+    }
+
     /// Refuse the next keychain operation before changing any stored value.
     pub fn fail_next_keychain_operation(&self) {
         self.keychain.fail_next_operation();

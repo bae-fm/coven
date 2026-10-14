@@ -42,6 +42,17 @@ impl StoreLogSync {
             // Only explicit confirmation or a verified admin deletion clears it.
             return Ok(Progress::Waiting(PendingReason::DeleteAccessKey(key)));
         }
+        if let Data::ReplaceAccessKey(work) = &data {
+            if work.abandoned {
+                return self.abandon_replacement(record, &data).await;
+            }
+            if record.last_step < data.entry_step_number(0) {
+                return self.replace_key_prelude(record, data).await;
+            }
+            if record.last_step >= data.entry_step_number(5) {
+                return self.replace_key_finish(record, data).await;
+            }
+        }
         if let Data::Revoke { member } = &data {
             return self.finish_revocation(record, member).await;
         }
@@ -247,6 +258,14 @@ impl StoreLogSync {
                     .advance_operation(data.update(&current, data.entry_step_number(5))?)
                     .await?;
             }
+            Some(EntryOutcome::Dropped(reason)) if matches!(&data, Data::ReplaceAccessKey(_)) => {
+                // A lost replacement is reported, never made again with a new
+                // key: its key is recorded, so it is pending deletion (§13).
+                let reason = reason.clone();
+                self.database.finish_operation(current.id).await?;
+                self.release_admin_access(current.id);
+                return Ok(Progress::Reply(Err(SyncError::Rejected(reason))));
+            }
             Some(EntryOutcome::Dropped(_)) => {
                 data.set_entry(None)?;
                 self.database
@@ -290,6 +309,14 @@ impl StoreLogSync {
                     }
                     return Err(SyncError::InvitationChanged);
                 }
+                return Ok(Some(change));
+            }
+            Data::ReplaceAccessKey(work) => {
+                let change = Self::replacement_change(work)?;
+                if effects::change_in_place(state, me, &change) {
+                    return Ok(None);
+                }
+                self.validate_administration(local, me, &change)?;
                 return Ok(Some(change));
             }
             Data::Revoke { .. }

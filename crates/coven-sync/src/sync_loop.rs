@@ -402,7 +402,20 @@ impl SyncRun {
                     self.status.send_replace(SyncStatus::Syncing);
                     let result = async {
                         self.codes.refresh_if_expired(self.clock.now()).await?;
-                        self.operations.sync().await
+                        self.operations.sync().await?;
+                        // An admin's replacement of this member's key arrives
+                        // sealed to them; adopt it before the old key goes (§13).
+                        let held = match self.codes.connection().await? {
+                            Some(coven_storage::ConnectionCredentials {
+                                credentials: coven_storage::StorageCredentials::S3(held),
+                                ..
+                            }) => Some(held.access_key_id),
+                            _ => None,
+                        };
+                        if let Some(key) = self.operations.delivered_access_key(held).await? {
+                            self.codes.adopt_delivered_key(key).await?;
+                        }
+                        Ok::<_, SyncError>(())
                     }.await;
                     match result {
                         Ok(()) => {

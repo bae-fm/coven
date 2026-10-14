@@ -28,7 +28,8 @@ pub use file_key::FileKey;
 pub use hashing::{ContentHash, ContentHasher, Fingerprint, FingerprintHasher};
 pub use keys::{CircleKey, InviteSecret, StoreKey, StoreKeyring};
 pub use member::{
-    seal_circle_key, seal_store_key, MemberId, MemberKeys, SealingPublicKey, Signature,
+    seal_access_key, seal_circle_key, seal_store_key, MemberId, MemberKeys, SealingPublicKey,
+    Signature, MAX_ACCESS_KEY_BOX,
 };
 pub use object_digest::{ObjectDigest, ObjectHasher};
 pub use s3_signing::{aws_request_signature, gcs_request_signature, s3_request_hash};

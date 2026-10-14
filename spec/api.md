@@ -2567,6 +2567,8 @@ pub enum OperationKind {
     /// An S3 key awaiting deletion with admin access or explicit
     /// confirmation (§13). Its record names the key.
     DeleteAccessKey,
+    /// An admin desktop replacing a member's S3 key (§13).
+    ReplaceAccessKey,
     /// Snapshot and reset an audience (§19.3).
     Reset,
 }
@@ -2889,8 +2891,11 @@ match stream.read_at(resume_at, 256 * 1024).await {
   S3 replacement for another member. Authority uses the author's role in the
   entry's recorded view, independently of who holds provider-admin access.
   `ProviderSignOut::ReplaceAccessKey` directs the person to the admin desktop
-  flow in §13: create, deliver to remaining devices, record for that member,
-  then delete the old key. §4 lists the operation-scoped admin-access sources.
+  flow in §13, `replace_member_access_key`: create, deliver to remaining
+  devices, record for that member, then delete the old key. Each remaining
+  device installs the delivered key on its next sync. Without admin access,
+  `replace_access_key` records a console-made key instead. §4 lists the
+  operation-scoped admin-access sources.
 - A member can replace their own signing/sealing pair; any admin can publish
   a prepared pair for an existing member with `replace_member_keys_for`.
   Replacement invites provide the approval/bootstrap flow (E10), subject to
@@ -3021,6 +3026,17 @@ impl CovenHandle {
     /// for that operation only (§4).
     pub async fn retry_with_admin_access(&self, operation: OperationId, admin: Arc<dyn AccessKeyAdmin>) -> Result<(), OperationError>;
 
+    /// Replaces a member's S3 key with admin access (§13): makes the key and
+    /// checks it from the member's side, delivers it sealed to the member's
+    /// devices (D9), records it for them, then deletes the old key and reads
+    /// it gone. Their own key, or another member's as an admin; any other
+    /// caller is refused before admin access is used. Returns the new key for
+    /// the person to keep, and the old key's outcome. A dropped entry returns
+    /// its refusal, with the made key pending deletion beside the old one.
+    /// After a restart the operation waits with AdminAccessRequired.
+    /// Discarding it leaves no key unrecorded (§13).
+    pub async fn replace_member_access_key(&self, member: &MemberId, admin: Arc<dyn AccessKeyAdmin>) -> Result<AccessKeyReplacement, SyncError>;
+
     /// Publishes the removal of this member and all their devices (§13).
     /// Returns once the entry is kept. Provider work appears only in pending(),
     /// including owner waits, retained grants and S3 keys until confirmed deleted.
@@ -3030,6 +3046,23 @@ impl CovenHandle {
     /// result says how its member signs out of the provider and signs in
     /// again on the devices they keep (§13).
     pub async fn remove_device(&self, device: DeviceId) -> Result<ProviderSignOut, SyncError>;
+}
+
+/// A member's replaced S3 key: the new key, which the member keeps
+/// separately, and what happened to the old one (§13).
+pub struct AccessKeyReplacement {
+    pub key: S3MemberKey,
+    pub old_key: OldKeyDeletion,
+}
+
+pub enum OldKeyDeletion {
+    /// No deletion remains: coven deleted it and read it absent, or its
+    /// record had already cleared.
+    Deleted,
+    /// Made in the console: delete it there, then confirm_access_key_deleted.
+    Console { operation: OperationId },
+    /// Deleting failed; the record stays for delete_access_key.
+    Failed { operation: OperationId, error: SyncError },
 }
 
 /// An S3 key superseded, recorded for a removed member, or from an ended invite (§13).
@@ -3181,7 +3214,7 @@ pub enum ProviderSignOut {
     RemoveFromAppleAccount,
     /// An admin desktop with the storage account's admin access creates a new
     /// S3 key, delivers it to the member's remaining devices, records it for
-    /// that member, then deletes the old key (§13). The old key is pending
+    /// that member, then deletes the old key (§13, replace_member_access_key). The old key is pending
     /// DeleteAccessKey work from recording until verified deletion or explicit
     /// confirmation. Keep the new member key separately; the restore code does
     /// not change. Admin access is held for one operation and never stored (§4).

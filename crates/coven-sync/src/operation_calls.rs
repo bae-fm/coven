@@ -120,32 +120,13 @@ impl StoreLogSync {
                 return Ok(Begun::Value(Output::Unit));
             }
             Command::DeleteKey(id, admin) => {
-                let record = self
-                    .database
-                    .operation(id)
-                    .await?
-                    .ok_or(SyncError::NotPending(id))?;
-                let Data::DeleteAccessKey(key) = Data::read(&record)? else {
-                    return Err(SyncError::NotPending(id));
-                };
-                let deleted = admin.revoke(&key.access_key_id, &key.principal).await;
-                // A read follows only an accepted deletion.
-                let observation = match &deleted {
-                    Ok(()) => Some(crate::access_keys::KeyObservation {
-                        access_key_id: key.access_key_id.clone(),
-                        reply: admin
-                            .key_exists(&key.access_key_id, &key.principal)
-                            .await
-                            .map(|present| match present {
-                                true => crate::access_keys::KeyPresence::Present,
-                                false => crate::access_keys::KeyPresence::Absent,
-                            }),
-                    }),
-                    Err(_) => None,
-                };
-                crate::access_keys::verify_deletion(&key.access_key_id, deleted, observation)?;
-                self.database.clear_access_key(key.access_key_id).await?;
+                self.delete_access_key(id, admin.as_ref()).await?;
                 return Ok(Begun::Value(Output::Unit));
+            }
+            Command::DeliveredKey(held) => {
+                return Ok(Begun::Value(Output::DeliveredKey(
+                    self.delivered_access_key(held.as_deref()).await?,
+                )));
             }
             #[cfg(any(test, feature = "test-utils"))]
             Command::Sync => {
@@ -171,6 +152,9 @@ impl StoreLogSync {
             }
             Command::Discard(id) => {
                 let record = self.pending_operation(id, true).await?;
+                if let Some(begun) = self.discard_replacement(&record).await? {
+                    return Ok(begun);
+                }
                 self.release_admin_access(id);
                 let data = Data::read(&record)?;
                 if let Data::Snapshots(task) = &data {
@@ -407,6 +391,11 @@ impl StoreLogSync {
             }
             Command::Invite(role, access) => {
                 return self.begin_invite(&local, &me, role, access).await
+            }
+            Command::ReplaceAccessKey(member, admin) => {
+                return self
+                    .begin_replace_access_key(&local, &me, member, admin)
+                    .await
             }
             Command::Approve(request) => {
                 return self

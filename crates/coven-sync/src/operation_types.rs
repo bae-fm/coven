@@ -40,6 +40,38 @@ pub enum OperationKind {
     RevokeAccess,
     /// An S3 key awaiting deletion with admin access or explicit confirmation (§13).
     DeleteAccessKey,
+    /// An admin desktop replacing a member's S3 key (§13).
+    ReplaceAccessKey,
+}
+
+/// A member's replaced S3 key (§13): the new key, which the member keeps
+/// separately, and what happened to the old one.
+#[derive(Debug)]
+pub struct AccessKeyReplacement {
+    /// The member's new key, delivered to their devices and recorded.
+    pub key: coven_storage::S3MemberKey,
+    /// The old key's deletion.
+    pub old_key: OldKeyDeletion,
+}
+
+/// The old key after a replacement was recorded (§13).
+#[derive(Debug)]
+pub enum OldKeyDeletion {
+    /// No deletion remains: coven deleted it with admin access and read it
+    /// absent, or its record had already cleared.
+    Deleted,
+    /// Made in the console: delete it there and confirm (§13).
+    Console {
+        /// Its pending deletion.
+        operation: OperationId,
+    },
+    /// Deleting it failed; its record stays for a later deletion.
+    Failed {
+        /// Its pending deletion.
+        operation: OperationId,
+        /// Why.
+        error: crate::SyncError,
+    },
 }
 
 /// A live member and the devices still belonging to them.

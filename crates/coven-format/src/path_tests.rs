@@ -287,3 +287,31 @@ fn provider_folders_cannot_introduce_another_layout_or_alias() {
         );
     }
 }
+
+#[test]
+fn access_key_deliveries_name_their_member_and_attempt() {
+    let member = coven_crypto::MemberKeys::generate().unwrap().member_id();
+    let attempt = uuid::Uuid::from_u128(5);
+    let path = ObjectPath::access_key(STORE_ID, &member, attempt);
+    assert_eq!(ObjectPath::parse(path.as_str()).unwrap(), path);
+    assert!(ObjectPrefix::access_keys(STORE_ID, &member).contains(&path));
+    assert!(ObjectPrefix::all(STORE_ID).contains(&path));
+    assert_eq!(path.device(), None);
+    assert!(!path.is_replaceable());
+    validate_directory(&format!("{STORE_ID}/access-keys")).unwrap();
+    validate_directory(&format!("{STORE_ID}/access-keys/{member}")).unwrap();
+    for tail in [
+        format!("access-keys/{member}"),
+        format!(
+            "access-keys/{}/{attempt}",
+            member.to_string().to_uppercase()
+        ),
+        format!("access-keys/{member}/not-a-uuid"),
+        format!("access-keys/00/{attempt}"),
+    ] {
+        assert!(
+            ObjectPath::parse(&format!("{STORE_ID}/{tail}")).is_err(),
+            "{tail}"
+        );
+    }
+}

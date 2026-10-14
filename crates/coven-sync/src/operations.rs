@@ -52,6 +52,8 @@ pub(crate) enum Command {
     ConfirmKey(String),
     DeleteKey(OperationId, Arc<dyn coven_storage::AccessKeyAdmin>),
     RetryWithAdmin(OperationId, Arc<dyn coven_storage::AccessKeyAdmin>),
+    ReplaceAccessKey(MemberId, Arc<dyn coven_storage::AccessKeyAdmin>),
+    DeliveredKey(Option<String>),
     Credentials {
         previous: Option<coven_storage::ConnectionCredentials>,
         next: coven_storage::ConnectionCredentials,
@@ -83,6 +85,8 @@ pub(crate) enum Output {
     Circles(Vec<Circle>),
     CircleMembers(Vec<CircleMemberInfo>),
     Invite(Invite),
+    AccessKeyReplaced(AccessKeyReplacement),
+    DeliveredKey(Option<coven_format::access_key_delivery::DeliveredKey>),
 }
 
 type Reply = oneshot::Sender<Result<Output, SyncError>>;
@@ -299,6 +303,34 @@ impl Operations {
         admin: Arc<dyn coven_storage::AccessKeyAdmin>,
     ) -> Result<(), SyncError> {
         self.unit(Command::DeleteKey(operation, admin)).await
+    }
+    /// Replace a member's S3 key with admin access (§13): make it, deliver it
+    /// sealed to the member's devices, record it for them, then delete the
+    /// old key. Their own replacement or, as an admin, another member's.
+    pub async fn replace_member_access_key(
+        &self,
+        member: &MemberId,
+        admin: Arc<dyn coven_storage::AccessKeyAdmin>,
+    ) -> Result<AccessKeyReplacement, SyncError> {
+        match self
+            .call(Command::ReplaceAccessKey(member.clone(), admin))
+            .await?
+        {
+            Output::AccessKeyReplaced(value) => Ok(value),
+            _ => unreachable!("replacement result"),
+        }
+    }
+    /// The key an admin delivered to this member that the store log now
+    /// records as their access, if this device can read it and does not
+    /// already hold it as `held` (§13).
+    pub(crate) async fn delivered_access_key(
+        &self,
+        held: Option<String>,
+    ) -> Result<Option<coven_format::access_key_delivery::DeliveredKey>, SyncError> {
+        match self.call(Command::DeliveredKey(held)).await? {
+            Output::DeliveredKey(value) => Ok(value),
+            _ => unreachable!("delivered key result"),
+        }
     }
     /// Confirm explicitly that this S3 key was deleted, such as in the console.
     /// Clears only this id's notice and keeps the confirmation (§13).

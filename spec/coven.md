@@ -3726,6 +3726,31 @@ Carol's tablet:
     then deletes the old key. The admin-access and guided console paths are
     in §4. Ana keeps the new member key separately; her restore code does
     not change. Her own scoped member key need not be able to create keys.
+  - The S3 replacement is one operation (§18). With admin access it makes the
+    key and checks it from the member's side as an invite's key is checked
+    (§4), seals it to Ana's sealing key and signs it as a delivered key at
+    `<store>/access-keys/<Ana>/<attempt>` (D9, D10), and only then records
+    the key for Ana in a set-access entry. Once that entry is kept, it deletes
+    the old key from the entry's recorded view and reads that it is gone. A
+    console-made old key, or a deletion that fails, stays pending
+    `DeleteAccessKey`; the call reports which. If replay drops the entry, the
+    operation finishes with that refusal, and the key it made stays pending
+    deletion with the old one (above).
+  - Each of Ana's devices, on its next sync, opens a delivered key whose
+    author also authored a kept set-access entry recording that key as Ana's
+    current access, and installs it as its storage key. A device that holds
+    the recorded key already reads nothing. A device that did not sync
+    between delivery and the old key's deletion can no longer reach storage
+    to fetch it; Ana enters the key she kept. Deleting promptly is the point:
+    the lost phone holds the same old key.
+  - After a restart, a replacement that has not yet made its key or deleted
+    the old one waits for admin access again (§4); none is stored.
+  - Discarding a replacement leaves no key unrecorded. Once its entry is
+    reserved, the discard publishes it and the store log covers the key. Before
+    that, a made key becomes pending `DeleteAccessKey` in the transaction that
+    removes the operation; with no key yet, what the attempt may have made is
+    rolled back with admin access, and without it the operation waits for
+    admin access with only that rollback left.
   - Recording an S3 replacement makes the old key from its recorded view
     pending `DeleteAccessKey` work in the same transaction as the entry and
     replay, even if the replacement entry drops. Recording the same key id

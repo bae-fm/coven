@@ -85,3 +85,64 @@ async fn guided_steps_fill_the_member_policy_for_this_store() {
     );
     network.close().await;
 }
+
+#[tokio::test]
+async fn an_admin_replaces_a_members_key_and_their_device_adopts_it() {
+    let network = Network::new(2).await;
+    let owner = &network.devices[0];
+    let member = owner
+        .handle
+        .get_members()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|member| !member.is_self)
+        .unwrap()
+        .id;
+    let admin = owner
+        .handle
+        .admin_access(AdminAccessSource::Pasted(AdminCredential::AccessKey {
+            access_key_id: "admin".into(),
+            secret_access_key: SecretText::new("admin-secret".into()),
+            session_token: None,
+        }))
+        .await
+        .unwrap();
+    let replaced = owner
+        .handle
+        .replace_member_access_key(&member, admin)
+        .await
+        .unwrap();
+    let new_key = replaced.key.credentials.access_key_id.clone();
+    // The invite's key was made in the console; only the console deletes it.
+    let OldKeyDeletion::Console { operation } = replaced.old_key else {
+        panic!("console deletion: {:?}", replaced.old_key)
+    };
+    assert_eq!(
+        pending_keys(&owner.handle.pending().await.unwrap())
+            .iter()
+            .find(|(id, _)| *id == operation)
+            .unwrap()
+            .1
+            .access_key_id,
+        "member-1"
+    );
+    let held = || {
+        let device = &network.devices[1];
+        let bytes = device
+            .app
+            .store_keychain(device.store)
+            .storage_credentials()
+            .unwrap()
+            .unwrap();
+        match coven_storage::StorageCredentials::decode(bytes.as_bytes()).unwrap() {
+            coven_storage::StorageCredentials::S3(key) => key.access_key_id,
+            _ => panic!("S3 device key"),
+        }
+    };
+    assert_eq!(held(), "member-1");
+    // The member's device picks up the delivered key on its next sync.
+    network.sync(1).await;
+    assert_eq!(held(), new_key);
+    network.close().await;
+}

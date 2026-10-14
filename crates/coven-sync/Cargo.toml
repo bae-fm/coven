@@ -21,6 +21,7 @@ thiserror.workspace = true
 hex.workspace = true
 tracing.workspace = true
 zeroize.workspace = true
+uuid = { workspace = true, features = ["serde"] }
 
 [dev-dependencies]
 coven-crypto = { workspace = true, features = ["test-utils"] }
