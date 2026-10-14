@@ -340,6 +340,59 @@ retains the original observations and restores them when its entries drop.
 These proofs concern the modeled work registry. They do not establish that
 Rust observes every storage failure, nor model every native error payload.
 
+**Two more ways a record ends are proved safe.** A loaded snapshot can move
+this device's write positions past a write that was waiting. `Pending.cover`
+runs in that load's transaction: it ends this device's wait for each write
+the new positions cover, and keeps a refusal or drop of the write's bytes.
+`cover_removes_only_covered_waits` and `cover_keeps_verdicts` prove that
+nothing else is touched: no peer's report, no other subject, no verdict.
+`covered_wait_gone` proves no covered wait is left. Why the wait is really
+over: the download only fetches writes its positions do not cover, and
+positions never move back (`raise_covers`, `history_positions_monotone`).
+`covered_never_scheduled` and `cover_safe` prove the covered write is never
+fetched again, so its wait could never have ended by the write applying.
+
+Each pass reads every peer's positions object, and each audience's snapshot
+listing reads every snapshot of that audience. `Pending.replace` lets one
+completed listing replace this device's records for that class as a whole.
+Given a listing that names exactly the objects storage holds, with the
+conditions their processing checks now (`Listing.Complete`),
+`listing_decides` proves the record for each subject of the class is that
+subject's current first unmet condition. `absent_subject_cleared` covers a
+subject with no object: nothing is left to process, so it has no record.
+`listing_safe` and `listing_removes_only_ended` prove a record is removed only
+when its condition no longer holds. `replace_keeps_others` proves records
+outside the class, and peers' reports, stay. This device's own positions
+record is outside every class: it belongs to its publication, which clears
+it only once storage confirms the upload (`own_positions_kept`). A failed
+check of its own listed object is an ordinary observation of that subject.
+A failed listing replaces nothing, as in Rust; that a scan really listed
+everything is an input.
+
+`Local.step` runs observations, covers and listings. As in Rust, a listing
+naming a subject twice or outside its class is refused and changes nothing.
+`history_unique` and `history_one_record` prove every reachable registry holds
+one record per subject and reporting device. `every_pending_subject` and
+`only_first_reason` quantify over any work list, so they apply unchanged to
+every state these steps reach. Checked examples run a cover over a wait, a
+refusal and an uncovered wait; a pass that drops two positions records while
+another listing's snapshot wait stays; and a refused duplicate listing.
+Positions moving back on a reset or in-place reload are outside this model;
+a reset clears the list atomically with its reload (§19.1).
+
+The Rust comparison `data_differential_pending_records`
+([`pending_tests.rs`](../../crates/coven-sync/src/pending_tests.rs)) mixes
+the three steps in random histories against the real pending table. A cover
+calls the database's covered-write clearing after installing positions. A
+positions listing calls `replace_pending_subjects`, the replacement the
+positions scan commits, with the subjects that scan decides: every peer
+positions record held plus every listed peer. A snapshot listing calls
+`replace_local_pending` with the snapshot catalog's audience test. The
+device's own positions record is in the histories and must survive passes. After each step, Rust's `pending()` must equal
+`Local.step` followed by `Pending.pending`, retry class included. The code
+that builds listings from storage (the positions pass and snapshot catalog)
+is not driven by this comparison.
+
 **Loss metadata is proved.** `LostValues.pending_exact` contains exactly the
 non-final entries in a loss's dependency expression, without duplicates.
 The ids are sorted. `pending_not_in_fingerprint` excludes this local metadata

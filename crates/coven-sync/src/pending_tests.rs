@@ -45,8 +45,15 @@ fn a_dropped_operation_waits_for_the_app_but_a_dropped_entry_or_write_is_final()
 
 /// SD `Pending`: each observation of a subject keeps exactly its first unmet
 /// condition, replacing the previous one; an observation with every condition
-/// met removes the record; the retry class follows the reason. The Rust side
-/// persists through the store's real pending table and reads `pending()`.
+/// met removes the record; the retry class follows the reason. Positions a
+/// snapshot load installs end this device's waits for the writes they cover
+/// and keep verdicts on their bytes (`Pending.cover`). A completed positions
+/// pass replaces every peer's positions record, and an audience snapshot
+/// listing that audience's snapshot records (`Pending.replace`); neither
+/// touches this device's own positions record. The Rust side persists through
+/// the store's real pending table, its covered-write clearing and the
+/// replacement calls the positions scan and snapshot catalog make, and reads
+/// `pending()`.
 #[tokio::test]
 #[ignore = "requires COVEN_STORELOG_DATA_LEAN, supplied by scripts/check.sh"]
 async fn data_differential_pending_records() {
@@ -126,18 +133,40 @@ async fn data_differential_pending_records() {
             .1
             .clone()
     };
-    let write = |number| {
+    let write = |device, number| {
         PendingSubject::Write(coven_merge::WriteId {
-            device: DeviceId(1),
+            device: DeviceId(device),
             number,
         })
     };
-    let subjects: Vec<(PendingSubject, Value)> = vec![
-        (write(1), json!(["write", 1, 1])),
-        (write(2), json!(["write", 1, 2])),
+    let circle = Audience::Circle(coven_foundation::id_source::CircleId(
+        uuid::Uuid::from_u128(1),
+    ));
+    let snapshot = |audience: &Audience, number| {
+        PendingSubject::Snapshot(coven_format::store_log::SnapshotId {
+            device: DeviceId(1),
+            number,
+            audience: audience.clone(),
+        })
+    };
+    // Writes of devices 7 and 8 are the ones a load's positions can cover:
+    // neither device exists in the group, so no other progress moves them.
+    let mut subjects: Vec<(PendingSubject, Value)> = vec![
+        (write(1, 1), json!(["write", 1, 1])),
+        (write(1, 2), json!(["write", 1, 2])),
+        (write(8, 1), json!(["write", 8, 1])),
         (
             PendingSubject::Positions(DeviceId(3)),
             json!(["positions", 3]),
+        ),
+        (
+            PendingSubject::Positions(DeviceId(4)),
+            json!(["positions", 4]),
+        ),
+        // This device's own positions: only its publication clears it.
+        (
+            PendingSubject::Positions(DeviceId(2)),
+            json!(["positions", 2]),
         ),
         (
             PendingSubject::Agreement {
@@ -146,6 +175,26 @@ async fn data_differential_pending_records() {
             },
             json!(["agreement", 0, 3]),
         ),
+        (snapshot(&Audience::Store, 1), json!(["snapshot", 0, 1])),
+        (snapshot(&Audience::Store, 2), json!(["snapshot", 0, 2])),
+        (snapshot(&circle, 1), json!(["snapshot", 1, 1])),
+    ];
+    for number in 1..=3 {
+        subjects.push((write(7, number), json!(["write", 7, number])));
+    }
+    /// The class one completed listing decides: every peer's positions, or
+    /// one audience's snapshots (`Pending.Scan.decides`).
+    fn decides(class: &Option<Audience>, subject: &PendingSubject) -> bool {
+        match (class, subject) {
+            (None, PendingSubject::Positions(device)) => *device != DeviceId(2),
+            (Some(audience), PendingSubject::Snapshot(id)) => id.audience == *audience,
+            _ => false,
+        }
+    }
+    let classes = [
+        (None, json!(["positions"])),
+        (Some(Audience::Store), json!(["snapshots", 0])),
+        (Some(circle.clone()), json!(["snapshots", 1])),
     ];
     let retry = |retry: Retry| match retry {
         Retry::Automatic => "automatic",
@@ -167,35 +216,98 @@ async fn data_differential_pending_records() {
     };
     let mut cases = Vec::new();
     let mut expected = Vec::new();
+    let encode = |conditions: &[(bool, usize)]| -> Value {
+        conditions
+            .iter()
+            .map(|(met, reason)| json!([met, reasons[*reason].1]))
+            .collect()
+    };
     for _ in 0..12 {
         let devices = group(storage(), 2).await;
         let db = &devices[1].db;
         let own = DeviceId(2);
         let mut steps = Vec::new();
         let mut observed = Vec::new();
-        for _ in 0..10 {
-            let (subject, subject_json) = subjects[next(subjects.len())].clone();
-            let conditions: Vec<(bool, usize)> = (0..next(4))
-                .map(|_| (next(3) == 0, next(reasons.len())))
-                .collect();
-            steps.push(json!({
-                "subject": subject_json,
-                "reporter": own.0,
-                "conditions": conditions
-                    .iter()
-                    .map(|(met, reason)| json!([met, reasons[*reason].1]))
-                    .collect::<Vec<_>>(),
-            }));
-            match conditions.iter().find(|(met, _)| !met) {
-                Some((_, reason)) => db
-                    .record_pending(PendingRecord {
-                        subject: subject.clone(),
-                        reason: reasons[*reason].0.clone(),
-                        reported_by: own,
-                    })
+        // The positions table holds one row per device, so each is covered once.
+        let mut uncovered = vec![7_u64, 8];
+        for _ in 0..16 {
+            let kind = next(7);
+            if kind == 0 && !uncovered.is_empty() {
+                let device = uncovered.remove(next(uncovered.len()));
+                let number = 1 + next(3) as u64;
+                db.test_cover_positions(vec![(device, number)])
                     .await
-                    .unwrap(),
-                None => db.clear_pending(subject.clone()).await.unwrap(),
+                    .unwrap();
+                steps.push(json!({ "cover": [[device, number]] }));
+            } else if kind <= 2 {
+                let (class, class_json) = classes[next(classes.len())].clone();
+                let mut listed = Vec::new();
+                let mut listed_subjects = Vec::new();
+                let mut records = Vec::new();
+                for (subject, subject_json) in subjects.iter().filter(|(s, _)| decides(&class, s)) {
+                    if next(2) == 0 {
+                        continue;
+                    }
+                    let conditions: Vec<(bool, usize)> = (0..next(4))
+                        .map(|_| (next(3) == 0, next(reasons.len())))
+                        .collect();
+                    listed.push(json!({
+                        "subject": subject_json,
+                        "conditions": encode(&conditions),
+                    }));
+                    listed_subjects.push(subject.clone());
+                    if let Some((_, reason)) = conditions.iter().find(|(met, _)| !met) {
+                        records.push(PendingRecord {
+                            subject: subject.clone(),
+                            reason: reasons[*reason].0.clone(),
+                            reported_by: own,
+                        });
+                    }
+                }
+                if class.is_none() {
+                    // As `posted_positions::scan`: the subjects it decides are
+                    // every peer positions record this device holds plus every
+                    // listed peer, committed through the same local replacement.
+                    let mut decided: Vec<PendingSubject> = db
+                        .pending::<PendingRecord>()
+                        .await
+                        .unwrap()
+                        .into_iter()
+                        .filter(|r| r.reported_by == own && decides(&class, &r.subject))
+                        .map(|r| r.subject)
+                        .collect();
+                    decided.extend(listed_subjects);
+                    db.replace_pending_subjects(decided, records).await.unwrap();
+                } else {
+                    db.replace_local_pending(
+                        move |record: &PendingRecord| decides(&class, &record.subject),
+                        records,
+                    )
+                    .await
+                    .unwrap();
+                }
+                steps.push(json!({ "listing": class_json, "observed": listed }));
+            } else {
+                let (subject, subject_json) = subjects[next(subjects.len())].clone();
+                let conditions: Vec<(bool, usize)> = (0..next(4))
+                    .map(|_| (next(3) == 0, next(reasons.len())))
+                    .collect();
+                steps.push(json!({
+                    "subject": subject_json,
+                    "reporter": own.0,
+                    "conditions": encode(&conditions),
+                }));
+                match conditions.iter().find(|(met, _)| !met) {
+                    Some((_, reason)) => db
+                        .record_pending(PendingRecord {
+                            subject: subject.clone(),
+                            reason: reasons[*reason].0.clone(),
+                            reported_by: own,
+                        })
+                        .await
+                        .unwrap(),
+                    None => db.clear_pending(subject.clone()).await.unwrap(),
+                }
             }
             let visible = db.pending::<PendingRecord>().await.unwrap();
             observed.push(sorted(
@@ -216,7 +328,7 @@ async fn data_differential_pending_records() {
                     .collect(),
             ));
         }
-        cases.push(Value::Array(steps));
+        cases.push(json!({ "device": own.0, "steps": steps }));
         expected.push(observed);
     }
     let output = crate::tests::run_lean("COVEN_STORELOG_DATA_LEAN", &json!({ "pending": cases }));

@@ -160,6 +160,25 @@ import CovenStorelogData
 #print axioms CovenStorelogData.SecurityExamples.rotations_coexist
 #print axioms CovenStorelogData.Pending.latest_reason_replaces_previous
 #print axioms CovenStorelogData.Pending.progress_removes_record
+#print axioms CovenStorelogData.Pending.one_record
+#print axioms CovenStorelogData.Pending.records_cover
+#print axioms CovenStorelogData.Pending.cover_removes_only_covered_waits
+#print axioms CovenStorelogData.Pending.cover_keeps_verdicts
+#print axioms CovenStorelogData.Pending.covered_wait_gone
+#print axioms CovenStorelogData.Pending.raise_covers
+#print axioms CovenStorelogData.Pending.covered_never_scheduled
+#print axioms CovenStorelogData.Pending.cover_safe
+#print axioms CovenStorelogData.Pending.replace_keeps_others
+#print axioms CovenStorelogData.Pending.listing_decides
+#print axioms CovenStorelogData.Pending.absent_subject_cleared
+#print axioms CovenStorelogData.Pending.listing_safe
+#print axioms CovenStorelogData.Pending.listing_removes_only_ended
+#print axioms CovenStorelogData.Pending.own_positions_kept
+#print axioms CovenStorelogData.Pending.replace_unique
+#print axioms CovenStorelogData.Pending.step_unique
+#print axioms CovenStorelogData.Pending.history_unique
+#print axioms CovenStorelogData.Pending.history_one_record
+#print axioms CovenStorelogData.Pending.history_positions_monotone
 #print axioms CovenStorelogData.RetentionSafety.first_finality_wait_visible
 
 #print axioms CovenStorelogData.ReplayEffects.scan_realizes
