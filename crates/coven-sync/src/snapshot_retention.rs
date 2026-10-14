@@ -59,10 +59,8 @@ impl StoreLogSync {
             pinned.insert(snapshot_path(self.directory.id(), snapshot)?);
         }
         for audience in &readable {
-            let candidates = self
-                .snapshot_candidates(audience, &local.log)
-                .await?
-                .candidates;
+            let catalog = self.snapshot_candidates(audience, &local.log).await?;
+            let candidates = catalog.candidates;
             let older: Vec<_> = candidates
                 .iter()
                 .map(|c| (c.object.path.clone(), c.prefix.writes.clone()))
@@ -88,7 +86,15 @@ impl StoreLogSync {
                         superseded.push(path);
                     }
                 }
-                coverage.insert(audience.clone(), prefix.writes);
+                // A prefix this device cannot read yet may be the newest, and
+                // need writes the chosen snapshot covers: deleting this
+                // audience's parts waits, as the reload waits (§15,
+                // `waiting_retention_safe`). That prefix's record says why.
+                if catalog.newest_unknown {
+                    tracing::debug!(?audience, "unread snapshot prefix holds back log retention");
+                } else {
+                    coverage.insert(audience.clone(), prefix.writes);
+                }
             }
         }
         let positions = self.retention_positions().await?;

@@ -382,3 +382,107 @@ async fn a_snapshot_keeps_its_key_when_a_removal_is_dropped() {
     );
     assert_eq!(tables(&a).await, tables(&b).await);
 }
+
+/// `newer_snapshot_retention_counterexample` (storelog-data `PendingScans`):
+/// Ana's snapshot covers her writes 1 to 4. Ben's covers her 1 to 3 and his
+/// own 1 and 2, more writes, so his is the store's newest (§15). `registered`
+/// is whether Ana has applied Ben's device registration. Ana's clock is past
+/// 30 storage days, so coverage alone decides deletion. Returns Ana, the path
+/// of Ben's snapshot and the paths of Ana's writes.
+async fn bens_snapshot_is_newest(
+    registered: bool,
+) -> (Arc<MemoryStorage>, Device, ObjectPath, Vec<ObjectPath>) {
+    let storage = snapshot_storage();
+    let mut a = notes_device(storage.clone(), 1).await;
+    a.create(key(1)).await;
+    for n in 0..4 {
+        write_rows(&a, n, 1, 17, Audience::Store).await;
+    }
+    let writes = a.db.test_queued_writes().await.unwrap();
+    upload(&a, &storage).await;
+    a.sync.write_snapshot(Audience::Store).await.unwrap();
+    let mut b = notes_device(storage.clone(), 2).await;
+    add_device(&mut b).await;
+    if registered {
+        a.sync().await;
+    }
+    for write in writes.iter().take(3) {
+        b.db.apply_downloaded(write.clone().into()).await.unwrap();
+    }
+    write_rows(&b, 10, 1, 17, Audience::Store).await;
+    write_rows(&b, 11, 1, 17, Audience::Store).await;
+    upload(&b, &storage).await;
+    let id = b.sync.write_snapshot(Audience::Store).await.unwrap();
+    a.clock.set(UNIX_EPOCH + Duration::from_secs(31 * 86400));
+    let ben = ObjectPath::snapshot(
+        store(1),
+        id.audience,
+        id.device,
+        NonZeroU64::new(id.number).unwrap(),
+    );
+    let writes = writes
+        .iter()
+        .map(|write| crate::write_seal::path(store(1), write.header.position))
+        .collect();
+    (storage, a, ben, writes)
+}
+
+async fn retained(storage: &MemoryStorage, writes: &[ObjectPath]) -> Vec<bool> {
+    let mut retained = Vec::new();
+    for path in writes {
+        retained.push(storage.status(path).await.unwrap().is_some());
+    }
+    retained
+}
+
+#[tokio::test]
+async fn a_newer_format_snapshot_holds_log_retention_like_the_reload() {
+    let (storage, mut a, ben, writes) = bens_snapshot_is_newest(true).await;
+    let readable = storage.read(&ben).await.unwrap();
+    let mut newer = readable.clone();
+    newer[2] = 2;
+    storage.delete(&ben).await.unwrap();
+    storage.create(&ben, &newer).await.unwrap();
+    // Ana's own snapshot covers her write 4, but Ben's, which she cannot
+    // read, may be the newest: retention waits for the update, as her
+    // reload does, and the snapshot's record says why.
+    a.sync.run_retention().await.unwrap();
+    assert_eq!(retained(&storage, &writes).await, [true; 4]);
+    assert_eq!(
+        snapshot_record(&a, &ben).await,
+        Some(crate::PendingReason::UpdateRequired(
+            crate::RequiredUpdate::CovenFormat { version: 2 }
+        ))
+    );
+    // A version that reads Ben's snapshot selects it as the newest; it
+    // covers Ana's writes 1 to 3 only, and the reload needs her write 4.
+    // Ana's retained bytes are the newer format's, so a new device reads it.
+    storage.delete(&ben).await.unwrap();
+    storage.create(&ben, &readable).await.unwrap();
+    let mut c = notes_device(storage.clone(), 3).await;
+    add_device(&mut c).await;
+    c.sync.reload_from_snapshots().await.unwrap();
+    assert_eq!(selected_snapshot(&mut c).await, ben);
+    assert!(tables(&c).await.iter().any(|(id, _, _)| id == "3"));
+}
+
+#[tokio::test]
+async fn a_snapshot_waiting_for_its_authors_registration_holds_log_retention() {
+    let (storage, mut a, ben, writes) = bens_snapshot_is_newest(false).await;
+    a.sync.run_retention().await.unwrap();
+    assert_eq!(retained(&storage, &writes).await, [true; 4]);
+    assert_eq!(
+        snapshot_record(&a, &ben).await,
+        Some(crate::PendingReason::Waits(
+            crate::Prerequisite::DeviceRegistration(ben.device().unwrap())
+        ))
+    );
+    // With Ben's registration applied his prefix checks and is the newest.
+    a.sync().await;
+    a.sync.run_retention().await.unwrap();
+    assert_eq!(
+        retained(&storage, &writes).await,
+        [false, false, false, true]
+    );
+    assert_eq!(snapshot_record(&a, &ben).await, None);
+}

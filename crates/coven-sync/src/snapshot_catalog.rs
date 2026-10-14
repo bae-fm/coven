@@ -27,6 +27,10 @@ pub(super) struct Catalog {
     /// history, even when their keys cannot authorize loading their rows.
     pub(super) required_positions: coven_format::value::WritePositions,
     pub(super) unreadable_prefix: bool,
+    /// A listed prefix waits, for an update or for its author's registration:
+    /// it may be the audience's current newest, so nothing that needs that
+    /// newest snapshot can decide until the prefix reads (§15).
+    pub(super) newest_unknown: bool,
     /// A listed snapshot in a newer format: work that selects among this
     /// audience's snapshots waits for that update (§15, §17.2).
     pub(super) update: Option<crate::RequiredUpdate>,
@@ -60,6 +64,7 @@ impl StoreLogSync {
         let mut candidates = Vec::new();
         let mut positions = BTreeMap::new();
         let mut unreadable_prefix = false;
+        let mut newest_unknown = false;
         let refused = self.refused_snapshots(audience).await?;
         let mut conditions = Vec::new();
         for object in objects {
@@ -81,6 +86,10 @@ impl StoreLogSync {
                 // A wait or a refusal: no coverage until the prefix checks.
                 Err(reason) => {
                     unreadable_prefix = true;
+                    newest_unknown |= matches!(
+                        reason,
+                        PendingReason::UpdateRequired(_) | PendingReason::Waits(_)
+                    );
                     if refusal.is_none() {
                         conditions.push((id, reason));
                     }
@@ -136,6 +145,7 @@ impl StoreLogSync {
                     .collect(),
             ),
             unreadable_prefix,
+            newest_unknown,
             update,
         })
     }

@@ -437,9 +437,10 @@ runs one version, so that retry is outside it.
 **Passing over a newer-format snapshot in retention fails (checked
 counterexample).** `select` makes the reload and the return check wait with
 `UpdateRequired` while any listed prefix is newer than this version reads
-(`reload_waits_for_newer`). Rust's retention instead treats such a snapshot
-as unreadable and judges deletion against the newest snapshot it can read.
-`newer_snapshot_retention_counterexample` checks the failure.
+(`reload_waits_for_newer`). Retention that instead treats such a snapshot as
+unreadable judges deletion against the newest snapshot it can read, as
+Rust's log retention did. `newer_snapshot_retention_counterexample` checks
+the failure.
 
 Ana (device 1) and Ben (device 2) snapshot the store concurrently. Ana's
 snapshot covers her writes through 10 and Ben's through 2. Ben runs a newer
@@ -457,10 +458,15 @@ without reading Ben's prefix.
 `waiting_retention_safe` proves the safe rule: retention that waits like the
 reload while any listed prefix is unreadable judges against the snapshot the
 reload selects once it proceeds, at this version or any later one, so it
-never deletes a write that reload needs. Rust's file retention already waits
-this way; growth only decides whether to write another snapshot. A prefix
-that waits for its author's registration reaches log retention through the
-same catalog; this model does not cover that case.
+never deletes a write that reload needs. Rust's log retention waits this way
+(`snapshot_retention.rs`): an audience whose listing holds a prefix waiting
+for an update gives no write coverage, and
+`a_newer_format_snapshot_holds_log_retention_like_the_reload` runs the
+counterexample. File retention already waited; growth only decides whether
+to write another snapshot. Log retention also waits while a prefix waits for
+its author's registration
+(`a_snapshot_waiting_for_its_authors_registration_holds_log_retention`); this
+model does not cover that case.
 
 The Rust comparison `data_differential_pending_records`
 ([`pending_tests.rs`](../../crates/coven-sync/src/pending_tests.rs)) mixes
