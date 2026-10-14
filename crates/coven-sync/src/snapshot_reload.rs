@@ -93,8 +93,8 @@ impl StoreLogSync {
                 // whatever this device found in its body or key. One it cannot
                 // load makes the reload wait, never pass it over for an older
                 // one whose coverage would skip a deleted write's part in that
-                // audience (§15; storelog-data `missingDecision`,
-                // `holding_never_skips`).
+                // audience (§15, §19.1; storelog-data `ReloadWait.choose`,
+                // `deleted_part_never_skipped`).
                 let mut selections = Vec::new();
                 for (audience, mut catalog) in catalogs {
                     super::include_positions(&mut highest, &catalog.required_positions.0);

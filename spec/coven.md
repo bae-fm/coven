@@ -5648,9 +5648,29 @@ holds failures and rejected entries, without making either wait look completed.
     received report set needs no replacement transaction.
   - A device can publish these records while its write positions wait (§6).
     Silence or different positions alone never proves an immutable refusal.
-- A damaged snapshot is recorded and passed over for the next latest, or
-  the logs. Its verified prefix still establishes required history; it
-  never authorizes applying a damaged body.
+- A damaged snapshot is recorded. Its verified prefix still establishes
+  required history and can still be its audience's current newest counting
+  snapshot (§15); it never authorizes applying a damaged body.
+  - While a snapshot this device cannot load is its audience's current
+    newest, because this device refused its body, does not accept the key
+    sealing its rows, or its rows need a newer app schema, the reload waits
+    on it and never loads an older one. Loading applies only the current
+    newest, after its body, key and schema check
+    ([`choose_loads_newest`, `choose_waits_iff`](proofs/storelog-data/CovenStorelogData/ReloadWait.lean)).
+  - The reload's own record names the snapshot, whose record is the
+    refusal, or the key; both retry automatically, and the wait ends when a
+    newer snapshot this device can load lands or the listing stops naming
+    this one. A schema wait ends with the app update
+    ([`wait_ends_when_newer_lands`, `wait_ends_when_unlisted`, `waits_retry`](proofs/storelog-data/CovenStorelogData/ReloadWait.lean)).
+  - With §15's retention, every write retention deleted is covered by the
+    snapshot the reload loads or waits on, so no audience skips its part
+    ([`choose_never_needs_deleted`, `deleted_part_never_skipped`](proofs/storelog-data/CovenStorelogData/ReloadWait.lean)).
+  - E.g. Ana's writes 1 and 2 each have a store and a Gifts part, and her
+    store snapshot and newest Gifts snapshot cover both, so write 2 is
+    deleted. Ben's version refuses that Gifts snapshot's body. Loading the
+    older Gifts snapshot instead, his reload would count write 2 as having
+    no Gifts part, since the store snapshot proves it deleted; he waits
+    ([`two_audience_pass_over_counterexample`](proofs/storelog-data/CovenStorelogData/ReloadWait.lean)).
   - Each listing keeps this device's refusal of a snapshot it still lists,
     and loading never offers a refused snapshot again: it applies only a
     snapshot whose complete body checked. Only a different installed

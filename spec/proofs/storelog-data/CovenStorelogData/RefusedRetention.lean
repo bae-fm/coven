@@ -18,7 +18,8 @@ snapshot leaves out:
 
 The safe rule judges by the newest verified prefix whatever its body, and
 holds while any listed prefix waits or is refused: `holding_safe`,
-`holding_never_skips`. A body refusal never holds it
+`holding_never_skips`; the reload loads that newest snapshot or waits on it
+(`choose`, `missingDecision`; `ReloadWait`). A body refusal never holds it
 (`retention_ignores_bodies`); a refused prefix holds it until a version
 verifies that prefix or the listing stops naming it
 (`refused_prefix_holds`, `holding_without_refusals`). A hold that exempts
@@ -77,6 +78,9 @@ structure Checks where
   prefixRefusal : Listed → Option RefusalKind
   bodyRefusal : Listed → Option RefusalKind
   keyHeld : Listed → Bool
+  /-- The app schema a snapshot's rows need, when it is newer than this
+  app's (§17): opening the body finds it. -/
+  schemaWait : Listed → Option Nat
 
 /-- The prefix waits for an update (§15). The registration wait is not modeled. -/
 def Checks.waits (c : Checks) (s : Listed) : Bool := !s.readable c.supported
@@ -125,22 +129,87 @@ theorem selectChecked_eq_select (c : Checks) (listed : List Listed)
       have same : (listed.find? fun s => !s.readable c.supported) = none := h
       rw [same, all]
 
+theorem selectChecked_ok {c : Checks} {listed : List Listed} {s : Listed}
+    (h : selectChecked c listed = .ok (some s)) :
+    listed.find? c.waits = none ∧ newest (listed.filter c.verifies) = some s := by
+  unfold selectChecked at h
+  split at h
+  · cases h
+  · next none => exact ⟨none, by simpa using h⟩
+
+/-- Why this device cannot load the rows of a verified snapshot, in Rust's
+order: it holds a refusal of the body, it does not accept the key sealing
+the rows, or opening the body finds a newer app schema. -/
+inductive LoadWait where
+  | body | key | schema (version : Nat)
+  deriving DecidableEq, Repr
+
+def Checks.loadWait (c : Checks) (s : Listed) : Option LoadWait :=
+  if (c.bodyRefusal s).isSome then some .body
+  else if !c.keyHeld s then some .key
+  else (c.schemaWait s).map .schema
+
+/-- The reload's choice for one audience (§15, §19.1). -/
+inductive Choice where
+  /-- A listed prefix is in a format this version cannot read: it may be
+  the newest, so the reload waits for the update. -/
+  | update (format : Nat)
+  /-- The current newest counting snapshot, which this device cannot load:
+  the reload waits on it and never loads an older one. -/
+  | waits (s : Listed) (why : LoadWait)
+  /-- Load the current newest counting snapshot. -/
+  | load (s : Listed)
+  /-- No listed prefix verifies: read the logs from the start. -/
+  | logs
+  deriving DecidableEq, Repr
+
+/-- Rust `Catalog::take_current` followed by `load_snapshot`: select as
+`selectChecked` does, then load that snapshot or wait on it. -/
+def choose (c : Checks) (listed : List Listed) : Choice :=
+  match listed.find? c.waits with
+  | some s => .update s.format
+  | none => match newest (listed.filter c.verifies) with
+    | none => .logs
+    | some s => match c.loadWait s with
+      | some why => .waits s why
+      | none => .load s
+
+theorem choose_selected {c : Checks} {listed : List Listed} {s : Listed}
+    (h : selectChecked c listed = .ok (some s)) :
+    choose c listed = match c.loadWait s with
+      | some why => .waits s why
+      | none => .load s := by
+  obtain ⟨nowait, hn⟩ := selectChecked_ok h
+  simp [choose, nowait, hn]
+
 /-- What §15 does with a required write that a successful GET finds missing
 and a fresh catalog shows was covered: load the current newest snapshot if
 it reaches the write, or skip the write as having no part in this audience.
-`load` waits instead when that snapshot's body is refused here (§19.1). -/
+While the reload waits, for an update or on a newest snapshot it cannot
+load, it decides nothing. -/
 inductive MissingWrite where
-  | waits (reason : Reason)
+  | waits (choice : Choice)
   | load (s : Listed)
   | skip
   deriving DecidableEq, Repr
 
 def missingDecision (c : Checks) (listed : List Listed) (w : Nat × Nat) : MissingWrite :=
-  match selectChecked c listed with
-  | .error reason => .waits reason
-  | .ok selected => match selected with
-    | some s => if s.covers w then .load s else .skip
-    | none => .skip
+  match choose c listed with
+  | .load s => if s.covers w then .load s else .skip
+  | .logs => .skip
+  | waiting => .waits waiting
+
+/-- Its two outcomes for a write the current newest covers: load that
+snapshot, or wait on it. -/
+theorem missing_covered {c : Checks} {listed : List Listed} {s : Listed} {w : Nat × Nat}
+    (h : selectChecked c listed = .ok (some s)) (covers : s.covers w = true) :
+    missingDecision c listed w = .load s ∨
+      ∃ why, missingDecision c listed w = .waits (.waits s why) := by
+  unfold missingDecision
+  rw [choose_selected h]
+  cases c.loadWait s with
+  | none => exact .inl (by simp [covers])
+  | some why => exact .inr ⟨why, rfl⟩
 
 /-! ## Retention rules -/
 
@@ -237,15 +306,16 @@ theorem classified_safe (permanent : RefusalKind → Bool) (earlier later : Chec
       simp [selectChecked, nowait, same, hn]
 
 /-- Its missing-write decision: a write it deleted is never skipped. The
-later reload loads the current newest, which covers the write; if this
-device refuses that snapshot's body, the reload waits (§15, §19.1). -/
+later reload loads the current newest, which covers the write, or waits on
+it when this device cannot load it (§15, §19.1). -/
 theorem classified_never_skips (permanent : RefusalKind → Bool) (earlier later : Checks)
     (listed : List Listed) (w : Nat × Nat)
     (deletes : coversClassified permanent earlier listed w = true)
     (updated : Checks.Later earlier later listed) (sound : Sound permanent earlier later listed) :
-    ∃ s, missingDecision later listed w = .load s ∧ s.covers w = true := by
+    ∃ s, s.covers w = true ∧ (missingDecision later listed w = .load s ∨
+      ∃ why, missingDecision later listed w = .waits (.waits s why)) := by
   obtain ⟨s, sel, covers⟩ := classified_safe permanent earlier later listed w deletes updated sound
-  exact ⟨s, by simp [missingDecision, sel, covers], covers⟩
+  exact ⟨s, covers, missing_covered sel covers⟩
 
 /-- The safe rule needs no classification premise. -/
 theorem holding_safe (earlier later : Checks) (listed : List Listed) (w : Nat × Nat)
@@ -258,7 +328,8 @@ theorem holding_safe (earlier later : Checks) (listed : List Listed) (w : Nat ×
 
 theorem holding_never_skips (earlier later : Checks) (listed : List Listed) (w : Nat × Nat)
     (deletes : coversHolding earlier listed w = true) (updated : Checks.Later earlier later listed) :
-    ∃ s, missingDecision later listed w = .load s ∧ s.covers w = true :=
+    ∃ s, s.covers w = true ∧ (missingDecision later listed w = .load s ∨
+      ∃ why, missingDecision later listed w = .waits (.waits s why)) :=
   classified_never_skips _ earlier later listed w deletes updated fun _ _ _ _ never => by
     simp at never
 
@@ -268,7 +339,8 @@ theorem as_written_safe_for_bodies (earlier later : Checks) (listed : List Liste
     (w : Nat × Nat) (deletes : coversAsWritten earlier listed w = true)
     (updated : Checks.Later earlier later listed)
     (prefixes : ∀ s ∈ listed, earlier.prefixRefusal s = none) :
-    ∃ s, missingDecision later listed w = .load s ∧ s.covers w = true :=
+    ∃ s, s.covers w = true ∧ (missingDecision later listed w = .load s ∨
+      ∃ why, missingDecision later listed w = .waits (.waits s why)) :=
   classified_never_skips _ earlier later listed w deletes updated fun s hs k hr _ => by
     rw [prefixes s hs] at hr
     cases hr
@@ -278,9 +350,10 @@ theorem as_written_safe_for_bodies (earlier later : Checks) (listed : List Liste
 /-- Retention never reads a body or key verdict: a refused body, or a
 snapshot this device cannot load, holds nothing. -/
 theorem retention_ignores_bodies (permanent : RefusalKind → Bool) (c : Checks)
-    (body : Listed → Option RefusalKind) (key : Listed → Bool) (listed : List Listed)
-    (w : Nat × Nat) :
-    coversClassified permanent { c with bodyRefusal := body, keyHeld := key } listed w =
+    (body : Listed → Option RefusalKind) (key : Listed → Bool) (schema : Listed → Option Nat)
+    (listed : List Listed) (w : Nat × Nat) :
+    coversClassified permanent
+        { c with bodyRefusal := body, keyHeld := key, schemaWait := schema } listed w =
       coversClassified permanent c listed w := rfl
 
 /-- A listed snapshot whose prefix this version refused holds every write of
@@ -333,7 +406,7 @@ def store : List Listed := [anaOwn, benNewest]
 def anaTarget : Nat → Nat := fun d => if d = 1 then 10 else 20
 
 /-- A version whose checks of both snapshots pass. -/
-def passes : Checks := ⟨1, fun _ => none, fun _ => none, fun _ => true⟩
+def passes : Checks := ⟨1, fun _ => none, fun _ => none, fun _ => true, fun _ => none⟩
 
 /-- Ana's version refuses Ben's body, say a parse bug the next version fixes. -/
 def refusesBody : Checks := { passes with bodyRefusal := fun s => if s = benNewest then some .parse else none }

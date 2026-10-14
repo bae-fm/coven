@@ -61,7 +61,7 @@ impl Catalog {
     /// newest verified prefix that follows the replay's reset/version
     /// boundary, whatever this device found in its body or key. Fails with
     /// what loading it waits for; an older snapshot never stands in for it
-    /// (§15; storelog-data `missingDecision`).
+    /// (§15, §19.1; storelog-data `ReloadWait.choose`).
     pub(super) fn take_current(
         &mut self,
         log: &StoreLog,
@@ -484,7 +484,7 @@ impl StoreLogSync {
     /// Load an audience's current newest snapshot into `file`. A body that
     /// fails its check is refused, and loading waits on that snapshot rather
     /// than passing it over for an older one: a version that loads the body
-    /// selects it (§15, §19.1; storelog-data `missingDecision`). A schema
+    /// selects it (§15, §19.1; storelog-data `ReloadWait.choose`). A schema
     /// outside the app's supported range fails the caller with that error.
     pub(super) async fn load_snapshot(
         &self,

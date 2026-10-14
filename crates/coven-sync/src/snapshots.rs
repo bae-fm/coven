@@ -76,8 +76,8 @@ impl StoreLogSync {
     /// Reload all readable audiences from validated snapshots and authenticated
     /// device writes, preserving queued plaintext, write numbers and key ids (§15).
     /// Joining, missing-history recovery and explicit recovery call this method.
-    /// A snapshot that fails its checks is its own pending record and is
-    /// passed over for the next latest, or the logs (§19.1).
+    /// A snapshot that fails its checks is its own pending record; while it
+    /// is its audience's current newest, the reload waits on it (§19.1).
     pub async fn reload_from_snapshots(&mut self) -> Result<(), SyncError> {
         let _reads = self.reads.enter();
         self.resume_snapshots().await?;

@@ -502,3 +502,243 @@ fn reads_circle_needs_store_and_circle_membership() {
     assert!(!state.reads_circle(circle(0), &member(2)));
     assert!(!state.reads_circle(circle(1), &member(0)));
 }
+
+/// storelog-data `ReloadWait.choose` and `Choice.reason`: Ben's catalog of
+/// the store's snapshots and `Catalog::take_current` choose what his reload
+/// loads, and a reload that waits records its reason on its operation. Each
+/// case lists snapshots by Ana's and Ben's devices with random signed
+/// positions. Some prefixes are signed by another member, so this version
+/// refuses them; some bodies carry Ben's refusal; some are sealed under a
+/// key his log does not accept; some prefixes are in a newer format. Bodies
+/// are never opened: a wait is compared on the reload's record, a load only
+/// on the snapshot chosen.
+#[tokio::test]
+#[ignore = "requires COVEN_STORELOG_DATA_LEAN, supplied by scripts/check.sh"]
+async fn data_differential_reload_choice() {
+    use crate::store_log_sync::tests::{device, key, member, store};
+    use crate::tests::run_lean;
+    use crate::{PendingReason, PendingRecord, PendingSubject, Prerequisite, RequiredUpdate};
+    use coven_format::sealed_snapshot::SnapshotObjectPrefix;
+    use coven_format::value::{EntryPositions, StorageTime, WritePositions};
+    use coven_foundation::id_source::DeviceId;
+    use coven_storage::ObjectPath;
+    use serde_json::{json, Value};
+    use std::num::NonZeroU64;
+    use std::sync::Arc;
+
+    const LANDED: u64 = 1_760_400_000;
+    let clock = Arc::new(coven_foundation::clock::FixedClock::new(
+        UNIX_EPOCH + Duration::from_secs(LANDED),
+    ));
+    let storage = Arc::new(
+        coven_storage::test_utils::MemoryStorage::builder()
+            .transfer_limits(65536, 65536)
+            .clock(clock)
+            .build()
+            .unwrap(),
+    );
+    let mut ana = device(storage.clone(), 1, member(1), store(1)).await;
+    ana.create(key(1)).await;
+    let mut ben = device(storage.clone(), 2, member(1), store(1)).await;
+    ben.sync().await;
+    let own = ben.db.local_store_log().await.unwrap().device;
+    ben.sync
+        .make_and_upload_entry(StoreChange::AddDevice {
+            device: own,
+            name: own.0.to_string(),
+            replaces: None,
+        })
+        .await
+        .unwrap();
+    let log = ben.db.local_store_log().await.unwrap().log;
+    let devices = [ana.db.local_store_log().await.unwrap().device, own];
+    let other = member(2);
+    let snapshot = |device: DeviceId, number: u64| {
+        ObjectPath::snapshot(
+            store(1),
+            Audience::Store,
+            device,
+            NonZeroU64::new(number).unwrap(),
+        )
+    };
+    let id_json = |path: &ObjectPath| {
+        let id = path.snapshot_id().unwrap();
+        json!([id.device.0, id.number])
+    };
+    let record_json = |reason: &PendingReason| match reason {
+        PendingReason::Waits(Prerequisite::Object(path)) => {
+            let id = path.snapshot_id().unwrap();
+            json!([
+                "waits",
+                ["object", format!("{}/{}", id.device.0, id.number)]
+            ])
+        }
+        PendingReason::KeyUnavailable {
+            audience: Audience::Store,
+            key,
+        } => json!(["keyUnavailable", 0, key.0.as_u128()]),
+        PendingReason::UpdateRequired(RequiredUpdate::CovenFormat { version }) => {
+            json!(["updateRequired", version])
+        }
+        other => panic!("unexpected reload record {other:?}"),
+    };
+    let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+    let mut next = |bound: u64| {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed % bound
+    };
+    let mut cases = Vec::new();
+    let mut actual = Vec::new();
+    for case in 0..48u64 {
+        let mut listed = Vec::new();
+        let mut paths = Vec::new();
+        let mut refused_bodies = Vec::new();
+        for k in 0..1 + next(4) {
+            let path = snapshot(devices[next(2) as usize], case * 8 + k + 1);
+            let mut positions = Vec::new();
+            for device in devices {
+                if next(3) > 0 {
+                    positions.push((device, 1 + next(4)));
+                }
+            }
+            if positions.is_empty() {
+                positions.push((devices[0], 1));
+            }
+            // 0: another member signs the prefix; 1-3: Ben refused the
+            // body; 4-5: a key Ben does not accept; 6: a newer format.
+            let kind = next(20);
+            let prefix = SnapshotObjectPrefix {
+                audience: Audience::Store,
+                key: if (4..=5).contains(&kind) {
+                    key(99)
+                } else {
+                    key(1)
+                },
+                caught_at: StorageTime::new(LANDED, 0).unwrap(),
+                writes: WritePositions(
+                    positions
+                        .iter()
+                        .map(|(device, number)| WriteId {
+                            device: *device,
+                            number: *number,
+                        })
+                        .collect(),
+                ),
+                store_log: EntryPositions(Vec::new()),
+            };
+            let mut bytes = prefix.encode().unwrap();
+            let signer = if kind == 0 { &other } else { &ana.member };
+            let signature = signer.sign_prefix(path.as_str(), &bytes);
+            bytes.extend_from_slice(signature.as_bytes());
+            bytes.extend_from_slice(&[0; 32]);
+            if kind == 6 {
+                bytes[2] = 2;
+            }
+            storage.create(&path, &bytes).await.unwrap();
+            if (1..=3).contains(&kind) {
+                refused_bodies.push(path.clone());
+            }
+            let id = path.snapshot_id().unwrap();
+            listed.push(json!({
+                "path": [id.device.0, id.number],
+                "writes": positions.iter().map(|(d, n)| json!([d.0, n])).collect::<Vec<_>>(),
+                "format": if kind == 6 { 2 } else { coven_format::FORMAT_VERSION },
+                "prefixRefused": kind == 0,
+                "bodyRefused": (1..=3).contains(&kind),
+                "keyHeld": !(4..=5).contains(&kind),
+                "key": if (4..=5).contains(&kind) { 99 } else { 1 },
+            }));
+            paths.push(path);
+        }
+        // A body refusal is recorded once its prefix verified and was retained.
+        ben.sync
+            .snapshot_candidates(&Audience::Store, &log)
+            .await
+            .unwrap();
+        for path in &refused_bodies {
+            ben.db
+                .record_pending(PendingRecord {
+                    subject: PendingSubject::Snapshot(path.snapshot_id().unwrap()),
+                    reason: PendingReason::Refused(crate::Refusal::Decryption { cause: None }),
+                    reported_by: own,
+                })
+                .await
+                .unwrap();
+        }
+        let mut catalog = ben
+            .sync
+            .snapshot_candidates(&Audience::Store, &log)
+            .await
+            .unwrap();
+        let choice = match catalog.update {
+            Some(RequiredUpdate::CovenFormat { version }) => json!(["update", version]),
+            Some(other) => panic!("unexpected update {other:?}"),
+            None => match catalog.take_current(&log) {
+                Ok(Some(candidate)) => json!(["load", id_json(&candidate.object.path)]),
+                Ok(None) => json!(["logs"]),
+                Err(PendingReason::Waits(Prerequisite::Object(path))) => {
+                    json!(["waits", id_json(&path), "body"])
+                }
+                Err(PendingReason::KeyUnavailable { .. }) => {
+                    let newest = catalog
+                        .verified
+                        .iter()
+                        .find(|snapshot| snapshot.follows_boundary(&log))
+                        .unwrap();
+                    json!(["waits", id_json(&newest.object.path), "key"])
+                }
+                Err(other) => panic!("unexpected wait {other:?}"),
+            },
+        };
+        // A waiting reload records that reason on its own operation.
+        let record = if matches!(choice[0].as_str(), Some("update" | "waits")) {
+            assert!(ben.sync.reload_from_snapshots().await.is_err());
+            let id = ben.sync.pending_reload().await.unwrap().unwrap();
+            let pending = ben
+                .db
+                .operation_pending::<PendingRecord>(id)
+                .await
+                .unwrap()
+                .unwrap();
+            ben.db.finish_operation(id).await.unwrap();
+            record_json(&pending.reason)
+        } else {
+            Value::Null
+        };
+        cases.push(json!({
+            "audience": 0,
+            "supported": coven_format::FORMAT_VERSION,
+            "listed": listed,
+        }));
+        actual.push(json!({"choice": choice, "record": record}));
+        for path in &paths {
+            storage.delete(path).await.unwrap();
+        }
+    }
+    let output = run_lean("COVEN_STORELOG_DATA_LEAN", &json!({"choices": cases}));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let expected: Vec<Value> = serde_json::from_slice(&output.stdout).unwrap();
+    for ((lean, rust), case) in expected.iter().zip(&actual).zip(&cases) {
+        assert_eq!(lean, rust, "reload choice: {case}");
+    }
+    assert_eq!(expected.len(), actual.len());
+    let kinds = |name: &str, why: Value| {
+        actual
+            .iter()
+            .filter(|outcome| outcome["choice"][0] == name && outcome["choice"][2] == why)
+            .count()
+    };
+    assert!(
+        kinds("load", Value::Null) > 0
+            && kinds("waits", json!("body")) > 0
+            && kinds("waits", json!("key")) > 0
+            && kinds("update", Value::Null) > 0,
+        "{actual:?}"
+    );
+}

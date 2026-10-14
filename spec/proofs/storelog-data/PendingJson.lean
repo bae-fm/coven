@@ -1,4 +1,4 @@
-import CovenStorelogData.Pending
+import CovenStorelogData.ReloadWait
 import Lean
 
 /-! §19.1 / E5: Rust records each observed subject's first unmet condition
@@ -7,7 +7,10 @@ installs positions, replaces a class of records with each completed listing
 (a snapshot listing keeping this device's refusals), and replaces its entry
 waits with each completed store-log scan. This adapter runs the same steps
 through `Pending.Local.step` and reports `Pending.pending` with each record's
-`retry`. Arrays encode subjects, reasons and conditions positionally. -/
+`retry`. Arrays encode subjects, reasons and conditions positionally.
+
+`choice` runs one audience's reload choice (`ReloadWait.choose`) on a
+snapshot listing and the reload's own record (`Choice.reason`). -/
 namespace PendingJson
 open Lean CovenStorelog CovenStorelogData.Pending
 
@@ -152,5 +155,41 @@ def run (j : Json) : Except String Json := do
       Json.arr #[subjectJson r.subject, toJson r.reporter, reasonJson r.reason,
         toJson (retryName (retry r.reason))]).toArray)
   pure (Json.arr out)
+
+private def pathJson (s : Listed) : Json := Json.arr #[toJson s.path.1, toJson s.path.2]
+
+def choiceJson : Choice → Json
+  | .update format => Json.arr #["update", toJson format]
+  | .waits s .body => Json.arr #["waits", pathJson s, "body"]
+  | .waits s .key => Json.arr #["waits", pathJson s, "key"]
+  | .waits s (.schema version) => Json.arr #["waits", pathJson s, Json.arr #["schema", toJson version]]
+  | .load s => Json.arr #["load", pathJson s]
+  | .logs => Json.arr #["logs"]
+
+/-- One audience's listing: each snapshot's path `[device, number]`, signed
+write positions, prefix format and key number, and this version's verdicts
+on it (`prefixRefused`, `bodyRefused`, `keyHeld`). The output is the choice
+and the reload's record, a snapshot object named `"device/number"`. -/
+def choice (j : Json) : Except String Json := do
+  let a := audience (← j.getObjValAs? Nat "audience")
+  let entries ← (← j.getObjValAs? (Array Json) "listed").toList.mapM fun s => do
+    let path ← s.getObjVal? "path"
+    let writes ← (← s.getObjValAs? (Array Json) "writes").toList.mapM fun w => do
+      pure (← nat w 0, ← nat w 1)
+    let listed : Listed := ⟨(← nat path 0, ← nat path 1), writes, ← s.getObjValAs? Nat "format"⟩
+    pure (listed, ← s.getObjValAs? Bool "prefixRefused", ← s.getObjValAs? Bool "bodyRefused",
+      ← s.getObjValAs? Bool "keyHeld", ← s.getObjValAs? Nat "key")
+  let entry (s : Listed) := entries.find? (·.1.path == s.path)
+  let checks : Checks := {
+    supported := ← j.getObjValAs? Nat "supported"
+    prefixRefusal := fun s => if (entry s).any (·.2.1) then some .signature else none
+    bodyRefusal := fun s => if (entry s).any (·.2.2.1) then some .decryption else none
+    keyHeld := fun s => (entry s).any (·.2.2.2.1)
+    schemaWait := fun _ => none }
+  let chosen := choose checks (entries.map (·.1))
+  let record := chosen.reason a (fun s => s!"{s.path.1}/{s.path.2}")
+    (fun s => ((entry s).map (·.2.2.2.2)).getD 0)
+  pure (Json.mkObj [("choice", choiceJson chosen),
+    ("record", (record.map reasonJson).getD Json.null)])
 
 end PendingJson

@@ -113,8 +113,9 @@ impl StoreLogSync {
         if crate::effects::member(&local.log.replay.state, &member.member_id()).is_none() {
             return Err(SyncError::Rejected(coven_database::DropReason::NotAllowed));
         }
-        // Snapshots that fail their checks are passed over for the next latest
-        // or the logs (§19.1); only a reload that cannot finish fails this call.
+        // A snapshot that fails its checks is recorded; a reload whose current
+        // newest snapshot this device cannot load waits on it (§19.1), and
+        // only a reload that cannot finish fails this call.
         self.resume_snapshots().await?;
         match local.log.replay.state.devices.get(&local.device) {
             Some(device) if device.member != member.member_id() => {

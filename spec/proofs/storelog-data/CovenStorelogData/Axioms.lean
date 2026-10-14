@@ -221,6 +221,27 @@ import CovenStorelogData
 #print axioms CovenStorelogData.Pending.missing_key_retention_counterexample
 #print axioms CovenStorelogData.Pending.refused_prefix_retention_counterexample
 #print axioms CovenStorelogData.Pending.holding_judges_by_newest
+#print axioms CovenStorelogData.Pending.selectChecked_ok
+#print axioms CovenStorelogData.Pending.choose_selected
+#print axioms CovenStorelogData.Pending.missing_covered
+#print axioms CovenStorelogData.Pending.before_trans
+#print axioms CovenStorelogData.Pending.before_total
+#print axioms CovenStorelogData.Pending.newest_spec
+#print axioms CovenStorelogData.Pending.newest_eq_of_min
+#print axioms CovenStorelogData.Pending.choose_loads_newest
+#print axioms CovenStorelogData.Pending.choose_waits_iff
+#print axioms CovenStorelogData.Pending.waits_listed
+#print axioms CovenStorelogData.Pending.wait_ends_when_newer_lands
+#print axioms CovenStorelogData.Pending.wait_ends_when_unlisted
+#print axioms CovenStorelogData.Pending.waits_retry
+#print axioms CovenStorelogData.Pending.choose_never_needs_deleted
+#print axioms CovenStorelogData.Pending.deleted_part_never_skipped
+#print axioms CovenStorelogData.Pending.two_audience_pass_over_counterexample
+#print axioms CovenStorelogData.Pending.superseded_deletion_invisible
+#print axioms CovenStorelogData.Pending.landing_keeps_deletions
+#print axioms CovenStorelogData.Pending.loadable_preparation_counterexample
+#print axioms CovenStorelogData.Pending.refused_write_reload_counterexample
+#print axioms CovenStorelogData.Pending.waiting_on_the_write_loads
 #print axioms CovenStorelogData.RetentionSafety.first_finality_wait_visible
 
 #print axioms CovenStorelogData.ReplayEffects.scan_realizes

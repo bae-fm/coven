@@ -325,8 +325,9 @@ def catalog (device : Nat) (audience : Audience) (work : List Work)
 
 /-- Loading: try the offered candidates in order. The first whose complete
 body checks loads; each one before it whose body fails is refused. Rust's
-reload offers only an audience's current newest snapshot and waits when its
-body fails (`missingDecision`), so its list has at most one element. -/
+reload offers only an audience's current newest snapshot and waits on it
+when its body fails (`ReloadWait.choose`), so its list has at most one
+element. -/
 def load (body : SnapshotId → Bool) : List SnapshotId → Option SnapshotId × List SnapshotId
   | [] => (none, [])
   | id :: rest =>

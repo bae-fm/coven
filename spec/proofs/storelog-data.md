@@ -506,7 +506,8 @@ and `a_snapshot_whose_key_is_not_accepted_still_decides_log_retention` run
 both counterexamples on this store: Ana keeps her writes 4 to 10, deletes 1
 to 3, and a device whose checks pass selects Ben's snapshot and reads write
 4 from her log. Deleting a device's own superseded snapshot still compares
-against the newest snapshot it can load.
+against the newest snapshot it can load, which is safe
+(`superseded_deletion_invisible`, below).
 - `refused_prefix_retention_counterexample`: Ana's version refuses Ben's
   prefix signature. §15 said a refused prefix "establishes nothing and does
   not hold deletion", so retention judged by Ana's snapshot; her updated
@@ -532,21 +533,93 @@ classification premise. `as_written_safe_for_bodies` proves §15 as written
 safe while no listed prefix is refused. The prefix counterexample shows that
 treating the signature refusal as permanent is unsound.
 
-Rust's reload follows `missingDecision`'s selection (`Catalog::take_current`
-in `snapshot_catalog.rs`): each audience loads its current newest counting
-snapshot, the newest verified prefix that follows its boundary, and waits
-on that snapshot when this version refused its body or does not accept its
-key, rather than loading an older one. Passing over it skips history when
-the reload spans two audiences: a deleted write that the store's selected
-snapshot covers counts as having no part in Gifts once Gifts' older
-selection stops before it, though Gifts' newest covers it.
+**The reload waits on a newest snapshot it cannot load (proved).**
+[ReloadWait](storelog-data/CovenStorelogData/ReloadWait.lean) models the
+reload's choice for one audience (`choose`, Rust `Catalog::take_current`
+and `load_snapshot`). It waits for an update while a listed prefix is in a
+newer format; otherwise it takes the current newest counting snapshot, the
+newest verified prefix. It loads that snapshot, or waits on it when this
+device holds a refusal of its body, does not accept the key sealing its
+rows, or its rows need a newer app schema. It never loads an older one.
+`missingDecision` decides a missing write from this choice and has a
+waiting outcome of its own.
+
+- `choose_loads_newest`: loading applies only the current newest snapshot,
+  after its prefix verified, with no refusal of its body held here, a key
+  this device accepts and rows at this app's schema. Refused bytes are never
+  loaded, and an older snapshot never stands in.
+- `choose_waits_iff` and `waits_listed`: the reload waits on a snapshot
+  exactly while it is the current newest, still listed, and this device
+  cannot load it.
+- `wait_ends_when_newer_lands`: once a newer snapshot this device can load
+  lands, the reload loads it. `wait_ends_when_unlisted`: once the listing
+  stops naming the snapshot, the reload no longer waits on it; the next
+  newest decides. `waits_retry`: the reload's own record retries
+  automatically for a body or key wait, so the next pass sees either
+  change. It names the snapshot (`Waits(Object(path))`, whose own record is
+  the refusal) or the key. A wait for a newer app schema retries after an
+  update.
+- `choose_never_needs_deleted`: after `RefusedRetention`'s retention
+  (`coversHolding`) deleted a write, any later version's reload loads a
+  snapshot covering it or waits on one that does.
+  `deleted_part_never_skipped` extends this to a reload of several
+  audiences: each audience of the write's parts that the reload loads
+  covers the write, so none skips its part.
+
+Passing over the newest, as §19.1 said ("passed over for the next latest,
+or the logs") and Rust did before T154, fails
+(`two_audience_pass_over_counterexample`, checked). Ana's writes 1 and 2
+each have a store part and a Gifts part. Her store snapshot and her newer
+Gifts snapshot cover both, so retention deletes write 2. Ben's version
+refuses the newer Gifts snapshot's body. Passing it over, he loads the
+older Gifts snapshot. Rust counts a missing write as deleted when a
+selected snapshot covers it (`skipsPart`), and the store's does, so Gifts
+skips write 2's part as having none, though Gifts' newest covers it. With
+one audience the absence would not count and the reload would fail on the
+missing write instead. The waiting reload waits on the refused snapshot.
 `a_reload_waits_on_a_newest_snapshot_whose_body_it_refused`
-(`snapshot_boundaries_tests.rs`) runs this, and loads the newer Gifts
-snapshot once one lands. The reload's own record names
-the snapshot it waits on (`Waits(Object(path))`), whose record is the
-refusal, so it retries on later passes. The model reads this wait as the
-`.load` outcome when the body is refused here; it has no separate waiting
-outcome, and the two-audience skip is not modeled.
+(`snapshot_boundaries_tests.rs`) runs this history in Rust and loads the
+newer Gifts snapshot once one lands.
+
+**Three other comparisons against the newest loadable snapshot (checked).**
+[ReloadWaitChecks](storelog-data/CovenStorelogData/ReloadWaitChecks.lean)
+checks the decisions that still compare against the newest snapshot this
+device can load rather than the newest verified one.
+
+- Deleting this device's own superseded snapshot is safe (proved). Rust
+  deletes one once the newest snapshot this device can load covers
+  everything it covers (`snapshot_retention.rs`). That snapshot's prefix
+  verified, and it precedes every other loadable snapshot that follows the
+  boundary. `superseded_deletion_invisible` proves that deleting a listed
+  snapshot which a verified listed snapshot precedes changes neither the
+  reload's choice nor log retention, at this version or any later one: the
+  deleted snapshot is never the current newest while the other is listed.
+- Snapshot growth is safe (proved). Rust measures growth since the newest
+  snapshot this device can load (`snapshot_grew`). Growth only decides
+  when to write a snapshot, not what it holds. `landing_keeps_deletions`
+  proves that a new snapshot covering everything the current newest
+  counting snapshot covers keeps every write retention deleted covered,
+  whatever triggered it. That premise is §15's preparation rule (IO
+  `canPrepare`), which must compare against the newest verified prefix:
+  `loadable_preparation_counterexample` (checked) shows a snapshot that
+  covers only what the newest loadable one covers outranking the refused
+  newest and losing a deleted write. Rust has no explicit preparation check;
+  a completed catch-up supplies it (IO `completed_catchup_covers_old`).
+- A reload that needs a write this device refused stays blocked until an
+  update, even once a snapshot covering the gap lands (checked
+  counterexample, `refused_write_reload_counterexample`). §15 says "a
+  snapshot covering it can load without reading it". Rust's reload fails
+  with the write's own `Refused` record (`pending_logs::required`), and
+  `record_operation_error` makes that the reload operation's reason.
+  `Refused` retries only after an update, and `operation_can_retry` keeps
+  `resume_snapshots`, `drive_snapshot` and the app's retry from driving the
+  operation again at this version. In the model Carol's reload selects a
+  snapshot through Ana's write 3, needs write 4, which her version refused,
+  and is blocked. Once a snapshot through write 4 lands, the reload would
+  load it, but it is never attempted. Recording the reload as waiting on
+  the refused write (`Waits(Object(path))`), as it waits on a refused
+  snapshot, retries automatically and loads the covering snapshot
+  (`waiting_on_the_write_loads`). Rust is unchanged.
 
 What the safe rule costs. A body refusal, or a key this device does not
 accept, never holds retention (`retention_ignores_bodies`). A refused prefix
@@ -563,9 +636,8 @@ it keeps both.
 Readings: the current newest counting snapshot, in §15's deletion rule and
 its missing-write rule, is chosen among verified prefixes whatever their
 bodies (§19.1: a damaged snapshot's verified prefix still establishes
-required history). §19.1 says a damaged snapshot is "passed over for the next
-latest, or the logs"; `missingDecision` and Rust's reload wait on it instead
-while it is the current newest. A version's verdict on
+required history), and the reload waits on it while it is the current
+newest (§19.1, `ReloadWait`). A version's verdict on
 a prefix is the same on every device running it. The listing is fixed, as in
 `waiting_retention_safe`; new arrivals and snapshot deletion between the two
 versions are outside the model, as are the other deletion gates, the
@@ -589,8 +661,22 @@ histories and must survive passes. After each step, Rust's `pending()` must
 equal `Local.step` followed by `Pending.pending`, retry class included. The
 code that builds listings and scans from storage (the positions pass,
 snapshot catalog and store-log scan) is not driven by this comparison, and
-`PendingScans`' catalog, loading and retention models and `RefusedRetention`
-have no Rust comparison.
+`PendingScans`' catalog, loading and retention models and `RefusedRetention`'s
+retention have no Rust comparison.
+
+The Rust comparison `data_differential_reload_choice`
+([`snapshot_reload_tests.rs`](../../crates/coven-sync/src/snapshot_reload_tests.rs))
+drives the real snapshot catalog and `Catalog::take_current` against
+`ReloadWait.choose`. Each of its cases lists store snapshots by two devices
+with random signed positions, in memory storage. Some prefixes are signed
+by another member, so this version refuses them; some bodies carry this
+device's recorded refusal; some are sealed under a key the log does not
+accept; some prefixes are in a newer format. Rust's choice (the catalog's
+required update, or what `take_current` takes or waits for) must equal
+Lean's, and for a wait the reason the real reload operation records must
+equal `Choice.reason`. Bodies are never opened, so a load is compared only
+on the snapshot chosen; the schema wait, found when a body opens, and
+reset and raise boundaries are not in the comparison.
 
 **Loss metadata is proved.** `LostValues.pending_exact` contains exactly the
 non-final entries in a loss's dependency expression, without duplicates.

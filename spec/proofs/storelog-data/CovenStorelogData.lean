@@ -23,6 +23,8 @@ import CovenStorelogData.KeySelection
 import CovenStorelogData.Pending
 import CovenStorelogData.PendingScans
 import CovenStorelogData.RefusedRetention
+import CovenStorelogData.ReloadWait
+import CovenStorelogData.ReloadWaitChecks
 import CovenStorelogData.Access
 import CovenStorelogData.AccessKeys
 import CovenStorelogData.AccessKeyExamples

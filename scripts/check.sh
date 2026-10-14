@@ -363,6 +363,13 @@ proofs() {
             exit 1
         fi
         COVEN_STORELOG_DATA_LEAN="$runner" cargo test -p coven-sync --all-features data_differential_pending_records -- --ignored
+        step "Rust / Lean reload choice and wait records"
+        if ! cargo test -p coven-sync --all-features data_differential_reload_choice -- --list |
+            grep '::data_differential_reload_choice: test$' > /dev/null; then
+            echo "the Rust test binary is missing the reload choice differential" >&2
+            exit 1
+        fi
+        COVEN_STORELOG_DATA_LEAN="$runner" cargo test -p coven-sync --all-features data_differential_reload_choice -- --ignored
     fi
 
     if proof_selected io || crate_selected coven-sync; then
