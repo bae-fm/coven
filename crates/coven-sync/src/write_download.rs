@@ -6,7 +6,6 @@ use crate::{replay_cache::ReplayCache, write_object::ReadyWrite, SyncError};
 use coven_crypto::{MemberId, StoreKeyring};
 use coven_database::{ApplyOutcome, DbError, StoreLog};
 use coven_storage::StoredObject;
-use std::io;
 use tokio::sync::oneshot;
 
 impl DeviceLogSync {
@@ -44,7 +43,7 @@ impl DeviceLogSync {
             .apply_downloaded_stream(download, log.positions(), move || {
                 validated
                     .blocking_recv()
-                    .map_err(|e| DbError::SyncStream(Box::new(e)))?
+                    .map_err(|e| DbError::SyncStream(Box::new(e)))
             });
         let download = async {
             let mut sink = WithReferences {
@@ -67,15 +66,13 @@ impl DeviceLogSync {
             let (downloaded, references) =
                 tokio::join!(download, self.database.write_file_references(input));
             let result = downloaded.and_then(|()| references.map_err(SyncError::from));
-            let checked = match &result {
-                Ok(_) => Ok(()),
-                Err(error) => Err(DbError::SyncStream(Box::new(io::Error::other(
-                    error.to_string(),
-                )))),
-            };
             // Both authentication and reference validation finish before rows
-            // can commit. An early database refusal needs no final check.
-            let _ = validation.send(checked);
+            // can commit. A failed transfer drops the sender, so the apply rolls
+            // back and its error is set aside below for the transfer's own
+            // typed failure. An early database refusal needs no final check.
+            if result.is_ok() {
+                let _ = validation.send(());
+            }
             result
         };
         let (applied, transferred) = tokio::join!(apply, transfer);
