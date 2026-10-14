@@ -17,15 +17,10 @@ async fn failed_deletions_remain_recorded_until_a_write_or_open_retries_them() {
         // A directory at the file's name makes removal fail on every platform.
         std::fs::remove_file(&path).unwrap();
         std::fs::create_dir(&path).unwrap();
-        let error = db
-            .write(|sql| {
-                sql.execute("DELETE FROM files", [])?;
-                Ok(())
-            })
-            .await
-            .unwrap_err();
+        // Upload completion releases the queue's copy.
+        let error = complete(&db).await.unwrap_err();
         assert!(matches!(error, DbError::FileCleanup { write: Ok(()), .. }));
-        assert_eq!(local_count(&db, "files"), 0);
+        assert_eq!(local_count(&db, "files"), 1);
         assert_eq!(local_count(&db, "_coven_device_files"), 0);
         assert_eq!(local_count(&db, "_coven_file_removals"), 1);
         if reopen {
@@ -73,13 +68,7 @@ async fn deleting_a_pending_record_can_fail_without_losing_the_retry() {
             "record stays",
         )
     });
-    let error = db
-        .write(|sql| {
-            sql.execute("DELETE FROM files", [])?;
-            Ok(())
-        })
-        .await
-        .unwrap_err();
+    let error = complete(&db).await.unwrap_err();
     assert!(
         matches!(error, DbError::FileCleanup { write: Ok(()), failures } if matches!(failures.as_slice(), [DbError::Sqlite(_)]))
     );
@@ -129,11 +118,12 @@ fn process_crashes_keep_every_unclaimed_file_recorded_and_reopen_removes_it() {
             })
             .unwrap();
         assert_eq!(pending, 1, "{phase}");
+        // Completion released the copy in the last two phases; no row changed.
         let attached = matches!(phase, "stream" | "transaction");
         assert_eq!(
             raw.query_row("SELECT count(*) FROM files", [], |r| r.get::<_, i64>(0))
                 .unwrap(),
-            i64::from(attached)
+            1
         );
         assert_eq!(original.exists(), phase != "removed");
         // This fault trigger intentionally survives the child; remove the test
@@ -215,14 +205,16 @@ fn crashing_file_writer() {
                 sql.crash_after("_coven_file_removals", "DELETE");
             }
         });
-        runtime
-            .block_on(db.write(|sql| {
-                sql.execute("DELETE FROM files", [])?;
-                Ok(())
-            }))
-            .unwrap();
+        runtime.block_on(complete(&db)).unwrap();
     }
     panic!("file write did not reach its crash point");
+}
+
+/// Retire the only queued upload as confirmed storage would.
+async fn complete(db: &Database) -> Result<(), DbError> {
+    let owner = FileDatabase::new(db.clone());
+    let id = owner.uploads().await?[0].id;
+    owner.complete_upload(id).await
 }
 
 struct CrashingReader(bool);
@@ -242,7 +234,7 @@ impl tokio::io::AsyncRead for CrashingReader {
 }
 
 #[tokio::test]
-async fn a_downloaded_reference_change_releases_this_devices_owned_copy() {
+async fn a_downloaded_reference_change_keeps_the_queued_copy_until_upload() {
     use coven_format::value::{Value, WritePositions};
     use coven_merge::{Operation, Timestamp, WriteId};
     let store = TestStore::new();
@@ -295,6 +287,15 @@ async fn a_downloaded_reference_change_releases_this_devices_owned_copy() {
     });
     let reference = db.file_ref("files", "7").await.unwrap();
     db.receive(record.into()).await.unwrap();
+    // The row names another file now; the queued upload keeps its own source.
+    assert_eq!(local_count(&db, "_coven_device_files"), 1);
+    assert_eq!(owned_paths(&store).len(), 1);
+    assert!(FileDatabase::new(db.clone())
+        .open_upload_source(&reference)
+        .await
+        .unwrap()
+        .is_some());
+    complete(&db).await.unwrap();
     assert_eq!(local_count(&db, "_coven_device_files"), 0);
     assert_eq!(local_count(&db, "_coven_file_removals"), 0);
     assert!(owned_paths(&store).is_empty());

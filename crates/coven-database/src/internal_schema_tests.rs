@@ -114,7 +114,6 @@ async fn only_the_spec_tables_are_created() {
                 "_coven_devices",
                 "_coven_file_chunks",
                 "_coven_file_removals",
-                "_coven_file_upload_chunks",
                 "_coven_file_uploads",
                 "_coven_finality",
                 "_coven_fingerprint_leaves",
@@ -298,13 +297,12 @@ mod fixture {
      INSERT INTO _coven_queued_file_refs SELECT device,substr(key,1,16),device,n FROM fixture;
      INSERT INTO _coven_write_upload_sessions SELECT device,n,x'00' FROM fixture;
      INSERT INTO _coven_user_files SELECT tab,key,'file',key,key,n,zeroblob(13) FROM fixture;
-     INSERT INTO _coven_device_files SELECT tab,key,'file',key,'path_' || i FROM fixture;
      INSERT INTO _coven_file_removals SELECT 'removed_' || i,'files' FROM fixture;
      INSERT INTO _coven_access_keys SELECT 'access_' || i,CASE WHEN i%2=0 THEN i END FROM fixture;
      INSERT INTO _coven_file_uploads(id,reference,device,file,queued_at)
        SELECT i,key,device,substr(key,17,16),zeroblob(13) FROM fixture;
-     INSERT INTO _coven_file_chunks SELECT tab,key,'file',key,0,key FROM fixture;
-     INSERT INTO _coven_file_upload_chunks SELECT i,0,key FROM fixture;
+     INSERT INTO _coven_device_files SELECT device,substr(key,17,16),'path_' || i FROM fixture;
+     INSERT INTO _coven_file_chunks SELECT device,substr(key,17,16),0,key FROM fixture;
      INSERT INTO _coven_cache(namespace,file_id,chunk,path,size,last_read,pinned,checked_hash)
        SELECT audience,'file_' || i,CASE WHEN (i/64)%4=0 THEN -2 ELSE 0 END,'cache_' || i,
               65536,i,CASE WHEN (i/64)%4=0 THEN 1 ELSE 0 END,
@@ -734,13 +732,6 @@ mod source {
         values[0].1.clone()
     }
 
-    fn replace(sql: &str, name: &str, values: &[&str]) -> Vec<String> {
-        values
-            .iter()
-            .map(|value| sql.replace(name, value))
-            .collect()
-    }
-
     fn expand(db: &Connection, file: &str, line: usize, sql: &str, source: &Source) -> Vec<String> {
         if !sql.contains('{') {
             return vec![sql.to_owned()];
@@ -762,14 +753,6 @@ mod source {
             .into_iter()
             .map(|(table, column)| sql.replace("{metadata}", table).replace("{column}", column))
             .collect();
-        }
-        if sql.contains("{local_table}") {
-            assert_eq!(file, "file_write.rs");
-            return replace(
-                sql,
-                "{local_table}",
-                &["_coven_user_files", "_coven_device_files"],
-            );
         }
         if sql.contains("{FINAL}") {
             assert!(matches!(file, "entry_inputs.rs" | "local_effects.rs"));

@@ -138,6 +138,15 @@ pub(crate) fn owned_paths(store: &TestStore) -> Vec<std::path::PathBuf> {
         .collect()
 }
 
+/// Retire every queued upload as confirmed storage would, releasing the
+/// queue's owned copies.
+pub(crate) async fn complete_uploads(db: &Database) {
+    let owner = crate::FileDatabase::new(db.clone());
+    for upload in owner.uploads().await.unwrap() {
+        owner.complete_upload(upload.id).await.unwrap();
+    }
+}
+
 pub(crate) fn local_count(db: &Database, table: &str) -> i64 {
     db.inspect_writer(|sql| {
         sql.query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))
@@ -282,15 +291,18 @@ async fn failed_sql_stream_and_commit_discard_new_bytes_and_preserve_old_bytes()
         assert_eq!(local_count(&db, "_coven_device_files"), 1);
         assert_eq!(records(&db).len(), 1);
     }
+    // The replaced attachment's upload keeps its copy until storage has it.
     attach(&db, b"replacement".to_vec(), false).await.unwrap();
-    assert!(!original[0].exists());
-    assert_eq!(owned_paths(&store).len(), 1);
+    assert!(original[0].exists());
+    assert_eq!(owned_paths(&store).len(), 2);
     db.write(|sql| {
         sql.execute("DELETE FROM files", [])?;
         Ok(())
     })
     .await
     .unwrap();
+    assert_eq!(owned_paths(&store).len(), 2);
+    complete_uploads(&db).await;
     assert!(owned_paths(&store).is_empty());
     assert_eq!(local_count(&db, "_coven_device_files"), 0);
     db.close().await.unwrap();
@@ -562,7 +574,7 @@ async fn shared_triggers_cannot_write_managed_columns_and_allowed_inserts_can_at
 }
 
 #[tokio::test]
-async fn shared_bytes_last_until_the_final_row_deletion_commits() {
+async fn shared_bytes_last_until_the_final_queued_upload_completes() {
     let store = TestStore::new();
     let declaration = SyncedTable::new("files", RowIdentity::SharedKey).carries_files(
         FileDecl::new("files", Provenance::AppProvided, CacheFill::CacheLazy)
@@ -584,36 +596,27 @@ async fn shared_bytes_last_until_the_final_row_deletion_commits() {
     )
     .await
     .unwrap();
+    // Each row has its own fixed reference and upload over one local copy.
     let paths = owned_paths(&store);
     assert_eq!(paths.len(), 1);
     assert_eq!(local_count(&db, "_coven_device_files"), 2);
     db.write(|sql| {
-        sql.execute("DELETE FROM files WHERE id='one'", [])?;
+        sql.execute("DELETE FROM files", [])?;
         Ok(())
     })
     .await
     .unwrap();
     assert_eq!(owned_paths(&store), paths);
-    let held = paths[0].clone();
-    let error = db
-        .write(move |sql| {
-            sql.execute("DELETE FROM files WHERE id='two'", [])?;
-            assert_eq!(std::fs::read(held).unwrap(), b"original");
-            Err::<(), _>(DbError::StoreClosed)
-        })
-        .await
-        .unwrap_err();
-    assert!(matches!(error, DbError::StoreClosed));
+    let owner = crate::FileDatabase::new(db.clone());
+    let uploads = owner.uploads().await.unwrap();
+    assert_eq!(uploads.len(), 2);
+    assert_ne!(uploads[0].file.id(), uploads[1].file.id());
+    owner.complete_upload(uploads[0].id).await.unwrap();
     assert_eq!(owned_paths(&store), paths);
-    let held = paths[0].clone();
-    db.write(move |sql| {
-        sql.execute("DELETE FROM files WHERE id='two'", [])?;
-        assert_eq!(std::fs::read(held).unwrap(), b"original");
-        Ok(())
-    })
-    .await
-    .unwrap();
+    assert_eq!(std::fs::read(&paths[0]).unwrap(), b"original");
+    owner.complete_upload(uploads[1].id).await.unwrap();
     assert!(owned_paths(&store).is_empty());
+    assert_eq!(local_count(&db, "_coven_file_removals"), 0);
     db.close().await.unwrap();
 }
 
@@ -685,7 +688,7 @@ async fn a_move_preserves_the_owned_copy_and_a_panicking_write_removes_new_bytes
 }
 
 #[tokio::test]
-async fn downloaded_deletion_removes_records_and_bytes_after_commit() {
+async fn a_downloaded_deletion_keeps_the_queued_copy_until_upload() {
     let ids = SequentialIds::new();
     let a_store = TestStore::with_ids(&ids);
     let b_store = TestStore::with_ids(&ids);
@@ -706,24 +709,13 @@ async fn downloaded_deletion_removes_records_and_bytes_after_commit() {
     .await
     .unwrap();
     let deletion = records(&b).remove(0);
-    a.inspect_writer(|sql| {
-        sql.fail_at(
-            "fail_delete",
-            "AFTER DELETE ON _coven_device_files",
-            "cannot forget file",
-        )
-    });
     let paths = owned_paths(&a_store);
-    assert!(matches!(
-        a.receive(deletion.clone().into()).await,
-        Err(DbError::Sqlite(_))
-    ));
-    assert_eq!(local_count(&a, "files"), 1);
+    a.receive(deletion.into()).await.unwrap();
+    // The row is gone, but its upload still owns the copy (§16.5).
+    assert_eq!(local_count(&a, "files"), 0);
     assert_eq!(local_count(&a, "_coven_device_files"), 1);
     assert_eq!(owned_paths(&a_store), paths);
-    a.inspect_writer(|sql| sql.batch("DROP TRIGGER fail_delete").unwrap());
-    a.receive(deletion.into()).await.unwrap();
-    assert_eq!(local_count(&a, "files"), 0);
+    complete_uploads(&a).await;
     assert_eq!(local_count(&a, "_coven_device_files"), 0);
     assert!(owned_paths(&a_store).is_empty());
     a.close().await.unwrap();

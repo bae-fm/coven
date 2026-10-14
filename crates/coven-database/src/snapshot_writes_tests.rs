@@ -169,8 +169,14 @@ async fn waiting_files_survive_intermediate_snapshot_and_gap_write_states() {
     .await
     .unwrap();
     assert_eq!(frames(&db, Audience::Store).await, expected);
+    // Both attachments still wait to upload, each from its own copy.
     assert_eq!(owned_paths(&store), paths);
-    assert_eq!(std::fs::read(&paths[0]).unwrap(), b"waiting bytes");
+    let mut bytes: Vec<_> = paths
+        .iter()
+        .map(|path| std::fs::read(path).unwrap())
+        .collect();
+    bytes.sort();
+    assert_eq!(bytes, [b"original".to_vec(), b"waiting bytes".to_vec()]);
     upload(&db, &waiting).await;
     db.close().await.unwrap();
 }

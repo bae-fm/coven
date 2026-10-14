@@ -168,8 +168,14 @@ async fn completion_retires_the_queue_without_writing_whatever_the_row_became() 
             _ => {}
         }
         let current = db.file_ref("files", "7").await.ok();
+        // The queue's source facts outlive the row's change until completion.
+        assert!(owner.open_upload_source(&first).await.unwrap().is_some());
+        if change == "retarget" {
+            assert_eq!(owned_paths(&store).len(), 2);
+        }
         let writes = db.test_queued_writes().await.unwrap().len();
         owner.complete_upload(first_id).await.unwrap();
+        assert!(owner.open_upload_source(&first).await.unwrap().is_none());
         assert_eq!(db.file_ref("files", "7").await.ok(), current);
         assert_eq!(db.test_queued_writes().await.unwrap().len(), writes);
         let queue = owner.uploads().await.unwrap();
@@ -188,7 +194,6 @@ async fn completion_retires_the_queue_without_writing_whatever_the_row_became() 
                 assert!(queue.is_empty());
                 assert_eq!(local_count(&db, "_coven_device_files"), 0);
                 assert_eq!(local_count(&db, "_coven_file_chunks"), 0);
-                assert_eq!(local_count(&db, "_coven_file_upload_chunks"), 0);
                 assert!(owned_paths(&store).is_empty());
             }
         }
@@ -211,63 +216,144 @@ async fn completion_retires_the_queue_without_writing_whatever_the_row_became() 
 }
 
 #[tokio::test]
-async fn chunk_hashes_belong_to_the_queued_version_and_retire_with_it() {
+async fn chunk_hashes_belong_to_the_queued_file_whatever_its_row_becomes() {
     use crate::file_write::tests::{local_count, SCHEMA};
     use coven_crypto::ContentHasher;
     use coven_format::chunks::CHUNK_SIZE;
+    let hashes = |bytes: &[u8]| {
+        bytes
+            .chunks(CHUNK_SIZE)
+            .map(|chunk| {
+                let mut hash = ContentHasher::new();
+                hash.update(chunk);
+                hash.finish()
+            })
+            .collect::<Vec<_>>()
+    };
     for provenance in [Provenance::UserProvided, Provenance::AppProvided] {
-        for remove in [false, true] {
+        for change in ["none", "retarget", "delete"] {
             let store = TestStore::new();
             let db = store
                 .schema(tables(provenance.clone()), SCHEMA)
                 .await
                 .unwrap();
-            let bytes = vec![17; CHUNK_SIZE + 1];
-            let original = tempfile::NamedTempFile::new().unwrap();
-            match provenance {
-                Provenance::AppProvided => attach(&db, bytes.clone(), true).await.unwrap(),
-                Provenance::UserProvided => {
-                    std::fs::write(original.path(), &bytes).unwrap();
-                    let prepared = crate::prepare_user_file(original.path(), |_| {})
-                        .await
-                        .unwrap();
-                    let size = bytes.len() as i64;
-                    db.write(move |sql| {
-                        sql.execute("INSERT INTO files(id,size) VALUES('7',?1)", [size])?;
-                        sql.register_user_file("files", "7", prepared)
+            let originals = tempfile::tempdir().unwrap();
+            let attach_bytes = |bytes: Vec<u8>, insert: bool| {
+                let db = db.clone();
+                let path = originals.path().join(format!("{}", bytes.len()));
+                let provenance = provenance.clone();
+                async move {
+                    match provenance {
+                        Provenance::AppProvided => attach(&db, bytes, insert).await.unwrap(),
+                        Provenance::UserProvided => {
+                            std::fs::write(&path, &bytes).unwrap();
+                            let prepared = crate::prepare_user_file(&path, |_| {}).await.unwrap();
+                            let size = bytes.len() as i64;
+                            db.write(move |sql| {
+                                sql.execute(
+                                    "INSERT INTO files(id,size) VALUES('7',?1)
+                                     ON CONFLICT(id) DO UPDATE SET size=excluded.size",
+                                    [size],
+                                )?;
+                                sql.register_user_file("files", "7", prepared)
+                            })
+                            .await
+                            .unwrap();
+                        }
+                    }
+                }
+            };
+            let first_bytes = vec![17; CHUNK_SIZE + 1];
+            attach_bytes(first_bytes.clone(), true).await;
+            let first = db.file_ref("files", "7").await.unwrap();
+            // One hash per chunk, recorded with the queue in the attaching write.
+            assert_eq!(local_count(&db, "_coven_file_chunks"), 2);
+            let second_bytes = vec![18; CHUNK_SIZE * 2];
+            match change {
+                "retarget" => attach_bytes(second_bytes.clone(), false).await,
+                "delete" => db
+                    .write(|sql| {
+                        sql.execute("DELETE FROM files", [])?;
+                        Ok(())
                     })
                     .await
-                    .unwrap();
-                }
+                    .unwrap(),
+                _ => {}
             }
-            assert_eq!(local_count(&db, "_coven_file_chunks"), 2);
-            let owner = FileDatabase::new(db.clone());
-            let id = owner.uploads().await.unwrap()[0].id;
-            assert_eq!(local_count(&db, "_coven_file_upload_chunks"), 2);
-            if remove {
-                db.write(|sql| {
-                    sql.execute("DELETE FROM files", [])?;
-                    Ok(())
-                })
+            // Crash recovery: the queue and its hashes survive reopening.
+            db.close().await.unwrap();
+            let db = store
+                .schema(tables(provenance.clone()), SCHEMA)
                 .await
                 .unwrap();
-                assert_eq!(local_count(&db, "_coven_file_chunks"), 0);
-            }
-            for (index, chunk) in bytes.chunks(CHUNK_SIZE).enumerate() {
-                let mut expected = ContentHasher::new();
-                expected.update(chunk);
+            let owner = FileDatabase::new(db.clone());
+            for (index, expected) in hashes(&first_bytes).into_iter().enumerate() {
                 assert_eq!(
-                    owner.upload_chunk_hash(id, index as u64).await.unwrap(),
-                    expected.finish()
+                    owner.upload_chunk_hash(&first, index as u64).await.unwrap(),
+                    expected
                 );
             }
-            owner.complete_upload(id).await.unwrap();
-            assert_eq!(local_count(&db, "_coven_file_chunks"), 0);
-            assert_eq!(local_count(&db, "_coven_file_upload_chunks"), 0);
-            assert!(owner.uploads().await.unwrap().is_empty());
+            assert!(owner.open_upload_source(&first).await.unwrap().is_some());
+            if change == "retarget" {
+                let second = db.file_ref("files", "7").await.unwrap();
+                assert_eq!(local_count(&db, "_coven_file_chunks"), 4);
+                for (index, expected) in hashes(&second_bytes).into_iter().enumerate() {
+                    assert_eq!(
+                        owner
+                            .upload_chunk_hash(&second, index as u64)
+                            .await
+                            .unwrap(),
+                        expected
+                    );
+                }
+            }
+            let first_id = owner
+                .uploads()
+                .await
+                .unwrap()
+                .into_iter()
+                .find(|upload| upload.file == first)
+                .unwrap()
+                .id;
+            owner.complete_upload(first_id).await.unwrap();
+            // Completing A cannot delete B's facts.
+            assert_eq!(
+                local_count(&db, "_coven_file_chunks"),
+                if change == "retarget" { 2 } else { 0 }
+            );
+            assert!(matches!(
+                owner.upload_chunk_hash(&first, 0).await,
+                Err(DbError::DamagedDatabase)
+            ));
             db.close().await.unwrap();
         }
     }
+}
+
+#[tokio::test]
+async fn an_empty_file_queues_no_chunk_hash_and_a_missing_one_is_damage() {
+    use crate::file_write::tests::{local_count, SCHEMA};
+    let store = TestStore::new();
+    let db = store
+        .schema(tables(Provenance::AppProvided), SCHEMA)
+        .await
+        .unwrap();
+    let owner = FileDatabase::new(db.clone());
+    attach(&db, Vec::new(), true).await.unwrap();
+    assert_eq!(local_count(&db, "_coven_file_chunks"), 0);
+    assert_eq!(owner.uploads().await.unwrap().len(), 1);
+    attach(&db, vec![5; 3], false).await.unwrap();
+    let file = db.file_ref("files", "7").await.unwrap();
+    assert_eq!(local_count(&db, "_coven_file_chunks"), 1);
+    db.commit_writer(|sql| {
+        sql.internal_execute("DELETE FROM _coven_file_chunks", [])
+            .unwrap()
+    });
+    assert!(matches!(
+        owner.upload_chunk_hash(&file, 0).await,
+        Err(DbError::DamagedDatabase)
+    ));
+    db.close().await.unwrap();
 }
 
 #[tokio::test]
@@ -313,7 +399,6 @@ async fn attachment_and_upload_queue_commit_or_roll_back_together() {
                 assert_eq!(local_count(&database, "_coven_device_files"), 0);
                 assert_eq!(local_count(&database, "_coven_user_files"), 0);
                 assert_eq!(local_count(&database, "_coven_file_chunks"), 0);
-                assert_eq!(local_count(&database, "_coven_file_upload_chunks"), 0);
                 assert!(owned_paths(&store).is_empty());
                 assert!(owner.uploads().await.unwrap().is_empty());
                 database

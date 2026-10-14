@@ -1,7 +1,7 @@
 //! Resolve a checked row reference to its one declared local byte source.
 
 use super::FileRef;
-use crate::{file_row, sqlite::DatabaseConnection, write_schema::WriteSchema, DbError, Provenance};
+use crate::{sqlite::DatabaseConnection, write_schema::WriteSchema, DbError};
 use coven_foundation::{
     files::{
         FileArea, FileError, FileName, FileReader, ObservationError, StoreDir, StoreLockError,
@@ -134,8 +134,9 @@ impl LocalFileReader {
 }
 
 /// Open the checked local source of a file this device still has queued for
-/// upload. Any other file, including one this device has finished uploading,
-/// returns `None`: its bytes are read from the cache or storage (§16.1).
+/// upload, after checking the reference against its row. Any other file,
+/// including one this device has finished uploading, returns `None`: its bytes
+/// are read from the cache or storage (§16.1).
 pub(crate) fn open(
     db: &DatabaseConnection,
     schema: &WriteSchema,
@@ -144,31 +145,62 @@ pub(crate) fn open(
     reference: &FileRef,
 ) -> Result<Option<LocalFileStream>, LocalFileError> {
     super::validate(db, schema, reference)?;
-    if reference.uploader() != device || !crate::file_queue::queued(db, reference)? {
+    if reference.uploader() != device {
         return Ok(None);
     }
+    open_queued(db, directory, reference)
+}
+
+/// Open a queued file's source from the facts its queue entry fixed at
+/// attachment, without consulting the row: a row retargeted, moved or deleted
+/// since cannot replace or release them (§16.5). The bytes must still match
+/// the captured size and content hash.
+pub(crate) fn open_queued(
+    db: &DatabaseConnection,
+    directory: &StoreDir,
+    reference: &FileRef,
+) -> Result<Option<LocalFileStream>, LocalFileError> {
+    let sources = db.query(
+        "SELECT u.original,u.modified_at,d.path FROM _coven_file_uploads u
+         LEFT JOIN _coven_device_files d ON d.device=u.device AND d.file=u.file
+         WHERE u.device=?1 AND u.file=?2",
+        (
+            reference.uploader().0.to_be_bytes(),
+            reference.id().0.as_bytes(),
+        ),
+        |row| {
+            Ok((
+                row.get::<_, Option<Vec<u8>>>(0)?,
+                row.get::<_, Option<Vec<u8>>>(1)?,
+                row.get::<_, Option<String>>(2)?,
+            ))
+        },
+    )?;
+    let Some(source) = sources.into_iter().next() else {
+        return Ok(None);
+    };
     let id = reference.id().to_string();
-    let (_, file) = file_row::declaration(schema, reference.table())?;
     let lock = directory.lock_read_only()?;
-    let (reader, original) = match file.provenance {
-        Provenance::UserProvided => {
-            let user = crate::user_file::read(db, schema, reference.table(), reference.key())?
-                .ok_or(DbError::DamagedDatabase)?;
+    let (reader, original) = match source {
+        (Some(path), Some(modified_at), None) => {
+            let path = crate::user_file::decode_path(path)?;
             (
-                FileReader::open_original(&user.path, user.size, user.modified_at),
-                Some(user.path),
+                FileReader::open_original(
+                    &path,
+                    reference.plaintext_size(),
+                    crate::user_file::decode_time(&modified_at)?,
+                ),
+                Some(path),
             )
         }
-        Provenance::AppProvided => {
-            let identity = reference.identity()?;
-            let names = db.query("SELECT path FROM _coven_device_files WHERE table_name=?1 AND key=?2 AND column_name=?3 AND identity=?4", (&reference.row.table, &reference.row.key, &reference.column, identity), |row| row.get::<_, String>(0))?;
-            let name = names.into_iter().next().ok_or(DbError::DamagedDatabase)?;
+        (None, None, Some(name)) => {
             let name = FileName::new(name).map_err(|_| DbError::DamagedDatabase)?;
             (
                 directory.file(FileArea::AppProvided, &name).open_reader(),
                 None,
             )
         }
+        _ => return Err(DbError::DamagedDatabase.into()),
     };
     let reader = reader.map_err(|error| observation(error, &id, original.is_some()))?;
     if !reference

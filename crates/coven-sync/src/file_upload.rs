@@ -253,11 +253,11 @@ impl FilesInner {
                 bytes_total: item.file.plaintext_size(),
             },
         );
-        // Only this device's queued files have a local source; the queue row
-        // being read here means this one does.
+        // The queue fixed this source at attachment; the row may have been
+        // retargeted, moved or deleted since without affecting it (§16.5).
         let source = self
             .database
-            .open_local(&item.file)
+            .open_upload_source(&item.file)
             .await?
             .ok_or(FileReadError::Database(DbError::DamagedDatabase))?;
         let total = FileHeader::new(item.file.plaintext_size())
@@ -427,7 +427,7 @@ impl FileTransfer<'_> {
             let expected = self
                 .owner
                 .database
-                .upload_chunk_hash(self.item.id, index)
+                .upload_chunk_hash(&self.item.file, index)
                 .await?;
             let plain = self
                 .source

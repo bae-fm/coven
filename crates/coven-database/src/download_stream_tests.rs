@@ -490,7 +490,7 @@ mod memory {
             drop(held);
             assert_eq!(count(receiver, "links"), expected);
             assert_eq!(fingerprint(&a, Audience::Store).await, fingerprint(&b, Audience::Store).await);
-            assert_eq!(crate::file_write::tests::owned_paths(&sa).len(), usize::from(expected != 0));
+            assert_eq!(crate::file_write::tests::owned_paths(&sa).len(), 1, "queued copy");
         }
     });
         std::process::exit(86);

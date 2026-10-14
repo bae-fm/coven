@@ -35,6 +35,7 @@ struct AttachedFile {
     id: Value,
     size: u64,
     hash: ContentHash,
+    queued: crate::file_queue::Attachment,
 }
 
 pub(crate) struct FileWrite<'a> {
@@ -133,7 +134,6 @@ impl<'a> FileWrite<'a> {
                         table.name.clone(),
                         crate::write_rows::row_key(table, &values)?,
                     );
-                    self.forget_owned(&key, &file.id)?;
                     file_row::set(
                         db,
                         self.schema,
@@ -142,39 +142,24 @@ impl<'a> FileWrite<'a> {
                         self.device,
                         self.ids,
                     )?;
-                    let Some(attached_values) = crate::write_rows::read_values(db, table, &key.1)?
-                    else {
+                    if crate::write_rows::read_values(db, table, &key.1)?.is_none() {
                         return Err(DbError::FileRowRemoved {
                             table: key.0.clone(),
                             key: file_row::key(&key)?,
                         });
-                    };
-                    db.internal_execute(
-                        "INSERT INTO _coven_device_files
-                             (table_name,key,column_name,identity,path)
-                         VALUES(?1,?2,?3,?4,?5)",
-                        (
-                            &key.0,
-                            &key.1,
-                            &file.id,
-                            file_row::identity(file, &attached_values)?,
-                            staged.name.as_str(),
-                        ),
-                    )?;
-                    staged.hashes.record(
-                        db,
-                        &key,
-                        &file.id,
-                        &file_row::identity(file, &attached_values)?
-                            .ok_or(DbError::DamagedDatabase)?,
-                        staged.size,
-                    )?;
+                    }
+                    // The queue takes the copy and its hashes when the write
+                    // commits; until then the staged name protects the bytes.
                     self.attached.borrow_mut().insert(
                         key,
                         AttachedFile {
                             id: values[&file.id].clone(),
                             size: staged.size,
                             hash: staged.hashes.content,
+                            queued: crate::file_queue::Attachment {
+                                source: crate::file_queue::Source::Copy(staged.name.clone()),
+                                chunks: staged.hashes.chunks().to_vec(),
+                            },
                         },
                     );
                     attached = true;
@@ -239,19 +224,19 @@ impl<'a> FileWrite<'a> {
                 crate::user_file::encode_time(prepared.observed.modified_at())
             ],
         )?;
-        prepared.hashes.record(
-            db,
-            &key,
-            &file.id,
-            &file_row::identity(file, &attached_values)?.ok_or(DbError::DamagedDatabase)?,
-            prepared.observed.size(),
-        )?;
         self.attached.borrow_mut().insert(
             key,
             AttachedFile {
                 id: values[&file.id].clone(),
                 size: prepared.observed.size(),
                 hash: prepared.hashes.content,
+                queued: crate::file_queue::Attachment {
+                    source: crate::file_queue::Source::Original {
+                        path: crate::user_file::encode_path(prepared.observed.path()),
+                        modified_at: crate::user_file::encode_time(prepared.observed.modified_at()),
+                    },
+                    chunks: prepared.hashes.chunks().to_vec(),
+                },
             },
         );
         self.originals.borrow_mut().push(prepared);
@@ -355,17 +340,17 @@ impl<'a> FileWrite<'a> {
                 }
             }
             if new.as_ref().is_none_or(|r| !has_file(r)) {
-                self.forget_owned(key, &file.id)?;
                 self.forget_original(key, &file.id)?;
             }
         }
         Ok(())
     }
 
-    /// Retain originals and owned copies while a current row still names them,
+    /// Retain an original's recorded facts while a current row still names it,
     /// including rows temporarily removed by constraints. Historical generations
-    /// and deleted circles cannot keep a file alive. Audience moves keep a file's
-    /// identity.
+    /// and deleted circles cannot keep them. Audience moves keep a file's
+    /// identity. The upload queue keeps its own source facts and owned copies
+    /// independently of rows (§16.5).
     pub(crate) fn retain_rows(
         &self,
         keys: BTreeSet<AppKey>,
@@ -381,15 +366,12 @@ impl<'a> FileWrite<'a> {
             let Some(file) = &self.schema.declaration(&key.0).files else {
                 continue;
             };
-            let local_table = match file.provenance {
-                Provenance::AppProvided => "_coven_device_files",
-                Provenance::UserProvided => "_coven_user_files",
-            };
+            if file.provenance != Provenance::UserProvided {
+                continue;
+            }
             let identities = db.query(
-                &format!(
-                    "SELECT identity FROM {local_table}
-                     WHERE table_name=?1 AND key=?2 AND column_name=?3"
-                ),
+                "SELECT identity FROM _coven_user_files
+                 WHERE table_name=?1 AND key=?2 AND column_name=?3",
                 (&key.0, &key.1, &file.id),
                 |r| r.get::<_, Vec<u8>>(0),
             )?;
@@ -432,12 +414,7 @@ impl<'a> FileWrite<'a> {
                 .iter()
                 .all(|identity| !retained.contains(identity))
             {
-                match file.provenance {
-                    Provenance::AppProvided => self.forget_owned(&key, &file.id)?,
-                    Provenance::UserProvided => {
-                        self.forget_original(&key, &file.id)?;
-                    }
-                }
+                self.forget_original(&key, &file.id)?;
             }
         }
         Ok(())
@@ -451,14 +428,36 @@ impl<'a> FileWrite<'a> {
         result
     }
 
+    /// Queue each file this write attached, atomically with the write (§16.1).
+    /// A file attached and then removed by the same write never reaches the
+    /// queue; its staged copy is released when the write commits.
     pub(crate) fn queue_attached(&self, now: std::time::SystemTime) -> Result<(), DbError> {
-        crate::file_queue::attached(
-            self.database,
-            self.schema,
-            self.attached.borrow().keys().cloned(),
-            self.device,
-            now,
-        )
+        for (key, attached) in self.attached.borrow().iter() {
+            let reference = match crate::file_ref::read(
+                self.database,
+                self.schema,
+                &key.0,
+                &file_row::key(key)?,
+            ) {
+                Ok(reference) => reference,
+                Err(DbError::FileAbsent { .. }) => continue,
+                Err(error) => return Err(error),
+            };
+            if reference.content_hash() != attached.hash
+                || reference.plaintext_size() != attached.size
+            {
+                return Err(DbError::DamagedDatabase);
+            }
+            // Reattaching identical bytes can change only local file records,
+            // leaving no row-write part on which to check membership.
+            crate::write_commit::check_membership(
+                self.database,
+                self.device,
+                &reference.audience(),
+            )?;
+            crate::file_queue::enqueue(self.database, &reference, &attached.queued, now)?;
+        }
+        Ok(())
     }
 
     pub(crate) fn before_commit(&self) -> Result<(), DbError> {
@@ -500,22 +499,6 @@ impl<'a> FileWrite<'a> {
             "DELETE FROM _coven_user_files WHERE table_name=?1 AND key=?2 AND column_name=?3",
             (&key.0, &key.1, column),
         )?;
-        Ok(())
-    }
-
-    fn forget_owned(&self, key: &AppKey, column: &str) -> Result<(), DbError> {
-        let db = self.database;
-        let paths = db.query(
-            "DELETE FROM _coven_device_files
-             WHERE table_name=?1 AND key=?2 AND column_name=?3 RETURNING path",
-            (&key.0, &key.1, column),
-            |r| r.get::<_, String>(0),
-        )?;
-        for path in paths {
-            self.obsolete
-                .borrow_mut()
-                .insert(FileName::new(path).map_err(|_| DbError::DamagedDatabase)?);
-        }
         Ok(())
     }
 

@@ -1,8 +1,10 @@
-use crate::file_write::tests::{attach, local_count, owned_paths, tables, SCHEMA};
+use crate::file_write::tests::{
+    attach, complete_uploads, local_count, owned_paths, tables, SCHEMA,
+};
 use crate::snapshot_write::tests::{frames, id, load_one, stream, SnapshotFrames};
 use crate::tests::{contents, TestStore};
 use crate::write::tests::{count, notes, records, sql, NOTES};
-use crate::{Database, DbError, Provenance, RowIdentity, SyncedTable};
+use crate::{Database, Provenance, RowIdentity, SyncedTable};
 use coven_foundation::id_source::{CircleId, SequentialIds};
 use coven_merge::Audience;
 use std::io::Cursor;
@@ -731,7 +733,7 @@ async fn waiting_for_a_snapshot_reader_keeps_the_writer_available() {
 }
 
 #[tokio::test]
-async fn replaying_waiting_files_keeps_the_bytes_used_by_the_final_state() {
+async fn replaying_waiting_files_keeps_every_queued_copy() {
     let store = TestStore::new();
     let db = store
         .schema(tables(Provenance::AppProvided), SCHEMA)
@@ -742,9 +744,15 @@ async fn replaying_waiting_files_keeps_the_bytes_used_by_the_final_state() {
     let empty = empty.concat();
     attach(&db, b"first".to_vec(), true).await.unwrap();
     attach(&db, b"second".to_vec(), false).await.unwrap();
+    // Both attachments wait to upload, each from its own copy.
     let paths = owned_paths(&store);
-    assert_eq!(paths.len(), 1);
-    assert_eq!(std::fs::read(&paths[0]).unwrap(), b"second");
+    assert_eq!(paths.len(), 2);
+    let mut bytes: Vec<_> = paths
+        .iter()
+        .map(|path| std::fs::read(path).unwrap())
+        .collect();
+    bytes.sort();
+    assert_eq!(bytes, [b"first".to_vec(), b"second".to_vec()]);
     let original = contents(&db);
     for _ in 0..2 {
         load_one(
@@ -755,16 +763,15 @@ async fn replaying_waiting_files_keeps_the_bytes_used_by_the_final_state() {
         )
         .await
         .unwrap();
-        assert_eq!(local_count(&db, "_coven_device_files"), 1);
+        assert_eq!(local_count(&db, "_coven_device_files"), 2);
         assert_eq!(owned_paths(&store), paths);
-        assert_eq!(std::fs::read(&paths[0]).unwrap(), b"second");
         assert_eq!(contents(&db)["_coven_uploads"], original["_coven_uploads"]);
     }
     db.close().await.unwrap();
 }
 
 #[tokio::test]
-async fn removing_a_file_in_a_snapshot_discards_bytes_only_after_a_successful_commit() {
+async fn a_snapshot_removing_a_queued_files_row_keeps_its_upload_source() {
     let ids = SequentialIds::new();
     let store = TestStore::with_ids(&ids);
     let other = TestStore::with_ids(&ids);
@@ -804,20 +811,6 @@ async fn removing_a_file_in_a_snapshot_discards_bytes_only_after_a_successful_co
     .is_err());
     assert_eq!(contents(&db), before);
     assert_eq!(std::fs::read(&paths[0]).unwrap(), b"keep until commit");
-    db.inspect_writer(|sql| sql.batch("CREATE TEMP TRIGGER refuse_forgetting_file BEFORE DELETE ON _coven_device_files BEGIN SELECT RAISE(ABORT,'keep bytes'); END").unwrap());
-    assert!(matches!(
-        load_one(
-            &db,
-            id(Audience::Store),
-            empty_prefix.clone(),
-            Cursor::new(empty.clone())
-        )
-        .await,
-        Err(DbError::Sqlite(_))
-    ));
-    assert_eq!(contents(&db), before);
-    assert_eq!(std::fs::read(&paths[0]).unwrap(), b"keep until commit");
-    db.inspect_writer(|sql| sql.batch("DROP TRIGGER refuse_forgetting_file").unwrap());
     load_one(
         &db,
         id(Audience::Store),
@@ -826,6 +819,10 @@ async fn removing_a_file_in_a_snapshot_discards_bytes_only_after_a_successful_co
     )
     .await
     .unwrap();
+    assert_eq!(local_count(&db, "files"), 0);
+    assert_eq!(local_count(&db, "_coven_device_files"), 1);
+    assert_eq!(owned_paths(&store), paths);
+    complete_uploads(&db).await;
     assert_eq!(local_count(&db, "_coven_device_files"), 0);
     assert_eq!(local_count(&db, "_coven_file_removals"), 0);
     assert!(owned_paths(&store).is_empty());

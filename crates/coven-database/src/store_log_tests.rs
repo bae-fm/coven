@@ -351,8 +351,8 @@ async fn deletion_and_reversal_commit_marks_and_visible_rows_together() {
 }
 
 #[tokio::test]
-async fn circle_deletion_commits_file_removal_with_the_entry_and_rolls_both_back() {
-    use crate::file_write::tests::owned_paths;
+async fn circle_deletion_keeps_a_queued_copy_until_its_upload_completes() {
+    use crate::file_write::tests::{complete_uploads, owned_paths};
     use crate::{CacheFill, FileDecl, Provenance};
 
     let store = TestStore::new();
@@ -395,31 +395,16 @@ async fn circle_deletion_commits_file_removal_with_the_entry_and_rolls_both_back
     .unwrap();
     let paths = owned_paths(&store);
     assert_eq!(paths.len(), 1);
-    let before = db.store_log().await.unwrap();
     let (entry, replay) = history[4].clone();
-    db.inspect_writer(|sql| {
-        sql.fail_at(
-            "refuse_file",
-            "AFTER DELETE ON _coven_device_files",
-            "keep file",
-        )
-    });
-    assert!(matches!(
-        db.apply_store_log::<PendingRecord>(checked(entry.clone()), replay.clone(), Vec::new())
-            .await,
-        Err(DbError::Sqlite(_))
-    ));
-    assert_eq!(db.store_log().await.unwrap(), before);
-    assert_eq!(count(&db, "files"), 1);
-    assert_eq!(count(&db, "_coven_device_files"), 1);
-    assert_eq!(owned_paths(&store), paths);
-    assert_eq!(std::fs::read(&paths[0]).unwrap(), b"original");
-    db.inspect_writer(|sql| sql.batch("DROP TRIGGER refuse_file").unwrap());
     db.apply_store_log::<PendingRecord>(checked(entry), replay.clone(), Vec::new())
         .await
         .unwrap();
     assert_eq!(db.store_log().await.unwrap().replay, replay);
+    // The deleted circle hides the row; its file still uploads from its copy.
     assert_eq!(count(&db, "files"), 0);
+    assert_eq!(count(&db, "_coven_device_files"), 1);
+    assert_eq!(owned_paths(&store), paths);
+    complete_uploads(&db).await;
     assert_eq!(count(&db, "_coven_device_files"), 0);
     assert_eq!(count(&db, "_coven_file_removals"), 0);
     assert!(owned_paths(&store).is_empty());

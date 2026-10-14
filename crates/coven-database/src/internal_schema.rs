@@ -628,12 +628,11 @@ macro_rules! coven_tables {
         ");
         $visit!(_coven_device_files, "
             CREATE TABLE _coven_device_files (
-                table_name TEXT NOT NULL,
-                key BLOB NOT NULL,
-                column_name TEXT NOT NULL,
-                identity BLOB NOT NULL,
+                device BLOB NOT NULL,
+                file BLOB NOT NULL,
                 path TEXT NOT NULL,
-                PRIMARY KEY(table_name,key,column_name)
+                PRIMARY KEY(device,file),
+                FOREIGN KEY(device,file) REFERENCES _coven_file_uploads(device,file)
             ) STRICT, WITHOUT ROWID;
             CREATE INDEX _coven_device_files_path ON _coven_device_files(path);
         ");
@@ -651,31 +650,26 @@ macro_rules! coven_tables {
                 reference BLOB NOT NULL UNIQUE,
                 device BLOB NOT NULL CHECK(length(device)=8),
                 file BLOB NOT NULL CHECK(length(file)=16),
+                original BLOB,
+                modified_at BLOB CHECK(modified_at IS NULL OR length(modified_at)=13),
                 queued_at BLOB NOT NULL,
                 attempts INTEGER NOT NULL DEFAULT 0 CHECK(attempts>=0),
                 last_attempt_at BLOB,
                 failure BLOB,
                 session BLOB,
-                UNIQUE(device,file)
+                UNIQUE(device,file),
+                CHECK((original IS NULL)=(modified_at IS NULL))
             ) STRICT;
         ");
         $visit!(_coven_file_chunks, "
             CREATE TABLE _coven_file_chunks (
-                table_name TEXT NOT NULL,
-                key BLOB NOT NULL,
-                column_name TEXT NOT NULL,
-                identity BLOB NOT NULL,
+                device BLOB NOT NULL,
+                file BLOB NOT NULL,
                 chunk INTEGER NOT NULL CHECK(chunk>=0),
                 hash BLOB NOT NULL CHECK(length(hash)=32),
-                PRIMARY KEY(table_name,key,column_name,chunk)
-            ) STRICT, WITHOUT ROWID;
-        ");
-        $visit!(_coven_file_upload_chunks, "
-            CREATE TABLE _coven_file_upload_chunks (
-                upload INTEGER NOT NULL REFERENCES _coven_file_uploads(id) ON DELETE CASCADE,
-                chunk INTEGER NOT NULL CHECK(chunk>=0),
-                hash BLOB NOT NULL CHECK(length(hash)=32),
-                PRIMARY KEY(upload,chunk)
+                PRIMARY KEY(device,file,chunk),
+                FOREIGN KEY(device,file) REFERENCES _coven_file_uploads(device,file)
+                    ON DELETE CASCADE
             ) STRICT, WITHOUT ROWID;
         ");
         $visit!(_coven_cache, "
@@ -737,21 +731,6 @@ pub(crate) fn initial_schema() -> String {
         };
     }
     coven_tables!(append);
-    // Source hashes have the same lifetime as their local file facts. Both
-    // deletion and replacement remove them in that transaction, including
-    // changes made while applying remote writes or restoring a snapshot.
-    for source in ["user", "device"] {
-        for (event, suffix) in [("DELETE", "delete"), ("UPDATE OF identity", "replace")] {
-            sql.push_str(&format!(
-                "CREATE TRIGGER _coven_{source}_file_chunks_{suffix}
-                 AFTER {event} ON _coven_{source}_files BEGIN
-                 DELETE FROM _coven_file_chunks
-                 WHERE table_name=OLD.table_name AND key=OLD.key
-                   AND column_name=OLD.column_name AND identity=OLD.identity;
-                 END;"
-            ));
-        }
-    }
     sql
 }
 

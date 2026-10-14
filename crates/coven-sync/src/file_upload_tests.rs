@@ -421,6 +421,66 @@ pub(super) async fn retargeted_upload(f: &Fixture) -> (FileRef, FileRef) {
 }
 
 #[tokio::test]
+async fn a_queued_upload_keeps_its_source_after_its_row_changes() {
+    for provenance in [Provenance::AppProvided, Provenance::UserProvided] {
+        let f = Fixture::new(provenance.clone(), CacheFill::CacheLazy).await;
+        let old = match provenance {
+            Provenance::AppProvided => f.attach("files", "old", vec![36; CHUNK + 3]).await,
+            Provenance::UserProvided => f.original("old", &vec![36; CHUNK + 3]).await,
+        };
+        // Retarget the row, then delete it, before any attempt starts.
+        let new = match provenance {
+            Provenance::AppProvided => f.attach("files", "old", vec![37; 5]).await,
+            Provenance::UserProvided => {
+                let path = f.root.path().join("new");
+                std::fs::write(&path, [37; 5]).unwrap();
+                let prepared = coven_database::prepare_user_file(&path, |_| {})
+                    .await
+                    .unwrap();
+                f.database
+                    .write(move |sql| {
+                        sql.execute("UPDATE files SET size=5 WHERE id='old'", [])?;
+                        sql.register_user_file("files", "old", prepared)
+                    })
+                    .await
+                    .unwrap();
+                f.database.file_ref("files", "old").await.unwrap()
+            }
+        };
+        f.database
+            .write(|sql| {
+                sql.execute("DELETE FROM files", [])?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        f.drain().await;
+        assert!(f.files.inner.database.uploads().await.unwrap().is_empty());
+        // Each upload sent its own bytes to its own fixed path.
+        for (file, bytes) in [(&old, vec![36; CHUNK + 3]), (&new, vec![37; 5])] {
+            let path = f.path(file);
+            let encrypted = f.storage.read(&path).await.unwrap();
+            let header = coven_format::file::FileHeader::decode(&encrypted[..11]).unwrap();
+            assert_eq!(header.size(), bytes.len() as u64);
+            let key = file.reference().unwrap().key;
+            let mut plain = Vec::new();
+            for index in 0..header.chunk_count() {
+                let chunk = header.chunk(index).unwrap();
+                let start = chunk.offset as usize;
+                let sealed = &encrypted[start..start + chunk.plaintext_length + 16];
+                plain.extend(
+                    header
+                        .open_chunk(&key, path.as_str(), index, sealed)
+                        .unwrap(),
+                );
+            }
+            assert_eq!(plain, bytes);
+        }
+        f.close().await;
+    }
+}
+
+#[tokio::test]
 async fn completing_a_replaced_files_upload_cannot_restore_it() {
     let f = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
     let (old, new) = retargeted_upload(&f).await;
@@ -758,6 +818,15 @@ mod differential {
                 finish(2, "stored"),
             ],
             vec![attach(1, 1), begin(1), delete(1), finish(1, "stored")],
+            // The queue keeps its own source facts, so the row may change
+            // before an attempt opens them.
+            vec![
+                attach(1, 1),
+                attach(1, 2),
+                delete(1),
+                finish(2, "stored"),
+                finish(1, "stored"),
+            ],
             vec![
                 attach(1, 1),
                 attach(2, 2),

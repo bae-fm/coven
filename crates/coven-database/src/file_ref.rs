@@ -18,7 +18,7 @@ use coven_merge::{Audience, RowId, WriteId};
 
 #[path = "local_file.rs"]
 mod local_file;
-pub(crate) use local_file::open as open_local;
+pub(crate) use local_file::{open as open_local, open_queued};
 pub use local_file::{LocalFileError, LocalFileStream};
 
 #[derive(Clone, Debug, PartialEq)]
@@ -71,17 +71,6 @@ impl FileRef {
     /// before and after upload. This never consults key custody.
     pub fn reference(&self) -> Result<coven_format::file_reference::FileReference, DbError> {
         self.version.location.reference()
-    }
-    /// The local byte identity, encoded as `file_row::identity` encodes a row's.
-    pub(crate) fn identity(&self) -> Result<Vec<u8>, DbError> {
-        Ok(file_row::identity_values(
-            &self.version.id,
-            &Value::Integer(
-                i64::try_from(self.version.size).map_err(|_| DbError::DamagedDatabase)?,
-            ),
-            &Value::Blob(self.version.hash.as_bytes().to_vec()),
-            &self.version.location,
-        )?)
     }
     /// Encode captured facts for a device-local journal. Contains the uploaded
     /// file key; callers must keep these bytes private, like the database itself.
@@ -151,10 +140,6 @@ impl FileRef {
                 location: FixedReference::decode(location)?,
             },
         })
-    }
-    /// The row's table and encoded key, as local file tables record them.
-    pub(crate) fn app_key(&self) -> crate::write_rows::AppKey {
-        (self.row.table.clone(), self.row.key.clone())
     }
     /// The declared table.
     pub fn table(&self) -> &str {

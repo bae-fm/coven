@@ -46,12 +46,12 @@ impl FileDatabase {
         }
     }
 
-    async fn run<T: Send + 'static>(
+    async fn run<T: Send + 'static, E: From<DbError> + Send + 'static>(
         &self,
-        run: impl FnOnce(&DatabaseConnection, &WriteSchema, &StoreDir, DeviceId) -> Result<T, DbError>
+        run: impl FnOnce(&DatabaseConnection, &WriteSchema, &StoreDir, DeviceId) -> Result<T, E>
             + Send
             + 'static,
-    ) -> Result<T, DbError> {
+    ) -> Result<T, E> {
         match &self.access {
             FileDatabaseAccess::Writer(database) => {
                 database
@@ -179,32 +179,27 @@ impl FileDatabase {
         })
         .await
     }
-    /// Read the first-read plaintext hash of one queued chunk. The queue owns
-    /// these records independently of later changes to the source row.
+    /// Read the first-read plaintext hash of one queued chunk, keyed by the
+    /// file's fixed reference and owned by the queue whatever the row became.
     pub async fn upload_chunk_hash(
         &self,
-        id: i64,
+        file: &FileRef,
         index: u64,
     ) -> Result<coven_crypto::ContentHash, DbError> {
-        self.run(move |db, _, _, _| {
-            let index = i64::try_from(index).map_err(|_| DbError::DamagedDatabase)?;
-            let hash = db
-                .query_row(
-                    "SELECT hash FROM _coven_file_upload_chunks WHERE upload=?1 AND chunk=?2",
-                    (id, index),
-                    |r| r.get::<_, Vec<u8>>(0),
-                )
-                .map_err(|error| match error {
-                    DbError::Sqlite(rusqlite::Error::QueryReturnedNoRows) => {
-                        DbError::DamagedDatabase
-                    }
-                    error => error,
-                })?;
-            Ok(coven_crypto::ContentHash::from_bytes(
-                hash.try_into().map_err(|_| DbError::DamagedDatabase)?,
-            ))
-        })
-        .await
+        let file = file.clone();
+        self.run(move |db, _, _, _| file_queue::chunk_hash(db, &file, index))
+            .await
+    }
+    /// Open the source an upload sends, from the facts its queue entry fixed at
+    /// attachment; later row changes cannot replace them. `None` means the
+    /// file is no longer queued.
+    pub async fn open_upload_source(
+        &self,
+        file: &FileRef,
+    ) -> Result<Option<crate::LocalFileStream>, crate::LocalFileError> {
+        let file = file.clone();
+        self.run(move |db, _, directory, _| file_ref::open_queued(db, directory, &file))
+            .await
     }
 
     /// Persist the provider recording after each confirmed change in progress.

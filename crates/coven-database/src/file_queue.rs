@@ -1,8 +1,9 @@
 //! Durable file upload facts; provider session bytes remain opaque to SQLite.
 
-use crate::{sqlite::DatabaseConnection, write_schema::WriteSchema, DbError, FileRef};
-use coven_crypto::SecretBytes;
+use crate::{sqlite::DatabaseConnection, DbError, FileRef};
+use coven_crypto::{ContentHash, SecretBytes};
 use coven_format::file::FileHeader;
+use coven_foundation::files::FileName;
 use std::time::SystemTime;
 
 /// One durable upload; its plaintext chunk hashes are owned child rows.
@@ -26,70 +27,66 @@ pub struct FileUpload {
     pub session: Option<SecretBytes>,
 }
 
-fn enqueue(
+/// Where a queued upload reads its bytes, fixed by the attaching write and
+/// kept by the queue whatever later happens to the row (§16.5).
+pub(crate) enum Source {
+    /// Coven's own copy of app-provided bytes.
+    Copy(FileName),
+    /// The user's original: its encoded path and recorded modification time.
+    Original { path: Vec<u8>, modified_at: Vec<u8> },
+}
+
+/// The source facts and first-read chunk hashes an attachment queues.
+pub(crate) struct Attachment {
+    pub(crate) source: Source,
+    pub(crate) chunks: Vec<ContentHash>,
+}
+
+/// Queue one attached file under its fixed reference, with its source and one
+/// hash per plaintext chunk, in the attaching transaction (§16.1, §16.6).
+pub(crate) fn enqueue(
     db: &DatabaseConnection,
-    schema: &WriteSchema,
     file: &FileRef,
+    attachment: &Attachment,
     now: SystemTime,
 ) -> Result<(), DbError> {
-    let (_, declaration) = crate::file_row::declaration(schema, file.table())?;
-    let (key, values) = crate::file_row::lookup(db, schema, file.table(), file.key())?;
-    let identity =
-        crate::file_row::identity(declaration, &values)?.ok_or(DbError::DamagedDatabase)?;
-    let inserted = db.internal_execute(
-        "INSERT INTO _coven_file_uploads(reference,device,file,queued_at) VALUES(?1,?2,?3,?4)
-         ON CONFLICT(reference) DO NOTHING",
+    if attachment.chunks.len() as u64 != FileHeader::new(file.plaintext_size()).chunk_count() {
+        return Err(DbError::DamagedDatabase);
+    }
+    let device = file.uploader().0.to_be_bytes();
+    let id = file.id().0;
+    let (original, modified_at) = match &attachment.source {
+        Source::Original { path, modified_at } => (Some(path), Some(modified_at)),
+        Source::Copy(_) => (None, None),
+    };
+    db.internal_execute(
+        "INSERT INTO _coven_file_uploads(reference,device,file,original,modified_at,queued_at)
+         VALUES(?1,?2,?3,?4,?5,?6)",
         (
             file.encode()?,
-            file.uploader().0.to_be_bytes(),
-            file.id().0.as_bytes(),
+            device,
+            id.as_bytes(),
+            original,
+            modified_at,
             crate::user_file::encode_time(now),
         ),
     )?;
-    if inserted == 1 {
-        let id: i64 = db.query_row("SELECT last_insert_rowid()", [], |r| r.get(0))?;
-        let count = db.internal_execute(
-            "INSERT INTO _coven_file_upload_chunks(upload,chunk,hash)
-             SELECT ?1,chunk,hash FROM _coven_file_chunks
-             WHERE table_name=?2 AND key=?3 AND column_name=?4 AND identity=?5",
-            (id, &key.0, &key.1, file.column(), identity),
+    if let Source::Copy(name) = &attachment.source {
+        db.internal_execute(
+            "INSERT INTO _coven_device_files(device,file,path) VALUES(?1,?2,?3)",
+            (device, id.as_bytes(), name.as_str()),
         )?;
-        let header = FileHeader::new(file.plaintext_size());
-        let end: Option<i64> = db.query_row(
-            "SELECT max(chunk)+1 FROM _coven_file_upload_chunks WHERE upload=?1",
-            [id],
-            |r| r.get(0),
-        )?;
-        if count as u64 != header.chunk_count() || end != (count != 0).then_some(count as i64) {
-            return Err(DbError::DamagedDatabase);
-        }
     }
-    Ok(())
-}
-
-pub(crate) fn attached(
-    db: &DatabaseConnection,
-    schema: &WriteSchema,
-    keys: impl Iterator<Item = crate::write_rows::AppKey>,
-    device: coven_foundation::id_source::DeviceId,
-    now: SystemTime,
-) -> Result<(), DbError> {
-    for (table, key) in keys {
-        match crate::file_ref::read(
-            db,
-            schema,
-            &table,
-            &crate::file_row::key(&(table.clone(), key))?,
-        ) {
-            Ok(reference) => {
-                // Reattaching identical bytes can change only local file records,
-                // leaving no row-write part on which to check membership.
-                crate::write_commit::check_membership(db, device, &reference.audience())?;
-                enqueue(db, schema, &reference, now)?;
-            }
-            Err(DbError::FileAbsent { .. }) => {}
-            Err(error) => return Err(error),
-        }
+    for (index, hash) in attachment.chunks.iter().enumerate() {
+        db.internal_execute(
+            "INSERT INTO _coven_file_chunks(device,file,chunk,hash) VALUES(?1,?2,?3,?4)",
+            (
+                device,
+                id.as_bytes(),
+                index as i64,
+                hash.as_bytes().as_slice(),
+            ),
+        )?;
     }
     Ok(())
 }
@@ -129,40 +126,61 @@ pub(crate) fn queued(db: &DatabaseConnection, file: &FileRef) -> Result<bool, Db
     )
 }
 
-/// Retire a confirmed upload in one transaction (§16.5): the queue row, its
-/// chunk hashes, and the owned copy kept only until upload. The app row and
-/// every `FileRef` stay unchanged, whatever happened to the row meanwhile.
-/// The released copy is recorded for removal after the caller commits.
-pub(crate) fn complete(db: &DatabaseConnection, id: i64) -> Result<(), DbError> {
-    let reference = db
+/// The first-read hash of one queued plaintext chunk. A missing hash is
+/// damage, found before any byte of that chunk is encrypted.
+pub(crate) fn chunk_hash(
+    db: &DatabaseConnection,
+    file: &FileRef,
+    index: u64,
+) -> Result<ContentHash, DbError> {
+    let index = i64::try_from(index).map_err(|_| DbError::DamagedDatabase)?;
+    let hash = db
         .query_row(
-            "SELECT reference FROM _coven_file_uploads WHERE id=?1",
-            [id],
+            "SELECT hash FROM _coven_file_chunks WHERE device=?1 AND file=?2 AND chunk=?3",
+            (
+                file.uploader().0.to_be_bytes(),
+                file.id().0.as_bytes(),
+                index,
+            ),
             |r| r.get::<_, Vec<u8>>(0),
         )
         .map_err(|error| match error {
             DbError::Sqlite(rusqlite::Error::QueryReturnedNoRows) => DbError::DamagedDatabase,
             error => error,
         })?;
-    let file = FileRef::decode(&reference)?;
-    let identity = file.identity()?;
-    let (table, key) = file.app_key();
+    Ok(ContentHash::from_bytes(
+        hash.try_into().map_err(|_| DbError::DamagedDatabase)?,
+    ))
+}
+
+/// Retire a confirmed upload in one transaction (§16.5): the queue row, its
+/// chunk hashes, and the owned copy kept only until upload. The app row and
+/// every `FileRef` stay unchanged, whatever happened to the row meanwhile.
+/// A released copy no other queued file shares is recorded for removal after
+/// the caller commits.
+pub(crate) fn complete(db: &DatabaseConnection, id: i64) -> Result<(), DbError> {
+    let (device, file) = db
+        .query_row(
+            "SELECT device,file FROM _coven_file_uploads WHERE id=?1",
+            [id],
+            |r| Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, Vec<u8>>(1)?)),
+        )
+        .map_err(|error| match error {
+            DbError::Sqlite(rusqlite::Error::QueryReturnedNoRows) => DbError::DamagedDatabase,
+            error => error,
+        })?;
     for path in db.query(
-        "DELETE FROM _coven_device_files
-         WHERE table_name=?1 AND key=?2 AND column_name=?3 AND identity=?4 RETURNING path",
-        (&table, &key, file.column(), &identity),
+        "DELETE FROM _coven_device_files WHERE device=?1 AND file=?2 RETURNING path",
+        (&device, &file),
         |r| r.get::<_, String>(0),
     )? {
         db.internal_execute(
-            "INSERT INTO _coven_file_removals(path) VALUES(?1) ON CONFLICT DO NOTHING",
+            "INSERT INTO _coven_file_removals(path)
+             SELECT ?1 WHERE NOT EXISTS(SELECT 1 FROM _coven_device_files WHERE path=?1)
+             ON CONFLICT DO NOTHING",
             [path],
         )?;
     }
-    db.internal_execute(
-        "DELETE FROM _coven_file_chunks
-         WHERE table_name=?1 AND key=?2 AND column_name=?3 AND identity=?4",
-        (&table, &key, file.column(), &identity),
-    )?;
     if db.internal_execute("DELETE FROM _coven_file_uploads WHERE id=?1", [id])? != 1 {
         return Err(DbError::DamagedDatabase);
     }

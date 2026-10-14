@@ -1,8 +1,7 @@
 //! Whole-file and plaintext-chunk hashes captured from the same first read.
 
-use crate::{sqlite::DatabaseConnection, write_rows::AppKey, DbError};
 use coven_crypto::{ContentHash, ContentHasher};
-use coven_format::{chunks::CHUNK_SIZE, file::FileHeader};
+use coven_format::chunks::CHUNK_SIZE;
 
 #[derive(Debug)]
 pub(crate) struct FileHashes {
@@ -58,36 +57,9 @@ impl FileHasher {
 }
 
 impl FileHashes {
-    pub(crate) fn record(
-        &self,
-        db: &DatabaseConnection,
-        key: &AppKey,
-        column: &str,
-        identity: &[u8],
-        size: u64,
-    ) -> Result<(), DbError> {
-        if self.chunks.len() as u64 != FileHeader::new(size).chunk_count() {
-            return Err(DbError::DamagedDatabase);
-        }
-        db.internal_execute(
-            "DELETE FROM _coven_file_chunks WHERE table_name=?1 AND key=?2 AND column_name=?3",
-            (&key.0, &key.1, column),
-        )?;
-        for (index, hash) in self.chunks.iter().enumerate() {
-            db.internal_execute(
-                "INSERT INTO _coven_file_chunks(table_name,key,column_name,identity,chunk,hash)
-                 VALUES(?1,?2,?3,?4,?5,?6)",
-                (
-                    &key.0,
-                    &key.1,
-                    column,
-                    identity,
-                    index as i64,
-                    &hash.as_bytes()[..],
-                ),
-            )?;
-        }
-        Ok(())
+    /// One hash per 64-KiB plaintext chunk, the last possibly shorter.
+    pub(crate) fn chunks(&self) -> &[ContentHash] {
+        &self.chunks
     }
 }
 
