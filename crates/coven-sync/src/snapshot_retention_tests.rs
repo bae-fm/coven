@@ -664,3 +664,73 @@ async fn a_refused_snapshot_prefix_holds_log_retention_while_it_is_listed() {
     assert_eq!(snapshot_record(&a, &ben).await, None);
     assert_eq!(retained(&storage, &writes).await, [false; 10]);
 }
+
+/// §5: proving file absence validates another device's snapshot while holding
+/// the database writer. A body stalled in storage must not keep an app write
+/// waiting: validation reads only bytes already received.
+#[tokio::test]
+async fn a_stalled_snapshot_body_does_not_hold_the_database_writer() {
+    let storage = snapshot_storage();
+    let mut a = notes_device(storage.clone(), 1).await;
+    a.create(key(1)).await;
+    let mut b = notes_device(storage.clone(), 2).await;
+    add_device(&mut b).await;
+    write_rows(&b, 0, 10, 20_000, Audience::Store).await;
+    upload(&b, &storage).await;
+    b.sync.write_snapshot(Audience::Store).await.unwrap();
+    a.sync().await;
+    let snapshot = storage
+        .list(&ObjectPrefix::snapshots(store(1)))
+        .await
+        .unwrap()
+        .remove(0);
+    let at = snapshot.size - 100;
+    assert!(at > 2 * coven_format::chunks::CHUNK_SIZE as u64);
+    // This device owns an unreferenced upload, so retention must read every
+    // retained snapshot's references before deleting it.
+    let orphan = ObjectPath::file(
+        store(1),
+        a.device().await,
+        coven_foundation::id_source::FileId(uuid::Uuid::from_u128(999)),
+    );
+    storage.create(&orphan, b"orphan").await.unwrap();
+    let (stalled, observed) = tokio::sync::oneshot::channel();
+    let (resume, held) = tokio::sync::oneshot::channel();
+    storage
+        .hold_body_at(snapshot.path.clone(), at, stalled, held)
+        .await;
+    let db = a.db.clone();
+    let app = async move {
+        observed.await.unwrap();
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            db.write(|sql| {
+                sql.execute(
+                    "INSERT INTO notes VALUES('local','store','while','downloading')",
+                    [],
+                )?;
+                Ok(())
+            }),
+        )
+        .await
+        .expect("an app write waited for a stalled snapshot body")
+        .unwrap();
+        resume.send(()).unwrap();
+    };
+    let (retained, ()) = tokio::join!(a.sync.run_retention(), app);
+    retained.unwrap();
+    assert_eq!(
+        storage.read(&orphan).await.unwrap_err().failure(),
+        coven_storage::StorageFailure::NotFound
+    );
+    assert_eq!(
+        a.db.read(|sql| Ok(sql.query_row(
+            "SELECT count(*) FROM notes WHERE id='local'",
+            [],
+            |row| row.get::<_, i64>(0)
+        )?))
+        .await
+        .unwrap(),
+        1
+    );
+}
