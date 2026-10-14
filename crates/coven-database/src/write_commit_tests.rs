@@ -282,7 +282,6 @@ const STEPS: &[(&str, &str)] = &[
     ("_coven_positions", "UPDATE"),
     ("_coven_uploads", "INSERT"),
     ("_coven_rows", "INSERT"),
-    ("_coven_columns", "INSERT"),
     ("_coven_cells", "INSERT"),
     ("_coven_lost", "DELETE"),
     ("_coven_references", "INSERT"),

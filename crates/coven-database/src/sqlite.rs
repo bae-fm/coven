@@ -226,9 +226,7 @@ impl DatabaseConnection {
             let schema = Schema::read(self)?;
             schema.validate(tables)?;
             if !read_only {
-                self.transaction(|db| {
-                    crate::row_queries::register_foreign_keys(db, &schema, tables)
-                })?;
+                self.transaction(|db| crate::row_queries::register_schema(db, &schema, tables))?;
             }
             if self.authorization.tables_changed() {
                 self.refresh_hidden_rowids()?;
@@ -276,7 +274,7 @@ impl DatabaseConnection {
                     )?;
                 }
             }
-            crate::row_queries::register_foreign_keys(db, &Schema::read(db)?, tables)?;
+            crate::row_queries::register_schema(db, &Schema::read(db)?, tables)?;
             db.refresh_hidden_rowids()?;
             Ok(outcomes)
         });

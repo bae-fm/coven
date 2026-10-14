@@ -101,11 +101,11 @@ pub(crate) fn put(
 ) -> Result<(), DbError> {
     let (column, value, setter) = match &loss.values {
         LossValues::Cell { column, cell } => (
-            Some(crate::write_commit::column(
-                database,
-                &loss.row.table,
-                column,
-            )?),
+            Some(if loss.retired {
+                crate::write_commit::frozen_column(database, &loss.row.table, column)?
+            } else {
+                crate::write_commit::column(database, &loss.row.table, column)?
+            }),
             encoded(merge_fields::encode_column_value(&cell.value))?,
             encoded(merge_fields::encode_write_id(&cell.write))?,
         ),

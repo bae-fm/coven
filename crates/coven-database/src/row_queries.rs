@@ -32,16 +32,26 @@ pub(crate) fn foreign_key(
     Ok(id.unwrap_or_else(|| panic!("foreign key {key:?} of {table} was never registered")))
 }
 
-/// Register one `_coven_foreign_keys` row per foreign key of each synced
-/// table (§8). Runs after a migration has carried renamed keys over and
-/// removed vanished ones, and on every writable open.
-pub(crate) fn register_foreign_keys(
+/// Register one `_coven_columns` row per column and one `_coven_foreign_keys`
+/// row per foreign key of each synced table (§8). Runs after a migration has
+/// carried renamed identities over and removed vanished ones, and on every
+/// writable open.
+pub(crate) fn register_schema(
     database: &DatabaseConnection,
     schema: &crate::schema::Schema,
     tables: &[crate::SyncedTable],
 ) -> Result<(), DbError> {
     for declaration in tables {
         let table = &schema.tables[&declaration.name.to_ascii_lowercase()];
+        for column in &table.columns {
+            definition_id(
+                database,
+                "_coven_columns",
+                "column_name",
+                &table.name,
+                &column.name,
+            )?;
+        }
         for key in &table.foreign_keys {
             definition_id(
                 database,
@@ -110,3 +120,7 @@ pub(crate) fn definition_id(
         |r| r.get(0),
     )
 }
+
+#[cfg(test)]
+#[path = "row_queries_tests.rs"]
+mod tests;

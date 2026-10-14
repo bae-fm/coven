@@ -253,7 +253,25 @@ pub(crate) fn plaintext(
     Ok(bytes)
 }
 
+/// The registered row of a synced column. Preparing the schema registers
+/// every one, so a cell or live loss can only name a registered column (§8).
 pub(crate) fn column(
+    database: &DatabaseConnection,
+    table: &str,
+    column: &str,
+) -> Result<i64, DbError> {
+    let id: Option<i64> = database.query_row(
+        "SELECT (SELECT id FROM _coven_columns WHERE table_name=?1 AND column_name=?2)",
+        params![table, column],
+        |r| r.get(0),
+    )?;
+    Ok(id.unwrap_or_else(|| panic!("column {column} of {table} was never registered")))
+}
+
+/// The row of a column a frozen loss names. Frozen values keep columns a
+/// breaking migration dropped (§17.1); such a column no longer syncs, so it
+/// has a row only once a frozen loss names it. A synced column is registered.
+pub(crate) fn frozen_column(
     database: &DatabaseConnection,
     table: &str,
     column: &str,

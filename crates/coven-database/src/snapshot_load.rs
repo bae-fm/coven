@@ -216,7 +216,24 @@ pub(crate) fn read(
                 )?,
                 SnapshotRecord::Write(write) => metadata.put(&write)?,
                 SnapshotRecord::Column(column) => {
-                    crate::write_commit::column(database, &column.table, &column.column)?;
+                    // A synced column is registered; any other column can be
+                    // named only by frozen losses, which keep dropped columns.
+                    let synced = schema
+                        .declarations
+                        .iter()
+                        .any(|declaration| declaration.name == column.table)
+                        && schema
+                            .table(&column.table)
+                            .columns
+                            .iter()
+                            .any(|c| c.name == column.column);
+                    if !synced {
+                        crate::write_commit::frozen_column(
+                            database,
+                            &column.table,
+                            &column.column,
+                        )?;
+                    }
                     database.internal_execute(
                             "INSERT INTO temp._coven_snapshot_columns(table_name,column_name) VALUES(?1,?2)",
                             params![column.table, column.column],

@@ -191,7 +191,7 @@ fn finish(
     let schema = crate::write_schema::WriteSchema::read(database, tables.to_vec())?;
     schema.with_evaluators(database, || {
         let refresh = crate::migration_state::carry(database, initial_schema, names, &schema)?;
-        crate::row_queries::register_foreign_keys(database, &schema.schema, tables)?;
+        crate::row_queries::register_schema(database, &schema.schema, tables)?;
         snapshot.rename(database, baseline_names)?;
         let before = AppView::migration_before(database, &schema, &snapshot);
         let visible = AppView::after(database, &schema);
