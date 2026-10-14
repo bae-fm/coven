@@ -141,6 +141,7 @@ import CovenQueue
 #print axioms CovenQueue.converted_change_matches_receiver
 #print axioms CovenQueue.conversions_preserve_frozen
 #print axioms CovenQueue.change_applied_iff
+#print axioms CovenQueue.mergeInput_effective
 #print axioms CovenQueue.mergeInput_valid
 #print axioms CovenQueue.rows_and_losses_converge
 #print axioms CovenQueue.row_value_accounted

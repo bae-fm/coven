@@ -5,6 +5,8 @@ import CovenMerge
 open CovenMerge
 
 -- merged state
+#print axioms step_spec
+#print axioms foldl_isSpec
 #print axioms merge_converges
 #print axioms snapshot_converges
 #print axioms run_isSpec
@@ -23,21 +25,28 @@ open CovenMerge
 #print axioms stamp_supplies_past_ts
 -- removal rules
 #print axioms newman
+#print axioms killStep_terminating
+#print axioms killStep_locallyConfluent
 #print axioms kill_unique_normal
 #print axioms normal_least
 #print axioms fires_monotone
 #print axioms stratified_unique
+#print axioms removal_stratified
 #print axioms any_order_removal
+#print axioms star_fires
 #print axioms removed_has_rule
 #print axioms device_converges
 #print axioms rule_order_converges
 #print axioms UniqueOnce.unique_with_others
 #print axioms UniqueOnce.judged_once
 -- audiences
+#print axioms valid_project
+#print axioms fold_atRow
 #print axioms audience_converges
 #print axioms audiences_agree
 #print axioms removal_local
 #print axioms rivals_closed
+#print axioms rivalBefore_forFingerprint
 #print axioms fingerprint_local
 #print axioms Moved.agree
 #print axioms Moved.store_wins
