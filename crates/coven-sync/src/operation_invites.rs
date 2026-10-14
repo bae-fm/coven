@@ -1,8 +1,9 @@
 //! The inviting device's one-time invitation and authenticated approval (§12.2).
 
+use super::operation_minting::Minting;
 use super::StoreLogSync;
 use crate::{
-    operation_data::{Data, InviteState, InviteWork},
+    operation_data::{Data, InviteGrant, InviteState, InviteWork, MintWork},
     operations::{Begun, Output, Progress},
     *,
 };
@@ -16,8 +17,8 @@ use coven_format::{
 };
 use coven_foundation::id_source::InviteId;
 use coven_storage::{
-    AccessGrant, CloudProvider, InviteStorage, MemberRemoval, ObjectPath, S3Credentials,
-    StorageFailure, StorageInvitation,
+    AccessGrant, CloudProvider, InviteStorage, MemberRemoval, MintScope, ObjectPath, S3Credentials,
+    S3MemberKey, StorageFailure, StorageInvitation,
 };
 use std::time::Duration;
 
@@ -27,7 +28,7 @@ impl StoreLogSync {
     }
 
     pub(super) async fn begin_invite(
-        &self,
+        &mut self,
         local: &LocalStoreLog,
         me: &MemberId,
         role: MemberRole,
@@ -53,17 +54,37 @@ impl StoreLogSync {
             }
             _ => (),
         }
-        let access = match access {
-            InviteAccess::ProviderAccount { email } => InviteAccess::ProviderAccount {
+        let id = InviteId(self.ids.new_id());
+        let mut admin = None;
+        let grant = match access {
+            InviteAccess::ProviderAccount { email } => InviteGrant::Account {
                 email: email.trim().to_ascii_lowercase(),
             },
-            access => access,
+            InviteAccess::S3AccessKey {
+                access_key_id,
+                secret_access_key,
+            } => InviteGrant::S3Key(S3MemberKey {
+                credentials: S3Credentials {
+                    access_key_id,
+                    secret_access_key,
+                },
+                principal: coven_format::S3Principal::Console,
+            }),
+            InviteAccess::S3AdminAccess(access) => {
+                admin = Some(access);
+                // The key is tagged with the invite; its member id is not chosen yet.
+                InviteGrant::Minting(MintWork::new(MintScope::new(
+                    local.store,
+                    &format!("invite-{}", id.0),
+                    self.ids.new_id(),
+                )))
+            }
         };
         let secret = InviteSecret::generate()?;
         let data = Data::Invite(InviteWork {
-            id: InviteId(self.ids.new_id()),
+            id,
             role,
-            access,
+            access: grant,
             secret: SecretText::new(serde_json::to_string(secret.to_secret_bytes().as_bytes())?),
             expires_at: self
                 .clock
@@ -75,11 +96,14 @@ impl StoreLogSync {
                 )?,
             state: InviteState::Grant,
         });
-        Ok(Begun::Operation(
-            self.database
-                .start_operation(data.new_operation("create_invite")?)
-                .await?,
-        ))
+        let operation = self
+            .database
+            .start_operation(data.new_operation("create_invite")?)
+            .await?;
+        if let Some(admin) = admin {
+            self.hold_admin_access(operation, admin);
+        }
+        Ok(Begun::Operation(operation))
     }
 
     pub(super) async fn settle_invite(
@@ -127,7 +151,7 @@ impl StoreLogSync {
                     &coven_format::store_log::StoreChange::AddMember {
                         keys: decoded.keys,
                         role: work.role,
-                        access: work.access.member_access(),
+                        access: work.access.member_access()?,
                     },
                 )?;
                 InviteState::Approving {
@@ -163,6 +187,34 @@ impl StoreLogSync {
             return Ok(Progress::Reply(Err(SyncError::InvitationChanged)));
         }
         match &mut work.state {
+            InviteState::Grant if matches!(work.access, InviteGrant::Minting(_)) => {
+                let InviteGrant::Minting(mint) = &mut work.access else {
+                    unreachable!()
+                };
+                let Some(admin) = self.admin_access(record.id) else {
+                    return Ok(Progress::Waiting(PendingReason::AdminAccessRequired));
+                };
+                match self.advance_mint(admin.as_ref(), mint).await {
+                    Minting::Ready(key) => {
+                        work.access = InviteGrant::S3Key(key);
+                        self.release_admin_access(record.id);
+                    }
+                    Minting::Advanced => {}
+                    Minting::Failed { error, reset } => {
+                        if reset {
+                            self.database
+                                .advance_operation(data.update(record, 0)?)
+                                .await?;
+                        }
+                        self.release_admin_access(record.id);
+                        return Err(error);
+                    }
+                }
+                self.database
+                    .advance_operation(data.update(record, 0)?)
+                    .await?;
+                Ok(Progress::Advanced)
+            }
             InviteState::Grant => {
                 self.catch_up().await?;
                 let local = self.database.local_store_log().await?;
@@ -173,7 +225,7 @@ impl StoreLogSync {
                 }
                 let storage = self.storage.as_deref().ok_or(SyncError::NoStorage)?;
                 let invitation = match &work.access {
-                    InviteAccess::ProviderAccount { email } => {
+                    InviteGrant::Account { email } => {
                         if storage.config().provider() == CloudProvider::S3 {
                             return Err(StorageFailure::InvalidConfiguration
                                 .with_source("S3 invitation needs its own access key")
@@ -188,7 +240,8 @@ impl StoreLogSync {
                             }
                         }
                     }
-                    InviteAccess::S3AccessKey { .. } => {
+                    InviteGrant::Minting(_) => unreachable!("minted before granting"),
+                    InviteGrant::S3Key(_) => {
                         if storage.config().provider() != CloudProvider::S3 {
                             return Err(StorageFailure::InvalidConfiguration
                                 .with_source("access-key invitation requires S3")
@@ -249,13 +302,34 @@ impl StoreLogSync {
                     .await?;
                 Ok(Progress::Advanced)
             }
+            InviteState::Revoking if matches!(work.access, InviteGrant::Minting(_)) => {
+                let InviteGrant::Minting(mint) = &work.access else {
+                    unreachable!()
+                };
+                if let Some(key) = &mint.minted {
+                    // A made key is pending deletion like any invite's key.
+                    work.access = InviteGrant::S3Key(key.clone());
+                } else {
+                    // Nothing reached the member; remove whatever the attempt made.
+                    let Some(admin) = self.admin_access(record.id) else {
+                        return Ok(Progress::Waiting(PendingReason::AdminAccessRequired));
+                    };
+                    admin.roll_back(&mint.scope).await?;
+                    self.release_admin_access(record.id);
+                    work.state = InviteState::Settled;
+                }
+                self.database
+                    .advance_operation(data.update(record, record.last_step)?)
+                    .await?;
+                Ok(Progress::Advanced)
+            }
             InviteState::Revoking => {
                 let result = self
-                    .revoke_access(record.id, &work.access.member_access())
+                    .revoke_access(record.id, &work.access.member_access()?)
                     .await?;
                 if let MemberRemoval::AccessRemains { shares } = result {
                     let coven_format::MemberAccess::ProviderAccount(account) =
-                        work.access.member_access()
+                        work.access.member_access()?
                     else {
                         return Err(coven_database::DbError::DamagedDatabase.into());
                     };
@@ -264,7 +338,7 @@ impl StoreLogSync {
                         shares,
                     }));
                 }
-                let access = work.access.member_access();
+                let access = work.access.member_access()?;
                 work.state = InviteState::Settled;
                 // The invite's S3 key stays pending until its deletion clears (§12.2).
                 let deletions = crate::access_keys::deletion(&access, None)
@@ -306,17 +380,12 @@ impl StoreLogSync {
             unreachable!()
         };
         let storage = match &work.access {
-            InviteAccess::ProviderAccount { .. } => InviteStorage::Account(invitation.clone()),
-            InviteAccess::S3AccessKey {
-                access_key_id,
-                secret_access_key,
-            } => InviteStorage::S3 {
+            InviteGrant::Account { .. } => InviteStorage::Account(invitation.clone()),
+            InviteGrant::S3Key(key) => InviteStorage::S3 {
                 invitation: invitation.clone(),
-                credentials: S3Credentials {
-                    access_key_id: access_key_id.clone(),
-                    secret_access_key: secret_access_key.clone(),
-                },
+                credentials: key.credentials.clone(),
             },
+            InviteGrant::Minting(_) => unreachable!("minted before granting"),
         };
         let store = local
             .log
@@ -421,7 +490,7 @@ impl StoreLogSync {
             member: request.keys.signing,
             device_name: request.device_name,
             provider_account_email: match &work.access {
-                InviteAccess::ProviderAccount { email } => Some(email.clone()),
+                InviteGrant::Account { email } => Some(email.clone()),
                 _ => None,
             },
             record: bytes.to_vec(),

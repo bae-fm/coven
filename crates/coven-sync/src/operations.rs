@@ -51,6 +51,7 @@ pub(crate) enum Command {
     Discard(OperationId),
     ConfirmKey(String),
     DeleteKey(OperationId, Arc<dyn coven_storage::AccessKeyAdmin>),
+    RetryWithAdmin(OperationId, Arc<dyn coven_storage::AccessKeyAdmin>),
     Credentials {
         previous: Option<coven_storage::ConnectionCredentials>,
         next: coven_storage::ConnectionCredentials,
@@ -278,6 +279,17 @@ impl Operations {
         operation: OperationId,
     ) -> Result<(), OperationError> {
         self.call(Command::Retry(operation)).await.map(|_| ())
+    }
+    /// Resume provider work that needs the storage account's admin access,
+    /// held by this operation only until its provider work is done (§4).
+    pub async fn retry_with_admin_access(
+        &self,
+        operation: OperationId,
+        admin: Arc<dyn coven_storage::AccessKeyAdmin>,
+    ) -> Result<(), OperationError> {
+        self.call(Command::RetryWithAdmin(operation, admin))
+            .await
+            .map(|_| ())
     }
     /// Discard a failed operation, publishing any already reserved entry first.
     pub async fn discard_pending_operation(

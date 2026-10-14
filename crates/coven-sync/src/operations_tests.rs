@@ -761,3 +761,6 @@ async fn store_reset_requires_admin_and_circle_reset_requires_membership() {
 
 #[path = "operation_pending_tests.rs"]
 mod pending_records;
+
+#[path = "operation_minting_tests.rs"]
+mod minting;

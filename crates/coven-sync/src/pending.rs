@@ -207,6 +207,9 @@ pub enum PendingReason {
     Failed(LocalFailure),
     /// Work awaits the app’s next action, such as approval or resuming a transfer.
     Paused,
+    /// Provider work needs the storage account's admin access again, which
+    /// coven never keeps beyond one operation (§4).
+    AdminAccessRequired,
     /// This installation was removed.
     Removed,
 }

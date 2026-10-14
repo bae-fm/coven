@@ -1236,6 +1236,47 @@ the file's ranges under `F`.
     console. With direct provider calls, coven performs the operation using
     the supplied admin access. Both paths record member access and pending
     deletion work under §13; a retry needing admin access obtains it again.
+  - Each catalogued profile's const entry names its key minter, function
+    pointers that make, roll back, delete and read a member key with admin
+    access. AWS uses IAM at its global endpoint, signing for `us-east-1`: a
+    user under the path `/coven/`, tagged `coven-store` and `coven-member`
+    with the store id and the member or invite id (never an email), the
+    member policy below as the inline policy `coven-member`, and one access
+    key. SeaweedFS's embedded IAM, on the location's S3 endpoint and region
+    (the operator sets `-iam.readOnly=false`), takes the same policy through
+    `CreatePolicy` and `AttachUserPolicy`: its `PutUserPolicy` drops
+    conditions and refuses `s3:ListMultipartUploadParts`. Ceph RGW accounts
+    take the inline form at the RGW endpoint once a profile names that
+    service. GCS, R2 and RustFS have their own minters; a custom profile uses
+    guided console steps.
+  - The member policy allows `s3:GetObject`, `s3:PutObject`,
+    `s3:DeleteObject`, `s3:AbortMultipartUpload` and
+    `s3:ListMultipartUploadParts` on `arn:aws:s3:::<bucket>/<prefix>/<store>/*`,
+    and `s3:ListBucket` on the bucket under the condition `StringLike`
+    `s3:prefix` `<prefix>/<store>/*`. It never adds a `Deny` on
+    `StringNotLike` `s3:prefix`: a request carrying no prefix, such as a bucket
+    check, matches the negated condition and would be denied.
+  - Making a key is one journaled operation (§18). Before the first provider
+    call the journal records a fresh attempt and the principal's name derived
+    from it, `coven-` and 24 hex digits, so every retry finds what an earlier
+    attempt made: an existing user or policy is kept, and keys whose secret no
+    attempt holds are deleted before a new one is created (an IAM user holds
+    at most two). The minted key's secret then joins the journal, as an
+    invite's key does.
+  - Before delivery the key is checked from the member's side. Under it, an
+    object in `<store>/.coven-check/<run>/` is created, refused a second time,
+    read back and deleted, and that prefix is listed; a listing of the
+    location's base prefix, outside every store, must be refused, or the
+    check fails with `StorageFailure::KeyBeyondStore`. Authentication and
+    permission failures are retried each second within the service's
+    propagation bound: 60 seconds for AWS IAM, which states none, and 30 for
+    SeaweedFS, whose gateways read identity changes asynchronously.
+  - A failed mint or check rolls back what the attempt's name created — keys,
+    policy and user — and reports the failure, with the rollback's own failure
+    if that fails too. Admin access is held only by the operation that needs
+    it and released once its key is checked or its step fails; after a restart
+    the step waits with `PendingReason::AdminAccessRequired` until a retry
+    supplies admin access again.
 - Posted positions live at `<store>/positions/<device>` ([§6](#6-syncing-writes)).
 - Sealed store and circle keys share `<store>/keys/<writer>/<n>`; their
   clear prefixes name audience, key and recipient ([§11](#11-keys), D9).
@@ -5245,8 +5286,11 @@ Carol's tablet:
   There is no preceding write or wait for row uploads.
 - Inviting a person ([§12.2](#122-adding-a-person)):
   1. share the storage with their account, or record the S3 key the admin
-     made through §4's admin-access or console path, and record the invite's
-     chosen stable id;
+     made in the console, or make the key with admin access (§4: the attempt
+     and principal name are recorded first, then the key, then its
+     member-side check), and record the invite's chosen stable id. A failed
+     mint rolls back; cancelling before the key exists rolls back with admin
+     access;
   2. once an admin approves the exact id and new public pair, confirm the
      initial and held historical audience-key copies to that credential,
      then publish Add member or Replace member keys as the invite specifies;

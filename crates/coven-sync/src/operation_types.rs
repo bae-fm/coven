@@ -74,7 +74,7 @@ pub struct CircleMemberInfo {
 }
 
 /// How the invited person reaches the store's provider.
-#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Clone)]
 pub enum InviteAccess {
     /// Share with the named provider account.
     ProviderAccount {
@@ -88,6 +88,9 @@ pub enum InviteAccess {
         /// The key's secret, carried only in the invitation.
         secret_access_key: SecretText,
     },
+    /// S3: coven makes the invited person's key with the storage account's
+    /// admin access, held by this invite's operation until the key is made (§4).
+    S3AdminAccess(std::sync::Arc<dyn coven_storage::AccessKeyAdmin>),
 }
 
 /// The invitation returned once its storage access has been granted.

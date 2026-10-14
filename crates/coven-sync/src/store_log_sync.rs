@@ -34,6 +34,10 @@ pub struct StoreLogSync {
     clock: ClockRef,
     ids: IdSourceRef,
     directory: coven_foundation::files::StoreDir,
+    /// The storage account's admin access, held only by the operation that
+    /// needs it and never written anywhere (§4).
+    admin_access:
+        std::collections::BTreeMap<crate::OperationId, Arc<dyn coven_storage::AccessKeyAdmin>>,
 }
 
 impl StoreLogSync {
@@ -59,6 +63,7 @@ impl StoreLogSync {
             clock,
             ids,
             directory,
+            admin_access: Default::default(),
         }
     }
 
@@ -83,6 +88,7 @@ impl StoreLogSync {
             clock,
             ids,
             directory,
+            admin_access: Default::default(),
         }
     }
 
@@ -699,6 +705,8 @@ pub(crate) mod tests;
 mod operation_calls;
 #[path = "operation_invites.rs"]
 mod operation_invites;
+#[path = "operation_minting.rs"]
+mod operation_minting;
 #[path = "operation_pending.rs"]
 mod operation_pending;
 #[path = "operation_steps.rs"]

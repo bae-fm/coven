@@ -152,6 +152,12 @@ impl StoreLogSync {
                 self.sync_store_log().await?;
                 return Ok(Begun::Value(Output::Unit));
             }
+            Command::RetryWithAdmin(id, admin) => {
+                self.pending_operation(id, false).await?;
+                self.hold_admin_access(id, admin);
+                self.database.retry_operation(id).await?;
+                return Ok(Begun::Operation(id));
+            }
             Command::Retry(id) => {
                 let record = self.pending_operation(id, false).await?;
                 let mut data = Data::read(&record)?;
@@ -193,6 +199,7 @@ impl StoreLogSync {
             }
             Command::Discard(id) => {
                 let record = self.pending_operation(id, true).await?;
+                self.release_admin_access(id);
                 let data = Data::read(&record)?;
                 if let Data::Snapshots(task) = &data {
                     self.discard_snapshot(&record, task.clone()).await?;

@@ -1,7 +1,7 @@
 //! Each operation's retained intent and completed steps.
 
 use crate::snapshot_data::{SnapshotJob, SnapshotTask, SnapshotTrigger};
-use crate::{InviteAccess, OperationKind, SyncError};
+use crate::{OperationKind, SyncError};
 use coven_database::{NewOperation, OperationRecord, OperationUpdate};
 use coven_format::{
     store_log::{MemberRole, StoreLogEntry},
@@ -59,11 +59,57 @@ pub(crate) struct EntryWork {
     pub(crate) removal: Option<MemberRemoval>,
 }
 
+/// A key coven makes with admin access (§4, §18). The scope, and with it the
+/// principal's name, is fixed before the first provider call; the minted key's
+/// secret joins the journal as an invite's does.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct MintWork {
+    pub(crate) scope: coven_storage::MintScope,
+    pub(crate) minted: Option<coven_storage::S3MemberKey>,
+    /// Whether the key passed its member-side check.
+    pub(crate) checked: bool,
+}
+
+impl MintWork {
+    pub(crate) fn new(scope: coven_storage::MintScope) -> Self {
+        Self {
+            scope,
+            minted: None,
+            checked: false,
+        }
+    }
+}
+
+/// How an invited person reaches storage, as the invite's journal keeps it.
+#[derive(Serialize, Deserialize)]
+pub(crate) enum InviteGrant {
+    /// The provider shares the store with this account.
+    Account { email: String },
+    /// An S3 key and who holds it, made in the console or by coven.
+    S3Key(coven_storage::S3MemberKey),
+    /// Coven is making the key with admin access.
+    Minting(MintWork),
+}
+
+impl InviteGrant {
+    /// The access the addition records; a key still being made has none yet.
+    pub(crate) fn member_access(&self) -> Result<MemberAccess, SyncError> {
+        match self {
+            Self::Account { email } => Ok(MemberAccess::ProviderAccount(email.clone())),
+            Self::S3Key(key) => Ok(MemberAccess::S3AccessKey {
+                access_key_id: key.credentials.access_key_id.clone(),
+                principal: key.principal.clone(),
+            }),
+            Self::Minting(_) => Err(SyncError::InvitationChanged),
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 pub(crate) struct InviteWork {
     pub(crate) id: InviteId,
     pub(crate) role: MemberRole,
-    pub(crate) access: InviteAccess,
+    pub(crate) access: InviteGrant,
     pub(crate) secret: coven_crypto::SecretText,
     pub(crate) expires_at: SystemTime,
     pub(crate) state: InviteState,
@@ -296,19 +342,5 @@ impl Data {
                 ..
             })
         )
-    }
-}
-
-impl InviteAccess {
-    pub(crate) fn member_access(&self) -> MemberAccess {
-        match self {
-            Self::ProviderAccount { email } => {
-                MemberAccess::ProviderAccount(email.trim().to_ascii_lowercase())
-            }
-            Self::S3AccessKey { access_key_id, .. } => MemberAccess::S3AccessKey {
-                access_key_id: access_key_id.clone(),
-                principal: coven_format::S3Principal::Console,
-            },
-        }
     }
 }

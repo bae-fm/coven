@@ -1917,6 +1917,8 @@ pub enum StorageFailure {
     /// The S3 service's member keys reach a whole bucket, so a store there
     /// needs a bucket of its own (§4).
     OwnBucketRequired { reason: OwnBucketReason },
+    /// A member key coven made could list outside its store's prefix (§4).
+    KeyBeyondStore,
     /// S3 rejected the device clock after one retry with the learned offset (§4).
     ClockSkew,
     /// The provider has no space left.
@@ -2264,6 +2266,9 @@ pub enum PendingReason {
     Disagrees,
     Failed(LocalFailure),
     Paused,
+    /// Provider work needs the storage account's admin access again; coven
+    /// holds it for one operation only (§4).
+    AdminAccessRequired,
     Removed,
     /// Sending needs this stable member's current credentials (§10).
     MemberKeysReplaced { member: MemberId },
@@ -3035,6 +3040,29 @@ pub enum IamPolicy {
     Managed { arn: String },
 }
 
+/// A service's key administration with the storage account's admin access,
+/// for one operation (§4). Coven's minters implement it per catalogued profile.
+#[async_trait]
+pub trait AccessKeyAdmin: Send + Sync {
+    /// Create the principal and a key limited to the scope's store, tolerating
+    /// what an earlier attempt with this scope made.
+    async fn mint(&self, scope: &MintScope) -> Result<S3MemberKey, StorageError>;
+    /// The member-side check before delivery (§4).
+    async fn probe(&self, scope: &MintScope, key: &S3Credentials) -> Result<(), StorageError>;
+    /// Remove whatever an attempt with this scope made.
+    async fn roll_back(&self, scope: &MintScope) -> Result<(), StorageError>;
+    /// Delete the key and the principal holding it; absence succeeds.
+    async fn revoke(&self, access_key_id: &str, principal: &S3Principal) -> Result<(), StorageError>;
+    /// Read whether this exact key remains; a failed read is never absence.
+    async fn key_exists(&self, access_key_id: &str, principal: &S3Principal) -> Result<bool, StorageError>;
+}
+
+/// What a minted key reaches; the principal name is fixed by the journal.
+pub struct MintScope { pub store: StoreId, pub name: String, pub member: String }
+
+/// A member's S3 key and who holds it.
+pub struct S3MemberKey { pub credentials: S3Credentials, pub principal: S3Principal }
+
 // Each DeleteAccessKey record belongs to its own DeleteAccessKey operation,
 // whose id the app passes to confirm or delete with admin access. Retry and
 // discard refuse it: only the two clearing events end it.
@@ -3344,8 +3372,11 @@ pub enum InviteAccess {
     /// Google Drive, Dropbox, OneDrive or iCloud: the store is shared with
     /// this account.
     ProviderAccount { email: String },
-    /// S3: a member key supplied through §4's admin-access or console path.
+    /// S3: a member key made in the provider's console (§4).
     S3AccessKey { access_key_id: String, secret_access_key: SecretText },
+    /// S3: coven makes the person's key with this admin access, held by the
+    /// invite's operation until the key passes its member-side check (§4).
+    S3AdminAccess(Arc<dyn AccessKeyAdmin>),
 }
 
 pub struct Invite {

@@ -71,6 +71,9 @@ pub(super) struct CataloguedProfile {
     pub(super) key_scope: S3KeyScope,
     /// Separate evidence: a sequential or unversioned run cannot certify this.
     pub(super) versioned_buckets: Certification<'static>,
+    /// How coven makes and deletes member keys with admin access; None where
+    /// the console makes them (§4).
+    pub(super) minter: Option<&'static super::minting::KeyMinter>,
     pub(super) certification: Certification<'static>,
 }
 
@@ -105,6 +108,7 @@ const AWS: CataloguedProfile = CataloguedProfile {
     // conditions on listing and resource ARNs ending `<prefix>/<store>/*`.
     key_scope: S3KeyScope::Prefix,
     versioned_buckets: Certification::Uncertified,
+    minter: Some(&super::iam::AWS_IAM),
     certification: Certification::Uncertified,
 };
 const GCS: CataloguedProfile = CataloguedProfile {
@@ -125,6 +129,7 @@ const GCS: CataloguedProfile = CataloguedProfile {
     // account `roles/storage.objectUser` on that folder alone.
     key_scope: S3KeyScope::Prefix,
     versioned_buckets: Certification::Uncertified,
+    minter: None,
     certification: Certification::Passed {
         date: "2026-10-13",
         suite: 1,
@@ -145,6 +150,7 @@ const R2: CataloguedProfile = CataloguedProfile {
     // credentials, which need a session token, take a prefix.
     key_scope: S3KeyScope::Bucket,
     versioned_buckets: Certification::Uncertified,
+    minter: None,
     certification: Certification::Passed {
         date: "2026-10-13",
         suite: 1,
@@ -168,6 +174,7 @@ const RUSTFS: CataloguedProfile = CataloguedProfile {
     // resources under the store's prefix.
     key_scope: S3KeyScope::Prefix,
     versioned_buckets: Certification::Uncertified,
+    minter: None,
     certification: Certification::Passed {
         date: "2026-10-13",
         suite: 2,
@@ -185,6 +192,7 @@ const SEAWEEDFS: CataloguedProfile = CataloguedProfile {
     // resources under the store's prefix.
     key_scope: S3KeyScope::Prefix,
     versioned_buckets: Certification::Uncertified,
+    minter: Some(&super::iam::SEAWEEDFS_IAM),
     certification: Certification::Passed {
         date: "2026-10-13",
         suite: 2,
@@ -201,6 +209,8 @@ const CEPH_RGW: CataloguedProfile = CataloguedProfile {
     // under the store's prefix.
     key_scope: S3KeyScope::Prefix,
     versioned_buckets: Certification::Uncertified,
+    // RGW accounts take IAM CreateUser/PutUserPolicy/CreateAccessKey; no minter yet (T143).
+    minter: None,
     certification: Certification::Passed {
         date: "2026-10-14",
         suite: 4,

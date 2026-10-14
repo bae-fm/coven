@@ -284,7 +284,7 @@ impl StoreLogSync {
                 let change = StoreChange::AddMember {
                     keys: request.keys.clone(),
                     role: work.role,
-                    access: work.access.member_access(),
+                    access: work.access.member_access()?,
                 };
                 self.validate_administration(local, me, &change)?;
                 if let Some(existing) = effects::member(state, &request.keys.signing) {
@@ -292,7 +292,7 @@ impl StoreLogSync {
                         && existing.role == work.role
                         && existing
                             .access
-                            .same_credential(&work.access.member_access())
+                            .same_credential(&work.access.member_access()?)
                     {
                         return Ok(None);
                     }
@@ -470,7 +470,10 @@ impl StoreLogSync {
             }
             if let Data::Invite(work) = Data::read(&record)? {
                 if !matches!(work.state, InviteState::Revoking | InviteState::Settled)
-                    && work.access.member_access().same_credential(access)
+                    && work
+                        .access
+                        .member_access()
+                        .is_ok_and(|recorded| recorded.same_credential(access))
                 {
                     in_use = true;
                 }

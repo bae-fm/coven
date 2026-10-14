@@ -22,6 +22,24 @@ pub fn gcs_request_signature(secret: &str, date: &str, region: &str, message: &[
     *hmac(key.as_ref(), message)
 }
 
+/// AWS Signature Version 4 over a request's string to sign. The signing key
+/// derives from the secret through the date, region and service scope;
+/// intermediate keys and the prefixed secret are erased on drop.
+pub fn aws_request_signature(
+    secret: &str,
+    date: &str,
+    region: &str,
+    service: &str,
+    message: &[u8],
+) -> [u8; 32] {
+    let secret = Zeroizing::new(format!("AWS4{secret}"));
+    let mut key = hmac(secret.as_bytes(), date.as_bytes());
+    for part in [region, service, "aws4_request"] {
+        key = hmac(key.as_ref(), part.as_bytes());
+    }
+    *hmac(key.as_ref(), message)
+}
+
 fn hmac(key: &[u8], bytes: &[u8]) -> Zeroizing<[u8; 32]> {
     let mut mac = Hmac::<Sha256>::new_from_slice(key).expect("HMAC accepts any key length");
     mac.update(bytes);

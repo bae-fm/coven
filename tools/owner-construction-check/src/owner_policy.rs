@@ -249,6 +249,18 @@ pub(crate) const POLICY: Policy = Policy {
             "<free>",
             "check_new_store",
         ),
+        // Admin access becomes one location's key administration (§4).
+        (
+            "crates/coven-storage/src/providers/s3_minting.rs",
+            "<free>",
+            "key_admin",
+        ),
+        // The member-side check connects with the minted key itself.
+        (
+            "crates/coven-storage/src/providers/s3_minting.rs",
+            "ProfileKeyAdmin",
+            "probe",
+        ),
         (
             "crates/coven-storage/src/settings.rs",
             "StorageSettings",

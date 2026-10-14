@@ -37,6 +37,12 @@ mod metadata;
 #[path = "s3_restart.rs"]
 mod restart;
 pub(crate) use detect::detect;
+#[path = "s3_iam.rs"]
+mod iam;
+#[path = "s3_member_probe.rs"]
+mod member_probe;
+#[path = "s3_minting.rs"]
+pub(crate) mod minting;
 #[path = "s3_own_bucket.rs"]
 mod own_bucket;
 pub(crate) use own_bucket::check_new_store;
