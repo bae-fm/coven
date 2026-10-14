@@ -1249,6 +1249,22 @@ the file's ranges under `F`.
     take the inline form at the RGW endpoint once a profile names that
     service. GCS, R2 and RustFS have their own minters; a custom profile uses
     guided console steps.
+  - On GCS each member key is the HMAC key of its own service account. The
+    minter reads the bucket's project through the JSON API and refuses a
+    bucket without uniform bucket-level access, which managed folders need.
+    It creates the service account `<name>@<project>.iam.gserviceaccount.com`,
+    whose description names the store and member, creates the store's managed
+    folder `<prefix>/<store>/` if absent, and binds the account to it as
+    `roles/storage.objectUser`, retrying once when the folder's policy changes
+    concurrently. HMAC keys an earlier attempt left are set inactive and
+    deleted; then `hmacKeys?serviceAccountEmail=` creates the key, whose
+    access id is the member key id. The admin access is an OAuth access token
+    with the `cloud-platform` scope. A new HMAC key can take up to 60 seconds
+    to work, so the member-side check retries for 60 seconds.
+  - Revoking a GCS key sets it inactive and deletes it, deletes the account's
+    other HMAC keys, removes its folder binding and deletes the service
+    account. The managed folder is the store's and stays. Absence is read
+    from the account's HMAC key list, which a deleted account leaves empty.
   - The member policy allows `s3:GetObject`, `s3:PutObject`,
     `s3:DeleteObject`, `s3:AbortMultipartUpload` and
     `s3:ListMultipartUploadParts` on `arn:aws:s3:::<bucket>/<prefix>/<store>/*`,

@@ -37,6 +37,8 @@ mod metadata;
 #[path = "s3_restart.rs"]
 mod restart;
 pub(crate) use detect::detect;
+#[path = "s3_gcs_keys.rs"]
+mod gcs_keys;
 #[path = "s3_iam.rs"]
 mod iam;
 #[path = "s3_member_probe.rs"]

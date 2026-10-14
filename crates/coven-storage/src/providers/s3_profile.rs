@@ -129,7 +129,7 @@ const GCS: CataloguedProfile = CataloguedProfile {
     // account `roles/storage.objectUser` on that folder alone.
     key_scope: S3KeyScope::Prefix,
     versioned_buckets: Certification::Uncertified,
-    minter: None,
+    minter: Some(&super::gcs_keys::GCS_KEYS),
     certification: Certification::Passed {
         date: "2026-10-13",
         suite: 1,

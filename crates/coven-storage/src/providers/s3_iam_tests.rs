@@ -378,6 +378,7 @@ impl Fake {
             },
             minting::AdminEndpoints {
                 aws_iam: url.join("/iam/").unwrap(),
+                ..minting::AdminEndpoints::production()
             },
             Arc::new(SystemClock),
             Arc::new(UuidIds),

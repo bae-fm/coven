@@ -41,11 +41,18 @@ impl Eq for KeyMinter {}
 #[derive(Clone, Debug)]
 pub(crate) struct AdminEndpoints {
     pub(crate) aws_iam: Url,
+    pub(crate) gcs_storage: Url,
+    pub(crate) gcs_iam: Url,
+    pub(crate) gcs_projects: Url,
 }
 impl AdminEndpoints {
     pub(crate) fn production() -> Self {
+        let url = |text| Url::parse(text).expect("static URL");
         Self {
-            aws_iam: Url::parse("https://iam.amazonaws.com/").expect("static URL"),
+            aws_iam: url("https://iam.amazonaws.com/"),
+            gcs_storage: url("https://storage.googleapis.com/storage/v1/"),
+            gcs_iam: url("https://iam.googleapis.com/v1/"),
+            gcs_projects: url("https://cloudresourcemanager.googleapis.com/v3/"),
         }
     }
 }
