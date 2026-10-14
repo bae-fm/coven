@@ -4404,6 +4404,10 @@ Carol's tablet:
     replacement; for each writer, the common target is the maximum of the
     frozen requirement and every selected snapshot's position
     ([`target_ready`](proofs/io/CovenIO/CommonReload.lean)).
+  - While such an audience lists a snapshot whose prefix is in a newer
+    format, that snapshot may be its newest: the reload and the
+    recent-return check wait for the update rather than choose without it
+    ([`reload_waits_for_newer`](proofs/storelog-data/CovenStorelogData/PendingScans.lean)).
   - Read each audience forward to that target, skipping parts already
     supplied by its selected snapshot and retaining actual checked write
     bytes for the rest; stop at the target, not a moving log tail
@@ -4512,6 +4516,19 @@ Carol's tablet:
     its current snapshot need not itself be a day old; replacing a snapshot
     does not restart the historical covering snapshot's age
     ([`maturity_survives_new_snapshots`, `eligible_after_day`](proofs/io/CovenIO/Retention.lean)).
+  - While an audience lists a snapshot whose prefix this device cannot read
+    yet, in a newer format or by an author whose device registration has
+    not applied, its current newest counting snapshot is unknown. Deleting
+    that audience's parts waits, as the reload waits for the update; that
+    snapshot's own record names the condition. A refused prefix establishes
+    nothing and does not hold deletion
+    ([`waiting_retention_safe`](proofs/storelog-data/CovenStorelogData/PendingScans.lean);
+    the registration wait is not modeled).
+  - E.g. Ana's snapshot covers her writes 1 to 4. Ben, on a newer version,
+    snapshots her writes 1 to 3 and more of his own, so his is the newest.
+    Ana cannot read its prefix, so she keeps all four: after her update the
+    reload selects Ben's snapshot and needs write 4
+    ([`newer_snapshot_retention_counterexample`](proofs/storelog-data/CovenStorelogData/PendingScans.lean)).
   - Retain the checked prefix and landing time that establish historical
     coverage while a retained write relies on them, even after the snapshot
     body is removed; without that evidence, wait for a known covering
@@ -5529,6 +5546,15 @@ holds failures and rejected entries, without making either wait look completed.
     device's own positions record clears only when its publication is
     confirmed
     ([`listing_decides`, `listing_safe`, `own_positions_kept`](proofs/storelog-data/CovenStorelogData/Pending.lean)).
+  - Each store-log scan decides this device's entry waits as a whole. An
+    entry it reads that has not applied records its first unmet condition:
+    a missing store key, a newer format, or the first entry of its recorded
+    past that has not applied, checking its own previous entry first and
+    then each entry it read. An entry behind a stopped entry of its own log
+    has no record of its own. A wait the scan no longer finds ends;
+    refusals and drops stay
+    ([`entry_scan_decides`, `entry_scan_safe`, `entry_scan_removes_only_ended`, `entry_scan_keeps_verdicts`](proofs/storelog-data/CovenStorelogData/Pending.lean),
+    [`first_missing_first_unmet`, `scan_names_only`, `behind_stop_never_named`](proofs/storelog-data/CovenStorelogData/PendingScans.lean)).
   - No wall-clock time or attempt counter controls these records. They
     describe current work, not a history of attempts.
 - Record every wait and failure, including:
@@ -5611,6 +5637,12 @@ holds failures and rejected entries, without making either wait look completed.
 - A damaged snapshot is recorded and passed over for the next latest, or
   the logs. Its verified prefix still establishes required history; it
   never authorizes applying a damaged body.
+  - Each listing keeps this device's refusal of a snapshot it still lists,
+    and loading never offers a refused snapshot again: it applies only a
+    snapshot whose complete body checked. Only a different installed
+    version permits one more check
+    ([`listing_keeps_refusal`](proofs/storelog-data/CovenStorelogData/Pending.lean),
+    [`never_loads_refused`, `refused_stays_unoffered`](proofs/storelog-data/CovenStorelogData/PendingScans.lean)).
   - Unverified prefixes establish no coverage.
   - Missing required logs block the reload without changing the database.
 - A damaged positions object has reason `InvalidPositions` and counts as
