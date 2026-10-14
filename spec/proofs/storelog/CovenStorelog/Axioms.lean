@@ -339,6 +339,17 @@ import CovenStorelog
 #print axioms CovenStorelog.EntryKeyExamples.later_disclosure
 #print axioms CovenStorelog.EntryKeyExamples.cutoff_does_not_erase_keys
 #print axioms CovenStorelog.EntryKeyExamples.custody_checks
+#print axioms CovenStorelog.PositionFingerprints.envelope_readable
+#print axioms CovenStorelog.PositionFingerprints.selected_bytes_unknown
+#print axioms CovenStorelog.PositionFingerprints.usable_fingerprint_untestable
+#print axioms CovenStorelog.PositionFingerprints.store_history_valid
+#print axioms CovenStorelog.PositionFingerprints.store_online
+#print axioms CovenStorelog.PositionFingerprints.store_keys
+#print axioms CovenStorelog.PositionFingerprints.readable_store_fingerprint_reveals_write
+#print axioms CovenStorelog.PositionFingerprints.circle_history_valid
+#print axioms CovenStorelog.PositionFingerprints.circle_online
+#print axioms CovenStorelog.PositionFingerprints.circle_keys
+#print axioms CovenStorelog.PositionFingerprints.readable_circle_fingerprint_reveals_write
 #print axioms CovenStorelog.CurrentKeyExamples.concurrent_removals_apply
 #print axioms CovenStorelog.CurrentKeyExamples.both_removals_mint_nothing
 #print axioms CovenStorelog.CurrentKeyExamples.excluded_dan_or_erin_retires_each_audience

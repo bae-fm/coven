@@ -33,6 +33,7 @@ import CovenStorelog.CurrentKeys
 import CovenStorelog.CurrentKeyExamples
 import CovenStorelog.EntryKeys
 import CovenStorelog.EntryKeyExamples
+import CovenStorelog.PositionFingerprints
 import CovenStorelog.ReplayMachine
 import CovenStorelog.ReplayMachineTermination
 import CovenStorelog.MemberKeys

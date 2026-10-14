@@ -3449,14 +3449,22 @@ Carol's tablet:
   - If no usable key exists, rotate or wait for its sealed copy, recording
     the first unmet condition. Never use a known exposed key as a fallback.
   - This selection governs app data: writes and snapshots. Store-log entries,
-    positions and clock objects carry membership and sync metadata, not app
-    data; they are sealed with the newest store key this device holds and
-    accepts. With an accepted store key in custody, exposure cannot block
-    sealing a removal or rotation entry. Until storage revocation is confirmed
+    positions and clock objects carry membership and sync metadata; entries
+    name keys only by id and hash. They are sealed with the newest store key
+    this device holds and accepts. With an accepted store key in custody,
+    exposure cannot block sealing a removal or rotation entry
+    ([`EntryKeys.metadata_sealing_available`](proofs/storelog/CovenStorelog/EntryKeys.lean)).
+    Until storage revocation is confirmed
     (§13), a removed member can still obtain and open metadata sealed with a
     key they retain or later acquire. Cutoff prevents new downloads, not opening
     ciphertext already obtained
     ([sealing and read conditions](proofs/storelog.md#store-log-entries-positions-and-clock-objects)).
+  - Positions' fingerprints are keyed digests of app data, so each uses its
+    audience's usable key from this selection, not the newest held one
+    (§19.1). Anyone holding a fingerprint's key can test guesses of that
+    audience's data, and an exposed key may be held by someone excluded
+    ([`PositionFingerprints.usable_fingerprint_untestable`,
+    `readable_store_fingerprint_reveals_write`, `readable_circle_fingerprint_reveals_write`](proofs/storelog/CovenStorelog/PositionFingerprints.lean)).
 - Every kept Replace member keys entry exposes the preceding sealing
   credential from its recorded view, regardless of why keys changed. Copies
   to that credential retire their audience keys even though the member stays
@@ -5723,8 +5731,9 @@ holds failures and rejected entries, without making either wait look completed.
     reads ([§14.2](#142-moving-rows));
   - and nothing else that differs between devices by design, such as
     `_coven_uploads`, `_coven_operations`, or local row ids;
-  - it is keyed with a key derived from the store's or circle's key, so the
-    provider learns nothing from it;
+  - it is keyed with a key derived from the store's or circle's usable key
+    (§11), so neither the provider nor a member excluded from that audience
+    learns anything from it;
   - each device posts its fingerprints with its positions ([§6](#6-syncing-writes));
   - two devices that have applied exactly the same writes must have the
     same fingerprints;

@@ -808,23 +808,70 @@ is unavailable; `cutoff_does_not_erase_keys` checks that an already obtained
 object remains openable. The spec citation makes this condition explicit;
 these examples do not require changing the key-selection policy.
 
-Positions also carry content fingerprints, each naming its own audience key
-([D8](../format.md#d8-small-frames), [D11](../format.md#d11-keys-contexts-and-fingerprints)).
-The [sync pass](../sync-pass.md#4-observe-keys-and-peers) calls that key usable;
-the conservative reading is C12's exposure-checked audience key, independently
-of the positions envelope's store key. The relaxed envelope rule does not
-authorize content fingerprints under exposed keys. Fingerprint construction
-and selection are outside this sealing model.
+**What the sealing key reveals.** Opening a metadata object gives its
+contents and nothing more. Entries name keys only by id and hash
+(`KeyCommitment`), never by their bytes, so a rotation sealed with a key Ben
+knows tells him the new key's id and hash but not the key. Clock objects carry a
+device id and store-log positions. Positions also carry fingerprints, each naming its own
+audience key ([D8](../format.md#d8-small-frames),
+[D11](../format.md#d11-keys-contexts-and-fingerprints)). A fingerprint is a
+keyed digest of that audience's app data, so anyone holding its key can test
+a guess about the data. Which key it uses therefore decides what the
+positions envelope reveals.
+
+[`PositionFingerprints`](storelog/CovenStorelog/PositionFingerprints.lean)
+models both readings. The [sync pass](../sync-pass.md#4-observe-keys-and-peers)
+says the fingerprint key is usable, which is C12's exposure-checked selection
+(`usableFingerprint`); the other reading is the newest key the device reads the
+audience with (`readableFingerprint`), the same rule as the envelope's store
+key (`envelope_readable`).
+
+**The usable key keeps fingerprints from excluded members.**
+`selected_bytes_unknown` proves that no group of members excluded from an
+audience obtains, from this pass's listed copies, the bytes of the key C12
+selects for it. A copy to them under the selected id is ruled out by
+`selected_no_excluded_copy`; a copy under another id would need equal bytes,
+which the `Fresh` hypothesis rules out (different key ids commit to different
+hashes; the hash need not be injective). `usable_fingerprint_untestable`
+concludes that such a group can test no guess against a fingerprint under the
+usable key, whatever key seals the positions object carrying it. When no
+usable key exists the fingerprint is omitted.
+
+**The newest readable key leaks app data: checked counterexamples.** In
+`storeLog` Ana removes Ben from the store and rotates to K1. Carol, not having
+read the removal, concurrently rotates to K2 and seals it to Ben too, as §11's
+lagging-device example permits. Both rotations are kept; K2 is newer and
+exposed, so Ana's writes use K1 and her newest readable store key is K2
+(`store_keys`, with `store_history_valid` and `store_online`). Ana's positions
+are sealed with K2, which Ben opens while revocation is pending. Her store
+fingerprint covers a write sealed with K1, which Ben cannot open. Under K2 the
+fingerprint tells Ben whether that write's flag is 1 or 0; under K1 it tells him
+nothing (`readable_store_fingerprint_reveals_write`).
+
+`circleLog` shows the same for a circle, where storage revocation never
+applies: Ben leaves Gifts but stays in the store, Ana rotates Gifts to G2 and
+Carol concurrently to G3, sealed to Ben. Ben opens Ana's positions with the
+store key he holds as a member and tests a Gifts write sealed with G2 against
+the G3 fingerprint (`circle_keys`, `readable_circle_fingerprint_reveals_write`,
+with `circle_history_valid` and `circle_online`). Both have literal Lean
+`example`s. So §11's relaxed envelope rule is safe only with fingerprints under
+usable keys, and §19.1 cites that reading.
 
 The model assumes correct encryption and supplies ciphertext availability and
-the reader's key knowledge as inputs. It does not prove provider cutoff,
-cryptographic secrecy, eventual key delivery, custody persistence, or the
-absence of app data in metadata bodies. Locally validated fresh introductions
-that seal themselves remain outside this received-key path; the availability
-proof needs only the existing accepted store key. Credential replacement,
-entry signatures and publication gates retain their separate models and
-assumptions. No Rust comparison is added for metadata sealing. All named
-results are included in the package's axiom audit.
+the reader's key knowledge as inputs. A fingerprint is abstracted to its key
+and the state it digests: holding the key lets a reader test a candidate
+state, and lacking it reveals nothing. It does not prove provider cutoff,
+cryptographic secrecy of HMAC or SHA-256, eventual key delivery or custody
+persistence. Excluded members' knowledge is what this pass's listing gives
+them; copies published after the listing are §11's residual window, and
+collusion with current members is outside the model. Names, public keys and
+the non-secret access handles in D6 entries are membership metadata the
+envelope reveals to whoever holds its key. Locally validated fresh
+introductions that seal themselves remain outside this received-key path; the
+availability proof needs only the existing accepted store key. Credential
+replacement, entry signatures and publication gates retain their separate
+models and assumptions. No Rust comparison is added for metadata sealing or
+fingerprint keys. All named results are included in the package's axiom audit.
 
 ### C13 Stable members and replaceable keys — checked proposal
 
