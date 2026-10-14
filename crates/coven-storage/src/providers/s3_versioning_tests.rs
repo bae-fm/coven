@@ -129,6 +129,7 @@ fn uncertified_profiles_refuse_enabled_suspended_and_unknown_buckets() {
     let endpoint = "http://localhost:9000".parse().unwrap();
     let profiles = profile::PROFILES
         .iter()
+        .filter(|entry| entry.versioned_buckets == profile::Certification::Uncertified)
         .map(|entry| Some(S3Profile::Named(entry.name)))
         .chain([None, Some(S3Profile::Custom(profile::PLAIN))]);
     for selected in profiles {
@@ -152,5 +153,41 @@ fn uncertified_profiles_refuse_enabled_suspended_and_unknown_buckets() {
             &Ok(S3BucketVersioning::Disabled),
         )
         .unwrap();
+    }
+}
+
+#[test]
+fn versioned_certification_admits_enabled_suspended_and_unknown_buckets() {
+    let endpoint = "http://localhost:9000".parse().unwrap();
+    let certified: Vec<_> = profile::PROFILES
+        .iter()
+        .filter(|entry| {
+            matches!(
+                entry.versioned_buckets,
+                profile::Certification::Passed { .. }
+            )
+        })
+        .collect();
+    assert!(!certified.is_empty());
+    for entry in certified {
+        let selected = Some(S3Profile::Named(entry.name));
+        for state in [
+            S3BucketVersioning::Disabled,
+            S3BucketVersioning::Enabled,
+            S3BucketVersioning::Suspended,
+        ] {
+            check(Some(&endpoint), selected.as_ref(), &Ok(state)).unwrap();
+        }
+        let cause = Arc::new(StorageFailure::PermissionDenied.with_source("no bucket metadata"));
+        check(Some(&endpoint), selected.as_ref(), &Err(cause)).unwrap();
+        // Settings equal to the certified entry's never inherit its certificate.
+        assert!(matches!(
+            check(
+                Some(&endpoint),
+                Some(&S3Profile::Custom(entry.settings)),
+                &Ok(S3BucketVersioning::Enabled)
+            ),
+            Err(StorageSetupError::S3VersioningUnsupported { .. })
+        ));
     }
 }

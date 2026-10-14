@@ -161,7 +161,9 @@ const R2: CataloguedProfile = CataloguedProfile {
 // Detected by certification suite 2. RustFS and SeaweedFS refused occupied
 // names on PUT and multipart completion with HTTP 412 and timestamp multipart
 // completion, so no copy is needed. Neither returned a checksum, even when
-// asked; §4's complete-byte comparison applies instead.
+// asked; §4's complete-byte comparison applies instead. RustFS 1.0.1 passed
+// suite 4 with versioning disabled and enabled: one conditional writer won
+// every race in both buckets.
 const RUSTFS: CataloguedProfile = CataloguedProfile {
     name: S3ProfileName::RustFs,
     endpoint: None,
@@ -173,11 +175,14 @@ const RUSTFS: CataloguedProfile = CataloguedProfile {
     // An access key's IAM policy takes `s3:prefix` conditions and object
     // resources under the store's prefix.
     key_scope: S3KeyScope::Prefix,
-    versioned_buckets: Certification::Uncertified,
+    versioned_buckets: Certification::Passed {
+        date: "2026-10-14",
+        suite: 4,
+    },
     minter: Some(&super::rustfs_keys::RUSTFS_ACCOUNTS),
     certification: Certification::Passed {
-        date: "2026-10-13",
-        suite: 2,
+        date: "2026-10-14",
+        suite: 4,
     },
 };
 const SEAWEEDFS: CataloguedProfile = CataloguedProfile {

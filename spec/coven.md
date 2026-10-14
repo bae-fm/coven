@@ -829,24 +829,25 @@ the file's ranges under `F`.
     suite version 2 passed RustFS and SeaweedFS the same day. Suite version 3
     detects with the production probes; the same day it reproduced each of
     those four entries and passed their setup safety check. Suite version 4
-    passed Ceph RGW 20.2.4 with versioning disabled on **2026-10-14**. AWS is
-    **uncertified**: there is no live account. The table's selected behaviors
-    are:
+    passed Ceph RGW 20.2.4 with versioning disabled on **2026-10-14**, and
+    RustFS 1.0.1 the same day with versioning both disabled and enabled. AWS
+    is **uncertified**: there is no live account. The table's selected
+    behaviors are:
 
     | Profile | Signing | Single PUT | Multipart publication | Native multipart time | Checksums | Listing | Revision |
     | --- | --- | --- | --- | --- | --- | --- | --- |
     | AWS (uncertified) | AWS SigV4 | `If-None-Match: *` | Copy with `If-None-Match: *` | Start | Scope stated | V2 | ETag |
     | GCS (certified) | Google HMAC | `x-goog-if-generation-match: 0` | Copy with the same generation condition | Completion | Scope stated | V2 | Generation |
     | R2 (certified) | AWS SigV4 | `If-None-Match: *` | Conditional completion | Completion | Unstated scope ignored | V2 | ETag |
-    | RustFS (certified) | AWS SigV4 | `If-None-Match: *` | Conditional completion | Completion | None returned | V2 | ETag |
+    | RustFS (certified, versioned too) | AWS SigV4 | `If-None-Match: *` | Conditional completion | Completion | None returned | V2 | ETag |
     | SeaweedFS (certified) | AWS SigV4 | `If-None-Match: *` | Conditional completion | Completion | None returned | V2 | ETag |
     | Ceph RGW (certified, unversioned) | AWS SigV4 | `If-None-Match: *` | Conditional completion | Completion | None returned | V2 | ETag |
 
-    No profile currently supports versioned buckets. GCS's supplied live key
-    could neither read bucket versioning nor create a second bucket for
-    certification. RustFS and SeaweedFS have no versioned certification; their
-    test containers were unavailable. AWS remains uncertified. R2 has no
-    versioning feature. Ceph RGW 20.2.4 fails the versioned races. See
+    RustFS alone supports versioned buckets: RustFS 1.0.1 passed every suite 4
+    race with versioning enabled. GCS's supplied live key could neither read
+    bucket versioning nor create a second bucket for certification.
+    SeaweedFS has no versioned certification. AWS remains uncertified. R2 has no versioning feature. Ceph
+    RGW 20.2.4 fails the versioned races. See
     [suite 4 evidence](s3-certification.md#concurrent-certification-suite-4)
     for the live runs and their bucket states.
 

@@ -10,7 +10,8 @@ the setup safety check at each, and the full suite 3 passed RustFS. Its output
 is in [Detection](#detection-suite-3).
 Suite version 4 records bucket versioning and adds the concurrent conditional
 publication checks described in [Concurrent certification](#concurrent-certification-suite-4).
-Earlier certificates do not establish versioned-bucket support.
+Earlier certificates do not establish versioned-bucket support. On
+2026-10-14 suite 4 passed RustFS with versioning disabled and enabled.
 The selected entries are in
 [`s3_profile.rs`](../crates/coven-storage/src/providers/s3_profile.rs); the
 contract and certification procedure are in [§4](coven.md#4-storage-providers-and-access).
@@ -797,6 +798,146 @@ bucket versioning_after=Enabled stable=true
 certification suite=4 FAIL
 ```
 
+### RustFS 1.0.1
+
+Run on 2026-10-14 against a local podman container of `rustfs/rustfs:latest`
+(RustFS 1.0.1, built 2026-10-03, `sha256:3bc0a69f7636`), selecting
+`COVEN_LIVE_S3_PROFILE=RustFs`, with one bucket left unversioned and a second
+with versioning `Enabled` before the run. Detection in both buckets
+reproduced the RustFS entry. Both runs passed every check, and versioning
+held its state through each. Conditional replacement losers received HTTP
+412 `PreconditionFailed`, classified as `AlreadyExists`. The profile is
+certified by suite 4 on 2026-10-14, and so is its `versioned_buckets`
+property: unlike Ceph RGW 20.2.4, a versioned RustFS bucket let exactly one
+conditional writer win every race.
+
+#### RustFS versioning disabled
+
+Each race's first trial and all aggregates and check verdicts follow:
+
+```text
+bucket versioning=Disabled
+setup_safety_check PASS
+§4 native_behavior_detection PASS
+race Put writers=2 trial=1 writer=0 start_us=508 end_us=34858 outcome=AlreadyExists HTTP 412
+race Put writers=2 trial=1 writer=1 start_us=81 end_us=34631 outcome=accepted
+race SUMMARY Put writers=2 trials=200 overlapping=200 successes=200 violations=0
+§4 concurrent_put_2 PASS cleanup=PASS
+race Put writers=8 trial=1 writer=0 start_us=470 end_us=31469 outcome=AlreadyExists HTTP 412
+race Put writers=8 trial=1 writer=1 start_us=233 end_us=30705 outcome=AlreadyExists HTTP 412
+race Put writers=8 trial=1 writer=2 start_us=308 end_us=31736 outcome=AlreadyExists HTTP 412
+race Put writers=8 trial=1 writer=3 start_us=551 end_us=29997 outcome=accepted
+race Put writers=8 trial=1 writer=4 start_us=396 end_us=30926 outcome=AlreadyExists HTTP 412
+race Put writers=8 trial=1 writer=5 start_us=618 end_us=31193 outcome=AlreadyExists HTTP 412
+race Put writers=8 trial=1 writer=6 start_us=685 end_us=30039 outcome=AlreadyExists HTTP 412
+race Put writers=8 trial=1 writer=7 start_us=59 end_us=30440 outcome=AlreadyExists HTTP 412
+race SUMMARY Put writers=8 trials=50 overlapping=50 successes=50 violations=0
+§4 concurrent_put_8 PASS cleanup=PASS
+race Multipart writers=2 trial=1 writer=0 start_us=277 end_us=23107 outcome=AlreadyExists HTTP 412
+race Multipart writers=2 trial=1 writer=1 start_us=20 end_us=23459 outcome=accepted
+race SUMMARY Multipart writers=2 trials=200 overlapping=200 successes=200 violations=0
+§4 concurrent_multipart_publication_2 PASS cleanup=PASS
+race Multipart writers=8 trial=1 writer=0 start_us=188 end_us=21351 outcome=AlreadyExists HTTP 412
+race Multipart writers=8 trial=1 writer=1 start_us=247 end_us=20169 outcome=AlreadyExists HTTP 412
+race Multipart writers=8 trial=1 writer=2 start_us=135 end_us=21143 outcome=AlreadyExists HTTP 412
+race Multipart writers=8 trial=1 writer=3 start_us=340 end_us=19985 outcome=AlreadyExists HTTP 412
+race Multipart writers=8 trial=1 writer=4 start_us=296 end_us=20505 outcome=AlreadyExists HTTP 412
+race Multipart writers=8 trial=1 writer=5 start_us=381 end_us=21667 outcome=AlreadyExists HTTP 412
+race Multipart writers=8 trial=1 writer=6 start_us=414 end_us=20857 outcome=AlreadyExists HTTP 412
+race Multipart writers=8 trial=1 writer=7 start_us=31 end_us=19704 outcome=accepted
+race SUMMARY Multipart writers=8 trials=50 overlapping=50 successes=50 violations=0
+§4 concurrent_multipart_publication_8 PASS cleanup=PASS
+race Mixed writers=2 trial=1 writer=0 start_us=123 end_us=16949 outcome=AlreadyExists HTTP 412
+race Mixed writers=2 trial=1 writer=1 start_us=11 end_us=17012 outcome=accepted
+race SUMMARY Mixed writers=2 trials=200 overlapping=200 successes=200 violations=0
+§4 concurrent_put_and_multipart_publication PASS cleanup=PASS
+race Replace writers=2 trial=1 writer=0 start_us=104 end_us=39600 outcome=AlreadyExists HTTP 412
+race Replace writers=2 trial=1 writer=1 start_us=8 end_us=39086 outcome=accepted
+race SUMMARY Replace writers=2 trials=200 overlapping=200 successes=200 violations=0
+§4 concurrent_replace_current_revision PASS cleanup=PASS
+§4 create_once_single_put PASS cleanup=PASS
+§4 whole_object_reads PASS cleanup=PASS
+§4 ranged_reads PASS cleanup=PASS
+§4 prefix_listing PASS cleanup=PASS
+§4 exact_status PASS cleanup=PASS
+§4 deletion PASS cleanup=PASS
+§4 setup_provider_check PASS cleanup=PASS
+§4 create_once_multipart PASS cleanup=PASS
+§4 partial_uploads_hidden PASS cleanup=PASS
+§4 multipart_resume PASS cleanup=PASS
+§4 single_put_timestamp_equals_completion PASS cleanup=PASS
+§4 multipart_timestamp_equals_completion PASS cleanup=PASS
+§4 revision_changes_on_replace PASS cleanup=PASS
+§4 listing_lag PASS cleanup=PASS
+§4 immediate_device_folders PASS cleanup=PASS
+bucket versioning_after=Disabled stable=true
+certification suite=4 PASS
+```
+
+#### RustFS versioning enabled
+
+The setup verdict printed at the start is the profile's state before this
+run certified it.
+
+```text
+bucket versioning=Enabled
+setup_safety_check refused: S3 bucket versioning Enabled is not certified for this profile
+§4 native_behavior_detection PASS
+race Put writers=2 trial=1 writer=0 start_us=339 end_us=89303 outcome=accepted
+race Put writers=2 trial=1 writer=1 start_us=58 end_us=89242 outcome=AlreadyExists HTTP 412
+race SUMMARY Put writers=2 trials=200 overlapping=200 successes=200 violations=0
+§4 concurrent_put_2 PASS cleanup=PASS
+race Put writers=8 trial=1 writer=0 start_us=524 end_us=78526 outcome=AlreadyExists HTTP 412
+race Put writers=8 trial=1 writer=1 start_us=979 end_us=81968 outcome=AlreadyExists HTTP 412
+race Put writers=8 trial=1 writer=2 start_us=806 end_us=77984 outcome=AlreadyExists HTTP 412
+race Put writers=8 trial=1 writer=3 start_us=1426 end_us=75656 outcome=accepted
+race Put writers=8 trial=1 writer=4 start_us=1125 end_us=79632 outcome=AlreadyExists HTTP 412
+race Put writers=8 trial=1 writer=5 start_us=1584 end_us=82637 outcome=AlreadyExists HTTP 412
+race Put writers=8 trial=1 writer=6 start_us=1263 end_us=76170 outcome=AlreadyExists HTTP 412
+race Put writers=8 trial=1 writer=7 start_us=92 end_us=80889 outcome=AlreadyExists HTTP 412
+race SUMMARY Put writers=8 trials=50 overlapping=50 successes=50 violations=0
+§4 concurrent_put_8 PASS cleanup=PASS
+race Multipart writers=2 trial=1 writer=0 start_us=244 end_us=31413 outcome=AlreadyExists HTTP 412
+race Multipart writers=2 trial=1 writer=1 start_us=21 end_us=32628 outcome=accepted
+race SUMMARY Multipart writers=2 trials=200 overlapping=200 successes=200 violations=0
+§4 concurrent_multipart_publication_2 PASS cleanup=PASS
+race Multipart writers=8 trial=1 writer=0 start_us=334 end_us=20566 outcome=AlreadyExists HTTP 412
+race Multipart writers=8 trial=1 writer=1 start_us=160 end_us=21116 outcome=AlreadyExists HTTP 412
+race Multipart writers=8 trial=1 writer=2 start_us=204 end_us=21294 outcome=AlreadyExists HTTP 412
+race Multipart writers=8 trial=1 writer=3 start_us=296 end_us=20048 outcome=AlreadyExists HTTP 412
+race Multipart writers=8 trial=1 writer=4 start_us=259 end_us=20299 outcome=AlreadyExists HTTP 412
+race Multipart writers=8 trial=1 writer=5 start_us=371 end_us=20732 outcome=AlreadyExists HTTP 412
+race Multipart writers=8 trial=1 writer=6 start_us=405 end_us=20893 outcome=AlreadyExists HTTP 412
+race Multipart writers=8 trial=1 writer=7 start_us=53 end_us=19344 outcome=accepted
+race SUMMARY Multipart writers=8 trials=50 overlapping=50 successes=50 violations=0
+§4 concurrent_multipart_publication_8 PASS cleanup=PASS
+race Mixed writers=2 trial=1 writer=0 start_us=112 end_us=28889 outcome=AlreadyExists HTTP 412
+race Mixed writers=2 trial=1 writer=1 start_us=11 end_us=29095 outcome=accepted
+race SUMMARY Mixed writers=2 trials=200 overlapping=200 successes=200 violations=0
+§4 concurrent_put_and_multipart_publication PASS cleanup=PASS
+race Replace writers=2 trial=1 writer=0 start_us=112 end_us=27073 outcome=AlreadyExists HTTP 412
+race Replace writers=2 trial=1 writer=1 start_us=9 end_us=26821 outcome=accepted
+race SUMMARY Replace writers=2 trials=200 overlapping=200 successes=200 violations=0
+§4 concurrent_replace_current_revision PASS cleanup=PASS
+§4 create_once_single_put PASS cleanup=PASS
+§4 whole_object_reads PASS cleanup=PASS
+§4 ranged_reads PASS cleanup=PASS
+§4 prefix_listing PASS cleanup=PASS
+§4 exact_status PASS cleanup=PASS
+§4 deletion PASS cleanup=PASS
+§4 setup_provider_check PASS cleanup=PASS
+§4 create_once_multipart PASS cleanup=PASS
+§4 partial_uploads_hidden PASS cleanup=PASS
+§4 multipart_resume PASS cleanup=PASS
+§4 single_put_timestamp_equals_completion PASS cleanup=PASS
+§4 multipart_timestamp_equals_completion PASS cleanup=PASS
+§4 revision_changes_on_replace PASS cleanup=PASS
+§4 listing_lag PASS cleanup=PASS
+§4 immediate_device_folders PASS cleanup=PASS
+bucket versioning_after=Enabled stable=true
+certification suite=4 PASS
+```
+
 ### Services without a versioned certificate
 
 On 2026-10-14 the supplied GCS HMAC key (`gcs-s3.env`) returned HTTP 403
@@ -827,9 +968,8 @@ bucket versioning=Unavailable
 setup_versioning_check PASS
 ```
 
-RustFS and SeaweedFS's test containers were unavailable, so neither was run
-with versioning enabled. Both profiles refuse enabled, suspended and unknown
-versioning until a versioned certification is recorded. AWS has no reachable
+SeaweedFS's profile refuses enabled, suspended and unknown versioning until a
+versioned certification is recorded. AWS has no reachable
 live account and likewise has no versioned certificate.
 
 ## Member keys
