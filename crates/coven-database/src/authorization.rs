@@ -25,6 +25,7 @@ impl ReadCapture {
                 table,
                 columns,
                 keys: keys.clone(),
+                inserted_only: false,
             }));
     }
 }

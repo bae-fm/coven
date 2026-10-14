@@ -17,6 +17,8 @@ pub(crate) struct TableRead {
     pub(crate) table: String,
     pub(crate) columns: BTreeSet<String>,
     pub(crate) keys: KeyScope,
+    /// Only inserted rows affect this read, not updates or deletions.
+    pub(crate) inserted_only: bool,
 }
 
 pub(crate) struct RowChange {
@@ -34,7 +36,17 @@ impl TableRead {
                 Some((old, new)) => self.keys.matches(old) || self.keys.matches(new),
                 None => true,
             }
+            && (!self.inserted_only || inserted(change))
     }
+}
+
+/// An insertion: a whole-row change whose old key is absent.
+fn inserted(change: &RowChange) -> bool {
+    change.column.is_empty()
+        && change
+            .keys
+            .as_ref()
+            .is_some_and(|(old, _)| old.values().all(|value| matches!(value, Value::Null)))
 }
 
 /// Why this handle refuses every call until the store is reopened.

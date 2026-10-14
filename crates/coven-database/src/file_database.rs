@@ -358,12 +358,14 @@ impl FileDatabase {
                                 .map(str::to_ascii_lowercase)
                                 .collect(),
                             keys: crate::key_scope::KeyScope::All,
+                            inserted_only: false,
                         })
                     })
                     .chain(std::iter::once(crate::observation::TableRead {
                         table: "_coven_file_uploads".into(),
                         columns: ["reference".into()].into(),
                         keys: crate::key_scope::KeyScope::All,
+                        inserted_only: false,
                     }))
                     .collect::<Vec<_>>();
                 let commits = inner.access.observer.subscribe();

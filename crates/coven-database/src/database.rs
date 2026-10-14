@@ -270,10 +270,12 @@ impl Database {
             .await,
         )
     }
-    /// Observe committed changes to the outgoing write queue. Register before
-    /// the first sync to include writes committed while a pass is running.
+    /// Observe new local writes: rows inserted into the outgoing write queue.
+    /// Upload confirmation removing a row is this device's own bookkeeping
+    /// and wakes nothing (SP step 9). Register before the first sync to
+    /// include writes committed while a pass is running.
     pub fn sync_changes(&self) -> crate::DatabaseChanges {
-        self.table_changes(&["_coven_uploads"], true)
+        self.table_changes(&["_coven_uploads"], true, true)
     }
 
     /// Observe commits that can satisfy a waiting operation's prerequisites:
@@ -295,11 +297,18 @@ impl Database {
                 "_coven_positions",
             ],
             false,
+            false,
         )
     }
 
-    /// `first` reports the initial state as a change.
-    fn table_changes(&self, tables: &[&str], first: bool) -> crate::DatabaseChanges {
+    /// `first` reports the initial state as a change; `inserted_only`
+    /// ignores updates and deletions.
+    fn table_changes(
+        &self,
+        tables: &[&str],
+        first: bool,
+        inserted_only: bool,
+    ) -> crate::DatabaseChanges {
         let slot = self.inner.read().expect("database lock poisoned");
         let reads: Vec<_> = tables
             .iter()
@@ -307,6 +316,7 @@ impl Database {
                 table: (*table).into(),
                 columns: BTreeSet::new(),
                 keys: crate::key_scope::KeyScope::All,
+                inserted_only,
             })
             .collect();
         let commits = match slot.as_ref() {

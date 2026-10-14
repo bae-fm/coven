@@ -12,7 +12,8 @@ impl CovenHandle {
     pub fn subscribe_uploads(&self) -> UploadsLiveQuery {
         self.files.subscribe_uploads()
     }
-    /// Attempt waiting uploads without waiting for their backoff.
+    /// Attempt waiting uploads now, overriding their ordinary backoff and
+    /// app-action waits; a provider cooldown still holds them (§16.5).
     pub async fn retry_uploads_now(&self) -> Result<DrainOutcome, SyncError> {
         self.files.retry_uploads_now().await
     }

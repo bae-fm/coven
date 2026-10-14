@@ -456,6 +456,18 @@ impl SyncRun {
                 _ = async { if let Some(held) = held.as_mut() { held.await } }, if holding => {}
                 _ = std::future::ready(()), if self.started && pending && !holding => {
                     pending = false;
+                    // This pass serves every local write committed so far; one
+                    // committed after this point retains one more pass. Its own
+                    // upload confirmations and other bookkeeping wake nothing.
+                    match self.changes.take_changed() {
+                        Ok(_) => {}
+                        Err(DbError::StoreClosed) => break,
+                        Err(error) => {
+                            self.started = false;
+                            self.status.send_replace(SyncStatus::Failed { error: SyncError::from(error).into() });
+                            continue;
+                        }
+                    }
                     self.status.send_replace(SyncStatus::Syncing);
                     let result = async {
                         self.codes.refresh_if_expired(self.clock.now()).await?;

@@ -290,3 +290,41 @@ async fn io_differential_waiting() {
     }
     assert_eq!(actual, crate::discovery::tests::io_runner(&cases));
 }
+
+#[tokio::test]
+async fn the_worker_wakes_for_the_earliest_due_retry() {
+    use futures_util::FutureExt;
+    let fixture = Fixture::new();
+    let (database, waits) = fixture.open().await;
+    let operation = |id| RetrySubject::Operation(coven_database::OperationId(id));
+    let later = RetryWait {
+        failures: 3,
+        not_before: fixture.clock.now() + Duration::from_secs(4),
+        wait: Duration::from_secs(4),
+    };
+    let sooner = RetryWait {
+        failures: 1,
+        not_before: fixture.clock.now() + Duration::from_secs(1),
+        wait: Duration::from_secs(1),
+    };
+    waits.arm(operation(1), &later);
+    waits.arm(operation(2), &sooner);
+    let operations = |subject: &RetrySubject| matches!(subject, RetrySubject::Operation(_));
+    let mut wake = waits.next_wake(operations).unwrap();
+    assert!((&mut wake).now_or_never().is_none());
+    fixture.advance(1);
+    tokio::time::timeout(Duration::from_secs(5), wake)
+        .await
+        .unwrap();
+    // Once the sooner wait is evaluated, the next wake is the later one.
+    assert!(waits.due(operation(2), Some(&sooner)));
+    waits.forget(operation(2));
+    let mut wake = waits.next_wake(operations).unwrap();
+    fixture.advance(2);
+    assert!((&mut wake).now_or_never().is_none());
+    fixture.advance(1);
+    tokio::time::timeout(Duration::from_secs(5), wake)
+        .await
+        .unwrap();
+    database.close().await.unwrap();
+}

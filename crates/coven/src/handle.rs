@@ -6,6 +6,9 @@ mod file;
 #[path = "storage_credentials.rs"]
 mod credentials;
 
+#[path = "handle_sync.rs"]
+mod sync_control;
+
 use crate::*;
 use coven_crypto::custody::StoreCustody;
 use coven_database::Database;
@@ -129,25 +132,6 @@ impl CovenHandle {
     /// A custody failure preserves the current connection and loop state.
     pub async fn disconnect_storage(&self) -> Result<(), SyncError> {
         self.storage.disconnect().await
-    }
-    /// Start syncing, building an absent client from custody credentials and
-    /// refreshing expired tokens. Already running or unconfigured stores do nothing.
-    pub async fn start_sync(&self) -> Result<(), SyncError> {
-        self.sync.start().await
-    }
-    /// Finish the active pass and transfers, then release the provider client.
-    /// Keys remain unlocked for the handle session. Completion publishes Stopped,
-    /// or Disconnected without configured storage; release failures publish Failed.
-    pub fn stop_sync(&self) {
-        self.sync.stop();
-    }
-    /// Request a pass immediately while started.
-    pub fn sync_now(&self) {
-        self.sync.sync_now();
-    }
-    /// Observe the current status and every subsequent status change.
-    pub fn subscribe_sync_status(&self) -> tokio::sync::watch::Receiver<SyncStatus> {
-        self.sync.subscribe()
     }
 
     /// The latest completed replacement stored in this installation, or None.
