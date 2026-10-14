@@ -3003,6 +3003,24 @@ impl CovenHandle {
     /// confirming this exact id absent; it never infers this confirmation.
     pub async fn confirm_access_key_deleted(&self, access_key_id: &str) -> Result<(), SyncError>;
 
+    /// Obtains the storage account's admin access from the source the person
+    /// chose, held in memory by the operations it is passed to and never
+    /// stored, logged or put in the store log or invites (§4). S3 only.
+    pub async fn admin_access(&self, source: AdminAccessSource) -> Result<Arc<dyn AccessKeyAdmin>, SyncError>;
+
+    /// The bucket, the store's prefix and the filled member policy for making
+    /// a key in the provider's console (§4).
+    pub async fn guided_access_key(&self) -> Result<GuidedAccessKey, SyncError>;
+
+    /// Deletes the key a DeleteAccessKey record names with admin access, then
+    /// reads the provider for that exact key. Only its absence clears the
+    /// record; failures return AccessKeyNotDeleted and the record stays (§13).
+    pub async fn delete_access_key(&self, operation: OperationId, admin: Arc<dyn AccessKeyAdmin>) -> Result<(), SyncError>;
+
+    /// Resumes work pending with AdminAccessRequired, holding this admin access
+    /// for that operation only (§4).
+    pub async fn retry_with_admin_access(&self, operation: OperationId, admin: Arc<dyn AccessKeyAdmin>) -> Result<(), OperationError>;
+
     /// Publishes the removal of this member and all their devices (§13).
     /// Returns once the entry is kept. Provider work appears only in pending(),
     /// including owner waits, retained grants and S3 keys until confirmed deleted.
@@ -3057,6 +3075,41 @@ pub trait AccessKeyAdmin: Send + Sync {
     async fn revoke(&self, access_key_id: &str, principal: &S3Principal) -> Result<(), StorageError>;
     /// Read whether this exact key remains; a failed read is never absence.
     async fn key_exists(&self, access_key_id: &str, principal: &S3Principal) -> Result<bool, StorageError>;
+}
+
+/// Where admin access comes from (§4). The CLI and browser sources exist on
+/// desktops only; coven runs or reads nothing before the person chooses one.
+pub enum AdminAccessSource {
+    AwsCli { profile: Option<String> },
+    GcloudCli { account: Option<String> },
+    GoogleSignIn,
+    AwsIdentityCenter {
+        start_url: String,
+        region: String,
+        account_id: String,
+        role_name: String,
+        presenter: Arc<dyn DeviceSignInPresenter>,
+    },
+    Pasted(AdminCredential),
+}
+
+/// Admin access for one operation; formatting never shows a secret.
+pub enum AdminCredential {
+    AccessKey { access_key_id: String, secret_access_key: SecretText, session_token: Option<SecretText> },
+    BearerToken(SecretText),
+}
+
+/// Shows a device sign-in page and code. `DesktopDeviceSignIn` opens the browser.
+#[async_trait]
+pub trait DeviceSignInPresenter: Send + Sync {
+    async fn show(&self, verification_url: &str, user_code: &str) -> Result<(), StorageError>;
+}
+
+/// Guided console steps for a key made by hand (§4).
+pub struct GuidedAccessKey {
+    pub bucket: String,
+    pub store_prefix: String,
+    pub policy: String,
 }
 
 /// What a minted key reaches; the principal name is fixed by the journal.

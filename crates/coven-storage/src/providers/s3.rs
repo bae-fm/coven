@@ -45,6 +45,7 @@ mod iam;
 mod member_probe;
 #[path = "s3_minting.rs"]
 pub(crate) mod minting;
+pub(crate) use minting::member_policy;
 #[path = "s3_own_bucket.rs"]
 mod own_bucket;
 #[path = "s3_r2_keys.rs"]

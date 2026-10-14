@@ -60,10 +60,14 @@ pub use coven_foundation::id_source::{
     CircleId, DeviceId, FileId, IdSource, IdSourceRef, InviteId, KeyId, StoreId, UuidIds,
 };
 pub use coven_merge::{Audience, MergeError};
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
+pub use coven_storage::providers::DesktopDeviceSignIn;
+pub use coven_storage::providers::{AdminAccessSource, DeviceSignInPresenter};
 pub use coven_storage::providers::{
     DropboxClients, GoogleDriveClient, OAuthClients, OAuthError, OAuthPresenter,
     OAuthRedirectError, ProviderResponse,
 };
+pub use coven_storage::{AccessKeyAdmin, AdminCredential, MintScope, S3MemberKey};
 pub use coven_storage::{
     ByteRange, ChecksumValue, CloudProvider, DropboxAccess, DropboxLocation, GoogleDriveAccess,
     OAuthAccess, ObjectChecksum, ObjectPath, ObjectPrefix, OwnBucketReason, S3BucketVersioning,
@@ -72,6 +76,7 @@ pub use coven_storage::{
     S3Revision, S3Settings, S3Signing, S3SinglePut, StorageConfig, StorageError, StorageFailure,
     StoredObject,
 };
+pub use storage::GuidedAccessKey;
 
 #[cfg(any(test, feature = "test-utils"))]
 pub use coven_foundation::{clock::FixedClock, id_source::SequentialIds};

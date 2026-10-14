@@ -1236,6 +1236,20 @@ the file's ranges under `F`.
     console. With direct provider calls, coven performs the operation using
     the supplied admin access. Both paths record member access and pending
     deletion work under §13; a retry needing admin access obtains it again.
+  - The sources (E9), on desktops: the AWS CLI's
+    `aws configure export-credentials --format process` for the chosen
+    profile, short-lived keys with their session token; `gcloud auth
+    print-access-token` for the chosen account; Google sign-in through the
+    app's Google client with the installed-app loopback, PKCE and the
+    `cloud-platform` scope, requesting no refresh token; AWS IAM Identity
+    Center's device authorization (register a public client, show the
+    verification page and code, poll at the given interval, then fetch the
+    chosen account and role's credentials). On every platform, the person may
+    paste an admin access key or API token. A CLI runs only after the person
+    chooses it, with no input; its output is parsed in memory and erased, and
+    a failure reports only its exit status, since CLI text can echo
+    configuration. Guided steps show the bucket, the store's prefix and the
+    member policy below, filled in.
   - Each catalogued profile's const entry names its key minter, function
     pointers that make, roll back, delete and read a member key with admin
     access. AWS uses IAM at its global endpoint, signing for `us-east-1`: a

@@ -186,6 +186,41 @@ impl CovenHandle {
     pub async fn confirm_access_key_deleted(&self, key: &str) -> Result<(), SyncError> {
         self.operations.confirm_access_key_deleted(key).await
     }
+    /// Obtains the storage account's admin access from the source the person
+    /// chose. It is held in memory for the operations it is passed to and is
+    /// never stored, logged or put in the store log or invites (§4).
+    pub async fn admin_access(
+        &self,
+        source: AdminAccessSource,
+    ) -> Result<Arc<dyn AccessKeyAdmin>, SyncError> {
+        self.storage.admin_access(source).await
+    }
+    /// The bucket, store prefix and filled member policy for making a key in
+    /// the provider's console (§4).
+    pub async fn guided_access_key(&self) -> Result<GuidedAccessKey, SyncError> {
+        self.storage.guided_access_key().await
+    }
+    /// Deletes the S3 key a pending DeleteAccessKey record names, with admin
+    /// access, then reads the provider for that exact key. Only its absence
+    /// clears the record; every failure is returned and the record stays (§13).
+    pub async fn delete_access_key(
+        &self,
+        operation: OperationId,
+        admin: Arc<dyn AccessKeyAdmin>,
+    ) -> Result<(), SyncError> {
+        self.operations.delete_access_key(operation, admin).await
+    }
+    /// Resumes work waiting with `AdminAccessRequired`, holding this admin
+    /// access for that operation only (§4).
+    pub async fn retry_with_admin_access(
+        &self,
+        operation: OperationId,
+        admin: Arc<dyn AccessKeyAdmin>,
+    ) -> Result<(), OperationError> {
+        self.operations
+            .retry_with_admin_access(operation, admin)
+            .await
+    }
     /// Reload this device from snapshots, retaining and replaying its waiting writes (§19.2).
     pub async fn reload_from_snapshot(&self) -> Result<(), OperationError> {
         self.operations.reload_from_snapshot().await

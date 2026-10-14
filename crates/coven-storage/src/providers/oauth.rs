@@ -385,7 +385,27 @@ impl OAuthClients {
         request: &AuthorizeRequest,
         callback: SecretText,
     ) -> Result<OAuthTokens, OAuthError> {
-        let provider = access.provider();
+        let code = Self::redirect_code(access.provider(), request, callback)?;
+        let (client_id, _, _, _) = self.config(access)?;
+        self.tokens(
+            access,
+            &[
+                ("grant_type", "authorization_code"),
+                ("code", code.as_str()),
+                ("redirect_uri", request.redirect.as_str()),
+                ("client_id", client_id),
+                ("code_verifier", request.verifier.as_str()),
+            ],
+        )
+        .await
+    }
+    /// The authorization code of a checked redirect: its origin and path, its
+    /// state, and either a code or the provider's error.
+    fn redirect_code(
+        provider: CloudProvider,
+        request: &AuthorizeRequest,
+        callback: SecretText,
+    ) -> Result<SecretText, OAuthError> {
         let mut redirect =
             url::Url::parse(callback.as_str()).map_err(|_| OAuthError::InvalidRedirect)?;
         let mut fields = std::collections::BTreeMap::new();
@@ -425,22 +445,10 @@ impl OAuthClients {
             }
             .into());
         }
-        let code = fields
-            .get("code")
+        fields
+            .remove("code")
             .filter(|code| !code.as_str().is_empty())
-            .ok_or(OAuthError::MissingCode)?;
-        let (client_id, _, _, _) = self.config(access)?;
-        self.tokens(
-            access,
-            &[
-                ("grant_type", "authorization_code"),
-                ("code", code.as_str()),
-                ("redirect_uri", request.redirect.as_str()),
-                ("client_id", client_id),
-                ("code_verifier", request.verifier.as_str()),
-            ],
-        )
-        .await
+            .ok_or(OAuthError::MissingCode)
     }
     /// Obtain replacement tokens. The facade commits them to custody before
     /// installing them on its provider session. Omitted refresh tokens retain
@@ -560,6 +568,9 @@ impl OAuthClients {
         self
     }
 }
+
+#[path = "oauth_admin.rs"]
+mod admin;
 
 #[cfg(test)]
 #[path = "oauth_tests.rs"]

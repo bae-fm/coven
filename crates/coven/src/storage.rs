@@ -382,6 +382,9 @@ impl StorageConnections {
 #[path = "storage_s3.rs"]
 mod s3;
 
+#[path = "storage_admin.rs"]
+mod admin;
+pub use admin::GuidedAccessKey;
 #[cfg(test)]
 #[path = "storage_tests.rs"]
 mod tests;
