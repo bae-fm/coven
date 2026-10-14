@@ -112,6 +112,7 @@ async fn only_the_spec_tables_are_created() {
                 "_coven_device_files",
                 "_coven_device_reset",
                 "_coven_devices",
+                "_coven_drained_devices",
                 "_coven_file_chunks",
                 "_coven_file_removals",
                 "_coven_file_uploads",
@@ -140,6 +141,7 @@ async fn only_the_spec_tables_are_created() {
                 "_coven_queued_file_refs",
                 "_coven_reference_values",
                 "_coven_references",
+                "_coven_retirement_finality",
                 "_coven_row_file_refs",
                 "_coven_rows",
                 "_coven_snapshot_reservation",
@@ -234,6 +236,8 @@ mod fixture {
      INSERT INTO _coven_store_log(device,number,record,timestamp,author_view,stored_at,outcome,retires_device,retires_member)
        SELECT device,n,zeroblob(128),CAST(n || device AS BLOB),x'00',zeroblob(13),'kept',
               CASE WHEN i%3=0 THEN device END,CASE WHEN i%3=1 THEN member END FROM fixture;
+     INSERT INTO _coven_retirement_finality SELECT n,device,n,zeroblob(13) FROM fixture;
+     INSERT INTO _coven_drained_devices SELECT n,device,n FROM fixture;
      INSERT INTO _coven_write_landings SELECT device,n,zeroblob(13),x'00',i%2 FROM fixture;
      INSERT INTO _coven_write_landing_parts SELECT device,n,audience FROM fixture;
      INSERT INTO _coven_store_log_uploads VALUES(counter(1),counter(1),zeroblob(128),CAST(counter(1) || counter(1) AS BLOB),zeroblob(16));
@@ -407,6 +411,14 @@ mod scans {
         Some("replay rejudges every verdict a retirement can still change; final ones are released"),
     ("write_landing.rs", "SELECT device,number,stored_at,header FROM _coven_write_landings", "_coven_write_landings") =>
         Some("release and retention check every verdict a retirement can still change"),
+    ("retirement_drain.rs", "SELECT device FROM _coven_retirement_finality", "_coven_retirement_finality") =>
+        Some("finality recording skips every retired device that already has its F"),
+    ("retirement_drain.rs", "SELECT device FROM _coven_drained_devices", "_coven_drained_devices") =>
+        Some("discovery skips every drained device"),
+    ("retirement_drain.rs", sql, "f") if sql.starts_with("SELECT f.device,f.entry_device,f.entry_number,f.final_at FROM _coven_retirement_finality f") =>
+        Some("each pass checks every retired device still waiting for its drain"),
+    ("retirement_drain.rs", sql, "_coven_retirement_finality") if sql.starts_with("DELETE FROM _coven_retirement_finality WHERE NOT EXISTS(") =>
+        Some("replay checks every drain basis against the entries it keeps"),
     ("entry_effects.rs", "SELECT audience FROM _coven_data_reloads", "_coven_data_reloads") =>
         Some("sync and replay read every audience awaiting replacement data"),
     ("sqlite.rs", "PRAGMA integrity_check", "database") =>

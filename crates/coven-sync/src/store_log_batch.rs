@@ -208,6 +208,28 @@ impl StoreLogSync {
                 break;
             }
         }
+        // Entry and key-copy misses following this scan's sample supply two
+        // of a retired device's three drain reads (§6, SP step 2).
+        let drains = match sample {
+            Some(sample) => self
+                .database
+                .retirement_finalities()
+                .await?
+                .into_iter()
+                .filter(|finality| {
+                    finality.drain_permitted(sample)
+                        && self
+                            .reads
+                            .reached_miss(coven_database::LogKind::Entry, finality.device)
+                        && self
+                            .reads
+                            .reached_miss(coven_database::LogKind::KeyCopy, finality.device)
+                })
+                .map(|finality| (finality.device, sample))
+                .collect(),
+            None => BTreeMap::new(),
+        };
+        self.reads.keep_drains(drains);
         // Discovery, including writers learned from these entries, precedes
         // immutable landing checks. Every author is checked against its own past.
         let publications = crate::store_log_landing::publication_times(&local.log, &paths)?;
@@ -377,12 +399,12 @@ impl StoreLogSync {
         } else {
             self.acquire_keys(&local.log, &member, &mut ring).await?;
         }
-        if let Some((through, unit)) = through {
+        if let (Some((through, unit)), Some(sample)) = (through, sample) {
             if complete_through(Some(through)) {
                 if let Some(horizon) = crate::finality::horizon(&local.log, through, unit) {
                     if local.log.horizon != Some(horizon) {
                         self.database
-                            .advance_store_log_horizon(local.log, horizon)
+                            .advance_store_log_horizon(local.log, horizon, sample)
                             .await?;
                     }
                 }

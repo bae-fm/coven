@@ -16,6 +16,9 @@ struct Reads {
     positions: Option<crate::posted_positions::Observation>,
     writers: Option<BTreeSet<DeviceId>>,
     misses: BTreeSet<(coven_database::LogKind, DeviceId, u64)>,
+    /// Retired devices whose entry and key-copy logs reached terminal misses in
+    /// a completed discovery, by the storage sample taken before it (§6).
+    drains: BTreeMap<DeviceId, std::time::SystemTime>,
     /// Audience snapshot listings shared while one return observation lasts.
     snapshot_listings: Option<BTreeMap<String, Vec<StoredObject>>>,
 }
@@ -95,6 +98,33 @@ impl PassReads {
             .contains(&(kind, writer, number))
     }
 
+    /// Whether this observation reached a terminal miss in `writer`'s log.
+    pub(crate) fn reached_miss(&self, kind: coven_database::LogKind, writer: DeviceId) -> bool {
+        self.0
+            .lock()
+            .expect("pass reads lock poisoned")
+            .misses
+            .iter()
+            .any(|(missed, device, _)| (*missed, *device) == (kind, writer))
+    }
+
+    /// Replace the drain halves of the latest completed membership discovery:
+    /// each device's entry and key-copy misses followed this storage sample.
+    pub(crate) fn keep_drains(&self, drains: BTreeMap<DeviceId, std::time::SystemTime>) {
+        let mut reads = self.0.lock().expect("pass reads lock poisoned");
+        if reads.scopes > 0 {
+            reads.drains = drains;
+        }
+    }
+
+    pub(crate) fn drains(&self) -> BTreeMap<DeviceId, std::time::SystemTime> {
+        self.0
+            .lock()
+            .expect("pass reads lock poisoned")
+            .drains
+            .clone()
+    }
+
     pub(crate) fn keep_miss(&self, kind: coven_database::LogKind, writer: DeviceId, number: u64) {
         let mut reads = self.0.lock().expect("pass reads lock poisoned");
         if reads.scopes > 0 {
@@ -144,6 +174,7 @@ impl Drop for ReadScope {
             reads.positions = None;
             reads.writers = None;
             reads.misses.clear();
+            reads.drains.clear();
         }
     }
 }

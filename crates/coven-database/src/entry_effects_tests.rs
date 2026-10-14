@@ -452,6 +452,7 @@ async fn horizon(db: &crate::Database, seconds: u64) {
     db.advance_store_log_horizon(
         db.store_log().await.unwrap(),
         std::time::Duration::from_secs(seconds),
+        std::time::UNIX_EPOCH + std::time::Duration::from_secs(seconds),
     )
     .await
     .unwrap();

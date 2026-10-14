@@ -98,8 +98,10 @@ pub(crate) async fn scan(
             .collect(),
         LogKind::KeyCopy => BTreeSet::new(),
     };
+    // A completed drain ends discovery; its retained history is in `input`.
+    let drained = database.drained_devices().await?;
     for &writer in writers {
-        if refused.contains(&writer) {
+        if refused.contains(&writer) || drained.contains(&writer) {
             continue;
         }
         let after = positions.get(&writer).copied().unwrap_or(0);

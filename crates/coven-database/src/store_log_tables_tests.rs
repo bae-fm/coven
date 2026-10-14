@@ -187,12 +187,20 @@ async fn horizon_persists_and_failed_or_stale_transactions_preserve_it() {
     let db = store.builder(vec![], vec![]).open().await.unwrap();
     let absent = db.local_store_log().await.unwrap().log;
     assert_eq!(absent.horizon, None);
-    db.advance_store_log_horizon(absent.clone(), Duration::ZERO)
-        .await
-        .unwrap();
-    db.advance_store_log_horizon(absent, Duration::ZERO)
-        .await
-        .unwrap();
+    db.advance_store_log_horizon(
+        absent.clone(),
+        Duration::ZERO,
+        std::time::UNIX_EPOCH + Duration::ZERO,
+    )
+    .await
+    .unwrap();
+    db.advance_store_log_horizon(
+        absent,
+        Duration::ZERO,
+        std::time::UNIX_EPOCH + Duration::ZERO,
+    )
+    .await
+    .unwrap();
     let zero = db.local_store_log().await.unwrap().log;
     assert_eq!(zero.horizon, Some(Duration::ZERO));
     let mut different = zero.clone();
@@ -202,8 +210,12 @@ async fn horizon_persists_and_failed_or_stale_transactions_preserve_it() {
         check: crate::StoreLogCheck::Allowed,
     });
     assert!(matches!(
-        db.advance_store_log_horizon(different, Duration::ZERO)
-            .await,
+        db.advance_store_log_horizon(
+            different,
+            Duration::ZERO,
+            std::time::UNIX_EPOCH + Duration::ZERO
+        )
+        .await,
         Err(DbError::StoreLogEntriesChanged)
     ));
     db.inspect_writer(|sql| {
@@ -213,22 +225,26 @@ async fn horizon_persists_and_failed_or_stale_transactions_preserve_it() {
             "horizon failed",
         )
     });
-    db.advance_store_log_horizon(zero.clone(), Duration::ZERO)
-        .await
-        .unwrap();
+    db.advance_store_log_horizon(
+        zero.clone(),
+        Duration::ZERO,
+        std::time::UNIX_EPOCH + Duration::ZERO,
+    )
+    .await
+    .unwrap();
     let later = Duration::from_secs(1) - Duration::from_nanos(1);
     assert!(db
-        .advance_store_log_horizon(zero.clone(), later)
+        .advance_store_log_horizon(zero.clone(), later, std::time::UNIX_EPOCH + later)
         .await
         .is_err());
     assert_eq!(db.local_store_log().await.unwrap().log, zero);
     db.inspect_writer(|sql| sql.batch("DROP TRIGGER reject_horizon").unwrap());
-    db.advance_store_log_horizon(zero.clone(), later)
+    db.advance_store_log_horizon(zero.clone(), later, std::time::UNIX_EPOCH + later)
         .await
         .unwrap();
     let saved = db.local_store_log().await.unwrap().log;
     assert_eq!(saved.horizon, Some(later));
-    db.advance_store_log_horizon(zero, Duration::ZERO)
+    db.advance_store_log_horizon(zero, Duration::ZERO, std::time::UNIX_EPOCH + Duration::ZERO)
         .await
         .unwrap();
     db.close().await.unwrap();

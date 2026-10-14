@@ -11,6 +11,8 @@ use std::sync::Arc;
 
 #[path = "write_download.rs"]
 mod download;
+#[path = "write_drain.rs"]
+mod drain;
 #[cfg(test)]
 #[path = "device_log_sync_tests.rs"]
 pub(crate) mod tests;
@@ -311,6 +313,25 @@ impl DeviceLogSync {
         };
         let mut objects = BTreeMap::new();
         let mut ends = BTreeMap::new();
+        // A drained device is never probed again; its discovered writes come
+        // from retained observations. A retired device whose entry and copy
+        // logs reached misses after a qualifying sample this pass completes its
+        // drain with a trusted write miss here (§6, SP step 6).
+        let drained = self.database.drained_devices().await?;
+        let drain_reads = self.reads.drains();
+        let draining: BTreeMap<_, _> = self
+            .database
+            .retirement_finalities()
+            .await?
+            .into_iter()
+            .filter_map(|finality| {
+                let sample = *drain_reads.get(&finality.device)?;
+                finality
+                    .drain_permitted(sample)
+                    .then_some((finality.device, (finality, sample)))
+            })
+            .collect();
+        let mut drains = Vec::new();
         // Every other device that ever registered, including removed and
         // replaced ones. The first phase reads this device's own next write.
         let writers: std::collections::BTreeSet<_> = local
@@ -340,6 +361,13 @@ impl DeviceLogSync {
             if stop.is_some() {
                 discovery.complete = false;
             }
+            if drained.contains(&writer) {
+                objects.extend(
+                    self.retained_writes(local.store, writer, after, stop)
+                        .await?,
+                );
+                continue;
+            }
             let (found, end) = next_writes(
                 storage,
                 local.store,
@@ -358,6 +386,8 @@ impl DeviceLogSync {
                 crate::recent_return::miss_is_recent(observation, self.clock.as_ref(), saved)
             }) {
                 discovery.needs_snapshots = true;
+            } else if let (Some(drain), None) = (draining.get(&writer), stop) {
+                drains.push((*drain, miss));
             }
         }
         let mut stuck = refused;
@@ -445,6 +475,10 @@ impl DeviceLogSync {
         }
         if discovery.needs_snapshots {
             discovery.complete = false;
+        }
+        for ((drain, sample), miss) in drains {
+            self.finish_drain(drain, sample, miss, &objects, &positions, &waits)
+                .await?;
         }
         self.compare_fingerprints().await?;
         Ok(discovery)

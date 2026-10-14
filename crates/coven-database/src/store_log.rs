@@ -401,6 +401,7 @@ pub(crate) fn apply<P: crate::PendingValue>(
         }
         let previous = crate::store_log_tables::deleted_circles(database)?;
         crate::store_log_tables::replace(database, replay, &outcomes)?;
+        crate::retirement_drain::forget_dropped(database)?;
         let deleted = crate::store_log_tables::deleted_circles(database)?;
         // Retired writes whose window verdict this replay changed (§10).
         let rejudged = crate::write_landing::rejudge::<P>(database)?;

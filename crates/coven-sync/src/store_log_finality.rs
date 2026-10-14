@@ -19,11 +19,12 @@ impl StoreLogSync {
             let local = self.database.local_store_log().await?;
             let ring = self.store_keys.read()?;
             self.share_keys(&local.log, &ring).await?;
+            let drains = self.database.retirement_finalities().await?;
             let due = self
                 .finality
                 .lock()
                 .expect("finality lock poisoned")
-                .probe_due(&local.log, self.clock.as_ref());
+                .probe_due(&local.log, &drains, self.clock.as_ref());
             if due && local.log.replay.state.devices.contains_key(&local.device) {
                 self.observe_clock(&local).await?;
                 self.scan_store_log_once(require_complete).await?;

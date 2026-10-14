@@ -80,7 +80,14 @@ impl Observation {
         }
     }
 
-    pub(crate) fn probe_due(&mut self, log: &StoreLog, clock: &dyn Clock) -> bool {
+    /// Whether a monotonic schedule says a finality or drain threshold may
+    /// have been reached that the known sample cannot decide (SP step 1).
+    pub(crate) fn probe_due(
+        &mut self,
+        log: &StoreLog,
+        drains: &[coven_database::RetirementFinality],
+        clock: &dyn Clock,
+    ) -> bool {
         if self
             .retry
             .as_mut()
@@ -103,10 +110,16 @@ impl Observation {
             Some((_, unit)) => ENTRY_WINDOW + LISTING_MARGIN + unit,
             None => ENTRY_WINDOW + LISTING_MARGIN,
         };
-        let due = pending.is_some_and(|pending| {
+        let finality_due = pending.is_some_and(|pending| {
             let threshold = last_late.map_or(pending, |late| late.max(pending));
             now.duration_since(threshold).is_ok_and(|age| age > wait)
         });
+        // §6's drain needs a sample strictly past F + one day + five minutes.
+        let drain_due = drains.iter().any(|drain| {
+            let deadline = drain.drain_due();
+            now > deadline && self.sample.is_none_or(|(time, _)| time <= deadline)
+        });
+        let due = finality_due || drain_due;
         if due {
             self.retry = Some(clock.sleep(Duration::from_secs(60)));
         }

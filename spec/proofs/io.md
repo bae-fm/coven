@@ -609,6 +609,11 @@ then completes its scans. Entries and copies derive availability from
 permanent storage. Writes still need the current-snapshot/recent-read
 availability conditions above; the snapshot races prevent an unconditional
 write-drain claim for arbitrary concurrent histories.
+[`IORunner.lean`](io/IORunner.lean)'s `drain` case executes `readLog` over the
+three logs, the strict wait after `F` and `Retired.polling`;
+[a Rust test](../../crates/coven-sync/src/write_drain_tests.rs) compares the
+actual drain mark and the next pass's probes at and past that wait, with a
+failed read in each log.
 
 The timing argument uses a common duration scale for finality, catch-up start,
 send and landing. An implementation must relate its monotonic timer to storage

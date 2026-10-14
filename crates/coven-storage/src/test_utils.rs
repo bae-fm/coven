@@ -31,6 +31,8 @@ pub struct Faults {
     pub fail_next: usize,
     /// Fail exact reads at these paths, retaining other in-flight responses.
     pub read_failures: BTreeMap<ObjectPath, StorageFailure>,
+    /// Fail exact status calls at these paths, independently of reads.
+    pub status_failures: BTreeMap<ObjectPath, StorageFailure>,
     /// Maximum bytes returned by each body read; nonzero.
     pub read_chunk_size: usize,
     /// Failures after metadata, independently of request-start failures.
@@ -62,6 +64,7 @@ impl Faults {
         Self {
             fail_next: 0,
             read_failures: BTreeMap::new(),
+            status_failures: BTreeMap::new(),
             read_chunk_size: 64 * 1024,
             body_failures: BTreeMap::new(),
             failure: StorageFailure::Network,
@@ -589,10 +592,11 @@ impl ProviderOps for MemoryProvider {
     }
     async fn status(&self, path: &ObjectPath) -> Result<Option<StoredObject>, StorageError> {
         self.before(MemoryRequest::Status(path.clone())).await?;
-        Ok(self
-            .state
-            .lock()
-            .await
+        let state = self.state.lock().await;
+        if let Some(failure) = state.faults.status_failures.get(path) {
+            return Err((*failure).into());
+        }
+        Ok(state
             .objects
             .get(path)
             .map(|object| object.metadata(path, self.time_resolution)))

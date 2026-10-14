@@ -1,6 +1,7 @@
 import CovenIO.Execution
 import CovenIO.Trace
 import CovenIO.Downloads
+import CovenIO.Retired
 import Lean
 
 /-! The IO differential runner. Each case names the executable transition it
@@ -201,6 +202,33 @@ private def sendGate (j : Json) : Except String Json := do
     if let some value := next then sender := value
   return toJson results
 
+/-- `Retired`: a retired writer is drained only when the sample before its
+reads exceeds `F + freshFor + day` (`retirement_closed`) and its entry, copy
+and write logs each reach a terminal miss (`drain_complete`'s `Scan`), the
+logs executed by `readLog` in that order. `polling` then excludes it. -/
+private def drain (j : Json) : Except String Json := do
+  let finalAt ← j.getObjValAs? Nat "final"
+  let sample ← j.getObjValAs? Nat "sample"
+  let writer ← j.getObjValAs? Nat "writer"
+  let known ← j.getObjValAs? (List Nat) "known"
+  let logs ← j.getObjValAs? (Array Json) "logs"
+  let kinds := [Kind.entry, Kind.copy, Kind.write]
+  let misses ← (kinds.zip logs.toList).mapM fun (kind, log) => do
+    let count ← log.getObjValAs? Nat "count"
+    let start ← log.getObjValAs? Nat "start"
+    let failed ← log.getObjValAs? Bool "failed"
+    let store : Store := (List.range count).foldl
+      (fun store n => put store (.log kind writer (n + 1)) [n + 1] 0) empty
+    let result := readLog (fun _ => store) (fun _ => if failed then some .network else none)
+      (fun _ => false) kind writer (count + 2) sample start
+    pure (result.stop == .miss)
+  let waited := decide (finalAt + freshFor + day < sample)
+  let drained := waited && misses.all id
+  let life : Nat → Retired.Life := fun w => if w = writer then .removed else .active
+  let after := if drained then Retired.retire life writer else life
+  return Json.mkObj [("drained", toJson drained),
+    ("polled", toJson (Retired.polling after known))]
+
 private def run (j : Json) : Except String Json := do
   match ← j.getObjValAs? String "check" with
   | "discovery" => discovery j
@@ -213,6 +241,7 @@ private def run (j : Json) : Except String Json := do
   | "positions" => positions j
   | "post" => post j
   | "send_gate" => sendGate j
+  | "drain" => drain j
   | check => throw s!"unknown IO check {check}"
 
 def main : IO UInt32 := do

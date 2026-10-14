@@ -23,7 +23,7 @@ async fn update(device: &mut Device, storage: Arc<MemoryStorage>, rename: bool, 
     .await;
 }
 
-pub(super) fn initial() -> Migration {
+pub(crate) fn initial() -> Migration {
     Migration::sql(
         1,
         "notes",

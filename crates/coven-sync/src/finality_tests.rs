@@ -134,19 +134,19 @@ async fn probes_wait_for_a_possible_quiet_window_and_back_off() {
     let clock = FixedClock::new(UNIX_EPOCH + day(30));
     let mut log = history(false);
     let mut observation = Observation::default();
-    assert!(!observation.probe_due(&log, &clock));
+    assert!(!observation.probe_due(&log, &[], &clock));
     clock.set(UNIX_EPOCH + day(31));
-    assert!(observation.probe_due(&log, &clock));
-    assert!(!observation.probe_due(&log, &clock));
+    assert!(observation.probe_due(&log, &[], &clock));
+    assert!(!observation.probe_due(&log, &[], &clock));
     clock.set(UNIX_EPOCH + day(31) + Duration::from_secs(60));
-    assert!(observation.probe_due(&log, &clock));
+    assert!(observation.probe_due(&log, &[], &clock));
     log = history(true);
     clock.set(UNIX_EPOCH + day(70));
-    assert!(!observation.probe_due(&log, &clock));
+    assert!(!observation.probe_due(&log, &[], &clock));
     // Completed timers are discarded, so repeated checks cannot poll a finished future.
-    assert!(!observation.probe_due(&log, &clock));
+    assert!(!observation.probe_due(&log, &[], &clock));
     clock.set(UNIX_EPOCH + day(70) + LISTING_MARGIN + Duration::from_millis(1));
-    assert!(observation.probe_due(&log, &clock));
+    assert!(observation.probe_due(&log, &[], &clock));
 }
 
 #[tokio::test]
@@ -160,9 +160,9 @@ async fn probes_require_the_margin_and_the_observed_provider_tick() {
     let log = history(true);
     let boundary = UNIX_EPOCH + day(70) + Duration::from_secs(3600) + unit;
     let clock = FixedClock::new(boundary);
-    assert!(!observation.probe_due(&log, &clock));
+    assert!(!observation.probe_due(&log, &[], &clock));
     clock.set(boundary + unit);
-    assert!(observation.probe_due(&log, &clock));
+    assert!(observation.probe_due(&log, &[], &clock));
 }
 
 fn run(variable: &str, input: Value) -> Value {

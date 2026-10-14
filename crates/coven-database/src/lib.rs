@@ -60,6 +60,8 @@ mod removal_schema;
 mod removal_sql;
 mod removal_view;
 mod retained_writes;
+mod retirement_drain;
+pub use retirement_drain::{RetirementFinality, DRAIN_WAIT};
 mod row_key;
 mod row_queries;
 mod schema;

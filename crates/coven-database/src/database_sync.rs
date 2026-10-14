@@ -603,10 +603,13 @@ impl Database {
     /// Save a completed scan's horizon against exactly the replay it checked.
     /// The writer transaction rejects stale inputs and preserves monotonicity.
     /// An unchanged cutoff performs no write and emits no query notification.
+    /// `sample` is the storage time observed before that scan; it becomes `F`
+    /// for every kept retirement this horizon first makes final (§6).
     pub async fn advance_store_log_horizon(
         &self,
         checked: crate::StoreLog,
         horizon: std::time::Duration,
+        sample: std::time::SystemTime,
     ) -> Result<(), DbError> {
         self.call(move |inner| {
             inner.with_store_log(|current| {
@@ -622,12 +625,57 @@ impl Database {
                             "UPDATE _coven_finality SET horizon=?1 WHERE singleton=1",
                             [crate::store_log_tables::encode_horizon(horizon)],
                         )?;
+                        crate::retirement_drain::record_finality(database, horizon, sample)?;
                         // Inputs whose boundary entries all became final are released.
                         crate::entry_inputs::release(database)
                     })?;
                     current.horizon = Some(horizon);
                     Ok(())
                 })
+            })
+        })
+        .await
+    }
+
+    /// Retired devices waiting for their drain, with their finality evidence.
+    pub async fn retirement_finalities(&self) -> Result<Vec<crate::RetirementFinality>, DbError> {
+        self.call(move |inner| {
+            inner
+                .access
+                .readers
+                .acquire_reader()
+                .with_reader(crate::retirement_drain::finalities)
+        })
+        .await
+    }
+
+    /// Devices whose completed drain ended their discovery; their retained
+    /// history still feeds replay, finality, key selection and application.
+    pub async fn drained_devices(
+        &self,
+    ) -> Result<std::collections::BTreeSet<coven_foundation::id_source::DeviceId>, DbError> {
+        self.call(move |inner| {
+            inner
+                .access
+                .readers
+                .acquire_reader()
+                .with_reader(crate::retirement_drain::drained)
+        })
+        .await
+    }
+
+    /// Record a completed drain after all three logs reached terminal misses
+    /// following `sample` and their completed input was retained. Returns
+    /// whether it was recorded: the evidence must still match, its entry must
+    /// still be kept and `sample` must exceed `F + one day + five minutes`.
+    pub async fn mark_drained(
+        &self,
+        drain: crate::RetirementFinality,
+        sample: std::time::SystemTime,
+    ) -> Result<bool, DbError> {
+        self.call(move |inner| {
+            inner.access.with_writer(|writer| {
+                writer.transaction(|db| crate::retirement_drain::mark(db, drain, sample))
             })
         })
         .await

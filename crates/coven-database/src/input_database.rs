@@ -260,6 +260,24 @@ impl Database {
         })
         .await
     }
+    /// The retained provider observation of an exact path, if any. A drained
+    /// writer's discovered objects are found here instead of by probing (§6).
+    pub async fn retained_observation(&self, path: String) -> Result<Option<Vec<u8>>, DbError> {
+        self.call(move |inner| {
+            inner.inputs.read(|db| {
+                Ok(db
+                    .query(
+                        "SELECT observation FROM _coven_input_objects WHERE path=?1",
+                        [&path],
+                        |r| r.get(0),
+                    )?
+                    .into_iter()
+                    .next())
+            })
+        })
+        .await
+    }
+
     /// Retain a provider observation before reading it. Immutable identity changes
     /// return `None` and preserve the preceding evidence. A replacement discards
     /// only that path's preceding version. Equal observations acquire no writer.

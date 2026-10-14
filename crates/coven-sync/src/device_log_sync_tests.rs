@@ -342,7 +342,7 @@ pub(crate) mod circles;
 #[path = "pending_logs_tests.rs"]
 mod routing;
 #[path = "schema_sync_tests.rs"]
-mod schema;
+pub(crate) mod schema;
 #[path = "write_upload_tests.rs"]
 mod streams;
 #[path = "write_download_tests.rs"]

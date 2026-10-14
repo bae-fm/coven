@@ -359,4 +359,4 @@ pub(crate) fn release(db: &DatabaseConnection) -> Result<(), DbError> {
 
 #[cfg(test)]
 #[path = "write_landing_tests.rs"]
-mod tests;
+pub(crate) mod tests;

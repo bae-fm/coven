@@ -17,7 +17,7 @@ fn at(seconds: u64) -> SystemTime {
 
 /// A kept retiring entry about `writer`, a device of member 2, as replay
 /// supplies it: removal of the device or its member, or its replacement.
-async fn retire(
+pub(crate) async fn retire(
     target: &crate::Database,
     writer: DeviceId,
     number: u64,
@@ -246,7 +246,11 @@ async fn a_settled_verdict_releases_its_retained_inputs() {
     // The deciding kept retirement is final: the late verdict cannot change
     // (`retirement_verdict_final`), so its inputs and verdict go.
     p.target
-        .advance_store_log_horizon(p.target.store_log().await.unwrap(), Duration::from_secs(1))
+        .advance_store_log_horizon(
+            p.target.store_log().await.unwrap(),
+            Duration::from_secs(1),
+            std::time::UNIX_EPOCH + Duration::from_secs(1),
+        )
         .await
         .unwrap();
     assert_eq!(retained(&p.target), (0, 0));
@@ -283,6 +287,7 @@ async fn an_admitted_verdict_settles_when_the_horizon_passes_its_window() {
             db.advance_store_log_horizon(
                 db.store_log().await.unwrap(),
                 Duration::from_secs(seconds),
+                std::time::UNIX_EPOCH + Duration::from_secs(seconds),
             )
             .await
             .unwrap()

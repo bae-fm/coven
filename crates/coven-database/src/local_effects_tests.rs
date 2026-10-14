@@ -181,6 +181,7 @@ async fn reversed_reset_restores_cascaded_and_nulled_local_rows_after_local_edit
         .advance_store_log_horizon(
             target.store_log().await.unwrap(),
             std::time::Duration::from_secs(1),
+            std::time::UNIX_EPOCH + std::time::Duration::from_secs(1),
         )
         .await
         .unwrap();

@@ -246,6 +246,29 @@ macro_rules! coven_tables {
             ) STRICT;
             INSERT INTO _coven_finality VALUES(1,NULL);
         ");
+        // §6's drain evidence: the qualifying storage time F of the finality
+        // observation that found a kept retiring entry final, then the mark of a
+        // completed drain. Both go when replay stops keeping that entry.
+        $visit!(_coven_retirement_finality, "
+            CREATE TABLE _coven_retirement_finality (
+                device BLOB PRIMARY KEY NOT NULL CHECK(length(device)=8),
+                entry_device BLOB NOT NULL CHECK(length(entry_device)=8),
+                entry_number BLOB NOT NULL CHECK(length(entry_number)=8),
+                final_at BLOB NOT NULL CHECK(length(final_at)=13),
+                UNIQUE(device,entry_device,entry_number),
+                FOREIGN KEY(entry_device,entry_number) REFERENCES _coven_store_log(device,number)
+            ) STRICT, WITHOUT ROWID;
+            CREATE INDEX _coven_retirement_finality_entry ON _coven_retirement_finality(entry_device,entry_number);
+        ");
+        $visit!(_coven_drained_devices, "
+            CREATE TABLE _coven_drained_devices (
+                device BLOB PRIMARY KEY NOT NULL CHECK(length(device)=8),
+                entry_device BLOB NOT NULL,
+                entry_number BLOB NOT NULL,
+                FOREIGN KEY(device,entry_device,entry_number)
+                    REFERENCES _coven_retirement_finality(device,entry_device,entry_number) ON DELETE CASCADE
+            ) STRICT, WITHOUT ROWID;
+        ");
         $visit!(_coven_device_reset, "
             CREATE TABLE _coven_device_reset (
                 singleton INTEGER PRIMARY KEY CHECK(singleton=1),
