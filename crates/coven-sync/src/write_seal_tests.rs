@@ -531,6 +531,9 @@ async fn reversed_removal_parts(
     ana.sync
         .test_rotate(audience.clone(), KeyId(Uuid::from_u128(2)))
         .await;
+    // Ben's copies expose both audiences' keys in Ana's view, so her second
+    // phase also replaces the other one before the write's first attempt.
+    ana.sync.rotate_exposed_keys().await.unwrap();
     sql(&ana.db, "INSERT INTO notes VALUES('one','public','body'); INSERT INTO pins VALUES('00000000-0000-4000-8000-000000000001','00000000-0000-0000-0000-00000000000a','private')").await;
     let writes = ana.writes.upload_writes().await.unwrap();
     assert_eq!(writes.len(), 1);
@@ -580,16 +583,11 @@ async fn reversed_removal_parts(
             &audience,
             rotation_key,
         ));
+        // Both of the write's keys were sealed only to Ana and Carol; the
+        // write waits for them while the pass continues.
         for time in [2, 4] {
             ben.clock.set(UNIX_EPOCH + Duration::from_secs(time));
-            let download = ben.writes.download_writes().await;
-            if store_rotation {
-                assert!(
-                    matches!(download, Err(SyncError::KeyUnavailable(key)) if key == rotation_key)
-                );
-            } else {
-                download.unwrap();
-            }
+            ben.writes.download_writes().await.unwrap();
         }
         assert!(rows(&ben.db).await.is_empty());
         assert_eq!(count(&ben.db).await, 0);
@@ -604,17 +602,9 @@ async fn reversed_removal_parts(
             .unwrap()
             .positions
             .covers(writes[0]));
-        let post = ben.writes.post_positions().await;
-        if store_rotation {
-            assert!(matches!(post, Err(SyncError::KeyUnavailable(key)) if key == rotation_key));
-            assert!(matches!(
-                storage.read(&ObjectPath::positions(STORE_ID, DeviceId(2))).await,
-                Err(error) if error.failure() == coven_storage::StorageFailure::NotFound
-            ));
-        } else {
-            assert!(post.unwrap());
-            assert!(!posted(&storage, ben, 2).await.writes.covers(writes[0]));
-        }
+        // Positions are replaceable metadata under the keys Ben reads with.
+        assert!(ben.writes.post_positions().await.unwrap());
+        assert!(!posted(&storage, ben, 2).await.writes.covers(writes[0]));
     }
 
     // Carol owns K2 and shares it through StoreLogSync when she learns the drop.
@@ -644,11 +634,16 @@ async fn reversed_removal_parts(
         assert_eq!(count(&carol.db).await, 1);
     }
     ben.sync.sync_store_log().await.unwrap();
+    let ring = ben.custody.read().unwrap().unwrap();
     assert!(crate::store_log_keys::holds(
-        Some(&ben.custody.read().unwrap().unwrap()),
+        Some(&ring),
         &audience,
-        rotation_key,
+        rotation_key
     ));
+    for audience in [Audience::Store, Audience::Circle(circle)] {
+        let newest = crate::key_introductions::newest(&ben.log().await, &audience).unwrap();
+        assert!(crate::store_log_keys::holds(Some(&ring), &audience, newest));
+    }
     let expected = rows(&ana.db).await;
     for device in [&mut *ben, &mut *carol] {
         device.writes.download_writes().await.unwrap();

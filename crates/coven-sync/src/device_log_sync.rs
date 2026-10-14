@@ -116,6 +116,8 @@ pub struct DeviceLogSync {
     /// Sleep-inclusive monotonic time for judging each miss when it is used.
     clock: ClockRef,
     download_limit: std::num::NonZeroUsize,
+    /// This pass's key-copy observation (§11).
+    copies: crate::key_introductions::PassObservation,
     storage: Option<Arc<dyn Storage>>,
     database: Database,
     store_keys: Arc<KeySession<StoreKeyring>>,
@@ -136,6 +138,7 @@ impl DeviceLogSync {
             observation: None,
             clock,
             download_limit: std::num::NonZeroUsize::MIN,
+            copies: Default::default(),
             storage: Some(storage),
             database,
             store_keys,
@@ -155,6 +158,7 @@ impl DeviceLogSync {
             observation: None,
             clock,
             download_limit: std::num::NonZeroUsize::MIN,
+            copies: Default::default(),
             storage: None,
             database,
             store_keys,
@@ -179,6 +183,30 @@ impl DeviceLogSync {
 
     pub(crate) fn set_download_limit(&mut self, limit: std::num::NonZeroUsize) {
         self.download_limit = limit;
+    }
+
+    pub(crate) fn share_copies(&mut self, copies: crate::key_introductions::PassObservation) {
+        self.copies = copies;
+    }
+
+    /// The pass's complete key-copy observation, or a fresh one outside a pass (§11).
+    async fn copy_observation(
+        &self,
+        store: coven_foundation::id_source::StoreId,
+    ) -> Result<crate::key_introductions::CopyObservation, SyncError> {
+        match self.copies.current() {
+            Some(observation) => Ok(observation),
+            None => {
+                crate::store_log_keys::observe(
+                    &self.database,
+                    &self.reads,
+                    self.download_limit,
+                    self.storage.as_deref().ok_or(SyncError::NoStorage)?,
+                    store,
+                )
+                .await
+            }
+        }
     }
 
     /// Publish queued writes in number order, fixing the sealing keys before the first
@@ -215,11 +243,19 @@ impl DeviceLogSync {
                 .ok_or(SyncError::KeyUnavailable(store_key))?;
             let selected_ring = ring.clone();
             let signer = member.clone();
+            let observation = self.copy_observation(local.store).await?;
             let next = self
                 .database
                 .prepare_write_upload(move |log, schema, header| {
-                    crate::write_seal::select(log, schema, header, &selected_ring, &signer)
-                        .map_err(|e| DbError::SyncStream(Box::new(e)))
+                    crate::write_seal::select(
+                        log,
+                        schema,
+                        header,
+                        &selected_ring,
+                        &signer,
+                        &observation,
+                    )
+                    .map_err(|e| DbError::SyncStream(Box::new(e)))
                 })
                 .await
                 .map_err(|error| match error {
@@ -567,9 +603,11 @@ impl DeviceLogSync {
             .store_keys
             .read()?
             .ok_or(SyncError::KeyUnavailable(store_key))?;
+        // Positions are replaceable metadata, not first attempts; fingerprints
+        // use the newest key this device reads each audience with.
         let mut selected = vec![(
             Audience::Store,
-            crate::write_seal::current_store(&local.log, &ring)?,
+            crate::write_seal::readable_key(&local.log, &ring, &Audience::Store)?,
         )];
         for (circle, state) in &local.log.replay.state.circles {
             if local.log.replay.state.circle_deletions.contains_key(circle)
@@ -578,7 +616,7 @@ impl DeviceLogSync {
                 continue;
             }
             let audience = Audience::Circle(*circle);
-            match crate::write_seal::current(&local.log, &ring, &audience, &member.member_id()) {
+            match crate::write_seal::readable_key(&local.log, &ring, &audience) {
                 Ok(key) => selected.push((audience, key)),
                 Err(SyncError::KeyUnavailable(_)) => (),
                 Err(error) => return Err(error),

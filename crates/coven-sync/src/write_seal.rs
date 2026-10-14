@@ -1,5 +1,6 @@
 //! The database-to-envelope stream; no write body is collected here.
 
+use crate::key_introductions::{newest, CopyObservation, Wait};
 use crate::SyncError;
 use coven_crypto::{DerivedKeys, MemberId, MemberKeys, ObjectHasher, StoreKeyring};
 use coven_database::{DbError, StoreLog, WaitingUpload};
@@ -33,27 +34,16 @@ pub(crate) fn derive(
     })
 }
 
-/// The store key for a first attempt; see [`current`].
-pub(crate) fn current_store(log: &StoreLog, ring: &StoreKeyring) -> Result<KeyId, SyncError> {
-    current_key(log, ring, &Audience::Store, None)
-}
-
-/// The key for a first attempt: the newest acceptable introduction of the
-/// audience, once held. Copies that expose a key are not consulted here.
-pub(crate) fn current(
+/// The key for a first attempt (§11): Appendix C12 selection over this pass's
+/// complete copy observation. A member who has left a circle still sends its
+/// pre-removal writes with the newest key it holds there (§14.6); that exposes
+/// no new circle data to it.
+pub(crate) fn first_attempt(
     log: &StoreLog,
+    observation: &CopyObservation,
     ring: &StoreKeyring,
-    audience: &Audience,
     member: &MemberId,
-) -> Result<KeyId, SyncError> {
-    current_key(log, ring, audience, Some(member))
-}
-
-fn current_key(
-    log: &StoreLog,
-    ring: &StoreKeyring,
     audience: &Audience,
-    member: Option<&MemberId>,
 ) -> Result<KeyId, SyncError> {
     let state = &log.replay.state;
     match audience {
@@ -65,42 +55,58 @@ fn current_key(
         }
         _ => {}
     }
-    let needed = crate::key_introductions::needed(log);
     let introductions = crate::key_introductions::introductions(log);
-    // An existing audience has its kept creation's introduction. When every
-    // introduction has conflicting commitments, the newest one names the wait.
-    let selected = match crate::key_introductions::newest(log, audience) {
-        Some(key) => key,
-        None => {
-            introductions
+    let copies = match observation {
+        CopyObservation::Complete(copies) => Some(
+            copies
                 .iter()
-                .rev()
-                .find(|introduction| &introduction.audience == audience)
-                .ok_or(DbError::DamagedDatabase)?
-                .key
-        }
+                .map(|copy| copy.prefix.clone())
+                .collect::<Vec<_>>(),
+        ),
+        CopyObservation::Incomplete(damage) => return Err(SyncError::Damaged(damage.clone())),
     };
-    if crate::key_introductions::accepted(Some(ring), &needed, audience, selected) {
-        return Ok(selected);
+    let waiting = |key: Option<KeyId>| match key {
+        Some(key) => SyncError::KeyUnavailable(key),
+        None => DbError::DamagedDatabase.into(),
+    };
+    match crate::key_introductions::select(
+        &introductions,
+        state,
+        member,
+        copies.as_deref(),
+        crate::key_introductions::held_hash(Some(ring)),
+        audience,
+    ) {
+        Ok(key) => Ok(key),
+        Err(Wait::Listing) => unreachable!("complete observation"),
+        Err(Wait::Key) => Err(waiting(newest(log, audience))),
+        Err(Wait::Membership) => match audience {
+            Audience::Store => Err(SyncError::Removed),
+            Audience::Circle(_) => readable_key(log, ring, audience),
+        },
     }
-    // A former circle member still writes its earlier readable history (§14.3).
-    // Select the newest held, accepted introduction, never UUID order.
-    if matches!((audience, member), (Audience::Circle(circle), Some(member)) if !state.circles[circle].members.contains(member))
-    {
-        for introduction in introductions.iter().rev() {
-            if &introduction.audience == audience
-                && crate::key_introductions::accepted(
-                    Some(ring),
-                    &needed,
-                    audience,
-                    introduction.key,
-                )
-            {
-                return Ok(introduction.key);
-            }
-        }
-    }
-    Err(SyncError::KeyUnavailable(selected))
+}
+
+/// The newest key of an audience this device holds and accepts, for reading.
+/// Unlock needs a readable store key; this never decides a first attempt.
+pub(crate) fn readable_key(
+    log: &StoreLog,
+    ring: &StoreKeyring,
+    audience: &Audience,
+) -> Result<KeyId, SyncError> {
+    let needed = crate::key_introductions::needed(log);
+    crate::key_introductions::introductions(log)
+        .iter()
+        .rev()
+        .find(|i| {
+            &i.audience == audience
+                && crate::key_introductions::accepted(Some(ring), &needed, audience, i.key)
+        })
+        .map(|i| i.key)
+        .ok_or_else(|| match newest(log, audience) {
+            Some(key) => SyncError::KeyUnavailable(key),
+            None => DbError::DamagedDatabase.into(),
+        })
 }
 
 pub(crate) fn check_member(
@@ -141,17 +147,19 @@ pub(crate) fn select(
     header: &WriteHeaderFrame,
     ring: &StoreKeyring,
     member: &MemberKeys,
+    observation: &CopyObservation,
 ) -> Result<WriteObjectPrefix, SyncError> {
     check_member(log, member, header.header.position.device)?;
     check_upload_version(log, schema)?;
-    let store_key = current_store(log, ring)?;
+    let me = member.member_id();
+    let store_key = first_attempt(log, observation, ring, &me, &Audience::Store)?;
     Ok(WriteObjectPrefix {
         format: coven_format::FormatVersion::CURRENT,
         store_key,
         part_keys: header
             .parts
             .iter()
-            .map(|part| current(log, ring, &part.audience, &member.member_id()))
+            .map(|part| first_attempt(log, observation, ring, &me, &part.audience))
             .collect::<Result<_, _>>()?,
     })
 }

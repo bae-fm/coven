@@ -2,11 +2,12 @@
 //! commitments (§11, Appendix C12).
 
 use coven_crypto::{MemberId, SealingPublicKey, StoreKeyring};
-use coven_database::StoreLog;
+use coven_database::{StoreLog, StoreLogState};
 use coven_format::{sealed_key::KeyCopyPrefix, store_log::StoreChange, value::EntryId};
 use coven_foundation::id_source::KeyId;
 use coven_merge::Audience;
 use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex};
 
 /// Only store creation, circle creation and rotation introduce keys (D6 tags 0, 6, 15).
 pub(crate) fn introduction(change: &StoreChange) -> Option<(Audience, KeyId, [u8; 32])> {
@@ -83,8 +84,7 @@ pub(crate) fn needed(log: &StoreLog) -> BTreeMap<(Audience, KeyId), [u8; 32]> {
 }
 
 /// The newest acceptable introduction of an audience, whether or not this
-/// device holds it yet. Each entry introduces at most one key, so its entry's
-/// timestamp alone orders them; the key-id tiebreak never applies.
+/// device holds it or it is exposed. This names a wait; it never selects.
 pub(crate) fn newest(log: &StoreLog, audience: &Audience) -> Option<KeyId> {
     let needed = needed(log);
     introductions(log)
@@ -137,6 +137,136 @@ pub(crate) fn accepted(
             .circle_key(*circle, key)
             .is_ok_and(|held| held.check_hash(hash).is_ok()),
     })
+}
+
+/// A pass's observation of the key-copy logs (§11): every copy's clear
+/// prefix, or the failure that left it incomplete. Only a complete one can
+/// start first attempts; a stale one never substitutes.
+#[derive(Clone, Debug)]
+pub(crate) enum CopyObservation {
+    Complete(Vec<crate::store_log_keys::ObservedCopy>),
+    Incomplete(crate::DamagedObject),
+}
+
+impl CopyObservation {
+    pub(crate) fn new(
+        copies: Vec<crate::store_log_keys::ObservedCopy>,
+        damages: Vec<crate::DamagedObject>,
+    ) -> Self {
+        match damages.into_iter().next() {
+            None => Self::Complete(copies),
+            Some(damage) => Self::Incomplete(damage),
+        }
+    }
+}
+
+/// The current pass's copy observation, shared by every owner that sends in
+/// that pass. Outside a pass there is none, so a sender observes afresh.
+#[derive(Clone, Default)]
+pub(crate) struct PassObservation(Arc<Mutex<Option<CopyObservation>>>);
+
+impl PassObservation {
+    pub(crate) fn record(&self, observation: CopyObservation) {
+        *self.0.lock().expect("pass observation lock poisoned") = Some(observation);
+    }
+
+    pub(crate) fn clear(&self) {
+        self.0
+            .lock()
+            .expect("pass observation lock poisoned")
+            .take();
+    }
+
+    pub(crate) fn current(&self) -> Option<CopyObservation> {
+        self.0
+            .lock()
+            .expect("pass observation lock poisoned")
+            .clone()
+    }
+}
+
+/// Why no key can start a first attempt (Appendix C12 `Wait`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Wait {
+    /// This pass has no complete copy observation.
+    Listing,
+    /// The sending member is outside the audience.
+    Membership,
+    /// No held, accepted and unexposed key exists: rotate or wait for a copy.
+    Key,
+}
+
+/// Appendix C12 `belongs`: a current member of the store, or of the circle.
+pub(crate) fn belongs(state: &StoreLogState, audience: &Audience, member: &MemberId) -> bool {
+    crate::effects::member(state, member).is_some()
+        && match audience {
+            Audience::Store => true,
+            Audience::Circle(circle) => crate::effects::circle(state, *circle)
+                .is_some_and(|circle| circle.members.contains(member)),
+        }
+}
+
+/// Appendix C12 `exposed`: a listed copy of the key addressed to someone outside
+/// its audience, or to a sealing credential that is not its member's current
+/// one (§11). Such a box cannot be opened to check it, so a forged one counts
+/// too; at worst it costs a rotation.
+pub(crate) fn exposed(
+    state: &StoreLogState,
+    copies: &[KeyCopyPrefix],
+    audience: &Audience,
+    key: KeyId,
+) -> bool {
+    copies.iter().any(|copy| {
+        &copy.audience == audience
+            && copy.key == key
+            && (!belongs(state, audience, &copy.member)
+                || state
+                    .members
+                    .get(&copy.member)
+                    .is_none_or(|member| member.sealing != copy.sealing))
+    })
+}
+
+/// Appendix C12 `select`: for a first attempt by `me`, the newest held key whose
+/// hash matches its agreed commitment and that no listed copy exposes, by its
+/// introduction's timestamp. An exposed key is never a fallback. `held` gives
+/// the hash of material in custody for an audience and key id.
+pub(crate) fn select(
+    introductions: &[Introduction],
+    state: &StoreLogState,
+    me: &MemberId,
+    copies: Option<&[KeyCopyPrefix]>,
+    held: impl Fn(&Audience, KeyId) -> Option<[u8; 32]>,
+    audience: &Audience,
+) -> Result<KeyId, Wait> {
+    let copies = copies.ok_or(Wait::Listing)?;
+    if !belongs(state, audience, me) {
+        return Err(Wait::Membership);
+    }
+    introductions
+        .iter()
+        .rev()
+        .find(|i| {
+            &i.audience == audience
+                && held(audience, i.key)
+                    .is_some_and(|hash| hash_for(introductions, audience, i.key) == Some(hash))
+                && !exposed(state, copies, audience, i.key)
+        })
+        .map(|i| i.key)
+        .ok_or(Wait::Key)
+}
+
+/// The hash of material this device holds for an audience's key.
+pub(crate) fn held_hash(
+    ring: Option<&StoreKeyring>,
+) -> impl Fn(&Audience, KeyId) -> Option<[u8; 32]> + '_ {
+    move |audience, key| {
+        let ring = ring?;
+        match audience {
+            Audience::Store => ring.store_key(key).ok().map(|held| held.hash()),
+            Audience::Circle(circle) => ring.circle_key(*circle, key).ok().map(|held| held.hash()),
+        }
+    }
 }
 
 #[cfg(test)]

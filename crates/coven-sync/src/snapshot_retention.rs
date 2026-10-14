@@ -22,7 +22,7 @@ impl StoreLogSync {
         let storage = self.storage.as_deref().ok_or(SyncError::NoStorage)?;
         let local = self.database.local_store_log().await?;
         self.check_stopped(&local, &self.operation_member()?)?;
-        let readable: BTreeSet<_> = self.snapshot_audiences(&local.log)?.into_keys().collect();
+        let readable = self.snapshot_audiences(&local.log)?;
         let mut coverage = BTreeMap::new();
         let mut superseded = Vec::new();
         let mut pinned = BTreeSet::new();

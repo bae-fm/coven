@@ -221,6 +221,9 @@ async fn concurrent_circle_removal_keeps_deletion_entry_only() {
     transfer(&a, &b).await;
     step(&mut a, deletion).await.unwrap(); // fix deletion against the original members
     finish(&mut b, removal).await;
+    // Carol's copy exposes the circle key; Ben's pass replaces it before the
+    // first attempt of his earlier write (§11).
+    b.sync.rotate_exposed_keys().await.unwrap();
     transfer(&b, &a).await;
     assert_eq!(count(&a).await, 2);
     finish(&mut a, deletion).await;

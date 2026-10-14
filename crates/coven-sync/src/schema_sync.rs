@@ -44,7 +44,7 @@ impl StoreLogSync {
         }
         if let Some(audience) = self
             .snapshot_audiences(&local.log)?
-            .into_keys()
+            .into_iter()
             .find(|a| !schema_in_place(&local.log.replay.state, a, version))
         {
             return Ok(Progress::Waiting(PendingReason::Waits(
@@ -95,7 +95,7 @@ impl StoreLogSync {
         }
         let mut audiences: Vec<_> =
             super::snapshots::audiences_for_member(&local.log, &device.member)?
-                .into_keys()
+                .into_iter()
                 .collect();
         // The store raise releases writes, so publish the readable circles first.
         audiences.sort_by_key(|a| matches!(a, Audience::Store));
@@ -161,6 +161,14 @@ impl StoreLogSync {
             self.database.finish_operation(record.id).await?;
             return Ok(Progress::Finished(Output::Unit));
         }
+        let observed = crate::store_log_keys::observe(
+            &self.database,
+            &self.reads,
+            self.download_limit,
+            self.storage.as_deref().ok_or(SyncError::NoStorage)?,
+            local.store,
+        )
+        .await?;
         let record = record.clone();
         self.database
             .prepare_operation_entry(
@@ -173,7 +181,7 @@ impl StoreLogSync {
                         entry,
                         ring.as_ref(),
                         &member,
-                        &[],
+                        &observed,
                     )?;
                     data.set_entry(Some(entry.clone()))?;
                     Ok::<_, SyncError>((sealed, data.update(&record, data.entry_step_number(1))?))

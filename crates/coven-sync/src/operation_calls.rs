@@ -83,12 +83,13 @@ impl StoreLogSync {
                 let member = self.operation_member()?;
                 self.check_stopped(&local, &member)?;
                 let ring = self.store_keys.read()?;
-                crate::write_seal::current_store(
+                crate::write_seal::readable_key(
                     &local.log,
                     ring.as_ref().ok_or(SyncError::KeyUnavailable(
                         crate::key_introductions::newest(&local.log, &coven_merge::Audience::Store)
                             .ok_or(SyncError::NoStorage)?,
                     ))?,
+                    &coven_merge::Audience::Store,
                 )?;
                 return Ok(Begun::Value(Output::Unit));
             }

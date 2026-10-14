@@ -62,6 +62,10 @@ impl Storage for BudgetStorage {
         path: &ObjectPath,
         range: Option<ByteRange>,
     ) -> Result<coven_storage::ObjectRead, StorageError> {
+        // A sender reads each small key copy whole for its copy observation.
+        if path.key_copy_position().is_some() {
+            return self.provider.read_object(path, range).await;
+        }
         let range = range.expect("write download must use bounded ranges");
         self.check(range.len() as usize);
         self.provider.read_object(path, Some(range)).await

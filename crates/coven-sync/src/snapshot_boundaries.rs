@@ -35,7 +35,7 @@ impl StoreLogSync {
         let mut saved = Vec::new();
         let boundaries: Vec<_> = log
             .boundaries()
-            .filter(|boundary| readable.contains_key(&boundary.snapshot().audience))
+            .filter(|boundary| readable.contains(&boundary.snapshot().audience))
             .collect();
         if boundaries.is_empty() {
             return Ok(saved);

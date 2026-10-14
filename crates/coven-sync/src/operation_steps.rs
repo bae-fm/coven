@@ -133,19 +133,14 @@ impl StoreLogSync {
                 return Ok(Progress::Advanced);
             };
             crate::store_log_keys::check_shared_keys(&local.log, &change, &ring)?;
-            let mut damages = Vec::new();
-            let observed = crate::store_log_keys::read_copies(
+            let observed = crate::store_log_keys::observe(
                 &self.database,
                 &self.reads,
                 self.download_limit,
                 self.storage.as_deref().ok_or(SyncError::NoStorage)?,
                 local.store,
-                &mut damages,
             )
             .await?;
-            if let Some(damaged) = damages.into_iter().next() {
-                return Err(damaged.into());
-            }
             let record = record.clone();
             self.database
                 .prepare_operation_entry(member.member_id(), change, move |log, entry, copies| {

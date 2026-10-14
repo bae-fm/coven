@@ -34,7 +34,10 @@ impl StoreLogSync {
             .store_keys
             .read()?
             .ok_or(SyncError::KeyUnavailable(newest))?;
-        let key_id = crate::write_seal::current_store(&local.log, &ring)?;
+        // The clock object carries only this device's id, which no key
+        // protects from members; any readable store key serves (§9).
+        let key_id =
+            crate::write_seal::readable_key(&local.log, &ring, &coven_merge::Audience::Store)?;
         let key = ring.store_key(key_id)?;
         let path = ObjectPath::clock(local.store, local.device);
         let prefix = coven_format::sealed_single::SingleChunkPrefix::ClockObservation(key_id);

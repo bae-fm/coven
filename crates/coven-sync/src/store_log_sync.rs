@@ -19,6 +19,18 @@ use coven_storage::{ObjectPath, Storage, StorageFailure};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
+/// One pass: shared reads and the key-copy observation that its senders use.
+pub(crate) struct PassScope {
+    _reads: crate::pass_reads::ReadScope,
+    copies: crate::key_introductions::PassObservation,
+}
+
+impl Drop for PassScope {
+    fn drop(&mut self) {
+        self.copies.clear();
+    }
+}
+
 /// Owns store-log, key and snapshot synchronization capabilities (§20.2).
 /// Calls require exclusive access so one install never authors or applies two
 /// entries concurrently through this owner. The database also checks stale replay.
@@ -30,6 +42,7 @@ pub struct StoreLogSync {
     /// checks its write misses against them (§15).
     finality: Arc<std::sync::Mutex<crate::finality::Observation>>,
     reads: crate::pass_reads::PassReads,
+    copies: crate::key_introductions::PassObservation,
     storage: Option<Arc<dyn Storage>>,
     database: Database,
     store_keys: Arc<KeySession<StoreKeyring>>,
@@ -60,6 +73,7 @@ impl StoreLogSync {
             download_limit: std::num::NonZeroUsize::MIN,
             finality: Arc::default(),
             reads: crate::pass_reads::PassReads::default(),
+            copies: Default::default(),
             storage: Some(storage),
             database,
             store_keys,
@@ -86,6 +100,7 @@ impl StoreLogSync {
             download_limit: std::num::NonZeroUsize::MIN,
             finality: Arc::default(),
             reads: crate::pass_reads::PassReads::default(),
+            copies: Default::default(),
             storage: None,
             database,
             store_keys,
@@ -104,14 +119,43 @@ impl StoreLogSync {
 
     /// Share metadata and checked references with device-log downloads until
     /// this pass ends. Standalone calls retain their own scoped reads.
-    pub(crate) fn begin_pass(
-        &self,
-        writes: &mut crate::DeviceLogSync,
-    ) -> crate::pass_reads::ReadScope {
+    /// Share this pass's reads and its key-copy observation with the sender.
+    /// Ending the pass discards the observation; nothing after it reuses it.
+    pub(crate) fn begin_pass(&self, writes: &mut crate::DeviceLogSync) -> PassScope {
         writes.share_reads(self.reads.clone());
         writes.share_observation(self.finality.clone());
         writes.set_download_limit(self.download_limit);
-        self.reads.enter()
+        writes.share_copies(self.copies.clone());
+        self.copies.clear();
+        PassScope {
+            _reads: self.reads.enter(),
+            copies: self.copies.clone(),
+        }
+    }
+
+    /// Tests drive owners without a pass; let their sends use the last reading.
+    #[cfg(test)]
+    pub(crate) fn share_copies(&self, writes: &mut crate::DeviceLogSync) {
+        writes.share_copies(self.copies.clone());
+    }
+
+    /// This pass's complete copy observation, or a fresh one outside a pass.
+    pub(crate) async fn copy_observation(
+        &self,
+    ) -> Result<crate::key_introductions::CopyObservation, SyncError> {
+        match self.copies.current() {
+            Some(observation) => Ok(observation),
+            None => {
+                keys::observe(
+                    &self.database,
+                    &self.reads,
+                    self.download_limit,
+                    self.storage.as_deref().ok_or(SyncError::NoStorage)?,
+                    self.directory.id(),
+                )
+                .await
+            }
+        }
     }
 
     /// Publish entries, replay downloads, acquire keys and resume snapshot work.
@@ -166,19 +210,14 @@ impl StoreLogSync {
             }
         }
         keys::check_shared_keys(&local.log, &change, &ring)?;
-        let mut damages = Vec::new();
-        let observed = keys::read_copies(
+        let observed = keys::observe(
             &self.database,
             &self.reads,
             self.download_limit,
             self.storage.as_deref().ok_or(SyncError::NoStorage)?,
             local.store,
-            &mut damages,
         )
         .await?;
-        if let Some(damaged) = damages.into_iter().next() {
-            return Err(damaged.into());
-        }
         let author = member.clone();
         let id = self
             .database
@@ -493,15 +532,27 @@ impl StoreLogSync {
             return Ok(());
         }
         let storage = self.storage.as_deref().ok_or(SyncError::NoStorage)?;
+        let mut copy_damages = Vec::new();
         let copies = keys::read_copies(
             &self.database,
             &self.reads,
             self.download_limit,
             storage,
             self.directory.id(),
-            damages,
+            &mut copy_damages,
         )
         .await?;
+        // The latest complete reading in a pass is what its senders select with.
+        self.copies
+            .record(crate::key_introductions::CopyObservation::new(
+                copies.clone(),
+                copy_damages.clone(),
+            ));
+        for damage in copy_damages {
+            if !damages.iter().any(|known| known.path == damage.path) {
+                damages.push(damage);
+            }
+        }
         for (audience, key) in needs.keys().cloned() {
             if !crate::key_introductions::accepted(ring.as_ref(), &needs, &audience, key) {
                 tracing::debug!(?audience, ?key, "historical key has not arrived");
@@ -620,3 +671,6 @@ mod store_log_batch;
 
 #[path = "key_acquisition.rs"]
 mod key_acquisition;
+
+#[path = "key_rotation.rs"]
+mod key_rotation;

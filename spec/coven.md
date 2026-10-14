@@ -3440,6 +3440,11 @@ Carol's tablet:
     miss, together with the complete histories of drained writers.
   - If no usable key exists, rotate or wait for its sealed copy, recording
     the first unmet condition. Never use a known exposed key as a fallback.
+  - This selection governs app data: writes and snapshots. Store-log entries,
+    positions and clock objects carry membership and sync metadata, not app
+    data; they are sealed with the newest store key this device holds and
+    accepts, so removal and rotation entries can always be authored. Storage
+    revocation keeps them from removed members (§13).
 - Every kept Replace member keys entry exposes the preceding sealing
   credential from its recorded view, regardless of why keys changed. Copies
   to that credential retire their audience keys even though the member stays

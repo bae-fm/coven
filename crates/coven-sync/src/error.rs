@@ -244,7 +244,7 @@ impl From<CryptoError> for SyncError {
 }
 
 /// An object whose checks failed (§19.1).
-#[derive(Debug, thiserror::Error)]
+#[derive(Clone, Debug, thiserror::Error)]
 #[error("damaged object at {path}: {failure}")]
 pub struct DamagedObject {
     /// The exact path read from storage.

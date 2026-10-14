@@ -222,7 +222,7 @@ impl Device {
         let custody = Arc::new(KeySession::store(Arc::new(InMemoryCustody::empty())).unwrap());
         let identity =
             Arc::new(KeySession::member(Arc::new(InMemoryCustody::new(member.clone()))).unwrap());
-        let writes = crate::DeviceLogSync::new(
+        let mut writes = crate::DeviceLogSync::new(
             storage.clone(),
             db.clone(),
             custody.clone(),
@@ -238,6 +238,7 @@ impl Device {
             ids.clone(),
             directory.clone(),
         );
+        sync.share_copies(&mut writes);
         Self {
             storage,
             sync,
@@ -278,6 +279,7 @@ impl Device {
             self.ids.clone(),
             self.directory.clone(),
         );
+        self.sync.share_copies(&mut self.writes);
     }
 
     pub(crate) async fn operation(

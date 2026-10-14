@@ -107,10 +107,14 @@ impl StoreLogSync {
             },
             SyncError::KeyUnavailable(key) => {
                 let local = self.database.local_store_log().await?;
+                // A key without a received introduction is a store key: an
+                // entry or object header sealed with a rotation this device
+                // has not opened yet. Circle keys are named only by writes whose
+                // recorded past, with the circle key's introduction, arrived.
                 let audience = crate::key_introductions::introductions(&local.log)
                     .into_iter()
                     .find_map(|i| (i.key == *key).then_some(i.audience))
-                    .ok_or(coven_database::DbError::DamagedDatabase)?;
+                    .unwrap_or(Audience::Store);
                 PendingReason::KeyUnavailable {
                     audience,
                     key: *key,

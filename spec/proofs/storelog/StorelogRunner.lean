@@ -45,6 +45,28 @@ private def copiesJson (input : StorelogJson.Input) (self : Nat)
         hashJson p.bytes]
     | none => Json.null)
 
+private def waitNumber : CurrentKeys.Wait → Nat
+  | .listing => 0
+  | .membership => 1
+  | .key => 2
+
+/-- C12 `firstAttempt` with the identity hash, for each requested audience:
+`select` over `receivedIntroductions` and the resolved state, as `firstAttempt`
+unfolds, with the author views computed once per history. -/
+private def selectJson (input : StorelogJson.Input) (views : Nat → State) (self : Nat)
+    (listing : CurrentKeys.Listing) (held : List CurrentKeys.Payload)
+    (audiences : List Audience) (subset : List Nat) : Json :=
+  let H := input.history
+  let is := CurrentKeys.introductions H.log views
+    ((List.range input.bound).filter (entrySet subset))
+  let state := (ReplayPolicy.materialize H.membership input.window input.bound input.bound
+    (entrySet subset) views).state
+  toJson (audiences.map fun audience =>
+    match CurrentKeys.select id is state self listing held audience with
+    | .use i => Json.mkObj [("use", Json.arr #[toJson (audienceNumber i.audience),
+        toJson i.key.id])]
+    | .pending reason => Json.mkObj [("pending", toJson (waitNumber reason))])
+
 private def run (j : Json) : Except String Json := do
   let input ← StorelogJson.read j
   let H := input.history
@@ -52,6 +74,19 @@ private def run (j : Json) : Except String Json := do
   if (← j.getObj?).contains "checks" then
     let checks ← j.getObjValAs? (Array Nat) "checks"
     return toJson (checks.map fun T => Horizon.recovered H.membership window input.bound T)
+  if (← j.getObj?).contains "select" then
+    let views ← StorelogJson.checkedViews input
+    let received ← StorelogJson.received j input
+    let self ← j.getObjValAs? Nat "self"
+    let listing ← match j.getObjVal? "listing" with
+      | .ok .null | .error _ => pure CurrentKeys.Listing.incomplete
+      | .ok copies => do
+        let copies ← (← copies.getArr?).mapM readCopy
+        pure (CurrentKeys.Listing.complete copies.toList)
+    let held ← (← j.getObjValAs? (Array Json) "held").mapM fun payload => do
+      pure (⟨← readKeyId payload, ← readBytes payload "bytes"⟩ : CurrentKeys.Payload)
+    let audiences ← (← j.getObjValAs? (Array Json) "audiences").mapM readAudience
+    return toJson (received.map (selectJson input views self listing held.toList audiences.toList))
   if (← j.getObj?).contains "copies" then
     let _ ← StorelogJson.checkedViews input
     let received ← StorelogJson.received j input

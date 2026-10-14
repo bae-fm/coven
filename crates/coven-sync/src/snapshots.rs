@@ -9,10 +9,10 @@ use crate::{
 };
 use coven_database::{OperationRecord, StoreLog};
 use coven_format::{store_log::SnapshotId, value::WritePositions};
-use coven_foundation::id_source::{DeviceId, KeyId};
+use coven_foundation::id_source::DeviceId;
 use coven_merge::Audience;
 use coven_storage::{ObjectPath, ObjectPrefix};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroU64;
 
 #[path = "snapshot_boundaries.rs"]
@@ -47,7 +47,7 @@ impl StoreLogSync {
         }
         let local = self.database.local_store_log().await?;
         self.check_stopped(&local, &self.operation_member()?)?;
-        for audience in self.snapshot_audiences(&local.log)?.into_keys() {
+        for audience in self.snapshot_audiences(&local.log)? {
             let record = self
                 .start_snapshot_task(SnapshotJob::Write {
                     audience,
@@ -109,10 +109,14 @@ impl StoreLogSync {
             return Err(SyncError::ReloadPending(id));
         }
         let local = self.database.local_store_log().await?;
-        self.check_stopped(&local, &self.operation_member()?)?;
-        if !self.snapshot_audiences(&local.log)?.contains_key(&audience) {
+        let member = self.operation_member()?;
+        self.check_stopped(&local, &member)?;
+        if !self.snapshot_audiences(&local.log)?.contains(&audience) {
             return Err(SyncError::Rejected(coven_database::DropReason::NotAllowed));
         }
+        // A snapshot is new data in its audience: replace an exposed key first.
+        self.rotate_if_exposed(audience.clone(), &member.member_id())
+            .await?;
         let record = self
             .start_snapshot_task(SnapshotJob::Write {
                 audience: audience.clone(),
@@ -382,14 +386,24 @@ impl StoreLogSync {
             self.database.finish_operation(record.id).await?;
             return Ok(Progress::Finished(Output::Unit));
         }
-        let current = self.snapshot_audiences(log)?;
-        let key_id = *current
-            .get(&id.audience)
-            .ok_or(SyncError::Rejected(coven_database::DropReason::NotAllowed))?;
-        let ring = self
-            .store_keys
-            .read()?
-            .ok_or(SyncError::KeyUnavailable(key_id))?;
+        if !self.snapshot_audiences(log)?.contains(&id.audience) {
+            return Err(SyncError::Rejected(coven_database::DropReason::NotAllowed));
+        }
+        let ring = self.store_keys.read()?.ok_or_else(|| {
+            SyncError::KeyUnavailable(
+                crate::key_introductions::newest(log, &id.audience)
+                    .expect("readable audience has a key"),
+            )
+        })?;
+        // A snapshot's first upload is a first attempt in its audience (§11).
+        let observation = self.copy_observation().await?;
+        let key_id = crate::write_seal::first_attempt(
+            log,
+            &observation,
+            &ring,
+            &member.member_id(),
+            &id.audience,
+        )?;
         let key = io::key(&ring, &id.audience, key_id)?;
         let caught_at = self.catch_up_time().await?;
         let name = self
@@ -576,7 +590,7 @@ impl StoreLogSync {
     pub(super) fn snapshot_audiences(
         &self,
         log: &StoreLog,
-    ) -> Result<BTreeMap<Audience, KeyId>, SyncError> {
+    ) -> Result<BTreeSet<Audience>, SyncError> {
         audiences_for_member(log, &self.operation_member()?.member_id())
     }
 
@@ -625,26 +639,23 @@ impl StoreLogSync {
     }
 }
 
+/// The audiences a member can read and snapshot (§15). Which key seals each
+/// snapshot is chosen when sealing, under §11.
 pub(super) fn audiences_for_member(
     log: &StoreLog,
     member: &coven_crypto::MemberId,
-) -> Result<BTreeMap<Audience, KeyId>, SyncError> {
+) -> Result<BTreeSet<Audience>, SyncError> {
     let state = &log.replay.state;
-    let mut audiences = BTreeMap::new();
     if state.members.get(member).is_none_or(|m| m.removed) {
         return Err(SyncError::Rejected(coven_database::DropReason::NotAllowed));
     }
-    let mut include = |audience: Audience| {
-        if let Some(key) = crate::key_introductions::newest(log, &audience) {
-            audiences.insert(audience, key);
-        }
-    };
+    let mut audiences = BTreeSet::new();
     if state.store.is_some() {
-        include(Audience::Store);
+        audiences.insert(Audience::Store);
     }
     for (id, circle) in &state.circles {
         if !state.circle_deletions.contains_key(id) && circle.members.contains(member) {
-            include(Audience::Circle(*id));
+            audiences.insert(Audience::Circle(*id));
         }
     }
     Ok(audiences)

@@ -18,7 +18,7 @@ impl StoreLogSync {
             .list(&ObjectPrefix::files(self.directory.id()))
             .await?;
         let local = self.database.local_store_log().await?;
-        let readable: BTreeSet<_> = self.snapshot_audiences(&local.log)?.into_keys().collect();
+        let readable = self.snapshot_audiences(&local.log)?;
         let protected = self.database.retained_files().await?;
         if objects.is_empty() && !protected.uploads.iter().any(|upload| upload.unused) {
             return Ok(());

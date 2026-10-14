@@ -108,7 +108,7 @@ pub(crate) fn seal(
     entry: &StoreLogEntry,
     ring: Option<&StoreKeyring>,
     member: &MemberKeys,
-    observed: &[ObservedCopy],
+    observation: &crate::key_introductions::CopyObservation,
 ) -> Result<StoreLogSealing, SyncError> {
     if !crate::store_log_object::author_matches_device(log, entry) {
         return Err(SyncError::Rejected(coven_database::DropReason::NotAllowed));
@@ -136,8 +136,17 @@ pub(crate) fn seal(
         ring.ok_or(SyncError::KeyUnavailable(*key))?
             .store_key(*key)?
     } else {
-        let id = newest(log, &Audience::Store).expect("authorized entry has a store key");
-        ring.ok_or(SyncError::KeyUnavailable(id))?.store_key(id)?
+        let ring = ring.ok_or_else(|| {
+            SyncError::KeyUnavailable(
+                newest(log, &Audience::Store).expect("authorized entry has a store key"),
+            )
+        })?;
+        // Entries are membership records, not app data: they use the newest
+        // readable store key, so removal and rotation entries can always be
+        // authored. Withholding app data from excluded members is §11's
+        // first-attempt selection, applied to writes and snapshots.
+        let id = crate::write_seal::readable_key(log, ring, &Audience::Store)?;
+        ring.store_key(id)?
     };
     let ring = ring.expect("entry holds its encryption key");
     let shared = needed(log);
@@ -215,6 +224,10 @@ pub(crate) fn seal(
         }
         _ => (),
     }
+    let observed = match observation {
+        crate::key_introductions::CopyObservation::Complete(copies) => copies.as_slice(),
+        crate::key_introductions::CopyObservation::Incomplete(_) => &[],
+    };
     for prefix in needs {
         // A copy to another of the member's sealing keys does not stand in.
         if observed.iter().any(|copy| copy.prefix == prefix) {
@@ -243,10 +256,27 @@ pub(crate) fn seal(
 }
 
 /// A decoded copy observation. The recipient still has to authenticate its box.
+#[derive(Clone, Debug)]
 pub(crate) struct ObservedCopy {
     pub path: ObjectPath,
     pub prefix: KeyCopyPrefix,
     pub bytes: Vec<u8>,
+}
+
+/// One complete observation of the key-copy logs, or the failure that left it
+/// incomplete (§11). A failed listing or read is returned as an error instead.
+pub(crate) async fn observe(
+    database: &coven_database::Database,
+    reads: &crate::pass_reads::PassReads,
+    limit: std::num::NonZeroUsize,
+    storage: &dyn coven_storage::Storage,
+    store: coven_foundation::id_source::StoreId,
+) -> Result<crate::key_introductions::CopyObservation, SyncError> {
+    let mut damages = Vec::new();
+    let copies = read_copies(database, reads, limit, storage, store, &mut damages).await?;
+    Ok(crate::key_introductions::CopyObservation::new(
+        copies, damages,
+    ))
 }
 
 pub(crate) async fn read_copies(

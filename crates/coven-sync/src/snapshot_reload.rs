@@ -34,7 +34,7 @@ impl StoreLogSync {
                 };
                 if let ReloadScope::Changed(changed) = scope {
                     let required = self.database.reloading_audiences().await?;
-                    audiences.retain(|audience, _| {
+                    audiences.retain(|audience| {
                         changed.contains(audience) && required.contains(audience)
                     });
                 }
@@ -51,7 +51,7 @@ impl StoreLogSync {
                         .schema
                         .iter()
                         .find(|(audience, version)| {
-                            audiences.contains_key(audience) && version.number > schema
+                            audiences.contains(audience) && version.number > schema
                         })
                 {
                     return Err(SyncError::UpdateRequired(
@@ -78,7 +78,7 @@ impl StoreLogSync {
                 let mut highest = BTreeMap::new();
                 let mut unknown_empty = false;
                 let mut catalogs = Vec::new();
-                for audience in audiences.keys() {
+                for audience in &audiences {
                     catalogs.push((
                         audience,
                         self.current_snapshot_candidates(audience, &local.log, damages)
@@ -132,7 +132,7 @@ impl StoreLogSync {
                     positions.iter().flat_map(|p| &p.0).chain(&required.0),
                 );
                 let stuck = crate::pending_logs::local_refusals(&self.database).await?;
-                let readable = readable.into_keys().collect();
+                let readable = readable.into_iter().collect();
                 let storage = self.storage.as_deref().ok_or(SyncError::NoStorage)?;
                 let mut replays = ReplayCache::new(&local.log);
                 let mut needed = Vec::new();

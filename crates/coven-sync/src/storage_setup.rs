@@ -51,7 +51,7 @@ impl StoreLogSync {
             let key = crate::key_introductions::newest(&local.log, &Audience::Store)
                 .ok_or(coven_storage::StorageFailure::NotFound)?;
             let selected = match self.store_keys.read()? {
-                Some(ring) => crate::write_seal::current_store(&local.log, &ring),
+                Some(ring) => crate::write_seal::readable_key(&local.log, &ring, &Audience::Store),
                 None => Err(SyncError::KeyUnavailable(key)),
             };
             match selected {
@@ -133,9 +133,11 @@ impl StoreLogSync {
                 };
                 let author = member.clone();
                 let ring = StoreKeyring::new(key);
+                // Creation seals with its own fresh key; no copy can expose it yet.
+                let observed = crate::key_introductions::CopyObservation::Complete(Vec::new());
                 self.database
                     .prepare_store_log(member.member_id(), change, move |log, entry, copies| {
-                        keys::seal(copies, log, entry, Some(&ring), &author, &[])
+                        keys::seal(copies, log, entry, Some(&ring), &author, &observed)
                     })
                     .await?;
                 local = self.database.local_store_log().await?;
@@ -269,13 +271,21 @@ impl StoreLogSync {
                     Some(_) => {}
                     None => {
                         let author = member.clone();
-                        let keys = ring.clone();
+                        let held = ring.clone();
+                        let observed = keys::observe(
+                            &self.database,
+                            &self.reads,
+                            self.download_limit,
+                            storage.as_ref(),
+                            store_id,
+                        )
+                        .await?;
                         self.database
                             .prepare_store_log(
                                 member.member_id(),
                                 change,
                                 move |log, entry, copies| {
-                                    keys::seal(copies, log, entry, Some(&keys), &author, &[])
+                                    keys::seal(copies, log, entry, Some(&held), &author, &observed)
                                 },
                             )
                             .await?;

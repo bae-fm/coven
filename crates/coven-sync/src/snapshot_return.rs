@@ -65,7 +65,7 @@ impl StoreLogSync {
         let state = self.database.sync_state(Vec::new()).await?;
         let mut damages = Vec::new();
         let mut advances = false;
-        for audience in self.snapshot_audiences(&local.log)?.into_keys() {
+        for audience in self.snapshot_audiences(&local.log)? {
             let catalog = self
                 .current_snapshot_candidates(&audience, &local.log, &mut damages)
                 .await?;

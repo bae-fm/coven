@@ -744,8 +744,11 @@ received authorized introductions and agreed commitments with
 late, beaten, unauthorized and conflicting introductions. Its copies mode
 compares Rust's per-copy acceptance with `acceptedCopy`, using the identity
 hash on bytes: copies to this member or another, unopened, committed, other
-bytes and another identity. Key selection and cryptographic operations are not
-compared.
+bytes and another identity. Its select mode compares Rust's first-attempt
+selection with `select` as `firstAttempt` applies it to the received
+introductions and resolved state, for complete and incomplete listings, copies
+to members and outsiders, and committed and other held bytes. Cryptographic
+operations are not compared.
 
 ### C13 Stable members and replaceable keys — checked proposal
 

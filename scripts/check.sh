@@ -289,6 +289,7 @@ proofs() {
             store_log_sync::store_log_batch::tests::lean_differential_batch_partitions \
             key_introductions::tests::lean_differential_introductions \
             key_introductions::tests::lean_differential_accepted_copies \
+            key_introductions::tests::lean_differential_first_attempts \
             finality::tests::lean_differential_finality_horizon; do
             if ! printf '%s\n' "$storelog_tests" | grep -qxF "$test: test"; then
                 echo "the Rust test binary is missing $test" >&2

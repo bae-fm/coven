@@ -213,7 +213,14 @@ async fn conflicting_commitments_reject_acquisition() {
     let ring = ana.custody.read().unwrap().unwrap();
     assert!(keys::holds(Some(&ring), &Audience::Store, key(3)));
     assert_eq!(
-        crate::write_seal::current_store(&ana.log().await, &ring).unwrap(),
+        crate::write_seal::first_attempt(
+            &ana.log().await,
+            &ana.sync.copy_observation().await.unwrap(),
+            &ring,
+            &ana.member.member_id(),
+            &Audience::Store,
+        )
+        .unwrap(),
         key(1)
     );
 }
@@ -569,6 +576,273 @@ fn lean_differential_accepted_copies() {
                     results[n + 1],
                     project(&log),
                     "order {order:?}, prefix {}",
+                    n + 1
+                );
+            }
+        }
+    }
+}
+
+/// Ana creates the store and admits Ben and Dan; Ana rotates the store key to
+/// `older`, then Ben rotates it to `newer`, whose id sorts first.
+fn rotations(older: &coven_crypto::StoreKey, newer: &coven_crypto::StoreKey) -> StoreLog {
+    let mut h = History::new();
+    h.all(0, 0, history::add(1, MemberRole::Admin));
+    h.all(1, 1, history::device(1));
+    h.all(0, 0, history::add(2, MemberRole::Member));
+    for (author, device, material) in [(0, 0, older), (1, 1, newer)] {
+        h.all(
+            author,
+            device,
+            StoreChange::RotateKey {
+                audience: Audience::Store,
+                key: material.id(),
+                key_hash: material.hash(),
+            },
+        );
+    }
+    landed_log(&h, &vec![0; h.entries.len()])
+}
+
+#[test]
+fn selection_takes_the_newest_held_unexposed_key() {
+    let older = coven_crypto::StoreKey::generate(history::key(20)).unwrap();
+    let newer = coven_crypto::StoreKey::generate(history::key(10)).unwrap();
+    let log = rotations(&older, &newer);
+    let introductions = introductions(&log);
+    let state = &log.replay.state;
+    let mut ring = coven_crypto::StoreKeyring::new(older.clone());
+    ring.insert_store_key(newer.clone()).unwrap();
+    let ana = history::member(0);
+    let select = |copies: Option<&[KeyCopyPrefix]>, ring: &coven_crypto::StoreKeyring, me| {
+        select(
+            &introductions,
+            state,
+            me,
+            copies,
+            held_hash(Some(ring)),
+            &Audience::Store,
+        )
+    };
+    // The newest introduction wins, whatever its id.
+    assert_eq!(select(Some(&[]), &ring, &ana), Ok(history::key(10)));
+    // A copy addressed outside the audience exposes it; the older key remains.
+    let outside = KeyCopyPrefix {
+        audience: Audience::Store,
+        key: history::key(10),
+        member: history::member(7),
+        sealing: history::keys(7).sealing,
+    };
+    assert_eq!(
+        select(Some(std::slice::from_ref(&outside)), &ring, &ana),
+        Ok(history::key(20))
+    );
+    // A copy to a current member's current credential exposes nothing; one
+    // to another of that member's sealing keys does.
+    let inside = KeyCopyPrefix {
+        member: history::member(2),
+        sealing: history::keys(2).sealing,
+        ..outside.clone()
+    };
+    assert_eq!(
+        select(Some(std::slice::from_ref(&inside)), &ring, &ana),
+        Ok(history::key(10))
+    );
+    let noncurrent = KeyCopyPrefix {
+        sealing: history::keys(3).sealing,
+        ..inside.clone()
+    };
+    assert_eq!(
+        select(Some(std::slice::from_ref(&noncurrent)), &ring, &ana),
+        Ok(history::key(20))
+    );
+    // Held bytes that miss the commitment never supply the key.
+    let mut forged = coven_crypto::StoreKeyring::new(older.clone());
+    forged
+        .insert_store_key(coven_crypto::StoreKey::generate(history::key(10)).unwrap())
+        .unwrap();
+    assert_eq!(select(Some(&[]), &forged, &ana), Ok(history::key(20)));
+    // No fallback to an exposed key, and no selection without an observation
+    // or outside the audience.
+    let both = [
+        outside.clone(),
+        KeyCopyPrefix {
+            key: history::key(20),
+            ..outside
+        },
+    ];
+    assert_eq!(select(Some(&both), &ring, &ana), Err(Wait::Key));
+    assert_eq!(select(None, &ring, &ana), Err(Wait::Listing));
+    assert_eq!(
+        select(Some(&[]), &ring, &history::member(7)),
+        Err(Wait::Membership)
+    );
+}
+
+#[test]
+#[ignore = "requires COVEN_STORELOG_LEAN, supplied by scripts/check.sh"]
+fn lean_differential_first_attempts() {
+    use crate::tests::{audience_number, key_number};
+    let audiences = [
+        Audience::Store,
+        Audience::Circle(history::circle(0)),
+        Audience::Circle(history::circle(1)),
+        Audience::Circle(history::circle(3)),
+    ];
+    let mut cases = Vec::new();
+    // Every listing and holder is replayed for each received prefix in Lean;
+    // the handcrafted histories and a third of the generated ones bound the run.
+    let histories = introduction_histories();
+    let handcrafted = histories.len() - 48;
+    for (index, (h, stored)) in histories.into_iter().enumerate() {
+        if index >= handcrafted && !(index - handcrafted).is_multiple_of(3) {
+            continue;
+        }
+        let log = landed_log(&h, &stored);
+        let all = introductions(&log);
+        // Custody holds one material per key: the latest commitment's, plus
+        // other bytes under one id.
+        let mut held: Vec<(Audience, KeyId, [u8; 32])> = Vec::new();
+        for i in all.iter().rev() {
+            if !held.iter().any(|(a, k, _)| *a == i.audience && *k == i.key) {
+                held.push((i.audience.clone(), i.key, i.key_hash));
+            }
+        }
+        if let Some(first) = all.first() {
+            held.push((first.audience.clone(), history::key(997), [0xee; 32]));
+            held.retain(|(_, key, _)| *key != history::key(10) || all.len().is_multiple_of(2));
+        }
+        let to = |recipient: u8| -> Vec<KeyCopyPrefix> {
+            all.iter()
+                .map(|i| KeyCopyPrefix {
+                    audience: i.audience.clone(),
+                    key: i.key,
+                    member: history::member(recipient),
+                    sealing: history::keys(recipient).sealing,
+                })
+                .collect()
+        };
+        let newest_to_outsider: Vec<_> = all.last().map_or(Vec::new(), |i| {
+            vec![KeyCopyPrefix {
+                audience: i.audience.clone(),
+                key: i.key,
+                member: history::member(7),
+                sealing: history::keys(7).sealing,
+            }]
+        });
+        for me in [0, 1] {
+            for listing in [
+                None,
+                Some(Vec::new()),
+                Some(to(1)),
+                Some(to(2)),
+                Some(newest_to_outsider.clone()),
+                Some(to(7)),
+            ] {
+                cases.push((h.clone(), stored.clone(), me, listing, held.clone()));
+            }
+        }
+    }
+    let member_number =
+        |id: &coven_crypto::MemberId| (0..8).find(|&i| history::member(i) == *id).unwrap() as u64;
+    let inputs: Vec<_> = cases
+        .iter()
+        .map(|(h, stored, me, listing, held)| {
+            let mut input = crate::tests::input(
+                h,
+                stored,
+                &crate::tests::received_prefixes(&crate::tests::orders(h)),
+            );
+            input["select"] = serde_json::json!(true);
+            input["self"] = serde_json::json!(me);
+            input["listing"] = listing.as_ref().map_or(serde_json::Value::Null, |copies| {
+                copies
+                    .iter()
+                    .map(|copy| {
+                        serde_json::json!({
+                            "audience": audience_number(&copy.audience),
+                            "key": key_number(copy.key),
+                            "recipient": member_number(&copy.member),
+                        })
+                    })
+                    .collect()
+            });
+            input["held"] = held
+                .iter()
+                .map(|(audience, key, bytes)| {
+                    serde_json::json!({
+                        "audience": audience_number(audience),
+                        "key": key_number(*key),
+                        "bytes": bytes,
+                    })
+                })
+                .collect();
+            input["audiences"] = audiences
+                .iter()
+                .map(|audience| serde_json::json!({"audience": audience_number(audience)}))
+                .collect();
+            input
+        })
+        .collect();
+    let output = crate::tests::run_lean(
+        "COVEN_STORELOG_LEAN",
+        &serde_json::json!({"histories": inputs}),
+    );
+    assert!(
+        output.status.success(),
+        "Lean runner failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let actual: Vec<Vec<serde_json::Value>> = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(actual.len(), cases.len());
+    for ((h, stored, me, listing, held), results) in cases.iter().zip(actual) {
+        let publications = crate::tests::publication_times(h, stored);
+        let project = |log: &StoreLog| {
+            let introductions = introductions(log);
+            let held = |audience: &Audience, key: KeyId| {
+                held.iter()
+                    .find(|(a, k, _)| a == audience && *k == key)
+                    .map(|(_, _, hash)| *hash)
+            };
+            serde_json::Value::Array(
+                audiences
+                    .iter()
+                    .map(|audience| {
+                        match select(
+                            &introductions,
+                            &log.replay.state,
+                            &history::member(*me),
+                            listing.as_deref(),
+                            held,
+                            audience,
+                        ) {
+                            Ok(key) => serde_json::json!({
+                                "use": [audience_number(audience), key_number(key)]
+                            }),
+                            Err(wait) => serde_json::json!({"pending": match wait {
+                                Wait::Listing => 0,
+                                Wait::Membership => 1,
+                                Wait::Key => 2,
+                            }}),
+                        }
+                    })
+                    .collect(),
+            )
+        };
+        let orders = crate::tests::orders(h);
+        for (order, results) in orders.iter().zip(results.chunks_exact(h.entries.len() + 1)) {
+            let mut log = StoreLog::default();
+            assert_eq!(results[0], project(&log));
+            for (n, &i) in order.iter().enumerate() {
+                let (checked, replay) =
+                    crate::replay_entry(&log, h.entries[i].clone(), &publications);
+                log.entries.push(checked);
+                log.entries.sort_by_key(|applied| applied.entry.timestamp);
+                log.replay = replay;
+                assert_eq!(
+                    results[n + 1],
+                    project(&log),
+                    "self {me}, listing {listing:?}, order {order:?}, prefix {}",
                     n + 1
                 );
             }
