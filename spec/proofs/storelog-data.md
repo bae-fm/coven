@@ -170,7 +170,9 @@ first storage time and recorded store-log reads until its verdict is final.
 
 `CurrentExamples.entry_only_deletion_restores` checks §14.7's deletion and its
 reversal without a row write. `deleted_return_reloads` includes a circle that
-was absent before replay. `passed_position_does_not_lose_part` loads a formerly
+was absent before replay, provided a non-late creation was already applied.
+The [returning-circle proof](#returning-circles) establishes why that condition
+is sufficient. `passed_position_does_not_lose_part` loads a formerly
 skipped part even though its overall position already passed. Missing reload
 inputs retain the old data and positions, refuse circle writes and appear in
 the pending list. `stale_reload_keeps_positions` prevents an old prepared
@@ -536,20 +538,59 @@ unavailable input keeps the old rows and refuses writes, and inputs and reset
 suppressions are released only once every boundary entry of the audience is
 strictly before the horizon.
 
+## Returning circles
+
+**The narrower reload rule in [§14.4](../coven.md#144-writes) is proved safe.**
+`CurrentData.createdBefore` examines the device's applied entries before the
+batch, including dropped entries, and excludes creations permanently rejected
+by §9's storage-time rule. `needsReload` requires this evidence when a circle
+becomes readable. A creation need never have been kept by this receiver: a
+write author's recorded view can keep it while the receiver's view drops it.
+
+`CircleCreation.readable_has_kept_creation` follows the actual kept effects
+from the empty state, through `ReplayEffects.entry_fate`, and proves that a
+readable circle has a kept creation. It accounts for replay's removal of empty
+circles. `kept_not_too_late` proves that every kept entry passes permanent time
+admission in every replay, including a write's recorded view.
+
+`CurrentData.passed_part_has_creation` applies those results to a write's
+author-in-circle check and §7.1's prerequisite that the receiver has applied
+every entry in that write's recorded past. Thus every already passed authorized
+circle part implies `createdBefore`, regardless of whether the receiver opened
+or skipped it. `passed_part_return_reloads` proves that such a part forces a
+reload when the circle becomes readable.
+`no_reload_no_skipped_part` proves that if this newly readable circle needs no
+reload, no authorized part could have passed before the batch. This covers
+both a creation first received in the batch and an earlier creation that landed
+too late. No uniqueness assumption about circle creation ids is needed.
+
+`CircleReturnExamples` checks a dropped creation returning, creation and
+membership arriving together, and a creation landing at the inclusive deadline
+or one tick after it. A later creation of the same id checks that an earlier
+time-rejected creation cannot spuriously trigger a reload. The reader examples
+check that a fresh circle becomes writable without a reload, while an existing
+reload wait still blocks writes. The original deletion, convergence, atomic
+reload, failed-reload and stale-reload theorems remain checked.
+
+The result is about the newly readable transition. It assumes that passed
+writes satisfied their recorded-past and author-in-circle checks; it derives
+their creation dependency rather than assuming it. Authentication, complete
+write discovery, storage retrieval, SQL transactions and crashes remain outside
+this proof. Required unreadable parts still wait for their key, as modeled by
+`HistoricalKeys`. Schema/reset reload triggers remain unchanged and independent
+of `createdBefore`; their broader model approximation is outside this refinement.
+No counterexample to the narrower rule was found; the existing historical
+counterexamples remain in the package.
+
 The circle-return differential (Rust
 [`data_differential_circle_returns`](../../crates/coven-sync/src/snapshot_reload_tests.rs))
 replays checked histories in which a member leaves and rejoins, a deletion
-drops, and a creation drops and returns, in two arrival orders and three batch
-widths. After each batch `StorelogDataRunner` reports every member and circle
-for which `CurrentData.needsReload` holds, the property behind
-`deleted_return_reloads`, and whether the circle's creation had been received
-before that batch. Rust's `StoreLog::returning_circles` must name exactly the
-pairs whose creation had arrived earlier. The others are circles first
-received in that batch: every write with a part in a circle reads its
-creation, so no such part was skipped, and Rust neither reloads them nor
-refuses their first writes. The model's `needsReload` does not make this
-distinction. Rust also disregards a creation that landed too late, which no
-view keeps; these histories contain no late entry. The histories contain no raise or reset: `needsReload` also
+drops, a creation drops and returns, and a creation lands at or after its
+deadline, in two arrival orders and three batch widths. After each batch
+`StorelogDataRunner` reports exactly the member/circle pairs for which
+`CurrentData.needsReload` holds. Rust's `StoreLog::returning_circles` must name
+the same pairs, with no extra flag or filtering. The histories contain no
+raise or reset: `needsReload` also
 holds for every circle member whenever any audience's version or reset
 changes, while Rust rebuilds a changed audience from its retained inputs and
 reloads it only when they are incomplete. `scripts/check.sh` runs all

@@ -35,12 +35,9 @@ private def run (j : Json) : Except String Json := do
           toJson [StorelogJson.audienceNumber a, id.number]))])
   pure (toJson results)
 
-/-- §14.4: after each received batch, the members and circles for which
-`CurrentData.needsReload` holds between consecutive replay states, and whether
-the circle's creation had been received before that batch. Rust reloads only
-the latter: a write with a part in a circle reads its creation, so a circle
-whose creation arrives in the same batch has no skipped part. The compared
-histories make no raise or reset, so only circle readability decides. -/
+/-- §14.4: after each received batch, exactly the members and circles for
+which `CurrentData.needsReload` holds. The compared histories make no raise
+or reset, so only returning circle readability decides. -/
 private def reloads (j : Json) : Except String Json := do
   let input ← StorelogJson.read j
   let H := input.history
@@ -54,12 +51,10 @@ private def reloads (j : Json) : Except String Json := do
   let mut results := #[]
   for subset in received do
     let after := state subset
-    let created (c : Nat) : Bool := previous.any fun e => match (H.log e).action with
-      | .makeCircle d _ _ => d == c
-      | _ => false
     let pairs := after.circles.flatMap fun (c, circle) =>
-      (circle.members.eraseDups.filter fun m => CurrentData.needsReload before after m c).map
-        fun m => Json.arr #[toJson m, toJson c, toJson (created c)]
+      (circle.members.eraseDups.filter fun m =>
+        CurrentData.needsReload H input.window input.bound previous before after m c).map
+        fun m => Json.arr #[toJson m, toJson c]
     results := results.push (Json.arr pairs.toArray)
     before := after
     previous := subset

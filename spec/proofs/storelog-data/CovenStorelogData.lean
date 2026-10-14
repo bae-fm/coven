@@ -30,6 +30,8 @@ import CovenStorelogData.SecurityExamples
 import CovenStorelogData.StorageFinality
 import CovenStorelogData.ReplayEffects
 import CovenStorelogData.CurrentData
+import CovenStorelogData.CircleCreation
+import CovenStorelogData.CircleReturnExamples
 import CovenStorelogData.CurrentExamples
 import CovenStorelogData.KeyPhases
 import CovenStorelogData.HistoricalKeys

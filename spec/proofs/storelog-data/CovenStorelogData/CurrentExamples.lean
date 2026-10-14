@@ -32,7 +32,8 @@ theorem entry_only_deletion_restores :
     ((circleView [6]).losses DeliveryExamples.row none).isSome = true ∧
     (circleView [6, 5]).view.shown DeliveryExamples.row = true ∧
     (circleView [6, 5]).losses DeliveryExamples.row none = none ∧
-    CurrentData.needsReload (circleResult [6]).state (circleResult [6, 5]).state 0 0 = true := by
+    CurrentData.needsReload circleHistory 30 7 (List.range 5 ++ [6])
+      (circleResult [6]).state (circleResult [6, 5]).state 0 0 = true := by
   exact ⟨validCheck_sound _ _ (by decide), by decide⟩
 
 def snapshot : Snapshot (Fin 1) Unit := ⟨CovenMerge.St.init, [], [], []⟩

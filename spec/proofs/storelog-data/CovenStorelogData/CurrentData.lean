@@ -2,6 +2,7 @@ import CovenStorelogData.ReplayEffects
 import CovenStorelogData.EntryFate
 import CovenStorelogData.Pending
 import CovenStorelogData.LostValues
+import CovenStorelogData.CircleCreation
 
 /-! §9, §10, §14.4–7. Database projections retain their original inputs.
 A returning circle reloads from storage without treating passed positions as
@@ -48,15 +49,72 @@ theorem convergence {W Col K : Type}
   rw [CurrentReplay.equal_received H Wtime n A B sameEntries,
     CovenMerge.merge_converges valid hx hy sameWrites]
 
-def needsReload (before after : CovenStorelog.State) (m c : Nat) : Bool :=
-  inCircle after c m && (!inCircle before c m ||
+/-- An earlier applied creation counts even if replay dropped it, unless its
+time rejection is permanent. `received` is the device's log before the batch. -/
+def createdBefore (H : CurrentReplay.History) (Wtime n : Nat)
+    (received : List Nat) (c : Nat) : Bool :=
+  received.any fun e => !Finality.tooLate H.membership Wtime n (fun _ => true) e &&
+    match (H.membership.log e).action with
+    | .makeCircle d _ => d == c
+    | _ => false
+
+def needsReload (H : CurrentReplay.History) (Wtime n : Nat) (received : List Nat)
+    (before after : CovenStorelog.State) (m c : Nat) : Bool :=
+  inCircle after c m && ((!inCircle before c m && createdBefore H Wtime n received c) ||
     before.versions != after.versions || before.resets != after.resets)
 
-theorem deleted_return_reloads (before after : CovenStorelog.State) (m c : Nat)
+theorem deleted_return_reloads (H : CurrentReplay.History) (Wtime n : Nat)
+    (received : List Nat) (before after : CovenStorelog.State) (m c : Nat)
+    (created : createdBefore H Wtime n received c = true)
     (deleted : lookup before.circles c = none) (returned : inCircle after c m = true) :
-    needsReload before after m c = true := by
-  simp [needsReload, inCircle, deleted] at *
+    needsReload H Wtime n received before after m c = true := by
+  simp [needsReload, inCircle, deleted, created] at *
   exact returned
+
+/-- §14.5's author-in-circle check derives a creation from actual replay.
+§7.1 then puts that creation in the receiver's applied entries before the
+write can pass, even if the receiver's replay drops it. -/
+theorem passed_part_has_creation (H : CurrentReplay.History) (Wtime n : Nat)
+    (received : List Nat) (author : Author) (c : Nat)
+    (past : ∀ e ∈ author.entries, e ∈ received)
+    (allowed : inCircle (CurrentReplay.resolve H Wtime n (entrySet author.entries)).state
+      c author.member = true) :
+    createdBefore H Wtime n received c = true := by
+  obtain ⟨e, kept, name, action⟩ :=
+    CircleCreation.readable_has_kept_creation H Wtime n _ c author.member allowed
+  have timely := CircleCreation.kept_not_too_late H Wtime n _ e kept
+  have read := (CurrentReplay.kept_received H Wtime n _ e kept).2
+  apply List.any_eq_true.mpr
+  exact ⟨e, past e (by simpa [entrySet] using read), by simp [timely, action]⟩
+
+/-- At a newly readable circle, every previously passed authorized part
+forces a reload. This quantifies over any write's recorded author and past. -/
+theorem passed_part_return_reloads (H : CurrentReplay.History) (Wtime n : Nat)
+    (received : List Nat) (before after : CovenStorelog.State) (m c : Nat)
+    (author : Author) (past : ∀ e ∈ author.entries, e ∈ received)
+    (allowed : inCircle (CurrentReplay.resolve H Wtime n (entrySet author.entries)).state
+      c author.member = true)
+    (outside : inCircle before c m = false) (returned : inCircle after c m = true) :
+    needsReload H Wtime n received before after m c = true := by
+  simp [needsReload, outside, returned,
+    passed_part_has_creation H Wtime n received author c past allowed]
+
+/-- If a newly readable circle needs no reload, no authorized circle part
+could have passed before the batch, whether opened or skipped. -/
+theorem no_reload_no_skipped_part (H : CurrentReplay.History) (Wtime n : Nat)
+    (received : List Nat) (before after : CovenStorelog.State) (m c : Nat)
+    (outside : inCircle before c m = false) (returned : inCircle after c m = true)
+    (noReload : needsReload H Wtime n received before after m c = false)
+    (author : Author) (past : ∀ e ∈ author.entries, e ∈ received) :
+    inCircle (CurrentReplay.resolve H Wtime n (entrySet author.entries)).state
+      c author.member = false := by
+  cases allowed : inCircle (CurrentReplay.resolve H Wtime n (entrySet author.entries)).state
+      c author.member with
+  | false => rfl
+  | true =>
+    have reload := passed_part_return_reloads H Wtime n received before after m c
+      author past allowed outside returned
+    simp [noReload] at reload
 
 inductive CircleStatus where
   | available | outside | reloading (reason : Pending.Reason)
@@ -67,11 +125,15 @@ structure CircleReader (W Col : Type) where
   positions : List W
   status : CircleStatus
 
-def circleReplay {W Col : Type} (before after : CovenStorelog.State)
+def circleReplay {W Col : Type} (H : CurrentReplay.History) (Wtime n : Nat)
+    (received : List Nat) (before after : CovenStorelog.State)
     (m c : Nat) (reader : CircleReader W Col) : CircleReader W Col :=
-  if needsReload before after m c then
+  if needsReload H Wtime n received before after m c then
     { reader with status := .reloading (.waits (.reload (.circle c))) }
-  else if !inCircle after c m then { reader with status := .outside } else reader
+  else if !inCircle after c m then { reader with status := .outside }
+  else match reader.status with
+    | .outside => { reader with status := .available }
+    | _ => reader
 
 def writable {W Col : Type} (reader : CircleReader W Col) : Bool :=
   reader.status == .available

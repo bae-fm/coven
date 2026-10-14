@@ -4031,6 +4031,8 @@ Carol's tablet:
   arrives with the entries that make it readable has nothing skipped: every
   write with a part in it read that creation. Nor does a circle whose only
   earlier creation landed too late, since no view keeps that entry.
+  The [returning-circle proof](proofs/storelog-data.md#returning-circles)
+  derives both facts from replay and the write's recorded-past checks.
   - Do not use the device's overall passed positions as proof that it read
     those parts. Load the circle's usable snapshot and remaining history.
   - Align it with the other audiences at the common point in §15. Commit

@@ -237,13 +237,24 @@ mod histories {
         h
     }
 
+    /// The other installation misses Notes' creation. Gifts' first creation
+    /// lands at the deadline or past it; another creation names the same id.
+    pub(super) fn late_creation(landing: u64) -> (History, Vec<u64>) {
+        let mut h = History::new();
+        h.all(0, 0, device(1));
+        h.all(0, 0, make(1, "Notes"));
+        h.push(0, 1, &[0, 1], make(0, "Gifts"));
+        h.all(0, 0, make(0, "Gifts"));
+        (h, vec![0, 1, 2, landing, landing + 1])
+    }
+
     /// Each batch's prior log and resulting replay state.
     pub(super) fn transitions(
         h: &History,
+        stored: &[u64],
         batches: &[Vec<usize>],
     ) -> Vec<(StoreLog, StoreLogState)> {
-        let stored: Vec<_> = (0..h.entries.len() as u64).collect();
-        let publications = crate::tests::publication_times(h, &stored);
+        let publications = crate::tests::publication_times(h, stored);
         let mut log = StoreLog::default();
         let mut result = Vec::new();
         for batch in batches {
@@ -262,7 +273,8 @@ mod histories {
     }
 
     pub(super) fn returning(h: &History, batches: &[Vec<usize>], m: u8) -> Vec<BTreeSet<CircleId>> {
-        transitions(h, batches)
+        let stored: Vec<_> = (0..h.entries.len() as u64).collect();
+        transitions(h, &stored, batches)
             .iter()
             .map(|(before, after)| before.returning_circles(after, &member(m)))
             .collect()
@@ -312,10 +324,27 @@ fn returning_circles_need_an_earlier_creation_and_new_readability() {
     }
 }
 
+#[test]
+fn a_late_creation_cannot_make_another_creation_reload() {
+    use crate::replay::tests::{circle, member};
+    for landing in [32, 33] {
+        let (h, stored) = histories::late_creation(landing);
+        let batches = histories::singles(&[0, 1, 2, 3, 4]);
+        let transitions = histories::transitions(&h, &stored, &batches);
+        let (before, after) = &transitions[4];
+        assert_eq!(before.entries[3].check.landed_too_late(), landing == 33);
+        assert_eq!(
+            before.replay.state.reads_circle(circle(0), &member(0)),
+            landing == 32
+        );
+        assert!(after.reads_circle(circle(0), &member(0)));
+        assert!(before.returning_circles(after, &member(0)).is_empty());
+    }
+}
+
 /// Compare each batch's returning circles with `CurrentData.needsReload`
-/// (§14.4) over the same checked histories. Lean also reports circles whose
-/// creation arrives in that batch, which have no skipped part; Rust reloads
-/// exactly the others.
+/// (§14.4) over the same checked histories, including creations first received
+/// in the batch, which have no skipped part and need no reload.
 #[test]
 #[ignore = "requires COVEN_STORELOG_DATA_LEAN, supplied by scripts/check.sh"]
 fn data_differential_circle_returns() {
@@ -323,12 +352,18 @@ fn data_differential_circle_returns() {
     use serde_json::{json, Value};
     let mut inputs = Vec::new();
     let mut expected = Vec::new();
-    for h in [
+    let histories = [
         histories::rejoin(),
         histories::deletion(),
         histories::creation(),
-    ] {
-        let stored: Vec<_> = (0..h.entries.len() as u64).collect();
+    ]
+    .into_iter()
+    .map(|h| {
+        let stored = (0..h.entries.len() as u64).collect();
+        (h, stored)
+    })
+    .chain([histories::late_creation(32), histories::late_creation(33)]);
+    for (h, stored) in histories {
         for order in orders(&h) {
             for width in [1, 2, h.entries.len()] {
                 let batches: Vec<Vec<usize>> = order.chunks(width).map(<[usize]>::to_vec).collect();
@@ -339,7 +374,7 @@ fn data_differential_circle_returns() {
                     received.push(all.clone());
                 }
                 let mut results = Vec::new();
-                for (before, after) in histories::transitions(&h, &batches) {
+                for (before, after) in histories::transitions(&h, &stored, &batches) {
                     let mut pairs = Vec::new();
                     for m in 0..5 {
                         for circle in
@@ -363,24 +398,19 @@ fn data_differential_circle_returns() {
     );
     let actual: Vec<Vec<Vec<Value>>> = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(actual.len(), expected.len());
-    let (mut reloads, mut new_circles) = (0, 0);
+    let mut reloads = 0;
     for ((actual, expected), input) in actual.iter().zip(&expected).zip(&inputs) {
         assert_eq!(actual.len(), expected.len(), "circle returns: {input}");
         for (lean, rust) in actual.iter().zip(expected) {
-            let mut skipped: Vec<_> = lean
-                .iter()
-                .filter(|pair| pair[2] == json!(true))
-                .map(|pair| json!([pair[0], pair[1]]))
-                .collect();
-            new_circles += lean.len() - skipped.len();
-            reloads += skipped.len();
+            let mut lean = lean.clone();
+            reloads += lean.len();
             let mut rust = rust.clone();
-            skipped.sort_by_key(Value::to_string);
+            lean.sort_by_key(Value::to_string);
             rust.sort_by_key(Value::to_string);
-            assert_eq!(skipped, rust, "circle returns: {input}");
+            assert_eq!(lean, rust, "circle returns: {input}");
         }
     }
-    assert!(reloads > 0 && new_circles > 0);
+    assert!(reloads > 0);
 }
 
 #[test]
