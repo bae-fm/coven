@@ -1,6 +1,7 @@
 import CovenQueue.Checked
 import CovenQueue.RowMerge
 import CovenQueue.RaiseProgress
+import CovenQueue.Conversion
 import Lean
 
 /-! JSON adapter for the queue differentials. Inputs are checked records in
@@ -99,9 +100,21 @@ private def receive (j : Json) : Except String Json := do
   let cols ← j.getObjValAs? Nat "columns"
   for w in snapshot ++ received do
     if w ≥ records.size then throw "write index outside the history"
+  let conversion ← match j.getObjValD "conversion" with
+    | .null => pure none
+    | c => do
+      let convert ← c.getObjValAs? Bool "convert"
+      pure (some (⟨← c.getObjValAs? Nat "version",
+        if convert then some id else none⟩ : Conversion))
   if good : dataOK records then
-    let h := recordHistory records
-    let valid := checkedData records good
+    let original := recordHistory records
+    let checked := checkedData records good
+    -- A selected raise's receive rule interprets late records first (§17.1).
+    let interpreted : (h : History) ×' DataValid h := match conversion with
+      | some c => ⟨receivedHistory c view original checked, receivedValid c view original checked⟩
+      | none => ⟨original, checked⟩
+    let h := interpreted.1
+    let valid := interpreted.2
     let start := snapshot.foldl (step (mergeInput h valid view)) St.init
     let st := mergeRows h valid view start received
     let changes := received.flatMap fun w => (changeResults h valid view w).map fun (ch, answer) =>

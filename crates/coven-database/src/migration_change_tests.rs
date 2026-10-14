@@ -460,3 +460,210 @@ async fn invalid_conversions_report_typed_causes_and_commit_nothing() {
         case.close().await;
     }
 }
+
+mod data_sources {
+    //! Ben's late old-schema writes 9 and 10 after a raise (§17.1): the data
+    //! rule runs on original changes before any converter (E13).
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    const NOTES: &str =
+        "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,title TEXT NOT NULL,body TEXT NOT NULL)";
+    fn tables() -> Vec<SyncedTable> {
+        vec![SyncedTable::new("notes", RowIdentity::SharedKey)]
+    }
+    fn initial() -> Migration {
+        Migration::sql(1, "notes", NOTES)
+    }
+    fn rename(
+        version: u32,
+        from: &'static str,
+        to: &'static str,
+        calls: Option<Arc<AtomicUsize>>,
+    ) -> Migration {
+        let sql: &'static str =
+            Box::leak(format!("ALTER TABLE notes RENAME COLUMN {from} TO {to}").into_boxed_str());
+        let migration = Migration::sql(version, "rename", sql);
+        match calls {
+            Some(calls) => migration.writes(move |row| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                row.rename_column(from, to);
+                Ok(())
+            }),
+            None => migration,
+        }
+    }
+    async fn open(store: &TestStore, migrations: Vec<Migration>) -> Database {
+        store.builder(tables(), migrations).open().await.unwrap()
+    }
+    async fn names(db: &Database, column: &'static str) -> Vec<(String, String)> {
+        db.read(move |sql| {
+            Ok(sql.query(
+                &format!("SELECT id,{column} FROM notes ORDER BY id"),
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?)
+        })
+        .await
+        .unwrap()
+    }
+    fn source(write: &WriteRecord, id: &str) -> crate::ChangeSource {
+        crate::ChangeSource {
+            write: write.header.position,
+            table: "notes".into(),
+            key: RowKey(vec![types::Value::Text(id.into())]),
+            audience: coven_merge::Audience::Store,
+        }
+    }
+
+    /// Ben's 9 creates a note and is excluded before any converter exists;
+    /// his 10 edits that note and renames an unrelated playlist. With the
+    /// converter, 10's note edit is a frozen dependency loss naming 9 and its
+    /// playlist rename converts and applies; the callback never sees the note.
+    #[tokio::test]
+    async fn a_change_built_on_an_excluded_write_stays_frozen_beside_a_converted_one() {
+        for setter_only in [false, true] {
+            let ids = SequentialIds::new();
+            let (ben_store, receiver_store) =
+                (TestStore::with_ids(&ids), TestStore::with_ids(&ids));
+            let ben = ben_store.schema(tables(), NOTES).await.unwrap();
+            sql(
+                &ben,
+                "INSERT INTO notes VALUES('p','playlist','b'),('n','covered note','b')",
+            )
+            .await
+            .unwrap();
+            if setter_only {
+                // 9 replaces the covered note's title: its generation survives.
+                sql(&ben, "UPDATE notes SET title='excluded title' WHERE id='n'")
+                    .await
+                    .unwrap();
+            } else {
+                sql(&ben, "DELETE FROM notes WHERE id='n'").await.unwrap();
+                sql(&ben, "INSERT INTO notes VALUES('n','new note','b')")
+                    .await
+                    .unwrap();
+            }
+            ben.write(|sql| {
+                sql.execute("UPDATE notes SET title='edited' WHERE id='n'", [])?;
+                sql.execute("UPDATE notes SET title='renamed playlist' WHERE id='p'", [])?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+            let writes = records(&ben);
+            // The receiver applied Ben's first write before its app migrated;
+            // the kept raise covers it.
+            let receiver = open(&receiver_store, vec![initial()]).await;
+            receiver.receive(writes[0].clone().into()).await.unwrap();
+            receiver.close().await.unwrap();
+            let receiver = open(
+                &receiver_store,
+                vec![initial(), rename(2, "title", "name", None)],
+            )
+            .await;
+            receiver.exclude_later_writes(2).await;
+            for write in &writes[1..writes.len() - 1] {
+                receiver.receive(write.clone().into()).await.unwrap();
+            }
+            receiver.close().await.unwrap();
+            let calls = Arc::new(AtomicUsize::new(0));
+            let receiver = open(
+                &receiver_store,
+                vec![initial(), rename(2, "title", "name", Some(calls.clone()))],
+            )
+            .await;
+            let ten = writes.last().unwrap();
+            assert_eq!(
+                receiver.receive(ten.clone().into()).await.unwrap(),
+                ApplyOutcome::Applied
+            );
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+            let note = if setter_only {
+                vec![source(&writes[1], "n")]
+            } else {
+                vec![source(&writes[2], "n"), source(&writes[2], "n")]
+            };
+            let dependency = receiver
+                .lost_values()
+                .await
+                .unwrap()
+                .into_iter()
+                .filter_map(|loss| match loss.replaced_by {
+                    Replacement::DataDependency { write, sources } => Some((write, sources)),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(dependency, [(ten.header.position, note)]);
+            // Neither excluded write applied: the covered note keeps its value.
+            let rows = names(&receiver, "name").await;
+            assert_eq!(
+                rows,
+                [
+                    ("n".to_owned(), "covered note".to_owned()),
+                    ("p".to_owned(), "renamed playlist".to_owned())
+                ]
+            );
+            // Reopening keeps the committed interpretation.
+            receiver.close().await.unwrap();
+            let receiver = open(
+                &receiver_store,
+                vec![initial(), rename(2, "title", "name", Some(calls.clone()))],
+            )
+            .await;
+            assert_eq!(names(&receiver, "name").await, rows);
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+            receiver.close().await.unwrap();
+            ben.close().await.unwrap();
+        }
+    }
+
+    /// A late write converts through every raise between its version and the
+    /// winning one, in version order; a covered write never reaches a callback.
+    #[tokio::test]
+    async fn repeated_raises_convert_in_version_order_and_skip_covered_writes() {
+        let ids = SequentialIds::new();
+        let (ben_store, receiver_store) = (TestStore::with_ids(&ids), TestStore::with_ids(&ids));
+        let ben = ben_store.schema(tables(), NOTES).await.unwrap();
+        sql(&ben, "INSERT INTO notes VALUES('n','covered','b')")
+            .await
+            .unwrap();
+        sql(&ben, "UPDATE notes SET title='late'").await.unwrap();
+        // An empty delete still converts as a delete of its row.
+        sql(&ben, "DELETE FROM notes").await.unwrap();
+        let mut writes = records(&ben);
+        writes[2].parts[0].rows[0].old.clear();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let receiver = open(&receiver_store, vec![initial()]).await;
+        receiver.receive(writes[0].clone().into()).await.unwrap();
+        receiver.close().await.unwrap();
+        let receiver = open(
+            &receiver_store,
+            vec![
+                initial(),
+                rename(2, "title", "heading", Some(calls.clone())),
+                rename(3, "heading", "name", Some(calls.clone())),
+            ],
+        )
+        .await;
+        receiver.exclude_later_writes(3).await;
+        assert_eq!(
+            receiver.receive(writes[0].clone().into()).await.unwrap(),
+            ApplyOutcome::AlreadyApplied
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        receiver.receive(writes[1].clone().into()).await.unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            names(&receiver, "name").await,
+            [("n".into(), "late".into())]
+        );
+        receiver.receive(writes[2].clone().into()).await.unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 4);
+        assert!(names(&receiver, "name").await.is_empty());
+        assert!(receiver.lost_values().await.unwrap().is_empty());
+        receiver.close().await.unwrap();
+        ben.close().await.unwrap();
+    }
+}

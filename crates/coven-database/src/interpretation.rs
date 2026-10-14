@@ -60,54 +60,43 @@ pub(crate) fn interpret(
         if record.header.disposition == WriteDisposition::Migration {
             continue;
         }
-        let originals: Vec<_> = part.rows.iter().map(|row| row.row.clone()).collect();
         // The part's direct admission before its changes' sources are followed.
-        let mut verdict =
+        let verdict =
             crate::write_boundary::WriteBoundary::part_verdict(&boundaries, &record.header, &part);
-        let mut converted = false;
-        if let Some(ChangeVerdict::Excluded(version)) = verdict {
-            if record.header.disposition == WriteDisposition::Apply
-                && crate::migration_receive::available(
-                    &schema.conversions,
-                    record.header.schema_version,
-                    version,
-                )
-            {
-                crate::migration_receive::convert(
-                    &schema.conversions,
-                    record.header.schema_version,
-                    version,
-                    &mut part,
-                )?;
-                verdict = None;
-                converted = true;
-            }
-        }
+        // A late old-schema part the winning raise's converters reach is a
+        // candidate for admission at that version; without them it is excluded.
+        let converts = match verdict {
+            Some(ChangeVerdict::Excluded(version)) => crate::migration_receive::available(
+                &schema.conversions,
+                record.header.schema_version,
+                version,
+            )
+            .then_some(version),
+            _ => None,
+        };
         match verdict {
             // A reset ignores the whole part, dismissals included, with no
             // loss; its position still passes (§19.3).
             Some(ChangeVerdict::Ignored(entry)) => {
-                for row in &originals {
+                for row in &part.rows {
                     crate::write_sources::admit(
                         database,
                         &record.header,
-                        row,
+                        &row.row,
                         &ChangeVerdict::Ignored(entry),
                     )?;
                 }
                 continue;
             }
-            // A schema change keeps each original change as a frozen loss (§17.1).
-            Some(ChangeVerdict::Excluded(version)) => {
-                for row in &originals {
+            // Without a converter, each original change is a frozen schema loss (§17.1).
+            Some(ChangeVerdict::Excluded(version)) if converts.is_none() => {
+                for change in &part.rows {
                     crate::write_sources::admit(
                         database,
                         &record.header,
-                        row,
+                        &change.row,
                         &ChangeVerdict::Excluded(version),
                     )?;
-                }
-                for change in &part.rows {
                     freeze(
                         database,
                         schema,
@@ -129,17 +118,16 @@ pub(crate) fn interpret(
             }
             _ => {}
         }
-        if converted {
-            for row in &originals {
-                crate::write_sources::admit(
-                    database,
-                    &record.header,
-                    row,
-                    &ChangeVerdict::Applied,
-                )?;
-            }
-        } else {
-            part.rows = classify(database, schema, &record.header, part.rows)?;
+        // Sources are resolved on the original changes; a dependent one stays
+        // frozen in its original shape and never reaches a converter (E13).
+        part.rows = classify(database, schema, &record.header, part.rows)?;
+        if let Some(version) = converts {
+            crate::migration_receive::convert(
+                &schema.conversions,
+                record.header.schema_version,
+                version,
+                &mut part,
+            )?;
         }
         crate::download_checks::part(schema, &part)?;
         kept.push(part);

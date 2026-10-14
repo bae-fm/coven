@@ -587,11 +587,24 @@ setters, cell setters and ordinary cell losses, and requires every position to
 be consumed. Snapshot evidence, conversion and replay rebuilds have their own
 families; scalar values, encryption and store-log selection are inputs.
 
-Run it with:
+Given a selected raise and its `Conversion`, the runner first interprets the
+history with `receivedHistory` and `receivedValid` (`receive`, `rebuild`),
+then reports `classifyChange` and `mergeRows` on that interpretation.
+`queue_conversion_differential_histories` generates 48 raise histories, each
+with and without a converter: a receiver that applied the covered prefix
+before its app migrated holds a kept raise to version 2 covering it, then
+receives late old-schema writes and new-schema writes. Authors who migrated
+may still hold their own late old-schema data, so changes built on excluded
+writes occur. Both schema-excluded and dependency losses must occur, and the
+same verdicts, frozen causes and rows are compared
+(`converted_change_matches_receiver`, `rows_and_losses_converge`). The callback
+is the identity here; renamed columns and references are Rust-tested.
+
+Run them with:
 
 ```sh
 COVEN_QUEUE_LEAN="$PWD/spec/proofs/queue/.lake/build/bin/queueRunner" \
-  cargo test -p coven-database queue_reset_differential_histories -- --ignored --nocapture
+  cargo test -p coven-database queue_ -- --ignored --nocapture
 ```
 
 The runner's raise mode drives one device's queue through app writes,

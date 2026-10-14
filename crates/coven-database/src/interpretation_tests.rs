@@ -81,19 +81,28 @@ fn merge_write(record: &WriteRecord) -> Write<Scalar> {
     }
 }
 
+/// The boundary the covered prefix ends at: a kept reset, or a kept raise to
+/// version 2 whose migration does or does not supply a converter.
+#[derive(Clone, Copy, Debug)]
+enum Kind {
+    Reset,
+    Raise { convert: bool },
+}
+
 /// Original records in timestamp order, the snapshot's covered prefix and the
-/// kept reset entry every later author may or may not have read.
+/// kept boundary every later author may or may not have read.
 #[derive(Clone)]
 struct QueueHistory {
     writes: Vec<WriteRecord>,
     covered: BTreeSet<WriteId>,
+    kind: Kind,
 }
 
 impl QueueHistory {
     /// Authors observe their whole causal past. One that read the reset may
     /// not have reloaded yet: then it still sees ignored pre-reset data and its
     /// changes can use it as sources (§19.3).
-    fn generate(rng: &mut Generator) -> Self {
+    fn generate(rng: &mut Generator, kind: Kind) -> Self {
         let mut writes = Vec::<WriteRecord>::new();
         let mut numbers = BTreeMap::<DeviceId, u64>::new();
         let mut header = |device: u64, ms: u64| {
@@ -139,22 +148,45 @@ impl QueueHistory {
                     past.extend(full_past(&previous.header));
                 }
             }
-            let reads_reset = rng.pick(2) == 0
-                || writes.iter().any(|w| {
-                    past.contains(&w.header.position) && w.header.store_log_read.covers(RESET)
-                });
-            if reads_reset {
-                past.extend(covered.iter().copied());
-                write.header.store_log_read = EntryPositions(vec![RESET]);
-            }
-            let reloaded = reads_reset && rng.pick(2) == 0;
-            // A reloaded author ignores unread pre-reset changes and freezes
-            // every change using them, as receivers do; one that has not
-            // reloaded still holds that data.
+            // A reset reader may not have reloaded yet; a migrated author has
+            // reloaded from the raise, and an older app cannot read new writes.
+            let reloaded = match kind {
+                Kind::Reset => {
+                    let reads_reset = rng.pick(2) == 0
+                        || writes.iter().any(|w| {
+                            past.contains(&w.header.position)
+                                && w.header.store_log_read.covers(RESET)
+                        });
+                    if reads_reset {
+                        past.extend(covered.iter().copied());
+                        write.header.store_log_read = EntryPositions(vec![RESET]);
+                    }
+                    reads_reset && rng.pick(2) == 0
+                }
+                Kind::Raise { .. } => {
+                    let migrated = rng.pick(2) == 0
+                        || writes.iter().any(|w| {
+                            past.contains(&w.header.position) && w.header.schema_version == 2
+                        });
+                    if migrated {
+                        past.extend(covered.iter().copied());
+                        write.header.schema_version = 2;
+                    }
+                    // A migrated author whose own raise lost still holds its
+                    // own late old-schema data until it reloads.
+                    migrated && rng.pick(2) == 0
+                }
+            };
+            // A reloaded author drops what receivers drop and freezes every
+            // change using it, as receivers do; one that has not reloaded
+            // still holds that data.
             let mut kept = BTreeSet::new();
             for w in writes.iter().filter(|w| past.contains(&w.header.position)) {
-                let ignored =
-                    !covered.contains(&w.header.position) && !w.header.store_log_read.covers(RESET);
+                let ignored = !covered.contains(&w.header.position)
+                    && match kind {
+                        Kind::Reset => !w.header.store_log_read.covers(RESET),
+                        Kind::Raise { convert } => w.header.schema_version < 2 && !convert,
+                    };
                 for change in w.parts.iter().flat_map(|p| &p.rows) {
                     let sources = change
                         .sources
@@ -215,7 +247,11 @@ impl QueueHistory {
             }];
             writes.push(write);
         }
-        Self { writes, covered }
+        Self {
+            writes,
+            covered,
+            kind,
+        }
     }
 
     fn index(&self, id: WriteId) -> usize {
@@ -270,9 +306,25 @@ impl QueueHistory {
             .filter(|(_, w)| self.covered.contains(&w.header.position))
             .map(|(i, _)| i)
             .collect();
-        json!({"mode": "receive", "writes": writes,
-            "reset": {"entry": 1, "covers": self.covered.iter().map(|p| [p.device.0, p.number]).collect::<Vec<_>>()},
-            "raise": Value::Null, "drops": [], "snapshot": snapshot,
+        let covers: Vec<_> = self
+            .covered
+            .iter()
+            .map(|p| [p.device.0, p.number])
+            .collect();
+        let (reset, raise, conversion) = match self.kind {
+            Kind::Reset => (
+                json!({"entry": 1, "covers": covers}),
+                Value::Null,
+                Value::Null,
+            ),
+            Kind::Raise { convert } => (
+                Value::Null,
+                json!({"entry": 2, "covers": covers, "version": 2}),
+                json!({"version": 2, "convert": convert}),
+            ),
+        };
+        json!({"mode": "receive", "writes": writes, "reset": reset, "raise": raise,
+            "conversion": conversion, "drops": [], "snapshot": snapshot,
             "received": received.iter().map(|id| self.index(*id)).collect::<Vec<_>>(),
             "rows": rows.len(), "columns": COLUMNS.len()})
     }
@@ -426,6 +478,9 @@ async fn install_reset(db: &Database) {
 /// The real receiver: a reset reload from the covered prefix, then the
 /// uncovered writes either inside that reload or received afterwards.
 async fn rust_result(history: &QueueHistory, received: &[WriteId], streamed: bool) -> Value {
+    if let Kind::Raise { convert } = history.kind {
+        return raise_result(history, received, convert).await;
+    }
     let ids = SequentialIds::new();
     let source_store = TestStore::with_ids(&ids);
     let target_store = TestStore::with_ids(&ids);
@@ -481,6 +536,51 @@ async fn rust_result(history: &QueueHistory, received: &[WriteId], streamed: boo
     );
     let result = observed(&target, history, received);
     source.close().await.unwrap();
+    target.close().await.unwrap();
+    result
+}
+
+/// The real receiver of a kept raise: it applied the covered prefix before its
+/// app migrated, then receives the uncovered writes through §17.1's rule.
+async fn raise_result(history: &QueueHistory, received: &[WriteId], convert: bool) -> Value {
+    let store = TestStore::new();
+    let target = store.schema(tables(), SCHEMA).await.unwrap();
+    for write in history
+        .writes
+        .iter()
+        .filter(|w| history.covered.contains(&w.header.position))
+    {
+        target.receive(write.clone().into()).await.unwrap();
+    }
+    target.close().await.unwrap();
+    let mut raise = crate::Migration::sql(2, "index", "CREATE INDEX rows_a ON rows(a)");
+    if convert {
+        raise = raise.writes(|_| Ok(()));
+    }
+    let target = store
+        .builder(
+            tables(),
+            vec![crate::Migration::sql(1, "rows", SCHEMA), raise],
+        )
+        .open()
+        .await
+        .unwrap();
+    target.exclude_later_writes(2).await;
+    for id in received {
+        assert_eq!(
+            target
+                .receive(history.writes[history.index(*id)].clone().into())
+                .await
+                .unwrap(),
+            ApplyOutcome::Applied
+        );
+    }
+    let positions = target.sync_state(Vec::new()).await.unwrap().positions;
+    assert!(history
+        .writes
+        .iter()
+        .all(|w| positions.covers(w.header.position)));
+    let result = observed(&target, history, received);
     target.close().await.unwrap();
     result
 }
@@ -553,12 +653,15 @@ fn observed(db: &Database, history: &QueueHistory, received: &[WriteId]) -> Valu
             .into_iter()
             .filter(|loss| loss.retired)
         {
-            let LossCause::Dependency { write, sources } = loss.cause else {
-                panic!("unexpected loss {loss:?}")
-            };
-            frozen.push(json!({"write": history.index(write),
-                "row": rows.iter().position(|r| *r == loss.row).unwrap(),
-                "sources": sources.iter().map(|s| history.index(s.write)).collect::<Vec<_>>()}));
+            let row = rows.iter().position(|r| *r == loss.row).unwrap();
+            frozen.push(match loss.cause {
+                LossCause::Dependency { write, sources } => json!({"write": history.index(write),
+                    "row": row, "sources": sources.iter().map(|s| history.index(s.write)).collect::<Vec<_>>()}),
+                LossCause::Excluded { write, version } => {
+                    json!({"write": history.index(write), "row": row, "schema": version})
+                }
+                cause => panic!("unexpected loss cause {cause:?}"),
+            });
         }
         let schema = crate::schema::Schema::read(db).unwrap();
         let store = crate::merge_store::MergeStore::from_schema(db, &schema);
@@ -606,9 +709,10 @@ fn lean_result(runner: &OsStr, history: &QueueHistory, received: &[WriteId]) -> 
     let mut frozen = Vec::new();
     for change in result["changes"].as_array().unwrap() {
         if let Some(cause) = change["verdict"].get("cause") {
-            if cause.get("schema").is_none() {
-                frozen.push(json!({"write": change["write"], "row": change["row"], "sources": cause["sources"]}));
-            }
+            frozen.push(match cause.get("schema") {
+                Some(version) => json!({"write": change["write"], "row": change["row"], "schema": version}),
+                None => json!({"write": change["write"], "row": change["row"], "sources": cause["sources"]}),
+            });
         }
     }
     let object = result.as_object_mut().unwrap();
@@ -634,7 +738,7 @@ async fn queue_reset_differential_histories() {
     let mut dependent = 0;
     for seed in 0..64 {
         let mut rng = Generator::new(seed + 40_000);
-        let history = QueueHistory::generate(&mut rng);
+        let history = QueueHistory::generate(&mut rng, Kind::Reset);
         for streamed in [true, false] {
             let received = history.arrival(&mut rng);
             let rust = sorted(rust_result(&history, &received, streamed).await);
@@ -652,4 +756,37 @@ async fn queue_reset_differential_histories() {
         dependent > 0,
         "histories exercise changes using ignored data"
     );
+}
+
+/// §17.1's receive rule after a kept raise, with and without a converter: a
+/// late old-schema change converts, or is a frozen schema loss, and a change
+/// built on dropped data is a dependency loss beside its write's others.
+#[tokio::test]
+#[ignore = "requires COVEN_QUEUE_LEAN; scripts/check.sh supplies the queue runner"]
+async fn queue_conversion_differential_histories() {
+    let runner = std::env::var_os("COVEN_QUEUE_LEAN").expect("built queueRunner");
+    let (mut dependent, mut schema) = (0, 0);
+    for seed in 0..48 {
+        for convert in [true, false] {
+            let mut rng = Generator::new(seed + 50_000);
+            let history = QueueHistory::generate(&mut rng, Kind::Raise { convert });
+            let received = history.arrival(&mut rng);
+            let rust = sorted(rust_result(&history, &received, false).await);
+            let lean = sorted(lean_result(&runner, &history, &received));
+            assert_eq!(
+                rust,
+                lean,
+                "queue conversion differential, seed {seed}, convert {convert}\ninput: {}",
+                history.input(&received)
+            );
+            for loss in rust["frozen"].as_array().unwrap() {
+                if loss.get("schema").is_some() {
+                    schema += 1;
+                } else {
+                    dependent += 1;
+                }
+            }
+        }
+    }
+    assert!(dependent > 0 && schema > 0, "{dependent} {schema}");
 }
