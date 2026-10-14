@@ -8,6 +8,7 @@ impl StoreLogSync {
         &self,
         require_complete: bool,
     ) -> Result<(Vec<DamagedObject>, bool), SyncError> {
+        self.send.begin();
         let _scope = self.reads.enter();
         self.reads.reset_discovery();
         let (through, sample) = {
@@ -24,11 +25,6 @@ impl StoreLogSync {
         self.check_stopped(&local, &member)?;
         self.acquire_keys(&local.log, &member, &mut ring, &mut damages)
             .await?;
-        let published = if self.can_publish(&local).await? {
-            self.upload_queued(&local, &member, &mut ring).await?
-        } else {
-            None
-        };
         let storage = self.storage.as_deref().ok_or(SyncError::NoStorage)?;
         let mut paths = Vec::new();
         let mut writers =
@@ -45,10 +41,7 @@ impl StoreLogSync {
         let mut probed = BTreeSet::new();
         let mut pending_entries = BTreeSet::new();
         let mut bytes = BTreeMap::new();
-        let mut opened: BTreeMap<_, _> = published
-            .into_iter()
-            .map(|entry| (entry.position, entry))
-            .collect();
+        let mut opened = BTreeMap::<EntryId, StoreLogEntry>::new();
         let mut missing_keys = BTreeMap::new();
         let mut entries = BTreeMap::new();
         loop {
@@ -268,12 +261,45 @@ impl StoreLogSync {
         };
         let complete = complete_through(None);
         if complete {
+            self.acquire_keys(&local.log, &member, &mut ring, &mut damages)
+                .await?;
+            let mut copy_damages = Vec::new();
+            let copies = keys::read_copies(
+                &self.database,
+                &self.reads,
+                self.download_limit,
+                storage,
+                local.store,
+                &mut copy_damages,
+            )
+            .await?;
+            let state = &local.log.replay.state;
+            let binding = match state.members.get(&member.member_id()) {
+                Some(held) if held.removed => crate::send_gate::Binding::Retired,
+                Some(held) if held.sealing == member.sealing_public_key() => {
+                    match state.devices.get(&local.device) {
+                        Some(device) if device.removed => crate::send_gate::Binding::Retired,
+                        Some(device) if device.member == member.member_id() => {
+                            crate::send_gate::Binding::Device
+                        }
+                        None => crate::send_gate::Binding::Member,
+                        Some(_) => crate::send_gate::Binding::Absent,
+                    }
+                }
+                _ => crate::send_gate::Binding::Absent,
+            };
+            if copy_damages.is_empty() {
+                self.send.complete(binding, copies)?;
+            }
+            for damage in copy_damages {
+                if !damages.iter().any(|known| known.path == damage.path) {
+                    damages.push(damage);
+                }
+            }
             self.finality
                 .lock()
                 .expect("finality lock poisoned")
                 .complete_catch_up(sample);
-            self.update_keys(&local.log, &member, &mut ring, &mut damages)
-                .await?;
         } else {
             self.acquire_keys(&local.log, &member, &mut ring, &mut damages)
                 .await?;

@@ -37,9 +37,19 @@ pub trait ProviderOps: Send + Sync {
         Err(StorageFailure::InvalidConfiguration.with_source("provider does not use S3 keys"))
     }
     /// Create in one request, including native duplicate cleanup on retries.
-    async fn create(&self, path: &ObjectPath, bytes: &[u8]) -> Result<(), StorageError>;
+    async fn create(
+        &self,
+        publication: &PublicationRequest,
+        path: &ObjectPath,
+        bytes: &[u8],
+    ) -> Result<(), StorageError>;
     /// Replace a checked positions or clock path in one request.
-    async fn replace(&self, path: &ObjectPath, bytes: &[u8]) -> Result<(), StorageError>;
+    async fn replace(
+        &self,
+        publication: &PublicationRequest,
+        path: &ObjectPath,
+        bytes: &[u8],
+    ) -> Result<(), StorageError>;
     /// Exact native lookup; only a confirmed missing object returns None.
     async fn status(&self, path: &ObjectPath) -> Result<Option<StoredObject>, StorageError>;
     /// Read complete bytes or a range, retaining metadata for those exact bytes.
@@ -95,21 +105,35 @@ pub trait ProviderOps: Send + Sync {
     /// Begin a nonempty upload to a checked immutable destination.
     async fn begin_upload(
         &self,
+        publication: &PublicationRequest,
         path: &ObjectPath,
         total: u64,
     ) -> Result<UploadSession, StorageError>;
     /// Recover native progress of a validated, incomplete session.
-    async fn resume_upload(&self, session: &mut UploadSession) -> Result<(), StorageError>;
+    async fn resume_upload(
+        &self,
+        publication: &PublicationRequest,
+        session: &mut UploadSession,
+    ) -> Result<(), StorageError>;
     /// Send a checked part ending at `end`. The connection validates its length,
     /// boundary and session; implementations enforce the native protocol.
     async fn upload_part(
         &self,
+        publication: &PublicationRequest,
         session: &mut UploadSession,
         bytes: &[u8],
         end: u64,
     ) -> Result<(), StorageError>;
     /// Publish an incomplete session, checking native progress where required.
-    async fn finish_upload(&self, session: &mut UploadSession) -> Result<(), StorageError>;
+    async fn finish_upload(
+        &self,
+        publication: &PublicationRequest,
+        session: &mut UploadSession,
+    ) -> Result<(), StorageError>;
     /// Abandon an incomplete session without deleting published bytes.
-    async fn abort_upload(&self, session: &UploadSession) -> Result<(), StorageError>;
+    async fn abort_upload(
+        &self,
+        publication: &PublicationRequest,
+        session: &UploadSession,
+    ) -> Result<(), StorageError>;
 }

@@ -259,6 +259,7 @@ async fn io_differential_discovery() {
                     store(1),
                     Some(storage.as_ref()),
                     &receiver.db,
+                    &receiver.send,
                 )
                 .await;
                 assert_eq!(first.is_err(), lost && count > 0);
@@ -284,6 +285,7 @@ async fn io_differential_discovery() {
                     store(1),
                     Some(storage.as_ref()),
                     &receiver.db,
+                    &receiver.send,
                 )
                 .await
                 .unwrap();

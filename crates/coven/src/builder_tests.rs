@@ -448,7 +448,7 @@ mod recovery {
     }
 
     #[tokio::test]
-    async fn damaged_database_requires_explicit_reload_and_preserves_readable_waiting_writes() {
+    async fn recovery_does_not_publish_a_salvaged_queue_before_registering_its_device() {
         for readable in [false, true] {
             let root = tempfile::tempdir().unwrap();
             let layout = StoreLayout::new(root.path().into());
@@ -501,12 +501,14 @@ mod recovery {
                 .unwrap();
             let key_session = Arc::new(KeySession::store(keys.clone()).unwrap());
             let member_session = Arc::new(KeySession::member(identity.clone()).unwrap());
+            let send = Arc::new(coven_sync::SendGate::new(clock.clone()));
             let mut sync = StoreLogSync::new(
                 storage.clone(),
                 db.clone(),
                 key_session.clone(),
                 member_session.clone(),
                 clock.clone(),
+                send.clone(),
                 ids.clone(),
                 directory.clone(),
             );
@@ -522,7 +524,9 @@ mod recovery {
                 key_session.clone(),
                 member_session.clone(),
                 clock.clone(),
+                send.clone(),
             );
+            sync.sync_store_log().await.unwrap();
             writes.upload_writes().await.unwrap();
             sync.write_snapshot(Audience::Store).await.unwrap();
             db.write(|sql| {
@@ -536,6 +540,7 @@ mod recovery {
                 directory.clone(),
                 None,
                 clock.clone(),
+                send.clone(),
                 ids.clone(),
                 coven_sync::TransferLimits::default(),
             );
@@ -546,6 +551,7 @@ mod recovery {
                     key_session.clone(),
                     member_session.clone(),
                     clock.clone(),
+                    send.clone(),
                     ids.clone(),
                     directory.clone(),
                 ),
@@ -555,6 +561,7 @@ mod recovery {
                     key_session.clone(),
                     member_session.clone(),
                     clock.clone(),
+                    send.clone(),
                 ),
                 clock.clone(),
             );
@@ -598,13 +605,13 @@ mod recovery {
             );
             assert!(matches!(publication, Err(SyncError::Storage(_))));
             let queued = db.local_store_log().await.unwrap().upload.unwrap();
-            let path = ObjectPath::store_log(
+            let queued_path = ObjectPath::store_log(
                 directory.id(),
                 queued.entry.position.device,
                 queued.entry.position.number.try_into().unwrap(),
             );
             assert_eq!(
-                storage.read(&path).await.unwrap_err().failure(),
+                storage.read(&queued_path).await.unwrap_err().failure(),
                 StorageFailure::NotFound
             );
 
@@ -700,8 +707,24 @@ mod recovery {
             }
             let recovered = builder()
                 .open_reloading(directory.id(), "Ana’s recovered laptop")
-                .await
-                .unwrap();
+                .await;
+            if readable {
+                assert!(matches!(
+                    recovered,
+                    Err(RecoveryError::Sync(SyncError::Storage(ref error)))
+                        if error.failure() == StorageFailure::CatchUpRequired
+                ));
+                assert_eq!(
+                    storage.read(&queued_path).await.unwrap_err().failure(),
+                    StorageFailure::NotFound
+                );
+                assert!(matches!(
+                    builder().open(directory.id()).await,
+                    Err(CovenError::Lock(StoreLockError::RecoveryPending(_)))
+                ));
+                continue;
+            }
+            let recovered = recovered.unwrap();
             let rows = recovered
                 .read(|sql| {
                     Ok(sql.query("SELECT id FROM notes ORDER BY id", [], |r| {
@@ -710,28 +733,7 @@ mod recovery {
                 })
                 .await
                 .unwrap();
-            assert_eq!(
-                rows,
-                if readable {
-                    vec!["saved", "waiting"]
-                } else {
-                    vec!["saved"]
-                }
-            );
-            if readable {
-                recovered.get_members().await.unwrap();
-                assert!(recovered
-                    .get_members()
-                    .await
-                    .unwrap()
-                    .iter()
-                    .flat_map(|member| &member.devices)
-                    .any(|device| *device == DeviceId(77)));
-                assert_eq!(
-                    recovered.circles().list().await.unwrap()[0].name,
-                    "Waiting operation"
-                );
-            }
+            assert_eq!(rows, vec!["saved"]);
             assert_ne!(directory.settings().unwrap().device_id, old_device);
             let archives: Vec<_> = std::fs::read_dir(path.parent().unwrap())
                 .unwrap()
@@ -757,12 +759,25 @@ mod recovery {
                 .open()
                 .await
                 .unwrap();
+            let send = Arc::new(coven_sync::SendGate::new(clock.clone()));
+            let mut caught_up = StoreLogSync::new(
+                storage.clone(),
+                db.clone(),
+                Arc::new(KeySession::store(keys.clone()).unwrap()),
+                Arc::new(KeySession::member(identity.clone()).unwrap()),
+                clock.clone(),
+                send.clone(),
+                ids.clone(),
+                directory.clone(),
+            );
+            caught_up.sync_store_log().await.unwrap();
             let mut writes = coven_sync::DeviceLogSync::new(
                 storage.clone(),
                 db.clone(),
                 Arc::new(KeySession::store(keys.clone()).unwrap()),
                 Arc::new(KeySession::member(identity.clone()).unwrap()),
                 clock.clone(),
+                send.clone(),
             );
             writes.upload_writes().await.unwrap();
             assert_eq!(
@@ -771,7 +786,7 @@ mod recovery {
                     .await
                     .unwrap()
                     .len(),
-                if readable { 2 } else { 1 }
+                1
             );
             db.close().await.unwrap();
         }

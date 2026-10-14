@@ -111,8 +111,7 @@ pub struct DeviceLogSync {
     /// Sleep-inclusive monotonic time for judging each miss when it is used.
     clock: ClockRef,
     download_limit: std::num::NonZeroUsize,
-    /// This pass's key-copy observation (§11).
-    copies: crate::key_introductions::PassObservation,
+    send: Arc<crate::SendGate>,
     storage: Option<Arc<dyn Storage>>,
     database: Database,
     store_keys: Arc<KeySession<StoreKeyring>>,
@@ -127,13 +126,14 @@ impl DeviceLogSync {
         store_keys: Arc<KeySession<StoreKeyring>>,
         member_keys: Arc<KeySession<MemberKeys>>,
         clock: ClockRef,
+        send: Arc<crate::SendGate>,
     ) -> Self {
         Self {
             reads: crate::pass_reads::PassReads::default(),
             observation: None,
             clock,
             download_limit: std::num::NonZeroUsize::MIN,
-            copies: Default::default(),
+            send,
             storage: Some(storage),
             database,
             store_keys,
@@ -147,13 +147,14 @@ impl DeviceLogSync {
         store_keys: Arc<KeySession<StoreKeyring>>,
         member_keys: Arc<KeySession<MemberKeys>>,
         clock: ClockRef,
+        send: Arc<crate::SendGate>,
     ) -> Self {
         Self {
             reads: crate::pass_reads::PassReads::default(),
             observation: None,
             clock,
             download_limit: std::num::NonZeroUsize::MIN,
-            copies: Default::default(),
+            send,
             storage: None,
             database,
             store_keys,
@@ -178,30 +179,6 @@ impl DeviceLogSync {
 
     pub(crate) fn set_download_limit(&mut self, limit: std::num::NonZeroUsize) {
         self.download_limit = limit;
-    }
-
-    pub(crate) fn share_copies(&mut self, copies: crate::key_introductions::PassObservation) {
-        self.copies = copies;
-    }
-
-    /// The pass's complete key-copy observation, or a fresh one outside a pass (§11).
-    async fn copy_observation(
-        &self,
-        store: coven_foundation::id_source::StoreId,
-    ) -> Result<crate::key_introductions::CopyObservation, SyncError> {
-        match self.copies.current() {
-            Some(observation) => Ok(observation),
-            None => {
-                crate::store_log_keys::observe(
-                    &self.database,
-                    &self.reads,
-                    self.download_limit,
-                    self.storage.as_deref().ok_or(SyncError::NoStorage)?,
-                    store,
-                )
-                .await
-            }
-        }
     }
 
     /// Publish queued writes in number order, fixing the sealing keys before the first
@@ -250,7 +227,7 @@ impl DeviceLogSync {
                 .ok_or(SyncError::KeyUnavailable(store_key))?;
             let selected_ring = ring.clone();
             let signer = member.clone();
-            let observation = self.copy_observation(local.store).await?;
+            let observation = self.send.observation()?;
             let prepared = self
                 .database
                 .prepare_write_upload(move |log, schema, header| {

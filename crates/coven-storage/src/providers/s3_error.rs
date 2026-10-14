@@ -6,6 +6,17 @@ pub(super) fn s3_error<E>(error: SdkError<E>) -> StorageError
 where
     E: ProvideErrorMetadata + std::error::Error + Send + Sync + 'static,
 {
+    // A local send refusal is not a provider network or configuration failure.
+    let mut cause: &(dyn std::error::Error + 'static) = &error;
+    loop {
+        if let Some(refusal) = cause.downcast_ref::<StorageError>() {
+            return refusal.failure().with_source(error);
+        }
+        match cause.source() {
+            Some(source) => cause = source,
+            None => break,
+        }
+    }
     let status = error
         .raw_response()
         .map(|response| response.status().as_u16());

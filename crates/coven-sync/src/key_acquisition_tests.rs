@@ -46,7 +46,7 @@ async fn forge_copy(ana: &Device, ben: &Device, audience: Audience, id: KeyId) {
         })
         .await
         .unwrap();
-    object::upload_keys(store(1), Some(ana.storage.as_ref()), &ana.db)
+    object::upload_keys(store(1), Some(ana.storage.as_ref()), &ana.db, &ana.send)
         .await
         .unwrap();
 }
@@ -119,7 +119,7 @@ async fn a_later_valid_copy_supplies_the_key_and_clears_the_refusal() {
         .prepare_key_upload(move |path| keys::circle_copy(path, &genuine, &recipient, &sealing))
         .await
         .unwrap();
-    object::upload_keys(store(1), Some(ana.storage.as_ref()), &ana.db)
+    object::upload_keys(store(1), Some(ana.storage.as_ref()), &ana.db, &ana.send)
         .await
         .unwrap();
     ben.sync().await;

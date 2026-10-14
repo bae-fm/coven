@@ -106,12 +106,14 @@ impl CloudKitStorage {
     }
     async fn save_bytes(
         &self,
+        publication: &PublicationRequest,
         path: &ObjectPath,
         bytes: &[u8],
         policy: CKRecordSavePolicy,
     ) -> Result<(), StorageError> {
         let mut record = self.object(path, bytes.len() as u64);
         let asset = record.set_asset(&self.files, bytes)?;
+        publication.check()?;
         native::modify(
             &self.database,
             vec![record],
@@ -147,12 +149,27 @@ impl ProviderOps for CloudKitStorage {
     async fn account(&self) -> Result<String, StorageError> {
         self.account_identity().await
     }
-    async fn create(&self, path: &ObjectPath, bytes: &[u8]) -> Result<(), StorageError> {
-        self.save_bytes(path, bytes, CKRecordSavePolicy::IfServerRecordUnchanged)
-            .await
+    async fn create(
+        &self,
+        publication: &PublicationRequest,
+        path: &ObjectPath,
+        bytes: &[u8],
+    ) -> Result<(), StorageError> {
+        self.save_bytes(
+            publication,
+            path,
+            bytes,
+            CKRecordSavePolicy::IfServerRecordUnchanged,
+        )
+        .await
     }
-    async fn replace(&self, path: &ObjectPath, bytes: &[u8]) -> Result<(), StorageError> {
-        self.save_bytes(path, bytes, CKRecordSavePolicy::AllKeys)
+    async fn replace(
+        &self,
+        publication: &PublicationRequest,
+        path: &ObjectPath,
+        bytes: &[u8],
+    ) -> Result<(), StorageError> {
+        self.save_bytes(publication, path, bytes, CKRecordSavePolicy::AllKeys)
             .await
     }
     async fn status(&self, path: &ObjectPath) -> Result<Option<StoredObject>, StorageError> {
@@ -255,27 +272,43 @@ impl ProviderOps for CloudKitStorage {
     }
     async fn begin_upload(
         &self,
+        publication: &PublicationRequest,
         path: &ObjectPath,
         total: u64,
     ) -> Result<UploadSession, StorageError> {
+        publication.check()?;
         self.prepare_upload(path, total)
     }
-    async fn resume_upload(&self, session: &mut UploadSession) -> Result<(), StorageError> {
+    async fn resume_upload(
+        &self,
+        publication: &PublicationRequest,
+        session: &mut UploadSession,
+    ) -> Result<(), StorageError> {
+        publication.check()?;
         self.resume(session).await
     }
     async fn upload_part(
         &self,
+        publication: &PublicationRequest,
         session: &mut UploadSession,
         bytes: &[u8],
         end: u64,
     ) -> Result<(), StorageError> {
-        self.save_part(session, bytes, end).await
+        self.save_part(publication, session, bytes, end).await
     }
-    async fn finish_upload(&self, session: &mut UploadSession) -> Result<(), StorageError> {
-        self.publish(session).await
+    async fn finish_upload(
+        &self,
+        publication: &PublicationRequest,
+        session: &mut UploadSession,
+    ) -> Result<(), StorageError> {
+        self.publish(publication, session).await
     }
-    async fn abort_upload(&self, session: &UploadSession) -> Result<(), StorageError> {
-        self.abort(session).await
+    async fn abort_upload(
+        &self,
+        publication: &PublicationRequest,
+        session: &UploadSession,
+    ) -> Result<(), StorageError> {
+        self.abort(publication, session).await
     }
 }
 

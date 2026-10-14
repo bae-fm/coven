@@ -647,16 +647,19 @@ impl Discovery {
             .await
             .unwrap();
         // Same store id and an extra writer in another zone must stay invisible.
+        let entry = ObjectPath::store_log(store, DeviceId(901), NonZeroU64::MIN);
+        let positions = ObjectPath::positions(store, DeviceId(7));
+        let fixture_request = |path| {
+            PublicationRequest::new(Arc::new(crate::test_utils::UnrestrictedPublications), path)
+        };
         other_zone
-            .create(
-                &ObjectPath::store_log(store, DeviceId(901), NonZeroU64::MIN),
-                b"other zone",
-            )
+            .create(&fixture_request(entry.clone()), &entry, b"other zone")
             .await
             .unwrap();
         other_zone
             .replace(
-                &ObjectPath::positions(store, DeviceId(7)),
+                &fixture_request(positions.clone()),
+                &positions,
                 b"other zone revision",
             )
             .await

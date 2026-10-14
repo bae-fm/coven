@@ -19,18 +19,6 @@ use coven_storage::{ObjectPath, Storage, StorageFailure};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-/// One pass: shared reads and the key-copy observation that its senders use.
-pub(crate) struct PassScope {
-    _reads: crate::pass_reads::ReadScope,
-    copies: crate::key_introductions::PassObservation,
-}
-
-impl Drop for PassScope {
-    fn drop(&mut self) {
-        self.copies.clear();
-    }
-}
-
 /// Owns store-log, key and snapshot synchronization capabilities (§20.2).
 /// Calls require exclusive access so one install never authors or applies two
 /// entries concurrently through this owner. The database also checks stale replay.
@@ -42,7 +30,7 @@ pub struct StoreLogSync {
     /// checks its write misses against them (§15).
     finality: Arc<std::sync::Mutex<crate::finality::Observation>>,
     reads: crate::pass_reads::PassReads,
-    copies: crate::key_introductions::PassObservation,
+    send: Arc<crate::SendGate>,
     storage: Option<Arc<dyn Storage>>,
     database: Database,
     store_keys: Arc<KeySession<StoreKeyring>>,
@@ -64,6 +52,7 @@ impl StoreLogSync {
         store_keys: Arc<KeySession<StoreKeyring>>,
         member_keys: Arc<KeySession<MemberKeys>>,
         clock: ClockRef,
+        send: Arc<crate::SendGate>,
         ids: IdSourceRef,
         directory: coven_foundation::files::StoreDir,
     ) -> Self {
@@ -73,7 +62,7 @@ impl StoreLogSync {
             download_limit: std::num::NonZeroUsize::MIN,
             finality: Arc::default(),
             reads: crate::pass_reads::PassReads::default(),
-            copies: Default::default(),
+            send,
             storage: Some(storage),
             database,
             store_keys,
@@ -91,6 +80,7 @@ impl StoreLogSync {
         store_keys: Arc<KeySession<StoreKeyring>>,
         member_keys: Arc<KeySession<MemberKeys>>,
         clock: ClockRef,
+        send: Arc<crate::SendGate>,
         ids: IdSourceRef,
         directory: coven_foundation::files::StoreDir,
     ) -> Self {
@@ -100,7 +90,7 @@ impl StoreLogSync {
             download_limit: std::num::NonZeroUsize::MIN,
             finality: Arc::default(),
             reads: crate::pass_reads::PassReads::default(),
-            copies: Default::default(),
+            send,
             storage: None,
             database,
             store_keys,
@@ -117,45 +107,24 @@ impl StoreLogSync {
         self.download_limit = limit;
     }
 
-    /// Share metadata and checked references with device-log downloads until
-    /// this pass ends. Standalone calls retain their own scoped reads.
-    /// Share this pass's reads and its key-copy observation with the sender.
-    /// Ending the pass discards the observation; nothing after it reuses it.
-    pub(crate) fn begin_pass(&self, writes: &mut crate::DeviceLogSync) -> PassScope {
+    /// Share reads and return evidence during this pass. Sending authority was
+    /// already injected into both owners at the composition root.
+    pub(crate) fn begin_pass(
+        &self,
+        writes: &mut crate::DeviceLogSync,
+    ) -> crate::pass_reads::ReadScope {
         writes.share_reads(self.reads.clone());
         writes.share_observation(self.finality.clone());
         writes.set_download_limit(self.download_limit);
-        writes.share_copies(self.copies.clone());
-        self.copies.clear();
-        PassScope {
-            _reads: self.reads.enter(),
-            copies: self.copies.clone(),
-        }
+        self.reads.enter()
     }
 
-    /// Tests drive owners without a pass; let their sends use the last reading.
-    #[cfg(test)]
-    pub(crate) fn share_copies(&self, writes: &mut crate::DeviceLogSync) {
-        writes.share_copies(self.copies.clone());
+    pub(crate) fn invalidate_sends(&self) {
+        self.send.invalidate();
     }
 
-    /// This pass's complete copy observation, or a fresh one outside a pass.
-    pub(crate) async fn copy_observation(
-        &self,
-    ) -> Result<crate::key_introductions::CopyObservation, SyncError> {
-        match self.copies.current() {
-            Some(observation) => Ok(observation),
-            None => {
-                keys::observe(
-                    &self.database,
-                    &self.reads,
-                    self.download_limit,
-                    self.storage.as_deref().ok_or(SyncError::NoStorage)?,
-                    self.directory.id(),
-                )
-                .await
-            }
-        }
+    pub(crate) fn copy_observation(&self) -> Result<Vec<keys::ObservedCopy>, SyncError> {
+        self.send.observation()
     }
 
     /// Publish entries, replay downloads, acquire keys and resume snapshot work.
@@ -189,15 +158,9 @@ impl StoreLogSync {
             .read()?
             .ok_or(coven_storage::StorageFailure::MemberKeysMissing)?;
         let mut ring = self.store_keys.read()?;
-        let mut damages = Vec::new();
         self.check_stopped(&local, &member)?;
-        self.update_keys(&local.log, &member, &mut ring, &mut damages)
-            .await?;
-        self.publish(&mut local, &member, &mut ring, &mut damages)
-            .await?;
-        if let Some(damaged) = damages.into_iter().next() {
-            return Err(damaged.into());
-        }
+        self.update_keys(&local.log, &member, &mut ring).await?;
+        self.publish(&mut local, &member, &mut ring).await?;
         if let Some(id) = self.pending_reload().await? {
             return Err(SyncError::ReloadPending(id));
         }
@@ -210,14 +173,14 @@ impl StoreLogSync {
             }
         }
         keys::check_shared_keys(&local.log, &change, &ring)?;
-        let observed = keys::observe(
-            &self.database,
-            &self.reads,
-            self.download_limit,
-            self.storage.as_deref().ok_or(SyncError::NoStorage)?,
-            local.store,
-        )
-        .await?;
+        let bootstrap = !local.log.replay.state.devices.contains_key(&local.device)
+            && (matches!(&change, StoreChange::CreateStore { .. })
+                || matches!(&change, StoreChange::AddDevice { device, .. } if *device == local.device));
+        let observed = if matches!(change, StoreChange::CreateStore { .. }) {
+            Vec::new()
+        } else {
+            self.send.observation()?
+        };
         let author = member.clone();
         let id = self
             .database
@@ -229,16 +192,16 @@ impl StoreLogSync {
         // every retry and never depends on a callback's transient return value.
         local = self.database.local_store_log().await?;
         let mut ring = self.store_keys.read()?;
-        let mut damages = Vec::new();
-        self.publish(&mut local, &member, &mut ring, &mut damages)
-            .await?;
-        if let Some(damaged) = damages.into_iter().next() {
-            return Err(damaged.into());
-        }
+        self.publish(&mut local, &member, &mut ring).await?;
         if let Some(coven_database::EntryOutcome::Dropped(reason)) =
             local.log.replay.entries.get(&id)
         {
             return Err(SyncError::Rejected(reason.clone()));
+        }
+        if bootstrap {
+            // Admission's exact-path exception supplies no ordinary authority.
+            // Observe the published binding before allowing subsequent sends.
+            self.scan_store_log_once(true).await?;
         }
         Ok(id)
     }
@@ -288,6 +251,7 @@ impl StoreLogSync {
             .is_some_and(|m| m.removed)
             || state.devices.get(&local.device).is_some_and(|d| d.removed)
         {
+            self.send.invalidate();
             return Err(SyncError::Removed);
         }
         Ok(())
@@ -298,10 +262,9 @@ impl StoreLogSync {
         local: &mut LocalStoreLog,
         member: &MemberKeys,
         ring: &mut Option<StoreKeyring>,
-        damages: &mut Vec<DamagedObject>,
     ) -> Result<(), SyncError> {
         if self.can_publish(local).await? {
-            self.publish_queued(local, member, ring, damages).await?;
+            self.publish_queued(local, member, ring).await?;
         }
         Ok(())
     }
@@ -341,7 +304,6 @@ impl StoreLogSync {
         local: &mut LocalStoreLog,
         member: &MemberKeys,
         ring: &mut Option<StoreKeyring>,
-        damages: &mut Vec<DamagedObject>,
     ) -> Result<(), SyncError> {
         if let Some(entry) = self.upload_queued(local, member, ring).await? {
             // Observe all landing witnesses after publication, before retaining
@@ -356,7 +318,7 @@ impl StoreLogSync {
                 entry.position,
             )
             .await?;
-            self.apply(local, entry, &publications, member, ring, damages)
+            self.apply(local, entry, &publications, member, ring)
                 .await?;
         }
         Ok(())
@@ -393,10 +355,12 @@ impl StoreLogSync {
                 }
             }
             let bytes = object::seal_upload(self.directory.id(), upload, ring.as_ref(), member)?;
+            let _bootstrap = self.bootstrap_publication(local, upload, member)?;
             object::upload(
                 self.directory.id(),
                 self.storage.as_deref(),
                 &self.database,
+                &self.send,
                 upload,
                 &bytes,
             )
@@ -406,6 +370,44 @@ impl StoreLogSync {
         Ok(None)
     }
 
+    fn bootstrap_publication<'a>(
+        &'a self,
+        local: &LocalStoreLog,
+        upload: &coven_database::StoreLogUpload,
+        member: &MemberKeys,
+    ) -> Result<Option<crate::PublicationScope<'a>>, SyncError> {
+        let membership = match &upload.entry.change {
+            StoreChange::CreateStore { store, admin, .. }
+                if local.log.replay.state.store.is_none()
+                    && *store == local.store
+                    && admin.signing == member.member_id()
+                    && admin.sealing == member.sealing_public_key() =>
+            {
+                false
+            }
+            StoreChange::AddDevice { device, .. }
+                if *device == local.device
+                    && !local.log.replay.state.devices.contains_key(device) =>
+            {
+                true
+            }
+            _ => return Ok(None),
+        };
+        if upload.entry.author != member.member_id() {
+            return Err(coven_database::DropReason::NotAllowed.into());
+        }
+        let paths = std::iter::once(object::path(local.store, upload.entry.position))
+            .chain(
+                upload
+                    .sealing
+                    .keys
+                    .iter()
+                    .map(|copy| copy.path(local.store)),
+            )
+            .collect();
+        Ok(Some(self.send.bootstrap(paths, membership)))
+    }
+
     async fn apply(
         &self,
         local: &mut LocalStoreLog,
@@ -413,11 +415,10 @@ impl StoreLogSync {
         publications: &BTreeMap<EntryId, std::time::SystemTime>,
         member: &MemberKeys,
         ring: &mut Option<StoreKeyring>,
-        damages: &mut Vec<DamagedObject>,
     ) -> Result<(), SyncError> {
         let (entry, replay) = crate::replay_entry(&local.log, entry, publications);
         self.apply_batch(local, vec![entry], replay, member).await?;
-        self.update_keys(&local.log, member, ring, damages).await
+        self.update_keys(&local.log, member, ring).await
     }
 
     async fn apply_batch(
@@ -497,58 +498,41 @@ impl StoreLogSync {
         self.check_stopped(local, member)
     }
 
+    /// Open newly needed keys from the completed catch-up's copies. Without a
+    /// fresh completion there is nothing current to open them from.
     async fn update_keys(
         &self,
         log: &StoreLog,
         member: &MemberKeys,
         ring: &mut Option<StoreKeyring>,
-        damages: &mut Vec<DamagedObject>,
     ) -> Result<(), SyncError> {
-        self.acquire_keys(log, member, ring, damages).await?;
-        self.share_keys(log, ring, damages).await
+        if !self.send.can_send() {
+            return Ok(());
+        }
+        self.acquire_observed_keys(log, member, ring, &self.send.observation()?)
+            .await
     }
 
     async fn share_keys(
         &self,
         log: &StoreLog,
         ring: &Option<StoreKeyring>,
-        damages: &mut Vec<DamagedObject>,
     ) -> Result<(), SyncError> {
         // Reserved copies precede all new sharing decisions. An observed duplicate
         // or removed recipient must never erase a writer's already reserved number.
-        if let Some(writer) =
-            object::upload_keys(self.directory.id(), self.storage.as_deref(), &self.database)
-                .await?
-        {
-            self.reads
-                .forget_misses(coven_database::LogKind::KeyCopy, writer);
-        }
+        object::upload_keys(
+            self.directory.id(),
+            self.storage.as_deref(),
+            &self.database,
+            &self.send,
+        )
+        .await?;
         let needs = crate::key_introductions::needed(log);
         if needs.is_empty() {
             return Ok(());
         }
         let storage = self.storage.as_deref().ok_or(SyncError::NoStorage)?;
-        let mut copy_damages = Vec::new();
-        let copies = keys::read_copies(
-            &self.database,
-            &self.reads,
-            self.download_limit,
-            storage,
-            self.directory.id(),
-            &mut copy_damages,
-        )
-        .await?;
-        // The latest complete reading in a pass is what its senders select with.
-        self.copies
-            .record(crate::key_introductions::CopyObservation::new(
-                copies.clone(),
-                copy_damages.clone(),
-            ));
-        for damage in copy_damages {
-            if !damages.iter().any(|known| known.path == damage.path) {
-                damages.push(damage);
-            }
-        }
+        let copies = self.send.observation()?;
         for (audience, key) in needs.keys().cloned() {
             if !crate::key_introductions::accepted(ring.as_ref(), &needs, &audience, key) {
                 tracing::debug!(?audience, ?key, "historical key has not arrived");
@@ -584,7 +568,13 @@ impl StoreLogSync {
                             .await?;
                     }
                 }
-                object::upload_keys(self.directory.id(), Some(storage), &self.database).await?;
+                object::upload_keys(
+                    self.directory.id(),
+                    Some(storage),
+                    &self.database,
+                    &self.send,
+                )
+                .await?;
             }
         }
         Ok(())

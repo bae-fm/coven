@@ -156,6 +156,7 @@ async fn a_write_exceeds_the_transfer_budget_on_upload_and_download() {
             device.custody.clone(),
             device.identity.clone(),
             device.clock.clone(),
+            device.send.clone(),
         );
     }
     devices[0]
@@ -230,6 +231,7 @@ async fn write_publication_records_invalidated_session_before_returning_abort_fa
         devices[0].custody.clone(),
         devices[0].identity.clone(),
         devices[0].clock.clone(),
+        devices[0].send.clone(),
     );
     devices[0]
         .db
@@ -355,6 +357,7 @@ async fn occupied_publication_with_failed_cleanup_keeps_the_write_pending() {
             devices[0].custody.clone(),
             devices[0].identity.clone(),
             devices[0].clock.clone(),
+            devices[0].send.clone(),
         );
         assert!(matches!(
             devices[0].writes.upload_writes().await,
@@ -478,5 +481,38 @@ async fn classified_occupied_paths_count_as_stored_with_and_without_a_session() 
         fault.failure = coven_storage::StorageFailure::AlreadyExists;
         storage.set_faults(fault).await;
         assert_eq!(devices[0].writes.upload_writes().await.unwrap(), [fixed.0]);
+    }
+}
+
+#[tokio::test]
+async fn a_completed_catch_up_expires_at_five_minutes_before_an_outside_write_send() {
+    for (age, allowed) in [
+        (Duration::from_millis(299_999), true),
+        (Duration::from_secs(300), false),
+    ] {
+        let storage = storage();
+        let mut devices = group(storage.clone(), 1).await;
+        let sender = &mut devices[0];
+        sql(
+            &sender.db,
+            "INSERT INTO notes VALUES('expiry','title','body')",
+        )
+        .await;
+        let now = coven_foundation::clock::Clock::now(sender.clock.as_ref());
+        sender.clock.set(now + age);
+        let before = storage.request_trace().len();
+        let result = sender.writes.upload_writes().await;
+        assert_eq!(result.is_ok(), allowed, "age {age:?}: {result:?}");
+        let sent = storage.request_trace()[before..].iter().any(|request| {
+            matches!(
+                request, coven_storage::test_utils::MemoryRequest::Create(path)
+                    if path.write_position().is_some()
+            )
+        });
+        assert_eq!(sent, allowed);
+        assert_eq!(
+            sender.db.test_queued_writes().await.unwrap().len(),
+            usize::from(!allowed)
+        );
     }
 }

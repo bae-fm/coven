@@ -215,7 +215,7 @@ async fn conflicting_commitments_reject_acquisition() {
     assert_eq!(
         crate::write_seal::first_attempt(
             &ana.log().await,
-            &ana.sync.copy_observation().await.unwrap(),
+            &ana.sync.copy_observation().unwrap(),
             &ring,
             &ana.member.member_id(),
             &Audience::Store,

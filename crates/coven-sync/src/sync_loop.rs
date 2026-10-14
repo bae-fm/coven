@@ -71,6 +71,7 @@ struct SyncRun {
     codes: crate::RestoreCodes,
     changes: DatabaseChanges,
     clock: ClockRef,
+    send: Arc<crate::SendGate>,
     commands: mpsc::UnboundedReceiver<SyncCommand>,
     status: watch::Sender<SyncStatus>,
     connection: Option<Arc<StorageConnection>>,
@@ -89,6 +90,7 @@ impl SyncLoop {
         codes: crate::RestoreCodes,
         changes: DatabaseChanges,
         clock: ClockRef,
+        send: Arc<crate::SendGate>,
         connection: Option<Arc<StorageConnection>>,
         connector: Arc<dyn StorageConnector>,
         device: DeviceId,
@@ -107,6 +109,7 @@ impl SyncLoop {
                 codes,
                 changes,
                 clock,
+                send,
                 commands: receiver,
                 status,
                 connection,
@@ -217,11 +220,17 @@ impl SyncRun {
     /// Reconstruct a configured provider through the injected connector. Callers
     /// serialize this with stop, setup and credential removal in the command loop.
     async fn connect(&mut self) -> Result<(), SyncError> {
+        self.send.invalidate();
         self.codes.refresh_if_expired(self.clock.now()).await?;
         let data = self.codes.connection().await?.ok_or(SyncError::NoStorage)?;
         let connection = self
             .connector
-            .connect(data.location, data.credentials, self.device)
+            .connect(
+                data.location,
+                data.credentials,
+                self.device,
+                self.send.clone(),
+            )
             .await?;
         self.operations
             .set_storage(Some(connection.clone()))
@@ -231,6 +240,7 @@ impl SyncRun {
     }
 
     async fn release_connection(&mut self) -> Result<(), SyncError> {
+        self.send.invalidate();
         self.operations.set_storage(None).await?;
         self.connection = None;
         Ok(())
@@ -294,6 +304,7 @@ impl SyncRun {
                     }));
                 }
             }
+            self.send.invalidate();
             return Err(operation);
         }
         Ok(())
@@ -367,6 +378,7 @@ impl SyncRun {
                         Some(SyncCommand::ForgetKeys(reply)) => {
                             let result = self.operations.forget_store_keys().await;
                             let result = if result.is_ok() {
+                                self.send.invalidate();
                                 self.started = false; self.connection = None; pending = false;
                                 self.publish_stopped(result)
                             } else { result };
@@ -436,6 +448,7 @@ impl SyncRun {
                 }
             }
         }
+        self.send.invalidate();
     }
 }
 

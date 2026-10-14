@@ -33,6 +33,7 @@ fn file_owner(d: &Device) -> Files {
         d.directory.clone(),
         d.sync.storage.clone(),
         d.clock.clone(),
+        d.send.clone(),
         d.sync.ids.clone(),
         crate::TransferLimits::default(),
     )
@@ -46,12 +47,14 @@ pub(crate) fn operation_owner(sync: StoreLogSync, files: Files) -> Operations {
             sync.store_keys.clone(),
             sync.member_keys.clone(),
             sync.clock.clone(),
+            sync.send.clone(),
         ),
         None => crate::DeviceLogSync::disconnected(
             sync.database.clone(),
             sync.store_keys.clone(),
             sync.member_keys.clone(),
             sync.clock.clone(),
+            sync.send.clone(),
         ),
     };
     let clock = sync.clock.clone();

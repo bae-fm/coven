@@ -1897,6 +1897,9 @@ pub enum StorageFailure {
     DropboxAppFolderNotShareable,
     /// The incremental sign-in selected another account; the store keeps its prior credentials.
     AccountMismatch,
+    /// No completed membership and key-copy catch-up started less than five
+    /// minutes ago; the send waits for the next pass (§10).
+    CatchUpRequired,
     /// No route to the provider, a timeout, or an interrupted response.
     Network,
     /// Credentials were refused or must be refreshed.
@@ -2190,6 +2193,8 @@ pub enum PendingSubject {
 
 /// A condition coven has not yet observed (§19.1).
 pub enum Prerequisite {
+    /// A completed membership and key-copy catch-up fresh enough to send (§10).
+    CatchUp,
     Object(ObjectPath),
     DeviceRegistration(DeviceId),
     SchemaPublication { audience: Audience, version: u32 },

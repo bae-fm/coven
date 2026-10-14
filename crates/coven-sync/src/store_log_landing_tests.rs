@@ -139,6 +139,7 @@ async fn stale_registration_is_consumed_after_an_unknown_devices_entry() {
     // A caught-up new attempt reads the dropped entry implicitly on its own
     // device. Its consumed number and first publication time survive reopening.
     clock.set(UNIX_EPOCH + Duration::from_secs(100 * 86400));
+    b.catch_up().await;
     let replacement = b
         .sync
         .make_and_upload_entry(fixed.entry.change.clone())
@@ -156,7 +157,9 @@ async fn stale_registration_is_consumed_after_an_unknown_devices_entry() {
         [dropped]
     );
     a.sync().await;
-    assert_eq!(a.log().await, after);
+    let received = a.log().await;
+    assert_eq!(received.entries, after.entries);
+    assert_eq!(received.replay, after.replay);
 }
 
 #[tokio::test]

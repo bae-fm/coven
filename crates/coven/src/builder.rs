@@ -187,6 +187,7 @@ impl CovenBuilder {
         let directory = self.layout.store_dir(&store);
         let ids = self.ids.clone();
         let clock = self.clock.clone();
+        let send = Arc::new(coven_sync::SendGate::new(clock.clone()));
         let connector = self.connector();
         let limits = self.limits;
         let database = self.database(directory.clone())?;
@@ -209,6 +210,7 @@ impl CovenBuilder {
                         data.location,
                         data.credentials,
                         directory.settings().map_err(CovenError::from)?.device_id,
+                        send.clone(),
                     )
                     .await
                     .map_err(SyncError::from)?,
@@ -220,6 +222,7 @@ impl CovenBuilder {
             directory,
             storage,
             clock,
+            send,
             ids,
             limits,
         );
@@ -321,6 +324,7 @@ impl CovenBuilder {
             initial_name: settings.name,
             keys,
             identity,
+            send: Arc::new(coven_sync::SendGate::new(self.clock.clone())),
             clock: self.clock,
             ids: self.ids,
             storage: None,
@@ -392,6 +396,7 @@ struct OpeningOwners {
     custody: StoreCustody,
     keys: Arc<KeySession<StoreKeyring>>,
     identity: Arc<KeySession<MemberKeys>>,
+    send: Arc<coven_sync::SendGate>,
     clock: ClockRef,
     ids: IdSourceRef,
     storage: Option<Arc<coven_storage::StorageConnection>>,
@@ -440,7 +445,12 @@ impl OpeningStore {
         }
         let storage = owners
             .connector
-            .connect(data.location, data.credentials, owners.device)
+            .connect(
+                data.location,
+                data.credentials,
+                owners.device,
+                owners.send.clone(),
+            )
             .await
             .map_err(SyncError::from)?;
         storage
@@ -474,6 +484,7 @@ impl OpeningStore {
             owners.keys.clone(),
             owners.identity.clone(),
             owners.clock.clone(),
+            owners.send.clone(),
         );
         sync.download_later_writes(&mut writes).await?;
         database.finish_recovery().await.map_err(CovenError::from)?;
@@ -490,6 +501,7 @@ impl OpeningOwners {
                 self.keys.clone(),
                 self.identity.clone(),
                 self.clock.clone(),
+                self.send.clone(),
                 self.ids.clone(),
                 self.directory.clone(),
             ),
@@ -498,6 +510,7 @@ impl OpeningOwners {
                 self.keys.clone(),
                 self.identity.clone(),
                 self.clock.clone(),
+                self.send.clone(),
                 self.ids.clone(),
                 self.directory.clone(),
             ),
@@ -516,12 +529,14 @@ impl OpeningOwners {
                 self.keys.clone(),
                 self.identity.clone(),
                 self.clock.clone(),
+                self.send.clone(),
             ),
             None => coven_sync::DeviceLogSync::disconnected(
                 database.clone(),
                 self.keys.clone(),
                 self.identity.clone(),
                 self.clock.clone(),
+                self.send.clone(),
             ),
         };
         let files = coven_sync::Files::new(
@@ -531,6 +546,7 @@ impl OpeningOwners {
                 .clone()
                 .map(|storage| storage as Arc<dyn coven_storage::Storage>),
             self.clock.clone(),
+            self.send.clone(),
             self.ids.clone(),
             self.limits,
         );
@@ -549,6 +565,7 @@ impl OpeningOwners {
             codes.clone(),
             database.sync_changes(),
             self.clock.clone(),
+            self.send.clone(),
             self.storage,
             self.connector.clone(),
             self.device,
@@ -566,6 +583,7 @@ impl OpeningOwners {
             self.device,
             self.ids,
             self.clock,
+            self.send,
         ));
         CovenHandle::new(
             database,

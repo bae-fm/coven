@@ -7,6 +7,7 @@ pub(super) async fn post(device: &Device, storage: &Arc<MemoryStorage>) {
         device.custody.clone(),
         device.identity.clone(),
         device.clock.clone(),
+        device.send.clone(),
     )
     .post_positions()
     .await
@@ -222,6 +223,7 @@ async fn a_file_named_only_by_a_retained_log_write_stays_until_that_log_goes() {
         a.directory.clone(),
         Some(storage.clone()),
         a.clock.clone(),
+        a.send.clone(),
         Arc::new(coven_foundation::id_source::UuidIds),
         crate::TransferLimits::default(),
     );
@@ -274,6 +276,9 @@ async fn a_file_named_only_by_a_retained_log_write_stays_until_that_log_goes() {
     }
     assert!(storage.read(&path).await.is_ok());
     a.clock.set(UNIX_EPOCH + Duration::from_secs(31 * 86400));
+    if !a.send.can_send() {
+        a.catch_up().await;
+    }
     a.sync.write_snapshot(Audience::Store).await.unwrap();
     assert!(storage
         .list(&ObjectPrefix::device_logs(store(1)))

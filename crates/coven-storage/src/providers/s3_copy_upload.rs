@@ -32,6 +32,7 @@ impl S3Storage {
 
     pub(super) async fn recover_completed_upload(
         &self,
+        publication: &PublicationRequest,
         session: &mut UploadSession,
     ) -> Result<(), StorageError> {
         if !self.settings.multipart.uses_copy() {
@@ -44,6 +45,8 @@ impl S3Storage {
             .head_object()
             .bucket(&self.bucket)
             .key(self.session_key(session)?)
+            .customize()
+            .interceptor(publication.clone())
             .send()
             .await
             .map_err(s3_error)
@@ -64,7 +67,7 @@ impl S3Storage {
                     return Err(StorageFailure::Protocol
                         .with_source("S3 upload temporary disagrees with session"));
                 }
-                self.publish_copy(session).await
+                self.publish_copy(publication, session).await
             }
             Err(error) if error.failure() == StorageFailure::NotFound => {
                 self.completed(session).await
@@ -75,6 +78,7 @@ impl S3Storage {
 
     pub(super) async fn publish_copy(
         &self,
+        publication: &PublicationRequest,
         session: &mut UploadSession,
     ) -> Result<(), StorageError> {
         let S3Multipart::Copy(condition) = self.settings.multipart else {
@@ -94,6 +98,7 @@ impl S3Storage {
             .mutate_request(move |request| {
                 request.headers_mut().insert(header, value);
             })
+            .interceptor(publication.clone())
             .send()
             .await;
         let result = match result {
@@ -105,6 +110,7 @@ impl S3Storage {
             {
                 return self
                     .require_restart(
+                        publication,
                         session,
                         StorageFailure::SessionExpired.with_source(s3_error(error)),
                     )

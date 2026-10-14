@@ -19,6 +19,7 @@ struct Fixture {
     directory: StoreDir,
     ids: IdSourceRef,
     clock: ClockRef,
+    send: Arc<crate::SendGate>,
     database: Database,
     files: Files,
     storage: Arc<MemoryStorage>,
@@ -26,11 +27,14 @@ struct Fixture {
 }
 impl Fixture {
     async fn new(provenance: Provenance, fill: CacheFill) -> Self {
-        let root = tempfile::tempdir().unwrap();
-        let ids: IdSourceRef = Arc::new(UuidIds);
         let clock: ClockRef = Arc::new(ClosureClock(|| {
             SystemTime::UNIX_EPOCH + Duration::from_secs(100)
         }));
+        Self::with_clock(provenance, fill, clock).await
+    }
+    async fn with_clock(provenance: Provenance, fill: CacheFill, clock: ClockRef) -> Self {
+        let root = tempfile::tempdir().unwrap();
+        let ids: IdSourceRef = Arc::new(UuidIds);
         let layout = StoreLayout::new(root.path().to_owned());
         let directory = layout
             .create_store_dir(StoreId(uuid::Uuid::from_u128(1)), "files", ids.as_ref())
@@ -56,11 +60,14 @@ impl Fixture {
                 .build()
                 .unwrap(),
         );
+        let send = completed_send_gate(clock.clone());
+        let storage = Arc::new(storage.with_publication_gate(send.clone()));
         let files = Files::new(
             FileDatabase::new(database.clone()),
             directory.clone(),
             Some(storage.clone()),
             clock.clone(),
+            send.clone(),
             ids.clone(),
             crate::TransferLimits::default(),
         );
@@ -70,6 +77,7 @@ impl Fixture {
             directory,
             ids,
             clock,
+            send,
             database,
             files,
             storage,
@@ -83,11 +91,14 @@ impl Fixture {
             .open()
             .await
             .unwrap();
+        self.send = completed_send_gate(self.clock.clone());
+        self.storage = Arc::new(self.storage.with_publication_gate(self.send.clone()));
         self.files = Files::new(
             FileDatabase::new(self.database.clone()),
             self.directory.clone(),
             Some(self.storage.clone()),
             self.clock.clone(),
+            self.send.clone(),
             self.ids.clone(),
             crate::TransferLimits::default(),
         );
@@ -239,6 +250,7 @@ async fn budgets_pins_eviction_and_second_device_reads() {
         second.directory.clone(),
         Some(f.storage.clone()),
         second.clock.clone(),
+        second.send.clone(),
         second.ids.clone(),
         crate::TransferLimits::default(),
     );
@@ -292,6 +304,7 @@ async fn eager_commit_observation_handles_download_apply() {
         b.directory.clone(),
         Some(a.storage.clone()),
         b.clock.clone(),
+        b.send.clone(),
         b.ids.clone(),
         crate::TransferLimits::default(),
     );
@@ -503,6 +516,7 @@ async fn whole_reads_and_pins_check_the_row_hash_after_authenticating_chunks() {
         b.directory.clone(),
         Some(a.storage.clone()),
         b.clock.clone(),
+        b.send.clone(),
         b.ids.clone(),
         crate::TransferLimits::default(),
     );
@@ -685,10 +699,7 @@ async fn waiting_files_name_the_attaching_device_until_its_automatic_upload() {
         let coven_database::FileLocation::OnDevice(device) = local.location() else {
             panic!("attachment must wait on its device")
         };
-        assert!(matches!(
-            a.files.sync_files().await,
-            Err(SyncError::NoStorage)
-        ));
+        a.files.sync_files().await.unwrap();
         let queued = a.files.inner.database.uploads().await.unwrap();
         assert_eq!(queued.len(), 1);
         assert_eq!(queued[0].file, local);
@@ -753,4 +764,78 @@ impl Files {
             join(task).await;
         }
     }
+}
+
+fn completed_send_gate(clock: ClockRef) -> Arc<crate::SendGate> {
+    let send = Arc::new(crate::SendGate::new(clock));
+    send.begin();
+    send.complete(crate::send_gate::Binding::Device, Vec::new())
+        .unwrap();
+    send
+}
+
+#[tokio::test]
+async fn completed_catch_up_wakes_a_worker_blocked_between_file_sends() {
+    use coven_foundation::clock::FixedClock;
+    use coven_storage::{ObjectPrefix, StorageFailure};
+    let clock = Arc::new(FixedClock::new(SystemTime::UNIX_EPOCH));
+    let f = Fixture::with_clock(Provenance::AppProvided, CacheFill::CacheLazy, clock.clone()).await;
+    f.attach("files", "first", b"first".to_vec()).await;
+    f.attach("files", "second", b"second".to_vec()).await;
+    let (started, observed) = tokio::sync::oneshot::channel();
+    let (resume, held) = tokio::sync::oneshot::channel();
+    f.storage
+        .hold_next_creation(ObjectPrefix::files(f.directory.id()), started, held)
+        .await;
+    let mut uploads = f.files.subscribe_uploads();
+    f.files.set_uploads_paused(false);
+    observed.await.unwrap();
+    clock.set(SystemTime::UNIX_EPOCH + Duration::from_secs(300));
+    resume.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let queue = uploads.next().await.unwrap();
+            if queue.files.iter().any(|file| matches!(file.last_failure.as_deref(),
+                Some(UploadFailure::Storage(error)) if error.failure() == StorageFailure::CatchUpRequired)) {
+                break;
+            }
+        }
+    }).await.unwrap();
+    assert_eq!(
+        f.database
+            .file_ref("files", "first")
+            .await
+            .unwrap()
+            .location(),
+        coven_database::FileLocation::Uploaded
+    );
+    assert!(matches!(
+        f.database
+            .file_ref("files", "second")
+            .await
+            .unwrap()
+            .location(),
+        coven_database::FileLocation::OnDevice(_)
+    ));
+    f.send.begin();
+    f.send
+        .complete(crate::send_gate::Binding::Device, Vec::new())
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            uploads.next().await.unwrap();
+            if f.database
+                .file_ref("files", "second")
+                .await
+                .unwrap()
+                .location()
+                == coven_database::FileLocation::Uploaded
+            {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    f.close().await;
 }

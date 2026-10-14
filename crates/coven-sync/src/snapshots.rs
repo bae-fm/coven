@@ -405,7 +405,7 @@ impl StoreLogSync {
         })?;
         // A snapshot's first upload is a first attempt in its audience (§11).
         // Without a usable key it waits; other audiences' sends go on.
-        let observation = self.copy_observation().await?;
+        let observation = self.copy_observation()?;
         let key_id = match crate::write_seal::first_attempt(
             log,
             &observation,

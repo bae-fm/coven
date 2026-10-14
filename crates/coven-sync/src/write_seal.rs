@@ -1,6 +1,7 @@
 //! The database-to-envelope stream; no write body is collected here.
 
-use crate::key_introductions::{newest, CopyObservation, Wait};
+use crate::key_introductions::{newest, Wait};
+use crate::store_log_keys::ObservedCopy;
 use crate::{PendingReason, PendingRecord, PendingSubject, SyncError};
 use coven_crypto::{DerivedKeys, MemberId, MemberKeys, ObjectHasher, StoreKeyring};
 use coven_database::{DbError, StoreLog, WaitingUpload};
@@ -34,13 +35,13 @@ pub(crate) fn derive(
     })
 }
 
-/// The key for a first attempt (§11): Appendix C12 selection over this pass's
-/// complete copy observation. A member who has left a circle still sends its
+/// The key for a first attempt (§11): Appendix C12 selection over the
+/// completed catch-up's copy observation. A member who has left a circle still sends its
 /// pre-removal writes with the newest key it holds there (§14.6); that exposes
 /// no new circle data to it.
 pub(crate) fn first_attempt(
     log: &StoreLog,
-    observation: &CopyObservation,
+    observation: &[ObservedCopy],
     ring: &StoreKeyring,
     member: &MemberId,
     audience: &Audience,
@@ -56,15 +57,12 @@ pub(crate) fn first_attempt(
         _ => {}
     }
     let introductions = crate::key_introductions::introductions(log);
-    let copies = match observation {
-        CopyObservation::Complete(copies) => Some(
-            copies
-                .iter()
-                .map(|copy| copy.prefix.clone())
-                .collect::<Vec<_>>(),
-        ),
-        CopyObservation::Incomplete(damage) => return Err(SyncError::Damaged(damage.clone())),
-    };
+    let copies = Some(
+        observation
+            .iter()
+            .map(|copy| copy.prefix.clone())
+            .collect::<Vec<_>>(),
+    );
     let waiting = |key: Option<KeyId>| match key {
         Some(key) => SyncError::KeyUnavailable(key),
         None => DbError::DamagedDatabase.into(),
@@ -149,7 +147,7 @@ pub(crate) fn select(
     header: &WriteHeaderFrame,
     ring: &StoreKeyring,
     member: &MemberKeys,
-    observation: &CopyObservation,
+    observation: &[ObservedCopy],
 ) -> Result<WriteObjectPrefix, SyncError> {
     let write = header.header.position;
     check_member(log, member, write.device)?;

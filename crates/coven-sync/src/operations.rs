@@ -452,6 +452,7 @@ impl OperationRun {
                     if matches!(command, Command::Close) { let _ = reply.send(Ok(Output::Unit)); break; }
                     self.sync.set_discovery_download_limit(self.files.transfer_limits().downloads);
                     if let Command::Storage(storage) = &command {
+                        self.sync.invalidate_sends();
                         if let Err(error) = self.files.set_storage(storage.clone(), std::future::ready(Ok(()))).await {
                             let _ = reply.send(Err(error));
                             continue;
@@ -463,7 +464,7 @@ impl OperationRun {
                             self.sync.begin_operation_call(Command::ForgetKeys).await?;
                             Ok(())
                         }).await;
-                        if result.is_ok() { self.writes.set_storage(None); }
+                        if result.is_ok() { self.sync.invalidate_sends(); self.writes.set_storage(None); }
                         let _ = reply.send(result.map(|()| Output::Unit));
                     } else if let Command::Unlock(storage) = command {
                         let result = self.files.set_storage(Some(storage.clone()), self.sync.unlock_storage(storage.clone())).await;
@@ -476,6 +477,7 @@ impl OperationRun {
                         if result.is_ok() {
                             self.writes.set_storage(Some(storage));
                         }
+                        if result.is_err() { self.sync.invalidate_sends(); }
                         let _ = reply.send(result.map(|()| Output::Unit));
                     } else if matches!(command, Command::SyncAll) {
                         response = Some((reply, self.sync_pass().await.map(|()| Output::Unit)));

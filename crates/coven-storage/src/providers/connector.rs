@@ -31,6 +31,7 @@ pub trait StorageConnector: Send + Sync {
         config: StorageConfig,
         credentials: StorageCredentials,
         device: DeviceId,
+        publications: Arc<dyn crate::PublicationGate>,
     ) -> Result<Arc<StorageConnection>, StorageError>;
     /// Probe an S3 location's service (§4), writing only fresh objects under
     /// the store's `.coven-check` prefix and deleting them, also on failure.
@@ -101,6 +102,7 @@ impl StorageConnector for ProviderConnector {
         config: StorageConfig,
         credentials: StorageCredentials,
         device: DeviceId,
+        publications: Arc<dyn crate::PublicationGate>,
     ) -> Result<Arc<StorageConnection>, StorageError> {
         crate::ConnectionCredentials {
             location: config.clone(),
@@ -138,7 +140,10 @@ impl StorageConnector for ProviderConnector {
                     .with_source("credentials do not match the provider"))
             }
         };
-        Ok(Arc::new(StorageConnection::from_provider(provider)))
+        Ok(Arc::new(StorageConnection::with_gate(
+            provider,
+            publications,
+        )))
     }
     async fn detect_s3(
         &self,

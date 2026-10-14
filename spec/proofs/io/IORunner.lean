@@ -177,6 +177,30 @@ private def post (j : Json) : Except String Json := do
   let current ← j.getObjValAs? (List Nat) "current"
   return toJson (changedPost confirmed present current)
 
+/-- Compare the shared real sender with Trace's executable transitions. Rejected
+requests preserve the prior state; an unfinished phase never renews it. -/
+private def sendGate (j : Json) : Except String Json := do
+  let actions ← j.getObjValAs? (Array Json) "actions"
+  let mut sender : Sender := ⟨none, none⟩
+  let mut results := #[]
+  for action in actions do
+    let event ← match ← action.getObjValAs? String "op" with
+      | "begin" => IOEvent.beginPass <$> action.getObjValAs? Nat "time"
+      | "checked" => do
+        let time ← action.getObjValAs? Nat "time"
+        let sending ← action.getObjValAs? Bool "send"
+        let retired ← action.getObjValAs? Bool "retired"
+        pure (.checked time (if sending then .send else .stopped) retired)
+      | "invalidate" => pure .invalidate
+      | "request" => do
+        let time ← action.getObjValAs? Nat "time"
+        pure (.request .outside time (.replace (.positions 1) [1]))
+      | other => throw s!"unknown send action {other}"
+    let next := gateStep sender event
+    results := results.push next.isSome
+    if let some value := next then sender := value
+  return toJson results
+
 private def run (j : Json) : Except String Json := do
   match ← j.getObjValAs? String "check" with
   | "discovery" => discovery j
@@ -188,6 +212,7 @@ private def run (j : Json) : Except String Json := do
   | "download" => download j
   | "positions" => positions j
   | "post" => post j
+  | "send_gate" => sendGate j
   | check => throw s!"unknown IO check {check}"
 
 def main : IO UInt32 := do

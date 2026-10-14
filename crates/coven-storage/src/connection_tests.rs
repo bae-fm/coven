@@ -288,3 +288,60 @@ async fn guards_and_completed_sessions_do_not_issue_provider_calls() {
     );
     assert_eq!(storage.request_count(), before);
 }
+
+struct SwitchGate(std::sync::atomic::AtomicBool);
+impl PublicationGate for SwitchGate {
+    fn check(&self, _: &ObjectPath) -> Result<(), StorageError> {
+        if self.0.load(std::sync::atomic::Ordering::SeqCst) {
+            Ok(())
+        } else {
+            Err(StorageFailure::CatchUpRequired.into())
+        }
+    }
+}
+
+#[tokio::test]
+async fn publication_checks_after_the_provider_creation_permit() {
+    use std::{future::Future, sync::atomic::Ordering, task::Poll};
+    let session = crate::providers::OAuthSession::new(
+        CloudProvider::GoogleDrive,
+        OAuthTokens {
+            client_id: "test-client".into(),
+            access: OAuthAccess::GoogleDrive(crate::GoogleDriveAccess::Full),
+            access_token: coven_crypto::SecretText::new("token".into()),
+            refresh_token: None,
+            expires_at: None,
+        },
+        Arc::new(coven_foundation::clock::FixedClock::new(
+            std::time::UNIX_EPOCH,
+        )),
+    )
+    .unwrap();
+    let provider = Arc::new(
+        crate::providers::GoogleDriveStorage::new(
+            StorageConfig::GoogleDrive {
+                folder_id: "folder".into(),
+            },
+            DeviceId(31),
+            session,
+        )
+        .unwrap(),
+    );
+    let gate = Arc::new(SwitchGate(std::sync::atomic::AtomicBool::new(true)));
+    let storage = StorageConnection::with_gate(provider.clone(), gate.clone());
+    let held = provider.lock_create().await;
+    let path = ObjectPath::store_log(STORE_ID, DeviceId(31), std::num::NonZeroU64::MIN);
+    let mut request = Box::pin(storage.create(&path, b"entry"));
+    std::future::poll_fn(|cx| {
+        assert!(request.as_mut().poll(cx).is_pending());
+        Poll::Ready(())
+    })
+    .await;
+    gate.0.store(false, Ordering::SeqCst);
+    drop(held);
+    assert_eq!(
+        request.await.unwrap_err().failure(),
+        StorageFailure::CatchUpRequired
+    );
+    assert!(!storage.reached());
+}

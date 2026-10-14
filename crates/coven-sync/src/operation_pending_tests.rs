@@ -115,6 +115,7 @@ async fn app_reload_and_reset_stay_pending_until_explicit_retry() {
             a.custody.clone(),
             a.identity.clone(),
             a.clock.clone(),
+            a.send.clone(),
             Arc::new(coven_foundation::id_source::UuidIds),
             a.directory.clone(),
         );

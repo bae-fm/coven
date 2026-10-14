@@ -13,7 +13,7 @@ impl GoogleDriveStorage {
         store: coven_foundation::id_source::StoreId,
     ) -> Result<Vec<DeviceId>, StorageError> {
         let directory = format!("{store}/store-log");
-        let parents = self.directory(&directory, false).await?;
+        let parents = self.directory(&directory, None).await?;
         if parents.is_empty() {
             return Ok(Vec::new());
         }
@@ -48,7 +48,11 @@ impl GoogleDriveStorage {
         Ok(writers.into_iter().collect())
     }
 
-    async fn directory(&self, path: &str, create: bool) -> Result<Vec<String>, StorageError> {
+    async fn directory(
+        &self,
+        path: &str,
+        publication: Option<&PublicationRequest>,
+    ) -> Result<Vec<String>, StorageError> {
         coven_format::path::validate_directory(path)?;
         if self.session.access().await == OAuthAccess::GoogleDrive(GoogleDriveAccess::File) {
             // Sharing can change on another device. A narrow grant must not
@@ -80,13 +84,14 @@ impl GoogleDriveStorage {
                 folders.extend(cached.iter().cloned());
             }
             if folders.is_empty() {
-                if !create {
+                let Some(publication) = publication else {
                     return Ok(Vec::new());
-                }
+                };
                 let parent = parents.first().expect("root or discovered parent folders");
                 let item = http::json(
                     PROVIDER,
-                    self.send(
+                    self.publish(
+                        publication,
                         Method::POST,
                         &self.url(
                             &["files"],
@@ -114,10 +119,14 @@ impl GoogleDriveStorage {
         if let Some(folders) = self.folder_ids.lock().await.get(directory) {
             return Ok(folders.iter().map(|(_, id)| id.clone()).collect());
         }
-        self.directory(directory, false).await
+        self.directory(directory, None).await
     }
-    pub(super) async fn create_parent(&self, path: &ObjectPath) -> Result<String, StorageError> {
-        self.directory(parent_path(path), true)
+    pub(super) async fn create_parent(
+        &self,
+        publication: &PublicationRequest,
+        path: &ObjectPath,
+    ) -> Result<String, StorageError> {
+        self.directory(parent_path(path), Some(publication))
             .await?
             .into_iter()
             .next()
@@ -269,7 +278,7 @@ impl GoogleDriveStorage {
         listing: &mut ObjectListing,
     ) -> Result<(), StorageError> {
         let directory = listing.prefix().as_str().trim_end_matches('/');
-        let parents = self.directory(directory, false).await?;
+        let parents = self.directory(directory, None).await?;
         if parents.is_empty() {
             return Ok(());
         }

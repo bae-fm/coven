@@ -1,7 +1,7 @@
 //! Phase 2 of a pass: replace an exposed key before sending with it (§11).
 
 use super::*;
-use crate::key_introductions::{belongs, introductions, select, CopyObservation, Wait};
+use crate::key_introductions::{belongs, introductions, select, Wait};
 use crate::operation_data::{Data, EntryWork, Intent};
 use crate::operations::Progress;
 
@@ -85,12 +85,17 @@ impl StoreLogSync {
         me: &coven_crypto::MemberId,
     ) -> Result<bool, SyncError> {
         let local = self.database.local_store_log().await?;
-        let observation = self.copy_observation().await?;
-        let CopyObservation::Complete(copies) = &observation else {
-            // Without this pass's complete observation, sends wait (§11).
-            return Ok(false);
+        let observed = match self.copy_observation() {
+            Ok(observed) => observed,
+            // Without a fresh completed catch-up, rotation waits for a pass (§11).
+            Err(SyncError::Storage(error))
+                if error.failure() == coven_storage::StorageFailure::CatchUpRequired =>
+            {
+                return Ok(false)
+            }
+            Err(error) => return Err(error),
         };
-        let copies: Vec<_> = copies.iter().map(|copy| copy.prefix.clone()).collect();
+        let copies: Vec<_> = observed.into_iter().map(|copy| copy.prefix).collect();
         let ring = self.store_keys.read()?;
         match select(
             &introductions(&local.log),

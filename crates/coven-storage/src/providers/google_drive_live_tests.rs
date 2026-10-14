@@ -431,7 +431,16 @@ async fn drive_live_listing_lag() {
         };
         let prefix = ObjectPrefix::store_log(drive.store, provider.device);
         let seed = path(1);
-        let writer = provider.create_parent(&seed).await.unwrap();
+        let writer = provider
+            .create_parent(
+                &PublicationRequest::new(
+                    Arc::new(crate::test_utils::UnrestrictedPublications),
+                    seed.clone(),
+                ),
+                &seed,
+            )
+            .await
+            .unwrap();
         let (replied, native) = created(&drive, &writer, seed.file_name()).await;
         let warm = observe(
             "Drive_setup",

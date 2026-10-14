@@ -11,6 +11,9 @@ async fn unusable_snapshots_do_not_turn_deleted_history_into_an_empty_audience()
         if deleted {
             a.clock.set(UNIX_EPOCH + Duration::from_secs(31 * 86400));
         }
+        if !a.send.can_send() {
+            a.catch_up().await;
+        }
         a.sync.write_snapshot(Audience::Store).await.unwrap();
         assert_eq!(
             storage
@@ -348,11 +351,7 @@ mod reset {
     }
 
     async fn reset_step(d: &mut Device, id: OperationId) -> Progress {
-        let record = d.operation(id).await;
-        d.sync
-            .operation_step(&record, Data::read(&record).unwrap())
-            .await
-            .unwrap()
+        d.step(id).await.unwrap()
     }
 
     async fn finish_reset(d: &mut Device, id: OperationId) {

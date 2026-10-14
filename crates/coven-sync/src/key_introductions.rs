@@ -7,7 +7,6 @@ use coven_format::{sealed_key::KeyCopyPrefix, store_log::StoreChange, value::Ent
 use coven_foundation::id_source::KeyId;
 use coven_merge::Audience;
 use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex};
 
 /// Only store creation, circle creation and rotation introduce keys (D6 tags 0, 6, 15).
 pub(crate) fn introduction(change: &StoreChange) -> Option<(Audience, KeyId, [u8; 32])> {
@@ -137,52 +136,6 @@ pub(crate) fn accepted(
             .circle_key(*circle, key)
             .is_ok_and(|held| held.check_hash(hash).is_ok()),
     })
-}
-
-/// A pass's observation of the key-copy logs (§11): every copy's clear
-/// prefix, or the failure that left it incomplete. Only a complete one can
-/// start first attempts; a stale one never substitutes.
-#[derive(Clone, Debug)]
-pub(crate) enum CopyObservation {
-    Complete(Vec<crate::store_log_keys::ObservedCopy>),
-    Incomplete(crate::DamagedObject),
-}
-
-impl CopyObservation {
-    pub(crate) fn new(
-        copies: Vec<crate::store_log_keys::ObservedCopy>,
-        damages: Vec<crate::DamagedObject>,
-    ) -> Self {
-        match damages.into_iter().next() {
-            None => Self::Complete(copies),
-            Some(damage) => Self::Incomplete(damage),
-        }
-    }
-}
-
-/// The current pass's copy observation, shared by every owner that sends in
-/// that pass. Outside a pass there is none, so a sender observes afresh.
-#[derive(Clone, Default)]
-pub(crate) struct PassObservation(Arc<Mutex<Option<CopyObservation>>>);
-
-impl PassObservation {
-    pub(crate) fn record(&self, observation: CopyObservation) {
-        *self.0.lock().expect("pass observation lock poisoned") = Some(observation);
-    }
-
-    pub(crate) fn clear(&self) {
-        self.0
-            .lock()
-            .expect("pass observation lock poisoned")
-            .take();
-    }
-
-    pub(crate) fn current(&self) -> Option<CopyObservation> {
-        self.0
-            .lock()
-            .expect("pass observation lock poisoned")
-            .clone()
-    }
 }
 
 /// Why no key can start a first attempt (Appendix C12 `Wait`).

@@ -96,6 +96,7 @@ struct DeviceData {
     directory: StoreDir,
     device: DeviceId,
     clock: ClockRef,
+    send: Arc<SendGate>,
     ids: Arc<SequentialIds>,
     keys: Arc<KeySession<StoreKeyring>>,
     identity: Arc<KeySession<MemberKeys>>,
@@ -134,7 +135,8 @@ impl Device<StoreLogSync> {
             .unwrap();
         let clock = Arc::new(PassClock) as ClockRef;
         let db = builder(&directory, &clock).open().await.unwrap();
-        let storage = Arc::new(storage.for_device());
+        let send = Arc::new(SendGate::new(clock.clone()));
+        let storage = Arc::new(storage.for_device().with_publication_gate(send.clone()));
         let key_custody = Arc::new(Custody::new(None));
         let member_custody = Arc::new(Custody::new(Some(member.clone())));
         let keys = Arc::new(KeySession::store(key_custody.clone()).unwrap());
@@ -148,6 +150,7 @@ impl Device<StoreLogSync> {
             directory.clone(),
             Some(storage.clone()),
             clock.clone(),
+            send.clone(),
             ids.clone(),
             TransferLimits::default(),
         );
@@ -158,6 +161,7 @@ impl Device<StoreLogSync> {
             keys.clone(),
             identity.clone(),
             clock.clone(),
+            send.clone(),
             ids.clone(),
             directory.clone(),
         );
@@ -169,6 +173,7 @@ impl Device<StoreLogSync> {
             keys.clone(),
             identity.clone(),
             clock.clone(),
+            send.clone(),
         );
         Self {
             data: DeviceData {
@@ -181,6 +186,7 @@ impl Device<StoreLogSync> {
                 directory,
                 device: DeviceId(number),
                 clock,
+                send,
                 ids,
                 keys,
                 identity,
@@ -223,6 +229,7 @@ impl Device<StoreLogSync> {
             })
             .await
             .unwrap();
+        self.owner.sync_store_log().await.unwrap();
     }
 
     async fn add_member(&mut self, member: &MemberKeys) {
@@ -275,6 +282,7 @@ impl DeviceData {
             self.keys.clone(),
             self.identity.clone(),
             self.clock.clone(),
+            self.send.clone(),
         )
     }
 
@@ -387,6 +395,8 @@ impl Device<Operations> {
         data.db = builder(&data.directory, &data.clock).open().await.unwrap();
         data.keys = Arc::new(KeySession::store(data.key_custody.clone()).unwrap());
         data.identity = Arc::new(KeySession::member(data.member_custody.clone()).unwrap());
+        data.send = Arc::new(SendGate::new(data.clock.clone()));
+        data.storage = Arc::new(data.storage.with_publication_gate(data.send.clone()));
         data.work.take();
         data.db.test_track_work(data.work.clone()).await.unwrap();
         data.files = Files::new(
@@ -394,6 +404,7 @@ impl Device<Operations> {
             data.directory.clone(),
             Some(data.storage.clone()),
             data.clock.clone(),
+            data.send.clone(),
             data.ids.clone(),
             TransferLimits::default(),
         );
@@ -404,6 +415,7 @@ impl Device<Operations> {
             data.keys.clone(),
             data.identity.clone(),
             data.clock.clone(),
+            data.send.clone(),
             data.ids.clone(),
             data.directory.clone(),
         );
@@ -721,7 +733,7 @@ async fn io_counts_one_write_local_baseline() {
     assert_eq!(repeated_reads(&counts.reads, &[], false), 0);
     // No fixed total is stated for non-idle writer holds or commits. These
     // are observed baselines; the saved-log decode bound is tested separately.
-    assert_eq!((counts.work.writer_holds, counts.work.commits), (78, 18));
+    assert_eq!((counts.work.writer_holds, counts.work.commits), (77, 18));
 }
 
 #[tokio::test]
@@ -733,10 +745,10 @@ async fn io_counts_first_catchup_baseline() {
     assert_eq!(
         (counts.requests, counts.requests_by_kind()),
         (
-            59,
+            62,
             RequestCounts {
                 lists: 7,
-                gets: 37,
+                gets: 40,
                 creates: 1,
                 replaces: 2,
                 statuses: 8,
@@ -746,7 +758,7 @@ async fn io_counts_first_catchup_baseline() {
         ),
         "{counts:#?}"
     );
-    assert_eq!((counts.work.writer_holds, counts.work.commits), (112, 42));
+    assert_eq!((counts.work.writer_holds, counts.work.commits), (111, 42));
     assert_eq!(
         counts.work.store_log_commits, 2,
         "catch-up batch and own registration"
@@ -816,7 +828,7 @@ async fn io_counts_file_fetch_baseline() {
         "{counts:#?}"
     );
     // No fixed non-idle writer/commit total is stated; observed counts.
-    assert_eq!((counts.work.writer_holds, counts.work.commits), (94, 37));
+    assert_eq!((counts.work.writer_holds, counts.work.commits), (93, 37));
 }
 
 #[tokio::test]
@@ -882,7 +894,7 @@ async fn io_counts_reopen_baseline() {
         ),
         "{counts:#?}"
     );
-    assert_eq!((counts.work.writer_holds, counts.work.commits), (73, 12));
+    assert_eq!((counts.work.writer_holds, counts.work.commits), (72, 12));
 }
 
 #[tokio::test]

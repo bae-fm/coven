@@ -41,6 +41,7 @@ pub(crate) struct StorageConnections {
     device: DeviceId,
     ids: IdSourceRef,
     clock: ClockRef,
+    send: Arc<coven_sync::SendGate>,
     calls: tokio::sync::Mutex<()>,
 }
 
@@ -74,7 +75,12 @@ impl StorageConnections {
                         .map_err(|error| oauth_error(required.provider(), error))?;
                     let before = self
                         .connector
-                        .connect(data.location.clone(), data.credentials.clone(), self.device)
+                        .connect(
+                            data.location.clone(),
+                            data.credentials.clone(),
+                            self.device,
+                            self.send.clone(),
+                        )
                         .await?;
                     let account = before.account().await?;
                     let mut tokens = flow
@@ -90,6 +96,7 @@ impl StorageConnections {
                             data.location,
                             StorageCredentials::OAuth(tokens.clone()),
                             self.device,
+                            self.send.clone(),
                         )
                         .await?;
                     if candidate.account().await? != account {
@@ -114,6 +121,7 @@ impl StorageConnections {
         device: DeviceId,
         ids: IdSourceRef,
         clock: ClockRef,
+        send: Arc<coven_sync::SendGate>,
     ) -> Self {
         Self {
             codes,
@@ -127,6 +135,7 @@ impl StorageConnections {
             device,
             ids,
             clock,
+            send,
             calls: tokio::sync::Mutex::new(()),
         }
     }
@@ -281,7 +290,12 @@ impl StorageConnections {
     ) -> Result<ConnectedStorage, StorageSetupError> {
         let storage = self
             .connector
-            .connect(config.clone(), credentials.clone(), self.device)
+            .connect(
+                config.clone(),
+                credentials.clone(),
+                self.device,
+                self.send.clone(),
+            )
             .await?;
         let path = ObjectPath::file(self.store, self.device, FileId(self.ids.new_id()));
         let plaintext = b"coven storage check";
@@ -294,7 +308,10 @@ impl StorageConnections {
                 .seal_chunk(&key, path.as_str(), 0, plaintext)
                 .map_err(|error| StorageSetupError::Internal(Box::new(error)))?,
         );
-        coven_storage::check_provider(storage.as_ref(), &path, &bytes).await?;
+        {
+            let _probe = self.send.provider_check(path.clone());
+            coven_storage::check_provider(storage.as_ref(), &path, &bytes).await?;
+        }
         let access = match &credentials {
             StorageCredentials::S3(keys) => coven_format::MemberAccess::S3AccessKey {
                 access_key_id: keys.access_key_id.clone(),
@@ -336,7 +353,12 @@ impl StorageConnections {
             let config = data.location;
             let storage = owner
                 .connector
-                .connect(config.clone(), data.credentials, owner.device)
+                .connect(
+                    config.clone(),
+                    data.credentials,
+                    owner.device,
+                    owner.send.clone(),
+                )
                 .await?;
             owner.sync.unlock(storage).await.map_err(unlock_error)?;
             Ok(ConnectedStorage {

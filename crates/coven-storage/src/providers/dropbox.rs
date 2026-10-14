@@ -109,6 +109,7 @@ impl DropboxStorage {
         arg: Value,
         data: Vec<u8>,
         range: Option<ByteRange>,
+        publication: Option<&PublicationRequest>,
     ) -> Result<reqwest::Response, StorageError> {
         let mut headers = self.root_headers();
         headers.extend([
@@ -119,12 +120,34 @@ impl DropboxStorage {
             headers.push(("Range", range.header()));
         }
         let url = http::endpoint(&self.content, &method.split('/').collect::<Vec<_>>(), &[])?;
-        self.session
-            .send(Method::POST, &url, &headers, Body::Bytes(data), true)
-            .await
+        match publication {
+            Some(publication) => {
+                self.session
+                    .publish(
+                        publication,
+                        Method::POST,
+                        &url,
+                        &headers,
+                        Body::Bytes(data),
+                        true,
+                    )
+                    .await
+            }
+            None => {
+                self.session
+                    .send(Method::POST, &url, &headers, Body::Bytes(data), true)
+                    .await
+            }
+        }
     }
-    async fn write(&self, path: &ObjectPath, bytes: &[u8], mode: &str) -> Result<(), StorageError> {
-        let response = self.content("files/upload",json!({"path":path.absolute(),"mode":mode,"autorename":false,"strict_conflict":true,"mute":true}),bytes.to_vec(),None).await?;
+    async fn write(
+        &self,
+        publication: &PublicationRequest,
+        path: &ObjectPath,
+        bytes: &[u8],
+        mode: &str,
+    ) -> Result<(), StorageError> {
+        let response = self.content("files/upload",json!({"path":path.absolute(),"mode":mode,"autorename":false,"strict_conflict":true,"mute":true}),bytes.to_vec(),None, Some(publication)).await?;
         let value = http::json(PROVIDER, response).await?;
         check_file(&value, path, bytes.len() as u64)
     }
@@ -282,11 +305,21 @@ impl ProviderOps for DropboxStorage {
     fn single_request_limit(&self) -> u64 {
         self.single_request_limit
     }
-    async fn create(&self, path: &ObjectPath, bytes: &[u8]) -> Result<(), StorageError> {
-        self.write(path, bytes, "add").await
+    async fn create(
+        &self,
+        publication: &PublicationRequest,
+        path: &ObjectPath,
+        bytes: &[u8],
+    ) -> Result<(), StorageError> {
+        self.write(publication, path, bytes, "add").await
     }
-    async fn replace(&self, path: &ObjectPath, bytes: &[u8]) -> Result<(), StorageError> {
-        self.write(path, bytes, "overwrite").await
+    async fn replace(
+        &self,
+        publication: &PublicationRequest,
+        path: &ObjectPath,
+        bytes: &[u8],
+    ) -> Result<(), StorageError> {
+        self.write(publication, path, bytes, "overwrite").await
     }
     async fn status(&self, path: &ObjectPath) -> Result<Option<StoredObject>, StorageError> {
         match self
@@ -316,6 +349,7 @@ impl ProviderOps for DropboxStorage {
                 json!({"path":path.absolute()}),
                 Vec::new(),
                 range,
+                None,
             )
             .await?,
         )
@@ -456,6 +490,7 @@ impl ProviderOps for DropboxStorage {
     }
     async fn begin_upload(
         &self,
+        publication: &PublicationRequest,
         path: &ObjectPath,
         total: u64,
     ) -> Result<UploadSession, StorageError> {
@@ -466,6 +501,7 @@ impl ProviderOps for DropboxStorage {
                 json!({"close":false}),
                 Vec::new(),
                 None,
+                Some(publication),
             )
             .await?,
         )
@@ -481,13 +517,17 @@ impl ProviderOps for DropboxStorage {
             },
         })
     }
-    async fn resume_upload(&self, session: &mut UploadSession) -> Result<(), StorageError> {
+    async fn resume_upload(
+        &self,
+        publication: &PublicationRequest,
+        session: &mut UploadSession,
+    ) -> Result<(), StorageError> {
         if matches!(session.state, SessionState::VerifyPublished) {
             return Ok(());
         }
         // Empty append is Dropbox's offset query. An incorrect-offset response
         // is authoritative progress, including a part whose reply was lost.
-        let response = self.content("files/upload_session/append_v2",json!({"cursor":{"session_id":self.id(session)?,"offset":session.confirmed},"close":false}),Vec::new(),None).await?;
+        let response = self.content("files/upload_session/append_v2",json!({"cursor":{"session_id":self.id(session)?,"offset":session.confirmed},"close":false}),Vec::new(),None, Some(publication)).await?;
         if response.status().is_success() {
             return Ok(());
         }
@@ -520,6 +560,7 @@ impl ProviderOps for DropboxStorage {
     }
     async fn upload_part(
         &self,
+        publication: &PublicationRequest,
         session: &mut UploadSession,
         bytes: &[u8],
         end: u64,
@@ -527,22 +568,30 @@ impl ProviderOps for DropboxStorage {
         if matches!(session.state, SessionState::VerifyPublished) {
             return http::verify_published_part(self, session, bytes, end).await;
         }
-        let response = self.content("files/upload_session/append_v2",json!({"cursor":{"session_id":self.id(session)?,"offset":session.confirmed},"close":false}),bytes.to_vec(),None).await?;
+        let response = self.content("files/upload_session/append_v2",json!({"cursor":{"session_id":self.id(session)?,"offset":session.confirmed},"close":false}),bytes.to_vec(),None, Some(publication)).await?;
         http::checked(PROVIDER, response).await?;
         session.confirmed = end;
         Ok(())
     }
-    async fn finish_upload(&self, session: &mut UploadSession) -> Result<(), StorageError> {
+    async fn finish_upload(
+        &self,
+        publication: &PublicationRequest,
+        session: &mut UploadSession,
+    ) -> Result<(), StorageError> {
         if session.confirmed != session.total {
             return Err(StorageFailure::InvalidPart.into());
         }
-        let response = self.content("files/upload_session/finish",json!({"cursor":{"session_id":self.id(session)?,"offset":session.confirmed},"commit":{"path":session.path.absolute(),"mode":"add","autorename":false,"strict_conflict":true,"mute":true}}),Vec::new(),None).await?;
+        let response = self.content("files/upload_session/finish",json!({"cursor":{"session_id":self.id(session)?,"offset":session.confirmed},"commit":{"path":session.path.absolute(),"mode":"add","autorename":false,"strict_conflict":true,"mute":true}}),Vec::new(),None, Some(publication)).await?;
         let value = http::json(PROVIDER, response).await?;
         check_file(&value, &session.path, session.total)?;
         session.state = SessionState::Complete;
         Ok(())
     }
-    async fn abort_upload(&self, session: &UploadSession) -> Result<(), StorageError> {
+    async fn abort_upload(
+        &self,
+        publication: &PublicationRequest,
+        session: &UploadSession,
+    ) -> Result<(), StorageError> {
         if matches!(session.state, SessionState::VerifyPublished) {
             return Ok(());
         }
@@ -555,6 +604,7 @@ impl ProviderOps for DropboxStorage {
                     json!({"cursor":{"session_id":self.id(session)?,"offset":offset},"close":true}),
                     Vec::new(),
                     None,
+                    Some(publication),
                 )
                 .await?;
             if response.status().is_success() {

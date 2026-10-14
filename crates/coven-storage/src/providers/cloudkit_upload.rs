@@ -15,7 +15,7 @@ enum Publication {
     Published,
     Aborted,
 }
-fn publication(record: &Record) -> Result<Publication, StorageError> {
+fn publication_state(record: &Record) -> Result<Publication, StorageError> {
     match record.text("state")?.as_str() {
         "pending" => Ok(Publication::Pending),
         "published" => Ok(Publication::Published),
@@ -75,7 +75,7 @@ impl CloudKitStorage {
             Err(error) => return Err(error),
         };
         let confirmed = check_record(&record, session)?;
-        match publication(&record)? {
+        match publication_state(&record)? {
             Publication::Aborted => return Err(StorageFailure::SessionExpired.into()),
             Publication::Pending => session.confirmed = confirmed,
             Publication::Published => {
@@ -91,6 +91,7 @@ impl CloudKitStorage {
     }
     pub(super) async fn save_part(
         &self,
+        publication: &PublicationRequest,
         session: &mut UploadSession,
         bytes: &[u8],
         end: u64,
@@ -109,7 +110,7 @@ impl CloudKitStorage {
             Err(error) => return Err(error),
         };
         let confirmed = check_record(&upload, session)?;
-        if publication(&upload)? != Publication::Pending {
+        if publication_state(&upload)? != Publication::Pending {
             return Err(StorageFailure::InvalidPart.into());
         }
         if confirmed != session.confirmed {
@@ -145,6 +146,7 @@ impl CloudKitStorage {
         part.set_reference("owner", &self.record_id(&previous));
         let asset = part.set_asset(&self.files, bytes)?;
         upload.set_number("confirmed", end);
+        publication.check()?;
         native::modify(
             &self.database,
             vec![upload, part],
@@ -168,7 +170,11 @@ impl CloudKitStorage {
         }
         Ok(())
     }
-    pub(super) async fn publish(&self, session: &mut UploadSession) -> Result<(), StorageError> {
+    pub(super) async fn publish(
+        &self,
+        publication: &PublicationRequest,
+        session: &mut UploadSession,
+    ) -> Result<(), StorageError> {
         if session.confirmed != session.total {
             return Err(StorageFailure::InvalidPart.into());
         }
@@ -177,7 +183,7 @@ impl CloudKitStorage {
         if check_record(&upload, session)? != session.total {
             return Err(StorageFailure::InvalidPart.into());
         }
-        match publication(&upload)? {
+        match publication_state(&upload)? {
             Publication::Aborted => return Err(StorageFailure::SessionExpired.into()),
             Publication::Published => self.confirm_publication(session).await?,
             Publication::Pending => {
@@ -185,6 +191,7 @@ impl CloudKitStorage {
                 object.set_text("upload", token(session)?);
                 upload.set_text("state", "published");
                 upload.set_reference("owner", &self.record_id(session.path.as_str()));
+                publication.check()?;
                 native::modify(
                     &self.database,
                     vec![object, upload],
@@ -200,7 +207,11 @@ impl CloudKitStorage {
         session.state = SessionState::Complete;
         Ok(())
     }
-    pub(super) async fn abort(&self, session: &UploadSession) -> Result<(), StorageError> {
+    pub(super) async fn abort(
+        &self,
+        publication: &PublicationRequest,
+        session: &UploadSession,
+    ) -> Result<(), StorageError> {
         let root = record::upload_name(&session.path, token(session)?)?;
         let mut upload = match self.fetch(&root, SESSION_KEYS).wait().await {
             Ok(record) => record,
@@ -208,7 +219,7 @@ impl CloudKitStorage {
             Err(error) => return Err(error),
         };
         check_record(&upload, session)?;
-        match publication(&upload)? {
+        match publication_state(&upload)? {
             Publication::Published => return Ok(()),
             Publication::Aborted => {}
             Publication::Pending => {
@@ -216,6 +227,7 @@ impl CloudKitStorage {
                 // A cleanup failure leaves an explicitly aborted, unpublishable
                 // session for this initiating call to retry.
                 upload.set_text("state", "aborted");
+                publication.check()?;
                 native::modify(
                     &self.database,
                     vec![upload],
@@ -228,6 +240,7 @@ impl CloudKitStorage {
                 .await?;
             }
         }
+        publication.check()?;
         let request = native::modify(
             &self.database,
             vec![],

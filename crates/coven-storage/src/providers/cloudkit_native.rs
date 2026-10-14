@@ -175,6 +175,12 @@ pub(super) fn modify(
             Some(&saves),
             Some(&NSArray::from_retained_slice(deletes)),
         );
+        // UserInitiated fails on network errors instead of retrying internally,
+        // and does not defer publication until discretionary background time.
+        let configuration = operation.configuration();
+        configuration.setQualityOfService(objc2_foundation::NSQualityOfService::UserInitiated);
+        configuration.setTimeoutIntervalForResource(120.0);
+        operation.setConfiguration(Some(&configuration));
         operation.setSavePolicy(policy);
         operation.setAtomic(true);
         let block = RcBlock::new(

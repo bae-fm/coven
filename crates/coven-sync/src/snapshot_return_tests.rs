@@ -101,6 +101,9 @@ async fn returning_after_thirty_days_reloads_history_deleted_meanwhile() {
     upload(&a, &storage).await;
     a.clock
         .set(UNIX_EPOCH + Duration::from_secs(START + 31 * DAY));
+    if !a.send.can_send() {
+        a.catch_up().await;
+    }
     a.sync.write_snapshot(Audience::Store).await.unwrap();
     assert!(storage
         .list(&ObjectPrefix::device_logs(store(1)))

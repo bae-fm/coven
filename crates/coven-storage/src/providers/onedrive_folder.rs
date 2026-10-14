@@ -76,7 +76,11 @@ impl OneDriveStorage {
         }
         result
     }
-    pub(super) async fn directory(&self, parts: &[&str]) -> Result<String, StorageError> {
+    pub(super) async fn directory(
+        &self,
+        publication: &PublicationRequest,
+        parts: &[&str],
+    ) -> Result<String, StorageError> {
         // Concurrent creates share the same resolution, including newly made
         // parents. The empty path records validation of the configured folder.
         let mut known = self.folder_ids.lock().await;
@@ -95,7 +99,7 @@ impl OneDriveStorage {
             for (index, name) in parts.iter().enumerate().skip(start) {
                 let value = http::json(
                     PROVIDER,
-                    self.send(
+                    self.publish(publication,
                         Method::POST,
                         &self.item(&id, &["children"])?,
                         Body::Json(
@@ -111,7 +115,7 @@ impl OneDriveStorage {
                         let base = self.item(&id, &[])?;
                         http::json(
                             PROVIDER,
-                            self.send(Method::GET, &format!("{base}:/{name}:"), Body::Empty)
+                            self.publish(publication, Method::GET, &format!("{base}:/{name}:"), Body::Empty)
                                 .await?,
                         )
                         .await?

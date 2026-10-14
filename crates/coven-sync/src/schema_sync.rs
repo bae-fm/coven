@@ -138,13 +138,10 @@ impl StoreLogSync {
         let mut local = self.database.local_store_log().await?;
         let member = self.operation_member()?;
         let mut ring = self.store_keys.read()?;
-        let mut damages = Vec::new();
-        self.update_keys(&local.log, &member, &mut ring, &mut damages)
-            .await?;
+        self.update_keys(&local.log, &member, &mut ring).await?;
         // A plain app call may have fixed the next entry before this open ran
         // migrations. Its reserved number must finish before preparing a raise.
-        self.publish(&mut local, &member, &mut ring, &mut damages)
-            .await?;
+        self.publish(&mut local, &member, &mut ring).await?;
         if let Some(upload) = &local.upload {
             return Ok(Progress::Waiting(PendingReason::Waits(
                 Prerequisite::Object(crate::store_log_object::path(
@@ -153,22 +150,12 @@ impl StoreLogSync {
                 )),
             )));
         }
-        if let Some(damaged) = damages.into_iter().next() {
-            return Err(damaged.into());
-        }
         if schema_in_place(&local.log.replay.state, &snapshot.audience, version) {
             self.clear_snapshot_files(record, &mut task).await?;
             self.database.finish_operation(record.id).await?;
             return Ok(Progress::Finished(Output::Unit));
         }
-        let observed = crate::store_log_keys::observe(
-            &self.database,
-            &self.reads,
-            self.download_limit,
-            self.storage.as_deref().ok_or(SyncError::NoStorage)?,
-            local.store,
-        )
-        .await?;
+        let observed = self.send.observation()?;
         let record = record.clone();
         self.database
             .prepare_operation_entry(

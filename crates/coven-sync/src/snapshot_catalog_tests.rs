@@ -210,6 +210,9 @@ async fn another_members_snapshot_signatures_never_authorize_selection_loading_o
         assert_eq!(tables(&b).await, tables(&a).await);
         // A new publication signed by the real author permits loading after the logs disappear.
         storage.delete(&path).await.unwrap();
+        if !a.send.can_send() {
+            a.catch_up().await;
+        }
         a.sync.write_snapshot(Audience::Store).await.unwrap();
         a.sync.run_retention().await.unwrap();
         assert!(storage
@@ -294,6 +297,9 @@ async fn signed_coverage_does_not_require_opening_the_body_but_loading_does() {
     assert!(b.sync.reload_from_snapshots().await.is_err());
     assert!(tables(&b).await.is_empty());
     storage.delete(&path).await.unwrap();
+    if !a.send.can_send() {
+        a.catch_up().await;
+    }
     a.sync.write_snapshot(Audience::Store).await.unwrap();
     b.sync.reload_from_snapshots().await.unwrap();
     assert_eq!(tables(&a).await, tables(&b).await);
@@ -307,6 +313,9 @@ async fn a_truncated_body_does_not_erase_signed_required_history() {
     write_rows(&a, 0, 1, 17, Audience::Store).await;
     upload(&a, &storage).await;
     a.clock.set(UNIX_EPOCH + Duration::from_secs(31 * 86400));
+    if !a.send.can_send() {
+        a.catch_up().await;
+    }
     a.sync.write_snapshot(Audience::Store).await.unwrap();
     assert!(storage
         .list(&ObjectPrefix::device_logs(store(1)))
@@ -809,6 +818,9 @@ async fn newer_schema_snapshot_is_passed_over_for_an_older_supported_one() {
         "ALTER TABLE notes ADD COLUMN added TEXT",
     ));
     a.reopen(storage.clone(), notes_tables(), migrations).await;
+    if !a.send.can_send() {
+        a.catch_up().await;
+    }
     a.sync.write_snapshot(Audience::Store).await.unwrap();
     let mut c = notes_device(storage.clone(), 3).await;
     add_device(&mut c).await;

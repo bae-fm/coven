@@ -637,3 +637,78 @@ async fn read_response(
             .bytes,
     )
 }
+
+struct ControlledPublication(std::sync::atomic::AtomicBool);
+impl crate::PublicationGate for ControlledPublication {
+    fn check(&self, _: &crate::ObjectPath) -> Result<(), StorageError> {
+        if self.0.load(std::sync::atomic::Ordering::SeqCst) {
+            Ok(())
+        } else {
+            Err(StorageFailure::CatchUpRequired.into())
+        }
+    }
+}
+
+#[tokio::test]
+async fn publication_is_rechecked_after_waiting_for_tokens() {
+    use std::{
+        future::Future,
+        sync::{atomic::Ordering, Arc},
+        task::Poll,
+    };
+    let requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let observed = requests.clone();
+    let server = TestServer::new(Router::new().fallback(move || {
+        let observed = observed.clone();
+        async move {
+            observed.fetch_add(1, Ordering::SeqCst);
+            response(200, "published")
+        }
+    }))
+    .await;
+    let session = crate::providers::tests::session(CloudProvider::Dropbox);
+    let gate = Arc::new(ControlledPublication(std::sync::atomic::AtomicBool::new(
+        true,
+    )));
+    let publication = crate::PublicationRequest::new(
+        gate.clone(),
+        crate::ObjectPath::positions(
+            crate::test_utils::STORE_ID,
+            coven_foundation::id_source::DeviceId(1),
+        ),
+    );
+    let tokens = session.tokens.write().await;
+    let mut request = Box::pin(session.publish(
+        &publication,
+        Method::POST,
+        &server.url,
+        &[],
+        Body::Empty,
+        true,
+    ));
+    std::future::poll_fn(|cx| {
+        assert!(request.as_mut().poll(cx).is_pending());
+        Poll::Ready(())
+    })
+    .await;
+    gate.0.store(false, Ordering::SeqCst);
+    drop(tokens);
+    assert_eq!(
+        request.await.unwrap_err().failure(),
+        StorageFailure::CatchUpRequired
+    );
+    assert_eq!(requests.load(Ordering::SeqCst), 0);
+    gate.0.store(true, Ordering::SeqCst);
+    session
+        .publish(
+            &publication,
+            Method::POST,
+            &server.url,
+            &[],
+            Body::Empty,
+            true,
+        )
+        .await
+        .unwrap();
+    assert_eq!(requests.load(Ordering::SeqCst), 1);
+}

@@ -27,7 +27,10 @@ impl StoreLogSync {
     /// Publish the previously recorded immutable request after provider acceptance.
     pub async fn submit_join(&mut self, request: &crate::JoiningIdentity) -> Result<(), SyncError> {
         request
-            .publish(self.storage.as_deref().ok_or(SyncError::NoStorage)?)
+            .publish(
+                self.storage.as_deref().ok_or(SyncError::NoStorage)?,
+                &self.send,
+            )
             .await
     }
 

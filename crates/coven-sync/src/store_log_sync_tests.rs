@@ -27,6 +27,7 @@ pub(crate) struct Device {
     pub(crate) identity: Arc<KeySession<MemberKeys>>,
     pub(crate) member: MemberKeys,
     pub(crate) clock: Arc<FixedClock>,
+    pub(crate) send: Arc<crate::SendGate>,
     pub(crate) ids: coven_foundation::id_source::IdSourceRef,
     _temporary: tempfile::TempDir,
 }
@@ -222,12 +223,15 @@ impl Device {
         let custody = Arc::new(KeySession::store(Arc::new(InMemoryCustody::empty())).unwrap());
         let identity =
             Arc::new(KeySession::member(Arc::new(InMemoryCustody::new(member.clone()))).unwrap());
-        let mut writes = crate::DeviceLogSync::new(
+        let send = Arc::new(crate::SendGate::new(clock.clone()));
+        let storage = Arc::new(storage.with_publication_gate(send.clone()));
+        let writes = crate::DeviceLogSync::new(
             storage.clone(),
             db.clone(),
             custody.clone(),
             identity.clone(),
             clock.clone(),
+            send.clone(),
         );
         let sync = StoreLogSync::new(
             storage.clone(),
@@ -235,10 +239,10 @@ impl Device {
             custody.clone(),
             identity.clone(),
             clock.clone(),
+            send.clone(),
             ids.clone(),
             directory.clone(),
         );
-        sync.share_copies(&mut writes);
         Self {
             storage,
             sync,
@@ -249,6 +253,7 @@ impl Device {
             identity,
             member,
             clock,
+            send,
             ids,
             _temporary: temporary,
         }
@@ -268,7 +273,8 @@ impl Device {
             .open()
             .await
             .unwrap();
-        self.storage = storage;
+        self.send = Arc::new(crate::SendGate::new(self.clock.clone()));
+        self.storage = Arc::new(storage.with_publication_gate(self.send.clone()));
         self.writes = self.writes();
         self.sync = StoreLogSync::new(
             self.storage.clone(),
@@ -276,10 +282,10 @@ impl Device {
             self.custody.clone(),
             self.identity.clone(),
             self.clock.clone(),
+            self.send.clone(),
             self.ids.clone(),
             self.directory.clone(),
         );
-        self.sync.share_copies(&mut self.writes);
     }
 
     pub(crate) async fn operation(
@@ -299,6 +305,9 @@ impl Device {
         &mut self,
         id: coven_database::OperationId,
     ) -> Result<crate::operations::Progress, SyncError> {
+        if !self.send.can_send() {
+            self.sync.scan_store_log_once(true).await?;
+        }
         let row = self.operation(id).await;
         let data = crate::operation_data::Data::read(&row)?;
         self.sync.operation_step(&row, data).await
@@ -321,6 +330,7 @@ impl Device {
             self.custody.clone(),
             self.identity.clone(),
             self.clock.clone(),
+            self.send.clone(),
         )
     }
 
@@ -356,6 +366,9 @@ impl Device {
     }
     pub(crate) async fn sync(&mut self) {
         self.sync.sync_store_log().await.unwrap();
+    }
+    pub(crate) async fn catch_up(&self) {
+        self.sync.scan_store_log_once(true).await.unwrap();
     }
     pub(crate) async fn log(&self) -> StoreLog {
         self.db.local_store_log().await.unwrap().log
@@ -418,6 +431,7 @@ async fn far_future_entry_waits_for_its_missing_causal_entry_then_applies() {
     let first = a.create(key(1)).await;
     b.sync().await;
     a.clock.set(UNIX_EPOCH + Duration::from_secs(365 * 86400));
+    a.catch_up().await;
     let second = a
         .sync
         .make_and_upload_entry(StoreChange::CreateCircle {
@@ -613,6 +627,7 @@ async fn far_future_entry_applies_and_a_restored_device_stamps_after_it() {
     a.create(key(1)).await;
     b.sync().await;
     a.clock.set(UNIX_EPOCH + Duration::from_secs(365 * 86400));
+    a.catch_up().await;
     let future = a
         .sync
         .make_and_upload_entry(StoreChange::AddDevice {
@@ -626,6 +641,7 @@ async fn far_future_entry_applies_and_a_restored_device_stamps_after_it() {
     assert!(b.log().await.replay.entries.contains_key(&future));
     b.clock.set(UNIX_EPOCH - Duration::from_secs(1));
     b.restart(storage.clone()).await;
+    b.catch_up().await;
     let id = b.device().await;
     let restored = b
         .sync

@@ -63,6 +63,7 @@ async fn provider_access_live_google_upgrade() {
             location.clone(),
             StorageCredentials::OAuth(narrow.clone()),
             DeviceId(31),
+            Arc::new(crate::test_utils::UnrestrictedPublications),
         )
         .await
         .unwrap();
@@ -81,7 +82,12 @@ async fn provider_access_live_google_upgrade() {
             assert_eq!(full.access, FULL);
             assert!(full.client_id == narrow.client_id, "upgrade changed client");
             let upgraded = connector
-                .connect(location, StorageCredentials::OAuth(full), DeviceId(32))
+                .connect(
+                    location,
+                    StorageCredentials::OAuth(full),
+                    DeviceId(32),
+                    Arc::new(crate::test_utils::UnrestrictedPublications),
+                )
                 .await
                 .unwrap();
             assert!(
@@ -157,6 +163,7 @@ async fn provider_access_live_dropbox_app_folder() {
             location.clone(),
             StorageCredentials::OAuth(tokens.clone()),
             DeviceId(31),
+            Arc::new(crate::test_utils::UnrestrictedPublications),
         )
         .await
         .unwrap();
@@ -172,8 +179,7 @@ async fn provider_access_live_dropbox_app_folder() {
             .connect(
                 StorageConfig::decode(location.encode().unwrap().as_bytes()).unwrap(),
                 StorageCredentials::OAuth(tokens),
-                DeviceId(32),
-            )
+                DeviceId(32), Arc::new(crate::test_utils::UnrestrictedPublications))
             .await
             .unwrap();
         let after = restored.read_object(&path, None).await.unwrap();

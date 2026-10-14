@@ -374,7 +374,8 @@ proofs() {
         for test in io_differential_discovery io_differential_snapshot_counts \
             io_differential_catalog_current io_differential_needs_snapshots \
             io_differential_recent_return io_differential_streaming_download_dispositions \
-            io_differential_positions; do
+            io_differential_positions io_differential_retained_ranges_and_refusal_eviction \
+            io_differential_send_gate; do
             if ! printf '%s\n' "$io_tests" | grep -q "::$test: test\$"; then
                 echo "the Rust test binary is missing $test" >&2
                 exit 1
@@ -387,7 +388,15 @@ proofs() {
             recent_return::tests::io_differential_needs_snapshots \
             recent_return::tests::io_differential_recent_return \
             device_log_sync::tests::validation::io_differential_streaming_download_dispositions \
-            device_log_sync::positions::tests::io_differential_positions
+            device_log_sync::positions::tests::io_differential_positions \
+            object_input::tests::io_differential_retained_ranges_and_refusal_eviction \
+            send_gate::tests::io_differential_send_gate
+    fi
+
+    if proof_selected merge || crate_selected coven-sync; then
+        runner=$(runner merge receiveRunner)
+        step "Rust / Lean send-gate publication bound"
+        COVEN_RECEIVE_LEAN="$runner" cargo test -p coven-sync --all-features mg_differential_send_gate_publication_bound -- --ignored
     fi
 
     if proof_selected storage || crate_selected coven-database; then

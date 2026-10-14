@@ -99,6 +99,30 @@ impl OAuthSession {
         body: Body,
         authenticated: bool,
     ) -> Result<Response, StorageError> {
+        self.send_request(None, method, url, headers, body, authenticated)
+            .await
+    }
+    pub(crate) async fn publish(
+        &self,
+        publication: &crate::PublicationRequest,
+        method: Method,
+        url: &str,
+        headers: &[(&str, String)],
+        body: Body,
+        authenticated: bool,
+    ) -> Result<Response, StorageError> {
+        self.send_request(Some(publication), method, url, headers, body, authenticated)
+            .await
+    }
+    async fn send_request(
+        &self,
+        publication: Option<&crate::PublicationRequest>,
+        method: Method,
+        url: &str,
+        headers: &[(&str, String)],
+        body: Body,
+        authenticated: bool,
+    ) -> Result<Response, StorageError> {
         let mut request = self.client.request(method, url);
         let access = if authenticated {
             let tokens = self.tokens.read().await;
@@ -125,6 +149,9 @@ impl OAuthSession {
             Body::Json(value) => request.json(&value),
             Body::Bytes(bytes) => request.body(bytes),
         };
+        if let Some(publication) = publication {
+            publication.check()?;
+        }
         let mut response = request
             .send()
             .await
@@ -144,6 +171,7 @@ pub(crate) enum Body {
 pub(crate) fn client() -> Result<reqwest::Client, reqwest::Error> {
     reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
+        .retry(reqwest::retry::never())
         .timeout(std::time::Duration::from_secs(120))
         .build()
 }

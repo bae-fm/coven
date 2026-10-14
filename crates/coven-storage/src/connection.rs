@@ -13,15 +13,31 @@ use std::sync::{
 pub struct StorageConnection<P: ?Sized = dyn ProviderOps> {
     pub(crate) provider: Arc<P>,
     reached: AtomicBool,
+    pub(crate) publications: Arc<dyn PublicationGate>,
 }
 
 impl<P: ProviderOps + ?Sized> StorageConnection<P> {
     /// Compose once when connecting, before distributing the connection to owners.
+    #[cfg(any(test, feature = "test-utils"))]
     pub(crate) fn from_provider(provider: Arc<P>) -> Self {
+        Self::with_gate(
+            provider,
+            Arc::new(crate::test_utils::UnrestrictedPublications),
+        )
+    }
+
+    pub(crate) fn with_gate(provider: Arc<P>, publications: Arc<dyn PublicationGate>) -> Self {
         Self {
             provider,
+            publications,
             reached: AtomicBool::new(false),
         }
+    }
+
+    fn publication(&self, path: &ObjectPath) -> Result<PublicationRequest, StorageError> {
+        let request = PublicationRequest::new(self.publications.clone(), path.clone());
+        request.check()?;
+        Ok(request)
     }
 
     /// Begin the installed connection's observation after setup or bootstrap checks.
@@ -36,10 +52,12 @@ impl<P: ProviderOps + ?Sized> StorageConnection<P> {
     }
 
     fn observed<T>(&self, result: Result<T, StorageError>) -> Result<T, StorageError> {
-        if !result
-            .as_ref()
-            .is_err_and(|error| error.failure() == StorageFailure::Network)
-        {
+        if !result.as_ref().is_err_and(|error| {
+            matches!(
+                error.failure(),
+                StorageFailure::Network | StorageFailure::CatchUpRequired
+            )
+        }) {
             self.reached.store(true, Ordering::Release);
         }
         result
@@ -61,7 +79,9 @@ impl<P: ProviderOps + ?Sized> StorageConnection<P> {
         if total == 0 {
             return Err(StorageFailure::InvalidPart.into());
         }
-        self.provider.begin_upload(path, total).await
+        self.provider
+            .begin_upload(&self.publication(path)?, path, total)
+            .await
     }
     pub(crate) async fn upload_part_checked(
         &self,
@@ -81,7 +101,9 @@ impl<P: ProviderOps + ?Sized> StorageConnection<P> {
                 session.end_of_part(bytes.len())?
             }
         };
-        self.provider.upload_part(session, bytes, end).await
+        self.provider
+            .upload_part(&self.publication(session.path())?, session, bytes, end)
+            .await
     }
     pub(crate) async fn finish_upload_checked(
         &self,
@@ -91,7 +113,9 @@ impl<P: ProviderOps + ?Sized> StorageConnection<P> {
         if session.is_complete() {
             return Ok(());
         }
-        self.provider.finish_upload(session).await
+        self.provider
+            .finish_upload(&self.publication(session.path())?, session)
+            .await
     }
     pub(crate) async fn abort_upload_checked(
         &self,
@@ -101,7 +125,9 @@ impl<P: ProviderOps + ?Sized> StorageConnection<P> {
         if session.is_complete() {
             return Ok(());
         }
-        self.provider.abort_upload(session).await
+        self.provider
+            .abort_upload(&self.publication(session.path())?, session)
+            .await
     }
 }
 
@@ -129,9 +155,15 @@ impl<P: ProviderOps + ?Sized> Storage for StorageConnection<P> {
     }
     async fn create(&self, path: &ObjectPath, bytes: &[u8]) -> Result<(), StorageError> {
         let _guard = self.provider.lock_create().await;
+        let publication = self.publication(path)?;
         self.observed(
-            crate::transfer::upload_bytes(self, path, bytes, self.provider.create(path, bytes))
-                .await,
+            crate::transfer::upload_bytes(
+                self,
+                path,
+                bytes,
+                self.provider.create(&publication, path, bytes),
+            )
+            .await,
         )
     }
     async fn replace(&self, path: &ObjectPath, bytes: &[u8]) -> Result<(), StorageError> {
@@ -140,7 +172,9 @@ impl<P: ProviderOps + ?Sized> Storage for StorageConnection<P> {
                 return Err(StorageFailure::InvalidPath.into());
             }
             crate::transfer::check_single_request(bytes.len() as u64, self.single_request_limit())?;
-            self.provider.replace(path, bytes).await
+            self.provider
+                .replace(&self.publication(path)?, path, bytes)
+                .await
         }
         .await;
         self.observed(result)
@@ -255,7 +289,9 @@ impl<P: ProviderOps + ?Sized> Storage for StorageConnection<P> {
             if session.is_complete() {
                 return Ok(());
             }
-            self.provider.resume_upload(session).await
+            self.provider
+                .resume_upload(&self.publication(session.path())?, session)
+                .await
         }
         .await;
         self.observed(result)

@@ -51,6 +51,9 @@ async fn reopen(
 
 async fn sync_all(devices: &mut [Device]) {
     for device in &mut *devices {
+        if !device.send.can_send() {
+            device.catch_up().await;
+        }
         device.writes.upload_writes().await.unwrap();
     }
     for device in &mut *devices {
@@ -254,13 +257,7 @@ async fn a_raise_resumes_after_reopening_at_every_publication_step() {
         device.sync.schedule_version_changes().await.unwrap();
         let id = device.db.operations().await.unwrap()[0].id;
         for _ in 0..crash {
-            let record = device.operation(id).await;
-            match device
-                .sync
-                .operation_step(&record, crate::operation_data::Data::read(&record).unwrap())
-                .await
-                .unwrap()
-            {
+            match device.step(id).await.unwrap() {
                 crate::operations::Progress::Finished(_) => break 'crashes,
                 crate::operations::Progress::Advanced => (),
                 _ => panic!("unexpected schema publication progress"),
@@ -507,10 +504,6 @@ async fn concurrent_raises_to_different_versions_are_both_kept() {
     let mut devices = group(storage.clone(), 3).await;
     seed(&mut devices).await;
     update(&mut devices[0], storage.clone(), true, true).await;
-    devices[0].sync.sync_store_log().await.unwrap();
-    devices[0].writes.upload_writes().await.unwrap();
-    let first =
-        devices[0].db.store_log().await.unwrap().replay.state.schema[&Audience::Store].clone();
     // Ben's migration and snapshot have not read Ana's raise.
     reopen(
         &mut devices[1],
@@ -523,6 +516,7 @@ async fn concurrent_raises_to_different_versions_are_both_kept() {
         ],
     )
     .await;
+    devices[1].catch_up().await;
     devices[1].sync.schedule_version_changes().await.unwrap();
     let id = devices[1].db.operations().await.unwrap()[0].id;
     for _ in 0..3 {
@@ -540,6 +534,10 @@ async fn concurrent_raises_to_different_versions_are_both_kept() {
             .await
             .unwrap();
     }
+    devices[0].sync.sync_store_log().await.unwrap();
+    devices[0].writes.upload_writes().await.unwrap();
+    let first =
+        devices[0].db.store_log().await.unwrap().replay.state.schema[&Audience::Store].clone();
     devices[1].sync.sync_store_log().await.unwrap();
     devices[1].writes.upload_writes().await.unwrap();
     for index in [0, 2] {
@@ -717,6 +715,7 @@ async fn a_migration_waits_for_an_operation_that_already_reserved_the_entry_numb
             device.directory.clone(),
             Some(storage),
             device.clock.clone(),
+            device.send.clone(),
             device.ids.clone(),
             crate::TransferLimits::default(),
         );
@@ -727,6 +726,7 @@ async fn a_migration_waits_for_an_operation_that_already_reserved_the_entry_numb
             device.clock.clone(),
         );
         operations.get_members().await.unwrap();
+        operations.sync().await.unwrap();
         assert!(device
             .db
             .pending::<crate::PendingRecord>()
@@ -867,6 +867,7 @@ mod recovery {
                             device.custody.clone(),
                             device.identity.clone(),
                             device.clock.clone(),
+                            device.send.clone(),
                         );
                         device.sync = StoreLogSync::new(
                             storage.clone(),
@@ -874,6 +875,7 @@ mod recovery {
                             device.custody.clone(),
                             device.identity.clone(),
                             device.clock.clone(),
+                            device.send.clone(),
                             device.ids.clone(),
                             device.directory.clone(),
                         );

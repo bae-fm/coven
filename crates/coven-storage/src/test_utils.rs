@@ -214,11 +214,25 @@ pub struct MemoryProvider {
 }
 impl Clone for MemoryStorage {
     fn clone(&self) -> Self {
-        Self::from_provider(self.provider.clone())
+        Self::with_gate(self.provider.clone(), self.publications.clone())
+    }
+}
+
+/// Authority for raw provider fixtures, which seed objects without a sync owner.
+pub struct UnrestrictedPublications;
+impl PublicationGate for UnrestrictedPublications {
+    fn check(&self, _: &ObjectPath) -> Result<(), StorageError> {
+        Ok(())
     }
 }
 
 impl MemoryStorage {
+    /// Bind a simulated installation to the real synchronization gate, preserving
+    /// this provider's credentials, durable objects and request observations.
+    pub fn with_publication_gate(&self, publications: Arc<dyn PublicationGate>) -> Self {
+        Self::with_gate(self.provider.clone(), publications)
+    }
+
     /// An S3 test location at the Unix epoch, with four-MiB single requests
     /// and 64-KiB parts. Override only the choices relevant to the scenario.
     pub fn builder() -> MemoryStorageBuilder {
@@ -294,8 +308,9 @@ impl MemoryStorage {
 
     /// Erase the provider type while retaining this exact connection's credentials.
     pub fn shared_connection(&self) -> Arc<StorageConnection> {
-        Arc::new(StorageConnection::from_provider(
-            self.provider.clone() as Arc<dyn ProviderOps>
+        Arc::new(StorageConnection::with_gate(
+            self.provider.clone() as Arc<dyn ProviderOps>,
+            self.publications.clone(),
         ))
     }
 
@@ -496,7 +511,13 @@ impl ProviderOps for MemoryProvider {
     fn single_request_limit(&self) -> u64 {
         self.single_limit
     }
-    async fn create(&self, path: &ObjectPath, bytes: &[u8]) -> Result<(), StorageError> {
+    async fn create(
+        &self,
+        publication: &PublicationRequest,
+        path: &ObjectPath,
+        bytes: &[u8],
+    ) -> Result<(), StorageError> {
+        publication.check()?;
         self.before(MemoryRequest::Create(path.clone())).await?;
         let mut state = self.state.lock().await;
         let held = if state
@@ -543,7 +564,13 @@ impl ProviderOps for MemoryProvider {
         Ok(())
     }
 
-    async fn replace(&self, path: &ObjectPath, bytes: &[u8]) -> Result<(), StorageError> {
+    async fn replace(
+        &self,
+        publication: &PublicationRequest,
+        path: &ObjectPath,
+        bytes: &[u8],
+    ) -> Result<(), StorageError> {
+        publication.check()?;
         self.before(MemoryRequest::Replace(path.clone())).await?;
         let mut state = self.state.lock().await;
         let revision = state.next_id()?;
@@ -725,9 +752,11 @@ impl ProviderOps for MemoryProvider {
     }
     async fn begin_upload(
         &self,
+        publication: &PublicationRequest,
         path: &ObjectPath,
         total: u64,
     ) -> Result<UploadSession, StorageError> {
+        publication.check()?;
         self.before(MemoryRequest::Other("begin_upload")).await?;
         let mut state = self.state.lock().await;
         if state.objects.contains_key(path) && !state.faults.overwrite_create {
@@ -755,7 +784,12 @@ impl ProviderOps for MemoryProvider {
             },
         })
     }
-    async fn resume_upload(&self, session: &mut UploadSession) -> Result<(), StorageError> {
+    async fn resume_upload(
+        &self,
+        publication: &PublicationRequest,
+        session: &mut UploadSession,
+    ) -> Result<(), StorageError> {
+        publication.check()?;
         self.before(MemoryRequest::Other("resume_upload")).await?;
         let id = self.session_id(session)?;
         let state = self.state.lock().await;
@@ -770,10 +804,12 @@ impl ProviderOps for MemoryProvider {
     }
     async fn upload_part(
         &self,
+        publication: &PublicationRequest,
         session: &mut UploadSession,
         bytes: &[u8],
         end: u64,
     ) -> Result<(), StorageError> {
+        publication.check()?;
         self.before(MemoryRequest::Other("upload_part")).await?;
         let id = self.session_id(session)?;
         let mut state = self.state.lock().await;
@@ -802,7 +838,12 @@ impl ProviderOps for MemoryProvider {
         session.confirmed = end;
         Ok(())
     }
-    async fn finish_upload(&self, session: &mut UploadSession) -> Result<(), StorageError> {
+    async fn finish_upload(
+        &self,
+        publication: &PublicationRequest,
+        session: &mut UploadSession,
+    ) -> Result<(), StorageError> {
+        publication.check()?;
         self.before(MemoryRequest::Other("finish_upload")).await?;
         let id = self.session_id(session)?;
         let mut state = self.state.lock().await;
@@ -836,7 +877,12 @@ impl ProviderOps for MemoryProvider {
         session.state = SessionState::Memory { id, complete: true };
         Ok(())
     }
-    async fn abort_upload(&self, session: &UploadSession) -> Result<(), StorageError> {
+    async fn abort_upload(
+        &self,
+        publication: &PublicationRequest,
+        session: &UploadSession,
+    ) -> Result<(), StorageError> {
+        publication.check()?;
         self.before(MemoryRequest::Other("abort_upload")).await?;
         let id = self.session_id(session)?;
         let mut state = self.state.lock().await;

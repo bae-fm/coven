@@ -441,3 +441,84 @@ async fn clock_publication_requires_the_devices_registered_member() {
     ));
     assert_eq!(storage.request_count(), requests);
 }
+
+#[tokio::test]
+async fn an_expired_clock_send_observes_membership_before_sampling_for_the_next_scan() {
+    use coven_storage::test_utils::MemoryRequest;
+    let storage_clock = Arc::new(coven_foundation::clock::FixedClock::new(UNIX_EPOCH));
+    let storage = Arc::new(
+        MemoryStorage::builder()
+            .clock(storage_clock.clone())
+            .build()
+            .unwrap(),
+    );
+    let mut owner = device(storage.clone(), 1, member(1), store(1)).await;
+    owner.create(key(1)).await;
+    storage_clock.set(UNIX_EPOCH + Duration::from_secs(100));
+    owner.send.invalidate();
+    let before = storage.request_trace().len();
+    owner
+        .sync
+        .observe_clock(&owner.db.local_store_log().await.unwrap())
+        .await
+        .unwrap();
+    let trace = storage.request_trace();
+    let observed = &trace[before..];
+    let clock = ObjectPath::clock(store(1), DeviceId(1));
+    let sent = observed
+        .iter()
+        .position(|r| matches!(r, MemoryRequest::Replace(path) if *path == clock))
+        .unwrap();
+    assert!(observed[..sent]
+        .iter()
+        .any(|r| matches!(r, MemoryRequest::Other("list_writers"))));
+    assert!(observed[..sent]
+        .iter()
+        .any(|r| matches!(r, MemoryRequest::Read(path, _) if path.store_log_position().is_some())));
+    // The enabling phase keeps its own earlier sample; the clock time it
+    // permitted qualifies only the next observation.
+    let sampled = storage.status(&clock).await.unwrap().unwrap().stored_at;
+    assert!(owner
+        .sync
+        .finality
+        .lock()
+        .unwrap()
+        .caught_up()
+        .is_none_or(|time| time < sampled));
+    owner.sync.scan_store_log_once(true).await.unwrap();
+    assert_eq!(
+        owner.sync.finality.lock().unwrap().caught_up(),
+        Some(sampled)
+    );
+}
+
+#[tokio::test]
+async fn a_suspended_first_phase_cannot_enable_its_waiting_clock_send() {
+    use coven_storage::{test_utils::MemoryRequest, StorageFailure};
+    let storage = Arc::new(MemoryStorage::builder().build().unwrap());
+    let mut owner = device(storage.clone(), 1, member(1), store(1)).await;
+    owner.create(key(1)).await;
+    owner.send.invalidate();
+    let (listed, started) = tokio::sync::oneshot::channel();
+    let (resume, held) = tokio::sync::oneshot::channel();
+    storage
+        .hold_next_listing(ObjectPrefix::store_logs(store(1)), listed, held)
+        .await;
+    let before = storage.request_trace().len();
+    let local = owner.db.local_store_log().await.unwrap();
+    let sending = owner.sync.observe_clock(&local);
+    tokio::pin!(sending);
+    tokio::select! {
+        result = &mut sending => panic!("clock send finished before membership: {result:?}"),
+        result = started => result.unwrap(),
+    }
+    owner.clock.set(UNIX_EPOCH + Duration::from_secs(301));
+    resume.send(()).unwrap();
+    assert!(
+        matches!(sending.await, Err(SyncError::Storage(error)) if error.failure() == StorageFailure::CatchUpRequired)
+    );
+    assert!(!owner.send.can_send());
+    assert!(storage.request_trace()[before..]
+        .iter()
+        .all(|r| !matches!(r, MemoryRequest::Create(_) | MemoryRequest::Replace(_))));
+}

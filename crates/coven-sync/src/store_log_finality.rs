@@ -7,9 +7,23 @@ impl StoreLogSync {
         &self,
         require_complete: bool,
     ) -> Result<Vec<DamagedObject>, SyncError> {
-        let (mut damages, complete) = self.scan_store_log_once(require_complete).await?;
+        let (mut damages, mut complete) = self.scan_store_log_once(require_complete).await?;
         if complete {
+            let mut local = self.database.local_store_log().await?;
+            let member = self.operation_member()?;
+            let mut ring = self.store_keys.read()?;
+            let queued = local.upload.is_some();
+            self.publish(&mut local, &member, &mut ring).await?;
+            if queued && local.upload.is_none() {
+                let (observed, checked) = self.scan_store_log_once(require_complete).await?;
+                damages.extend(observed);
+                complete = checked;
+            }
+        }
+        if complete && self.send.can_send() {
             let local = self.database.local_store_log().await?;
+            let ring = self.store_keys.read()?;
+            self.share_keys(&local.log, &ring).await?;
             let due = self
                 .finality
                 .lock()
@@ -26,6 +40,14 @@ impl StoreLogSync {
     /// A complete catch-up precedes this publication. The following
     /// scan captures its status time before making any discovery request.
     pub(crate) async fn observe_clock(&self, local: &LocalStoreLog) -> Result<(), SyncError> {
+        let refreshed;
+        let local = if self.send.can_send() {
+            local
+        } else {
+            self.scan_store_log_once(true).await?;
+            refreshed = self.database.local_store_log().await?;
+            &refreshed
+        };
         let member = self.operation_member()?;
         crate::write_seal::check_member(&local.log, &member, local.device)?;
         let newest = crate::key_introductions::newest(&local.log, &coven_merge::Audience::Store)

@@ -598,7 +598,16 @@ fn onedrive_live_conditional_copy() {
         let provider = &live.storage.provider;
         let path = live.path(1);
         let session_before = live.marker(2).await;
-        provider.parents(&path).await.unwrap();
+        provider
+            .parents(
+                &PublicationRequest::new(
+                    Arc::new(crate::test_utils::UnrestrictedPublications),
+                    path.clone(),
+                ),
+                &path,
+            )
+            .await
+            .unwrap();
         let marker = provider.metadata(&live.path(2)).await.unwrap();
         let parent = http::string(&marker["parentReference"], "id").unwrap();
         let root = provider.item(&provider.folder, &[]).unwrap();

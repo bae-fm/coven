@@ -26,6 +26,7 @@ async fn sync(f: &Fixture) -> (StoreLogSync, MemberKeys, crate::DeviceLogSync) {
         store_keys.clone(),
         member_keys.clone(),
         f.clock.clone(),
+        f.send.clone(),
     );
     let mut sync = StoreLogSync::new(
         f.storage.clone(),
@@ -33,6 +34,7 @@ async fn sync(f: &Fixture) -> (StoreLogSync, MemberKeys, crate::DeviceLogSync) {
         store_keys,
         member_keys,
         f.clock.clone(),
+        f.send.clone(),
         f.ids.clone(),
         f.directory.clone(),
     );

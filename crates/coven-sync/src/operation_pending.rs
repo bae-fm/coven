@@ -98,6 +98,11 @@ impl StoreLogSync {
             SyncError::NoStorage => PendingReason::NoStorage,
             SyncError::UpdateRequired(update) => PendingReason::UpdateRequired(*update),
             SyncError::Removed => PendingReason::Removed,
+            SyncError::Storage(error)
+                if error.failure() == coven_storage::StorageFailure::CatchUpRequired =>
+            {
+                PendingReason::Waits(Prerequisite::CatchUp)
+            }
             SyncError::Storage(error) => match &self.storage {
                 Some(storage) => PendingReason::Storage {
                     provider: storage.config().provider(),

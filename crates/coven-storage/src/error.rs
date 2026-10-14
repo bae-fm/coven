@@ -23,6 +23,8 @@ pub enum StorageFailure {
     DropboxAppFolderNotShareable,
     /// An incremental sign-in selected a different provider account.
     AccountMismatch,
+    /// The installation must complete membership and key-copy catch-up before sending.
+    CatchUpRequired,
     /// No route to the provider, a timeout, or an interrupted response.
     Network,
     /// Credentials were refused or must be refreshed.

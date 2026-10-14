@@ -15,6 +15,8 @@ use std::fmt;
 
 #[path = "s3_error.rs"]
 mod error;
+#[path = "s3_publication.rs"]
+mod publication;
 use error::s3_error;
 #[path = "s3_profile.rs"]
 mod profile;
@@ -197,7 +199,13 @@ impl S3Storage {
             single_request_limit: 5 * 1024 * 1024 * 1024,
         })
     }
-    async fn put(&self, path: &ObjectPath, bytes: &[u8], create: bool) -> Result<(), StorageError> {
+    async fn put(
+        &self,
+        publication: &PublicationRequest,
+        path: &ObjectPath,
+        bytes: &[u8],
+        create: bool,
+    ) -> Result<(), StorageError> {
         let mut request = self
             .client
             .put_object()
@@ -216,6 +224,7 @@ impl S3Storage {
                     request.headers_mut().insert(name, value);
                 }
             })
+            .interceptor(publication.clone())
             .send()
             .await
             .map_err(s3_error)?;
@@ -312,11 +321,21 @@ impl ProviderOps for S3Storage {
             5 * 1024 * 1024 * 1024
         }
     }
-    async fn create(&self, path: &ObjectPath, bytes: &[u8]) -> Result<(), StorageError> {
-        self.put(path, bytes, true).await
+    async fn create(
+        &self,
+        publication: &PublicationRequest,
+        path: &ObjectPath,
+        bytes: &[u8],
+    ) -> Result<(), StorageError> {
+        self.put(publication, path, bytes, true).await
     }
-    async fn replace(&self, path: &ObjectPath, bytes: &[u8]) -> Result<(), StorageError> {
-        self.put(path, bytes, false).await
+    async fn replace(
+        &self,
+        publication: &PublicationRequest,
+        path: &ObjectPath,
+        bytes: &[u8],
+    ) -> Result<(), StorageError> {
+        self.put(publication, path, bytes, false).await
     }
     async fn status(&self, path: &ObjectPath) -> Result<Option<StoredObject>, StorageError> {
         let mut request = self
@@ -469,6 +488,7 @@ impl ProviderOps for S3Storage {
     }
     async fn begin_upload(
         &self,
+        publication: &PublicationRequest,
         path: &ObjectPath,
         total: u64,
     ) -> Result<UploadSession, StorageError> {
@@ -481,6 +501,8 @@ impl ProviderOps for S3Storage {
             .bucket(&self.bucket)
             .key(key)
             .metadata("coven-upload", token.as_str())
+            .customize()
+            .interceptor(publication.clone())
             .send()
             .await
             .map_err(s3_error)?;
@@ -501,10 +523,14 @@ impl ProviderOps for S3Storage {
             },
         })
     }
-    async fn resume_upload(&self, session: &mut UploadSession) -> Result<(), StorageError> {
+    async fn resume_upload(
+        &self,
+        publication: &PublicationRequest,
+        session: &mut UploadSession,
+    ) -> Result<(), StorageError> {
         if matches!(session.state, SessionState::S3Restart { .. }) {
             return self
-                .require_restart(session, StorageFailure::SessionExpired.into())
+                .require_restart(publication, session, StorageFailure::SessionExpired.into())
                 .await;
         }
         let id = SecretText::new(self.upload_id(session)?.to_owned());
@@ -520,12 +546,14 @@ impl ProviderOps for S3Storage {
                 .key(self.session_key(session)?)
                 .upload_id(id.as_str())
                 .set_part_number_marker(marker)
+                .customize()
+                .interceptor(publication.clone())
                 .send()
                 .await
             {
                 Ok(response) => response,
                 Err(error) if error.code() == Some("NoSuchUpload") => {
-                    return self.recover_completed_upload(session).await
+                    return self.recover_completed_upload(publication, session).await
                 }
                 Err(error) => return Err(s3_error(error)),
             };
@@ -576,6 +604,7 @@ impl ProviderOps for S3Storage {
     }
     async fn upload_part(
         &self,
+        publication: &PublicationRequest,
         session: &mut UploadSession,
         bytes: &[u8],
         end: u64,
@@ -600,6 +629,8 @@ impl ProviderOps for S3Storage {
             .upload_id(id)
             .part_number(number)
             .body(ByteStream::from(bytes.to_vec()))
+            .customize()
+            .interceptor(publication.clone())
             .send()
             .await
             .map_err(s3_error)?;
@@ -618,10 +649,14 @@ impl ProviderOps for S3Storage {
         session.confirmed = end;
         Ok(())
     }
-    async fn finish_upload(&self, session: &mut UploadSession) -> Result<(), StorageError> {
+    async fn finish_upload(
+        &self,
+        publication: &PublicationRequest,
+        session: &mut UploadSession,
+    ) -> Result<(), StorageError> {
         if matches!(session.state, SessionState::S3Restart { .. }) {
             return self
-                .require_restart(session, StorageFailure::SessionExpired.into())
+                .require_restart(publication, session, StorageFailure::SessionExpired.into())
                 .await;
         }
         if session.confirmed != session.total {
@@ -654,20 +689,25 @@ impl ProviderOps for S3Storage {
         if self.settings.multipart == S3Multipart::ConditionalCompletion {
             request = request.if_none_match("*");
         }
-        let result = request.send().await;
+        let result = request
+            .customize()
+            .interceptor(publication.clone())
+            .send()
+            .await;
         match result {
             Ok(_) => {
                 if self.settings.multipart.uses_copy() {
-                    return self.publish_copy(session).await;
+                    return self.publish_copy(publication, session).await;
                 }
                 session.state = SessionState::Complete;
                 Ok(())
             }
             Err(error) if matches!(error.code(), Some("NoSuchUpload" | "PreconditionFailed")) => {
-                self.recover_completed_upload(session).await
+                self.recover_completed_upload(publication, session).await
             }
             Err(error) if error.code() == Some("ConditionalRequestConflict") => {
                 self.require_restart(
+                    publication,
                     session,
                     StorageFailure::SessionExpired.with_source(s3_error(error)),
                 )
@@ -676,13 +716,19 @@ impl ProviderOps for S3Storage {
             Err(error) => Err(s3_error(error)),
         }
     }
-    async fn abort_upload(&self, session: &UploadSession) -> Result<(), StorageError> {
+    async fn abort_upload(
+        &self,
+        publication: &PublicationRequest,
+        session: &UploadSession,
+    ) -> Result<(), StorageError> {
         let result = match self
             .client
             .abort_multipart_upload()
             .bucket(&self.bucket)
             .key(self.session_key(session)?)
             .upload_id(self.upload_id(session)?)
+            .customize()
+            .interceptor(publication.clone())
             .send()
             .await
         {

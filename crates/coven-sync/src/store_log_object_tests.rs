@@ -577,6 +577,7 @@ async fn damaged_entries_block_only_their_device_and_retain_each_cause() {
         b.sync().await;
         b.sync.load_new_device("second").await.unwrap();
         a.sync().await;
+        c.catch_up().await;
         let broken = a
             .sync
             .make_and_upload_entry(StoreChange::AddDevice {

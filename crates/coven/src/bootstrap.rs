@@ -218,7 +218,7 @@ async fn bootstrap_device(
         .await?;
     let result = prepare_and_load(&mut builder, &pending, &request, &status, cancel).await;
     match result {
-        Ok(Some((code, credentials, ring, database, storage))) => {
+        Ok(Some((code, credentials, ring, database, storage, send))) => {
             status("Keeping keys and credentials");
             let result = check_cancel(cancel).and_then(|()| {
                 builder.authentication.take();
@@ -227,6 +227,8 @@ async fn bootstrap_device(
                     Arc::new(StoreKeychain::new(keychain, id)),
                 )?;
                 storage.reset_reachability();
+                send.invalidate();
+                owners.send = send;
                 owners.storage = Some(storage);
                 // No await separates final custody, publication and the handle.
                 commit::publish_bootstrap(
@@ -282,6 +284,7 @@ async fn prepare_and_load(
         StoreKeyring,
         Database,
         Arc<coven_storage::StorageConnection>,
+        Arc<coven_sync::SendGate>,
     )>,
     BootstrapError,
 > {
@@ -306,12 +309,14 @@ async fn prepare_and_load(
     };
     check_cancel(cancel)?;
     let settings = directory.settings().map_err(CovenError::from)?;
+    let send = Arc::new(coven_sync::SendGate::new(builder.clock.clone()));
     let storage = builder
         .connector()
         .connect(
             data.location.clone(),
             data.credentials.clone(),
             settings.device_id,
+            send.clone(),
         )
         .await
         .map_err(SyncError::from)?;
@@ -328,6 +333,7 @@ async fn prepare_and_load(
         ring.clone(),
         identity.clone(),
         builder.clock.clone(),
+        send.clone(),
     );
     let mut sync = StoreLogSync::new(
         storage.clone(),
@@ -335,6 +341,7 @@ async fn prepare_and_load(
         ring.clone(),
         identity,
         builder.clock.clone(),
+        send.clone(),
         builder.ids.clone(),
         directory,
     );
@@ -392,7 +399,7 @@ async fn prepare_and_load(
     });
     match result {
         Ok(Some((code, credentials, ring))) => {
-            Ok(Some((code, credentials, ring, database, storage)))
+            Ok(Some((code, credentials, ring, database, storage, send)))
         }
         result => {
             let closed = database

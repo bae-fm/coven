@@ -175,10 +175,15 @@ impl FilesInner {
         if waiting.is_empty() {
             return Ok(DrainOutcome::QueueEmpty);
         }
-        let eligible = waiting
-            .into_iter()
-            .filter(|item| force || !in_backoff(item, self.clock.now()))
-            .collect::<Vec<_>>();
+        if !self.send.can_send() {
+            return Err(coven_storage::StorageFailure::CatchUpRequired.into());
+        }
+        let mut eligible = Vec::new();
+        for item in waiting {
+            if force || !in_backoff(&item, self.clock.now())? {
+                eligible.push(item);
+            }
+        }
         if eligible.is_empty() {
             return Ok(DrainOutcome::AllInBackoff);
         }
@@ -377,18 +382,26 @@ pub(crate) fn decode_identity(bytes: &[u8]) -> Result<(FileId, FileKey), DbError
         ),
     ))
 }
-fn in_backoff(item: &FileUpload, now: SystemTime) -> bool {
-    if item.failure.is_none() {
-        return false;
+fn in_backoff(item: &FileUpload, now: SystemTime) -> Result<bool, DbError> {
+    let Some(failure) = &item.failure else {
+        return Ok(false);
+    };
+    let failure: RecordedUploadFailure =
+        serde_json::from_slice(failure.as_bytes()).map_err(|_| DbError::DamagedDatabase)?;
+    if matches!(
+        failure,
+        RecordedUploadFailure::Storage(coven_storage::StorageFailure::CatchUpRequired)
+    ) {
+        return Ok(false);
     }
     let Some(last) = item.last_attempt_at else {
-        return false;
+        return Ok(false);
     };
     let seconds = (1u64 << item.attempts.saturating_sub(1).min(9)).min(300);
-    match now.duration_since(last) {
+    Ok(match now.duration_since(last) {
         Ok(elapsed) => elapsed < Duration::from_secs(seconds),
         Err(_) => true,
-    }
+    })
 }
 
 struct FileTransfer<'a> {

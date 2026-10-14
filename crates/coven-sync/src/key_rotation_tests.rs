@@ -7,16 +7,20 @@ use coven_database::EntryOutcome;
 use coven_format::store_log::MemberRole;
 
 /// A fresh complete observation, as a new pass would make.
-async fn observed(device: &Device) -> crate::key_introductions::CopyObservation {
-    keys::observe(
+async fn observed(device: &Device) -> Vec<keys::ObservedCopy> {
+    let mut damages = Vec::new();
+    let copies = keys::read_copies(
         &device.db,
         &crate::pass_reads::PassReads::default(),
         std::num::NonZeroUsize::MIN,
         device.storage.as_ref(),
         store(1),
+        &mut damages,
     )
     .await
-    .unwrap()
+    .unwrap();
+    assert!(damages.is_empty(), "{damages:?}");
+    copies
 }
 
 async fn selected(device: &Device) -> Result<KeyId, SyncError> {
@@ -56,7 +60,7 @@ async fn a_forged_copy_to_an_outsider_exposes_the_key_and_costs_one_rotation() {
         })
         .await
         .unwrap();
-    object::upload_keys(store(1), Some(ben.storage.as_ref()), &ben.db)
+    object::upload_keys(store(1), Some(ben.storage.as_ref()), &ben.db, &ben.send)
         .await
         .unwrap();
     assert!(matches!(
@@ -108,21 +112,8 @@ async fn an_incomplete_copy_observation_blocks_first_attempts() {
     let storage = storage();
     let mut ana = device(storage.clone(), 1, member(1), store(1)).await;
     ana.create(key(1)).await;
-    let ring = ana.custody.read().unwrap().unwrap();
-    let damage = crate::DamagedObject {
-        path: "keys/1/9".into(),
-        failure: Refusal::Parse { cause: None },
-    };
-    let blocked = crate::write_seal::first_attempt(
-        &ana.log().await,
-        &crate::key_introductions::CopyObservation::Incomplete(damage),
-        &ring,
-        &ana.member.member_id(),
-        &Audience::Store,
-    );
-    assert!(matches!(blocked, Err(SyncError::Damaged(d)) if d.path == "keys/1/9"));
     // An undecodable copy in a known writer's log leaves an observation
-    // incomplete.
+    // incomplete. It cannot renew the earlier completion once that expires.
     let writer = ana.db.local_store_log().await.unwrap().device;
     let next = storage
         .list(&coven_storage::ObjectPrefix::keys(store(1)))
@@ -137,9 +128,15 @@ async fn an_incomplete_copy_observation_blocks_first_attempts() {
         )
         .await
         .unwrap();
+    let bad = coven_storage::ObjectPath::key_copy(store(1), writer, next.try_into().unwrap());
+    let now = coven_foundation::clock::Clock::now(ana.clock.as_ref());
+    ana.clock.set(now + std::time::Duration::from_secs(300));
+    let (damages, complete) = ana.sync.scan_store_log_once(true).await.unwrap();
+    assert!(complete);
+    assert!(damages.iter().any(|damage| damage.path == bad.as_str()));
     assert!(matches!(
-        observed(&ana).await,
-        crate::key_introductions::CopyObservation::Incomplete(_)
+        ana.send.observation(),
+        Err(SyncError::Storage(error)) if error.failure() == coven_storage::StorageFailure::CatchUpRequired
     ));
     ana.sync.rotate_exposed_keys().await.unwrap();
     finish_rotation(&mut ana).await;
@@ -366,9 +363,7 @@ async fn lean_differential_rotation_phases() {
                 Audience::Store
             };
             let before = ana.log().await;
-            let CopyObservation::Complete(copies) = observed(&ana).await else {
-                panic!("complete copies")
-            };
+            let copies = observed(&ana).await;
             ana.sync.rotate_exposed_keys().await.unwrap();
             let id = ana
                 .db
@@ -696,7 +691,7 @@ async fn an_exposed_replacement_is_rotated_again_without_reusing_its_material() 
         })
         .await
         .unwrap();
-    object::upload_keys(store(1), Some(ana.storage.as_ref()), &ana.db)
+    object::upload_keys(store(1), Some(ana.storage.as_ref()), &ana.db, &ana.send)
         .await
         .unwrap();
     ana.sync.sync_store_log().await.unwrap();

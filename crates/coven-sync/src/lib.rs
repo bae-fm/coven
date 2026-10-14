@@ -8,6 +8,8 @@ mod effects;
 mod finality;
 mod pass_reads;
 mod recent_return;
+mod send_gate;
+pub use send_gate::{PublicationScope, SendGate};
 mod replay;
 mod replay_cache;
 mod stream_input;

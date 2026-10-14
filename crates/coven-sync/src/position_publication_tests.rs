@@ -137,6 +137,7 @@ async fn invalid_revision_and_confirmed_post_survive_reopening() {
     );
     storage.delete(&path).await.unwrap();
     device.writes.observe_positions().await.unwrap();
+    device.catch_up().await;
     assert!(device.writes.post_positions().await.unwrap());
     assert!(!pending(&device)
         .await
@@ -643,6 +644,7 @@ async fn a_retry_settles_its_exact_bytes_before_posting_newer_pending_records() 
     let expected: Vec<u8> = serde_json::from_value(attempted["attempt"]["sealed"].clone()).unwrap();
     device.db.clear_pending(subject).await.unwrap();
     device.reopen(storage.clone(), vec![], vec![]).await;
+    device.catch_up().await;
     let start = storage.request_trace().len();
     assert!(!device.writes.post_positions().await.unwrap());
     assert_eq!(
@@ -797,6 +799,7 @@ async fn io_differential_positions() {
         }
         if action == "reopen" {
             device.reopen(storage.clone(), vec![], vec![]).await;
+            device.catch_up().await;
         }
         if action == "disappear" {
             storage.delete(&path).await.unwrap();

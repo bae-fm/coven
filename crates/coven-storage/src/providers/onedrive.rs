@@ -74,15 +74,20 @@ impl OneDriveStorage {
         url: &str,
         body: Body,
     ) -> Result<reqwest::Response, StorageError> {
-        let headers = if let Body::Bytes(bytes) = &body {
-            vec![
-                ("Content-Type", "application/octet-stream".into()),
-                ("Content-Length", bytes.len().to_string()),
-            ]
-        } else {
-            Vec::new()
-        };
+        let headers = body_headers(&body);
         self.session.send(method, url, &headers, body, true).await
+    }
+    async fn publish(
+        &self,
+        publication: &PublicationRequest,
+        method: Method,
+        url: &str,
+        body: Body,
+    ) -> Result<reqwest::Response, StorageError> {
+        let headers = body_headers(&body);
+        self.session
+            .publish(publication, method, url, &headers, body, true)
+            .await
     }
     async fn check_folder(&self) -> Result<(), StorageError> {
         let value = http::json(
@@ -112,9 +117,13 @@ impl OneDriveStorage {
         }
         result
     }
-    async fn parents(&self, path: &ObjectPath) -> Result<String, StorageError> {
+    async fn parents(
+        &self,
+        publication: &PublicationRequest,
+        path: &ObjectPath,
+    ) -> Result<String, StorageError> {
         let parts = path.components();
-        self.directory(&parts[..parts.len() - 1]).await
+        self.directory(publication, &parts[..parts.len() - 1]).await
     }
     async fn get(
         &self,
@@ -234,8 +243,13 @@ impl ProviderOps for OneDriveStorage {
     fn single_request_limit(&self) -> u64 {
         self.single_request_limit
     }
-    async fn create(&self, path: &ObjectPath, bytes: &[u8]) -> Result<(), StorageError> {
-        self.parents(path).await?;
+    async fn create(
+        &self,
+        publication: &PublicationRequest,
+        path: &ObjectPath,
+        bytes: &[u8],
+    ) -> Result<(), StorageError> {
+        self.parents(publication, path).await?;
         let url = format!(
             "{}?@microsoft.graph.conflictBehavior=fail",
             self.by_path(path, "/content")?
@@ -243,7 +257,8 @@ impl ProviderOps for OneDriveStorage {
         let result = http::checked(
             PROVIDER,
             self.session
-                .send(
+                .publish(
+                    publication,
                     Method::PUT,
                     &url,
                     &[
@@ -261,11 +276,17 @@ impl ProviderOps for OneDriveStorage {
         Ok(())
     }
 
-    async fn replace(&self, path: &ObjectPath, bytes: &[u8]) -> Result<(), StorageError> {
-        self.parents(path).await?;
+    async fn replace(
+        &self,
+        publication: &PublicationRequest,
+        path: &ObjectPath,
+        bytes: &[u8],
+    ) -> Result<(), StorageError> {
+        self.parents(publication, path).await?;
         let result = http::checked(
             PROVIDER,
-            self.send(
+            self.publish(
+                publication,
                 Method::PUT,
                 &self.by_path(path, "/content")?,
                 Body::Bytes(bytes.to_vec()),
@@ -407,29 +428,53 @@ impl ProviderOps for OneDriveStorage {
 
     async fn begin_upload(
         &self,
+        publication: &PublicationRequest,
         path: &ObjectPath,
         total: u64,
     ) -> Result<UploadSession, StorageError> {
-        self.begin_temporary(path, total).await
+        self.begin_temporary(publication, path, total).await
     }
-    async fn resume_upload(&self, session: &mut UploadSession) -> Result<(), StorageError> {
-        self.resume_temporary(session).await
+    async fn resume_upload(
+        &self,
+        publication: &PublicationRequest,
+        session: &mut UploadSession,
+    ) -> Result<(), StorageError> {
+        self.resume_temporary(publication, session).await
     }
     async fn upload_part(
         &self,
+        publication: &PublicationRequest,
         session: &mut UploadSession,
         bytes: &[u8],
         end: u64,
     ) -> Result<(), StorageError> {
-        self.send_part(session, bytes, end).await
+        self.send_part(publication, session, bytes, end).await
     }
-    async fn finish_upload(&self, session: &mut UploadSession) -> Result<(), StorageError> {
-        self.publish_temporary(session).await
+    async fn finish_upload(
+        &self,
+        publication: &PublicationRequest,
+        session: &mut UploadSession,
+    ) -> Result<(), StorageError> {
+        self.publish_temporary(publication, session).await
     }
-    async fn abort_upload(&self, session: &UploadSession) -> Result<(), StorageError> {
-        self.abort_temporary(session).await
+    async fn abort_upload(
+        &self,
+        publication: &PublicationRequest,
+        session: &UploadSession,
+    ) -> Result<(), StorageError> {
+        self.abort_temporary(publication, session).await
     }
 }
+fn body_headers(body: &Body) -> Vec<(&'static str, String)> {
+    match body {
+        Body::Bytes(bytes) => vec![
+            ("Content-Type", "application/octet-stream".into()),
+            ("Content-Length", bytes.len().to_string()),
+        ],
+        _ => Vec::new(),
+    }
+}
+
 fn writable(value: &Value) -> bool {
     value["roles"].as_array().is_some_and(|roles| {
         roles

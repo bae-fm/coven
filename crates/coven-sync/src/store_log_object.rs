@@ -57,10 +57,11 @@ pub(crate) async fn upload(
     store: StoreId,
     storage: Option<&dyn Storage>,
     database: &Database,
+    send: &crate::SendGate,
     upload: &StoreLogUpload,
     bytes: &[u8],
 ) -> Result<(), SyncError> {
-    upload_keys(store, storage, database).await?;
+    upload_keys(store, storage, database, send).await?;
     storage
         .ok_or(SyncError::NoStorage)?
         .create_once(&path(store, upload.entry.position), bytes)
@@ -70,14 +71,14 @@ pub(crate) async fn upload(
 
 /// Settle every reserved copy in writer/number order, regardless of its current
 /// recipient or initiating operation. Each confirmation commits before the next send.
-/// Publish reserved copies in number order. Returns the writer whose copy log
-/// grew, so discovery can probe only that log again.
+/// Each confirmed copy also extends the sender's observed copy set, so a later
+/// failure cannot hide an exposure that already happened.
 pub(crate) async fn upload_keys(
     store: StoreId,
     storage: Option<&dyn Storage>,
     database: &Database,
-) -> Result<Option<coven_foundation::id_source::DeviceId>, SyncError> {
-    let mut published = None;
+    send: &crate::SendGate,
+) -> Result<(), SyncError> {
     for copy in database.key_uploads().await? {
         let storage = storage.ok_or(SyncError::NoStorage)?;
         let path = copy.path(store);
@@ -94,10 +95,10 @@ pub(crate) async fn upload_keys(
             }
             Err(error) => return Err(error.into()),
         }
-        published = Some(copy.writer);
-        database.complete_key_upload(copy).await?;
+        database.complete_key_upload(copy.clone()).await?;
+        send.published_copy(store, &copy)?;
     }
-    Ok(published)
+    Ok(())
 }
 
 pub(crate) fn seal(

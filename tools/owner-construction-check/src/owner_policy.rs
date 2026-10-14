@@ -294,6 +294,11 @@ pub(crate) const POLICY: Policy = Policy {
         (
             "crates/coven-storage/src/test_utils.rs",
             "MemoryStorage",
+            "with_publication_gate",
+        ),
+        (
+            "crates/coven-storage/src/test_utils.rs",
+            "MemoryStorage",
             "for_device",
         ),
         (
@@ -323,6 +328,8 @@ pub(crate) const POLICY: Policy = Policy {
         ),
         ("crates/coven-sync/src/file_read.rs", "UploadedFile", "open"),
         ("crates/coven-sync/src/files.rs", "Files", "new"),
+        // One sending gate per opened installation, injected into every sender.
+        ("crates/coven-sync/src/send_gate.rs", "SendGate", "new"),
         ("crates/coven-sync/src/operations.rs", "Operations", "new"),
         // Setup stages its candidate connection's keys without changing custody.
         (
@@ -669,6 +676,8 @@ pub(crate) const POLICY: Policy = Policy {
     // Writes and pending deletions borrow the database's retained connection,
     // StoreDir and id source; app SQL receives none of those dependencies.
     borrowed_facade_types: &[
+        // A setup or admission exception borrows the gate for exact paths.
+        "PublicationScope",
         "SnapshotMetadata",
         "Circles",
         "FileWrite",
@@ -689,6 +698,7 @@ pub(crate) const POLICY: Policy = Policy {
         "WriteApply",
     ],
     task_types: &[
+        "PublicationScope",
         "OpenFile",
         "LocalFileReader",
         "LockedWriter",

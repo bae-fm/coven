@@ -188,8 +188,13 @@ impl JoiningIdentity {
         Ok(())
     }
 
-    pub(crate) async fn publish(&self, storage: &dyn Storage) -> Result<(), SyncError> {
+    pub(crate) async fn publish(
+        &self,
+        storage: &dyn Storage,
+        send: &crate::SendGate,
+    ) -> Result<(), SyncError> {
         let path = &self.path;
+        let _bootstrap = send.bootstrap([path.clone()].into(), false);
         match storage.create(path, &self.request).await {
             Ok(()) => Ok(()),
             Err(error) if error.failure() == StorageFailure::AlreadyExists => {

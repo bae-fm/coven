@@ -482,6 +482,7 @@ async fn interrupted_and_lost_reply_copies_retry_identical_bytes_after_restart()
             std::slice::from_ref(&fixed)
         );
         ana.sync.storage = Some(fault.clone());
+        ana.catch_up().await;
         ana.sync
             .make_and_upload_entry(StoreChange::AddDevice {
                 device: DeviceId(20),
@@ -669,11 +670,11 @@ async fn failed_occupied_comparison_keeps_the_copy_pending() {
         CopyAttempt::FailComparison,
     );
     assert!(
-        matches!(object::upload_keys(store(1), Some(&fault), &ana.db).await,
+        matches!(object::upload_keys(store(1), Some(&fault), &ana.db, &ana.send).await,
         Err(SyncError::Storage(error)) if error.failure() == StorageFailure::Network)
     );
     assert_eq!(ana.db.key_uploads().await.unwrap(), [copy]);
-    object::upload_keys(store(1), Some(storage.as_ref()), &ana.db)
+    object::upload_keys(store(1), Some(storage.as_ref()), &ana.db, &ana.send)
         .await
         .unwrap();
     assert!(ana.db.key_uploads().await.unwrap().is_empty());
@@ -699,7 +700,7 @@ async fn duplicate_cleanup_failure_is_reported_without_confirming_the_copy() {
         })
         .await;
     assert!(matches!(
-        object::upload_keys(store(1), Some(storage.as_ref()), &ana.db).await,
+        object::upload_keys(store(1), Some(storage.as_ref()), &ana.db, &ana.send).await,
         Err(SyncError::Storage(StorageError::Cleanup { .. }))
     ));
     assert_eq!(
@@ -707,7 +708,7 @@ async fn duplicate_cleanup_failure_is_reported_without_confirming_the_copy() {
         std::slice::from_ref(&copy)
     );
     storage.set_faults(Faults::none()).await;
-    object::upload_keys(store(1), Some(storage.as_ref()), &ana.db)
+    object::upload_keys(store(1), Some(storage.as_ref()), &ana.db, &ana.send)
         .await
         .unwrap();
     assert!(ana.db.key_uploads().await.unwrap().is_empty());
@@ -747,6 +748,11 @@ async fn partially_confirmed_prerequisites_resume_before_their_entry() {
         .all(|copy| copy.before_entry == Some(upload.entry.position)));
     let confirmed = ObjectPath::key_copy(store(1), DeviceId(1), 4.try_into().unwrap());
     let confirmed_bytes = storage.read(&confirmed).await.unwrap();
+    let copies = ana.send.observation().unwrap();
+    assert!(
+        copies.iter().any(|copy| copy.path == confirmed),
+        "a later failed copy cannot hide a confirmed local exposure"
+    );
     let entry_path = object::path(store(1), upload.entry.position);
     assert_eq!(
         storage.read(&entry_path).await.unwrap_err().failure(),

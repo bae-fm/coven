@@ -43,13 +43,32 @@ impl StoreLogSync {
         ring: &mut Option<StoreKeyring>,
         damages: &mut Vec<DamagedObject>,
     ) -> Result<(), SyncError> {
+        let copies = keys::read_copies(
+            &self.database,
+            &self.reads,
+            self.download_limit,
+            self.storage.as_deref().ok_or(SyncError::NoStorage)?,
+            self.directory.id(),
+            damages,
+        )
+        .await?;
+        self.acquire_observed_keys(log, member, ring, &copies).await
+    }
+
+    /// Open copies already checked by the completed phase or confirmed locally.
+    pub(super) async fn acquire_observed_keys(
+        &self,
+        log: &StoreLog,
+        member: &MemberKeys,
+        ring: &mut Option<StoreKeyring>,
+        copies: &[keys::ObservedCopy],
+    ) -> Result<(), SyncError> {
         let introductions = introductions(log);
         let me = member.member_id();
         let mut conditions = BTreeMap::new();
         for (audience, key) in needed(log).into_keys() {
-            let Some(reason) = self
-                .acquire(&audience, key, &introductions, member, ring, damages)
-                .await?
+            let Some(reason) =
+                self.acquire_copies(&audience, key, &introductions, member, ring, copies)?
             else {
                 continue;
             };
@@ -319,6 +338,27 @@ impl StoreLogSync {
         ring: &mut Option<StoreKeyring>,
         damages: &mut Vec<DamagedObject>,
     ) -> Result<Option<PendingReason>, SyncError> {
+        let copies = keys::read_copies(
+            &self.database,
+            &self.reads,
+            self.download_limit,
+            self.storage.as_deref().ok_or(SyncError::NoStorage)?,
+            self.directory.id(),
+            damages,
+        )
+        .await?;
+        self.acquire_copies(audience, key, introductions, member, ring, &copies)
+    }
+
+    fn acquire_copies(
+        &self,
+        audience: &Audience,
+        key: KeyId,
+        introductions: &[Introduction],
+        member: &MemberKeys,
+        ring: &mut Option<StoreKeyring>,
+        copies: &[keys::ObservedCopy],
+    ) -> Result<Option<PendingReason>, SyncError> {
         if keys::holds(ring.as_ref(), audience, key) {
             return Ok(None);
         }
@@ -330,18 +370,8 @@ impl StoreLogSync {
         if ring.is_none() && *audience != Audience::Store {
             return Ok(Some(unavailable));
         }
-        let storage = self.storage.as_deref().ok_or(SyncError::NoStorage)?;
         let mut refusal = None;
-        for copy in keys::read_copies(
-            &self.database,
-            &self.reads,
-            self.download_limit,
-            storage,
-            self.directory.id(),
-            damages,
-        )
-        .await?
-        {
+        for copy in copies {
             if copy.prefix.audience != *audience
                 || copy.prefix.key != key
                 || !copy
@@ -350,14 +380,14 @@ impl StoreLogSync {
             {
                 continue;
             }
-            match open(&copy, introductions, member, ring) {
+            match open(copy, introductions, member, ring) {
                 Ok(()) => {
                     self.store_keys
                         .persist(ring.as_ref().expect("opened keyring"))?;
                     return Ok(None);
                 }
                 Err(failure) => {
-                    refused(&copy, &failure);
+                    refused(copy, &failure);
                     refusal.get_or_insert(failure);
                 }
             }

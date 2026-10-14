@@ -64,13 +64,29 @@ impl GoogleDriveStorage {
     ) -> Result<reqwest::Response, StorageError> {
         self.session.send(method, url, &[], body, true).await
     }
+    async fn publish(
+        &self,
+        publication: &PublicationRequest,
+        method: Method,
+        url: &str,
+        body: Body,
+    ) -> Result<reqwest::Response, StorageError> {
+        self.session
+            .publish(publication, method, url, &[], body, true)
+            .await
+    }
     fn url(&self, segments: &[&str], query: &[(&str, &str)]) -> Result<String, StorageError> {
         let mut query = query.to_vec();
         query.push(("supportsAllDrives", "true"));
         http::endpoint(&self.api, segments, &query)
     }
-    async fn create_request(&self, path: &ObjectPath, bytes: &[u8]) -> Result<(), StorageError> {
-        let parent = self.create_parent(path).await?;
+    async fn create_request(
+        &self,
+        publication: &PublicationRequest,
+        path: &ObjectPath,
+        bytes: &[u8],
+    ) -> Result<(), StorageError> {
+        let parent = self.create_parent(publication, path).await?;
         let metadata = json!({"name": path.file_name(), "parents": [parent], "properties": {"covenDevice": self.device.0.to_string()}});
         let (content_type, body) = multipart_content(&metadata, bytes)?;
         let url = http::endpoint(
@@ -81,7 +97,8 @@ impl GoogleDriveStorage {
         let item = http::json(
             PROVIDER,
             self.session
-                .send(
+                .publish(
+                    publication,
                     Method::POST,
                     &url,
                     &[("Content-Type", content_type)],
@@ -92,10 +109,11 @@ impl GoogleDriveStorage {
         )
         .await?;
         let id = http::string(&item, "id")?;
-        self.ensure_unique(path, id).await
+        self.ensure_unique(publication, path, id).await
     }
     async fn remove_own_duplicates(
         &self,
+        publication: &PublicationRequest,
         path: &ObjectPath,
         uploaded_id: Option<&str>,
     ) -> Result<Option<Value>, StorageError> {
@@ -110,7 +128,8 @@ impl GoogleDriveStorage {
         own.next();
         for duplicate in own {
             let response = self
-                .send(
+                .publish(
+                    publication,
                     Method::DELETE,
                     &self.url(&["files", http::string(duplicate, "id")?], &[])?,
                     Body::Empty,
@@ -166,7 +185,11 @@ impl GoogleDriveStorage {
         }
         Ok(stream)
     }
-    async fn verify_completed(&self, session: &mut UploadSession) -> Result<(), StorageError> {
+    async fn verify_completed(
+        &self,
+        publication: &PublicationRequest,
+        session: &mut UploadSession,
+    ) -> Result<(), StorageError> {
         let SessionState::GoogleDrive { file_id, .. } = &session.state else {
             return Err(StorageFailure::SessionMismatch.into());
         };
@@ -203,13 +226,22 @@ impl GoogleDriveStorage {
         {
             return Err(StorageFailure::Protocol.with_source("Drive completed another object"));
         }
-        self.ensure_unique(&session.path, file_id.as_str()).await?;
+        self.ensure_unique(publication, &session.path, file_id.as_str())
+            .await?;
         session.confirmed = session.total;
         session.state = SessionState::Complete;
         Ok(())
     }
-    async fn ensure_unique(&self, path: &ObjectPath, file_id: &str) -> Result<(), StorageError> {
-        match self.remove_own_duplicates(path, Some(file_id)).await {
+    async fn ensure_unique(
+        &self,
+        publication: &PublicationRequest,
+        path: &ObjectPath,
+        file_id: &str,
+    ) -> Result<(), StorageError> {
+        match self
+            .remove_own_duplicates(publication, path, Some(file_id))
+            .await
+        {
             Ok(Some(found)) if found["id"].as_str() == Some(file_id) => Ok(()),
             Ok(Some(_)) => Err(StorageFailure::AlreadyExists.into()),
             Err(error) => Err(error),
@@ -227,6 +259,7 @@ impl GoogleDriveStorage {
     }
     async fn progress(
         &self,
+        publication: &PublicationRequest,
         session: &mut UploadSession,
         response: reqwest::Response,
     ) -> Result<(), StorageError> {
@@ -249,7 +282,7 @@ impl GoogleDriveStorage {
             session.confirmed = confirmed;
             Ok(())
         } else if response.status().is_success() || response.status().as_u16() == 404 {
-            self.verify_completed(session).await
+            self.verify_completed(publication, session).await
         } else {
             Err(http::response_error(PROVIDER, response).await)
         }
@@ -420,21 +453,35 @@ impl ProviderOps for GoogleDriveStorage {
     fn single_request_limit(&self) -> u64 {
         5_000_000
     }
-    async fn create(&self, path: &ObjectPath, bytes: &[u8]) -> Result<(), StorageError> {
-        if self.remove_own_duplicates(path, None).await?.is_some() {
+    async fn create(
+        &self,
+        publication: &PublicationRequest,
+        path: &ObjectPath,
+        bytes: &[u8],
+    ) -> Result<(), StorageError> {
+        if self
+            .remove_own_duplicates(publication, path, None)
+            .await?
+            .is_some()
+        {
             return Err(StorageFailure::AlreadyExists.into());
         }
-        self.create_request(path, bytes).await
+        self.create_request(publication, path, bytes).await
     }
 
-    async fn replace(&self, path: &ObjectPath, bytes: &[u8]) -> Result<(), StorageError> {
+    async fn replace(
+        &self,
+        publication: &PublicationRequest,
+        path: &ObjectPath,
+        bytes: &[u8],
+    ) -> Result<(), StorageError> {
         let _guard = self.create_lock.lock().await;
         let item = match self.cached(path).await? {
             Some(item) => Some(item),
-            None => self.remove_own_duplicates(path, None).await?,
+            None => self.remove_own_duplicates(publication, path, None).await?,
         };
         let Some(item) = item else {
-            return self.create_request(path, bytes).await;
+            return self.create_request(publication, path, bytes).await;
         };
         let url = http::endpoint(
             &self.upload_api,
@@ -444,7 +491,8 @@ impl ProviderOps for GoogleDriveStorage {
         http::checked(
             PROVIDER,
             self.session
-                .send(
+                .publish(
+                    publication,
                     Method::PATCH,
                     &url,
                     &[("Content-Type", "application/octet-stream".into())],
@@ -618,15 +666,21 @@ impl ProviderOps for GoogleDriveStorage {
     }
     async fn begin_upload(
         &self,
+        publication: &PublicationRequest,
         path: &ObjectPath,
         total: u64,
     ) -> Result<UploadSession, StorageError> {
-        if self.remove_own_duplicates(path, None).await?.is_some() {
+        if self
+            .remove_own_duplicates(publication, path, None)
+            .await?
+            .is_some()
+        {
             return Err(StorageFailure::AlreadyExists.into());
         }
         let generated = http::json(
             PROVIDER,
-            self.send(
+            self.publish(
+                publication,
                 Method::GET,
                 &self.url(
                     &["files", "generateIds"],
@@ -643,7 +697,7 @@ impl ProviderOps for GoogleDriveStorage {
             .filter(|id| !id.is_empty())
             .ok_or(StorageFailure::Protocol.with_source("Drive omitted generated id"))?
             .to_owned();
-        let parent = self.create_parent(path).await?;
+        let parent = self.create_parent(publication, path).await?;
         let body = json!({"id":file_id,"name":path.file_name(),"parents":[parent],"properties":{"covenDevice":self.device.0.to_string()}});
         let url = http::endpoint(
             &self.upload_api,
@@ -653,7 +707,8 @@ impl ProviderOps for GoogleDriveStorage {
         let response = http::checked(
             PROVIDER,
             self.session
-                .send(
+                .publish(
+                    publication,
                     Method::POST,
                     &url,
                     &[
@@ -685,10 +740,15 @@ impl ProviderOps for GoogleDriveStorage {
             },
         })
     }
-    async fn resume_upload(&self, session: &mut UploadSession) -> Result<(), StorageError> {
+    async fn resume_upload(
+        &self,
+        publication: &PublicationRequest,
+        session: &mut UploadSession,
+    ) -> Result<(), StorageError> {
         let response = self
             .session
-            .send(
+            .publish(
+                publication,
                 Method::PUT,
                 self.upload_url(session)?,
                 &[
@@ -699,17 +759,19 @@ impl ProviderOps for GoogleDriveStorage {
                 true,
             )
             .await?;
-        self.progress(session, response).await
+        self.progress(publication, session, response).await
     }
     async fn upload_part(
         &self,
+        publication: &PublicationRequest,
         session: &mut UploadSession,
         bytes: &[u8],
         end: u64,
     ) -> Result<(), StorageError> {
         let response = self
             .session
-            .send(
+            .publish(
+                publication,
                 Method::PUT,
                 self.upload_url(session)?,
                 &[
@@ -723,23 +785,32 @@ impl ProviderOps for GoogleDriveStorage {
                 true,
             )
             .await?;
-        self.progress(session, response).await?;
+        self.progress(publication, session, response).await?;
         if session.confirmed != end {
             return Err(StorageFailure::Protocol.with_source("Drive did not store the whole part"));
         }
         Ok(())
     }
-    async fn finish_upload(&self, session: &mut UploadSession) -> Result<(), StorageError> {
-        self.resume_upload(session).await?;
+    async fn finish_upload(
+        &self,
+        publication: &PublicationRequest,
+        session: &mut UploadSession,
+    ) -> Result<(), StorageError> {
+        self.resume_upload(publication, session).await?;
         if !session.is_complete() {
             return Err(StorageFailure::InvalidPart.into());
         }
         Ok(())
     }
-    async fn abort_upload(&self, session: &UploadSession) -> Result<(), StorageError> {
+    async fn abort_upload(
+        &self,
+        publication: &PublicationRequest,
+        session: &UploadSession,
+    ) -> Result<(), StorageError> {
         let response = self
             .session
-            .send(
+            .publish(
+                publication,
                 Method::DELETE,
                 self.upload_url(session)?,
                 &[],

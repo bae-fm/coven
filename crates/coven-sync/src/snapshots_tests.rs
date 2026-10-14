@@ -86,12 +86,16 @@ async fn write_rows(device: &Device, start: usize, count: usize, bytes: usize, a
 }
 
 async fn upload(device: &Device, storage: &Arc<MemoryStorage>) {
+    if !device.send.can_send() {
+        device.catch_up().await;
+    }
     crate::DeviceLogSync::new(
         storage.clone(),
         device.db.clone(),
         device.custody.clone(),
         device.identity.clone(),
         device.clock.clone(),
+        device.send.clone(),
     )
     .upload_writes()
     .await
@@ -201,6 +205,7 @@ async fn the_signed_catch_up_time_is_a_provider_sample_never_device_time() {
         if reopen {
             a.reopen(storage.clone(), notes_tables(), notes_migrations())
                 .await;
+            a.catch_up().await;
         }
         let sampled = sampled + Duration::from_secs(later);
         clock.set(sampled);
@@ -284,6 +289,7 @@ async fn writing_resumes_after_each_recorded_step_with_identical_ciphertext() {
         };
         a.reopen(storage.clone(), notes_tables(), notes_migrations())
             .await;
+        a.catch_up().await;
         a.sync.write_snapshots().await.unwrap();
         let objects = storage
             .list(&ObjectPrefix::snapshots(store(1)))
@@ -318,6 +324,7 @@ async fn uncovered_logs_survive_thirty_days_and_never_posting_devices_hold_cover
         1
     );
     a.clock.set(UNIX_EPOCH + Duration::from_secs(1));
+    a.catch_up().await;
     a.sync.write_snapshots().await.unwrap();
     assert_eq!(
         storage
@@ -466,6 +473,7 @@ async fn deleted_history_reload_preserves_waiting_numbers_and_late_writes_conver
     .unwrap();
     upload(&a, &storage).await;
     a.clock.set(UNIX_EPOCH + Duration::from_secs(31 * 86400));
+    a.catch_up().await;
     a.sync.write_snapshot(Audience::Store).await.unwrap();
     assert!(storage
         .list(&ObjectPrefix::device_logs(store(1)))
@@ -725,6 +733,7 @@ async fn idle_pass_uses_bounded_header_ranges_and_reuses_overread_bytes() {
         a.directory.clone(),
         Some(storage.clone()),
         a.clock.clone(),
+        a.send.clone(),
         a.sync.ids.clone(),
         crate::TransferLimits::default(),
     );
@@ -767,6 +776,7 @@ async fn a_pass_reuses_loaded_snapshot_and_write_references() {
         upload(&b, &storage).await;
         if deleted_history {
             b.clock.set(UNIX_EPOCH + Duration::from_secs(31 * 86400));
+            b.catch_up().await;
             b.sync.write_snapshot(Audience::Store).await.unwrap();
             assert!(storage
                 .list(&ObjectPrefix::device_logs(store(1)))
@@ -796,6 +806,7 @@ async fn a_pass_reuses_loaded_snapshot_and_write_references() {
             a.directory.clone(),
             Some(storage.clone()),
             a.clock.clone(),
+            a.send.clone(),
             a.sync.ids.clone(),
             crate::TransferLimits::default(),
         );

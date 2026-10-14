@@ -56,6 +56,7 @@ struct FilesInner {
     directory: StoreDir,
     storage: std::sync::RwLock<Option<Arc<dyn Storage>>>,
     clock: ClockRef,
+    send: Arc<crate::SendGate>,
     ids: IdSourceRef,
     state: Mutex<UploadState>,
     changed: watch::Sender<u64>,
@@ -91,10 +92,12 @@ impl Files {
         directory: StoreDir,
         storage: Option<Arc<dyn Storage>>,
         clock: ClockRef,
+        send: Arc<crate::SendGate>,
         ids: IdSourceRef,
         limits: TransferLimits,
     ) -> Self {
         let mut changes = database.changes();
+        let mut sending = send.changes();
         let (changed, _) = watch::channel(0);
         let (eager, _) = watch::channel(crate::EagerCacheFillStatus::Idle);
         let (cancel_eager, _) = watch::channel(0);
@@ -104,6 +107,7 @@ impl Files {
             directory,
             storage: std::sync::RwLock::new(storage),
             clock,
+            send,
             ids,
             state: Mutex::new(UploadState {
                 paused: false,
@@ -134,6 +138,7 @@ impl Files {
                         break;
                     },
                     _=wake.notified()=>{},
+                    result=sending.changed()=>if result.is_err() { break; },
                 }
                 let Some(owner) = weak.upgrade() else { break };
                 let work = async {
@@ -141,6 +146,12 @@ impl Files {
                         Ok(_) => (),
                         Err(SyncError::NoStorage) => {
                             tracing::debug!("file uploads waiting for storage");
+                        }
+                        Err(SyncError::Storage(error))
+                            if error.failure()
+                                == coven_storage::StorageFailure::CatchUpRequired =>
+                        {
+                            tracing::debug!("file uploads waiting for a completed catch-up");
                         }
                         Err(error) => tracing::error!(?error, "upload queue failed"),
                     }
@@ -204,7 +215,7 @@ impl Files {
     }
 
     pub(crate) async fn sync_files(&self) -> Result<(), SyncError> {
-        self.inner.drain_uploads(false).await?;
+        self.inner.wake.notify_one();
         self.inner.fill_eager().await;
         Ok(())
     }

@@ -19,6 +19,7 @@ impl StoreLogSync {
         &mut self,
         storage: Arc<dyn Storage>,
     ) -> Result<(), SyncError> {
+        self.send.invalidate();
         let previous = self.storage.replace(storage);
         let previous_finality =
             std::mem::take(&mut *self.finality.lock().expect("finality lock poisoned"));
@@ -76,6 +77,7 @@ impl StoreLogSync {
         }
         .await;
         if result.is_err() {
+            self.send.invalidate();
             self.storage = previous;
             *self.finality.lock().expect("finality lock poisoned") = previous_finality;
         }
@@ -89,6 +91,7 @@ impl StoreLogSync {
         device_name: String,
         commit: StorageCommit,
     ) -> Result<(), SyncError> {
+        self.send.invalidate();
         let member = self
             .member_keys
             .read()?
@@ -134,10 +137,9 @@ impl StoreLogSync {
                 let author = member.clone();
                 let ring = StoreKeyring::new(key);
                 // Creation seals with its own fresh key; no copy can expose it yet.
-                let observed = crate::key_introductions::CopyObservation::Complete(Vec::new());
                 self.database
                     .prepare_store_log(member.member_id(), change, move |log, entry, copies| {
-                        keys::seal(copies, log, entry, Some(&ring), &author, &observed)
+                        keys::seal(copies, log, entry, Some(&ring), &author, &[])
                     })
                     .await?;
                 local = self.database.local_store_log().await?;
@@ -181,10 +183,12 @@ impl StoreLogSync {
                 previous.as_ref()
             };
             let bytes = object::seal_upload(store_id, upload, sealing_ring, &member)?;
+            let _bootstrap = self.bootstrap_publication(&local, upload, &member)?;
             object::upload(
                 store_id,
                 Some(storage.as_ref()),
                 &self.database,
+                &self.send,
                 upload,
                 &bytes,
             )
@@ -272,14 +276,8 @@ impl StoreLogSync {
                     None => {
                         let author = member.clone();
                         let held = ring.clone();
-                        let observed = keys::observe(
-                            &self.database,
-                            &self.reads,
-                            self.download_limit,
-                            storage.as_ref(),
-                            store_id,
-                        )
-                        .await?;
+                        // The setup catch-up above just observed every copy.
+                        let observed = self.send.observation()?;
                         self.database
                             .prepare_store_log(
                                 member.member_id(),
@@ -354,6 +352,7 @@ impl StoreLogSync {
             let error = compensate(error, restored_keys.map_err(SyncError::from));
             return Err(compensate(error, rollback()));
         }
+        self.send.invalidate();
         self.storage = Some(storage);
         *self.finality.lock().expect("finality lock poisoned") = Default::default();
         Ok(())
@@ -373,6 +372,7 @@ impl StoreLogSync {
             staged_keys.clone(),
             self.member_keys.clone(),
             self.clock.clone(),
+            self.send.clone(),
             self.ids.clone(),
             self.directory.clone(),
         );

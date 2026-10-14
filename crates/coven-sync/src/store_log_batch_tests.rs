@@ -163,7 +163,7 @@ fn lean_differential_batch_partitions() {
 }
 
 #[tokio::test]
-async fn a_queued_publication_joins_the_received_batch() {
+async fn a_queued_publication_follows_the_committed_read_only_catch_up() {
     let storage = Arc::new(MemoryStorage::builder().build().unwrap());
     let mut author = device(storage.clone(), 1, member(1), store(1)).await;
     author.create(key(1)).await;
@@ -203,7 +203,7 @@ async fn a_queued_publication_joins_the_received_batch() {
     let work = WorkCounter::default();
     receiver.db.test_track_work(work.clone()).await.unwrap();
     receiver.sync.step().await.unwrap();
-    assert_eq!(work.take().store_log_commits, 1);
+    assert_eq!(work.take().store_log_commits, 2);
     let current = receiver.db.local_store_log().await.unwrap();
     assert!(current.upload.is_none());
     assert!(current.log.replay.entries.contains_key(&queued));

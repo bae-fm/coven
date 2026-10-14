@@ -3,6 +3,7 @@ use super::*;
 impl S3Storage {
     pub(super) async fn require_restart(
         &self,
+        publication: &PublicationRequest,
         session: &mut UploadSession,
         cause: StorageError,
     ) -> Result<(), StorageError> {
@@ -15,6 +16,6 @@ impl S3Storage {
         }
         // Retain the native identifiers until abort and temporary deletion both
         // succeed. No completion or copy may reuse this rejected publication.
-        crate::transfer::with_cleanup(Err(cause), self.abort_upload(session).await)
+        crate::transfer::with_cleanup(Err(cause), self.abort_upload(publication, session).await)
     }
 }

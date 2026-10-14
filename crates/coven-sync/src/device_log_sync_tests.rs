@@ -263,6 +263,7 @@ async fn fixed_bytes_survive_restart_and_a_lost_completion_reply() {
         .await
         .unwrap();
     assert_eq!(writes::resealed(device).await.1, expected);
+    device.sync.sync_store_log().await.unwrap();
     assert_eq!(
         device
             .db

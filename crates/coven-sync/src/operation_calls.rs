@@ -172,8 +172,7 @@ impl StoreLogSync {
                     let member = self.operation_member()?;
                     let mut local = self.database.local_store_log().await?;
                     let mut ring = self.store_keys.read()?;
-                    self.publish_queued(&mut local, &member, &mut ring, &mut Vec::new())
-                        .await?;
+                    self.publish_queued(&mut local, &member, &mut ring).await?;
                 }
                 self.database.finish_operation(id).await?;
                 return Ok(Begun::Value(Output::Unit));

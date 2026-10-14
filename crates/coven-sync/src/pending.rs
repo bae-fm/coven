@@ -83,6 +83,8 @@ pub enum PendingSubject {
 /// A fact required before processing can continue.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Prerequisite {
+    /// Membership and key-copy discovery must finish within the sending window.
+    CatchUp,
     /// A storage object must arrive.
     Object(ObjectPath),
     /// The author's device must be registered.

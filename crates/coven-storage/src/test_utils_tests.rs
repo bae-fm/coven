@@ -727,7 +727,12 @@ async fn a_candidate_connection_does_not_replace_the_active_connections_tokens()
         })
     };
     let active = storage
-        .connect(storage.config(), tokens(None), DeviceId(1))
+        .connect(
+            storage.config(),
+            tokens(None),
+            DeviceId(1),
+            Arc::new(crate::test_utils::UnrestrictedPublications),
+        )
         .await
         .unwrap();
     let candidate = storage
@@ -735,6 +740,7 @@ async fn a_candidate_connection_does_not_replace_the_active_connections_tokens()
             storage.config(),
             tokens(Some(std::time::UNIX_EPOCH)),
             DeviceId(1),
+            Arc::new(crate::test_utils::UnrestrictedPublications),
         )
         .await
         .unwrap();

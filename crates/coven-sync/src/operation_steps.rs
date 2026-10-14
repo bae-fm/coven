@@ -118,12 +118,7 @@ impl StoreLogSync {
             }
             let local = self.database.local_store_log().await?;
             let mut ring = self.store_keys.read()?;
-            let mut damages = Vec::new();
-            self.update_keys(&local.log, &member, &mut ring, &mut damages)
-                .await?;
-            if let Some(damaged) = damages.into_iter().next() {
-                return Err(damaged.into());
-            }
+            self.update_keys(&local.log, &member, &mut ring).await?;
             let Some(change) =
                 self.operation_change(&local, &member.member_id(), &mut data, &mut ring)?
             else {
@@ -133,14 +128,7 @@ impl StoreLogSync {
                 return Ok(Progress::Advanced);
             };
             crate::store_log_keys::check_shared_keys(&local.log, &change, &ring)?;
-            let observed = crate::store_log_keys::observe(
-                &self.database,
-                &self.reads,
-                self.download_limit,
-                self.storage.as_deref().ok_or(SyncError::NoStorage)?,
-                local.store,
-            )
-            .await?;
+            let observed = self.send.observation()?;
             let record = record.clone();
             self.database
                 .prepare_operation_entry(member.member_id(), change, move |log, entry, copies| {
@@ -174,6 +162,7 @@ impl StoreLogSync {
                         self.directory.id(),
                         self.storage.as_deref(),
                         &self.database,
+                        &self.send,
                     )
                     .await?;
                     self.database
@@ -214,14 +203,7 @@ impl StoreLogSync {
                     )
                     .await?;
                     match self
-                        .apply(
-                            &mut local,
-                            entry.clone(),
-                            &publications,
-                            &member,
-                            &mut ring,
-                            &mut Vec::new(),
-                        )
+                        .apply(&mut local, entry.clone(), &publications, &member, &mut ring)
                         .await
                     {
                         Ok(()) | Err(SyncError::Removed) => (),
