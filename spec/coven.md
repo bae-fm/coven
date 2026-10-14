@@ -4026,7 +4026,11 @@ Carol's tablet:
   - A device has applied every entry the write had read, so it knows each
     part's key; it skips a part only when it isn't in that key's audience.
 - When replay makes a circle readable again, reload everything skipped
-  while it was unreadable. A deleted circle returning follows the same rule.
+  while it was unreadable. A deleted circle returning follows the same rule,
+  as does one whose creation dropped and returns. A circle whose creation
+  arrives with the entries that make it readable has nothing skipped: every
+  write with a part in it read that creation. Nor does a circle whose only
+  earlier creation landed too late, since no view keeps that entry.
   - Do not use the device's overall passed positions as proof that it read
     those parts. Load the circle's usable snapshot and remaining history.
   - Align it with the other audiences at the common point in §15. Commit

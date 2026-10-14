@@ -2,7 +2,7 @@ use super::*;
 use coven_format::store_log::MemberRole;
 use coven_foundation::id_source::CircleId;
 
-fn identity(seed: u8) -> MemberKeys {
+pub(crate) fn identity(seed: u8) -> MemberKeys {
     let mut bytes = b"CVMK\x01".to_vec();
     bytes.extend([seed; 64]);
     MemberKeys::from_secret_bytes(&bytes).unwrap()
@@ -15,7 +15,7 @@ async fn circle_device(storage: Arc<MemoryStorage>, number: u64, seed: u8) -> De
             vec![schema::initial(), Migration::sql(2, "circles", "CREATE TABLE pins(id TEXT NOT NULL PRIMARY KEY,audience TEXT NOT NULL,title TEXT NOT NULL);")]).await;
     device
 }
-pub(super) async fn household(storage: Arc<MemoryStorage>) -> Vec<Device> {
+pub(crate) async fn household(storage: Arc<MemoryStorage>) -> Vec<Device> {
     let mut devices = Vec::new();
     for number in 1..=3 {
         devices.push(circle_device(storage.clone(), number, number as u8 + 2).await);

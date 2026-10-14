@@ -32,32 +32,25 @@ fn set_applied(db: &DatabaseConnection, entry: EntryId, applied: bool) -> Result
 
 /// Rebuild every audience whose selected boundaries changed from its retained
 /// inputs, in the replay's transaction. An audience without a complete retained
-/// input keeps its committed rows, refuses writes and waits for a reload.
+/// input keeps its committed rows, refuses writes and waits for a reload, as
+/// does every circle in `returning` ([`crate::StoreLog::returning_circles`]).
 pub(crate) fn replay<P: PendingValue>(
     db: &DatabaseConnection,
     before: &DatabaseConnection,
     schema: &WriteSchema,
     previous: &[Boundary],
     deleted: &BTreeMap<coven_foundation::id_source::CircleId, EntryId>,
+    returning: &BTreeSet<coven_foundation::id_source::CircleId>,
 ) -> Result<BTreeSet<crate::write_rows::AppKey>, DbError> {
-    // A shared write position does not prove that this device opened a circle's
-    // parts while outside it. Returning membership therefore requires storage
-    // input even when previously opened rows are retained locally, and the
-    // inputs retained before the absence cannot reproduce the circle.
-    let device = db.pending_device().ok_or(DbError::DamagedDatabase)?;
+    // Positions this device passed while it could not read a returning circle
+    // never show that it opened the circle's parts, and the inputs retained
+    // before the absence cannot reproduce it: it reloads from storage (§14.4).
     let mut returned = BTreeSet::new();
-    for circle in readable_circles(db, device)?.difference(&readable_circles(before, device)?) {
-        let existed: bool = before.query_row(
-            "SELECT EXISTS(SELECT 1 FROM _coven_circles WHERE circle=?1)",
-            [circle],
-            |r| r.get(0),
-        )?;
-        if existed {
-            let audience = crate::write_encoding::audience(circle)?;
-            crate::entry_inputs::forget(db, &audience, None)?;
-            require_reload::<P>(db, &audience, false)?;
-            returned.insert(audience);
-        }
+    for circle in returning {
+        let audience = Audience::Circle(*circle);
+        crate::entry_inputs::forget(db, &audience, None)?;
+        require_reload::<P>(db, &audience, false)?;
+        returned.insert(audience);
     }
     let previous = groups(previous);
     let current = groups(&Boundary::load_selected(db)?);
@@ -137,16 +130,6 @@ pub(crate) fn replay<P: PendingValue>(
         crate::pending::refresh(db)?;
     }
     Ok(affected)
-}
-
-fn readable_circles(
-    db: &DatabaseConnection,
-    device: coven_foundation::id_source::DeviceId,
-) -> Result<BTreeSet<String>, DbError> {
-    Ok(db.query(
-        "SELECT m.circle FROM _coven_devices d JOIN _coven_circle_members m ON m.member=d.member WHERE d.device=?1 AND d.removed=0 AND NOT EXISTS(SELECT 1 FROM _coven_circle_deletions x WHERE x.circle=m.circle)",
-        [device.0.to_be_bytes().as_slice()], |r| r.get(0),
-    )?.into_iter().collect())
 }
 
 fn require_reload<P: PendingValue>(

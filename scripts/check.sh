@@ -336,6 +336,13 @@ proofs() {
             exit 1
         fi
         COVEN_STORELOG_DATA_LEAN="$runner" cargo test -p coven-database --all-features data_differential_entry_effects -- --ignored
+        step "Rust / Lean circles readable again"
+        if ! cargo test -p coven-sync --all-features data_differential_circle_returns -- --list |
+            grep '::data_differential_circle_returns: test$' > /dev/null; then
+            echo "the Rust test binary is missing the circle return differential" >&2
+            exit 1
+        fi
+        COVEN_STORELOG_DATA_LEAN="$runner" cargo test -p coven-sync --all-features data_differential_circle_returns -- --ignored
     fi
 
     if proof_selected io || crate_selected coven-sync; then

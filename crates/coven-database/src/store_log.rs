@@ -66,6 +66,30 @@ impl StoreLog {
         })
     }
 
+    /// Circles `next` makes readable to `member` that this applied log already
+    /// created while `member` could not read them (§14.4). Their parts may have
+    /// been skipped under positions that have since passed, so each one reloads
+    /// from storage: after leaving, after deletion, and after a dropped creation.
+    /// A write with a part in a circle reads a creation of that circle that its
+    /// author's view kept. A circle whose creation first arrives with `next`
+    /// has no skipped part, and neither does a creation that landed too late,
+    /// which no view ever keeps (§9).
+    pub fn returning_circles(&self, next: &StoreLogState, member: &MemberId) -> BTreeSet<CircleId> {
+        use coven_format::store_log::StoreChange;
+        self.entries
+            .iter()
+            .filter(|applied| !applied.check.landed_too_late())
+            .filter_map(|applied| match &applied.entry.change {
+                StoreChange::CreateCircle { circle, .. } => Some(*circle),
+                _ => None,
+            })
+            .filter(|circle| {
+                next.reads_circle(*circle, member)
+                    && !self.replay.state.reads_circle(*circle, member)
+            })
+            .collect()
+    }
+
     /// Effective raise/reset entries in replay order, excluding kept no-ops.
     pub fn boundaries(&self) -> impl Iterator<Item = crate::Boundary> + '_ {
         crate::Boundary::select(self.entries.iter().filter_map(|entry| {
@@ -126,6 +150,19 @@ pub struct StoreLogState {
     pub schema: BTreeMap<Audience, StoreVersion>,
     /// The last kept reset of each audience (§19.3).
     pub resets: BTreeMap<Audience, SnapshotId>,
+}
+
+impl StoreLogState {
+    /// Whether `member` remains in the store and in `circle`, which exists and
+    /// is not deleted (§14.3).
+    pub fn reads_circle(&self, circle: CircleId, member: &MemberId) -> bool {
+        self.members.get(member).is_some_and(|m| !m.removed)
+            && !self.circle_deletions.contains_key(&circle)
+            && self
+                .circles
+                .get(&circle)
+                .is_some_and(|c| c.members.contains(member))
+    }
 }
 
 /// The created store, as its kept creation entry names it (§9).
@@ -251,6 +288,7 @@ pub(crate) fn apply<P: crate::PendingValue>(
     schema: &WriteSchema,
     incoming: &[ReplayEntry],
     replay: &StoreLogReplay,
+    returning: &BTreeSet<CircleId>,
     files: &crate::file_write::FileWrite<'_>,
     operations: &[crate::NewOperation],
     updates: &[crate::OperationUpdate],
@@ -331,6 +369,7 @@ pub(crate) fn apply<P: crate::PendingValue>(
             schema,
             &previous_boundaries,
             &deleted,
+            returning,
         )?;
         let mut touched = BTreeSet::new();
         let changed: BTreeSet<_> = previous.keys().chain(deleted.keys()).copied()

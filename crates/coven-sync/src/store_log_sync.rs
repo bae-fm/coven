@@ -445,20 +445,16 @@ impl StoreLogSync {
             })
             .cloned()
             .collect();
-        // A device advances shared write headers while it cannot read a circle.
-        // Restored membership must reload those skipped parts before continuing
-        // from that frontier. Record the reload with the membership replay.
-        for (circle, current) in &after.circles {
-            if !after.circle_deletions.contains_key(circle)
-                && current.members.contains(&member.member_id())
-                && before.circles.get(circle).is_some_and(|previous| {
-                    before.circle_deletions.contains_key(circle)
-                        || !previous.members.contains(&member.member_id())
-                })
-            {
-                changed.insert(Audience::Circle(*circle));
-            }
-        }
+        // A circle readable again may have parts this device skipped under
+        // positions it has since passed. The database requires its reload in the
+        // replay's transaction; record the operation that performs it there too.
+        changed.extend(
+            local
+                .log
+                .returning_circles(after, &member.member_id())
+                .into_iter()
+                .map(Audience::Circle),
+        );
         if !changed.is_empty() {
             operations.push(
                 crate::operation_data::Data::Snapshots(crate::snapshot_data::SnapshotTask {

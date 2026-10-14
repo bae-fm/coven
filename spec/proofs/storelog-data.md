@@ -534,9 +534,28 @@ removal is final. They also cover the rest: a failed rebuild leaves the previous
 and data committed, readers never observe a replay without its data, an
 unavailable input keeps the old rows and refuses writes, and inputs and reset
 suppressions are released only once every boundary entry of the audience is
-strictly before the horizon. `scripts/check.sh` runs both differentials,
-rebuilds every selected module and checks `Axioms.lean`; the audit permits only
-Lean's own `propext`, `Classical.choice`, and `Quot.sound`.
+strictly before the horizon.
+
+The circle-return differential (Rust
+[`data_differential_circle_returns`](../../crates/coven-sync/src/snapshot_reload_tests.rs))
+replays checked histories in which a member leaves and rejoins, a deletion
+drops, and a creation drops and returns, in two arrival orders and three batch
+widths. After each batch `StorelogDataRunner` reports every member and circle
+for which `CurrentData.needsReload` holds, the property behind
+`deleted_return_reloads`, and whether the circle's creation had been received
+before that batch. Rust's `StoreLog::returning_circles` must name exactly the
+pairs whose creation had arrived earlier. The others are circles first
+received in that batch: every write with a part in a circle reads its
+creation, so no such part was skipped, and Rust neither reloads them nor
+refuses their first writes. The model's `needsReload` does not make this
+distinction. Rust also disregards a creation that landed too late, which no
+view keeps; these histories contain no late entry. The histories contain no raise or reset: `needsReload` also
+holds for every circle member whenever any audience's version or reset
+changes, while Rust rebuilds a changed audience from its retained inputs and
+reloads it only when they are incomplete. `scripts/check.sh` runs all
+three differentials, rebuilds every selected module and checks `Axioms.lean`;
+the audit permits only Lean's own `propext`, `Classical.choice`, and
+`Quot.sound`.
 
 ## Rust differential coverage
 

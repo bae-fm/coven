@@ -112,13 +112,14 @@ impl StoreLogSync {
                         }
                     }
                 }
-                let mut positions = files
+                let selected = files
                     .snapshots
                     .iter()
                     .map(|snapshot| {
                         SnapshotObjectPrefix::decode(&snapshot.prefix).map(|p| p.writes)
                     })
                     .collect::<Result<Vec<_>, _>>()?;
+                let mut positions = selected.clone();
                 // Unchanged audiences keep their local frontier. Download the
                 // shared headers and any still-unread parts needed to bring
                 // those audiences through the selected snapshots' positions.
@@ -165,7 +166,11 @@ impl StoreLogSync {
                         let path = crate::write_seal::path(self.directory.id(), id);
                         match storage.status(&path).await? {
                             Some(object) => needed.push(object),
-                            None if positions.iter().any(|p| p.covers(id)) => {
+                            // Only a selected snapshot accounts for a missing
+                            // write. The local frontier passed it for unchanged
+                            // audiences, while a returning circle may have
+                            // skipped its part there (§14.4).
+                            None if selected.iter().any(|p| p.covers(id)) => {
                                 files.absent.push((device, number))
                             }
                             None => {
@@ -379,3 +384,7 @@ impl StoreLogSync {
         })
     }
 }
+
+#[cfg(test)]
+#[path = "snapshot_reload_tests.rs"]
+mod tests;

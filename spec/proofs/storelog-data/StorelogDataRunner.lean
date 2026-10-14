@@ -1,10 +1,12 @@
 import StorelogJson
 import CovenStorelogData.ReplayEffects
 import CovenStorelogData.Snapshots
+import CovenStorelogData.CurrentData
 import StorelogDataEffects
 
-/-! Compare replay realization and effective snapshot boundaries with Rust.
-The adapter calls the model's selection functions on checked causal histories. -/
+/-! Compare replay realization, effective snapshot boundaries and circle
+reloads with Rust. The adapter calls the model's functions on checked causal
+histories. -/
 open Lean CovenStorelog CovenStorelogData
 
 private def run (j : Json) : Except String Json := do
@@ -33,14 +35,45 @@ private def run (j : Json) : Except String Json := do
           toJson [StorelogJson.audienceNumber a, id.number]))])
   pure (toJson results)
 
+/-- §14.4: after each received batch, the members and circles for which
+`CurrentData.needsReload` holds between consecutive replay states, and whether
+the circle's creation had been received before that batch. Rust reloads only
+the latter: a write with a part in a circle reads its creation, so a circle
+whose creation arrives in the same batch has no skipped part. The compared
+histories make no raise or reset, so only circle readability decides. -/
+private def reloads (j : Json) : Except String Json := do
+  let input ← StorelogJson.read j
+  let H := input.history
+  let views ← StorelogJson.checkedViews input
+  let received ← StorelogJson.received j input
+  let state (subset : List Nat) : State :=
+    (CurrentReplay.finish (ReplayPolicy.replay H.membership input.window input.bound
+      input.bound (entrySet subset) views)).state
+  let mut before := State.empty
+  let mut previous : List Nat := []
+  let mut results := #[]
+  for subset in received do
+    let after := state subset
+    let created (c : Nat) : Bool := previous.any fun e => match (H.log e).action with
+      | .makeCircle d _ _ => d == c
+      | _ => false
+    let pairs := after.circles.flatMap fun (c, circle) =>
+      (circle.members.eraseDups.filter fun m => CurrentData.needsReload before after m c).map
+        fun m => Json.arr #[toJson m, toJson c, toJson (created c)]
+    results := results.push (Json.arr pairs.toArray)
+    before := after
+    previous := subset
+  pure (toJson results)
+
 def main : IO UInt32 := do
   let input ← (← IO.getStdin).readToEnd
   let output := do
     let j ← Json.parse input
-    match j.getObjVal? "circles", j.getObjVal? "effects" with
-    | .ok circles, _ => toJson <$> (← circles.getArr?).mapM StorelogDataEffects.circles
-    | _, .ok effects => toJson <$> (← effects.getArr?).mapM StorelogDataEffects.run
-    | .error _, .error _ =>
+    match j.getObjVal? "reloads", j.getObjVal? "circles", j.getObjVal? "effects" with
+    | .ok histories, _, _ => toJson <$> (← histories.getArr?).mapM reloads
+    | _, .ok circles, _ => toJson <$> (← circles.getArr?).mapM StorelogDataEffects.circles
+    | _, _, .ok effects => toJson <$> (← effects.getArr?).mapM StorelogDataEffects.run
+    | .error _, .error _, .error _ =>
         let histories ← j.getObjValAs? (Array Json) "histories"
         toJson <$> histories.mapM run
   match output with

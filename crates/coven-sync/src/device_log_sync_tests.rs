@@ -93,7 +93,7 @@ pub(crate) async fn group(storage: Arc<MemoryStorage>, count: u64) -> Vec<Device
     }
     devices
 }
-async fn sql(db: &Database, sql: &'static str) {
+pub(crate) async fn sql(db: &Database, sql: &'static str) {
     db.write(move |context| {
         context.execute_batch(sql)?;
         Ok(())
@@ -101,7 +101,7 @@ async fn sql(db: &Database, sql: &'static str) {
     .await
     .unwrap();
 }
-async fn rows(db: &Database) -> Vec<(String, String, String)> {
+pub(crate) async fn rows(db: &Database) -> Vec<(String, String, String)> {
     db.read(|sql| {
         Ok(
             sql.query("SELECT id,title,body FROM notes ORDER BY id", [], |r| {
@@ -282,7 +282,7 @@ async fn fixed_bytes_survive_restart_and_a_lost_completion_reply() {
 }
 
 #[path = "write_seal_tests.rs"]
-mod circles;
+pub(crate) mod circles;
 
 #[path = "schema_sync_tests.rs"]
 mod schema;
