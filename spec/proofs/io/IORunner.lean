@@ -42,10 +42,28 @@ private def counts (j : Json) : Except String Json := do
   let snapshot : Snapshot := ⟨0, 0, 1, stored, caught, []⟩
   return toJson snapshot.counts
 
+/-- `catalogCurrent .writes`: late landings are filtered before choosing the
+snapshot with the most covered writes, ties going to the smaller path. -/
+private def catalog (j : Json) : Except String Json := do
+  let audience ← j.getObjValAs? Nat "audience"
+  let entries ← j.getObjValAs? (Array Json) "snapshots"
+  let snapshots ← entries.toList.mapM fun s => do
+    let audience ← s.getObjValAs? Nat "audience"
+    let writer ← s.getObjValAs? Nat "writer"
+    let number ← s.getObjValAs? Nat "number"
+    let stored ← s.getObjValAs? Nat "stored"
+    let caught ← s.getObjValAs? Nat "caught"
+    let positions ← s.getObjValAs? (List (Nat × Nat)) "positions"
+    pure (Snapshot.mk audience writer number stored caught positions)
+  return match catalogCurrent .writes snapshots audience with
+    | some s => toJson [s.writer, s.number]
+    | none => Json.null
+
 private def run (j : Json) : Except String Json := do
   match ← j.getObjValAs? String "check" with
   | "discovery" => discovery j
   | "counts" => counts j
+  | "catalog" => catalog j
   | check => throw s!"unknown IO check {check}"
 
 def main : IO UInt32 := do

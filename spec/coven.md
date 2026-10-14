@@ -4351,8 +4351,9 @@ Carol's tablet:
     trusted copy (§19.3). Keeping one older snapshot is not a recovery rule.
 - The *latest* or *current newest* snapshot of an audience is its counting
   snapshot covering the most writes, counted over every log; a tie goes to
-  the smaller path, and the existing schema, reset and reader checks still
-  decide usability
+  the smaller path, comparing the writing device's id and then the snapshot
+  number as numbers (device 9 before device 10), and the existing schema,
+  reset and reader checks still decide usability
   ([`catalogCurrent`](proofs/io/CovenIO/Retention.lean),
   [`SnapshotHistory.deleted_stays_covered`](proofs/io/CovenIO/Reload.lean)).
 - Until an audience has a snapshot, a new device reads every log from the

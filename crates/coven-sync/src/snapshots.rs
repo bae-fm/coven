@@ -18,7 +18,7 @@ use std::num::NonZeroU64;
 #[path = "snapshot_boundaries.rs"]
 mod boundaries;
 #[path = "snapshot_catalog.rs"]
-mod catalog;
+pub(super) mod catalog;
 #[path = "snapshot_file_retention.rs"]
 mod file_retention;
 #[path = "snapshot_io.rs"]

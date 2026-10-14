@@ -427,3 +427,240 @@ fn io_differential_snapshot_counts() {
     }
     assert_eq!(actual, crate::discovery::tests::io_runner(&cases));
 }
+
+/// IO `catalogCurrent` with `.writes`, `late_snapshot_ignored` and the
+/// repaired example's late competitor: the real filter and ordering choose
+/// the current counting snapshot of each audience.
+#[test]
+#[ignore = "scripts/check.sh supplies the Lean IO runner"]
+fn io_differential_catalog_current() {
+    use coven_format::value::{StorageTime, WritePositions};
+    use serde_json::json;
+    const DAY: u64 = StorageTime::DAY_SECONDS;
+    // (audience, writer, number, stored, caught, positions)
+    type Listed = (u64, u64, u64, u64, u64, Vec<(u64, u64)>);
+    let mut catalogs: Vec<Vec<Listed>> = vec![
+        // RepairedExamples: Ana's timely snapshot and a late, larger competitor.
+        vec![
+            (0, 0, 1, 0, 0, vec![(0, 1)]),
+            (0, 1, 1, DAY + 1, 0, vec![(1, 2)]),
+        ],
+        // Equal counts: the smaller device, then the smaller number.
+        vec![
+            (0, 2, 1, 5, 5, vec![(0, 3)]),
+            (0, 1, 2, 5, 5, vec![(1, 3)]),
+            (0, 1, 1, 5, 5, vec![(2, 3)]),
+        ],
+        // Incomparable timely snapshots: the most covered writes wins.
+        vec![
+            (0, 0, 1, 0, 0, vec![(0, 5)]),
+            (0, 1, 1, 10, 9, vec![(1, 4), (2, 2)]),
+        ],
+        // Exactly one day counts; one second more does not.
+        vec![
+            (0, 0, 1, DAY, 0, vec![(0, 2)]),
+            (0, 1, 1, DAY + 1, 0, vec![(1, 9)]),
+        ],
+        // Only late snapshots: no current snapshot.
+        vec![(0, 0, 1, 2 * DAY, 0, vec![(0, 1)])],
+        // Smaller paths compare devices as numbers, not as path text.
+        vec![
+            (0, 10, 1, 0, 0, vec![(0, 2)]),
+            (0, 9, 1, 0, 0, vec![(1, 2)]),
+        ],
+        // Per audience: a circle's larger snapshot does not compete.
+        vec![(0, 0, 1, 0, 0, vec![(0, 1)]), (1, 1, 1, 0, 0, vec![(1, 7)])],
+    ];
+    let mut seed = 0x2545_f491_4f6c_dd1du64;
+    let mut next = |bound: u64| {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed % bound
+    };
+    for _ in 0..200 {
+        let count = 1 + next(5);
+        let mut catalog = Vec::new();
+        for _ in 0..count {
+            let caught = next(3) * DAY;
+            let stored = caught + [0, DAY - 1, DAY, DAY + 1][next(4) as usize];
+            let mut positions = Vec::new();
+            for writer in 0..3 {
+                if next(2) == 1 {
+                    positions.push((writer, 1 + next(4)));
+                }
+            }
+            catalog.push((next(2), next(3), 1 + next(3), stored, caught, positions));
+        }
+        catalog.sort_by_key(|s| (s.0, s.1, s.2));
+        catalog.dedup_by_key(|s| (s.0, s.1, s.2));
+        catalogs.push(catalog);
+    }
+    let audience = |n: u64| match n {
+        0 => coven_merge::Audience::Store,
+        n => coven_merge::Audience::Circle(coven_crypto::CircleId(uuid::Uuid::from_u128(n.into()))),
+    };
+    let mut cases = Vec::new();
+    let mut actual = Vec::new();
+    for catalog in catalogs {
+        for wanted in 0..2 {
+            let mut listed = Vec::new();
+            for (n, writer, number, stored, caught, positions) in &catalog {
+                if *n != wanted {
+                    continue;
+                }
+                let object = coven_storage::StoredObject {
+                    path: ObjectPath::snapshot(
+                        store(1),
+                        audience(*n),
+                        DeviceId(*writer),
+                        (*number).try_into().unwrap(),
+                    ),
+                    size: 0,
+                    stored_at: UNIX_EPOCH + Duration::from_secs(*stored),
+                    time_resolution: Duration::from_secs(1),
+                    object_id: "id".into(),
+                    revision: "1".into(),
+                    checksum: None,
+                };
+                let prefix = SnapshotObjectPrefix {
+                    audience: audience(*n),
+                    key: key(1),
+                    caught_at: StorageTime::new(*caught, 0).unwrap(),
+                    writes: WritePositions(
+                        positions
+                            .iter()
+                            .map(|(device, number)| coven_merge::WriteId {
+                                device: DeviceId(*device),
+                                number: *number,
+                            })
+                            .collect(),
+                    ),
+                    store_log: coven_format::value::EntryPositions(Vec::new()),
+                };
+                if prefix
+                    .counts(crate::store_log_sync::snapshots::catalog::landing(&object).unwrap())
+                {
+                    listed.push((object, prefix));
+                }
+            }
+            listed.sort_by(|a, b| {
+                crate::store_log_sync::snapshots::catalog::newest_first((&a.0, &a.1), (&b.0, &b.1))
+            });
+            actual.push(match listed.first() {
+                Some((object, _)) => {
+                    let id = object.path.snapshot_id().unwrap();
+                    json!([id.device.0, id.number])
+                }
+                None => serde_json::Value::Null,
+            });
+            let snapshots: Vec<_> = catalog
+                .iter()
+                .map(|(n, writer, number, stored, caught, positions)| {
+                    json!({"audience": n, "writer": writer, "number": number,
+                        "stored": stored, "caught": caught, "positions": positions})
+                })
+                .collect();
+            cases.push(json!({"check": "catalog", "audience": wanted, "snapshots": snapshots}));
+        }
+    }
+    assert_eq!(actual, crate::discovery::tests::io_runner(&cases));
+}
+
+#[tokio::test]
+async fn a_late_landing_is_ignored_even_when_it_covers_more_writes() {
+    let clock = Arc::new(coven_foundation::clock::FixedClock::new(
+        UNIX_EPOCH + Duration::from_secs(1_760_400_000),
+    ));
+    let storage = Arc::new(
+        MemoryStorage::builder()
+            .transfer_limits(65536, 65536)
+            .clock(clock.clone())
+            .build()
+            .unwrap(),
+    );
+    let mut a = notes_device(storage.clone(), 1).await;
+    a.create(key(1)).await;
+    write_rows(&a, 0, 1, 17, Audience::Store).await;
+    upload(&a, &storage).await;
+    let timely = a.sync.write_snapshot(Audience::Store).await.unwrap();
+    write_rows(&a, 1, 2, 17, Audience::Store).await;
+    upload(&a, &storage).await;
+    // Prepare from a catch-up, then let the upload land a day and a second later.
+    let data = Data::Snapshots(SnapshotTask {
+        job: SnapshotJob::Write {
+            audience: Audience::Store,
+            device: a.device().await,
+            trigger: crate::snapshot_data::SnapshotTrigger::Requested,
+            session: None,
+        },
+        temporary: Vec::new(),
+    });
+    let id =
+        a.db.start_operation(data.new_operation("coven").unwrap())
+            .await
+            .unwrap();
+    let record = a.operation(id).await;
+    assert!(matches!(
+        a.sync
+            .operation_step(&record, Data::read(&record).unwrap())
+            .await
+            .unwrap(),
+        Progress::Advanced
+    ));
+    clock.set(
+        UNIX_EPOCH
+            + Duration::from_secs(
+                1_760_400_000 + coven_format::value::StorageTime::DAY_SECONDS + 1,
+            ),
+    );
+    loop {
+        let Some(record) =
+            a.db.operations()
+                .await
+                .unwrap()
+                .into_iter()
+                .find(|r| r.id == id)
+        else {
+            break;
+        };
+        a.sync
+            .operation_step(&record, Data::read(&record).unwrap())
+            .await
+            .unwrap();
+    }
+    let late = ObjectPath::snapshot(
+        store(1),
+        Audience::Store,
+        a.device().await,
+        NonZeroU64::new(id.0.try_into().unwrap()).unwrap(),
+    );
+    let bytes = storage.read(&late).await.unwrap();
+    let prefix =
+        SnapshotObjectPrefix::decode(&bytes[..SnapshotObjectPrefix::length(&bytes).unwrap()])
+            .unwrap();
+    assert!(
+        crate::store_log_sync::snapshots::catalog::score(&prefix) > 1,
+        "the late snapshot covers more writes"
+    );
+    let mut c = notes_device(storage.clone(), 3).await;
+    add_device(&mut c).await;
+    let timely = ObjectPath::snapshot(
+        store(1),
+        timely.audience,
+        timely.device,
+        NonZeroU64::new(timely.number).unwrap(),
+    );
+    assert_eq!(selected_snapshot(&mut c).await, timely);
+    // A fresh preparation samples the later storage time and counts.
+    let fresh = a.sync.write_snapshot(Audience::Store).await.unwrap();
+    assert_eq!(
+        selected_snapshot(&mut c).await,
+        ObjectPath::snapshot(
+            store(1),
+            fresh.audience,
+            fresh.device,
+            NonZeroU64::new(fresh.number).unwrap()
+        )
+    );
+}

@@ -6,6 +6,7 @@ use crate::{snapshot_data::SavedSnapshot, DamagedObject, SyncError};
 use coven_crypto::{MemberId, ObjectHasher, Signature};
 use coven_database::StoreLog;
 use coven_format::sealed_snapshot::{SnapshotObjectLayout, SnapshotObjectPrefix};
+use coven_format::value::StorageTime;
 use coven_merge::Audience;
 use coven_storage::{ObjectPath, ObjectPrefix, StoredObject};
 use std::collections::BTreeMap;
@@ -67,6 +68,12 @@ impl StoreLogSync {
                 )?;
                 continue;
             }
+            // A landing more than a day after its signed catch-up time is
+            // ignored for loading, selection and coverage (§15).
+            if !prefix.counts(landing(&object)?) {
+                tracing::debug!(path = object.path.as_str(), "late snapshot does not count");
+                continue;
+            }
             // A snapshot prepared for a concurrent raise can include its
             // author's unpublished migration write. A boundary that excludes
             // that snapshot also excludes its demand for that write's history.
@@ -81,11 +88,7 @@ impl StoreLogSync {
                 candidates.push(candidate);
             }
         }
-        candidates.sort_by(|a, b| {
-            score(&b.prefix)
-                .cmp(&score(&a.prefix))
-                .then_with(|| a.object.path.cmp(&b.object.path))
-        });
+        candidates.sort_by(|a, b| newest_first((&a.object, &a.prefix), (&b.object, &b.prefix)));
         Ok(Catalog {
             listed,
             candidates,
@@ -324,8 +327,33 @@ impl StoreLogSync {
     }
 }
 
-pub(super) fn score(prefix: &SnapshotObjectPrefix) -> u128 {
+/// The writes a snapshot covers, counted over every log.
+pub(crate) fn score(prefix: &SnapshotObjectPrefix) -> u128 {
     prefix.writes.0.iter().map(|id| u128::from(id.number)).sum()
+}
+
+/// Counting snapshots of one audience, newest first: the most covered writes,
+/// then the smaller path by device and number (§15, IO `catalogCurrent`).
+pub(crate) fn newest_first(
+    (a, a_prefix): (&StoredObject, &SnapshotObjectPrefix),
+    (b, b_prefix): (&StoredObject, &SnapshotObjectPrefix),
+) -> std::cmp::Ordering {
+    let path = |object: &StoredObject| {
+        let id = object.path.snapshot_id().expect("checked snapshot path");
+        (id.device, id.number)
+    };
+    score(b_prefix)
+        .cmp(&score(a_prefix))
+        .then_with(|| path(a).cmp(&path(b)))
+}
+
+/// The first complete publication time of a listed snapshot.
+pub(crate) fn landing(object: &StoredObject) -> Result<StorageTime, SyncError> {
+    StorageTime::from_system_time(object.stored_at).map_err(|_| {
+        coven_storage::StorageFailure::Protocol
+            .with_source("snapshot publication precedes the Unix epoch")
+            .into()
+    })
 }
 
 pub(super) fn inconsistent(reason: &'static str) -> SyncError {

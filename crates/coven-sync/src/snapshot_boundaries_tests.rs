@@ -462,6 +462,58 @@ mod reset {
     }
 
     #[tokio::test]
+    async fn a_reset_naming_a_late_snapshot_is_ignored_like_an_absent_one() {
+        let start = UNIX_EPOCH + Duration::from_secs(1_760_400_000);
+        let clock = Arc::new(coven_foundation::clock::FixedClock::new(start));
+        let storage = Arc::new(
+            MemoryStorage::builder()
+                .transfer_limits(65536, 65536)
+                .clock(clock.clone())
+                .build()
+                .unwrap(),
+        );
+        let mut a = notes_device(storage.clone(), 1).await;
+        a.create(key(1)).await;
+        write_rows(&a, 1, 1, 7, Audience::Store).await;
+        upload(&a, &storage).await;
+        let id = begin_reset(&mut a, Audience::Store).await;
+        // The reset snapshot is sealed with its catch-up time, then its upload
+        // and entry land more than a day later.
+        reset_step(&mut a, id).await;
+        clock.set(start + Duration::from_secs(coven_format::value::StorageTime::DAY_SECONDS + 1));
+        // The author steps until its entry is published; its own reload of
+        // the late snapshot stops the operation there.
+        while !a.log().await.boundaries().any(|_| true) {
+            let record = a.operation(id).await;
+            match a
+                .sync
+                .operation_step(&record, Data::read(&record).unwrap())
+                .await
+            {
+                Ok(Progress::Waiting(_)) => {
+                    a.sync.sync_store_log().await.unwrap();
+                }
+                Ok(Progress::Advanced) => (),
+                Ok(_) | Err(_) => break,
+            }
+        }
+        assert!(
+            a.log().await.boundaries().any(|_| true),
+            "the reset entry is kept"
+        );
+        // A peer applying the reset cannot load its late snapshot; the reload
+        // waits as if the snapshot had not arrived.
+        let mut b = notes_device(storage.clone(), 2).await;
+        let caught_up = b.sync.sync_store_log().await;
+        assert!(
+            matches!(&caught_up, Err(crate::SyncFailure::Storage(error))
+                if error.failure() == coven_storage::StorageFailure::NotFound),
+            "{caught_up:?}"
+        );
+        assert!(tables(&b).await.is_empty());
+    }
+
+    #[tokio::test]
     async fn reset_resumes_every_durable_step_without_replacing_its_snapshot_or_entry() {
         'crashes: for steps in 0.. {
             let storage = snapshot_storage();

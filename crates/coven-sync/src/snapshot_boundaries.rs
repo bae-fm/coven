@@ -52,6 +52,13 @@ impl StoreLogSync {
                 .find(|object| object.path == path)
                 .ok_or(coven_storage::StorageFailure::NotFound)?;
             let candidate = self.snapshot_prefix(object, log).await?;
+            // A named snapshot that landed late is ignored like any other:
+            // the boundary waits as if it had not arrived.
+            if !candidate.prefix.counts(super::catalog::landing(object)?) {
+                return Err(coven_storage::StorageFailure::NotFound
+                    .with_source("the boundary's snapshot landed after its catch-up deadline")
+                    .into());
+            }
             let clear = candidate.prefix.encode()?;
             saved.push(SavedBoundary {
                 entry: (boundary.entry().device, boundary.entry().number),

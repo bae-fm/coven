@@ -342,9 +342,10 @@ proofs() {
         step "Rust / Lean finality observation endpoint"
         COVEN_IO_LEAN="$runner" cargo test -p coven-sync --all-features io_differential_finality -- --ignored
         runner=$(runner io ioRunner)
-        step "Rust / Lean numbered publication, discovery and snapshot counting"
+        step "Rust / Lean numbered publication, discovery and snapshot selection"
         io_tests=$(cargo test -p coven-sync --all-features -- --list --ignored)
-        for test in io_differential_discovery io_differential_snapshot_counts; do
+        for test in io_differential_discovery io_differential_snapshot_counts \
+            io_differential_catalog_current; do
             if ! printf '%s\n' "$io_tests" | grep -q "::$test: test\$"; then
                 echo "the Rust test binary is missing $test" >&2
                 exit 1
@@ -352,7 +353,8 @@ proofs() {
         done
         COVEN_IO_RUNNER="$runner" cargo test -p coven-sync --all-features -- --ignored \
             --exact discovery::tests::io_differential_discovery \
-            store_log_sync::tests::snapshots::signatures::io_differential_snapshot_counts
+            store_log_sync::tests::snapshots::signatures::io_differential_snapshot_counts \
+            store_log_sync::tests::snapshots::signatures::io_differential_catalog_current
     fi
 
     if proof_selected storage || crate_selected coven-database; then
