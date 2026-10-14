@@ -872,3 +872,85 @@ async fn a_refresh_its_custody_cannot_commit_fails_the_request_without_retrying(
         .iter()
         .all(|(token, _)| token == "Bearer token"));
 }
+
+#[test]
+fn google_drive_reasons_distinguish_throttling_limits_authentication_and_permission() {
+    use serde_json::json;
+    for (status, reason, expected) in [
+        (403, "rateLimitExceeded", StorageFailure::RateLimited),
+        (429, "rateLimitExceeded", StorageFailure::RateLimited),
+        (403, "userRateLimitExceeded", StorageFailure::RateLimited),
+        (403, "sharingRateLimitExceeded", StorageFailure::RateLimited),
+        (403, "dailyLimitExceeded", StorageFailure::RateLimited),
+        (403, "storageQuotaExceeded", StorageFailure::QuotaExceeded),
+        (
+            403,
+            "activeItemCreationLimitExceeded",
+            StorageFailure::QuotaExceeded,
+        ),
+        (
+            403,
+            "numChildrenInNonRootLimitExceeded",
+            StorageFailure::QuotaExceeded,
+        ),
+        (
+            403,
+            "teamDriveFileLimitExceeded",
+            StorageFailure::QuotaExceeded,
+        ),
+        (
+            403,
+            "myDriveHierarchyDepthLimitExceeded",
+            StorageFailure::QuotaExceeded,
+        ),
+        (
+            403,
+            "teamDriveHierarchyTooDeep",
+            StorageFailure::QuotaExceeded,
+        ),
+        (401, "authError", StorageFailure::Authentication),
+        (
+            403,
+            "insufficientFilePermissions",
+            StorageFailure::PermissionDenied,
+        ),
+        (
+            403,
+            "appNotAuthorizedToFile",
+            StorageFailure::PermissionDenied,
+        ),
+        (403, "domainPolicy", StorageFailure::PermissionDenied),
+        // An undocumented 403 reason is still a refusal of this account.
+        (403, "somethingNew", StorageFailure::PermissionDenied),
+        (404, "notFound", StorageFailure::NotFound),
+    ] {
+        let body = json!({"error": {
+            "code": status,
+            "message": "provider detail",
+            "errors": [{"domain": "usageLimits", "reason": reason, "message": "provider detail"}],
+        }});
+        assert_eq!(
+            classify(
+                CloudProvider::GoogleDrive,
+                status,
+                &serde_json::to_vec(&body).unwrap()
+            ),
+            expected,
+            "{status} {reason}"
+        );
+    }
+}
+
+#[test]
+fn a_drive_throttle_keeps_its_retry_after_through_classification() {
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert(reqwest::header::RETRY_AFTER, "120".parse().unwrap());
+    let body = serde_json::json!({"error": {"errors": [{"reason": "sharingRateLimitExceeded"}]}});
+    let error = ProviderResponse::new(403, headers, serde_json::to_vec(&body).unwrap())
+        .into_error(CloudProvider::GoogleDrive);
+    assert_eq!(error.failure(), StorageFailure::RateLimited);
+    assert_eq!(
+        error.retry_after(),
+        Some(crate::RetryAfter::Wait(std::time::Duration::from_secs(120)))
+    );
+}

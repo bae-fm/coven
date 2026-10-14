@@ -378,33 +378,14 @@ pub(crate) fn classify(provider: CloudProvider, status: u16, body: &[u8]) -> Sto
     {
         return failure;
     }
-    if provider == CloudProvider::Dropbox {
-        if let Some(failure) = parsed.as_ref().and_then(dropbox_failure) {
-            return failure;
-        }
-    }
-    let code = parsed.as_ref().and_then(|value| match provider {
-        CloudProvider::GoogleDrive => value["error"]["errors"][0]["reason"].as_str(),
-        CloudProvider::Dropbox => value["error_summary"].as_str(),
-        CloudProvider::OneDrive => value["error"]["code"].as_str(),
+    let native = parsed.as_ref().and_then(|value| match provider {
+        CloudProvider::GoogleDrive => google_drive_failure(value),
+        CloudProvider::Dropbox => dropbox_failure(value),
+        CloudProvider::OneDrive => onedrive_failure(value),
         _ => None,
     });
-    if let Some(code) = code {
-        match code {
-            "storageQuotaExceeded" | "quotaLimitReached" => return StorageFailure::QuotaExceeded,
-            "authError" | "InvalidAuthenticationToken" | "invalid_grant" => {
-                return StorageFailure::Authentication
-            }
-            "insufficientFilePermissions" | "accessDenied" => {
-                return StorageFailure::PermissionDenied
-            }
-            "notFound" | "itemNotFound" => return StorageFailure::NotFound,
-            "nameAlreadyExists" => return StorageFailure::AlreadyExists,
-            "rateLimitExceeded" | "userRateLimitExceeded" | "activityLimitReached" => {
-                return StorageFailure::RateLimited
-            }
-            _ => {}
-        }
+    if let Some(failure) = native {
+        return failure;
     }
     match status {
         401 => StorageFailure::Authentication,
@@ -418,6 +399,44 @@ pub(crate) fn classify(provider: CloudProvider, status: u16, body: &[u8]) -> Sto
         408 | 500..=599 => StorageFailure::Network,
         _ => StorageFailure::Refused,
     }
+}
+/// Drive's documented reasons (handle-errors and limits guides). Its 403
+/// carries throttling, item and storage limits as well as permission, so the
+/// reason decides; the first error is the primary one.
+fn google_drive_failure(value: &Value) -> Option<StorageFailure> {
+    Some(match value["error"]["errors"][0]["reason"].as_str()? {
+        // Per-user, per-project and sharing rates, and the project's daily
+        // courtesy limit: a later retry succeeds.
+        "rateLimitExceeded"
+        | "userRateLimitExceeded"
+        | "sharingRateLimitExceeded"
+        | "dailyLimitExceeded" => StorageFailure::RateLimited,
+        // The account's storage, and the item limits of an account, a folder,
+        // a shared drive or a folder hierarchy: nothing more fits.
+        "storageQuotaExceeded"
+        | "activeItemCreationLimitExceeded"
+        | "numChildrenInNonRootLimitExceeded"
+        | "teamDriveFileLimitExceeded"
+        | "myDriveHierarchyDepthLimitExceeded"
+        | "teamDriveHierarchyTooDeep" => StorageFailure::QuotaExceeded,
+        "authError" => StorageFailure::Authentication,
+        "insufficientFilePermissions" | "appNotAuthorizedToFile" | "domainPolicy" => {
+            StorageFailure::PermissionDenied
+        }
+        "notFound" => StorageFailure::NotFound,
+        _ => return None,
+    })
+}
+fn onedrive_failure(value: &Value) -> Option<StorageFailure> {
+    Some(match value["error"]["code"].as_str()? {
+        "quotaLimitReached" => StorageFailure::QuotaExceeded,
+        "InvalidAuthenticationToken" => StorageFailure::Authentication,
+        "accessDenied" => StorageFailure::PermissionDenied,
+        "itemNotFound" => StorageFailure::NotFound,
+        "nameAlreadyExists" => StorageFailure::AlreadyExists,
+        "activityLimitReached" => StorageFailure::RateLimited,
+        _ => return None,
+    })
 }
 fn dropbox_failure(value: &Value) -> Option<StorageFailure> {
     fn tags<'a>(value: &'a Value, result: &mut Vec<&'a str>) {
