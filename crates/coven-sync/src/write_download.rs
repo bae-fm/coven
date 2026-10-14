@@ -17,6 +17,7 @@ impl DeviceLogSync {
         replays: &mut ReplayCache<'_>,
         member: &MemberId,
     ) -> Result<ApplyOutcome, SyncError> {
+        let retained = crate::object_input::ObjectInput::observe(&self.database, object).await?;
         let ReadyWrite {
             opened,
             author,
@@ -25,7 +26,7 @@ impl DeviceLogSync {
             self.storage.as_deref().ok_or(SyncError::NoStorage)?,
             object,
             Some(ring),
-            &self.reads,
+            &retained,
             log,
             replays,
             || Ok(member.clone()),
@@ -53,6 +54,7 @@ impl DeviceLogSync {
             let result = crate::write_object::finish(
                 self.storage.as_deref().ok_or(SyncError::NoStorage)?,
                 object,
+                &retained,
                 ring,
                 &author,
                 opened,
@@ -78,12 +80,20 @@ impl DeviceLogSync {
         let (applied, transferred) = tokio::join!(apply, transfer);
         let applied = match transferred {
             Ok(references) => {
-                self.reads.keep_files(object, references);
+                retained.keep_files(references).await?;
                 applied
             }
             Err(SyncError::Database(error)) => Err(error),
             Err(error) => return Err(error),
         };
-        applied.map_err(|error| crate::write_object::database_failure(&object.path, error))
+        let applied =
+            applied.map_err(|error| crate::write_object::database_failure(&object.path, error))?;
+        if matches!(
+            applied,
+            ApplyOutcome::Applied | ApplyOutcome::AlreadyApplied
+        ) {
+            retained.release_ranges().await?;
+        }
+        Ok(applied)
     }
 }

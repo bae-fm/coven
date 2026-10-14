@@ -63,7 +63,7 @@ pub(crate) fn replay<P: PendingValue>(
     let mut inputs = BTreeMap::new();
     let mut resets = Vec::new();
     for audience in changed.difference(&returned) {
-        crate::entry_inputs::original(db, &schema.schema, audience)?;
+        crate::entry_inputs::original(db, schema, audience)?;
         let selected = current.get(audience).map(Vec::as_slice).unwrap_or(&[]);
         let ids: BTreeSet<_> = selected.iter().map(Boundary::entry).collect();
         let applied = crate::entry_inputs::applied(db, audience)?;

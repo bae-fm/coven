@@ -17,6 +17,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 pub(crate) fn begin(
     database: &DatabaseConnection,
+    schema: &WriteSchema,
     audience: &Audience,
 ) -> Result<BTreeSet<RowId>, DbError> {
     let audience = audience_text(audience);
@@ -28,6 +29,11 @@ pub(crate) fn begin(
         )?
         .into_iter()
         .collect();
+    let loss_keys = database.query(
+        "SELECT DISTINCT table_name,key FROM _coven_lost WHERE audience=?1",
+        [&audience],
+        |r| Ok((r.get::<_, String>(0)?, r.get::<_, Vec<u8>>(1)?)),
+    )?;
     for table in ["_coven_references", "_coven_cells", "_coven_claims"] {
         database.internal_execute(
             &format!(
@@ -48,6 +54,9 @@ pub(crate) fn begin(
         )?;
     }
 
+    for key in loss_keys {
+        crate::file_protection::refresh(database, schema, &key)?;
+    }
     Ok(touched)
 }
 
@@ -242,7 +251,8 @@ pub(crate) fn loss(
             _ => return Err(invalid("active loss disagrees with merge state")),
         }
     }
-    crate::loss_record::put(database, &loss, None)
+    crate::loss_record::put(database, &loss, None)?;
+    crate::file_protection::retain_loss(database, schema, &loss)
 }
 
 pub(crate) fn ordinal(database: &DatabaseConnection, id: WriteId) -> Result<i64, DbError> {

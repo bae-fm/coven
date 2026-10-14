@@ -1,15 +1,16 @@
 //! File references used to prove that storage deletion cannot strand a row.
 
 use super::Database;
+use crate::file_protection::value as retain_value;
 use crate::{DbError, DownloadedPartStream, DownloadedWriteStream, FileUpload};
-use coven_format::{file_reference::FileReference, value::Value, write::RowChange};
+use coven_format::{value::Value, write::RowChange};
 use coven_foundation::id_source::{DeviceId, FileId};
 use coven_merge::{ColumnValue, Operation};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Local references and publication attempts read in one database transaction.
 pub struct FileRetention {
-    /// Uploaded objects still named by visible rows or waiting writes.
+    /// Uploaded paths named by rows, losses, reversible inputs or waiting writes.
     pub references: BTreeSet<(DeviceId, FileId)>,
     /// Includes unfinished publication, whose opaque fixed identity sync owns.
     pub uploads: Vec<FileUpload>,
@@ -42,44 +43,7 @@ impl Database {
             let reader = inner.access.readers.acquire_reader();
             reader.with_reader(|db| {
                 db.read_transaction(|| {
-                    let schema = &inner.access.write_schema;
-                    let mut references = BTreeSet::new();
-                    for table in &schema.declarations {
-                        let Some(file) = &table.files else {
-                            continue;
-                        };
-                        db.for_each(
-                            &format!(
-                                "SELECT {} FROM main.{} WHERE {} IS NOT NULL",
-                                crate::sql::identifier(&file.location),
-                                crate::sql::identifier(&table.name),
-                                crate::sql::identifier(&file.location)
-                            ),
-                            [],
-                            |row| {
-                                retain_value(
-                                    &crate::write_encoding::value(row.get_ref(0)?)?,
-                                    &mut references,
-                                )
-                            },
-                        )?;
-                    }
-                    crate::upload::each_plaintext(db, |_, parts| {
-                        for (header, mut chunks) in parts {
-                            crate::download_stream::visit_part(
-                                header,
-                                |chunk| chunks.read_chunk(chunk),
-                                |frame| {
-                                    if let coven_format::dismissal::WriteFrame::Change(row) = frame
-                                    {
-                                        retain_change(schema, &row, &mut references)?;
-                                    }
-                                    Ok::<_, DbError>(())
-                                },
-                            )?;
-                        }
-                        Ok(())
-                    })?;
+                    let references = db.query("SELECT device,file FROM _coven_row_file_refs UNION SELECT device,file FROM _coven_input_file_refs UNION SELECT device,file FROM _coven_queued_file_refs", [], |r| Ok((DeviceId(u64::from_be_bytes(r.get(0)?)),FileId(uuid::Uuid::from_bytes(r.get(1)?)))))?.into_iter().collect();
                     Ok(FileRetention {
                         references,
                         uploads: crate::file_queue::read(db)?,
@@ -133,6 +97,7 @@ impl Database {
 
 pub(super) fn snapshot_references(
     db: &crate::sqlite::DatabaseConnection,
+    audience: &coven_merge::Audience,
     schema: &crate::write_schema::WriteSchema,
 ) -> Result<BTreeSet<(DeviceId, FileId)>, DbError> {
     let mut references = BTreeSet::new();
@@ -144,6 +109,9 @@ pub(super) fn snapshot_references(
             retain_columns(schema, &row.get::<_, String>(0)?, &columns, &mut references)
         },
     )?;
+    crate::loss_record::visit(db, audience, |loss| {
+        crate::file_protection::loss(schema, &loss, &mut references)
+    })?;
     Ok(references)
 }
 
@@ -155,6 +123,11 @@ fn retain_change(
     if let Operation::Insert(columns) | Operation::Update(columns) = &row.change.operation {
         retain_columns(schema, &row.row.table, columns, references)?;
     }
+    if let Some(column) = location_column(schema, &row.row.table)? {
+        if let Some(value) = row.old.get(column) {
+            retain_value(value, references)?;
+        }
+    }
     Ok(())
 }
 
@@ -164,31 +137,29 @@ fn retain_columns(
     columns: &BTreeMap<String, ColumnValue<Value>>,
     references: &mut BTreeSet<(DeviceId, FileId)>,
 ) -> Result<(), DbError> {
-    let declaration = schema
-        .declarations
-        .iter()
-        .find(|d| d.name == table)
-        .ok_or(DbError::DamagedDatabase)?;
-    if let Some(file) = &declaration.files {
-        if let Some(value) = columns.get(&file.location) {
+    if let Some(column) = location_column(schema, table)? {
+        if let Some(value) = columns.get(column) {
             retain_value(&value.value, references)?;
         }
     }
     Ok(())
 }
 
-fn retain_value(
-    value: &Value,
-    references: &mut BTreeSet<(DeviceId, FileId)>,
-) -> Result<(), DbError> {
-    if matches!(value, Value::Null) {
-        return Ok(());
-    }
-    if let crate::file_location::StoredLocation::Uploaded(text) =
-        crate::file_location::StoredLocation::decode(value)?
-    {
-        let file = FileReference::decode(text.as_str())?;
-        references.insert((file.device, file.id));
-    }
-    Ok(())
+fn location_column<'a>(
+    schema: &'a crate::write_schema::WriteSchema,
+    table: &str,
+) -> Result<Option<&'a str>, DbError> {
+    let declaration = schema
+        .declarations
+        .iter()
+        .find(|d| d.name == table)
+        .ok_or(DbError::DamagedDatabase)?;
+    Ok(declaration
+        .files
+        .as_ref()
+        .map(|file| file.location.as_str()))
 }
+
+#[cfg(test)]
+#[path = "database_file_retention_tests.rs"]
+mod tests;

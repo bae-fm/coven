@@ -138,6 +138,12 @@ impl StoreDir {
         self.path.join("store.db")
     }
 
+    /// Retained remote input has its own SQLite owner: receiving bytes must not
+    /// wait for a transaction applying those bytes to the application database.
+    pub fn input_database_path(&self) -> PathBuf {
+        self.path.join("inputs.db")
+    }
+
     /// Refuse an unfinished explicit recovery before opening SQLite.
     pub fn check_database_recovery(&self) -> Result<(), StoreLockError> {
         super::DatabaseRecovery::check(&self.path, self.id)

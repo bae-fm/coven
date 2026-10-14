@@ -65,13 +65,6 @@ impl<'a> UploadBytes<'a> {
         }
         Ok(())
     }
-
-    pub(crate) fn read_chunk(&mut self, bytes: &mut [u8]) -> Result<(), DbError> {
-        self.check_length(self.offset, bytes.len())?;
-        self.blob.read_at_exact(bytes, self.offset)?;
-        self.offset += bytes.len();
-        Ok(())
-    }
 }
 
 impl Iterator for UploadBytes<'_> {
@@ -263,6 +256,8 @@ pub(crate) fn succeeded(database: &DatabaseConnection, write: WriteId) -> Result
         if entry.keys.is_none() {
             return Err(DbError::UploadNotAttempted { write });
         }
+        let (header, _, _) = plaintext(database, &entry)?;
+        crate::write_headers::retain(database, &header)?;
         crate::pending::clear_log(database, crate::LogObject::Write(write))?;
         database.internal_execute("DELETE FROM _coven_uploads WHERE rowid=?1", [entry.rowid])?;
         Ok(true)

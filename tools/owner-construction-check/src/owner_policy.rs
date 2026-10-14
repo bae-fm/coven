@@ -19,7 +19,7 @@ pub(crate) const POLICY: Policy = Policy {
     capabilities: CAPABILITIES,
     database_schema: Some((
         "crates/coven-database/src/internal_schema.rs",
-        &["coven_tables"],
+        &["coven_tables", "coven_input_tables"],
     )),
     // One list for owner construction, runtime acquisition and task starts.
     // Owner constructors include their private representations; names grant no exemption.
@@ -137,6 +137,11 @@ pub(crate) const POLICY: Policy = Policy {
             "read_at",
         ),
         ("crates/coven-database/src/read_pool.rs", "ReadPool", "new"),
+        (
+            "crates/coven-database/src/input_database.rs",
+            "InputDatabase",
+            "new",
+        ),
         (
             "crates/coven-foundation/src/files/atomic_file.rs",
             "FileWriter",
@@ -695,6 +700,8 @@ pub(crate) const POLICY: Policy = Policy {
         "CacheReservation",
         "UploadedFile",
         "SnapshotInput",
+        "RetainedInput",
+        "ObjectInput",
         "SnapshotWriteParts",
         "SnapshotTransfer",
         "FileTransfer",

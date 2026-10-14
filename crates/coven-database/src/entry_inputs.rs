@@ -90,7 +90,7 @@ fn reads(db: &DatabaseConnection, audience: &Audience) -> Result<bool, DbError> 
 /// does not read) there is nothing to restore later; a reversal then reloads.
 pub(crate) fn original(
     db: &DatabaseConnection,
-    schema: &crate::schema::Schema,
+    schema: &WriteSchema,
     audience: &Audience,
 ) -> Result<(), DbError> {
     let exists: bool = db.query_row(
@@ -101,13 +101,14 @@ pub(crate) fn original(
     if exists || crate::entry_effects::reloading(db, audience)? || !reads(db, audience)? {
         return Ok(());
     }
-    let store = crate::merge_store::MergeStore::from_schema(db, schema);
+    let store = crate::merge_store::MergeStore::from_schema(db, &schema.schema);
     let input = retain(
         db,
         Origin::Local(audience),
         db.schema_version()?,
         &crate::download::positions(db)?,
         &store,
+        schema,
     )?;
     db.internal_execute(
         "INSERT INTO _coven_data_origins(audience,input,basis) VALUES(?1,?2,?3)",
@@ -128,6 +129,7 @@ pub(crate) fn retain(
     version: u32,
     positions: &WritePositions,
     store: &crate::merge_store::MergeStore<'_>,
+    schema: &WriteSchema,
 ) -> Result<i64, DbError> {
     let audience = audience_text(origin.audience());
     let positions = encoded(merge_fields::encode_write_positions(positions))?;
@@ -146,6 +148,7 @@ pub(crate) fn retain(
     };
     let id = match existing {
         Some(id) => {
+            db.internal_execute("DELETE FROM _coven_input_file_refs WHERE input=?1", [id])?;
             db.internal_execute("DELETE FROM _coven_data_rows WHERE input=?1", [id])?;
             db.internal_execute("DELETE FROM _coven_data_losses WHERE input=?1", [id])?;
             db.internal_execute(
@@ -171,12 +174,18 @@ pub(crate) fn retain(
             )?
         }
     };
+    let mut references = BTreeSet::new();
     db.for_each(
         "SELECT DISTINCT table_name,key,audience FROM _coven_rows WHERE audience=?1 ORDER BY table_name,key",
         [&audience],
         |r| {
             let row = crate::row_queries::read_identity(r)?;
             let state = store.row_without_losses(&row)?.state;
+            if let Some(location) = crate::file_protection::location(schema, &row.table) {
+                if let Some(cell) = state.cells().get(location) {
+                    crate::file_protection::value(&cell.value.value, &mut references)?;
+                }
+            }
             db.internal_execute(
                 "INSERT INTO _coven_data_rows(input,table_name,key,record) VALUES(?1,?2,?3,?4)",
                 params![id, row.table, row.key, encoded(merge_fields::encode_merge_row(&MergeRow { state }))?],
@@ -186,6 +195,7 @@ pub(crate) fn retain(
     )?;
     let mut ordinal = 0i64;
     crate::loss_record::visit(db, origin.audience(), |loss| {
+        crate::file_protection::loss(schema, &loss, &mut references)?;
         db.internal_execute(
             "INSERT INTO _coven_data_losses(input,ordinal,record) VALUES(?1,?2,?3)",
             params![id, ordinal, encoded(merge_fields::encode_loss(&loss))?],
@@ -193,6 +203,7 @@ pub(crate) fn retain(
         ordinal += 1;
         Ok::<_, DbError>(())
     })?;
+    crate::file_protection::retain_input(db, id, &references)?;
     Ok(id)
 }
 
@@ -410,7 +421,7 @@ pub(crate) fn restore(
             db.internal_execute("INSERT INTO _coven_positions(device,number) VALUES(?1,?2) ON CONFLICT(device) DO UPDATE SET number=max(number,excluded.number)", (position.device.0.to_be_bytes().as_slice(), position.number.to_be_bytes().as_slice()))?;
         }
         coverage.insert(audience.clone(), positions);
-        touched.extend(crate::snapshot_state::begin(db, audience)?);
+        touched.extend(crate::snapshot_state::begin(db, schema, audience)?);
         let metadata = crate::snapshot_metadata::SnapshotMetadata::new(db);
         db.for_each("SELECT record FROM _coven_data_rows WHERE input=?1 ORDER BY table_name,key", [input], |r| {
             let merged = merge_fields::decode_merge_row(&r.get::<_, Vec<u8>>(0)?, &metadata);
@@ -431,11 +442,9 @@ pub(crate) fn restore(
             "SELECT record FROM _coven_data_losses WHERE input=?1 ORDER BY ordinal",
             [input],
             |r| {
-                crate::loss_record::put(
-                    db,
-                    &merge_fields::decode_loss(&r.get::<_, Vec<u8>>(0)?)?,
-                    None,
-                )
+                let loss = merge_fields::decode_loss(&r.get::<_, Vec<u8>>(0)?)?;
+                crate::loss_record::put(db, &loss, None)?;
+                crate::file_protection::retain_loss(db, schema, &loss)
             },
         )?;
     }

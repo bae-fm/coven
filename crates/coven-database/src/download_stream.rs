@@ -38,7 +38,8 @@ impl<R: Read> DownloadedWriteStream<R> {
             if crate::store_log::positions(database)? != *store_log {
                 return Err(crate::DbError::StoreLogEntriesChanged);
             }
-            self.header.encode()?;
+            let original_header = self.header.clone();
+            original_header.encode()?;
             if self.header.parts.len() != self.parts.len() {
                 return Err(SnapshotError::Inconsistent(
                     "write stream count differs from its header",
@@ -78,6 +79,7 @@ impl<R: Read> DownloadedWriteStream<R> {
                 })?;
             }
             authenticate()?;
+            crate::write_headers::retain(database, &original_header)?;
             crate::download_stage::finish(
                 database,
                 before,

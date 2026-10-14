@@ -86,6 +86,7 @@ impl Database {
                     )?;
                     let files = super::file_retention::snapshot_references(
                         writer,
+                        &id.audience,
                         &inner.access.write_schema,
                     )
                     .map_err(|error| match error {

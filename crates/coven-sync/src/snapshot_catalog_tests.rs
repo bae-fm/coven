@@ -83,7 +83,11 @@ async fn unsigned_snapshot_cannot_replace_rows_or_authorize_log_deletion() {
     a.create(key(1)).await;
     write_rows(&a, 0, 1, 17, Audience::Store).await;
     upload(&a, &storage).await;
-    let id = a.sync.write_snapshot(Audience::Store).await.unwrap();
+    let id = coven_format::store_log::SnapshotId {
+        audience: Audience::Store,
+        device: a.device().await,
+        number: 999,
+    };
     let path = ObjectPath::snapshot(
         store(1),
         id.audience.clone(),
@@ -132,14 +136,17 @@ async fn another_members_snapshot_signatures_never_authorize_selection_loading_o
         a.add(&other, MemberRole::Member).await;
         write_rows(&a, 0, 1, 17, Audience::Store).await;
         upload(&a, &storage).await;
-        let id = a.sync.write_snapshot(Audience::Store).await.unwrap();
+        let id = coven_format::store_log::SnapshotId {
+            audience: Audience::Store,
+            device: a.device().await,
+            number: 999,
+        };
         let path = ObjectPath::snapshot(
             store(1),
             id.audience.clone(),
             id.device,
             id.number.try_into().unwrap(),
         );
-        let original = storage.read(&path).await.unwrap();
         let unsigned = unsigned_snapshot(&a, id).await;
         let forged = signed_snapshot(
             &unsigned,
@@ -201,9 +208,9 @@ async fn another_members_snapshot_signatures_never_authorize_selection_loading_o
         b.sync.reload_from_snapshots().await.unwrap();
         b.writes.download_writes().await.unwrap();
         assert_eq!(tables(&b).await, tables(&a).await);
-        // The real author's signatures permit loading after the logs disappear.
+        // A new publication signed by the real author permits loading after the logs disappear.
         storage.delete(&path).await.unwrap();
-        storage.create(&path, &original).await.unwrap();
+        a.sync.write_snapshot(Audience::Store).await.unwrap();
         a.sync.run_retention().await.unwrap();
         assert!(storage
             .list(&ObjectPrefix::device_logs(store(1)))
@@ -222,15 +229,22 @@ async fn coverage_checks_read_exactly_the_signed_prefix_without_an_audience_key(
     a.create(key(1)).await;
     write_rows(&a, 0, 1, 17, Audience::Store).await;
     upload(&a, &storage).await;
+    let mut b = notes_device(storage.clone(), 2).await;
+    add_device(&mut b).await;
+    b.writes.download_writes().await.unwrap();
     a.sync.write_snapshot(Audience::Store).await.unwrap();
     let object = storage
         .list(&ObjectPrefix::snapshots(store(1)))
         .await
         .unwrap()
         .remove(0);
-    a.custody.forget().unwrap();
+    b.sync
+        .observe_clock(&b.db.local_store_log().await.unwrap())
+        .await
+        .unwrap();
+    b.custody.forget().unwrap();
     let before = storage.ranges().await.len();
-    a.sync.discover_snapshots().await.unwrap();
+    b.sync.discover_snapshots().await.unwrap();
     let ranges = storage.ranges().await;
     assert_eq!(ranges.len() - before, 4);
     assert_eq!(ranges[before].start(), 0);
@@ -253,20 +267,20 @@ async fn signed_coverage_does_not_require_opening_the_body_but_loading_does() {
     a.create(key(1)).await;
     write_rows(&a, 0, 1, 17, Audience::Store).await;
     upload(&a, &storage).await;
-    let id = a.sync.write_snapshot(Audience::Store).await.unwrap();
-    let object = storage
-        .list(&ObjectPrefix::snapshots(store(1)))
-        .await
-        .unwrap()
-        .remove(0);
-    let original = storage.read(&object.path).await.unwrap();
+    let id = coven_format::store_log::SnapshotId {
+        audience: Audience::Store,
+        device: a.device().await,
+        number: 999,
+    };
+    let path = ObjectPath::snapshot(
+        store(1),
+        id.audience.clone(),
+        id.device,
+        id.number.try_into().unwrap(),
+    );
     let unsigned = unsigned_snapshot(&a, id).await;
-    let wrong_body_signature = signed_snapshot(&unsigned, &object.path, &a.member, &member(2));
-    storage.delete(&object.path).await.unwrap();
-    storage
-        .create(&object.path, &wrong_body_signature)
-        .await
-        .unwrap();
+    let wrong_body_signature = signed_snapshot(&unsigned, &path, &a.member, &member(2));
+    storage.create(&path, &wrong_body_signature).await.unwrap();
     a.sync.write_snapshots().await.unwrap();
     a.clock.set(UNIX_EPOCH + Duration::from_secs(31 * 86400));
     a.sync.run_retention().await.unwrap();
@@ -279,8 +293,8 @@ async fn signed_coverage_does_not_require_opening_the_body_but_loading_does() {
     add_device(&mut b).await;
     assert!(b.sync.reload_from_snapshots().await.is_err());
     assert!(tables(&b).await.is_empty());
-    storage.delete(&object.path).await.unwrap();
-    storage.create(&object.path, &original).await.unwrap();
+    storage.delete(&path).await.unwrap();
+    a.sync.write_snapshot(Audience::Store).await.unwrap();
     b.sync.reload_from_snapshots().await.unwrap();
     assert_eq!(tables(&a).await, tables(&b).await);
 }
@@ -324,7 +338,11 @@ async fn reset_boundaries_reject_another_members_prefix_before_changing_rows() {
     a.add(&other, MemberRole::Member).await;
     write_rows(&a, 0, 1, 17, Audience::Store).await;
     upload(&a, &storage).await;
-    let id = a.sync.write_snapshot(Audience::Store).await.unwrap();
+    let id = coven_format::store_log::SnapshotId {
+        audience: Audience::Store,
+        device: a.device().await,
+        number: 999,
+    };
     let path = ObjectPath::snapshot(
         store(1),
         id.audience.clone(),
@@ -713,6 +731,10 @@ async fn selection_orders_coverage_then_path_and_passes_over_damaged_objects() {
         .corrupt_byte(&newer, size as usize - 1)
         .await
         .unwrap();
+    // The reader that already authenticated the object keeps its checked bytes.
+    assert_eq!(selected_snapshot(&mut c).await, newer);
+    let mut c = notes_device(storage.clone(), 4).await;
+    add_device(&mut c).await;
     let damages = c.sync.reload_from_snapshots().await.unwrap();
     assert!(damages.iter().any(|d| d.path == newer.as_str()));
     assert_eq!(selected_snapshot(&mut c).await, path(b_id));

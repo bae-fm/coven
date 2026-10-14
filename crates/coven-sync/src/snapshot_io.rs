@@ -7,7 +7,6 @@ use coven_foundation::{
     id_source::KeyId,
 };
 use coven_merge::Audience;
-use coven_storage::{ByteRange, ObjectPath, Storage};
 use std::io::{self, Read};
 
 pub(super) const BUFFER: usize = coven_format::chunks::CHUNK_SIZE;
@@ -75,28 +74,6 @@ pub(super) fn key(
     id: KeyId,
 ) -> Result<DerivedKeys, SyncError> {
     crate::write_seal::derive(ring, audience, id)
-}
-
-pub(super) async fn range(
-    storage: &dyn Storage,
-    path: &ObjectPath,
-    offset: u64,
-    length: usize,
-) -> Result<Vec<u8>, SyncError> {
-    let end = offset
-        .checked_add(length as u64)
-        .ok_or(coven_format::Error::Truncated)?;
-    crate::object_range::read(storage, path, ByteRange::new(offset, end)?)
-        .await
-        .map_err(|error| match error {
-            crate::object_range::ReadError::Length => coven_format::Error::Truncated.into(),
-            crate::object_range::ReadError::Storage(error)
-                if error.failure() == coven_storage::StorageFailure::InvalidRange =>
-            {
-                coven_format::Error::Truncated.into()
-            }
-            crate::object_range::ReadError::Storage(error) => error.into(),
-        })
 }
 
 /// Snapshot loading writes retained plaintext; reference checking sends it

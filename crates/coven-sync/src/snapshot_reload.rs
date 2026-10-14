@@ -355,6 +355,26 @@ impl StoreLogSync {
                 }
             }
             2 => {
+                let SnapshotJob::Reload {
+                    files: Some(files), ..
+                } = &task.job
+                else {
+                    return Err(coven_database::DbError::DamagedDatabase.into());
+                };
+                let mut paths: Vec<_> = files
+                    .snapshots
+                    .iter()
+                    .map(|s| s.path.as_str().to_owned())
+                    .collect();
+                for write in &files.writes {
+                    let header = WriteHeaderFrame::decode(&write.header)?;
+                    paths.push(
+                        crate::write_seal::path(self.directory.id(), header.header.position)
+                            .as_str()
+                            .to_owned(),
+                    );
+                }
+                self.database.release_input_ranges(paths).await?;
                 self.clear_snapshot_files(record, &mut task).await?;
                 self.database.finish_operation(record.id).await?;
                 return Ok(Progress::Finished(Output::Unit));

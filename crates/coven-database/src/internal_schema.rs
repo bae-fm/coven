@@ -80,6 +80,25 @@ macro_rules! coven_tables {
             ) STRICT;
             CREATE INDEX _coven_data_inputs_audience ON _coven_data_inputs(audience,kind,device,number);
         ");
+        $visit!(_coven_row_file_refs, "
+            CREATE TABLE _coven_row_file_refs (
+                device BLOB NOT NULL CHECK(length(device)=8),
+                file BLOB NOT NULL CHECK(length(file)=16),
+                table_name TEXT NOT NULL,
+                key BLOB NOT NULL,
+                PRIMARY KEY(device,file,table_name,key)
+            ) STRICT, WITHOUT ROWID;
+            CREATE INDEX _coven_row_file_refs_row ON _coven_row_file_refs(table_name,key);
+        ");
+        $visit!(_coven_input_file_refs, "
+            CREATE TABLE _coven_input_file_refs (
+                device BLOB NOT NULL CHECK(length(device)=8),
+                file BLOB NOT NULL CHECK(length(file)=16),
+                input INTEGER NOT NULL REFERENCES _coven_data_inputs(id) ON DELETE CASCADE,
+                PRIMARY KEY(device,file,input)
+            ) STRICT, WITHOUT ROWID;
+            CREATE INDEX _coven_input_file_refs_input ON _coven_input_file_refs(input);
+        ");
         $visit!(_coven_data_origins, "
             CREATE TABLE _coven_data_origins (
                 audience TEXT PRIMARY KEY NOT NULL,
@@ -342,6 +361,14 @@ macro_rules! coven_tables {
             ) STRICT;
             CREATE UNIQUE INDEX _coven_write_position ON _coven_writes({WRITE_DEVICE_SQL}, number);
         ");
+        $visit!(_coven_write_headers, "
+            CREATE TABLE _coven_write_headers (
+                device BLOB NOT NULL CHECK(length(device)=8),
+                number BLOB NOT NULL CHECK(length(number)=8 AND number>x'0000000000000000'),
+                header BLOB NOT NULL,
+                PRIMARY KEY(device,number)
+            ) STRICT, WITHOUT ROWID;
+        ");
         $visit!(_coven_positions, "
             CREATE TABLE _coven_positions (
                 device BLOB PRIMARY KEY NOT NULL CHECK(length(device)=8),
@@ -445,6 +472,7 @@ macro_rules! coven_tables {
                 CHECK(replacement_kind!='excluded' OR retired=1)
             ) STRICT;
             CREATE INDEX _coven_lost_row ON _coven_lost(audience,table_name,key,generation,column_id);
+            CREATE INDEX _coven_lost_app_key ON _coven_lost(table_name,key);
             CREATE UNIQUE INDEX _coven_lost_live_cell ON _coven_lost(table_name,key,audience,column_id,set_by) WHERE retired=0 AND replacement_kind='write';
             CREATE INDEX _coven_lost_removed ON _coven_lost(table_name,key,audience) WHERE retired=0 AND replacement_kind='rules';
             CREATE INDEX _coven_lost_column ON _coven_lost(column_id);
@@ -457,6 +485,17 @@ macro_rules! coven_tables {
                 sealing_keys BLOB,
                 PRIMARY KEY(device, number)
             ) STRICT;
+        ");
+        $visit!(_coven_queued_file_refs, "
+            CREATE TABLE _coven_queued_file_refs (
+                device BLOB NOT NULL CHECK(length(device)=8),
+                file BLOB NOT NULL CHECK(length(file)=16),
+                writer BLOB NOT NULL CHECK(length(writer)=8),
+                number BLOB NOT NULL CHECK(length(number)=8),
+                PRIMARY KEY(device,file,writer,number),
+                FOREIGN KEY(writer,number) REFERENCES _coven_uploads(device,number) ON DELETE CASCADE
+            ) STRICT, WITHOUT ROWID;
+            CREATE INDEX _coven_queued_file_refs_write ON _coven_queued_file_refs(writer,number);
         ");
         $visit!(_coven_write_upload_sessions, "
             CREATE TABLE _coven_write_upload_sessions (
@@ -604,6 +643,80 @@ pub(crate) fn initial_schema() -> String {
             ));
         }
     }
+    sql
+}
+
+// Independently committed remote input, owned by the same store lifetime.
+macro_rules! coven_input_tables {
+    ($visit:ident) => {
+        $visit!(
+            _coven_input_objects,
+            "
+    CREATE TABLE _coven_input_objects (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        path TEXT NOT NULL UNIQUE,
+        identity BLOB NOT NULL,
+        observation BLOB NOT NULL,
+        released INTEGER NOT NULL DEFAULT 0 CHECK(released IN (0,1)),
+        metadata BLOB,
+        files_complete INTEGER CHECK(files_complete IN (0,1))
+    ) STRICT;
+        "
+        );
+        $visit!(
+            _coven_input_ranges,
+            "
+    CREATE TABLE _coven_input_ranges (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        object INTEGER NOT NULL REFERENCES _coven_input_objects(id) ON DELETE CASCADE,
+        start INTEGER NOT NULL CHECK(start>=0),
+        end INTEGER NOT NULL CHECK(end>start),
+        bytes BLOB NOT NULL CHECK(length(bytes)=end-start),
+        UNIQUE(object,start)
+    ) STRICT;
+        "
+        );
+        $visit!(
+            _coven_input_files,
+            "
+    CREATE TABLE _coven_input_files (
+        object INTEGER NOT NULL REFERENCES _coven_input_objects(id) ON DELETE CASCADE,
+        device BLOB NOT NULL CHECK(length(device)=8),
+        file BLOB NOT NULL CHECK(length(file)=16),
+        PRIMARY KEY(object,device,file)
+    ) STRICT, WITHOUT ROWID;
+        "
+        );
+        $visit!(
+            _coven_input_budget,
+            "
+    CREATE TABLE _coven_input_budget (
+        singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+        maximum INTEGER NOT NULL CHECK(maximum>=0),
+        retained INTEGER NOT NULL CHECK(retained>=0),
+        evicted INTEGER NOT NULL CHECK(evicted>=0)
+    ) STRICT;
+    INSERT INTO _coven_input_budget VALUES(1,67108864,0,0);
+    CREATE TRIGGER _coven_input_range_added AFTER INSERT ON _coven_input_ranges BEGIN
+        UPDATE _coven_input_budget SET retained=retained+length(NEW.bytes) WHERE singleton=1;
+    END;
+    CREATE TRIGGER _coven_input_range_removed AFTER DELETE ON _coven_input_ranges BEGIN
+        UPDATE _coven_input_budget SET retained=retained-length(OLD.bytes) WHERE singleton=1;
+    END;
+    PRAGMA application_id=1;
+        "
+        );
+    };
+}
+
+pub(crate) fn initial_input_schema() -> String {
+    let mut sql = String::new();
+    macro_rules! append {
+        ($table:ident, $sql:literal) => {
+            sql.push_str($sql);
+        };
+    }
+    coven_input_tables!(append);
     sql
 }
 

@@ -587,6 +587,7 @@ async fn a_snapshot_exceeding_the_transfer_memory_budget_streams_in_bounded_requ
         .unwrap();
     assert!(snapshots[0].size > MEMORY_BUDGET);
     let mut b = notes_device(storage.clone(), 2).await;
+    b.db.set_input_budget(128 * 1024 * 1024).await.unwrap();
     add_device(&mut b).await;
     b.sync.reload_from_snapshots().await.unwrap();
     assert_eq!(fingerprint(&a).await, fingerprint(&b).await);

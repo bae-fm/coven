@@ -8,7 +8,7 @@ use crate::{DamagedObject, SyncError};
 use coven_database::{EntryOutcome, StoreLog};
 use coven_format::{store_log::StoreChange, value::WritePositions};
 use coven_foundation::id_source::DeviceId;
-use coven_storage::{CloudProvider, ObjectPath, ObjectPrefix};
+use coven_storage::{CloudProvider, ObjectPrefix};
 use std::{
     collections::{BTreeMap, BTreeSet},
     time::Duration,
@@ -210,7 +210,7 @@ impl StoreLogSync {
             .list(&ObjectPrefix::positions(self.directory.id()))
             .await?
         {
-            match self.open_retention_positions(&object.path, log).await {
+            match self.open_retention_positions(&object, log).await {
                 Ok((device, writes)) => {
                     positions.insert(device, writes);
                 }
@@ -222,19 +222,20 @@ impl StoreLogSync {
 
     async fn open_retention_positions(
         &self,
-        path: &ObjectPath,
+        object: &coven_storage::StoredObject,
         log: &StoreLog,
     ) -> Result<(DeviceId, WritePositions), SyncError> {
         let storage = self.storage.as_deref().ok_or(SyncError::NoStorage)?;
-        let bytes = storage.read(path).await?;
+        let input = crate::object_input::ObjectInput::observe(&self.database, object).await?;
+        let bytes = input.whole(storage).await?;
         let ring = self.store_keys.read()?;
-        let positions = crate::posted_positions::open(&bytes, path, ring.as_ref(), log)?;
+        let positions = crate::posted_positions::open(&bytes, &object.path, ring.as_ref(), log)?;
         Ok((positions.device, positions.writes))
     }
 }
 
 // Retention cannot prove coverage or absence until a write's inputs arrive.
-pub(super) fn waiting(path: &ObjectPath, error: &SyncError) -> bool {
+pub(super) fn waiting(path: &coven_storage::ObjectPath, error: &SyncError) -> bool {
     let waiting = matches!(
         error,
         SyncError::KeyUnavailable(_)

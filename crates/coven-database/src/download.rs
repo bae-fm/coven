@@ -218,7 +218,7 @@ pub(crate) fn accepted(
                 .find_map(|boundary| boundary.excludes(&record.header, &part)),
         };
         if let Some(cause) = cause {
-            exclude(database, &record.header, &part, cause)?;
+            exclude(database, schema, &record.header, &part, cause)?;
             if !part.dismissals.is_empty() {
                 kept.push(WritePart {
                     rows: Vec::new(),
@@ -236,18 +236,20 @@ pub(crate) fn accepted(
 
 fn exclude(
     database: &DatabaseConnection,
+    schema: &WriteSchema,
     header: &WriteHeader,
     part: &WritePart,
     cause: LostWriteCause,
 ) -> Result<(), DbError> {
     for change in &part.rows {
-        exclude_row(database, header, cause, change)?;
+        exclude_row(database, schema, header, cause, change)?;
     }
     Ok(())
 }
 
-pub(crate) fn exclude_row(
+fn exclude_row(
     database: &DatabaseConnection,
+    schema: &WriteSchema,
     header: &WriteHeader,
     reason: LostWriteCause,
     change: &coven_format::write::RowChange,
@@ -268,33 +270,31 @@ pub(crate) fn exclude_row(
             })
             .collect(),
     };
-    crate::loss_record::put(
-        database,
-        &coven_format::loss::Loss {
-            row: change.row.clone(),
-            generation: change.change.generation,
-            retired: true,
-            values: coven_format::loss::LossValues::Row(
-                values
-                    .into_iter()
-                    .map(|(name, value)| {
-                        (
-                            name,
-                            coven_merge::Cell {
-                                write: header.position,
-                                value,
-                            },
-                        )
-                    })
-                    .collect(),
-            ),
-            cause: coven_format::loss::LossCause::Excluded {
-                write: header.position,
-                cause: reason,
-            },
+    let loss = coven_format::loss::Loss {
+        row: change.row.clone(),
+        generation: change.change.generation,
+        retired: true,
+        values: coven_format::loss::LossValues::Row(
+            values
+                .into_iter()
+                .map(|(name, value)| {
+                    (
+                        name,
+                        coven_merge::Cell {
+                            write: header.position,
+                            value,
+                        },
+                    )
+                })
+                .collect(),
+        ),
+        cause: coven_format::loss::LossCause::Excluded {
+            write: header.position,
+            cause: reason,
         },
-        None,
-    )
+    };
+    crate::loss_record::put(database, &loss, None)?;
+    crate::file_protection::retain_loss(database, schema, &loss)
 }
 
 /// Agreement state read atomically for sync to post.

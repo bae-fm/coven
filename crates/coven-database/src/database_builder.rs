@@ -191,6 +191,23 @@ impl DatabaseBuilder {
         write_schema.prepare(&writer)?;
         writer.prepare_file_triggers()?;
         let observer = CommitObserver::new();
+        let input_path = self.directory.input_database_path();
+        let mut input_writer =
+            DatabaseConnection::open(&input_path, false, SqlAuthorization::new(&[]))?;
+        input_writer.check_integrity()?;
+        input_writer.enable_wal()?;
+        let version: u32 = input_writer.query_row("PRAGMA application_id", [], |r| r.get(0))?;
+        match version {
+            0 => input_writer
+                .transaction(|db| db.batch(&crate::internal_schema::initial_input_schema()))?,
+            1 => (),
+            _ => return Err(DbError::DamagedDatabase.into()),
+        }
+        let mut input_reader =
+            DatabaseConnection::open(&input_path, true, SqlAuthorization::new(&[]))?;
+        input_writer.serve(observer.clone());
+        input_reader.serve(observer.clone());
+        let inputs = input_database::InputDatabase::new(input_reader, input_writer);
         #[cfg(test)]
         drop(profile);
         writer.observe_commits(observer.clone(), settings.device_id)?;
@@ -207,6 +224,7 @@ impl DatabaseBuilder {
             closing: Arc::new(lock.closing_guard()),
             file_tasks: Arc::new(tokio::sync::RwLock::new(())),
             inner: Arc::new(RwLock::new(Some(DatabaseInner {
+                inputs,
                 store_log: Mutex::new(None),
                 access: DatabaseAccess {
                     writer: Mutex::new(writer),

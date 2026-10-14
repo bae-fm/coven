@@ -119,6 +119,7 @@ fn contains(database: &DatabaseConnection, dismissal: &Dismissal) -> Result<bool
 
 pub(crate) fn apply(
     database: &DatabaseConnection,
+    schema: &WriteSchema,
     record: &WriteRecord,
 ) -> Result<BTreeSet<RowId>, DbError> {
     let mut affected = BTreeSet::new();
@@ -168,6 +169,15 @@ pub(crate) fn apply(
                 affected.insert(row.clone());
             }
         }
+    }
+    for key in record
+        .parts
+        .iter()
+        .flat_map(|part| &part.dismissals)
+        .map(|d| (d.row.table.clone(), d.row.key.clone()))
+        .collect::<BTreeSet<_>>()
+    {
+        crate::file_protection::refresh(database, schema, &key)?;
     }
     Ok(affected)
 }

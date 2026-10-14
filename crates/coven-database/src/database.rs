@@ -14,6 +14,9 @@ mod file_staging;
 mod read_pool;
 use read_pool::ReadPool;
 
+#[path = "input_database.rs"]
+pub(crate) mod input_database;
+
 #[path = "database_operations.rs"]
 mod operations;
 
@@ -53,6 +56,7 @@ pub struct Database {
 }
 
 struct DatabaseInner {
+    inputs: input_database::InputDatabase,
     // Shared by the sync owner and its workers; only a committed replay replaces it.
     store_log: Mutex<Option<crate::StoreLog>>,
     access: DatabaseAccess<StoreLock>,
@@ -518,7 +522,19 @@ impl Database {
                         let Some(inner) = slot.take() else {
                             return Err(DbError::StoreClosed);
                         };
-                        inner.access.close()
+                        let mut failures = inner.inputs.close();
+                        match inner.access.close() {
+                            Err(DbError::Closing {
+                                failures: application,
+                            }) => failures.extend(application),
+                            Err(error) => failures.push(error),
+                            Ok(()) => (),
+                        }
+                        if failures.is_empty() {
+                            Ok(())
+                        } else {
+                            Err(DbError::Closing { failures })
+                        }
                     })
                     .await,
                 )

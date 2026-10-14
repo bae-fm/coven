@@ -198,8 +198,9 @@ impl StoreLogSync {
         replays: &mut ReplayCache<'_>,
         readable: &BTreeSet<coven_merge::Audience>,
     ) -> Result<Option<crate::pass_reads::FileReferences>, SyncError> {
-        if let Some(files) = self.reads.files(object) {
-            return Ok(files);
+        let retained = crate::object_input::ObjectInput::observe(&self.database, object).await?;
+        if let Some(Some(files)) = retained.files().await? {
+            return Ok(Some(files));
         }
         let storage = self.storage.as_deref().ok_or(SyncError::NoStorage)?;
         let ring = self.store_keys.read()?;
@@ -211,7 +212,7 @@ impl StoreLogSync {
             storage,
             object,
             ring.as_ref(),
-            &self.reads,
+            &retained,
             log,
             replays,
             || Ok(self.operation_member()?.member_id()),
@@ -224,15 +225,16 @@ impl StoreLogSync {
             *opens &= readable.contains(&part.audience);
         }
         if opens.contains(&false) {
-            self.reads.keep_files(object, None);
+            retained.keep_files(None).await?;
             return Ok(None);
         }
         let (mut sink, input) =
             crate::stream_input::ChannelParts::new(opened.header.clone(), &opens);
         let transfer = async {
-            let result =
-                crate::write_object::finish(storage, object, ring, &author, opened, &mut sink)
-                    .await;
+            let result = crate::write_object::finish(
+                storage, object, &retained, ring, &author, opened, &mut sink,
+            )
+            .await;
             drop(sink);
             result
         };
@@ -241,7 +243,7 @@ impl StoreLogSync {
         transferred?;
         let files =
             checked.map_err(|error| crate::write_object::database_failure(&object.path, error))?;
-        self.reads.keep_files(object, files.clone());
+        retained.keep_files(files.clone()).await?;
         Ok(files)
     }
 }

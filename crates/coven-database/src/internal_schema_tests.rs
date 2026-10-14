@@ -1,5 +1,3 @@
-use std::collections::BTreeMap;
-
 use crate::{tests::TestStore, Migration, RowIdentity, SyncedTable};
 use coven_format::{
     merge_fields::*,
@@ -8,9 +6,9 @@ use coven_format::{
 };
 use coven_foundation::id_source::DeviceId;
 use coven_merge::{ColumnValue, WriteId};
+use std::collections::BTreeMap;
 
 const NOTE_ID: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
-
 fn declarations() -> Vec<SyncedTable> {
     vec![SyncedTable::new("notes", RowIdentity::IndependentUuid)
         .key_columns(["id", "number"])
@@ -122,6 +120,7 @@ async fn only_the_spec_tables_are_created() {
                 "_coven_fingerprint_leaves",
                 "_coven_fingerprint_sums",
                 "_coven_foreign_keys",
+                "_coven_input_file_refs",
                 "_coven_key_publications",
                 "_coven_key_uploads",
                 "_coven_loaded_audiences",
@@ -136,14 +135,17 @@ async fn only_the_spec_tables_are_created() {
                 "_coven_pending",
                 "_coven_pending_resets",
                 "_coven_positions",
+                "_coven_queued_file_refs",
                 "_coven_reference_values",
                 "_coven_references",
+                "_coven_row_file_refs",
                 "_coven_rows",
                 "_coven_snapshot_schema",
                 "_coven_store_log",
                 "_coven_store_log_uploads",
                 "_coven_uploads",
                 "_coven_user_files",
+                "_coven_write_headers",
                 "_coven_write_input_frames",
                 "_coven_write_inputs",
                 "_coven_write_upload_sessions",
@@ -212,10 +214,8 @@ async fn a_lost_row_does_not_require_an_accepted_generation() {
 }
 
 mod query_plans {
-    use std::collections::BTreeSet;
-
     use rusqlite::Connection;
-
+    use std::collections::BTreeSet;
     mod fixture {
         use rusqlite::{
             fallible_iterator::FallibleIterator, functions::FunctionFlags, Batch, Connection,
@@ -279,6 +279,8 @@ mod query_plans {
          INSERT INTO _coven_circle_members SELECT 'circle_' || i,key FROM fixture;
          INSERT INTO _coven_circle_deletions SELECT 'circle_' || i,device,n FROM fixture;
          INSERT INTO _coven_data_inputs SELECT i,audience,'snapshot',device,n,1,x'00' FROM fixture;
+         INSERT INTO _coven_row_file_refs SELECT device,substr(key,1,16),tab,key FROM fixture;
+         INSERT INTO _coven_input_file_refs SELECT device,substr(key,1,16),i FROM fixture;
          INSERT INTO _coven_data_origins SELECT 'audience_' || i,i,x'' FROM fixture;
          INSERT INTO _coven_data_reloads SELECT 'audience_' || i,key,i%2 FROM fixture;
          INSERT INTO _coven_data_rows SELECT i,tab,key,x'00' FROM fixture;
@@ -297,6 +299,7 @@ mod query_plans {
          INSERT INTO _coven_writes
            SELECT i,CAST(n || device AS BLOB),n,x'00' FROM fixture;
          INSERT INTO _coven_positions SELECT n,n FROM fixture;
+         INSERT INTO _coven_write_headers SELECT device,n,x'00' FROM fixture;
          INSERT INTO _coven_columns SELECT i,tab,'column_' || i FROM fixture;
          INSERT INTO _coven_rows SELECT i,tab,key,audience,counter(1),i FROM fixture;
          INSERT INTO _coven_cells
@@ -313,6 +316,7 @@ mod query_plans {
            SELECT tab,key,audience,counter(1),CASE WHEN i%3=0 THEN i END,
                   zeroblob(64),n,i%2,CASE WHEN i%3=0 THEN 'write' ELSE 'rules' END,n FROM fixture;
          INSERT INTO _coven_uploads SELECT device,n,zeroblob(256),NULL FROM fixture;
+         INSERT INTO _coven_queued_file_refs SELECT device,substr(key,1,16),device,n FROM fixture;
          INSERT INTO _coven_write_upload_sessions SELECT device,n,x'00' FROM fixture;
          INSERT INTO _coven_user_files SELECT tab,key,'file',key,key,n,zeroblob(13) FROM fixture;
          INSERT INTO _coven_device_files SELECT tab,key,'file',key,'path_' || i FROM fixture;
@@ -390,13 +394,14 @@ mod query_plans {
     }
     mod scans {
         use super::source::Statement;
-
         /// Exceptions name the exact source statement and scanned relation. A nested
         /// lookup in a whole-table enumeration still has to use its own index.
         pub(super) fn reason(statement: &Statement, relation: &str) -> Option<&'static str> {
             let file = statement.file.as_str();
             let sql = statement.template.as_str();
             match (file, sql, relation) {
+        ("database_file_retention.rs", "SELECT device,file FROM _coven_row_file_refs UNION SELECT device,file FROM _coven_input_file_refs UNION SELECT device,file FROM _coven_queued_file_refs", "_coven_row_file_refs" | "_coven_input_file_refs" | "_coven_queued_file_refs") =>
+            Some("file retention returns every protected fixed path from the sparse indexes"),
         ("pending.rs", "INSERT INTO _coven_pending_resets(subject,reporter,entry_device,entry_number) SELECT p.subject,p.reporter,?1,?2 FROM _coven_pending AS p WHERE NOT EXISTS(SELECT 1 FROM _coven_access_keys AS k WHERE k.operation=p.operation) ON CONFLICT DO NOTHING", "p") =>
             Some("a newly applied reset suppresses every earlier observation but S3 key deletions"),
         ("pending.rs", sql, "p") if sql.starts_with("UPDATE _coven_pending AS p SET suppressed=EXISTS(") =>
@@ -517,12 +522,10 @@ mod query_plans {
         use proc_macro2::{TokenStream, TokenTree};
         use rusqlite::Connection;
         use syn::{spanned::Spanned, visit::Visit};
-
         struct Source {
             strings: Vec<(usize, String)>,
             table_loops: Vec<TableLoop>,
         }
-
         struct TableLoop {
             variable: String,
             start: usize,
@@ -568,7 +571,6 @@ mod query_plans {
             pub template: String,
             pub sql: String,
         }
-
         /// Read the shipping SQL, including format strings, rather than maintaining a
         /// second copy of each query that can keep passing after its caller changes.
         pub(super) fn statements(db: &Connection) -> Vec<Statement> {

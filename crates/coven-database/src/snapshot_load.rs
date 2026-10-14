@@ -56,7 +56,7 @@ pub(crate) fn load<R: Read, W: Read>(
                 return Err(invalid("reload repeats an audience"));
             }
             // The rows being replaced, under the boundaries they were applied with.
-            crate::entry_inputs::original(database, &schema.schema, audience)?;
+            crate::entry_inputs::original(database, schema, audience)?;
         }
         let applied = crate::download::positions(database)?;
         let mut causes = BTreeSet::new();
@@ -111,13 +111,14 @@ pub(crate) fn load<R: Read, W: Read>(
                         header.schema_version,
                         &header.writes,
                         &store,
+                        schema,
                     )?;
                     crate::entry_inputs::selected(database, &id.audience, retained)?;
                     coverage.loaded(id.audience, header.writes);
                     touched.extend(rows);
                 }
                 crate::SnapshotSource::Empty(audience) => {
-                    touched.extend(crate::snapshot_state::begin(database, &audience)?);
+                    touched.extend(crate::snapshot_state::begin(database, schema, &audience)?);
                     let store = MergeStore::from_snapshot(database, &schema.schema, &selected);
                     let retained = crate::entry_inputs::retain(
                         database,
@@ -125,6 +126,7 @@ pub(crate) fn load<R: Read, W: Read>(
                         database.schema_version()?,
                         &coven_format::value::WritePositions(Vec::new()),
                         &store,
+                        schema,
                     )?;
                     crate::entry_inputs::selected(database, &audience, retained)?;
                     coverage.loaded(audience, coven_format::value::WritePositions(Vec::new()));
@@ -171,7 +173,7 @@ pub(crate) fn read(
     mut input: impl Read,
 ) -> Result<(SnapshotHeader, BTreeSet<RowId>), DbError> {
     let local_version = *schema.versions.end();
-    let mut touched = crate::snapshot_state::begin(database, &expected.audience)?;
+    let mut touched = crate::snapshot_state::begin(database, schema, &expected.audience)?;
     let metadata = SnapshotMetadata::new(database);
     let mut decoder = SnapshotChunkDecoder::new(prefix);
     let mut checked_header = false;

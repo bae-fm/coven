@@ -206,7 +206,19 @@ async fn unreadable_circle_parts_are_skipped_but_missing_members_keys_wait() {
             [7; 32],
         )))
         .unwrap();
+    let path = ObjectPath::device_log(STORE_ID, DeviceId(1), 1.try_into().unwrap());
+    let before_wait = storage.reads().await.len();
     devices[1].writes.download_writes().await.unwrap();
+    let retained: Vec<_> = storage.reads().await[before_wait..]
+        .iter()
+        .filter(|(p, _, _)| p == &path)
+        .cloned()
+        .collect();
+    let before_repeat = storage.reads().await.len();
+    devices[1].writes.download_writes().await.unwrap();
+    assert!(storage.reads().await[before_repeat..]
+        .iter()
+        .all(|(p, _, _)| p != &path));
     assert!(rows(&devices[1].db).await.is_empty());
     // A reload without a snapshot has no target past local positions; the
     // key wait stays with discovery.
@@ -220,7 +232,19 @@ async fn unreadable_circle_parts_are_skipped_but_missing_members_keys_wait() {
     assert_eq!(rows(&devices[2].db).await.len(), 1);
     assert_eq!(count(&devices[2].db).await, 0);
     devices[1].sync.sync_store_log().await.unwrap();
+    let before_key = storage.reads().await.len();
     devices[1].writes.download_writes().await.unwrap();
+    for (_, start, length) in storage.reads().await[before_key..]
+        .iter()
+        .filter(|(p, _, _)| p == &path)
+    {
+        assert!(
+            retained
+                .iter()
+                .all(|(_, old, old_length)| start + length <= *old || old + old_length <= *start),
+            "key arrival fetched retained header bytes"
+        );
+    }
     assert_eq!(count(&devices[1].db).await, 1);
 }
 

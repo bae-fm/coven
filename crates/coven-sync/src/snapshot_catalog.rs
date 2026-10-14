@@ -134,7 +134,8 @@ impl StoreLogSync {
         let storage = self.storage.as_deref().ok_or(SyncError::NoStorage)?;
         let path = &object.path;
         let author = crate::object_author::member(log, path)?;
-        let bytes = match self.reads.metadata(object) {
+        let input = crate::object_input::ObjectInput::observe(&self.database, object).await?;
+        let bytes = match input.metadata().await? {
             Some(bytes) => bytes,
             None => {
                 let mut bytes = Vec::new();
@@ -147,10 +148,14 @@ impl StoreLogSync {
                         break;
                     }
                     bytes.extend(
-                        io::range(storage, path, bytes.len() as u64, end - bytes.len()).await?,
+                        input
+                            .read(
+                                storage,
+                                coven_storage::ByteRange::new(bytes.len() as u64, end as u64)?,
+                            )
+                            .await?,
                     );
                 }
-                self.reads.keep_metadata(object, bytes.clone());
                 bytes
             }
         };
@@ -178,6 +183,7 @@ impl StoreLogSync {
         {
             return Err(damaged(path, crate::Refusal::WrongIdentity { cause: None }));
         }
+        input.keep_metadata(bytes).await?;
         Ok(Candidate {
             object: object.clone(),
             prefix,
@@ -231,7 +237,10 @@ impl StoreLogSync {
                 &io::name(file)?,
             )
             .create_writer(self.directory.lock_read_only()?)?;
-        self.stream_snapshot(candidate, &mut writer).await?;
+        let retained =
+            crate::object_input::ObjectInput::observe(&self.database, &candidate.object).await?;
+        self.stream_snapshot(candidate, &retained, &mut writer)
+            .await?;
         writer.finish().await?;
         let files = self
             .database
@@ -245,7 +254,7 @@ impl StoreLogSync {
                 io::SnapshotInput::open(&self.directory, file)?,
             )
             .await?;
-        self.reads.keep_files(&candidate.object, Some(files));
+        retained.keep_files(Some(files)).await?;
         Ok(())
     }
 
@@ -253,12 +262,14 @@ impl StoreLogSync {
         &self,
         candidate: &Candidate,
     ) -> Result<crate::pass_reads::FileReferences, SyncError> {
-        if let Some(Some(files)) = self.reads.files(&candidate.object) {
+        let retained =
+            crate::object_input::ObjectInput::observe(&self.database, &candidate.object).await?;
+        if let Some(Some(files)) = retained.files().await? {
             return Ok(files);
         }
         let (mut send, input) = crate::stream_input::StreamInput::channel();
         let transfer = async {
-            let result = self.stream_snapshot(candidate, &mut send).await;
+            let result = self.stream_snapshot(candidate, &retained, &mut send).await;
             drop(send);
             result
         };
@@ -274,14 +285,14 @@ impl StoreLogSync {
         let (transferred, checked) = tokio::join!(transfer, check);
         transferred?;
         let files = checked?;
-        self.reads
-            .keep_files(&candidate.object, Some(files.clone()));
+        retained.keep_files(Some(files.clone())).await?;
         Ok(files)
     }
 
     async fn stream_snapshot(
         &self,
         candidate: &Candidate,
+        input: &crate::object_input::ObjectInput,
         sink: &mut impl io::SnapshotSink,
     ) -> Result<(), SyncError> {
         let storage = self.storage.as_deref().ok_or(SyncError::NoStorage)?;
@@ -306,12 +317,21 @@ impl StoreLogSync {
             if end - offset < 4 {
                 return Err(coven_format::Error::Truncated.into());
             }
-            let mut piece = io::range(storage, path, offset, 4).await?;
+            let mut piece = input
+                .read(storage, coven_storage::ByteRange::new(offset, offset + 4)?)
+                .await?;
             let length = layout.chunk_length(&piece)?;
             if length as u64 > end - offset {
                 return Err(coven_format::Error::Truncated.into());
             }
-            piece.extend(io::range(storage, path, offset + 4, length - 4).await?);
+            piece.extend(
+                input
+                    .read(
+                        storage,
+                        coven_storage::ByteRange::new(offset + 4, offset + length as u64)?,
+                    )
+                    .await?,
+            );
             hash.update(&piece);
             let index = layout.index();
             let sealed = layout.decode_chunk(&piece)?;
@@ -322,7 +342,11 @@ impl StoreLogSync {
         if offset != end {
             return Err(coven_format::Error::Truncated.into());
         }
-        let signature = layout.read_signature(&io::range(storage, path, end, 64).await?)?;
+        let signature = layout.read_signature(
+            &input
+                .read(storage, coven_storage::ByteRange::new(end, end + 64)?)
+                .await?,
+        )?;
         candidate
             .author
             .verify_object(path.as_str(), &hash.finish(), &signature)?;

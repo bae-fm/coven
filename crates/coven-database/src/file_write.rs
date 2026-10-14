@@ -369,6 +369,7 @@ impl<'a> FileWrite<'a> {
         let visible = AppView::after(db, self.schema).without_row_cache();
         let store = crate::merge_store::MergeStore::new(db, &visible).without_row_cache();
         for key in keys {
+            crate::file_protection::refresh(db, self.schema, &key)?;
             let Some(file) = &self.schema.declaration(&key.0).files else {
                 continue;
             };

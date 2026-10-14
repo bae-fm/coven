@@ -17,9 +17,17 @@ impl StoreLogSync {
         &self,
         object: &StoredObject,
     ) -> Result<WriteHeaderFrame, SyncError> {
+        let retained = crate::object_input::ObjectInput::observe(&self.database, object).await?;
+        let id = object.path.write_id().ok_or_else(|| {
+            coven_storage::StorageFailure::Protocol
+                .with_source("write header requested for another object kind")
+        })?;
+        if let Some(header) = self.database.checked_write_header(id).await? {
+            return Ok(header);
+        }
         let storage = self.storage.as_deref().ok_or(SyncError::NoStorage)?;
         let ring = self.store_keys.read()?;
-        let result = crate::write_object::open(storage, object, ring.as_ref(), &self.reads).await;
+        let result = crate::write_object::open(storage, object, ring.as_ref(), &retained).await;
         if let Err(SyncError::Damaged(damage)) = &result {
             crate::write_object::record_damage(&self.database, storage, object, &damage.failure)
                 .await?;
@@ -67,6 +75,7 @@ impl StoreLogSync {
     ) -> Result<SavedWrite, SyncError> {
         let storage = self.storage.as_deref().ok_or(SyncError::NoStorage)?;
         let ring = self.store_keys.read()?;
+        let retained = crate::object_input::ObjectInput::observe(&self.database, object).await?;
         let crate::write_object::ReadyWrite {
             opened,
             author,
@@ -75,7 +84,7 @@ impl StoreLogSync {
             storage,
             object,
             ring.as_ref(),
-            &self.reads,
+            &retained,
             log,
             replays,
             || Ok(self.operation_member()?.member_id()),
@@ -116,12 +125,15 @@ impl StoreLogSync {
                 primary,
                 references,
             };
-            crate::write_object::finish(storage, object, ring, &author, opened, &mut sink).await
+            crate::write_object::finish(
+                storage, object, &retained, ring, &author, opened, &mut sink,
+            )
+            .await
         };
         let (transferred, checked) =
             tokio::join!(transfer, self.database.write_file_references(input));
         transferred?;
-        self.reads.keep_files(object, checked?);
+        retained.keep_files(checked?).await?;
         Ok(SavedWrite {
             header,
             parts: files,
@@ -155,3 +167,7 @@ impl crate::write_object::PartSink for SnapshotWriteParts {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "snapshot_write_input_tests.rs"]
+mod tests;

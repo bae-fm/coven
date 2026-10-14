@@ -193,10 +193,30 @@ async fn newer_write_waits_until_the_app_schema_updates() {
     publish(&storage, &record).await;
     devices[1].writes.download_writes().await.unwrap();
     assert!(rows(&devices[1].db).await.is_empty());
+    let path = crate::write_seal::path(STORE_ID, record.header.position);
+    let reads = storage
+        .reads()
+        .await
+        .into_iter()
+        .filter(|(read, _, _)| read == &path)
+        .count();
+    for _ in 0..2 {
+        devices[1].writes.download_writes().await.unwrap();
+    }
+    assert_eq!(
+        storage
+            .reads()
+            .await
+            .into_iter()
+            .filter(|(read, _, _)| read == &path)
+            .count(),
+        reads,
+        "a schema wait must reuse retained encrypted input"
+    );
     let device = &mut devices[1];
     device
         .reopen(
-            storage,
+            storage.clone(),
             vec![SyncedTable::new("notes", RowIdentity::SharedKey)],
             vec![
                 schema::initial(),
@@ -206,6 +226,16 @@ async fn newer_write_waits_until_the_app_schema_updates() {
         .await;
     device.writes.download_writes().await.unwrap();
     assert_eq!(rows(&device.db).await[0].1, "new");
+    assert_eq!(
+        storage
+            .reads()
+            .await
+            .into_iter()
+            .filter(|(read, _, _)| read == &path)
+            .count(),
+        reads,
+        "schema arrival after reopen must open the retained input"
+    );
 }
 
 #[tokio::test]
@@ -305,13 +335,15 @@ async fn only_a_newer_format_requires_an_update() {
             .unwrap()
             .is_empty());
         assert_eq!(storage.read(&path).await.unwrap(), bytes);
-        storage.delete(&path).await.unwrap();
-        storage.create(&path, &original).await.unwrap();
-        devices[1].writes.download_writes().await.unwrap();
-        assert_eq!(
-            rows(&devices[1].db).await.len(),
-            if version == 2 { 2 } else { 1 }
-        );
+        let reads = storage.reads().await;
+        let repeated = devices[1].writes.download_writes().await;
+        if version == 2 {
+            assert!(matches!(repeated, Err(SyncError::UpdateRequired(_))));
+        } else {
+            repeated.unwrap();
+        }
+        assert_eq!(storage.reads().await, reads);
+        assert_eq!(rows(&devices[1].db).await.len(), 1);
         assert_eq!(queued(&devices[1].db).await, waiting);
     }
 }

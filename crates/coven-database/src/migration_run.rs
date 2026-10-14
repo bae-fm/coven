@@ -181,6 +181,7 @@ pub(crate) fn run<'a>(
             author,
         )?;
     }
+    crate::file_protection::migrate(database, tables)?;
     Ok(outcomes)
 }
 

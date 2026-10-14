@@ -134,6 +134,15 @@ pub enum DbError {
     /// The wall clock or next timestamp exceeds its representation (§7.2).
     #[error("clock is outside the timestamp range")]
     ClockOutOfRange,
+    /// Protected remote input fills the configured disk budget. No input or
+    /// budget change was committed; increase the budget or finish pending work.
+    #[error("retained input requires {required} bytes within a {maximum} byte budget")]
+    InputBudgetExceeded {
+        /// Bytes required after evicting every eligible range.
+        required: u64,
+        /// Configured encrypted-input limit.
+        maximum: u64,
+    },
     /// A value or row exceeds the format (§5), or a write's plaintext and sealing
     /// key ids cannot fit in its SQLite queue row (§6).
     #[error("{field} length {actual} exceeds {maximum}")]

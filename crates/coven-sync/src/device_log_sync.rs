@@ -537,22 +537,22 @@ impl DeviceLogSync {
             if object.path.device() == Some(local.device) {
                 continue;
             }
-            let bytes = match self
-                .storage
-                .as_deref()
-                .ok_or(SyncError::NoStorage)?
-                .read(&object.path)
+            let input = crate::object_input::ObjectInput::observe(&self.database, &object).await?;
+            let bytes = match input
+                .whole(self.storage.as_deref().ok_or(SyncError::NoStorage)?)
                 .await
             {
                 Ok(bytes) => bytes,
-                Err(error) if error.failure() == coven_storage::StorageFailure::NotFound => {
+                Err(SyncError::Storage(error))
+                    if error.failure() == coven_storage::StorageFailure::NotFound =>
+                {
                     tracing::debug!(
                         path = object.path.as_str(),
                         "positions disappeared after listing"
                     );
                     continue;
                 }
-                Err(error) => return Err(error.into()),
+                Err(error) => return Err(error),
             };
             let peer =
                 match crate::posted_positions::open(&bytes, &object.path, ring.as_ref(), &log) {

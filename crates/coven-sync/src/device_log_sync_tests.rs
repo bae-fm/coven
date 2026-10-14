@@ -686,8 +686,18 @@ mod stuck {
             device.db.pending::<crate::PendingRecord>().await.unwrap(),
             [crate::PendingRecord::log_refusal(record, DeviceId(2))]
         );
+        assert!(crate::pending_logs::local_refusals(&device.db)
+            .await
+            .unwrap()
+            .is_empty());
         device.writes.download_writes().await.unwrap();
-        assert!(storage.reads().await.len() > before.len());
+        assert_eq!(storage.reads().await, before);
+        assert_eq!(
+            crate::pending_logs::local_refusals(&device.db)
+                .await
+                .unwrap(),
+            vec![record]
+        );
         assert_eq!(
             device.db.pending::<crate::PendingRecord>().await.unwrap(),
             vec![crate::PendingRecord::log_refusal(record, DeviceId(2))]
@@ -832,6 +842,10 @@ mod stuck {
         sql(&devices[1].db, "UPDATE notes SET title='local'").await;
         let expected = rows(&devices[1].db).await;
         let queued = queued(&devices[1].db).await;
+        // Without eviction, the reload correctly reuses its authenticated copy.
+        let maximum = devices[1].db.input_budget().await.unwrap().maximum;
+        devices[1].db.set_input_budget(0).await.unwrap();
+        devices[1].db.set_input_budget(maximum).await.unwrap();
         let object = storage
             .list(&ObjectPrefix::device_logs(STORE_ID))
             .await

@@ -16,6 +16,7 @@ impl Database {
                 Ok::<_, DbError>(())
             })?;
             inner.access.readers.test_track_work(&counter);
+            inner.inputs.test_track_work(&counter);
             Ok(())
         })
         .await

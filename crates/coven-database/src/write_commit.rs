@@ -212,7 +212,7 @@ pub(crate) fn retain_queue(
             bytes
         ],
     )?;
-    Ok(())
+    crate::file_protection::queued(database, record)
 }
 
 /// Check the encoder's exact plaintext length against SQLite's connection limit

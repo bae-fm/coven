@@ -226,9 +226,19 @@ async fn fixed_file_references_are_found_by_eager_reads_and_retention() {
         .lines()
         .nth(1)
         .unwrap();
-    db.commit_writer(|sql| {
-        sql.internal_execute("UPDATE files SET location=?1", [text])
-            .unwrap()
+    db.inspect_writer_schema(|sql, schema| {
+        sql.transaction(|sql| {
+            sql.internal_execute("UPDATE files SET location=?1", [text])?;
+            crate::file_protection::refresh(
+                sql,
+                schema,
+                &(
+                    "files".into(),
+                    coven_format::key::encode_key(&[coven_format::value::Value::Text("7".into())])?,
+                ),
+            )
+        })
+        .unwrap()
     });
     let files = FileDatabase::new(db.clone()).eager_files().await.unwrap();
     assert_eq!(files, vec![db.file_ref("files", "7").await.unwrap()]);

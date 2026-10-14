@@ -150,7 +150,7 @@ async fn deleting_an_unused_publication_retires_its_queue() {
 }
 
 #[tokio::test]
-async fn locally_protected_files_need_only_snapshot_prefixes() {
+async fn locally_protected_files_reuse_the_checked_snapshot_prefix() {
     let f = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
     let (mut sync, _, _) = sync(&f).await;
     f.uploaded("kept", vec![32; CHUNK]).await;
@@ -161,8 +161,6 @@ async fn locally_protected_files_need_only_snapshot_prefixes() {
         .await
         .unwrap()
         .remove(0);
-    let bytes = f.storage.read(&object.path).await.unwrap();
-    let prefix = coven_format::sealed_snapshot::SnapshotObjectPrefix::length(&bytes).unwrap() + 64;
     let start = f.storage.reads().await.len();
     sync.run_retention().await.unwrap();
     let reads = f.storage.reads().await;
@@ -172,7 +170,7 @@ async fn locally_protected_files_need_only_snapshot_prefixes() {
             .filter(|(path, _, _)| path == &object.path)
             .map(|(_, _, bytes)| bytes)
             .sum::<u64>(),
-        prefix as u64
+        0
     );
     f.close().await;
 }

@@ -102,6 +102,7 @@ pub(crate) fn apply<R: Read>(
             let supplied = matches!(source, Source::Download(_));
             let write = match source {
                 Source::Download(stream) => {
+                    crate::write_headers::retain(database, &stream.header)?;
                     let write = stream.read()?;
                     crate::retained_writes::download(database, &write)?;
                     write

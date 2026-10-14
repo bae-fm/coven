@@ -1,10 +1,17 @@
 import CovenIO.Execution
+import CovenIO.Trace
+import CovenIO.Downloads
 import Lean
 
 /-! The IO differential runner. Each case names the executable transition it
 exercises; the Rust harness feeds the actual decision path's inputs and
 compares its observed results with this output. -/
 open Lean CovenIO
+
+private def cacheTransition (cache : Cache) (event : CacheEvent) : Except String Cache :=
+  match cacheStep cache event with
+  | some next => .ok next
+  | none => .error "invalid cache transition"
 
 /-- A writer publishes `count` key copies through `Publication`, possibly
 losing the first completion reply, then a reader with `start` retained copies
@@ -89,6 +96,37 @@ private def recent (j : Json) : Except String Json := do
     | .miss => "miss" | .snapshots => "snapshots" | _ => "other"
   return Json.mkObj [("stop", toJson stop), ("position", toJson result.position)]
 
+/-- Ranges batch `Trace.cacheStep` byte addresses. Reopen preserves the cache;
+explicit eviction removes bytes but preserves Downloads' permanent refusal. -/
+private def retained (j : Json) : Except String Json := do
+  let actions ← j.getObjValAs? (Array Json) "actions"
+  let mut cache : Cache := ⟨[], []⟩
+  let mut download : Downloads.State := .unfinished [] .authentication
+  let mut output := #[]
+  for action in actions do
+    let mut fetched := 0
+    match ← action.getObjValAs? String "op" with
+    | "read" =>
+      let start ← action.getObjValAs? Nat "start"
+      let stop ← action.getObjValAs? Nat "end"
+      for offset in List.range' start (stop - start) do
+        let address : ByteAddress := ⟨.log .write 1 1, ⟨10, 0, 0⟩, offset⟩
+        if address ∉ cache.retained then
+          cache ← cacheTransition cache (.fetch address)
+          cache ← cacheTransition cache (.commit address)
+          fetched := fetched + 1
+    | "reopen" => cache ← cacheTransition cache .reopen
+    | "evict" =>
+      for address in cache.retained do
+        cache ← cacheTransition cache (.evict address)
+      download := Downloads.evict download 0
+    | "wait" => pure ()
+    | action => throw s!"unknown cache action {action}"
+    output := output.push (Json.mkObj [
+      ("fetched", toJson fetched), ("retained", toJson cache.retained.length),
+      ("refused", toJson (Downloads.pending download == some .authentication))])
+  return toJson output
+
 private def run (j : Json) : Except String Json := do
   match ← j.getObjValAs? String "check" with
   | "discovery" => discovery j
@@ -96,6 +134,7 @@ private def run (j : Json) : Except String Json := do
   | "catalog" => catalog j
   | "needs" => needs j
   | "recent" => recent j
+  | "retained" => retained j
   | check => throw s!"unknown IO check {check}"
 
 def main : IO UInt32 := do

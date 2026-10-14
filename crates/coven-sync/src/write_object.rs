@@ -33,6 +33,7 @@ pub(crate) trait PartSink: Send {
 async fn piece(
     storage: &dyn coven_storage::Storage,
     object: &StoredObject,
+    input: &crate::object_input::ObjectInput,
     offset: u64,
     length: usize,
 ) -> Result<Vec<u8>, SyncError> {
@@ -45,14 +46,7 @@ async fn piece(
             Refusal::from(coven_format::Error::Truncated),
         ));
     }
-    crate::object_range::read(storage, &object.path, ByteRange::new(offset, end)?)
-        .await
-        .map_err(|error| match error {
-            crate::object_range::ReadError::Storage(error) => error.into(),
-            crate::object_range::ReadError::Length => coven_storage::StorageFailure::Protocol
-                .with_source("range response has the wrong length")
-                .into(),
-        })
+    input.read(storage, ByteRange::new(offset, end)?).await
 }
 
 /// Persist a judgment only after the entire listed immutable object is readable.
@@ -62,12 +56,14 @@ pub(crate) async fn record_damage(
     object: &StoredObject,
     failure: &Refusal,
 ) -> Result<coven_database::LogRefusal, SyncError> {
-    read_complete(storage, object).await?;
+    let input = crate::object_input::ObjectInput::observe(database, object).await?;
+    read_complete(storage, object, &input).await?;
     let record = coven_database::LogRefusal {
         object: coven_database::LogObject::Write(object.path.write_id().expect("write path")),
         failure: failure.into(),
     };
     crate::pending_logs::record_refusal(database, record).await?;
+    input.release_ranges().await?;
     tracing::warn!(path = object.path.as_str(), error = %failure, "write log is stuck");
     Ok(record)
 }
@@ -76,11 +72,12 @@ pub(crate) async fn record_damage(
 async fn read_complete(
     storage: &dyn coven_storage::Storage,
     object: &StoredObject,
+    input: &crate::object_input::ObjectInput,
 ) -> Result<(), SyncError> {
     let mut offset = 0;
     while offset < object.size {
         let length = (object.size - offset).min(64 * 1024) as usize;
-        piece(storage, object, offset, length).await?;
+        piece(storage, object, input, offset, length).await?;
         offset += length as u64;
     }
     // An empty listed object must still be readable; absence is transient.
@@ -99,16 +96,13 @@ pub(crate) async fn open(
     storage: &dyn coven_storage::Storage,
     object: &StoredObject,
     ring: Option<&StoreKeyring>,
-    reads: &crate::pass_reads::PassReads,
+    input: &crate::object_input::ObjectInput,
 ) -> Result<OpenedWrite, SyncError> {
-    let bytes = match reads.metadata(object) {
+    let bytes = match input.metadata().await? {
         Some(bytes) => bytes,
-        None => {
-            let bytes = read_header(storage, object).await?;
-            reads.keep_metadata(object, bytes.clone());
-            bytes
-        }
+        None => read_header(storage, object, input).await?,
     };
+    let retained_header = bytes.clone();
     let prefix_length = checked(&object.path, WriteObjectPrefix::length(&bytes))?;
     let (aad, bytes) = bytes.split_at(prefix_length);
     let prefix = checked(&object.path, WriteObjectPrefix::decode(aad))?;
@@ -162,6 +156,7 @@ pub(crate) async fn open(
             header.parts.iter().map(|p| p.plaintext_length).collect(),
         ),
     )?;
+    input.keep_metadata(retained_header).await?;
     Ok(OpenedWrite {
         header,
         prefix,
@@ -174,26 +169,28 @@ pub(crate) async fn open(
 async fn read_header(
     storage: &dyn coven_storage::Storage,
     object: &StoredObject,
+    input: &crate::object_input::ObjectInput,
 ) -> Result<Vec<u8>, SyncError> {
-    let mut bytes = piece(storage, object, 0, 23).await?;
+    let mut bytes = piece(storage, object, input, 0, 23).await?;
     let prefix_length = checked(&object.path, WriteObjectPrefix::length(&bytes))?;
     if prefix_length > bytes.len() {
         bytes.extend(
             piece(
                 storage,
                 object,
+                input,
                 bytes.len() as u64,
                 prefix_length - bytes.len(),
             )
             .await?,
         );
     }
-    bytes.extend(piece(storage, object, prefix_length as u64, 4).await?);
+    bytes.extend(piece(storage, object, input, prefix_length as u64, 4).await?);
     let length = checked(
         &object.path,
         WriteObjectPrefix::header_chunk_length(&bytes[prefix_length..]),
     )?;
-    bytes.extend(piece(storage, object, bytes.len() as u64, length - 4).await?);
+    bytes.extend(piece(storage, object, input, bytes.len() as u64, length - 4).await?);
     Ok(bytes)
 }
 
@@ -230,6 +227,7 @@ fn parts(
 pub(crate) async fn finish<S: PartSink>(
     storage: &dyn coven_storage::Storage,
     object: &StoredObject,
+    input: &crate::object_input::ObjectInput,
     ring: &StoreKeyring,
     author: &MemberId,
     mut opened: OpenedWrite,
@@ -237,9 +235,9 @@ pub(crate) async fn finish<S: PartSink>(
 ) -> Result<(), SyncError> {
     let aad = opened.prefix.encode()?;
     while let Some(coordinate) = opened.layout.next_chunk() {
-        let mut bytes = piece(storage, object, opened.offset, 4).await?;
+        let mut bytes = piece(storage, object, input, opened.offset, 4).await?;
         let length = checked(&object.path, opened.layout.chunk_length(&bytes))?;
-        bytes.extend(piece(storage, object, opened.offset + 4, length - 4).await?);
+        bytes.extend(piece(storage, object, input, opened.offset + 4, length - 4).await?);
         opened.offset += length as u64;
         opened.hash.update(&bytes);
         let (_, sealed) = checked(&object.path, opened.layout.decode_chunk(&bytes))?;
@@ -276,7 +274,7 @@ pub(crate) async fn finish<S: PartSink>(
             sink.end(part).await?;
         }
     }
-    let bytes = piece(storage, object, opened.offset, 64).await?;
+    let bytes = piece(storage, object, input, opened.offset, 64).await?;
     let signature = checked(&object.path, opened.layout.read_signature(&bytes))?;
     if opened.offset + 64 != object.size {
         return Err(damaged(
@@ -351,12 +349,12 @@ pub(crate) async fn download(
     storage: &dyn coven_storage::Storage,
     object: &StoredObject,
     ring: Option<&StoreKeyring>,
-    reads: &crate::pass_reads::PassReads,
+    input: &crate::object_input::ObjectInput,
     log: &StoreLog,
     replays: &mut ReplayCache<'_>,
     member: impl FnOnce() -> Result<MemberId, SyncError>,
 ) -> Result<Result<ReadyWrite, WriteWait>, SyncError> {
-    let opened = open(storage, object, ring, reads).await?;
+    let opened = open(storage, object, ring, input).await?;
     let missing: Vec<_> = opened
         .header
         .header

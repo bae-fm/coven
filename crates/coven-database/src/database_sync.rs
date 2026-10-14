@@ -4,6 +4,22 @@ use super::Database;
 use crate::{CovenResult, DbError};
 
 impl Database {
+    /// Original plaintext of an authenticated received or confirmed published header.
+    /// This establishes header facts, not the validity of a subsequently read body.
+    pub async fn checked_write_header(
+        &self,
+        id: coven_merge::WriteId,
+    ) -> Result<Option<coven_format::write_stream::WriteHeaderFrame>, DbError> {
+        self.call(move |inner| {
+            inner
+                .access
+                .readers
+                .acquire_reader()
+                .with_reader(|db| crate::write_headers::read(db, id))
+        })
+        .await
+    }
+
     /// Audiences whose selected entry effects still require readable replacement
     /// data. A replay that rebuilds from retained inputs removes its requirement
     /// in the same transaction, so sync need not load that audience again.

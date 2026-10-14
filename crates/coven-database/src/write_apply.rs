@@ -90,7 +90,7 @@ impl<'a> WriteApply<'a> {
             },
         )?;
         if let Some(record) = record {
-            let dismissed = crate::dismissal::apply(self.database, record)?;
+            let dismissed = crate::dismissal::apply(self.database, self.schema, record)?;
             if !dismissed.is_empty() {
                 // Read the committed merge effects and the acknowledged losses
                 // inside this same transaction, without cached pre-dismissal rows.

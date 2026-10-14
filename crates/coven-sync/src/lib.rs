@@ -23,7 +23,7 @@ mod tests;
 mod error;
 mod key_introductions;
 mod object_author;
-mod object_range;
+mod object_input;
 mod posted_positions;
 mod store_log_keys;
 mod store_log_landing;
