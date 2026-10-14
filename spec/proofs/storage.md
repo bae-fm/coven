@@ -178,7 +178,9 @@ deletion, is an [IO verification obligation](io.md#discovery-obligations).
 The model has no key-copy counter and does not prove that added check.
 `IdentityRunner` executes `checkIdentity` and `ReplacementRead.observe`/`gate`
 for the Rust differential tests of coven-sync's pre-send check; key-copy
-counters stay equal on both sides of those cases.
+counters stay equal on both sides of those cases. It also runs `beginReset`,
+`retryReset`, `finishReset` and the first `commitWrite` against coven's
+recorded reset, failed `reset_device` retries and the published replacement.
 
 `Identity` also contains a separate model with recorded replacement ends.
 Its `ends_*`, `combined_end_keeps_completed` and `beyond_end_waits` results

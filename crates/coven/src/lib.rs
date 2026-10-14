@@ -22,9 +22,7 @@ pub use coven_sync::{
     QueuedUpload, RecordedUploadFailure, RowsPinnedLiveQuery, TransferLimits, UploadFailure,
     UploadFailures, UploadPhase, UploadQueue, UploadsLiveQuery,
 };
-pub use error::{
-    ReadOnlyOpenError, RecoveryError, StoreCreationError, StoreDeletionError, StoreKeyUnlockError,
-};
+pub use error::{ReadOnlyOpenError, StoreCreationError, StoreDeletionError, StoreKeyUnlockError};
 pub use handle::CovenHandle;
 pub use read_handle::CovenReadHandle;
 

@@ -235,10 +235,7 @@ impl DatabaseConnection {
             .expect("pending migration");
         #[cfg(test)]
         let _profile = self.profile_statements();
-        let publishes = matches!(
-            author,
-            Some(crate::migration_run::MigrationOrigin::Device(..))
-        );
+        let publishes = author.is_some();
         let result = self.transaction(|db| {
             let outcomes = crate::migration_run::run(
                 db,

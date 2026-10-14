@@ -15,7 +15,6 @@ mod layout;
 mod lock;
 mod lock_registry;
 mod observed_file;
-mod recovery;
 mod settings;
 
 pub use atomic_file::{AtomicFile, FileError, FileWriter};
@@ -28,5 +27,3 @@ pub use layout::{StoreInfo, StoreLayout, StoreLayoutError};
 pub use lock::{StoreClosingGuard, StoreDeletionLock, StoreLock, StoreLockError, StoreReadLock};
 pub use observed_file::{observe_file, ObservationError, ObservedFile};
 pub use settings::{SettingsError, StoreSettings};
-
-pub use recovery::DatabaseRecovery;

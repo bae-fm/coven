@@ -60,12 +60,31 @@ private def replacement (j : Json) : Except String Json := do
     | other => throw s!"unknown replacement event {other}"
   return Json.arr results
 
+/-- Begin a reset from a working copy, retry it, then finish it: whether the
+installation is writable while resetting, and the finished device's id,
+queue length and first write number. -/
+private def reset (j : Json) : Except String Json := do
+  let queued ← j.getObjValAs? Nat "queued"
+  let copy : Local := ⟨← j.getObjValAs? Nat "old", ⟨⟨queued, 0⟩, 0⟩,
+    (List.range queued).map fun n => .untried ⟨.write 0 (n + 1), []⟩, []⟩
+  let r : Replacement := ⟨copy.device, ← j.getObjValAs? Nat "fresh", ⟨0, 0⟩, 1, .storageAhead⟩
+  let mut state := beginReset copy r
+  let mut writable := #[]
+  for _ in List.range (← j.getObjValAs? Nat "retries") do
+    state := retryReset state
+    writable := writable.push (CovenStorage.writable state)
+  let finished := finishReset r []
+  return Json.mkObj [("writable", toJson writable), ("device", toJson finished.device),
+    ("queue", toJson finished.queue.length),
+    ("first", toJson (commitWrite finished []).reserved.logs.writes)]
+
 private def run (j : Json) : Except String Json := do
   let cases ← fromJson? j (α := Array Json)
   Json.arr <$> cases.mapM fun c => do
     match ← c.getObjValAs? String "check" with
     | "identity" => identity c
     | "replacement" => replacement c
+    | "reset" => reset c
     | other => throw s!"unknown identity check {other}"
 
 def main : IO UInt32 := do

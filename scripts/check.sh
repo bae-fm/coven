@@ -412,6 +412,12 @@ proofs() {
         COVEN_IDENTITY_LEAN="$runner" cargo test -p coven-sync --all-features st_differential_ -- --ignored
     fi
 
+    if proof_selected storage || crate_selected coven; then
+        runner=$(runner storage identityRunner)
+        step "Rust / Lean device reset boundary"
+        COVEN_IDENTITY_LEAN="$runner" cargo test -p coven --all-features st_differential_reset_boundary -- --ignored
+    fi
+
     if proof_selected storage || crate_selected coven-storage; then
         runner=$(runner storage createRunner)
         step "Rust / Lean differential provider create-once tests"

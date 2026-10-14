@@ -398,17 +398,10 @@ mod scans {
         Some("sync and replay read every audience awaiting replacement data"),
     ("sqlite.rs", "PRAGMA integrity_check", "database") =>
         Some("corruption detection checks every stored row and index"),
-    ("database_recovery.rs", "PRAGMA table_info({table})", "database") =>
-        Some("recovery inspects every column in the copied table's definition"),
     ("download.rs", "SELECT device,number FROM _coven_positions ORDER BY device", "_coven_positions") =>
         Some("positions() returns every device's consumed position"),
     ("store_log.rs" | "snapshot_write.rs", "SELECT device,max(number) FROM _coven_store_log GROUP BY device ORDER BY device", "_coven_store_log") =>
         Some("compute the complete store-log frontier for all devices"),
-    ("database_recovery.rs", "SELECT record,sealing_keys,interpretation FROM _coven_uploads ORDER BY rowid", "_coven_uploads") =>
-        Some("recovery salvages every queued write in insertion order"),
-    ("database_recovery.rs", "SELECT * FROM {table}", table)
-        if statement.sql == format!("SELECT * FROM {table}") =>
-        Some("recovery copies every row of the local journal or file table"),
     ("database_snapshots.rs", "SELECT device,number FROM _coven_uploads ORDER BY device,number", "_coven_uploads") =>
         Some("snapshot coverage includes every waiting write"),
     ("database_sync.rs", "SELECT EXISTS(SELECT 1 FROM _coven_uploads)", "_coven_uploads") =>
@@ -613,7 +606,6 @@ mod source {
                 let diagnostic = matches!(
                     (file.as_str(), sql.as_str()),
                     ("sqlite.rs", "PRAGMA integrity_check")
-                        | ("database_recovery.rs", "PRAGMA table_info({table})")
                 );
                 if !matches!(
                     keyword.as_str(),
@@ -783,10 +775,7 @@ mod source {
                 .table_loops
                 .iter()
                 .filter(|binding| {
-                    binding.variable == variable
-                        && ((binding.start..=binding.end).contains(&line)
-            // copy_table receives the loop's table as a function argument.
-            || file == "database_recovery.rs")
+                    binding.variable == variable && (binding.start..=binding.end).contains(&line)
                 })
                 .collect();
             assert_eq!(

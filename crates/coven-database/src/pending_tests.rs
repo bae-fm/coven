@@ -318,7 +318,6 @@ async fn losing_a_pending_update_fails_all_calls_and_subscriptions_until_reopen(
             cause(db_error(db.read(|_| Ok(())).await.unwrap_err())),
             cause(db.write(|_| Ok(())).await.unwrap_err()),
             cause(db.applied_migrations().unwrap_err()),
-            cause(db.finish_recovery().await.unwrap_err()),
             cause(db.schema_version().await.unwrap_err()),
             cause(db_error(
                 db.subscribe_pending::<Record>().next().await.unwrap_err(),

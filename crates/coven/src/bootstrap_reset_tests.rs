@@ -213,13 +213,134 @@ async fn an_interrupted_reset_keeps_its_fresh_id_and_stays_unavailable() {
 }
 
 #[tokio::test]
-async fn reset_device_without_a_recorded_reset_refuses_a_published_store() {
+async fn an_unconnected_store_without_a_decided_reset_keeps_its_files() {
     let f = Fixture::new().await;
     f.handle.close().await.unwrap();
+    let database = std::fs::read(f.directory.database_path()).unwrap();
+    // Only storage can supply a replacement for a damaged database (§19.2).
     assert!(matches!(
         reopen(&f).reset_device(f.directory.id(), "Phone").await,
-        Err(BootstrapError::Directory(BootstrapDirectoryError::Create(
-            coven_foundation::files::StoreCreationError::AlreadyExists(_)
-        )))
+        Err(BootstrapError::Sync(SyncError::NoStorage))
     ));
+    assert_eq!(
+        std::fs::read(f.directory.database_path()).unwrap(),
+        database
+    );
+    assert_eq!(f.directory.device_reset().unwrap(), None);
+    reopen(&f)
+        .open(f.directory.id())
+        .await
+        .unwrap()
+        .close()
+        .await
+        .unwrap();
+}
+
+async fn queued(f: &Fixture) -> Vec<coven_format::write::WriteRecord> {
+    let database = coven_database::DatabaseBuilder::new(f.directory.clone())
+        .synced_tables(vec![SyncedTable::new("notes", RowIdentity::SharedKey)])
+        .migrations(vec![Migration::sql(
+            1,
+            "notes",
+            "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,body TEXT NOT NULL)",
+        )])
+        .open()
+        .await
+        .unwrap();
+    let writes = database.test_queued_writes().await.unwrap();
+    database.close().await.unwrap();
+    writes
+}
+
+/// Lean `beginReset`, `retryReset`, `finishReset` and the first `commitWrite`
+/// against the real decision, failed retries and completed replacement.
+#[tokio::test]
+#[ignore = "requires COVEN_IDENTITY_LEAN"]
+async fn st_differential_reset_boundary() {
+    use serde_json::json;
+    use std::io::Write;
+    let mut cases = Vec::new();
+    let mut actual = Vec::new();
+    for queued_writes in [0usize, 2] {
+        for retries in [0usize, 1, 2] {
+            let f = Fixture::new().await;
+            f.setup().await.unwrap();
+            status(&f.handle, |s| matches!(s, SyncStatus::Synced { .. })).await;
+            f.handle.stop_sync();
+            status(&f.handle, |s| matches!(s, SyncStatus::Stopped)).await;
+            for n in 0..queued_writes {
+                f.handle
+                    .write(move |sql| {
+                        sql.execute("INSERT INTO notes VALUES(?1,'unsent')", [n.to_string()])?;
+                        Ok(())
+                    })
+                    .await
+                    .unwrap();
+            }
+            f.handle.close().await.unwrap();
+            assert_eq!(queued(&f).await.len(), queued_writes);
+            let old = f.directory.settings().unwrap().device_id;
+            custody(&f).delete_device_id().unwrap();
+            assert!(reopen(&f).open(f.directory.id()).await.is_err());
+            let decided = f.directory.device_reset().unwrap().unwrap();
+            let mut writable = Vec::new();
+            f.storage.set_online(false);
+            for _ in 0..retries {
+                assert!(reopen(&f)
+                    .reset_device(f.directory.id(), "Phone")
+                    .await
+                    .is_err());
+                writable.push(reopen(&f).open(f.directory.id()).await.is_ok());
+            }
+            f.storage.set_online(true);
+            let handle = reopen(&f)
+                .reset_device(f.directory.id(), "Phone")
+                .await
+                .unwrap();
+            handle.stop_sync();
+            status(&handle, |s| matches!(s, SyncStatus::Stopped)).await;
+            let device = f.directory.settings().unwrap().device_id;
+            handle.close().await.unwrap();
+            let queue = queued(&f).await.len();
+            let handle = reopen(&f).open(f.directory.id()).await.unwrap();
+            handle
+                .write(|sql| {
+                    sql.execute("INSERT INTO notes VALUES('first','after reset')", [])?;
+                    Ok(())
+                })
+                .await
+                .unwrap();
+            handle.close().await.unwrap();
+            let first = queued(&f)
+                .await
+                .iter()
+                .map(|w| w.header.position)
+                .find(|w| w.device == device)
+                .unwrap()
+                .number;
+            cases.push(
+                json!({"check":"reset","old":old.0,"fresh":decided.new_device.0,
+                "queued":queued_writes,"retries":retries}),
+            );
+            actual.push(json!({"writable":writable,"device":device.0,"queue":queue,"first":first}));
+        }
+    }
+    let runner = std::env::var("COVEN_IDENTITY_LEAN").expect("Lean identity runner");
+    let mut child = std::process::Command::new(runner)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(&serde_json::to_vec(&cases).unwrap())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success());
+    assert_eq!(
+        actual,
+        serde_json::from_slice::<Vec<serde_json::Value>>(&output.stdout).unwrap()
+    );
 }

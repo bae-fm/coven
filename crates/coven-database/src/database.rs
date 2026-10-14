@@ -43,8 +43,6 @@ use crate::{LiveQuery, LostValue, Read, ReconfigurableLiveQuery, SqlReadContext}
 
 #[path = "database_builder.rs"]
 mod builder;
-#[path = "database_recovery.rs"]
-mod recovery;
 #[path = "database_sync.rs"]
 mod sync;
 pub use builder::DatabaseBuilder;
@@ -70,7 +68,6 @@ struct DatabaseInner {
     clock: ClockRef,
     ids: IdSourceRef,
     staging: Mutex<BTreeSet<coven_foundation::files::FileName>>,
-    recovery: Option<coven_foundation::files::DatabaseRecovery>,
 }
 
 // The lock outlives every connection, including when the last handle is dropped.
@@ -290,35 +287,6 @@ impl Database {
             reads,
             first: true,
         }
-    }
-
-    /// Publish an explicitly recovered database after sync commits its snapshot
-    /// reload. Until then, ordinary writer and reader opens refuse the store.
-    pub async fn finish_recovery(&self) -> Result<(), DbError> {
-        let database = self.inner.clone();
-        finish_blocking(
-            tokio::task::spawn_blocking(move || {
-                let mut slot = database.write().expect("database lock poisoned");
-                let inner = slot.as_mut().ok_or(DbError::StoreClosed)?;
-                if let Some(error) = inner.access.observer.error() {
-                    return Err(error);
-                }
-                if let Some(recovery) = &inner.recovery {
-                    inner.access.with_writer(|writer| {
-                        crate::file_removals::FileRemovals::new(
-                            writer,
-                            &inner.access.directory,
-                            &BTreeSet::new(),
-                        )
-                        .finish(Ok::<_, DbError>(()))?;
-                        recovery.finish().map_err(DbError::from)
-                    })?;
-                }
-                inner.recovery = None;
-                Ok(())
-            })
-            .await,
-        )
     }
 
     /// Open the source selected by a file reference, after checking its row.

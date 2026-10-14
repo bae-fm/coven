@@ -1,9 +1,7 @@
 use crate::*;
-use coven_crypto::custody::{KeySession, KeyringCustody, StoreKeychain};
+use coven_crypto::custody::{KeyringCustody, StoreKeychain};
 use coven_database::DatabaseBuilder;
-use coven_format::store_log::StoreChange;
 use coven_storage::{test_utils::MemoryStorage, Storage};
-use coven_sync::StoreLogSync;
 use std::sync::Arc;
 use std::{future::Future, task::Poll, time::UNIX_EPOCH};
 
@@ -271,7 +269,7 @@ mod recovery {
     }
 
     #[tokio::test]
-    async fn recovery_reconnects_from_setup_credentials() {
+    async fn a_damaged_database_resets_from_setup_credentials_after_checking_them() {
         for config in [
             StorageConfig::S3 {
                 bucket: "test".into(),
@@ -365,6 +363,18 @@ mod recovery {
             .await
             .unwrap()
             .unwrap();
+            handle.stop_sync();
+            status
+                .wait_for(|s| matches!(s, SyncStatus::Stopped))
+                .await
+                .unwrap();
+            handle
+                .write(|sql| {
+                    sql.execute("INSERT INTO notes VALUES('unsent','local only')", [])?;
+                    Ok(())
+                })
+                .await
+                .unwrap();
             handle.close().await.unwrap();
             let damaged = b"damaged SQLite";
             std::fs::write(directory.database_path(), damaged).unwrap();
@@ -378,32 +388,49 @@ mod recovery {
                 .set_storage_credentials(&SecretBytes::new(b"malformed credentials".to_vec()))
                 .unwrap();
             assert!(matches!(
+                builder().open(directory.id()).await,
+                Err(CovenError::Database(DbError::DamagedDatabase))
+            ));
+            assert!(matches!(
                 builder()
-                    .open_reloading(directory.id(), "Ana’s recovered laptop")
+                    .reset_device(directory.id(), "Ana’s recovered laptop")
                     .await,
-                Err(RecoveryError::Sync(SyncError::Storage(error)))
+                Err(BootstrapError::Sync(SyncError::Storage(error)))
                     if error.failure() == StorageFailure::Encoding
             ));
             assert_eq!(std::fs::read(directory.database_path()).unwrap(), damaged);
             scoped.set_storage_credentials(&credentials).unwrap();
             storage.set_online(false);
             let error = builder()
-                .open_reloading(directory.id(), "Ana’s recovered laptop")
+                .reset_device(directory.id(), "Ana’s recovered laptop")
                 .await
                 .unwrap_err();
             assert!(
                 matches!(
                     &error,
-                    RecoveryError::Sync(SyncError::Storage(error)) if error.failure() == StorageFailure::Network
+                    BootstrapError::Sync(SyncError::Storage(error)) if error.failure() == StorageFailure::Network
                 ),
                 "{error:?}"
             );
+            // Failed checks move nothing and decide no reset.
             assert_eq!(std::fs::read(directory.database_path()).unwrap(), damaged);
+            assert_eq!(directory.device_reset().unwrap(), None);
+            let old_device = directory.settings().unwrap().device_id;
             storage.set_online(true);
             let recovered = builder()
-                .open_reloading(directory.id(), "Ana’s recovered laptop")
+                .reset_device(directory.id(), "Ana’s recovered laptop")
                 .await
                 .unwrap();
+            let reset = recovered.device_reset().await.unwrap().unwrap();
+            assert_eq!(reset.old_device, old_device);
+            assert_eq!(reset.reason, DeviceResetReason::DatabaseDamage);
+            // The damaged files stay aside for inspection, never as live state.
+            let archive = directory
+                .database_path()
+                .parent()
+                .unwrap()
+                .join(format!("discarded-device-{}", old_device.0));
+            assert_eq!(std::fs::read(archive.join("store.db")).unwrap(), damaged);
             let title: String = recovered
                 .read(|sql| {
                     Ok(
@@ -415,6 +442,18 @@ mod recovery {
                 .await
                 .unwrap();
             assert_eq!(title, "from storage");
+            // Nothing unsent is salvaged from the damaged copy.
+            let unsent: i64 = recovered
+                .read(|sql| {
+                    Ok(sql.query_row(
+                        "SELECT count(*) FROM notes WHERE id='unsent'",
+                        [],
+                        |row| row.get(0),
+                    )?)
+                })
+                .await
+                .unwrap();
+            assert_eq!(unsent, 0);
             if config.provider() == CloudProvider::Dropbox {
                 assert_eq!(
                     sign_in.presentation_count(),
@@ -444,351 +483,6 @@ mod recovery {
                 "Ana’s recovered laptop"
             );
             database.close().await.unwrap();
-        }
-    }
-
-    #[tokio::test]
-    async fn recovery_does_not_publish_a_salvaged_queue_before_registering_its_device() {
-        for readable in [false, true] {
-            let root = tempfile::tempdir().unwrap();
-            let layout = StoreLayout::new(root.path().into());
-            let app = TestCoven::new();
-            let ids = Arc::new(UuidIds);
-            let directory = app
-                .create_store(&layout, "Recovery", ids.clone())
-                .await
-                .unwrap();
-            let clock = Arc::new(FixedClock::new(UNIX_EPOCH));
-            let storage = Arc::new(
-                MemoryStorage::builder()
-                    .clock(clock.clone())
-                    .build()
-                    .unwrap(),
-            );
-            let scoped = Arc::new(StoreKeychain::new(
-                app.builder(layout.clone()).keychain().unwrap(),
-                directory.id(),
-            ));
-            let identity = Arc::new(KeyringCustody::<MemberKeys>::new(scoped.clone()));
-            identity.persist(&MemberKeys::generate().unwrap()).unwrap();
-            let keys = Arc::new(KeyringCustody::<StoreKeyring>::new(scoped));
-            let builder = || {
-                app.builder(layout.clone())
-                    .synced_tables(recovery_tables())
-                    .migrations(recovery_migrations())
-                    .clock(clock.clone())
-                    .key_custody(KeyCustody::Custom(keys.clone()))
-                    .identity_custody(IdentityCustody::Custom(identity.clone()))
-                    .storage_connector(storage.clone())
-            };
-            let handle = builder().open(directory.id()).await.unwrap();
-            handle
-                .setup_s3_storage(
-                    storage.config(),
-                    "Original",
-                    "owner".into(),
-                    SecretText::new("secret".into()),
-                )
-                .await
-                .unwrap();
-            handle.close().await.unwrap();
-            let db = DatabaseBuilder::new(directory.clone())
-                .synced_tables(recovery_tables())
-                .migrations(recovery_migrations())
-                .clock(clock.clone())
-                .open()
-                .await
-                .unwrap();
-            let key_session = Arc::new(KeySession::store(keys.clone()).unwrap());
-            let member_session = Arc::new(KeySession::member(identity.clone()).unwrap());
-            let send = Arc::new(coven_sync::SendGate::new(clock.clone()));
-            let mut sync = StoreLogSync::new(
-                storage.clone(),
-                db.clone(),
-                key_session.clone(),
-                member_session.clone(),
-                clock.clone(),
-                send.clone(),
-                ids.clone(),
-                directory.clone(),
-            );
-            db.write(|sql| {
-                sql.execute("INSERT INTO notes VALUES('saved','snapshot')", [])?;
-                Ok(())
-            })
-            .await
-            .unwrap();
-            let mut writes = coven_sync::DeviceLogSync::new(
-                storage.clone(),
-                db.clone(),
-                key_session.clone(),
-                member_session.clone(),
-                clock.clone(),
-                send.clone(),
-            );
-            sync.sync_store_log().await.unwrap();
-            writes.upload_writes().await.unwrap();
-            sync.write_snapshot(Audience::Store).await.unwrap();
-            db.write(|sql| {
-                sql.execute("INSERT INTO notes VALUES('waiting','offline')", [])?;
-                Ok(())
-            })
-            .await
-            .unwrap();
-            let files = coven_sync::Files::new(
-                coven_database::FileDatabase::new(db.clone()),
-                directory.clone(),
-                None,
-                clock.clone(),
-                send.clone(),
-                ids.clone(),
-                coven_sync::TransferLimits::default(),
-            );
-            let operations = coven_sync::Operations::new(
-                StoreLogSync::new(
-                    storage.clone(),
-                    db.clone(),
-                    key_session.clone(),
-                    member_session.clone(),
-                    clock.clone(),
-                    send.clone(),
-                    ids.clone(),
-                    directory.clone(),
-                ),
-                files,
-                coven_sync::DeviceLogSync::disconnected(
-                    db.clone(),
-                    key_session.clone(),
-                    member_session.clone(),
-                    clock.clone(),
-                    send.clone(),
-                ),
-                clock.clone(),
-            );
-            let (started, observed) = tokio::sync::oneshot::channel();
-            let (resume, held) = tokio::sync::oneshot::channel();
-            storage
-                .hold_next_creation(ObjectPrefix::keys(directory.id()), started, held)
-                .await;
-            let mut pending = Box::pin(operations.create_circle("Waiting operation"));
-            std::future::poll_fn(|cx| {
-                assert!(pending.as_mut().poll(cx).is_pending());
-                Poll::Ready(())
-            })
-            .await;
-            observed.await.unwrap();
-            drop(resume);
-            operations.get_members().await.unwrap();
-            assert_eq!(db.operations().await.unwrap().len(), 1);
-            drop(pending);
-            operations.close().await.unwrap();
-            // Retain the operation journal after publishing its reserved entry.
-            db.retry_operation(db.operations().await.unwrap()[0].id)
-                .await
-                .unwrap();
-            sync.sync_store_log().await.unwrap();
-            let (started, observed) = tokio::sync::oneshot::channel();
-            let (resume, held) = tokio::sync::oneshot::channel();
-            storage
-                .hold_next_creation(ObjectPrefix::store_logs(directory.id()), started, held)
-                .await;
-            let (publication, ()) = tokio::join!(
-                sync.make_and_upload_entry(StoreChange::AddDevice {
-                    device: DeviceId(77),
-                    name: "Waiting entry".into(),
-                    replaces: None,
-                }),
-                async {
-                    observed.await.unwrap();
-                    drop(resume);
-                }
-            );
-            assert!(matches!(publication, Err(SyncError::Storage(_))));
-            let queued = db.local_store_log().await.unwrap().upload.unwrap();
-            let queued_path = ObjectPath::store_log(
-                directory.id(),
-                queued.entry.position.device,
-                queued.entry.position.number.try_into().unwrap(),
-            );
-            assert_eq!(
-                storage.read(&queued_path).await.unwrap_err().failure(),
-                StorageFailure::NotFound
-            );
-
-            let old_device = directory.settings().unwrap().device_id;
-            let scratch: i64 = db
-                .read(|sql| {
-                    Ok(sql.query_row(
-                        "SELECT rootpage FROM sqlite_schema WHERE name='scratch'",
-                        [],
-                        |r| r.get(0),
-                    )?)
-                })
-                .await
-                .unwrap();
-            db.close().await.unwrap();
-            drop(sync);
-            drop(writes);
-            key_session.close();
-            member_session.close();
-            let path = directory.database_path();
-            let mut damaged = std::fs::read(&path).unwrap();
-            if readable {
-                let size = u16::from_be_bytes([damaged[16], damaged[17]]) as usize;
-                damaged[(scratch as usize - 1) * size] = 0xff;
-            } else {
-                damaged[..16].fill(0xff);
-            }
-            std::fs::write(&path, &damaged).unwrap();
-            assert!(matches!(
-                builder().open(directory.id()).await,
-                Err(CovenError::Database(DbError::DamagedDatabase))
-            ));
-            let settings = coven_storage::StorageSettings::new(directory.clone());
-            settings.remove().unwrap();
-            assert!(matches!(
-                builder()
-                    .open_reloading(directory.id(), "Ana’s recovered laptop")
-                    .await,
-                Err(RecoveryError::Sync(SyncError::NoStorage))
-            ));
-            assert_eq!(std::fs::read(&path).unwrap(), damaged);
-            settings.commit(&storage.config()).unwrap();
-            let ring = keys.unlock().unwrap().unwrap();
-            keys.forget().unwrap();
-            assert!(matches!(
-                builder()
-                    .open_reloading(directory.id(), "Ana’s recovered laptop")
-                    .await,
-                Err(RecoveryError::NoStoreKeys)
-            ));
-            assert_eq!(std::fs::read(&path).unwrap(), damaged);
-            keys.persist(&ring).unwrap();
-            if readable {
-                let snapshot = storage
-                    .list(&ObjectPrefix::snapshots(directory.id()))
-                    .await
-                    .unwrap()
-                    .remove(0)
-                    .path;
-                let snapshot_bytes = storage.read(&snapshot).await.unwrap();
-                let write = storage
-                    .list(&ObjectPrefix::device_logs(directory.id()))
-                    .await
-                    .unwrap()
-                    .remove(0)
-                    .path;
-                let write_bytes = storage.read(&write).await.unwrap();
-                storage
-                    .corrupt_byte(&snapshot, snapshot_bytes.len() - 1)
-                    .await
-                    .unwrap();
-                storage.delete(&write).await.unwrap();
-                assert!(builder()
-                    .open_reloading(directory.id(), "Ana’s recovered laptop")
-                    .await
-                    .is_err());
-                assert!(matches!(
-                    builder().open(directory.id()).await,
-                    Err(CovenError::Lock(StoreLockError::RecoveryPending(_)))
-                ));
-                assert!(matches!(
-                    builder().open_read_only(directory.id()).await,
-                    Err(ReadOnlyOpenError::Local(CovenError::Lock(
-                        StoreLockError::RecoveryPending(_)
-                    )))
-                ));
-                storage.delete(&snapshot).await.unwrap();
-                storage
-                    .create_once(&snapshot, &snapshot_bytes)
-                    .await
-                    .unwrap();
-                storage.create_once(&write, &write_bytes).await.unwrap();
-            }
-            let recovered = builder()
-                .open_reloading(directory.id(), "Ana’s recovered laptop")
-                .await;
-            if readable {
-                assert!(matches!(
-                    recovered,
-                    Err(RecoveryError::Sync(SyncError::Storage(ref error)))
-                        if error.failure() == StorageFailure::CatchUpRequired
-                ));
-                assert_eq!(
-                    storage.read(&queued_path).await.unwrap_err().failure(),
-                    StorageFailure::NotFound
-                );
-                assert!(matches!(
-                    builder().open(directory.id()).await,
-                    Err(CovenError::Lock(StoreLockError::RecoveryPending(_)))
-                ));
-                continue;
-            }
-            let recovered = recovered.unwrap();
-            let rows = recovered
-                .read(|sql| {
-                    Ok(sql.query("SELECT id FROM notes ORDER BY id", [], |r| {
-                        r.get::<_, String>(0)
-                    })?)
-                })
-                .await
-                .unwrap();
-            assert_eq!(rows, vec!["saved"]);
-            assert_ne!(directory.settings().unwrap().device_id, old_device);
-            let archives: Vec<_> = std::fs::read_dir(path.parent().unwrap())
-                .unwrap()
-                .map(|e| e.unwrap().path())
-                .filter(|p| {
-                    p.file_name()
-                        .unwrap()
-                        .to_str()
-                        .unwrap()
-                        .starts_with("damaged-database-")
-                })
-                .collect();
-            assert_eq!(archives.len(), 1);
-            assert_eq!(
-                std::fs::read(archives[0].join("store.db")).unwrap(),
-                damaged
-            );
-            recovered.close().await.unwrap();
-            let db = DatabaseBuilder::new(directory.clone())
-                .synced_tables(recovery_tables())
-                .migrations(recovery_migrations())
-                .clock(clock.clone())
-                .open()
-                .await
-                .unwrap();
-            let send = Arc::new(coven_sync::SendGate::new(clock.clone()));
-            let mut caught_up = StoreLogSync::new(
-                storage.clone(),
-                db.clone(),
-                Arc::new(KeySession::store(keys.clone()).unwrap()),
-                Arc::new(KeySession::member(identity.clone()).unwrap()),
-                clock.clone(),
-                send.clone(),
-                ids.clone(),
-                directory.clone(),
-            );
-            caught_up.sync_store_log().await.unwrap();
-            let mut writes = coven_sync::DeviceLogSync::new(
-                storage.clone(),
-                db.clone(),
-                Arc::new(KeySession::store(keys.clone()).unwrap()),
-                Arc::new(KeySession::member(identity.clone()).unwrap()),
-                clock.clone(),
-                send.clone(),
-            );
-            writes.upload_writes().await.unwrap();
-            assert_eq!(
-                storage
-                    .list(&ObjectPrefix::device_logs(directory.id()))
-                    .await
-                    .unwrap()
-                    .len(),
-                1
-            );
-            db.close().await.unwrap();
         }
     }
 }

@@ -1,6 +1,4 @@
 use super::*;
-use crate::StoreLogSync;
-use coven_database::DatabaseBuilder;
 use coven_format::write::WriteDisposition;
 
 async fn update(device: &mut Device, storage: Arc<MemoryStorage>, rename: bool, convert: bool) {
@@ -747,8 +745,6 @@ async fn a_migration_waits_for_an_operation_that_already_reserved_the_entry_numb
 
 mod recovery {
     use super::*;
-    use coven_database::{CovenError, DbError};
-    use coven_foundation::files::FileName;
 
     fn recovery_migrations(convert: bool) -> Vec<Migration> {
         let mut change =
@@ -767,8 +763,8 @@ mod recovery {
     }
 
     #[tokio::test]
-    async fn recovery_converts_old_waiting_writes_and_preserves_attempted_bytes() {
-        for rebuild in [false, true] {
+    async fn reloading_in_place_converts_old_waiting_writes_and_preserves_attempted_bytes() {
+        {
             for convert in [false, true] {
                 for attempted in [false, true] {
                     let storage = storage();
@@ -826,70 +822,13 @@ mod recovery {
                     devices[0].sync.sync_store_log().await.unwrap();
                     devices[0].writes.upload_writes().await.unwrap();
                     let device = &mut devices[1];
-                    if rebuild {
-                        let page: i64 = device
-                            .db
-                            .read(|sql| {
-                                Ok(sql.query_row(
-                                    "SELECT rootpage FROM sqlite_schema WHERE name='notes'",
-                                    [],
-                                    |r| r.get(0),
-                                )?)
-                            })
-                            .await
-                            .unwrap();
-                        device.db.close().await.unwrap();
-                        let path = device.directory.database_path();
-                        let mut bytes = std::fs::read(&path).unwrap();
-                        let size = u16::from_be_bytes([bytes[16], bytes[17]]) as usize;
-                        bytes[(page as usize - 1) * size] = 0xff;
-                        std::fs::write(&path, &bytes).unwrap();
-                        let builder = || {
-                            DatabaseBuilder::new(device.directory.clone())
-                                .synced_tables(vec![SyncedTable::new(
-                                    "notes",
-                                    RowIdentity::SharedKey,
-                                )])
-                                .migrations(recovery_migrations(convert))
-                                .clock(device.clock.clone())
-                        };
-                        assert!(matches!(
-                            builder().open().await,
-                            Err(CovenError::Database(DbError::DamagedDatabase))
-                        ));
-                        let lock = device.directory.lock_exclusive().unwrap();
-                        lock.set_device_id(DeviceId(999)).unwrap();
-                        device.db = builder()
-                            .open_reloading_locked(lock, FileName::new("test").unwrap())
-                            .await
-                            .unwrap();
-                        device.writes = DeviceLogSync::new(
-                            storage.clone(),
-                            device.db.clone(),
-                            device.custody.clone(),
-                            device.identity.clone(),
-                            device.clock.clone(),
-                            device.send.clone(),
-                        );
-                        device.sync = StoreLogSync::new(
-                            storage.clone(),
-                            device.db.clone(),
-                            device.custody.clone(),
-                            device.identity.clone(),
-                            device.clock.clone(),
-                            device.send.clone(),
-                            device.ids.clone(),
-                            device.directory.clone(),
-                        );
-                    } else {
-                        reopen(
-                            device,
-                            storage.clone(),
-                            vec![SyncedTable::new("notes", RowIdentity::SharedKey)],
-                            recovery_migrations(convert),
-                        )
-                        .await;
-                    }
+                    reopen(
+                        device,
+                        storage.clone(),
+                        vec![SyncedTable::new("notes", RowIdentity::SharedKey)],
+                        recovery_migrations(convert),
+                    )
+                    .await;
                     let queue = device.db.test_queued_writes().await.unwrap();
                     let waiting = queue
                         .iter()
@@ -901,18 +840,6 @@ mod recovery {
                     }
                     device.sync.sync_store_log().await.unwrap();
                     device.sync.reload_from_snapshots().await.unwrap();
-                    if rebuild {
-                        device
-                            .sync
-                            .make_and_upload_entry(StoreChange::AddDevice {
-                                device: DeviceId(999),
-                                name: "Recovered".into(),
-                                replaces: None,
-                            })
-                            .await
-                            .unwrap();
-                        device.db.finish_recovery().await.unwrap();
-                    }
                     reopen(
                         &mut devices[2],
                         storage.clone(),

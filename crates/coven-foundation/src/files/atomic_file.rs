@@ -76,10 +76,6 @@ impl AtomicFile {
         Self { path }
     }
 
-    pub(super) fn exists(&self) -> Result<bool, FileError> {
-        exists("inspect staged file", &self.path)
-    }
-
     /// Read the complete file. Only a missing file is `None`; other errors
     /// retain their operating-system cause.
     pub fn read_optional(&self) -> Result<Option<Vec<u8>>, FileError> {

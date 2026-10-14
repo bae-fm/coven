@@ -144,21 +144,6 @@ impl StoreDir {
         self.path.join("inputs.db")
     }
 
-    /// Refuse an unfinished explicit recovery before opening SQLite.
-    pub fn check_database_recovery(&self) -> Result<(), StoreLockError> {
-        super::DatabaseRecovery::check(&self.path, self.id)
-    }
-
-    /// Archive the damaged SQLite files under the writer lock. Existing readers
-    /// prevent replacement. A durable marker protects the unpublished database.
-    pub fn recover_database(
-        &self,
-        lock: &StoreLock,
-        name: &FileName,
-    ) -> Result<super::DatabaseRecovery, StoreLockError> {
-        super::DatabaseRecovery::begin(&self.path, self.id, lock, name)
-    }
-
     /// The recorded replacement of this installation, if one is unfinished
     /// or its record outlived publication (§10).
     pub fn device_reset(&self) -> Result<Option<super::DeviceReset>, super::FileError> {

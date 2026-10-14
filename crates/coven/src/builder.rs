@@ -155,24 +155,7 @@ impl CovenBuilder {
     /// committed file work. Empty custody is allowed; an unlock failure prevents
     /// opening. No sync loop starts, and local database calls need no key material.
     pub async fn open(self, store: StoreId) -> CovenResult<CovenHandle> {
-        self.open_graph(store, false).await?.open().await
-    }
-
-    /// Recover a damaged database from storage, preserving readable waiting work.
-    /// Connects from saved settings and custody credentials, refreshing expired
-    /// sign-in tokens. Storage and unlocked keys are checked before any database
-    /// file moves. The fresh device id is registered with the app's device name.
-    /// The damaged SQLite files remain in a named archive. An interrupted reload
-    /// must be retried explicitly; ordinary opens refuse its unpublished state.
-    pub async fn open_reloading(
-        self,
-        store: StoreId,
-        device_name: &str,
-    ) -> Result<CovenHandle, RecoveryError> {
-        self.open_graph(store, true)
-            .await?
-            .open_reloading(device_name)
-            .await
+        self.open_graph(store).await?.open().await
     }
 
     /// Replace this installation with a new device loaded from storage (§10,
@@ -271,7 +254,7 @@ impl CovenBuilder {
         Keychain::registered()
     }
 
-    async fn open_graph(self, store: StoreId, recovering: bool) -> CovenResult<OpeningStore> {
+    async fn open_graph(self, store: StoreId) -> CovenResult<OpeningStore> {
         let directory = self.layout.store_dir(&store);
         let database = self.database(directory.clone())?;
         let lock = directory.lock_for_open().await?;
@@ -279,35 +262,23 @@ impl CovenBuilder {
         let result = crate::coven::blocking(move || {
             let settings = lock.settings()?;
             let keychain = Arc::new(StoreKeychain::new(self.keychain()?, settings.id));
-            let new_recovery = recovering
-                && match directory.check_database_recovery() {
-                    Ok(()) => true,
-                    Err(StoreLockError::RecoveryPending(_)) => false,
-                    Err(error) => return Err(error.into()),
-                };
-            if new_recovery {
-                let device = self.ids.new_device_id();
-                lock.set_device_id(device)?;
-                keychain.set_device_id(device)?;
-            } else {
-                // A copy restored without its non-backed-up custody id, or one
-                // sync already decided to replace, resets as a new device (§10).
-                let reset = match directory.unfinished_device_reset()? {
-                    Some(reset) => Some(reset),
-                    None if keychain.device_id()? != Some(settings.device_id) => Some(
-                        directory
-                            .record_device_reset(&DeviceReset {
-                                old_device: settings.device_id,
-                                new_device: self.ids.new_device_id(),
-                                reason: DeviceResetReason::IdentityMismatch,
-                            })
-                            .map_err(StoreLockError::from)?,
-                    ),
-                    None => None,
-                };
-                if reset.is_some() {
-                    return Err(StoreLockError::BootstrapPending(settings.id).into());
-                }
+            // A copy restored without its non-backed-up custody id, or one
+            // sync already decided to replace, resets as a new device (§10).
+            let reset = match directory.unfinished_device_reset()? {
+                Some(reset) => Some(reset),
+                None if keychain.device_id()? != Some(settings.device_id) => Some(
+                    directory
+                        .record_device_reset(&DeviceReset {
+                            old_device: settings.device_id,
+                            new_device: self.ids.new_device_id(),
+                            reason: DeviceResetReason::IdentityMismatch,
+                        })
+                        .map_err(StoreLockError::from)?,
+                ),
+                None => None,
+            };
+            if reset.is_some() {
+                return Err(StoreLockError::BootstrapPending(settings.id).into());
             }
             Ok(OpeningStore {
                 database,
@@ -444,82 +415,6 @@ impl OpeningStore {
             crate::coven::blocking(move || self.builder.owners(self.directory, self.keychain))
                 .await?;
         let sync = owners.sync(database.clone());
-        Ok(owners.handle(database, sync))
-    }
-
-    async fn open_reloading(self, device_name: &str) -> Result<CovenHandle, RecoveryError> {
-        let mut owners =
-            crate::coven::blocking(move || self.builder.owners(self.directory, self.keychain))
-                .await?;
-        let mut data = coven_sync::read_connection(
-            &coven_storage::StorageSettings::new(owners.directory.clone()),
-            &owners.keychain,
-        )?
-        .ok_or(SyncError::NoStorage)?;
-        owners
-            .keys
-            .read()
-            .map_err(CovenError::from)?
-            .ok_or(RecoveryError::NoStoreKeys)?;
-        owners
-            .identity
-            .read()
-            .map_err(CovenError::from)?
-            .ok_or(SyncError::from(
-                coven_storage::StorageFailure::MemberKeysMissing,
-            ))?;
-        if let Some(credentials) =
-            coven_sync::refreshed_credentials(&data, owners.oauth.as_ref(), owners.clock.now())
-                .await?
-        {
-            coven_sync::commit_credentials(&owners.keychain, &credentials, None)?;
-            data.credentials = credentials;
-        }
-        let storage = owners
-            .connector
-            .connect(
-                data.location,
-                data.credentials,
-                owners.device,
-                owners.send.clone(),
-            )
-            .await
-            .map_err(SyncError::from)?;
-        storage
-            .list_writers(owners.directory.id())
-            .await
-            .map_err(SyncError::from)?;
-        owners.storage = Some(storage);
-        let archive = coven_foundation::files::FileName::new(owners.ids.new_id().to_string())
-            .expect("UUID filename");
-        let database = self
-            .database
-            .open_reloading_locked(self.lock, archive)
-            .await?;
-        let mut sync = owners.sync(database.clone());
-        // Store-log replay and snapshot loading remain owned by sync. The new
-        // device identity prevents reuse of numbers the damaged file cannot supply.
-        sync.sync_store_log().await?;
-        sync.reload_from_snapshots().await?;
-        let local = database.local_store_log().await.map_err(CovenError::from)?;
-        if !local.log.replay.state.devices.contains_key(&local.device) {
-            sync.make_and_upload_entry(coven_format::store_log::StoreChange::AddDevice {
-                device: local.device,
-                name: device_name.into(),
-                replaces: None,
-            })
-            .await?;
-        }
-        let mut writes = coven_sync::DeviceLogSync::new(
-            owners.storage.clone().expect("connected for recovery"),
-            database.clone(),
-            owners.keys.clone(),
-            owners.identity.clone(),
-            owners.clock.clone(),
-            owners.send.clone(),
-        );
-        sync.download_later_writes(&mut writes).await?;
-        database.finish_recovery().await.map_err(CovenError::from)?;
         Ok(owners.handle(database, sync))
     }
 }

@@ -3,13 +3,12 @@ use super::*;
 #[test]
 fn existence_checks_directory_entries_and_preserves_inspection_errors() {
     let directory = tempfile::tempdir().unwrap();
-    let file = AtomicFile::new(directory.path().join("file"));
-    assert!(!file.exists().unwrap());
+    let path = directory.path().join("file");
+    let file = AtomicFile::new(path.clone());
+    assert!(!exists("inspect", &path).unwrap());
     file.replace(b"present").unwrap();
-    assert!(file.exists().unwrap());
-    assert!(AtomicFile::new(directory.path().to_owned())
-        .exists()
-        .unwrap());
+    assert!(exists("inspect", &path).unwrap());
+    assert!(exists("inspect", directory.path()).unwrap());
     let invalid = directory.path().join("file\0suffix");
     assert!(matches!(
         exists("inspect store destination", &invalid),
@@ -20,7 +19,7 @@ fn existence_checks_directory_entries_and_preserves_inspection_errors() {
     {
         let path = directory.path().join("dangling");
         std::os::unix::fs::symlink(directory.path().join("absent"), &path).unwrap();
-        assert!(AtomicFile::new(path).exists().unwrap());
+        assert!(exists("inspect", &path).unwrap());
     }
 }
 

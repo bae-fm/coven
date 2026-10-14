@@ -120,9 +120,6 @@ pub enum StoreLockError {
     /// Async opens wait for a closing instance in this process to release it.
     #[error("store {0} is already open")]
     AlreadyOpen(StoreId),
-    /// An explicit database recovery has not published its replacement.
-    #[error("store {0} requires open_reloading to finish database recovery")]
-    RecoveryPending(StoreId),
     /// An unfinished new-device installation must be resumed with its code.
     #[error("store {0} requires restore or join to finish bootstrap")]
     BootstrapPending(StoreId),

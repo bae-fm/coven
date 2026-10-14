@@ -2,7 +2,8 @@
 //!
 //! The durable record is the decision: once written, ordinary opens refuse the
 //! store and every retry uses the same fresh id. Turning the directory into an
-//! unpublished bootstrap moves the discarded local state aside as a whole.
+//! unpublished bootstrap moves the discarded local state aside as a whole,
+//! under the writer, bootstrap and reader locks. It stays for inspection only.
 
 use std::fs;
 use std::path::Path;
@@ -107,6 +108,8 @@ pub(super) fn begin(
     }
     let marker = super::bootstrap::marker(directory);
     if !atomic_file::exists("inspect bootstrap marker", &marker)? {
+        // No reader may hold the discarded files open while they move.
+        let _readers = super::lock::exclude_readers(directory, id)?;
         let archive = directory.join(format!("{ARCHIVE_PREFIX}{}", reset.old_device.0));
         if !atomic_file::exists("inspect discarded device archive", &archive)? {
             fs::create_dir(&archive).map_err(|source| {
