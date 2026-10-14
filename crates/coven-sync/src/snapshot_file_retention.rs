@@ -1,15 +1,12 @@
 //! Prove absence across retained data before deleting an uploader's files.
 
-use super::{catalog::snapshot_damage, StoreLogSync};
-use crate::{replay_cache::ReplayCache, DamagedObject, SyncError};
+use super::{catalog::failure, StoreLogSync};
+use crate::{replay_cache::ReplayCache, SyncError};
 use coven_storage::{ObjectPath, ObjectPrefix};
 use std::collections::{BTreeMap, BTreeSet};
 
 impl StoreLogSync {
-    pub(super) async fn retain_uploaded_files(
-        &self,
-        damages: &mut Vec<DamagedObject>,
-    ) -> Result<(), SyncError> {
+    pub(super) async fn retain_uploaded_files(&self) -> Result<(), SyncError> {
         let storage = self.storage.as_deref().ok_or(SyncError::NoStorage)?;
         // List first: publication fixes an identity in the local queue before
         // storage can list it, and atomically replaces that queue protection
@@ -87,11 +84,10 @@ impl StoreLogSync {
             audiences.insert(id.audience);
         }
         for audience in audiences {
-            let damaged = damages.len();
-            let candidates = self
-                .snapshot_candidates(&audience, &local.log, damages)
-                .await?;
-            if damages.len() != damaged || candidates.listed != candidates.candidates.len() {
+            // A snapshot that waits, was refused or cannot be read is not a
+            // candidate; any of them prevents proving absence.
+            let candidates = self.snapshot_candidates(&audience, &local.log).await?;
+            if candidates.listed != candidates.candidates.len() {
                 tracing::debug!(
                     ?audience,
                     "excluded retained snapshots prevent proving file absence"
@@ -115,8 +111,8 @@ impl StoreLogSync {
                         return Ok(());
                     }
                     Err(error) => {
-                        snapshot_damage(damages, &candidate.object.path, error)?;
-                        // Damaged or unsupported data cannot establish absence.
+                        self.refuse_snapshot(&candidate.object, error).await?;
+                        // Refused data cannot establish absence.
                         return Ok(());
                     }
                 }
@@ -170,7 +166,7 @@ impl StoreLogSync {
                         )
                         .await?;
                     }
-                    snapshot_damage(damages, &object.path, error)?;
+                    failure(&object.path, error)?;
                     return Ok(());
                 }
             };

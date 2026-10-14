@@ -53,12 +53,16 @@ impl StoreLogSync {
                 .ok_or(coven_storage::StorageFailure::NotFound)?;
             let candidate = match self.snapshot_prefix(object, log).await? {
                 Ok(candidate) => candidate,
+                // The named snapshot's wait or refusal is its own record, and
+                // the reload that needs it fails with that record (§19.1).
                 Err(reason) => {
-                    return Err(SyncError::Pending(Box::new(crate::PendingRecord {
+                    let record = crate::PendingRecord {
                         subject: crate::PendingSubject::Snapshot(id.clone()),
                         reason,
                         reported_by: self.database.local_store_log().await?.device,
-                    })))
+                    };
+                    self.database.record_pending(record.clone()).await?;
+                    return Err(SyncError::Pending(Box::new(record)));
                 }
             };
             // A named snapshot that landed late is ignored like any other:

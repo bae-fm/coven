@@ -2,7 +2,7 @@
 
 use super::{io, StoreLogSync};
 use crate::write_object::{checked, damaged};
-use crate::{snapshot_data::SavedSnapshot, DamagedObject, SyncError};
+use crate::{snapshot_data::SavedSnapshot, Refusal, SyncError};
 use crate::{PendingReason, PendingRecord, PendingSubject};
 use coven_crypto::{MemberId, ObjectHasher, Signature};
 use coven_database::StoreLog;
@@ -27,14 +27,21 @@ pub(super) struct Catalog {
     /// history, even when their keys cannot authorize loading their rows.
     pub(super) required_positions: coven_format::value::WritePositions,
     pub(super) unreadable_prefix: bool,
+    /// A listed snapshot in a newer format: work that selects among this
+    /// audience's snapshots waits for that update (§15, §17.2).
+    pub(super) update: Option<crate::RequiredUpdate>,
 }
 
 impl StoreLogSync {
+    /// List an audience's snapshots and check each signed prefix. The listing
+    /// decides each listed snapshot's record (§19.1): a prefix that waits or
+    /// fails its check establishes no coverage, and a snapshot whose body was
+    /// refused keeps its verified prefix's required history but is never a
+    /// candidate again until a newer version permits one more check.
     pub(super) async fn snapshot_candidates(
         &self,
         audience: &Audience,
         log: &StoreLog,
-        damages: &mut Vec<DamagedObject>,
     ) -> Result<Catalog, SyncError> {
         let storage = self.storage.as_deref().ok_or(SyncError::NoStorage)?;
         // A snapshot's authorized key stays eligible when replay drops its
@@ -53,30 +60,42 @@ impl StoreLogSync {
         let mut candidates = Vec::new();
         let mut positions = BTreeMap::new();
         let mut unreadable_prefix = false;
-        let mut waiting = Vec::new();
+        let refused = self.refused_snapshots(audience).await?;
+        let mut conditions = Vec::new();
         for object in objects {
-            let candidate = match self.snapshot_prefix(&object, log).await {
-                Ok(Ok(candidate)) => candidate,
-                // Not damaged, yet unable to establish coverage until it checks.
-                Ok(Err(reason)) => {
+            let id = object.path.snapshot_id().expect("snapshot path");
+            let refusal = refused.iter().find(|(refused, _)| *refused == id);
+            if let Some((_, reason)) = refusal {
+                conditions.push((id.clone(), reason.clone()));
+                // A prefix that never checked was not retained: its refusal
+                // stands without reading the same bytes again.
+                let input =
+                    crate::object_input::ObjectInput::observe(&self.database, &object).await?;
+                if input.metadata().await?.is_none() {
                     unreadable_prefix = true;
-                    waiting.push((object.path.snapshot_id().expect("snapshot path"), reason));
                     continue;
                 }
-                Err(error) => {
+            }
+            let candidate = match self.snapshot_prefix(&object, log).await? {
+                Ok(candidate) => candidate,
+                // A wait or a refusal: no coverage until the prefix checks.
+                Err(reason) => {
                     unreadable_prefix = true;
-                    snapshot_damage(damages, &object.path, error)?;
+                    if refusal.is_none() {
+                        conditions.push((id, reason));
+                    }
                     continue;
                 }
             };
             let prefix = &candidate.prefix;
             if prefix.audience != *audience {
                 unreadable_prefix = true;
-                snapshot_damage(
-                    damages,
-                    &object.path,
-                    damaged(&object.path, crate::Refusal::WrongIdentity { cause: None }),
-                )?;
+                if refusal.is_none() {
+                    let reason = self
+                        .snapshot_condition(&object, Refusal::WrongIdentity { cause: None })
+                        .await?;
+                    conditions.push((id, reason));
+                }
                 continue;
             }
             // A landing more than a day after its signed catch-up time is
@@ -95,11 +114,17 @@ impl StoreLogSync {
             ) {
                 super::include_positions(&mut positions, &prefix.writes.0);
             }
-            if keys.contains_key(&(audience.clone(), prefix.key)) {
+            // A refused body never authorizes loading its rows (§19.1).
+            if refusal.is_none() && keys.contains_key(&(audience.clone(), prefix.key)) {
                 candidates.push(candidate);
             }
         }
-        self.replace_snapshot_waits(audience, waiting).await?;
+        let update = conditions.iter().find_map(|(_, reason)| match reason {
+            PendingReason::UpdateRequired(update) => Some(*update),
+            _ => None,
+        });
+        self.replace_snapshot_conditions(audience, conditions)
+            .await?;
         candidates.sort_by(|a, b| newest_first((&a.object, &a.prefix), (&b.object, &b.prefix)));
         Ok(Catalog {
             listed,
@@ -111,6 +136,7 @@ impl StoreLogSync {
                     .collect(),
             ),
             unreadable_prefix,
+            update,
         })
     }
 
@@ -118,9 +144,8 @@ impl StoreLogSync {
         &self,
         audience: &Audience,
         log: &StoreLog,
-        damages: &mut Vec<DamagedObject>,
     ) -> Result<Catalog, SyncError> {
-        let mut catalog = self.snapshot_candidates(audience, log, damages).await?;
+        let mut catalog = self.snapshot_candidates(audience, log).await?;
         catalog.candidates.retain(|candidate| {
             super::boundaries::allows(
                 log,
@@ -135,18 +160,45 @@ impl StoreLogSync {
         Ok(catalog)
     }
 
-    /// This audience's completed listing decides its snapshots' wait records:
-    /// one that now checks, or is no longer listed, loses its record (§19.1).
-    async fn replace_snapshot_waits(
+    /// This device's refusals of an audience's snapshots that this version
+    /// may not check again (§19.1).
+    async fn refused_snapshots(
         &self,
         audience: &Audience,
-        waiting: Vec<(coven_format::store_log::SnapshotId, PendingReason)>,
+    ) -> Result<Vec<(coven_format::store_log::SnapshotId, PendingReason)>, SyncError> {
+        let own = self.database.local_store_log().await?.device;
+        let mut refused = Vec::new();
+        for record in self.database.pending::<PendingRecord>().await? {
+            if record.reported_by != own || !matches!(record.reason, PendingReason::Refused(_)) {
+                continue;
+            }
+            let PendingSubject::Snapshot(id) = &record.subject else {
+                continue;
+            };
+            if id.audience == *audience
+                && !self
+                    .database
+                    .pending_can_retry::<PendingRecord>(record.subject.clone())
+                    .await?
+            {
+                refused.push((id.clone(), record.reason));
+            }
+        }
+        Ok(refused)
+    }
+
+    /// This audience's completed listing decides its snapshots' records: one
+    /// that now checks, or is no longer listed, loses its record (§19.1).
+    async fn replace_snapshot_conditions(
+        &self,
+        audience: &Audience,
+        conditions: Vec<(coven_format::store_log::SnapshotId, PendingReason)>,
     ) -> Result<(), SyncError> {
-        let records = if waiting.is_empty() {
+        let records = if conditions.is_empty() {
             Vec::new()
         } else {
             let reported_by = self.database.local_store_log().await?.device;
-            waiting
+            conditions
                 .into_iter()
                 .map(|(id, reason)| PendingRecord {
                     subject: PendingSubject::Snapshot(id),
@@ -169,8 +221,27 @@ impl StoreLogSync {
 
     /// Read and authenticate a listed snapshot's signed prefix. The inner
     /// error is its first unmet condition: an author whose registration this
-    /// device has not applied waits on the retained prefix bytes (§19.1).
+    /// device has not applied waits on the retained prefix bytes, a newer
+    /// format waits for an update, and a failed check refuses the snapshot
+    /// (§19.1). The outer error is a transport or local failure.
     pub(super) async fn snapshot_prefix(
+        &self,
+        object: &StoredObject,
+        log: &StoreLog,
+    ) -> Result<Result<Candidate, PendingReason>, SyncError> {
+        match self.check_prefix(object, log).await {
+            Ok(checked) => Ok(checked),
+            Err(SyncError::UpdateRequired(update)) => {
+                Ok(Err(PendingReason::UpdateRequired(update)))
+            }
+            Err(error) => {
+                let failure = failure(&object.path, error)?;
+                Ok(Err(self.snapshot_condition(object, failure).await?))
+            }
+        }
+    }
+
+    async fn check_prefix(
         &self,
         object: &StoredObject,
         log: &StoreLog,
@@ -228,11 +299,66 @@ impl StoreLogSync {
         }))
     }
 
+    /// What a failed check means for a listed snapshot (§19.1): a newer format
+    /// waits for an update; any other failure refuses its bytes, recorded only
+    /// once they are completely downloaded. A reader that stopped at the
+    /// prefix finishes the download first, and the ranges are then released.
+    async fn snapshot_condition(
+        &self,
+        object: &StoredObject,
+        failure: Refusal,
+    ) -> Result<PendingReason, SyncError> {
+        if let Some(update) = failure.required_update() {
+            tracing::debug!(
+                path = object.path.as_str(),
+                ?update,
+                "snapshot needs a newer coven"
+            );
+            return Ok(PendingReason::UpdateRequired(update));
+        }
+        let input = crate::object_input::ObjectInput::observe(&self.database, object).await?;
+        if !input.received().await? {
+            input
+                .stream(self.storage.as_deref().ok_or(SyncError::NoStorage)?)
+                .await
+                .drain()
+                .await?;
+        }
+        input.release_ranges().await?;
+        tracing::warn!(path = object.path.as_str(), error = %failure, "snapshot is refused");
+        Ok(PendingReason::Refused(failure))
+    }
+
+    /// Record a candidate's refused body as its snapshot's record; the
+    /// listing passes it over from now on (§19.1). A body in a newer format
+    /// fails the caller with that required update.
+    pub(super) async fn refuse_snapshot(
+        &self,
+        object: &StoredObject,
+        error: SyncError,
+    ) -> Result<(), SyncError> {
+        let failure = failure(&object.path, error)?;
+        match self.snapshot_condition(object, failure).await? {
+            PendingReason::UpdateRequired(update) => Err(SyncError::UpdateRequired(update)),
+            reason => {
+                self.database
+                    .record_pending(PendingRecord {
+                        subject: PendingSubject::Snapshot(
+                            object.path.snapshot_id().expect("snapshot path"),
+                        ),
+                        reason,
+                        reported_by: self.database.local_store_log().await?.device,
+                    })
+                    .await?;
+                Ok(())
+            }
+        }
+    }
+
     pub(super) async fn load_snapshot(
         &self,
         candidates: Vec<Candidate>,
         files: &mut impl Iterator<Item = String>,
-        damages: &mut Vec<DamagedObject>,
     ) -> Result<Option<SavedSnapshot>, SyncError> {
         for candidate in candidates {
             let file = files.next().expect("reserved snapshot candidates");
@@ -254,7 +380,7 @@ impl StoreLogSync {
                         "snapshot schema is outside the app's supported range"
                     );
                 }
-                Err(error) => snapshot_damage(damages, &candidate.object.path, error)?,
+                Err(error) => self.refuse_snapshot(&candidate.object, error).await?,
             }
             io::remove(&self.directory, &file)?;
         }
@@ -424,30 +550,25 @@ pub(super) fn inconsistent(reason: &'static str) -> SyncError {
     coven_database::DbError::Snapshot(coven_database::SnapshotError::Inconsistent(reason)).into()
 }
 
-pub(super) fn snapshot_damage(
-    damages: &mut Vec<DamagedObject>,
-    path: &ObjectPath,
-    error: SyncError,
-) -> Result<(), SyncError> {
-    let failure = match error {
+/// The check failure an error reports for this object, or the error itself
+/// when it is a transport or local failure rather than a verdict on bytes.
+pub(super) fn failure(path: &ObjectPath, error: SyncError) -> Result<Refusal, SyncError> {
+    Ok(match error {
         SyncError::Damaged(object) => object.failure,
         SyncError::Crypto(error @ coven_crypto::CryptoError::Unavailable(_)) => {
             return Err(error.into())
         }
-        SyncError::Crypto(error @ coven_crypto::CryptoError::Signature) => {
-            crate::Refusal::Signature {
-                cause: Some(Arc::new(error)),
-            }
-        }
-        SyncError::Crypto(error) => crate::Refusal::Decryption {
+        SyncError::Crypto(error @ coven_crypto::CryptoError::Signature) => Refusal::Signature {
             cause: Some(Arc::new(error)),
         },
-        SyncError::Format(error) => crate::Refusal::from(error),
+        SyncError::Crypto(error) => Refusal::Decryption {
+            cause: Some(Arc::new(error)),
+        },
+        SyncError::Format(error) => Refusal::from(error),
         SyncError::Database(error) => match crate::write_object::database_failure(path, error) {
             SyncError::Damaged(object) => object.failure,
             error => return Err(error),
         },
         error => return Err(error),
-    };
-    StoreLogSync::damage(damages, path, failure)
+    })
 }

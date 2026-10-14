@@ -40,7 +40,7 @@ async fn far_future_entry_waits_for_missing_or_damaged_sealed_keys() {
             .find(|record| record.subject == store_copy)
             .map(|record| record.reason)
     };
-    assert!(b.sync.step().await.unwrap().is_empty());
+    b.sync.step().await.unwrap();
     assert!(matches!(
         copy_reason(b.db.pending().await.unwrap()),
         Some(crate::PendingReason::Refused(Refusal::Decryption { .. }))
@@ -63,7 +63,7 @@ async fn far_future_entry_waits_for_missing_or_damaged_sealed_keys() {
         .unwrap();
         let wrong = prefix.encode_box(&wrong).unwrap();
         storage.create(&path, &wrong).await.unwrap();
-        assert!(b.sync.step().await.unwrap().is_empty());
+        b.sync.step().await.unwrap();
         let reason = copy_reason(b.db.pending().await.unwrap());
         // The first copy remains refused; later failures do not hide it.
         assert!(matches!(
@@ -201,7 +201,7 @@ async fn introductions_refuse_material_that_does_not_match_the_committed_hash() 
 
 #[path = "../tests/fixtures/copy_storage.rs"]
 mod copy_storage;
-pub(super) use copy_storage::failing_creation;
+pub(crate) use copy_storage::failing_creation;
 use copy_storage::{CopyAttempt, CopyStorage};
 
 async fn household(storage: &Arc<MemoryStorage>) -> [Device; 4] {
@@ -323,7 +323,7 @@ async fn a_missing_or_damaged_holder_copy_waits_and_a_later_copy_enables_sharing
     for damaged in [false, true] {
         let storage = storage();
         let ([mut ana, ben, _dan, erin], _) = concurrent_addition(&storage, Some(damaged)).await;
-        assert!(ana.sync.step().await.unwrap().is_empty());
+        ana.sync.step().await.unwrap();
         let subject = crate::PendingSubject::KeyCopy {
             audience: Audience::Store,
             key: key(3),
@@ -422,8 +422,8 @@ async fn two_suppliers_publish_distinct_copies_for_the_same_member() {
     })
     .await
     .unwrap();
-    assert!(a.unwrap().is_empty());
-    assert!(b.unwrap().is_empty());
+    a.unwrap();
+    b.unwrap();
     let attempts = racing.attempts();
     assert_eq!(attempts.len(), 2);
     assert_ne!(attempts[0].0, attempts[1].0);

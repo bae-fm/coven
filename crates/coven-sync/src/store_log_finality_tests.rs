@@ -67,9 +67,7 @@ mod listing {
             .observe_clock(&owner.db.local_store_log().await.unwrap())
             .await
             .unwrap();
-        let (damage, complete) = owner.sync.scan_store_log_once(false).await.unwrap();
-        assert!(damage.is_empty());
-        assert!(complete);
+        assert!(owner.sync.scan_store_log_once(false).await.unwrap());
     }
 
     #[tokio::test]
@@ -194,8 +192,7 @@ mod listing {
                 .observe_clock(&owner.db.local_store_log().await.unwrap())
                 .await
                 .unwrap();
-            let (_, complete) = owner.sync.scan_store_log_once(false).await.unwrap();
-            assert!(!complete);
+            assert!(!owner.sync.scan_store_log_once(false).await.unwrap());
             let log = owner.log().await;
             assert_eq!(log.horizon, Some(Duration::from_secs(10 * 86400)));
             assert!(log.is_final(creation));

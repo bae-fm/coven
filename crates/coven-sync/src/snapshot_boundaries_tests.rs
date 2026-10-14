@@ -59,7 +59,12 @@ async fn unusable_snapshots_do_not_turn_deleted_history_into_an_empty_audience()
             }
             assert_eq!(tables(&b).await, before);
         } else {
-            assert_eq!(result.unwrap().len(), 1);
+            // The unusable snapshot is its own refused subject.
+            result.unwrap();
+            assert!(matches!(
+                snapshot_record(&b, &object.path).await,
+                Some(crate::PendingReason::Refused(_))
+            ));
             b.writes.download_writes().await.unwrap();
             let mut expected = tables(&a).await;
             expected.extend(before);

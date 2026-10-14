@@ -1,13 +1,18 @@
 //! Receiving and committing a causally ready store-log batch.
 
 use super::*;
+use crate::{PendingReason, PendingRecord, PendingSubject, Prerequisite};
 use coven_format::sealed_single::SingleChunkObject;
 
 impl StoreLogSync {
+    /// One complete scan of the received store log. Each received entry that
+    /// cannot apply yet is its own subject's record, replaced by this scan: its
+    /// missing key, its newer format, or the first entry of its recorded past
+    /// that has not applied (§19.1). Returns whether every observed entry applied.
     pub(super) async fn scan_store_log_once(
         &self,
         require_complete: bool,
-    ) -> Result<(Vec<DamagedObject>, bool), SyncError> {
+    ) -> Result<bool, SyncError> {
         self.send.begin();
         let _scope = self.reads.enter();
         self.reads.reset_discovery();
@@ -21,10 +26,8 @@ impl StoreLogSync {
             .read()?
             .ok_or(coven_storage::StorageFailure::MemberKeysMissing)?;
         let mut ring = self.store_keys.read()?;
-        let mut damages = Vec::new();
         self.check_stopped(&local, &member)?;
-        self.acquire_keys(&local.log, &member, &mut ring, &mut damages)
-            .await?;
+        self.acquire_keys(&local.log, &member, &mut ring).await?;
         let storage = self.storage.as_deref().ok_or(SyncError::NoStorage)?;
         let mut paths = Vec::new();
         let mut writers =
@@ -43,6 +46,7 @@ impl StoreLogSync {
         let mut bytes = BTreeMap::new();
         let mut opened = BTreeMap::<EntryId, StoreLogEntry>::new();
         let mut missing_keys = BTreeMap::new();
+        let mut waits = BTreeMap::new();
         let mut entries = BTreeMap::new();
         loop {
             let unseen = writers.difference(&probed).copied().collect();
@@ -123,8 +127,12 @@ impl StoreLogSync {
                 let envelope = match SingleChunkObject::decode(&bytes[id]) {
                     Ok(envelope) => envelope,
                     Err(error) => {
-                        self.stuck_entry(*id, &stored.path, Refusal::from(error))
-                            .await?;
+                        if let Some(wait) = self
+                            .stuck_entry(*id, &stored.path, Refusal::from(error))
+                            .await?
+                        {
+                            waits.insert(*id, wait);
+                        }
                         pending_entries.insert(*id);
                         continue;
                     }
@@ -145,7 +153,6 @@ impl StoreLogSync {
                         *key,
                         &member,
                         &mut ring,
-                        &mut damages,
                     )
                     .await?
                 {
@@ -155,7 +162,9 @@ impl StoreLogSync {
                         continue;
                     }
                     super::key_acquisition::EntryOpening::Refused(failure) => {
-                        self.stuck_entry(*id, &stored.path, failure).await?;
+                        if let Some(wait) = self.stuck_entry(*id, &stored.path, failure).await? {
+                            waits.insert(*id, wait);
+                        }
                         pending_entries.insert(*id);
                         continue;
                     }
@@ -203,7 +212,11 @@ impl StoreLogSync {
                     Ok(true) => advanced = true,
                     Ok(false) => (),
                     Err(failure) => {
-                        self.stuck_entry(id, &entries[&id].path, failure).await?;
+                        if let Some(wait) =
+                            self.stuck_entry(id, &entries[&id].path, failure).await?
+                        {
+                            waits.insert(id, wait);
+                        }
                         pending_entries.insert(id);
                     }
                 }
@@ -212,14 +225,47 @@ impl StoreLogSync {
                 break;
             }
         }
+        // An opened entry left out of the batch waits for the first entry of
+        // its recorded past that has not applied.
+        for entry in &ordered {
+            let id = entry.position;
+            if batch.contains(id) || pending_entries.contains(&id) {
+                continue;
+            }
+            match object::first_missing(entry, |past| batch.contains(past)) {
+                Some(past) => {
+                    waits.insert(
+                        id,
+                        PendingReason::Waits(Prerequisite::Object(object::path(local.store, past))),
+                    );
+                }
+                // Its whole recorded past applied while the store's creation
+                // has not: that creation must check this entry when it arrives.
+                None => tracing::debug!(?id, "entry waits for the store's creation"),
+            }
+        }
+        for (id, key) in &missing_keys {
+            waits.insert(
+                *id,
+                PendingReason::KeyUnavailable {
+                    audience: Audience::Store,
+                    key: *key,
+                },
+            );
+        }
+        // One behind a stopped entry of its own log is not read again, so it
+        // has no record of its own (§19.1).
+        waits.retain(|id, _| {
+            !pending_entries
+                .iter()
+                .any(|stop| stop.device == id.device && stop.number < id.number)
+        });
         if let Some((ready, replay)) = batch.finish() {
             self.apply_batch(&mut local, ready, replay, &member).await?;
         }
+        self.replace_entry_waits(&local, waits).await?;
         if require_complete {
             if let Some(key) = missing_keys.values().next() {
-                if let Some(damage) = damages.into_iter().next() {
-                    return Err(damage.into());
-                }
                 return Err(SyncError::KeyUnavailable(*key));
             }
             if let Some(refusal) = crate::pending_logs::local_refusals(&self.database)
@@ -260,17 +306,15 @@ impl StoreLogSync {
                 })
         };
         let complete = complete_through(None);
+        let mut unreadable = None;
         if complete {
-            self.acquire_keys(&local.log, &member, &mut ring, &mut damages)
-                .await?;
-            let mut copy_damages = Vec::new();
-            let copies = keys::read_copies(
+            self.acquire_keys(&local.log, &member, &mut ring).await?;
+            let reading = keys::read_copies(
                 &self.database,
                 &self.reads,
                 self.download_limit,
                 storage,
                 local.store,
-                &mut copy_damages,
             )
             .await?;
             let state = &local.log.replay.state;
@@ -288,21 +332,18 @@ impl StoreLogSync {
                 }
                 _ => crate::send_gate::Binding::Absent,
             };
-            if copy_damages.is_empty() {
-                self.send.complete(binding, copies)?;
-            }
-            for damage in copy_damages {
-                if !damages.iter().any(|known| known.path == damage.path) {
-                    damages.push(damage);
-                }
+            // A copy without a readable prefix leaves the reading incomplete:
+            // it supplies no sending authority (§11).
+            match reading.unreadable {
+                None => self.send.complete(binding, reading.copies)?,
+                Some(damage) => unreadable = Some(damage),
             }
             self.finality
                 .lock()
                 .expect("finality lock poisoned")
                 .complete_catch_up(sample);
         } else {
-            self.acquire_keys(&local.log, &member, &mut ring, &mut damages)
-                .await?;
+            self.acquire_keys(&local.log, &member, &mut ring).await?;
         }
         if let Some((through, unit)) = through {
             if complete_through(Some(through)) {
@@ -315,7 +356,56 @@ impl StoreLogSync {
                 }
             }
         }
-        Ok((damages, complete))
+        // A catch-up that must be complete fails loudly on that copy.
+        match unreadable {
+            Some(damage) if require_complete => Err(damage.into()),
+            _ => Ok(complete),
+        }
+    }
+
+    /// This completed scan decides every entry wait this device records:
+    /// received entries that cannot apply yet, and its own queued entry whose
+    /// recorded past has not applied. An entry that applied, or no longer
+    /// waits, loses its record; refusals and drops are not waits (§19.1).
+    async fn replace_entry_waits(
+        &self,
+        local: &coven_database::LocalStoreLog,
+        mut waits: BTreeMap<EntryId, PendingReason>,
+    ) -> Result<(), SyncError> {
+        if let Some(upload) = &local.upload {
+            if let Some(past) = object::first_missing(&upload.entry, |past| {
+                local.log.replay.entries.contains_key(&past)
+            }) {
+                waits.insert(
+                    upload.entry.position,
+                    PendingReason::Waits(Prerequisite::Object(object::path(local.store, past))),
+                );
+            }
+        }
+        let records = waits
+            .into_iter()
+            .filter(|(id, _)| !local.log.replay.entries.contains_key(id))
+            .map(|(id, reason)| PendingRecord {
+                subject: PendingSubject::Entry(id),
+                reason,
+                reported_by: local.device,
+            })
+            .collect();
+        self.database
+            .replace_local_pending(
+                |record: &PendingRecord| {
+                    matches!(record.subject, PendingSubject::Entry(_))
+                        && matches!(
+                            record.reason,
+                            PendingReason::Waits(_)
+                                | PendingReason::KeyUnavailable { .. }
+                                | PendingReason::UpdateRequired(_)
+                        )
+                },
+                records,
+            )
+            .await?;
+        Ok(())
     }
 }
 

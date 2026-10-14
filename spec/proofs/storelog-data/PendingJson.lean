@@ -19,6 +19,8 @@ private def audienceNumber : Audience → Nat | .store => 0 | .circle c => c + 1
 def subject (j : Json) : Except String Subject := do
   match ← str j 0 with
   | "write" => pure (.write (← nat j 1) (← nat j 2))
+  | "entry" => pure (.entry (← nat j 1))
+  | "keyCopy" => pure (.keyCopy (audience (← nat j 1)) (← nat j 2) (← nat j 3))
   | "positions" => pure (.positions (← nat j 1))
   | "agreement" => pure (.agreement (audience (← nat j 1)) (← nat j 2))
   | "snapshot" => pure (.snapshot ⟨audience (← nat j 1), ← nat j 2⟩)
@@ -26,6 +28,9 @@ def subject (j : Json) : Except String Subject := do
 
 def subjectJson : Subject → Json
   | .write device number => Json.arr #["write", toJson device, toJson number]
+  | .entry id => Json.arr #["entry", toJson id]
+  | .keyCopy a key member =>
+      Json.arr #["keyCopy", toJson (audienceNumber a), toJson key, toJson member]
   | .positions device => Json.arr #["positions", toJson device]
   | .agreement a peer => Json.arr #["agreement", toJson (audienceNumber a), toJson peer]
   | .snapshot id => Json.arr #["snapshot", toJson (audienceNumber id.audience), toJson id.number]

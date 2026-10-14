@@ -17,6 +17,20 @@ mod returns;
 #[path = "snapshot_catalog_tests.rs"]
 mod signatures;
 
+/// This device's record for the snapshot at `path`, if any.
+async fn snapshot_record(device: &Device, path: &ObjectPath) -> Option<crate::PendingReason> {
+    let subject = crate::PendingSubject::Snapshot(path.snapshot_id().unwrap());
+    let own = device.device().await;
+    device
+        .db
+        .pending::<crate::PendingRecord>()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|record| record.subject == subject && record.reported_by == own)
+        .map(|record| record.reason)
+}
+
 fn snapshot_storage() -> Arc<MemoryStorage> {
     Arc::new(
         MemoryStorage::builder()

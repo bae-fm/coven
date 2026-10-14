@@ -3,11 +3,8 @@
 use super::*;
 
 impl StoreLogSync {
-    pub(super) async fn scan_store_log(
-        &self,
-        require_complete: bool,
-    ) -> Result<Vec<DamagedObject>, SyncError> {
-        let (mut damages, mut complete) = self.scan_store_log_once(require_complete).await?;
+    pub(super) async fn scan_store_log(&self, require_complete: bool) -> Result<(), SyncError> {
+        let mut complete = self.scan_store_log_once(require_complete).await?;
         if complete {
             let mut local = self.database.local_store_log().await?;
             let member = self.operation_member()?;
@@ -15,9 +12,7 @@ impl StoreLogSync {
             let queued = local.upload.is_some();
             self.publish(&mut local, &member, &mut ring).await?;
             if queued && local.upload.is_none() {
-                let (observed, checked) = self.scan_store_log_once(require_complete).await?;
-                damages.extend(observed);
-                complete = checked;
+                complete = self.scan_store_log_once(require_complete).await?;
             }
         }
         if complete && self.send.can_send() {
@@ -31,10 +26,10 @@ impl StoreLogSync {
                 .probe_due(&local.log, self.clock.as_ref());
             if due && local.log.replay.state.devices.contains_key(&local.device) {
                 self.observe_clock(&local).await?;
-                damages.extend(self.scan_store_log_once(require_complete).await?.0);
+                self.scan_store_log_once(require_complete).await?;
             }
         }
-        Ok(damages)
+        Ok(())
     }
 
     /// A complete catch-up precedes this publication. The following

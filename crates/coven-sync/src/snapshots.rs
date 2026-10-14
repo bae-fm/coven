@@ -5,7 +5,7 @@ use crate::{
     operation_data::Data,
     operations::{Output, Progress},
     snapshot_data::*,
-    DamagedObject, SyncError,
+    SyncError,
 };
 use coven_database::{OperationRecord, StoreLog};
 use coven_format::{store_log::SnapshotId, value::WritePositions};
@@ -41,7 +41,7 @@ impl StoreLogSync {
     /// recorded disk bytes.
     pub async fn write_snapshots(&mut self) -> Result<(), SyncError> {
         let _reads = self.reads.enter();
-        let mut damages = self.resume_snapshots().await?;
+        self.resume_snapshots().await?;
         if let Some(id) = self.pending_reload().await? {
             return Err(SyncError::ReloadPending(id));
         }
@@ -56,7 +56,7 @@ impl StoreLogSync {
                     session: None,
                 })
                 .await?;
-            self.drive_snapshot(record.id, &mut damages).await?;
+            self.drive_snapshot(record.id).await?;
         }
         Ok(())
     }
@@ -76,26 +76,28 @@ impl StoreLogSync {
     /// Reload all readable audiences from validated snapshots and authenticated
     /// device writes, preserving queued plaintext, write numbers and key ids (§15).
     /// Joining, missing-history recovery and explicit recovery call this method.
-    pub async fn reload_from_snapshots(&mut self) -> Result<Vec<DamagedObject>, SyncError> {
+    /// A snapshot that fails its checks is its own pending record and is
+    /// passed over for the next latest, or the logs (§19.1).
+    pub async fn reload_from_snapshots(&mut self) -> Result<(), SyncError> {
         let _reads = self.reads.enter();
-        let mut damages = self.resume_snapshots().await?;
+        self.resume_snapshots().await?;
         let record = self
             .start_snapshot_task(SnapshotJob::Reload {
                 scope: crate::snapshot_data::ReloadScope::All,
                 files: None,
             })
             .await?;
-        self.drive_snapshot(record.id, &mut damages).await?;
-        Ok(damages)
+        self.drive_snapshot(record.id).await?;
+        Ok(())
     }
 
     /// Delete covered logs, this device's superseded snapshots, and eligible
     /// unreferenced uploaded files under §§15 and 16.5. No timer is installed.
     pub async fn run_retention(&mut self) -> Result<(), SyncError> {
         let _reads = self.reads.enter();
-        let mut damages = self.resume_snapshots().await?;
+        self.resume_snapshots().await?;
         let record = self.start_snapshot_task(SnapshotJob::Retain).await?;
-        self.drive_snapshot(record.id, &mut damages).await?;
+        self.drive_snapshot(record.id).await?;
         Ok(())
     }
 
@@ -126,7 +128,7 @@ impl StoreLogSync {
                 session: None,
             })
             .await?;
-        if !self.drive_snapshot(record.id, &mut Vec::new()).await? {
+        if !self.drive_snapshot(record.id).await? {
             let pending = self
                 .database
                 .operation_pending::<crate::PendingRecord>(record.id)
@@ -169,9 +171,8 @@ impl StoreLogSync {
         self.snapshot_record(id).await
     }
 
-    pub(super) async fn resume_snapshots(&mut self) -> Result<Vec<DamagedObject>, SyncError> {
+    pub(super) async fn resume_snapshots(&mut self) -> Result<(), SyncError> {
         let _reads = self.reads.enter();
-        let mut damages = Vec::new();
         loop {
             let mut work = Vec::new();
             for record in self.database.operations().await? {
@@ -209,13 +210,12 @@ impl StoreLogSync {
                 {
                     continue;
                 }
-                advanced |= self.drive_snapshot(record.id, &mut damages).await?;
+                advanced |= self.drive_snapshot(record.id).await?;
             }
             if !advanced {
-                break;
+                return Ok(());
             }
         }
-        Ok(damages)
     }
 
     pub(crate) async fn pending_reload(&self) -> Result<Option<crate::OperationId>, SyncError> {
@@ -252,11 +252,7 @@ impl StoreLogSync {
             .ok_or_else(|| coven_database::DbError::OperationChanged(id).into())
     }
 
-    async fn drive_snapshot(
-        &mut self,
-        id: crate::OperationId,
-        damages: &mut Vec<DamagedObject>,
-    ) -> Result<bool, SyncError> {
+    async fn drive_snapshot(&mut self, id: crate::OperationId) -> Result<bool, SyncError> {
         loop {
             let record = self.snapshot_record(id).await?;
             if !self.operation_can_retry(&record).await? {
@@ -271,7 +267,7 @@ impl StoreLogSync {
             let Data::Snapshots(task) = data else {
                 return Err(coven_database::DbError::DamagedDatabase.into());
             };
-            let progress = match self.snapshot_step(&record, task, damages).await {
+            let progress = match self.snapshot_step(&record, task).await {
                 Ok(progress) => progress,
                 Err(error) => {
                     self.record_operation_error(&record, &error).await?;
@@ -294,15 +290,14 @@ impl StoreLogSync {
         &mut self,
         record: &OperationRecord,
         mut task: SnapshotTask,
-        damages: &mut Vec<DamagedObject>,
     ) -> Result<Progress, SyncError> {
         let _reads = self.reads.enter();
         match &task.job {
-            SnapshotJob::Write { .. } => self.write_snapshot_step(record, task, damages).await,
-            SnapshotJob::Reload { .. } => self.reload_snapshot_step(record, task, damages).await,
+            SnapshotJob::Write { .. } => self.write_snapshot_step(record, task).await,
+            SnapshotJob::Reload { .. } => self.reload_snapshot_step(record, task).await,
             SnapshotJob::Retain => {
                 self.clear_snapshot_files(record, &mut task).await?;
-                self.retain_snapshot_objects(damages).await?;
+                self.retain_snapshot_objects().await?;
                 self.database.finish_operation(record.id).await?;
                 Ok(Progress::Finished(Output::Unit))
             }
@@ -313,7 +308,6 @@ impl StoreLogSync {
         &mut self,
         record: &OperationRecord,
         task: SnapshotTask,
-        damages: &mut Vec<DamagedObject>,
     ) -> Result<Progress, SyncError> {
         let SnapshotJob::Write {
             audience,
@@ -363,11 +357,11 @@ impl StoreLogSync {
         }
         match record.last_step {
             0 => {
-                self.prepare_snapshot(record, task, &path, &local.log, &member, damages)
+                self.prepare_snapshot(record, task, &path, &local.log, &member)
                     .await
             }
             1 => self.upload_snapshot(record, task, &path).await,
-            2 => self.finish_snapshot(record, task, id, damages).await,
+            2 => self.finish_snapshot(record, task, id).await,
             _ => Err(coven_database::DbError::DamagedDatabase.into()),
         }
     }
@@ -379,7 +373,6 @@ impl StoreLogSync {
         path: &ObjectPath,
         log: &StoreLog,
         member: &coven_crypto::MemberKeys,
-        damages: &mut Vec<DamagedObject>,
     ) -> Result<Progress, SyncError> {
         let id = path.snapshot_id().expect("snapshot path");
         self.clear_snapshot_files(record, &mut task).await?;
@@ -389,7 +382,7 @@ impl StoreLogSync {
                 trigger: SnapshotTrigger::Growth,
                 ..
             }
-        ) && !self.snapshot_grew(&id.audience, log, damages).await?
+        ) && !self.snapshot_grew(&id.audience, log).await?
         {
             self.database.finish_operation(record.id).await?;
             return Ok(Progress::Finished(Output::Unit));
@@ -454,15 +447,8 @@ impl StoreLogSync {
         Ok(coven_format::value::StorageTime::from_system_time(sample)?)
     }
 
-    async fn snapshot_grew(
-        &self,
-        audience: &Audience,
-        log: &StoreLog,
-        damages: &mut Vec<DamagedObject>,
-    ) -> Result<bool, SyncError> {
-        let candidates = self
-            .current_snapshot_candidates(audience, log, damages)
-            .await?;
+    async fn snapshot_grew(&self, audience: &Audience, log: &StoreLog) -> Result<bool, SyncError> {
+        let candidates = self.current_snapshot_candidates(audience, log).await?;
         let (positions, threshold) = match candidates.candidates.first() {
             Some(latest) => (
                 latest.prefix.writes.clone(),
@@ -580,7 +566,6 @@ impl StoreLogSync {
         record: &OperationRecord,
         mut task: SnapshotTask,
         id: SnapshotId,
-        damages: &mut Vec<DamagedObject>,
     ) -> Result<Progress, SyncError> {
         if matches!(
             task.job,
@@ -599,7 +584,7 @@ impl StoreLogSync {
                 .await?;
             return Ok(Progress::Advanced);
         }
-        self.retain_snapshot_objects(damages).await?;
+        self.retain_snapshot_objects().await?;
         self.clear_snapshot_files(record, &mut task).await?;
         self.database.finish_operation(record.id).await?;
         Ok(Progress::Finished(Output::Unit))

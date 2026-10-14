@@ -292,3 +292,93 @@ async fn a_file_named_only_by_a_retained_log_write_stays_until_that_log_goes() {
         .is_empty());
     files.close().await;
 }
+
+#[tokio::test]
+async fn a_snapshot_keeps_its_key_when_a_removal_is_dropped() {
+    let storage = snapshot_storage();
+    let mut a = notes_device(storage.clone(), 1).await;
+    a.create(key(1)).await;
+    let mut b = device(storage.clone(), 2, member(2), store(1)).await;
+    b.reopen(storage.clone(), notes_tables(), notes_migrations())
+        .await;
+    let mut c = device(storage.clone(), 3, member(3), store(1)).await;
+    a.add(&b.member, MemberRole::Admin).await;
+    a.add(&c.member, MemberRole::Member).await;
+    add_device(&mut b).await;
+    // Carol's device is registered, so others discover its key copies.
+    add_device(&mut c).await;
+    a.sync().await;
+    // Ben receives Carol's registration, which Ana's write has read.
+    b.sync().await;
+    write_rows(&a, 0, 1, 17, Audience::Store).await;
+    assert_eq!(
+        b.db.apply_downloaded(a.db.test_queued_writes().await.unwrap().remove(0).into())
+            .await
+            .unwrap(),
+        coven_database::ApplyOutcome::Applied
+    );
+    a.sync.write_snapshot(Audience::Store).await.unwrap();
+    write_rows(&b, 1, 1, 17, Audience::Store).await;
+    let write = b.db.test_queued_writes().await.unwrap()[0].header.position;
+    upload(&b, &storage).await;
+    // Ben's write is gone, as retention may delete it once his snapshot below
+    // covers it: two covered writes against Ana's one make that snapshot the
+    // current newest, which deletion requires (§15).
+    let path = ObjectPath::device_log(
+        store(1),
+        write.device,
+        NonZeroU64::new(write.number).unwrap(),
+    );
+    storage.delete(&path).await.unwrap();
+    b.clock.set(UNIX_EPOCH + Duration::from_secs(3));
+    b.sync
+        .make_and_upload_entry(StoreChange::RemoveMember {
+            member: a.member.member_id(),
+        })
+        .await
+        .unwrap();
+    // In Ben's view Ana is out, so his snapshot first rotates the store key,
+    // sealing the replacement to himself and Carol only (§11).
+    let selected = b.sync.write_snapshot(Audience::Store).await.unwrap();
+    let replacement = b.newest(Audience::Store).await;
+    assert_ne!(replacement, key(1));
+    assert!(find_copy(
+        storage.as_ref(),
+        Audience::Store,
+        replacement,
+        &a.member.member_id()
+    )
+    .await
+    .is_none());
+    a.clock.set(UNIX_EPOCH + Duration::from_secs(2));
+    a.sync
+        .make_and_upload_entry(StoreChange::RemoveMember {
+            member: b.member.member_id(),
+        })
+        .await
+        .unwrap();
+    // Ana's earlier removal wins. Carol holds the replacement and shares it
+    // with Ana, now a current member who lacks it; the snapshot stays readable.
+    c.sync().await;
+    assert!(find_copy(
+        storage.as_ref(),
+        Audience::Store,
+        replacement,
+        &a.member.member_id()
+    )
+    .await
+    .is_some());
+    a.sync().await;
+    let ring = a.custody.read().unwrap().unwrap();
+    assert!(ring.store_key(replacement).is_ok());
+    // Ben's rotation was authorized in his view, so its key stays a readable
+    // snapshot key for Ana after his removal of her drops (§11).
+    assert!(crate::key_introductions::needed(&a.log().await)
+        .contains_key(&(Audience::Store, replacement)));
+    a.sync.reload_from_snapshots().await.unwrap();
+    assert_eq!(
+        selected_snapshot(&mut a).await.snapshot_id(),
+        Some(selected)
+    );
+    assert_eq!(tables(&a).await, tables(&b).await);
+}

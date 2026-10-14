@@ -6,7 +6,7 @@ use crate::{
     operations::{Output, Progress},
     replay_cache::ReplayCache,
     snapshot_data::*,
-    DamagedObject, SyncError,
+    SyncError,
 };
 use coven_database::{
     DownloadedPartStream, DownloadedWriteStream, OperationRecord, SnapshotReload, SnapshotSource,
@@ -20,7 +20,6 @@ impl StoreLogSync {
         &self,
         record: &OperationRecord,
         mut task: SnapshotTask,
-        damages: &mut Vec<DamagedObject>,
     ) -> Result<Progress, SyncError> {
         match record.last_step {
             0 => {
@@ -81,9 +80,14 @@ impl StoreLogSync {
                 for audience in &audiences {
                     catalogs.push((
                         audience,
-                        self.current_snapshot_candidates(audience, &local.log, damages)
+                        self.current_snapshot_candidates(audience, &local.log)
                             .await?,
                     ));
+                }
+                // A newer snapshot may be the one to load: the reload waits
+                // for the update rather than choosing without it.
+                if let Some(update) = catalogs.iter().find_map(|(_, catalog)| catalog.update) {
+                    return Err(SyncError::UpdateRequired(update));
                 }
                 let count = catalogs
                     .iter()
@@ -97,7 +101,7 @@ impl StoreLogSync {
                     super::include_positions(&mut highest, &candidates.required_positions.0);
                     let unreadable_prefix = candidates.unreadable_prefix;
                     match self
-                        .load_snapshot(candidates.candidates, &mut names, damages)
+                        .load_snapshot(candidates.candidates, &mut names)
                         .await?
                     {
                         Some(snapshot) => files.snapshots.push(snapshot),

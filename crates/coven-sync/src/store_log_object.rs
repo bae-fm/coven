@@ -223,21 +223,33 @@ pub(crate) fn ready(
     Ok(true)
 }
 
+/// The first entry of `entry`'s recorded past that `applied` lacks, in the
+/// order readiness checks them: its own log's previous entry, then each
+/// entry it read. It is the entry's causal wait (§19.1).
+pub(crate) fn first_missing(
+    entry: &StoreLogEntry,
+    applied: impl Fn(EntryId) -> bool,
+) -> Option<EntryId> {
+    let previous = (entry.position.number > 1).then(|| EntryId {
+        number: entry.position.number - 1,
+        ..entry.position
+    });
+    previous
+        .into_iter()
+        .chain(entry.had_read.0.iter().copied())
+        .find(|id| !applied(*id))
+}
+
 pub(crate) fn causally_ready(
     entries: &[coven_database::ReplayEntry],
     entry: &StoreLogEntry,
     store: StoreId,
 ) -> Result<bool, Refusal> {
-    let contains = |id: EntryId| entries.iter().any(|prior| prior.entry.position == id);
-    if entry.position.number > 1
-        && !contains(EntryId {
-            number: entry.position.number - 1,
-            ..entry.position
-        })
+    if first_missing(entry, |id| {
+        entries.iter().any(|prior| prior.entry.position == id)
+    })
+    .is_some()
     {
-        return Ok(false);
-    }
-    if entry.had_read.0.iter().any(|id| !contains(*id)) {
         return Ok(false);
     }
     if let StoreChange::CreateStore { store: id, .. } = &entry.change {

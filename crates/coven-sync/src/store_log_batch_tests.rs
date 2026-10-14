@@ -264,3 +264,141 @@ async fn intermediate_removal_cannot_stop_the_owner_before_batch_replay() {
     assert!(!log.replay.state.members[&ana.member.member_id()].removed);
     assert!(log.replay.state.members[&ben.member.member_id()].removed);
 }
+
+mod waits {
+    //! A received entry that cannot apply yet is its own subject's record,
+    //! replaced by each scan and ended when it applies (§19.1).
+    use crate::store_log_object as object;
+    use crate::store_log_sync::tests::{device, find_copy, key, member, storage, store, Device};
+    use crate::{PendingReason, PendingRecord, PendingSubject, Prerequisite};
+    use coven_format::store_log::{MemberRole, StoreChange};
+    use coven_format::value::EntryId;
+    use coven_foundation::id_source::DeviceId;
+    use coven_merge::Audience;
+    use coven_storage::Storage;
+
+    async fn entry_records(device: &Device) -> Vec<(EntryId, PendingReason)> {
+        let own = device.db.local_store_log().await.unwrap().device;
+        device
+            .db
+            .pending::<PendingRecord>()
+            .await
+            .unwrap()
+            .into_iter()
+            .filter_map(|record| match record.subject {
+                PendingSubject::Entry(id) if record.reported_by == own => Some((id, record.reason)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn add_device(number: u64) -> StoreChange {
+        StoreChange::AddDevice {
+            device: DeviceId(number),
+            name: number.to_string(),
+            replaces: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn an_entry_without_its_key_waits_for_it_until_the_copy_arrives() {
+        let storage = storage();
+        let mut ana = device(storage.clone(), 1, member(1), store(1)).await;
+        let mut ben = device(storage.clone(), 2, member(2), store(1)).await;
+        ana.create(key(1)).await;
+        ana.add(&ben.member, MemberRole::Member).await;
+        ben.sync().await;
+        ana.sync.test_rotate(Audience::Store, key(3)).await;
+        let sealed = ana
+            .sync
+            .make_and_upload_entry(add_device(20))
+            .await
+            .unwrap();
+        let later = ana
+            .sync
+            .make_and_upload_entry(add_device(21))
+            .await
+            .unwrap();
+        let copy = find_copy(
+            storage.as_ref(),
+            Audience::Store,
+            key(3),
+            &ben.member.member_id(),
+        )
+        .await
+        .unwrap()
+        .path;
+        let bytes = storage.read(&copy).await.unwrap();
+        storage.delete(&copy).await.unwrap();
+        ben.sync().await;
+        // The first entry sealed with the missing key waits for it; the
+        // later one waits behind it in its log and has no record of its own.
+        assert!(!ben.log().await.replay.entries.contains_key(&sealed));
+        assert_eq!(
+            entry_records(&ben).await,
+            [(
+                sealed,
+                PendingReason::KeyUnavailable {
+                    audience: Audience::Store,
+                    key: key(3),
+                }
+            )]
+        );
+        // An unchanged scan keeps the same record.
+        ben.sync().await;
+        assert_eq!(entry_records(&ben).await.len(), 1);
+        storage.create(&copy, &bytes).await.unwrap();
+        ben.sync().await;
+        assert!(ben.log().await.replay.entries.contains_key(&later));
+        assert!(entry_records(&ben).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_entry_waits_for_the_first_unapplied_entry_of_its_past() {
+        let storage = storage();
+        let mut a = device(storage.clone(), 1, member(1), store(1)).await;
+        let mut b = device(storage.clone(), 2, member(1), store(1)).await;
+        a.create(key(1)).await;
+        let read = a.sync.make_and_upload_entry(add_device(20)).await.unwrap();
+        b.sync().await;
+        b.sync.load_new_device("second").await.unwrap();
+        let later = b.sync.make_and_upload_entry(add_device(21)).await.unwrap();
+        let own = EntryId {
+            device: later.device,
+            number: 1,
+        };
+        let missing = object::path(store(1), read);
+        let bytes = storage.read(&missing).await.unwrap();
+        storage.delete(&missing).await.unwrap();
+        let mut c = device(storage.clone(), 3, member(1), store(1)).await;
+        c.sync().await;
+        // Its device's first entry read the missing one; the later entry
+        // waits first for its own log's previous entry (§19.1).
+        let mut records = entry_records(&c).await;
+        records.sort_by_key(|(id, _)| (id.device, id.number));
+        let mut expected = vec![(
+            own,
+            PendingReason::Waits(Prerequisite::Object(missing.clone())),
+        )];
+        for number in 2..=later.number {
+            expected.push((
+                EntryId {
+                    device: later.device,
+                    number,
+                },
+                PendingReason::Waits(Prerequisite::Object(object::path(
+                    store(1),
+                    EntryId {
+                        device: later.device,
+                        number: number - 1,
+                    },
+                ))),
+            ));
+        }
+        assert_eq!(records, expected);
+        storage.create(&missing, &bytes).await.unwrap();
+        c.sync().await;
+        assert!(entry_records(&c).await.is_empty());
+        assert_eq!(c.log().await, b.log().await);
+    }
+}

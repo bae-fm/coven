@@ -226,3 +226,71 @@ async fn a_copy_to_another_sealing_key_of_this_member_is_skipped_unopened() {
     );
     assert!(ben.custody.read().unwrap().is_none());
 }
+
+#[tokio::test]
+async fn recovering_a_creation_from_a_refused_copy_is_that_copys_record() {
+    let storage = storage();
+    let mut ana = device(storage.clone(), 1, member(1), store(1)).await;
+    let entry = ObjectPath::store_log(
+        store(1),
+        coven_foundation::id_source::DeviceId(1),
+        1.try_into().unwrap(),
+    );
+    ana.sync.storage = Some(
+        crate::store_log_sync::tests::key_distribution::failing_creation(
+            storage.clone(),
+            entry,
+            false,
+        ),
+    );
+    let key_hash = ana.sync.test_key(Audience::Store, key(1));
+    assert!(matches!(
+        ana.sync
+            .make_and_upload_entry(StoreChange::CreateStore {
+                store: store(1),
+                name: "Store".into(),
+                admin: crate::store_log_sync::tests::public(&ana.member),
+                access: coven_format::MemberAccess::S3AccessKey {
+                    access_key_id: "owner".into(),
+                    principal: coven_format::S3Principal::Console,
+                },
+                device_name: "Ana".into(),
+                key: key(1),
+                key_hash,
+            })
+            .await,
+        Err(SyncError::Storage(_))
+    ));
+    // The only copy of the creation's key fails to open after a restart that
+    // lost the key from custody.
+    let copy = ObjectPath::key_copy(
+        store(1),
+        coven_foundation::id_source::DeviceId(1),
+        1.try_into().unwrap(),
+    );
+    let size = storage.read(&copy).await.unwrap().len();
+    storage.corrupt_byte(&copy, size - 1).await.unwrap();
+    ana.custody.forget().unwrap();
+    ana.restart(storage.clone()).await;
+    let error = ana.sync.sync_store_log().await.unwrap_err();
+    let SyncError::Pending(record) = error else {
+        panic!("recovery must name the refused key copy: {error:?}");
+    };
+    assert_eq!(
+        record.subject,
+        PendingSubject::KeyCopy {
+            audience: Audience::Store,
+            key: key(1),
+            member: ana.member.member_id(),
+        }
+    );
+    assert!(matches!(
+        record.reason,
+        PendingReason::Refused(Refusal::Decryption { .. })
+    ));
+    assert_eq!(
+        key_copy_record(&ana, Audience::Store, key(1)).await,
+        Some(record.reason)
+    );
+    assert!(ana.db.local_store_log().await.unwrap().upload.is_some());
+}

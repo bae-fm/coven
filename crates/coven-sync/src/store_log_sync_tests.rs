@@ -841,18 +841,56 @@ async fn only_newer_envelopes_require_an_update() {
             storage.create(&path, &bytes).await.unwrap();
             let mut b = device(storage.clone(), 2, member(1), store(1)).await;
             let result = b.sync.sync_store_log().await;
-            if version == 2 {
-                assert!(matches!(result, Err(SyncError::UpdateRequired(_))));
-            } else {
-                let damage = result.unwrap();
-                if sealed_key {
-                    assert_eq!(damage[0].path, path.as_str());
-                } else {
-                    assert!(damage.is_empty());
-                    assert_eq!(
-                        b.db.pending::<crate::PendingRecord>().await.unwrap()[0].subject,
-                        crate::PendingSubject::Entry(first)
+            let entry = |reason: &crate::PendingReason| crate::PendingRecord {
+                subject: crate::PendingSubject::Entry(first),
+                reason: reason.clone(),
+                reported_by: DeviceId(2),
+            };
+            let pending = b.db.pending::<crate::PendingRecord>().await.unwrap();
+            match (sealed_key, version) {
+                // A copy whose prefix cannot be read names no key copy subject.
+                (true, 2) => assert!(matches!(result, Err(SyncError::UpdateRequired(_)))),
+                (true, _) => {
+                    result.unwrap();
+                    // It leaves the copy reading incomplete; the creation waits
+                    // for its key.
+                    let reading = keys::read_copies(
+                        &b.db,
+                        &crate::pass_reads::PassReads::default(),
+                        std::num::NonZeroUsize::MIN,
+                        storage.as_ref(),
+                        store(1),
+                    )
+                    .await
+                    .unwrap();
+                    assert!(
+                        matches!(reading.unreadable, Some(damage) if damage.path == path.as_str())
                     );
+                    assert!(
+                        pending.contains(&entry(&crate::PendingReason::KeyUnavailable {
+                            audience: Audience::Store,
+                            key: key(1),
+                        }))
+                    );
+                }
+                // The entry itself waits for an update; the scan goes on.
+                (false, 2) => {
+                    result.unwrap();
+                    assert_eq!(
+                        pending,
+                        [entry(&crate::PendingReason::UpdateRequired(
+                            crate::RequiredUpdate::CovenFormat { version: 2 }
+                        ))]
+                    );
+                }
+                (false, _) => {
+                    result.unwrap();
+                    assert_eq!(pending.len(), 1);
+                    assert_eq!(pending[0].subject, crate::PendingSubject::Entry(first));
+                    assert!(matches!(
+                        pending[0].reason,
+                        crate::PendingReason::Refused(_)
+                    ));
                 }
             }
             assert!(b.log().await.entries.is_empty());
@@ -868,10 +906,14 @@ async fn only_newer_envelopes_require_an_update() {
             // the object is not downloaded again to look for another version.
             let before = storage.request_trace().len();
             let again = b.sync.sync_store_log().await;
-            if version == 2 {
+            if sealed_key && version == 2 {
                 assert!(matches!(again, Err(SyncError::UpdateRequired(_))));
             } else {
                 again.unwrap();
+                assert_eq!(
+                    b.db.pending::<crate::PendingRecord>().await.unwrap(),
+                    pending
+                );
             }
             assert!(!storage.request_trace()[before..]
                 .iter()
@@ -917,7 +959,7 @@ async fn changing_custody_cannot_change_a_devices_author() {
 mod objects;
 
 #[path = "store_log_keys_tests.rs"]
-mod key_distribution;
+pub(crate) mod key_distribution;
 
 #[path = "operations_tests.rs"]
 pub(crate) mod operations;

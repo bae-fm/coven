@@ -8,19 +8,17 @@ use coven_format::store_log::MemberRole;
 
 /// A fresh complete observation, as a new pass would make.
 async fn observed(device: &Device) -> Vec<keys::ObservedCopy> {
-    let mut damages = Vec::new();
-    let copies = keys::read_copies(
+    let reading = keys::read_copies(
         &device.db,
         &crate::pass_reads::PassReads::default(),
         std::num::NonZeroUsize::MIN,
         device.storage.as_ref(),
         store(1),
-        &mut damages,
     )
     .await
     .unwrap();
-    assert!(damages.is_empty(), "{damages:?}");
-    copies
+    assert!(reading.unreadable.is_none(), "{:?}", reading.unreadable);
+    reading.copies
 }
 
 async fn selected(device: &Device) -> Result<KeyId, SyncError> {
@@ -131,9 +129,13 @@ async fn an_incomplete_copy_observation_blocks_first_attempts() {
     let bad = coven_storage::ObjectPath::key_copy(store(1), writer, next.try_into().unwrap());
     let now = coven_foundation::clock::Clock::now(ana.clock.as_ref());
     ana.clock.set(now + std::time::Duration::from_secs(300));
-    let (damages, complete) = ana.sync.scan_store_log_once(true).await.unwrap();
-    assert!(complete);
-    assert!(damages.iter().any(|damage| damage.path == bad.as_str()));
+    // A catch-up that must be complete fails on that copy; a pass's scan
+    // completes but supplies no sending authority.
+    assert!(matches!(
+        ana.sync.scan_store_log_once(true).await,
+        Err(SyncError::Damaged(damage)) if damage.path == bad.as_str()
+    ));
+    assert!(ana.sync.scan_store_log_once(false).await.unwrap());
     assert!(matches!(
         ana.send.observation(),
         Err(SyncError::Storage(error)) if error.failure() == coven_storage::StorageFailure::CatchUpRequired

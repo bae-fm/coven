@@ -116,6 +116,17 @@ impl From<coven_format::Error> for Refusal {
     }
 }
 
+impl Refusal {
+    /// A parse failure from a newer format is no verdict on the bytes: it is
+    /// the update this version needs before it can check them (§19.1).
+    pub(crate) fn required_update(&self) -> Option<crate::RequiredUpdate> {
+        match self {
+            Self::Parse { cause: Some(error) } => crate::error::required_format(error.as_ref()),
+            _ => None,
+        }
+    }
+}
+
 // The format crate cannot depend on DbError's owning crate. Its wire
 // value represents exactly the same variants without process-local causes.
 impl From<&Refusal> for RefusalCode {

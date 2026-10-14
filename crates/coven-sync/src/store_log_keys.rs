@@ -259,15 +259,27 @@ pub(crate) struct ObservedCopy {
     pub bytes: Vec<u8>,
 }
 
+/// One reading of every writer's key-copy log: the copies whose clear prefix
+/// decodes, and the first object whose prefix does not. Without a prefix that
+/// object names no audience, key or recipient, so it is no key copy subject;
+/// it leaves the reading incomplete, so the catch-up supplies no sending
+/// authority (§11), while this member's readable copies still open.
+pub(crate) struct CopyReading {
+    pub(crate) copies: Vec<ObservedCopy>,
+    pub(crate) unreadable: Option<crate::DamagedObject>,
+}
+
 pub(crate) async fn read_copies(
     database: &coven_database::Database,
     reads: &crate::pass_reads::PassReads,
     limit: std::num::NonZeroUsize,
     storage: &dyn coven_storage::Storage,
     store: coven_foundation::id_source::StoreId,
-    damages: &mut Vec<crate::DamagedObject>,
-) -> Result<Vec<ObservedCopy>, SyncError> {
-    let mut copies = Vec::new();
+) -> Result<CopyReading, SyncError> {
+    let mut reading = CopyReading {
+        copies: Vec::new(),
+        unreadable: None,
+    };
     let writers = crate::discovery::writers(database, reads, storage, store).await?;
     for read in crate::discovery::scan(
         database,
@@ -283,17 +295,25 @@ pub(crate) async fn read_copies(
         let object = read.metadata;
         let bytes = read.bytes;
         match coven_format::sealed_key::SealedKey::decode(&bytes) {
-            Ok(sealed) => copies.push(ObservedCopy {
+            Ok(sealed) => reading.copies.push(ObservedCopy {
                 path: object.path,
                 prefix: sealed.prefix().clone(),
                 bytes,
             }),
             Err(error) => {
-                crate::StoreLogSync::damage(damages, &object.path, crate::Refusal::from(error))?
+                let failure = crate::Refusal::from(error);
+                if let Some(update) = failure.required_update() {
+                    return Err(SyncError::UpdateRequired(update));
+                }
+                tracing::warn!(path = object.path.as_str(), error = %failure, "key copy has no readable prefix");
+                reading.unreadable.get_or_insert(crate::DamagedObject {
+                    path: object.path.as_str().to_owned(),
+                    failure,
+                });
             }
         }
     }
-    Ok(copies)
+    Ok(reading)
 }
 
 /// Open this member's copy of a store key, trying each retained copy in writer/number order.
@@ -310,9 +330,11 @@ pub(crate) async fn read_store_key(
     expected: Option<&[u8; 32]>,
     member: &MemberKeys,
 ) -> Result<StoreKey, SyncError> {
-    let mut damages = Vec::new();
     let mut refused = None;
-    for copy in read_copies(database, reads, limit, storage, store, &mut damages).await? {
+    for copy in read_copies(database, reads, limit, storage, store)
+        .await?
+        .copies
+    {
         if copy.prefix.audience != Audience::Store
             || copy.prefix.key != key
             || !copy

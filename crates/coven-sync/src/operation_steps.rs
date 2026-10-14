@@ -33,7 +33,7 @@ impl StoreLogSync {
             return self.schema_publication_step(record, version).await;
         }
         if let Data::Snapshots(task) = data {
-            return self.snapshot_step(record, task, &mut Vec::new()).await;
+            return self.snapshot_step(record, task).await;
         }
         if matches!(data, Data::Invite(_)) {
             return self.invite_step(record, data).await;

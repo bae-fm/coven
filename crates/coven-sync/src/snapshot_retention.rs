@@ -1,10 +1,10 @@
 //! Deletion follows authenticated coverage, posted positions and ownership.
 
 use super::{
-    catalog::{inconsistent, snapshot_damage},
+    catalog::{failure, inconsistent},
     snapshot_path, StoreLogSync,
 };
-use crate::{DamagedObject, SyncError};
+use crate::SyncError;
 use coven_database::{EntryOutcome, StoreLog};
 use coven_format::{store_log::StoreChange, value::WritePositions};
 use coven_foundation::id_source::DeviceId;
@@ -15,10 +15,7 @@ use std::{
 };
 
 impl StoreLogSync {
-    pub(super) async fn retain_snapshot_objects(
-        &self,
-        damages: &mut Vec<DamagedObject>,
-    ) -> Result<(), SyncError> {
+    pub(super) async fn retain_snapshot_objects(&self) -> Result<(), SyncError> {
         let storage = self.storage.as_deref().ok_or(SyncError::NoStorage)?;
         let local = self.database.local_store_log().await?;
         self.check_stopped(&local, &self.operation_member()?)?;
@@ -63,7 +60,7 @@ impl StoreLogSync {
         }
         for audience in &readable {
             let candidates = self
-                .snapshot_candidates(audience, &local.log, damages)
+                .snapshot_candidates(audience, &local.log)
                 .await?
                 .candidates;
             let older: Vec<_> = candidates
@@ -116,6 +113,8 @@ impl StoreLogSync {
             let header = match self.open_write_header(&object).await {
                 Ok(header) => header,
                 Err(error) if waiting(&object.path, &error) => return Ok(()),
+                // Opening the header recorded a refusal as the write's own
+                // record; it stops that log here as well.
                 Err(error) => {
                     if let SyncError::Damaged(damage) = &error {
                         stuck.push(coven_database::LogRefusal {
@@ -123,7 +122,7 @@ impl StoreLogSync {
                             failure: (&damage.failure).into(),
                         });
                     }
-                    snapshot_damage(damages, &object.path, error)?;
+                    failure(&object.path, error)?;
                     continue;
                 }
             };
@@ -151,7 +150,7 @@ impl StoreLogSync {
         for path in superseded {
             storage.delete(&path).await?;
         }
-        self.retain_uploaded_files(damages).await
+        self.retain_uploaded_files().await
     }
 
     pub(super) fn can_delete_device(

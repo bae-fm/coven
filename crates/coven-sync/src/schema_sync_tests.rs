@@ -615,7 +615,7 @@ async fn a_newer_snapshot_format_stays_pending_until_the_required_update() {
         .unwrap();
     let path = ObjectPath::snapshot(
         STORE_ID,
-        id.audience,
+        id.audience.clone(),
         id.device,
         id.number.try_into().unwrap(),
     );
@@ -637,13 +637,15 @@ async fn a_newer_snapshot_format_stays_pending_until_the_required_update() {
         .pending::<crate::PendingRecord>()
         .await
         .unwrap();
-    assert!(matches!(
-        pending.as_slice(),
-        [crate::PendingRecord {
-            reason: crate::PendingReason::UpdateRequired(crate::RequiredUpdate::CovenFormat { .. }),
-            ..
-        }]
-    ));
+    // The snapshot's own record and the reload waiting on it both name the update.
+    assert_eq!(pending.len(), 2);
+    assert!(pending.iter().all(|record| matches!(
+        record.reason,
+        crate::PendingReason::UpdateRequired(crate::RequiredUpdate::CovenFormat { .. })
+    )));
+    assert!(pending
+        .iter()
+        .any(|record| record.subject == crate::PendingSubject::Snapshot(id.clone())));
     assert_eq!(devices[1].db.operations().await.unwrap().len(), 1);
 }
 

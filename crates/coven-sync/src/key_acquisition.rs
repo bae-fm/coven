@@ -41,7 +41,6 @@ impl StoreLogSync {
         log: &StoreLog,
         member: &MemberKeys,
         ring: &mut Option<StoreKeyring>,
-        damages: &mut Vec<DamagedObject>,
     ) -> Result<(), SyncError> {
         let copies = keys::read_copies(
             &self.database,
@@ -49,9 +48,9 @@ impl StoreLogSync {
             self.download_limit,
             self.storage.as_deref().ok_or(SyncError::NoStorage)?,
             self.directory.id(),
-            damages,
         )
-        .await?;
+        .await?
+        .copies;
         self.acquire_observed_keys(log, member, ring, &copies).await
     }
 
@@ -149,7 +148,6 @@ impl StoreLogSync {
         key: KeyId,
         member: &MemberKeys,
         ring: &mut Option<StoreKeyring>,
-        damages: &mut Vec<DamagedObject>,
     ) -> Result<EntryOpening, SyncError> {
         let held = |ring: &Option<StoreKeyring>| {
             ring.as_ref()
@@ -167,7 +165,7 @@ impl StoreLogSync {
             .iter()
             .any(|i| i.audience == Audience::Store && i.key == key)
         {
-            self.acquire(&Audience::Store, key, &introductions, member, ring, damages)
+            self.acquire(&Audience::Store, key, &introductions, member, ring)
                 .await?
         } else {
             let scanned = scanned
@@ -177,7 +175,7 @@ impl StoreLogSync {
                     _ => None,
                 });
             match self
-                .confirm_tentative(envelope, path, key, scanned, member, ring, damages)
+                .confirm_tentative(envelope, path, key, scanned, member, ring)
                 .await?
             {
                 Tentative::Confirmed => None,
@@ -203,7 +201,6 @@ impl StoreLogSync {
         scanned: Option<[u8; 32]>,
         member: &MemberKeys,
         ring: &mut Option<StoreKeyring>,
-        damages: &mut Vec<DamagedObject>,
     ) -> Result<Tentative, SyncError> {
         let storage = self.storage.as_deref().ok_or(SyncError::NoStorage)?;
         let mut refusal = None;
@@ -213,9 +210,9 @@ impl StoreLogSync {
             self.download_limit,
             storage,
             self.directory.id(),
-            damages,
         )
         .await?
+        .copies
         {
             if copy.prefix.audience != Audience::Store
                 || copy.prefix.key != key
@@ -290,13 +287,15 @@ impl StoreLogSync {
         )))
     }
 
-    async fn record_key_condition(
+    /// Make `condition` this member's record for one key copy, or end it.
+    /// Returns the record now held.
+    pub(super) async fn record_key_condition(
         &self,
         audience: &Audience,
         key: KeyId,
         member: &MemberKeys,
         condition: Option<PendingReason>,
-    ) -> Result<(), SyncError> {
+    ) -> Result<Option<PendingRecord>, SyncError> {
         let subject = PendingSubject::KeyCopy {
             audience: audience.clone(),
             key,
@@ -309,20 +308,21 @@ impl StoreLogSync {
             .await?
             .into_iter()
             .find(|record| record.subject == subject && record.reported_by == own);
-        match condition {
-            None if recorded.is_some() => self.database.clear_pending(subject).await?,
-            Some(reason) if recorded.is_none_or(|record| record.reason != reason) => {
-                self.database
-                    .record_pending(PendingRecord {
-                        subject,
-                        reason,
-                        reported_by: own,
-                    })
-                    .await?
+        let Some(reason) = condition else {
+            if recorded.is_some() {
+                self.database.clear_pending(subject).await?;
             }
-            _ => (),
+            return Ok(None);
+        };
+        let record = PendingRecord {
+            subject,
+            reason,
+            reported_by: own,
+        };
+        if recorded.as_ref() != Some(&record) {
+            self.database.record_pending(record.clone()).await?;
         }
-        Ok(())
+        Ok(Some(record))
     }
 
     /// Open this member's retained copies of one key in writer/number order. A copy that fails
@@ -336,7 +336,6 @@ impl StoreLogSync {
         introductions: &[Introduction],
         member: &MemberKeys,
         ring: &mut Option<StoreKeyring>,
-        damages: &mut Vec<DamagedObject>,
     ) -> Result<Option<PendingReason>, SyncError> {
         let copies = keys::read_copies(
             &self.database,
@@ -344,9 +343,9 @@ impl StoreLogSync {
             self.download_limit,
             self.storage.as_deref().ok_or(SyncError::NoStorage)?,
             self.directory.id(),
-            damages,
         )
-        .await?;
+        .await?
+        .copies;
         self.acquire_copies(audience, key, introductions, member, ring, &copies)
     }
 

@@ -644,7 +644,7 @@ async fn damaged_entries_block_only_their_device_and_retain_each_cause() {
         }
         storage.delete(&path).await.unwrap();
         storage.create(&path, &bytes).await.unwrap();
-        assert!(c.sync.step().await.unwrap().is_empty());
+        c.sync.step().await.unwrap();
         let record = LogRefusal {
             object: LogObject::Entry(broken),
             failure: match damage {
@@ -811,7 +811,7 @@ async fn invalid_causal_past_and_timestamps_are_damaged() {
         }
         storage.create(&path, &bytes).await.unwrap();
         let c = device(storage.clone(), 3, member(1), store(1)).await;
-        assert!(c.sync.step().await.unwrap().is_empty());
+        c.sync.step().await.unwrap();
         let records = c.db.pending::<crate::PendingRecord>().await.unwrap();
         assert_eq!(records.len(), 1);
         assert_eq!(
@@ -892,7 +892,7 @@ async fn an_entry_that_cannot_be_read_after_listing_is_not_a_permanent_judgment(
         };
         let (result, ()) = tokio::join!(b.sync.step(), interrupt);
         if missing {
-            assert!(result.unwrap().is_empty());
+            result.unwrap();
         } else {
             assert!(matches!(result, Err(SyncError::Storage(_))));
         }

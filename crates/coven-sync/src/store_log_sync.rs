@@ -128,14 +128,13 @@ impl StoreLogSync {
     }
 
     /// Publish entries, replay downloads, acquire keys and resume snapshot work.
-    /// A missing dependency or sealed copy waits solely in storage for a later call.
-    /// Returns skipped damage so connecting storage can reject incomplete key setup.
-    pub async fn sync_store_log(&mut self) -> Result<Vec<DamagedObject>, SyncError> {
+    /// A missing dependency or sealed copy waits solely in storage for a later
+    /// call; each waiting or refused object is its own subject's pending record.
+    pub async fn sync_store_log(&mut self) -> Result<(), SyncError> {
         let _reads = self.reads.enter();
-        let mut damages = self.step().await?;
+        self.step().await?;
         self.schedule_version_changes().await?;
-        damages.extend(self.resume_snapshots().await?);
-        Ok(damages)
+        self.resume_snapshots().await
     }
 
     /// Fix and publish a new entry. Existing queued entries go first. The change's
@@ -206,30 +205,32 @@ impl StoreLogSync {
         Ok(id)
     }
 
+    /// A complete catch-up: every received entry applied and this pass's
+    /// key-copy observation complete (§11).
     async fn catch_up(&self) -> Result<(), SyncError> {
-        let damages = self.scan_store_log(true).await?;
-        if let Some(damage) = damages.into_iter().next() {
-            return Err(damage.into());
-        }
-        Ok(())
+        self.scan_store_log(true).await
     }
 
-    async fn step(&self) -> Result<Vec<DamagedObject>, SyncError> {
+    async fn step(&self) -> Result<(), SyncError> {
         self.scan_store_log(false).await
     }
 
+    /// Settle an entry whose complete bytes failed a check. A newer format is
+    /// not a verdict: it is returned as the entry's wait for that update, and
+    /// its log stops there as it would at a refusal (§19.1).
     async fn stuck_entry(
         &self,
         entry: EntryId,
         path: &ObjectPath,
         failure: Refusal,
-    ) -> Result<(), SyncError> {
-        if let Refusal::Parse { cause: Some(error) } = &failure {
-            if crate::error::newer_format(error.as_ref()) {
-                return Err(SyncError::UpdateRequired(
-                    crate::error::required_format(error.as_ref()).expect("newer format"),
-                ));
-            }
+    ) -> Result<Option<crate::PendingReason>, SyncError> {
+        if let Some(update) = failure.required_update() {
+            tracing::debug!(
+                path = path.as_str(),
+                ?update,
+                "store-log entry needs a newer coven"
+            );
+            return Ok(Some(crate::PendingReason::UpdateRequired(update)));
         }
         crate::pending_logs::record_refusal(
             &self.database,
@@ -240,7 +241,7 @@ impl StoreLogSync {
         )
         .await?;
         tracing::warn!(path = path.as_str(), error = %failure, "store log is stuck");
-        Ok(())
+        Ok(None)
     }
 
     fn check_stopped(&self, local: &LocalStoreLog, member: &MemberKeys) -> Result<(), SyncError> {
@@ -335,7 +336,10 @@ impl StoreLogSync {
                 if upload.sealing.keys.is_empty()
                     && !keys::holds(ring.as_ref(), &Audience::Store, upload.sealing.key)
                 {
-                    let key = keys::read_store_key(
+                    // Recovering an unpublished creation needs this member's
+                    // copy of its key: a missing or refused copy is that key
+                    // copy's record and fails publication loudly (§19.1).
+                    let key = match keys::read_store_key(
                         &self.database,
                         &self.reads,
                         self.download_limit,
@@ -345,7 +349,34 @@ impl StoreLogSync {
                         Some(key_hash),
                         member,
                     )
-                    .await?;
+                    .await
+                    {
+                        Ok(key) => key,
+                        Err(error) => {
+                            let reason = match &error {
+                                SyncError::Damaged(damage) => {
+                                    crate::PendingReason::Refused(damage.failure.clone())
+                                }
+                                SyncError::KeyUnavailable(key) => {
+                                    crate::PendingReason::KeyUnavailable {
+                                        audience: Audience::Store,
+                                        key: *key,
+                                    }
+                                }
+                                _ => return Err(error),
+                            };
+                            let record = self
+                                .record_key_condition(
+                                    &Audience::Store,
+                                    upload.sealing.key,
+                                    member,
+                                    Some(reason),
+                                )
+                                .await?
+                                .expect("a recorded condition");
+                            return Err(SyncError::Pending(Box::new(record)));
+                        }
+                    };
                     match ring {
                         Some(ring) => ring.insert_store_key(key)?,
                         None => *ring = Some(StoreKeyring::new(key)),
@@ -513,6 +544,9 @@ impl StoreLogSync {
             .await
     }
 
+    /// Record this pass's key-copy reading for its senders, then share every
+    /// historical key a current audience member lacks. An incomplete reading
+    /// is recorded as such; it blocks the work that needs a complete one.
     async fn share_keys(
         &self,
         log: &StoreLog,
@@ -595,28 +629,6 @@ impl StoreLogSync {
             }
             Err(error) => Err(error.into()),
         }
-    }
-
-    pub(crate) fn damage(
-        damages: &mut Vec<DamagedObject>,
-        path: &ObjectPath,
-        failure: Refusal,
-    ) -> Result<(), SyncError> {
-        if let Refusal::Parse { cause: Some(error) } = &failure {
-            if crate::error::newer_format(error.as_ref()) {
-                return Err(SyncError::UpdateRequired(
-                    crate::error::required_format(error.as_ref()).expect("newer format"),
-                ));
-            }
-        }
-        tracing::warn!(path = path.as_str(), error = %failure, "retained object failed validation");
-        if !damages.iter().any(|object| object.path == path.as_str()) {
-            damages.push(DamagedObject {
-                path: path.as_str().to_owned(),
-                failure,
-            });
-        }
-        Ok(())
     }
 }
 

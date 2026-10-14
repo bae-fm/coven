@@ -63,12 +63,14 @@ impl StoreLogSync {
             .clock()
             .expect("observed storage time");
         let state = self.database.sync_state(Vec::new()).await?;
-        let mut damages = Vec::new();
         let mut advances = false;
         for audience in self.snapshot_audiences(&local.log)? {
             let catalog = self
-                .current_snapshot_candidates(&audience, &local.log, &mut damages)
+                .current_snapshot_candidates(&audience, &local.log)
                 .await?;
+            if let Some(update) = catalog.update {
+                return Err(SyncError::UpdateRequired(update));
+            }
             advances |= catalog
                 .required_positions
                 .0

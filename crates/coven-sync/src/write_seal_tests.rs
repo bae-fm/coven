@@ -696,10 +696,10 @@ async fn reversed_removal_parts(
             std::num::NonZeroUsize::MIN,
             storage.as_ref(),
             STORE_ID,
-            &mut Vec::new()
         )
         .await
         .unwrap()
+        .copies
     ));
     if ben_reads_before_copy {
         ben.sync.sync_store_log().await.unwrap();
@@ -745,10 +745,10 @@ async fn reversed_removal_parts(
             std::num::NonZeroUsize::MIN,
             storage.as_ref(),
             STORE_ID,
-            &mut Vec::new()
         )
         .await
         .unwrap()
+        .copies
     ));
     assert!(matches!(
         carol.db.store_log().await.unwrap().replay.entries[&dropped],

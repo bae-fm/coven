@@ -139,6 +139,12 @@ async fn data_differential_pending_records() {
             number,
         })
     };
+    let entry = |device, number| {
+        PendingSubject::Entry(coven_format::value::EntryId {
+            device: DeviceId(device),
+            number,
+        })
+    };
     let circle = Audience::Circle(coven_foundation::id_source::CircleId(
         uuid::Uuid::from_u128(1),
     ));
@@ -155,6 +161,18 @@ async fn data_differential_pending_records() {
         (write(1, 1), json!(["write", 1, 1])),
         (write(1, 2), json!(["write", 1, 2])),
         (write(8, 1), json!(["write", 8, 1])),
+        // The model names an entry by one number; these distinct Rust
+        // identities map to distinct model numbers.
+        (entry(1, 4), json!(["entry", 1004])),
+        (entry(3, 1), json!(["entry", 3001])),
+        (
+            PendingSubject::KeyCopy {
+                audience: Audience::Store,
+                key: KeyId(uuid::Uuid::from_u128(5)),
+                member: crate::store_log_sync::tests::member(2).member_id(),
+            },
+            json!(["keyCopy", 0, 5, 2]),
+        ),
         (
             PendingSubject::Positions(DeviceId(3)),
             json!(["positions", 3]),
