@@ -67,6 +67,16 @@ pub(crate) fn create_tables(database: &DatabaseConnection) -> Result<(), DbError
     Ok(())
 }
 
+/// A generated cell keeps the value its write computed, which can differ from
+/// the value SQLite computes from the merged inputs (§8), so a snapshot's
+/// generated values are checked against their cells rather than recomputed.
+fn generated(table: &crate::schema::TableSchema, name: &str) -> bool {
+    table
+        .columns
+        .iter()
+        .any(|column| column.generated && column.name == name)
+}
+
 pub(crate) fn synced(
     database: &DatabaseConnection,
     schema: &WriteSchema,
@@ -85,7 +95,7 @@ pub(crate) fn synced(
     let evaluated = crate::removal_sql::evaluate_values(database, table, &values)?;
     if values
         .iter()
-        .any(|(name, value)| evaluated.get(name) != Some(value))
+        .any(|(name, value)| !generated(table, name) && evaluated.get(name) != Some(value))
         || (!additions && values.len() != evaluated.len())
         || crate::write_rows::row_key(table, &evaluated)? != row.row.key
     {
@@ -163,10 +173,9 @@ pub(crate) fn merged(
             .map(|(name, cell)| (name.clone(), cell.value.value.clone()))
             .collect();
         let evaluated = crate::removal_sql::evaluate_values(database, table, &raw)?;
-        if synced
-            .iter()
-            .any(|(name, value)| evaluated.get(name) != Some(&value.value))
-        {
+        if synced.iter().any(|(name, value)| {
+            !generated(table, name) && evaluated.get(name) != Some(&value.value)
+        }) {
             return Err(invalid("synced values disagree with merge defaults"));
         }
         database.internal_execute(

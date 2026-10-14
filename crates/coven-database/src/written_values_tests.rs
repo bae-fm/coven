@@ -477,6 +477,22 @@ async fn generated_cells_lose_their_written_values_in_every_arrival_order() {
         for outcome in &outcomes[1..] {
             assert_eq!(outcome, &outcomes[0], "{case}");
         }
-        origin.close().await.unwrap();
+        // A snapshot taken while the generated cell shows a value no write set
+        // carries the written one, and the loaded copy loses it the same way.
+        let source_store = TestStore::with_ids(&ids);
+        let source = open(&source_store, 10).await.unwrap();
+        let target_store = TestStore::with_ids(&ids);
+        let target = open(&target_store, 10).await.unwrap();
+        for write in [&initial, &writes[0], &writes[1]] {
+            source.receive(write.clone().into()).await.unwrap();
+        }
+        crate::snapshot_write::tests::assert_loaded_losses(&source, &target).await;
+        for db in [&source, &target] {
+            db.receive(writes[2].clone().into()).await.unwrap();
+        }
+        crate::snapshot_write::tests::assert_loaded_losses(&source, &target).await;
+        for db in [source, target, origin] {
+            db.close().await.unwrap();
+        }
     }
 }
