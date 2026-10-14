@@ -59,11 +59,6 @@ pub(crate) const POLICY: Policy = Policy {
         (
             "crates/coven-database/src/database.rs",
             "Database",
-            "finish_recovery",
-        ),
-        (
-            "crates/coven-database/src/database.rs",
-            "Database",
             "write_with_files",
         ),
         (
@@ -100,16 +95,6 @@ pub(crate) const POLICY: Policy = Policy {
             "crates/coven-database/src/database_builder.rs",
             "DatabaseBuilder",
             "open_read_only",
-        ),
-        (
-            "crates/coven-database/src/database_builder.rs",
-            "DatabaseBuilder",
-            "open_reloading_locked",
-        ),
-        (
-            "crates/coven-database/src/database_builder.rs",
-            "DatabaseBuilder",
-            "open_with_archive",
         ),
         (
             "crates/coven-database/src/file_database.rs",
@@ -153,11 +138,6 @@ pub(crate) const POLICY: Policy = Policy {
             "reserve_bootstrap_directory",
         ),
         (
-            "crates/coven-foundation/src/files/directory.rs",
-            "StoreDir",
-            "recover_database",
-        ),
-        (
             "crates/coven-foundation/src/files/layout.rs",
             "StoreLayout",
             "stores",
@@ -166,16 +146,6 @@ pub(crate) const POLICY: Policy = Policy {
             "crates/coven-foundation/src/files/lock_registry.rs",
             "LockRegistration",
             "open_on_worker",
-        ),
-        (
-            "crates/coven-foundation/src/files/recovery.rs",
-            "DatabaseRecovery",
-            "begin",
-        ),
-        (
-            "crates/coven-foundation/src/files/recovery.rs",
-            "DatabaseRecovery",
-            "check",
         ),
         (
             "crates/coven-storage/src/conformance.rs",
@@ -541,12 +511,6 @@ pub(crate) const POLICY: Policy = Policy {
         (
             "crates/coven-foundation/src/files/directory.rs",
             "StoreDir",
-            "recover_database",
-            "DatabaseRecovery",
-        ),
-        (
-            "crates/coven-foundation/src/files/directory.rs",
-            "StoreDir",
             "lock_for_deletion",
             "StoreDeletionLock",
         ),
@@ -625,7 +589,6 @@ pub(crate) const POLICY: Policy = Policy {
         "StoreLock",
         "StoreReadLock",
         "StoreDeletionLock",
-        "DatabaseRecovery",
         "Keychain",
         "StoreKeychain",
         "KeyringCustody",
@@ -659,7 +622,6 @@ pub(crate) const POLICY: Policy = Policy {
         "StoreLock",
         "StoreReadLock",
         "StoreDeletionLock",
-        "DatabaseRecovery",
         "AtomicFile",
         "FileWriter",
         "ClockRef",
