@@ -65,6 +65,7 @@ pub use retirement_drain::{RetirementFinality, DRAIN_WAIT};
 mod row_key;
 mod row_queries;
 mod schema;
+mod schema_local_children;
 mod schema_source;
 mod snapshot_coverage;
 mod snapshot_error;

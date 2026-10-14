@@ -590,6 +590,14 @@ pub enum SchemaError {
         /// The referencing column.
         column: String,
     },
+    /// A local foreign key could stop coven updating a synced value in place (§8.4).
+    #[error("local reference {table}.{column} must use ON UPDATE CASCADE or SET NULL")]
+    LocalChildUpdate {
+        /// The local child table.
+        table: String,
+        /// The referencing column.
+        column: String,
+    },
     /// A declared synced table isn't in the database (E2).
     #[error("declared synced table {table} is missing")]
     MissingTable {

@@ -2359,6 +2359,24 @@ Carol's tablet:
   - e.g. `pins(note_id REFERENCES notes ON DELETE RESTRICT)` is refused:
     Ben's phone, holding a pin, couldn't take out a note that Ana's phone
     could, and the two would differ.
+- Coven applies another device's change to a synced non-key column as an
+  `UPDATE`, so a local foreign key must follow that update too:
+  - coven refuses, checked when the database opens and after migrating, a
+    foreign key from a local table into a synced table's non-key column
+    unless its update action is cascade or set null, with
+    `SchemaError::LocalChildUpdate`, naming the table and column. A local
+    column such a key rewrites passes the update on, so a local key into
+    that column must follow it the same way;
+  - e.g. `pins(code REFERENCES parents(code) ON DELETE CASCADE)` is
+    refused: its update action is NO ACTION by default. Ana's phone, holding
+    a pin on code `'a'`, could never apply Ben's renaming it to `'b'`: every
+    attempt fails SQLite's foreign-key check at commit and rolls back to the
+    same state ([`stuck_forever`](proofs/merge/CovenMerge/LocalUpdateAction.lean)).
+    Cascade and set null keep every local reference valid along the chain
+    ([`chain_holds`](proofs/merge/CovenMerge/LocalUpdateAction.lean),
+    [B20](proofs/merge.md#b20-local-keys-into-values-coven-updates));
+  - a key column changes by a delete and an insert (§8.5), which the delete
+    rule above covers.
 - Anything else in the app's local schema that refuses such a delete, such
   as a trigger that raises an error, fails the write or the apply that
   needs it on that device, until the app changes its schema.
@@ -6166,4 +6184,5 @@ merge later.
 - Status: refused for foreign keys of synced tables on open and after
   migrating; the target must be the parent's complete primary key
   ([§8.4](#84-foreign-keys)). Local children keep SQLite's behavior subject
-  to the existing foreign-key action restrictions.
+  to the existing foreign-key action restrictions: a local key into a synced
+  non-key column follows its updates with cascade or set null.

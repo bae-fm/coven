@@ -229,57 +229,6 @@ async fn a_set_default_migration_preserves_the_previous_schema_and_rows() {
 }
 
 #[tokio::test]
-async fn set_default_between_local_tables_remains_sqlites_action() {
-    const SCHEMA: &str = "CREATE TABLE synced(id TEXT NOT NULL PRIMARY KEY); CREATE TABLE parent(id TEXT PRIMARY KEY); CREATE TABLE child(p TEXT NOT NULL DEFAULT 'fallback' REFERENCES parent(id) ON DELETE SET DEFAULT ON UPDATE SET DEFAULT); CREATE TABLE null_default(p TEXT NOT NULL REFERENCES parent(id) ON DELETE SET DEFAULT)";
-    let store = TestStore::new();
-    let db = store.schema(vec![shared("synced")], SCHEMA).await.unwrap();
-    crate::write::tests::sql(&db, "INSERT INTO parent VALUES('p'),('fallback'); INSERT INTO child VALUES('p'); UPDATE parent SET id='q' WHERE id='p'").await.unwrap();
-    db.read(|sql| {
-        assert_eq!(
-            sql.query_row("SELECT p FROM child", [], |r| r.get::<_, String>(0))?,
-            "fallback"
-        );
-        Ok(())
-    })
-    .await
-    .unwrap();
-    crate::write::tests::sql(
-        &db,
-        "UPDATE child SET p='q'; DELETE FROM parent WHERE id='q'",
-    )
-    .await
-    .unwrap();
-    db.read(|sql| {
-        assert_eq!(
-            sql.query_row("SELECT p FROM child", [], |r| r.get::<_, String>(0))?,
-            "fallback"
-        );
-        Ok(())
-    })
-    .await
-    .unwrap();
-    db.close().await.unwrap();
-    store
-        .schema(vec![shared("synced")], SCHEMA)
-        .await
-        .unwrap()
-        .close()
-        .await
-        .unwrap();
-    store
-        .builder(
-            vec![shared("synced")],
-            vec![Migration::sql(1, "schema", SCHEMA)],
-        )
-        .open_read_only()
-        .await
-        .unwrap()
-        .close()
-        .await
-        .unwrap();
-}
-
-#[tokio::test]
 async fn primary_key_rules_have_distinct_errors() {
     rejects(
         "CREATE TABLE notes (title TEXT)",
@@ -900,28 +849,4 @@ async fn nonprimary_reference_migration_preserves_the_previous_database() {
     assert_eq!(db.schema_version().await.unwrap(), 1);
     assert_eq!(crate::tests::contents(&db), before);
     db.close().await.unwrap();
-}
-
-#[tokio::test]
-async fn local_children_can_reference_unique_nonprimary_values() {
-    for synced_parent in [false, true] {
-        let store = TestStore::new();
-        let tables = if synced_parent {
-            vec![shared("parents")]
-        } else {
-            vec![]
-        };
-        let db = store.schema(tables, "CREATE TABLE parents(id TEXT NOT NULL PRIMARY KEY,code TEXT UNIQUE); CREATE TABLE children(parent TEXT REFERENCES parents(code) ON DELETE CASCADE ON UPDATE CASCADE)").await.unwrap();
-        crate::write::tests::sql(&db, "INSERT INTO parents VALUES('p','old'); INSERT INTO children VALUES('old'); UPDATE parents SET code='new'").await.unwrap();
-        db.read(|sql| {
-            assert_eq!(
-                sql.query_row("SELECT parent FROM children", [], |r| r.get::<_, String>(0))?,
-                "new"
-            );
-            Ok(())
-        })
-        .await
-        .unwrap();
-        db.close().await.unwrap();
-    }
 }

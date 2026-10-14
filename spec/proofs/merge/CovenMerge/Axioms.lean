@@ -311,3 +311,10 @@ open CovenMerge
 #print axioms GeneratedReference.Unwritten.unwritten_reference
 #print axioms GeneratedReference.Unwritten.orders_causal
 #print axioms GeneratedReference.Unwritten.grouped_reference_recorded
+-- local children of values coven updates in place (§8.4)
+#print axioms LocalUpdate.rename_holds
+#print axioms LocalUpdate.follow_holds
+#print axioms LocalUpdate.chain_holds
+#print axioms LocalUpdate.Stuck.stuck_forever
+#print axioms LocalUpdate.Stuck.restrict_fails
+#print axioms LocalUpdate.Stuck.accepted_apply

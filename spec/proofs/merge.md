@@ -1205,3 +1205,30 @@ and capturing a group's components together, are SQL facts supplied as the
 `Columns` record and the `Grouped` hypothesis, as for the composite-reference
 differential in B11. A key whose generated column reads no column at all is
 refused too; the model does not need that case.
+
+### B20 Local keys into values coven updates
+
+Coven applies a change to a synced non-key column with an `UPDATE`, and
+SQLite then runs every local foreign key's `ON UPDATE` action. Local rows
+exist on one device only, so no write accounts for them.
+`LocalUpdateAction.lean` checks the rule of [§8.4](../coven.md#84-foreign-keys).
+
+**NO ACTION stops the apply for good.** `Stuck` is synced `parents.code = 'a'`
+with a local pin on `'a'` under the default `ON UPDATE NO ACTION`; Ben's write
+renames the code to `'b'`. `stuck_forever` proves that the commit check fails,
+the apply rolls back to the same state, and every retry fails again.
+`restrict_fails` shows RESTRICT failing at once. The Rust test
+`a_local_key_that_does_not_follow_stops_every_apply` reproduces both attempts.
+
+**CASCADE and SET NULL keep every key valid.** `rename_holds` and
+`follow_holds` prove that a child renamed with its parent, to the new value or
+to NULL, still references existing values. `chain_holds` extends this by
+induction along a chain of local keys, each into the column the previous
+key's action rewrites, which is the set of columns the schema check follows.
+`accepted_apply` reruns the pin under both accepted actions.
+
+**Outside the model.** A column is a list of values. Keys act independently,
+as SQLite applies each key's action to its own columns; the model follows one
+chain at a time and does not cover a local column two keys rewrite at once.
+Primary-key changes are deletes and inserts (§8.5) and fall under the delete
+rule, which this file does not model.

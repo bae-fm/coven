@@ -538,6 +538,8 @@ pub enum SchemaError {
     ImpossibleAction { table: String, column: String },
     /// A local table's foreign key could stop coven deleting a synced row (§8.4).
     LocalChildAction { table: String, column: String },
+    /// A local table's foreign key could stop coven updating a synced value (§8.4).
+    LocalChildUpdate { table: String, column: String },
     /// SQLite chooses the primary key itself (§8.5).
     GeneratedPrimaryKey { table: String },
     /// An independent key has no text column to hold its UUID (§8.5).

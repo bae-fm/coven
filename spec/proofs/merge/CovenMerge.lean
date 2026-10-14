@@ -34,6 +34,7 @@ import CovenMerge.OwnerCellAccounting
 import CovenMerge.OwnerCascadeAuthorization
 import CovenMerge.ForeignKeyActions
 import CovenMerge.GeneratedReference
+import CovenMerge.LocalUpdateAction
 import CovenMerge.OwnerAdmission
 import CovenMerge.OwnerForeignKeyExamples
 import CovenMerge.OwnerTransientForeignKey

@@ -171,6 +171,21 @@ pub(crate) async fn remote_update(
     id: &str,
     changes: &[(&str, coven_format::value::Value)],
 ) {
+    assert_eq!(
+        try_remote_update(database, table, id, changes)
+            .await
+            .unwrap(),
+        crate::ApplyOutcome::Applied
+    );
+}
+
+/// [`remote_update`], returning what applying it did.
+pub(crate) async fn try_remote_update(
+    database: &crate::Database,
+    table: &str,
+    id: &str,
+    changes: &[(&str, coven_format::value::Value)],
+) -> Result<crate::ApplyOutcome, DbError> {
     use coven_merge::Operation;
     let records = crate::write::tests::records(database);
     let key =
@@ -201,10 +216,20 @@ pub(crate) async fn remote_update(
         columns.insert((*name).into(), column);
     }
     row.change.operation = Operation::Update(columns);
-    remote_write(database, row).await;
+    try_remote_write(database, row).await
 }
 
 pub(crate) async fn remote_write(database: &crate::Database, row: coven_format::write::RowChange) {
+    assert_eq!(
+        try_remote_write(database, row).await.unwrap(),
+        crate::ApplyOutcome::Applied
+    );
+}
+
+async fn try_remote_write(
+    database: &crate::Database,
+    row: coven_format::write::RowChange,
+) -> Result<crate::ApplyOutcome, DbError> {
     use coven_format::write::{WriteHeader, WritePart, WriteRecord};
     let row = database.inspect_writer_schema(|db, schema| {
         let app = crate::write_rows::AppView::after(db, schema);
@@ -248,10 +273,7 @@ pub(crate) async fn remote_write(database: &crate::Database, row: coven_format::
             dismissals: vec![],
         }],
     };
-    assert_eq!(
-        database.receive(record.into()).await.unwrap(),
-        crate::ApplyOutcome::Applied
-    );
+    database.receive(record.into()).await
 }
 
 /// All app and coven tables, for whole-transaction rollback assertions.
