@@ -9,7 +9,8 @@ Each case is a list of events. `attach` fixes a row's reference and queues it;
 writes; `begin` marks when the Rust attempt opens its source and is ignored
 here; `finish` settles a queued reference against a storage observation.
 The output reports each settlement, whether it changed the write count, and
-finally every row's reference and the queued references. -/
+finally every row's reference and the queued references. A `status` case
+instead judges one storage observation with the uploader's evidence. -/
 
 open Lean CovenStorage CovenStorage.Files
 
@@ -73,9 +74,58 @@ private def runCase (j : Json) : Except String Json := do
     ("rows", Json.arr rowJson.toArray),
     ("queue", Json.arr (state.queue.map (referenceJson ·.row.reference)).toArray)]
 
+private def deviceState : String → Except String DeviceState
+  | "active" => pure .active
+  | "removed" => pure .removed
+  | "replaced" => pure .replaced
+  | other => throw s!"unknown device state {other}"
+
+private def sourceFailure : String → Except String SourceFailure
+  | "missing" => pure .missing
+  | "changed" => pure .changed
+  | "integrity" => pure .integrity
+  | other => throw s!"unknown source failure {other}"
+
+private def sourceFailureJson : SourceFailure → Json
+  | .missing => "missing"
+  | .changed => "changed"
+  | .integrity => "integrity"
+
+private def statusJson : Except ReadFailure Status → Json
+  | .error _ => Json.mkObj [("error", true)]
+  | .ok .available => "available"
+  | .ok (.uploading device) => Json.mkObj [("uploading", toJson device)]
+  | .ok (.missing device .deviceRemoved) =>
+    Json.mkObj [("missing", toJson device), ("reason", "removed")]
+  | .ok (.missing device .deviceReplaced) =>
+    Json.mkObj [("missing", toJson device), ("reason", "replaced")]
+  | .ok (.missing device (.source failure)) =>
+    Json.mkObj [("missing", toJson device), ("reason", sourceFailureJson failure)]
+
+/-- One status judgement: the observation at the fixed path and the uploader's
+state and report. Unrelated devices' states and reports are set to differ. -/
+private def statusCase (j : Json) : Except String Json := do
+  let r ← reference (← j.getObjVal? "ref")
+  let observed : Except ReadFailure (Option Object) ←
+    match ← j.getObjValAs? String "remote" with
+    | "present" => pure (.ok (some ⟨[0], 0⟩))
+    | "absent" => pure (.ok none)
+    | "error" => pure (.error .network)
+    | other => throw s!"unknown storage observation {other}"
+  let state ← deviceState (← j.getObjValAs? String "device")
+  let report ← match j.getObjVal? "report" with
+    | .ok .null => pure none
+    | .ok (.str failure) => some <$> sourceFailure failure
+    | _ => pure none
+  let reports : Reports := {
+    device := fun d => if d = r.uploader then state else .removed
+    unavailable := fun d f => if d = r.uploader ∧ f = r.id then report else some .integrity }
+  pure (statusJson (status r observed reports))
+
 private def run (j : Json) : Except String Json := do
   let cases ← fromJson? j (α := Array Json)
-  Json.arr <$> cases.mapM runCase
+  Json.arr <$> cases.mapM fun c =>
+    if (c.getObjVal? "status").isOk then statusCase c else runCase c
 
 def main : IO UInt32 := do
   let input ← (← IO.getStdin).readToEnd

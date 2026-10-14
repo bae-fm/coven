@@ -180,6 +180,29 @@ impl Fixture {
         self.database.close().await.unwrap();
     }
 }
+/// Run the storage model's files runner over JSON cases.
+fn files_runner(cases: &[serde_json::Value]) -> Vec<serde_json::Value> {
+    use std::{
+        io::Write,
+        process::{Command, Stdio},
+    };
+    let runner = std::env::var("COVEN_FILES_LEAN").expect("Lean files runner");
+    let mut child = Command::new(runner)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(&serde_json::to_vec(cases).unwrap())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success());
+    serde_json::from_slice(&output.stdout).unwrap()
+}
+
 fn builder(
     directory: &StoreDir,
     ids: &IdSourceRef,
@@ -480,6 +503,8 @@ async fn cancelling_a_pin_releases_partial_budget_exemptions() {
     f.close().await;
 }
 
+#[path = "file_status_tests.rs"]
+mod status;
 #[path = "file_upload_tests.rs"]
 mod uploads;
 

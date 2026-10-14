@@ -54,6 +54,39 @@ impl Database {
         .await
     }
 
+    /// Record a device's replayed state as a kept store-log entry would, under
+    /// a placeholder member when the device is not yet registered.
+    pub async fn test_device_state(
+        &self,
+        device: coven_foundation::id_source::DeviceId,
+        state: crate::DeviceState,
+    ) -> Result<(), DbError> {
+        let state = match state {
+            crate::DeviceState::Active => "active",
+            crate::DeviceState::Removed => "removed",
+            crate::DeviceState::Replaced => "replaced",
+        };
+        self.call(move |inner| {
+            inner.access.with_writer(|writer| {
+                writer.transaction(|db| {
+                    let member = [7u8; 32];
+                    db.internal_execute(
+                        "INSERT INTO _coven_members(member,sealing,access,role,removed)
+                         VALUES(?1,?1,x'00','member',0) ON CONFLICT DO NOTHING",
+                        [member.as_slice()],
+                    )?;
+                    db.internal_execute(
+                        "INSERT INTO _coven_devices(device,member,name,state) VALUES(?1,?2,'test',?3)
+                         ON CONFLICT(device) DO UPDATE SET state=excluded.state",
+                        (device.0.to_be_bytes().as_slice(), member.as_slice(), state),
+                    )?;
+                    Ok(())
+                })
+            })
+        })
+        .await
+    }
+
     /// Model a snapshot load's position jump: install consumed positions
     /// without applying their writes, clearing covered waits in that commit.
     pub async fn test_cover_positions(&self, positions: Vec<(u64, u64)>) -> Result<(), DbError> {

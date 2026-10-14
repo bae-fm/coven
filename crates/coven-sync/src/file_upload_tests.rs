@@ -1,4 +1,4 @@
-use super::{Fixture, CHUNK};
+use super::{files_runner, Fixture, CHUNK};
 use crate::files::file_error::*;
 use crate::files::file_upload::*;
 use coven_database::FileRef;
@@ -580,7 +580,7 @@ async fn attaching_starts_upload_after_commit_and_checks_changed_originals() {
 /// ST `Files`: attachment, row deletion and settled uploads leave the rows,
 /// queue and write count that `Files.attach` and `Files.finish` describe.
 mod differential {
-    use super::Fixture;
+    use super::{files_runner, Fixture};
     use crate::files::file_error::*;
     use coven_database::{CacheFill, DbError, FileRef, Provenance};
     use coven_storage::{ObjectPrefix, Storage, StorageFailure};
@@ -772,28 +772,6 @@ mod differential {
         drop(guard);
         f.close().await;
         json!({"finishes": finishes, "rows": row_refs, "queue": queue})
-    }
-
-    fn files_runner(cases: &[Value]) -> Vec<Value> {
-        use std::{
-            io::Write,
-            process::{Command, Stdio},
-        };
-        let runner = std::env::var("COVEN_FILES_LEAN").expect("Lean files runner");
-        let mut child = Command::new(runner)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .spawn()
-            .unwrap();
-        child
-            .stdin
-            .take()
-            .unwrap()
-            .write_all(&serde_json::to_vec(cases).unwrap())
-            .unwrap();
-        let output = child.wait_with_output().unwrap();
-        assert!(output.status.success());
-        serde_json::from_slice(&output.stdout).unwrap()
     }
 
     /// The model keeps its queue newest first; the order carries no meaning.

@@ -53,8 +53,8 @@ mod operations;
 pub use operations::Operations;
 mod files;
 pub use files::{
-    DrainOutcome, EagerCacheFillStatus, FileRangeStream, FileReadError, FileStream, Files,
-    PinProgress, QueuedUpload, RecordedUploadFailure, RowsPinnedLiveQuery, TransferLimits,
+    DrainOutcome, EagerCacheFillStatus, FileRangeStream, FileReadError, FileStatus, FileStream,
+    Files, PinProgress, QueuedUpload, RecordedUploadFailure, RowsPinnedLiveQuery, TransferLimits,
     UploadFailure, UploadFailures, UploadPhase, UploadQueue, UploadsLiveQuery,
 };
 

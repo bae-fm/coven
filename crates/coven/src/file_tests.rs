@@ -498,6 +498,10 @@ async fn uploaded_files_pins_and_read_only_ranges_use_the_composed_owner() {
         .unwrap()
         .files
         .is_empty());
+    assert_eq!(
+        handle.file_status(&file).await.unwrap(),
+        FileStatus::Available
+    );
     let mut pins = handle.subscribe_rows_pinned(
         "thumbnails",
         vec![thumbnail.as_str().into(), "absent".into()],

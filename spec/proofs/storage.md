@@ -384,6 +384,8 @@ prevents a collision from retiring that upload.
 which attaches app-provided files, retargets or deletes their rows while an
 upload is in flight, and compares the settlements, the write count, each row's
 fixed reference and the queue. Row deletion is an environment step in the runner.
+Its `status` cases compare `status` with coven-sync's status rule over every
+storage observation, uploader state and source report.
 
 **Retried file chunks are fixed.** `encrypted_chunk_is_captured` proves that a
 successfully checked chunk has the captured plaintext, key, path, size and index.

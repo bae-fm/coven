@@ -149,6 +149,33 @@ impl FileDatabase {
         })
         .await
     }
+    /// The uploader's replayed state and its own record about `subject`, read
+    /// in one committed state: the evidence a confirmed absence is judged
+    /// with (§16.1). A device with no registration here has no removal or
+    /// replacement either, so it reads as active.
+    pub async fn uploader_evidence<P: crate::PendingValue>(
+        &self,
+        uploader: DeviceId,
+        subject: P::Subject,
+    ) -> Result<(crate::DeviceState, Option<P>), DbError>
+    where
+        P::Subject: Send,
+    {
+        self.run(move |db, _, _, _| {
+            db.read_transaction(|| {
+                let state = db
+                    .query(
+                        "SELECT state FROM _coven_devices WHERE device=?1",
+                        [uploader.0.to_be_bytes()],
+                        |r| crate::store_log_tables::device_state(r.get(0)?),
+                    )?
+                    .pop()
+                    .unwrap_or(crate::DeviceState::Active);
+                Ok((state, crate::pending::find::<P>(db, &subject, uploader)?))
+            })
+        })
+        .await
+    }
     /// Durable queue, including files whose row changed after attachment.
     pub async fn uploads(&self) -> Result<Vec<FileUpload>, DbError> {
         self.run(|db, _, _, _| file_queue::read(db)).await

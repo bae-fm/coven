@@ -155,6 +155,25 @@ pub(crate) fn operation<P: PendingValue>(
     .transpose()
 }
 
+/// The current record one reporter keeps for one subject, if any.
+pub(crate) fn find<P: PendingValue>(
+    db: &DatabaseConnection,
+    subject: &P::Subject,
+    reporter: DeviceId,
+) -> Result<Option<P>, DbError> {
+    db.query(
+        &format!("{SELECT} WHERE suppressed=0 AND subject=?1 AND reporter=?2"),
+        (
+            serde_json::to_vec(subject).map_err(DbError::PendingEncoding)?,
+            reporter.0.to_be_bytes().as_slice(),
+        ),
+        StoredRecord::read,
+    )?
+    .pop()
+    .map(|stored| stored.decode())
+    .transpose()
+}
+
 pub(crate) fn retry<P: PendingValue>(
     db: &DatabaseConnection,
     subject: &P::Subject,

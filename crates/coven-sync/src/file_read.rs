@@ -476,14 +476,18 @@ async fn fetch(
         .expect("storage lock poisoned")
         .clone()
         .ok_or(FileReadError::NoStorage)?;
-    // Rows may arrive before their files (§16.5): confirmed absence names the
-    // uploader, never a provider failure.
+    // Rows may arrive before their files (§16.5): confirmed absence is judged
+    // with the uploader's evidence, never reported as a provider failure.
     let bytes = match storage.read_range(path, ByteRange::new(start, end)?).await {
         Ok(bytes) => bytes,
         Err(error) if error.failure() == coven_storage::StorageFailure::NotFound => {
-            return Err(FileReadError::Uploading {
+            return Err(owner.absence_error(file).await)
+        }
+        // Every requested range lies within the file's encrypted size; an
+        // object too short to hold it is damage at the fixed path.
+        Err(error) if error.failure() == coven_storage::StorageFailure::InvalidRange => {
+            return Err(FileReadError::Integrity {
                 id: file.id().to_string(),
-                device: file.uploader(),
             })
         }
         Err(error) => return Err(error.into()),

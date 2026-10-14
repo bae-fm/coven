@@ -6,6 +6,8 @@ mod file_cache;
 mod file_error;
 #[path = "file_read.rs"]
 mod file_read;
+#[path = "file_status.rs"]
+mod file_status;
 #[path = "file_upload.rs"]
 pub(crate) mod file_upload;
 use crate::SyncError;
@@ -15,6 +17,7 @@ use coven_storage::Storage;
 pub use file_cache::{EagerCacheFillStatus, PinProgress, RowsPinnedLiveQuery};
 pub use file_error::{FileReadError, RecordedUploadFailure, UploadFailure, UploadFailures};
 pub use file_read::{FileRangeStream, FileStream};
+pub use file_status::FileStatus;
 pub use file_upload::{DrainOutcome, QueuedUpload, UploadPhase, UploadQueue, UploadsLiveQuery};
 use std::{
     collections::BTreeMap,
