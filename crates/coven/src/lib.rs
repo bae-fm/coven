@@ -35,11 +35,11 @@ pub use coven_crypto::{
     StoreKeyring,
 };
 pub use coven_database::{
-    named_params, params, prepare_user_file, types, CacheFill, ChangeOp, ColumnChange, CovenError,
-    CovenMigrationError, CovenResult, DbError, FileDecl, FileRef, FileSource, LiveQuery,
-    LiveQueryCause, LiveQueryClosed, LiveQueryRequests, LiveQueryRevision, Lost, LostCell,
-    LostValue, Migration, MigrationChange, MigrationContext, MigrationError, MigrationOutcome,
-    Params, PreparedUserFile, Provenance, Read, ReconfigurableLiveQuery,
+    named_params, params, prepare_user_file, types, CacheFill, ChangeOp, ChangeSource,
+    ColumnChange, CovenError, CovenMigrationError, CovenResult, DbError, FileDecl, FileRef,
+    FileSource, LiveQuery, LiveQueryCause, LiveQueryClosed, LiveQueryRequests, LiveQueryRevision,
+    Lost, LostCell, LostValue, Migration, MigrationChange, MigrationContext, MigrationError,
+    MigrationOutcome, Params, PreparedUserFile, Provenance, Read, ReconfigurableLiveQuery,
     ReconfigurableLiveQueryEvent, RemovalRule, Replacement, Row, RowChange, RowIdentity, RowKey,
     SchemaError, SqlContext, SqlReadContext, SyncedTable, ToSql, UserFile, WriteBatch, WriteId,
 };

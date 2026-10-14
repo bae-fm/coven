@@ -136,6 +136,12 @@ impl<R: Read> DownloadedWriteStream<R> {
                         if let WriteFrame::Change(row) = frame {
                             crate::write_sources::validate(database, &self.header.header, &row)?;
                             crate::write_sources::retain(database, &self.header.header, &row)?;
+                            crate::write_sources::admit(
+                                database,
+                                &self.header.header,
+                                &row.row,
+                                &crate::write_sources::Interpretation::Dropped,
+                            )?;
                         }
                         return Ok(());
                     }

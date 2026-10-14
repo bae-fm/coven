@@ -449,6 +449,8 @@ proofs() {
         COVEN_RECEIVE_LEAN="$runner" cargo test -p coven-database --all-features lean_differential_receive -- --ignored
         step "Rust / Lean retirement window"
         COVEN_RECEIVE_LEAN="$runner" cargo test -p coven-database --all-features mg_differential_retirement_window -- --ignored
+        step "Rust / Lean data dependency"
+        COVEN_RECEIVE_LEAN="$runner" cargo test -p coven-merge mg_differential_data_dependency -- --ignored
     fi
 }
 

@@ -18,7 +18,7 @@ pub(crate) fn visit<E: From<DbError>>(
     mut visit: impl FnMut(Loss) -> Result<(), E>,
 ) -> Result<(), E> {
     database.for_each(
-        &format!("{SELECT} WHERE l.audience=?1 ORDER BY l.table_name,l.key,l.generation,_coven_loss_order(c.column_name,l.set_by),l.retired,CASE l.replacement_kind WHEN 'write' THEN 0 WHEN 'rules' THEN 1 ELSE 2 END,CASE l.replacement_kind WHEN 'excluded' THEN substr(l.replaced_by,1,16) END"),
+        &format!("{SELECT} WHERE l.audience=?1 ORDER BY l.table_name,l.key,l.generation,_coven_loss_order(c.column_name,l.set_by),l.retired,CASE l.replacement_kind WHEN 'write' THEN 0 WHEN 'rules' THEN 1 WHEN 'excluded' THEN 2 ELSE 3 END,CASE WHEN l.replacement_kind IN ('excluded','dependency') THEN substr(l.replaced_by,1,16) END"),
         [audience_text(audience)],
         |r| visit(read(r).map_err(DbError::from)?),
     )
@@ -68,6 +68,10 @@ pub(crate) fn read(r: &rusqlite::Row<'_>) -> rusqlite::Result<Loss> {
             let (write, cause) = decoded(merge_fields::decode_exclusion(&replacement))?;
             LossCause::Excluded { write, cause }
         }
+        "dependency" => {
+            let (write, sources) = decoded(merge_fields::decode_dependency(&replacement))?;
+            LossCause::Dependency { write, sources }
+        }
         _ => return Err(damaged()),
     };
     if !matches!(
@@ -75,7 +79,7 @@ pub(crate) fn read(r: &rusqlite::Row<'_>) -> rusqlite::Result<Loss> {
         (LossValues::Cell { .. }, LossCause::Write(_))
             | (
                 LossValues::Row(_),
-                LossCause::Rules(_) | LossCause::Excluded { .. }
+                LossCause::Rules(_) | LossCause::Excluded { .. } | LossCause::Dependency { .. }
             )
     ) {
         return Err(damaged());
@@ -124,6 +128,10 @@ pub(crate) fn put(
         LossCause::Excluded { write, cause } => (
             "excluded",
             encoded(merge_fields::encode_exclusion(*write, *cause))?,
+        ),
+        LossCause::Dependency { write, sources } => (
+            "dependency",
+            encoded(merge_fields::encode_dependency(*write, sources))?,
         ),
     };
     database.internal_execute("INSERT INTO _coven_lost(id,table_name,key,audience,generation,column_id,value,set_by,replacement_kind,replaced_by,retired) VALUES(?11,?1,?2,?3,?4,?5,?6,?7,?8,?9,?10) ON CONFLICT(id) DO UPDATE SET table_name=excluded.table_name,key=excluded.key,audience=excluded.audience,generation=excluded.generation,column_id=excluded.column_id,value=excluded.value,set_by=excluded.set_by,replacement_kind=excluded.replacement_kind,replaced_by=excluded.replaced_by,retired=excluded.retired",params![loss.row.table,loss.row.key,audience_text(&loss.row.audience),loss.generation.to_be_bytes().as_slice(),column,value,setter,kind,cause,loss.retired,id])?;

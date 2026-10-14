@@ -459,9 +459,11 @@ async fn frozen_display_and_dismissal_preserve_original_parents_sources_and_admi
             .unwrap(),
             before
         );
-        for (_, cause) in before {
+        // Each original keeps its schema exclusion as this device's interpretation.
+        for (_, admission) in before {
+            assert_eq!(admission[0], 1);
             assert_eq!(
-                merge_fields::decode_lost_write_cause(&cause).unwrap(),
+                merge_fields::decode_lost_write_cause(&admission[1..]).unwrap(),
                 LostWriteCause::SchemaChange(2)
             );
         }

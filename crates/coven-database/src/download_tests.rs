@@ -692,11 +692,8 @@ async fn reset_exclusion_is_audience_scoped_and_counts_implicit_own_reads() {
             ApplyOutcome::Applied
         );
         assert_eq!(count(&db, "notes"), i64::from(!lost));
-        let losses = db.lost_values().await.unwrap();
-        assert_eq!(losses.len(), usize::from(lost));
-        if lost {
-            assert_eq!(losses[0].replaced_by, crate::Replacement::Reset(entry));
-        }
+        // A reset ignores the write's part without a loss (§19.3).
+        assert!(db.lost_values().await.unwrap().is_empty());
         db.close().await.unwrap();
     }
     source.close().await.unwrap();

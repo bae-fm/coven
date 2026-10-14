@@ -118,7 +118,7 @@ pub use live_query::{
     ReconfigurableLiveQuery, ReconfigurableLiveQueryEvent,
 };
 pub use log_refusal::{LogObject, LogRefusal};
-pub use lost::{Lost, LostCell, LostValue, RemovalRule, Replacement};
+pub use lost::{ChangeSource, Lost, LostCell, LostValue, RemovalRule, Replacement};
 pub use members::{Circle, CircleMemberInfo, DeviceInfo, MemberInfo};
 pub use migration::{Migration, MigrationChange, MigrationContext, MigrationOutcome};
 pub use migration_change::{ChangeOp, ColumnChange, RowChange};

@@ -6,9 +6,10 @@ use crate::write_rows::AppView;
 use crate::write_schema::WriteSchema;
 use crate::DbError;
 use coven_format::{
+    loss::LossCause,
     snapshot_rows::LostWriteCause,
     value::WritePositions,
-    write::{WriteDisposition, WriteHeader, WritePart, WriteRecord},
+    write::{RowChange, WriteDisposition, WriteHeader, WritePart, WriteRecord},
 };
 use coven_foundation::id_source::{CircleId, DeviceId};
 use coven_merge::{Audience, ColumnValue, Operation, WriteId, WritePast};
@@ -301,6 +302,7 @@ pub(crate) fn interpret(
     schema: &WriteSchema,
     download: DownloadedWrite,
 ) -> Result<WriteRecord, DbError> {
+    use crate::write_sources::Interpretation;
     let mut record = WriteRecord {
         header: download.header,
         parts: download
@@ -315,6 +317,16 @@ pub(crate) fn interpret(
     // A write outside its own retirement window is consumed without effects
     // or losses; later readers never rescue it (§10).
     if crate::write_landing::late(database, record.header.position)? {
+        for part in &record.parts {
+            for row in &part.rows {
+                crate::write_sources::admit(
+                    database,
+                    &record.header,
+                    &row.row,
+                    &Interpretation::Dropped,
+                )?;
+            }
+        }
         record.parts.clear();
         return Ok(record);
     }
@@ -326,6 +338,7 @@ pub(crate) fn interpret(
         }
         let originals: Vec<_> = part.rows.iter().map(|row| row.row.clone()).collect();
         let mut cause = source_cause(&boundaries, &record.header, &part);
+        let mut converted = false;
         if matches!(cause, Some(LostWriteCause::SchemaChange(_)))
             && record.header.disposition == WriteDisposition::Apply
         {
@@ -354,47 +367,120 @@ pub(crate) fn interpret(
                     &mut part,
                 )?;
                 cause = None;
+                converted = true;
             }
         }
-        for row in originals {
-            crate::write_sources::admit(database, &record.header, &row, cause)?;
-        }
         if let Some(cause) = cause {
-            exclude(database, schema, &record.header, &part, cause)?;
+            for row in &originals {
+                crate::write_sources::admit(
+                    database,
+                    &record.header,
+                    row,
+                    &Interpretation::Excluded(cause),
+                )?;
+            }
+            // A reset ignores the part without a loss (§19.3); a schema
+            // change keeps each original change as a frozen loss (§17.1).
+            if let LostWriteCause::SchemaChange(_) = cause {
+                for change in &part.rows {
+                    freeze(
+                        database,
+                        schema,
+                        &record.header,
+                        change,
+                        LossCause::Excluded {
+                            write: record.header.position,
+                            cause,
+                        },
+                    )?;
+                }
+            }
             if !part.dismissals.is_empty() {
                 kept.push(WritePart {
                     rows: Vec::new(),
                     ..part
                 });
             }
-        } else {
-            crate::download_checks::part(schema, &part)?;
-            kept.push(part);
+            continue;
         }
+        if converted {
+            for row in &originals {
+                crate::write_sources::admit(
+                    database,
+                    &record.header,
+                    row,
+                    &Interpretation::Applied,
+                )?;
+            }
+        } else {
+            part.rows = classify(database, schema, &record.header, part.rows)?;
+        }
+        crate::download_checks::part(schema, &part)?;
+        kept.push(part);
     }
     record.parts = kept;
     Ok(record)
 }
 
-fn exclude(
+/// The shared data rule (§8): an admitted change whose generation source or
+/// replaced setter does not survive becomes a frozen loss naming those
+/// sources; its write's other changes still apply.
+fn classify(
     database: &DatabaseConnection,
     schema: &WriteSchema,
     header: &WriteHeader,
-    part: &WritePart,
-    cause: LostWriteCause,
-) -> Result<(), DbError> {
-    for change in &part.rows {
-        exclude_row(database, schema, header, cause, change)?;
+    rows: Vec<RowChange>,
+) -> Result<Vec<RowChange>, DbError> {
+    use crate::write_sources::Interpretation;
+    let mut applied = Vec::new();
+    for row in rows {
+        let provenance = coven_merge::Provenance {
+            generation: row.sources.generation.clone(),
+            setters: row
+                .sources
+                .setters
+                .values()
+                .map(|setter| setter.change.clone())
+                .collect(),
+        };
+        match coven_merge::classify(true, &provenance, |source| {
+            crate::write_sources::retained(database, source)
+        })? {
+            coven_merge::DataVerdict::Dependent(sources) => {
+                crate::write_sources::admit(
+                    database,
+                    header,
+                    &row.row,
+                    &Interpretation::Dependent(sources.clone()),
+                )?;
+                freeze(
+                    database,
+                    schema,
+                    header,
+                    &row,
+                    LossCause::Dependency {
+                        write: header.position,
+                        sources,
+                    },
+                )?;
+            }
+            _ => {
+                crate::write_sources::admit(database, header, &row.row, &Interpretation::Applied)?;
+                applied.push(row);
+            }
+        }
     }
-    Ok(())
+    Ok(applied)
 }
 
-fn exclude_row(
+/// Keep one original row change as a frozen loss with its written values:
+/// new values for an insert or update, old scalar values for a delete.
+fn freeze(
     database: &DatabaseConnection,
     schema: &WriteSchema,
     header: &WriteHeader,
-    reason: LostWriteCause,
-    change: &coven_format::write::RowChange,
+    change: &RowChange,
+    cause: LossCause,
 ) -> Result<(), DbError> {
     let mut values = match &change.change.operation {
         Operation::Insert(values) | Operation::Update(values) => values.clone(),
@@ -412,6 +498,7 @@ fn exclude_row(
             })
             .collect(),
     };
+    // Frozen display values have no live parent links (D5).
     for value in values.values_mut() {
         value.parents.clear();
     }
@@ -433,10 +520,7 @@ fn exclude_row(
                 })
                 .collect(),
         ),
-        cause: coven_format::loss::LossCause::Excluded {
-            write: header.position,
-            cause: reason,
-        },
+        cause,
     };
     crate::loss_record::put(database, &loss, None)?;
     crate::file_protection::retain_loss(database, schema, &loss)

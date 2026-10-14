@@ -51,8 +51,8 @@ pub struct LostCell {
     pub set_by: WriteId,
 }
 
-/// The write, rules, breaking schema version or reset entry responsible for a loss.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// The write, rules, breaking schema version or dropped data responsible for a loss.
+#[derive(Clone, Debug, PartialEq)]
 pub enum Replacement {
     /// A write that had not read the displaced value.
     Write(WriteId),
@@ -63,8 +63,28 @@ pub enum Replacement {
         /// The schema version reached by the breaking change.
         version: u32,
     },
-    /// A reset the write had not read.
-    Reset(EntryId),
+    /// This original row change used dropped data (§8, §10): its generation
+    /// source or a cell setter it replaced, named in role order with repeats.
+    /// An empty delete still names its write.
+    DataDependency {
+        /// The write containing this row change.
+        write: WriteId,
+        /// The failed sources, generation first, then replaced setters.
+        sources: Vec<ChangeSource>,
+    },
+}
+
+/// An original row change used as data (§8).
+#[derive(Clone, Debug, PartialEq)]
+pub struct ChangeSource {
+    /// The write containing it.
+    pub write: WriteId,
+    /// Its original table name, before any conversion.
+    pub table: String,
+    /// The row's primary key.
+    pub key: RowKey,
+    /// The row's audience.
+    pub audience: coven_merge::Audience,
 }
 
 /// A rule responsible for a removed row.
@@ -100,15 +120,19 @@ pub enum RemovalRule {
     },
 }
 
+fn row_key(key: &[u8]) -> Result<RowKey, DbError> {
+    Ok(RowKey(
+        coven_format::key::decode_key(key)
+            .map_err(|_| DbError::DamagedDatabase)?
+            .iter()
+            .map(crate::write_encoding::sql_value)
+            .collect(),
+    ))
+}
+
 impl LostValue {
     pub(crate) fn from_record(record: Loss) -> Result<Self, DbError> {
-        let key = RowKey(
-            coven_format::key::decode_key(&record.row.key)
-                .map_err(|_| DbError::DamagedDatabase)?
-                .iter()
-                .map(crate::write_encoding::sql_value)
-                .collect(),
-        );
+        let key = row_key(&record.row.key)?;
         let cell = |column, cell: coven_merge::Cell<coven_format::value::Value>| LostCell {
             column,
             value: crate::write_encoding::sql_value(&cell.value.value),
@@ -151,10 +175,25 @@ impl LostValue {
                 cause: LostWriteCause::SchemaChange(version),
                 ..
             } => Replacement::SchemaChange { version },
+            // Resets create no losses (§19.3).
             LossCause::Excluded {
-                cause: LostWriteCause::Reset(entry),
+                cause: LostWriteCause::Reset(_),
                 ..
-            } => Replacement::Reset(entry),
+            } => return Err(DbError::DamagedDatabase),
+            LossCause::Dependency { write, sources } => Replacement::DataDependency {
+                write,
+                sources: sources
+                    .into_iter()
+                    .map(|source| {
+                        Ok(ChangeSource {
+                            write: source.write,
+                            key: row_key(&source.row.key)?,
+                            table: source.row.table,
+                            audience: source.row.audience,
+                        })
+                    })
+                    .collect::<Result<_, DbError>>()?,
+            },
         };
         let row = record.row;
         let target = if matches!(replaced_by, Replacement::Rules(_)) && !record.retired {

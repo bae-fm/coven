@@ -226,7 +226,12 @@ fn finish(
             for row in &part.rows {
                 crate::write_sources::validate(database, &record.header, row)?;
                 crate::write_sources::retain(database, &record.header, row)?;
-                crate::write_sources::admit(database, &record.header, &row.row, None)?;
+                crate::write_sources::admit(
+                    database,
+                    &record.header,
+                    &row.row,
+                    &crate::write_sources::Interpretation::Applied,
+                )?;
             }
             crate::write_sources::complete(database, &record.header, &part.audience)?;
         }

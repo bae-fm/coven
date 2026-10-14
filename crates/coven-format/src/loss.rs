@@ -4,6 +4,7 @@ use crate::error::{require, Error, Rule as FormatRule};
 use crate::snapshot_rows::LostWriteCause;
 use crate::value::{name, positive, row, Value, WritePositions};
 use crate::wire::{Decoder, Encoder, Wire};
+use crate::write_sources::ChangeId;
 use coven_merge::{Cell, LostKey, LostValue, RowId, Rule, WriteId};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -109,6 +110,14 @@ pub enum LossCause {
         /// The boundary that excluded it.
         cause: LostWriteCause,
     },
+    /// An admitted row change that used data which does not survive (§8):
+    /// its generation source or a cell setter it replaced.
+    Dependency {
+        /// The write whose row change this is, even for an empty delete.
+        write: WriteId,
+        /// Failed sources in generation-then-setter role order, with repeats.
+        sources: Vec<ChangeId>,
+    },
 }
 impl Wire for LossCause {
     fn put(&self, out: &mut Encoder) -> Result<(), Error> {
@@ -126,6 +135,11 @@ impl Wire for LossCause {
                 write.put(out)?;
                 cause.put(out)
             }
+            Self::Dependency { write, sources } => {
+                3u8.put(out)?;
+                write.put(out)?;
+                sources.put(out)
+            }
         }
     }
     fn get(input: &mut Decoder<'_>) -> Result<Self, Error> {
@@ -135,6 +149,10 @@ impl Wire for LossCause {
             2 => Ok(Self::Excluded {
                 write: Wire::get(input)?,
                 cause: Wire::get(input)?,
+            }),
+            3 => Ok(Self::Dependency {
+                write: Wire::get(input)?,
+                sources: Wire::get(input)?,
             }),
             tag => Err(Error::UnknownTag {
                 field: "loss cause",
@@ -193,6 +211,7 @@ impl Loss {
             LossCause::Write(_) => 0,
             LossCause::Rules(_) => 1,
             LossCause::Excluded { .. } => 2,
+            LossCause::Dependency { .. } => 3,
         };
         (
             self.row.clone(),
@@ -201,7 +220,9 @@ impl Loss {
             self.retired,
             cause,
             match self.cause {
-                LossCause::Excluded { write, .. } => Some(write),
+                LossCause::Excluded { write, .. } | LossCause::Dependency { write, .. } => {
+                    Some(write)
+                }
                 _ => None,
             },
         )
@@ -238,6 +259,28 @@ impl Loss {
                 require(self.retired, "excluded loss", FormatRule::Required)?;
                 cause.validate()?;
             }
+            (LossValues::Row(cells), LossCause::Dependency { write, sources }) => {
+                positive(write.number)?;
+                require(
+                    cells.values().all(|cell| cell.write == *write),
+                    "dependent setters",
+                    FormatRule::Required,
+                )?;
+                require(self.retired, "dependent loss", FormatRule::Required)?;
+                require(
+                    !sources.is_empty(),
+                    "dependency sources",
+                    FormatRule::Required,
+                )?;
+                for source in sources {
+                    positive(source.write.number)?;
+                    require(
+                        source.row.key == self.row.key && source.row.audience == self.row.audience,
+                        "dependency source row",
+                        FormatRule::Required,
+                    )?;
+                }
+            }
             _ => {
                 return Err(Error::Invalid {
                     field: "loss cause",
@@ -245,7 +288,10 @@ impl Loss {
                 })
             }
         }
-        if !matches!(self.cause, LossCause::Excluded { .. }) {
+        if !matches!(
+            self.cause,
+            LossCause::Excluded { .. } | LossCause::Dependency { .. }
+        ) {
             require(
                 !self.generation.is_multiple_of(2),
                 "loss incarnation",
@@ -256,7 +302,12 @@ impl Loss {
             name(n)?;
             positive(cell.write.number)?;
             crate::merge_wire::column(&cell.value)?;
-            if self.retired && !matches!(self.cause, LossCause::Excluded { .. }) {
+            if self.retired
+                && !matches!(
+                    self.cause,
+                    LossCause::Excluded { .. } | LossCause::Dependency { .. }
+                )
+            {
                 require(
                     cell.value.parents.is_empty(),
                     "frozen references",
@@ -287,6 +338,9 @@ impl Loss {
             && match self.cause {
                 LossCause::Write(write) | LossCause::Excluded { write, .. } => {
                     positions.covers(write)
+                }
+                LossCause::Dependency { write, ref sources } => {
+                    positions.covers(write) && sources.iter().all(|s| positions.covers(s.write))
                 }
                 _ => true,
             }

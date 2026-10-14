@@ -528,14 +528,17 @@ async fn repeated_boundaries_keep_their_original_coverage_and_application_order(
         );
         assert_eq!(count(&db, "_coven_boundaries"), 2);
         assert_eq!(count(&db, "notes"), 0);
+        // A schema exclusion keeps the change as a loss; a reset leaves none.
         let losses = db.lost_values().await.unwrap();
-        assert_eq!(losses.len(), 1);
         assert_eq!(
-            losses[0].replaced_by,
+            losses
+                .iter()
+                .map(|loss| loss.replaced_by.clone())
+                .collect::<Vec<_>>(),
             if reset_first {
-                Replacement::Reset(entry)
+                vec![]
             } else {
-                Replacement::SchemaChange { version: 2 }
+                vec![Replacement::SchemaChange { version: 2 }]
             }
         );
         db.close().await.unwrap();

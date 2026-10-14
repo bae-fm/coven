@@ -382,8 +382,11 @@
     `1 | cells:map<name, Cell>` for a whole row. All values are as written,
     without foreign-key null substitution. Dismissed cells are absent;
     dismissal that empties a row removes its record.
-  - `cause` is `0 | replacing:WriteId`, `1 | rules:set<Rule>`, or
-    `2 | write:WriteId | version:u32` for a schema-excluded loss.
+  - `cause` is `0 | replacing:WriteId`, `1 | rules:set<Rule>`,
+    `2 | write:WriteId | version:u32` for a schema-excluded loss, or
+    `3 | write:WriteId | sources:[ChangeId]` for a dependent row change (§8):
+    its write and the failed sources in generation-then-setter role order,
+    repeats retained, each naming the loss's key and audience.
     Resets create no loss records (§19.3).
     A replacing write requires cell values; rules and schema changes require
     row values. The schema loss's `write` is the excluded write, or the
@@ -396,7 +399,9 @@
     cells and rules are nonempty. An excluded row keeps the generation of
     its row change; inserts and updates keep their new values and parents,
     deletes their old scalar values with empty parent maps.
-  - `frozen` is true for schema-excluded rows and for losses frozen by a breaking
+  - Dependent values name their own write as setter and have empty parent
+    maps; the identity remains for a delete with no old values.
+  - `frozen` is true for schema-excluded and dependent rows, and for losses frozen by a breaking
     migration. Migration-frozen values have empty parent maps, keeping their
     written scalar values and names independently of the current schema.
     Active losses follow merge and removal rules; frozen ones do not.
@@ -406,7 +411,7 @@
   - A schema-change version is positive and at most the snapshot's schema
     version.
   - Loss identity orders by row, generation, values identity, frozen flag,
-    cause tag, then schema loss write ID when present. Values identity is
+    cause tag, then the schema or dependency loss's write ID when present. Values identity is
     `0 | column:name | setter:WriteId` for a cell or
     `1 | setters:map<name, WriteId>` for a row. Columns and maps compare
     logically as in D2. Duplicate identities are refused.

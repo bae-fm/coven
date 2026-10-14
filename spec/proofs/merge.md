@@ -985,9 +985,14 @@ compares coven-database's retirement window over every subset of kept
 retirements, reads of them, and publication times at and around thirty days.
 For each case with a kept retirement it also keeps the final prefix through
 the earliest one, adds a later retirement, and checks both runs agree, as
-`retirement_verdict_final` states. The Boolean, reset and schema runners
+`retirement_verdict_final` states. Its `dependency` check runs
+`DataDependency.retained` and `droppedSources` for
+`mg_differential_data_dependency`, which compares coven-merge's shared
+classifier over generated rows with dropped bases, chains and repeated
+sources; the database receives every change through that classifier. The Boolean, reset and schema runners
 retain their existing paths and comparison scope.
-This comparison does not cover a Rust implementation of per-change data losses.
+The database's per-change data losses are checked by its receive tests, not
+by a model comparison.
 
 ### B18 Owner tables and row authenticity
 

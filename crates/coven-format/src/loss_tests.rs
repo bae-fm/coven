@@ -274,3 +274,57 @@ fn circle_loss_requires_its_entry_in_snapshot_coverage() {
         .unwrap();
     decoder.finish().unwrap();
 }
+
+/// A dependent change's loss keeps its write and failed sources in role
+/// order with repeats, even as an empty delete; the sources must name the
+/// same row, be present and be covered by the snapshot's positions.
+#[test]
+fn dependency_losses_round_trip_with_their_sources() {
+    let empty = test_utils::TestOracle {
+        writes: BTreeMap::new(),
+    };
+    let mut loss = test_utils::excluded_loss();
+    let write = test_utils::write().header.position;
+    let source = crate::write_sources::ChangeId {
+        write,
+        row: loss.row.clone(),
+    };
+    loss.cause = LossCause::Dependency {
+        write,
+        sources: vec![source.clone(), source.clone()],
+    };
+    let (mut encoder, mut decoder) = encoder(2);
+    let mut empty_delete = loss.clone();
+    empty_delete.values = LossValues::Row(BTreeMap::new());
+    empty_delete.generation = loss.generation + 1;
+    for loss in [loss.clone(), empty_delete] {
+        let record = SnapshotRecord::Loss(loss);
+        let frame = encoder.record(record.clone()).unwrap();
+        assert_eq!(decoder.frame(&frame, &empty).unwrap(), Some(record));
+    }
+    decoder.frame(&encoder.finish().unwrap(), &empty).unwrap();
+    decoder.finish().unwrap();
+    for invalid in [
+        LossCause::Dependency {
+            write,
+            sources: vec![],
+        },
+        LossCause::Dependency {
+            write,
+            sources: vec![crate::write_sources::ChangeId {
+                write,
+                row: coven_merge::RowId {
+                    key: b"other".to_vec(),
+                    ..loss.row.clone()
+                },
+            }],
+        },
+    ] {
+        let mut bad = loss.clone();
+        bad.cause = invalid;
+        assert!(bad.validate().is_err());
+    }
+    let mut unfrozen = loss;
+    unfrozen.retired = false;
+    assert!(unfrozen.validate().is_err());
+}

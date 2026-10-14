@@ -5,7 +5,10 @@
 //! [`recompute`] restricts that work to a closed region (Appendix B, B9).
 //! Values are opaque to the merge. The database supplies CHECK results and
 //! unique claims after resolving references, using its own SQL semantics.
+//! [`classify`] is the shared data rule deciding which received row changes
+//! enter the merge at all.
 
+mod dependency;
 mod error;
 #[cfg(any(test, feature = "test-utils"))]
 mod history;
@@ -14,6 +17,7 @@ mod removal;
 mod state;
 mod timestamp;
 
+pub use dependency::{classify, DataVerdict, Provenance};
 pub use error::MergeError;
 #[cfg(test)]
 use history::from_writes;

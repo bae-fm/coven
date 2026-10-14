@@ -292,14 +292,47 @@ pub(crate) fn complete(
     Ok(())
 }
 
-/// Record an actual interpretation under the original identity. NULL means
-/// unjudged, an empty blob means admitted, and a cause means excluded. Receiving
-/// covered bytes alone never judges them; an exclusion survives later receipt.
+/// How this device interpreted one original row change (§8, §10, §17.1).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Interpretation {
+    /// It entered the merge.
+    Applied,
+    /// A schema change or reset excluded its part.
+    Excluded(LostWriteCause),
+    /// Its write landed outside a retirement window; it has no effects.
+    Dropped,
+    /// It used data that does not survive: these sources, in role order.
+    Dependent(Vec<ChangeId>),
+}
+
+impl Interpretation {
+    /// `write` is the change's own write, kept with its failed sources.
+    fn encode(&self, write: WriteId) -> Result<Vec<u8>, DbError> {
+        Ok(match self {
+            Self::Applied => Vec::new(),
+            Self::Excluded(cause) => {
+                let mut bytes = vec![1];
+                bytes.extend(merge_fields::encode_lost_write_cause(cause)?);
+                bytes
+            }
+            Self::Dropped => vec![2],
+            Self::Dependent(sources) => {
+                let mut bytes = vec![3];
+                bytes.extend(merge_fields::encode_dependency(write, sources)?);
+                bytes
+            }
+        })
+    }
+}
+
+/// Record this device's current interpretation under the original identity,
+/// replacing an earlier one: replay rebuilds interpret retained inputs again.
+/// NULL means unjudged; receiving covered bytes alone never judges them.
 pub(crate) fn admit(
     db: &DatabaseConnection,
     header: &WriteHeader,
     row: &RowId,
-    cause: Option<LostWriteCause>,
+    admission: &Interpretation,
 ) -> Result<(), DbError> {
     let write = merge_fields::encode_write_id(&header.position)?;
     let audience = audience_text(&row.audience);
@@ -316,13 +349,32 @@ pub(crate) fn admit(
         original.schema_version,
     )?
     .ok_or(DbError::DamagedDatabase)?;
-    let admission = match cause {
-        Some(cause) => merge_fields::encode_lost_write_cause(&cause)?,
-        None => Vec::new(),
-    };
-    db.internal_execute("UPDATE _coven_authored_changes SET admission=?5 WHERE write_id=?1 AND audience=?2 AND table_name=?3 AND key=?4 AND (admission IS NULL OR (length(admission)=0 AND length(?5)>0))",
-        params![write, audience, table, row.key, admission])?;
+    db.internal_execute(
+        "UPDATE _coven_authored_changes SET admission=?5 WHERE write_id=?1 AND audience=?2 AND table_name=?3 AND key=?4",
+        params![write, audience, table, row.key, admission.encode(header.position)?],
+    )?;
     Ok(())
+}
+
+/// Whether an original change survives as data for later changes: applied
+/// here, or never judged here because a loaded snapshot carries its effects.
+pub(crate) fn retained(db: &DatabaseConnection, source: &ChangeId) -> Result<bool, DbError> {
+    let admission: Option<Option<Vec<u8>>> = db
+        .query(
+            "SELECT admission FROM _coven_authored_changes WHERE write_id=?1 AND audience=?2 AND table_name=?3 AND key=?4",
+            params![
+                merge_fields::encode_write_id(&source.write)?,
+                audience_text(&source.row.audience),
+                source.row.table,
+                source.row.key
+            ],
+            |r| r.get(0),
+        )?
+        .pop();
+    match admission {
+        None => Err(DbError::MissingWriteSources(vec![source.clone()])),
+        Some(admission) => Ok(admission.is_none_or(|bytes| bytes.is_empty())),
+    }
 }
 
 #[cfg(test)]

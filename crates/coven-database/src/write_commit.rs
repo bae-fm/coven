@@ -169,7 +169,12 @@ pub(crate) fn queue(database: &DatabaseConnection, record: &WriteRecord) -> Resu
     retain_queue(database, record)?;
     for part in &record.parts {
         for row in &part.rows {
-            crate::write_sources::admit(database, &record.header, &row.row, None)?;
+            crate::write_sources::admit(
+                database,
+                &record.header,
+                &row.row,
+                &crate::write_sources::Interpretation::Applied,
+            )?;
         }
     }
     Ok(())

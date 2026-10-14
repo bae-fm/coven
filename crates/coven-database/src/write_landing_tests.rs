@@ -391,3 +391,103 @@ fn mg_differential_retirement_window() {
     let expected: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(serde_json::Value::Array(actual), expected);
 }
+
+/// B17's four histories (§10 example): Ana's creation lands one second
+/// outside her removed device's window. Ben read it, edited the note and, in
+/// the same write, renamed his own playlist; Carol deleted the note. Ben's
+/// note edit and Carol's delete become frozen losses naming the creation;
+/// the playlist rename applies; both receive orders agree. Dropping the
+/// removal restores the creation and both dependents (§8, §10).
+#[tokio::test]
+async fn changes_built_on_a_late_write_are_frozen_and_unrelated_ones_apply() {
+    use crate::Replacement;
+    let ids = SequentialIds::new();
+    let stores: Vec<_> = (0..5).map(|_| TestStore::with_ids(&ids)).collect();
+    let mut dbs = Vec::new();
+    for store in &stores {
+        dbs.push(store.schema(notes(), NOTES).await.unwrap());
+    }
+    let [ana, ben, carol, first, second] = &dbs[..] else {
+        unreachable!()
+    };
+    sql(ana, "INSERT INTO notes VALUES('note','draft','body')")
+        .await
+        .unwrap();
+    let creation = records(ana).remove(0);
+    sql(ben, "INSERT INTO notes VALUES('playlist','Mix','')")
+        .await
+        .unwrap();
+    for reader in [ben, carol] {
+        reader.receive(creation.clone().into()).await.unwrap();
+    }
+    sql(
+        ben,
+        "UPDATE notes SET title='edited' WHERE id='note'; UPDATE notes SET title='Road trip' WHERE id='playlist'",
+    )
+    .await
+    .unwrap();
+    sql(carol, "DELETE FROM notes WHERE id='note'")
+        .await
+        .unwrap();
+    let ben_writes = records(ben);
+    let delete = records(carol).remove(0);
+    let rows = |db: &crate::Database| {
+        db.inspect_writer(|sql| {
+            sql.query("SELECT id,title FROM notes ORDER BY id", [], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            })
+            .unwrap()
+        })
+    };
+    let mut results = Vec::new();
+    for (target, delete_first) in [(first, false), (second, true)] {
+        let removal = retire(target, creation.header.position.device, 1, "device", 0).await;
+        target
+            .apply_downloaded::<Record>(creation.clone().into(), at(30 * DAY + 1))
+            .await
+            .unwrap();
+        target.receive(ben_writes[0].clone().into()).await.unwrap();
+        if delete_first {
+            target.receive(delete.clone().into()).await.unwrap();
+            target.receive(ben_writes[1].clone().into()).await.unwrap();
+        } else {
+            target.receive(ben_writes[1].clone().into()).await.unwrap();
+            target.receive(delete.clone().into()).await.unwrap();
+        }
+        assert_eq!(rows(target), [("playlist".into(), "Road trip".into())]);
+        let mut losses = target.lost_values().await.unwrap();
+        losses.sort_by_key(|loss| format!("{:?}", loss.replaced_by));
+        let causes: Vec<_> = losses
+            .iter()
+            .map(|loss| match &loss.replaced_by {
+                Replacement::DataDependency { write, sources } => {
+                    (*write, sources.iter().map(|s| s.write).collect::<Vec<_>>())
+                }
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        let created = creation.header.position;
+        let mut expected = vec![
+            (ben_writes[1].header.position, vec![created, created]),
+            // Generation, then the id, title and body setters it replaced.
+            (delete.header.position, vec![created; 4]),
+        ];
+        expected.sort_by_key(|(write, _)| format!("{write:?}"));
+        let mut causes = causes;
+        causes.sort_by_key(|(write, _)| format!("{write:?}"));
+        assert_eq!(causes, expected);
+        results.push((rows(target), causes));
+        // Restored, Ben's edit and Carol's concurrent delete merge as usual:
+        // the delete wins and Ben's edited title is an ordinary lost cell.
+        fate(target, removal, false).await.unwrap();
+        let losses = target.lost_values().await.unwrap();
+        assert_eq!(losses.len(), 1);
+        assert_eq!(
+            losses[0].replaced_by,
+            Replacement::Write(delete.header.position)
+        );
+        assert!(rows(target).iter().all(|(id, _)| id != "note"));
+        assert_eq!(rows(target).len(), 1);
+    }
+    assert_eq!(results[0], results[1]);
+}

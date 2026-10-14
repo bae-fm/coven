@@ -14,8 +14,9 @@
 //! entry keeps its format in `record`'s frame prefix. No ciphertext is kept for either.
 //! `_coven_uploads` retains its rowid for queue order and incremental BLOB reads.
 //! Cell keys start with the row; column-wide cell edits occur only in migrations.
-//! Original-change admission is NULL until judged, an empty blob when admitted,
-//! or the encoded exclusion cause. Consumed positions do not establish admission.
+//! Original-change admission is NULL until judged, then the receiving device's
+//! interpretation (`write_sources::Interpretation`). Consumed positions do not
+//! establish admission.
 //! Write-id indexes serve SQLite's incoming foreign-key checks on INSERT with
 //! RETURNING, which EXPLAIN QUERY PLAN includes alongside explicit lookups.
 
@@ -566,10 +567,10 @@ macro_rules! coven_tables {
                 value BLOB NOT NULL,
                 set_by BLOB NOT NULL,
                 retired INTEGER NOT NULL DEFAULT 0 CHECK(retired IN (0,1)),
-                replacement_kind TEXT NOT NULL CHECK(replacement_kind IN ('write', 'rules', 'excluded')),
+                replacement_kind TEXT NOT NULL CHECK(replacement_kind IN ('write', 'rules', 'excluded', 'dependency')),
                 replaced_by BLOB NOT NULL,
                 CHECK((replacement_kind='write') = (column_id IS NOT NULL)),
-                CHECK(replacement_kind!='excluded' OR retired=1)
+                CHECK(replacement_kind NOT IN ('excluded','dependency') OR retired=1)
             ) STRICT;
             CREATE INDEX _coven_lost_row ON _coven_lost(audience,table_name,key,generation,column_id);
             CREATE INDEX _coven_lost_app_key ON _coven_lost(table_name,key);

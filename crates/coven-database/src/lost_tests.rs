@@ -37,7 +37,7 @@ fn insert(
 ) {
     db.commit_writer(|sql| {
         sql.internal_execute("INSERT INTO _coven_lost(table_name,key,audience,generation,column_id,value,set_by,replacement_kind,replaced_by,retired) VALUES ('notes',?1,'store',?2,?3,?4,?5,?6,?7,?8)",
-            (key(), 0u64.to_be_bytes().to_vec(), column, value, setters, kind, replacement, kind == "excluded")).unwrap();
+            (key(), 0u64.to_be_bytes().to_vec(), column, value, setters, kind, replacement, matches!(kind, "excluded" | "dependency"))).unwrap();
     });
 }
 
@@ -88,19 +88,35 @@ async fn losses_preserve_storage_classes_each_setter_and_every_replacement() {
         ]))
         .unwrap(),
     );
-    for cause in [
-        LostWriteCause::SchemaChange(u32::MAX),
-        LostWriteCause::Reset(entry),
-    ] {
-        insert(
-            &db,
-            None,
-            encode_columns(&values).unwrap(),
-            encode_setters(&setters).unwrap(),
-            "excluded",
-            encode_exclusion(setter(1), cause).unwrap(),
-        );
-    }
+    insert(
+        &db,
+        None,
+        encode_columns(&values).unwrap(),
+        encode_setters(&setters).unwrap(),
+        "excluded",
+        encode_exclusion(setter(1), LostWriteCause::SchemaChange(u32::MAX)).unwrap(),
+    );
+    // A dependent change names its failed sources in role order, with repeats.
+    let source = |write| coven_format::write_sources::ChangeId {
+        write,
+        row: coven_merge::RowId {
+            table: "notes".into(),
+            key: key(),
+            audience: coven_merge::Audience::Store,
+        },
+    };
+    insert(
+        &db,
+        None,
+        encode_columns(&values).unwrap(),
+        encode_setters(&setters).unwrap(),
+        "dependency",
+        coven_format::merge_fields::encode_dependency(
+            setter(1),
+            &[source(setter(7)), source(setter(7)), source(setter(8))],
+        )
+        .unwrap(),
+    );
     let losses = db.lost_values().await.unwrap();
     assert_eq!(losses.len(), 4);
     assert_eq!(
@@ -152,7 +168,19 @@ async fn losses_preserve_storage_classes_each_setter_and_every_replacement() {
         losses[2].replaced_by,
         Replacement::SchemaChange { version: u32::MAX }
     );
-    assert_eq!(losses[3].replaced_by, Replacement::Reset(entry));
+    let named = |write| crate::ChangeSource {
+        write,
+        table: "notes".into(),
+        key: losses[3].key.clone(),
+        audience: coven_merge::Audience::Store,
+    };
+    assert_eq!(
+        losses[3].replaced_by,
+        Replacement::DataDependency {
+            write: setter(1),
+            sources: vec![named(setter(7)), named(setter(7)), named(setter(8))]
+        }
+    );
     db.close().await.unwrap();
     let ro = store
         .builder(vec![], vec![])

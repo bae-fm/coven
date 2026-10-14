@@ -192,6 +192,27 @@ pub fn decode_exclusion(bytes: &[u8]) -> Result<(WriteId, LostWriteCause), Error
     Ok((write, cause))
 }
 
+/// Encode a dependent change's write and failed sources for its loss record.
+pub fn encode_dependency(
+    write: WriteId,
+    sources: &[crate::write_sources::ChangeId],
+) -> Result<Vec<u8>, Error> {
+    let mut out = Encoder::new();
+    write.put(&mut out)?;
+    sources.to_vec().put(&mut out)?;
+    Ok(out.bytes)
+}
+
+/// Decode a dependent change's write and failed sources.
+pub fn decode_dependency(
+    bytes: &[u8],
+) -> Result<(WriteId, Vec<crate::write_sources::ChangeId>), Error> {
+    let (write, sources): (WriteId, Vec<crate::write_sources::ChangeId>) =
+        decode_with(bytes, |input| Ok((Wire::get(input)?, Wire::get(input)?)))?;
+    crate::value::positive(write.number)?;
+    Ok((write, sources))
+}
+
 /// Encode one loss using the same bytes as the snapshot loss section.
 pub fn encode_loss(value: &crate::loss::Loss) -> Result<Vec<u8>, Error> {
     value.validate()?;
@@ -271,9 +292,10 @@ pub fn encode_loss_identity(value: &crate::loss::Loss) -> Result<Vec<u8>, Error>
         LossCause::Write(_) => 0u8,
         LossCause::Rules(_) => 1,
         LossCause::Excluded { .. } => 2,
+        LossCause::Dependency { .. } => 3,
     }
     .put(&mut out)?;
-    if let LossCause::Excluded { write, .. } = value.cause {
+    if let LossCause::Excluded { write, .. } | LossCause::Dependency { write, .. } = value.cause {
         write.put(&mut out)?;
     }
     Ok(out.bytes)
