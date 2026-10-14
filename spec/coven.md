@@ -4516,14 +4516,22 @@ Carol's tablet:
     its current snapshot need not itself be a day old; replacing a snapshot
     does not restart the historical covering snapshot's age
     ([`maturity_survives_new_snapshots`, `eligible_after_day`](proofs/io/CovenIO/Retention.lean)).
-  - While an audience lists a snapshot whose prefix this device cannot read
-    yet, in a newer format or by an author whose device registration has
-    not applied, its current newest counting snapshot is unknown. Deleting
-    that audience's parts waits, as the reload waits for the update; that
-    snapshot's own record names the condition. A refused prefix establishes
-    nothing and does not hold deletion
-    ([`waiting_retention_safe`](proofs/storelog-data/CovenStorelogData/PendingScans.lean);
+  - While an audience lists a snapshot whose prefix this device has not
+    verified, its current newest counting snapshot is unknown: the prefix
+    is in a newer format, by an author whose device registration has not
+    applied, or refused by this version, and a later version may verify a
+    refused prefix (§19.1). Deleting that audience's parts waits until that
+    snapshot's prefix verifies or the listing no longer names it, as the
+    reload waits for the update; that snapshot's own record names the
+    condition. The refused prefix still establishes no coverage
+    ([`waiting_retention_safe`](proofs/storelog-data/CovenStorelogData/PendingScans.lean),
+    [`holding_safe`, `holding_never_skips`, `refused_prefix_holds`](proofs/storelog-data/CovenStorelogData/RefusedRetention.lean);
     the registration wait is not modeled).
+  - E.g. Ana's version refuses the signature on the prefix of Ben's newest
+    snapshot, which covers her writes 1 to 3. She keeps all her writes while
+    it is listed: a version whose check passes selects Ben's snapshot and
+    needs her write 4
+    ([`refused_prefix_retention_counterexample`](proofs/storelog-data/CovenStorelogData/RefusedRetention.lean)).
   - That current newest is chosen by verified prefix, whatever this device
     found in a snapshot's body and whether it accepts its key: a version
     that loads the body selects that snapshot (§19.1). E.g. Ana's version

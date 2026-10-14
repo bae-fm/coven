@@ -99,7 +99,7 @@ impl StoreLogSync {
                     .into_iter();
                 for (audience, candidates) in catalogs {
                     super::include_positions(&mut highest, &candidates.required_positions.0);
-                    let unreadable_prefix = candidates.unreadable_prefix;
+                    let newest_unknown = candidates.newest_unknown;
                     match self
                         .load_snapshot(candidates.candidates, &mut names)
                         .await?
@@ -111,7 +111,7 @@ impl StoreLogSync {
                             ))
                         }
                         None => {
-                            unknown_empty |= unreadable_prefix;
+                            unknown_empty |= newest_unknown;
                             files.empty.push(audience.clone());
                         }
                     }
@@ -188,7 +188,7 @@ impl StoreLogSync {
                         }
                     }
                 }
-                // An unreadable prefix may cover deleted history. An empty
+                // An unverified prefix may cover deleted history. An empty
                 // audience is established only while some log still starts
                 // at its first write.
                 if unknown_empty && needed.is_empty() {

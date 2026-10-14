@@ -40,10 +40,12 @@ pub(super) struct Catalog {
     /// Verified prefixes that follow the replay's reset/version boundary require
     /// history, even when their keys cannot authorize loading their rows.
     pub(super) required_positions: coven_format::value::WritePositions,
-    pub(super) unreadable_prefix: bool,
-    /// A listed prefix waits, for an update or for its author's registration:
+    /// A listed prefix this device has not verified: it waits, for an update
+    /// or for its author's registration, or this version refused it, and a
+    /// later version may verify it (§19.1). It establishes no coverage, but
     /// it may be the audience's current newest, so nothing that needs that
-    /// newest snapshot can decide until the prefix reads (§15).
+    /// newest snapshot can decide until it verifies or is no longer listed
+    /// (§15).
     pub(super) newest_unknown: bool,
     /// A listed snapshot in a newer format: work that selects among this
     /// audience's snapshots waits for that update (§15, §17.2).
@@ -93,7 +95,6 @@ impl StoreLogSync {
         let listed = objects.len();
         let mut candidates = Vec::new();
         let mut verified = Vec::new();
-        let mut unreadable_prefix = false;
         let mut newest_unknown = false;
         let refused = self.refused_snapshots(audience).await?;
         let mut conditions = Vec::new();
@@ -107,7 +108,7 @@ impl StoreLogSync {
                 let input =
                     crate::object_input::ObjectInput::observe(&self.database, &object).await?;
                 if input.metadata().await?.is_none() {
-                    unreadable_prefix = true;
+                    newest_unknown = true;
                     continue;
                 }
             }
@@ -115,11 +116,7 @@ impl StoreLogSync {
                 Ok(candidate) => candidate,
                 // A wait or a refusal: no coverage until the prefix checks.
                 Err(reason) => {
-                    unreadable_prefix = true;
-                    newest_unknown |= matches!(
-                        reason,
-                        PendingReason::UpdateRequired(_) | PendingReason::Waits(_)
-                    );
+                    newest_unknown = true;
                     if refusal.is_none() {
                         conditions.push((id, reason));
                     }
@@ -128,7 +125,7 @@ impl StoreLogSync {
             };
             let prefix = &candidate.prefix;
             if prefix.audience != *audience {
-                unreadable_prefix = true;
+                newest_unknown = true;
                 if refusal.is_none() {
                     let reason = self
                         .snapshot_condition(&object, Refusal::WrongIdentity { cause: None })
@@ -180,7 +177,6 @@ impl StoreLogSync {
                     .map(|(device, number)| coven_merge::WriteId { device, number })
                     .collect(),
             ),
-            unreadable_prefix,
             newest_unknown,
             update,
         })

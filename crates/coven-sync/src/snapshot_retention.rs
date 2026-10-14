@@ -70,12 +70,18 @@ impl StoreLogSync {
                 .iter()
                 .find(|snapshot| snapshot.follows_boundary(&local.log))
             {
-                // A prefix this device cannot read yet may be the newest, and
-                // need writes the chosen snapshot covers: deleting this
-                // audience's parts waits, as the reload waits (§15,
-                // `waiting_retention_safe`). That prefix's record says why.
+                // A listed prefix this device has not verified, because it
+                // waits or this version refused it, may be the newest for a
+                // later version, and need writes the chosen snapshot covers:
+                // deleting this audience's parts waits until it verifies or
+                // is no longer listed (§15, §19.1; `waiting_retention_safe`,
+                // storelog-data `holding_safe`, `refused_prefix_holds`). That
+                // prefix's record says why. A refused body never holds.
                 if catalog.newest_unknown {
-                    tracing::debug!(?audience, "unread snapshot prefix holds back log retention");
+                    tracing::debug!(
+                        ?audience,
+                        "unverified snapshot prefix holds back log retention"
+                    );
                 } else {
                     coverage.insert(audience.clone(), newest.prefix.writes.clone());
                 }

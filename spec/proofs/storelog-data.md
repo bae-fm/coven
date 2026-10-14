@@ -508,9 +508,14 @@ to 3, and a device whose checks pass selects Ben's snapshot and reads write
 4 from her log. Deleting a device's own superseded snapshot still compares
 against the newest snapshot it can load.
 - `refused_prefix_retention_counterexample`: Ana's version refuses Ben's
-  prefix signature. §15 says a refused prefix "establishes nothing and does
-  not hold deletion", so retention judges by Ana's snapshot. This is the
-  spec as written; her updated version verifies the prefix.
+  prefix signature. §15 said a refused prefix "establishes nothing and does
+  not hold deletion", so retention judged by Ana's snapshot; her updated
+  version verifies the prefix. §15 now holds deletion while a refused
+  prefix is listed, and Rust's catalog counts such a prefix as leaving the
+  newest unknown (`snapshot_catalog.rs`):
+  `a_refused_snapshot_prefix_holds_log_retention_while_it_is_listed` runs
+  this counterexample on the store, where Ana keeps all ten writes until the
+  listing stops naming Ben's snapshot.
 
 `classified_safe` and `classified_never_skips` prove the general rule.
 Retention holds an audience while any listed prefix waits for an update or

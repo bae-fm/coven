@@ -603,3 +603,34 @@ async fn a_snapshot_whose_key_is_not_accepted_still_decides_log_retention() {
     storage.create(&ben, &readable).await.unwrap();
     a_passing_version_needs_write_4(&storage, &ben).await;
 }
+
+/// `refused_prefix_retention_counterexample` (storelog-data
+/// `RefusedRetention`): Ana's version refuses the signature on Ben's prefix.
+/// A version whose check passes selects his snapshot as the newest and needs
+/// her write 4, so while that refusal is listed Ana deletes no write of the
+/// store (`refused_prefix_holds`, `holding_safe`). The hold ends once the
+/// listing stops naming his snapshot (`holding_without_refusals`).
+#[tokio::test]
+async fn a_refused_snapshot_prefix_holds_log_retention_while_it_is_listed() {
+    let (storage, mut a, ben, writes) = ana_ten_ben_twenty().await;
+    let readable = storage.read(&ben).await.unwrap();
+    let mut refused = readable.clone();
+    refused[SnapshotObjectPrefix::length(&readable).unwrap()] ^= 1;
+    storage.delete(&ben).await.unwrap();
+    storage.create(&ben, &refused).await.unwrap();
+    a.sync.run_retention().await.unwrap();
+    assert_eq!(retained(&storage, &writes).await, [true; 10]);
+    assert!(matches!(
+        snapshot_record(&a, &ben).await,
+        Some(crate::PendingReason::Refused(
+            crate::Refusal::Signature { .. }
+        ))
+    ));
+    storage.delete(&ben).await.unwrap();
+    storage.create(&ben, &readable).await.unwrap();
+    a_passing_version_needs_write_4(&storage, &ben).await;
+    storage.delete(&ben).await.unwrap();
+    a.sync.run_retention().await.unwrap();
+    assert_eq!(snapshot_record(&a, &ben).await, None);
+    assert_eq!(retained(&storage, &writes).await, [false; 10]);
+}
