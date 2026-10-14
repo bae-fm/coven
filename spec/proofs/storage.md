@@ -462,24 +462,32 @@ reports, so it is never Available, Uploading or Missing.
 Available.
 
 **Reads agree.** `rangeReply` is what a provider that passes coven-storage's
-conformance check answers for one range: exactly those bytes, a confirmed
-absence, or a refusal for a range reaching past the object's end. A read only
-asks for ranges inside the file's complete size, because the header is checked
-against the row first. `past_end_is_damage` proves that such a refusal is an
-integrity error, and `present_never_absent` that a present object is never
-read as absent. `complete_object_reads` proves the rule never refuses a genuine
-file: a complete object returns exactly the requested bytes for every range
-inside its size. `read_absence_matches_status` proves that a read meeting a
-confirmed absence fails with the same Uploading or Missing verdict a status
-call gives, and `read_failure_kept` that a provider failure keeps its category.
-`damage_cases` checks these on small objects.
+conformance check answers for one range: exactly those bytes together with the
+complete object's size (§4: a ranged read still describes the complete
+object), a confirmed absence, or a refusal for a range reaching past the
+object's end. `fetch` checks that size against the file's, as status does.
+`wrong_size_read_is_damage` proves that an object of any other size is an
+integrity error to every read, longer objects included, and
+`past_end_is_damage` that a refusal past the end is the same damage.
+`present_never_absent` proves that a present object is never read as absent.
+`complete_object_reads` proves the rule never refuses a genuine file: a
+complete object returns exactly the requested bytes for every range inside
+its size. `read_absence_matches_status` proves that a read meeting a confirmed
+absence fails with the same Uploading or Missing verdict a status call gives,
+and `read_failure_kept` that a provider failure keeps its category.
+`read_agrees_with_status` puts these together: for every storage observation
+and every range inside the file, a read returns bytes exactly when status says
+Available and fails as damage exactly when status does. `damage_cases` and
+`longer_object_is_damage` check small objects; the second is an object whose
+leading bytes are all there but whose reported size is one too many.
 
-A longer object is the one place status and reads differ.
-`longer_object_reads_within_size` checks it: status reports damage, while
-reads, which never ask past the file's size, return its leading bytes. Each
-chunk in those bytes is then authenticated on its own and the whole file
-against its content hash, so a genuine prefix reads and anything else fails
-there. That checking is outside this model.
+Every provider adapter reports the complete size on a ranged read: S3 and the
+HTTP providers from the reply's `Content-Range` total, checked against the
+object's metadata, Dropbox from its download metadata, and CloudKit from the
+record. coven-storage's conformance suite, run against the S3, Drive,
+Dropbox and OneDrive test servers and the in-memory provider, refuses a
+ranged read whose metadata is not the complete object's; CloudKit's adapter
+test checks the same.
 
 **Completion never changes a row.** `attachment_atomic` fixes the whole file
 reference and queues it in the attaching transaction. `completion_changes_no_row`
@@ -511,7 +519,8 @@ whether each deletion and settlement changed the write count, each row's fixed
 reference and the queue. Its `status` cases serve `st_differential_file_status`:
 every storage observation, uploader state and source report through
 coven-sync's status rule, then absent, failing, complete, longer and
-truncated objects through the real status call and whole-file read. Those read
+truncated objects through the real status call and whole-file read, which
+agree on each. Those read
 cases hand the model the ranges the read actually requested and compare its
 `fetch` result with the read's.
 

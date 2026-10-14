@@ -127,6 +127,32 @@ async fn an_object_of_the_wrong_size_at_the_fixed_path_is_damage_not_absence() {
     a.close().await;
 }
 
+/// A longer object holds every range the read asks for, but the reply reports
+/// its complete size: the read is damage, as status says (§16.3).
+#[tokio::test]
+async fn a_longer_object_is_damage_to_status_and_reads() {
+    let a = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
+    let file = a.attach("files", "photo", vec![64; CHUNK + 9]).await;
+    let (b, remote) = receiver(&a, &file).await;
+    a.drain().await;
+    let path = a.path(&file);
+    let mut longer = a.storage.read(&path).await.unwrap();
+    longer.push(0);
+    a.storage.delete(&path).await.unwrap();
+    a.storage.create(&path, &longer).await.unwrap();
+    assert!(matches!(
+        b.files.file_status(&remote).await,
+        Err(FileReadError::Integrity { .. })
+    ));
+    let read = b.files.read_file(&remote).await;
+    assert!(
+        matches!(read, Err(FileReadError::Integrity { .. })),
+        "{read:?}"
+    );
+    b.close().await;
+    a.close().await;
+}
+
 #[tokio::test]
 async fn an_authenticated_object_with_other_content_is_present_but_unreadable() {
     let a = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;

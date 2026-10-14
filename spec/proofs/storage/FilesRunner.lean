@@ -155,7 +155,7 @@ private def statusCase (j : Json) : Except String Json := do
   | .ok ranges =>
     let ranges ← (← fromJson? ranges (α := Array Json)).mapM range
     let read := ranges.toList.forM fun (start, stop) =>
-      (fetch r reports start stop (rangeReply observed start stop)).map fun _ => ()
+      (fetch r reports size start stop (rangeReply observed start stop)).map fun _ => ()
     pure (Json.mkObj [("status", judged), ("read", readJson read)])
 
 private def run (j : Json) : Except String Json := do

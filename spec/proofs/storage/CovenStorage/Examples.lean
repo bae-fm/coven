@@ -163,18 +163,20 @@ meeting absence fails with status's verdict. -/
 theorem damage_cases :
     status photoA 3 (.ok (some ⟨[1, 2], 0⟩)) missingReports = .error .integrity ∧
     status photoA 3 (.ok (some ⟨[1, 2, 3, 4], 0⟩)) activeReports = .error .integrity ∧
-    fetch photoA activeReports 1 3 (rangeReply (.ok (some ⟨[1, 2], 0⟩)) 1 3) =
+    fetch photoA activeReports 3 1 3 (rangeReply (.ok (some ⟨[1, 2], 0⟩)) 1 3) =
       .error (.file .integrity) ∧
-    fetch photoA missingReports 0 2 (rangeReply (.ok none) 0 2) =
+    fetch photoA missingReports 3 0 2 (rangeReply (.ok none) 0 2) =
       .error (.unavailable (.missing 7 (.source .missing))) := by decide
 
-/-- An object longer than the file: status reports damage, yet ranged reads
-within the file's size still return its leading bytes. Each chunk those
-ranges hold is then authenticated on its own (§16.2), so a genuine prefix
-reads and a changed one fails its check. -/
-theorem longer_object_reads_within_size :
+/-- An object longer than the file: every range inside the file's size is
+there, but the reply reports the object's complete size, so the read is
+damage, as status says. -/
+theorem longer_object_is_damage :
     status photoA 2 (.ok (some ⟨[1, 2, 9], 0⟩)) activeReports = .error .integrity ∧
-    fetch photoA activeReports 0 2 (rangeReply (.ok (some ⟨[1, 2, 9], 0⟩)) 0 2) =
+    rangeReply (.ok (some ⟨[1, 2, 9], 0⟩)) 0 2 = .bytes [1, 2] 3 ∧
+    fetch photoA activeReports 2 0 2 (rangeReply (.ok (some ⟨[1, 2, 9], 0⟩)) 0 2) =
+      .error (.file .integrity) ∧
+    fetch photoA activeReports 2 0 2 (rangeReply (.ok (some ⟨[1, 2], 0⟩)) 0 2) =
       .ok [1, 2] := by decide
 
 /-- Ana attaches photo A to row 7 and deletes the row while A uploads. The

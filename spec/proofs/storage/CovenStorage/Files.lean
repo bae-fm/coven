@@ -123,23 +123,25 @@ theorem absence_not_available (r : Reference) (reports : Reports) :
   · simp
   · split <;> simp
 
-/-- A provider's reply to one ranged read of `[start, stop)`. -/
+/-- A provider's reply to one ranged read of `[start, stop)`. A reply with
+bytes also reports the complete object's size (§4: a ranged read still
+describes the complete object). -/
 inductive RangeReply where
-  | bytes (b : Bytes)
+  | bytes (b : Bytes) (total : Nat)
   | absent
   | pastEnd
   | failed (e : ReadFailure)
   deriving DecidableEq, Repr
 
 /-- §4, and the provider conformance check in coven-storage: a ranged read
-returns exactly the requested bytes, or confirms absence, or refuses a range
-reaching past the object's end. -/
+returns exactly the requested bytes with the object's complete size, or
+confirms absence, or refuses a range reaching past the object's end. -/
 def rangeReply (remote : Except ReadFailure (Option Object)) (start stop : Nat) : RangeReply :=
   match remote with
   | .error e => .failed e
   | .ok none => .absent
   | .ok (some o) =>
-    if stop ≤ o.bytes.length then .bytes ((o.bytes.drop start).take (stop - start))
+    if stop ≤ o.bytes.length then .bytes ((o.bytes.drop start).take (stop - start)) o.bytes.length
     else .pastEnd
 
 /-- A read's failure: no answer from storage, or a confirmed absence carrying
@@ -150,32 +152,41 @@ inductive ReadError where
   | unavailable (verdict : Status)
   deriving DecidableEq, Repr
 
-/-- §16.3: one ranged fetch of remote bytes. Every range a read requests lies
-within the file's complete encrypted size, because the header is checked
-against the row's size first, so a range past the object's end means the
-object is too short: damage, not absence. Chunk authentication and the content
-hash follow and are outside this function. -/
-def fetch (r : Reference) (reports : Reports) (start stop : Nat) : RangeReply → Except ReadError Bytes
-  | .bytes b => if b.length = stop - start then .ok b else .error (.file .integrity)
+/-- §16.3: one ranged fetch of remote bytes, against the file's complete
+encrypted `size`. An object of any other size is damage, as status says; a
+range past the object's end means it is too short, the same damage. Chunk
+authentication and the content hash follow and are outside this function. -/
+def fetch (r : Reference) (reports : Reports) (size start stop : Nat) :
+    RangeReply → Except ReadError Bytes
+  | .bytes b total =>
+    if total = size ∧ b.length = stop - start then .ok b else .error (.file .integrity)
   | .absent => .error (.unavailable (absence r reports))
   | .pastEnd => .error (.file .integrity)
   | .failed e => .error (.file (.failed e))
 
 /-- A present object is never read as absent. -/
-theorem present_never_absent (r : Reference) (reports : Reports) (start stop : Nat)
+theorem present_never_absent (r : Reference) (reports : Reports) (size start stop : Nat)
     (o : Object) (v : Status) :
-    fetch r reports start stop (rangeReply (.ok (some o)) start stop) ≠
+    fetch r reports size start stop (rangeReply (.ok (some o)) start stop) ≠
       .error (.unavailable v) := by
   simp only [rangeReply]
   split
   · simp only [fetch]; split <;> simp
   · simp [fetch]
 
-/-- A range within the file's size that reaches past the object's end is
-damage, whatever the reports say. -/
-theorem past_end_is_damage (r : Reference) (reports : Reports) (start stop : Nat)
+/-- An object of any size but the file's is damage to every read, as to
+status, whatever the reports say. -/
+theorem wrong_size_read_is_damage (r : Reference) (reports : Reports) (size start stop : Nat)
+    (o : Object) (h : o.bytes.length ≠ size) :
+    fetch r reports size start stop (rangeReply (.ok (some o)) start stop) =
+      .error (.file .integrity) := by
+  simp only [rangeReply]
+  split <;> simp [fetch, h]
+
+/-- A range that reaches past the object's end is damage. -/
+theorem past_end_is_damage (r : Reference) (reports : Reports) (size start stop : Nat)
     (o : Object) (h : o.bytes.length < stop) :
-    fetch r reports start stop (rangeReply (.ok (some o)) start stop) =
+    fetch r reports size start stop (rangeReply (.ok (some o)) start stop) =
       .error (.file .integrity) := by
   simp [rangeReply, fetch, Nat.not_le.mpr h]
 
@@ -183,27 +194,50 @@ theorem past_end_is_damage (r : Reference) (reports : Reports) (start stop : Nat
 within the file's size: the damage rule never refuses a genuine file. -/
 theorem complete_object_reads (r : Reference) (reports : Reports) (size start stop : Nat)
     (o : Object) (hsize : o.bytes.length = size) (hstop : stop ≤ size) :
-    fetch r reports start stop (rangeReply (.ok (some o)) start stop) =
+    fetch r reports size start stop (rangeReply (.ok (some o)) start stop) =
       .ok ((o.bytes.drop start).take (stop - start)) := by
   have hle : stop ≤ o.bytes.length := hsize ▸ hstop
   have hlen : ((o.bytes.drop start).take (stop - start)).length = stop - start := by
     simp only [List.length_take, List.length_drop]; omega
-  simp [rangeReply, fetch, hle, hlen]
+  simp only [rangeReply, if_pos hle]
+  simp [fetch, hlen, hsize]
 
 /-- A read that meets a confirmed absence fails with exactly the verdict a
 status call on the same observation and evidence returns. -/
 theorem read_absence_matches_status (r : Reference) (reports : Reports)
     (size start stop : Nat) :
     status r size (.ok none) reports = .ok (absence r reports) ∧
-    fetch r reports start stop (rangeReply (.ok none) start stop) =
+    fetch r reports size start stop (rangeReply (.ok none) start stop) =
       .error (.unavailable (absence r reports)) := ⟨rfl, rfl⟩
 
 /-- A provider failure fails the read with its category; it is never absence
 or damage. -/
-theorem read_failure_kept (r : Reference) (reports : Reports) (start stop : Nat)
+theorem read_failure_kept (r : Reference) (reports : Reports) (size start stop : Nat)
     (e : ReadFailure) :
-    fetch r reports start stop (rangeReply (.error e) start stop) =
+    fetch r reports size start stop (rangeReply (.error e) start stop) =
       .error (.file (.failed e)) := rfl
+
+/-- Status and a read of any range within the file agree on every storage
+observation: a read returns bytes exactly when status says Available, and
+fails as damage exactly when status does. -/
+theorem read_agrees_with_status (r : Reference) (reports : Reports) (size start stop : Nat)
+    (remote : Except ReadFailure (Option Object)) (hstop : stop ≤ size) :
+    ((∃ b, fetch r reports size start stop (rangeReply remote start stop) = .ok b) ↔
+      status r size remote reports = .ok .available) ∧
+    (fetch r reports size start stop (rangeReply remote start stop) = .error (.file .integrity) ↔
+      status r size remote reports = .error .integrity) := by
+  cases remote with
+  | error e => simp [rangeReply, fetch, status]
+  | ok v => cases v with
+    | none =>
+      have := absence_not_available r reports
+      simp [rangeReply, fetch, status, this]
+    | some o =>
+      by_cases h : o.bytes.length = size
+      · rw [complete_object_reads r reports size start stop o h hstop]
+        simp [status, h]
+      · rw [wrong_size_read_is_damage r reports size start stop o h]
+        simp [status, h]
 
 structure RowFile where
   reference : Reference

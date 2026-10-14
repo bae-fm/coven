@@ -486,8 +486,11 @@ async fn fetch(
         .ok_or(FileReadError::NoStorage)?;
     // Rows may arrive before their files (§16.5): confirmed absence is judged
     // with the uploader's evidence, never reported as a provider failure.
-    let bytes = match storage.read_range(path, ByteRange::new(start, end)?).await {
-        Ok(bytes) => bytes,
+    let read = match storage
+        .read_object(path, Some(ByteRange::new(start, end)?))
+        .await
+    {
+        Ok(read) => read,
         Err(error) if error.failure() == coven_storage::StorageFailure::NotFound => {
             return Err(owner.absence_error(file).await)
         }
@@ -500,6 +503,10 @@ async fn fetch(
         }
         Err(error) => return Err(error.into()),
     };
+    // The reply describes the complete object (§4). Any size but the file's is
+    // damage, as file status says, even when the requested range is there.
+    crate::files::file_status::complete(file, &read.metadata)?;
+    let bytes = read.bytes;
     if bytes.len() as u64 != end - start {
         return Err(FileReadError::Integrity {
             id: file.id().to_string(),

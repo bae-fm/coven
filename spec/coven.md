@@ -4790,11 +4790,14 @@ Carol's tablet:
   and names the uploader, with the verdict file status gives
   ([`read_absence_matches_status`](proofs/storage/CovenStorage/Files.lean)).
   The app can ask for a missing file to be attached again.
-- Every range a read requests lies within the file's complete encrypted
-  size, because the header is checked against the row first. So a range
-  the provider refuses as reaching past the object's end means the object
-  is too short: an integrity error, never absence
-  ([`past_end_is_damage`, `present_never_absent`, `complete_object_reads`](proofs/storage/CovenStorage/Files.lean)).
+- A ranged read still describes the complete object (§4), so a read checks
+  the object's size as status does: any size but the file's complete
+  encrypted size is an integrity error, even when the requested range is
+  there. Every range a read requests lies within that size, because the
+  header is checked against the row first, so a range the provider refuses
+  as reaching past the object's end is the same damage, never absence. Status
+  and reads agree on every storage observation
+  ([`read_agrees_with_status`, `wrong_size_read_is_damage`, `past_end_is_damage`, `present_never_absent`, `complete_object_reads`](proofs/storage/CovenStorage/Files.lean)).
 - After a successful upload, reads on the attaching device use the cache
   or storage; coven never reads its user-provided original again.
   - The original stays where it is and is never changed or deleted.

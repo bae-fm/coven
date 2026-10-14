@@ -29,7 +29,7 @@ import CovenStorage
 #print axioms CovenStorage.Examples.duplicate_delivery_after_reset
 #print axioms CovenStorage.Examples.status_cases
 #print axioms CovenStorage.Examples.damage_cases
-#print axioms CovenStorage.Examples.longer_object_reads_within_size
+#print axioms CovenStorage.Examples.longer_object_is_damage
 #print axioms CovenStorage.Examples.deleted_row_upload_finishes
 #print axioms CovenStorage.Examples.reattached_row_keeps_new_upload
 #print axioms CovenStorage.Examples.older_upload_cannot_restore_photo
@@ -45,7 +45,9 @@ import CovenStorage
 #print axioms CovenStorage.Files.wrong_size_is_damage
 #print axioms CovenStorage.Files.absence_not_available
 #print axioms CovenStorage.Files.present_never_absent
+#print axioms CovenStorage.Files.wrong_size_read_is_damage
 #print axioms CovenStorage.Files.past_end_is_damage
+#print axioms CovenStorage.Files.read_agrees_with_status
 #print axioms CovenStorage.Files.complete_object_reads
 #print axioms CovenStorage.Files.read_absence_matches_status
 #print axioms CovenStorage.Files.read_failure_kept

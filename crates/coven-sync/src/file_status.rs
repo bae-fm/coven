@@ -134,8 +134,9 @@ impl FilesInner {
 }
 
 /// An object at the fixed path counts as the file only at the file's complete
-/// encrypted size; anything else there is damage, not absence.
-fn complete(file: &FileRef, object: &StoredObject) -> Result<(), FileReadError> {
+/// encrypted size; anything else there is damage, not absence. Status and every
+/// ranged read check it, so they agree (ST `read_agrees_with_status`).
+pub(crate) fn complete(file: &FileRef, object: &StoredObject) -> Result<(), FileReadError> {
     let expected = FileHeader::new(file.plaintext_size())
         .encrypted_size()
         .map_err(|_| FileReadError::Integrity {
