@@ -119,9 +119,14 @@ the conditional stability theorem or to a provider that honors the margin.
 
 Existing retention deadlines require finality as an input; these histories
 do not disprove those conditional bounds. The shifted bounds are stated below.
-Native provider measurements, persistence
-and cleanup are outside these histories. The IO package has no Rust
-differential runner.
+Native provider measurements, persistence and cleanup are outside these
+histories. [`FinalityRunner.lean`](io/FinalityRunner.lean) provides the IO
+differential: [two Rust tests](../../crates/coven-sync/src/finality_tests.rs)
+check observation endpoints and the missing-old-prefix counterexample, and
+[a third](../../crates/coven-sync/src/store_log_finality_tests.rs) compares delayed
+discovery receipts and the resulting finality horizon. `scripts/check.sh` builds
+`finalityRunner` and supplies `COVEN_IO_LEAN` to all three
+`io_differential_finality` tests. This does not establish general IO equivalence.
 
 The common-cut reload proposal stages all readable audiences, fills their parts
 to the maximum selected positions, and installs them together. It terminates
@@ -855,8 +860,8 @@ under its source and completion hypotheses; it does not prove row application.
 
 ## Rust checks outside the model
 
-These obligations are retained. This package adds no Rust tests and changes
-no Rust behavior.
+These obligations extend beyond the finality differential described above.
+The model does not establish them.
 
 - Count actual pages, metadata/body bytes, name lookups, redirects, native
   asset parts, SDK retries, publications, confirmations, deletions and access
