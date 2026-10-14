@@ -436,7 +436,9 @@ impl StoreLogSync {
     async fn catch_up_time(&self) -> Result<coven_format::value::StorageTime, SyncError> {
         self.observe_clock(&self.database.local_store_log().await?)
             .await?;
-        self.catch_up().await?;
+        // T_c must precede this catch-up's reads, so the pass's earlier first
+        // phase cannot serve here.
+        self.scan_store_log(true).await?;
         let sample = self
             .finality
             .lock()

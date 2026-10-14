@@ -3,34 +3,28 @@
 use super::*;
 
 impl StoreLogSync {
-    pub(super) async fn scan_store_log(&self, require_complete: bool) -> Result<(), SyncError> {
-        let mut complete = self.scan_store_log_once(require_complete).await?;
-        if complete {
-            let mut local = self.database.local_store_log().await?;
-            let member = self.operation_member()?;
-            let mut ring = self.store_keys.read()?;
-            let queued = local.upload.is_some();
-            self.publish(&mut local, &member, &mut ring).await?;
-            if queued && local.upload.is_none() {
-                complete = self.scan_store_log_once(require_complete).await?;
-            }
+    /// Phase 1 (SP steps 1–4): the read-only membership and key-copy catch-up.
+    /// A completed one observes storage time when a finality or drain
+    /// threshold may have passed, then discovers again from that sample.
+    /// Nothing here publishes an entry or shares a key. Returns whether the
+    /// observation completed.
+    pub(super) async fn scan_store_log(&self, require_complete: bool) -> Result<bool, SyncError> {
+        let complete = self.scan_store_log_once(require_complete).await?;
+        if !complete || !self.send.can_send() {
+            return Ok(complete);
         }
-        if complete && self.send.can_send() {
-            let local = self.database.local_store_log().await?;
-            let ring = self.store_keys.read()?;
-            self.share_keys(&local.log, &ring).await?;
-            let drains = self.database.retirement_finalities().await?;
-            let due = self
-                .finality
-                .lock()
-                .expect("finality lock poisoned")
-                .probe_due(&local.log, &drains, self.clock.as_ref());
-            if due && local.log.replay.state.devices.contains_key(&local.device) {
-                self.observe_clock(&local).await?;
-                self.scan_store_log_once(require_complete).await?;
-            }
+        let local = self.database.local_store_log().await?;
+        let drains = self.database.retirement_finalities().await?;
+        let due = self
+            .finality
+            .lock()
+            .expect("finality lock poisoned")
+            .probe_due(&local.log, &drains, self.clock.as_ref());
+        if due && local.log.replay.state.devices.contains_key(&local.device) {
+            self.observe_clock(&local).await?;
+            return self.scan_store_log_once(require_complete).await;
         }
-        Ok(())
+        Ok(complete)
     }
 
     /// A complete catch-up precedes this publication. The following

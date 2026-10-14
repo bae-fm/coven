@@ -734,7 +734,7 @@ async fn io_counts_one_write_local_baseline() {
     assert_eq!(repeated_reads(&counts.reads, &[], false), 0);
     // No fixed total is stated for non-idle writer holds or commits. These
     // are observed baselines; the saved-log decode bound is tested separately.
-    assert_eq!((counts.work.writer_holds, counts.work.commits), (77, 18));
+    assert_eq!((counts.work.writer_holds, counts.work.commits), (69, 17));
 }
 
 #[tokio::test]
@@ -759,7 +759,7 @@ async fn io_counts_first_catchup_baseline() {
         ),
         "{counts:#?}"
     );
-    assert_eq!((counts.work.writer_holds, counts.work.commits), (111, 42));
+    assert_eq!((counts.work.writer_holds, counts.work.commits), (103, 41));
     assert_eq!(
         counts.work.store_log_commits, 2,
         "catch-up batch and own registration"
@@ -830,7 +830,7 @@ async fn io_counts_file_fetch_baseline() {
         "{counts:#?}"
     );
     // No fixed non-idle writer/commit total is stated; observed counts.
-    assert_eq!((counts.work.writer_holds, counts.work.commits), (87, 30));
+    assert_eq!((counts.work.writer_holds, counts.work.commits), (79, 29));
 }
 
 #[tokio::test]
@@ -896,7 +896,7 @@ async fn io_counts_reopen_baseline() {
         ),
         "{counts:#?}"
     );
-    assert_eq!((counts.work.writer_holds, counts.work.commits), (72, 12));
+    assert_eq!((counts.work.writer_holds, counts.work.commits), (64, 11));
 }
 
 #[tokio::test]

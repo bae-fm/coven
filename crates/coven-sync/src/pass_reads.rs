@@ -19,6 +19,8 @@ struct Reads {
     /// Retired devices whose entry and key-copy logs reached terminal misses in
     /// a completed discovery, by the storage sample taken before it (§6).
     drains: BTreeMap<DeviceId, std::time::SystemTime>,
+    /// This pass's first phase: whether it completed with sending authority.
+    membership: Option<bool>,
     /// Audience snapshot listings shared while one return observation lasts.
     snapshot_listings: Option<BTreeMap<String, Vec<StoredObject>>>,
 }
@@ -125,6 +127,19 @@ impl PassReads {
             .clone()
     }
 
+    /// Record the outcome of this pass's read-only first phase.
+    pub(crate) fn keep_membership(&self, complete: bool) {
+        let mut reads = self.0.lock().expect("pass reads lock poisoned");
+        if reads.scopes > 0 {
+            reads.membership = Some(complete);
+        }
+    }
+
+    /// This pass's first phase, if one ran: operations reuse it (SP step 5).
+    pub(crate) fn membership(&self) -> Option<bool> {
+        self.0.lock().expect("pass reads lock poisoned").membership
+    }
+
     pub(crate) fn keep_miss(&self, kind: coven_database::LogKind, writer: DeviceId, number: u64) {
         let mut reads = self.0.lock().expect("pass reads lock poisoned");
         if reads.scopes > 0 {
@@ -175,6 +190,7 @@ impl Drop for ReadScope {
             reads.writers = None;
             reads.misses.clear();
             reads.drains.clear();
+            reads.membership = None;
         }
     }
 }

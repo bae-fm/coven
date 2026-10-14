@@ -338,7 +338,7 @@ impl Device {
         .unwrap()
     }
 
-    fn writes(&self) -> crate::DeviceLogSync {
+    pub(crate) fn writes(&self) -> crate::DeviceLogSync {
         crate::DeviceLogSync::new(
             self.storage.clone(),
             self.db.clone(),

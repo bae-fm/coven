@@ -2,6 +2,7 @@ import CovenIO.Execution
 import CovenIO.Trace
 import CovenIO.Downloads
 import CovenIO.Retired
+import CovenStorelogData.KeyPhases
 import Lean
 
 /-! The IO differential runner. Each case names the executable transition it
@@ -229,6 +230,31 @@ private def drain (j : Json) : Except String Json := do
   return Json.mkObj [("drained", toJson drained),
     ("polled", toJson (Retired.polling after known))]
 
+/-- SD `KeyPhases.begin` over IO `readLog`: phase 1 supplies membership and
+the copy listing only when the entry and key-copy logs each reach a terminal
+miss. A failed read or a refused entry leaves no completed observation, and
+`firstSend` needs one (`incomplete_membership_waits`, `incomplete_listing_waits`). -/
+private def phases (j : Json) : Except String Json := do
+  let observe (kind : Kind) (field : String) : Except String Bool := do
+    let log ← j.getObjVal? field
+    let count ← log.getObjValAs? Nat "count"
+    let failed ← log.getObjValAs? Bool "failed"
+    let refused ← log.getObjValAs? Bool "refused"
+    let store : Store := (List.range count).foldl
+      (fun store n => put store (.log kind 1 (n + 1)) [n + 1] 0) empty
+    let result := readLog (fun _ => store) (fun _ => if failed then some .network else none)
+      (fun _ => refused) kind 1 (count + 2) 0 0
+    pure (result.stop == .miss)
+  let wait : CovenStorelogData.Pending.Reason := .dropped .notAllowed
+  let membership : Except CovenStorelogData.Pending.Reason (List Nat) :=
+    if ← observe .entry "entry" then .ok [] else .error wait
+  let listing : Except CovenStorelogData.Pending.Reason CovenStorelogData.KeySelection.Copies :=
+    if ← observe .copy "copy" then .ok [] else .error wait
+  let caughtUp := match CovenStorelogData.KeyPhases.begin [] membership listing with
+    | .ok _ => true
+    | .error _ => false
+  return Json.mkObj [("first_attempt", toJson caughtUp)]
+
 private def run (j : Json) : Except String Json := do
   match ← j.getObjValAs? String "check" with
   | "discovery" => discovery j
@@ -242,6 +268,7 @@ private def run (j : Json) : Except String Json := do
   | "post" => post j
   | "send_gate" => sendGate j
   | "drain" => drain j
+  | "phases" => phases j
   | check => throw s!"unknown IO check {check}"
 
 def main : IO UInt32 := do

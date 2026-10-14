@@ -497,50 +497,6 @@ impl OperationRun {
         result
     }
 
-    async fn pass_steps(&mut self) -> Result<(), SyncError> {
-        let _pass = self.sync.begin_pass(&mut self.writes);
-        self.sync.sync_store_log().await?;
-        self.writes.observe_positions().await?;
-        // Phase 2: replace exposed keys before any first attempt (§11).
-        self.sync.rotate_exposed_keys().await?;
-        self.drive_key_phase().await?;
-        // Pending reports still travel while a reload holds the confirmed past.
-        if let Some(id) = self.sync.pending_reload().await? {
-            self.writes.post_positions().await?;
-            return Err(SyncError::ReloadPending(id));
-        }
-        self.sync.prepare_return().await?;
-        let checkpoint = self.sync.return_sample();
-        self.writes.upload_writes().await?;
-        let mut discovery = self.writes.download_writes().await?;
-        if discovery.needs_snapshots {
-            self.sync.discover_snapshots().await?;
-            discovery = self.writes.download_writes().await?;
-        }
-        self.drive_key_phase().await?;
-        if let Some(id) = self.sync.pending_reload().await? {
-            self.writes.post_positions().await?;
-            return Err(SyncError::ReloadPending(id));
-        }
-        self.files.sync_files().await?;
-        self.writes.upload_writes().await?;
-        self.sync.write_snapshots().await?;
-        self.sync.run_retention().await?;
-        self.sync
-            .finish_pass(&mut self.writes, discovery.complete, checkpoint)
-            .await
-    }
-
-    async fn drive_key_phase(&mut self) -> Result<(), SyncError> {
-        loop {
-            self.drive_pass().await?;
-            // Local operations may have changed membership during this phase.
-            if !self.sync.rotate_exposed_keys().await? {
-                return Ok(());
-            }
-        }
-    }
-
     async fn drive_pass(&mut self) -> Result<(), SyncError> {
         match self.drive().await? {
             Some(error) => Err(error),
@@ -666,3 +622,6 @@ impl OperationRun {
         }
     }
 }
+
+#[path = "operation_pass.rs"]
+mod pass;

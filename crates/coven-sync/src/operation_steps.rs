@@ -180,11 +180,15 @@ impl StoreLogSync {
                 _ => return Err(coven_database::DbError::DamagedDatabase.into()),
             }
         }
-        // Completion uses replay after downloading concurrent entries. Applying
-        // our own removal can stop this device; its kept result is still final.
-        match self.step().await {
-            Ok(_) | Err(SyncError::Removed) => (),
-            Err(error) => return Err(error),
+        // Completion uses replay after downloading concurrent entries; within
+        // a pass, its first phase already did, and own publication extended
+        // it (SP step 4). Applying our own removal can stop this device; its
+        // kept result is still final.
+        if self.reads.membership().is_none() {
+            match self.step().await {
+                Ok(_) | Err(SyncError::Removed) => (),
+                Err(error) => return Err(error),
+            }
         }
         local = self.database.local_store_log().await?;
         let current = self

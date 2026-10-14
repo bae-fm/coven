@@ -229,9 +229,11 @@ async fn a_reload_call_receives_its_native_failure_and_automatic_retry_replaces_
     );
     storage.set_online(true);
     storage.delete(&snapshot).await.unwrap();
+    // The pass reports the reload that holds its data phase; the reload's
+    // own native failure is its recorded reason below.
     let error = operations.sync().await.unwrap_err();
     assert!(
-        matches!(&error, SyncError::Storage(error) if error.failure() == StorageFailure::NotFound),
+        matches!(&error, SyncError::ReloadPending(id) if *id == retained[0].id),
         "{error:?}"
     );
     let conditions = pending(&operations, &a.db).await;
@@ -240,6 +242,17 @@ async fn a_reload_call_receives_its_native_failure_and_automatic_retry_replaces_
     assert_eq!(
         pending_kind(&conditions[0]),
         OperationKind::ReloadFromSnapshot
+    );
+    assert!(
+        matches!(
+            &conditions[0].reason,
+            PendingReason::Storage {
+                failure: StorageFailure::NotFound,
+                ..
+            }
+        ),
+        "{:?}",
+        conditions[0].reason
     );
     operations.close().await.unwrap();
 }

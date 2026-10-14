@@ -141,6 +141,58 @@ impl StoreLogSync {
         self.resume_snapshots().await
     }
 
+    /// Catch up, then settle key work and the reserved entry in that order:
+    /// discovery always precedes publication.
+    async fn step(&self) -> Result<(), SyncError> {
+        if self.catch_up_membership().await? {
+            self.match_keys().await?;
+            self.settle_queued_entry().await?;
+        }
+        Ok(())
+    }
+
+    /// Phase 1 of a pass: discover and apply the store log and read key
+    /// copies and identity, publishing nothing. Its completion serves every
+    /// operation of this pass in place of their own catch-up (SP step 5).
+    pub(crate) async fn catch_up_membership(&self) -> Result<bool, SyncError> {
+        let complete = self.scan_store_log(false).await?;
+        self.reads.keep_membership(complete && self.send.can_send());
+        Ok(complete)
+    }
+
+    /// Phase 2's key work: publish reserved copies, then share historical
+    /// keys with current members who lack them. Without a fresh completed
+    /// first phase, sharing waits (SP step 2).
+    pub(crate) async fn match_keys(&self) -> Result<(), SyncError> {
+        if !self.send.can_send() {
+            return Ok(());
+        }
+        let local = self.database.local_store_log().await?;
+        let ring = self.store_keys.read()?;
+        self.share_keys(&local.log, &ring).await
+    }
+
+    /// SP step 5 begins with the reserved store-log entry, whose number
+    /// cannot be abandoned, before any operation reserves another. Callers
+    /// settle it only after a completed first phase; the send gate checks
+    /// that phase's freshness before every request.
+    pub(crate) async fn settle_queued_entry(&self) -> Result<(), SyncError> {
+        let mut local = self.database.local_store_log().await?;
+        if local.upload.is_none() {
+            return Ok(());
+        }
+        let member = self.operation_member()?;
+        let mut ring = self.store_keys.read()?;
+        // Only an admission entry publishes without sending authority; its
+        // binding must be observed before any ordinary send (§10).
+        let admission = !self.send.can_send();
+        self.publish(&mut local, &member, &mut ring).await?;
+        if admission && local.upload.is_none() {
+            self.scan_store_log_once(true).await?;
+        }
+        Ok(())
+    }
+
     /// Fix and publish a new entry. Existing queued entries go first. The change's
     /// key introductions name material already in custody and commit its hash.
     /// Administrative callers must complete online catch-up before calling this
@@ -211,12 +263,15 @@ impl StoreLogSync {
 
     /// A complete catch-up: every received entry applied and this pass's
     /// key-copy observation complete (§11).
+    /// Within a pass, its completed first phase is the catch-up; one that
+    /// did not complete, or has expired, waits for the next pass (SP steps 2
+    /// and 5). Outside a pass, read the store log and key copies now.
     async fn catch_up(&self) -> Result<(), SyncError> {
-        self.scan_store_log(true).await
-    }
-
-    async fn step(&self) -> Result<(), SyncError> {
-        self.scan_store_log(false).await
+        match self.reads.membership() {
+            Some(true) if self.send.can_send() => Ok(()),
+            Some(_) => Err(StorageFailure::CatchUpRequired.into()),
+            None => self.scan_store_log(true).await.map(|_| ()),
+        }
     }
 
     /// Settle an entry whose complete bytes failed a check. A newer format is

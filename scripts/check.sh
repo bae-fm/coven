@@ -394,7 +394,8 @@ proofs() {
             io_differential_catalog_current io_differential_needs_snapshots \
             io_differential_recent_return io_differential_streaming_download_dispositions \
             io_differential_positions io_differential_retained_ranges_and_refusal_eviction \
-            io_differential_send_gate io_differential_retired_drain; do
+            io_differential_send_gate io_differential_retired_drain \
+            io_differential_pass_phases; do
             if ! printf '%s\n' "$io_tests" | grep -q "::$test: test\$"; then
                 echo "the Rust test binary is missing $test" >&2
                 exit 1
@@ -410,7 +411,8 @@ proofs() {
             device_log_sync::positions::tests::io_differential_positions \
             object_input::tests::io_differential_retained_ranges_and_refusal_eviction \
             send_gate::tests::io_differential_send_gate \
-            device_log_sync::drain::tests::io_differential_retired_drain
+            device_log_sync::drain::tests::io_differential_retired_drain \
+            operations::pass::tests::io_differential_pass_phases
     fi
 
     if proof_selected merge || crate_selected coven-sync; then

@@ -438,6 +438,15 @@ impl StoreLogSync {
                 _ => None,
             })
             .ok_or(coven_database::DbError::DamagedDatabase)?;
+        // The cursor names published copies only: reserved numbers go up
+        // first, in order, so the joiner's tail starts after them (SP step 4).
+        crate::store_log_object::upload_keys(
+            self.directory.id(),
+            self.storage.as_deref(),
+            &self.database,
+            &self.send,
+        )
+        .await?;
         let code = InviteCode {
             store: store.id,
             name: store.name.clone(),

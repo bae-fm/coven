@@ -190,6 +190,17 @@ impl DeviceLogSync {
     /// A write with an audience lacking a usable key records that wait and stops
     /// this log's sends, later numbers included; the pass goes on (§11).
     pub async fn upload_writes(&mut self) -> Result<Vec<WriteId>, SyncError> {
+        self.upload(true).await
+    }
+
+    /// Retry only already attempted writes, with their fixed bytes. A pass
+    /// whose first phase did not complete makes no first attempt (SP step 2);
+    /// attempted writes precede every untried one in the queue.
+    pub(crate) async fn retry_attempted_writes(&mut self) -> Result<Vec<WriteId>, SyncError> {
+        self.upload(false).await
+    }
+
+    async fn upload(&mut self, first_attempts: bool) -> Result<Vec<WriteId>, SyncError> {
         let mut uploaded = Vec::new();
         let mut waits: Vec<_> = self
             .database
@@ -202,6 +213,19 @@ impl DeviceLogSync {
             })
             .collect();
         loop {
+            if !first_attempts
+                && !self
+                    .database
+                    .read_oldest_upload(|upload| Ok::<_, SyncError>(upload.keys.is_some()))
+                    .await
+                    .map_err(|error| match error {
+                        coven_database::UploadReadError::Database(error) => error.into(),
+                        coven_database::UploadReadError::Consumer(error) => error,
+                    })?
+                    .unwrap_or(false)
+            {
+                break;
+            }
             let local = self.database.local_store_log().await?;
             let state = self.database.sync_state(Vec::new()).await?;
             let member = self
