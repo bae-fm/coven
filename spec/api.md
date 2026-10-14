@@ -334,6 +334,9 @@ pub enum DbError {
     /// A value or row exceeds the format (§5), or a write's plaintext or sealed
     /// bytes cannot fit in a SQLite value and its queue row (§6).
     TooLarge { field: &'static str, actual: u64, maximum: u64 },
+    /// A statement or shared trigger directly changed another member's row (§8.8).
+    /// The transaction, including its upload record, did not commit.
+    NotOwner { table: String, key: RowKey, owner: MemberId },
     /// A local trigger wrote a synced table or a shared trigger a local one (§8.7).
     TriggerTarget { trigger: String, table: String },
     /// A reference points at a row outside the source row's audience (§14.5).
@@ -850,7 +853,13 @@ handle.setup_oauth_storage(
   snapshots and file retention.
 - Each synced table declares its kind of key ([§8.5](coven.md#85-keys-and-uniqueness)),
   how its rows get their audience ([§14](coven.md#14-audiences)), and whether its rows
-  carry a file ([§16](coven.md#16-files)).
+  carry a file ([§16](coven.md#16-files)). It may restrict direct writes to
+  each row's original creator with `owner_only()`
+  ([§8.8](coven.md#88-owner-tables)).
+- Owner tables use the same foreign-key actions, unique constraints, CHECKs
+  and shared triggers as other synced tables. Opening and schema raises
+  enforce the ordinary schema rules, including SET DEFAULT's refusal; no
+  owner-column or owner-specific RESTRICT requirement is added.
 - A table declares at most one of `audience_column` and `audience_from`;
   opening refuses both with `SchemaError::TwoAudiences`. A table that
   declares neither is in the store.
@@ -874,6 +883,11 @@ impl SyncedTable {
     where
         I: IntoIterator<Item = S>,
         S: Into<String>;
+
+    /// Only each row's original creating member may directly update or delete
+    /// it. Shared-trigger targets count as direct writes; exact foreign-key
+    /// consequences are verified separately (§8.8). No app owner column is needed.
+    pub fn owner_only(self) -> Self;
 
     /// Makes the table a root: its text `column` holds each row's audience,
     /// `store` or a circle's id, and is never NULL (§14).
@@ -998,7 +1012,9 @@ pub struct UserFile {
 pub struct FileRef { /* private fields */ }
 
 impl CovenHandle {
-    /// Runs one write.
+    /// Runs one write. A statement or shared trigger targeting another owner's
+    /// row refuses the transaction with DbError::NotOwner (§8.8). Authorized
+    /// foreign-key actions may change that row under the declared schema.
     pub async fn write<F, R>(&self, sql: F) -> CovenResult<R>
     where
         F: FnOnce(SqlContext<'_, '_>) -> CovenResult<R> + Send + 'static,
@@ -1223,7 +1239,8 @@ impl CovenHandle {
 
     /// Dismisses lost values the app has dealt with, in a write, so every
     /// device drops them from `_coven_lost`; a removed row is deleted for
-    /// good, and never comes back (§8).
+    /// good, and never comes back (§8). Deleting an owned removed row requires
+    /// its owner's permission (§8.8); dismissing a frozen record changes no row.
     pub async fn dismiss_lost_values(&self, values: &[LostValue]) -> CovenResult<()>;
 
     /// The same, as a live query.
@@ -1278,7 +1295,7 @@ pub struct LostValue {
     /// One cell's value, or a whole removed row's values.
     pub lost: Lost,
     /// What replaced it: a write that hadn't read it, removal rules, a
-    /// breaking change, or dropped data sources.
+    /// breaking change, dropped data sources, or failed row authorization.
     pub replaced_by: Replacement,
     /// Old-shape values kept independently of the current schema (§17.1).
     /// Their table or columns may no longer exist; dismissal still works.
@@ -1314,10 +1331,30 @@ pub enum Replacement {
     /// A breaking change excluded the write or deleted a hidden row through
     /// its generation. Frozen values retain their original setters (§17.1).
     SchemaChange { version: u32 },
-    /// This original row change used dropped data (§8, §10). Sources are
-    /// failed generation/setter writes in authored role order, with repeats.
-    /// `write` preserves the change identity even for a delete without values.
-    DataDependency { write: WriteId, sources: Vec<WriteId> },
+    /// This original row change used dropped data (§8, §10). Sources name
+    /// generation/setter changes, additional direct-execution sources, then
+    /// verified foreign-key causes (§8.8),
+    /// in authored role/execution order, with repeats. Row identity distinguishes
+    /// several causes in the same write. Empty deletes retain their write id.
+    DataDependency { write: WriteId, sources: Vec<ChangeSource> },
+    /// A member's row change lacked permission; other changes may apply (§8.8).
+    NotAuthorized { write: WriteId, reason: RowAuthorizationFailure },
+}
+
+/// An original row change or direct execution target used as data (§8, §8.8).
+pub struct ChangeSource {
+    pub write: WriteId,
+    pub table: String,
+    pub key: RowKey,
+    pub audience: Audience,
+}
+
+pub enum RowAuthorizationFailure {
+    /// A direct target belongs to this member, or a foreign target had no
+    /// valid foreign-key derivation from an authorized direct change.
+    NotOwner { owner: MemberId },
+    /// The proposed derived payload differs from the reconstructed schema effect.
+    InvalidForeignKeyEffect,
 }
 
 pub enum RemovalRule {

@@ -22,6 +22,7 @@
   - [8.5 Keys and uniqueness](#85-keys-and-uniqueness)
   - [8.6 CHECK constraints](#86-check-constraints)
   - [8.7 Triggers](#87-triggers)
+  - [8.8 Owner tables](#88-owner-tables)
 - [9. Members and roles](#9-members-and-roles)
 - [10. Device identity](#10-device-identity)
 - [11. Keys](#11-keys)
@@ -1138,6 +1139,9 @@ the file's ranges under `F`.
   - its *write record*, waiting to be uploaded in coven's `_coven_uploads`
     table:
     - its row changes: which rows, which columns, old and new values;
+    - the original creator identities, direct targets and foreign-key causes
+      needed to check owner permissions (§8.8), including actions coalesced
+      into one row change;
     - which device wrote it, its number, its timestamp, and what it had
       read;
     - the schema version it was made with;
@@ -1535,8 +1539,13 @@ Two mechanisms order writes:
   - For each row change, retain the write that supplied its generation and
     the setter of each cell it replaced, as used on the authoring device.
     A row is its table, key and audience. Generation zero has no source.
-  - An otherwise eligible change is a frozen loss if any such source's
-    change at that row was dropped. Follow sources through earlier changes:
+  - A recorded foreign-key action also depends on the direct changes and
+    intermediate actions in the same write that caused it (§8.8). Recompute
+    these sources from the original schema and authoring inputs. Each source
+    names its write and row, since two changes in one write can have different
+    verdicts. Preserve every contributing cause when actions coalesce.
+  - An otherwise eligible change is a frozen loss if any such source change
+    was dropped. Follow their source changes transitively:
     a change frozen by this rule cannot support another, even if its write's
     other changes survived. An ordinary merge loss does not drop its setter's
     change. One row change, including all its columns, is the unit of loss.
@@ -1545,8 +1554,9 @@ Two mechanisms order writes:
     creates no data dependence by itself.
   - Record the original change on every device reading that audience: its
     write identity, row, generation, operation, old names and written values,
-    with the failed source identities as its cause, generation first and then
-    replaced setters in authored order. Keep repeated identities when one
+    with the failed source identities as its cause, generation first, then
+    replaced setters in authored order, additional direct-execution sources,
+    then foreign-key causes in reconstructed execution order. Keep repeated identities when one
     write supplied several roles, and keep even a delete with no scalar
     values. A later replacement does not acknowledge this loss away.
   - Keep source identities and their per-change verdicts separately from
@@ -1679,8 +1689,10 @@ Two mechanisms order writes:
     - the value that lost, or every value of the removed row;
     - the write that set each value;
     - what replaced it: a write that hadn't read it, the rules that removed
-      the row, a breaking change that excluded it, or its dropped data sources;
-    - whether its values are frozen: dependent changes, schema-excluded writes
+      the row, a breaking change that excluded it, dropped data sources,
+      or a refused owner permission or foreign-key derivation (§8.8);
+    - whether its values are frozen: unauthorized changes, dependent changes,
+      schema-excluded writes
       and rows deleted by a breaking migration retain old-shape values
       ([§17.1](#171-host-application));
     - for an excluded or dependent change, its write identity and operation,
@@ -1977,7 +1989,8 @@ Carol's tablet:
 - A row change that points at a parent also carries the parent's
   generation ([§8.3](#83-deletes)).
 - On the device that deletes a parent, SQLite runs each child's foreign key
-  action, and the write records the results as ordinary row changes.
+  action, and the write records the results as derived row changes with their
+  causes (§8.8). They use the ordinary generation and cell merge rules.
   - E.g. attachments point at notes with cascade, and links with set null;
     Carol added attachment 8 to note 43 in her write 3 at 15:30, and every
     device has it.
@@ -2267,6 +2280,9 @@ Carol's tablet:
     index to "Shopping".
 - A shared trigger runs only on the device making the write, writes only
   synced tables, and its writes become part of that write.
+  - Its targets are direct writes for owner permissions (§8.8), including
+    when a foreign-key action fires the trigger. Only the foreign-key action
+    itself receives the derived-change exception.
   - E.g. a shared trigger sets a note's `edited_at` when its body changes:
 
     ```sql
@@ -2314,6 +2330,74 @@ Carol's tablet:
     ```
 
   - A local trigger writing a local table counts 3 on every device.
+
+### 8.8 Owner tables
+
+- A synced table may declare `owner_only()` ([E2](api.md#e2-declaring-synced-tables)).
+  Its owner permission uses coven's retained creator identity, not a mutable
+  app column. Tables without this declaration have no row-owner restriction.
+- A row's owner is the authenticated member who originally created it.
+  Inserting a new row establishes that author as its owner. Updating,
+  deleting, reinserting or copying it between audiences preserves that identity.
+  - Concurrent generation-zero creations of one shared key select the
+    creating write with the smallest timestamp, before permission filtering,
+    on every device. First receipt cannot choose the owner. If an earlier
+    competing creation arrives later, recheck the affected changes against
+    the selected creator.
+  - Retain the creating write's authenticated identity through deletion,
+    loss dismissal, schema conversion and snapshots. Renaming a table or
+    key does not make the migration's author the row's creator.
+- Only the owner may directly update or delete an owned row. An insert over
+  an existing or removed shared key is an update for this permission.
+  - Direct targets include the write's own statements and its shared
+    triggers. Check every direct target even if its effects combine with a
+    foreign-key action on the same row. A trigger cannot borrow permission
+    from the row that fired it.
+  - At commit, a foreign direct target refuses the whole local transaction
+    with `DbError::NotOwner`, leaving its rows and upload queue unchanged.
+  - On receipt, the unauthorized row change becomes a frozen per-change loss
+    naming the owner; unrelated changes in the write still apply. Changes
+    that used its data follow §8's dropped-source rule. This is separate from
+    the whole-write membership and signature checks in §7.1.
+- A foreign-key action derived from an authorized direct change in the same
+  write can update or delete another owner's row. This includes transitive
+  CASCADE and SET NULL actions, on deletion or referenced-key updates.
+  - Receivers recompute the complete effect from the original schema, the
+    write's direct changes and verified authoring inputs. They do not trust
+    a claimed direct/derived label, target, generation, scalar patch or cause
+    list. Shared-trigger effects remain direct targets.
+  - Match the exact row, generation, operation and every changed column and
+    value, including all components of a compound key. Several actions on
+    one row must match their complete combined effect in original execution
+    order; accepting only one component is not sufficient.
+  - Every derivation must reach authorized direct causes in this write. A
+    cycle with no direct cause proves nothing. A proposed foreign-owned
+    change without this exact derivation is an unauthorized per-change loss;
+    missing prerequisite evidence waits instead of granting permission.
+  - Keep the verified derivation, full original row change and all contributing
+    causes independently of dismissible losses. Keep a direct action and
+    its data sources even when its own row ends with no net change: its
+    foreign-key effects can remain. An accepted cascade is a
+    recorded derived delete even when it knowingly replaced the old values
+    and the ordinary cell rules require no lost-cell record.
+  - If a cause drops, its derived row changes drop through §8's data rule.
+    Replay the surviving changes; the row's earlier generation and values
+    return unless an independent surviving change or removal rule keeps them
+    out. A combined row change loses if any contributing cause loses.
+- All ordinary schema and removal rules apply to owner tables. UNIQUE and
+  CHECK conflicts can hide owned rows, and shared triggers can cause such
+  conflicts through their authorized targets. Every hidden row has its
+  ordinary loss naming the causes; when the last cause disappears, it returns.
+  The existing SET DEFAULT refusal (§8.4) also applies.
+- E.g. Ben deletes a track while Ana's review points at it. With CASCADE,
+  the write records the review's derived deletion. With RESTRICT, SQLite
+  refuses the delete while the review references it. Ben can never directly
+  edit Ana's review.
+- Owner permissions and verified foreign-key consequences are checked on
+  every device from the same authenticated inputs, including after a reload.
+  [B18](proofs/merge.md#b18-owner-tables-and-row-authenticity) proves their
+  authorization, agreement, loss recording and reversal at the stated SQL
+  extraction boundary. Ownership grants no additional schema restrictions.
 
 ## 9. Members and roles
 
@@ -3764,6 +3848,12 @@ Carol's tablet:
   rows and losses in the loading transaction; retain original inputs until
   the deciding replacement prefix is final and independent retention checks
   pass. A snapshot cannot rescue an old-key write by covering it.
+- Snapshots also retain the original creator identities and verified direct
+  and foreign-key provenance required by §8.8. A snapshot author's signature
+  cannot substitute for another member's original authorship. Recheck exact
+  derived effects from retained original schema and execution evidence before
+  accepting foreign-owned row changes; losing or dismissing a value does not
+  erase the evidence needed for that decision.
 - Snapshots are discovered by listing `<store>/snapshots/<audience>/`,
   never by GETting the next snapshot number. Retention can delete snapshot
   2 while leaving 3. List the audience's retained snapshots and check their
@@ -4534,7 +4624,8 @@ Carol's tablet:
   after it, as SQLite lists it.
   - Only new tables or new columns: an addition.
   - Anything else, such as a new index, constraint or foreign key: a
-    breaking change.
+    breaking change. Changing an existing table's `owner_only` declaration
+    is also breaking; compare declarations as well as SQLite's schema.
   - Changes only to local tables that keep their names, their columns,
     indexes and triggers, and to views, are neither: they don't sync.
   - Dropping or renaming a table is a breaking change, since it may have
@@ -4695,7 +4786,10 @@ Carol's tablet:
   - Member-key window exclusions supply base verdicts to the same §8 data
     rule (§10); conversion cannot rescue them.
   - First determine candidate schema admission without changing values,
-    then resolve each change's original data sources under §8. Invoke the
+    check owner permission using the current table declaration and retained
+    original identities (§8.8), and verify foreign-key effects against the
+    write's original schema. Resolve each change's original data sources
+    under §8. Invoke the
     callback only on eligible changes. A dependent change stays frozen in
     its original shape with its failed sources as the cause; unrelated
     changes in the same write, even the same part, can convert and apply
