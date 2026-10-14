@@ -164,7 +164,7 @@ async fn every_profile_checks_missing_objects_with_a_prefix_scoped_listing() {
     for settings in settings {
         let state = Arc::new(Mutex::new(Remote {
             gcs: settings.signing == S3Signing::GoogleHmac,
-            allowed_prefix: Some(ObjectPrefix::all(STORE_ID).under("store")),
+            allowed_prefix: Some(ObjectPrefix::all(STORE_ID).under("")),
             ..Remote::default()
         }));
         let server =
@@ -199,14 +199,11 @@ async fn every_profile_checks_missing_objects_with_a_prefix_scoped_listing() {
             let requests = &state.lock().unwrap().requests;
             assert_eq!(requests.len(), 2, "one exact HEAD and one bucket listing");
             assert_eq!(requests[0].0, Method::HEAD);
-            assert_eq!(
-                requests[0].1.path(),
-                format!("/bucket/{}", path.under("store"))
-            );
+            assert_eq!(requests[0].1.path(), format!("/bucket/{}", path.under("")));
             assert_eq!(requests[1].0, Method::GET);
             assert_eq!(requests[1].1.path(), "/bucket/");
             let q = query(&requests[1].1);
-            assert_eq!(q["prefix"], path.under("store"));
+            assert_eq!(q["prefix"], path.under(""));
             assert_eq!(q["max-keys"], "0");
             assert_eq!(
                 q.get("list-type").map(String::as_str),

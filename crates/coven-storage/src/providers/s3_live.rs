@@ -22,12 +22,20 @@ impl LiveS3 {
                 .remove(key)
                 .expect("required live S3 setting missing")
         };
+        // A service whose member keys reach a whole bucket keeps each store
+        // at the bucket's root (§4); the suite's stores share the test bucket.
+        let prefix = match crate::providers::s3_key_scope(endpoint.as_ref(), None)
+            .expect("valid live endpoint")
+        {
+            crate::providers::S3KeyScope::Bucket => String::new(),
+            crate::providers::S3KeyScope::Prefix => "coven-live".into(),
+        };
         let config = StorageConfig::S3 {
             bucket: take("COVEN_LIVE_S3_BUCKET").as_str().to_owned(),
             region: take("COVEN_LIVE_S3_REGION").as_str().to_owned(),
             endpoint,
             profile: None,
-            prefix: "coven-live".into(),
+            prefix,
         };
         let credentials = S3Credentials {
             access_key_id: take("COVEN_LIVE_S3_ACCESS_KEY_ID").as_str().to_owned(),

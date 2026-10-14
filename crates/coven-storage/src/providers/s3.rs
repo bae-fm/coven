@@ -18,7 +18,7 @@ mod error;
 use error::s3_error;
 #[path = "s3_profile.rs"]
 mod profile;
-pub(crate) use profile::settings as s3_settings;
+pub(crate) use profile::{settings as s3_settings, S3KeyScope};
 #[path = "s3_checksum_headers.rs"]
 mod checksum_headers;
 #[path = "s3_copy_upload.rs"]
@@ -34,13 +34,17 @@ mod metadata;
 #[path = "s3_restart.rs"]
 mod restart;
 pub(crate) use detect::detect;
+#[path = "s3_own_bucket.rs"]
+mod own_bucket;
+pub(crate) use own_bucket::check_new_store;
 
-/// Refuses a profile or plain-http endpoint that contradicts the endpoint (§4).
-pub(crate) fn check_s3_profile(
+/// The finest scope a member key has at this location, after refusing a
+/// profile or plain-http endpoint that contradicts the endpoint (§4).
+pub(crate) fn s3_key_scope(
     endpoint: Option<&url::Url>,
     profile: Option<&crate::S3Profile>,
-) -> Result<(), StorageError> {
-    profile::settings(endpoint, profile).map(|_| ())
+) -> Result<S3KeyScope, StorageError> {
+    profile::select(endpoint, profile).map(profile::Selected::key_scope)
 }
 
 /// S3 and compatible endpoints, using only object operations and manually supplied keys.

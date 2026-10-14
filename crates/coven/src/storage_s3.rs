@@ -1,4 +1,5 @@
-//! S3 setup: detection and the safety check of the effective settings
+//! S3 setup: a new store's own-bucket check where member keys reach a whole
+//! bucket, then detection and the safety check of the effective settings
 //! against the service, before the provider check and any commitment (§4).
 
 use super::*;
@@ -23,8 +24,17 @@ impl StorageConnections {
         };
         let device_name = device_name.to_owned();
         self.call(move |owner| async move {
-            let config = owner.recorded_s3(storage).await?;
+            let recorded = owner.codes.location().await.map_err(setup_error)?;
+            let config = recorded_s3(storage, recorded.as_ref());
             owner.check_location(&config).await?;
+            if recorded.is_none() {
+                // Creating the store: where member keys reach the whole
+                // bucket, the bucket must hold nothing but this store (§4).
+                owner
+                    .connector
+                    .check_new_s3_store(config.clone(), credentials.clone(), owner.store)
+                    .await?;
+            }
             // §4's safety check: the effective settings must agree with what
             // the service does, before the provider check and any commitment.
             let detection = owner
@@ -37,33 +47,6 @@ impl StorageConnections {
                 .await
         })
         .await
-    }
-
-    /// Reconnecting with the recorded S3 location and no profile reuses the
-    /// recorded settings, which every other device already uses (§4).
-    async fn recorded_s3(
-        &self,
-        supplied: StorageConfig,
-    ) -> Result<StorageConfig, StorageSetupError> {
-        let recorded = self.codes.location().await.map_err(setup_error)?;
-        Ok(match (supplied, recorded) {
-            (
-                StorageConfig::S3 {
-                    bucket,
-                    region,
-                    endpoint,
-                    profile: None,
-                    prefix,
-                },
-                Some(recorded @ StorageConfig::S3 { .. }),
-            ) if matches!(&recorded, StorageConfig::S3 {
-                    bucket: b, region: r, endpoint: e, prefix: p, ..
-                } if *b == bucket && *r == region && *e == endpoint && *p == prefix) =>
-            {
-                recorded
-            }
-            (supplied, _) => supplied,
-        })
     }
 
     pub(crate) async fn detect_s3(
@@ -90,5 +73,28 @@ impl StorageConnections {
                 .await?)
         })
         .await
+    }
+}
+
+/// Reconnecting with the recorded S3 location and no profile reuses the
+/// recorded settings, which every other device already uses (§4).
+fn recorded_s3(supplied: StorageConfig, recorded: Option<&StorageConfig>) -> StorageConfig {
+    match (supplied, recorded) {
+        (
+            StorageConfig::S3 {
+                bucket,
+                region,
+                endpoint,
+                profile: None,
+                prefix,
+            },
+            Some(recorded @ StorageConfig::S3 { .. }),
+        ) if matches!(recorded, StorageConfig::S3 {
+                bucket: b, region: r, endpoint: e, prefix: p, ..
+            } if *b == bucket && *r == region && *e == endpoint && *p == prefix) =>
+        {
+            recorded.clone()
+        }
+        (supplied, _) => supplied,
     }
 }

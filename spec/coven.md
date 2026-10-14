@@ -662,8 +662,8 @@ the file's ranges under `F`.
   - Catalogued services are const entries in the adapter's
     [`s3_profile.rs`](../crates/coven-storage/src/providers/s3_profile.rs):
     name, endpoint host or host suffix (none for a self-hosted service), the
-    settings they fill, and the date and suite version of their last
-    certification.
+    settings they fill, the finest scope a member key can have (below), and
+    the date and suite version of their last certification.
   - No endpoint selects **AWS S3**. Host suffix `.amazonaws.com` selects AWS;
     exact host `storage.googleapis.com` selects **Google Cloud Storage (GCS)**
     through its XML API; suffix `.r2.cloudflarestorage.com` selects
@@ -679,6 +679,34 @@ the file's ranges under `F`.
     profile, or a plain-`http` catalogued host, fails validation with
     `InvalidConfiguration` before any request. The self-hosted profiles are
     **RustFS** and **SeaweedFS**; no hostname selects them.
+  - **Member key scope.** A service limits a member key either to a prefix
+    inside a bucket or only to a whole bucket. AWS (IAM `s3:prefix`
+    conditions), GCS (a managed folder per store), RustFS and SeaweedFS
+    (policy `s3:prefix` conditions) limit it to the store's prefix, so their
+    stores can share a bucket and base prefix. An R2 API token is limited to
+    buckets, never to a folder inside one, so every member's key reaches
+    every object in its bucket: a member of one store could delete another
+    store's ciphertext there. On such a service every store has its own
+    bucket from creation, however its keys are made (by hand in the
+    provider's dashboard, or by coven). A custom profile, detected or chosen,
+    says nothing about keys, so it takes bucket scope too.
+    - The location's base prefix is empty. Any other prefix fails
+      validation before any request with
+      `StorageFailure::OwnBucketRequired { reason: Prefix }`.
+    - A store's first setup, before any location is recorded, lists the
+      bucket's root with delimiter `/` before detection or any other write.
+      Any object or folder other than the store's own `<store>/` refuses
+      setup with `OwnBucketRequired { reason: Occupied }`. A retried creation
+      that already wrote under `<store>/` passes. The listing margin M
+      applies: an object stored within M may be absent, so two stores
+      created in one bucket within M of each other can both pass.
+    - Reconnecting, restore and joining use the recorded location and check
+      nothing outside the store's own folder.
+    - Moving a store into its own bucket at its first invite would copy all
+      its data, so the rule applies from creation, including to one-member
+      stores.
+    - E.g. Ana creates Household in the R2 bucket `household`. Creating
+      Garden in that bucket is refused; Garden gets the bucket `garden`.
   - An endpoint that matches no catalogued host and names no profile has no
     AWS fallback. Setup detects its behaviors (below) and records them as the
     location's custom profile; the returned and recorded location carries
@@ -1030,10 +1058,10 @@ the file's ranges under `F`.
   bodyless 404 requires a bucket check: every S3 service uses a zero-entry
   listing with the exact object's key as its prefix, under the configured
   prefix and store id. Catalogued profiles use ListObjectsV2; a custom V1
-  profile uses ListObjects. A member key is scoped to the store's prefix;
-  HEAD Bucket requires bucket-list permission without a prefix condition,
-  which that key does not grant. Object absence comes from the exact HEAD,
-  never from the listing. A miss remains two requests: one HEAD and one listing.
+  profile uses ListObjects. Where the service allows it, a member key is
+  scoped to the store's prefix; HEAD Bucket requires bucket-list permission
+  without a prefix condition, which that key does not grant. Object absence
+  comes from the exact HEAD, never from the listing. A miss remains two requests: one HEAD and one listing.
   A revision proves freshness, not byte
   equality: occupied immutable paths still require §10's complete comparison.
   Snapshot confirmation still checks the complete-object checksum (§15).
@@ -1116,9 +1144,13 @@ the file's ranges under `F`.
 - Every storage path starts with the store's id, including the provider
   check's temporary objects and S3 detection's reserved
   `<store>/.coven-check/` probes ([D10](format.md#d10-paths)).
-  - Several stores can share one bucket prefix, folder or zone.
-  - Setup reads and writes only this store's prefix; other stores and
-    unrelated objects outside it do not compete with this store.
+  - Several stores can share one folder or zone, and one bucket prefix
+    where member keys can be limited to a prefix. On an S3 service whose
+    keys reach a whole bucket, each store has its own bucket (above).
+  - Setup writes only this store's prefix and reads only it, apart from
+    the bucket-root listing that creates a store needing its own bucket
+    (above); other stores and unrelated objects outside it do not compete
+    with this store.
   - E.g. Ana creates Household and Ben creates Garden in the same folder.
     Their store ids differ, so their first entries have different paths.
 - Reconnecting uses the recorded provider location. Setup does not move an

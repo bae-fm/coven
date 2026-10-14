@@ -387,7 +387,8 @@ fn provider(url: &str) -> StorageConnection<S3Storage> {
             region: "us-east-1".into(),
             endpoint: Some(url.parse().unwrap()),
             profile: Some(crate::S3Profile::Custom(profile::PLAIN)),
-            prefix: "store".into(),
+            // A custom profile's member keys reach the whole bucket (§4).
+            prefix: String::new(),
         },
         S3Credentials {
             access_key_id: "access".into(),
@@ -484,7 +485,7 @@ async fn shared_location_ignores_unrelated_objects() {
         .lock()
         .unwrap()
         .objects
-        .insert("store/unrelated".into(), b"data".to_vec());
+        .insert("unrelated".into(), b"data".to_vec());
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     let storage = provider(&server.url);
     crate::test_utils::Conformance::new(Arc::new(storage), STORE_ID)
@@ -606,7 +607,7 @@ async fn duplicate_listing_entries_merge_or_fail_before_fetching_another_page() 
     for (size, expected_requests) in [(4, 2), (5, 1)] {
         let requests = Arc::new(AtomicUsize::new(0));
         let received = requests.clone();
-        let key = path.under("store");
+        let key = path.under("");
         let server = TestServer::new(Router::new().fallback(move || {
             let page = received.fetch_add(1, Ordering::SeqCst);
             let key = key.clone();
@@ -905,7 +906,7 @@ async fn provider_check_preserves_unrelated_contents() {
         .lock()
         .unwrap()
         .objects
-        .insert("store/unrelated".into(), b"kept".to_vec());
+        .insert("unrelated".into(), b"kept".to_vec());
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     let storage = provider(&server.url);
     let path = ObjectPath::file(
@@ -918,7 +919,7 @@ async fn provider_check_preserves_unrelated_contents() {
         .unwrap();
     assert_eq!(
         state.lock().unwrap().objects,
-        BTreeMap::from([("store/unrelated".into(), b"kept".to_vec())])
+        BTreeMap::from([("unrelated".into(), b"kept".to_vec())])
     );
 }
 

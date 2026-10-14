@@ -178,6 +178,11 @@ pub(crate) const POLICY: Policy = Policy {
             "new",
         ),
         (
+            "crates/coven-storage/src/memory_connector.rs",
+            "MemoryStorage",
+            "connect",
+        ),
+        (
             "crates/coven-storage/src/memory_storage_builder.rs",
             "MemoryStorageBuilder",
             "new",
@@ -238,6 +243,12 @@ pub(crate) const POLICY: Policy = Policy {
             "<free>",
             "detect",
         ),
+        // A new store's own-bucket check connects one candidate per signer.
+        (
+            "crates/coven-storage/src/providers/s3_own_bucket.rs",
+            "<free>",
+            "check_new_store",
+        ),
         (
             "crates/coven-storage/src/settings.rs",
             "StorageSettings",
@@ -252,11 +263,6 @@ pub(crate) const POLICY: Policy = Policy {
             "crates/coven-storage/src/test_utils.rs",
             "MemoryStorage",
             "clone",
-        ),
-        (
-            "crates/coven-storage/src/test_utils.rs",
-            "MemoryStorage",
-            "connect",
         ),
         (
             "crates/coven-storage/src/test_utils.rs",

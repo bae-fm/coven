@@ -1,14 +1,28 @@
 //! S3 setup's detection and safety check at the application boundary (§4, E5).
 use super::*;
-use coven_storage::{test_utils::DETECTED_S3_SETTINGS, S3Detection, S3Profile};
+use coven_storage::{test_utils::DETECTED_S3_SETTINGS, OwnBucketReason, S3Detection, S3Profile};
 
 fn uncatalogued(profile: Option<S3Profile>) -> StorageConfig {
+    uncatalogued_under(profile, "")
+}
+
+fn uncatalogued_under(profile: Option<S3Profile>, prefix: &str) -> StorageConfig {
     StorageConfig::S3 {
         bucket: "test".into(),
         region: "us-east-1".into(),
         endpoint: Some("http://localhost:9000".parse().unwrap()),
         profile,
-        prefix: "store".into(),
+        prefix: prefix.into(),
+    }
+}
+
+fn r2(prefix: &str) -> StorageConfig {
+    StorageConfig::S3 {
+        bucket: "test".into(),
+        region: "auto".into(),
+        endpoint: Some("https://account.r2.cloudflarestorage.com".parse().unwrap()),
+        profile: None,
+        prefix: prefix.into(),
     }
 }
 
@@ -35,6 +49,14 @@ impl StorageConnector for Overwrites {
             settings: DETECTED_S3_SETTINGS,
             observations: Vec::new(),
         })
+    }
+    async fn check_new_s3_store(
+        &self,
+        config: StorageConfig,
+        credentials: S3Credentials,
+        store: StoreId,
+    ) -> Result<(), StorageError> {
+        self.0.check_new_s3_store(config, credentials, store).await
     }
 }
 
@@ -150,5 +172,73 @@ async fn a_server_that_overwrites_occupied_names_is_refused_before_anything_is_c
             .unwrap(),
         None
     );
+    opened.handle.close().await.unwrap();
+}
+
+fn own_bucket_required(error: &StorageSetupError, reason: OwnBucketReason) -> bool {
+    matches!(
+        error,
+        StorageSetupError::Storage(source)
+            if source.failure() == StorageFailure::OwnBucketRequired { reason }
+    )
+}
+
+#[tokio::test]
+async fn an_r2_store_is_created_only_in_a_bucket_of_its_own() {
+    let storage = Arc::new(MemoryStorage::builder().location(r2("")).build().unwrap());
+    let first = open(storage.clone()).await;
+    setup(&first.handle, r2("")).await.unwrap();
+    // Every member's key reaches the whole bucket, so a second store there
+    // is refused before setup writes anything.
+    let second = open(storage.clone()).await;
+    let before = storage.request_count();
+    let error = setup(&second.handle, r2("")).await.unwrap_err();
+    assert!(
+        own_bucket_required(&error, OwnBucketReason::Occupied),
+        "{error:?}"
+    );
+    assert_eq!(storage.request_count(), before);
+    assert_eq!(
+        StorageSettings::new(second.directory.clone())
+            .read()
+            .unwrap(),
+        None
+    );
+    // Reconnecting the first store checks nothing outside its own folder.
+    first.handle.disconnect_storage().await.unwrap();
+    setup(&first.handle, r2("")).await.unwrap();
+    first.handle.close().await.unwrap();
+    second.handle.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_base_prefix_is_refused_where_member_keys_reach_the_whole_bucket() {
+    let storage = Arc::new(MemoryStorage::builder().location(r2("")).build().unwrap());
+    let opened = open(storage.clone()).await;
+    for location in [
+        r2("stores"),
+        uncatalogued_under(Some(S3Profile::Custom(DETECTED_S3_SETTINGS)), "stores"),
+        uncatalogued_under(None, "stores"),
+    ] {
+        let error = setup(&opened.handle, location.clone()).await.unwrap_err();
+        assert!(
+            own_bucket_required(&error, OwnBucketReason::Prefix),
+            "{error:?}"
+        );
+        let error = opened
+            .handle
+            .detect_s3_settings(
+                location,
+                "member-key".into(),
+                SecretText::new("secret".into()),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            own_bucket_required(&error, OwnBucketReason::Prefix),
+            "{error:?}"
+        );
+    }
+    assert_eq!(storage.request_count(), 0);
     opened.handle.close().await.unwrap();
 }

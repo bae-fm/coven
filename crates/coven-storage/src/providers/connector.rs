@@ -43,6 +43,18 @@ pub trait StorageConnector: Send + Sync {
     ) -> Result<S3Detection, StorageError> {
         Err(StorageFailure::ProviderUnavailable.into())
     }
+    /// Before a store's first setup at an S3 location whose member keys reach
+    /// the whole bucket, refuse a bucket holding anything outside the store's
+    /// folder with `OwnBucketRequired { reason: Occupied }` (§4). Reads only.
+    /// A connector without native S3 refuses this capability.
+    async fn check_new_s3_store(
+        &self,
+        _config: StorageConfig,
+        _credentials: S3Credentials,
+        _store: StoreId,
+    ) -> Result<(), StorageError> {
+        Err(StorageFailure::ProviderUnavailable.into())
+    }
 }
 
 /// The provider composition root retains the supplied clock and id source.
@@ -130,6 +142,26 @@ impl StorageConnector for ProviderConnector {
         }
         .validate()?;
         super::detect_s3(
+            config,
+            credentials,
+            store,
+            self.clock.clone(),
+            self.ids.clone(),
+        )
+        .await
+    }
+    async fn check_new_s3_store(
+        &self,
+        config: StorageConfig,
+        credentials: S3Credentials,
+        store: StoreId,
+    ) -> Result<(), StorageError> {
+        crate::ConnectionCredentials {
+            location: config.clone(),
+            credentials: StorageCredentials::S3(credentials.clone()),
+        }
+        .validate()?;
+        super::check_new_s3_store(
             config,
             credentials,
             store,

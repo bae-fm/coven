@@ -31,7 +31,10 @@ impl CloudProvider {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub enum StorageConfig {
-    /// An existing S3 bucket and a base prefix that may hold several stores.
+    /// An existing S3 bucket and a base prefix. Where the service's member
+    /// keys can be limited to a prefix, the base prefix may hold several
+    /// stores; where they reach a whole bucket (R2, and every custom or
+    /// detected profile), the store has the bucket to itself (§4).
     S3 {
         /// Bucket name.
         bucket: String,
@@ -46,7 +49,9 @@ pub enum StorageConfig {
         /// AWS, and setup detects any other endpoint's settings, recording
         /// them as Custom. All run the setup checks.
         profile: Option<crate::S3Profile>,
-        /// The base prefix, without leading or trailing slashes; paths add the store id.
+        /// The base prefix, without leading or trailing slashes; paths add
+        /// the store id. Empty where member keys reach a whole bucket;
+        /// otherwise `OwnBucketRequired { reason: Prefix }`.
         prefix: String,
     },
     /// A Google Drive folder; paths within it start with the store id.
@@ -121,8 +126,16 @@ impl StorageConfig {
                         );
                     }
                 }
-                crate::providers::check_s3_profile(endpoint.as_ref(), profile.as_ref())?;
+                let scope = crate::providers::s3_key_scope(endpoint.as_ref(), profile.as_ref())?;
                 crate::path::validate_root(prefix)?;
+                // A key that reaches the whole bucket reaches every store in
+                // it, so such a store occupies the bucket's root (§4).
+                if scope == crate::providers::S3KeyScope::Bucket && !prefix.is_empty() {
+                    return Err(crate::StorageFailure::OwnBucketRequired {
+                        reason: crate::OwnBucketReason::Prefix,
+                    }
+                    .into());
+                }
                 vec![bucket, region]
             }
             Self::GoogleDrive { folder_id } => vec![folder_id],

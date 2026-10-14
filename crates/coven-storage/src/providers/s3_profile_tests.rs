@@ -75,7 +75,7 @@ async fn listing_profile_selects_v1_and_follows_key_markers() {
             coven_foundation::id_source::DeviceId(31),
             n.try_into().unwrap(),
         )
-        .under("store")
+        .under("")
     });
     let server = TestServer::new(Router::new().fallback(move |uri: Uri| {
         let keys = keys.clone();
@@ -169,7 +169,8 @@ pub(super) fn profile_provider(url: &str, settings: S3Settings) -> StorageConnec
                 region: "us-east-1".into(),
                 endpoint: Some(url.parse().unwrap()),
                 profile: None,
-                prefix: "store".into(),
+                // An undetected endpoint's member keys reach the whole bucket (§4).
+                prefix: String::new(),
             },
             S3Credentials {
                 access_key_id: "access".into(),
@@ -448,4 +449,37 @@ async fn absent_policy_reads_without_a_checksum_and_refuses_any_returned_one() {
             StorageFailure::Protocol
         );
     }
+}
+
+#[test]
+fn only_r2_and_uncatalogued_settings_scope_member_keys_to_a_whole_bucket() {
+    for profile in PROFILES {
+        let expected = if profile.name == S3ProfileName::R2 {
+            S3KeyScope::Bucket
+        } else {
+            S3KeyScope::Prefix
+        };
+        assert_eq!(profile.key_scope, expected, "{:?}", profile.name);
+    }
+    let uncatalogued: url::Url = "http://localhost:9000".parse().unwrap();
+    for (profile, expected) in [
+        (None, S3KeyScope::Bucket),
+        (Some(S3Profile::Custom(PLAIN)), S3KeyScope::Bucket),
+        (
+            Some(S3Profile::Named(S3ProfileName::R2)),
+            S3KeyScope::Bucket,
+        ),
+        (
+            Some(S3Profile::Named(S3ProfileName::RustFs)),
+            S3KeyScope::Prefix,
+        ),
+    ] {
+        assert_eq!(
+            select(Some(&uncatalogued), profile.as_ref())
+                .unwrap()
+                .key_scope(),
+            expected
+        );
+    }
+    assert_eq!(select(None, None).unwrap().key_scope(), S3KeyScope::Prefix);
 }

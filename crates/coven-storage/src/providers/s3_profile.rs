@@ -48,6 +48,14 @@ impl S3Multipart {
         matches!(self, Self::Copy(_))
     }
 }
+/// The finest scope a member key can have on a service (§4).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum S3KeyScope {
+    /// A key reaches a whole bucket, so every store has its own bucket.
+    Bucket,
+    /// A key can be limited to the store's prefix, so stores can share a bucket.
+    Prefix,
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Certification<'date> {
     Uncertified,
@@ -60,6 +68,7 @@ pub(super) struct CataloguedProfile {
     /// arbitrary endpoint only an explicit profile name can select.
     pub(super) endpoint: Option<EndpointMatch>,
     pub(super) settings: S3Settings,
+    pub(super) key_scope: S3KeyScope,
     pub(super) certification: Certification<'static>,
 }
 
@@ -90,6 +99,9 @@ const AWS: CataloguedProfile = CataloguedProfile {
         multipart_timestamp: S3MultipartTimestamp::Start,
         ..PLAIN
     },
+    // IAM policies limit a key to the store's prefix with `s3:prefix`
+    // conditions on listing and resource ARNs ending `<prefix>/<store>/*`.
+    key_scope: S3KeyScope::Prefix,
     certification: Certification::Uncertified,
 };
 const GCS: CataloguedProfile = CataloguedProfile {
@@ -106,6 +118,9 @@ const GCS: CataloguedProfile = CataloguedProfile {
         response_headers: S3ResponseHeaders::Google,
         request_checksums: false,
     },
+    // A managed folder `<prefix>/<store>/` grants the HMAC key's service
+    // account `roles/storage.objectUser` on that folder alone.
+    key_scope: S3KeyScope::Prefix,
     certification: Certification::Passed {
         date: "2026-10-13",
         suite: 1,
@@ -121,6 +136,10 @@ const R2: CataloguedProfile = CataloguedProfile {
         checksums: S3Checksums::UnstatedIgnored,
         ..PLAIN
     },
+    // An R2 API token is limited to buckets, never to a prefix inside one
+    // (https://developers.cloudflare.com/r2/api/tokens/); only temporary
+    // credentials, which need a session token, take a prefix.
+    key_scope: S3KeyScope::Bucket,
     certification: Certification::Passed {
         date: "2026-10-13",
         suite: 1,
@@ -140,6 +159,9 @@ const RUSTFS: CataloguedProfile = CataloguedProfile {
         request_checksums: false,
         ..PLAIN
     },
+    // An access key's IAM policy takes `s3:prefix` conditions and object
+    // resources under the store's prefix.
+    key_scope: S3KeyScope::Prefix,
     certification: Certification::Passed {
         date: "2026-10-13",
         suite: 2,
@@ -153,6 +175,9 @@ const SEAWEEDFS: CataloguedProfile = CataloguedProfile {
         request_checksums: false,
         ..PLAIN
     },
+    // An identity's S3 policy takes `s3:prefix` conditions and object
+    // resources under the store's prefix.
+    key_scope: S3KeyScope::Prefix,
     certification: Certification::Passed {
         date: "2026-10-13",
         suite: 2,
@@ -179,20 +204,46 @@ impl CataloguedProfile {
     }
 }
 
-/// The settings a location uses. A named or custom profile is used as given;
+/// What a location's endpoint and profile select.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Selected {
+    Catalogued(CataloguedProfile),
+    Custom(S3Settings),
+    /// An uncatalogued endpoint naming no profile: only setup's detection
+    /// can supply its settings, recorded as a custom profile.
+    Undetected,
+}
+impl Selected {
+    pub(super) fn settings(self) -> Option<S3Settings> {
+        match self {
+            Self::Catalogued(profile) => Some(profile.settings),
+            Self::Custom(settings) => Some(settings),
+            Self::Undetected => None,
+        }
+    }
+    /// Custom settings say nothing about keys, so they take the
+    /// conservative bucket scope, as does a location detection will make custom.
+    pub(super) fn key_scope(self) -> S3KeyScope {
+        match self {
+            Self::Catalogued(profile) => profile.key_scope,
+            Self::Custom(_) | Self::Undetected => S3KeyScope::Bucket,
+        }
+    }
+}
+
+/// What a location selects. A named or custom profile is used as given;
 /// otherwise the endpoint host selects, with AWS for no endpoint. A catalogued
 /// host requires https and admits only its own name. Without an endpoint,
-/// requests reach AWS, so only AWS may be named. Ok(None) is an uncatalogued
-/// endpoint naming no profile: only setup's detection can supply its settings.
-pub(crate) fn settings(
+/// requests reach AWS, so only AWS may be named.
+pub(super) fn select(
     endpoint: Option<&Url>,
     profile: Option<&S3Profile>,
-) -> Result<Option<S3Settings>, StorageError> {
+) -> Result<Selected, StorageError> {
     let invalid =
         |reason: &'static str| Err(StorageFailure::InvalidConfiguration.with_source(reason));
     let Some(endpoint) = endpoint else {
         return match profile {
-            None | Some(S3Profile::Named(S3ProfileName::Aws)) => Ok(Some(AWS.settings)),
+            None | Some(S3Profile::Named(S3ProfileName::Aws)) => Ok(Selected::Catalogued(AWS)),
             Some(_) => invalid("S3 profile requires its endpoint"),
         };
     };
@@ -206,9 +257,20 @@ pub(crate) fn settings(
         (Some(_), Some(S3Profile::Custom(_))) => {
             invalid("a catalogued S3 host admits only its own profile")
         }
-        (Some(hosted), _) => Ok(Some(hosted.settings)),
-        (None, Some(S3Profile::Named(name))) => Ok(Some(CataloguedProfile::named(*name).settings)),
-        (None, Some(S3Profile::Custom(settings))) => Ok(Some(*settings)),
-        (None, None) => Ok(None),
+        (Some(hosted), _) => Ok(Selected::Catalogued(hosted)),
+        (None, Some(S3Profile::Named(name))) => {
+            Ok(Selected::Catalogued(CataloguedProfile::named(*name)))
+        }
+        (None, Some(S3Profile::Custom(settings))) => Ok(Selected::Custom(*settings)),
+        (None, None) => Ok(Selected::Undetected),
     }
+}
+
+/// The settings a location uses; Ok(None) is an uncatalogued endpoint
+/// naming no profile, whose settings only setup's detection can supply.
+pub(crate) fn settings(
+    endpoint: Option<&Url>,
+    profile: Option<&S3Profile>,
+) -> Result<Option<S3Settings>, StorageError> {
+    select(endpoint, profile).map(Selected::settings)
 }

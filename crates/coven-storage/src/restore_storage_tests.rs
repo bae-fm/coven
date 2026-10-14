@@ -41,9 +41,9 @@ fn restore_storage_is_exactly_the_location_for_every_provider() {
                     response_headers: crate::S3ResponseHeaders::S3,
                     request_checksums: false,
                 })),
-                prefix: "store".into(),
+                prefix: String::new(),
             },
-            r#"{"S3":{"bucket":"bucket","region":"region","endpoint":"http://localhost:9000/","profile":{"Custom":{"signing":"AwsSigV4","single_put":"IfNoneMatch","multipart":{"Copy":"CloudflareIfNoneMatch"},"multipart_timestamp":"Start","checksums":"Absent","listing":"V1","revision":"ETag","response_headers":"S3","request_checksums":false}},"prefix":"store"}}"#,
+            r#"{"S3":{"bucket":"bucket","region":"region","endpoint":"http://localhost:9000/","profile":{"Custom":{"signing":"AwsSigV4","single_put":"IfNoneMatch","multipart":{"Copy":"CloudflareIfNoneMatch"},"multipart_timestamp":"Start","checksums":"Absent","listing":"V1","revision":"ETag","response_headers":"S3","request_checksums":false}},"prefix":""}}"#,
         ),
         (
             StorageConfig::GoogleDrive {

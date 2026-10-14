@@ -37,7 +37,7 @@ fn endpoints_allow_http_but_refuse_credentials_queries_and_fragments() {
         let config = StorageConfig::S3 {
             bucket: "bucket".into(),
             region: "region".into(),
-            prefix: "store".into(),
+            prefix: String::new(),
             endpoint: Some(url.parse().unwrap()),
             profile: None,
         };
@@ -99,7 +99,7 @@ fn catalogued_hosts_require_https_and_their_own_profile_name() {
             region: "region".into(),
             endpoint: endpoint.map(|url| url.parse().unwrap()),
             profile,
-            prefix: "store".into(),
+            prefix: String::new(),
         };
         let result = config.validate();
         assert_eq!(result.is_ok(), accepted, "{endpoint:?} {profile:?}");
@@ -250,5 +250,69 @@ fn s3_base_prefixes_have_no_leading_or_trailing_slash() {
             prefix: prefix.into(),
         };
         assert_eq!(config.validate().is_ok(), valid, "{prefix}");
+    }
+}
+
+#[test]
+fn a_base_prefix_needs_member_keys_limited_to_a_prefix() {
+    let custom = Some(S3Profile::Custom(S3Settings {
+        signing: S3Signing::AwsSigV4,
+        single_put: S3SinglePut::IfNoneMatch,
+        multipart: S3Multipart::ConditionalCompletion,
+        multipart_timestamp: S3MultipartTimestamp::Completion,
+        checksums: S3Checksums::Absent,
+        listing: S3Listing::V2,
+        revision: S3Revision::ETag,
+        response_headers: S3ResponseHeaders::S3,
+        request_checksums: false,
+    }));
+    let named = |name| Some(S3Profile::Named(name));
+    for (endpoint, profile, shared) in [
+        (None, None, true),
+        (Some("https://s3.us-east-1.amazonaws.com"), None, true),
+        (Some("https://storage.googleapis.com"), None, true),
+        (
+            Some("http://localhost:9000"),
+            named(S3ProfileName::RustFs),
+            true,
+        ),
+        (
+            Some("http://localhost:8333"),
+            named(S3ProfileName::SeaweedFs),
+            true,
+        ),
+        (
+            Some("https://account.r2.cloudflarestorage.com"),
+            None,
+            false,
+        ),
+        (
+            Some("http://localhost:9000"),
+            named(S3ProfileName::R2),
+            false,
+        ),
+        (Some("http://localhost:9000"), custom, false),
+        (Some("http://localhost:9000"), None, false),
+    ] {
+        let config = |prefix: &str| StorageConfig::S3 {
+            bucket: "bucket".into(),
+            region: "region".into(),
+            endpoint: endpoint.map(|url| url.parse().unwrap()),
+            profile,
+            prefix: prefix.into(),
+        };
+        config("").validate().unwrap();
+        let prefixed = config("stores").validate();
+        if shared {
+            prefixed.unwrap();
+        } else {
+            assert_eq!(
+                prefixed.unwrap_err().failure(),
+                StorageFailure::OwnBucketRequired {
+                    reason: OwnBucketReason::Prefix
+                },
+                "{endpoint:?} {profile:?}"
+            );
+        }
     }
 }

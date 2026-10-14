@@ -10,7 +10,10 @@ commit key custody or database state.
 ## Object and transfer contract
 
 Every path and listing prefix begins with the canonical store UUID. Stores can
-share a provider location without sharing object names. Every path has one writer. `create` refuses an occupied path; `create_once`
+share a provider location without sharing object names, except on an S3
+service whose member keys reach a whole bucket (R2, and every custom or
+detected profile): there a store has the bucket to itself, at an empty base
+prefix, and creating it refuses a bucket holding anything else (§4). Every path has one writer. `create` refuses an occupied path; `create_once`
 accepts an identical retry after comparing the stored bytes. Only posted
 positions and per-device clock objects can be replaced. Files use foundation
 `FileId` UUIDs. Prefixes include

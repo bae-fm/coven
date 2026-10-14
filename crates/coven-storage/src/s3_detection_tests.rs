@@ -20,7 +20,7 @@ fn location(endpoint: Option<&str>, profile: Option<S3Profile>) -> StorageConfig
         region: "region".into(),
         endpoint: endpoint.map(|url| url.parse().unwrap()),
         profile,
-        prefix: "store".into(),
+        prefix: String::new(),
     }
 }
 

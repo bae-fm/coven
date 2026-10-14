@@ -127,6 +127,16 @@ impl StorageConnector for TrackingConnector {
     ) -> Result<coven_storage::S3Detection, StorageError> {
         self.storage.detect_s3(config, credentials, store).await
     }
+    async fn check_new_s3_store(
+        &self,
+        config: StorageConfig,
+        credentials: coven_storage::S3Credentials,
+        store: StoreId,
+    ) -> Result<(), StorageError> {
+        self.storage
+            .check_new_s3_store(config, credentials, store)
+            .await
+    }
 }
 
 #[tokio::test]
@@ -551,6 +561,16 @@ impl StorageConnector for Locations {
         store: StoreId,
     ) -> Result<coven_storage::S3Detection, StorageError> {
         self.0[0].detect_s3(config, credentials, store).await
+    }
+    async fn check_new_s3_store(
+        &self,
+        config: StorageConfig,
+        credentials: coven_storage::S3Credentials,
+        store: StoreId,
+    ) -> Result<(), StorageError> {
+        self.0[0]
+            .check_new_s3_store(config, credentials, store)
+            .await
     }
 }
 

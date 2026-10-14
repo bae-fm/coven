@@ -39,6 +39,12 @@ pub enum StorageFailure {
     ContainerNotFound,
     /// The S3 endpoint or signing region is wrong.
     RegionMismatch,
+    /// The S3 service's member keys reach a whole bucket, so a store there
+    /// needs a bucket of its own (§4).
+    OwnBucketRequired {
+        /// What the location shares.
+        reason: OwnBucketReason,
+    },
     /// The provider has no space left.
     QuotaExceeded,
     /// The provider requests a later retry.
@@ -78,6 +84,15 @@ pub enum StorageFailure {
     File,
     /// This installation has no member keys in custody.
     MemberKeysMissing,
+}
+
+/// Why an S3 location cannot hold a store that needs its own bucket (§4).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum OwnBucketReason {
+    /// The location names a base prefix; the store occupies the bucket's root.
+    Prefix,
+    /// Creating the store found objects outside its own folder in the bucket.
+    Occupied,
 }
 
 /// A storage error preserves its cause without converting it into text.

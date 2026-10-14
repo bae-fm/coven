@@ -324,7 +324,7 @@ fn list(state: &Remote, q: &BTreeMap<String, String>) -> Response<Body> {
         }
     }
     let prefix = q.get("prefix").map(String::as_str).unwrap_or("");
-    if !prefix.starts_with(&format!("store/{STORE}/")) {
+    if !prefix.starts_with(&format!("{STORE}/")) {
         return error(403, "AccessDenied");
     }
     let after = q.get(if v2 { "continuation-token" } else { "marker" });
@@ -394,7 +394,7 @@ impl Fixture {
             region: "us-east-1".into(),
             endpoint: Some(self.server.url.parse().unwrap()),
             profile,
-            prefix: "store".into(),
+            prefix: String::new(),
         }
     }
     async fn detect(&self, profile: Option<S3Profile>) -> Result<S3Detection, StorageError> {
@@ -416,7 +416,7 @@ impl Fixture {
             state.bucket_heads, 0,
             "detection uses only prefix-scoped access"
         );
-        let namespace = format!("store/{STORE}/.coven-check/");
+        let namespace = format!("{STORE}/.coven-check/");
         let runs: std::collections::BTreeSet<_> = state
             .written
             .iter()
@@ -634,7 +634,7 @@ async fn listings_exclude_detection_probes_but_refuse_malformed_ones() {
         .unwrap(),
     ));
     let run = uuid::Uuid::from_bytes([7; 16]);
-    let probe = format!("store/{STORE}/.coven-check/{run}/marker-before");
+    let probe = format!("{STORE}/.coven-check/{run}/marker-before");
     publish(
         &mut fixture.state.lock().unwrap(),
         probe,
@@ -643,7 +643,7 @@ async fn listings_exclude_detection_probes_but_refuse_malformed_ones() {
     );
     let all = ObjectPrefix::all(STORE);
     assert!(storage.list(&all).await.unwrap().is_empty());
-    let malformed = format!("store/{STORE}/.coven-check/not-a-run/marker");
+    let malformed = format!("{STORE}/.coven-check/not-a-run/marker");
     publish(
         &mut fixture.state.lock().unwrap(),
         malformed,
@@ -683,7 +683,7 @@ async fn v2_is_unsupported_on_501_but_an_outage_fails_detection() {
             region: "us-east-1".into(),
             endpoint: Some(outage.url.parse().unwrap()),
             profile: None,
-            prefix: "store".into(),
+            prefix: String::new(),
         },
         credentials(),
         STORE,

@@ -1418,7 +1418,8 @@ while let Ok(values) = lost.next().await {
 
 - *Setting up storage* creates the store at a location on a provider, the
   first time it connects, and connects this device to it.
-  - Paths start with this store's id. Other stores can share the location.
+  - Paths start with this store's id. Other stores can share the location,
+    except on an S3 service whose member keys reach a whole bucket (below).
   - After `disconnect_storage`, setup reconnects at the recorded location.
     It refuses a different location with `LocationChangeUnsupported`;
     setup does not relocate a store already used by other devices.
@@ -1450,6 +1451,17 @@ while let Ok(values) = lost.next().await {
   catalogued host, a name other than AWS or any custom profile without an
   endpoint, or plain `http` to a catalogued host is `InvalidConfiguration`;
   other endpoints may use `http`.
+- Where an S3 service's member keys reach a whole bucket (R2, and every
+  custom profile, detected or chosen), any member's key reaches every store
+  in the bucket, so each store has its own bucket from creation (§4). A
+  non-empty base prefix fails validation, before any request, with
+  `StorageFailure::OwnBucketRequired { reason: OwnBucketReason::Prefix }`.
+  A store's first setup lists the bucket's root before detection writes and
+  refuses a bucket holding anything outside the store's folder with
+  `OwnBucketRequired { reason: OwnBucketReason::Occupied }`, wrapped in
+  `StorageSetupError::Storage`. Reconnecting checks nothing outside the
+  store's folder. AWS, GCS, RustFS and SeaweedFS keys can be limited to the
+  store's prefix, so their stores share buckets and prefixes unchecked.
 - An endpoint matching no catalogued host and naming no profile has no AWS
   fallback: setup detects its settings and returns and records the location
   with them as a custom profile. Reconnecting with that same location and no
@@ -1576,7 +1588,10 @@ pub enum CloudProvider {
 
 /// A store's location, with credentials kept separately (§4, E5).
 pub enum StorageConfig {
-    /// An existing S3 bucket and a base prefix that may hold several stores.
+    /// An existing S3 bucket and a base prefix. Where the service's member
+    /// keys can be limited to a prefix, the base prefix may hold several
+    /// stores; where they reach a whole bucket (R2, and every custom or
+    /// detected profile), the store has the bucket to itself (§4).
     S3 {
         /// The bucket's name.
         bucket: String,
@@ -1591,7 +1606,9 @@ pub enum StorageConfig {
         /// AWS, and setup detects any other endpoint's settings, recording
         /// them as Custom. All run the setup checks.
         profile: Option<S3Profile>,
-        /// The base prefix, without leading or trailing slashes; paths add the store id.
+        /// The base prefix, without leading or trailing slashes; paths add
+        /// the store id. Empty where member keys reach a whole bucket;
+        /// otherwise `OwnBucketRequired { reason: Prefix }`.
         prefix: String,
     },
     /// A Google Drive folder; paths within it start with the store id.
@@ -1798,6 +1815,9 @@ pub enum StorageFailure {
     ContainerNotFound,
     /// The S3 endpoint or signing region is wrong.
     RegionMismatch,
+    /// The S3 service's member keys reach a whole bucket, so a store there
+    /// needs a bucket of its own (§4).
+    OwnBucketRequired { reason: OwnBucketReason },
     /// S3 rejected the device clock after one retry with the learned offset (§4).
     ClockSkew,
     /// The provider has no space left.
@@ -1841,6 +1861,14 @@ pub enum StorageFailure {
     File,
     /// This installation has no member keys in custody.
     MemberKeysMissing,
+}
+
+/// Why an S3 location cannot hold a store that needs its own bucket (§4).
+pub enum OwnBucketReason {
+    /// The location names a base prefix; the store occupies the bucket's root.
+    Prefix,
+    /// Creating the store found objects outside its own folder in the bucket.
+    Occupied,
 }
 
 impl StorageFailure {
