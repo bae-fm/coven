@@ -254,25 +254,49 @@ impl DeviceLogSync {
             .store_keys
             .read()?
             .ok_or(SyncError::KeyUnavailable(store_key))?;
-        // Positions are replaceable metadata, not first attempts; fingerprints
-        // use the newest key this device reads each audience with.
-        let mut selected = vec![(
-            Audience::Store,
-            crate::write_seal::readable_key(&local.log, &ring, &Audience::Store)?,
-        )];
-        for (circle, state) in &local.log.replay.state.circles {
-            if local.log.replay.state.circle_deletions.contains_key(circle)
-                || !state.members.contains(&member.member_id())
+        // Fingerprints digest app data, so each uses its audience's usable key
+        // from this pass's copy observation (§11, §19.1), never merely the
+        // newest held one: a key an excluded member holds would let them test
+        // guesses of data sealed with keys they lack (Appendix C12,
+        // `PositionFingerprints`). An audience without a usable key omits its
+        // fingerprint. Without this pass's complete observation no key is
+        // known usable, so the current past waits and the confirmed post stands.
+        let copies = match self.send.observation() {
+            Ok(copies) => copies
+                .into_iter()
+                .map(|copy| copy.prefix)
+                .collect::<Vec<_>>(),
+            Err(SyncError::Storage(error))
+                if error.failure() == coven_storage::StorageFailure::CatchUpRequired =>
             {
-                continue;
+                return Ok(None)
             }
-            let audience = Audience::Circle(*circle);
-            match crate::write_seal::readable_key(&local.log, &ring, &audience) {
-                Ok(key) => selected.push((audience, key)),
-                Err(SyncError::KeyUnavailable(_)) => (),
-                Err(error) => return Err(error),
-            }
-        }
+            Err(error) => return Err(error),
+        };
+        let replay = &local.log.replay.state;
+        let introductions = crate::key_introductions::introductions(&local.log);
+        let me = member.member_id();
+        let audiences = std::iter::once(Audience::Store).chain(
+            replay
+                .circles
+                .keys()
+                .filter(|circle| !replay.circle_deletions.contains_key(circle))
+                .map(|circle| Audience::Circle(*circle)),
+        );
+        let selected: Vec<_> = audiences
+            .filter_map(|audience| {
+                let key = crate::key_introductions::select(
+                    &introductions,
+                    replay,
+                    &me,
+                    Some(copies.as_slice()),
+                    crate::key_introductions::held_hash(Some(&ring)),
+                    &audience,
+                )
+                .ok()?;
+                Some((audience, key))
+            })
+            .collect();
         let hashers = selected
             .iter()
             .map(|(audience, key)| {

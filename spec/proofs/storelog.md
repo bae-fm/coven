@@ -870,8 +870,13 @@ envelope reveals to whoever holds its key. Locally validated fresh
 introductions that seal themselves remain outside this received-key path; the
 availability proof needs only the existing accepted store key. Credential
 replacement, entry signatures and publication gates retain their separate
-models and assumptions. No Rust comparison is added for metadata sealing or
-fingerprint keys. All named results are included in the package's axiom audit.
+models and assumptions. Rust picks each fingerprint key with the same
+`key_introductions::select` that the runner's select mode compares with
+`select`; with no complete copy observation, its current positions wait.
+Rust tests replay both counterexample histories and check that Ana's posted
+fingerprints use the usable keys while the envelope uses her newest store key. No Rust comparison is
+added for metadata sealing. All named results are included in the package's
+axiom audit.
 
 ### C13 Stable members and replaceable keys — checked proposal
 

@@ -109,6 +109,8 @@ async fn invalid_revision_and_confirmed_post_survive_reopening() {
     device.writes.post_positions().await.unwrap();
     device.writes.observe_positions().await.unwrap();
     device.reopen(storage.clone(), vec![], vec![]).await;
+    // Current fingerprints need a completed catch-up's copy observation.
+    device.catch_up().await;
     let start = storage.request_trace().len();
     assert!(device.writes.post_positions().await.unwrap());
     assert_eq!(
@@ -353,6 +355,8 @@ async fn failed_publication_retains_confirmation_and_reopening_confirms_a_lost_r
         .await
         .iter()
         .any(|r| matches!(r.reason, Reason::Storage { .. })));
+    // Current fingerprints need a completed catch-up's copy observation.
+    device.catch_up().await;
     let start = storage.request_trace().len();
     assert!(device.writes.post_positions().await.unwrap());
     assert!(!storage.request_trace()[start..]
@@ -692,6 +696,8 @@ async fn unsupported_positions_version_is_retained_until_replaced() {
     );
     storage.replace(&path, &original).await.unwrap();
     device.writes.observe_positions().await.unwrap();
+    // Current fingerprints need a completed catch-up's copy observation.
+    device.catch_up().await;
     assert!(device.writes.post_positions().await.unwrap());
     assert!(pending(&device).await.is_empty());
 }
@@ -823,4 +829,170 @@ async fn io_differential_positions() {
         confirmed = Some(current);
     }
     assert_eq!(actual, crate::discovery::tests::io_runner(&cases));
+}
+
+/// The posted positions' envelope key and fingerprint keys, as stored.
+async fn posted_keys(
+    storage: &MemoryStorage,
+    device: &Device,
+) -> (KeyId, Vec<(coven_merge::Audience, KeyId)>) {
+    let local = device.db.local_store_log().await.unwrap();
+    let path = ObjectPath::positions(local.store, local.device);
+    let bytes = storage.read(&path).await.unwrap();
+    let sealed = coven_format::sealed_single::SingleChunkObject::decode(&bytes).unwrap();
+    let SingleChunkPrefix::PostedPositions(envelope) = sealed.prefix().clone() else {
+        panic!("positions prefix");
+    };
+    let ring = device.custody.read().unwrap().unwrap();
+    let plain = ring
+        .store_key(envelope)
+        .unwrap()
+        .derive()
+        .open_object_chunk(
+            path.as_str(),
+            &sealed.prefix().encode().unwrap(),
+            0,
+            0,
+            sealed.chunk(),
+        )
+        .unwrap();
+    let Object::PostedPositions(posted) = Object::decode(&plain).unwrap() else {
+        panic!("posted positions");
+    };
+    let keys = posted
+        .fingerprints
+        .into_iter()
+        .map(|f| (f.audience, f.key))
+        .collect();
+    (envelope, keys)
+}
+
+/// Lean `PositionFingerprints.readable_store_fingerprint_reveals_write`: Ana
+/// removes Ben and rotates to K2. Carol, not having read the removal, rotates
+/// to K3 and seals it to Ben too. K3 is newer and Ben holds it, so a store
+/// fingerprint under K3 would let him test guesses of writes sealed with K2.
+/// Ana's positions may be sealed with K3 (§11), but fingerprint with K2.
+#[tokio::test]
+async fn store_fingerprint_skips_a_newer_key_sealed_to_a_removed_member() {
+    use crate::store_log_sync::tests::{device, find_copy, key, member, storage, store};
+    use coven_format::store_log::{MemberRole, StoreChange};
+    use coven_merge::Audience;
+    let storage = storage();
+    let mut ana = device(storage.clone(), 1, member(1), store(1)).await;
+    let ben = member(2);
+    let mut carol = device(storage.clone(), 3, member(3), store(1)).await;
+    ana.create(key(1)).await;
+    ana.add(&ben, MemberRole::Member).await;
+    ana.add(&carol.member, MemberRole::Member).await;
+    carol.sync().await;
+    carol.sync.load_new_device("Carol", None).await.unwrap();
+    ana.sync().await;
+    ana.sync
+        .make_and_upload_entry(StoreChange::RemoveMember {
+            member: ben.member_id(),
+        })
+        .await
+        .unwrap();
+    ana.sync.test_rotate(Audience::Store, key(2)).await;
+    // Her rotation's timestamp is the newer one.
+    let now = coven_foundation::clock::Clock::now(carol.clock.as_ref());
+    carol.clock.set(now + std::time::Duration::from_secs(1));
+    carol.sync.test_rotate(Audience::Store, key(3)).await;
+    assert!(
+        find_copy(storage.as_ref(), Audience::Store, key(3), &ben.member_id())
+            .await
+            .is_some(),
+        "Carol's view still has Ben"
+    );
+    ana.sync().await;
+    let log = ana.log().await;
+    assert!(crate::effects::member(&log.replay.state, &ben.member_id()).is_none());
+    let ring = ana.custody.read().unwrap().unwrap();
+    assert!(ring.store_key(key(2)).is_ok() && ring.store_key(key(3)).is_ok());
+    assert_eq!(
+        crate::write_seal::readable_key(&log, &ring, &Audience::Store).unwrap(),
+        key(3)
+    );
+    assert!(ana.writes.post_positions().await.unwrap());
+    assert_eq!(
+        posted_keys(&storage, &ana).await,
+        (key(3), vec![(Audience::Store, key(2))])
+    );
+}
+
+/// Lean `PositionFingerprints.readable_circle_fingerprint_reveals_write`: Ben
+/// leaves Gifts but stays in the store, so storage revocation never ends his
+/// reads of positions. Ana rotates Gifts to G2; Carol, not having read the
+/// removal, rotates to G3 and seals it to Ben. Ana's Gifts fingerprint uses
+/// G2, which Ben cannot obtain, not G3, which he holds.
+#[tokio::test]
+async fn circle_fingerprint_skips_a_newer_key_sealed_to_a_former_member() {
+    use crate::store_log_sync::tests::{device, key, member, storage, store};
+    use coven_format::store_log::{MemberRole, StoreChange};
+    use coven_foundation::id_source::CircleId;
+    use coven_merge::Audience;
+    let storage = storage();
+    let mut ana = device(storage.clone(), 1, member(1), store(1)).await;
+    let mut ben = device(storage.clone(), 2, member(2), store(1)).await;
+    let mut carol = device(storage.clone(), 3, member(3), store(1)).await;
+    ana.create(key(1)).await;
+    ana.add(&ben.member, MemberRole::Member).await;
+    ana.add(&carol.member, MemberRole::Member).await;
+    for device in [&mut ben, &mut carol] {
+        device.sync().await;
+        device.sync.load_new_device("other", None).await.unwrap();
+    }
+    ana.sync().await;
+    let circle = CircleId(Uuid::from_u128(10));
+    let gifts = Audience::Circle(circle);
+    let key_hash = ana.sync.test_key(gifts.clone(), key(10));
+    ana.sync
+        .make_and_upload_entry(StoreChange::CreateCircle {
+            circle,
+            name: "Gifts".into(),
+            key: key(10),
+            key_hash,
+        })
+        .await
+        .unwrap();
+    for other in [&ben.member, &carol.member] {
+        ana.sync
+            .make_and_upload_entry(StoreChange::AddCircleMember {
+                circle,
+                member: other.member_id(),
+            })
+            .await
+            .unwrap();
+    }
+    carol.sync().await;
+    ana.sync
+        .make_and_upload_entry(StoreChange::RemoveCircleMember {
+            circle,
+            member: ben.member.member_id(),
+        })
+        .await
+        .unwrap();
+    ana.sync.test_rotate(gifts.clone(), key(11)).await;
+    // Her rotation's timestamp is the newer one.
+    let now = coven_foundation::clock::Clock::now(carol.clock.as_ref());
+    carol.clock.set(now + std::time::Duration::from_secs(1));
+    carol.sync.test_rotate(gifts.clone(), key(12)).await;
+    ana.sync().await;
+    ben.sync().await;
+    // Ben is still a store member and holds G3, but not G2.
+    let state = ben.log().await.replay.state;
+    assert!(crate::effects::member(&state, &ben.member.member_id()).is_some());
+    let held = ben.custody.read().unwrap().unwrap();
+    assert!(held.circle_key(circle, key(12)).is_ok());
+    assert!(held.circle_key(circle, key(11)).is_err());
+    let ring = ana.custody.read().unwrap().unwrap();
+    assert_eq!(
+        crate::write_seal::readable_key(&ana.log().await, &ring, &gifts).unwrap(),
+        key(12)
+    );
+    assert!(ana.writes.post_positions().await.unwrap());
+    assert_eq!(
+        posted_keys(&storage, &ana).await,
+        (key(1), vec![(Audience::Store, key(1)), (gifts, key(11))])
+    );
 }

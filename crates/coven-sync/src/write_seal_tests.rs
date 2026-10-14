@@ -731,7 +731,7 @@ async fn reversed_removal_parts(
             .unwrap()
             .positions
             .covers(writes[0]));
-        // Positions are replaceable metadata under the keys Ben reads with.
+        // Positions still post, sealed with the newest store key Ben reads with.
         assert!(ben.writes.post_positions().await.unwrap());
         assert!(!posted(&storage, ben, 2).await.writes.covers(writes[0]));
     }
@@ -783,6 +783,19 @@ async fn reversed_removal_parts(
         device.writes.download_writes().await.unwrap();
         assert_eq!(rows(&device.db).await, expected);
         assert_eq!(count(&device.db).await, 1);
+        assert!(device.writes.post_positions().await.unwrap());
+    }
+    // Every key reached Ana, whom Ben's removal excluded: no usable key is
+    // left to fingerprint with (§19.1) until Ben replaces both.
+    assert!(posted(&storage, ben, 2).await.fingerprints.is_empty());
+    for target in [Audience::Store, Audience::Circle(circle)] {
+        ben.sync
+            .rotate_if_exposed(target, &identity(4).member_id())
+            .await
+            .unwrap();
+    }
+    carol.sync.sync_store_log().await.unwrap();
+    for device in [&mut *ben, &mut *carol] {
         assert!(device.writes.post_positions().await.unwrap());
     }
     let ben = posted(&storage, ben, 2).await;
