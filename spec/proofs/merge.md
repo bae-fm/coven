@@ -229,7 +229,9 @@ at.
   - whether the row's merged values fail a CHECK ([§8.6](../coven.md#86-check-constraints));
   - the kept entry that deleted the row's circle, if any ([§14.7](../coven.md#147-deleting-a-circle));
   - each row's unique claims, each with a stamp: the timestamp of the latest
-    write that set any of the constraint's columns in it ([§8.5](../coven.md#85-keys-and-uniqueness));
+    write that set any column the constraint reads in it, including a partial
+    index's WHERE columns, and generated columns as set by each write that
+    changed their value ([§8.5](../coven.md#85-keys-and-uniqueness));
   - each key present in two audiences on the device ([§14.2](../coven.md#142-moving-rows)).
 - **Set null** for a child whose parent's generation was deleted is part
   of the merged state, not the rules ([§8.4](../coven.md#84-foreign-keys)):

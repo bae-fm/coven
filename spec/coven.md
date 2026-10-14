@@ -1582,7 +1582,11 @@ Two mechanisms order writes:
   - A lost value is recorded, so the app can show it and offer it back.
   - Lost values, including a removed row's cells, show what was written;
     deleting a reference's parent does not change them.
-  - It stops being lost if a later write replaces it having read it.
+  - It stops being lost only when a later write that had read it replaces
+    it in place: sets the same cell in the same incarnation of its row, or
+    deletes that incarnation. Changing another cell, or the row's next
+    incarnation after a delete, leaves it lost
+    ([`lostStep`](proofs/merge/CovenMerge/Model.lean)).
 - Building on something that does not count does not make it count.
   Dependence is decided by data, never by recorded reads.
   - For each row change, retain the write that supplied its generation and
@@ -2248,9 +2252,13 @@ Carol's tablet:
   - Ana's insert of note 45 is stamped 16:00, and Ben's of note 46 is
     stamped 16:05.
   - Every device keeps note 45, and records Ben's note 46 in `_coven_lost`.
-- A row's claim dates from the latest write that set any of the
-  constraint's columns in it, since that is when the row first held the
-  whole value.
+- A row's claim dates from the latest write that set any column the
+  constraint reads in it, since that is when the row first held the whole
+  value.
+  - The constraint reads its columns, the columns its expressions use and,
+    for a partial index, the columns its WHERE clause uses.
+  - A generated column counts as set by each write whose changes to its
+    inputs changed its value.
   - E.g. notes are unique by `(folder, title)`, and note 2 is "Draft" in
     Home.
 
@@ -2285,10 +2293,11 @@ Carol's tablet:
 
 ### 8.6 CHECK constraints
 
-- A CHECK on one column can't fail after a merge, since each value passed
-  it on the device that wrote it.
-- A CHECK on several columns can, when concurrent writes each set some of
-  them.
+- A CHECK that reads one stored column can't fail after a merge, since
+  each value passed it on the device that wrote it.
+- A CHECK that reads several stored columns can, when concurrent writes
+  each set some of them. A generated column counts as the stored columns it
+  is computed from, so a CHECK on one generated column can fail too.
 - E.g. a row checks `start <= end`, Ana sets `start` and Ben, offline, sets
   `end`:
 
