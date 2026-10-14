@@ -27,6 +27,14 @@ pub(crate) fn storage() -> Arc<MemoryStorage> {
     )
 }
 async fn device(storage: Arc<MemoryStorage>, number: u64) -> Device {
+    device_of(storage, number, member()).await
+}
+/// Device `number` of `member`, holding the group's store key.
+pub(crate) async fn device_of(
+    storage: Arc<MemoryStorage>,
+    number: u64,
+    member: MemberIdentity,
+) -> Device {
     let ids = Arc::new(SequentialIds::new());
     for _ in 0..number {
         ids.new_device_id();
@@ -34,7 +42,7 @@ async fn device(storage: Arc<MemoryStorage>, number: u64) -> Device {
     let device = Device::new(
         storage,
         number,
-        member(),
+        member,
         STORE_ID,
         vec![SyncedTable::new("notes", RowIdentity::SharedKey)],
         vec![schema::initial()],

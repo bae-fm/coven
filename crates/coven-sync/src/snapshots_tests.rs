@@ -197,6 +197,52 @@ async fn far_future_threshold_snapshot_and_later_writes_reload_on_a_new_device()
     assert!(next.header.timestamp > tail.header.timestamp);
 }
 
+/// A snapshot load alone moves the clock past every write it covers: no store-log
+/// entry or downloaded write carries the newer time (§7.2).
+#[tokio::test]
+async fn loading_a_snapshot_advances_the_timestamp_clock() {
+    let storage = snapshot_storage();
+    let mut a = notes_device(storage.clone(), 1).await;
+    a.create(key(1)).await;
+    a.clock.set(UNIX_EPOCH + Duration::from_secs(365 * 86400));
+    write_rows(&a, 0, 40, 32768, Audience::Store).await;
+    let covered = a.db.test_queued_writes().await.unwrap().pop().unwrap();
+    upload(&a, &storage).await;
+    a.sync.write_snapshots().await.unwrap();
+    assert_eq!(
+        storage
+            .list(&ObjectPrefix::snapshots(store(1)))
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    let write_reads = || async {
+        storage
+            .reads()
+            .await
+            .into_iter()
+            .filter(|(path, _, _)| path.write_id().is_some())
+            .count()
+    };
+    let before = write_reads().await;
+    let mut b = notes_device(storage.clone(), 2).await;
+    add_device(&mut b).await;
+    b.clock.set(UNIX_EPOCH - Duration::from_secs(1));
+    b.sync.reload_from_snapshots().await.unwrap();
+    assert_eq!(write_reads().await, before);
+    assert!(b
+        .log()
+        .await
+        .entries
+        .iter()
+        .all(|e| e.entry.timestamp < covered.header.timestamp));
+    assert_eq!(tables(&a).await, tables(&b).await);
+    write_rows(&b, 40, 1, 17, Audience::Store).await;
+    let next = b.db.test_queued_writes().await.unwrap().pop().unwrap();
+    assert!(next.header.timestamp > covered.header.timestamp);
+}
+
 #[tokio::test]
 async fn the_signed_catch_up_time_is_a_provider_sample_never_device_time() {
     let sampled = UNIX_EPOCH + Duration::new(1_760_400_000, 250_000_000);

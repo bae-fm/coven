@@ -505,3 +505,7 @@ pub(crate) fn damaged(path: &ObjectPath, failure: Refusal) -> SyncError {
     }
     .into()
 }
+
+#[cfg(test)]
+#[path = "write_object_tests.rs"]
+mod tests;
