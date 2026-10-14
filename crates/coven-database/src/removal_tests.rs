@@ -909,3 +909,35 @@ fn deleting_entry() -> crate::EntryId {
         number: 1,
     }
 }
+
+/// A child moving its unique value and taking a parent that returns with the
+/// value it gives up: the parent cannot be inserted while the child still
+/// holds the value, so the child's update comes first and its deferred
+/// foreign key is checked at commit.
+#[test]
+fn unique_claims_order_before_deferrable_parents() {
+    let row = |key: &str| coven_merge::RowId {
+        table: "rows".into(),
+        key: key.as_bytes().to_vec(),
+        audience: coven_merge::Audience::Store,
+    };
+    let (child, parent) = (row("child"), row("parent"));
+    let rows = std::collections::BTreeSet::from([child.clone(), parent.clone()]);
+    let claims = std::collections::BTreeMap::from([(
+        parent.clone(),
+        std::collections::BTreeSet::from([child.clone()]),
+    )]);
+    let parents = std::collections::BTreeMap::from([(
+        child.clone(),
+        std::collections::BTreeSet::from([parent.clone()]),
+    )]);
+    assert_eq!(
+        super::dependency_order(rows.clone(), &claims, &parents),
+        [child.clone(), parent.clone()]
+    );
+    // Without the claim the parent is put first.
+    assert_eq!(
+        super::dependency_order(rows, &std::collections::BTreeMap::new(), &parents),
+        [parent, child]
+    );
+}

@@ -251,11 +251,12 @@ impl Loss {
             }
             (LossValues::Row(cells), LossCause::Excluded { write, version }) => {
                 positive(write.number)?;
-                require(
-                    cells.values().all(|cell| cell.write == *write),
-                    "excluded setters",
-                    FormatRule::Required,
-                )?;
+                // An excluded write names itself as setter; a row a migration
+                // write deleted through its generation keeps each original
+                // setter (D7).
+                for cell in cells.values() {
+                    positive(cell.write.number)?;
+                }
                 require(self.retired, "excluded loss", FormatRule::Required)?;
                 require(
                     *version > 0,

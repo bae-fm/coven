@@ -1,5 +1,6 @@
 use crate::test_utils::tests::*;
 use crate::tests::TestStore;
+use crate::write::tests::{count, records};
 use crate::{Database, RowIdentity, SyncedTable};
 use coven_format::value::{Value as Scalar, WritePositions};
 use coven_format::write::WriteRecord;
@@ -276,10 +277,20 @@ async fn comparison(history: &MigrationHistory) -> Comparison {
             crate::ApplyOutcome::Applied
         );
     }
-    if history.deletion.is_some() {
+    if let Some(finality) = history.deletion {
         crate::store_log::tests::delete_circle(&db, circle_id())
             .await
             .unwrap();
+        // Replay supplies finality: a final deletion lies before the horizon.
+        if let Finality::Final = finality {
+            db.advance_store_log_horizon(
+                db.store_log().await.unwrap(),
+                std::time::Duration::from_secs(1),
+                std::time::UNIX_EPOCH + std::time::Duration::from_secs(1),
+            )
+            .await
+            .unwrap();
+        }
     }
     let (input, before) = migration_input(&db, history);
     db.close().await.unwrap();
@@ -304,8 +315,8 @@ async fn comparison(history: &MigrationHistory) -> Comparison {
             .enumerate()
             .map(|(i, (row, generation))| {
                 let after = store.row(row).unwrap().state;
-                // A selected row changes generation (an ordinary delete per the
-                // spec, or erased generation records in Rust's retirement path).
+                // A selected row changes generation: the migration write's
+                // ordinary delete at it (§17.1).
                 json!({"id":i,"selected":after.generation()!=*generation})
             })
             .collect::<Vec<_>>())
@@ -334,7 +345,7 @@ async fn reduce(runner: &OsStr, mut history: MigrationHistory) -> MigrationHisto
 }
 
 #[tokio::test]
-#[ignore = "requires COVEN_MERGE_LEAN; stops at the first migration selection mismatch"]
+#[ignore = "requires COVEN_MERGE_LEAN; scripts/check.sh runs the migration selection histories"]
 async fn migration_differential_histories() {
     let runner = std::env::var_os("COVEN_MERGE_LEAN").expect("built mergeRunner");
     for seed in 0..128 {
@@ -356,9 +367,12 @@ async fn migration_differential_histories() {
     }
 }
 
+/// B16's former counterexample: one key-only row in a circle whose deletion
+/// is not final. Both sides leave it out of the migration; removing the row
+/// or the deletion, or making the deletion final, also agrees.
 #[tokio::test]
-#[ignore = "requires COVEN_MERGE_LEAN; scripts/check.sh checks the migration discrepancy"]
-async fn migration_differential_counterexample() {
+#[ignore = "requires COVEN_MERGE_LEAN; scripts/check.sh runs the migration agreement"]
+async fn migration_differential_agreement() {
     let runner = std::env::var_os("COVEN_MERGE_LEAN").expect("built mergeRunner");
     let mut write = migration_insert(15, 0, Audience::Circle(circle_id()));
     let Operation::Insert(columns) = &mut write.parts[0].rows[0].change.operation else {
@@ -372,11 +386,8 @@ async fn migration_differential_counterexample() {
         deletion: Some(Finality::NonFinal),
     };
     let case = comparison(&history).await;
-    assert_eq!(case.rust, json!([{"id":0,"selected":true}]));
-    assert_eq!(
-        run_lean(&runner, &case.input),
-        json!([{"id":0,"selected":false}])
-    );
+    assert_eq!(case.rust, json!([{"id":0,"selected":false}]));
+    assert_eq!(run_lean(&runner, &case.input), case.rust);
     let mut empty = history.clone();
     empty.writes.clear();
     assert!(!mismatch(&runner, &empty).await);
@@ -385,5 +396,311 @@ async fn migration_differential_counterexample() {
     assert!(!mismatch(&runner, &no_deletion).await);
     let mut final_deletion = history;
     final_deletion.deletion = Some(Finality::Final);
-    assert!(!mismatch(&runner, &final_deletion).await);
+    let case = comparison(&final_deletion).await;
+    assert_eq!(case.rust, json!([{"id":0,"selected":true}]));
+    assert_eq!(run_lean(&runner, &case.input), case.rust);
+}
+
+fn generations(db: &Database, row: &RowId) -> Vec<(u64, coven_merge::WriteId)> {
+    db.inspect_writer_schema(|db, schema| {
+        let store = crate::merge_store::MergeStore::from_schema(db, &schema.schema);
+        Ok::<_, crate::DbError>(
+            store
+                .row(row)?
+                .state
+                .generations()
+                .iter()
+                .map(|(g, w)| (*g, *w))
+                .collect(),
+        )
+    })
+    .unwrap()
+}
+
+fn setters(loss: &crate::LostValue) -> Vec<(String, coven_merge::WriteId)> {
+    let mut cells: Vec<_> = match &loss.lost {
+        crate::Lost::Cell(cell) => vec![(cell.column.clone(), cell.set_by)],
+        crate::Lost::Row(cells) => cells.iter().map(|c| (c.column.clone(), c.set_by)).collect(),
+    };
+    cells.sort();
+    cells
+}
+
+fn row_of(write: &WriteRecord) -> RowId {
+    write.parts[0].rows[0].row.clone()
+}
+
+fn migrated(store: &TestStore, converter: bool) -> crate::DatabaseBuilder {
+    let mut index = crate::Migration::sql(2, "index", "CREATE INDEX rows_a ON rows(a)");
+    if converter {
+        index = index.writes(|_| Ok(()));
+    }
+    store.builder(
+        migration_tables(),
+        vec![crate::Migration::sql(1, "rows", MIGRATION_SCHEMA), index],
+    )
+}
+
+/// §17.1: a circle row and its child hidden only by a non-final circle
+/// deletion are left out of the migration write, keeping their merge records
+/// and removal records; a store row losing a unique claim independently is
+/// deleted at its generation with one frozen whole-row loss naming the
+/// migration write and its original setter. When the deletion drops, the
+/// parent and child return; the deleted row stays deleted (B12).
+#[tokio::test]
+async fn a_non_final_circle_deletion_leaves_its_rows_out_of_the_migration() {
+    use crate::Replacement;
+    let parent = migration_insert(0, 0, Audience::Circle(circle_id()));
+    let mut child = migration_insert(1, 1, Audience::Circle(circle_id()));
+    let Operation::Insert(columns) = &mut child.parts[0].rows[0].change.operation else {
+        unreachable!()
+    };
+    columns.insert(
+        "parent".into(),
+        ColumnValue {
+            value: coven_format::key::decode_key(&row_of(&parent).key)
+                .unwrap()
+                .remove(0),
+            parents: BTreeMap::from([(
+                ForeignKey::new(["parent"], "rows", ["id"]),
+                Parent {
+                    row: row_of(&parent),
+                    generation: 1,
+                },
+            )]),
+        },
+    );
+    child.header.had_read = WritePositions(vec![parent.header.position]);
+    let mut first = migration_insert(2, 2, Audience::Store);
+    let mut second = migration_insert(3, 3, Audience::Store);
+    for write in [&mut first, &mut second] {
+        let Operation::Insert(columns) = &mut write.parts[0].rows[0].change.operation else {
+            unreachable!()
+        };
+        columns.get_mut("b").unwrap().value = Scalar::Text("same".into());
+    }
+    let store = TestStore::new();
+    let db = store
+        .schema(migration_tables(), MIGRATION_SCHEMA)
+        .await
+        .unwrap();
+    for write in [&parent, &child, &first, &second] {
+        assert_eq!(
+            db.receive(write.clone().into()).await.unwrap(),
+            crate::ApplyOutcome::Applied
+        );
+    }
+    crate::store_log::tests::delete_circle(&db, circle_id())
+        .await
+        .unwrap();
+    assert_eq!(count(&db, "rows"), 1);
+    let hidden = db.lost_values().await.unwrap();
+    assert_eq!(hidden.len(), 3);
+    db.close().await.unwrap();
+    let db = migrated(&store, false).open().await.unwrap();
+    let marker = records(&db).last().unwrap().header.position;
+    for write in [&parent, &child] {
+        assert_eq!(
+            generations(&db, &row_of(write)),
+            [(1, write.header.position)]
+        );
+    }
+    assert_eq!(
+        generations(&db, &row_of(&second)),
+        [(1, second.header.position), (2, marker)]
+    );
+    let losses = db.lost_values().await.unwrap();
+    assert_eq!(losses.len(), 3, "{losses:#?}");
+    let frozen: Vec<_> = losses
+        .iter()
+        .filter(|l| matches!(l.replaced_by, Replacement::SchemaChange { version: 2 }))
+        .collect();
+    assert_eq!(frozen.len(), 1);
+    assert!(setters(frozen[0])
+        .iter()
+        .all(|(_, write)| *write == second.header.position));
+    assert_eq!(
+        losses
+            .iter()
+            .filter(|l| matches!(l.replaced_by, Replacement::Rules(_)))
+            .count(),
+        2,
+        "the provisional rows keep their removal records"
+    );
+    let deletion = crate::store_log::tests::circle_history(circle_id())
+        .last()
+        .unwrap()
+        .0
+        .position;
+    // Replay drops the deletion: the circle is no longer deleted.
+    let log = db.store_log().await.unwrap();
+    let mut next = log.clone();
+    next.replay.entries.insert(
+        deletion,
+        crate::EntryOutcome::Dropped(crate::DropReason::NotAllowed),
+    );
+    next.replay.state.circle_deletions.remove(&circle_id());
+    db.apply_store_log_batch::<crate::pending::tests::Record>(
+        log,
+        vec![],
+        next.replay,
+        vec![],
+        vec![],
+        Vec::new(),
+        Vec::new(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(count(&db, "rows"), 3, "parent and child return");
+    assert_eq!(
+        generations(&db, &row_of(&second)),
+        [(1, second.header.position), (2, marker)]
+    );
+    let losses = db.lost_values().await.unwrap();
+    assert_eq!(losses.len(), 1);
+    assert!(matches!(
+        losses[0].replaced_by,
+        Replacement::SchemaChange { version: 2 }
+    ));
+    db.close().await.unwrap();
+}
+
+/// After the migration deleted a hidden row, a late edit whose sources
+/// survive is converted, applies at the old generation and loses to the
+/// retained generation delete; an edit built on a write outside its own
+/// retirement window is a dependency loss; the late write itself leaves
+/// nothing. A device that loads the raise's snapshot and then receives the
+/// same writes reaches the same rows, verdicts and losses (§8.3, §10, §17.1).
+#[tokio::test]
+async fn late_edits_to_a_migration_deleted_row_lose_to_its_delete() {
+    use crate::write::tests::sql;
+    use crate::Replacement;
+    const DAY: u64 = 24 * 60 * 60;
+    let ids = coven_foundation::id_source::SequentialIds::new();
+    let stores: Vec<_> = (0..6).map(|_| TestStore::with_ids(&ids)).collect();
+    let mut dbs = Vec::new();
+    for store in &stores[..5] {
+        dbs.push(
+            store
+                .schema(migration_tables(), MIGRATION_SCHEMA)
+                .await
+                .unwrap(),
+        );
+    }
+    let [ana, carol, late, mia, target] = &dbs[..] else {
+        unreachable!()
+    };
+    sql(ana, "INSERT INTO rows(id,audience,a,b) VALUES('00000000-0000-4000-8000-000000000001','store',1,'x')")
+        .await
+        .unwrap();
+    sql(carol, "INSERT INTO rows(id,audience,a,b) VALUES('00000000-0000-4000-8000-000000000002','store',1,'x')")
+        .await
+        .unwrap();
+    let kept = records(ana).remove(0);
+    let created = records(carol).remove(0);
+    sql(carol, "UPDATE rows SET a=5").await.unwrap();
+    let edit = records(carol).remove(1);
+    late.receive(created.clone().into()).await.unwrap();
+    sql(late, "UPDATE rows SET a=7").await.unwrap();
+    let dropped = records(late).remove(0);
+    for write in [&created, &dropped] {
+        mia.receive(write.clone().into()).await.unwrap();
+    }
+    sql(mia, "UPDATE rows SET a=8").await.unwrap();
+    let dependent = records(mia).remove(0);
+    // Carol's later claim of 'x' loses to Ana's: her row is hidden.
+    for write in [&kept, &created] {
+        target.receive(write.clone().into()).await.unwrap();
+    }
+    assert_eq!(count(target, "rows"), 1);
+    target.close().await.unwrap();
+    let target = migrated(&stores[4], true).open().await.unwrap();
+    target.exclude_later_writes(2).await;
+    let marker = records(&target).last().unwrap().header.position;
+    let snapshot = crate::snapshot_write::tests::frames(&target, Audience::Store).await;
+    let fresh = migrated(&stores[5], true).open().await.unwrap();
+    // The kept raise is replayed before its snapshot loads.
+    fresh.exclude_later_writes(2).await;
+    crate::snapshot_write::tests::load_one(
+        &fresh,
+        crate::snapshot_write::tests::id(Audience::Store),
+        snapshot.prefix.clone(),
+        std::io::Cursor::new(snapshot.concat()),
+    )
+    .await
+    .unwrap();
+    let row = row_of(&created);
+    let mut results = Vec::new();
+    for db in [&target, &fresh] {
+        assert_eq!(
+            generations(db, &row),
+            [(1, created.header.position), (2, marker)]
+        );
+        crate::write_landing::tests::retire(db, dropped.header.position.device, 1, "device", 0)
+            .await;
+        db.receive(edit.clone().into()).await.unwrap();
+        db.apply_downloaded::<crate::pending::tests::Record>(
+            dropped.clone().into(),
+            std::time::UNIX_EPOCH + std::time::Duration::from_secs(30 * DAY + 1),
+        )
+        .await
+        .unwrap();
+        db.receive(dependent.clone().into()).await.unwrap();
+        assert_eq!(
+            generations(db, &row),
+            [(1, created.header.position), (2, marker)]
+        );
+        let mut losses: Vec<_> = db
+            .lost_values()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|loss| {
+                let cause = match &loss.replaced_by {
+                    Replacement::Write(write) => format!("write {write:?}"),
+                    Replacement::SchemaChange { version } => format!("schema {version}"),
+                    Replacement::DataDependency { write, sources } => format!(
+                        "dependency {write:?} {:?}",
+                        sources.iter().map(|s| s.write).collect::<Vec<_>>()
+                    ),
+                    other => panic!("{other:?}"),
+                };
+                (cause, setters(&loss))
+            })
+            .collect();
+        losses.sort();
+        let expected = {
+            let mut expected = vec![
+                (
+                    format!("write {marker:?}"),
+                    vec![("a".to_string(), edit.header.position)],
+                ),
+                (
+                    format!(
+                        "dependency {:?} {:?}",
+                        dependent.header.position,
+                        [dropped.header.position]
+                    ),
+                    vec![("a".to_string(), dependent.header.position)],
+                ),
+            ];
+            let mut frozen: Vec<_> = ["a", "audience", "b", "id", "parent"]
+                .iter()
+                .map(|c| (c.to_string(), created.header.position))
+                .collect();
+            frozen.sort();
+            expected.push(("schema 2".to_string(), frozen));
+            expected.sort();
+            expected
+        };
+        assert_eq!(losses, expected);
+        results.push(losses);
+    }
+    assert_eq!(results[0], results[1]);
+    for db in [target, fresh] {
+        db.close().await.unwrap();
+    }
+    for db in dbs {
+        db.close().await.ok();
+    }
 }

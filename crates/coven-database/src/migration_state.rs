@@ -16,21 +16,6 @@ pub(crate) fn carry(
     names: &MigrationMatch,
     after: &WriteSchema,
 ) -> Result<BTreeSet<String>, DbError> {
-    // The cursor owns identities only, and never changes the table being visited.
-    db.batch("CREATE TEMP TABLE _coven_migration_retired AS SELECT DISTINCT table_name,key,audience FROM _coven_lost WHERE retired=0 AND replacement_kind='rules'")?;
-    db.for_each::<_, crate::DbError>("SELECT table_name,key,audience FROM temp._coven_migration_retired", [], |r| {
-        let id = crate::row_queries::read_identity(r)?;
-        freeze_losses(db, &id)?;
-        crate::fingerprint::forget_rows(db, std::iter::once(&id))?;
-        let audience = audience_text(&id.audience);
-        for table in ["_coven_references", "_coven_cells", "_coven_claims"] {
-            db.internal_execute(&format!("DELETE FROM {table} WHERE row_id IN (SELECT id FROM _coven_rows WHERE table_name=?1 AND key=?2 AND audience=?3)"),params![id.table,id.key,audience])?;
-        }
-        db.internal_execute("DELETE FROM _coven_rows WHERE table_name=?1 AND key=?2 AND audience=?3",params![id.table,id.key,audience])?;
-        Ok(())
-    })?;
-    db.batch("DROP TABLE temp._coven_migration_retired")?;
-
     let mut refresh = BTreeSet::new();
     let definitions = before.changed_tables(&after.schema);
     for table in before.tables.values() {
@@ -81,7 +66,10 @@ pub(crate) fn carry(
 }
 
 /// Retired losses keep their written values without active reference metadata.
-fn freeze_losses(db: &DatabaseConnection, row: &coven_merge::RowId) -> Result<(), DbError> {
+pub(crate) fn freeze_losses(
+    db: &DatabaseConnection,
+    row: &coven_merge::RowId,
+) -> Result<(), DbError> {
     let ids = db.query(
         "SELECT id FROM _coven_lost WHERE table_name=?1 AND key=?2 AND audience=?3 AND retired=0",
         params![row.table, row.key, audience_text(&row.audience)],
@@ -112,7 +100,41 @@ fn rename_table(db: &DatabaseConnection, old: &str, new: &str) -> Result<(), DbE
         "UPDATE _coven_rows SET table_name=?2 WHERE table_name=?1",
         params![old, new],
     )?;
-    db.internal_execute("UPDATE _coven_lost SET table_name=?2 WHERE table_name=?1 AND retired=0 AND replacement_kind='write'",params![old,new])?;
+    // Active losses follow their row: a hidden row keeps its values in its
+    // removal record (§17.1).
+    db.internal_execute(
+        "UPDATE _coven_lost SET table_name=?2 WHERE table_name=?1 AND retired=0",
+        params![old, new],
+    )?;
+    Ok(())
+}
+
+/// A hidden row's removal record holds its values by column name: renamed
+/// columns move with the row's cells, and dropped ones go with them.
+fn rename_removed_values(
+    db: &DatabaseConnection,
+    table: &str,
+    columns: &std::collections::BTreeMap<String, Option<String>>,
+) -> Result<(), DbError> {
+    for (id, bytes) in db.query(
+        "SELECT id,value FROM _coven_lost WHERE table_name=?1 AND retired=0 AND replacement_kind='rules' AND column_id IS NULL",
+        [table],
+        |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?)),
+    )? {
+        let values = decoded(merge_fields::decode_columns(&bytes))?;
+        let renamed: std::collections::BTreeMap<_, _> = values
+            .into_iter()
+            .filter_map(|(column, value)| match columns.get(&column) {
+                Some(Some(new)) => Some((new.clone(), value)),
+                Some(None) => None,
+                None => Some((column, value)),
+            })
+            .collect();
+        db.internal_execute(
+            "UPDATE _coven_lost SET value=?2 WHERE id=?1",
+            params![id, encoded(merge_fields::encode_columns(&renamed))?],
+        )?;
+    }
     Ok(())
 }
 
@@ -129,6 +151,10 @@ fn columns(db: &DatabaseConnection, names: &MigrationMatch) -> Result<(), DbErro
         },
     )?;
     let mut renamed = Vec::new();
+    let mut removed_values = std::collections::BTreeMap::<
+        String,
+        std::collections::BTreeMap<String, Option<String>>,
+    >::new();
     for (id, table, column) in columns {
         let target = names
             .tables
@@ -137,6 +163,10 @@ fn columns(db: &DatabaseConnection, names: &MigrationMatch) -> Result<(), DbErro
         if target == Some((&table, &column)) {
             continue;
         }
+        removed_values
+            .entry(table.clone())
+            .or_default()
+            .insert(column.clone(), target.map(|(_, column)| column.clone()));
         let Some((new_table, new_column)) = target else {
             db.internal_execute("DELETE FROM _coven_references WHERE column_id=?1", [id])?;
             db.internal_execute("DELETE FROM _coven_cells WHERE column_id=?1", [id])?;
@@ -170,6 +200,9 @@ fn columns(db: &DatabaseConnection, names: &MigrationMatch) -> Result<(), DbErro
             id
         };
         renamed.push((active, new_table, new_column));
+    }
+    for (table, columns) in &removed_values {
+        rename_removed_values(db, table, columns)?;
     }
     for (id, table, column) in renamed {
         let existing: Option<i64> = db.query_row(

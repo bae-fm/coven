@@ -414,6 +414,58 @@ pub(crate) fn load_evidence(
     Ok(())
 }
 
+/// This device's migration write changes rows only through its own raise's
+/// snapshot (§17.1). A loaded snapshot that covers it without carrying those
+/// changes was made from another raise's data, in which they never counted:
+/// their evidence goes with the data they described.
+pub(crate) fn forget_own_migration(
+    db: &DatabaseConnection,
+    audience: &coven_merge::Audience,
+    covered: &coven_format::value::WritePositions,
+    carried: &std::collections::BTreeSet<(WriteId, String, Vec<u8>)>,
+) -> Result<(), DbError> {
+    let own = db.pending_device().ok_or(DbError::DamagedDatabase)?;
+    let audience = audience_text(audience);
+    let first = merge_fields::encode_write_id(&WriteId {
+        device: own,
+        number: 1,
+    })?;
+    let last = merge_fields::encode_write_id(&WriteId {
+        device: own,
+        number: u64::MAX,
+    })?;
+    for (write_id, header) in db.query(
+        "SELECT write_id,header FROM _coven_authored_parts WHERE write_id BETWEEN ?2 AND ?3 AND audience=?1",
+        params![audience, first, last],
+        |r| Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, Vec<u8>>(1)?)),
+    )? {
+        let header = merge_fields::decode_write_header(&header)?;
+        if header.disposition != coven_format::write::WriteDisposition::Migration
+            || !covered.covers(header.position)
+        {
+            continue;
+        }
+        for (table, key) in db.query(
+            "SELECT table_name,key FROM _coven_authored_changes WHERE write_id=?1 AND audience=?2",
+            params![write_id, audience],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, Vec<u8>>(1)?)),
+        )? {
+            if !carried.contains(&(header.position, table.clone(), key.clone())) {
+                db.internal_execute(
+                    "DELETE FROM _coven_authored_changes WHERE write_id=?1 AND audience=?2 AND table_name=?3 AND key=?4",
+                    params![write_id, audience, table, key],
+                )?;
+            }
+        }
+        db.internal_execute(
+            "DELETE FROM _coven_authored_parts WHERE write_id=?1 AND audience=?2
+             AND NOT EXISTS(SELECT 1 FROM _coven_authored_changes c WHERE c.write_id=?1 AND c.audience=?2)",
+            params![write_id, audience],
+        )?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 #[path = "write_sources_tests.rs"]
 mod tests;

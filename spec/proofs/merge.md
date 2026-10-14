@@ -796,37 +796,36 @@ and circle audiences, references, CHECK failures and unique rivals, sampled
 in causal orders and prefixes. Replay supplies the deleting entry and its
 finality; selecting or proving that finality remains outside this family.
 
-The comparison observes which rows the migration retires, by their changed
-generations. It does not equate Rust's erased generation records with the
-model's ordinary generation deletes or compare migration loss encoding.
-Those are different outputs from the row-selection function tested here.
-The reducer removes writes, optional values, references and the deletion,
-retaining valid causal histories and schema-required insert cells.
+The comparison observes which rows the migration deletes, by their changed
+generations: Rust's migration write deletes each selected row at its
+generation, as `withHiddenDeletes` does, so the selection and the generation
+change are the same observation. Finality comes from the store-log horizon:
+a final deletion is stored before it. The reducer removes writes, optional
+values, references and the deletion, retaining valid causal histories and
+schema-required insert cells.
 
-Seed 0 reduces to one insert in a circle, its non-final deletion, and the
-breaking migration. Only the key, audience and null reference cell remain;
-there are no independent CHECK failures, references or competing claims.
-Rust retires the row; Lean leaves it out of the migration. The fixed
-`migration_differential_counterexample` checks those results and verifies
-agreement with the insert removed, the deletion removed, or the deletion
-made final. `MigrationCounterexample` checks the corresponding Lean results.
+Rust follows [§17.1](../coven.md#171-host-application): with every deletion
+final it deletes the rows removal rules hide; with a non-final deletion it
+reruns the three passes on the migrated state with and without that
+deletion, leaves out each hidden row the deletion decides, and includes each
+row that loses only once it is absent. All 128 seeds pass, each in three
+causal application orders at both a full history and a random prefix (768
+comparisons). Earlier histories stopped at seed 0 (one insert in a circle,
+its non-final deletion, and the breaking migration), where Rust retired the
+row; `migration_differential_agreement` now checks that both sides leave it
+out, and agree with the insert removed, the deletion removed, or the
+deletion final (then both delete it). `MigrationCounterexample` keeps the
+corresponding Lean results. Database tests check the migration write's
+deletes, frozen whole-row losses with original setters and old names, a
+returning parent and child after the deletion drops, and late edits losing
+to the retained delete on the migrating device and on a device that loads
+its snapshot.
 
-Lean follows [§17.1](../coven.md#171-host-application): “A non-final circle
-deletion cannot decide that a migration loses a row” and “Judge independent
-causes with non-final deleted-circle causes absent; a child hidden solely
-through such a parent is left out too.” Rust selects every active rule loss,
-matching the hidden-row selection in “A breaking migration deletes rows
-already hidden by removal rules through the ordinary generation path,” but
-without that section's non-final exception. Its selection has no finality
-input and does not rerun the three passes. No sentence in the current spec
-permits dropping this exception.
-
-`scripts/check.sh` checks the fixed migration counterexample. The strict
-comparison stops at this first discrepancy and remains outside the script:
+`scripts/check.sh` runs the strict comparison and the agreement case:
 
 ```sh
 COVEN_MERGE_LEAN="$PWD/spec/proofs/merge/.lake/build/bin/mergeRunner" \
-  cargo test -p coven-database migration_differential_histories -- --ignored --nocapture
+  cargo test -p coven-database migration_differential -- --ignored --nocapture
 ```
 
 <a id="b17-receive-order-progress-and-the-retirement-gap"></a>

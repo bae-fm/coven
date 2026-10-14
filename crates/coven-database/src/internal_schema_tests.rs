@@ -506,8 +506,8 @@ mod scans {
         Some("once per migration: discover every table with retained column metadata"),
     ("migration_receive.rs", "SELECT version,before_schema,after_schema,tables,columns FROM _coven_conversion_schemas ORDER BY version", "_coven_conversion_schemas") =>
         Some("opening retains every breaking migration's conversion schema"),
-    ("migration_state.rs", "CREATE TEMP TABLE _coven_migration_retired AS SELECT DISTINCT table_name,key,audience FROM _coven_lost WHERE retired=0 AND replacement_kind='rules'", "_coven_lost") =>
-        Some("once per migration: freeze all removed rows before changing their schema"),
+    ("migration_hidden.rs", "SELECT DISTINCT table_name,key,audience FROM _coven_lost WHERE retired=0 AND replacement_kind='rules'", "_coven_lost") =>
+        Some("once per migration: read every hidden row before its identity moves"),
     ("migration_state.rs", "SELECT id,table_name,column_name FROM _coven_columns", "_coven_columns") =>
         Some("once per migration: carry all column definitions through renames and drops"),
     ("migration_state.rs", "SELECT id,table_name,identity FROM _coven_foreign_keys", "_coven_foreign_keys") =>
@@ -786,7 +786,10 @@ mod source {
             .collect();
         }
         if sql.contains("{FINAL}") {
-            assert!(matches!(file, "entry_inputs.rs" | "local_effects.rs"));
+            assert!(matches!(
+                file,
+                "entry_inputs.rs" | "local_effects.rs" | "migration_hidden.rs"
+            ));
             let condition =
                 select_constant(&sources()["entry_inputs.rs"].strings, "(l.stored_at <");
             return vec![sql.replace("{FINAL}", &condition)];

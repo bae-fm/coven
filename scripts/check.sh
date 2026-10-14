@@ -271,8 +271,9 @@ proofs() {
         step "Rust / Lean schema-boundary differential"
         COVEN_MERGE_LEAN="$runner" cargo test -p coven-database --all-features schema_differential_histories -- --ignored
 
-        step "Rust / Lean migration-selection counterexample"
-        COVEN_MERGE_LEAN="$runner" cargo test -p coven-database --all-features migration_differential_counterexample -- --ignored
+        step "Rust / Lean migration selection"
+        COVEN_MERGE_LEAN="$runner" cargo test -p coven-database --all-features migration_differential_histories -- --ignored
+        COVEN_MERGE_LEAN="$runner" cargo test -p coven-database --all-features migration_differential_agreement -- --ignored
     fi
 
     if proof_selected merge || proof_selected queue || crate_selected coven-database; then

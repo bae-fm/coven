@@ -44,6 +44,10 @@ pub(crate) fn materialize(
         .cloned()
         .collect();
     let mut dependencies = BTreeMap::<RowId, BTreeSet<RowId>>::new();
+    // A returning child's parent is put first when it can be; foreign keys are
+    // deferred, so this order yields to unique claims, which SQLite checks at
+    // once (§8.5).
+    let mut parents = BTreeMap::<RowId, BTreeSet<RowId>>::new();
     let mut old_claims = BTreeMap::new();
     for id in &actions {
         if let Some(app) = visible
@@ -75,10 +79,21 @@ pub(crate) fn materialize(
                 _ => None,
             };
             if let Some(parent) = parent {
-                dependencies
+                parents
                     .entry(id.clone())
                     .or_default()
                     .insert(parent.clone());
+                // SQLite matches a reference by key alone: a row leaving under
+                // the parent's key would cascade its delete into this one.
+                for old in removed_visible
+                    .iter()
+                    .filter(|old| old.table == parent.table && old.key == parent.key)
+                {
+                    dependencies
+                        .entry(id.clone())
+                        .or_default()
+                        .insert(old.clone());
+                }
             }
         }
         for old in removed_visible
@@ -106,7 +121,7 @@ pub(crate) fn materialize(
             }
         }
     }
-    let ordered = dependency_order(actions, &dependencies);
+    let ordered = dependency_order(actions, &dependencies, &parents);
     database.materialize(|database| {
         // Kept local rows can only return with a synced parent coven inserts.
         let kept = crate::local_effects::any(database)?;
@@ -213,12 +228,29 @@ fn removal_causes(
     Ok(causes)
 }
 
-/// Visit dependencies first. A back edge is a SQLite-deferred cycle; native
-/// actions still execute, and any constraint failure rolls back the write.
+/// Visit dependencies first. `dependencies` are immediate: a surviving child
+/// repointed before its old parent's native cascade, and a key or unique
+/// claim vacated before another row takes it. `deferrable` orders a returning
+/// child after its parent only where no immediate dependency runs the other
+/// way: SQLite defers that foreign-key check to commit. Any remaining back edge
+/// is a deferred cycle; native actions still execute, and any constraint
+/// failure rolls back the write.
 fn dependency_order(
     rows: BTreeSet<RowId>,
     dependencies: &BTreeMap<RowId, BTreeSet<RowId>>,
+    deferrable: &BTreeMap<RowId, BTreeSet<RowId>>,
 ) -> Vec<RowId> {
+    let mut dependencies = dependencies.clone();
+    for (child, parents) in deferrable {
+        for parent in parents {
+            if !reaches(&dependencies, parent, child) {
+                dependencies
+                    .entry(child.clone())
+                    .or_default()
+                    .insert(parent.clone());
+            }
+        }
+    }
     let mut visited = BTreeSet::new();
     let mut ordered = Vec::new();
     for root in &rows {
@@ -242,6 +274,21 @@ fn dependency_order(
         }
     }
     ordered
+}
+
+/// Whether `from` depends on `to`, directly or through other dependencies.
+fn reaches(dependencies: &BTreeMap<RowId, BTreeSet<RowId>>, from: &RowId, to: &RowId) -> bool {
+    let mut seen = BTreeSet::new();
+    let mut pending = vec![from];
+    while let Some(row) = pending.pop() {
+        if row == to {
+            return true;
+        }
+        if seen.insert(row) {
+            pending.extend(dependencies.get(row).into_iter().flatten());
+        }
+    }
+    false
 }
 
 fn put(

@@ -332,7 +332,7 @@ async fn a_migration_write_failure_rolls_back_schema_data_and_metadata() {
 }
 
 #[tokio::test]
-async fn a_removed_row_is_forgotten_but_its_loss_survives_migration_and_reinsertion() {
+async fn a_hidden_row_is_deleted_at_its_generation_and_reinsertion_follows_it() {
     use coven_format::{
         value::{Value, WritePositions},
         write::{RowChange, WriteHeader, WritePart, WriteRecord},
@@ -409,10 +409,21 @@ async fn a_removed_row_is_forgotten_but_its_loss_survives_migration_and_reinsert
         vec![Migration::sql(1,"initial",INITIAL),Migration::sql(2,"drop check","DROP TABLE notes; CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,title TEXT,body TEXT)")]
     };
     let db = store.builder(notes(), migrations()).open().await.unwrap();
-    assert_same_loss_values(&db.lost_values().await.unwrap(), &lost);
+    // The migration write deletes the hidden row at its generation and keeps
+    // its written values and setters in one frozen loss (§17.1).
+    let migrated = db.lost_values().await.unwrap();
+    assert_eq!(migrated.len(), 1);
+    assert_eq!(
+        migrated[0].replaced_by,
+        crate::Replacement::SchemaChange { version: 2 }
+    );
+    assert_eq!(
+        (&migrated[0].table, &migrated[0].key, &migrated[0].lost),
+        (&lost[0].table, &lost[0].key, &lost[0].lost)
+    );
+    assert_eq!(count(&db, "_coven_rows"), 2, "both generations stay");
     for table in [
         "notes",
-        "_coven_rows",
         "_coven_cells",
         "_coven_references",
         "_coven_claims",
@@ -422,16 +433,16 @@ async fn a_removed_row_is_forgotten_but_its_loss_survives_migration_and_reinsert
     sql(&db, "INSERT INTO notes VALUES('n','new','new')")
         .await
         .unwrap();
-    assert_same_loss_values(&db.lost_values().await.unwrap(), &lost);
+    assert_same_loss_values(&db.lost_values().await.unwrap(), &migrated);
     assert_eq!(
         records(&db).last().unwrap().parts[0].rows[0]
             .change
             .generation,
-        0
+        2
     );
     db.close().await.unwrap();
     let db = store.builder(notes(), migrations()).open().await.unwrap();
-    assert_same_loss_values(&db.lost_values().await.unwrap(), &lost);
+    assert_same_loss_values(&db.lost_values().await.unwrap(), &migrated);
     sql(&db, "UPDATE notes SET title='later'").await.unwrap();
     assert_eq!(count(&db, "notes"), 1);
     let historical = db.lost_values().await.unwrap();
@@ -713,7 +724,7 @@ async fn matching_cells_survive_absence_between_migrations_of_one_run() {
 }
 
 #[tokio::test]
-async fn retiring_a_removed_row_keeps_its_cell_loss_names_while_live_cells_are_renamed() {
+async fn a_deleted_hidden_row_freezes_old_names_and_its_delete_reads_the_cell_loss() {
     const INITIAL: &str =
         "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,title TEXT CHECK(title<>'bad'),body TEXT)";
     let store = TestStore::new();
@@ -743,13 +754,36 @@ async fn retiring_a_removed_row_keeps_its_cell_loss_names_while_live_cells_are_r
     assert_eq!(lost.len(), 2);
     db.close().await.unwrap();
     let db = store.builder(vec![SyncedTable::new("renamed",RowIdentity::SharedKey)],vec![Migration::sql(1,"initial",INITIAL),Migration::sql(2,"rename","ALTER TABLE notes RENAME TO renamed; ALTER TABLE renamed RENAME COLUMN title TO name")]).open().await.unwrap();
-    assert_same_loss_values(&db.lost_values().await.unwrap(), &lost);
+    let removed = lost
+        .iter()
+        .find(|loss| matches!(loss.replaced_by, crate::Replacement::Rules(_)))
+        .unwrap();
+    let cell = lost
+        .iter()
+        .find(|loss| matches!(loss.replaced_by, crate::Replacement::Write(_)))
+        .unwrap();
+    // The migration write read the concurrent title, so its delete
+    // acknowledges that cell loss; the frozen whole-row loss keeps the old
+    // table and column names (§8.3, §17.1).
+    let check = |migrated: Vec<crate::LostValue>| {
+        assert_eq!(migrated.len(), 1);
+        assert_eq!(
+            migrated[0].replaced_by,
+            crate::Replacement::SchemaChange { version: 2 }
+        );
+        assert_eq!(
+            (&migrated[0].table, &migrated[0].key, &migrated[0].lost),
+            (&removed.table, &removed.key, &removed.lost)
+        );
+        assert!(cell.table == "notes");
+    };
+    check(db.lost_values().await.unwrap());
     assert_eq!(setters(&db, "renamed", "live")["name"], 1);
     assert!(setters(&db, "renamed", "removed").is_empty());
     sql(&db, "UPDATE renamed SET name='later' WHERE id='live'")
         .await
         .unwrap();
-    assert_same_loss_values(&db.lost_values().await.unwrap(), &lost);
+    check(db.lost_values().await.unwrap());
     db.close().await.unwrap();
 }
 
@@ -785,7 +819,18 @@ async fn a_renamed_unique_constraint_replaces_the_dropped_columns_constraint() {
     let lost = db.lost_values().await.unwrap();
     db.close().await.unwrap();
     let db = store.builder(notes(),vec![Migration::sql(1,"initial",INITIAL),Migration::sql(2,"replace column","DROP INDEX y_index; ALTER TABLE notes DROP COLUMN y; ALTER TABLE notes RENAME COLUMN x TO y")]).open().await.unwrap();
-    assert_same_loss_values(&db.lost_values().await.unwrap(), &lost);
+    // The losing row is deleted at its generation; its frozen loss keeps the
+    // old x and y values with their setters (§17.1).
+    let migrated = db.lost_values().await.unwrap();
+    assert_eq!(migrated.len(), 1);
+    assert_eq!(
+        migrated[0].replaced_by,
+        crate::Replacement::SchemaChange { version: 2 }
+    );
+    assert_eq!(
+        (&migrated[0].table, &migrated[0].key, &migrated[0].lost),
+        (&lost[0].table, &lost[0].key, &lost[0].lost)
+    );
     assert_eq!(count(&db, "_coven_constraints"), 1);
     db.inspect_writer(|db| {
         let (id, identity) = db
@@ -864,8 +909,6 @@ fn downloaded_update(
     original
 }
 
-// Retirement preserves the displayed history, but dismissal then acknowledges
-// historical cells rather than deleting a row in the active merge.
 fn assert_same_loss_values(actual: &[crate::LostValue], expected: &[crate::LostValue]) {
     assert_eq!(actual.len(), expected.len());
     for (actual, expected) in actual.iter().zip(expected) {

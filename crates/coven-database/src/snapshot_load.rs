@@ -163,6 +163,7 @@ pub(crate) fn read(
     let mut checked_header = false;
     let mut loss_state = None;
     let mut complete = BTreeSet::new();
+    let mut carried = BTreeSet::new();
     let mut chunk = [0; coven_format::chunks::CHUNK_SIZE];
     loop {
         let length = match input.read(&mut chunk) {
@@ -230,6 +231,11 @@ pub(crate) fn read(
                 SnapshotRecord::Authored(authored) => {
                     crate::write_landing::agrees(database, &authored)?;
                     crate::write_sources::load_evidence(database, &authored)?;
+                    carried.insert((
+                        authored.header.position,
+                        authored.change.row.table.clone(),
+                        authored.change.row.key.clone(),
+                    ));
                     if authored.complete {
                         complete.insert((
                             coven_format::merge_fields::encode_write_header(&authored.header)
@@ -251,6 +257,12 @@ pub(crate) fn read(
         .ok_or_else(|| invalid("snapshot has no header"))?;
     check_header(database, schema, expected, header)?;
     metadata.validate(&header.writes)?;
+    crate::write_sources::forget_own_migration(
+        database,
+        &expected.audience,
+        &header.writes,
+        &carried,
+    )?;
     crate::snapshot_state::finish(database)?;
     database.batch(
         "DELETE FROM temp._coven_snapshot_writes; DELETE FROM temp._coven_snapshot_columns",

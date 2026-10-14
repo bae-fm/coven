@@ -132,7 +132,7 @@ async fn restored_parents_restore_live_references_while_losses_keep_written_valu
 }
 
 #[tokio::test]
-async fn migrations_freeze_retired_losses_and_preserve_surviving_written_references() {
+async fn migrations_freeze_deleted_rows_and_preserve_surviving_written_references() {
     let clock = |seconds| {
         std::sync::Arc::new(coven_foundation::clock::FixedClock::new(
             std::time::UNIX_EPOCH + std::time::Duration::from_secs(seconds),
@@ -230,27 +230,34 @@ async fn migrations_freeze_retired_losses_and_preserve_surviving_written_referen
         .open()
         .await
         .unwrap();
+    // The removed child is deleted at its generation: one frozen loss keeps its
+    // old names and written values. The migration write had read the
+    // concurrent cell, so its delete acknowledges that loss (§17.1).
     let retained = a.lost_values().await.unwrap();
-    assert_eq!(retained.len(), losses.len());
-    for (after, before) in retained.iter().zip(&losses) {
-        assert_eq!(
-            (&after.table, &after.key, &after.lost, &after.replaced_by),
-            (
-                &before.table,
-                &before.key,
-                &before.lost,
-                &before.replaced_by
-            )
-        );
-        assert!(matches!(after.target, crate::lost::LossTarget::Cells(_)));
-    }
+    let removed = losses
+        .iter()
+        .find(|l| matches!(l.replaced_by, crate::Replacement::Rules(_)))
+        .unwrap();
+    assert_eq!(retained.len(), 1, "the migration delete read the cell loss");
+    assert_eq!(
+        retained[0].replaced_by,
+        crate::Replacement::SchemaChange { version: 2 }
+    );
+    assert_eq!(
+        (&retained[0].table, &retained[0].key, &retained[0].lost),
+        (&removed.table, &removed.key, &removed.lost)
+    );
+    assert!(matches!(
+        retained[0].target,
+        crate::lost::LossTarget::Cells(_)
+    ));
     a.inspect_writer_schema(|db, schema| {
         db.for_each::<_, crate::DbError>(
             "SELECT replacement_kind,value FROM _coven_lost WHERE retired=1",
             [],
             |r| {
                 let bytes = r.get::<_, Vec<u8>>(1)?;
-                if r.get::<_, String>(0)? == "rules" {
+                if r.get::<_, String>(0)? != "write" {
                     for value in coven_format::merge_fields::decode_columns(&bytes)
                         .unwrap()
                         .values()

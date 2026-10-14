@@ -180,6 +180,7 @@ fn finish(
 ) -> Result<coven_merge::WriteId, DbError> {
     let schema = crate::write_schema::WriteSchema::read(database, tables.to_vec())?;
     schema.with_evaluators(database, || {
+        let hidden = crate::migration_hidden::Hidden::before(database, initial_schema, names)?;
         let refresh = crate::migration_state::carry(database, initial_schema, names, &schema)?;
         crate::row_queries::register_schema(database, &schema.schema, tables)?;
         snapshot.rename(database, baseline_names)?;
@@ -204,10 +205,30 @@ fn finish(
             &mut changed,
         )?;
         let deleted = crate::store_log_tables::deleted_circles(database)?;
-        let changes = crate::write_record::changes(
+        let mut changes = crate::write_record::changes(
             database, &schema, &before, &visible, &store, &changed, &deleted,
         )?;
+        // Rows removal rules hide independently become ordinary deletes at
+        // their generations (§17.1).
+        let selected = hidden.select(database, &schema, &visible)?;
+        let mut deletes = Vec::new();
+        for row in &selected {
+            if let Some(change) = crate::migration_hidden::Hidden::delete(database, &store, row)? {
+                deletes.push(row.clone());
+                changes.insert(row.clone(), change);
+            }
+        }
         let mut record = crate::write_record::record(database, device, now, changes)?;
+        for row in &deletes {
+            hidden.freeze(
+                database,
+                &schema,
+                &store,
+                row,
+                record.header.position,
+                record.header.schema_version,
+            )?;
+        }
         crate::write_apply::WriteApply::new(database, &schema, &store, &before, &visible, &deleted)
             .apply(Some(&record), BTreeSet::new())?;
         record.header.disposition = WriteDisposition::Migration;

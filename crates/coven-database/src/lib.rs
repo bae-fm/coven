@@ -43,6 +43,7 @@ mod members;
 mod merge_store;
 mod migration;
 mod migration_change;
+mod migration_hidden;
 mod migration_names;
 mod migration_receive;
 mod migration_references;

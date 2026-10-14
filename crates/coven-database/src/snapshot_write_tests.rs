@@ -418,7 +418,7 @@ async fn output_errors_and_panics_release_the_reader_transaction() {
 }
 
 #[tokio::test]
-async fn a_migration_preserves_removed_rows_and_their_concurrent_losses_in_snapshots() {
+async fn a_migration_deletes_removed_rows_and_snapshots_their_losses() {
     const UNIQUE_NOTES: &str = "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,title TEXT NOT NULL UNIQUE,body TEXT NOT NULL DEFAULT '')";
     let ids = SequentialIds::new();
     let a_store = TestStore::with_ids(&ids);
@@ -458,24 +458,34 @@ async fn a_migration_preserves_removed_rows_and_their_concurrent_losses_in_snaps
         .open()
         .await
         .unwrap();
+    // The migration deletes the losing row at its generation: its removed-row
+    // loss becomes one frozen loss with the old names. The migration write had
+    // read the concurrent cell, so its delete acknowledges that loss (§17.1).
     let retained = a.lost_values().await.unwrap();
-    assert_eq!(retained.len(), losses.len());
-    for (after, before) in retained.iter().zip(&losses) {
-        assert_eq!(
-            (&after.table, &after.key, &after.lost, &after.replaced_by),
-            (
-                &before.table,
-                &before.key,
-                &before.lost,
-                &before.replaced_by
-            )
-        );
-        assert!(matches!(after.target, crate::lost::LossTarget::Cells(_)));
-    }
+    let removed = losses
+        .iter()
+        .find(|l| matches!(l.replaced_by, crate::Replacement::Rules(_)))
+        .unwrap();
+    assert_eq!(retained.len(), 1, "the migration delete read the cell loss");
+    assert_eq!(
+        retained[0].replaced_by,
+        crate::Replacement::SchemaChange { version: 2 }
+    );
+    assert_eq!(
+        (&retained[0].table, &retained[0].key, &retained[0].lost),
+        (&removed.table, &removed.key, &removed.lost)
+    );
+    assert!(matches!(
+        retained[0].target,
+        crate::lost::LossTarget::Cells(_)
+    ));
     let (header, snapshot) = decode(&frames(&a, Audience::Store).await);
     assert_eq!(header.schema_version, 2);
-    assert_eq!(header.counts[3], 1);
-    assert_eq!(header.counts[4], 2);
+    assert_eq!(
+        header.counts[3], 2,
+        "the deleted row keeps its merge record"
+    );
+    assert_eq!(header.counts[4], 1);
     let retained: Vec<_> = snapshot
         .into_iter()
         .filter_map(|record| match record {
@@ -483,18 +493,13 @@ async fn a_migration_preserves_removed_rows_and_their_concurrent_losses_in_snaps
             _ => None,
         })
         .collect();
-    assert_eq!(retained.len(), 2);
-    for loss in &retained {
-        assert_eq!(
-            coven_format::key::decode_key(&loss.row.key).unwrap(),
-            [Value::Text("b".into())]
-        );
-    }
-    assert!(
-        matches!(&retained[0].values, coven_format::loss::LossValues::Cell { column, .. } if column=="body")
+    assert_eq!(retained.len(), 1);
+    assert_eq!(
+        coven_format::key::decode_key(&retained[0].row.key).unwrap(),
+        [Value::Text("b".into())]
     );
     assert!(
-        matches!(&retained[1].values, coven_format::loss::LossValues::Row(cells) if cells.contains_key("body") && !cells.contains_key("content"))
+        matches!(&retained[0].values, coven_format::loss::LossValues::Row(cells) if cells.contains_key("body") && !cells.contains_key("content"))
     );
     // Retired history also survives a new incarnation with the same identity.
     sql(
