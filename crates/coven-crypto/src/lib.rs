@@ -13,6 +13,7 @@ mod keys;
 mod member;
 mod object_digest;
 mod randomness;
+pub use randomness::random_secret;
 mod s3_signing;
 mod secret;
 mod wire;

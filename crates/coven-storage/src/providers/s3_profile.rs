@@ -174,7 +174,7 @@ const RUSTFS: CataloguedProfile = CataloguedProfile {
     // resources under the store's prefix.
     key_scope: S3KeyScope::Prefix,
     versioned_buckets: Certification::Uncertified,
-    minter: None,
+    minter: Some(&super::rustfs_keys::RUSTFS_ACCOUNTS),
     certification: Certification::Passed {
         date: "2026-10-13",
         suite: 2,

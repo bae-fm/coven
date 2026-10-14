@@ -1277,6 +1277,16 @@ the file's ranges under `F`.
     absence is read from the token itself. Because the key reaches its whole
     bucket, its member-side check requires the account's bucket listing to be
     refused.
+  - On RustFS each member key is a service account made through
+    `/rustfs/admin/v3/add-service-account` with the member policy inline, as
+    plain JSON; MinIO's `/minio/admin` alias expects madmin's encrypted
+    bodies. Every member key's parent is one dedicated user, `coven`, created
+    once with a random secret nobody keeps and granted `readwrite`; a service
+    account's access is its parent's intersected with its own policy.
+    Deleting that parent would delete every member's key, so coven never
+    deletes it. Accounts an earlier attempt named are deleted first.
+    Requests are signed with Signature Version 4 for `s3`. Revocation calls
+    `delete-service-account`; absence is read with `info-service-account`.
   - The member policy allows `s3:GetObject`, `s3:PutObject`,
     `s3:DeleteObject`, `s3:AbortMultipartUpload` and
     `s3:ListMultipartUploadParts` on `arn:aws:s3:::<bucket>/<prefix>/<store>/*`,
