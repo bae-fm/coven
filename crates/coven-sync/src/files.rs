@@ -14,6 +14,7 @@ use crate::SyncError;
 use coven_database::{DbError, FileDatabase};
 use coven_foundation::{clock::ClockRef, files::StoreDir, id_source::IdSourceRef};
 use coven_storage::Storage;
+use file_cache::{EagerAttempts, EagerWork};
 pub use file_cache::{EagerCacheFillStatus, PinProgress, RowsPinnedLiveQuery};
 pub use file_error::{FileReadError, RecordedUploadFailure, UploadFailure, UploadFailures};
 pub use file_read::{FileRangeStream, FileStream};
@@ -74,7 +75,7 @@ struct FilesInner {
     pins: tokio::sync::Mutex<()>,
     closed: AtomicBool,
     eager: watch::Sender<crate::EagerCacheFillStatus>,
-    eager_seen: tokio::sync::Mutex<Vec<coven_database::FileRef>>,
+    eager_attempts: tokio::sync::Mutex<EagerAttempts>,
     cancel_eager: watch::Sender<u64>,
 }
 struct UploadState {
@@ -129,7 +130,7 @@ impl Files {
             pins: tokio::sync::Mutex::new(()),
             closed: AtomicBool::new(false),
             eager,
-            eager_seen: tokio::sync::Mutex::new(Vec::new()),
+            eager_attempts: tokio::sync::Mutex::new(EagerAttempts::default()),
             cancel_eager,
         });
         let weak = Arc::downgrade(&inner);
@@ -161,7 +162,7 @@ impl Files {
                         }
                         Err(error) => tracing::error!(?error, "upload queue failed"),
                     }
-                    owner.fill_eager().await;
+                    owner.fill_eager(EagerWork::NewReferences).await;
                 };
                 tokio::select! { biased; _=stopping.changed()=>break, _=work=>{} }
                 owner.notify();
@@ -220,9 +221,11 @@ impl Files {
         }
     }
 
+    /// SP step 7: wake the upload worker, and fill the eager cache with new
+    /// references and the retries of temporary failures that only a pass makes.
     pub(crate) async fn sync_files(&self) -> Result<(), SyncError> {
         self.inner.wake.notify_one();
-        self.inner.fill_eager().await;
+        self.inner.fill_eager(EagerWork::WithRetries).await;
         Ok(())
     }
 
@@ -233,7 +236,7 @@ impl Files {
         storage: Option<Arc<dyn Storage>>,
         ready: impl std::future::Future<Output = Result<(), SyncError>>,
     ) -> Result<(), SyncError> {
-        let _eager = self.inner.eager_seen.lock().await;
+        let _eager = self.inner.eager_attempts.lock().await;
         let _drain = self.inner.drain.lock().await;
         let _pins = self.inner.pins.lock().await;
         let _cache = self.inner.cache.write().await;

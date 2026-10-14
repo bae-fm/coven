@@ -33,6 +33,21 @@ pub enum EagerCacheFillStatus {
     /// The application cancelled the pending downloads.
     Cancelled(PinProgress),
 }
+/// The eager references a fill has attempted, and those of them whose
+/// temporary failure a later pass retries (SP step 7).
+#[derive(Default)]
+pub(crate) struct EagerAttempts {
+    seen: Vec<FileRef>,
+    retry: Vec<FileRef>,
+}
+/// Which eager references one fill attempts. A commit or connection wake
+/// reevaluates only changed references; retrying a failed download is a
+/// pass's work, so an unchanged wait is not requested again on every wake.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EagerWork {
+    NewReferences,
+    WithRetries,
+}
 /// Pin answers with replaceable row requests.
 pub struct RowsPinnedLiveQuery {
     files: Files,
@@ -215,8 +230,8 @@ impl FilesInner {
             bytes_total,
         })
     }
-    pub(crate) async fn fill_eager(self: &Arc<Self>) {
-        let mut seen = self.eager_seen.lock().await;
+    pub(crate) async fn fill_eager(self: &Arc<Self>, work: EagerWork) {
+        let mut attempts = self.eager_attempts.lock().await;
         if self
             .storage
             .read()
@@ -235,10 +250,14 @@ impl FilesInner {
         };
         let pending = files
             .iter()
-            .filter(|file| !seen.contains(file))
+            .filter(|file| {
+                !attempts.seen.contains(file)
+                    || (work == EagerWork::WithRetries && attempts.retry.contains(file))
+            })
             .cloned()
             .collect::<Vec<_>>();
-        *seen = files;
+        attempts.retry.retain(|file| files.contains(file));
+        attempts.seen = files;
         if pending.is_empty() {
             return;
         }
@@ -246,7 +265,7 @@ impl FilesInner {
             Ok(p) => p,
             Err(error) => {
                 tracing::error!(?error, "measuring eager downloads failed");
-                seen.retain(|file| !pending.contains(file));
+                attempts.seen.retain(|file| !pending.contains(file));
                 return;
             }
         };
@@ -269,6 +288,8 @@ impl FilesInner {
             };
             let result = tokio::select! {
                 _ = cancel.changed() => {
+                    // Cancelled downloads are not retried; new references remain eligible.
+                    attempts.retry.retain(|file| !pending.contains(file));
                     self.eager.send_replace(EagerCacheFillStatus::Cancelled(
                         current.into_inner().expect("eager progress poisoned"),
                     ));
@@ -288,6 +309,7 @@ impl FilesInner {
                 device: file.uploader(),
                 file: file.id(),
             };
+            attempts.retry.retain(|retry| retry != file);
             let recorded = match reason {
                 None => {
                     progress.files_completed += 1;
@@ -295,7 +317,7 @@ impl FilesInner {
                 }
                 Some(reason) => {
                     if retries(&reason) {
-                        seen.retain(|seen| seen != file);
+                        attempts.retry.push(file.clone());
                     }
                     self.database
                         .record_file_pending(move |reported_by| PendingRecord {
@@ -347,7 +369,7 @@ impl FilesInner {
     }
 }
 
-/// Temporary conditions retry on a later wake; refusals of immutable bytes,
+/// Temporary conditions retry on a later pass; refusals of immutable bytes,
 /// a missing file and a required update wait for app action or an update.
 fn retries(reason: &PendingReason) -> bool {
     !matches!(
