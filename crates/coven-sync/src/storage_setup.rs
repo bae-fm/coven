@@ -10,7 +10,7 @@ use coven_format::{
     sealed_single::SingleChunkObject,
     store_log::{MemberPublicKeys, StoreChange, StoreLogEntry},
 };
-use coven_storage::{ObjectPath, Storage, StorageSetupError};
+use coven_storage::{ObjectPath, Storage};
 use std::sync::Arc;
 
 impl StoreLogSync {
@@ -75,9 +75,7 @@ impl StoreLogSync {
             read_setup_entry(storage.as_ref(), &path, &member).await?
         } else {
             if local.upload.is_none() {
-                let settings = self.directory.settings().map_err(|error| {
-                    SyncError::Setup(Box::new(StorageSetupError::Internal(Box::new(error))))
-                })?;
+                let settings = self.directory.settings().map_err(SyncError::disk)?;
                 let key = coven_crypto::StoreKey::generate(coven_foundation::id_source::KeyId(
                     self.ids.new_id(),
                 ))?;
@@ -181,7 +179,7 @@ impl StoreLogSync {
                 .get(&member.member_id())
                 .ok_or(SyncError::Rejected(coven_database::DropReason::NotAllowed))?;
             if current.removed {
-                return Err(crate::SyncFailure::Removed.into());
+                return Err(SyncError::Removed);
             }
             creation = None;
             if current.access != access {

@@ -2,7 +2,6 @@
 
 use crate::{
     store_log_keys as keys, store_log_object as object, DamagedObject, Refusal, SyncError,
-    SyncFailure,
 };
 use coven_crypto::{custody::KeySession, MemberKeys, StoreKeyring};
 use coven_database::{Database, LocalStoreLog, StoreLog};
@@ -100,13 +99,11 @@ impl StoreLogSync {
     /// Publish entries, replay downloads, acquire keys and resume snapshot work.
     /// A missing dependency or sealed copy waits solely in storage for a later call.
     /// Returns skipped damage so connecting storage can reject incomplete key setup.
-    pub async fn sync_store_log(&mut self) -> Result<Vec<DamagedObject>, SyncFailure> {
+    pub async fn sync_store_log(&mut self) -> Result<Vec<DamagedObject>, SyncError> {
         let _reads = self.reads.enter();
-        let mut damages = self.step().await.map_err(SyncFailure::from)?;
-        self.schedule_version_changes()
-            .await
-            .map_err(SyncFailure::from)?;
-        damages.extend(self.resume_snapshots().await.map_err(SyncFailure::from)?);
+        let mut damages = self.step().await?;
+        self.schedule_version_changes().await?;
+        damages.extend(self.resume_snapshots().await?);
         Ok(damages)
     }
 
@@ -229,10 +226,9 @@ impl StoreLogSync {
     ) -> Result<(), SyncError> {
         if let Refusal::Parse { cause: Some(error) } = &failure {
             if crate::error::newer_format(error.as_ref()) {
-                return Err(SyncFailure::UpdateRequired(
+                return Err(SyncError::UpdateRequired(
                     crate::error::required_format(error.as_ref()).expect("newer format"),
-                )
-                .into());
+                ));
             }
         }
         crate::pending_logs::record_refusal(
@@ -255,7 +251,7 @@ impl StoreLogSync {
             .is_some_and(|m| m.removed)
             || state.devices.get(&local.device).is_some_and(|d| d.removed)
         {
-            return Err(SyncFailure::Removed.into());
+            return Err(SyncError::Removed);
         }
         Ok(())
     }
@@ -660,10 +656,9 @@ impl StoreLogSync {
     ) -> Result<(), SyncError> {
         if let Refusal::Parse { cause: Some(error) } = &failure {
             if crate::error::newer_format(error.as_ref()) {
-                return Err(SyncFailure::UpdateRequired(
+                return Err(SyncError::UpdateRequired(
                     crate::error::required_format(error.as_ref()).expect("newer format"),
-                )
-                .into());
+                ));
             }
         }
         tracing::warn!(path = path.as_str(), error = %failure, "damaged object; will reread on sync");

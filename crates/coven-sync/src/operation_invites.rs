@@ -255,7 +255,15 @@ impl StoreLogSync {
                     .await?;
                 let key = match result {
                     MemberRemoval::AccessRemains { shares } => {
-                        return Err(SyncError::AccessRemains(shares))
+                        let coven_format::MemberAccess::ProviderAccount(account) =
+                            work.access.member_access()
+                        else {
+                            return Err(coven_database::DbError::DamagedDatabase.into());
+                        };
+                        return Ok(Progress::Waiting(PendingReason::AccessRemains {
+                            account,
+                            shares,
+                        }));
                     }
                     MemberRemoval::DeleteAccessKey { access_key_id } => Some(access_key_id),
                     _ => None,

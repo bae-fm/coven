@@ -449,7 +449,7 @@ impl OpeningStore {
         let mut sync = owners.sync(database.clone());
         // Store-log replay and snapshot loading remain owned by sync. The new
         // device identity prevents reuse of numbers the damaged file cannot supply.
-        sync.sync_store_log().await.map_err(SyncError::from)?;
+        sync.sync_store_log().await?;
         sync.reload_from_snapshots().await?;
         let local = database.local_store_log().await.map_err(CovenError::from)?;
         if !local.log.replay.state.devices.contains_key(&local.device) {

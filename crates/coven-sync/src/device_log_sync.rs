@@ -1,6 +1,6 @@
 //! One upload, download or position-posting step; scheduling belongs to the caller.
 
-use crate::{SyncError, SyncFailure};
+use crate::SyncError;
 use coven_crypto::{custody::KeySession, MemberKeys, StoreKeyring};
 use coven_database::{ApplyOutcome, Database, DbError, LogObject, LogRefusal};
 use coven_format::{
@@ -403,7 +403,7 @@ impl DeviceLogSync {
             .state
             .store
             .as_ref()
-            .ok_or(SyncFailure::Removed)?;
+            .ok_or(SyncError::Removed)?;
         let ring = self
             .store_keys
             .read()?

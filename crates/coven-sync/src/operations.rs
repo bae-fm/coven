@@ -246,7 +246,15 @@ impl Operations {
     pub async fn remove_member(&self, member: &MemberId) -> Result<MemberRemoval, SyncError> {
         match self.call(Command::RemoveMember(member.clone())).await {
             Ok(Output::Removal(value)) => Ok(value),
-            Err(SyncError::AccessRemains(shares)) => Ok(MemberRemoval::AccessRemains { shares }),
+            Err(SyncError::Pending(pending)) => match pending.reason {
+                PendingReason::AccessRemains { shares, .. } => {
+                    Ok(MemberRemoval::AccessRemains { shares })
+                }
+                reason => Err(SyncError::Pending(Box::new(PendingRecord {
+                    reason,
+                    ..*pending
+                }))),
+            },
             Err(error) => Err(error),
             _ => unreachable!("removal result"),
         }
@@ -452,17 +460,21 @@ impl OperationRun {
             }
             if let Err(error) = self.drive().await {
                 // A journal failure cannot be recorded in the journal. Stop this
-                // owner and fail its waiters, retaining the typed database cause.
+                // owner and fail every waiter with one shared typed cause.
                 tracing::error!(error = %error, "operation journal failed; worker stopped");
-                let shared = SyncFailure::from(error);
+                let (failure, source) = error.into_shared();
+                let shared = || SyncError::Failed {
+                    failure,
+                    source: source.clone(),
+                };
                 if let Some((reply, _)) = response.take() {
-                    let _ = reply.send(Err(shared.clone().into()));
+                    let _ = reply.send(Err(shared()));
                 }
                 if let Some((reply, _)) = query.take() {
-                    let _ = reply.send(Err(shared.clone().into()));
+                    let _ = reply.send(Err(shared()));
                 }
                 for (_, reply) in std::mem::take(&mut self.waiters) {
-                    let _ = reply.send(Err(shared.clone().into()));
+                    let _ = reply.send(Err(shared()));
                 }
                 break;
             }
@@ -516,7 +528,7 @@ impl OperationRun {
         let mut maintenance_failure = None;
         loop {
             match self.sync.schedule_version_changes().await {
-                Ok(()) | Err(SyncError::Stopped(SyncFailure::UpdateRequired(_))) => (),
+                Ok(()) | Err(SyncError::UpdateRequired(_)) => (),
                 Err(error) => return Err(error),
             }
             let records = self

@@ -326,7 +326,7 @@ impl StoreLogSync {
                     .await
                 {
                     Ok(_) => (),
-                    Err(SyncError::Stopped(SyncFailure::Removed)) if device == local.device => {
+                    Err(SyncError::Removed) if device == local.device => {
                         let latest = self.database.local_store_log().await?;
                         if !latest
                             .log
@@ -336,7 +336,7 @@ impl StoreLogSync {
                             .get(&device)
                             .is_some_and(|d| d.removed)
                         {
-                            return Err(SyncFailure::Removed.into());
+                            return Err(SyncError::Removed);
                         }
                     }
                     Err(error) => return Err(error),

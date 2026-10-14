@@ -429,10 +429,7 @@ pub(crate) fn database_failure(path: &ObjectPath, error: coven_database::DbError
         DbError::WriteFormat(error) | DbError::Snapshot(SnapshotError::Format(error))
             if crate::error::newer_format(&error) =>
         {
-            crate::SyncFailure::UpdateRequired(
-                crate::error::required_format(&error).expect("newer format"),
-            )
-            .into()
+            SyncError::UpdateRequired(crate::error::required_format(&error).expect("newer format"))
         }
         DbError::InvalidWrite {
             error:
@@ -483,12 +480,9 @@ pub(crate) fn checked<T>(
     value: Result<T, coven_format::Error>,
 ) -> Result<T, SyncError> {
     match value {
-        Err(error) if crate::error::newer_format(&error) => {
-            Err(crate::SyncFailure::UpdateRequired(
-                crate::error::required_format(&error).expect("newer format"),
-            )
-            .into())
-        }
+        Err(error) if crate::error::newer_format(&error) => Err(SyncError::UpdateRequired(
+            crate::error::required_format(&error).expect("newer format"),
+        )),
         value => value.map_err(|e| damaged(path, Refusal::from(e))),
     }
 }

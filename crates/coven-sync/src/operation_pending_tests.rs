@@ -57,7 +57,7 @@ async fn maintenance_failures_are_visible_and_wait_for_a_changed_connection() {
         );
         let error = operations.sync().await.unwrap_err();
         assert!(
-            matches!(&error, SyncError::Stopped(SyncFailure::Storage(error)) if error.failure() == StorageFailure::PermissionDenied),
+            matches!(&error, SyncError::Storage(error) if error.failure() == StorageFailure::PermissionDenied),
             "{error:?}"
         );
         operations.set_storage(Some(storage)).await.unwrap();
@@ -230,7 +230,7 @@ async fn a_reload_call_receives_its_native_failure_and_automatic_retry_replaces_
     storage.delete(&snapshot).await.unwrap();
     let error = operations.sync().await.unwrap_err();
     assert!(
-        matches!(&error, SyncError::Stopped(SyncFailure::Storage(error)) if error.failure() == StorageFailure::NotFound),
+        matches!(&error, SyncError::Storage(error) if error.failure() == StorageFailure::NotFound),
         "{error:?}"
     );
     let conditions = pending(&operations, &a.db).await;
@@ -516,7 +516,7 @@ async fn retained_access_commits_its_condition_with_the_provider_result() {
             .await
             .unwrap();
         assert!(
-            matches!(progress, Progress::Reply(Err(SyncError::AccessRemains(found))) if found == shares)
+            matches!(&progress, Progress::Reply(Err(SyncError::Pending(found))) if found.reason == PendingReason::AccessRemains { account: "cat@example.com".into(), shares: shares.clone() })
         );
         let saved = a.db.operation(id).await.unwrap().unwrap();
         assert_eq!(saved.last_step, 1);
@@ -628,7 +628,7 @@ async fn lean_differential_access_pending() {
             for _ in 1..failures {
                 assert!(matches!(
                     operations.retry_pending_operation(operation.unwrap()).await,
-                    Err(SyncError::AccessRemains(found)) if found == shares
+                    Err(SyncError::Pending(found)) if matches!(&found.reason, PendingReason::AccessRemains { shares: found, .. } if *found == shares)
                 ));
                 results
                     .push(observed(&operations, &a.db, &storage, account, operation, index).await);

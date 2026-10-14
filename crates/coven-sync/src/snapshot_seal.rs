@@ -56,7 +56,7 @@ impl StoreLogSync {
             Err(coven_database::SnapshotWriteError::Format(error)) => Err(error.into()),
             Err(coven_database::SnapshotWriteError::Output(error)) => {
                 consumed?;
-                Err(error.into())
+                Err(SyncError::disk(error))
             }
             Ok(()) => consumed,
         }

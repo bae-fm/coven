@@ -230,7 +230,7 @@ async fn newer_store_stops_uploads_and_waits_for_newer_downloads() {
         .unwrap();
     assert!(matches!(
         devices[1].sync.sync_store_log().await,
-        Err(SyncFailure::UpdateRequired(_))
+        Err(SyncError::UpdateRequired(_))
     ));
     sql(
         &devices[1].db,
@@ -239,7 +239,7 @@ async fn newer_store_stops_uploads_and_waits_for_newer_downloads() {
     .await;
     assert!(matches!(
         devices[1].writes.upload_writes().await,
-        Err(SyncError::Stopped(SyncFailure::UpdateRequired(_)))
+        Err(SyncError::UpdateRequired(_))
     ));
     devices[1].writes.download_writes().await.unwrap();
     assert_eq!(
@@ -279,10 +279,7 @@ async fn only_a_newer_format_requires_an_update() {
             .positions;
         let result = devices[1].writes.download_writes().await;
         if version == 2 {
-            assert!(matches!(
-                result,
-                Err(SyncError::Stopped(SyncFailure::UpdateRequired(_)))
-            ));
+            assert!(matches!(result, Err(SyncError::UpdateRequired(_))));
         } else {
             result.unwrap();
         }

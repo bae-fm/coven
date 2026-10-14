@@ -96,10 +96,8 @@ impl StoreLogSync {
         let reason = match error {
             SyncError::Pending(record) => record.reason.clone(),
             SyncError::NoStorage => PendingReason::NoStorage,
-            SyncError::Stopped(SyncFailure::UpdateRequired(update)) => {
-                PendingReason::UpdateRequired(*update)
-            }
-            SyncError::Stopped(SyncFailure::Removed) => PendingReason::Removed,
+            SyncError::UpdateRequired(update) => PendingReason::UpdateRequired(*update),
+            SyncError::Removed => PendingReason::Removed,
             SyncError::Storage(error) => match &self.storage {
                 Some(storage) => PendingReason::Storage {
                     provider: storage.config().provider(),
@@ -121,21 +119,6 @@ impl StoreLogSync {
             SyncError::Damaged(object) => PendingReason::Refused(object.failure.clone()),
             SyncError::Rejected(reason) => PendingReason::Dropped(reason.clone()),
             SyncError::ReloadPending(id) => self.reload_condition(*id).await?,
-            SyncError::AccessRemains(shares) => {
-                let data = Data::read(record)?;
-                let Data::Invite(work) = data else {
-                    return Err(coven_database::DbError::DamagedDatabase.into());
-                };
-                let access = work.access.member_access();
-                let coven_format::MemberAccess::ProviderAccount(account) = access else {
-                    return Err(coven_database::DbError::DamagedDatabase.into());
-                };
-                PendingReason::AccessRemains {
-                    account,
-                    shares: shares.clone(),
-                }
-            }
-            SyncError::Failed { failure, .. } => PendingReason::Failed(*failure),
             SyncError::Database(coven_database::DbError::Snapshot(error)) => match error {
                 coven_database::SnapshotError::MissingWrites { missing } => write_wait(
                     self.directory.id(),
@@ -155,17 +138,10 @@ impl StoreLogSync {
                 }
                 _ => PendingReason::Failed(LocalFailure::Database),
             },
-            SyncError::Database(_) => PendingReason::Failed(LocalFailure::Database),
-            SyncError::Disk(_)
-            | SyncError::SnapshotIo(_)
-            | SyncError::SnapshotFile(_)
-            | SyncError::Lock(_) => PendingReason::Failed(LocalFailure::Disk),
-            SyncError::SecureStorage(_) => PendingReason::Failed(LocalFailure::KeyCustody),
-            SyncError::Crypto(_) | SyncError::Key(_) => PendingReason::Failed(LocalFailure::Crypto),
             SyncError::Cleanup { operation, .. } => {
                 return Box::pin(self.record_operation_error(record, operation)).await
             }
-            _ => PendingReason::Failed(LocalFailure::Operation),
+            error => PendingReason::Failed(error.local_failure()),
         };
         self.record_operation_condition(record, reason).await?;
         Ok(())

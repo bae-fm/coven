@@ -2057,16 +2057,18 @@ pub enum SyncError {
     Storage(StorageError),
     /// The local database failed.
     Database(DbError),
-    /// An internal invariant failed. The public category is also recorded
-    /// as PendingReason::Failed; the initiating call retains the native cause.
+    /// A local invariant or resource failed: the database refusing sync's
+    /// own requests (`Database`), local files, directories or the store lock
+    /// (`Disk`), or the operation worker stopping on its journal
+    /// (`Operation`). The public category is also recorded as
+    /// PendingReason::Failed; the initiating call retains the native cause.
+    /// Callers failed by one cause, such as a stopped worker's waiters, share it.
     Failed { failure: LocalFailure, source: Arc<dyn std::error::Error + Send + Sync> },
     /// A later step, such as a rollback or closing another owner, failed
     /// too; neither failure is hidden.
     Cleanup { operation: Box<SyncError>, cleanup: Box<SyncError> },
     /// Reading or removing credentials or keys failed.
     SecureStorage(KeyError),
-    /// Opening the store key failed.
-    Unlock(StoreKeyUnlockError),
     /// Making or checking signed or encrypted bytes failed.
     Crypto(CryptoError),
     /// The request or invitation is absent, expired, or no longer matches.
@@ -2081,6 +2083,9 @@ pub enum SyncError {
     /// The requested journal row is not failed work eligible for this call:
     /// retry accepts provider work; discard accepts only app-owned work.
     NotPending(OperationId),
+    /// This device publishes no store-log entry or snapshot until this
+    /// retained reload finishes (§18).
+    ReloadPending(OperationId),
     /// Decoding persisted operation data failed, retaining its cause.
     OperationData(serde_json::Error),
 }
@@ -2855,7 +2860,8 @@ match stream.read_at(resume_at, 256 * 1024).await {
   the notice. Failed commits preserve pending work and report the failure.
 - Removing an account can leave access through a parent, a grant reaching other
   accounts, an unidentified recipient, or the owner. `PendingReason::AccessRemains`
-  retains these grants and their reasons for the app to present to the owner.
+  retains these grants and their reasons for the app to present to the owner;
+  a waiting call receives that record as `SyncError::Pending`.
   The revocation remains in `pending()` until a retry confirms the owner
   removed those grants, or replay no longer requires that revocation.
   This also preserves the result when no app call is waiting, including a

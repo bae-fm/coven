@@ -247,11 +247,12 @@ impl SyncRun {
                 Ok(())
             }
             Err(error) => {
-                let error = SyncFailure::from(error);
+                // The status and the waiting call share one cause.
+                let (failure, source) = error.into_shared();
                 self.status.send_replace(SyncStatus::Failed {
-                    error: error.clone(),
+                    error: SyncFailure::Other(source.clone()),
                 });
-                Err(error.into())
+                Err(SyncError::Failed { failure, source })
             }
         }
     }

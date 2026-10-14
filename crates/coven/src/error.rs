@@ -69,7 +69,6 @@ pub enum StoreKeyUnlockError {
 
 pub(crate) fn setup_error(error: SyncError) -> StorageSetupError {
     match error {
-        SyncError::Setup(error) => *error,
         SyncError::SecureStorage(error) => StorageSetupError::SecureStorage(error),
         SyncError::Storage(error) => StorageSetupError::Storage(error),
         error => StorageSetupError::Internal(Box::new(error)),

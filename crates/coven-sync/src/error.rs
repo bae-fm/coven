@@ -2,6 +2,7 @@
 
 use coven_crypto::{custody::KeyError, CryptoError, MaterialError};
 use coven_database::{DbError, DropReason};
+use coven_foundation::files::{FileError, ObservationError, StoreLockError};
 use coven_foundation::id_source::{KeyId, StoreId};
 use coven_storage::{StorageError, StorageFailure};
 use std::sync::Arc;
@@ -12,7 +13,8 @@ pub enum SyncError {
     /// This call requires work that cannot yet advance.
     #[error("pending: {0:?}")]
     Pending(Box<crate::PendingRecord>),
-    /// An internal failure, classified without erasing its native cause.
+    /// A local invariant or resource failed, classified without erasing its
+    /// native cause. One failure delivered to several callers shares one cause.
     #[error("{failure:?}: {source}")]
     Failed {
         /// Durable local category.
@@ -21,9 +23,6 @@ pub enum SyncError {
         #[source]
         source: Arc<dyn std::error::Error + Send + Sync>,
     },
-    /// Provider setup failed before replacing the active connection.
-    #[error(transparent)]
-    Setup(#[from] Box<coven_storage::StorageSetupError>),
     /// A later step, such as a rollback or closing another owner, failed
     /// too; neither failure is hidden.
     #[error("{operation}; then: {cleanup}")]
@@ -34,18 +33,6 @@ pub enum SyncError {
         #[source]
         cleanup: Box<SyncError>,
     },
-    /// Reading a snapshot stream failed.
-    #[error(transparent)]
-    SnapshotIo(#[from] std::io::Error),
-    /// Recorded snapshot bytes disappeared or changed on disk.
-    #[error(transparent)]
-    SnapshotFile(#[from] coven_foundation::files::ObservationError),
-    /// Keeping a snapshot file failed.
-    #[error(transparent)]
-    Disk(#[from] coven_foundation::files::FileError),
-    /// The store could not be retained during snapshot work.
-    #[error(transparent)]
-    Lock(#[from] coven_foundation::files::StoreLockError),
     /// This call requires connected storage; durable work remains queued.
     #[error("storage is not connected")]
     NoStorage,
@@ -64,11 +51,6 @@ pub enum SyncError {
     /// Decoding persisted operation data failed; its cause remains available.
     #[error("invalid operation data: {0}")]
     OperationData(#[from] serde_json::Error),
-
-    /// Revocation left grants requiring the owner's action. The operation stays
-    /// pending so an unattended removal cannot lose this result.
-    #[error("storage access remains through grants: {0:?}")]
-    AccessRemains(Vec<coven_storage::RetainedAccess>),
     /// Storage refused or failed a request.
     #[error(transparent)]
     Storage(#[from] StorageError),
@@ -99,9 +81,12 @@ pub enum SyncError {
     /// A required object failed authentication or parsing.
     #[error(transparent)]
     Damaged(#[from] crate::DamagedObject),
-    /// This device must stop syncing with this location.
-    #[error(transparent)]
-    Stopped(#[from] SyncFailure),
+    /// This device or its member was removed; syncing stops for good (§10).
+    #[error("this device or its member was removed")]
+    Removed,
+    /// This call needs a newer app schema or coven format (§17).
+    #[error("an update is required: {0:?}")]
+    UpdateRequired(crate::RequiredUpdate),
     /// A create-store entry named a store other than this database's store.
     #[error("create-store entry names another store")]
     WrongStore {
@@ -145,6 +130,60 @@ impl From<DbError> for SyncError {
     }
 }
 
+impl SyncError {
+    /// A local file, directory or store-lock failure, retaining its cause.
+    pub(crate) fn disk(error: impl std::error::Error + Send + Sync + 'static) -> Self {
+        Self::Failed {
+            failure: crate::LocalFailure::Disk,
+            source: Arc::new(error),
+        }
+    }
+
+    /// The local category recorded for a failure that names no other condition.
+    pub(crate) fn local_failure(&self) -> crate::LocalFailure {
+        match self {
+            Self::Failed { failure, .. } => *failure,
+            Self::Database(_) => crate::LocalFailure::Database,
+            Self::SecureStorage(_) => crate::LocalFailure::KeyCustody,
+            Self::Crypto(_) | Self::Key(_) => crate::LocalFailure::Crypto,
+            Self::Cleanup { operation, .. } => operation.local_failure(),
+            _ => crate::LocalFailure::Operation,
+        }
+    }
+
+    /// Splits a failure for delivery to several receivers: its local category
+    /// and the original as one shared cause, so each receives the same `Failed`.
+    pub(crate) fn into_shared(
+        self,
+    ) -> (
+        crate::LocalFailure,
+        Arc<dyn std::error::Error + Send + Sync>,
+    ) {
+        match self {
+            Self::Failed { failure, source } => (failure, source),
+            error => (error.local_failure(), Arc::new(error)),
+        }
+    }
+}
+
+impl From<FileError> for SyncError {
+    fn from(error: FileError) -> Self {
+        Self::disk(error)
+    }
+}
+
+impl From<ObservationError> for SyncError {
+    fn from(error: ObservationError) -> Self {
+        Self::disk(error)
+    }
+}
+
+impl From<StoreLockError> for SyncError {
+    fn from(error: StoreLockError) -> Self {
+        Self::disk(error)
+    }
+}
+
 /// A sync step stopped as a whole (E5).
 #[derive(Clone, Debug, thiserror::Error)]
 pub enum SyncFailure {
@@ -177,7 +216,8 @@ impl From<StorageFailure> for SyncError {
 impl From<SyncError> for SyncFailure {
     fn from(error: SyncError) -> Self {
         match error {
-            SyncError::Stopped(failure) => failure,
+            SyncError::Removed => Self::Removed,
+            SyncError::UpdateRequired(update) => Self::UpdateRequired(update),
             SyncError::Storage(error) => Self::Storage(Arc::new(error)),
             error => Self::Other(Arc::new(error)),
         }
@@ -187,7 +227,7 @@ impl From<SyncError> for SyncFailure {
 impl From<coven_format::Error> for SyncError {
     fn from(error: coven_format::Error) -> Self {
         match required_format(&error) {
-            Some(update) => Self::Stopped(SyncFailure::UpdateRequired(update)),
+            Some(update) => Self::UpdateRequired(update),
             None => Self::Format(error),
         }
     }

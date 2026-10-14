@@ -429,7 +429,7 @@ async fn clock_publication_requires_the_devices_registered_member() {
     let requests = storage.request_count();
     assert!(matches!(
         a.sync.observe_clock(&local).await,
-        Err(SyncError::Stopped(crate::SyncFailure::Removed))
+        Err(SyncError::Removed)
     ));
     assert_eq!(storage.request_count(), requests);
 }

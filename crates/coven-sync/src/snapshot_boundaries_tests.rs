@@ -104,17 +104,14 @@ async fn a_removed_device_cannot_start_or_resume_snapshot_publication() {
             .unwrap();
         assert!(matches!(
             a.sync.sync_store_log().await,
-            Err(SyncFailure::Removed)
+            Err(SyncError::Removed)
         ));
         let result = if recorded_step.is_some() {
             a.sync.write_snapshots().await.map(|_| ())
         } else {
             a.sync.write_snapshot(Audience::Store).await.map(|_| ())
         };
-        assert!(matches!(
-            result,
-            Err(SyncError::Stopped(SyncFailure::Removed))
-        ));
+        assert!(matches!(result, Err(SyncError::Removed)));
         assert!(
             storage
                 .list(&ObjectPrefix::snapshots(store(1)))

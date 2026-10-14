@@ -410,7 +410,7 @@ async fn interrupted_and_lost_reply_copies_retry_identical_bytes_after_restart()
         });
         ana.sync.storage = Some(fault.clone());
         assert!(
-            matches!(ana.sync.sync_store_log().await.unwrap_err(), SyncFailure::Storage(error) if error.failure() == StorageFailure::Network)
+            matches!(ana.sync.sync_store_log().await.unwrap_err(), SyncError::Storage(error) if error.failure() == StorageFailure::Network)
         );
         let fixed = ana.db.key_uploads().await.unwrap().remove(0);
         assert_eq!(fixed.path(store(1)), path);

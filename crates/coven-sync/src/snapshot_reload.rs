@@ -55,12 +55,11 @@ impl StoreLogSync {
                             audiences.contains_key(audience) && version.number > schema
                         })
                 {
-                    return Err(crate::SyncFailure::UpdateRequired(
+                    return Err(SyncError::UpdateRequired(
                         crate::RequiredUpdate::AppSchema {
                             version: version.number,
                         },
-                    )
-                    .into());
+                    ));
                 }
                 let mut files = ReloadFiles {
                     snapshots: Vec::new(),

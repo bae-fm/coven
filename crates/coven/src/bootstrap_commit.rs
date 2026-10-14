@@ -84,7 +84,7 @@ pub(super) fn publish_bootstrap(
     let cleanup = directory
         .owned_file(StoreFile::Bootstrap)
         .remove()
-        .map_err(|error| BootstrapError::from(SyncError::Disk(error)));
+        .map_err(|error| BootstrapError::from(SyncError::from(error)));
     let result = match publication_error {
         Some(error) => combine(Err(error), cleanup),
         None => cleanup,

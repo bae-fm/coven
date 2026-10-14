@@ -17,10 +17,7 @@ fn newer_key_envelopes_require_an_update_at_the_sync_boundary() {
                 SyncError::Format(coven_format::Error::UnsupportedVersion(0))
             ));
         } else {
-            assert!(matches!(
-                error,
-                SyncError::Stopped(SyncFailure::UpdateRequired(_))
-            ));
+            assert!(matches!(error, SyncError::UpdateRequired(_)));
         }
     }
 }
@@ -152,4 +149,80 @@ fn refusals_of_syncs_own_requests_fail_internally_and_keep_their_native_cause() 
     ] {
         assert!(matches!(SyncError::from(condition), SyncError::Database(_)));
     }
+}
+
+#[test]
+fn local_file_and_lock_failures_are_disk_failures_with_their_cause() {
+    let store = crate::device_log_sync::tests::STORE_ID;
+    let missing = std::path::PathBuf::from("snapshot.tmp");
+    let file = || coven_foundation::files::FileError::Io {
+        operation: "append",
+        path: missing.clone(),
+        source: Box::new(std::io::Error::from(std::io::ErrorKind::StorageFull)),
+    };
+    let failures = [
+        SyncError::from(file()),
+        SyncError::from(coven_foundation::files::ObservationError::Missing(
+            missing.clone(),
+        )),
+        SyncError::from(coven_foundation::files::StoreLockError::AlreadyOpen(store)),
+        SyncError::disk(std::io::Error::from(std::io::ErrorKind::BrokenPipe)),
+    ];
+    for error in &failures {
+        let SyncError::Failed {
+            failure: crate::LocalFailure::Disk,
+            source,
+        } = error
+        else {
+            panic!("{error:?}")
+        };
+        assert!(
+            source.is::<coven_foundation::files::FileError>()
+                || source.is::<coven_foundation::files::ObservationError>()
+                || source.is::<coven_foundation::files::StoreLockError>()
+                || source.is::<std::io::Error>(),
+            "{source:?}"
+        );
+    }
+}
+
+#[test]
+fn one_failure_shared_by_several_receivers_keeps_one_cause_and_its_category() {
+    let (failure, source) = SyncError::Database(DbError::DamagedDatabase).into_shared();
+    assert_eq!(failure, crate::LocalFailure::Database);
+    assert!(matches!(
+        source.downcast_ref::<SyncError>(),
+        Some(SyncError::Database(DbError::DamagedDatabase))
+    ));
+    // Sharing an already shared failure keeps the same cause, unwrapped.
+    let (again, shared) = SyncError::Failed {
+        failure,
+        source: source.clone(),
+    }
+    .into_shared();
+    assert_eq!(again, failure);
+    assert!(Arc::ptr_eq(&source, &shared));
+    // A chained failure is categorized by the operation that failed first.
+    let chained = SyncError::Cleanup {
+        operation: Box::new(SyncError::SecureStorage(KeyError::StoreClosed)),
+        cleanup: Box::new(SyncError::Database(DbError::StoreClosed)),
+    };
+    assert_eq!(chained.local_failure(), crate::LocalFailure::KeyCustody);
+    assert_eq!(
+        SyncError::OperationData(serde_json::from_str::<u8>("x").unwrap_err()).local_failure(),
+        crate::LocalFailure::Operation
+    );
+}
+
+#[test]
+fn removal_and_required_updates_stop_the_pass_as_themselves() {
+    let update = crate::RequiredUpdate::AppSchema { version: 3 };
+    assert!(matches!(
+        SyncFailure::from(SyncError::Removed),
+        SyncFailure::Removed
+    ));
+    assert!(matches!(
+        SyncFailure::from(SyncError::UpdateRequired(update)),
+        SyncFailure::UpdateRequired(found) if found == update
+    ));
 }

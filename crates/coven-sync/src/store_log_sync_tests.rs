@@ -511,7 +511,7 @@ async fn removal_then_rotations_share_keys_only_with_remaining_members() {
     c.sync().await;
     assert!(matches!(
         b.sync.sync_store_log().await,
-        Err(SyncFailure::Removed)
+        Err(SyncError::Removed)
     ));
     for device in [&a, &c] {
         let ring = device.custody.read().unwrap().unwrap();
@@ -549,12 +549,12 @@ async fn own_device_removal_stops_sync() {
         a.sync
             .make_and_upload_entry(StoreChange::RemoveDevice { device: own })
             .await,
-        Err(SyncError::Stopped(SyncFailure::Removed))
+        Err(SyncError::Removed)
     ));
     assert!(a.db.local_store_log().await.unwrap().upload.is_none());
     assert!(matches!(
         a.sync.sync_store_log().await,
-        Err(SyncFailure::Removed)
+        Err(SyncError::Removed)
     ));
 }
 
@@ -837,7 +837,7 @@ async fn only_newer_envelopes_require_an_update() {
             let mut b = device(storage.clone(), 2, member(1), store(1)).await;
             let result = b.sync.sync_store_log().await;
             if version == 2 {
-                assert!(matches!(result, Err(SyncFailure::UpdateRequired(_))));
+                assert!(matches!(result, Err(SyncError::UpdateRequired(_))));
             } else {
                 let damage = result.unwrap();
                 if sealed_key {

@@ -217,7 +217,7 @@ impl StoreLogSync {
                         )
                         .await
                     {
-                        Ok(()) | Err(SyncError::Stopped(SyncFailure::Removed)) => (),
+                        Ok(()) | Err(SyncError::Removed) => (),
                         Err(error) => return Err(error),
                     }
                 }
@@ -227,7 +227,7 @@ impl StoreLogSync {
         // Completion uses replay after downloading concurrent entries. Applying
         // our own removal can stop this device; its kept result is still final.
         match self.step().await {
-            Ok(_) | Err(SyncError::Stopped(SyncFailure::Removed)) => (),
+            Ok(_) | Err(SyncError::Removed) => (),
             Err(error) => return Err(error),
         }
         local = self.database.local_store_log().await?;
@@ -351,15 +351,15 @@ impl StoreLogSync {
         reason: Option<PendingReason>,
     ) -> Result<Progress, SyncError> {
         let update = data.update(record, step)?;
-        let retained = match data {
-            Data::Revoke { result, .. } => result.as_ref(),
-            Data::Entry(work) => work.removal.as_ref(),
-            _ => None,
-        };
         let pending = match reason {
             Some(reason) => Some(self.operation_condition(record, reason).await?),
             None => None,
         };
+        // A condition needing app action, such as retained grants, answers the
+        // waiting call as the same record pending() shows.
+        let reply = pending
+            .clone()
+            .filter(|pending| pending.retry() != Retry::Automatic);
         if keys.is_empty() {
             match pending {
                 Some(pending) => {
@@ -394,11 +394,9 @@ impl StoreLogSync {
                 .record_access_key_deletions(update, keys, pending)
                 .await?
         }
-        Ok(match retained {
-            Some(MemberRemoval::AccessRemains { shares }) => {
-                Progress::Reply(Err(SyncError::AccessRemains(shares.clone())))
-            }
-            _ => Progress::Advanced,
+        Ok(match reply {
+            Some(pending) => Progress::Reply(Err(SyncError::Pending(Box::new(pending)))),
+            None => Progress::Advanced,
         })
     }
 

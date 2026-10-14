@@ -1,6 +1,6 @@
 //! The database-to-envelope stream; no write body is collected here.
 
-use crate::{SyncError, SyncFailure};
+use crate::SyncError;
 use coven_crypto::{DerivedKeys, MemberId, MemberKeys, ObjectHasher, StoreKeyring};
 use coven_database::{DbError, EntryOutcome, StoreLog, WaitingUpload};
 use coven_format::sealed_write::{WriteObjectLayout, WriteObjectPrefix};
@@ -85,7 +85,7 @@ pub(crate) fn check_member(
     if crate::effects::member(state, &identity).is_none()
         || crate::effects::device(state, device).is_none_or(|d| d.member != identity)
     {
-        return Err(SyncFailure::Removed.into());
+        return Err(SyncError::Removed);
     }
     Ok(())
 }
@@ -98,12 +98,11 @@ pub(crate) fn check_upload_version(log: &StoreLog, schema: u32) -> Result<(), Sy
         .get(&Audience::Store)
         .filter(|v| v.number > schema)
     {
-        return Err(
-            SyncFailure::UpdateRequired(crate::RequiredUpdate::AppSchema {
+        return Err(SyncError::UpdateRequired(
+            crate::RequiredUpdate::AppSchema {
                 version: version.number,
-            })
-            .into(),
-        );
+            },
+        ));
     }
     Ok(())
 }

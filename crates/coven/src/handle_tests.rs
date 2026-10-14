@@ -608,9 +608,20 @@ async fn closing_erases_custody_even_when_releasing_a_worker_fails() {
         .await
         .unwrap();
     let clone = handle.clone();
-    // The operation worker's own failure, not a database error.
+    // The operation worker stops on its journal and every waiter, here the
+    // sync loop releasing its provider, shares that one undecodable row.
     let error = handle.close().await.unwrap_err();
-    assert!(!matches!(error, SyncError::Database(_)), "{error:?}");
+    let SyncError::Failed {
+        failure: LocalFailure::Operation,
+        source,
+    } = &error
+    else {
+        panic!("{error:?}")
+    };
+    assert!(
+        matches!(source.downcast_ref(), Some(SyncError::OperationData(_))),
+        "{source:?}"
+    );
     assert_eq!(keys.closes.load(Ordering::SeqCst), 1);
     assert_eq!(identity.closes.load(Ordering::SeqCst), 1);
     assert!(keys.keys.lock().unwrap().is_none());

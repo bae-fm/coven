@@ -165,7 +165,7 @@ async fn owner_removal_preserves_keys_and_revokes_the_account() {
     let removal = &log.entries.last().unwrap().entry.change;
     assert!(keys::introduced(removal).is_none());
     assert!(
-        matches!(b.sync.sync_store_log().await, Err(SyncFailure::Storage(error)) if error.failure() == StorageFailure::PermissionDenied)
+        matches!(b.sync.sync_store_log().await, Err(SyncError::Storage(error)) if error.failure() == StorageFailure::PermissionDenied)
     );
     assert!(a.db.operations().await.unwrap().is_empty());
 }
@@ -533,7 +533,7 @@ async fn retained_provider_grants_block_both_requested_and_remote_revocations() 
         );
         let id = pending_id(&conditions[0]);
         assert!(
-            matches!(operations.retry_pending_operation(id).await, Err(SyncError::AccessRemains(found)) if found == shares)
+            matches!(operations.retry_pending_operation(id).await, Err(SyncError::Pending(found)) if matches!(&found.reason, PendingReason::AccessRemains { shares: found, .. } if *found == shares))
         );
         assert!(MemoryStorage::for_recipient(&storage, "cat@example.com")
             .unwrap()
@@ -581,7 +581,7 @@ async fn removing_a_member_cuts_off_every_device_of_their_account() {
     assert!(state.devices[&phone_id].removed);
     assert!(state.devices[&b.device().await].removed);
     assert!(
-        matches!(phone.sync.sync_store_log().await, Err(SyncFailure::Storage(error)) if error.failure() == StorageFailure::PermissionDenied)
+        matches!(phone.sync.sync_store_log().await, Err(SyncError::Storage(error)) if error.failure() == StorageFailure::PermissionDenied)
     );
     assert!(phone
         .custody
@@ -622,7 +622,7 @@ async fn plain_device_removal_preserves_member_keys_and_returns_provider_sign_ou
     assert!(a.db.operations().await.unwrap().is_empty());
     assert!(matches!(
         b.sync.sync_store_log().await,
-        Err(SyncFailure::Removed)
+        Err(SyncError::Removed)
     ));
     assert!(MemoryStorage::for_recipient(&storage, "ben@example.com")
         .unwrap()

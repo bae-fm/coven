@@ -424,12 +424,16 @@ async fn cancelling_keeps_retained_provider_grants_visible_until_acknowledged() 
             }],
         )
         .await;
+    // The waiting call receives the same record pending() keeps.
+    let Err(SyncError::Pending(returned)) = operations.cancel_invite(&invite.id).await else {
+        panic!("retained grants answer the call as pending")
+    };
     assert!(matches!(
-        operations.cancel_invite(&invite.id).await,
-        Err(SyncError::AccessRemains(_))
+        &returned.reason,
+        PendingReason::AccessRemains { account, .. } if account == "join@example.com"
     ));
     let conditions = pending(&operations, &a.db).await;
-    assert_eq!(conditions.len(), 1);
+    assert_eq!(conditions, vec![*returned]);
     storage
         .set_retained_access("join@example.com", Vec::new())
         .await;

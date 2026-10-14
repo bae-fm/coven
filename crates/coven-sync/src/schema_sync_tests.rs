@@ -124,11 +124,11 @@ async fn rename_holds_uploads_then_converts_or_loses_offline_edits_everywhere() 
             assert_eq!(log.replay.state.schema[&Audience::Store].number, 2);
             assert!(matches!(
                 devices[1].sync.sync_store_log().await,
-                Err(SyncFailure::UpdateRequired(_))
+                Err(SyncError::UpdateRequired(_))
             ));
             assert!(matches!(
                 devices[1].writes.upload_writes().await,
-                Err(SyncError::Stopped(SyncFailure::UpdateRequired(_)))
+                Err(SyncError::UpdateRequired(_))
             ));
             for device in devices.iter_mut().skip(1) {
                 update(device, storage.clone(), true, convert).await;
@@ -190,7 +190,7 @@ async fn an_old_write_uploaded_without_being_read_by_the_change_is_lost_everywhe
         for device in devices.iter_mut().skip(1) {
             assert!(matches!(
                 device.sync.sync_store_log().await,
-                Err(SyncFailure::UpdateRequired(_))
+                Err(SyncError::UpdateRequired(_))
             ));
             update(device, storage.clone(), true, true).await;
         }
@@ -238,7 +238,7 @@ async fn concurrent_raises_choose_the_earlier_timestamp_even_when_it_arrives_las
     devices[1].writes.upload_writes().await.unwrap();
     assert!(matches!(
         devices[2].sync.sync_store_log().await,
-        Err(SyncFailure::UpdateRequired(_))
+        Err(SyncError::UpdateRequired(_))
     ));
     update(&mut devices[2], storage.clone(), true, true).await;
     sync_all(&mut devices).await;
@@ -306,7 +306,7 @@ async fn a_raise_resumes_after_reopening_at_every_publication_step() {
         assert!(device.db.operations().await.unwrap().is_empty());
         assert!(matches!(
             devices[1].sync.sync_store_log().await,
-            Err(SyncFailure::UpdateRequired(_))
+            Err(SyncError::UpdateRequired(_))
         ));
         update(&mut devices[1], storage.clone(), true, true).await;
         sync_all(&mut devices).await;
@@ -412,7 +412,7 @@ async fn a_circle_is_raised_by_its_first_updating_member_after_the_store() {
         if index != 2 {
             assert!(matches!(
                 devices[index].sync.sync_store_log().await,
-                Err(SyncFailure::UpdateRequired(_))
+                Err(SyncError::UpdateRequired(_))
             ));
         }
         reopen(&mut devices[index], storage.clone(),
@@ -638,7 +638,7 @@ async fn a_newer_snapshot_format_stays_pending_until_the_required_update() {
     storage.create(&path, &future).await.unwrap();
     assert!(matches!(
         devices[1].sync.reload_from_snapshots().await,
-        Err(SyncError::Stopped(SyncFailure::UpdateRequired(_)))
+        Err(SyncError::UpdateRequired(_))
     ));
     storage.delete(&path).await.unwrap();
     storage.create(&path, &original).await.unwrap();
