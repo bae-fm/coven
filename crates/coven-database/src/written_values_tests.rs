@@ -1,5 +1,5 @@
 use crate::tests::TestStore;
-use crate::write::tests::{records, sql};
+use crate::write::tests::{count, records, sql};
 use crate::{Database, RowIdentity, SyncedTable};
 use coven_format::value::Value;
 use coven_foundation::id_source::SequentialIds;
@@ -124,7 +124,7 @@ async fn restored_parents_restore_live_references_while_losses_keep_written_valu
             Some("PaReNt".into()),
             "lost={lost}"
         );
-        assert_eq!(crate::write::tests::count(&b, "_coven_reference_values"), 0);
+        assert_eq!(crate::write::tests::count(&b, "_coven_written_values"), 0);
         for db in [a, b] {
             db.close().await.unwrap();
         }
@@ -342,5 +342,141 @@ async fn dropping_a_lost_reference_keeps_its_written_value_as_plain_data() {
     });
     for db in [a, b, c] {
         db.close().await.unwrap();
+    }
+}
+
+/// §8: a lost value is one some write set. A generated cell can display a
+/// value no write set, computed from a NULL-substituted reference or from
+/// inputs other writes merged in; every arrival order records the written one.
+#[tokio::test]
+async fn generated_cells_lose_their_written_values_in_every_arrival_order() {
+    use coven_crypto::StoreKey;
+    use coven_foundation::id_source::KeyId;
+    let schema = "CREATE TABLE parents(id TEXT NOT NULL PRIMARY KEY); CREATE TABLE children(id TEXT NOT NULL PRIMARY KEY,parent TEXT REFERENCES parents(id) ON DELETE SET NULL,a TEXT,b TEXT,label TEXT AS (coalesce(parent,'none')),joined TEXT AS (a||b))";
+    let open = |store: &TestStore, seconds: u64| {
+        store
+            .builder(
+                tables(),
+                vec![crate::Migration::run(1, "generated", move |sql| {
+                    sql.execute_batch(schema)?;
+                    Ok(())
+                })],
+            )
+            .clock(std::sync::Arc::new(
+                coven_foundation::clock::FixedClock::new(
+                    std::time::UNIX_EPOCH + std::time::Duration::from_secs(seconds),
+                ),
+            ))
+            .open()
+    };
+    let fingerprint = |db: &Database| {
+        let key = StoreKey::from_bytes(KeyId(uuid::Uuid::from_u128(1)), [7; 32]).derive();
+        let db = db.clone();
+        async move {
+            db.sync_state(vec![(Audience::Store, key.fingerprint_hasher())])
+                .await
+                .unwrap()
+                .fingerprints[0]
+                .1
+        }
+    };
+    // Each case: three concurrent writes stamped in this order, and the
+    // generated column and values those writes set.
+    let cases: [(&str, [&str; 3], &str, &[&str]); 2] = [
+        (
+            // Ben deletes p without having read Ana's reference to it; on a
+            // device that applies his delete before Dan's write, label shows
+            // 'none', which no write set.
+            "reference",
+            [
+                "UPDATE children SET parent='p'",
+                "DELETE FROM parents WHERE id='p'",
+                "UPDATE children SET parent='q'",
+            ],
+            "label",
+            &["p"],
+        ),
+        (
+            // Ana and Ben set different inputs; once both apply, joined shows
+            // 'AB', which no write set.
+            "inputs",
+            [
+                "UPDATE children SET a='A'",
+                "UPDATE children SET b='B'",
+                "UPDATE children SET a='D',b='D'",
+            ],
+            "joined",
+            &["Ay", "xB"],
+        ),
+    ];
+    for (case, statements, column, written) in cases {
+        let ids = SequentialIds::new();
+        let origin_store = TestStore::with_ids(&ids);
+        let origin = open(&origin_store, 1).await.unwrap();
+        sql(
+            &origin,
+            "INSERT INTO parents VALUES('o'),('p'),('q'); INSERT INTO children(id,parent,a,b) VALUES('c','o','x','y')",
+        )
+        .await
+        .unwrap();
+        let initial = records(&origin).remove(0);
+        let mut writes = Vec::new();
+        for (index, statement) in statements.into_iter().enumerate() {
+            let store = TestStore::with_ids(&ids);
+            let author = open(&store, 2 + index as u64).await.unwrap();
+            author.receive(initial.clone().into()).await.unwrap();
+            sql(&author, statement).await.unwrap();
+            writes.push(records(&author).remove(0));
+            author.close().await.unwrap();
+        }
+        let mut outcomes = Vec::new();
+        for order in [
+            [0, 1, 2],
+            [0, 2, 1],
+            [1, 0, 2],
+            [1, 2, 0],
+            [2, 0, 1],
+            [2, 1, 0],
+        ] {
+            let store = TestStore::with_ids(&ids);
+            let receiver = open(&store, 10).await.unwrap();
+            receiver.receive(initial.clone().into()).await.unwrap();
+            for index in order {
+                receiver
+                    .receive(writes[index].clone().into())
+                    .await
+                    .unwrap();
+            }
+            let losses = receiver.lost_values().await.unwrap();
+            let generated: Vec<_> = losses
+                .iter()
+                .filter_map(|loss| match &loss.lost {
+                    crate::Lost::Cell(cell) if cell.column == column => Some(cell.value.clone()),
+                    _ => None,
+                })
+                .collect();
+            assert!(!generated.is_empty(), "{case} {order:?}");
+            for value in &generated {
+                assert!(
+                    written
+                        .iter()
+                        .any(|w| *value == crate::types::Value::Text((*w).into())),
+                    "{case} {order:?} lost {value:?}, which no write set"
+                );
+            }
+            // The listing's order follows local column ids; compare as a set.
+            let mut listed: Vec<_> = losses.iter().map(|loss| format!("{loss:?}")).collect();
+            listed.sort();
+            outcomes.push((
+                listed,
+                fingerprint(&receiver).await,
+                count(&receiver, "_coven_lost"),
+            ));
+            receiver.close().await.unwrap();
+        }
+        for outcome in &outcomes[1..] {
+            assert_eq!(outcome, &outcomes[0], "{case}");
+        }
+        origin.close().await.unwrap();
     }
 }

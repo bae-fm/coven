@@ -526,7 +526,7 @@ async fn retargeting_a_reference_replaces_its_retained_pre_null_value() {
         )
         .await
         .unwrap();
-        assert_eq!(count(db, "_coven_reference_values"), 1);
+        assert_eq!(count(db, "_coven_written_values"), 1);
     }
     sql(&c, "UPDATE links SET parent='new'").await.unwrap();
     b.receive_stream(

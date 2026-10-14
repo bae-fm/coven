@@ -137,7 +137,7 @@ pub(crate) fn materialize(
             let loss = old.loss.filter(|_| old.state.generation()==state.generation());
             let columns:BTreeMap<_,_> = state.cells().iter().map(|(name,cell)| (name.clone(),cell.value.clone())).collect();
             let row_ordinal: i64 = database.query_row("SELECT id FROM _coven_rows WHERE table_name=?1 AND key=?2 AND audience=?3 AND generation=?4", params![id.table,id.key,audience_text(&id.audience),state.generation().to_be_bytes().as_slice()], |r| r.get(0))?;
-            crate::reference_values::store(database,row_ordinal,&state,(!result.removed.contains_key(id)).then_some(&row.values))?;
+            crate::written_values::store(database,row_ordinal,&state,(!result.removed.contains_key(id)).then_some(&row.values))?;
             let previous_claims: BTreeMap<i64,Vec<u8>> = database.query("SELECT constraint_id,value FROM _coven_claims WHERE row_id=?1", [row_ordinal], |r| Ok((r.get(0)?,r.get(1)?)))?.into_iter().collect();
             let mut claims = BTreeMap::new();
             if result.removed.contains_key(id) {

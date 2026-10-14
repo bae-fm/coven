@@ -139,7 +139,6 @@ async fn only_the_spec_tables_are_created() {
                 "_coven_positions_post",
                 "_coven_provider_access",
                 "_coven_queued_file_refs",
-                "_coven_reference_values",
                 "_coven_references",
                 "_coven_retirement_finality",
                 "_coven_row_file_refs",
@@ -158,6 +157,7 @@ async fn only_the_spec_tables_are_created() {
                 "_coven_write_landings",
                 "_coven_write_upload_sessions",
                 "_coven_writes",
+                "_coven_written_values",
                 "sqlite_sequence"
             ]
         );
@@ -290,7 +290,7 @@ mod fixture {
        SELECT (i-1)%1024+1+offset,i,i FROM fixture
        CROSS JOIN (SELECT 0 AS offset UNION ALL SELECT 1024 UNION ALL SELECT 2048);
      INSERT INTO _coven_foreign_keys SELECT i,tab,n FROM fixture;
-     INSERT INTO _coven_reference_values
+     INSERT INTO _coven_written_values
        SELECT column_id,row_id,'written value' FROM _coven_cells WHERE column_id<=1024;
      INSERT INTO _coven_references SELECT i,(i-1)%1024+1,i,tab,key,audience,counter(1) FROM fixture;
      INSERT INTO _coven_constraints SELECT i,tab,n FROM fixture;

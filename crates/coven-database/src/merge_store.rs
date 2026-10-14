@@ -254,10 +254,10 @@ impl<'a> MergeStore<'a> {
                     .ok_or(DbError::DamagedDatabase)?,
                 }
             };
-            // Staged cells already contain written references. A correction for
+            // Staged cells already contain written values. A correction for
             // an earlier displayed NULL must not replace a new target.
             if !raw_staged {
-                values.extend(crate::reference_values::load(self.database, ordinal)?);
+                values.extend(crate::written_values::load(self.database, ordinal)?);
             }
             let mut references = BTreeMap::<String, BTreeMap<_, _>>::new();
             for (column,key,parent) in self.database.query("SELECT c.column_name,f.identity,v.parent_table,v.parent_key,v.parent_audience,v.parent_generation FROM _coven_references v JOIN _coven_foreign_keys f ON f.id=v.foreign_key_id JOIN _coven_columns c ON c.id=v.column_id WHERE v.row_id=?1", [ordinal], |r| Ok((r.get::<_,String>(0)?,decoded(merge_fields::decode_foreign_key(&r.get::<_,Vec<u8>>(1)?))?, coven_merge::Parent { row: RowId { table:r.get(2)?,key:r.get(3)?,audience:crate::write_encoding::audience(&r.get::<_,String>(4)?)? }, generation:counter(r.get(5)?) })))? {

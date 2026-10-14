@@ -3,8 +3,9 @@
 //!
 //! Unsigned merge counters are big-endian eight-byte blobs. SQLite's signed
 //! integer range must not truncate device ids, generations or write numbers.
-//! Present displayed values live in app tables; differing written references
-//! are kept by cell. Metadata and lost values use coven-format's snapshot
+//! Present displayed values live in app tables; a written value that reads
+//! differently (a NULL-substituted reference, a generated value recomputed from
+//! merged inputs) is kept by cell. Metadata and lost values use coven-format's snapshot
 //! field encodings inside blobs.
 //! Loss targets name their row directly: a write excluded by a schema change
 //! or reset need not have an accepted generation in `_coven_rows`.
@@ -545,8 +546,8 @@ macro_rules! coven_tables {
                 UNIQUE(table_name, identity)
             ) STRICT;
         ");
-        $visit!(_coven_reference_values, "
-            CREATE TABLE _coven_reference_values (
+        $visit!(_coven_written_values, "
+            CREATE TABLE _coven_written_values (
                 column_id INTEGER NOT NULL,
                 row_id INTEGER NOT NULL,
                 value ANY,

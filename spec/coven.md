@@ -1927,10 +1927,11 @@ Two mechanisms order writes:
       below;
     - the row's audience and the value it claims
       ([§8.5](#85-keys-and-uniqueness)).
-  - A present row's displayed values are in the app's table. When a
-    reference reads differently from what was written (§8.4),
-    `_coven_reference_values` keeps the written value by cell until the
-    two agree again.
+  - A present row's displayed values are in the app's table. When a cell
+    reads differently from what was written, a reference read as null
+    (§8.4) or a generated column computed from merged inputs,
+    `_coven_written_values` keeps the written value by cell until the two
+    agree again.
   - `_coven_lost`, one record for every kind of loss, naming:
     - the table, key and audience;
     - the column for a cell, or no column for a whole row;
