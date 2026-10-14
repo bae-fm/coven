@@ -15,12 +15,12 @@ the current newest, checked against the waiting reload.
   whatever triggered it: `landing_keeps_deletions`. Judged against the
   newest loadable snapshot instead, that preparation rule would lose a
   deleted write: `loadable_preparation_counterexample`.
-- A reload that needs a write this device refused: Rust records the write's
-  refusal as the reload's own reason, which retries only after an update, so
-  the reload stays blocked after a snapshot covering the gap lands, though
-  §15 lets that snapshot load without the write:
-  `refused_write_reload_counterexample`. A wait on the refused write would
-  retry and load it: `waiting_on_the_write_loads`. -/
+- A reload that needs a write this device refused: recording the write's
+  refusal as the reload's own reason, as Rust did before T159, retries only
+  after an update, so the reload stays blocked after a snapshot covering the
+  gap lands, though §15 lets that snapshot load without the write:
+  `refused_write_reload_counterexample`. A wait on the refused write, which
+  Rust now records, retries and loads it: `waiting_on_the_write_loads`. -/
 namespace CovenStorelogData.Pending
 open CovenStorelog
 
@@ -187,8 +187,8 @@ def attempt (c : Checks) (listed : List Listed) (target : Nat → Nat)
     | none => .loads s
   | other => .waits other
 
-/-- Rust's record for a blocked reload: the write's own refusal
-(`pending_logs::required`, `record_operation_error`). -/
+/-- The record Rust gave a blocked reload before T159: the write's own
+refusal (`pending_logs::required`, `record_operation_error`). -/
 def blockedRecord : Reason := .refused
 
 /-- Rust `operation_can_retry` at the same installed version: work is driven
@@ -218,7 +218,8 @@ theorem refused_write_reload_counterexample :
 
 /-- Recording the reload as waiting on the refused write, as the reload
 waits on a refused snapshot, retries automatically: the next attempt loads
-the covering snapshot. The write's own refusal stays its record. -/
+the covering snapshot. The write's own refusal stays its record. Rust's
+reload records this wait (`snapshot_reload.rs`). -/
 theorem waiting_on_the_write_loads (path : String) :
     drivenAgain (.waits (.object path)) = true ∧
       attempt passes [throughThree, throughFour, coversGap] carolTarget [(1, 4)] carolLogs =

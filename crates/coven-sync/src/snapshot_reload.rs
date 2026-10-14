@@ -174,13 +174,28 @@ impl StoreLogSync {
                         if waiting.contains(&id) {
                             continue;
                         }
-                        if let Some(record) = stuck
-                            .iter()
-                            .find(|record| record.blocks(coven_database::LogObject::Write(id)))
+                        // The reload waits on the refused write, whose own
+                        // record is the refusal. Recording the refusal here
+                        // would retry only after an update, so a snapshot
+                        // covering the gap would never be tried (§15;
+                        // storelog-data `refused_write_reload_counterexample`,
+                        // `waiting_on_the_write_loads`).
+                        if let Some(refused) =
+                            stuck.iter().find_map(|refusal| match refusal.object {
+                                coven_database::LogObject::Write(refused)
+                                    if refusal.blocks(coven_database::LogObject::Write(id)) =>
+                                {
+                                    Some(refused)
+                                }
+                                _ => None,
+                            })
                         {
-                            return Err(
-                                crate::pending_logs::required(&self.database, *record).await?
-                            );
+                            let reason = crate::PendingReason::Waits(crate::Prerequisite::Object(
+                                crate::write_seal::path(self.directory.id(), refused),
+                            ));
+                            return Err(SyncError::Pending(Box::new(
+                                self.operation_condition(record, reason).await?,
+                            )));
                         }
                         // Read to the fixed target by exact number, never a
                         // listing of the moving log tail.

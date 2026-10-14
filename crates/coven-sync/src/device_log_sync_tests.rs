@@ -892,7 +892,7 @@ mod stuck {
     }
 
     #[tokio::test]
-    async fn a_required_stuck_gap_preserves_local_edits_and_is_not_downloaded_again() {
+    async fn a_required_stuck_gap_waits_for_a_covering_snapshot_and_keeps_local_edits() {
         let storage = storage();
         let mut devices = group(storage.clone(), 2).await;
         sql(
@@ -919,12 +919,16 @@ mod stuck {
             .corrupt_byte(&object.path, object.size as usize - 1)
             .await
             .unwrap();
+        // The reload waits on the refused write, whose own record is the
+        // refusal; the wait retries, without downloading the write again (§15).
         for attempt in 0..2 {
             let before = storage.reads().await;
             assert!(matches!(
                 devices[1].sync.reload_from_snapshots().await,
                 Err(SyncError::Pending(record))
-                    if record.reason == crate::PendingReason::Refused(RefusalCode::Signature.into())
+                    if record.reason == crate::PendingReason::Waits(
+                        crate::Prerequisite::Object(object.path.clone())
+                    )
             ));
             assert!(devices[1]
                 .db
@@ -941,5 +945,20 @@ mod stuck {
             assert_eq!(rows(&devices[1].db).await, expected);
             assert_eq!(super::writes::queued(&devices[1].db).await, queued);
         }
+        // A snapshot covering the refused write lands: the waiting reload
+        // loads it without reading the write, and the local edit stays on top.
+        devices[0]
+            .sync
+            .write_snapshot(Audience::Store)
+            .await
+            .unwrap();
+        let before = storage.reads().await;
+        devices[1].sync.reload_from_snapshots().await.unwrap();
+        assert!(!storage.reads().await[before.len()..]
+            .iter()
+            .any(|(path, _, _)| *path == object.path));
+        assert_eq!(devices[1].sync.pending_reload().await.unwrap(), None);
+        assert_eq!(rows(&devices[1].db).await, expected);
+        assert_eq!(super::writes::queued(&devices[1].db).await, queued);
     }
 }

@@ -4588,8 +4588,16 @@ Carol's tablet:
   including for retention and reload. Keep those objects and any files
   whose absence cannot be proved without them.
   - A reload requiring that gap fails atomically with `SyncError::Pending`.
+    Its own record waits on the refused write (`Waits(Object(path))`),
+    whose record is the refusal, so it retries automatically.
   - A snapshot covering it can load without reading it. The refusal remains
     recorded until the reset or update rules of §19.1 permit a new attempt.
+  - E.g. Carol's reload selects Ana's snapshot through write 3 and needs
+    write 4, which her version refused. Once a snapshot through write 4
+    lands, her waiting reload retries and loads it. Recording the write's
+    refusal as the reload's own would retry only after an update, leaving
+    the reload blocked though that snapshot can load
+    ([`refused_write_reload_counterexample`, `waiting_on_the_write_loads`](proofs/storelog-data/CovenStorelogData/ReloadWaitChecks.lean)).
 - A device deletes a snapshot of its own once a newer one of the same
   audience covers everything it covers, and the entries that make that
   replacement usable are final (§9).

@@ -605,21 +605,24 @@ device can load rather than the newest verified one.
   covers only what the newest loadable one covers outranking the refused
   newest and losing a deleted write. Rust has no explicit preparation check;
   a completed catch-up supplies it (IO `completed_catchup_covers_old`).
-- A reload that needs a write this device refused stays blocked until an
-  update, even once a snapshot covering the gap lands (checked
-  counterexample, `refused_write_reload_counterexample`). §15 says "a
-  snapshot covering it can load without reading it". Rust's reload fails
-  with the write's own `Refused` record (`pending_logs::required`), and
-  `record_operation_error` makes that the reload operation's reason.
-  `Refused` retries only after an update, and `operation_can_retry` keeps
+- A reload that needs a write this device refused waits on that write
+  (proved, `waiting_on_the_write_loads`). Recording the write's own
+  `Refused` record as the reload's reason, as Rust did before T159
+  (`pending_logs::required`, then `record_operation_error`), keeps it
+  blocked until an update, even once a snapshot covering the gap lands
+  (checked counterexample, `refused_write_reload_counterexample`), though
+  §15 says "a snapshot covering it can load without reading it". `Refused`
+  retries only after an update, and `operation_can_retry` keeps
   `resume_snapshots`, `drive_snapshot` and the app's retry from driving the
   operation again at this version. In the model Carol's reload selects a
   snapshot through Ana's write 3, needs write 4, which her version refused,
   and is blocked. Once a snapshot through write 4 lands, the reload would
-  load it, but it is never attempted. Recording the reload as waiting on
-  the refused write (`Waits(Object(path))`), as it waits on a refused
-  snapshot, retries automatically and loads the covering snapshot
-  (`waiting_on_the_write_loads`). Rust is unchanged.
+  load it. Recording the reload as waiting on the refused write
+  (`Waits(Object(path))`), as it waits on a refused snapshot, retries
+  automatically and loads the covering snapshot. Rust's reload now records
+  that wait (`snapshot_reload.rs`);
+  `a_required_stuck_gap_waits_for_a_covering_snapshot_and_keeps_local_edits`
+  (`device_log_sync_tests.rs`) runs the history.
 
 What the safe rule costs. A body refusal, or a key this device does not
 accept, never holds retention (`retention_ignores_bodies`). A refused prefix
@@ -676,7 +679,9 @@ required update, or what `take_current` takes or waits for) must equal
 Lean's, and for a wait the reason the real reload operation records must
 equal `Choice.reason`. Bodies are never opened, so a load is compared only
 on the snapshot chosen; the schema wait, found when a body opens, and
-reset and raise boundaries are not in the comparison.
+reset and raise boundaries are not in the comparison. Neither is the wait on
+a refused write (`attempt`): the reload reads its writes only after a
+selected body loads.
 
 **Loss metadata is proved.** `LostValues.pending_exact` contains exactly the
 non-final entries in a loss's dependency expression, without duplicates.
