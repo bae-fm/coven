@@ -2726,6 +2726,12 @@ match stream.read_at(resume_at, 256 * 1024).await {
 - Only admins add and remove members, and change roles; each member removes
   their own devices, and admins any device ([§9](coven.md#9-members-and-roles)).
 - Administrative calls require an online store-log catch-up (§9, E6).
+- A member records their own new storage access; an admin may also record an
+  S3 replacement for another member. Authority uses the author's role in the
+  entry's recorded view, independently of who holds provider-admin access.
+  `ProviderSignOut::ReplaceAccessKey` directs the person to the admin desktop
+  flow in §13: create, deliver to remaining devices, record for that member,
+  then delete the old key. §4 lists the operation-scoped admin-access sources.
 - A member can replace their own signing/sealing pair; any admin can publish
   a prepared pair for an existing member with `replace_member_keys_for`.
   Replacement invites provide the approval/bootstrap flow (E10), subject to
@@ -2745,7 +2751,17 @@ match stream.read_at(resume_at, 256 * 1024).await {
   Pending and failed work appears in `pending()`, with the operation id for
   retry. Derived provider work cannot be discarded while its current
   intention remains unmet: disappearance from this list must not hide a
-  retained grant. A replay change can replace or remove that intention.
+  retained grant. A replay change can replace or remove an account-sharing
+  intention; S3 deletion records follow the rule below.
+- Each distinct superseded or removed-member S3 key has a `DeleteAccessKey`
+  record, including keys recorded by an admin and keys in dropped entries.
+  The old key becomes pending when its replacement is recorded. A record
+  clears only after coven deletes that exact key with admin access and a
+  subsequent provider read confirms that id absent, or after an explicit
+  `confirm_access_key_deleted`. Missing, failed or wrong-key reads retain it;
+  a delete reply, elapsed time or replay reversal never suffices. Both paths
+  retain confirmation by key id, so later entries and retries cannot restore
+  the notice. Failed commits preserve pending work and report the failure.
 - Removing an account can leave access through a parent, a grant reaching other
   accounts, an unidentified recipient, or the owner. `PendingReason::AccessRemains`
   retains these grants and their reasons for the app to present to the owner.
@@ -2790,12 +2806,12 @@ impl CovenHandle {
         keys: MemberPublicKeys,
     ) -> Result<(), SyncError>;
 
-    /// On S3: switches this member to the access key they made in the
-    /// provider's console and records the new key's id in the store log (§9).
+    /// On S3: switches this member to a key supplied through §4's admin-access
+    /// or console path and records the new key's id in the store log (§9).
     /// The restore code does not change. They keep the key separately,
-    /// update their other devices with update_credentials, and delete the old
-    /// key in the console (§13). Requires connected storage. If publication
-    /// fails, the call returns the failure and retains the new credentials:
+    /// update their other devices with update_credentials, and the old key
+    /// becomes pending deletion under §13. Requires connected storage.
+    /// If publication fails, the call returns the failure and retains the new credentials:
     /// the remote entry may already exist. Retry with the same key to finish publication.
     /// Member removal lists every recorded key until confirmed deleted,
     /// including this key if replay drops its set-access entry (§13).
@@ -2818,8 +2834,11 @@ impl CovenHandle {
     /// Changes a member's role, as an admin (§9).
     pub async fn set_member_role(&self, member: &MemberId, role: MemberRole) -> Result<(), SyncError>;
 
-    /// Records that the admin deleted an S3 key in the provider's console,
-    /// so pending() removes its DeleteAccessKey record (§13).
+    /// Explicitly confirms that the admin deleted this S3 key, including
+    /// through guided console steps. Clears only this id's DeleteAccessKey
+    /// record and retains its confirmation (§13). Coven's automatic path
+    /// instead requires its admin deletion followed by a provider read
+    /// confirming this exact id absent; it never infers this confirmation.
     pub async fn confirm_access_key_deleted(&self, access_key_id: &str) -> Result<(), SyncError>;
 
     /// Publishes the removal of this member and all their devices (§13).
@@ -2833,15 +2852,15 @@ impl CovenHandle {
     pub async fn remove_device(&self, device: DeviceId) -> Result<ProviderSignOut, SyncError>;
 }
 
-/// An S3 key whose member no longer has access, or whose invite ended (§13).
+/// An S3 key superseded, recorded for a removed member, or from an ended invite (§13).
 pub struct AccessKeyToDelete {
     pub access_key_id: String,
     pub member: Option<MemberId>,
 }
 
-// Pending notices are DeleteAccessKey records in _coven_pending. Confirmation
-// is retained separately by key id, so later entries and retries cannot restore
-// an already-confirmed notice.
+// Pending notices are DeleteAccessKey records in _coven_pending. Only verified
+// admin deletion or explicit confirm_access_key_deleted clears one. Confirmation
+// is retained separately by key id, so later entries and retries cannot restore it.
 
 /// A grant that revocation left for the owner to inspect.
 pub struct RetainedAccess {
@@ -2896,8 +2915,12 @@ pub enum ProviderSignOut {
     RemoveAppAccess { provider: CloudProvider },
     /// Remove the device from the Apple account.
     RemoveFromAppleAccount,
-    /// Keep a new S3 key separately, update retained devices, then delete the old key.
-    /// The written restore code does not change.
+    /// An admin desktop with the storage account's admin access creates a new
+    /// S3 key, delivers it to the member's remaining devices, records it for
+    /// that member, then deletes the old key (§13). The old key is pending
+    /// DeleteAccessKey work from recording until verified deletion or explicit
+    /// confirmation. Keep the new member key separately; the restore code does
+    /// not change. Admin access is held for one operation and never stored (§4).
     ReplaceAccessKey,
 }
 ```
@@ -3120,12 +3143,12 @@ impl CovenHandle {
     pub async fn approve_join_request(&self, request: &JoinRequest) -> Result<(), SyncError>;
 
     /// Declines the request, and takes back the storage access its invite
-    /// granted; on S3 the admin deletes the key in the provider's console.
+    /// granted; on S3 the key stays pending until deleted and cleared under E9.
     pub async fn decline_join_request(&self, request: &JoinRequest) -> Result<(), SyncError>;
 
     /// Cancels an invite before anyone joins with it, taking back the
-    /// storage access it granted; on S3 the admin deletes the key in the
-    /// provider's console.
+    /// storage access it granted; on S3 the key stays pending until deleted
+    /// and cleared under E9.
     pub async fn cancel_invite(&self, invite: &InviteId) -> Result<(), SyncError>;
 }
 
@@ -3140,7 +3163,7 @@ pub enum InviteAccess {
     /// Google Drive, Dropbox, OneDrive or iCloud: the store is shared with
     /// this account.
     ProviderAccount { email: String },
-    /// S3: an access key the admin made for them in the provider's console.
+    /// S3: a member key supplied through §4's admin-access or console path.
     S3AccessKey { access_key_id: String, secret_access_key: SecretText },
 }
 

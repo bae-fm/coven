@@ -1121,9 +1121,19 @@ the file's ranges under `F`.
 - Reconnecting uses the recorded provider location. Setup does not move an
   existing store to another location: its other devices still use the
   location in their restore codes.
-- S3 has no standard way to make or delete access keys; each S3 provider
-  has its own, so on S3 an admin makes and deletes members' keys in the
-  provider's console, and coven says when.
+- Access-key creation and deletion are specific to each S3 service.
+  Coven may make and delete member keys using the storage account's admin
+  access, held in memory for one operation and never stored. Admin credentials
+  never enter the store log, invites, logs or device key custody; member
+  credentials remain separate and follow their ordinary custody rules.
+  - The person chooses a signed-in CLI and its profile/account, browser
+    sign-in, a pasted admin key, or guided console steps. Coven reads no CLI
+    configuration and runs no CLI credential helper before the person chooses
+    that CLI. Provider-admin access does not itself confer a store admin role.
+  - With guided steps, the admin creates or deletes the key in the provider's
+    console. With direct provider calls, coven performs the operation using
+    the supplied admin access. Both paths record member access and pending
+    deletion work under §13; a retry needing admin access obtains it again.
 - Posted positions live at `<store>/positions/<device>` ([§6](#6-syncing-writes)).
 - Sealed store and circle keys share `<store>/keys/<writer>/<n>`; their
   clear prefixes name audience, key and recipient ([§11](#11-keys), D9).
@@ -2472,8 +2482,11 @@ Carol's tablet:
     reuse a key established for any member earlier in that view or the replay;
   - each member adds and removes their own devices, with their own key, and
     admins can remove any device;
-  - each member records their own new storage access, such as a replaced S3
-    access key, so a later removal takes back the access they have now
+  - each member records their own new storage access; an admin may also record
+    a replacement S3 access key for another member. The author must be that
+    member or an admin in the entry's recorded view; the target must exist in
+    that view and at its replay position. A later removal takes back every
+    recorded access, including dropped entries
     ([§13](#13-removing-members-and-devices));
   - a removal names a device its author had read the addition of, so it
     knows whose device it is;
@@ -3191,8 +3204,8 @@ Carol's tablet:
     Copy exposure cannot be undone by rejecting a late object.
   - Writes first sent before the sender learned of a removal also remain
     readable under their old keys while the recipient has storage access.
-    Revocation ends that access; on S3 an admin deletes the access key in
-    the console.
+    Revocation ends that access; on S3 coven deletes the access key with
+    operation-scoped admin access, or an admin deletes it in the console (§13).
 - Every object encrypted with a store or circle key names that key outside
   its encryption, so a reader knows which key opens it.
 - A file's independent key is carried in its row's encrypted writes
@@ -3335,8 +3348,8 @@ Carol's tablet:
   - the invite's id, the chosen stable member id, a one-time *invite secret*, the initial store key id
     from the creation entry, the inviting writer's device id, and that
     writer's last published key-copy number when making the invite;
-  - on S3, an access key the admin made for the new person in the
-    provider's console and entered.
+  - on S3, an access key made for the new person using the admin-access or
+    guided console path in §4.
 - The admin fixes the member id before showing the invite. For a new person
   coven generates a fresh id and the admin chooses a role. For recovery the
   admin selects an existing active member; its role and circle memberships
@@ -3418,8 +3431,8 @@ Carol's tablet:
 - Once the request is approved or declined, or the invite expires, Ana's
   device deletes the request object.
 - Declining the request, or letting the invite expire after a day, takes
-  back the storage access it granted; on S3, coven tells the admin to
-  delete the key in the provider's console.
+  back the storage access it granted; on S3, the key becomes pending deletion
+  under §13, through coven with admin access or through the provider's console.
   Replacement-invite cleanup revokes only that invite's new grants; it
   cannot revoke the existing active member's retained access. Provider
   shared-account and retained-grant checks still apply (§13).
@@ -3460,10 +3473,19 @@ Carol's tablet:
   - Google Drive, Dropbox and OneDrive: she removes the app's access from
     her provider account;
   - iCloud: she removes the phone from her Apple account;
-  - S3: she makes a new access key in the provider's console and enters it
-    on one device. She keeps the key separately and supplies it to her other
-    devices, directly or through a QR scan from one of her own devices, then
-    deletes the old key in the console. Her restore code does not change.
+  - S3: an admin desktop with the storage account's admin access, usually
+    the owner's, creates a new key for Ana and delivers it to her remaining
+    devices. That desktop records the replacement for Ana in the store log,
+    then deletes the old key. The admin-access and guided console paths are
+    in §4. Ana keeps the new member key separately; her restore code does
+    not change. Her own scoped member key need not be able to create keys.
+  - Recording an S3 replacement makes the old key from its recorded view
+    pending `DeleteAccessKey` work in the same transaction as the entry and
+    replay, even if the replacement entry drops. Recording the same key id
+    again is not a replacement of that credential. Any recorded key displaced
+    by replay, including a losing concurrent replacement, becomes pending too.
+    The winning key stays in use unless it was already pending deletion;
+    replay cannot cancel that deletion, so that case needs a fresh key.
 - Device removal alone changes no member keys: the phone still holds Ana's
   private pair, but can't reach storage
   to read or write anything new.
@@ -3473,8 +3495,9 @@ Carol's tablet:
   bound are §10's credential rules. Stored entries keep §9's permanent rule.
   Rotate exposed audience keys under §11 and handle provider credentials
   separately. Recovery with changed S3 credentials records a separate
-  set-access entry under the rebound member's new signing key; until it is
-  kept, the invite retains the new grant for failure/decline revocation.
+  set-access entry signed by the rebound member or an admin under §9's
+  recorded-view authority; until it is kept, the invite retains the new grant
+  for failure/decline revocation.
 - Removing a member is a store-log entry naming that member. It removes
   them and their devices; it contains no store key or circle-key list.
   Replay still derives deletion of circles whose sole member the author
@@ -3496,12 +3519,22 @@ Carol's tablet:
     Ana's next pass records and performs the revocation.
 - Taking back a removed member's access covers every access recorded for
   them in any entry the store log holds, kept or dropped: create-store and
-  add-member entries naming them, and set-access entries signed by them.
+  add-member entries naming them, and set-access entries authored by them or
+  by an admin recording their replacement key.
   Dropping an entry does not undo the provider access it records.
-  - Every distinct S3 key id gets a `DeleteAccessKey` pending record until the
-    admin confirms its deletion. A replacement concurrent with removal
-    therefore lists both the old and the new key, even though removal
-    defeats the set-access entry in replay.
+  - Every distinct S3 key id gets a `DeleteAccessKey` pending record. It clears
+    only after coven deletes that exact key with admin access and a subsequent
+    provider read confirms that key id is absent, or after an explicit
+    `confirm_access_key_deleted` call. A successful delete reply alone, a
+    failed or missing read, a read of another key, elapsed time and replay
+    reversal cannot clear it. Retain the record and report failures.
+  - A replacement concurrent with removal therefore lists both the old and
+    the new key, even though removal defeats the set-access entry in replay.
+    Two admins' replacements, or an admin's and the member's, retain every
+    distinct key: before removal the old and losing keys are pending, and
+    removal adds the winning key. S3 access replacements use the ordinary
+    timestamp conflict rule, without the priority for an admin replacing
+    signing/sealing keys.
   - Every provider account is revoked using the existing owner, shared-account
     and retained-grant rules ([E9](api.md#e9-members-and-devices)).
   - Applying a later access entry for a removed member records its revocation
@@ -3512,7 +3545,7 @@ Carol's tablet:
 - What the entry names is fixed when the removal starts, from the member
   list the device has then; if the replay drops the entry, the removal
   starts over against the new list ([§18](#18-operations)).
-- Provider access follows replay both ways. If a removal drops and the
+- Account sharing follows replay both ways. If a removal drops and the
   member is back, the owner's device grants the intended access again.
   - E.g. Ana owns the folder; Ben and Carol are its admins. Ana's phone
     applies Carol's removal of Ben and revokes Ben's share. Ben's earlier
@@ -3520,17 +3553,19 @@ Carol's tablet:
     then grants Ben's share again; the app sees the pending work.
   - A grant that was already delivered cannot be undisclosed. Keys and
     storage cut-off bound what that access can reveal (§11, §13).
-  - On S3, deleting a key in the provider's console is irreversible. If
-    a returning member's recorded key was deleted, an admin supplies a
-    replacement through the existing access-key calls (E9).
+  - On S3, key deletion is irreversible and a pending deletion cannot be
+    cancelled by replay. If a returning member's recorded key was deleted or
+    is pending deletion, an admin supplies and records a fresh replacement (E9).
 - The member whose provider account holds the store can't be removed:
   the store would go with their account. Removing them fails with
   `SyncError::StoreOwner`.
-- On S3, `pending()` lists keys the admin must delete until
-  the admin confirms they are gone ([E9](api.md#e9-members-and-devices)), however
-  the removal or expiry that needs it came about. The device retains the
-  confirmation by key id: another entry, invite, retry or restart cannot
-  bring that deletion notice back.
+- On S3, `pending()` retains each `DeleteAccessKey` record until one of the
+  two clearing events above ([E9](api.md#e9-members-and-devices)), whether it
+  arose from replacement, removal or an invite ending. Retain both pending
+  work and confirmed key ids through restart. Another entry, invite or retry
+  cannot bring a confirmed deletion notice back. Recording entries, replay,
+  pending work and confirmations uses atomic local commits; a failed commit
+  reports failure and preserves the previous state.
 - A removed member's old keys cannot read other members' writes first sent by a device
   that already knew of the removal, subject to §11's window for copies made
   after its copy observation (§3). Earlier attempted writes keep their keys on retry;
@@ -5062,7 +5097,8 @@ Carol's tablet:
   There is no preceding write or wait for row uploads.
 - Inviting a person ([§12.2](#122-adding-a-person)):
   1. share the storage with their account, or record the S3 key the admin
-     made in the provider's console, and record the invite's chosen stable id;
+     made through §4's admin-access or console path, and record the invite's
+     chosen stable id;
   2. once an admin approves the exact id and new public pair, confirm the
      initial and held historical audience-key copies to that credential,
      then publish Add member or Replace member keys as the invite specifies;

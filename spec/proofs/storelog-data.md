@@ -224,12 +224,94 @@ An explicit due retry uses the current intention and remains visible.
 `pending_until_finished`, `owner_wait_visible`, `retained_grant_visible` and
 `finished_work_absent` connect those states to the pending query.
 
-Every recorded S3 key, including a later dropped access entry, contributes
-until confirmed deleted (`credential_pending_visible`,
-`dropped_access_stays_pending`). Confirmed ids never reappear. The account
-proof quantifies over one already recorded account; provider account discovery,
-provider implementation and coordination between owner devices are outside it.
-The existing journal supplies operation ids for the pending subjects.
+The account proof quantifies over one already recorded account; provider account
+discovery, provider implementation and coordination between owner devices are
+outside it. The existing journal supplies operation ids for the pending subjects.
+
+**Every recorded S3 key is accounted for, and pending deletion requires evidence to clear.**
+[AccessKeys](storelog-data/CovenStorelogData/AccessKeys.lean) extends `Access`
+with `Access.S3`, using the existing `CurrentReplay.Entry`, membership effects,
+conflicts and terminating `ReplayMachine`. This replay changes only set-access authority:
+an active member records their own key, or an admin records another active
+member's replacement, judged in the entry's recorded view. The target must
+also exist at replay. `replacement_authority`, `kept_authorized` and
+`other_member_requires_admin` prove these checks at admission and in the
+actual replay result. Provider-admin access is a separate operation input;
+holding it does not grant a store-log role. Signature authentication supplies
+the stable author id, as in the existing access model.
+
+`every_recorded_key_accounted` proves that each received key is either the
+member's current access, pending deletion, or already confirmed deleted.
+Recording a replacement does not schedule its current winning key for deletion
+merely because it was recorded. The old key from an
+authorized replacement's recorded view becomes pending immediately, even
+when that replacement drops (`replacement_old_pending`). Recording the same
+id again does not replace that credential. Every key that replay displaces,
+including a losing concurrent replacement, becomes pending too.
+These are S3 access keys, distinct from member signing/sealing keys: their
+concurrent replacements retain §9's ordinary earlier-timestamp rule, without
+the admin-over-self priority for replacing the member's private pair.
+
+`removed_recorded_pending` has no kept-entry or author-identity premise:
+removing a member covers every key recorded for them, including a later
+received or time-dropped entry. It extends `credential_pending_visible` and
+the retained `HistoricalExamples.dropped_access_stays_pending` result.
+`received_never_forgotten` preserves those inputs across all modeled events.
+The journal commits received entries, replay and new deletion obligations
+together, and retains obligations through replay reversal. A returning member
+whose key is pending deletion needs a fresh replacement. These S3 obligations
+differ from reversible account-sharing intentions.
+
+`pending_record_iff` connects each key to an actual `Pending.records` result
+using the existing `credentialWork` and journal operation id.
+`no_other_transition_clears` and `history_pending_until_cleared` prove retention
+for one event and arbitrary event histories. `history_loss_requires_clearance`
+proves that a disappearing pending key must have a clearing event for that id.
+There are exactly two such events: explicit `confirmAccessKeyDeleted`, and
+successful deletion with provider-admin access followed by an absence read.
+`deletion_requires_exact_absence` and `provider_clear_requires_observation`
+require the read to name the exact deletion target. A missing read, failed
+read, present key, different key id, failed delete, or lack of admin access
+cannot clear it. Each failure is returned to the initiator.
+`records_clear_only_with_evidence` requires the local commit to succeed too;
+`failed_commit_retains` preserves the preceding state on failure.
+`confirmed_never_returns` proves that later entries and retries cannot
+restore a confirmed notice. No timer, replay or reset can clear it.
+
+[AccessKeyExamples](storelog-data/CovenStorelogData/AccessKeyExamples.lean)
+checks two admins replacing Carol's key, and an admin racing Carol's own
+replacement, in both receipt orders. Before removal the old and losing keys
+are listed; after removal all three ids are listed. The winning key can be
+Carol's own earlier replacement (`self_replacement_can_win`).
+`removal_before_replacements` checks removal arriving first.
+`removal_and_later_record` checks the replacement landing after its thirty-day
+limit; `late_access_after_finished_removal` checks its key becoming pending
+even after all previously recorded keys were cleared. `checked_metadata`
+checks causal closure, own-device predecessors and online attempts for both
+replacement histories. `authority_uses_recorded_view` accepts Ben's replacement
+concurrent with his demotion, refuses his subsequent replacement after reading
+the demotion, and checks that a non-admin can record only their own access.
+The deletion examples check both clearing paths and every failed observation
+case, including a failed database commit.
+
+There is a checked `example` of key loss if the journal is omitted: create
+Ana, add admin Ben, then their concurrent removals of one another. Neither is
+the protected storage-account owner. Receiving
+Ben's removal first lists Ana's key. Receiving Ana's earlier removal returns
+Ana; the query derived solely from current replay loses her key without a
+clearing event. `replay_reversal_retains_deletion` checks that the journal
+keeps it pending in this same four-entry history. This is a counterexample
+to discarding the journal, not to the two permitted clearing rules.
+
+The model covers one device's durable deletion journal and received entries
+from multiple authors. It does not prove provider key creation, secret
+delivery to remaining devices, admin credential acquisition or destruction,
+provider truthfulness, signature verification, invite scheduling, SQL/crash
+recovery, provider-account ownership, or coordination between devices' confirmation records. Provider
+receipts represent deletion followed by its read; actual IO ordering and
+consistency are inputs. The journal holds key ids and never admin credentials.
+The unchanged account and historical theorems remain in the axiom audit;
+Rust/Lean comparisons keep their original replay interface.
 
 **Every modeled pending subject is visible with its first reason.**
 `Pending.every_pending_subject`, `only_first_reason`, and `first_unmet` connect
@@ -341,9 +423,9 @@ The current spec resolves or narrows the historical witnesses as follows:
   earlier disclosures even to devices that never saw the removal
   drop. Copies published after that writer's miss remain the residual window.
   Different custody or observation times can still produce different key choices.
-- **Provider revocation and stale requests:** intended access follows replay
+- **Provider revocation and stale requests:** account sharing follows replay
   both ways; serialized requests cover the single-device ordering failure.
-  Actual grants during a pending request and irreversible S3 console deletion
+  Actual grants during a pending request and irreversible S3 key deletion
   are explicit §4/§13 exceptions, not reversible database effects.
 - **Reset-cleared reports:** §19.1 makes suppression reversible until final.
   The model's reset-reversal theorem proves restoration from retained observations.
