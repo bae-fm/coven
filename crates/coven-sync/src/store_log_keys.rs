@@ -80,8 +80,9 @@ pub(crate) fn store_copy(
         audience: Audience::Store,
         key: key.id(),
         member: member.clone(),
+        sealing: *recipient,
     };
-    let sealed = seal_store_key(key, recipient, path.as_str(), &prefix.encode()?)?;
+    let sealed = seal_store_key(key, &prefix.sealing, path.as_str(), &prefix.encode()?)?;
     Ok(prefix.encode_box(&sealed)?)
 }
 
@@ -95,8 +96,9 @@ pub(crate) fn circle_copy(
         audience: Audience::Circle(key.circle()),
         key: key.id(),
         member: member.clone(),
+        sealing: *recipient,
     };
-    let sealed = seal_circle_key(key, recipient, path.as_str(), &prefix.encode()?)?;
+    let sealed = seal_circle_key(key, &prefix.sealing, path.as_str(), &prefix.encode()?)?;
     Ok(prefix.encode_box(&sealed)?)
 }
 
@@ -142,14 +144,12 @@ pub(crate) fn seal(
     let mut needs = Vec::new();
     let mut need =
         |audience: Audience, key: KeyId, member: &MemberId, recipient: &SealingPublicKey| {
-            needs.push((
-                KeyCopyPrefix {
-                    audience,
-                    key,
-                    member: member.clone(),
-                },
-                *recipient,
-            ));
+            needs.push(KeyCopyPrefix {
+                audience,
+                key,
+                member: member.clone(),
+                sealing: *recipient,
+            });
         };
     match &entry.change {
         StoreChange::AddMember {
@@ -215,7 +215,8 @@ pub(crate) fn seal(
         }
         _ => (),
     }
-    for (prefix, recipient) in needs {
+    for prefix in needs {
+        // A copy to another of the member's sealing keys does not stand in.
         if observed.iter().any(|copy| copy.prefix == prefix) {
             tracing::debug!(?prefix, "entry prerequisite copy already observed");
             continue;
@@ -225,13 +226,13 @@ pub(crate) fn seal(
                 path,
                 ring.store_key(prefix.key)?,
                 &prefix.member,
-                &recipient,
+                &prefix.sealing,
             ),
             Audience::Circle(circle) => circle_copy(
                 path,
                 ring.circle_key(circle, prefix.key)?,
                 &prefix.member,
-                &recipient,
+                &prefix.sealing,
             ),
         })?;
     }
@@ -304,7 +305,9 @@ pub(crate) async fn read_store_key(
     for copy in read_copies(database, reads, limit, storage, store, &mut damages).await? {
         if copy.prefix.audience != Audience::Store
             || copy.prefix.key != key
-            || copy.prefix.member != member.member_id()
+            || !copy
+                .prefix
+                .addressed_to(&member.member_id(), &member.sealing_public_key())
         {
             continue;
         }

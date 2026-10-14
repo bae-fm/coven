@@ -1,7 +1,7 @@
 //! Key provenance: authorized received introductions and their agreed
 //! commitments (§11, Appendix C12).
 
-use coven_crypto::{MemberId, StoreKeyring};
+use coven_crypto::{MemberId, SealingPublicKey, StoreKeyring};
 use coven_database::StoreLog;
 use coven_format::{sealed_key::KeyCopyPrefix, store_log::StoreChange, value::EntryId};
 use coven_foundation::id_source::KeyId;
@@ -103,16 +103,17 @@ pub(crate) struct Opened {
     pub(crate) hash: [u8; 32],
 }
 
-/// Appendix C12 `acceptedCopy`: a copy addressed to `me` supplies its key only
-/// when the opened box names the prefix's key and its bytes match the one
-/// agreed commitment. Any other copy is refused by itself (§11).
+/// Appendix C12 `acceptedCopy`: a copy addressed to `me` at its sealing key
+/// supplies its key only when the opened box names the prefix's key and its
+/// bytes match the one agreed commitment. Any other copy is refused by itself (§11).
 pub(crate) fn accepts_copy(
     introductions: &[Introduction],
     prefix: &KeyCopyPrefix,
     me: &MemberId,
+    sealing: &SealingPublicKey,
     opened: &Opened,
 ) -> bool {
-    prefix.member == *me
+    prefix.addressed_to(me, sealing)
         && opened.audience == prefix.audience
         && opened.key == prefix.key
         && hash_for(introductions, &prefix.audience, prefix.key) == Some(opened.hash)

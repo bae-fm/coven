@@ -184,3 +184,45 @@ async fn an_absent_usable_store_key_stays_pending() {
         assert!(ben.custody.read().unwrap().is_none());
     }
 }
+
+#[tokio::test]
+async fn a_copy_to_another_sealing_key_of_this_member_is_skipped_unopened() {
+    let storage = storage();
+    let (ana, mut ben) = household(&storage).await;
+    let genuine = find_copy(
+        storage.as_ref(),
+        Audience::Store,
+        key(1),
+        &ben.member.member_id(),
+    )
+    .await
+    .unwrap();
+    storage.delete(&genuine.path).await.unwrap();
+    // Ben's id at a sealing key he does not hold, carrying the genuine key.
+    let mut seeds = ben.member.to_secret_bytes().as_bytes().to_vec();
+    seeds[37..69].fill(0x77);
+    let other = MemberKeys::from_secret_bytes(&seeds).unwrap();
+    assert_eq!(other.member_id(), ben.member.member_id());
+    let ring = ana.custody.read().unwrap().unwrap();
+    let bytes = keys::store_copy(
+        &genuine.path,
+        ring.store_key(key(1)).unwrap(),
+        &ben.member.member_id(),
+        &other.sealing_public_key(),
+    )
+    .unwrap();
+    storage.create(&genuine.path, &bytes).await.unwrap();
+    let error = ben.sync.unlock_storage(storage.clone()).await.unwrap_err();
+    let SyncError::Pending(record) = error else {
+        panic!("unlock must name the pending store key: {error:?}");
+    };
+    // Not a refusal: the copy names another credential, so Ben never opens it.
+    assert_eq!(
+        record.reason,
+        PendingReason::KeyUnavailable {
+            audience: Audience::Store,
+            key: key(1),
+        }
+    );
+    assert!(ben.custody.read().unwrap().is_none());
+}

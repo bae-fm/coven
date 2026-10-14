@@ -200,7 +200,9 @@ impl StoreLogSync {
         {
             if copy.prefix.audience != Audience::Store
                 || copy.prefix.key != key
-                || copy.prefix.member != member.member_id()
+                || !copy
+                    .prefix
+                    .addressed_to(&member.member_id(), &member.sealing_public_key())
             {
                 continue;
             }
@@ -342,7 +344,9 @@ impl StoreLogSync {
         {
             if copy.prefix.audience != *audience
                 || copy.prefix.key != key
-                || copy.prefix.member != member.member_id()
+                || !copy
+                    .prefix
+                    .addressed_to(&member.member_id(), &member.sealing_public_key())
             {
                 continue;
             }
@@ -432,7 +436,13 @@ fn check(
     member: &MemberKeys,
     opened: Opened,
 ) -> Result<(), Refusal> {
-    if accepts_copy(introductions, prefix, &member.member_id(), &opened) {
+    if accepts_copy(
+        introductions,
+        prefix,
+        &member.member_id(),
+        &member.sealing_public_key(),
+        &opened,
+    ) {
         Ok(())
     } else {
         Err(Refusal::WrongIdentity { cause: None })

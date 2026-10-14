@@ -52,10 +52,11 @@ async fn far_future_entry_waits_for_missing_or_damaged_sealed_keys() {
             audience: Audience::Store,
             key: claimed_key,
             member: a.member.member_id(),
+            sealing: a.member.sealing_public_key(),
         };
         let wrong = coven_crypto::seal_store_key(
             &StoreKey::generate(key(2)).unwrap(),
-            &a.member.sealing_public_key(),
+            &prefix.sealing,
             path.as_str(),
             &prefix.encode().unwrap(),
         )

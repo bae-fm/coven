@@ -409,8 +409,9 @@ fn lean_differential_introductions() {
 }
 
 /// Copies of every introduced identity (and one never introduced), addressed to
-/// `me` or another member, opening to nothing, the committed bytes, other bytes
-/// or another identity. The runner's hash is the identity on bytes.
+/// `me`, another member, or `me`'s id at another sealing key, opening to nothing,
+/// the committed bytes, other bytes or another identity. The runner's hash is the
+/// identity on bytes.
 fn copies(h: &History, me: u8) -> Vec<(KeyCopyPrefix, Option<Opened>)> {
     let log = landed_log(h, &vec![0; h.entries.len()]);
     let introductions = introductions(&log);
@@ -428,11 +429,12 @@ fn copies(h: &History, me: u8) -> Vec<(KeyCopyPrefix, Option<Opened>)> {
             .map(|i| i.key_hash)
             .collect();
         hashes.push([0xee; 32]);
-        for recipient in [me, me + 1] {
+        for (recipient, sealing) in [(me, me), (me + 1, me + 1), (me, me + 1)] {
             let prefix = KeyCopyPrefix {
                 audience: audience.clone(),
                 key,
                 member: history::member(recipient),
+                sealing: history::keys(sealing).sealing,
             };
             copies.push((prefix.clone(), None));
             for hash in &hashes {
@@ -478,8 +480,16 @@ fn lean_differential_accepted_copies() {
             (h, stored, copies)
         })
         .collect();
-    let member_number =
-        |id: &coven_crypto::MemberId| (0..8).find(|&i| history::member(i) == *id).unwrap() as u64;
+    // The model's recipient is the exact addressee; a member's other sealing key
+    // is a different addressee, numbered outside the history's members.
+    let recipient_number = |prefix: &KeyCopyPrefix| {
+        (0..8)
+            .find(|&i| {
+                let keys = history::keys(i);
+                prefix.addressed_to(&keys.signing, &keys.sealing)
+            })
+            .map_or(1000, u64::from)
+    };
     let key_json = |audience: &Audience, key: KeyId| serde_json::json!({"audience": audience_number(audience), "key": key_number(key)});
     let inputs: Vec<_> = cases
         .iter()
@@ -494,7 +504,7 @@ fn lean_differential_accepted_copies() {
                 .iter()
                 .map(|(prefix, opened)| {
                     let mut copy = key_json(&prefix.audience, prefix.key);
-                    copy["recipient"] = serde_json::json!(member_number(&prefix.member));
+                    copy["recipient"] = serde_json::json!(recipient_number(prefix));
                     copy["opened"] = opened.as_ref().map_or(serde_json::Value::Null, |o| {
                         let mut payload = key_json(&o.audience, o.key);
                         payload["bytes"] = serde_json::json!(o.hash);
@@ -531,6 +541,7 @@ fn lean_differential_accepted_copies() {
                                 &introductions,
                                 prefix,
                                 &history::member(me),
+                                &history::keys(me).sealing,
                                 opened,
                             ) =>
                         {

@@ -244,7 +244,7 @@ impl JoiningIdentity {
             let prefix = sealed.prefix();
             if prefix.audience == coven_merge::Audience::Store
                 && prefix.key == self.initial_key
-                && prefix.member == self.keys.member_id()
+                && prefix.addressed_to(&self.keys.member_id(), &self.keys.sealing_public_key())
             {
                 match sealed.open_store_key(&self.keys, read.metadata.path.as_str()) {
                     Ok(key) => return Ok(Some(key)),

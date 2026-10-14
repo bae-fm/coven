@@ -2,7 +2,7 @@
 
 use crate::wire::{Decoder, Encoder, Wire};
 use crate::Error;
-use coven_crypto::{CircleKey, CryptoError, MemberId, MemberKeys, StoreKey};
+use coven_crypto::{CircleKey, CryptoError, MemberId, MemberKeys, SealingPublicKey, StoreKey};
 use coven_foundation::id_source::KeyId;
 use coven_merge::Audience;
 
@@ -16,6 +16,9 @@ pub struct KeyCopyPrefix {
     pub key: KeyId,
     /// The member to whom this copy is addressed.
     pub member: MemberId,
+    /// The member's exact sealing key the box is sealed to. A copy to another
+    /// of the member's credentials is a different copy.
+    pub sealing: SealingPublicKey,
 }
 
 impl KeyCopyPrefix {
@@ -27,7 +30,14 @@ impl KeyCopyPrefix {
         self.audience.put(&mut out)?;
         self.key.put(&mut out)?;
         self.member.put(&mut out)?;
+        self.sealing.put(&mut out)?;
         Ok(out.bytes)
+    }
+
+    /// Whether this copy names exactly this recipient: its member id and the
+    /// sealing key it is sealed to. Matching needs no box opening (§12.2).
+    pub fn addressed_to(&self, member: &MemberId, sealing: &SealingPublicKey) -> bool {
+        self.member == *member && self.sealing == *sealing
     }
 
     /// Frame the box produced by crypto with this prefix. Its original random
@@ -44,8 +54,8 @@ impl KeyCopyPrefix {
 
     fn length(&self) -> usize {
         match self.audience {
-            Audience::Store => 52,
-            Audience::Circle(_) => 68,
+            Audience::Store => 84,
+            Audience::Circle(_) => 100,
         }
     }
 
@@ -75,6 +85,7 @@ impl<'a> SealedKey<'a> {
             audience: Audience::get(&mut input)?,
             key: KeyId::get(&mut input)?,
             member: MemberId::get(&mut input)?,
+            sealing: SealingPublicKey::get(&mut input)?,
         };
         input.take(prefix.box_length())?;
         input.finish()?;
@@ -91,7 +102,8 @@ impl<'a> SealedKey<'a> {
         self.bytes.to_vec()
     }
 
-    /// Open a tentative store key and require the addressed member and payload identity.
+    /// Open a tentative store key and require the addressed member, its sealing key
+    /// and the payload identity.
     /// Before accepting it, check its hash against the authorized introduction with
     /// [`StoreKey::check_hash`]. A candidate may open its own introduction for validation.
     pub fn open_store_key(&self, member: &MemberKeys, path: &str) -> Result<StoreKey, CryptoError> {
@@ -107,7 +119,8 @@ impl<'a> SealedKey<'a> {
         Ok(key)
     }
 
-    /// Open a tentative circle key and require the addressed member and payload identity.
+    /// Open a tentative circle key and require the addressed member, its sealing key
+    /// and the payload identity.
     /// Before accepting it, check its hash against the authorized introduction with
     /// [`CircleKey::check_hash`]. Decryption alone does not authorize a key.
     pub fn open_circle_key(
@@ -128,7 +141,10 @@ impl<'a> SealedKey<'a> {
     }
 
     fn check_recipient(&self, member: &MemberKeys) -> Result<(), CryptoError> {
-        if self.prefix.member != member.member_id() {
+        if !self
+            .prefix
+            .addressed_to(&member.member_id(), &member.sealing_public_key())
+        {
             return Err(CryptoError::Authentication);
         }
         Ok(())

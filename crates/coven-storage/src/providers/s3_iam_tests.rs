@@ -32,6 +32,11 @@ impl Clock for ProbeClock {
         SystemTime::UNIX_EPOCH + Duration::from_secs(1_791_936_000)
     }
 
+    // Only the recorded sleeps pass.
+    fn elapsed(&self) -> Duration {
+        self.sleeps.lock().unwrap().iter().sum()
+    }
+
     fn sleep(
         &self,
         duration: Duration,
