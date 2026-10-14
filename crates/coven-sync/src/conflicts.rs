@@ -1,9 +1,8 @@
 //! §9 and Appendix C11's contradictions, with the replay's preference order.
 
-use coven_crypto::MemberId;
 use coven_database::StoreLogCheck;
 use coven_format::store_log::{MemberRole, StoreChange, StoreLogEntry};
-use coven_foundation::id_source::{CircleId, DeviceId};
+use coven_foundation::id_source::{CircleId, DeviceId, MemberId};
 use coven_merge::Audience;
 
 use crate::replay::had_read;
@@ -43,7 +42,7 @@ pub(crate) fn before(
 
 fn membership_state(change: &StoreChange) -> Option<&MemberId> {
     match change {
-        StoreChange::AddMember { keys, .. } => Some(&keys.signing),
+        StoreChange::AddMember { member, .. } => Some(member),
         StoreChange::RemoveMember { member } | StoreChange::ChangeRole { member, .. } => {
             Some(member)
         }
@@ -127,18 +126,34 @@ fn same_meaning(
                 access: y,
             },
         ) => m == n && x.same_credential(y),
+        // Two additions of one id with different keys contradict: an addition
+        // never changes an active member's keys (§9).
         (
             AddMember {
-                keys: m, role: r, ..
+                member: m,
+                keys: x,
+                role: r,
+                ..
             },
             AddMember {
-                keys: n, role: s, ..
+                member: n,
+                keys: y,
+                role: s,
+                ..
             },
-        ) => m.signing == n.signing && r == s,
-        (AddMember { keys, role: r, .. }, ChangeRole { member, role: s })
-        | (ChangeRole { member, role: s }, AddMember { keys, role: r, .. }) => {
-            keys.signing == *member && r == s
-        }
+        ) => m == n && x == y && r == s,
+        (
+            AddMember {
+                member: m, role: r, ..
+            },
+            ChangeRole { member, role: s },
+        )
+        | (
+            ChangeRole { member, role: s },
+            AddMember {
+                member: m, role: r, ..
+            },
+        ) => m == member && r == s,
         (RemoveMember { member: m }, RemoveMember { member: n }) => m == n,
         (ChangeRole { member: m, role: r }, ChangeRole { member: n, role: s }) => m == n && r == s,
         (AddDevice { device: d, .. }, AddDevice { device: e, .. }) => {

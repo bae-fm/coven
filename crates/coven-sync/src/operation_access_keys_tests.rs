@@ -29,7 +29,7 @@ async fn replace(
 ) -> Result<AccessKeyReplacement, SyncError> {
     let id = begin(
         d,
-        crate::operations::Command::ReplaceAccessKey(target.clone(), Arc::new(admin.clone())),
+        crate::operations::Command::ReplaceAccessKey(*target, Arc::new(admin.clone())),
     )
     .await;
     match finish(d, id).await? {
@@ -74,7 +74,7 @@ async fn minted_user(a: &Device, target: &MemberId) -> String {
 async fn an_admin_makes_delivers_and_records_a_members_new_key_then_deletes_the_old() {
     let (storage, mut a, mut b) = household().await;
     let admin = MemoryKeyAdmin::default();
-    let ben = b.member.member_id();
+    let ben = b.member.member();
     let first = replace(&mut a, &ben, &admin).await.unwrap();
     assert_eq!(first.key.credentials.access_key_id, "minted-1");
     // Ben's previous key was made in the console: only the console deletes it.
@@ -142,7 +142,7 @@ async fn a_member_cannot_replace_another_members_key() {
     assert!(matches!(
         b.sync
             .begin_operation_call(crate::operations::Command::ReplaceAccessKey(
-                a.member.member_id(),
+                a.member.member(),
                 Arc::new(admin.clone()),
             ))
             .await,
@@ -150,7 +150,7 @@ async fn a_member_cannot_replace_another_members_key() {
     ));
     assert!(admin.calls().is_empty());
     // A member may replace their own key with admin access.
-    let own = b.member.member_id();
+    let own = b.member.member();
     let replaced = replace(&mut b, &own, &admin).await.unwrap();
     assert_eq!(replaced.key.credentials.access_key_id, "minted-1");
     a.sync().await;
@@ -167,11 +167,11 @@ async fn a_member_cannot_replace_another_members_key() {
 async fn a_restart_needs_admin_access_again_and_a_failed_deletion_keeps_the_record() {
     let (_storage, mut a, b) = household().await;
     let admin = MemoryKeyAdmin::default();
-    let ben = b.member.member_id();
+    let ben = b.member.member();
     let first = replace(&mut a, &ben, &admin).await.unwrap();
     let id = begin(
         &mut a,
-        crate::operations::Command::ReplaceAccessKey(ben.clone(), Arc::new(admin.clone())),
+        crate::operations::Command::ReplaceAccessKey(ben, Arc::new(admin.clone())),
     )
     .await;
     a.restart(a.storage.clone()).await;
@@ -208,10 +208,10 @@ async fn a_replacement_lost_to_removal_is_reported_and_its_key_stays_pending() {
     c.sync.load_new_device("Carol", None).await.unwrap();
     a.sync().await;
     let admin = MemoryKeyAdmin::default();
-    let ben = b.member.member_id();
+    let ben = b.member.member();
     let id = begin(
         &mut a,
-        crate::operations::Command::ReplaceAccessKey(ben.clone(), Arc::new(admin.clone())),
+        crate::operations::Command::ReplaceAccessKey(ben, Arc::new(admin.clone())),
     )
     .await;
     // Make, check and deliver the key, and reserve the entry.
@@ -219,9 +219,7 @@ async fn a_replacement_lost_to_removal_is_reported_and_its_key_stays_pending() {
         assert!(matches!(a.step(id).await.unwrap(), Progress::Advanced));
     }
     c.sync
-        .make_and_upload_entry(StoreChange::RemoveMember {
-            member: ben.clone(),
-        })
+        .make_and_upload_entry(StoreChange::RemoveMember { member: ben })
         .await
         .unwrap();
     assert!(matches!(
@@ -260,12 +258,12 @@ async fn discard(d: &mut Device, id: OperationId) -> Result<Begun, SyncError> {
 #[tokio::test]
 async fn discarding_a_replacement_leaves_no_key_unrecorded() {
     let (_storage, mut a, b) = household().await;
-    let ben = b.member.member_id();
+    let ben = b.member.member();
     // A made key becomes pending deletion as the row goes.
     let admin = MemoryKeyAdmin::default();
     let id = begin(
         &mut a,
-        crate::operations::Command::ReplaceAccessKey(ben.clone(), Arc::new(admin.clone())),
+        crate::operations::Command::ReplaceAccessKey(ben, Arc::new(admin.clone())),
     )
     .await;
     assert!(matches!(a.step(id).await.unwrap(), Progress::Advanced));
@@ -280,7 +278,7 @@ async fn discarding_a_replacement_leaves_no_key_unrecorded() {
     let admin = MemoryKeyAdmin::default();
     let id = begin(
         &mut a,
-        crate::operations::Command::ReplaceAccessKey(ben.clone(), Arc::new(admin.clone())),
+        crate::operations::Command::ReplaceAccessKey(ben, Arc::new(admin.clone())),
     )
     .await;
     admin.mint(&scope(&a, id).await).await.unwrap();
@@ -291,7 +289,7 @@ async fn discarding_a_replacement_leaves_no_key_unrecorded() {
     let admin = MemoryKeyAdmin::default();
     let id = begin(
         &mut a,
-        crate::operations::Command::ReplaceAccessKey(ben.clone(), Arc::new(admin.clone())),
+        crate::operations::Command::ReplaceAccessKey(ben, Arc::new(admin.clone())),
     )
     .await;
     admin.mint(&scope(&a, id).await).await.unwrap();
@@ -335,10 +333,10 @@ async fn an_occupied_delivery_counts_only_with_its_own_complete_bytes() {
     // A lost reply stored the fixed bytes: the retry counts them.
     let (storage, mut a, b) = household().await;
     let admin = MemoryKeyAdmin::default();
-    let ben = b.member.member_id();
+    let ben = b.member.member();
     let id = begin(
         &mut a,
-        crate::operations::Command::ReplaceAccessKey(ben.clone(), Arc::new(admin.clone())),
+        crate::operations::Command::ReplaceAccessKey(ben, Arc::new(admin.clone())),
     )
     .await;
     let (path, bytes) = sealed_delivery(&mut a, id, &ben).await;
@@ -350,7 +348,7 @@ async fn an_occupied_delivery_counts_only_with_its_own_complete_bytes() {
     // stays pending; a completed one stops this copy before the entry.
     let id = begin(
         &mut a,
-        crate::operations::Command::ReplaceAccessKey(ben.clone(), Arc::new(admin.clone())),
+        crate::operations::Command::ReplaceAccessKey(ben, Arc::new(admin.clone())),
     )
     .await;
     let (path, _) = sealed_delivery(&mut a, id, &ben).await;

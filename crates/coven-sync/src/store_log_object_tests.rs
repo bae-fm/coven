@@ -14,7 +14,12 @@ fn entry_sealing_reproduces_the_fixture_and_binds_plaintext_and_prefix() {
     let member = member(0x33);
     let envelope = SingleChunkObject::decode(&bytes).unwrap();
     let path = ObjectPath::store_log(store, DeviceId(1), 1.try_into().unwrap());
-    let entry = object::open(&envelope, &path, &key).unwrap();
+    let opened = object::open(&envelope, &path, &key).unwrap();
+    // Creation verifies with the initial pair it supplies, without a view.
+    opened
+        .verify(&coven_database::StoreLogState::default())
+        .unwrap();
+    let entry = opened.entry;
     let seal = |entry: &StoreLogEntry, key: &StoreKey| {
         object::seal(
             store,
@@ -39,7 +44,7 @@ fn entry_sealing_reproduces_the_fixture_and_binds_plaintext_and_prefix() {
         let changed = seal(entry, key);
         let other = SingleChunkObject::decode(&changed).unwrap();
         assert_ne!(envelope.chunk()[..24], other.chunk()[..24]);
-        assert_eq!(object::open(&other, &path, key).unwrap(), *entry);
+        assert_eq!(object::open(&other, &path, key).unwrap().entry, *entry);
         assert_eq!(changed, seal(entry, key));
     }
 }
@@ -157,7 +162,7 @@ async fn another_member_cannot_claim_an_empty_registered_store_log_folder() {
         let log = a.log().await;
         assert_eq!(
             log.replay.state.devices[&DeviceId(70)].member,
-            b.member.member_id()
+            b.member.member()
         );
         assert!(log
             .entries
@@ -169,7 +174,7 @@ async fn another_member_cannot_claim_an_empty_registered_store_log_folder() {
                 number: 1,
             },
             timestamp: coven_merge::Timestamp::new(2000, 0, DeviceId(70)).unwrap(),
-            author: a.member.member_id(),
+            author: a.member.member(),
             had_read: log.positions(),
             change: StoreChange::AddDevice {
                 device: added_device,
@@ -231,7 +236,7 @@ async fn a_new_device_registers_itself_before_publishing_other_entries() {
     assert_eq!(log.replay.entries[&first], EntryOutcome::Kept);
     assert_eq!(
         log.replay.state.devices[&DeviceId(2)].member,
-        b.member.member_id()
+        b.member.member()
     );
     let second = b.sync.make_and_upload_entry(unrelated).await.unwrap();
     assert_eq!(second, EntryId { number: 2, ..first });
@@ -282,7 +287,7 @@ async fn a_replacement_device_registers_itself_in_its_first_entry() {
     assert_eq!(log.replay.entries[&first], EntryOutcome::Kept);
     assert_eq!(
         log.replay.state.devices[&DeviceId(2)].member,
-        b.member.member_id()
+        b.member.member()
     );
     assert_eq!(log.entries.last().unwrap().entry.change, registration);
     assert_eq!(log, b.log().await);
@@ -329,75 +334,14 @@ async fn queued_creation_rejects_a_copy_with_the_right_identity_and_wrong_materi
     upload.sealing.keys[0].bytes = keys::store_copy(
         &upload.sealing.keys[0].path(store(1)),
         &wrong,
-        &a.member.member_id(),
-        &a.member.sealing_public_key(),
+        &a.member.member(),
+        &a.member.keys().public_keys().sealing,
     )
     .unwrap();
     assert!(
         matches!(object::seal_upload(store(1), &upload, None, &a.member),
         Err(SyncError::Key(coven_crypto::MaterialError::StoreKeyConflict(id))) if id == key(1))
     );
-}
-
-#[tokio::test]
-async fn creation_and_later_entries_use_the_same_authenticated_envelope() {
-    let storage = storage();
-    let mut a = device(storage.clone(), 1, member(1), store(1)).await;
-    a.create(key(1)).await;
-    a.add(&member(2), MemberRole::Member).await;
-    let ring = a.custody.read().unwrap().unwrap();
-    let key = ring.store_key(key(1)).unwrap();
-    for applied in a.log().await.entries {
-        let entry = applied.entry;
-        let path = object::path(store(1), entry.position);
-        let bytes = storage.read(&path).await.unwrap();
-        let envelope = SingleChunkObject::decode(&bytes).unwrap();
-        assert_eq!(envelope.prefix().encode().unwrap().len(), 19);
-        assert_eq!(object::open(&envelope, &path, key).unwrap(), entry);
-        assert_eq!(
-            object::seal(
-                store(1),
-                &entry,
-                coven_format::FormatVersion::CURRENT,
-                key,
-                &a.member
-            )
-            .unwrap(),
-            bytes
-        );
-        let other_path = ObjectPath::store_log(store(1), DeviceId(99), 1.try_into().unwrap());
-        assert!(matches!(
-            object::open(&envelope, &other_path, key),
-            Err(Refusal::Decryption { .. })
-        ));
-        let wrong_key = StoreKey::generate(key.id()).unwrap();
-        assert!(matches!(
-            object::open(&envelope, &path, &wrong_key),
-            Err(Refusal::Decryption { .. })
-        ));
-        let forged = object::seal(
-            store(1),
-            &entry,
-            coven_format::FormatVersion::CURRENT,
-            key,
-            &member(2),
-        )
-        .unwrap();
-        assert!(matches!(
-            object::open(&SingleChunkObject::decode(&forged).unwrap(), &path, key),
-            Err(Refusal::Signature { .. })
-        ));
-        let mut changed = bytes.clone();
-        changed[3] ^= 1;
-        assert!(object::open(&SingleChunkObject::decode(&changed).unwrap(), &path, key).is_err());
-        let last = changed.len() - 1;
-        changed = bytes;
-        changed[last] ^= 1;
-        assert!(matches!(
-            object::open(&SingleChunkObject::decode(&changed).unwrap(), &path, key),
-            Err(Refusal::Signature { .. })
-        ));
-    }
 }
 
 #[tokio::test]
@@ -457,8 +401,16 @@ async fn creation_identity_is_checked_in_the_authenticated_plaintext() {
         match defect {
             "number" => plain[15..23].copy_from_slice(&2u64.to_be_bytes()),
             "timestamp" => plain[31..39].copy_from_slice(&2u64.to_be_bytes()),
-            // The frame has its author's key once before its create-store payload.
-            "admin" => plain[39..71].copy_from_slice(&member(2).member_id().to_bytes()),
+            // Another signing key in place of the supplied initial pair's.
+            "admin" => {
+                let ours = *a.member.keys().public_keys().signing.as_bytes();
+                let at = plain
+                    .windows(32)
+                    .position(|window| window == ours)
+                    .expect("creation supplies its admin's signing key");
+                plain[at..at + 32]
+                    .copy_from_slice(member(2).keys().public_keys().signing.as_bytes());
+            }
             "path" => {
                 stored_path = ObjectPath::store_log(store(1), DeviceId(2), 1.try_into().unwrap())
             }
@@ -480,6 +432,7 @@ async fn creation_identity_is_checked_in_the_authenticated_plaintext() {
         hash.update(&bytes);
         bytes.extend_from_slice(
             a.member
+                .keys()
                 .sign_object(stored_path.as_str(), &hash.finish())
                 .as_bytes(),
         );
@@ -488,13 +441,21 @@ async fn creation_identity_is_checked_in_the_authenticated_plaintext() {
             &stored_path,
             key,
         );
-        if matches!(defect, "path" | "timestamp" | "store") {
-            assert!(matches!(opened, Err(Refusal::WrongIdentity { .. })));
-        } else {
-            assert!(
+        match defect {
+            "path" | "timestamp" | "store" => {
+                assert!(matches!(opened, Err(Refusal::WrongIdentity { .. })))
+            }
+            // Creation's own supplied pair must verify it.
+            "admin" => assert!(matches!(
+                opened
+                    .unwrap()
+                    .verify(&coven_database::StoreLogState::default()),
+                Err(Refusal::Signature { .. })
+            )),
+            _ => assert!(
                 matches!(opened, Err(Refusal::Parse { .. })),
                 "{defect}: {opened:?}"
-            );
+            ),
         }
     }
 }
@@ -636,6 +597,7 @@ async fn damaged_entries_block_only_their_device_and_retain_each_cause() {
                 hash.update(&bytes);
                 bytes.extend_from_slice(
                     a.member
+                        .keys()
                         .sign_object(path.as_str(), &hash.finish())
                         .as_bytes(),
                 );
@@ -702,7 +664,7 @@ async fn damaged_entries_block_only_their_device_and_retain_each_cause() {
 
 #[tokio::test]
 async fn invalid_causal_past_and_timestamps_are_damaged() {
-    for defect in ["closure", "timestamp", "own position", "author"] {
+    for defect in ["closure", "timestamp", "own position", "author", "signer"] {
         let storage = storage();
         let mut a = device(storage.clone(), 1, member(1), store(1)).await;
         let mut b = device(storage.clone(), 2, member(1), store(1)).await;
@@ -735,7 +697,7 @@ async fn invalid_causal_past_and_timestamps_are_damaged() {
                 number: 1,
             },
             timestamp: coven_merge::Timestamp::new(2000, 0, DeviceId(70)).unwrap(),
-            author: a.member.member_id(),
+            author: a.member.member(),
             had_read: coven_format::value::EntryPositions(vec![creation, indirect]),
             change: StoreChange::AddDevice {
                 device: DeviceId(40),
@@ -761,23 +723,29 @@ async fn invalid_causal_past_and_timestamps_are_damaged() {
                     ..prior
                 }];
             }
-            "author" => {
+            "author" | "signer" => {
                 bad.position = EntryId {
                     number: prior.number + 1,
                     ..prior
                 };
                 bad.timestamp = coven_merge::Timestamp::new(2000, 0, prior.device).unwrap();
-                bad.author = member(2).member_id();
+                if defect == "author" {
+                    bad.author = member(2).member();
+                }
                 bad.had_read = a.log().await.positions();
                 bad.had_read.0.retain(|id| id.device != bad.position.device);
             }
             _ => unreachable!(),
         }
         let ring = a.custody.read().unwrap().unwrap();
-        let signer = if defect == "author" {
-            member(2)
-        } else {
-            a.member.clone()
+        let signer = match defect {
+            "author" => member(2),
+            // The device owner's own id with a key its recorded view never
+            // bound to it: a key change happens only by a kept replacement.
+            "signer" => {
+                coven_crypto::MemberIdentity::new(a.member.member(), member(2).keys().clone())
+            }
+            _ => a.member.clone(),
         };
         let path = object::path(store(1), bad.position);
         let key = ring.store_key(key(1)).unwrap();
@@ -798,8 +766,8 @@ async fn invalid_causal_past_and_timestamps_are_damaged() {
                 .open_object_chunk(path.as_str(), &aad, 0, 0, sealed.chunk())
                 .unwrap();
             // D6: frame prefix, entry id, timestamp, author, then the had-read count.
-            assert_eq!(&plain[71..75], &1u32.to_be_bytes());
-            plain[75..83].copy_from_slice(&bad.position.device.0.to_be_bytes());
+            assert_eq!(&plain[55..59], &1u32.to_be_bytes());
+            plain[59..67].copy_from_slice(&bad.position.device.0.to_be_bytes());
             let chunk = key
                 .derive()
                 .seal_object_chunk(path.as_str(), &aad, 0, 0, &plain)
@@ -807,7 +775,12 @@ async fn invalid_causal_past_and_timestamps_are_damaged() {
             bytes = prefix.encode_chunk(&chunk).unwrap();
             let mut hash = coven_crypto::ObjectHasher::new();
             hash.update(&bytes);
-            bytes.extend_from_slice(signer.sign_object(path.as_str(), &hash.finish()).as_bytes());
+            bytes.extend_from_slice(
+                signer
+                    .keys()
+                    .sign_object(path.as_str(), &hash.finish())
+                    .as_bytes(),
+            );
         }
         storage.create(&path, &bytes).await.unwrap();
         let c = device(storage.clone(), 3, member(1), store(1)).await;
@@ -824,6 +797,7 @@ async fn invalid_causal_past_and_timestamps_are_damaged() {
             match defect {
                 "closure" | "timestamp" => 5,
                 "author" => 6,
+                "signer" => 1,
                 "own position" => 2,
                 _ => unreachable!(),
             },

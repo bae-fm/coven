@@ -4,11 +4,11 @@ use super::{keys, object, StoreLogSync};
 use crate::{StorageCommit, SyncError};
 use coven_crypto::{
     custody::{InMemoryCustody, KeySession},
-    MemberKeys, StoreKey, StoreKeyring,
+    MemberIdentity, StoreKey, StoreKeyring,
 };
 use coven_format::{
     sealed_single::SingleChunkObject,
-    store_log::{MemberPublicKeys, StoreChange, StoreLogEntry},
+    store_log::{StoreChange, StoreLogEntry},
 };
 use coven_merge::Audience;
 use coven_storage::{ObjectPath, Storage};
@@ -28,7 +28,7 @@ impl StoreLogSync {
             // objects and refused key copies stay in their pending records.
             self.sync_store_log().await?;
             let local = self.database.local_store_log().await?;
-            let member = self.operation_member()?.member_id();
+            let member = self.operation_member()?.member();
             let store_copy = |record: &crate::PendingRecord| {
                 record.reported_by == local.device
                     && matches!(&record.subject, crate::PendingSubject::KeyCopy {
@@ -141,13 +141,12 @@ impl StoreLogSync {
                 let key = coven_crypto::StoreKey::generate(coven_foundation::id_source::KeyId(
                     self.ids.new_id(),
                 ))?;
+                // The author header names the first admin's stable id; the
+                // payload supplies that admin's initial pair (D6).
                 let change = StoreChange::CreateStore {
                     store: local.store,
                     name: settings.name,
-                    admin: MemberPublicKeys {
-                        signing: member.member_id(),
-                        sealing: member.sealing_public_key(),
-                    },
+                    admin: member.keys().public_keys(),
                     key: key.id(),
                     key_hash: key.hash(),
                     access: access.clone(),
@@ -157,7 +156,7 @@ impl StoreLogSync {
                 let ring = StoreKeyring::new(key);
                 // Creation seals with its own fresh key; no copy can expose it yet.
                 self.database
-                    .prepare_store_log(member.member_id(), change, move |log, entry, copies| {
+                    .prepare_store_log(member.member(), change, move |log, entry, copies| {
                         keys::seal(copies, log, entry, Some(&ring), &author, &[])
                     })
                     .await?;
@@ -273,7 +272,7 @@ impl StoreLogSync {
                 .replay
                 .state
                 .members
-                .get(&member.member_id())
+                .get(&member.member())
                 .ok_or(SyncError::Rejected(coven_database::DropReason::NotAllowed))?;
             if current.removed {
                 return Err(SyncError::Removed);
@@ -281,7 +280,7 @@ impl StoreLogSync {
             creation = None;
             if !current.access.same_credential(&access) {
                 let change = StoreChange::SetAccess {
-                    member: member.member_id(),
+                    member: member.member(),
                     access,
                 };
                 match &local.upload {
@@ -299,7 +298,7 @@ impl StoreLogSync {
                         let observed = self.send.observation()?;
                         self.database
                             .prepare_store_log(
-                                member.member_id(),
+                                member.member(),
                                 change,
                                 move |log, entry, copies| {
                                     keys::seal(copies, log, entry, Some(&held), &author, &observed)
@@ -403,7 +402,7 @@ async fn read_setup_entry(
     limit: std::num::NonZeroUsize,
     storage: &dyn Storage,
     path: &ObjectPath,
-    member: &MemberKeys,
+    member: &MemberIdentity,
 ) -> Result<(StoreLogEntry, StoreKey), SyncError> {
     let bytes = storage.read(path).await?;
     let envelope = SingleChunkObject::decode(&bytes)?;
@@ -425,10 +424,16 @@ async fn read_setup_entry(
         member,
     )
     .await?;
-    let entry = object::open(&envelope, path, &key).map_err(|failure| crate::DamagedObject {
-        path: path.as_str().into(),
-        failure,
-    })?;
+    // The setup path names the creation, which its supplied pair verifies.
+    let entry = object::open(&envelope, path, &key)
+        .and_then(|opened| {
+            opened.verify(&coven_database::StoreLogState::default())?;
+            Ok(opened.entry)
+        })
+        .map_err(|failure| crate::DamagedObject {
+            path: path.as_str().into(),
+            failure,
+        })?;
     if let StoreChange::CreateStore {
         key: introduced,
         key_hash,

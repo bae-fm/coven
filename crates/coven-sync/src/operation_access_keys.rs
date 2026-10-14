@@ -12,13 +12,13 @@ use crate::{
     operations::{Begun, Output, Progress},
     *,
 };
-use coven_crypto::MemberId;
 use coven_database::{LocalStoreLog, OperationRecord};
 use coven_format::{
     access_key_delivery::{self, DeliveredKey},
     store_log::StoreChange,
     MemberAccess, S3Principal,
 };
+use coven_foundation::id_source::MemberId;
 use coven_storage::{AccessKeyAdmin, MintScope, ObjectPath, ObjectPrefix, S3MemberKey};
 use std::sync::Arc;
 
@@ -33,9 +33,7 @@ impl StoreLogSync {
     ) -> Result<Begun, SyncError> {
         let state = &local.log.replay.state;
         let current = crate::effects::member(state, &member).ok_or(SyncError::Rejected(
-            coven_database::DropReason::TargetGone(coven_database::EntryTarget::Member(
-                member.clone(),
-            )),
+            coven_database::DropReason::TargetGone(coven_database::EntryTarget::Member(member)),
         ))?;
         if !matches!(current.access, MemberAccess::S3AccessKey { .. }) {
             return Err(coven_storage::StorageFailure::InvalidConfiguration
@@ -47,7 +45,7 @@ impl StoreLogSync {
             state,
             me,
             &StoreChange::SetAccess {
-                member: member.clone(),
+                member,
                 access: MemberAccess::S3AccessKey {
                     access_key_id: String::new(),
                     principal: S3Principal::Console,
@@ -56,7 +54,7 @@ impl StoreLogSync {
         )?;
         let attempt = self.ids.new_id();
         let data = Data::ReplaceAccessKey(ReplaceKeyWork {
-            member: member.to_string(),
+            member,
             attempt,
             mint: MintWork::new(MintScope::new(local.store, &member.to_string(), attempt)),
             delivery: None,
@@ -107,15 +105,16 @@ impl StoreLogSync {
                 }
             };
         }
-        let member: MemberId = work.member.parse()?;
+        let member = work.member;
         let path = ObjectPath::access_key(self.directory.id(), &member, work.attempt);
         let Some(bytes) = &work.delivery else {
             // Seal once; retries resend these exact bytes.
             let local = self.database.local_store_log().await?;
             let sealing = crate::effects::member(&local.log.replay.state, &member)
                 .ok_or(SyncError::Rejected(coven_database::DropReason::TargetGone(
-                    coven_database::EntryTarget::Member(member.clone()),
+                    coven_database::EntryTarget::Member(member),
                 )))?
+                .keys
                 .sealing;
             let key = minted(work)?;
             let delivered = DeliveredKey {
@@ -159,7 +158,7 @@ impl StoreLogSync {
     pub(super) fn replacement_change(work: &ReplaceKeyWork) -> Result<StoreChange, SyncError> {
         let key = minted(work)?;
         Ok(StoreChange::SetAccess {
-            member: work.member.parse()?,
+            member: work.member,
             access: MemberAccess::S3AccessKey {
                 access_key_id: key.credentials.access_key_id.clone(),
                 principal: key.principal.clone(),
@@ -184,7 +183,7 @@ impl StoreLogSync {
         let local = self.database.local_store_log().await?;
         let positions = crate::replay::author_positions(&entry);
         let view = crate::replay::at(&local.log, &positions).state;
-        let member: MemberId = work.member.parse()?;
+        let member = work.member;
         let old = crate::effects::member(&view, &member)
             .map(|member| member.access.clone())
             .ok_or(coven_database::DbError::DamagedDatabase)?;
@@ -243,8 +242,8 @@ impl StoreLogSync {
                 access_key_id: key.credentials.access_key_id.clone(),
                 principal: key.principal.clone(),
             };
-            let deletion = crate::access_keys::deletion(&made, Some(work.member.parse()?))
-                .expect("an S3 key")?;
+            let deletion =
+                crate::access_keys::deletion(&made, Some(work.member)).expect("an S3 key")?;
             self.database
                 .finish_operation_with_access_keys::<PendingRecord>(record.id, vec![deletion])
                 .await?;
@@ -345,7 +344,7 @@ impl StoreLogSync {
         };
         let me = self.operation_member()?;
         let local = self.database.local_store_log().await?;
-        let Some(current) = crate::effects::member(&local.log.replay.state, &me.member_id()) else {
+        let Some(current) = crate::effects::member(&local.log.replay.state, &me.member()) else {
             return Ok(None);
         };
         let MemberAccess::S3AccessKey { access_key_id, .. } = &current.access else {
@@ -370,16 +369,14 @@ impl StoreLogSync {
                         MemberAccess::S3AccessKey {
                             access_key_id: id, ..
                         },
-                } if *member == me.member_id() && id == access_key_id => {
-                    Some(entry.entry.author.clone())
-                }
+                } if *member == me.member() && id == access_key_id => Some(entry.entry.author),
                 _ => None,
             })
             .collect();
         if recorders.is_empty() {
             return Ok(None);
         }
-        let prefix = ObjectPrefix::access_keys(self.directory.id(), &me.member_id());
+        let prefix = ObjectPrefix::access_keys(self.directory.id(), &me.member());
         for object in storage.list(&prefix).await? {
             let bytes = storage.read(&object.path).await?;
             let Ok(routing) = access_key_delivery::routing(&bytes) else {
@@ -388,7 +385,13 @@ impl StoreLogSync {
             if !recorders.contains(&routing.author) {
                 continue;
             }
-            let Ok(key) = access_key_delivery::open(&me, object.path.as_str(), &bytes) else {
+            // The recorder's current signing key verifies the delivery (D9).
+            let Some(author) = local.log.replay.state.members.get(&routing.author) else {
+                continue;
+            };
+            let Ok(key) =
+                access_key_delivery::open(&me, &author.keys.signing, object.path.as_str(), &bytes)
+            else {
                 continue;
             };
             if key.access_key_id == *access_key_id {

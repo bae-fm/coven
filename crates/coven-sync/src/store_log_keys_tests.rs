@@ -12,7 +12,7 @@ async fn far_future_entry_waits_for_missing_or_damaged_sealed_keys() {
         storage.as_ref(),
         Audience::Store,
         key(1),
-        &a.member.member_id(),
+        &a.member.member(),
     )
     .await;
     let original = storage.read(&path).await.unwrap();
@@ -32,7 +32,8 @@ async fn far_future_entry_waits_for_missing_or_damaged_sealed_keys() {
     let store_copy = crate::PendingSubject::KeyCopy {
         audience: Audience::Store,
         key: key(1),
-        member: b.member.member_id(),
+        member: b.member.member(),
+        sealing: b.member.keys().public_keys().sealing,
     };
     let copy_reason = |records: Vec<crate::PendingRecord>| {
         records
@@ -51,8 +52,8 @@ async fn far_future_entry_waits_for_missing_or_damaged_sealed_keys() {
         let prefix = coven_format::sealed_key::KeyCopyPrefix {
             audience: Audience::Store,
             key: claimed_key,
-            member: a.member.member_id(),
-            sealing: a.member.sealing_public_key(),
+            member: a.member.member(),
+            sealing: a.member.keys().public_keys().sealing,
         };
         let wrong = coven_crypto::seal_store_key(
             &StoreKey::generate(key(2)).unwrap(),
@@ -77,8 +78,8 @@ async fn far_future_entry_waits_for_missing_or_damaged_sealed_keys() {
     let valid = crate::store_log_keys::store_copy(
         &next(3),
         ring.store_key(key(1)).unwrap(),
-        &a.member.member_id(),
-        &a.member.sealing_public_key(),
+        &a.member.member(),
+        &a.member.keys().public_keys().sealing,
     )
     .unwrap();
     storage.create(&next(3), &valid).await.unwrap();
@@ -253,7 +254,7 @@ async fn concurrent_addition(
         ben.sync.storage = Some(Arc::new(CopyStorage::new(
             storage.clone(),
             Vec::new(),
-            CopyAttempt::CorruptFor(ana.member.member_id()),
+            CopyAttempt::CorruptFor(ana.member.member()),
         )));
     }
     let rotation = ben.sync.test_rotate(Audience::Store, key(3)).await;
@@ -262,7 +263,7 @@ async fn concurrent_addition(
         storage.as_ref(),
         Audience::Store,
         key(3),
-        &ana.member.member_id(),
+        &ana.member.member(),
     )
     .await;
     // Ana's addition is concurrent: Ben's rotation and its copies have not
@@ -297,7 +298,7 @@ async fn concurrent_addition(
         storage.as_ref(),
         Audience::Store,
         key(3),
-        &erin.member.member_id()
+        &erin.member.member()
     )
     .await
     .is_none());
@@ -327,7 +328,8 @@ async fn a_missing_or_damaged_holder_copy_waits_and_a_later_copy_enables_sharing
         let subject = crate::PendingSubject::KeyCopy {
             audience: Audience::Store,
             key: key(3),
-            member: ana.member.member_id(),
+            member: ana.member.member(),
+            sealing: ana.member.keys().public_keys().sealing,
         };
         let reason = ana
             .db
@@ -363,7 +365,7 @@ async fn a_missing_or_damaged_holder_copy_waits_and_a_later_copy_enables_sharing
             storage.as_ref(),
             Audience::Store,
             key(3),
-            &erin.member.member_id()
+            &erin.member.member()
         )
         .await
         .is_none());
@@ -375,8 +377,8 @@ async fn a_missing_or_damaged_holder_copy_waits_and_a_later_copy_enables_sharing
             let valid = crate::store_log_keys::store_copy(
                 &later,
                 ring.store_key(key(3)).unwrap(),
-                &ana.member.member_id(),
-                &ana.member.sealing_public_key(),
+                &ana.member.member(),
+                &ana.member.keys().public_keys().sealing,
             )
             .unwrap();
             storage.create(&later, &valid).await.unwrap();
@@ -386,7 +388,7 @@ async fn a_missing_or_damaged_holder_copy_waits_and_a_later_copy_enables_sharing
             storage.as_ref(),
             Audience::Store,
             key(3),
-            &erin.member.member_id(),
+            &erin.member.member(),
         )
         .await
         .unwrap();
@@ -525,7 +527,7 @@ async fn reserved_copy_settles_even_after_another_supplier_or_recipient_removal(
             storage.as_ref(),
             Audience::Store,
             key(3),
-            &erin.member.member_id(),
+            &erin.member.member(),
         )
         .await;
         assert_ne!(supplied, path);
@@ -533,7 +535,7 @@ async fn reserved_copy_settles_even_after_another_supplier_or_recipient_removal(
             let id = ben
                 .sync
                 .make_and_upload_entry(StoreChange::RemoveMember {
-                    member: erin.member.member_id(),
+                    member: erin.member.member(),
                 })
                 .await
                 .unwrap();
@@ -568,7 +570,7 @@ async fn reserved_copy_settles_even_after_another_supplier_or_recipient_removal(
             storage.as_ref(),
             Audience::Circle(circle(9)),
             key(9),
-            &ana.member.member_id(),
+            &ana.member.member(),
         )
         .await;
         assert_eq!(next.key_copy_position().unwrap().1.get(), expected_next);
@@ -871,7 +873,7 @@ async fn observed_historical_copies_do_not_reserve_numbers_when_a_member_returns
     let before = storage.list(&ObjectPrefix::keys(store(1))).await.unwrap();
     ana.sync
         .make_and_upload_entry(StoreChange::RemoveMember {
-            member: member(2).member_id(),
+            member: member(2).member(),
         })
         .await
         .unwrap();
@@ -908,7 +910,7 @@ async fn circle_rotations_share_only_with_current_circle_members() {
         ana.sync
             .make_and_upload_entry(StoreChange::AddCircleMember {
                 circle: circle(1),
-                member: who.member_id(),
+                member: who.member(),
             })
             .await
             .unwrap();
@@ -916,7 +918,7 @@ async fn circle_rotations_share_only_with_current_circle_members() {
     ana.sync
         .make_and_upload_entry(StoreChange::RemoveCircleMember {
             circle: circle(1),
-            member: dan.member.member_id(),
+            member: dan.member.member(),
         })
         .await
         .unwrap();
@@ -929,7 +931,7 @@ async fn circle_rotations_share_only_with_current_circle_members() {
         storage.as_ref(),
         Audience::Circle(circle(1)),
         key(11),
-        &erin.member.member_id(),
+        &erin.member.member(),
     )
     .await;
     storage.delete(&missing).await.unwrap();
@@ -959,7 +961,7 @@ async fn circle_rotations_share_only_with_current_circle_members() {
         storage.as_ref(),
         Audience::Circle(circle(1)),
         key(11),
-        &dan.member.member_id()
+        &dan.member.member()
     )
     .await
     .is_none());
@@ -971,7 +973,7 @@ async fn circle_rotations_share_only_with_current_circle_members() {
         storage.as_ref(),
         Audience::Circle(circle(1)),
         key(11),
-        &erin.member.member_id(),
+        &erin.member.member(),
     )
     .await;
     storage.delete(&copy).await.unwrap();
@@ -980,7 +982,7 @@ async fn circle_rotations_share_only_with_current_circle_members() {
         storage.as_ref(),
         Audience::Circle(circle(1)),
         key(11),
-        &erin.member.member_id()
+        &erin.member.member()
     )
     .await
     .is_none());

@@ -95,18 +95,24 @@ impl ReplayBatch {
         self.entries.iter().any(|entry| entry.entry.position == id)
     }
 
+    /// Check a received entry against its own recorded past once that past
+    /// has applied: its device's registered owner, then its signature with the
+    /// author's key in that view (§9).
     pub(crate) fn push(
         &mut self,
-        entry: &StoreLogEntry,
+        opened: &crate::store_log_object::OpenedEntry,
         publications: &BTreeMap<EntryId, SystemTime>,
         store: coven_foundation::id_source::StoreId,
     ) -> Result<bool, crate::Refusal> {
+        let entry = &opened.entry;
         if !crate::store_log_object::causally_ready(&self.entries, entry, store)? {
             return Ok(false);
         }
-        if !crate::store_log_object::author_matches_view(&self.author_view(entry).state, entry) {
+        let view = &self.author_view(entry).state;
+        if !crate::store_log_object::author_matches_view(view, entry) {
             return Err(crate::Refusal::WrongIdentity { cause: None });
         }
+        opened.verify(view)?;
         self.push_checked(entry.clone(), publications);
         Ok(true)
     }

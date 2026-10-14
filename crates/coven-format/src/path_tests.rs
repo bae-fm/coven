@@ -290,7 +290,7 @@ fn provider_folders_cannot_introduce_another_layout_or_alias() {
 
 #[test]
 fn access_key_deliveries_name_their_member_and_attempt() {
-    let member = coven_crypto::MemberKeys::generate().unwrap().member_id();
+    let member = crate::test_utils::member_id();
     let attempt = uuid::Uuid::from_u128(5);
     let path = ObjectPath::access_key(STORE_ID, &member, attempt);
     assert_eq!(ObjectPath::parse(path.as_str()).unwrap(), path);
@@ -308,6 +308,12 @@ fn access_key_deliveries_name_their_member_and_attempt() {
         ),
         format!("access-keys/{member}/not-a-uuid"),
         format!("access-keys/00/{attempt}"),
+        // A member spelling never encodes a public key (D10).
+        format!(
+            "access-keys/{}/{attempt}",
+            hex::encode(crate::test_utils::member().signing.as_bytes())
+        ),
+        format!("access-keys/{}/{attempt}", member.0.simple()),
     ] {
         assert!(
             ObjectPath::parse(&format!("{STORE_ID}/{tail}")).is_err(),

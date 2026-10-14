@@ -27,7 +27,7 @@ const SALT_LEN: usize = 16;
 // RFC 9106's memory-constrained Argon2id parameters, with a 256-bit output.
 const WRITE_PARAMETERS: [u32; 3] = [65536, 3, 4];
 
-/// Passphrase file custody for `StoreKeyring` or `MemberKeys` (E1).
+/// Passphrase file custody for `StoreKeyring` or `MemberIdentity` (E1).
 /// The composition root supplies the corresponding reserved `AtomicFile`.
 pub struct PassphraseCustody<T> {
     protection: Mutex<Option<Protection>>,

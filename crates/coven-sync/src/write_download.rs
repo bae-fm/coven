@@ -4,9 +4,9 @@ use super::DeviceLogSync;
 use crate::stream_input::{ChannelParts, WithReferences};
 use crate::write_object::{ReadyWrite, Unready};
 use crate::{replay_cache::ReplayCache, PendingReason, PendingRecord, PendingSubject, SyncError};
-use coven_crypto::{MemberId, StoreKeyring};
+use coven_crypto::StoreKeyring;
 use coven_database::{ApplyOutcome, DbError, StoreLog};
-use coven_foundation::id_source::DeviceId;
+use coven_foundation::id_source::{DeviceId, MemberId};
 use coven_storage::StoredObject;
 use tokio::sync::oneshot;
 
@@ -79,10 +79,10 @@ impl DeviceLogSync {
         let mut stream = retained.stream(storage).await;
         let ReadyWrite {
             opened,
-            author,
+            signer,
             parts: opens,
         } = match crate::write_object::download(&mut stream, Some(ring), log, replays, || {
-            Ok(member.clone())
+            Ok(*member)
         })
         .await?
         {
@@ -109,7 +109,7 @@ impl DeviceLogSync {
                 references,
             };
             let result =
-                crate::write_object::finish(&mut stream, ring, &author, opened, &mut sink).await;
+                crate::write_object::finish(&mut stream, ring, &signer, opened, &mut sink).await;
             drop(sink);
             result
         };

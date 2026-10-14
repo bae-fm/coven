@@ -889,7 +889,7 @@ async fn store_fingerprint_skips_a_newer_key_sealed_to_a_removed_member() {
     ana.sync().await;
     ana.sync
         .make_and_upload_entry(StoreChange::RemoveMember {
-            member: ben.member_id(),
+            member: ben.member(),
         })
         .await
         .unwrap();
@@ -899,14 +899,14 @@ async fn store_fingerprint_skips_a_newer_key_sealed_to_a_removed_member() {
     carol.clock.set(now + std::time::Duration::from_secs(1));
     carol.sync.test_rotate(Audience::Store, key(3)).await;
     assert!(
-        find_copy(storage.as_ref(), Audience::Store, key(3), &ben.member_id())
+        find_copy(storage.as_ref(), Audience::Store, key(3), &ben.member())
             .await
             .is_some(),
         "Carol's view still has Ben"
     );
     ana.sync().await;
     let log = ana.log().await;
-    assert!(crate::effects::member(&log.replay.state, &ben.member_id()).is_none());
+    assert!(crate::effects::member(&log.replay.state, &ben.member()).is_none());
     let ring = ana.custody.read().unwrap().unwrap();
     assert!(ring.store_key(key(2)).is_ok() && ring.store_key(key(3)).is_ok());
     assert_eq!(
@@ -959,7 +959,7 @@ async fn circle_fingerprint_skips_a_newer_key_sealed_to_a_former_member() {
         ana.sync
             .make_and_upload_entry(StoreChange::AddCircleMember {
                 circle,
-                member: other.member_id(),
+                member: other.member(),
             })
             .await
             .unwrap();
@@ -968,7 +968,7 @@ async fn circle_fingerprint_skips_a_newer_key_sealed_to_a_former_member() {
     ana.sync
         .make_and_upload_entry(StoreChange::RemoveCircleMember {
             circle,
-            member: ben.member.member_id(),
+            member: ben.member.member(),
         })
         .await
         .unwrap();
@@ -981,7 +981,7 @@ async fn circle_fingerprint_skips_a_newer_key_sealed_to_a_former_member() {
     ben.sync().await;
     // Ben is still a store member and holds G3, but not G2.
     let state = ben.log().await.replay.state;
-    assert!(crate::effects::member(&state, &ben.member.member_id()).is_some());
+    assert!(crate::effects::member(&state, &ben.member.member()).is_some());
     let held = ben.custody.read().unwrap().unwrap();
     assert!(held.circle_key(circle, key(12)).is_ok());
     assert!(held.circle_key(circle, key(11)).is_err());

@@ -991,8 +991,18 @@ existing `KeySelection` and `KeyPhases` results for the
 [stable-member proposal](storelog.md#c13-stable-members-and-replaceable-keys--checked-proposal).
 They use `CurrentReplay.Keyed` directly; the unkeyed interfaces and their
 Rust comparisons remain available. The normative rules and layouts are in
-`spec/coven.md` and `spec/format.md`; these models still have no Rust differential
-for member-key replacement.
+`spec/coven.md` and `spec/format.md`.
+
+[`lean_differential_member_keys`](../../crates/coven-sync/src/entry_signature_tests.rs)
+runs `memberKeyRunner` (`COVEN_MEMBER_KEY_LEAN`) on real sealed entries and key
+copies decoded by the production codec. It compares `Keyed.signatureCurrent`
+in each entry's recorded view, kept and dropped entries, every installed pair
+and active role from `Keyed.resolve`, `currentCredential` for each copy's
+member and sealing key, and `MemberKeys.selectInReplay` with Rust's first-attempt
+selection. Leaves signed with a key their author's view never bound are Rust
+signature refusals and model drops; a self-registration by an id no entry
+added is dropped by both. Its histories add each id once and contain no
+replacement, so member-key replacement itself still has no Rust differential.
 
 A recipient contains a stable member id and the exact sealing public key.
 An old copy and a new copy can address the same member while disclosing their

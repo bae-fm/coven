@@ -5,7 +5,6 @@ use std::{
     process::{Command, Stdio},
 };
 
-use coven_crypto::MemberId;
 use coven_database::{
     DatabaseBuilder, DropReason, EntryOutcome, StoreLog, StoreLogCheck, StoreLogReplay,
     StoreLogState,
@@ -14,6 +13,7 @@ use coven_format::{
     store_log::{MemberRole, StoreChange},
     Object,
 };
+use coven_foundation::id_source::MemberId;
 use coven_foundation::{
     files::{StoreDir, StoreLayout},
     id_source::{CircleId, DeviceId, SequentialIds, StoreId},
@@ -30,7 +30,7 @@ use crate::{
 pub(crate) struct Generator(pub(crate) u64);
 
 impl Generator {
-    fn pick(&mut self, n: usize) -> usize {
+    pub(crate) fn pick(&mut self, n: usize) -> usize {
         self.0 ^= self.0 << 13;
         self.0 ^= self.0 >> 7;
         self.0 ^= self.0 << 17;
@@ -206,7 +206,7 @@ pub(crate) fn input(h: &History, stored: &[u64], received: &[Vec<usize>]) -> Val
         let past: Vec<_> = h.entries[..i].iter().enumerate().filter_map(|(j,e)| crate::replay::had_read(entry,e).then_some(j)).collect();
         let action = match &entry.change {
             StoreChange::CreateStore { access, key, key_hash, .. } => json!({"kind":0,"access":serde_json::to_string(access).unwrap(),"key":key_number(*key),"key_hash":key_hash}),
-            StoreChange::AddMember { keys, role, access } => json!({"kind":1,"member":member_number(&keys.signing),"role":role_number(*role),"access":serde_json::to_string(access).unwrap()}),
+            StoreChange::AddMember { member, role, access, .. } => json!({"kind":1,"member":member_number(member),"role":role_number(*role),"access":serde_json::to_string(access).unwrap()}),
             StoreChange::RemoveMember { member } => json!({"kind":2,"member":member_number(member)}),
             StoreChange::ChangeRole { member, role } => json!({"kind":3,"member":member_number(member),"role":role_number(*role)}),
             StoreChange::AddDevice { device, replaces, .. } => {
@@ -228,6 +228,7 @@ pub(crate) fn input(h: &History, stored: &[u64], received: &[Vec<usize>]) -> Val
             StoreChange::Reset { snapshot } => json!({"kind":13,"snapshot":{"audience":audience_number(&snapshot.audience),"number":snapshot.number}}),
             StoreChange::RotateKey { audience, key, key_hash } => json!({"kind":15,"audience":audience_number(audience),"key":key_number(*key),"key_hash":key_hash}),
             StoreChange::SetAccess { member, access } => json!({"kind":14,"member":member_number(member),"access":serde_json::to_string(access).unwrap()}),
+            StoreChange::ReplaceMemberKeys { .. } => unreachable!("CurrentReplay has no member-key replacement"),
         };
         // Attempt at the latest observed landing; a later stored time is a retry.
         let attempted = past.iter().map(|&p| stored[p]).max().unwrap_or(stored[0]);
@@ -729,7 +730,7 @@ fn current_projection_preserves_commitments_and_rust_only_data() {
     }
     let result = replay(&h.entries);
     assert_eq!(result.state.store.as_ref().unwrap().name, "Home");
-    assert_eq!(result.state.members[&member(1)].sealing, keys(1).sealing);
+    assert_eq!(result.state.members[&member(1)].keys, keys(1));
     assert_eq!(result.state.devices[&DeviceId(0)].name, "Ana’s phone");
     assert_eq!(result.state.devices[&DeviceId(1)].name, "Device 1");
     assert_eq!(newest_key(&h, Audience::Store), Some(key(20)));

@@ -16,7 +16,7 @@ impl StoreLogSync {
         log: &StoreLog,
         operations: impl IntoIterator<Item = &'a Data>,
     ) -> Result<Vec<ProviderAccessChange>, SyncError> {
-        let owner = self.owns_storage(log, &self.operation_member()?.member_id());
+        let owner = self.owns_storage(log, &self.operation_member()?.member());
         let mut recorded = BTreeSet::new();
         for entry in &log.entries {
             if let Some((_, MemberAccess::ProviderAccount(account))) =
@@ -127,7 +127,7 @@ impl StoreLogSync {
         loop {
             self.catch_up().await?;
             let local = self.database.local_store_log().await?;
-            let me = self.operation_member()?.member_id();
+            let me = self.operation_member()?.member();
             self.validate_administration(&local, &me, &change)?;
             if crate::effects::change_in_place(&local.log.replay.state, &me, &change) {
                 return Ok(());
@@ -166,7 +166,7 @@ impl StoreLogSync {
         account: String,
     ) -> Result<Progress, SyncError> {
         let local = self.database.local_store_log().await?;
-        if !self.owns_storage(&local.log, &self.operation_member()?.member_id()) {
+        if !self.owns_storage(&local.log, &self.operation_member()?.member()) {
             return Ok(Progress::Waiting(PendingReason::PendingOwner { account }));
         }
         let storage = self.storage.as_deref().ok_or(SyncError::NoStorage)?;

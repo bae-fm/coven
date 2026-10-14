@@ -60,7 +60,7 @@ async fn a_rejoined_member_reloads_the_part_its_passed_position_skipped() {
         panic!("three members")
     };
     let membership = |add| {
-        let (circle, member) = (GIFTS, identity(4).member_id());
+        let (circle, member) = (GIFTS, identity(4).member());
         if add {
             StoreChange::AddCircleMember { circle, member }
         } else {
@@ -176,7 +176,7 @@ async fn a_circle_whose_creation_dropped_reloads_when_it_returns() {
     let plans = CircleId(Uuid::from_u128(20));
     ana.sync
         .make_and_upload_entry(StoreChange::ChangeRole {
-            member: identity(5).member_id(),
+            member: identity(5).member(),
             role: MemberRole::Member,
         })
         .await
@@ -200,7 +200,7 @@ async fn a_circle_whose_creation_dropped_reloads_when_it_returns() {
     ana.clock.set(UNIX_EPOCH + Duration::from_secs(20));
     ana.sync
         .make_and_upload_entry(StoreChange::RemoveMember {
-            member: identity(4).member_id(),
+            member: identity(4).member(),
         })
         .await
         .unwrap();
@@ -218,17 +218,17 @@ async fn a_circle_whose_creation_dropped_reloads_when_it_returns() {
     for change in [
         StoreChange::AddCircleMember {
             circle: plans,
-            member: identity(5).member_id(),
+            member: identity(5).member(),
         },
         StoreChange::RemoveMember {
-            member: identity(3).member_id(),
+            member: identity(3).member(),
         },
     ] {
         ben.sync.make_and_upload_entry(change).await.unwrap();
     }
     carol.sync.sync_store_log().await.unwrap();
     let state = carol.db.store_log().await.unwrap().replay.state;
-    assert!(state.reads_circle(plans, &identity(5).member_id()));
+    assert!(state.reads_circle(plans, &identity(5).member()));
     assert!(carol.db.reloading_audiences().await.unwrap().is_empty());
     assert_eq!(pins(&carol.db).await, ["plan"]);
 }
@@ -630,7 +630,7 @@ async fn data_differential_reload_choice() {
             };
             let mut bytes = prefix.encode().unwrap();
             let signer = if kind == 0 { &other } else { &ana.member };
-            let signature = signer.sign_prefix(path.as_str(), &bytes);
+            let signature = signer.keys().sign_prefix(path.as_str(), &bytes);
             bytes.extend_from_slice(signature.as_bytes());
             bytes.extend_from_slice(&[0; 32]);
             if kind == 6 {

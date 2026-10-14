@@ -13,8 +13,8 @@ use crate::store_log::*;
 use crate::value::*;
 use crate::write::*;
 use crate::Object;
-use coven_crypto::{InviteSecret, MemberKeys, SecretBytes};
-use coven_foundation::id_source::{CircleId, DeviceId, InviteId, KeyId, StoreId};
+use coven_crypto::{InviteSecret, MemberIdentity, MemberKeys, SecretBytes};
+use coven_foundation::id_source::{CircleId, DeviceId, InviteId, KeyId, MemberId, StoreId};
 use coven_merge::{
     Audience, Cell, Change, ColumnValue, LostKey, LostValue, MergeError, Operation, Parent, RowId,
     RowState, Timestamp, WriteId, WriteOracle,
@@ -49,20 +49,44 @@ pub fn column(value: Value) -> ColumnValue<Value> {
         parents: BTreeMap::new(),
     }
 }
-/// Member keys with fixed, public test seeds.
-pub fn member_keys() -> MemberKeys {
+/// A private pair whose signing and sealing seeds are both `seed`: public test data.
+pub fn keys_from_seed(seed: u8) -> MemberKeys {
     let mut bytes = Zeroizing::new(Vec::with_capacity(69));
     bytes.extend_from_slice(b"CVMK\x01");
-    bytes.extend_from_slice(&[0x33; 64]);
+    bytes.extend_from_slice(&[seed; 64]);
     MemberKeys::from_secret_bytes(&bytes).unwrap()
 }
-/// The public halves of the test member keys.
+/// The fixture member Ana's stable id, independent of every key she holds.
+pub fn member_id() -> MemberId {
+    MemberId(Uuid::from_bytes([0x4d; 16]))
+}
+/// Ana's original private pair, with fixed public test seeds 0x33.
+pub fn member_keys() -> MemberKeys {
+    keys_from_seed(0x33)
+}
+/// Ana's id with her original pair, as identity custody holds it.
+pub fn identity() -> MemberIdentity {
+    MemberIdentity::new(member_id(), member_keys())
+}
+/// The public halves of Ana's original pair.
 pub fn member() -> MemberPublicKeys {
-    let keys = member_keys();
-    MemberPublicKeys {
-        signing: keys.member_id(),
-        sealing: keys.sealing_public_key(),
-    }
+    member_keys().public_keys()
+}
+/// Ana's replacement private pair, with fixed public test seeds 0x34 (§9).
+pub fn replacement_keys() -> MemberKeys {
+    keys_from_seed(0x34)
+}
+/// The public halves of Ana's replacement pair, bound to the same id.
+pub fn replacement() -> MemberPublicKeys {
+    replacement_keys().public_keys()
+}
+/// Another member, Ben, whom the fixtures add and remove.
+pub fn other_member_id() -> MemberId {
+    MemberId(Uuid::from_bytes([0x42; 16]))
+}
+/// Ben's initial public pair, with fixed public test seeds 0x35.
+pub fn other_member() -> MemberPublicKeys {
+    keys_from_seed(0x35).public_keys()
 }
 /// A write with old/new values and named foreign-key metadata on its new value.
 pub fn write() -> WriteRecord {
@@ -143,7 +167,7 @@ pub fn store_log() -> StoreLogEntry {
             number: 1,
         },
         timestamp: timestamp(),
-        author: member().signing,
+        author: member_id(),
         had_read: EntryPositions(vec![]),
         change: StoreChange::CreateStore {
             access: crate::MemberAccess::S3AccessKey {
@@ -167,12 +191,10 @@ pub fn member_removal() -> StoreLogEntry {
             number: 2,
         },
         timestamp: Timestamp::new(7, 0, DeviceId(1)).unwrap(),
-        author: member().signing,
+        author: member_id(),
         had_read: EntryPositions(vec![]),
         change: StoreChange::RemoveMember {
-            member: "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a"
-                .parse()
-                .unwrap(),
+            member: other_member_id(),
         },
     }
 }
@@ -440,6 +462,7 @@ pub fn restore() -> RestoreCode {
     RestoreCode {
         store: StoreId(Uuid::from_bytes([0x10; 16])),
         name: "S".into(),
+        member: member_id(),
         member_keys: member_keys(),
         storage: SecretBytes::new(
             br#"{"S3":{"bucket":"bucket","region":"region","endpoint":null,"profile":null,"prefix":"store"}}"#
@@ -453,6 +476,8 @@ pub fn invite() -> InviteCode {
         store: StoreId(Uuid::from_bytes([0x10; 16])),
         name: "S".into(),
         invite: InviteId(Uuid::from_bytes([0x55; 16])),
+        // A re-binding invite names Ana's existing id (D13).
+        member: member_id(),
         secret: InviteSecret::from_bytes([0x66; 32]),
         initial_key: store_key().id(),
         inviting_writer: DeviceId(1),
@@ -463,18 +488,19 @@ pub fn invite() -> InviteCode {
 /// Each store-log change in its canonical tag order.
 pub fn store_changes() -> Vec<StoreChange> {
     let c = CircleId(uuid::Uuid::from_bytes([2; 16]));
-    let m = member().signing;
+    let m = member_id();
     let snapshot = snapshot_header().id;
     vec![
         store_log().change,
         StoreChange::AddMember {
+            member: other_member_id(),
             access: crate::MemberAccess::ProviderAccount("member@example.test".into()),
-            keys: member(),
+            keys: other_member(),
             role: MemberRole::Member,
         },
         member_removal().change,
         StoreChange::ChangeRole {
-            member: m.clone(),
+            member: m,
             role: MemberRole::Admin,
         },
         StoreChange::AddDevice {
@@ -498,11 +524,11 @@ pub fn store_changes() -> Vec<StoreChange> {
         StoreChange::DeleteCircle { circle: c },
         StoreChange::AddCircleMember {
             circle: c,
-            member: m.clone(),
+            member: m,
         },
         StoreChange::RemoveCircleMember {
             circle: c,
-            member: m.clone(),
+            member: m,
         },
         StoreChange::RaiseSchema {
             version: 2,
@@ -515,7 +541,7 @@ pub fn store_changes() -> Vec<StoreChange> {
             },
         },
         StoreChange::SetAccess {
-            member: m.clone(),
+            member: m,
             access: crate::MemberAccess::S3AccessKey {
                 access_key_id: "replacement-key".into(),
                 principal: crate::S3Principal::IamUser {
@@ -535,6 +561,10 @@ pub fn store_changes() -> Vec<StoreChange> {
             audience: Audience::Circle(c),
             key: KeyId(Uuid::from_bytes([4; 16])),
             key_hash: [0xa2; 32],
+        },
+        StoreChange::ReplaceMemberKeys {
+            member: m,
+            keys: replacement(),
         },
     ]
 }
@@ -562,11 +592,7 @@ pub fn objects() -> Vec<Object> {
             },
             ..store_log()
         }),
-        Object::JoinRequest(JoinRequest {
-            invite: InviteId(Uuid::from_bytes([0x55; 16])),
-            keys: member(),
-            device_name: "D".into(),
-        }),
+        Object::JoinRequest(join_request()),
         Object::PostedPositions(PostedPositions {
             pending: vec![
                 crate::pending::PendingReport {
@@ -613,10 +639,28 @@ pub fn objects() -> Vec<Object> {
                 }))
             }),
     );
-    objects.push(Object::ClockObservation(ClockObservation {
-        device: DeviceId(1),
-    }));
+    objects.push(Object::ClockObservation(clock()));
     objects
+}
+/// Ana's request answering the re-binding invite with her replacement pair,
+/// which signs it (D8, D13).
+pub fn join_request() -> JoinRequest {
+    JoinRequest {
+        invite: InviteId(Uuid::from_bytes([0x55; 16])),
+        member: member_id(),
+        keys: replacement(),
+        device_name: "D".into(),
+    }
+}
+/// Device one's clock frame, with the store log it had read (D8).
+pub fn clock() -> ClockObservation {
+    ClockObservation {
+        device: DeviceId(1),
+        store_log_read: EntryPositions(vec![EntryId {
+            device: DeviceId(1),
+            number: 2,
+        }]),
+    }
 }
 /// A two-audience write with a row frame spanning three chunks.
 pub fn chunked_write() -> WriteRecord {

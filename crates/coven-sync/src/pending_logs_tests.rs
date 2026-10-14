@@ -85,7 +85,7 @@ async fn a_missing_store_key_is_the_writes_wait_and_its_arrival_applies_retained
     let log = devices[1].db.store_log().await.unwrap();
     let held = devices[1].custody.read().unwrap().unwrap();
     let other = StoreKeyring::new(StoreKey::from_bytes(KeyId(Uuid::from_u128(2)), [8; 32]));
-    let member = devices[1].identity.read().unwrap().unwrap().member_id();
+    let member = devices[1].identity.read().unwrap().unwrap().member();
     let mut replays = crate::replay_cache::ReplayCache::new(&log);
     let result = devices[1]
         .writes

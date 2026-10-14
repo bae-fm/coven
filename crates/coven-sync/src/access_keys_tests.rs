@@ -56,6 +56,7 @@ fn s3(id: &str) -> MemberAccess {
 
 fn add(n: u8, role: MemberRole, key: &str) -> StoreChange {
     StoreChange::AddMember {
+        member: member(n),
         keys: keys(n),
         role,
         access: s3(key),

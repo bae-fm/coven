@@ -1,6 +1,6 @@
 use super::*;
 use crate::custody::{KeychainError, MemberKeyCustody, StoreKeyCustody};
-use crate::{MemberKeys, StoreKey, StoreKeyring};
+use crate::{MemberIdentity, StoreKey, StoreKeyring};
 use coven_foundation::id_source::KeyId;
 use uuid::Uuid;
 
@@ -40,9 +40,12 @@ fn restore_codes_and_s3_keys_sync_separately_and_only_codes_discover_stores() {
         KeyId(uuid::Uuid::from_bytes([1; 16])),
         [17; 32],
     ));
-    let member = MemberKeys::generate().unwrap();
+    let member = MemberIdentity::generate(coven_foundation::id_source::MemberId(
+        uuid::Uuid::from_u128(1),
+    ))
+    .unwrap();
     let store_custody = KeyringCustody::<StoreKeyring>::new(a.clone());
-    let member_custody = KeyringCustody::<MemberKeys>::new(a.clone());
+    let member_custody = KeyringCustody::<MemberIdentity>::new(a.clone());
     store_custody.persist(&keys).unwrap();
     member_custody.persist(&member).unwrap();
     a.set_host_secret("api-token", "local secret").unwrap();
@@ -115,8 +118,8 @@ fn restore_codes_and_s3_keys_sync_separately_and_only_codes_discover_stores() {
         keys.to_secret_bytes().as_bytes()
     );
     assert_eq!(
-        member_custody.unlock().unwrap().unwrap().member_id(),
-        member.member_id()
+        member_custody.unlock().unwrap().unwrap().member(),
+        member.member()
     );
     assert_eq!(
         a.host_secret("api-token").unwrap().as_deref(),
@@ -284,7 +287,7 @@ fn present_but_empty_or_malformed_key_entries_are_errors() {
         Err(KeyError::Material(_))
     ));
     assert!(matches!(
-        KeyringCustody::<MemberKeys>::new(store.clone()).unlock(),
+        KeyringCustody::<MemberIdentity>::new(store.clone()).unlock(),
         Err(KeyError::Material(_))
     ));
 }

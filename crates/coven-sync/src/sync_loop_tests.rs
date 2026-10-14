@@ -2,7 +2,7 @@ use crate::store_log_sync::tests::{key, member, public, store};
 use crate::*;
 use coven_crypto::{
     custody::{KeyError, KeySession, MemberKeyCustody, StoreKeyCustody},
-    MemberKeys, StoreKeyring,
+    MemberIdentity, StoreKeyring,
 };
 use coven_database::{
     test_utils::{WorkCounter, WorkCounts},
@@ -77,7 +77,7 @@ macro_rules! custody {
     };
 }
 custody!(StoreKeyCustody, StoreKeyring);
-custody!(MemberKeyCustody, MemberKeys);
+custody!(MemberKeyCustody, MemberIdentity);
 
 // Preparing a fixture and running its passes transfer the same store-log owner.
 // In particular, bootstrap does not create a second independently decoded log.
@@ -92,16 +92,16 @@ struct DeviceData {
     entry_decodes: Arc<AtomicUsize>,
     db: Database,
     storage: Arc<MemoryStorage>,
-    member: MemberKeys,
+    member: MemberIdentity,
     directory: StoreDir,
     device: DeviceId,
     clock: ClockRef,
     send: Arc<SendGate>,
     ids: Arc<SequentialIds>,
     keys: Arc<KeySession<StoreKeyring>>,
-    identity: Arc<KeySession<MemberKeys>>,
+    identity: Arc<KeySession<MemberIdentity>>,
     key_custody: Arc<Custody<StoreKeyring>>,
-    member_custody: Arc<Custody<MemberKeys>>,
+    member_custody: Arc<Custody<MemberIdentity>>,
     work: WorkCounter,
     read_history: Vec<(coven_storage::ObjectPath, u64, u64)>,
     _root: tempfile::TempDir,
@@ -124,7 +124,7 @@ fn builder(directory: &StoreDir, clock: &ClockRef) -> DatabaseBuilder {
 }
 
 impl Device<StoreLogSync> {
-    async fn new(storage: &MemoryStorage, number: u64, member: MemberKeys) -> Self {
+    async fn new(storage: &MemoryStorage, number: u64, member: MemberIdentity) -> Self {
         let root = tempfile::tempdir().unwrap();
         let ids = Arc::new(SequentialIds::new());
         for _ in 1..number {
@@ -232,9 +232,10 @@ impl Device<StoreLogSync> {
         self.owner.sync_store_log().await.unwrap();
     }
 
-    async fn add_member(&mut self, member: &MemberKeys) {
+    async fn add_member(&mut self, member: &MemberIdentity) {
         self.owner
             .make_and_upload_entry(coven_format::store_log::StoreChange::AddMember {
+                member: member.member(),
                 keys: public(member),
                 role: MemberRole::Member,
                 access: coven_format::MemberAccess::S3AccessKey {

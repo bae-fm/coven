@@ -125,6 +125,7 @@ pub(crate) fn signed_positions(device: &Device, positions: PostedPositions) -> V
     bytes.extend_from_slice(
         device
             .member
+            .keys()
             .sign_object(path.as_str(), &hash.finish())
             .as_bytes(),
     );
@@ -142,20 +143,19 @@ async fn authenticated_key_copy_reports_are_limited_to_the_posters_member() {
         .unwrap()
         .unwrap();
     positions.fingerprints.clear();
-    let own = devices[0].member.member_id();
-    let other: coven_crypto::MemberId =
-        "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a"
-            .parse()
-            .unwrap();
+    let own = devices[0].member.member();
+    let other = crate::store_log_sync::tests::member(0x42).member();
+    let sealing = devices[0].member.keys().public_keys().sealing;
     let path = ObjectPath::positions(STORE_ID, positions.device);
     let ring = devices[1].custody.read().unwrap().unwrap();
     let log = devices[1].db.store_log().await.unwrap();
-    for member in [own.clone(), other] {
+    for member in [own, other] {
         positions.pending = vec![PendingReport {
             subject: PendingSubject::KeyCopy {
                 audience: Audience::Store,
                 key: KeyId(Uuid::from_u128(1)),
-                member: member.clone(),
+                member,
+                sealing,
             },
             reason: PendingReason::Refused(RefusalCode::Decryption),
         }];

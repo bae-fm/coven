@@ -31,8 +31,8 @@ pub use coven_crypto::custody::{
     MemberKeyCustody, Passphrase, StoreKeyCustody,
 };
 pub use coven_crypto::{
-    CircleKey, CryptoError, MaterialError, MemberId, MemberKeys, SecretBytes, SecretText, StoreKey,
-    StoreKeyring,
+    CircleKey, CryptoError, MaterialError, MemberIdentity, MemberKeys, SecretBytes, SecretText,
+    StoreKey, StoreKeyring,
 };
 pub use coven_database::{
     named_params, params, prepare_user_file, types, CacheFill, ChangeOp, ChangeSource,
@@ -54,6 +54,7 @@ pub use coven_foundation::files::{
     BootstrapDirectoryError, DeviceReset, DeviceResetReason, FileError, FileName, FileNameError,
     SettingsError, StoreDir, StoreInfo, StoreLayout, StoreLayoutError, StoreLockError,
 };
+pub use coven_foundation::id_source::MemberId;
 pub use coven_foundation::id_source::{
     CircleId, DeviceId, FileId, IdSource, IdSourceRef, InviteId, KeyId, StoreId, UuidIds,
 };

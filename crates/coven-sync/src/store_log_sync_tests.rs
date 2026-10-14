@@ -1,5 +1,5 @@
 use super::*;
-use coven_crypto::{custody::InMemoryCustody, MemberKeys, StoreKey};
+use coven_crypto::{custody::InMemoryCustody, MemberIdentity, MemberKeys, StoreKey};
 use coven_database::{DatabaseBuilder, EntryOutcome, Migration, SyncedTable};
 use coven_format::sealed_single::SingleChunkObject;
 use coven_format::store_log::{MemberPublicKeys, MemberRole};
@@ -24,8 +24,8 @@ pub(crate) struct Device {
     pub(crate) db: Database,
     pub(crate) directory: StoreDir,
     pub(crate) custody: Arc<KeySession<StoreKeyring>>,
-    pub(crate) identity: Arc<KeySession<MemberKeys>>,
-    pub(crate) member: MemberKeys,
+    pub(crate) identity: Arc<KeySession<MemberIdentity>>,
+    pub(crate) member: MemberIdentity,
     pub(crate) clock: Arc<FixedClock>,
     pub(crate) send: Arc<crate::SendGate>,
     pub(crate) ids: coven_foundation::id_source::IdSourceRef,
@@ -41,10 +41,15 @@ pub(crate) fn circle(n: u128) -> CircleId {
 pub(crate) fn store(n: u128) -> StoreId {
     StoreId(Uuid::from_u128(n))
 }
-pub(crate) fn member(n: u8) -> MemberKeys {
+/// Member `n`: a stable id and a private pair, both from seed `n` but
+/// independent of each other (§9).
+pub(crate) fn member(n: u8) -> MemberIdentity {
     let mut bytes = b"CVMK\x01".to_vec();
     bytes.extend([n; 64]);
-    MemberKeys::from_secret_bytes(&bytes).unwrap()
+    MemberIdentity::new(
+        coven_foundation::id_source::MemberId(Uuid::from_bytes([n; 16])),
+        MemberKeys::from_secret_bytes(&bytes).unwrap(),
+    )
 }
 /// S3 keys this device lists as pending deletion, by key id (§13).
 pub(crate) async fn access_keys(db: &coven_database::Database) -> Vec<crate::AccessKeyToDelete> {
@@ -62,18 +67,15 @@ pub(crate) async fn access_keys(db: &coven_database::Database) -> Vec<crate::Acc
     keys
 }
 /// The pending deletion of a console-made key recorded for a member.
-pub(crate) fn console_key(id: &str, member: Option<&MemberKeys>) -> crate::AccessKeyToDelete {
+pub(crate) fn console_key(id: &str, member: Option<&MemberIdentity>) -> crate::AccessKeyToDelete {
     crate::AccessKeyToDelete {
         access_key_id: id.into(),
         principal: coven_format::S3Principal::Console,
-        member: member.map(MemberKeys::member_id),
+        member: member.map(MemberIdentity::member),
     }
 }
-pub(crate) fn public(member: &MemberKeys) -> MemberPublicKeys {
-    MemberPublicKeys {
-        signing: member.member_id(),
-        sealing: member.sealing_public_key(),
-    }
+pub(crate) fn public(member: &MemberIdentity) -> MemberPublicKeys {
+    member.keys().public_keys()
 }
 pub(crate) fn storage() -> Arc<MemoryStorage> {
     Arc::new(MemoryStorage::builder().build().unwrap())
@@ -82,7 +84,7 @@ pub(crate) async fn find_copy(
     storage: &dyn Storage,
     audience: Audience,
     key: KeyId,
-    member: &coven_crypto::MemberId,
+    member: &coven_foundation::id_source::MemberId,
 ) -> Option<keys::ObservedCopy> {
     for object in storage.list(&ObjectPrefix::keys(store(1))).await.unwrap() {
         let bytes = storage.read(&object.path).await.unwrap();
@@ -108,7 +110,7 @@ async fn copy_path(
     storage: &dyn Storage,
     audience: Audience,
     key: KeyId,
-    member: &coven_crypto::MemberId,
+    member: &coven_foundation::id_source::MemberId,
 ) -> ObjectPath {
     find_copy(storage, audience, key, member)
         .await
@@ -119,7 +121,7 @@ async fn copy_path(
 pub(crate) async fn device(
     storage: Arc<MemoryStorage>,
     n: u64,
-    member: MemberKeys,
+    member: MemberIdentity,
     store: StoreId,
 ) -> Device {
     Device::new(
@@ -207,7 +209,7 @@ impl Device {
     pub(crate) async fn new(
         storage: Arc<MemoryStorage>,
         n: u64,
-        member: MemberKeys,
+        member: MemberIdentity,
         store: StoreId,
         tables: Vec<SyncedTable>,
         migrations: Vec<Migration>,
@@ -364,13 +366,14 @@ impl Device {
             .await
             .unwrap()
     }
-    pub(crate) async fn add(&mut self, other: &MemberKeys, role: MemberRole) -> EntryId {
+    pub(crate) async fn add(&mut self, other: &MemberIdentity, role: MemberRole) -> EntryId {
         self.sync
             .make_and_upload_entry(StoreChange::AddMember {
                 access: coven_format::MemberAccess::S3AccessKey {
                     access_key_id: "fixture-access-key".into(),
                     principal: coven_format::S3Principal::Console,
                 },
+                member: other.member(),
                 keys: public(other),
                 role,
             })
@@ -563,7 +566,7 @@ async fn removal_then_rotations_share_keys_only_with_remaining_members() {
         a.sync
             .make_and_upload_entry(StoreChange::AddCircleMember {
                 circle: circle(1),
-                member: who.member_id(),
+                member: who.member(),
             })
             .await
             .unwrap();
@@ -572,7 +575,7 @@ async fn removal_then_rotations_share_keys_only_with_remaining_members() {
     c.sync().await;
     a.sync
         .make_and_upload_entry(StoreChange::RemoveMember {
-            member: b.member.member_id(),
+            member: b.member.member(),
         })
         .await
         .unwrap();
@@ -598,7 +601,7 @@ async fn removal_then_rotations_share_keys_only_with_remaining_members() {
         (Audience::Circle(circle(1)), key(4)),
     ] {
         assert!(
-            find_copy(storage.as_ref(), audience, key, &b.member.member_id())
+            find_copy(storage.as_ref(), audience, key, &b.member.member())
                 .await
                 .is_none()
         );
@@ -776,7 +779,7 @@ async fn circle_member_rotates_after_outside_admin_removal_and_repeated_removal_
     b.sync
         .make_and_upload_entry(StoreChange::AddCircleMember {
             circle: circle(1),
-            member: c.member.member_id(),
+            member: c.member.member(),
         })
         .await
         .unwrap();
@@ -786,7 +789,7 @@ async fn circle_member_rotates_after_outside_admin_removal_and_repeated_removal_
     a.sync().await;
     a.sync
         .make_and_upload_entry(StoreChange::RemoveMember {
-            member: b.member.member_id(),
+            member: b.member.member(),
         })
         .await
         .unwrap();
@@ -812,7 +815,7 @@ async fn circle_member_rotates_after_outside_admin_removal_and_repeated_removal_
         .is_ok());
     a.sync
         .make_and_upload_entry(StoreChange::RemoveMember {
-            member: b.member.member_id(),
+            member: b.member.member(),
         })
         .await
         .unwrap();
@@ -841,7 +844,7 @@ async fn only_newer_envelopes_require_an_update() {
                     storage.as_ref(),
                     Audience::Store,
                     key(1),
-                    &a.member.member_id(),
+                    &a.member.member(),
                 )
                 .await
             } else {

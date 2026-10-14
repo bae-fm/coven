@@ -7,7 +7,7 @@ use crate::{
     operations::{Begun, Output, Progress},
     *,
 };
-use coven_crypto::{InviteSecret, MemberId, ObjectHasher, SecretText};
+use coven_crypto::{InviteSecret, ObjectHasher, SecretText};
 use coven_database::{LocalStoreLog, OperationRecord};
 use coven_format::{
     codes::InviteCode,
@@ -15,7 +15,7 @@ use coven_format::{
     store_log::{MemberRole, StoreChange},
     Object,
 };
-use coven_foundation::id_source::InviteId;
+use coven_foundation::id_source::{InviteId, MemberId};
 use coven_storage::{
     CloudProvider, InviteStorage, MintScope, ObjectPath, S3Credentials, S3MemberKey,
     StorageFailure, StorageInvitation,
@@ -83,6 +83,8 @@ impl StoreLogSync {
         let secret = InviteSecret::generate()?;
         let data = Data::Invite(InviteWork {
             id,
+            // An addition's fresh stable id, fixed before the invite exists (D13).
+            member: MemberId(self.ids.new_id()),
             role,
             access: grant,
             secret: SecretText::new(serde_json::to_string(secret.to_secret_bytes().as_bytes())?),
@@ -146,6 +148,7 @@ impl StoreLogSync {
                     local,
                     me,
                     &coven_format::store_log::StoreChange::AddMember {
+                        member: decoded.member,
                         keys: decoded.keys,
                         role: work.role,
                         access: work.access.member_access()?,
@@ -234,7 +237,7 @@ impl StoreLogSync {
             InviteState::Grant => {
                 self.catch_up().await?;
                 let local = self.database.local_store_log().await?;
-                let me = self.operation_member()?.member_id();
+                let me = self.operation_member()?.member();
                 crate::effects::Authority::Admin.check(&local.log.replay.state, &me)?;
                 if !self.owns_storage(&local.log, &me) {
                     return Err(StorageFailure::NotStoreOwner.into());
@@ -439,6 +442,7 @@ impl StoreLogSync {
             store: store.id,
             name: store.name.clone(),
             invite: work.id,
+            member: work.member,
             secret: self.invite_secret(work)?,
             initial_key,
             inviting_writer: local.device,
@@ -477,7 +481,8 @@ impl StoreLogSync {
                 envelope.chunk(),
             )?;
         let request = self.decode_request(&plain)?;
-        if request.invite != work.id {
+        // The signed request must repeat the id the invite fixed (D8).
+        if request.invite != work.id || request.member != work.member {
             return Err(SyncError::InvitationChanged);
         }
         let mut hasher = ObjectHasher::new();
@@ -507,7 +512,7 @@ impl StoreLogSync {
         let request = self.decode_request(bytes)?;
         Ok(JoinRequest {
             invite: request.invite,
-            member: request.keys.signing,
+            member: request.member,
             device_name: request.device_name,
             provider_account_email: match &work.access {
                 InviteGrant::Account { email } => Some(email.clone()),

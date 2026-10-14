@@ -286,6 +286,13 @@ fn every_secret_value_redacts_debug_output() {
         format!("{:?}", StoreKeyring::new(key)),
         format!("{member:?}"),
         format!("{:?}", member.to_secret_bytes()),
+        format!(
+            "{:?}",
+            crate::MemberIdentity::new(
+                coven_foundation::id_source::MemberId(Uuid::from_u128(9)),
+                member.clone()
+            )
+        ),
         format!("{:?}", SecretBytes::new(sentinel.to_vec())),
         format!("{:?}", ContentHasher::new()),
     ];

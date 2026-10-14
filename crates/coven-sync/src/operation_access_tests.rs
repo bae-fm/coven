@@ -85,7 +85,7 @@ async fn removal_answers_while_the_provider_request_is_held() {
     let operations = operation_owner(a.sync, files);
     tokio::time::timeout(
         Duration::from_secs(5),
-        operations.remove_member(&c.member.member_id()),
+        operations.remove_member(&c.member.member()),
     )
     .await
     .unwrap()
@@ -98,7 +98,7 @@ async fn removal_answers_while_the_provider_request_is_held() {
             .log
             .replay
             .state
-            .members[&c.member.member_id()]
+            .members[&c.member.member()]
             .removed
     );
     assert!(a
@@ -130,7 +130,7 @@ async fn restart_repeats_unconfirmed_access_and_keeps_the_same_pending_subject()
     for checkpoint in [0, 1, 2, 3] {
         let storage = google();
         let [mut a, _, c] = accounts(storage.clone()).await;
-        publish(&mut a, Command::RemoveMember(c.member.member_id())).await;
+        publish(&mut a, Command::RemoveMember(c.member.member())).await;
         let id = account_operation(&a).await;
         if checkpoint > 0 {
             assert!(matches!(
@@ -239,16 +239,17 @@ async fn a_cancelled_unsent_grant_never_reaches_the_provider() {
     );
 }
 
-async fn adopt_account(a: &mut Device, target: &MemberKeys, intended: bool) {
+async fn adopt_account(a: &mut Device, target: &MemberIdentity, intended: bool) {
     let change = if intended {
         StoreChange::AddMember {
+            member: target.member(),
             keys: public(target),
             role: MemberRole::Member,
             access: coven_format::MemberAccess::ProviderAccount(ACCOUNT.into()),
         }
     } else {
         StoreChange::RemoveMember {
-            member: target.member_id(),
+            member: target.member(),
         }
     };
     // Authoring requires a completed catch-up; a reopened device starts closed.
@@ -549,10 +550,7 @@ async fn an_obsolete_held_revoke_is_followed_by_a_grant_before_completion() {
         .await;
     let files = file_owner(&a);
     let operations = operation_owner(a.sync, files);
-    operations
-        .remove_member(&c.member.member_id())
-        .await
-        .unwrap();
+    operations.remove_member(&c.member.member()).await.unwrap();
     observed.await.unwrap();
     b.sync().await;
     adopt_account(&mut b, &c.member, true).await;
@@ -594,10 +592,7 @@ async fn retained_provider_access_does_not_prevent_an_independent_sync_pass() {
     let device = a.device().await;
     let files = file_owner(&a);
     let operations = operation_owner(a.sync, files);
-    operations
-        .remove_member(&c.member.member_id())
-        .await
-        .unwrap();
+    operations.remove_member(&c.member.member()).await.unwrap();
     let conditions = pending(&operations, &a.db).await;
     assert_eq!(conditions.len(), 1);
     assert!(matches!(
@@ -626,7 +621,7 @@ async fn shared_accounts_follow_the_union_of_active_members() {
     let [mut a, b, mut c] = accounts(storage.clone()).await;
     c.sync
         .make_and_upload_entry(StoreChange::SetAccess {
-            member: c.member.member_id(),
+            member: c.member.member(),
             access: coven_format::MemberAccess::ProviderAccount("BEN@example.com".into()),
         })
         .await
@@ -637,7 +632,7 @@ async fn shared_accounts_follow_the_union_of_active_members() {
         matches!(MemoryStorage::for_recipient(&storage,ACCOUNT).unwrap().list(&ObjectPrefix::all(store(1))).await,
         Err(error) if error.failure()==StorageFailure::PermissionDenied)
     );
-    publish(&mut a, Command::RemoveMember(b.member.member_id())).await;
+    publish(&mut a, Command::RemoveMember(b.member.member())).await;
     assert!(a
         .db
         .provider_access("ben@example.com".into())
@@ -652,7 +647,7 @@ async fn shared_accounts_follow_the_union_of_active_members() {
         .list(&ObjectPrefix::all(store(1)))
         .await
         .is_ok());
-    publish(&mut a, Command::RemoveMember(c.member.member_id())).await;
+    publish(&mut a, Command::RemoveMember(c.member.member())).await;
     drive_access(&mut a).await;
     assert!(
         matches!(MemoryStorage::for_recipient(&storage,"ben@example.com").unwrap().list(&ObjectPrefix::all(store(1))).await,
@@ -666,8 +661,8 @@ async fn removing_self_returns_only_after_its_own_entry_is_kept() {
     let mut a = device(storage, 1, member(1), store(1)).await;
     a.create(key(1)).await;
     a.add(&member(2), MemberRole::Admin).await;
-    let own = a.member.member_id();
-    publish(&mut a, Command::RemoveMember(own.clone())).await;
+    let own = a.member.member();
+    publish(&mut a, Command::RemoveMember(own)).await;
     let log = a.log().await;
     assert!(log.replay.state.members[&own].removed);
     assert_eq!(

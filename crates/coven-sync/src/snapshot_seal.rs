@@ -2,7 +2,7 @@
 
 use super::{io, StoreLogSync};
 use crate::SyncError;
-use coven_crypto::{DerivedKeys, MemberKeys, ObjectHasher};
+use coven_crypto::{DerivedKeys, MemberIdentity, ObjectHasher};
 use coven_format::{
     sealed_snapshot::{SnapshotObjectLayout, SnapshotObjectPrefix},
     store_log::SnapshotId,
@@ -18,7 +18,7 @@ impl StoreLogSync {
         key_id: KeyId,
         caught_at: coven_format::value::StorageTime,
         key: DerivedKeys,
-        member: &MemberKeys,
+        member: &MemberIdentity,
         path: &ObjectPath,
         name: &str,
     ) -> Result<(), SyncError> {
@@ -71,7 +71,7 @@ async fn seal_frames(
     mut receive: mpsc::Receiver<Vec<u8>>,
     path: &ObjectPath,
     key: DerivedKeys,
-    member: &MemberKeys,
+    member: &MemberIdentity,
 ) -> Result<(), SyncError> {
     let prefix = prefix
         .await
@@ -79,7 +79,7 @@ async fn seal_frames(
         .encode()?;
     let first = receive.recv().await.ok_or(coven_format::Error::Truncated)?;
     writer.append(&prefix).await?;
-    let signature = member.sign_prefix(path.as_str(), &prefix);
+    let signature = member.keys().sign_prefix(path.as_str(), &prefix);
     writer.append(signature.as_bytes()).await?;
     let mut hash = ObjectHasher::new();
     hash.update(&prefix);
@@ -111,7 +111,12 @@ async fn seal_frames(
         writer.append(&piece).await?;
     }
     writer
-        .append(member.sign_object(path.as_str(), &hash.finish()).as_bytes())
+        .append(
+            member
+                .keys()
+                .sign_object(path.as_str(), &hash.finish())
+                .as_bytes(),
+        )
         .await?;
     writer.finish().await?;
     Ok(())

@@ -1,20 +1,20 @@
 //! Local serde adapters for domain values whose owning crates define wire encodings.
 use serde::{Deserialize, Serialize};
 
-pub(crate) mod member {
+pub(crate) mod sealing {
     use super::*;
     pub(crate) fn serialize<S: serde::Serializer>(
-        v: &coven_crypto::MemberId,
+        v: &coven_crypto::SealingKey,
         s: S,
     ) -> Result<S::Ok, S::Error> {
-        v.to_string().serialize(s)
+        v.as_bytes().serialize(s)
     }
     pub(crate) fn deserialize<'de, D: serde::Deserializer<'de>>(
         d: D,
-    ) -> Result<coven_crypto::MemberId, D::Error> {
-        String::deserialize(d)?
-            .parse()
-            .map_err(serde::de::Error::custom)
+    ) -> Result<coven_crypto::SealingKey, D::Error> {
+        Ok(coven_crypto::SealingKey::from_bytes(
+            <[u8; 32]>::deserialize(d)?,
+        ))
     }
 }
 macro_rules! log_id {
@@ -76,7 +76,7 @@ pub(crate) enum SourceFailure {
 #[derive(Serialize, Deserialize)]
 #[serde(remote = "coven_database::EntryTarget")]
 pub(crate) enum Target {
-    Member(#[serde(with = "member")] coven_crypto::MemberId),
+    Member(coven_foundation::id_source::MemberId),
     Device(coven_foundation::id_source::DeviceId),
     Circle(coven_foundation::id_source::CircleId),
 }
@@ -94,22 +94,5 @@ pub(crate) enum Drop {
 pub(crate) struct AccessKey {
     access_key_id: String,
     principal: coven_format::S3Principal,
-    #[serde(with = "optional_member")]
-    member: Option<coven_crypto::MemberId>,
-}
-mod optional_member {
-    use super::*;
-    pub(super) fn serialize<S: serde::Serializer>(
-        v: &Option<coven_crypto::MemberId>,
-        s: S,
-    ) -> Result<S::Ok, S::Error> {
-        v.as_ref().map(ToString::to_string).serialize(s)
-    }
-    pub(super) fn deserialize<'de, D: serde::Deserializer<'de>>(
-        d: D,
-    ) -> Result<Option<coven_crypto::MemberId>, D::Error> {
-        Option::<String>::deserialize(d)?
-            .map(|v| v.parse().map_err(serde::de::Error::custom))
-            .transpose()
-    }
+    member: Option<coven_foundation::id_source::MemberId>,
 }

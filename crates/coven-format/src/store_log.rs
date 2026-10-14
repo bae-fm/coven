@@ -7,8 +7,8 @@
 use crate::error::{require, Error, Rule};
 use crate::value::{name, positive, EntryId, EntryPositions};
 use crate::wire::{wire_struct, Decoder, Encoder, Wire};
-use coven_crypto::{MemberId, SealingPublicKey};
-use coven_foundation::id_source::{CircleId, DeviceId, KeyId, StoreId};
+pub use coven_crypto::MemberPublicKeys;
+use coven_foundation::id_source::{CircleId, DeviceId, KeyId, MemberId, StoreId};
 use coven_merge::{Audience, Timestamp};
 
 /// Complete encrypted store-log object limit, including routing and signature.
@@ -22,16 +22,6 @@ pub(crate) fn check_frame_length(length: usize) -> Result<(), Error> {
         "store-log object",
     )
 }
-
-/// The signing and sealed-box public keys of a member (§11.1).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct MemberPublicKeys {
-    /// The Ed25519 public key, which identifies the member.
-    pub signing: MemberId,
-    /// The X25519 public key that opens keys sealed to this member.
-    pub sealing: SealingPublicKey,
-}
-wire_struct!(MemberPublicKeys, signing, sealing);
 
 /// A member's role in the store (§9).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -74,12 +64,14 @@ wire_struct!(SnapshotId, audience, device, number);
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum StoreChange {
     /// Create a store, name its first admin and register the writing device.
+    /// The entry's author is the first admin's stable id; `admin` supplies
+    /// that member's initial pair, which verifies this entry (D6).
     CreateStore {
         /// The store's id.
         store: StoreId,
         /// The store's name.
         name: String,
-        /// The first admin's public keys.
+        /// The first admin's initial public pair.
         admin: MemberPublicKeys,
         /// The owner’s provider account or public S3 key id.
         access: crate::MemberAccess,
@@ -90,9 +82,11 @@ pub enum StoreChange {
         /// The name of the device that wrote this entry, belonging to its author.
         device_name: String,
     },
-    /// Add a member with both public keys and their initial role.
+    /// Add a member's stable id with both public keys and their initial role.
     AddMember {
-        /// The member's public keys.
+        /// The added member's stable id, fixed by the admin's invite.
+        member: MemberId,
+        /// The member's initial public pair.
         keys: MemberPublicKeys,
         /// Storage access granted by the inviting owner.
         access: crate::MemberAccess,
@@ -192,6 +186,14 @@ pub enum StoreChange {
         /// The snapshot and the audience being reset.
         snapshot: SnapshotId,
     },
+    /// Replace an active member's public pair, keeping their id, role, access,
+    /// circles and devices (§9). It carries no audience keys.
+    ReplaceMemberKeys {
+        /// The member whose keys change.
+        member: MemberId,
+        /// The member's new public pair.
+        keys: MemberPublicKeys,
+    },
 }
 
 impl StoreChange {
@@ -231,7 +233,8 @@ impl StoreChange {
             | Self::RemoveDevice { .. }
             | Self::DeleteCircle { .. }
             | Self::AddCircleMember { .. }
-            | Self::RemoveCircleMember { .. } => Ok(()),
+            | Self::RemoveCircleMember { .. }
+            | Self::ReplaceMemberKeys { .. } => Ok(()),
         }
     }
 }
@@ -256,7 +259,7 @@ macro_rules! store_changes {
 }
 store_changes!(
     0 => CreateStore { store, name => crate::wire::get_name, admin, access, device_name => crate::wire::get_name, key, key_hash },
-    1 => AddMember { keys, role, access },
+    1 => AddMember { member, keys, role, access },
     2 => RemoveMember { member },
     3 => ChangeRole { member, role },
     4 => AddDevice { device, name => crate::wire::get_name, replaces },
@@ -270,6 +273,7 @@ store_changes!(
     13 => Reset { snapshot },
     14 => SetAccess { member, access },
     15 => RotateKey { audience, key, key_hash },
+    16 => ReplaceMemberKeys { member, keys },
 );
 
 /// One store-log entry. Its eventual signature establishes who authored it (§9).
@@ -279,7 +283,8 @@ pub struct StoreLogEntry {
     pub position: EntryId,
     /// The timestamp used to replay entries and break concurrent ties.
     pub timestamp: Timestamp,
-    /// The member whose signature must cover the entry.
+    /// The stable id of the member whose current signing key in the recorded
+    /// view, or creation's supplied pair, must verify the entry (§9).
     pub author: MemberId,
     /// Other devices’ store-log positions; the author’s own earlier entries are implicit.
     pub had_read: EntryPositions,
@@ -296,13 +301,12 @@ impl StoreLogEntry {
             Rule::TimestampDevice,
         )?;
         self.had_read.without_own_device(self.position.device)?;
-        if let StoreChange::CreateStore { admin, .. } = &self.change {
+        if let StoreChange::CreateStore { .. } = &self.change {
             require(
                 self.position.number == 1 && self.had_read.0.is_empty(),
                 "first store entry",
                 Rule::OwnPosition,
             )?;
-            require(admin.signing == self.author, "first admin", Rule::Required)?;
         }
         self.change.validate()
     }

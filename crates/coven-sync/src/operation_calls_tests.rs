@@ -11,8 +11,8 @@ async fn failed_administrative_catch_up_reserves_nothing() {
     storage.set_online(false);
     for command in [
         Command::CreateCircle("Offline".into()),
-        Command::RemoveMember(member(2).member_id()),
-        Command::SetRole(member(2).member_id(), MemberRole::Admin),
+        Command::RemoveMember(member(2).member()),
+        Command::SetRole(member(2).member(), MemberRole::Admin),
         Command::Reset(Audience::Store),
         Command::Invite(
             MemberRole::Member,
@@ -35,7 +35,7 @@ async fn sole_admin_demotion_returns_replays_reason() {
     a.create(key(1)).await;
     assert!(matches!(
         a.sync
-            .begin_operation_call(Command::SetRole(a.member.member_id(), MemberRole::Member))
+            .begin_operation_call(Command::SetRole(a.member.member(), MemberRole::Member))
             .await,
         Err(SyncError::Rejected(DropReason::NoAdminLeft))
     ));
@@ -49,9 +49,9 @@ async fn absent_targets_return_replays_reason() {
     a.create(key(1)).await;
     for (command, change) in [
         (
-            Command::SetRole(member(9).member_id(), MemberRole::Admin),
+            Command::SetRole(member(9).member(), MemberRole::Admin),
             StoreChange::ChangeRole {
-                member: member(9).member_id(),
+                member: member(9).member(),
                 role: MemberRole::Admin,
             },
         ),
@@ -140,19 +140,11 @@ async fn dropped_attempt_revalidates_before_reserving_a_retry() {
     let Output::CircleId(circle) = finish(&mut a, create).await else {
         panic!()
     };
-    let add = begin(
-        &mut a,
-        Command::AddCircleMember(circle, b.member.member_id()),
-    )
-    .await;
+    let add = begin(&mut a, Command::AddCircleMember(circle, b.member.member())).await;
     finish(&mut a, add).await;
     b.sync().await;
     b.sync.load_new_device("Ben", None).await.unwrap();
-    let operation = begin(
-        &mut a,
-        Command::AddCircleMember(circle, member(3).member_id()),
-    )
-    .await;
+    let operation = begin(&mut a, Command::AddCircleMember(circle, member(3).member())).await;
     step(&mut a, operation).await.unwrap();
     let fixed = a.db.local_store_log().await.unwrap().upload.unwrap().entry;
     b.sync
@@ -209,7 +201,7 @@ async fn removal_downloads_authority_changes() {
     b.sync.load_new_device("Ben", None).await.unwrap();
     b.sync
         .make_and_upload_entry(StoreChange::ChangeRole {
-            member: a.member.member_id(),
+            member: a.member.member(),
             role: MemberRole::Member,
         })
         .await
@@ -217,22 +209,19 @@ async fn removal_downloads_authority_changes() {
     let files = file_owner(&a);
     let operations = operation_owner(a.sync, files);
     assert!(matches!(
-        operations.remove_member(&member(3).member_id()).await,
+        operations.remove_member(&member(3).member()).await,
         Err(SyncError::Rejected(DropReason::NotAllowed))
     ));
     assert!(a.db.local_store_log().await.unwrap().upload.is_none());
     b.sync
         .make_and_upload_entry(StoreChange::ChangeRole {
-            member: a.member.member_id(),
+            member: a.member.member(),
             role: MemberRole::Admin,
         })
         .await
         .unwrap();
-    operations
-        .remove_member(&member(3).member_id())
-        .await
-        .unwrap();
-    assert!(a.db.store_log().await.unwrap().replay.state.members[&member(3).member_id()].removed);
+    operations.remove_member(&member(3).member()).await.unwrap();
+    assert!(a.db.store_log().await.unwrap().replay.state.members[&member(3).member()].removed);
     // Only the removed member's key remains, awaiting deletion (§13).
     assert_eq!(
         pending(&operations, &a.db)

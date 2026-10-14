@@ -145,7 +145,12 @@ impl DeviceLogSync {
             let mut bytes = prefix.encode_chunk(&sealed)?;
             let mut hash = coven_crypto::ObjectHasher::new();
             hash.update(&bytes);
-            bytes.extend_from_slice(member.sign_object(path.as_str(), &hash.finish()).as_bytes());
+            bytes.extend_from_slice(
+                member
+                    .keys()
+                    .sign_object(path.as_str(), &hash.finish())
+                    .as_bytes(),
+            );
             post.attempt = Some(Attempt {
                 plaintext: plaintext.clone(),
                 sealed: bytes,
@@ -237,7 +242,7 @@ impl DeviceLogSync {
 
     async fn positions_for(
         &self,
-        member: &coven_crypto::MemberKeys,
+        member: &coven_crypto::MemberIdentity,
         local: &coven_database::LocalStoreLog,
     ) -> Result<Option<PostedPositions>, SyncError> {
         if let Some(operation) = self
@@ -278,7 +283,7 @@ impl DeviceLogSync {
         };
         let replay = &local.log.replay.state;
         let introductions = crate::key_introductions::introductions(&local.log);
-        let me = member.member_id();
+        let me = member.member();
         let audiences = std::iter::once(Audience::Store).chain(
             replay
                 .circles

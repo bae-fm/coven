@@ -14,7 +14,7 @@ impl StoreLogSync {
             return Ok(false);
         }
         let member = self.operation_member()?;
-        let me = member.member_id();
+        let me = member.member();
         let state = &local.log.replay.state;
         let mut audiences = vec![Audience::Store];
         audiences.extend(
@@ -35,7 +35,7 @@ impl StoreLogSync {
     pub(crate) async fn rotate_if_exposed(
         &mut self,
         audience: Audience,
-        me: &coven_crypto::MemberId,
+        me: &coven_foundation::id_source::MemberId,
     ) -> Result<(), SyncError> {
         self.schedule_rotation(audience.clone(), me).await?;
         for record in self.database.operations().await? {
@@ -82,7 +82,7 @@ impl StoreLogSync {
     async fn schedule_rotation(
         &self,
         audience: Audience,
-        me: &coven_crypto::MemberId,
+        me: &coven_foundation::id_source::MemberId,
     ) -> Result<bool, SyncError> {
         let local = self.database.local_store_log().await?;
         let observed = match self.copy_observation() {

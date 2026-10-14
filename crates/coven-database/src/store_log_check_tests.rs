@@ -1,5 +1,5 @@
 use super::*;
-use crate::store_log::tests::keys;
+use crate::store_log::tests::member;
 
 #[test]
 fn author_view_checks_retain_all_facts_and_reject_damaged_encodings() {
@@ -9,7 +9,7 @@ fn author_view_checks_retain_all_facts_and_reject_damaged_encodings() {
         StoreLogCheck::LandedTooLate { authorized: false },
         StoreLogCheck::LandedTooLate { authorized: true },
         StoreLogCheck::NotAllowed,
-        StoreLogCheck::DeviceOwner(keys(1).signing),
+        StoreLogCheck::DeviceOwner(member(1)),
         StoreLogCheck::MemberRemoval(BTreeMap::new()),
         StoreLogCheck::MemberRemoval([(circle, CircleRemoval::Member)].into()),
         StoreLogCheck::MemberRemoval([(circle, CircleRemoval::Circle)].into()),

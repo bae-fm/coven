@@ -202,7 +202,7 @@ async fn conflicting_commitments_reject_acquisition() {
         storage.as_ref(),
         Audience::Store,
         key(3),
-        &erin.member.member_id()
+        &erin.member.member()
     )
     .await
     .is_some());
@@ -217,7 +217,7 @@ async fn conflicting_commitments_reject_acquisition() {
             &ana.log().await,
             &ana.sync.copy_observation().unwrap(),
             &ring,
-            &ana.member.member_id(),
+            &ana.member.member(),
             &Audience::Store,
         )
         .unwrap(),
@@ -249,11 +249,11 @@ async fn an_unauthorized_rotation_and_its_copy_supply_no_key() {
     // rotation of Gifts and a sealed copy of its key addressed to Ana.
     let forged = coven_crypto::CircleKey::generate(circle(1), key(9)).unwrap();
     let hash = forged.hash();
-    let ana_id = ana.member.member_id();
-    let ana_sealing = ana.member.sealing_public_key();
+    let ana_id = ana.member.member();
+    let ana_sealing = ana.member.keys().public_keys().sealing;
     ben.db
         .prepare_store_log(
-            ben.member.member_id(),
+            ben.member.member(),
             StoreChange::RotateKey {
                 audience: Audience::Circle(circle(1)),
                 key: key(9),
@@ -273,13 +273,13 @@ async fn an_unauthorized_rotation_and_its_copy_supply_no_key() {
     ana.sync().await;
     let log = ana.log().await;
     let rotation = log.entries.last().unwrap();
-    assert_eq!(rotation.entry.author, ben.member.member_id());
+    assert_eq!(rotation.entry.author, ben.member.member());
     assert_eq!(rotation.check, StoreLogCheck::NotAllowed);
     assert!(find_copy(
         storage.as_ref(),
         Audience::Circle(circle(1)),
         key(9),
-        &ana.member.member_id()
+        &ana.member.member()
     )
     .await
     .is_some());
@@ -491,10 +491,7 @@ fn lean_differential_accepted_copies() {
     // is a different addressee, numbered outside the history's members.
     let recipient_number = |prefix: &KeyCopyPrefix| {
         (0..8)
-            .find(|&i| {
-                let keys = history::keys(i);
-                prefix.addressed_to(&keys.signing, &keys.sealing)
-            })
+            .find(|&i| prefix.addressed_to(&history::member(i), &history::keys(i).sealing))
             .map_or(1000, u64::from)
     };
     let key_json = |audience: &Audience, key: KeyId| serde_json::json!({"audience": audience_number(audience), "key": key_number(key)});
@@ -743,8 +740,9 @@ fn lean_differential_first_attempts() {
             }
         }
     }
-    let member_number =
-        |id: &coven_crypto::MemberId| (0..8).find(|&i| history::member(i) == *id).unwrap() as u64;
+    let member_number = |id: &coven_foundation::id_source::MemberId| {
+        (0..8).find(|&i| history::member(i) == *id).unwrap() as u64
+    };
     let inputs: Vec<_> = cases
         .iter()
         .map(|(h, stored, me, listing, held)| {

@@ -1,9 +1,11 @@
 use super::*;
 use crate::custody::MemberKeyCustody;
-use crate::MemberKeys;
+use crate::MemberIdentity;
+use coven_foundation::id_source::MemberId;
 
-fn poisoned_custody() -> InMemoryCustody<MemberKeys> {
-    let custody = InMemoryCustody::new(MemberKeys::generate().unwrap());
+fn poisoned_custody() -> InMemoryCustody<MemberIdentity> {
+    let custody =
+        InMemoryCustody::new(MemberIdentity::generate(MemberId(uuid::Uuid::from_u128(1))).unwrap());
     let poisoned = std::panic::catch_unwind(|| {
         let _guard = custody.secret.lock().unwrap();
         panic!("poison custody secret");
@@ -21,7 +23,8 @@ fn unlocking_propagates_a_poisoned_secret_lock() {
 #[test]
 #[should_panic(expected = "in-memory custody secret lock is poisoned")]
 fn persisting_propagates_a_poisoned_secret_lock() {
-    let _persisted = poisoned_custody().persist(&MemberKeys::generate().unwrap());
+    let _persisted = poisoned_custody()
+        .persist(&MemberIdentity::generate(MemberId(uuid::Uuid::from_u128(1))).unwrap());
 }
 
 #[test]

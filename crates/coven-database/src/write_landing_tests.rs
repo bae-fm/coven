@@ -1,7 +1,7 @@
 use super::*;
 use crate::entry_effects::tests::fate;
 use crate::pending::tests::Record;
-use crate::store_log::tests::{checked, keys};
+use crate::store_log::tests::{checked, keys, member};
 use crate::tests::TestStore;
 use crate::write::tests::{count, notes, records, sql, NOTES};
 use crate::{DeviceState, EntryOutcome, StoreDevice, StoreMember};
@@ -29,23 +29,19 @@ async fn retire(
         device: DeviceId(97),
         number,
     };
-    let owner = keys(2).signing;
+    let owner = member(2);
     let mut replay = log.replay;
-    replay
-        .state
-        .members
-        .entry(owner.clone())
-        .or_insert(StoreMember {
-            sealing: keys(2).sealing,
-            access: coven_format::MemberAccess::S3AccessKey {
-                access_key_id: "fixture-access-key".into(),
-                principal: coven_format::S3Principal::Console,
-            },
-            role: MemberRole::Member,
-            removed: false,
-        });
+    replay.state.members.entry(owner).or_insert(StoreMember {
+        keys: keys(2),
+        access: coven_format::MemberAccess::S3AccessKey {
+            access_key_id: "fixture-access-key".into(),
+            principal: coven_format::S3Principal::Console,
+        },
+        role: MemberRole::Member,
+        removed: false,
+    });
     replay.state.devices.entry(writer).or_insert(StoreDevice {
-        member: owner.clone(),
+        member: owner,
         name: "writer".into(),
         state: DeviceState::Active,
     });
@@ -65,7 +61,7 @@ async fn retire(
             replay.state.devices.insert(
                 fresh,
                 StoreDevice {
-                    member: keys(2).signing,
+                    member: member(2),
                     name: "restored".into(),
                     state: DeviceState::Active,
                 },
@@ -87,7 +83,7 @@ async fn retire(
             id.device,
         )
         .unwrap(),
-        author: keys(1).signing,
+        author: member(1),
         had_read: EntryPositions(Vec::new()),
         change,
     };

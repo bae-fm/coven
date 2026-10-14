@@ -3,7 +3,7 @@
 use crate::{commit_credentials, credential_custody::cleanup_error, CredentialRollback, SyncError};
 use coven_crypto::{
     custody::{KeySession, StoreKeychain},
-    MemberKeys, SecretText,
+    MemberIdentity, SecretText,
 };
 use coven_database::{Database, DbError};
 use coven_format::codes::RestoreCode;
@@ -21,7 +21,7 @@ pub struct RestoreCodes {
 }
 struct RestoreCodesInner {
     database: Database,
-    identity: Arc<KeySession<MemberKeys>>,
+    identity: Arc<KeySession<MemberIdentity>>,
     keychain: Arc<StoreKeychain>,
     settings: StorageSettings,
     operations: crate::Operations,
@@ -40,7 +40,7 @@ impl RestoreCodes {
     /// are also the narrow persisted connection contract used by storage setup.
     pub fn new(
         database: Database,
-        identity: Arc<KeySession<MemberKeys>>,
+        identity: Arc<KeySession<MemberIdentity>>,
         keychain: Arc<StoreKeychain>,
         settings: StorageSettings,
         operations: crate::Operations,
@@ -206,6 +206,11 @@ impl RestoreCodes {
         let guard = self.inner.clone().lock_owned().await;
         let owner = guard.as_ref().ok_or(DbError::StoreClosed)?;
         let local = owner.database.local_store_log().await?;
+        let identity = owner
+            .identity
+            .read()?
+            .ok_or(coven_storage::StorageFailure::MemberKeysMissing)?;
+        // The code names the stable id its unchanged private-pair blob belongs to (D13).
         let code = RestoreCode {
             store: local.store,
             name: local
@@ -214,10 +219,8 @@ impl RestoreCodes {
                 .state
                 .store
                 .map_or(initial_name, |store| store.name),
-            member_keys: owner
-                .identity
-                .read()?
-                .ok_or(coven_storage::StorageFailure::MemberKeysMissing)?,
+            member: identity.member(),
+            member_keys: identity.keys().clone(),
             storage: data.location.encode()?,
         };
         let previous_location = owner.settings.read()?;
@@ -289,14 +292,15 @@ impl RestoreCodesInner {
         let local = self.database.local_store_log().await?;
         let store = local.log.replay.state.store.ok_or(SyncError::NoStorage)?;
         let location = self.settings.read()?.ok_or(SyncError::NoStorage)?;
-        let member_keys = self
+        let identity = self
             .identity
             .read()?
             .ok_or(coven_storage::StorageFailure::MemberKeysMissing)?;
         Ok(RestoreCode {
             store: store.id,
             name: store.name,
-            member_keys,
+            member: identity.member(),
+            member_keys: identity.keys().clone(),
             storage: location.encode()?,
         })
     }

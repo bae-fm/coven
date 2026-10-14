@@ -218,7 +218,7 @@ fn circle_write(n: u64, id: &str, audience: &Audience) -> WriteRecord {
 
 #[tokio::test]
 async fn a_child_of_two_provisionally_hidden_parents_returns_when_both_do() {
-    use crate::store_log::tests::{checked, circle_history, keys};
+    use crate::store_log::tests::{checked, circle_history, member};
     use coven_format::store_log::StoreChange;
     let circle = CircleId(uuid::Uuid::from_u128(2));
     let history = circle_history(circle);
@@ -281,23 +281,16 @@ async fn a_child_of_two_provisionally_hidden_parents_returns_when_both_do() {
     let mut removal = history[0].0.clone();
     removal.position.number = 5;
     removal.timestamp = coven_merge::Timestamp::new(5, 0, removal.position.device).unwrap();
-    removal.change = StoreChange::RemoveMember {
-        member: keys(2).signing,
-    };
+    removal.change = StoreChange::RemoveMember { member: member(2) };
     let mut replay = db.store_log().await.unwrap().replay;
-    replay
-        .state
-        .members
-        .get_mut(&keys(2).signing)
-        .unwrap()
-        .removed = true;
+    replay.state.members.get_mut(&member(2)).unwrap().removed = true;
     replay
         .state
         .circles
         .get_mut(&circle)
         .unwrap()
         .members
-        .remove(&keys(2).signing);
+        .remove(&member(2));
     replay.state.circle_deletions.remove(&circle);
     replay
         .entries

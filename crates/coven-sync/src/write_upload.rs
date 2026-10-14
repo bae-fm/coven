@@ -14,7 +14,7 @@ impl DeviceLogSync {
         store: coven_foundation::id_source::StoreId,
         write: WriteId,
         ring: coven_crypto::StoreKeyring,
-        member: coven_crypto::MemberKeys,
+        member: coven_crypto::MemberIdentity,
     ) -> Result<(), SyncError> {
         let storage = self.storage.as_deref().ok_or(SyncError::NoStorage)?;
         let database = &self.database;
@@ -196,7 +196,7 @@ impl DeviceLogSync {
         store: coven_foundation::id_source::StoreId,
         write: WriteId,
         ring: coven_crypto::StoreKeyring,
-        member: coven_crypto::MemberKeys,
+        member: coven_crypto::MemberIdentity,
         path: coven_storage::ObjectPath,
     ) -> Result<(), SyncError> {
         let storage = self.storage.as_deref().ok_or(SyncError::NoStorage)?;

@@ -122,7 +122,12 @@ fn dropping_the_last_session_and_failed_open_both_close_custom_custody() {
 #[test]
 fn closing_erases_in_memory_identity_and_store_material() {
     let keys = Arc::new(InMemoryCustody::new(ring(1)));
-    let identity = Arc::new(InMemoryCustody::new(MemberKeys::generate().unwrap()));
+    let identity = Arc::new(InMemoryCustody::new(
+        crate::MemberIdentity::generate(coven_foundation::id_source::MemberId(
+            uuid::Uuid::from_u128(1),
+        ))
+        .unwrap(),
+    ));
     let store_session = KeySession::store(keys.clone()).unwrap();
     let member_session = KeySession::member(identity.clone()).unwrap();
     member_session.close();

@@ -477,3 +477,83 @@ fn a_dropped_replacement_restores_the_old_id_without_rejudging_recorded_pasts() 
         DeviceId(1)
     ));
 }
+
+#[test]
+fn an_addition_cannot_change_an_active_members_keys() {
+    let mut h = household(Member, Member);
+    let readd = |keys| StoreChange::AddMember {
+        member: member(1),
+        keys,
+        role: Member,
+        access: coven_format::MemberAccess::S3AccessKey {
+            access_key_id: "fixture-access-key".into(),
+            principal: coven_format::S3Principal::Console,
+        },
+    };
+    // The same id, keys, role and access is already in place.
+    h.all(0, 0, readd(keys(1)));
+    // Another pair for the active id: only a replacement changes keys (§9).
+    h.all(0, 0, readd(keys(3)));
+    h.every_order(|r| {
+        assert_eq!(h.drops(r), vec![6]);
+        assert_eq!(
+            r.entries[&h.entries[6].position],
+            coven_database::EntryOutcome::Dropped(coven_database::DropReason::NotAllowed)
+        );
+        assert_eq!(r.state.members[&member(1)].keys, keys(1));
+    });
+}
+
+#[test]
+fn concurrent_additions_of_one_id_with_different_keys_conflict() {
+    for later in [keys(3), keys(4)] {
+        let mut h = household(Admin, Member);
+        let past: Vec<_> = (0..h.entries.len()).collect();
+        let add = |keys| StoreChange::AddMember {
+            member: member(3),
+            keys,
+            role: Member,
+            access: coven_format::MemberAccess::S3AccessKey {
+                access_key_id: "fixture-access-key".into(),
+                principal: coven_format::S3Principal::Console,
+            },
+        };
+        h.push(0, 0, &past, add(keys(3)));
+        h.push(1, 1, &past, add(later));
+        h.every_order(|r| {
+            assert_eq!(r.state.members[&member(3)].keys, keys(3));
+            if later == keys(3) {
+                // Equal additions are one result, as before stable ids.
+                assert!(h.drops(r).is_empty());
+            } else {
+                assert_eq!(
+                    r.entries[&h.entries[6].position],
+                    coven_database::EntryOutcome::Dropped(coven_database::DropReason::BeatenBy(
+                        h.entries[5].position
+                    ))
+                );
+            }
+        });
+    }
+}
+
+#[test]
+fn a_member_key_replacement_is_not_yet_authorized_by_any_view() {
+    let mut h = household(Admin, Member);
+    // Sentinel coverage until T105 replays replacements (§9).
+    h.all(
+        1,
+        1,
+        StoreChange::ReplaceMemberKeys {
+            member: member(1),
+            keys: keys(3),
+        },
+    );
+    h.every_order(|r| {
+        assert_eq!(
+            r.entries[&h.entries[5].position],
+            coven_database::EntryOutcome::Dropped(coven_database::DropReason::NotAllowed)
+        );
+        assert_eq!(r.state.members[&member(1)].keys, keys(1));
+    });
+}

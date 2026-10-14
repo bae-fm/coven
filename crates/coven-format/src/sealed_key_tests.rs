@@ -1,7 +1,7 @@
 use super::*;
 use crate::{test_utils, tests::hex};
 use coven_crypto::StoreKeyring;
-use coven_crypto::{seal_circle_key, seal_store_key, MaterialError, SealingPublicKey};
+use coven_crypto::{seal_circle_key, seal_store_key, MaterialError, MemberKeys};
 use coven_foundation::id_source::CircleId;
 use uuid::Uuid;
 
@@ -12,23 +12,30 @@ fn circle() -> Audience {
 }
 
 fn prefix(audience: Audience) -> KeyCopyPrefix {
-    let member = crate::test_utils::member_keys();
+    let member = crate::test_utils::identity();
     KeyCopyPrefix {
         audience,
         key: KeyId(Uuid::from_u128(3)),
-        member: member.member_id(),
-        sealing: member.sealing_public_key(),
+        member: member.member(),
+        sealing: sealing(&member),
     }
 }
 
+fn sealing(member: &MemberIdentity) -> SealingKey {
+    member.keys().public_keys().sealing
+}
+
 // The test member's id with another sealing pair: a different credential.
-fn other_credential() -> MemberKeys {
+fn other_credential() -> MemberIdentity {
     let mut seeds = crate::test_utils::member_keys()
         .to_secret_bytes()
         .as_bytes()
         .to_vec();
     seeds[37..69].fill(0x35);
-    MemberKeys::from_secret_bytes(&seeds).unwrap()
+    MemberIdentity::new(
+        test_utils::member_id(),
+        MemberKeys::from_secret_bytes(&seeds).unwrap(),
+    )
 }
 
 // An anonymous sender can seal any material under any claimed routing facts.
@@ -37,7 +44,7 @@ fn seal(
     audience: &Audience,
     key: KeyId,
     material: [u8; 32],
-    recipient: &SealingPublicKey,
+    recipient: &SealingKey,
 ) -> Vec<u8> {
     let prefix = routing.encode().unwrap();
     let body = match audience {
@@ -58,7 +65,7 @@ fn seal(
     routing.encode_box(&body).unwrap()
 }
 
-fn open(envelope: &SealedKey<'_>, member: &MemberKeys, path: &str) -> Result<(), CryptoError> {
+fn open(envelope: &SealedKey<'_>, member: &MemberIdentity, path: &str) -> Result<(), CryptoError> {
     match envelope.prefix().audience {
         Audience::Store => envelope.open_store_key(member, path).map(|_| ()),
         Audience::Circle(_) => envelope.open_circle_key(member, path).map(|_| ()),
@@ -66,40 +73,34 @@ fn open(envelope: &SealedKey<'_>, member: &MemberKeys, path: &str) -> Result<(),
 }
 
 // Open the box under exactly these prefix bytes, skipping the recipient check.
-fn open_box(audience: &Audience, member: &MemberKeys, bytes: &[u8]) -> Result<(), CryptoError> {
+fn open_box(audience: &Audience, member: &MemberIdentity, bytes: &[u8]) -> Result<(), CryptoError> {
     let length = prefix(audience.clone()).length();
     let (prefix, sealed) = bytes.split_at(length);
     match audience {
-        Audience::Store => member.open_store_key(PATH, prefix, sealed).map(|_| ()),
-        Audience::Circle(_) => member.open_circle_key(PATH, prefix, sealed).map(|_| ()),
+        Audience::Store => member
+            .keys()
+            .open_store_key(PATH, prefix, sealed)
+            .map(|_| ()),
+        Audience::Circle(_) => member
+            .keys()
+            .open_circle_key(PATH, prefix, sealed)
+            .map(|_| ()),
     }
 }
 
 #[test]
 fn every_routing_field_and_exact_numbered_path_are_authenticated() {
-    let member = crate::test_utils::member_keys();
-    let mut seeds = member.to_secret_bytes().as_bytes().to_vec();
-    seeds[5..37].fill(0x34);
-    let other_identity = MemberKeys::from_secret_bytes(&seeds).unwrap();
-    assert_eq!(
-        member.sealing_public_key(),
-        other_identity.sealing_public_key()
-    );
+    let member = crate::test_utils::identity();
+    // Another member holding the same sealing pair: only the id differs.
+    let other_identity =
+        MemberIdentity::new(test_utils::other_member_id(), test_utils::member_keys());
+    assert_eq!(sealing(&member), sealing(&other_identity));
     let other_credential = other_credential();
-    assert_eq!(member.member_id(), other_credential.member_id());
-    assert_ne!(
-        member.sealing_public_key(),
-        other_credential.sealing_public_key()
-    );
+    assert_eq!(member.member(), other_credential.member());
+    assert_ne!(sealing(&member), sealing(&other_credential));
     for audience in [Audience::Store, circle()] {
         let prefix = prefix(audience.clone());
-        let bytes = seal(
-            &prefix,
-            &audience,
-            prefix.key,
-            [17; 32],
-            &member.sealing_public_key(),
-        );
+        let bytes = seal(&prefix, &audience, prefix.key, [17; 32], &sealing(&member));
         let envelope = SealedKey::decode(&bytes).unwrap();
         assert_eq!(envelope.prefix(), &prefix);
         open(&envelope, &member, PATH).unwrap();
@@ -119,18 +120,18 @@ fn every_routing_field_and_exact_numbered_path_are_authenticated() {
                 ..prefix.clone()
             },
             KeyCopyPrefix {
-                member: other_identity.member_id(),
+                member: other_identity.member(),
                 ..prefix.clone()
             },
             KeyCopyPrefix {
-                sealing: other_credential.sealing_public_key(),
+                sealing: sealing(&other_credential),
                 ..prefix.clone()
             },
         ] {
             let changed_bytes = changed.encode_box(&bytes[prefix.length()..]).unwrap();
             let recipient = [&member, &other_identity, &other_credential]
                 .into_iter()
-                .find(|keys| changed.addressed_to(&keys.member_id(), &keys.sealing_public_key()))
+                .find(|keys| changed.addressed_to(&keys.member(), &sealing(keys)))
                 .unwrap();
             assert!(matches!(
                 open(&SealedKey::decode(&changed_bytes).unwrap(), recipient, PATH),
@@ -162,20 +163,14 @@ fn every_routing_field_and_exact_numbered_path_are_authenticated() {
 
 #[test]
 fn foreign_recipient_routing_is_visible_even_when_the_box_is_forged() {
-    let member = crate::test_utils::member_keys();
-    let foreign = MemberKeys::generate().unwrap();
+    let member = crate::test_utils::identity();
+    let foreign = MemberIdentity::generate(test_utils::other_member_id()).unwrap();
     for audience in [Audience::Store, circle()] {
         let prefix = KeyCopyPrefix {
-            member: foreign.member_id(),
+            member: foreign.member(),
             ..prefix(audience.clone())
         };
-        let mut bytes = seal(
-            &prefix,
-            &audience,
-            prefix.key,
-            [17; 32],
-            &foreign.sealing_public_key(),
-        );
+        let mut bytes = seal(&prefix, &audience, prefix.key, [17; 32], &sealing(&foreign));
         for forged in [false, true] {
             if forged {
                 bytes[prefix.length()..].fill(0);
@@ -193,7 +188,7 @@ fn foreign_recipient_routing_is_visible_even_when_the_box_is_forged() {
 
 #[test]
 fn authenticated_payload_must_match_its_claimed_key_and_circle() {
-    let member = crate::test_utils::member_keys();
+    let member = crate::test_utils::identity();
     for audience in [Audience::Store, circle()] {
         let prefix = prefix(audience.clone());
         let bytes = seal(
@@ -201,7 +196,7 @@ fn authenticated_payload_must_match_its_claimed_key_and_circle() {
             &audience,
             KeyId(Uuid::from_u128(4)),
             [17; 32],
-            &member.sealing_public_key(),
+            &sealing(&member),
         );
         assert!(matches!(
             open(&SealedKey::decode(&bytes).unwrap(), &member, PATH),
@@ -214,7 +209,7 @@ fn authenticated_payload_must_match_its_claimed_key_and_circle() {
         &Audience::Circle(CircleId(Uuid::from_u128(8))),
         prefix.key,
         [17; 32],
-        &member.sealing_public_key(),
+        &sealing(&member),
     );
     assert!(matches!(
         open(&SealedKey::decode(&bytes).unwrap(), &member, PATH),
@@ -224,10 +219,10 @@ fn authenticated_payload_must_match_its_claimed_key_and_circle() {
 
 #[test]
 fn matching_sealing_keys_do_not_override_the_addressed_member() {
-    let member = crate::test_utils::member_keys();
-    let other = MemberKeys::generate().unwrap();
+    let member = crate::test_utils::identity();
+    let other = test_utils::other_member_id();
     let prefix = KeyCopyPrefix {
-        member: other.member_id(),
+        member: other,
         ..prefix(Audience::Store)
     };
     let bytes = seal(
@@ -235,10 +230,11 @@ fn matching_sealing_keys_do_not_override_the_addressed_member() {
         &Audience::Store,
         prefix.key,
         [17; 32],
-        &member.sealing_public_key(),
+        &sealing(&member),
     );
     // This box really decrypts with our sealing secret, but names another member.
     member
+        .keys()
         .open_store_key(PATH, &bytes[..prefix.length()], &bytes[prefix.length()..])
         .unwrap();
     assert!(matches!(
@@ -251,18 +247,12 @@ fn matching_sealing_keys_do_not_override_the_addressed_member() {
 
 #[test]
 fn opened_material_must_match_the_introductions_secret_hash() {
-    let member = crate::test_utils::member_keys();
+    let member = crate::test_utils::identity();
     for audience in [Audience::Store, circle()] {
         let prefix = prefix(audience.clone());
         let expected = StoreKey::from_bytes(prefix.key, [17; 32]).hash();
         for material in [[17; 32], [18; 32]] {
-            let bytes = seal(
-                &prefix,
-                &audience,
-                prefix.key,
-                material,
-                &member.sealing_public_key(),
-            );
+            let bytes = seal(&prefix, &audience, prefix.key, material, &sealing(&member));
             let envelope = SealedKey::decode(&bytes).unwrap();
             let result = match audience {
                 Audience::Store => envelope
@@ -312,12 +302,13 @@ fn malformed_routing_and_box_lengths_are_rejected_without_decryption() {
                 })
             ));
         }
+        // A member id is any UUID: no key validation applies to it.
         let mut changed = bytes.clone();
-        changed[prefix.length() - 64..prefix.length() - 32].fill(0);
-        assert!(matches!(
-            SealedKey::decode(&changed),
-            Err(Error::InvalidMemberId)
-        ));
+        changed[prefix.length() - 48..prefix.length() - 32].fill(0);
+        assert_eq!(
+            SealedKey::decode(&changed).unwrap().prefix().member,
+            MemberId(Uuid::nil())
+        );
         for length in [prefix.box_length() - 1, prefix.box_length() + 1] {
             assert!(prefix.encode_box(&vec![0; length]).is_err());
         }
@@ -326,15 +317,15 @@ fn malformed_routing_and_box_lengths_are_rejected_without_decryption() {
 
 #[test]
 fn key_copy_routing_is_visible_without_the_recipient_secret() {
-    let member = test_utils::member_keys();
+    let member = test_utils::identity();
     let key = test_utils::store_key();
     let circle_key = CircleKey::from_bytes(CircleId(Uuid::from_u128(2)), key.id(), [18; 32]);
     for audience in [Audience::Store, circle()] {
         let routing = KeyCopyPrefix {
             audience: audience.clone(),
             key: key.id(),
-            member: member.member_id(),
-            sealing: member.sealing_public_key(),
+            member: member.member(),
+            sealing: sealing(&member),
         };
         let sealed = match audience {
             Audience::Store => {
@@ -359,8 +350,8 @@ fn key_copy_routing_is_visible_without_the_recipient_secret() {
             }
         }
         prefix.extend_from_slice(key.id().0.as_bytes());
-        prefix.extend_from_slice(&member.member_id().to_bytes());
-        prefix.extend_from_slice(member.sealing_public_key().as_bytes());
+        prefix.extend_from_slice(member.member().0.as_bytes());
+        prefix.extend_from_slice(sealing(&member).as_bytes());
         assert_eq!(routing.encode().unwrap(), prefix);
         assert_eq!(&bytes[..prefix.len()], prefix);
         assert_eq!(bytes.len(), prefix.len() + routing.box_length());
@@ -371,27 +362,21 @@ fn key_copy_routing_is_visible_without_the_recipient_secret() {
 
 #[test]
 fn a_copy_to_another_sealing_key_of_the_member_is_not_addressed_to_this_one() {
-    let member = crate::test_utils::member_keys();
+    let member = crate::test_utils::identity();
     let other = other_credential();
     for audience in [Audience::Store, circle()] {
         let routing = KeyCopyPrefix {
-            sealing: other.sealing_public_key(),
+            sealing: sealing(&other),
             ..prefix(audience.clone())
         };
-        let bytes = seal(
-            &routing,
-            &audience,
-            routing.key,
-            [17; 32],
-            &other.sealing_public_key(),
-        );
+        let bytes = seal(&routing, &audience, routing.key, [17; 32], &sealing(&other));
         let envelope = SealedKey::decode(&bytes).unwrap();
         assert!(!envelope
             .prefix()
-            .addressed_to(&member.member_id(), &member.sealing_public_key()));
+            .addressed_to(&member.member(), &sealing(&member)));
         assert!(envelope
             .prefix()
-            .addressed_to(&other.member_id(), &other.sealing_public_key()));
+            .addressed_to(&other.member(), &sealing(&other)));
         assert!(matches!(
             open(&envelope, &member, PATH),
             Err(CryptoError::Authentication)
@@ -401,10 +386,13 @@ fn a_copy_to_another_sealing_key_of_the_member_is_not_addressed_to_this_one() {
 }
 
 // Public test material, independently sealed using Python hashlib/hmac and libsodium.
-// Recipient seeds are 0x33, ephemeral seeds are 0x55/0x56, nonces 0x44/0x45.
+// Both copies go to Ana's one stable id: the store key to her original
+// credential (seeds 0x33), the circle key to her replacement (seeds 0x34).
+// Ephemeral seeds are 0x55/0x56, nonces 0x44/0x45.
 #[test]
 fn sealed_key_fixtures_open_and_reencode_without_losing_their_random_bytes() {
-    let member = crate::test_utils::member_keys();
+    let original = crate::test_utils::identity();
+    let replaced = MemberIdentity::new(test_utils::member_id(), test_utils::replacement_keys());
     for (circle, text) in [
         (false, include_str!("../fixtures/sealed-store-key.hex")),
         (true, include_str!("../fixtures/sealed-circle-key.hex")),
@@ -418,12 +406,22 @@ fn sealed_key_fixtures_open_and_reencode_without_losing_their_random_bytes() {
             "10101010-1010-1010-1010-101010101010/keys/7/9"
         };
         assert_eq!(SealedKey::decode(&bytes).unwrap().encode(), bytes);
+        let (member, other) = if circle {
+            (&replaced, &original)
+        } else {
+            (&original, &replaced)
+        };
+        let routing = SealedKey::decode(&bytes).unwrap().prefix().clone();
+        assert_eq!(routing.member, test_utils::member_id());
+        assert_eq!(routing.sealing, sealing(member));
+        // The same id's other credential is not this copy's recipient.
+        assert!(!routing.addressed_to(&other.member(), &sealing(other)));
         let initial = StoreKey::from_bytes(KeyId(Uuid::from_bytes([1; 16])), [17; 32]);
         let mut expected = StoreKeyring::new(initial.clone());
         let actual = if circle {
             let key = SealedKey::decode(&bytes)
                 .unwrap()
-                .open_circle_key(&member, path)
+                .open_circle_key(member, path)
                 .unwrap();
             assert_eq!((key.circle(), key.id()), (circle_id, key_id));
             expected
@@ -435,7 +433,7 @@ fn sealed_key_fixtures_open_and_reencode_without_losing_their_random_bytes() {
         } else {
             let key = SealedKey::decode(&bytes)
                 .unwrap()
-                .open_store_key(&member, path)
+                .open_store_key(member, path)
                 .unwrap();
             assert_eq!(key.id(), key_id);
             StoreKeyring::new(key)
@@ -447,9 +445,9 @@ fn sealed_key_fixtures_open_and_reencode_without_losing_their_random_bytes() {
         let open = |bytes: &[u8]| -> Result<(), Box<dyn std::error::Error>> {
             let envelope = SealedKey::decode(bytes)?;
             if circle {
-                envelope.open_circle_key(&member, path)?;
+                envelope.open_circle_key(member, path)?;
             } else {
-                envelope.open_store_key(&member, path)?;
+                envelope.open_store_key(member, path)?;
             }
             Ok(())
         };

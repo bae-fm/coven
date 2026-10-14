@@ -482,7 +482,7 @@ impl Database {
     /// A store creation must name the directory settings' id and name (§9).
     pub async fn prepare_store_log<F, E>(
         &self,
-        author: coven_crypto::MemberId,
+        author: coven_foundation::id_source::MemberId,
         change: coven_format::store_log::StoreChange,
         seal: F,
     ) -> Result<crate::EntryId, E>

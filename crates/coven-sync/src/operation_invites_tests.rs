@@ -24,11 +24,20 @@ async fn invite(d: &mut Device, account: &str) -> (OperationId, Invite) {
     };
     (id, invite)
 }
-async fn request(storage: &dyn Storage, invite: &Invite, keys: &MemberKeys, name: &str) {
+/// The joining member: the id the invite fixed, with seed `seed`'s fresh pair.
+fn joiner(invite: &Invite, seed: u8) -> MemberIdentity {
+    MemberIdentity::new(
+        InviteCode::from_text(&invite.code).unwrap().member,
+        member(seed).keys().clone(),
+    )
+}
+
+async fn request(storage: &dyn Storage, invite: &Invite, keys: &MemberIdentity, name: &str) {
     let code = InviteCode::from_text(&invite.code).unwrap();
     let path = ObjectPath::join_request(code.store, invite.id);
     let plain = Object::JoinRequest(WireRequest {
         invite: invite.id,
+        member: keys.member(),
         keys: public(keys),
         device_name: name.into(),
     })
@@ -42,7 +51,7 @@ async fn request(storage: &dyn Storage, invite: &Invite, keys: &MemberKeys, name
         .unwrap();
     let mut hash = ObjectHasher::new();
     hash.update(&prefix.encode_chunk(&chunk).unwrap());
-    let signature = keys.sign_object(path.as_str(), &hash.finish());
+    let signature = keys.keys().sign_object(path.as_str(), &hash.finish());
     let bytes = SingleChunkObject::JoinRequest {
         chunk: &chunk,
         signature,
@@ -56,7 +65,7 @@ async fn request(storage: &dyn Storage, invite: &Invite, keys: &MemberKeys, name
 async fn approve_seals_store_history_and_removes_the_request() {
     let storage = google();
     let [mut a, b, _c] = accounts(storage.clone()).await;
-    publish(&mut a, Command::RemoveMember(b.member.member_id())).await;
+    publish(&mut a, Command::RemoveMember(b.member.member())).await;
     drive_access(&mut a).await;
     a.sync.test_rotate(Audience::Store, key(2)).await;
     let expected: Vec<_> = a.custody.read().unwrap().unwrap().store_key_ids().collect();
@@ -71,7 +80,9 @@ async fn approve_seals_store_history_and_removes_the_request() {
     );
     assert!(code.key_copy_number > 0);
     let joining = MemoryStorage::for_recipient(&storage, "join@example.com").unwrap();
-    let keys = member(9);
+    let keys = joiner(&invite, 9);
+    // The invite fixes a fresh id, independent of every key (D13).
+    assert_ne!(keys.member(), member(9).member());
     request(&joining, &invite, &keys, "New phone").await;
     assert!(matches!(
         step(&mut a, operation).await.unwrap(),
@@ -93,7 +104,7 @@ async fn approve_seals_store_history_and_removes_the_request() {
         Err(error) if error.failure() == StorageFailure::NotFound
     ));
     for key in expected {
-        let path = copy_path(&joining, Audience::Store, key, &keys.member_id()).await;
+        let path = copy_path(&joining, Audience::Store, key, &keys.member()).await;
         let (writer, number) = path.key_copy_position().unwrap();
         assert_eq!(writer, code.inviting_writer);
         assert!(number.get() > code.key_copy_number);
@@ -108,10 +119,10 @@ async fn approve_seals_store_history_and_removes_the_request() {
     }
     let state = a.log().await.replay.state;
     assert_eq!(
-        state.members[&keys.member_id()].access,
+        state.members[&keys.member()].access,
         coven_format::MemberAccess::ProviderAccount("join@example.com".into())
     );
-    assert!(!state.devices.values().any(|d| d.member == keys.member_id())); // Joining device adds itself later.
+    assert!(!state.devices.values().any(|d| d.member == keys.member())); // Joining device adds itself later.
 }
 
 #[tokio::test]
@@ -140,8 +151,8 @@ async fn invite_cursor_excludes_reserved_copies_until_the_invites_catch_up_publi
                 keys::store_copy(
                     path,
                     &fixed_key,
-                    &recipient.member_id(),
-                    &recipient.sealing_public_key(),
+                    &recipient.member(),
+                    &recipient.keys().public_keys().sealing,
                 )
             })
             .await
@@ -188,7 +199,7 @@ async fn decline_cancel_discard_and_expiry_take_access_back() {
             .list(&ObjectPrefix::store_logs(store(1)))
             .await
             .is_ok());
-        request(&joining, &invite, &member(9), "New phone").await;
+        request(&joining, &invite, &joiner(&invite, 9), "New phone").await;
         step(&mut a, operation).await.unwrap();
         match settle {
             "decline" => {
@@ -224,7 +235,7 @@ async fn decline_cancel_discard_and_expiry_take_access_back() {
             .replay
             .state
             .members
-            .contains_key(&member(9).member_id()));
+            .contains_key(&joiner(&invite, 9).member()));
     }
 }
 
@@ -289,19 +300,34 @@ async fn s3_invitation_carries_its_key_and_retains_the_manual_deletion_notice() 
 }
 
 #[tokio::test]
+async fn a_request_must_repeat_the_member_id_its_invite_fixed() {
+    let storage = google();
+    let [mut a, _b, _c] = accounts(storage.clone()).await;
+    let (operation, invite) = invite(&mut a, "join@example.com").await;
+    let joining = MemoryStorage::for_recipient(&storage, "join@example.com").unwrap();
+    // A correctly signed request for an id the invite did not fix (D8).
+    request(&joining, &invite, &member(9), "Phone").await;
+    assert!(matches!(
+        step(&mut a, operation).await,
+        Err(SyncError::InvitationChanged)
+    ));
+    assert!(a.sync.current_join_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn replacement_request_cannot_be_approved_from_a_stale_prompt() {
     let storage = google();
     let [mut a, _b, _c] = accounts(storage.clone()).await;
     let (operation, invite) = invite(&mut a, "join@example.com").await;
     let joining = MemoryStorage::for_recipient(&storage, "join@example.com").unwrap();
-    request(&joining, &invite, &member(9), "Phone").await;
+    request(&joining, &invite, &joiner(&invite, 9), "Phone").await;
     step(&mut a, operation).await.unwrap();
     let previous = a.sync.current_join_requests().await.unwrap().remove(0);
     storage
         .delete(&ObjectPath::join_request(store(1), invite.id))
         .await
         .unwrap();
-    request(&joining, &invite, &member(8), "Phone").await;
+    request(&joining, &invite, &joiner(&invite, 8), "Phone").await;
     step(&mut a, operation).await.unwrap();
     assert!(matches!(
         a.sync
@@ -372,13 +398,13 @@ async fn failed_join_request_still_expires_and_live_requests_are_delivered() {
         2,
         "a command must not postpone the retry"
     );
-    request(&joining, &invite, &member(9), "Phone").await;
+    request(&joining, &invite, &joiner(&invite, 9), "Phone").await;
     a.clock.set(UNIX_EPOCH + Duration::from_secs(2));
     tokio::time::timeout(Duration::from_secs(10), joins.changed())
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(joins.borrow()[0].member, member(9).member_id());
+    assert_eq!(joins.borrow()[0].member, joiner(&invite, 9).member());
     storage
         .delete(&ObjectPath::join_request(store(1), invite.id))
         .await

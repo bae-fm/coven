@@ -35,7 +35,12 @@ async fn unsigned_positions_cannot_authorize_log_deletion() {
     let mut hash = coven_crypto::ObjectHasher::new();
     hash.update(&unsigned);
     let mut forged = unsigned.clone();
-    forged.extend_from_slice(other.sign_object(path.as_str(), &hash.finish()).as_bytes());
+    forged.extend_from_slice(
+        other
+            .keys()
+            .sign_object(path.as_str(), &hash.finish())
+            .as_bytes(),
+    );
     for damaged in [unsigned, forged] {
         storage.replace(&path, &damaged).await.unwrap();
         a.sync.run_retention().await.unwrap();
@@ -167,7 +172,7 @@ async fn removed_member_logs_belong_to_the_store_owner_and_stay_on_google_drive(
         a.sync.write_snapshot(Audience::Store).await.unwrap();
         a.sync
             .make_and_upload_entry(StoreChange::RemoveMember {
-                member: b.member.member_id(),
+                member: b.member.member(),
             })
             .await
             .unwrap();
@@ -334,7 +339,7 @@ async fn a_snapshot_keeps_its_key_when_a_removal_is_dropped() {
     b.clock.set(UNIX_EPOCH + Duration::from_secs(3));
     b.sync
         .make_and_upload_entry(StoreChange::RemoveMember {
-            member: a.member.member_id(),
+            member: a.member.member(),
         })
         .await
         .unwrap();
@@ -347,14 +352,14 @@ async fn a_snapshot_keeps_its_key_when_a_removal_is_dropped() {
         storage.as_ref(),
         Audience::Store,
         replacement,
-        &a.member.member_id()
+        &a.member.member()
     )
     .await
     .is_none());
     a.clock.set(UNIX_EPOCH + Duration::from_secs(2));
     a.sync
         .make_and_upload_entry(StoreChange::RemoveMember {
-            member: b.member.member_id(),
+            member: b.member.member(),
         })
         .await
         .unwrap();
@@ -365,7 +370,7 @@ async fn a_snapshot_keeps_its_key_when_a_removal_is_dropped() {
         storage.as_ref(),
         Audience::Store,
         replacement,
-        &a.member.member_id()
+        &a.member.member()
     )
     .await
     .is_some());

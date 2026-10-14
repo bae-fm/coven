@@ -1,5 +1,5 @@
 use super::*;
-use coven_crypto::{custody::Keychain, MemberKeys, SecretText};
+use coven_crypto::{custody::Keychain, SecretText};
 use coven_foundation::id_source::StoreId;
 use coven_storage::{OAuthTokens, S3Credentials, StorageConfig};
 use std::sync::Arc;
@@ -30,7 +30,8 @@ fn fixture(present: bool) -> (Arc<Keychain>, StoreKeychain, RestoreCode) {
     let code = RestoreCode {
         store: id,
         name: "Household".into(),
-        member_keys: MemberKeys::generate().unwrap(),
+        member: crate::store_log_sync::tests::member(1).member(),
+        member_keys: coven_crypto::MemberKeys::generate().unwrap(),
         storage: StorageConfig::S3 {
             bucket: "bucket".into(),
             region: "region".into(),

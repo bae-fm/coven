@@ -364,7 +364,8 @@ async fn pending_queries_round_trip_every_subject_and_reason() {
         PendingSubject::KeyCopy {
             audience: coven_merge::Audience::Store,
             key: key(1),
-            member: a.member.member_id(),
+            member: a.member.member(),
+            sealing: a.member.keys().public_keys().sealing,
         },
         PendingSubject::Snapshot(coven_format::store_log::SnapshotId {
             audience: coven_merge::Audience::Store,
@@ -446,7 +447,7 @@ async fn pending_queries_round_trip_every_subject_and_reason() {
                 email: "member@project.iam.gserviceaccount.com".into(),
                 managed_folder: "base/store/".into(),
             },
-            member: Some(a.member.member_id()),
+            member: Some(a.member.member()),
         }),
         PendingReason::FileUnavailable(FileMissingReason::Source(FileSourceFailure::Changed)),
         PendingReason::Disagrees,
@@ -534,17 +535,14 @@ async fn lean_differential_access_pending() {
                 storage.set_retained_access(account, shares.clone()).await;
             }
             if remote {
-                publish(&mut b, Command::RemoveMember(c.member.member_id())).await;
+                publish(&mut b, Command::RemoveMember(c.member.member())).await;
                 drive_access(&mut b).await;
                 a.sync().await;
             }
             let files = file_owner(&a);
             let operations = operation_owner(a.sync, files);
             if !remote {
-                operations
-                    .remove_member(&c.member.member_id())
-                    .await
-                    .unwrap();
+                operations.remove_member(&c.member.member()).await.unwrap();
             }
             let conditions = pending(&operations, &a.db).await;
             assert_eq!(conditions.len(), usize::from(failures > 0));

@@ -1,10 +1,10 @@
 //! Key provenance: authorized received introductions and their agreed
 //! commitments (§11, Appendix C12).
 
-use coven_crypto::{MemberId, SealingPublicKey, StoreKeyring};
+use coven_crypto::{SealingKey, StoreKeyring};
 use coven_database::{StoreLog, StoreLogState};
 use coven_format::{sealed_key::KeyCopyPrefix, store_log::StoreChange, value::EntryId};
-use coven_foundation::id_source::KeyId;
+use coven_foundation::id_source::{KeyId, MemberId};
 use coven_merge::Audience;
 use std::collections::BTreeMap;
 
@@ -109,7 +109,7 @@ pub(crate) fn accepts_copy(
     introductions: &[Introduction],
     prefix: &KeyCopyPrefix,
     me: &MemberId,
-    sealing: &SealingPublicKey,
+    sealing: &SealingKey,
     opened: &Opened,
 ) -> bool {
     prefix.addressed_to(me, sealing)
@@ -176,7 +176,7 @@ pub(crate) fn exposed(
                 || state
                     .members
                     .get(&copy.member)
-                    .is_none_or(|member| member.sealing != copy.sealing))
+                    .is_none_or(|member| member.keys.sealing != copy.sealing))
     })
 }
 

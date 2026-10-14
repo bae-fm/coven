@@ -153,20 +153,20 @@ impl StoreKeyCustody for Keys {
 
 #[derive(Default)]
 struct Identity {
-    keys: Mutex<Option<MemberKeys>>,
+    keys: Mutex<Option<MemberIdentity>>,
     unlocks: AtomicUsize,
     closes: AtomicUsize,
     refuse: AtomicBool,
 }
 impl MemberKeyCustody for Identity {
-    fn unlock(&self) -> Result<Option<MemberKeys>, KeyError> {
+    fn unlock(&self) -> Result<Option<MemberIdentity>, KeyError> {
         self.unlocks.fetch_add(1, Ordering::SeqCst);
         if self.refuse.load(Ordering::SeqCst) {
             return Err(KeyError::PassphraseAuthentication);
         }
         Ok(self.keys.lock().unwrap().clone())
     }
-    fn persist(&self, keys: &MemberKeys) -> Result<(), KeyError> {
+    fn persist(&self, keys: &MemberIdentity) -> Result<(), KeyError> {
         *self.keys.lock().unwrap() = Some(keys.clone());
         Ok(())
     }
@@ -503,7 +503,7 @@ async fn workers_share_keys_across_stop_forget_and_reacquisition_until_close() {
     assert!(keys.keys.lock().unwrap().is_none());
     assert_eq!(clone.store_key_state().unwrap(), StoreKeyState::Locked);
     assert_eq!(
-        identity.keys.lock().unwrap().as_ref().unwrap().member_id(),
+        identity.keys.lock().unwrap().as_ref().unwrap().member(),
         member
     );
     assert_eq!(handle.restore_code().await.unwrap(), code);
@@ -896,9 +896,7 @@ fn replay_drops_are_final_for_logs_and_app_retriable_for_operations() {
             }),
             DropReason::TargetGone(EntryTarget::Device(DeviceId(2))),
             DropReason::TargetGone(EntryTarget::Circle(CircleId(uuid::Uuid::from_u128(1)))),
-            DropReason::TargetGone(EntryTarget::Member(
-                MemberKeys::generate().unwrap().member_id(),
-            )),
+            DropReason::TargetGone(EntryTarget::Member(MemberId(uuid::Uuid::from_u128(5)))),
             DropReason::NotAllowed,
             DropReason::NoAdminLeft,
         ] {

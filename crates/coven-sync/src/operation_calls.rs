@@ -8,10 +8,10 @@ use crate::{
     operations::{Begun, Command, Output},
     *,
 };
-use coven_crypto::{MemberId, MemberKeys};
+use coven_crypto::MemberIdentity;
 use coven_database::{LocalStoreLog, OperationRecord, StoreLog};
 use coven_format::store_log::{MemberRole, StoreChange};
-use coven_foundation::id_source::CircleId;
+use coven_foundation::id_source::{CircleId, MemberId};
 
 impl StoreLogSync {
     pub(crate) async fn operation_record(
@@ -199,7 +199,7 @@ impl StoreLogSync {
         let local = self.database.local_store_log().await?;
         let member = self.operation_member()?;
         self.check_stopped(&local, &member)?;
-        let me = member.member_id();
+        let me = member.member();
         let state = &local.log.replay.state;
         let intent = match command {
             Command::Reload => {
@@ -240,10 +240,7 @@ impl StoreLogSync {
                 ));
             }
             Command::SetAccess(access) => {
-                let change = StoreChange::SetAccess {
-                    member: me.clone(),
-                    access,
-                };
+                let change = StoreChange::SetAccess { member: me, access };
                 if !effects::validate_change(state, &me, &change)? {
                     self.make_and_upload_entry(change).await?;
                 }
@@ -314,12 +311,12 @@ impl StoreLogSync {
                     &me,
                     &StoreChange::AddCircleMember {
                         circle,
-                        member: target.clone(),
+                        member: target,
                     },
                 )?;
                 Intent::AddCircleMember {
                     circle,
-                    member: target.to_string(),
+                    member: target,
                 }
             }
             Command::RemoveCircleMember(circle, target) => {
@@ -373,7 +370,7 @@ impl StoreLogSync {
     async fn retry_operation(&self, record: &OperationRecord) -> Result<(), SyncError> {
         if let Data::ProviderAccess { account } = Data::read(record)? {
             let log = self.database.local_store_log().await?.log;
-            let owner = self.owns_storage(&log, &self.operation_member()?.member_id());
+            let owner = self.owns_storage(&log, &self.operation_member()?.member());
             self.database
                 .retry_provider_request::<PendingRecord>(account, record.id, owner)
                 .await?;
@@ -383,7 +380,7 @@ impl StoreLogSync {
         Ok(())
     }
 
-    pub(super) fn operation_member(&self) -> Result<MemberKeys, SyncError> {
+    pub(super) fn operation_member(&self) -> Result<MemberIdentity, SyncError> {
         self.member_keys
             .read()?
             .ok_or_else(|| coven_storage::StorageFailure::MemberKeysMissing.into())

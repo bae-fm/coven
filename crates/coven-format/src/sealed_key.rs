@@ -2,8 +2,8 @@
 
 use crate::wire::{Decoder, Encoder, Wire};
 use crate::Error;
-use coven_crypto::{CircleKey, CryptoError, MemberId, MemberKeys, SealingPublicKey, StoreKey};
-use coven_foundation::id_source::KeyId;
+use coven_crypto::{CircleKey, CryptoError, MemberIdentity, SealingKey, StoreKey};
+use coven_foundation::id_source::{KeyId, MemberId};
 use coven_merge::Audience;
 
 /// Routing visible to every reader, including readers without the recipient's keys.
@@ -18,7 +18,7 @@ pub struct KeyCopyPrefix {
     pub member: MemberId,
     /// The member's exact sealing key the box is sealed to. A copy to another
     /// of the member's credentials is a different copy.
-    pub sealing: SealingPublicKey,
+    pub sealing: SealingKey,
 }
 
 impl KeyCopyPrefix {
@@ -36,7 +36,7 @@ impl KeyCopyPrefix {
 
     /// Whether this copy names exactly this recipient: its member id and the
     /// sealing key it is sealed to. Matching needs no box opening (§12.2).
-    pub fn addressed_to(&self, member: &MemberId, sealing: &SealingPublicKey) -> bool {
+    pub fn addressed_to(&self, member: &MemberId, sealing: &SealingKey) -> bool {
         self.member == *member && self.sealing == *sealing
     }
 
@@ -54,8 +54,8 @@ impl KeyCopyPrefix {
 
     fn length(&self) -> usize {
         match self.audience {
-            Audience::Store => 84,
-            Audience::Circle(_) => 100,
+            Audience::Store => 68,
+            Audience::Circle(_) => 84,
         }
     }
 
@@ -85,7 +85,7 @@ impl<'a> SealedKey<'a> {
             audience: Audience::get(&mut input)?,
             key: KeyId::get(&mut input)?,
             member: MemberId::get(&mut input)?,
-            sealing: SealingPublicKey::get(&mut input)?,
+            sealing: SealingKey::get(&mut input)?,
         };
         input.take(prefix.box_length())?;
         input.finish()?;
@@ -106,13 +106,17 @@ impl<'a> SealedKey<'a> {
     /// and the payload identity.
     /// Before accepting it, check its hash against the authorized introduction with
     /// [`StoreKey::check_hash`]. A candidate may open its own introduction for validation.
-    pub fn open_store_key(&self, member: &MemberKeys, path: &str) -> Result<StoreKey, CryptoError> {
+    pub fn open_store_key(
+        &self,
+        member: &MemberIdentity,
+        path: &str,
+    ) -> Result<StoreKey, CryptoError> {
         self.check_recipient(member)?;
         if self.prefix.audience != Audience::Store {
             return Err(CryptoError::KeyIdentity);
         }
         let (prefix, sealed) = self.bytes.split_at(self.prefix.length());
-        let key = member.open_store_key(path, prefix, sealed)?;
+        let key = member.keys().open_store_key(path, prefix, sealed)?;
         if key.id() != self.prefix.key {
             return Err(CryptoError::KeyIdentity);
         }
@@ -125,7 +129,7 @@ impl<'a> SealedKey<'a> {
     /// [`CircleKey::check_hash`]. Decryption alone does not authorize a key.
     pub fn open_circle_key(
         &self,
-        member: &MemberKeys,
+        member: &MemberIdentity,
         path: &str,
     ) -> Result<CircleKey, CryptoError> {
         self.check_recipient(member)?;
@@ -133,17 +137,17 @@ impl<'a> SealedKey<'a> {
             return Err(CryptoError::KeyIdentity);
         };
         let (prefix, sealed) = self.bytes.split_at(self.prefix.length());
-        let key = member.open_circle_key(path, prefix, sealed)?;
+        let key = member.keys().open_circle_key(path, prefix, sealed)?;
         if key.circle() != circle || key.id() != self.prefix.key {
             return Err(CryptoError::KeyIdentity);
         }
         Ok(key)
     }
 
-    fn check_recipient(&self, member: &MemberKeys) -> Result<(), CryptoError> {
+    fn check_recipient(&self, member: &MemberIdentity) -> Result<(), CryptoError> {
         if !self
             .prefix
-            .addressed_to(&member.member_id(), &member.sealing_public_key())
+            .addressed_to(&member.member(), &member.keys().public_keys().sealing)
         {
             return Err(CryptoError::Authentication);
         }

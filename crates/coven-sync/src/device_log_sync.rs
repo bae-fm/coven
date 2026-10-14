@@ -1,7 +1,7 @@
 //! One upload, download or position-posting step; scheduling belongs to the caller.
 
 use crate::{PendingReason, PendingRecord, PendingSubject, SyncError};
-use coven_crypto::{custody::KeySession, MemberKeys, StoreKeyring};
+use coven_crypto::{custody::KeySession, MemberIdentity, StoreKeyring};
 use coven_database::{ApplyOutcome, Database, DbError, LogObject, LogRefusal};
 use coven_foundation::clock::ClockRef;
 use coven_merge::{Audience, WriteId};
@@ -115,7 +115,7 @@ pub struct DeviceLogSync {
     storage: Option<Arc<dyn Storage>>,
     database: Database,
     store_keys: Arc<KeySession<StoreKeyring>>,
-    member_keys: Arc<KeySession<MemberKeys>>,
+    member_keys: Arc<KeySession<MemberIdentity>>,
 }
 
 impl DeviceLogSync {
@@ -124,7 +124,7 @@ impl DeviceLogSync {
         storage: Arc<dyn Storage>,
         database: Database,
         store_keys: Arc<KeySession<StoreKeyring>>,
-        member_keys: Arc<KeySession<MemberKeys>>,
+        member_keys: Arc<KeySession<MemberIdentity>>,
         clock: ClockRef,
         send: Arc<crate::SendGate>,
     ) -> Self {
@@ -145,7 +145,7 @@ impl DeviceLogSync {
     pub fn disconnected(
         database: Database,
         store_keys: Arc<KeySession<StoreKeyring>>,
-        member_keys: Arc<KeySession<MemberKeys>>,
+        member_keys: Arc<KeySession<MemberIdentity>>,
         clock: ClockRef,
         send: Arc<crate::SendGate>,
     ) -> Self {
@@ -389,7 +389,7 @@ impl DeviceLogSync {
                         &ring,
                         &local.log,
                         &mut replays,
-                        &member.member_id(),
+                        &member.member(),
                         local.device,
                     )
                     .await

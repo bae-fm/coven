@@ -417,7 +417,7 @@ fn encode_host_secret_names(names: &BTreeSet<&str>) -> Result<SecretBytes, Mater
     Ok(bytes)
 }
 
-/// OS keychain custody for `StoreKeyring` or `MemberKeys`, built at a composition root.
+/// OS keychain custody for `StoreKeyring` or `MemberIdentity`, built at a composition root.
 pub struct KeyringCustody<T> {
     keychain: Arc<StoreKeychain>,
     material: PhantomData<fn() -> T>,

@@ -6,6 +6,7 @@ fn code(store: StoreId) -> RestoreCode {
     RestoreCode {
         store,
         name: "Household".into(),
+        member: MemberId(uuid::Uuid::from_u128(0x4d)),
         member_keys: MemberKeys::generate().unwrap(),
         storage: StorageConfig::S3 {
             bucket: "bucket".into(),
@@ -32,10 +33,10 @@ fn s3_key() -> S3Credentials {
 
 struct RefusedIdentity(Option<std::path::PathBuf>);
 impl MemberKeyCustody for RefusedIdentity {
-    fn unlock(&self) -> Result<Option<MemberKeys>, KeyError> {
+    fn unlock(&self) -> Result<Option<MemberIdentity>, KeyError> {
         Ok(None)
     }
-    fn persist(&self, _: &MemberKeys) -> Result<(), KeyError> {
+    fn persist(&self, _: &MemberIdentity) -> Result<(), KeyError> {
         if let Some(path) = &self.0 {
             std::fs::remove_file(path).unwrap();
             std::fs::create_dir(path).unwrap();

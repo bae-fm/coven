@@ -15,11 +15,14 @@ use std::time::Duration;
 pub(crate) fn keys(seed: u8) -> MemberPublicKeys {
     let mut bytes = b"CVMK\x01".to_vec();
     bytes.extend([seed; 64]);
-    let keys = coven_crypto::MemberKeys::from_secret_bytes(&bytes).unwrap();
-    MemberPublicKeys {
-        signing: keys.member_id(),
-        sealing: keys.sealing_public_key(),
-    }
+    coven_crypto::MemberKeys::from_secret_bytes(&bytes)
+        .unwrap()
+        .public_keys()
+}
+
+/// A stable member id, independent of `keys(seed)`.
+pub(crate) fn member(seed: u8) -> MemberId {
+    MemberId(uuid::Uuid::from_bytes([seed; 16]))
 }
 
 fn key(n: u128) -> coven_foundation::id_source::KeyId {
@@ -31,7 +34,7 @@ fn entry(number: u64, change: StoreChange) -> StoreLogEntry {
     StoreLogEntry {
         position: EntryId { device, number },
         timestamp: Timestamp::new(number, 0, device).unwrap(),
-        author: keys(1).signing,
+        author: member(1),
         had_read: EntryPositions(vec![]),
         change,
     }
@@ -53,8 +56,8 @@ pub(crate) fn checked(entry: StoreLogEntry) -> ReplayEntry {
 
 // Supplied replay results are fixtures for the database boundary, not computed here.
 pub(crate) fn circle_history(circle: CircleId) -> Vec<(StoreLogEntry, StoreLogReplay)> {
-    let ana = keys(1);
-    let ben = keys(2);
+    let (ana, ana_keys) = (member(1), keys(1));
+    let (ben, ben_keys) = (member(2), keys(2));
     let store = StoreIdentity {
         id: crate::tests::store_id(),
         name: crate::tests::STORE_NAME.into(),
@@ -68,7 +71,7 @@ pub(crate) fn circle_history(circle: CircleId) -> Vec<(StoreLogEntry, StoreLogRe
             },
             store: store.id,
             name: store.name.clone(),
-            admin: ana.clone(),
+            admin: ana_keys,
             key: key(1),
             device_name: "Ana’s phone".into(),
             key_hash: [17; 32],
@@ -77,13 +80,13 @@ pub(crate) fn circle_history(circle: CircleId) -> Vec<(StoreLogEntry, StoreLogRe
     let mut replay = StoreLogReplay::default();
     replay.state.store = Some(store);
     replay.state.members.insert(
-        ana.signing.clone(),
+        ana,
         StoreMember {
             access: coven_format::MemberAccess::S3AccessKey {
                 access_key_id: "fixture-access-key".into(),
                 principal: coven_format::S3Principal::Console,
             },
-            sealing: ana.sealing,
+            keys: ana_keys,
             role: MemberRole::Admin,
             removed: false,
         },
@@ -91,7 +94,7 @@ pub(crate) fn circle_history(circle: CircleId) -> Vec<(StoreLogEntry, StoreLogRe
     replay.state.devices.insert(
         first.position.device,
         StoreDevice {
-            member: ana.signing.clone(),
+            member: ana,
             name: "Ana’s phone".into(),
             state: DeviceState::Active,
         },
@@ -105,18 +108,19 @@ pub(crate) fn circle_history(circle: CircleId) -> Vec<(StoreLogEntry, StoreLogRe
                 access_key_id: "fixture-access-key".into(),
                 principal: coven_format::S3Principal::Console,
             },
-            keys: ben.clone(),
+            member: ben,
+            keys: ben_keys,
             role: MemberRole::Member,
         },
     );
     replay.state.members.insert(
-        ben.signing.clone(),
+        ben,
         StoreMember {
             access: coven_format::MemberAccess::S3AccessKey {
                 access_key_id: "fixture-access-key".into(),
                 principal: coven_format::S3Principal::Console,
             },
-            sealing: ben.sealing,
+            keys: ben_keys,
             role: MemberRole::Member,
             removed: false,
         },
@@ -136,7 +140,7 @@ pub(crate) fn circle_history(circle: CircleId) -> Vec<(StoreLogEntry, StoreLogRe
         circle,
         StoreCircle {
             name: "Gifts".into(),
-            members: [ana.signing.clone()].into(),
+            members: [ana].into(),
         },
     );
     replay.entries.insert(create.position, EntryOutcome::Kept);
@@ -145,7 +149,7 @@ pub(crate) fn circle_history(circle: CircleId) -> Vec<(StoreLogEntry, StoreLogRe
         4,
         StoreChange::AddCircleMember {
             circle,
-            member: ben.signing.clone(),
+            member: ben,
         },
     );
     replay
@@ -154,11 +158,11 @@ pub(crate) fn circle_history(circle: CircleId) -> Vec<(StoreLogEntry, StoreLogRe
         .get_mut(&circle)
         .unwrap()
         .members
-        .insert(ben.signing.clone());
+        .insert(ben);
     replay.entries.insert(add.position, EntryOutcome::Kept);
     history.push((add, replay.clone()));
     let mut delete = entry(1, StoreChange::DeleteCircle { circle });
-    delete.author = ben.signing;
+    delete.author = ben;
     delete.position.device = DeviceId(u64::MAX - 1);
     delete.timestamp = Timestamp::new(6, 0, delete.position.device).unwrap();
     delete.had_read = EntryPositions(vec![history[3].0.position]);
@@ -284,21 +288,11 @@ async fn deletion_and_reversal_commit_marks_and_visible_rows_together() {
         .contains_key(&circle));
 
     // §9: Ana's earlier concurrent removal of Ben beats Ben's deletion.
-    let remove = entry(
-        5,
-        StoreChange::RemoveMember {
-            member: keys(2).signing,
-        },
-    );
+    let remove = entry(5, StoreChange::RemoveMember { member: member(2) });
     let mut restored = history[3].1.clone();
     let gifts = restored.state.circles.get_mut(&circle).unwrap();
-    gifts.members = [keys(1).signing].into();
-    restored
-        .state
-        .members
-        .get_mut(&keys(2).signing)
-        .unwrap()
-        .removed = true;
+    gifts.members = [member(1)].into();
+    restored.state.members.get_mut(&member(2)).unwrap().removed = true;
     restored.entries.insert(remove.position, EntryOutcome::Kept);
     restored.entries.insert(
         delete.position,
@@ -504,6 +498,7 @@ async fn late_verdict_and_first_publication_commit_together_and_cannot_be_revers
         entry: entry(
             2,
             StoreChange::AddMember {
+                member: member(2),
                 keys: keys(2),
                 role: MemberRole::Member,
                 access: coven_format::MemberAccess::S3AccessKey {
@@ -576,12 +571,7 @@ async fn removed_identities_keys_versions_resets_and_every_drop_reason_round_tri
     delete_circle(&db, circle).await.unwrap();
     let mut expected = db.store_log().await.unwrap();
     let mut replay = expected.replay.clone();
-    replay
-        .state
-        .members
-        .get_mut(&keys(2).signing)
-        .unwrap()
-        .removed = true;
+    replay.state.members.get_mut(&member(2)).unwrap().removed = true;
     replay
         .state
         .devices
@@ -592,13 +582,13 @@ async fn removed_identities_keys_versions_resets_and_every_drop_reason_round_tri
     replay.state.devices.insert(
         DeviceId(u64::MAX - 1),
         StoreDevice {
-            member: keys(2).signing,
+            member: member(2),
             name: "Restored".into(),
             state: DeviceState::Replaced,
         },
     );
     for (index, reason) in [
-        DropReason::TargetGone(EntryTarget::Member(keys(2).signing)),
+        DropReason::TargetGone(EntryTarget::Member(member(2))),
         DropReason::TargetGone(EntryTarget::Device(DeviceId(u64::MAX))),
         DropReason::TargetGone(EntryTarget::Circle(circle)),
         DropReason::NoAdminLeft,
@@ -611,7 +601,7 @@ async fn removed_identities_keys_versions_resets_and_every_drop_reason_round_tri
         let e = entry(
             index as u64 + 5,
             StoreChange::ChangeRole {
-                member: keys(2).signing,
+                member: member(2),
                 role: MemberRole::Member,
             },
         );
@@ -739,7 +729,7 @@ async fn audience_versions_round_trip_and_a_failed_raise_keeps_every_audience() 
         notes,
         StoreCircle {
             name: "Notes".into(),
-            members: [keys(1).signing].into(),
+            members: [member(1)].into(),
         },
     );
     replay.entries.insert(create.position, EntryOutcome::Kept);

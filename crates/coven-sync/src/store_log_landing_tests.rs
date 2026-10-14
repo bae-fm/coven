@@ -248,7 +248,7 @@ async fn a_dropped_witness_arriving_after_the_late_entry_cannot_grant_authority(
             number: 1,
         },
         timestamp: coven_merge::Timestamp::new(2000, 0, DeviceId(3)).unwrap(),
-        author: member(9).member_id(),
+        author: member(9).member(),
         had_read: a.log().await.positions(),
         change: StoreChange::AddDevice {
             device: DeviceId(3),
@@ -274,6 +274,7 @@ async fn a_dropped_witness_arriving_after_the_late_entry_cannot_grant_authority(
     assert!(matches!(
         b.sync
             .make_and_upload_entry(StoreChange::AddMember {
+                member: member(2).member(),
                 keys: public(&member(2)),
                 role: MemberRole::Member,
                 access: coven_format::MemberAccess::ProviderAccount("member2@example.org".into()),
@@ -295,11 +296,7 @@ async fn a_dropped_witness_arriving_after_the_late_entry_cannot_grant_authority(
         log.replay.entries[&witness.position],
         EntryOutcome::Dropped(coven_database::DropReason::NotAllowed)
     );
-    assert!(!log
-        .replay
-        .state
-        .members
-        .contains_key(&member(2).member_id()));
+    assert!(!log.replay.state.members.contains_key(&member(2).member()));
     c.restart(storage).await;
     assert_eq!(c.log().await, log);
 }
@@ -484,7 +481,7 @@ async fn setup_consumes_a_late_access_entry_before_committing_credentials() {
     assert!(b
         .sync
         .make_and_upload_entry(StoreChange::SetAccess {
-            member: b.member.member_id(),
+            member: b.member.member(),
             access: access.clone()
         })
         .await
@@ -563,10 +560,7 @@ async fn setup_consumes_a_late_access_entry_before_committing_credentials() {
         ..fixed.entry.position
     };
     assert_eq!(log.replay.entries[&retry], EntryOutcome::Kept);
-    assert_eq!(
-        log.replay.state.members[&member(1).member_id()].access,
-        access
-    );
+    assert_eq!(log.replay.state.members[&member(1).member()].access, access);
     assert_eq!(
         log.replay.entries[&fixed.entry.position],
         EntryOutcome::Dropped(coven_database::DropReason::LandedTooLate)
@@ -598,7 +592,7 @@ async fn setup_compares_an_occupied_access_entry_before_committing() {
         assert!(b
             .sync
             .make_and_upload_entry(StoreChange::SetAccess {
-                member: b.member.member_id(),
+                member: b.member.member(),
                 access: access.clone()
             })
             .await
@@ -676,6 +670,7 @@ async fn a_late_removal_revalidates_changed_authority_before_a_new_number() {
     ] {
         a.sync
             .make_and_upload_entry(StoreChange::AddMember {
+                member: keys.member(),
                 keys: public(&keys),
                 role,
                 access: coven_format::MemberAccess::ProviderAccount(format!(
@@ -690,14 +685,14 @@ async fn a_late_removal_revalidates_changed_authority_before_a_new_number() {
     b.interrupt_entry(2).await;
     assert!(matches!(b
         .sync
-        .begin_operation_call(Command::RemoveMember(member(3).member_id()))
+        .begin_operation_call(Command::RemoveMember(member(3).member()))
         .await, Err(SyncError::Storage(error)) if error.failure() == coven_storage::StorageFailure::Network));
     let fixed = b.db.local_store_log().await.unwrap().upload.unwrap();
     assert!(b.db.operations().await.unwrap().is_empty());
     clock.set(UNIX_EPOCH + Duration::from_secs(86400));
     a.sync
         .make_and_upload_entry(StoreChange::ChangeRole {
-            member: member(2).member_id(),
+            member: member(2).member(),
             role: MemberRole::Member,
         })
         .await
@@ -715,7 +710,7 @@ async fn a_late_removal_revalidates_changed_authority_before_a_new_number() {
     for _ in 0..2 {
         assert!(matches!(
             b.sync
-                .begin_operation_call(Command::RemoveMember(member(3).member_id()))
+                .begin_operation_call(Command::RemoveMember(member(3).member()))
                 .await,
             Err(SyncError::Rejected(coven_database::DropReason::NotAllowed))
         ));

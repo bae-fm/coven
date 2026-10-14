@@ -65,13 +65,15 @@ impl TestStore {
     ) {
         let device = self.directory.settings().unwrap().device_id;
         let keys = crate::store_log::tests::keys(1);
+        let member = crate::store_log::tests::member(1);
         database.inspect_writer(|db| {
             db.transaction(|db| {
                 db.internal_execute(
-                    "INSERT INTO _coven_members(member,sealing,role,removed,access)
-                     VALUES(?1,?2,'admin',0,?3) ON CONFLICT(member) DO NOTHING",
+                    "INSERT INTO _coven_members(member,signing,sealing,role,removed,access)
+                     VALUES(?1,?2,?3,'admin',0,?4) ON CONFLICT(member) DO NOTHING",
                     (
-                        keys.signing.to_bytes(),
+                        member.0.as_bytes(),
+                        keys.signing.as_bytes(),
                         keys.sealing.as_bytes(),
                         serde_json::to_vec(&coven_format::MemberAccess::S3AccessKey {
                             access_key_id: "fixture-access-key".into(),
@@ -83,7 +85,7 @@ impl TestStore {
                 db.internal_execute(
                     "INSERT INTO _coven_devices(device,member,name,state)
                      VALUES(?1,?2,'Local device','active') ON CONFLICT(device) DO NOTHING",
-                    (device.0.to_be_bytes(), keys.signing.to_bytes()),
+                    (device.0.to_be_bytes(), member.0.as_bytes()),
                 )?;
                 db.internal_execute(
                     "INSERT INTO _coven_circles(circle,name)

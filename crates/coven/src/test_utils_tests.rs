@@ -28,8 +28,11 @@ fn tables() -> Vec<SyncedTable> {
     ]
 }
 
-fn member(seed: u8) -> MemberKeys {
-    MemberKeys::from_secret_bytes(&[b"CVMK\x01".as_slice(), &[seed; 64]].concat()).unwrap()
+fn member(seed: u8) -> MemberIdentity {
+    MemberIdentity::new(
+        MemberId(uuid::Uuid::from_bytes([seed; 16])),
+        MemberKeys::from_secret_bytes(&[b"CVMK\x01".as_slice(), &[seed; 64]].concat()).unwrap(),
+    )
 }
 
 struct Fixture {
@@ -40,7 +43,7 @@ struct Fixture {
     clock: Arc<FixedClock>,
     storage: Arc<MemoryStorage>,
     keys: Arc<KeyringCustody<StoreKeyring>>,
-    member: MemberKeys,
+    member: MemberIdentity,
     _root: tempfile::TempDir,
 }
 
@@ -169,7 +172,7 @@ fn open_write(
     bytes: &[u8],
     path: &ObjectPath,
     ring: &StoreKeyring,
-    author: &MemberId,
+    signer: &coven_crypto::SigningKey,
 ) -> coven_format::write::WriteRecord {
     let prefix_len = WriteObjectPrefix::length(bytes).unwrap();
     let aad = &bytes[..prefix_len];
@@ -209,7 +212,7 @@ fn open_write(
     let signature = layout.read_signature(&bytes[offset..]).unwrap();
     let mut hash = coven_crypto::ObjectHasher::new();
     hash.update(&bytes[..offset]);
-    author
+    signer
         .verify_object(path.as_str(), &hash.finish(), &signature)
         .unwrap();
     layout.finish(&[]).unwrap();
@@ -231,7 +234,7 @@ async fn assert_uploaded(
             ObjectPath::device_log(f.directory.id(), id.device, id.number.try_into().unwrap());
         let bytes = f.storage.read(&path).await.unwrap();
         assert_eq!(
-            open_write(&bytes, &path, &ring, &f.member.member_id()),
+            open_write(&bytes, &path, &ring, &f.member.keys().public_keys().signing),
             *record
         );
     }
@@ -548,7 +551,8 @@ async fn newer_snapshots_delete_covered_logs_and_older_own_snapshots() {
     handle.close().await.unwrap();
 }
 
-async fn admit_member(f: &Fixture, handle: &CovenHandle, keys: &MemberKeys) {
+/// Admit a member with `keys` through an invite; returns the id it fixed.
+async fn admit_member(f: &Fixture, handle: &CovenHandle, keys: &MemberKeys) -> MemberId {
     use coven_format::{
         sealed_single::{SingleChunkObject, SingleChunkPrefix},
         Object,
@@ -567,10 +571,8 @@ async fn admit_member(f: &Fixture, handle: &CovenHandle, keys: &MemberKeys) {
     let path = ObjectPath::join_request(f.directory.id(), invite.id);
     let request = Object::JoinRequest(coven_format::objects::JoinRequest {
         invite: invite.id,
-        keys: coven_format::store_log::MemberPublicKeys {
-            signing: keys.member_id(),
-            sealing: keys.sealing_public_key(),
-        },
+        member: code.member,
+        keys: keys.public_keys(),
         device_name: "Departing member".into(),
     })
     .encode()
@@ -604,35 +606,31 @@ async fn admit_member(f: &Fixture, handle: &CovenHandle, keys: &MemberKeys) {
         .await
         .unwrap()
         .iter()
-        .any(|m| m.id == keys.member_id()));
+        .any(|m| m.id == code.member));
+    code.member
 }
 
 #[tokio::test]
 async fn removal_preserves_key_material_and_publishes_only_the_member_target() {
     let (f, handle) = Fixture::new().await;
-    let removed = member(29);
-    admit_member(&f, &handle, &removed).await;
+    let removed = admit_member(&f, &handle, member(29).keys()).await;
     let circle = handle.circles().create("Shared").await.unwrap();
-    handle
-        .circles()
-        .add_member(circle, &removed.member_id())
-        .await
-        .unwrap();
+    handle.circles().add_member(circle, &removed).await.unwrap();
     let before = f.keys.unlock().unwrap().unwrap().to_secret_bytes();
-    handle.remove_member(&removed.member_id()).await.unwrap();
+    handle.remove_member(&removed).await.unwrap();
     assert!(!handle
         .members()
         .await
         .unwrap()
         .iter()
-        .any(|m| m.id == removed.member_id()));
+        .any(|m| m.id == removed));
     assert!(!handle
         .circles()
         .members(circle)
         .await
         .unwrap()
         .iter()
-        .any(|m| m.member == removed.member_id()));
+        .any(|m| m.member == removed));
     let ring = f.keys.unlock().unwrap().unwrap();
     assert_eq!(ring.to_secret_bytes().as_bytes(), before.as_bytes());
     let mut removals = 0;
@@ -677,7 +675,7 @@ async fn removal_preserves_key_material_and_publishes_only_the_member_target() {
                 assert_eq!(key_hash, ring.circle_key(circle, key).unwrap().hash());
             }
             StoreChange::RemoveMember { member } => {
-                assert_eq!(member, removed.member_id());
+                assert_eq!(member, removed);
                 removals += 1;
             }
             _ => (),

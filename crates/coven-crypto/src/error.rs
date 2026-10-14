@@ -18,9 +18,9 @@ pub enum CryptoError {
     /// X25519 produced a non-contributory shared secret.
     #[error("X25519 public key has low order")]
     WeakSealingKey,
-    /// The Ed25519 public key does not identify a member.
+    /// The Ed25519 public key is invalid or weak.
     #[error("invalid or weak Ed25519 public key")]
-    InvalidMemberId,
+    InvalidSigningKey,
     /// The member's signature did not verify.
     #[error("signature verification failed")]
     Signature,

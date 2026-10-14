@@ -27,8 +27,8 @@ async fn household(storage: &Arc<MemoryStorage>) -> (Device, Device) {
 
 /// Ana publishes a copy for Ben of material that is not the committed key.
 async fn forge_copy(ana: &Device, ben: &Device, audience: Audience, id: KeyId) {
-    let recipient = ben.member.member_id();
-    let sealing = ben.member.sealing_public_key();
+    let recipient = ben.member.member();
+    let sealing = ben.member.keys().public_keys().sealing;
     ana.db
         .prepare_key_upload(move |path| match audience {
             Audience::Store => keys::store_copy(
@@ -63,7 +63,8 @@ async fn key_copy_record(device: &Device, audience: Audience, id: KeyId) -> Opti
                 == PendingSubject::KeyCopy {
                     audience: audience.clone(),
                     key: id,
-                    member: device.member.member_id(),
+                    member: device.member.member(),
+                    sealing: device.member.keys().public_keys().sealing,
                 }
         })
         .map(|record| record.reason)
@@ -102,7 +103,7 @@ async fn a_later_valid_copy_supplies_the_key_and_clears_the_refusal() {
     ana.sync
         .make_and_upload_entry(StoreChange::AddCircleMember {
             circle: circle(1),
-            member: ben.member.member_id(),
+            member: ben.member.member(),
         })
         .await
         .unwrap();
@@ -114,7 +115,7 @@ async fn a_later_valid_copy_supplies_the_key_and_clears_the_refusal() {
         .circle_key(circle(1), key(2))
         .unwrap()
         .clone();
-    let (recipient, sealing) = (ben.member.member_id(), ben.member.sealing_public_key());
+    let (recipient, sealing) = (ben.member.member(), ben.member.keys().public_keys().sealing);
     ana.db
         .prepare_key_upload(move |path| keys::circle_copy(path, &genuine, &recipient, &sealing))
         .await
@@ -137,7 +138,7 @@ async fn an_absent_usable_store_key_stays_pending() {
             storage.as_ref(),
             Audience::Store,
             key(1),
-            &ben.member.member_id(),
+            &ben.member.member(),
         )
         .await
         .unwrap();
@@ -148,8 +149,8 @@ async fn an_absent_usable_store_key_stays_pending() {
             let bytes = keys::store_copy(
                 &genuine.path,
                 &coven_crypto::StoreKey::generate(key(1)).unwrap(),
-                &ben.member.member_id(),
-                &ben.member.sealing_public_key(),
+                &ben.member.member(),
+                &ben.member.keys().public_keys().sealing,
             )
             .unwrap();
             storage.create(&genuine.path, &bytes).await.unwrap();
@@ -163,7 +164,8 @@ async fn an_absent_usable_store_key_stays_pending() {
             PendingSubject::KeyCopy {
                 audience: Audience::Store,
                 key: key(1),
-                member: ben.member.member_id(),
+                member: ben.member.member(),
+                sealing: ben.member.keys().public_keys().sealing,
             }
         );
         if forged {
@@ -193,22 +195,25 @@ async fn a_copy_to_another_sealing_key_of_this_member_is_skipped_unopened() {
         storage.as_ref(),
         Audience::Store,
         key(1),
-        &ben.member.member_id(),
+        &ben.member.member(),
     )
     .await
     .unwrap();
     storage.delete(&genuine.path).await.unwrap();
     // Ben's id at a sealing key he does not hold, carrying the genuine key.
-    let mut seeds = ben.member.to_secret_bytes().as_bytes().to_vec();
+    let mut seeds = ben.member.keys().to_secret_bytes().as_bytes().to_vec();
     seeds[37..69].fill(0x77);
-    let other = MemberKeys::from_secret_bytes(&seeds).unwrap();
-    assert_eq!(other.member_id(), ben.member.member_id());
+    let other = MemberIdentity::new(
+        ben.member.member(),
+        coven_crypto::MemberKeys::from_secret_bytes(&seeds).unwrap(),
+    );
+    assert_eq!(other.member(), ben.member.member());
     let ring = ana.custody.read().unwrap().unwrap();
     let bytes = keys::store_copy(
         &genuine.path,
         ring.store_key(key(1)).unwrap(),
-        &ben.member.member_id(),
-        &other.sealing_public_key(),
+        &ben.member.member(),
+        &other.keys().public_keys().sealing,
     )
     .unwrap();
     storage.create(&genuine.path, &bytes).await.unwrap();
@@ -281,7 +286,8 @@ async fn recovering_a_creation_from_a_refused_copy_is_that_copys_record() {
         PendingSubject::KeyCopy {
             audience: Audience::Store,
             key: key(1),
-            member: ana.member.member_id(),
+            member: ana.member.member(),
+            sealing: ana.member.keys().public_keys().sealing,
         }
     );
     assert!(matches!(

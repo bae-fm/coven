@@ -2,7 +2,7 @@
 
 use std::sync::Mutex;
 
-/// In-memory custody for `StoreKeyring` or `MemberKeys`, erased with the session.
+/// In-memory custody for `StoreKeyring` or `MemberIdentity`, erased with the session.
 pub struct InMemoryCustody<T> {
     secret: Mutex<Option<T>>,
 }

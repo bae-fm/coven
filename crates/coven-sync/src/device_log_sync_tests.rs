@@ -1,8 +1,8 @@
 use super::*;
-use coven_crypto::{MemberKeys, StoreKey, StoreKeyring};
+use coven_crypto::{MemberIdentity, StoreKey, StoreKeyring};
 use coven_database::{LogRefusal, Migration, RowIdentity, SyncedTable};
 use coven_format::pending::RefusalCode;
-use coven_format::store_log::{MemberPublicKeys, StoreChange};
+use coven_format::store_log::StoreChange;
 use coven_format::{objects::PostedPositions, sealed_single::SingleChunkPrefix, Object};
 use coven_foundation::id_source::{DeviceId, IdSource, KeyId, SequentialIds, StoreId};
 use coven_storage::test_utils::{Faults, MemoryStorage};
@@ -15,10 +15,8 @@ use crate::store_log_sync::tests::Device;
 
 pub(crate) const STORE_ID: StoreId = StoreId(Uuid::from_u128(1));
 
-fn member() -> MemberKeys {
-    let mut bytes = b"CVMK\x01".to_vec();
-    bytes.extend([3; 64]);
-    MemberKeys::from_secret_bytes(&bytes).unwrap()
+fn member() -> MemberIdentity {
+    crate::store_log_sync::tests::member(3)
 }
 pub(crate) fn storage() -> Arc<MemoryStorage> {
     Arc::new(
@@ -65,10 +63,7 @@ pub(crate) async fn group(storage: Arc<MemoryStorage>, count: u64) -> Vec<Device
         .make_and_upload_entry(StoreChange::CreateStore {
             store: STORE_ID,
             name: "Store".into(),
-            admin: MemberPublicKeys {
-                signing: member().member_id(),
-                sealing: member().sealing_public_key(),
-            },
+            admin: member().keys().public_keys(),
             key: KeyId(Uuid::from_u128(1)),
             key_hash,
             device_name: "one".into(),
@@ -448,7 +443,7 @@ mod writes {
         hash.update(&bytes);
         bytes.extend(
             layout
-                .signature(&member().sign_object(path.as_str(), &hash.finish()))
+                .signature(&member().keys().sign_object(path.as_str(), &hash.finish()))
                 .unwrap(),
         );
         layout.finish(&[]).unwrap();

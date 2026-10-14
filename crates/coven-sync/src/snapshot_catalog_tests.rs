@@ -5,16 +5,26 @@ use coven_format::sealed_snapshot::{SnapshotObjectLayout, SnapshotObjectPrefix};
 pub(super) fn signed_snapshot(
     unsigned: &[u8],
     path: &ObjectPath,
-    prefix_author: &MemberKeys,
-    author: &MemberKeys,
+    prefix_author: &MemberIdentity,
+    author: &MemberIdentity,
 ) -> Vec<u8> {
     let length = SnapshotObjectPrefix::length(unsigned).unwrap();
     let mut bytes = unsigned[..length].to_vec();
-    bytes.extend_from_slice(prefix_author.sign_prefix(path.as_str(), &bytes).as_bytes());
+    bytes.extend_from_slice(
+        prefix_author
+            .keys()
+            .sign_prefix(path.as_str(), &bytes)
+            .as_bytes(),
+    );
     bytes.extend_from_slice(&unsigned[length..]);
     let mut hash = ObjectHasher::new();
     hash.update(&bytes);
-    bytes.extend_from_slice(author.sign_object(path.as_str(), &hash.finish()).as_bytes());
+    bytes.extend_from_slice(
+        author
+            .keys()
+            .sign_object(path.as_str(), &hash.finish())
+            .as_bytes(),
+    );
     bytes
 }
 

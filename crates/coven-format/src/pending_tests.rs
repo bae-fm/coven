@@ -51,7 +51,8 @@ fn subjects() -> Vec<PendingSubject> {
         PendingSubject::KeyCopy {
             audience: Audience::Store,
             key: KeyId(Uuid::from_u128(4)),
-            member: crate::test_utils::member().signing,
+            member: crate::test_utils::member_id(),
+            sealing: crate::test_utils::member().sealing,
         },
         PendingSubject::File {
             device: DeviceId(1),
@@ -68,7 +69,11 @@ fn subjects() -> Vec<PendingSubject> {
 
 #[test]
 fn every_subject_has_its_d8_tag_and_exact_field_order() {
-    let member = hex::encode(crate::test_utils::member().signing.to_bytes());
+    let member = format!(
+        "{}{}",
+        hex::encode(crate::test_utils::member_id().0.as_bytes()),
+        hex::encode(crate::test_utils::member().sealing.as_bytes())
+    );
     let expected = [
         "0000000000000000020000000000000003".to_owned(),
         "0100000000000000020000000000000003".to_owned(),
@@ -92,7 +97,8 @@ fn every_subject_has_its_d8_tag_and_exact_field_order() {
         PendingSubject::KeyCopy {
             audience: Audience::Circle(CircleId(Uuid::from_u128(6))),
             key: KeyId(Uuid::from_u128(4)),
-            member: crate::test_utils::member().signing,
+            member: crate::test_utils::member_id(),
+            sealing: crate::test_utils::member().sealing,
         },
         &format!("02010000000000000000000000000000000600000000000000000000000000000004{member}"),
     );
@@ -381,10 +387,13 @@ fn pending_paths_reject_local_noncanonical_and_malformed_text() {
 #[test]
 fn reports_follow_subject_fields_and_reject_duplicates_regardless_of_reason() {
     let mut all = subjects();
-    let member = crate::test_utils::member().signing;
-    let other_member: MemberId = "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a"
-        .parse()
-        .unwrap();
+    let member = crate::test_utils::member_id();
+    let other_member = crate::test_utils::other_member_id();
+    // Ana's original and replacement credentials are distinct subjects.
+    let credentials = [
+        crate::test_utils::member().sealing,
+        crate::test_utils::replacement().sealing,
+    ];
     for device in [1, 2, 256] {
         for number in [1, 2, 256] {
             all.push(PendingSubject::Write(WriteId {
@@ -418,12 +427,15 @@ fn reports_follow_subject_fields_and_reject_duplicates_regardless_of_reason() {
         Audience::Circle(CircleId(Uuid::from_u128(1))),
     ] {
         for key in [1, 256] {
-            for member in [member.clone(), other_member.clone()] {
-                all.push(PendingSubject::KeyCopy {
-                    audience: audience.clone(),
-                    key: KeyId(Uuid::from_u128(key)),
-                    member,
-                });
+            for member in [member, other_member] {
+                for sealing in credentials {
+                    all.push(PendingSubject::KeyCopy {
+                        audience: audience.clone(),
+                        key: KeyId(Uuid::from_u128(key)),
+                        member,
+                        sealing,
+                    });
+                }
             }
         }
     }
@@ -464,7 +476,7 @@ fn reports_follow_subject_fields_and_reject_duplicates_regardless_of_reason() {
 
 #[test]
 fn key_copy_reports_must_name_the_authenticated_posters_member() {
-    let member = crate::test_utils::member().signing;
+    let member = crate::test_utils::member_id();
     let pending = report(
         subjects().remove(2),
         PendingReason::Refused(RefusalCode::Decryption),
@@ -476,10 +488,9 @@ fn key_copy_reports_must_name_the_authenticated_posters_member() {
         panic!("fixture is the creation entry")
     };
     posted.validate_reporter(&member, store).unwrap();
-    let other = "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a"
-        .parse()
-        .unwrap();
-    assert!(posted.validate_reporter(&other, store).is_err());
+    assert!(posted
+        .validate_reporter(&crate::test_utils::other_member_id(), store)
+        .is_err());
 }
 
 #[test]
@@ -586,10 +597,28 @@ fn pinned_pending_frame_covers_the_complete_report_grammar() {
         subjects().remove(1),
         PendingReason::Refused(RefusalCode::NotAuthorized),
     ));
-    reports.push(report(
-        subjects().remove(2),
-        PendingReason::Refused(RefusalCode::Decryption),
-    ));
+    // Ana's copies of one key to her original and replacement credentials are
+    // distinct subjects, ordered by sealing key after audience, key and member.
+    let mut copies = vec![
+        report(
+            subjects().remove(2),
+            PendingReason::Refused(RefusalCode::Decryption),
+        ),
+        report(
+            PendingSubject::KeyCopy {
+                audience: Audience::Store,
+                key: KeyId(Uuid::from_u128(4)),
+                member: crate::test_utils::member_id(),
+                sealing: crate::test_utils::replacement().sealing,
+            },
+            PendingReason::KeyUnavailable {
+                audience: Audience::Store,
+                key: KeyId(Uuid::from_u128(4)),
+            },
+        ),
+    ];
+    copies.sort_by(|a, b| a.subject.cmp(&b.subject));
+    reports.extend(copies);
     for (index, reason) in [
         PendingReason::Refused(RefusalCode::ContentHash),
         PendingReason::FileUnavailable(FileSourceFailure::Missing),

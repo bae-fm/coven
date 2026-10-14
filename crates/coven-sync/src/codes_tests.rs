@@ -1,5 +1,5 @@
 use super::*;
-use coven_crypto::{InviteSecret, MemberKeys, SecretBytes, SecretText};
+use coven_crypto::{InviteSecret, SecretBytes, SecretText};
 use coven_foundation::id_source::{DeviceId, InviteId, KeyId};
 use coven_storage::{S3Credentials, StorageConfig, StorageInvitation};
 
@@ -47,7 +47,8 @@ fn restore_metadata_retains_the_creation_access_choice() {
         let code = RestoreCode {
             store: StoreId(uuid::Uuid::from_u128(1)),
             name: "Personal".into(),
-            member_keys: MemberKeys::generate().unwrap(),
+            member: crate::store_log_sync::tests::member(1).member(),
+            member_keys: coven_crypto::MemberKeys::generate().unwrap(),
             storage: location.encode().unwrap(),
         }
         .to_text()
@@ -66,7 +67,8 @@ fn metadata_validates_kind_checksum_and_storage_without_exposing_secrets() {
     let restore = RestoreCode {
         store: StoreId(uuid::Uuid::from_u128(1)),
         name: "Household".into(),
-        member_keys: MemberKeys::generate().unwrap(),
+        member: crate::store_log_sync::tests::member(1).member(),
+        member_keys: coven_crypto::MemberKeys::generate().unwrap(),
         storage: location().encode().unwrap(),
     };
     let restore_text = restore.to_text().unwrap();
@@ -74,6 +76,7 @@ fn metadata_validates_kind_checksum_and_storage_without_exposing_secrets() {
         store: restore.store,
         name: restore.name.clone(),
         invite: InviteId(uuid::Uuid::from_u128(2)),
+        member: restore.member,
         secret: InviteSecret::generate().unwrap(),
         initial_key: KeyId(uuid::Uuid::from_u128(3)),
         inviting_writer: DeviceId(4),

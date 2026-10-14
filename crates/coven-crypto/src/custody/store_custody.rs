@@ -1,7 +1,8 @@
 //! Member identity and host secrets, without exposing retained custody.
 
 use super::{KeyError, KeySession, StoreKeychain};
-use crate::{CryptoError, MemberId, MemberKeys, StoreKeyring};
+use crate::{CryptoError, MemberIdentity, StoreKeyring};
+use coven_foundation::id_source::MemberId;
 use std::sync::Arc;
 
 /// Initializing this device's member identity failed (E11).
@@ -21,7 +22,7 @@ pub enum IdentityError {
 /// The store's identity and host secrets, retaining their custody and keychain.
 /// Shares the unlocked sessions used by the handle and its workers.
 pub struct StoreCustody {
-    identity: Arc<KeySession<MemberKeys>>,
+    identity: Arc<KeySession<MemberIdentity>>,
     keys: Arc<KeySession<StoreKeyring>>,
     keychain: Arc<StoreKeychain>,
 }
@@ -30,7 +31,7 @@ impl StoreCustody {
     /// Compose already chosen custody at the application opening root.
     pub fn new(
         keys: Arc<KeySession<StoreKeyring>>,
-        identity: Arc<KeySession<MemberKeys>>,
+        identity: Arc<KeySession<MemberIdentity>>,
         keychain: Arc<StoreKeychain>,
     ) -> Self {
         Self {
@@ -46,16 +47,16 @@ impl StoreCustody {
         self.identity.close();
     }
 
-    /// Makes this member's two key pairs and puts them in identity custody,
-    /// for the person creating a store. Fails if custody already holds keys.
-    /// Joining and restoring put the keys there themselves.
-    pub fn initialize_identity(&mut self) -> Result<MemberId, IdentityError> {
+    /// Makes this member's two key pairs for the independently generated
+    /// `member` and puts both in identity custody, for the person creating a
+    /// store. Fails if custody already holds keys. Joining and restoring put
+    /// their identity there themselves.
+    pub fn initialize_identity(&mut self, member: MemberId) -> Result<MemberId, IdentityError> {
         if self.identity.read()?.is_some() {
             return Err(IdentityError::AlreadyInitialized);
         }
-        let keys = MemberKeys::generate()?;
-        self.identity.persist(&keys)?;
-        Ok(keys.member_id())
+        self.identity.persist(&MemberIdentity::generate(member)?)?;
+        Ok(member)
     }
 
     /// Records the name before saving the value in its own device-only entry,

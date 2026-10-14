@@ -86,3 +86,30 @@ fn sequential_device_ids_preserve_high_bits() {
 fn sequential_source_never_wraps() {
     SequentialIds(std::sync::atomic::AtomicU64::new(u64::MAX)).new_id();
 }
+
+#[test]
+fn member_identity_is_an_independent_uuid_with_one_spelling() {
+    let uuid = Uuid::from_u128(0x00112233_4455_6677_8899_aabbccddeeff);
+    let member = MemberId(uuid);
+    assert_eq!(std::mem::size_of::<MemberId>(), 16);
+    let encoded = serde_json::to_string(&member).unwrap();
+    assert_eq!(encoded, serde_json::to_string(&uuid).unwrap());
+    assert_eq!(serde_json::from_str::<MemberId>(&encoded).unwrap(), member);
+    assert_eq!(member.to_string(), "00112233-4455-6677-8899-aabbccddeeff");
+    assert_eq!(
+        "00112233-4455-6677-8899-aabbccddeeff"
+            .parse::<MemberId>()
+            .unwrap(),
+        member
+    );
+    for other in [
+        "00112233-4455-6677-8899-AABBCCDDEEFF",
+        "00112233445566778899aabbccddeeff",
+        "{00112233-4455-6677-8899-aabbccddeeff}",
+        "urn:uuid:00112233-4455-6677-8899-aabbccddeeff",
+        "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+        "",
+    ] {
+        assert_eq!(other.parse::<MemberId>(), Err(InvalidMemberId), "{other}");
+    }
+}

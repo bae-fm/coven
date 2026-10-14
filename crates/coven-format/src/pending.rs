@@ -9,8 +9,8 @@ use crate::path::ObjectPath;
 use crate::store_log::SnapshotId;
 use crate::value::{positive, EntryId};
 use crate::wire::{wire_struct, Decoder, Encoder, Wire};
-use coven_crypto::MemberId;
-use coven_foundation::id_source::{DeviceId, FileId, KeyId};
+use coven_crypto::SealingKey;
+use coven_foundation::id_source::{DeviceId, FileId, KeyId, MemberId};
 use coven_merge::{Audience, WriteId};
 use std::cmp::Ordering;
 
@@ -39,6 +39,9 @@ pub enum PendingSubject {
         key: KeyId,
         /// The copy's recipient.
         member: MemberId,
+        /// The recipient's exact sealing credential: a report for an old
+        /// credential never satisfies a wait for its replacement (D8).
+        sealing: SealingKey,
     },
     /// A file belonging to its uploading device.
     File {
@@ -76,13 +79,15 @@ impl Ord for PendingSubject {
                     audience: a,
                     key: ak,
                     member: am,
+                    sealing: asl,
                 },
                 Self::KeyCopy {
                     audience: b,
                     key: bk,
                     member: bm,
+                    sealing: bsl,
                 },
-            ) => (a, ak, am).cmp(&(b, bk, bm)),
+            ) => (a, ak, am, asl).cmp(&(b, bk, bm, bsl)),
             (
                 Self::File {
                     device: a,
@@ -117,10 +122,12 @@ impl Wire for PendingSubject {
                 audience,
                 key,
                 member,
+                sealing,
             } => {
                 audience.put(out)?;
                 key.put(out)?;
-                member.put(out)
+                member.put(out)?;
+                sealing.put(out)
             }
             Self::File { device, file } => {
                 device.put(out)?;
@@ -138,6 +145,7 @@ impl Wire for PendingSubject {
                 audience: Wire::get(input)?,
                 key: Wire::get(input)?,
                 member: Wire::get(input)?,
+                sealing: Wire::get(input)?,
             }),
             3 => Ok(Self::File {
                 device: Wire::get(input)?,

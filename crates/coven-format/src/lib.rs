@@ -117,7 +117,7 @@ impl Object {
             Self::StoreLog(v) => v.validate(),
             Self::JoinRequest(v) => v.validate(),
             Self::PostedPositions(v) => v.validate(),
-            Self::ClockObservation(_) => Ok(()),
+            Self::ClockObservation(v) => v.validate(),
         }
     }
 }

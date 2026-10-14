@@ -396,8 +396,8 @@ fn st_differential_replacement_admission() {
                 };
                 verdicts.push(
                     match crate::write_object::authority(&log, &mut replays, &header) {
-                        Ok(member) => {
-                            assert_eq!(member, crate::replay::tests::member(author));
+                        Ok(signer) => {
+                            assert_eq!(signer, crate::replay::tests::keys(author).signing);
                             true
                         }
                         Err(crate::Refusal::NotAuthorized) => false,
@@ -445,13 +445,8 @@ fn st_differential_replacement_admission() {
 /// even when a kept replacement also names it (§10).
 #[test]
 fn local_checks_reset_a_replaced_id_and_keep_a_removed_one_stopped() {
-    let ben = coven_crypto::MemberKeys::from_secret_bytes(&{
-        let mut bytes = b"CVMK\x01".to_vec();
-        bytes.extend([2; 64]);
-        bytes
-    })
-    .unwrap();
-    assert_eq!(ben.member_id(), crate::replay::tests::member(1));
+    let ben = crate::store_log_sync::tests::member(2);
+    assert_eq!(ben.member(), crate::replay::tests::member(1));
     let mut replaced_phone = household(MemberRole::Admin, MemberRole::Member);
     replaced_phone.all(1, 5, replace(5, 1));
     let log = checked_log(&replaced_phone.entries);

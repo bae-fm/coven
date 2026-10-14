@@ -1,8 +1,16 @@
-"""Generate sealed write, entry, snapshot and key-copy fixtures independently of Rust,
-using libsodium.
+"""Generate format-1 fixtures independently of Rust, using hashlib/hmac and libsodium.
 
-Run with Python 3 and libsodium installed. All keys are public test material.
-The plaintext frames and clear prefix come from the checked-in format fixture.
+Run with Python 3 and libsodium installed. All keys, seeds and fixed nonces are
+public test material.
+
+The member-bearing plaintext frames (store-log entries, the join request, the
+clock and the pending-report grammar) and both codes are encoded here from D2,
+D6, D8 and D13. The write, snapshot and posted-positions frames carry no member
+data and come from the checked-in `v1.hex`. Sealed objects, key boxes and
+signatures are calculated here for every fixture.
+
+Ana's stable id is 0x4d repeated. Her original pair has signing and sealing
+seeds 0x33, her replacement pair 0x34; Ben (0x42 repeated) has seeds 0x35.
 """
 
 import ctypes as c
@@ -11,19 +19,78 @@ import hashlib
 import hmac
 from pathlib import Path
 
+ANA = bytes([0x4D]) * 16
+BEN = bytes([0x42]) * 16
+STORE = bytes([0x10]) * 16
+CIRCLE = bytes([2]) * 16
+STORE_TEXT = b"10101010-1010-1010-1010-101010101010/"
+
 
 def context(*fields):
     return b"".join(len(field).to_bytes(8, "big") + field for field in fields)
 
 
+def derive(secret, label):
+    extracted = hmac.digest(bytes(32), secret, "sha256")
+    return hmac.digest(extracted, context(label) + b"\x01", "sha256")
+
+
 def encryption_key(value):
-    extracted = hmac.digest(bytes(32), bytes([value]) * 32, "sha256")
-    return hmac.digest(extracted, context(b"coven/encryption/v1") + b"\x01", "sha256")
+    return derive(bytes([value]) * 32, b"coven/encryption/v1")
 
 
 def checked(result):
     if result != 0:
         raise RuntimeError(f"libsodium failed: {result}")
+
+
+# D2 primitives.
+def u8(value):
+    return value.to_bytes(1, "big")
+
+
+def u16(value):
+    return value.to_bytes(2, "big")
+
+
+def u32(value):
+    return value.to_bytes(4, "big")
+
+
+def u64(value):
+    return value.to_bytes(8, "big")
+
+
+def text(value):
+    return u32(len(value)) + value
+
+
+def collection(items):
+    return u32(len(items)) + b"".join(items)
+
+
+def entry_id(device, number):
+    return u64(device) + u64(number)
+
+
+def timestamp(ms, counter, device):
+    return ms.to_bytes(6, "big") + u16(counter) + u64(device)
+
+
+def store_audience():
+    return b"\x00"
+
+
+def circle_audience(circle):
+    return b"\x01" + circle
+
+
+def snapshot_id(audience, device, number):
+    return audience + u64(device) + u64(number)
+
+
+def frame(kind, payload):
+    return u8(kind) + u16(1) + u32(len(payload)) + payload
 
 
 def chunk(sodium, key, path, prefix, section, index, plaintext):
@@ -49,33 +116,33 @@ def sealed_chunk(sodium, key, path, prefix, section, index, plaintext, nonce):
 def signing_public(sodium, seed):
     public = c.create_string_buffer(32)
     secret = c.create_string_buffer(64)
-    checked(sodium.crypto_sign_seed_keypair(public, secret, seed))
+    checked(sodium.crypto_sign_seed_keypair(public, secret, bytes([seed]) * 32))
     return public.raw
 
 
-def sealing_public(sodium, secret):
+def sealing_public(sodium, seed):
     public = c.create_string_buffer(32)
-    checked(sodium.crypto_scalarmult_base(public, secret))
+    checked(sodium.crypto_scalarmult_base(public, bytes([seed]) * 32))
     return public.raw
 
 
-def hkdf(secret, info):
-    extracted = hmac.digest(bytes(32), secret, "sha256")
-    return hmac.digest(extracted, info + b"\x01", "sha256")
+def pair(sodium, seed):
+    """D2 `MemberKeys`: the signing then the sealing public key."""
+    return signing_public(sodium, seed) + sealing_public(sodium, seed)
 
 
-def key_copy(sodium, path, audience, key_id, plaintext, ephemeral_seed, nonce):
-    """A kind-37 copy to the member whose signing and sealing seeds are 0x33 (D9, D11)."""
-    member = signing_public(sodium, bytes([0x33]) * 32)
-    recipient = sealing_public(sodium, bytes([0x33]) * 32)
-    prefix = bytes([37, 0, 1]) + audience + key_id + member + recipient
+def key_copy(sodium, path, audience, key_id, plaintext, seed, ephemeral_seed, nonce):
+    """A kind-37 copy to Ana's credential whose seeds are `seed` (D9, D11)."""
+    recipient = sealing_public(sodium, seed)
+    prefix = bytes([37, 0, 1]) + audience + key_id + ANA + recipient
     ephemeral = bytes([ephemeral_seed]) * 32
-    sender = sealing_public(sodium, ephemeral)
+    sender = sealing_public(sodium, ephemeral_seed)
     shared = c.create_string_buffer(32)
     checked(sodium.crypto_scalarmult(shared, ephemeral, recipient))
     kind = b"circle" if audience[0] == 1 else b"store"
     box_context = context(b"coven/sealed-box/v1", kind, path, prefix, sender, recipient)
-    key = hkdf(shared.raw, box_context)
+    extracted = hmac.digest(bytes(32), shared.raw, "sha256")
+    key = hmac.digest(extracted, box_context + b"\x01", "sha256")
     nonce = bytes([nonce]) * 24
     ciphertext = c.create_string_buffer(len(plaintext) + 16)
     length = c.c_ulonglong()
@@ -87,10 +154,10 @@ def key_copy(sodium, path, audience, key_id, plaintext, ephemeral_seed, nonce):
     return prefix + sender + nonce + ciphertext.raw
 
 
-def signature(sodium, message):
+def signature(sodium, message, seed):
     public = c.create_string_buffer(32)
     secret = c.create_string_buffer(64)
-    checked(sodium.crypto_sign_seed_keypair(public, secret, bytes([0x33]) * 32))
+    checked(sodium.crypto_sign_seed_keypair(public, secret, bytes([seed]) * 32))
     result = c.create_string_buffer(64)
     length = c.c_ulonglong()
     checked(sodium.crypto_sign_detached(
@@ -100,9 +167,145 @@ def signature(sodium, message):
     return result.raw
 
 
-def signed(sodium, path, body):
+def signed(sodium, path, body, seed=0x33):
     message = context(b"coven/object-signature/v1", path, hashlib.sha256(body).digest())
-    return body + signature(sodium, message)
+    return body + signature(sodium, message, seed)
+
+
+def single_chunk(sodium, kind, key_id, key, path, plaintext, nonce, seed):
+    """A one-chunk object (D9): kinds 35/39 name their key; a join request has none."""
+    prefix = bytes([kind, 0, 1]) + key_id
+    return signed(sodium, path, prefix + sealed_chunk(
+        sodium, key, path, prefix, 0, 0, plaintext, bytes([nonce]) * 24), seed)
+
+
+# D6 store-log entries.
+def entry(change, number=1, stamp=(6, 3, 1), author=ANA):
+    payload = entry_id(1, number) + timestamp(*stamp) + author + collection([]) + change
+    return frame(4, payload)
+
+
+def changes(sodium):
+    """`test_utils::store_changes`, in canonical tag order."""
+    initial_hash = hashlib.sha256(bytes([17]) * 32).digest()
+    s3_console = b"\x01" + text(b"fixture-access-key") + b"\x00"
+    return [
+        b"\x00" + STORE + text(b"S") + pair(sodium, 0x33) + s3_console + text(b"D")
+        + bytes([1]) * 16 + initial_hash,
+        b"\x01" + BEN + pair(sodium, 0x35) + b"\x01" + b"\x00" + text(b"member@example.test"),
+        b"\x02" + BEN,
+        b"\x03" + ANA + b"\x00",
+        b"\x04" + u64(2) + text(b"D") + b"\x00",
+        b"\x05" + u64(2),
+        b"\x06" + CIRCLE + text(b"C") + bytes([1]) * 16 + initial_hash,
+        b"\x07" + CIRCLE + text(b"N"),
+        b"\x08" + CIRCLE,
+        b"\x09" + CIRCLE + ANA,
+        b"\x0a" + CIRCLE + ANA,
+        b"\x0b" + u32(2) + snapshot_id(store_audience(), 1, 1),
+        b"\x0d" + snapshot_id(circle_audience(CIRCLE), 1, 1),
+        b"\x0e" + ANA + b"\x01" + text(b"replacement-key") + b"\x01" + text(b"coven-member")
+        + b"\x00" + text(b"coven-store"),
+        b"\x0f" + store_audience() + bytes([3]) * 16 + bytes([0x91]) * 32,
+        b"\x0f" + circle_audience(CIRCLE) + bytes([4]) * 16 + bytes([0xA2]) * 32,
+        b"\x10" + ANA + pair(sodium, 0x34),
+    ]
+
+
+def join_request(sodium):
+    """Ana's request answering the re-binding invite with her replacement pair."""
+    return frame(9, bytes([0x55]) * 16 + ANA + pair(sodium, 0x34) + text(b"D"))
+
+
+def clock():
+    return frame(12, u64(1) + collection([entry_id(1, 2)]))
+
+
+def objects(sodium, positions):
+    """`test_utils::objects`: creation, removal, a raise, a replacing device,
+    the join request, posted positions, the other changes, then the clock."""
+    every = changes(sodium)
+    frames = [
+        entry(every[0]),
+        entry(every[2], number=2, stamp=(7, 0, 1)),
+        entry(b"\x0b" + u32(3) + snapshot_id(circle_audience((7).to_bytes(16, "big")), 9, 11)),
+        entry(b"\x04" + u64(2) + text(b"D") + b"\x01" + u64(1)),
+        join_request(sodium),
+        positions,
+    ]
+    frames += [entry(change) for index, change in enumerate(every) if index not in (0, 2, 11)]
+    frames.append(clock())
+    return frames
+
+
+# D8 pending reports.
+def path_text(path):
+    return text(STORE_TEXT + path)
+
+
+def pending_reports(sodium):
+    """The grammar fixture `pinned_pending_frame_covers_the_complete_report_grammar`."""
+    key4 = (4).to_bytes(16, "big")
+    reports = []
+    for failure in range(7):
+        reports.append(b"\x00" + entry_id(2, failure + 1) + b"\x00" + u8(failure))
+    for index, reason in enumerate([
+        b"\x01" + path_text(b"devices/2/3"),
+        b"\x02\x00" + path_text(b"store-log/3/1"),
+        b"\x02\x01" + u64(3),
+        b"\x03" + store_audience() + key4,
+        b"\x04\x00" + u32(3),
+        b"\x04\x01" + u32(0xFFFF),
+    ]):
+        reports.append(b"\x00" + entry_id(2, index + 8) + reason)
+    reports.append(b"\x01" + entry_id(2, 3) + b"\x00\x04")
+    # Ana's original and replacement credentials are distinct subjects,
+    # ordered by sealing key after audience, key and member.
+    subject_length = 1 + 1 + 16 + 16 + 32
+    copies = [
+        b"\x02" + store_audience() + key4 + ANA + sealing_public(sodium, 0x33) + b"\x00\x00",
+        b"\x02" + store_audience() + key4 + ANA + sealing_public(sodium, 0x34)
+        + b"\x03" + store_audience() + key4,
+    ]
+    reports += sorted(copies, key=lambda report: report[:subject_length])
+    for index, reason in enumerate([b"\x00\x07", b"\x05\x00", b"\x05\x01", b"\x05\x02"]):
+        reports.append(b"\x03" + u64(1) + (index + 1).to_bytes(16, "big") + reason)
+    circle6 = circle_audience((6).to_bytes(16, "big"))
+    reports.append(b"\x04" + snapshot_id(circle6, 2, 3) + b"\x03" + circle6 + key4)
+    reports.append(b"\x05" + u64(2) + b"\x06\x01")
+    payload = u64(1) + collection([]) + collection([]) + u32(1) + collection([])
+    return frame(8, payload + collection(reports))
+
+
+# D13 codes.
+def crc32c(data):
+    crc = 0xFFFFFFFF
+    for byte in data:
+        crc ^= byte
+        for _ in range(8):
+            crc = (crc >> 1) ^ (0x82F63B78 if crc & 1 else 0)
+    return crc ^ 0xFFFFFFFF
+
+
+def code_text(prefix, data):
+    alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"
+    bits = "".join(f"{byte:08b}" for byte in data + crc32c(data).to_bytes(4, "big"))
+    bits += "0" * (-len(bits) % 5)
+    return prefix + "".join(alphabet[int(bits[i:i + 5], 2)] for i in range(0, len(bits), 5))
+
+
+def restore_code():
+    """Ana's id with her unchanged private-pair blob and a location without credentials."""
+    storage = (b'{"S3":{"bucket":"bucket","region":"region","endpoint":null,'
+               b'"profile":null,"prefix":"store"}}')
+    keys = b"CVMK\x01" + bytes([0x33]) * 64
+    return frame(10, STORE + text(b"S") + ANA + text(keys) + text(storage))
+
+
+def invite_code():
+    """A re-binding invite fixing Ana's existing id."""
+    return frame(11, STORE + text(b"S") + bytes([0x55]) * 16 + ANA + bytes([0x66]) * 32
+                 + bytes([1]) * 16 + u64(1) + u64(12) + text(b"\x44"))
 
 
 def main():
@@ -123,56 +326,86 @@ def main():
     sodium.crypto_scalarmult.argtypes = [pointer, pointer, pointer]
 
     directory = Path(__file__).resolve().parent
-    frames = [bytes.fromhex(line) for line in (directory / "v1.hex").read_text().splitlines()]
-    store = b"10101010-1010-1010-1010-101010101010/"
-    path = store + b"devices/1/3"
+    pinned = [bytes.fromhex(line) for line in (directory / "v1.hex").read_text().splitlines()]
+    # The object frames come first; the write header (kind 1) starts the rest.
+    rest_at = next(i for i, frame_ in enumerate(pinned) if frame_[0] == 1)
+    positions = [frame_ for frame_ in pinned[:rest_at] if frame_[0] == 8]
+    assert len(positions) == 1
+    frames = objects(sodium, positions[0]) + pinned[rest_at:]
+    (directory / "v1.hex").write_text("".join(frame_.hex() + "\n" for frame_ in frames))
+    (directory / "clock.hex").write_text(clock().hex() + "\n")
+    (directory / "pending-reports.hex").write_text(pending_reports(sodium).hex() + "\n")
+
+    path = STORE_TEXT + b"devices/1/3"
     # The write prefix (kind 32) follows the plaintext frames; its header and
     # part chunks follow it, then the snapshot prefix (kind 34) and its chunks.
-    write_at = next(i for i, frame in enumerate(frames) if frame[0] == 32)
-    snapshot_at = next(i for i, frame in enumerate(frames) if frame[0] == 34)
+    write_at = next(i for i, frame_ in enumerate(frames) if frame_[0] == 32)
+    snapshot_at = next(i for i, frame_ in enumerate(frames) if frame_[0] == 34)
     prefix = frames[write_at]
     assert frames[write_at + 1][0] == 1 and snapshot_at == write_at + 6
     body = prefix
-    for frame, section, index, key in [
+    for frame_, section, index, key in [
         (frames[write_at + 1], 0, 0, encryption_key(17)),
         (frames[write_at + 2], 1, 0, encryption_key(17)),
         (frames[write_at + 3], 1, 1, encryption_key(17)),
         (frames[write_at + 4], 1, 2, encryption_key(17)),
         (frames[write_at + 5], 2, 0, encryption_key(18)),
     ]:
-        body += chunk(sodium, key, path, prefix, section, index, frame)
+        body += chunk(sodium, key, path, prefix, section, index, frame_)
     write = signed(sodium, path, body)
 
-    path = store + b"store-log/1/1"
-    prefix = bytes([33]) + frames[0][1:3] + bytes([1]) * 16
+    # Creation is verified with the admin pair it supplies (seeds 0x33).
+    path = STORE_TEXT + b"store-log/1/1"
+    prefix = bytes([33, 0, 1]) + bytes([1]) * 16
     assert frames[0][0] == 4
     body = prefix + chunk(sodium, encryption_key(17), path, prefix, 0, 0, frames[0])
-    entry = signed(sodium, path, body)
+    entry_object = signed(sodium, path, body)
 
     # Snapshot chunks use random nonces; these fixed ones are public test data.
-    path = store + b"snapshots/store/1/1"
+    path = STORE_TEXT + b"snapshots/store/1/1"
     prefix = frames[snapshot_at]
-    body = prefix + signature(sodium, context(b"coven/prefix-signature/v1", path, prefix))
-    for index, frame in enumerate(frames[snapshot_at + 1:]):
-        body += sealed_chunk(sodium, encryption_key(17), path, prefix, 0, index, frame,
+    body = prefix + signature(
+        sodium, context(b"coven/prefix-signature/v1", path, prefix), 0x33)
+    for index, frame_ in enumerate(frames[snapshot_at + 1:]):
+        body += sealed_chunk(sodium, encryption_key(17), path, prefix, 0, index, frame_,
                              bytes([0x60 + index]) * 24)
     snapshot = signed(sodium, path, body)
 
-    # Key copies use random ephemeral keys and nonces; these fixed ones are public.
+    # Positions, clock and join request use random nonces; these are fixed.
     store_key_id = bytes([1]) * 16
-    store_key = key_copy(sodium, store + b"keys/7/9", b"\x00", store_key_id,
-                         store_key_id + bytes([17]) * 32, 0x55, 0x44)
-    circle_id, circle_key_id = bytes([2]) * 16, bytes([3]) * 16
-    circle_key = key_copy(sodium, store + b"keys/7/10", b"\x01" + circle_id, circle_key_id,
-                          circle_id + circle_key_id + bytes([18]) * 32, 0x56, 0x45)
+    positions_object = single_chunk(sodium, 35, store_key_id, encryption_key(17),
+                                    STORE_TEXT + b"positions/1", positions[0], 0x51, 0x33)
+    clock_object = single_chunk(sodium, 39, store_key_id, encryption_key(17),
+                                STORE_TEXT + b"clock/1", clock(), 0x39, 0x33)
+    # The request is sealed with the invite secret's key and signed by the pair it requests.
+    join_object = single_chunk(
+        sodium, 36, b"", derive(bytes([0x66]) * 32, b"coven/join-request/v1"),
+        STORE_TEXT + b"join-requests/55555555-5555-5555-5555-555555555555",
+        join_request(sodium), 0x52, 0x34)
+
+    # Key copies use random ephemeral keys and nonces; these fixed ones are public.
+    # Both go to Ana's one id: the store key to her original credential and the
+    # circle key to her replacement.
+    store_key = key_copy(sodium, STORE_TEXT + b"keys/7/9", b"\x00", store_key_id,
+                         store_key_id + bytes([17]) * 32, 0x33, 0x55, 0x44)
+    circle_key_id = bytes([3]) * 16
+    circle_key = key_copy(sodium, STORE_TEXT + b"keys/7/10", b"\x01" + CIRCLE, circle_key_id,
+                          CIRCLE + circle_key_id + bytes([18]) * 32, 0x34, 0x56, 0x45)
     for name, data in [
         ("sealed-write.hex", write),
-        ("sealed-store-log.hex", entry),
+        ("sealed-store-log.hex", entry_object),
         ("sealed-snapshot.hex", snapshot),
+        ("sealed-positions.hex", positions_object),
+        ("sealed-clock.hex", clock_object),
+        ("sealed-join-request.hex", join_object),
         ("sealed-store-key.hex", store_key),
         ("sealed-circle-key.hex", circle_key),
+        ("restore-code.hex", restore_code()),
+        ("invite-code.hex", invite_code()),
     ]:
         (directory / name).write_text(data.hex() + "\n")
+    (directory / "codes.txt").write_text(
+        code_text("CVR1-", restore_code()) + "\n" + code_text("CVI1-", invite_code()) + "\n")
 
 
 if __name__ == "__main__":

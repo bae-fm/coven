@@ -44,7 +44,7 @@ impl crate::Database {
             StoreLogEntry {
                 position: id,
                 timestamp,
-                author: crate::store_log::tests::keys(1).signing,
+                author: crate::store_log::tests::member(1),
                 had_read: EntryPositions(Vec::new()),
                 change: match &boundary {
                     crate::Boundary::SchemaChange(v) => StoreChange::RaiseSchema {
@@ -138,7 +138,7 @@ impl crate::Database {
 #[tokio::test]
 async fn checked_boundaries_survive_selection_changes_and_restart() {
     use crate::pending::tests::Record;
-    use crate::store_log::tests::{checked, keys};
+    use crate::store_log::tests::{checked, member};
     use coven_format::{
         store_log::{SnapshotId, StoreChange, StoreLogEntry},
         value::EntryPositions,
@@ -161,7 +161,7 @@ async fn checked_boundaries_survive_selection_changes_and_restart() {
         let entry = StoreLogEntry {
             position,
             timestamp: Timestamp::new(number, 0, position.device).unwrap(),
-            author: keys(1).signing,
+            author: member(1),
             had_read: EntryPositions(Vec::new()),
             change: StoreChange::RaiseSchema {
                 version,
@@ -565,7 +565,7 @@ mod differential {
         let entry = coven_format::store_log::StoreLogEntry {
             position: RESET,
             timestamp: Timestamp::new(100, 0, RESET.device).unwrap(),
-            author: crate::store_log::tests::keys(1).signing,
+            author: crate::store_log::tests::member(1),
             had_read: EntryPositions(Vec::new()),
             change: coven_format::store_log::StoreChange::Reset {
                 snapshot: snapshot_id(Audience::Store),

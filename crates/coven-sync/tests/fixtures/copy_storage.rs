@@ -16,7 +16,7 @@ pub(super) enum CopyAttempt {
     /// These objects have not landed yet for this reader.
     Hidden,
     /// The provider stores different bytes for copies addressed to this member.
-    CorruptFor(coven_crypto::MemberId),
+    CorruptFor(coven_foundation::id_source::MemberId),
 }
 
 pub(super) struct CopyStorage {

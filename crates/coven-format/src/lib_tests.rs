@@ -3,12 +3,10 @@ use crate::error::Rule;
 use zeroize::Zeroizing;
 
 #[test]
-fn clock_frame_contains_only_its_device() {
+fn clock_frame_contains_its_device_and_store_log_view() {
     let bytes = hex(include_str!("../fixtures/clock.hex"));
-    assert_eq!(frame_length(&bytes).unwrap(), 15);
-    let clock = Object::ClockObservation(ClockObservation {
-        device: coven_foundation::id_source::DeviceId(1),
-    });
+    assert_eq!(frame_length(&bytes).unwrap(), 35);
+    let clock = Object::ClockObservation(test_utils::clock());
     assert_eq!(Object::decode(&bytes).unwrap(), clock);
     assert_eq!(clock.encode().unwrap(), bytes);
 }

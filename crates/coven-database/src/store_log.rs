@@ -2,10 +2,10 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use coven_crypto::{MemberId, SealingPublicKey};
+use coven_crypto::MemberPublicKeys;
 use coven_format::store_log::{MemberRole, SnapshotId};
 use coven_format::{value::EntryId, Object};
-use coven_foundation::id_source::{CircleId, DeviceId, StoreId};
+use coven_foundation::id_source::{CircleId, DeviceId, MemberId, StoreId};
 use coven_merge::Audience;
 
 use crate::{sqlite::DatabaseConnection, write_schema::WriteSchema, DbError, ReplayEntry};
@@ -210,11 +210,12 @@ pub(crate) fn check_creation(
     Ok(())
 }
 
-/// A member's signing key is the key in [`StoreLogState::members`].
+/// A member as replay has them, keyed by stable id in [`StoreLogState::members`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StoreMember {
-    /// The public key used to seal store and circle keys to this member.
-    pub sealing: SealingPublicKey,
+    /// The current public pair: the signing key that verifies this member's
+    /// objects in this view and the sealing key copies go to (§9, §11).
+    pub keys: MemberPublicKeys,
     /// Current access selected by replay. Revocation also reads dropped and
     /// superseded access from [`StoreLog::entries`] (§13).
     pub access: coven_format::MemberAccess,

@@ -39,7 +39,7 @@ async fn restore_code_api_never_discloses_storage_credentials() {
         }
         assert_eq!(code.store, owner.directory.id());
         assert_eq!(code.name, "Household");
-        assert_eq!(code.member_keys.member_id(), owner.member.member_id());
+        assert_eq!(code.member, owner.member.member());
         assert_eq!(
             RestoreCode::from_bytes(&bytes).unwrap().storage.as_bytes(),
             serde_json::to_vec(&owner.storage.config()).unwrap()
@@ -112,7 +112,7 @@ async fn restore_loads_snapshots_and_later_writes_with_identical_fingerprints() 
     let log = db.local_store_log().await.unwrap();
     assert_eq!(
         log.log.replay.state.devices[&log.device].member,
-        owner.member.member_id()
+        owner.member.member()
     );
     assert_eq!(
         log.log.replay.state.devices[&log.device].name,
@@ -164,8 +164,8 @@ async fn join_accepts_provider_access_and_approval_then_loads_the_store() {
         }
         let restored =
             coven_sync::read_restore_code(&handle.restore_code().await.unwrap()).unwrap();
-        assert_eq!(restored.member_keys.member_id(), member);
-        assert_ne!(member, owner.member.member_id());
+        assert_eq!(restored.member, member);
+        assert_ne!(member, owner.member.member());
         assert_eq!(
             handle
                 .read(|sql| Ok(
@@ -281,11 +281,7 @@ async fn restart_while_waiting_reuses_the_member_device_and_request_bytes() {
     let directory = install.layout.store_dir(&owner.directory.id());
     assert_eq!(directory.settings().unwrap().device_id, device);
     assert_eq!(
-        keychain_code(&install.keychain)
-            .unwrap()
-            .unwrap()
-            .member_keys
-            .member_id(),
+        keychain_code(&install.keychain).unwrap().unwrap().member,
         request.member
     );
     handle.close().await.unwrap();
@@ -537,7 +533,7 @@ async fn s3_credential_changes_preserve_the_code_location_and_member_across_reop
             .member_keys
             .to_secret_bytes()
             .as_bytes(),
-        owner.member.to_secret_bytes().as_bytes()
+        owner.member.keys().to_secret_bytes().as_bytes()
     );
     handle.close().await.unwrap();
     assert!(matches!(
@@ -711,13 +707,7 @@ async fn removal_lists_every_recorded_key_including_a_dropped_replacement() {
                 listing.await.unwrap();
                 replace().await.unwrap();
                 let code = handle.restore_code().await.unwrap();
-                assert_eq!(
-                    coven_sync::read_restore_code(&code)
-                        .unwrap()
-                        .member_keys
-                        .member_id(),
-                    member
-                );
+                assert_eq!(coven_sync::read_restore_code(&code).unwrap().member, member);
                 resume.send(()).unwrap();
             };
             let (removal, ()) = tokio::time::timeout(Duration::from_secs(20), async {
@@ -729,13 +719,7 @@ async fn removal_lists_every_recorded_key_including_a_dropped_replacement() {
         } else {
             replace().await.unwrap();
             let code = handle.restore_code().await.unwrap();
-            assert_eq!(
-                coven_sync::read_restore_code(&code)
-                    .unwrap()
-                    .member_keys
-                    .member_id(),
-                member
-            );
+            assert_eq!(coven_sync::read_restore_code(&code).unwrap().member, member);
             owner.sync().await;
             owner.handle.remove_member(&member).await.unwrap();
         };
@@ -744,7 +728,7 @@ async fn removal_lists_every_recorded_key_including_a_dropped_replacement() {
             ["invited-key", "new-member-key"].map(|key| AccessKeyToDelete {
                 access_key_id: key.into(),
                 principal: coven_format::S3Principal::Console,
-                member: Some(member.clone())
+                member: Some(member)
             })
         );
         handle.close().await.unwrap();
@@ -905,9 +889,8 @@ async fn restores_return_session_keys_and_builder_choices_without_reopening() {
             ));
             let member = coven_sync::read_restore_code(&handle.restore_code().await.unwrap())
                 .unwrap()
-                .member_keys
-                .member_id();
-            assert_eq!(member, owner.member.member_id());
+                .member;
+            assert_eq!(member, owner.member.member());
             handle.close().await.unwrap();
             if passphrase {
                 // The same files remain usable at their permanent paths after publication.
@@ -952,8 +935,7 @@ async fn joining_retains_the_approved_member_in_session_custody() {
     assert_eq!(
         coven_sync::read_restore_code(&handle.restore_code().await.unwrap())
             .unwrap()
-            .member_keys
-            .member_id(),
+            .member,
         member
     );
     assert_eq!(handle.store_key_state().unwrap(), StoreKeyState::Available);

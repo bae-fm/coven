@@ -4,7 +4,7 @@ use super::{io, StoreLogSync};
 use crate::write_object::{checked, damaged};
 use crate::{snapshot_data::SavedSnapshot, Refusal, SyncError};
 use crate::{PendingReason, PendingRecord, PendingSubject};
-use coven_crypto::{MemberId, ObjectHasher, Signature};
+use coven_crypto::{ObjectHasher, Signature, SigningKey};
 use coven_database::StoreLog;
 use coven_format::sealed_snapshot::{SnapshotObjectLayout, SnapshotObjectPrefix};
 use coven_format::value::StorageTime;
@@ -16,7 +16,7 @@ use std::sync::Arc;
 pub(super) struct Candidate {
     pub(super) object: StoredObject,
     pub(super) prefix: SnapshotObjectPrefix,
-    author: MemberId,
+    signer: SigningKey,
     signature: Signature,
 }
 
@@ -357,12 +357,11 @@ impl StoreLogSync {
                 .ok_or(coven_format::Error::Truncated),
         )?;
         let (prefix, signature) = checked(path, SnapshotObjectPrefix::decode_signed(signed))?;
-        let author = match crate::object_author::member(log, path.device().expect("snapshot path"))
-        {
-            Ok(author) => author,
+        let signer = match crate::object_author::owner(log, path.device().expect("snapshot path")) {
+            Ok((_, signer)) => signer,
             Err(reason) => return Ok(Err(reason)),
         };
-        author
+        signer
             .verify_prefix(path.as_str(), &signed[..length], &signature)
             .map_err(|error| {
                 damaged(
@@ -382,7 +381,7 @@ impl StoreLogSync {
         Ok(Ok(Candidate {
             object: object.clone(),
             prefix,
-            author: author.clone(),
+            signer,
             signature,
         }))
     }
@@ -637,7 +636,7 @@ impl StoreLogSync {
             }
             let signature = layout.read_signature(&stream.read_exact(64).await?)?;
             candidate
-                .author
+                .signer
                 .verify_object(path.as_str(), &hash.finish(), &signature)?;
             Ok(())
         }

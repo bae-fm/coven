@@ -91,6 +91,7 @@ async fn accounts(storage: Arc<MemoryStorage>) -> [Device; 3] {
         storage.grant_access(email).await.unwrap();
         a.sync
             .make_and_upload_entry(StoreChange::AddMember {
+                member: d.member.member(),
                 keys: public(&d.member),
                 role,
                 access: coven_format::MemberAccess::ProviderAccount(email.into()),
@@ -196,21 +197,21 @@ async fn owner_removal_preserves_keys_and_revokes_the_account() {
         panic!()
     };
     for who in [&b.member, &c.member] {
-        let id = begin(&mut a, Command::AddCircleMember(circle, who.member_id())).await;
+        let id = begin(&mut a, Command::AddCircleMember(circle, who.member())).await;
         finish(&mut a, id).await;
     }
     b.sync().await;
     c.sync().await;
     let old_store = a.newest(Audience::Store).await;
     let old_circle = a.newest(Audience::Circle(circle)).await;
-    publish(&mut a, Command::RemoveMember(b.member.member_id())).await;
+    publish(&mut a, Command::RemoveMember(b.member.member())).await;
     drive_access(&mut a).await;
     c.sync().await;
     let state = a.log().await.replay.state;
     // A removal introduces no key; rotation is the only replacement (§11).
     assert_eq!(a.newest(Audience::Store).await, old_store);
     assert_eq!(a.newest(Audience::Circle(circle)).await, old_circle);
-    assert!(state.members[&b.member.member_id()].removed);
+    assert!(state.members[&b.member.member()].removed);
     assert!(state.devices[&b.device().await].removed());
     let ring = c.custody.read().unwrap().unwrap();
     assert!(ring.store_key(old_store).is_ok());
@@ -232,15 +233,11 @@ async fn outside_admin_removes_a_member_without_learning_the_circle_key() {
     let Output::CircleId(gifts) = finish(&mut b, id).await else {
         panic!()
     };
-    let id = begin(
-        &mut b,
-        Command::AddCircleMember(gifts, c.member.member_id()),
-    )
-    .await;
+    let id = begin(&mut b, Command::AddCircleMember(gifts, c.member.member())).await;
     finish(&mut b, id).await;
     a.sync().await;
     c.sync().await;
-    publish(&mut a, Command::RemoveMember(b.member.member_id())).await;
+    publish(&mut a, Command::RemoveMember(b.member.member())).await;
     c.sync().await;
     let key = a.newest(Audience::Circle(gifts)).await;
     assert!(matches!(
@@ -272,7 +269,7 @@ async fn another_admin_cannot_share_and_owner_applies_their_revocation() {
         Err(SyncError::Storage(error)) if error.failure() == StorageFailure::NotStoreOwner
     ));
     assert!(b.db.operations().await.unwrap().is_empty());
-    publish(&mut b, Command::RemoveMember(c.member.member_id())).await;
+    publish(&mut b, Command::RemoveMember(c.member.member())).await;
     drive_access(&mut b).await;
     assert!(b
         .db
@@ -317,7 +314,7 @@ async fn interrupted_plain_removal_keeps_its_entry_and_schedules_access_on_repla
         ));
         assert!(matches!(
             a.sync
-                .begin_operation_call(Command::RemoveMember(b.member.member_id()))
+                .begin_operation_call(Command::RemoveMember(b.member.member()))
                 .await,
             Err(SyncError::Storage(_))
         ));
@@ -359,8 +356,8 @@ async fn independent_removals_keep_their_original_attempts() {
     let storage = google();
     let [mut a, mut b, c] = accounts(storage.clone()).await;
     a.clock.set(UNIX_EPOCH + Duration::from_secs(2));
-    let attempted = queue_removal(&mut a, Command::RemoveMember(b.member.member_id())).await;
-    publish(&mut b, Command::RemoveMember(c.member.member_id())).await;
+    let attempted = queue_removal(&mut a, Command::RemoveMember(b.member.member())).await;
+    publish(&mut b, Command::RemoveMember(c.member.member())).await;
     let concurrent = b.log().await.entries.last().unwrap().entry.position;
     a.sync().await;
     drive_access(&mut a).await;
@@ -374,8 +371,8 @@ async fn independent_removals_keep_their_original_attempts() {
     let removal = &log.entries.last().unwrap().entry;
     assert_eq!(removal, &attempted.entry);
     assert!(!removal.had_read.0.contains(&concurrent));
-    assert!(log.replay.state.members[&b.member.member_id()].removed);
-    assert!(log.replay.state.members[&c.member.member_id()].removed);
+    assert!(log.replay.state.members[&b.member.member()].removed);
+    assert!(log.replay.state.members[&c.member.member()].removed);
     assert_eq!(
         crate::key_introductions::newest(&log, &Audience::Store),
         Some(key(1))
@@ -392,17 +389,13 @@ async fn circle_membership_rotates_and_shares_history() {
     let Output::CircleId(circle) = finish(&mut a, create).await else {
         panic!()
     };
-    let add = begin(
-        &mut a,
-        Command::AddCircleMember(circle, b.member.member_id()),
-    )
-    .await;
+    let add = begin(&mut a, Command::AddCircleMember(circle, b.member.member())).await;
     finish(&mut a, add).await;
     b.sync().await;
     let old_key = a.newest(Audience::Circle(circle)).await;
     publish(
         &mut a,
-        Command::RemoveCircleMember(circle, b.member.member_id()),
+        Command::RemoveCircleMember(circle, b.member.member()),
     )
     .await;
     assert_eq!(a.newest(Audience::Circle(circle)).await, old_key);
@@ -418,11 +411,7 @@ async fn circle_membership_rotates_and_shares_history() {
             .circle_key(circle, new_key),
         Err(coven_crypto::MaterialError::UnknownCircleKey { .. })
     ));
-    let add = begin(
-        &mut a,
-        Command::AddCircleMember(circle, c.member.member_id()),
-    )
-    .await;
+    let add = begin(&mut a, Command::AddCircleMember(circle, c.member.member())).await;
     finish(&mut a, add).await;
     c.sync().await;
     let ring = c.custody.read().unwrap().unwrap();
@@ -531,16 +520,13 @@ async fn retained_provider_grants_block_both_requested_and_remote_revocations() 
             .set_retained_access("cat@example.com", shares.clone())
             .await;
         if remote {
-            publish(&mut b, Command::RemoveMember(c.member.member_id())).await;
+            publish(&mut b, Command::RemoveMember(c.member.member())).await;
             a.sync().await;
         }
         let files = file_owner(&a);
         let operations = { operation_owner(a.sync, files) };
         if !remote {
-            operations
-                .remove_member(&c.member.member_id())
-                .await
-                .unwrap();
+            operations.remove_member(&c.member.member()).await.unwrap();
         }
         let conditions = pending(&operations, &a.db).await;
         assert_eq!(conditions.len(), 1);
@@ -590,7 +576,7 @@ async fn removing_a_member_cuts_off_every_device_of_their_account() {
         .await
         .unwrap();
     a.sync().await;
-    publish(&mut a, Command::RemoveMember(b.member.member_id())).await;
+    publish(&mut a, Command::RemoveMember(b.member.member())).await;
     drive_access(&mut a).await;
     let state = a.log().await.replay.state;
     let store_key = a.newest(Audience::Store).await;
@@ -633,7 +619,7 @@ async fn plain_device_removal_preserves_member_keys_and_returns_provider_sign_ou
     ));
     let state = a.log().await.replay.state;
     assert_eq!(a.newest(Audience::Store).await, previous_key);
-    assert!(!state.members[&b.member.member_id()].removed);
+    assert!(!state.members[&b.member.member()].removed);
     assert!(state.devices[&b_id].removed());
     assert!(a.db.operations().await.unwrap().is_empty());
     assert!(matches!(
@@ -658,8 +644,8 @@ async fn plain_device_removal_preserves_member_keys_and_returns_provider_sign_ou
 #[tokio::test]
 async fn role_changes_preserve_an_admin_and_owner_accounts_cannot_be_removed() {
     let [a, b, c] = accounts(google()).await;
-    let owner = a.member.member_id();
-    let admin = b.member.member_id();
+    let owner = a.member.member();
+    let admin = b.member.member();
     let a_db = a.db.clone();
     let files = file_owner(&a);
     let a = { operation_owner(a.sync, files) };
@@ -689,8 +675,8 @@ async fn role_changes_preserve_an_admin_and_owner_accounts_cannot_be_removed() {
         .any(|m| m.id == owner && m.role == MemberRole::Member));
     let circle = a.create_circle("Members' circle").await.unwrap();
     assert!(matches!(
-        a.add_circle_member(circle, &member(99).member_id()).await,
-        Err(SyncError::Rejected(coven_database::DropReason::TargetGone(coven_database::EntryTarget::Member(id)))) if id == member(99).member_id()
+        a.add_circle_member(circle, &member(99).member()).await,
+        Err(SyncError::Rejected(coven_database::DropReason::TargetGone(coven_database::EntryTarget::Member(id)))) if id == member(99).member()
     ));
     // An absent circle has no members; listing it is not a change to reject.
     assert!(a_db
@@ -720,23 +706,20 @@ async fn resumed_removal_uses_the_targets_current_storage_account() {
         .await
         .unwrap();
     a.sync().await;
-    queue_removal(&mut a, Command::RemoveMember(b.member.member_id())).await;
-    publish(
-        &mut owner_phone,
-        Command::RemoveMember(b.member.member_id()),
-    )
-    .await;
+    queue_removal(&mut a, Command::RemoveMember(b.member.member())).await;
+    publish(&mut owner_phone, Command::RemoveMember(b.member.member())).await;
     storage.grant_access("ben-new@example.com").await.unwrap();
     owner_phone
         .sync
         .make_and_upload_entry(StoreChange::AddMember {
+            member: b.member.member(),
             keys: public(&b.member),
             role: MemberRole::Member,
             access: coven_format::MemberAccess::ProviderAccount("ben-new@example.com".into()),
         })
         .await
         .unwrap();
-    publish(&mut a, Command::RemoveMember(b.member.member_id())).await;
+    publish(&mut a, Command::RemoveMember(b.member.member())).await;
     drive_access(&mut a).await;
     assert!(
         matches!(MemoryStorage::for_recipient(&storage, "ben-new@example.com")
@@ -787,11 +770,11 @@ async fn removal_returns_unit_before_provider_work_and_has_no_operation_row() {
     let [mut ana, ben, _] = accounts(storage.clone()).await;
     let result = ana
         .sync
-        .begin_operation_call(Command::RemoveMember(ben.member.member_id()))
+        .begin_operation_call(Command::RemoveMember(ben.member.member()))
         .await
         .unwrap();
     assert!(matches!(result, Begun::Value(Output::Unit)));
-    assert!(ana.log().await.replay.state.members[&ben.member.member_id()].removed);
+    assert!(ana.log().await.replay.state.members[&ben.member.member()].removed);
     assert!(ana
         .db
         .operations()

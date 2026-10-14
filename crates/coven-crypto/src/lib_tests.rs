@@ -177,7 +177,8 @@ fn streamed_object_signatures_bind_path_digest_member_and_domain() {
     let digest = whole.finish();
     let signature = keys.sign_object(path, &digest);
     assert!(keys
-        .member_id()
+        .public_keys()
+        .signing
         .verify_object(
             "20202020-2020-2020-2020-202020202020/devices/1/3",
             &digest,
@@ -189,12 +190,13 @@ fn streamed_object_signatures_bind_path_digest_member_and_domain() {
         for piece in bytes.chunks(size) {
             stream.update(piece);
         }
-        keys.member_id()
+        keys.public_keys()
+            .signing
             .verify_object(path, &stream.finish(), &signature)
             .unwrap();
     }
     assert!(matches!(
-        keys.member_id().verify_object(
+        keys.public_keys().signing.verify_object(
             "10101010-1010-1010-1010-101010101010/devices/1/4",
             &digest,
             &signature
@@ -204,7 +206,8 @@ fn streamed_object_signatures_bind_path_digest_member_and_domain() {
     assert!(matches!(
         MemberKeys::generate()
             .unwrap()
-            .member_id()
+            .public_keys()
+            .signing
             .verify_object(path, &digest, &signature),
         Err(CryptoError::Signature)
     ));
@@ -214,7 +217,8 @@ fn streamed_object_signatures_bind_path_digest_member_and_domain() {
         let mut stream = ObjectHasher::new();
         stream.update(&changed);
         assert!(matches!(
-            keys.member_id()
+            keys.public_keys()
+                .signing
                 .verify_object(path, &stream.finish(), &signature),
             Err(CryptoError::Signature)
         ));
@@ -230,11 +234,14 @@ fn streamed_object_signatures_bind_path_digest_member_and_domain() {
         cipher::context(&[path.as_bytes(), digest.as_bytes()]),
     ] {
         assert!(matches!(
-            keys.member_id().verify(&other_message, &signature),
+            keys.public_keys()
+                .signing
+                .verify(&other_message, &signature),
             Err(CryptoError::Signature)
         ));
         assert!(matches!(
-            keys.member_id()
+            keys.public_keys()
+                .signing
                 .verify_object(path, &digest, &keys.sign(&other_message)),
             Err(CryptoError::Signature)
         ));
@@ -245,7 +252,10 @@ fn streamed_object_signatures_bind_path_digest_member_and_domain() {
         path.as_bytes(),
         digest.as_bytes(),
     ]);
-    keys.member_id().verify(&message, &signature).unwrap();
+    keys.public_keys()
+        .signing
+        .verify(&message, &signature)
+        .unwrap();
 }
 
 #[test]
@@ -254,7 +264,7 @@ fn prefix_signatures_bind_exact_bytes_path_member_and_a_separate_domain() {
     let path = "10101010-1010-1010-1010-101010101010/snapshots/store/1/3";
     let prefix = b"kind, version, audience, key and positions";
     let signature = keys.sign_prefix(path, prefix);
-    let author = keys.member_id();
+    let author = keys.public_keys().signing;
     author.verify_prefix(path, prefix, &signature).unwrap();
     assert!(author
         .verify_prefix(
@@ -280,7 +290,8 @@ fn prefix_signatures_bind_exact_bytes_path_member_and_a_separate_domain() {
     assert!(matches!(
         MemberKeys::generate()
             .unwrap()
-            .member_id()
+            .public_keys()
+            .signing
             .verify_prefix(path, prefix, &signature),
         Err(CryptoError::Signature)
     ));

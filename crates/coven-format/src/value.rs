@@ -2,8 +2,8 @@
 
 use crate::error::{bound, require, Error, Rule};
 use crate::wire::{get_blob, put_blob, wire_struct, Decoder, Encoder, Wire};
-use coven_crypto::{Fingerprint, MemberId, SealingPublicKey};
-use coven_foundation::id_source::{CircleId, DeviceId, FileId, InviteId, KeyId, StoreId};
+use coven_crypto::{Fingerprint, SealingKey, SigningKey};
+use coven_foundation::id_source::{CircleId, DeviceId, FileId, InviteId, KeyId, MemberId, StoreId};
 pub use coven_merge::EntryId;
 use coven_merge::{Audience, RowId, Timestamp, WriteId};
 use uuid::Uuid;
@@ -27,17 +27,18 @@ macro_rules! uuid_id {
         }
     )* };
 }
-uuid_id!(StoreId, CircleId, InviteId, KeyId, FileId);
+uuid_id!(StoreId, CircleId, InviteId, KeyId, FileId, MemberId);
 
-impl Wire for MemberId {
+impl Wire for SigningKey {
     fn put(&self, out: &mut Encoder) -> Result<(), Error> {
-        self.to_bytes().put(out)
+        self.as_bytes().put(out)
     }
     fn get(input: &mut Decoder<'_>) -> Result<Self, Error> {
-        Self::from_bytes(Wire::get(input)?).map_err(|_| Error::InvalidMemberId)
+        Self::from_bytes(Wire::get(input)?).map_err(|_| Error::InvalidSigningKey)
     }
 }
-impl Wire for SealingPublicKey {
+wire_struct!(coven_crypto::MemberPublicKeys, signing, sealing);
+impl Wire for SealingKey {
     fn put(&self, out: &mut Encoder) -> Result<(), Error> {
         self.as_bytes().put(out)
     }

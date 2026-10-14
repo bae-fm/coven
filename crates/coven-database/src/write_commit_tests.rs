@@ -31,13 +31,15 @@ fn circle_tables() -> Vec<SyncedTable> {
 
 fn leave_circle(db: &Database) {
     let other = crate::store_log::tests::keys(2);
+    let member = crate::store_log::tests::member(2);
     db.inspect_writer(|db| {
         db.transaction(|db| {
             db.internal_execute(
-                "INSERT INTO _coven_members(member,sealing,role,removed,access)
-                 VALUES(?1,?2,'member',0,?3)",
+                "INSERT INTO _coven_members(member,signing,sealing,role,removed,access)
+                 VALUES(?1,?2,?3,'member',0,?4)",
                 (
-                    other.signing.to_bytes(),
+                    member.0.as_bytes(),
+                    other.signing.as_bytes(),
                     other.sealing.as_bytes(),
                     serde_json::to_vec(&coven_format::MemberAccess::S3AccessKey {
                         access_key_id: "other-access-key".into(),
@@ -48,7 +50,7 @@ fn leave_circle(db: &Database) {
             )?;
             db.internal_execute(
                 "UPDATE _coven_circle_members SET member=?1 WHERE circle=?2",
-                (other.signing.to_bytes(), CIRCLE),
+                (member.0.as_bytes(), CIRCLE),
             )?;
             Ok(())
         })

@@ -82,9 +82,11 @@ async fn resuming_join_authenticates_the_initial_key_and_writer_cursor() {
     let resumed = JoiningIdentity::prepare(&directory, &code, "New phone").unwrap();
     assert!(resumed.attempted());
     assert_eq!(
-        resumed.member_keys().member_id(),
-        identity.member_keys().member_id()
+        resumed.identity().keys().public_keys(),
+        identity.identity().keys().public_keys()
     );
+    // The resumed identity keeps the id the invite fixed.
+    assert_eq!(resumed.identity().member(), code.member);
     assert_eq!(file.read_optional().unwrap().unwrap(), saved);
     drop(directory);
     pending.cancel().unwrap();

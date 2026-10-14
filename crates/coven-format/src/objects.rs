@@ -5,29 +5,40 @@ use crate::pending::{PendingReason, PendingReport, PendingSubject, Prerequisite}
 use crate::store_log::MemberPublicKeys;
 use crate::value::{name, EntryPositions, WritePositions};
 use crate::wire::wire_struct;
-use coven_foundation::id_source::{DeviceId, InviteId, StoreId};
+use coven_foundation::id_source::{DeviceId, InviteId, MemberId, StoreId};
 use coven_merge::Audience;
 
 /// A device's storage-time probe (§9, D8). Its publication time is provider
-/// metadata; the frame asserts no time, positions, fingerprints or reports.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// metadata; the frame asserts no time, write positions, fingerprints or reports.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ClockObservation {
     /// The publishing device, which must match the clock object's path.
     pub device: DeviceId,
+    /// The store log its author had read. Its replay resolves the path
+    /// device's member and the signing key that verifies the object (D9).
+    pub store_log_read: EntryPositions,
 }
-wire_struct!(ClockObservation, device);
+wire_struct!(ClockObservation, device, store_log_read);
+impl ClockObservation {
+    pub(crate) fn validate(&self) -> Result<(), Error> {
+        self.store_log_read.validate()
+    }
+}
 
 /// A new person's request, encrypted with the invite-derived key and signed (§12.2).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct JoinRequest {
     /// The invite this request answers.
     pub invite: InviteId,
-    /// The new member's signing and sealed-box public keys.
+    /// The member id fixed by the invite: fresh for an addition, or the
+    /// existing member's for a re-binding (D8, D13).
+    pub member: MemberId,
+    /// The requested public pair; it verifies this request's signature.
     pub keys: MemberPublicKeys,
     /// The new device's name shown to the approving admin.
     pub device_name: String,
 }
-wire_struct!(JoinRequest, invite, keys, device_name => crate::wire::get_name);
+wire_struct!(JoinRequest, invite, member, keys, device_name => crate::wire::get_name);
 impl JoinRequest {
     pub(crate) fn validate(&self) -> Result<(), Error> {
         name(&self.device_name)
@@ -106,11 +117,7 @@ impl PostedPositions {
 
     /// Check recipients and report paths against the authenticated member and store (D8).
     /// The decoder checks syntax; the caller supplies this context after authentication.
-    pub fn validate_reporter(
-        &self,
-        member: &coven_crypto::MemberId,
-        store: StoreId,
-    ) -> Result<(), Error> {
+    pub fn validate_reporter(&self, member: &MemberId, store: StoreId) -> Result<(), Error> {
         for report in &self.pending {
             match &report.reason {
                 PendingReason::Missing { path }

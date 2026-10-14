@@ -1,17 +1,23 @@
 use super::*;
 use crate::CircleId;
-use coven_foundation::id_source::{IdSource, KeyId};
+use coven_foundation::id_source::{IdSource, KeyId, MemberId};
 use uuid::Uuid;
 
 #[test]
-fn member_identity_retains_only_the_public_key_bytes() {
-    assert_eq!(std::mem::size_of::<MemberId>(), 32);
+fn member_identity_is_independent_of_its_public_keys() {
+    assert_eq!(std::mem::size_of::<MemberId>(), 16);
+    assert_eq!(std::mem::size_of::<SigningKey>(), 32);
+    let keys = MemberKeys::generate().unwrap();
+    let ana = MemberIdentity::new(MemberId(Uuid::from_u128(1)), keys.clone());
+    let ben = MemberIdentity::new(MemberId(Uuid::from_u128(2)), keys);
+    assert_ne!(ana.member(), ben.member());
+    assert_eq!(ana.keys().public_keys(), ben.keys().public_keys());
 }
 
 #[test]
 fn wrong_key_lengths_are_refused_before_opening_the_box() {
     let member = MemberKeys::generate().unwrap();
-    let recipient = member.sealing_public_key();
+    let recipient = member.public_keys().sealing;
     let store = StoreKey::from_bytes(KeyId(uuid::Uuid::from_bytes([1; 16])), [17; 32]);
     let circle = CircleKey::from_bytes(
         CircleId(Uuid::from_u128(11)),
@@ -59,39 +65,46 @@ fn wrong_key_lengths_are_refused_before_opening_the_box() {
 }
 
 #[test]
-fn member_public_bytes_round_trip_through_each_constructor() {
+fn signing_key_bytes_round_trip_and_match_the_private_pair() {
     let text = "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a";
     let bytes: [u8; 32] = hex::decode(text).unwrap().try_into().unwrap();
-    let member = MemberId::from_bytes(bytes).unwrap();
-    assert_eq!(member.to_bytes(), bytes);
-    assert_eq!(member.to_string(), text);
-    assert_eq!(text.parse::<MemberId>().unwrap().to_bytes(), bytes);
-    assert_eq!(MemberId::from_bytes(member.to_bytes()).unwrap(), member);
+    let signing = SigningKey::from_bytes(bytes).unwrap();
+    assert_eq!(*signing.as_bytes(), bytes);
+    assert_eq!(
+        SigningKey::from_bytes(*signing.as_bytes()).unwrap(),
+        signing
+    );
 
     let keys = MemberKeys::generate().unwrap();
-    let member = keys.member_id();
-    assert_eq!(member.to_bytes(), keys.signing.verifying_key().to_bytes());
-    assert_eq!(MemberId::from_bytes(member.to_bytes()).unwrap(), member);
+    let public = keys.public_keys();
+    assert_eq!(
+        *public.signing.as_bytes(),
+        keys.signing.verifying_key().to_bytes()
+    );
+    assert_eq!(
+        SigningKey::from_bytes(*public.signing.as_bytes()).unwrap(),
+        public.signing
+    );
 }
 
 #[test]
 fn member_signatures_and_both_key_pairs_survive_custody_encoding() {
     let keys = MemberKeys::generate().unwrap();
     let restored = MemberKeys::from_secret_bytes(keys.to_secret_bytes().as_bytes()).unwrap();
-    assert_eq!(keys.member_id(), restored.member_id());
-    assert_eq!(keys.sealing_public_key(), restored.sealing_public_key());
-    let member: MemberId = keys.member_id().to_string().parse().unwrap();
+    assert_eq!(keys.public_keys(), restored.public_keys());
+    let signing = keys.public_keys().signing;
     for bytes in [b"".as_slice(), b"member's signed write"] {
         let signature = restored.sign(bytes);
-        member.verify(bytes, &signature).unwrap();
+        signing.verify(bytes, &signature).unwrap();
         assert!(matches!(
-            member.verify(b"altered", &signature),
+            signing.verify(b"altered", &signature),
             Err(CryptoError::Signature)
         ));
         assert!(matches!(
             MemberKeys::generate()
                 .unwrap()
-                .member_id()
+                .public_keys()
+                .signing
                 .verify(bytes, &signature),
             Err(CryptoError::Signature)
         ));
@@ -99,7 +112,7 @@ fn member_signatures_and_both_key_pairs_survive_custody_encoding() {
             let mut changed = *signature.as_bytes();
             changed[index] ^= 1;
             assert!(matches!(
-                member.verify(bytes, &Signature::from_bytes(changed)),
+                signing.verify(bytes, &Signature::from_bytes(changed)),
                 Err(CryptoError::Signature)
             ));
         }
@@ -114,10 +127,53 @@ fn member_signatures_and_both_key_pairs_survive_custody_encoding() {
 }
 
 #[test]
+fn identity_custody_pins_the_id_before_the_unchanged_private_pair() {
+    let pair = hex::decode(concat!(
+        "43564d4b01",
+        "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60",
+        "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+    ))
+    .unwrap();
+    let member = MemberId(Uuid::from_u128(0x00112233_4455_6677_8899_aabbccddeeff));
+    let identity = MemberIdentity::new(member, MemberKeys::from_secret_bytes(&pair).unwrap());
+    let mut expected = b"CVMI\x01".to_vec();
+    expected.extend_from_slice(member.0.as_bytes());
+    expected.extend_from_slice(&pair);
+    assert_eq!(identity.to_secret_bytes().as_bytes(), expected);
+    let restored = MemberIdentity::from_secret_bytes(&expected).unwrap();
+    assert_eq!(restored.member(), member);
+    assert_eq!(restored.keys().public_keys(), identity.keys().public_keys());
+    for end in 0..expected.len() {
+        assert!(MemberIdentity::from_secret_bytes(&expected[..end]).is_err());
+    }
+    let mut extra = expected.clone();
+    extra.push(0);
+    assert!(MemberIdentity::from_secret_bytes(&extra).is_err());
+    // The custody envelope is not the restore code's private-pair blob.
+    assert!(MemberIdentity::from_secret_bytes(&pair).is_err());
+    assert!(MemberKeys::from_secret_bytes(&expected).is_err());
+    for offset in 0..5 {
+        let mut changed = expected.clone();
+        changed[offset] ^= 1;
+        assert_eq!(
+            MemberIdentity::from_secret_bytes(&changed).unwrap_err(),
+            MaterialError::Encoding
+        );
+    }
+    let debug = format!("{identity:?}");
+    assert!(debug.contains(&member.to_string()));
+    assert!(!debug.contains("9d61b19d"));
+}
+
+#[test]
 fn ed25519_rfc8032_vector_verifies() {
-    let member: MemberId = "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a"
-        .parse()
-        .unwrap();
+    let member = SigningKey::from_bytes(
+        hex::decode("d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a")
+            .unwrap()
+            .try_into()
+            .unwrap(),
+    )
+    .unwrap();
     let bytes = hex::decode(concat!(
         "e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e06522490155",
         "5fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b"
@@ -141,11 +197,11 @@ fn private_pair_encoding_pins_seed_order_and_independent_public_keys() {
     let keys = MemberKeys::from_secret_bytes(&bytes).unwrap();
     assert_eq!(keys.to_secret_bytes().as_bytes(), bytes);
     assert_eq!(
-        hex::encode(keys.member_id().to_bytes()),
+        hex::encode(keys.public_keys().signing.as_bytes()),
         "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a"
     );
     assert_eq!(
-        hex::encode(keys.sealing_public_key().as_bytes()),
+        hex::encode(keys.public_keys().sealing.as_bytes()),
         "8f40c5adb68f25624ae5b214ea767a6ec94d829d3d7b5e1ad1ba6f3e2138285f"
     );
     assert_eq!(
@@ -166,33 +222,26 @@ fn private_pair_encoding_pins_seed_order_and_independent_public_keys() {
 }
 
 #[test]
-fn invalid_and_weak_member_ids_are_rejected() {
-    for value in ["", "00", &"0".repeat(64), &"z".repeat(64), &"A".repeat(64)] {
-        assert!(value.parse::<MemberId>().is_err());
-    }
+fn invalid_and_weak_signing_keys_are_rejected() {
     let mut identity = [0; 32];
     identity[0] = 1;
     assert!(matches!(
-        MemberId::from_bytes(identity),
-        Err(CryptoError::InvalidMemberId)
+        SigningKey::from_bytes(identity),
+        Err(CryptoError::InvalidSigningKey)
     ));
     // Compressed y = 2 has no Ed25519 point, unlike the weak identity above.
     let mut invalid = [0; 32];
     invalid[0] = 2;
     assert!(matches!(
-        MemberId::from_bytes(invalid),
-        Err(CryptoError::InvalidMemberId)
-    ));
-    assert!(matches!(
-        hex::encode(invalid).parse::<MemberId>(),
-        Err(CryptoError::InvalidMemberId)
+        SigningKey::from_bytes(invalid),
+        Err(CryptoError::InvalidSigningKey)
     ));
 }
 
 #[test]
 fn sealed_box_domains_are_checked_even_when_payload_lengths_match() {
     let member = MemberKeys::generate().unwrap();
-    let recipient = member.sealing_public_key();
+    let recipient = member.public_keys().sealing;
     let path = "10101010-1010-1010-1010-101010101010/keys/7/9";
     let prefix = b"clear routing prefix";
     let key = StoreKey::from_bytes(KeyId(Uuid::from_u128(3)), [17; 32]);
@@ -225,7 +274,7 @@ fn anonymous_store_boxes_bind_recipient_path_and_all_ciphertext_bytes() {
     let path = "10101010-1010-1010-1010-101010101010/keys/7/9".to_owned();
     let sealed = seal_store_key(
         &store,
-        &member.sealing_public_key(),
+        &member.public_keys().sealing,
         &path,
         b"clear routing prefix",
     )
@@ -233,7 +282,7 @@ fn anonymous_store_boxes_bind_recipient_path_and_all_ciphertext_bytes() {
     assert_eq!(sealed.len(), 120);
     let repeated = seal_store_key(
         &store,
-        &member.sealing_public_key(),
+        &member.public_keys().sealing,
         &path,
         b"clear routing prefix",
     )
@@ -293,7 +342,7 @@ fn anonymous_circle_boxes_preserve_circle_and_id() {
         CircleKey::generate(CircleId(Uuid::from_u128(11)), KeyId(key_ids.new_id())).unwrap();
     let sealed = seal_circle_key(
         &circle,
-        &member.sealing_public_key(),
+        &member.public_keys().sealing,
         "10101010-1010-1010-1010-101010101010/keys/7/9",
         b"clear routing prefix",
     )
@@ -355,7 +404,7 @@ fn low_order_x25519_keys_are_rejected_in_both_directions() {
         assert!(matches!(
             seal_store_key(
                 &store,
-                &SealingPublicKey::from_bytes(low),
+                &SealingKey::from_bytes(low),
                 "10101010-1010-1010-1010-101010101010/keys/7/9",
                 b"clear routing prefix"
             ),
@@ -363,7 +412,7 @@ fn low_order_x25519_keys_are_rejected_in_both_directions() {
         ));
         let mut sealed = seal_store_key(
             &store,
-            &member.sealing_public_key(),
+            &member.public_keys().sealing,
             "10101010-1010-1010-1010-101010101010/keys/7/9",
             b"clear routing prefix",
         )
@@ -387,7 +436,7 @@ fn access_key_boxes_open_only_for_their_member_path_and_prefix() {
     let plaintext = b"key id, secret and principal";
     let sealed = seal_access_key(
         plaintext,
-        &ana.sealing_public_key(),
+        &ana.public_keys().sealing,
         "s/access-keys/a/1",
         b"prefix",
     )
@@ -412,7 +461,7 @@ fn access_key_boxes_open_only_for_their_member_path_and_prefix() {
         .is_err());
     assert!(seal_access_key(
         &vec![0; MAX_ACCESS_KEY_BOX + 1],
-        &ana.sealing_public_key(),
+        &ana.public_keys().sealing,
         "p",
         b""
     )

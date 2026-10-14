@@ -7,10 +7,9 @@ use crate::{
     operations::{Output, Progress},
     *,
 };
-use coven_crypto::MemberId;
 use coven_database::{EntryOutcome, LocalStoreLog, OperationRecord};
 use coven_format::store_log::StoreChange;
-use coven_foundation::id_source::KeyId;
+use coven_foundation::id_source::{KeyId, MemberId};
 
 impl StoreLogSync {
     pub(crate) async fn operation_step(
@@ -89,7 +88,7 @@ impl StoreLogSync {
             let mut ring = self.store_keys.read()?;
             self.update_keys(&local.log, &member, &mut ring).await?;
             let Some(change) =
-                self.operation_change(&local, &member.member_id(), &mut data, &mut ring)?
+                self.operation_change(&local, &member.member(), &mut data, &mut ring)?
             else {
                 self.database
                     .advance_operation(data.update(record, data.entry_step_number(5))?)
@@ -100,7 +99,7 @@ impl StoreLogSync {
             let observed = self.send.observation()?;
             let record = record.clone();
             self.database
-                .prepare_operation_entry(member.member_id(), change, move |log, entry, copies| {
+                .prepare_operation_entry(member.member(), change, move |log, entry, copies| {
                     let sealed = crate::store_log_keys::seal(
                         copies,
                         log,
@@ -244,13 +243,14 @@ impl StoreLogSync {
                 };
                 let request = self.decode_request(request)?;
                 let change = StoreChange::AddMember {
-                    keys: request.keys.clone(),
+                    member: request.member,
+                    keys: request.keys,
                     role: work.role,
                     access: work.access.member_access()?,
                 };
                 self.validate_administration(local, me, &change)?;
-                if let Some(existing) = effects::member(state, &request.keys.signing) {
-                    if existing.sealing == request.keys.sealing
+                if let Some(existing) = effects::member(state, &request.member) {
+                    if existing.keys == request.keys
                         && existing.role == work.role
                         && existing
                             .access
@@ -303,7 +303,7 @@ impl StoreLogSync {
             }
             Intent::AddCircleMember { circle, member } => StoreChange::AddCircleMember {
                 circle: *circle,
-                member: member.parse()?,
+                member: *member,
             },
             Intent::DeleteCircle { circle } => StoreChange::DeleteCircle { circle: *circle },
         };

@@ -202,10 +202,10 @@ macro_rules! coven_tables {
                 beaten_number BLOB CHECK(length(beaten_number)=8),
                 target BLOB,
                 retires_device BLOB CHECK(length(retires_device)=8),
-                retires_member BLOB CHECK(length(retires_member)=32),
+                retires_member BLOB CHECK(length(retires_member)=16),
                 CHECK(retires_device IS NULL OR retires_member IS NULL),
                 CHECK((author_view IN (x'0400',x'0401'))=(outcome='late')),
-                CHECK((outcome='target-member' AND target IS NOT NULL AND length(target)=32)
+                CHECK((outcome='target-member' AND target IS NOT NULL AND length(target)=16)
                    OR (outcome='target-device' AND target IS NOT NULL AND length(target)=8)
                    OR (outcome='target-circle' AND target IS NOT NULL AND length(target)=16)
                    OR (outcome NOT IN ('target-member','target-device','target-circle') AND target IS NULL)),
@@ -318,7 +318,8 @@ macro_rules! coven_tables {
         ");
         $visit!(_coven_members, "
             CREATE TABLE _coven_members (
-                member BLOB PRIMARY KEY NOT NULL CHECK(length(member)=32),
+                member BLOB PRIMARY KEY NOT NULL CHECK(length(member)=16),
+                signing BLOB NOT NULL CHECK(length(signing)=32),
                 sealing BLOB NOT NULL CHECK(length(sealing)=32),
                 access BLOB NOT NULL,
                 role TEXT NOT NULL CHECK(role IN ('admin','member')),

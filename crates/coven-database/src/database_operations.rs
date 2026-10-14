@@ -120,7 +120,7 @@ impl Database {
     /// identity and author view into the operation data it returns.
     pub async fn prepare_operation_entry<F, E>(
         &self,
-        author: coven_crypto::MemberId,
+        author: coven_foundation::id_source::MemberId,
         change: coven_format::store_log::StoreChange,
         seal: F,
     ) -> Result<crate::EntryId, E>

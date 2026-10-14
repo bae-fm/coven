@@ -12,7 +12,8 @@
 
 use crate::wire::{Decoder, Encoder, Wire};
 use crate::{Error, S3Principal};
-use coven_crypto::{CryptoError, MemberId, MemberKeys, ObjectHasher, SealingPublicKey, SecretText};
+use coven_crypto::{CryptoError, MemberIdentity, ObjectHasher, SealingKey, SecretText, SigningKey};
+use coven_foundation::id_source::MemberId;
 use zeroize::Zeroizing;
 
 const KIND: u8 = 40;
@@ -44,7 +45,7 @@ pub struct DeliveryRouting {
     /// The member whose key this is.
     pub member: MemberId,
     /// The member's sealing key the box is sealed to.
-    pub sealing: SealingPublicKey,
+    pub sealing: SealingKey,
     /// The admin who made the key and signed the delivery.
     pub author: MemberId,
 }
@@ -94,16 +95,16 @@ fn decode_key(bytes: &[u8]) -> Result<DeliveredKey, Error> {
 
 /// Seal and sign a delivery of `key` to the member at `path`.
 pub fn seal(
-    author: &MemberKeys,
+    author: &MemberIdentity,
     member: &MemberId,
-    sealing: &SealingPublicKey,
+    sealing: &SealingKey,
     path: &str,
     key: &DeliveredKey,
 ) -> Result<Vec<u8>, DeliveryError> {
     let routing = DeliveryRouting {
-        member: member.clone(),
+        member: *member,
         sealing: *sealing,
-        author: author.member_id(),
+        author: author.member(),
     };
     let mut bytes = routing.encode()?;
     let plaintext = encode_key(key)?;
@@ -112,7 +113,7 @@ pub fn seal(
     bytes.extend_from_slice(&sealed);
     let mut hasher = ObjectHasher::new();
     hasher.update(&bytes);
-    bytes.extend_from_slice(author.sign_object(path, &hasher.finish()).as_bytes());
+    bytes.extend_from_slice(author.keys().sign_object(path, &hasher.finish()).as_bytes());
     Ok(bytes)
 }
 
@@ -122,17 +123,24 @@ pub fn routing(bytes: &[u8]) -> Result<DeliveryRouting, Error> {
     let mut input = Decoder::new(&bytes[3..])?;
     Ok(DeliveryRouting {
         member: MemberId::get(&mut input)?,
-        sealing: SealingPublicKey::get(&mut input)?,
+        sealing: SealingKey::get(&mut input)?,
         author: MemberId::get(&mut input)?,
     })
 }
 
-/// Verify the author's signature, then open the box for this member. The
-/// caller decides whether the author may deliver this member's key.
-pub fn open(member: &MemberKeys, path: &str, bytes: &[u8]) -> Result<DeliveredKey, DeliveryError> {
+/// Verify the signature with `author`, the routing author's current signing
+/// key that the caller resolved from the store log, then open the box for
+/// this member. The caller decides whether the author may deliver this
+/// member's key.
+pub fn open(
+    member: &MemberIdentity,
+    author: &SigningKey,
+    path: &str,
+    bytes: &[u8],
+) -> Result<DeliveredKey, DeliveryError> {
     let routing = routing(bytes)?;
-    let prefix_length = 3 + 32 + 32 + 32;
-    if routing.member != member.member_id() || routing.sealing != member.sealing_public_key() {
+    let prefix_length = 3 + 16 + 32 + 16;
+    if routing.member != member.member() || routing.sealing != member.keys().public_keys().sealing {
         return Err(DeliveryError::Crypto(CryptoError::Authentication));
     }
     let length_bytes: [u8; 4] = bytes
@@ -151,10 +159,8 @@ pub fn open(member: &MemberKeys, path: &str, bytes: &[u8]) -> Result<DeliveredKe
     let signature = crate::sealed::signature(&bytes[end..])?;
     let mut hasher = ObjectHasher::new();
     hasher.update(signed);
-    routing
-        .author
-        .verify_object(path, &hasher.finish(), &signature)?;
-    let plaintext = member.open_access_key(
+    author.verify_object(path, &hasher.finish(), &signature)?;
+    let plaintext = member.keys().open_access_key(
         path,
         &bytes[..prefix_length],
         &bytes[prefix_length + 4..end],

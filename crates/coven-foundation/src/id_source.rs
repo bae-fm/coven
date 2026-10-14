@@ -47,6 +47,46 @@ impl std::fmt::Display for KeyId {
     }
 }
 
+/// A member's random stable identity, independent of their keys (§9).
+/// Device ownership, circle membership and store-log authors name it; a key
+/// replacement keeps it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct MemberId(
+    /// The member's UUID, supplied by the id source.
+    pub Uuid,
+);
+
+impl std::fmt::Display for MemberId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl std::str::FromStr for MemberId {
+    type Err = InvalidMemberId;
+    /// Only the canonical lowercase hyphenated spelling (D10); a member
+    /// spelling never encodes a public key.
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match Uuid::try_parse(value) {
+            Ok(id) if id.hyphenated().to_string() == value => Ok(Self(id)),
+            _ => Err(InvalidMemberId),
+        }
+    }
+}
+
+/// Text that is not a member id's canonical lowercase hyphenated UUID (D10).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct InvalidMemberId;
+
+impl std::fmt::Display for InvalidMemberId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("not a canonical member id")
+    }
+}
+
+impl std::error::Error for InvalidMemberId {}
+
 /// An invitation's identity, independent of its one-time secret (§12.2).
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
 #[serde(transparent)]

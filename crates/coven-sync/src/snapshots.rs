@@ -120,7 +120,7 @@ impl StoreLogSync {
             return Err(SyncError::Rejected(coven_database::DropReason::NotAllowed));
         }
         // A snapshot is new data in its audience: replace an exposed key first.
-        self.rotate_if_exposed(audience.clone(), &member.member_id())
+        self.rotate_if_exposed(audience.clone(), &member.member())
             .await?;
         let record = self
             .start_snapshot_task(SnapshotJob::Write {
@@ -333,7 +333,7 @@ impl StoreLogSync {
         self.check_stopped(&local, &member)?;
         if matches!(trigger, SnapshotTrigger::Reset) {
             crate::effects::Authority::reset(&audience)
-                .check(&local.log.replay.state, &member.member_id())?;
+                .check(&local.log.replay.state, &member.member())?;
         }
         let id = SnapshotId {
             audience: audience.clone(),
@@ -374,7 +374,7 @@ impl StoreLogSync {
         mut task: SnapshotTask,
         path: &ObjectPath,
         log: &StoreLog,
-        member: &coven_crypto::MemberKeys,
+        member: &coven_crypto::MemberIdentity,
     ) -> Result<Progress, SyncError> {
         let id = path.snapshot_id().expect("snapshot path");
         self.clear_snapshot_files(record, &mut task).await?;
@@ -405,7 +405,7 @@ impl StoreLogSync {
             log,
             &observation,
             &ring,
-            &member.member_id(),
+            &member.member(),
             &id.audience,
         ) {
             Ok(key) => key,
@@ -584,7 +584,7 @@ impl StoreLogSync {
         &self,
         log: &StoreLog,
     ) -> Result<BTreeSet<Audience>, SyncError> {
-        audiences_for_member(log, &self.operation_member()?.member_id())
+        audiences_for_member(log, &self.operation_member()?.member())
     }
 
     pub(super) async fn save_snapshot_task(
@@ -636,7 +636,7 @@ impl StoreLogSync {
 /// snapshot is chosen when sealing, under §11.
 pub(super) fn audiences_for_member(
     log: &StoreLog,
-    member: &coven_crypto::MemberId,
+    member: &coven_foundation::id_source::MemberId,
 ) -> Result<BTreeSet<Audience>, SyncError> {
     let state = &log.replay.state;
     if state.members.get(member).is_none_or(|m| m.removed) {

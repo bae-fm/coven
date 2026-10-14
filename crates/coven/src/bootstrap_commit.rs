@@ -24,7 +24,7 @@ pub(super) fn publish_bootstrap(
     let mut commit = || -> Result<(), BootstrapError> {
         settings.commit(&location).map_err(SyncError::from)?;
         keys.persist(&ring)?;
-        identity.persist(&code.member_keys)?;
+        identity.persist(&MemberIdentity::new(code.member, code.member_keys.clone()))?;
         keychain.set_device_id(owners.device)?;
         credential_rollback = Some(coven_sync::commit_credentials(
             keychain,

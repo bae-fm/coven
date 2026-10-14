@@ -2,14 +2,15 @@
 //! Each call and its live subscription run the same query.
 
 use crate::{sqlite::DatabaseConnection, store_log::DeviceState, write_encoding::counter, DbError};
-use coven_crypto::{MemberId, SealingPublicKey};
+use coven_crypto::{SealingKey, SigningKey};
 use coven_format::store_log::{MemberPublicKeys, MemberRole};
-use coven_foundation::id_source::{CircleId, DeviceId};
+use coven_foundation::id_source::{CircleId, DeviceId, MemberId};
+use rusqlite::types::Type;
 
 /// A live member and every device they registered (E9).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MemberInfo {
-    /// Signing identity.
+    /// The stable member id, independent of its keys (§9).
     pub id: MemberId,
     /// The current public signing and sealing pair.
     pub keys: MemberPublicKeys,
@@ -44,7 +45,7 @@ pub struct Circle {
 /// An active store member in a circle (E12).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CircleMemberInfo {
-    /// Signing identity.
+    /// The stable member id, independent of its keys (§9).
     pub member: MemberId,
     /// Whether this is the local member.
     pub is_self: bool,
@@ -69,7 +70,7 @@ pub(crate) fn members(
 ) -> Result<Vec<MemberInfo>, DbError> {
     let me = me(db, device)?;
     let mut members = db.query(
-        "SELECT member,role,sealing FROM _coven_members WHERE removed=0",
+        "SELECT member,role,signing,sealing FROM _coven_members WHERE removed=0",
         [],
         |r| {
             Ok((
@@ -79,17 +80,22 @@ pub(crate) fn members(
                     "member" => MemberRole::Member,
                     _ => return Err(rusqlite::Error::InvalidQuery),
                 },
-                SealingPublicKey::from_bytes(r.get(2)?),
+                MemberPublicKeys {
+                    signing: SigningKey::from_bytes(r.get(2)?).map_err(|error| {
+                        crate::write_encoding::decode_failure(2, Type::Blob, error)
+                    })?,
+                    sealing: SealingKey::from_bytes(r.get(3)?),
+                },
             ))
         },
     )?;
     members.sort_by(|a, b| a.0.cmp(&b.0));
     members
         .into_iter()
-        .map(|(id, role, sealing)| {
+        .map(|(id, role, keys)| {
             let mut devices = db.query(
                 "SELECT device,name,state FROM _coven_devices WHERE member=?1",
-                [id.to_bytes().as_slice()],
+                [id.0.as_bytes().as_slice()],
                 |r| {
                     Ok(DeviceInfo {
                         id: DeviceId(counter(r.get(0)?)),
@@ -101,10 +107,7 @@ pub(crate) fn members(
             devices.sort_by_key(|device| device.id);
             Ok(MemberInfo {
                 is_self: me.as_ref() == Some(&id),
-                keys: MemberPublicKeys {
-                    signing: id.clone(),
-                    sealing,
-                },
+                keys,
                 id,
                 role,
                 devices,
@@ -120,7 +123,7 @@ pub(crate) fn circles(db: &DatabaseConnection, device: DeviceId) -> Result<Vec<C
     let mut circles = db.query(
         "SELECT c.circle,c.name FROM _coven_circle_members m JOIN _coven_circles c ON c.circle=m.circle
          WHERE m.member=?1 AND NOT EXISTS(SELECT 1 FROM _coven_circle_deletions d WHERE d.circle=c.circle)",
-        [me.to_bytes().as_slice()],
+        [me.0.as_bytes().as_slice()],
         |r| {
             Ok(Circle {
                 id: circle(r.get(0)?)?,

@@ -17,7 +17,7 @@ pub struct AccessKeyToDelete {
     /// The provider identity holding the key, which deleting it needs.
     pub principal: coven_format::S3Principal,
     /// The member it was recorded for, absent when an invitation ended before approval.
-    pub member: Option<coven_crypto::MemberId>,
+    pub member: Option<coven_foundation::id_source::MemberId>,
 }
 
 /// A deletion obligation and the operation that carries its pending notice.

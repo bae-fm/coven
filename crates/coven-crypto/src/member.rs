@@ -2,34 +2,36 @@
 
 use crate::{cipher, derivation, randomness, wire};
 use crate::{CircleKey, CryptoError, MaterialError, ObjectDigest, SecretBytes, StoreKey};
-use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
-use std::{fmt, str::FromStr};
+use coven_foundation::id_source::MemberId;
+use ed25519_dalek::{Signer, VerifyingKey};
+use std::fmt;
 use x25519_dalek::{PublicKey, StaticSecret};
 use zeroize::Zeroizing;
 
-/// A member, by the public half of their Ed25519 key pair (Appendix E).
-#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
-pub struct MemberId([u8; 32]);
+/// A member's validated Ed25519 public signing key (§11.1). It is bound to a
+/// stable [`MemberId`] by the store log and is never that identity.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub struct SigningKey([u8; 32]);
 
-impl MemberId {
-    /// Validate a member's public key, refusing weak Ed25519 points.
+impl SigningKey {
+    /// Validate a public signing key, refusing invalid and weak Ed25519 points.
     pub fn from_bytes(bytes: [u8; 32]) -> Result<Self, CryptoError> {
-        let key = VerifyingKey::from_bytes(&bytes).map_err(|_| CryptoError::InvalidMemberId)?;
+        let key = VerifyingKey::from_bytes(&bytes).map_err(|_| CryptoError::InvalidSigningKey)?;
         if key.is_weak() {
-            return Err(CryptoError::InvalidMemberId);
+            return Err(CryptoError::InvalidSigningKey);
         }
         Ok(Self(bytes))
     }
 
     /// The validated Ed25519 public key's 32 bytes.
-    pub fn to_bytes(&self) -> [u8; 32] {
-        self.0
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
     }
 
-    /// Verify a detached signature against this member's public key (§10).
+    /// Verify a detached signature against this public key (§10).
     pub fn verify(&self, message: &[u8], signature: &Signature) -> Result<(), CryptoError> {
         let key = VerifyingKey::from_bytes(&self.0)
-            .expect("MemberId contains a validated Ed25519 public key");
+            .expect("SigningKey contains a validated Ed25519 public key");
         key.verify_strict(message, &ed25519_dalek::Signature::from_bytes(&signature.0))
             .map_err(|_| CryptoError::Signature)
     }
@@ -59,33 +61,12 @@ impl MemberId {
     }
 }
 
-impl FromStr for MemberId {
-    type Err = CryptoError;
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        if value.len() != 64
-            || value
-                .bytes()
-                .any(|b| !b.is_ascii_digit() && !(b'a'..=b'f').contains(&b))
-        {
-            return Err(CryptoError::InvalidMemberId);
-        }
-        let mut bytes = [0; 32];
-        hex::decode_to_slice(value, &mut bytes).map_err(|_| CryptoError::InvalidMemberId)?;
-        Self::from_bytes(bytes)
-    }
-}
-
-impl fmt::Display for MemberId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&hex::encode(self.0))
-    }
-}
-
 /// The public half of a member's X25519 pair, used for anonymous sealed keys.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct SealingPublicKey([u8; 32]);
+/// A copy names the exact sealing key it is sealed to (D9).
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub struct SealingKey([u8; 32]);
 
-impl SealingPublicKey {
+impl SealingKey {
     /// Read a public sealing key. Low-order keys are refused when sealing.
     pub fn from_bytes(bytes: [u8; 32]) -> Self {
         Self(bytes)
@@ -96,12 +77,22 @@ impl SealingPublicKey {
     }
 }
 
+/// A member's public signing and sealing keys, independent of their stable
+/// [`MemberId`] (§9, D2). Creation, addition and replacement bind a pair to an id.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MemberPublicKeys {
+    /// The Ed25519 key that verifies the member's signatures.
+    pub signing: SigningKey,
+    /// The X25519 key to which store and circle keys are sealed.
+    pub sealing: SealingKey,
+}
+
 /// A detached Ed25519 signature on bytes authored by a member (§10).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Signature([u8; 64]);
 
 impl Signature {
-    /// Read a detached signature; authenticity is checked by `MemberId::verify`.
+    /// Read a detached signature; authenticity is checked by `SigningKey::verify`.
     pub fn from_bytes(bytes: [u8; 64]) -> Self {
         Self(bytes)
     }
@@ -116,7 +107,7 @@ impl Signature {
 /// its keys while returning an independently owned unlocked pair.
 #[derive(Clone)]
 pub struct MemberKeys {
-    signing: SigningKey,
+    signing: ed25519_dalek::SigningKey,
     sealing: StaticSecret,
 }
 
@@ -128,19 +119,17 @@ impl MemberKeys {
         randomness::fill(signing.as_mut())?;
         randomness::fill(sealing.as_mut())?;
         Ok(Self {
-            signing: SigningKey::from_bytes(&signing),
+            signing: ed25519_dalek::SigningKey::from_bytes(&signing),
             sealing: StaticSecret::from(*sealing),
         })
     }
 
-    /// This member, identified by their public Ed25519 key (Appendix E).
-    pub fn member_id(&self) -> MemberId {
-        MemberId(self.signing.verifying_key().to_bytes())
-    }
-
-    /// The public X25519 key to which store and circle keys are sealed (§11).
-    pub fn sealing_public_key(&self) -> SealingPublicKey {
-        SealingPublicKey(PublicKey::from(&self.sealing).to_bytes())
+    /// The public pair a store log binds to a stable member id (§9).
+    pub fn public_keys(&self) -> MemberPublicKeys {
+        MemberPublicKeys {
+            signing: SigningKey(self.signing.verifying_key().to_bytes()),
+            sealing: SealingKey(PublicKey::from(&self.sealing).to_bytes()),
+        }
     }
 
     /// Sign bytes with the member's Ed25519 pair (§10).
@@ -186,7 +175,7 @@ impl MemberKeys {
         let sealing = Zeroizing::new(wire::array(&mut bytes)?);
         wire::end(bytes)?;
         Ok(Self {
-            signing: SigningKey::from_bytes(&signing),
+            signing: ed25519_dalek::SigningKey::from_bytes(&signing),
             sealing: StaticSecret::from(*sealing),
         })
     }
@@ -254,7 +243,7 @@ impl MemberKeys {
             return Err(CryptoError::Malformed);
         }
         let sender: [u8; 32] = sealed[..32].try_into().expect("checked box length");
-        let recipient = self.sealing_public_key();
+        let recipient = self.public_keys().sealing;
         let shared = self.sealing.diffie_hellman(&PublicKey::from(sender));
         if !shared.was_contributory() {
             return Err(CryptoError::WeakSealingKey);
@@ -275,12 +264,69 @@ impl fmt::Debug for MemberKeys {
     }
 }
 
+/// This device's member: the stable id and the private pair it signs and
+/// opens copies with (E1, E11). Identity custody keeps it; the id never
+/// derives from the keys.
+#[derive(Clone)]
+pub struct MemberIdentity {
+    member: MemberId,
+    keys: MemberKeys,
+}
+
+impl MemberIdentity {
+    /// Bind a private pair to the stable id the store log names for it.
+    pub fn new(member: MemberId, keys: MemberKeys) -> Self {
+        Self { member, keys }
+    }
+
+    /// Make both key pairs for an independently generated id (§9).
+    pub fn generate(member: MemberId) -> Result<Self, CryptoError> {
+        Ok(Self::new(member, MemberKeys::generate()?))
+    }
+
+    /// The stable member id.
+    pub fn member(&self) -> MemberId {
+        self.member
+    }
+
+    /// The private pair this device signs and opens copies with.
+    pub fn keys(&self) -> &MemberKeys {
+        &self.keys
+    }
+
+    /// Encode the id and private pair for identity custody. This custody
+    /// encoding is not a restore code (D13).
+    pub fn to_secret_bytes(&self) -> SecretBytes {
+        let keys = self.keys.to_secret_bytes();
+        let mut bytes = Zeroizing::new(Vec::with_capacity(21 + keys.as_bytes().len()));
+        bytes.extend_from_slice(b"CVMI\x01");
+        bytes.extend_from_slice(self.member.0.as_bytes());
+        bytes.extend_from_slice(keys.as_bytes());
+        SecretBytes(bytes)
+    }
+
+    /// Restore the id and pair from identity custody.
+    pub fn from_secret_bytes(mut bytes: &[u8]) -> Result<Self, MaterialError> {
+        wire::prefix(&mut bytes, b"CVMI\x01")?;
+        let member = MemberId(uuid::Uuid::from_bytes(wire::array(&mut bytes)?));
+        Ok(Self::new(member, MemberKeys::from_secret_bytes(bytes)?))
+    }
+}
+
+impl fmt::Debug for MemberIdentity {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("MemberIdentity")
+            .field("member", &self.member)
+            .finish_non_exhaustive()
+    }
+}
+
 /// Seal a store key anonymously, authenticating its path and exact clear prefix (D11).
 /// Returns ephemeral key, nonce, ciphertext and tag; format supplies the prefix.
 /// Panics if the storage path is empty.
 pub fn seal_store_key(
     key: &StoreKey,
-    recipient: &SealingPublicKey,
+    recipient: &SealingKey,
     path: &str,
     prefix: &[u8],
 ) -> Result<Vec<u8>, CryptoError> {
@@ -294,7 +340,7 @@ pub fn seal_store_key(
 /// Panics if the storage path is empty.
 pub fn seal_circle_key(
     key: &CircleKey,
-    recipient: &SealingPublicKey,
+    recipient: &SealingKey,
     path: &str,
     prefix: &[u8],
 ) -> Result<Vec<u8>, CryptoError> {
@@ -311,7 +357,7 @@ pub const MAX_ACCESS_KEY_BOX: usize = 8 * 1024;
 /// Panics if the storage path is empty.
 pub fn seal_access_key(
     plaintext: &[u8],
-    recipient: &SealingPublicKey,
+    recipient: &SealingKey,
     path: &str,
     prefix: &[u8],
 ) -> Result<Vec<u8>, CryptoError> {
@@ -356,7 +402,7 @@ fn box_context(
 
 fn seal_box(
     kind: &[u8],
-    recipient: &SealingPublicKey,
+    recipient: &SealingKey,
     path: &str,
     prefix: &[u8],
     plaintext: &[u8],

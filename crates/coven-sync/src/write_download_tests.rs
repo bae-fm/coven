@@ -67,7 +67,7 @@ async fn damaged_objects_roll_back_and_block_only_their_device() {
                 &ring,
                 &log,
                 &mut replays,
-                &member().member_id(),
+                &member().member(),
                 DeviceId(3),
             )
             .await
@@ -437,7 +437,7 @@ async fn a_newer_schema_does_not_hide_a_damaged_signature() {
                 &ring,
                 &log,
                 &mut replays,
-                &member().member_id(),
+                &member().member(),
                 DeviceId(2)
             )
             .await,
@@ -521,7 +521,7 @@ async fn missing_read_view_waits_then_replays_after_the_store_log_arrives() {
                 &ring,
                 &log,
                 &mut replays,
-                &member().member_id(),
+                &member().member(),
                 DeviceId(2),
             )
             .await
@@ -631,7 +631,7 @@ async fn authorization_causality_and_identity_refusals_keep_their_report_tags() 
                 &ring,
                 &log,
                 &mut replays,
-                &member().member_id(),
+                &member().member(),
                 DeviceId(2),
             )
             .await
@@ -755,7 +755,7 @@ async fn streamed_write_requests(inspect_header: bool) {
                 &ring,
                 &log,
                 &mut replays,
-                &member().member_id(),
+                &member().member(),
                 DeviceId(2)
             )
             .await
@@ -856,7 +856,7 @@ async fn streamed_disposition(
             &ring,
             &log,
             &mut replays,
-            &member().member_id(),
+            &member().member(),
             DeviceId(2),
         )
         .await;

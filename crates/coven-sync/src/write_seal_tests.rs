@@ -2,10 +2,8 @@ use super::*;
 use coven_format::store_log::MemberRole;
 use coven_foundation::id_source::CircleId;
 
-pub(crate) fn identity(seed: u8) -> MemberKeys {
-    let mut bytes = b"CVMK\x01".to_vec();
-    bytes.extend([seed; 64]);
-    MemberKeys::from_secret_bytes(&bytes).unwrap()
+pub(crate) fn identity(seed: u8) -> MemberIdentity {
+    crate::store_log_sync::tests::member(seed)
 }
 async fn circle_device(storage: Arc<MemoryStorage>, number: u64, seed: u8) -> Device {
     let mut device = device(storage.clone(), number).await;
@@ -28,10 +26,7 @@ pub(crate) async fn household(storage: Arc<MemoryStorage>) -> Vec<Device> {
         .make_and_upload_entry(StoreChange::CreateStore {
             store: StoreId(Uuid::from_u128(1)),
             name: "Store".into(),
-            admin: MemberPublicKeys {
-                signing: member().member_id(),
-                sealing: member().sealing_public_key(),
-            },
+            admin: member().keys().public_keys(),
             key: KeyId(Uuid::from_u128(1)),
             key_hash,
             device_name: "one".into(),
@@ -47,10 +42,8 @@ pub(crate) async fn household(storage: Arc<MemoryStorage>) -> Vec<Device> {
         devices[0]
             .sync
             .make_and_upload_entry(StoreChange::AddMember {
-                keys: MemberPublicKeys {
-                    signing: identity.member_id(),
-                    sealing: identity.sealing_public_key(),
-                },
+                member: identity.member(),
+                keys: identity.keys().public_keys(),
                 role: MemberRole::Admin,
                 access: coven_format::MemberAccess::S3AccessKey {
                     access_key_id: format!("member-{seed}"),
@@ -92,7 +85,7 @@ pub(crate) async fn household(storage: Arc<MemoryStorage>) -> Vec<Device> {
         .sync
         .make_and_upload_entry(StoreChange::AddCircleMember {
             circle,
-            member: identity(4).member_id(),
+            member: identity(4).member(),
         })
         .await
         .unwrap();
@@ -268,7 +261,7 @@ async fn a_circle_restored_and_rejoined_after_deletion_reloads_previously_skippe
     ana.sync
         .make_and_upload_entry(StoreChange::AddCircleMember {
             circle,
-            member: identity(5).member_id(),
+            member: identity(5).member(),
         })
         .await
         .unwrap();
@@ -280,7 +273,7 @@ async fn a_circle_restored_and_rejoined_after_deletion_reloads_previously_skippe
         .sync
         .make_and_upload_entry(StoreChange::RemoveCircleMember {
             circle,
-            member: identity(3).member_id(),
+            member: identity(3).member(),
         })
         .await
         .unwrap();
@@ -346,7 +339,7 @@ async fn a_circle_restored_and_rejoined_after_deletion_reloads_previously_skippe
     tablet
         .sync
         .make_and_upload_entry(StoreChange::RemoveMember {
-            member: identity(4).member_id(),
+            member: identity(4).member(),
         })
         .await
         .unwrap();
@@ -356,7 +349,7 @@ async fn a_circle_restored_and_rejoined_after_deletion_reloads_previously_skippe
         .sync
         .make_and_upload_entry(StoreChange::AddCircleMember {
             circle,
-            member: identity(3).member_id(),
+            member: identity(3).member(),
         })
         .await
         .unwrap();
@@ -367,7 +360,7 @@ async fn a_circle_restored_and_rejoined_after_deletion_reloads_previously_skippe
         assert!(!log.replay.state.circle_deletions.contains_key(&circle));
         assert!(log.replay.state.circles[&circle]
             .members
-            .contains(&identity(3).member_id()));
+            .contains(&identity(3).member()));
         assert_eq!(
             log.replay.entries[&removal],
             coven_database::EntryOutcome::Kept
@@ -403,7 +396,7 @@ async fn new_uploads_wait_for_a_current_members_replacement_circle_key() {
         .sync
         .make_and_upload_entry(StoreChange::RemoveCircleMember {
             circle: CircleId(Uuid::from_u128(10)),
-            member: identity(3).member_id(),
+            member: identity(3).member(),
         })
         .await
         .unwrap();
@@ -491,7 +484,7 @@ async fn a_snapshot_waiting_for_its_audience_key_leaves_the_pass_going() {
         .sync
         .make_and_upload_entry(StoreChange::RemoveCircleMember {
             circle: CircleId(Uuid::from_u128(10)),
-            member: identity(3).member_id(),
+            member: identity(3).member(),
         })
         .await
         .unwrap();
@@ -554,7 +547,7 @@ async fn a_former_circle_member_still_waits_for_its_missing_earlier_key() {
         .sync
         .make_and_upload_entry(StoreChange::RemoveCircleMember {
             circle: CircleId(Uuid::from_u128(10)),
-            member: identity(4).member_id(),
+            member: identity(4).member(),
         })
         .await
         .unwrap();
@@ -583,7 +576,7 @@ async fn posted_fingerprints_stop_when_a_member_leaves_the_circle() {
         .sync
         .make_and_upload_entry(StoreChange::RemoveCircleMember {
             circle: CircleId(Uuid::from_u128(10)),
-            member: identity(4).member_id(),
+            member: identity(4).member(),
         })
         .await
         .unwrap();
@@ -624,14 +617,14 @@ async fn reversed_removal_parts(
     ana.sync
         .make_and_upload_entry(StoreChange::AddCircleMember {
             circle,
-            member: identity(5).member_id(),
+            member: identity(5).member(),
         })
         .await
         .unwrap();
     // With two admins, the later mutual removal would leave none and drops.
     ana.sync
         .make_and_upload_entry(StoreChange::ChangeRole {
-            member: identity(5).member_id(),
+            member: identity(5).member(),
             role: MemberRole::Member,
         })
         .await
@@ -643,7 +636,7 @@ async fn reversed_removal_parts(
     let dropped = ana
         .sync
         .make_and_upload_entry(StoreChange::RemoveMember {
-            member: identity(4).member_id(),
+            member: identity(4).member(),
         })
         .await
         .unwrap();
@@ -659,7 +652,7 @@ async fn reversed_removal_parts(
     // phase also replaces the other one before the write's first attempt.
     for target in [Audience::Store, Audience::Circle(circle)] {
         ana.sync
-            .rotate_if_exposed(target, &identity(3).member_id())
+            .rotate_if_exposed(target, &identity(3).member())
             .await
             .unwrap();
     }
@@ -677,7 +670,7 @@ async fn reversed_removal_parts(
     let winner = ben
         .sync
         .make_and_upload_entry(StoreChange::RemoveMember {
-            member: identity(3).member_id(),
+            member: identity(3).member(),
         })
         .await
         .unwrap();
@@ -686,7 +679,7 @@ async fn reversed_removal_parts(
         copies.into_iter().any(|copy| {
             copy.prefix.audience == audience
                 && copy.prefix.key == rotation_key
-                && copy.prefix.member == identity(4).member_id()
+                && copy.prefix.member == identity(4).member()
         })
     };
     assert!(!has_copy(
@@ -790,7 +783,7 @@ async fn reversed_removal_parts(
     assert!(posted(&storage, ben, 2).await.fingerprints.is_empty());
     for target in [Audience::Store, Audience::Circle(circle)] {
         ben.sync
-            .rotate_if_exposed(target, &identity(4).member_id())
+            .rotate_if_exposed(target, &identity(4).member())
             .await
             .unwrap();
     }

@@ -476,7 +476,10 @@ pub(crate) async fn posted(device: &Device) -> coven_format::objects::PostedPosi
         {
             opened = Some(
                 sealed
-                    .open_store_key(&code.member_keys, copy.path.as_str())
+                    .open_store_key(
+                        &MemberIdentity::new(code.member, code.member_keys.clone()),
+                        copy.path.as_str(),
+                    )
                     .unwrap(),
             );
             break;
@@ -485,8 +488,11 @@ pub(crate) async fn posted(device: &Device) -> coven_format::objects::PostedPosi
     let key = opened.expect("member's published store key");
     let mut hash = coven_crypto::ObjectHasher::new();
     hash.update(&bytes[..bytes.len() - 64]);
-    member
-        .id
+    // The positions' author signs with the pair its restore code carries.
+    assert_eq!(member.id, code.member);
+    code.member_keys
+        .public_keys()
+        .signing
         .verify_object(path.as_str(), &hash.finish(), signature)
         .unwrap();
     let plain = key
@@ -707,7 +713,7 @@ async fn reconnecting_with_a_replacement_key_records_the_access_that_removal_rev
     let key = |id: &str| AccessKeyToDelete {
         access_key_id: id.into(),
         principal: coven_format::S3Principal::Console,
-        member: Some(member.clone()),
+        member: Some(member),
     };
     assert_eq!(
         access_keys(owner).await,

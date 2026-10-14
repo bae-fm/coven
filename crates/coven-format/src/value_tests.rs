@@ -1,5 +1,6 @@
 use super::*;
 use crate::{encode_frame, test_utils, Object};
+use coven_crypto::SigningKey;
 
 fn bytes<T: Wire>(value: &T) -> Vec<u8> {
     let mut out = Encoder::new();
@@ -21,21 +22,25 @@ fn uuid_identities_use_foundations_uuid_byte_order() {
 }
 
 #[test]
-fn member_identity_encoding_uses_cryptos_public_bytes() {
-    let member = test_utils::member().signing;
-    let raw = member.to_bytes();
+fn member_identity_encoding_is_its_uuid_independent_of_keys() {
+    let member = test_utils::member_id();
+    let raw = *member.0.as_bytes();
     assert_eq!(bytes(&member), raw);
-    let text = member.to_string();
-    assert_eq!(bytes(&text.parse::<MemberId>().unwrap()), raw);
     assert_eq!(
         MemberId::get(&mut Decoder::new(&raw).unwrap()).unwrap(),
         member
     );
+    assert_eq!(member.to_string(), "4d4d4d4d-4d4d-4d4d-4d4d-4d4d4d4d4d4d");
+    assert_eq!(bytes(&member.to_string().parse::<MemberId>().unwrap()), raw);
+    // Any 16 bytes are an id; key validation applies to signing keys only.
+    for raw in [[0; 16], [0xff; 16]] {
+        MemberId::get(&mut Decoder::new(&raw).unwrap()).unwrap();
+    }
+    let signing = test_utils::member().signing;
+    assert_eq!(bytes(&signing), signing.as_bytes());
     assert_eq!(
-        MemberId::get(&mut Decoder::new(&raw).unwrap())
-            .unwrap()
-            .to_string(),
-        text
+        SigningKey::get(&mut Decoder::new(signing.as_bytes()).unwrap()).unwrap(),
+        signing
     );
 }
 
@@ -179,30 +184,31 @@ fn sqlite_values_keep_their_storage_classes_outside_keys() {
     }
 }
 #[test]
-fn member_ids_are_validated_by_crypto_in_every_wire_context() {
+fn signing_keys_are_validated_by_crypto_in_every_wire_context() {
     for raw in [[0; 32], {
         let mut p = [0; 32];
         p[0] = 1;
         p
     }] {
         assert!(matches!(
-            MemberId::get(&mut Decoder::new(&raw).unwrap()),
-            Err(Error::InvalidMemberId)
+            SigningKey::get(&mut Decoder::new(&raw).unwrap()),
+            Err(Error::InvalidSigningKey)
         ));
-        let mut join = Object::JoinRequest(crate::objects::JoinRequest {
-            invite: InviteId(Uuid::from_bytes([1; 16])),
-            keys: test_utils::member(),
-            device_name: "D".into(),
-        })
-        .encode()
-        .unwrap();
-        join[23..55].copy_from_slice(&raw);
-        assert!(matches!(Object::decode(&join), Err(Error::InvalidMemberId)));
+        let mut join = Object::JoinRequest(test_utils::join_request())
+            .encode()
+            .unwrap();
+        // Frame prefix, invite and member id precede the requested pair.
+        join[39..71].copy_from_slice(&raw);
+        assert!(matches!(
+            Object::decode(&join),
+            Err(Error::InvalidSigningKey)
+        ));
         let mut entry = Object::StoreLog(test_utils::store_log()).encode().unwrap();
-        entry[39..71].copy_from_slice(&raw);
+        // Creation's admin pair follows the header, tag, store id and name "S".
+        entry[81..113].copy_from_slice(&raw);
         assert!(matches!(
             Object::decode(&entry),
-            Err(Error::InvalidMemberId)
+            Err(Error::InvalidSigningKey)
         ));
     }
 }

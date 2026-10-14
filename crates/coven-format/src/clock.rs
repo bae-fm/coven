@@ -1,25 +1,43 @@
 //! Authentication of a device's signed storage-time probe (§9, D8–D10).
 //!
-//! Crate-to-crate API: callers supply the store key and the member the applied
-//! store log names for the path's device. An unknown device waits for registration.
-//! Time probes use provider status metadata; opening a body never supplies a time.
+//! Crate-to-crate API: [`open`] authenticates the encryption and the path's
+//! identity with the store key; the caller then replays the frame's
+//! `store_log_read`, resolves the path device's member and passes that
+//! member's signing key current in the view to [`OpenedClock::verify`].
+//! Until then the view is only a lookup hint. An unknown device waits for
+//! registration. Time probes use provider status metadata; opening a body
+//! never supplies a time.
 
 use crate::error::Rule;
 use crate::objects::ClockObservation;
 use crate::path::ObjectPath;
 use crate::sealed_single::SingleChunkObject;
 use crate::{Error, Object};
-use coven_crypto::{CryptoError, MemberId, ObjectHasher, StoreKey};
+use coven_crypto::{CryptoError, ObjectDigest, ObjectHasher, Signature, SigningKey, StoreKey};
 
-/// Authenticate one complete clock object and require its payload to name its path.
-/// Missing storage objects are handled by the caller; empty or malformed bytes
-/// are errors, never an absent observation.
-pub fn open(
-    bytes: &[u8],
-    path: &ObjectPath,
-    key: &StoreKey,
-    author: &MemberId,
-) -> Result<ClockObservation, ClockError> {
+/// A decrypted clock object whose signature awaits its recorded-view signer (D9).
+#[derive(Debug)]
+pub struct OpenedClock {
+    /// The frame; its `store_log_read` locates the signer and is unverified.
+    pub observation: ClockObservation,
+    path: ObjectPath,
+    digest: ObjectDigest,
+    signature: Signature,
+}
+
+impl OpenedClock {
+    /// Verify with the path device's member's current signing key in the
+    /// replay of `observation.store_log_read`.
+    pub fn verify(self, signer: &SigningKey) -> Result<ClockObservation, ClockError> {
+        signer.verify_object(self.path.as_str(), &self.digest, &self.signature)?;
+        Ok(self.observation)
+    }
+}
+
+/// Decrypt one complete clock object and require its payload to name its
+/// path. Missing storage objects are handled by the caller; empty or
+/// malformed bytes are errors, never an absent observation.
+pub fn open(bytes: &[u8], path: &ObjectPath, key: &StoreKey) -> Result<OpenedClock, ClockError> {
     let object = SingleChunkObject::decode(bytes)?;
     let SingleChunkObject::ClockObservation { key: declared, .. } = &object else {
         return Err(Error::Invalid {
@@ -31,9 +49,6 @@ pub fn open(
     if *declared != key.id() {
         return Err(ClockError::WrongIdentity);
     }
-    let mut hash = ObjectHasher::new();
-    hash.update(&bytes[..bytes.len() - 64]);
-    author.verify_object(path.as_str(), &hash.finish(), object.signature())?;
     let plain = key.derive().open_object_chunk(
         path.as_str(),
         &object.prefix().encode()?,
@@ -51,7 +66,14 @@ pub fn open(
     if *path != ObjectPath::clock(path.store(), clock.device) {
         return Err(ClockError::WrongIdentity);
     }
-    Ok(clock)
+    let mut hash = ObjectHasher::new();
+    hash.update(&bytes[..bytes.len() - 64]);
+    Ok(OpenedClock {
+        observation: clock,
+        path: path.clone(),
+        digest: hash.finish(),
+        signature: object.signature().clone(),
+    })
 }
 
 /// A clock object failed framing, authentication or its declared identity checks.

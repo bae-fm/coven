@@ -3,15 +3,14 @@
 use crate::key_introductions::{accepted, needed, newest};
 use crate::SyncError;
 use coven_crypto::{
-    seal_circle_key, seal_store_key, CircleKey, MemberId, MemberKeys, SealingPublicKey, StoreKey,
-    StoreKeyring,
+    seal_circle_key, seal_store_key, CircleKey, MemberIdentity, SealingKey, StoreKey, StoreKeyring,
 };
 use coven_database::{KeyUploadBatch, StoreLog, StoreLogSealing};
 use coven_format::{
     sealed_key::KeyCopyPrefix,
     store_log::{StoreChange, StoreLogEntry},
 };
-use coven_foundation::id_source::KeyId;
+use coven_foundation::id_source::{KeyId, MemberId};
 use coven_merge::Audience;
 use coven_storage::ObjectPath;
 use std::collections::BTreeSet;
@@ -23,7 +22,7 @@ pub(crate) fn introduced(change: &StoreChange) -> Option<(Audience, KeyId)> {
 pub(crate) fn recipients<'a>(
     log: &'a StoreLog,
     audience: &'a Audience,
-) -> impl Iterator<Item = (&'a MemberId, &'a SealingPublicKey)> {
+) -> impl Iterator<Item = (&'a MemberId, &'a SealingKey)> {
     log.replay
         .state
         .members
@@ -39,7 +38,7 @@ pub(crate) fn recipients<'a>(
                         })
                     }
                 };
-            included.then_some((id, &member.sealing))
+            included.then_some((id, &member.keys.sealing))
         })
 }
 
@@ -74,12 +73,12 @@ pub(crate) fn store_copy(
     path: &ObjectPath,
     key: &StoreKey,
     member: &MemberId,
-    recipient: &SealingPublicKey,
+    recipient: &SealingKey,
 ) -> Result<Vec<u8>, SyncError> {
     let prefix = KeyCopyPrefix {
         audience: Audience::Store,
         key: key.id(),
-        member: member.clone(),
+        member: *member,
         sealing: *recipient,
     };
     let sealed = seal_store_key(key, &prefix.sealing, path.as_str(), &prefix.encode()?)?;
@@ -90,12 +89,12 @@ pub(crate) fn circle_copy(
     path: &ObjectPath,
     key: &CircleKey,
     member: &MemberId,
-    recipient: &SealingPublicKey,
+    recipient: &SealingKey,
 ) -> Result<Vec<u8>, SyncError> {
     let prefix = KeyCopyPrefix {
         audience: Audience::Circle(key.circle()),
         key: key.id(),
-        member: member.clone(),
+        member: *member,
         sealing: *recipient,
     };
     let sealed = seal_circle_key(key, &prefix.sealing, path.as_str(), &prefix.encode()?)?;
@@ -107,7 +106,7 @@ pub(crate) fn seal(
     log: &StoreLog,
     entry: &StoreLogEntry,
     ring: Option<&StoreKeyring>,
-    member: &MemberKeys,
+    member: &MemberIdentity,
     observation: &[ObservedCopy],
 ) -> Result<StoreLogSealing, SyncError> {
     if !crate::store_log_object::author_matches_device(log, entry) {
@@ -130,7 +129,7 @@ pub(crate) fn seal(
     }
     let state = &log.replay.state;
     let encryption = if let StoreChange::CreateStore { key, admin, .. } = &entry.change {
-        if admin.signing != member.member_id() || admin.sealing != member.sealing_public_key() {
+        if entry.author != member.member() || *admin != member.keys().public_keys() {
             return Err(SyncError::Rejected(coven_database::DropReason::NotAllowed));
         }
         ring.ok_or(SyncError::KeyUnavailable(*key))?
@@ -151,22 +150,23 @@ pub(crate) fn seal(
     let ring = ring.expect("entry holds its encryption key");
     let shared = needed(log);
     let mut needs = Vec::new();
-    let mut need =
-        |audience: Audience, key: KeyId, member: &MemberId, recipient: &SealingPublicKey| {
-            needs.push(KeyCopyPrefix {
-                audience,
-                key,
-                member: member.clone(),
-                sealing: *recipient,
-            });
-        };
+    let mut need = |audience: Audience, key: KeyId, member: &MemberId, recipient: &SealingKey| {
+        needs.push(KeyCopyPrefix {
+            audience,
+            key,
+            member: *member,
+            sealing: *recipient,
+        });
+    };
     match &entry.change {
         StoreChange::AddMember {
-            keys: recipient, ..
+            member: added,
+            keys: recipient,
+            ..
         } => {
             for id in ring.store_key_ids() {
                 if accepted(Some(ring), &shared, &Audience::Store, id) {
-                    need(Audience::Store, id, &recipient.signing, &recipient.sealing);
+                    need(Audience::Store, id, added, &recipient.sealing);
                 }
             }
         }
@@ -177,7 +177,7 @@ pub(crate) fn seal(
             ..
         } => {
             ring.store_key(*key)?.check_hash(key_hash)?;
-            need(Audience::Store, *key, &admin.signing, &admin.sealing);
+            need(Audience::Store, *key, &entry.author, &admin.sealing);
         }
         StoreChange::CreateCircle {
             circle,
@@ -190,7 +190,7 @@ pub(crate) fn seal(
                 Audience::Circle(*circle),
                 *key,
                 &entry.author,
-                &member.sealing_public_key(),
+                &member.keys().public_keys().sealing,
             );
         }
         StoreChange::RotateKey {
@@ -217,7 +217,7 @@ pub(crate) fn seal(
                         audience.clone(),
                         id,
                         recipient,
-                        &state.members[recipient].sealing,
+                        &state.members[recipient].keys.sealing,
                     );
                 }
             }
@@ -328,7 +328,7 @@ pub(crate) async fn read_store_key(
     store: coven_foundation::id_source::StoreId,
     key: KeyId,
     expected: Option<&[u8; 32]>,
-    member: &MemberKeys,
+    member: &MemberIdentity,
 ) -> Result<StoreKey, SyncError> {
     let mut refused = None;
     for copy in read_copies(database, reads, limit, storage, store)
@@ -339,7 +339,7 @@ pub(crate) async fn read_store_key(
             || copy.prefix.key != key
             || !copy
                 .prefix
-                .addressed_to(&member.member_id(), &member.sealing_public_key())
+                .addressed_to(&member.member(), &member.keys().public_keys().sealing)
         {
             continue;
         }

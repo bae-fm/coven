@@ -2,9 +2,8 @@
 
 use std::collections::BTreeMap;
 
-use coven_crypto::MemberId;
 use coven_format::store_log::StoreLogEntry;
-use coven_foundation::id_source::CircleId;
+use coven_foundation::id_source::{CircleId, MemberId};
 
 use crate::DbError;
 
@@ -84,7 +83,7 @@ impl StoreLogCheck {
             Self::NotAllowed => vec![1],
             Self::DeviceOwner(owner) => {
                 let mut bytes = vec![2];
-                bytes.extend(owner.to_bytes());
+                bytes.extend(owner.0.as_bytes());
                 bytes
             }
             Self::MemberRemoval(circles) => {
@@ -108,10 +107,9 @@ impl StoreLogCheck {
             }),
             [0] => Ok(Self::Allowed),
             [1] => Ok(Self::NotAllowed),
-            [2, owner @ ..] if owner.len() == 32 => Ok(Self::DeviceOwner(
-                MemberId::from_bytes(owner.try_into().expect("checked owner length"))
-                    .map_err(|_| DbError::DamagedDatabase)?,
-            )),
+            [2, owner @ ..] if owner.len() == 16 => Ok(Self::DeviceOwner(MemberId(
+                uuid::Uuid::from_bytes(owner.try_into().expect("checked owner length")),
+            ))),
             [3, circles @ ..] if circles.len().is_multiple_of(17) => {
                 let mut result = BTreeMap::new();
                 for bytes in circles.chunks_exact(17) {

@@ -1,11 +1,10 @@
 //! Lifetime owner for durable operations. Dropping an app future drops only its waiter.
 
 use crate::*;
-use coven_crypto::MemberId;
 use coven_database::OperationId;
 use coven_format::store_log::MemberRole;
 use coven_foundation::clock::ClockRef;
-use coven_foundation::id_source::{CircleId, DeviceId, InviteId};
+use coven_foundation::id_source::{CircleId, DeviceId, InviteId, MemberId};
 use coven_storage::{ProviderSignOut, Storage};
 use std::{
     collections::BTreeMap,
@@ -221,7 +220,7 @@ impl Operations {
         member: &MemberId,
         role: MemberRole,
     ) -> Result<(), SyncError> {
-        self.unit(Command::SetRole(member.clone(), role)).await
+        self.unit(Command::SetRole(*member, role)).await
     }
     /// Publish the current member's replacement storage access. A failed
     /// publication retains its fixed bytes for explicit retry.
@@ -233,7 +232,7 @@ impl Operations {
     }
     /// Publish removal; provider access work is reported through pending().
     pub async fn remove_member(&self, member: &MemberId) -> Result<(), SyncError> {
-        self.unit(Command::RemoveMember(member.clone())).await
+        self.unit(Command::RemoveMember(*member)).await
     }
     /// Remove a device with the provider's instructions for signing it out.
     pub async fn remove_device(&self, device: DeviceId) -> Result<ProviderSignOut, SyncError> {
@@ -300,10 +299,7 @@ impl Operations {
         member: &MemberId,
         admin: Arc<dyn coven_storage::AccessKeyAdmin>,
     ) -> Result<AccessKeyReplacement, SyncError> {
-        match self
-            .call(Command::ReplaceAccessKey(member.clone(), admin))
-            .await?
-        {
+        match self.call(Command::ReplaceAccessKey(*member, admin)).await? {
             Output::AccessKeyReplaced(value) => Ok(value),
             _ => unreachable!("replacement result"),
         }
@@ -373,8 +369,7 @@ impl Operations {
         circle: CircleId,
         member: &MemberId,
     ) -> Result<(), SyncError> {
-        self.unit(Command::AddCircleMember(circle, member.clone()))
-            .await
+        self.unit(Command::AddCircleMember(circle, *member)).await
     }
     /// Remove a circle member.
     pub async fn remove_circle_member(
@@ -382,7 +377,7 @@ impl Operations {
         circle: CircleId,
         member: &MemberId,
     ) -> Result<(), SyncError> {
-        self.unit(Command::RemoveCircleMember(circle, member.clone()))
+        self.unit(Command::RemoveCircleMember(circle, *member))
             .await
     }
     /// Stop the task before closing its database; journal rows remain for reopening.

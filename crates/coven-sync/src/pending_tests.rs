@@ -169,10 +169,16 @@ async fn data_differential_pending_records() {
         (entry(3, 1), json!(["entry", 3, 1])),
         (entry(3, 2), json!(["entry", 3, 2])),
         (
+            // The model's subject has one credential per member; this
+            // projection names that member's only sealing key.
             PendingSubject::KeyCopy {
                 audience: Audience::Store,
                 key: KeyId(uuid::Uuid::from_u128(5)),
-                member: crate::store_log_sync::tests::member(2).member_id(),
+                member: crate::store_log_sync::tests::member(2).member(),
+                sealing: crate::store_log_sync::tests::member(2)
+                    .keys()
+                    .public_keys()
+                    .sealing,
             },
             json!(["keyCopy", 0, 5, 2]),
         ),

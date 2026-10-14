@@ -5,6 +5,7 @@ pub use access_keys::DeleteAccessKeyError;
 mod conflicts;
 mod device_log_sync;
 mod effects;
+mod entry_signature;
 mod finality;
 mod identity;
 mod pass_reads;

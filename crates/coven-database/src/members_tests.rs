@@ -1,6 +1,6 @@
 use super::*;
 use crate::pending::tests::Record;
-use crate::store_log::tests::keys;
+use crate::store_log::tests::{keys, member};
 use crate::tests::TestStore;
 use crate::{EntryOutcome, StoreCircle, StoreDevice, StoreMember};
 use std::time::Duration;
@@ -14,9 +14,9 @@ fn access() -> coven_format::MemberAccess {
 
 fn store_member(seed: u8, role: MemberRole, removed: bool) -> (MemberId, StoreMember) {
     (
-        keys(seed).signing,
+        member(seed),
         StoreMember {
-            sealing: keys(seed).sealing,
+            keys: keys(seed),
             access: access(),
             role,
             removed,
@@ -37,8 +37,8 @@ async fn fixture(db: &crate::Database) {
         store_member(3, MemberRole::Member, true),
     ]
     .into();
-    let device = |member: u8, name: &str, state| StoreDevice {
-        member: keys(member).signing,
+    let device = |owner: u8, name: &str, state| StoreDevice {
+        member: member(owner),
         name: name.into(),
         state,
     };
@@ -55,7 +55,7 @@ async fn fixture(db: &crate::Database) {
             CircleId(uuid::Uuid::from_u128(7)),
             StoreCircle {
                 name: "Gifts".into(),
-                members: [keys(1).signing, keys(2).signing, keys(3).signing].into(),
+                members: [member(1), member(2), member(3)].into(),
             },
         ),
         (
@@ -74,7 +74,7 @@ async fn fixture(db: &crate::Database) {
     let entry = coven_format::store_log::StoreLogEntry {
         position: deletion,
         timestamp: coven_merge::Timestamp::new(1, 0, own).unwrap(),
-        author: keys(1).signing,
+        author: member(1),
         had_read: coven_format::value::EntryPositions(Vec::new()),
         change: coven_format::store_log::StoreChange::DeleteCircle {
             circle: CircleId(uuid::Uuid::from_u128(8)),
@@ -101,7 +101,7 @@ async fn members_list_every_device_with_its_state_and_the_local_member() {
     let members = db.members().await.unwrap();
     let mut expected = vec![
         MemberInfo {
-            id: keys(1).signing,
+            id: member(1),
             keys: keys(1),
             role: MemberRole::Admin,
             devices: vec![DeviceInfo {
@@ -112,7 +112,7 @@ async fn members_list_every_device_with_its_state_and_the_local_member() {
             is_self: true,
         },
         MemberInfo {
-            id: keys(2).signing,
+            id: member(2),
             keys: keys(2),
             role: MemberRole::Member,
             devices: [
@@ -146,11 +146,11 @@ async fn members_list_every_device_with_its_state_and_the_local_member() {
     circle.sort_by(|a, b| a.member.cmp(&b.member));
     let mut wanted = vec![
         CircleMemberInfo {
-            member: keys(1).signing,
+            member: member(1),
             is_self: true,
         },
         CircleMemberInfo {
-            member: keys(2).signing,
+            member: member(2),
             is_self: false,
         },
     ];

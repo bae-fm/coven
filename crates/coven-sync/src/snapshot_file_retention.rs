@@ -178,10 +178,10 @@ impl StoreLogSync {
         let mut stream = retained.stream(storage).await;
         let crate::write_object::ReadyWrite {
             opened,
-            author,
+            signer,
             parts: mut opens,
         } = crate::write_object::download(&mut stream, ring.as_ref(), log, replays, || {
-            Ok(self.operation_member()?.member_id())
+            Ok(self.operation_member()?.member())
         })
         .await?
         .map_err(crate::write_object::Unready::into_snapshot_error)?;
@@ -201,7 +201,7 @@ impl StoreLogSync {
         );
         let transfer = async {
             let result =
-                crate::write_object::finish(&mut stream, ring, &author, opened, &mut sink).await;
+                crate::write_object::finish(&mut stream, ring, &signer, opened, &mut sink).await;
             drop(sink);
             result
         };

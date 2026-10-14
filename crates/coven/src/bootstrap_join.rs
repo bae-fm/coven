@@ -63,8 +63,8 @@ pub(super) async fn prepare_request<'a>(
 }
 
 impl Joining<'_> {
-    pub(super) fn member_keys(&self) -> coven_crypto::MemberKeys {
-        self.identity.member_keys()
+    pub(super) fn identity(&self) -> coven_crypto::MemberIdentity {
+        self.identity.identity()
     }
 
     /// Accept provider access, send the request once, and wait for its outcome.

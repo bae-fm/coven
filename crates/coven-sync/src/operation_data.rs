@@ -7,7 +7,7 @@ use coven_format::{
     store_log::{MemberRole, StoreLogEntry},
     MemberAccess, Object,
 };
-use coven_foundation::id_source::{CircleId, InviteId};
+use coven_foundation::id_source::{CircleId, InviteId, MemberId};
 use coven_storage::StorageInvitation;
 use serde::{Deserialize, Serialize};
 use std::time::SystemTime;
@@ -28,7 +28,7 @@ pub(crate) enum Intent {
     },
     AddCircleMember {
         circle: CircleId,
-        member: String,
+        member: MemberId,
     },
     DeleteCircle {
         circle: CircleId,
@@ -79,7 +79,7 @@ impl MintWork {
 /// access, deliver it sealed to the member, record it, then delete the old one.
 #[derive(Serialize, Deserialize)]
 pub(crate) struct ReplaceKeyWork {
-    pub(crate) member: String,
+    pub(crate) member: MemberId,
     /// The attempt naming the principal and the delivery.
     pub(crate) attempt: uuid::Uuid,
     pub(crate) mint: MintWork,
@@ -119,6 +119,8 @@ impl InviteGrant {
 #[derive(Serialize, Deserialize)]
 pub(crate) struct InviteWork {
     pub(crate) id: InviteId,
+    /// The member id the invite fixes and the request must repeat.
+    pub(crate) member: MemberId,
     pub(crate) role: MemberRole,
     pub(crate) access: InviteGrant,
     pub(crate) secret: coven_crypto::SecretText,

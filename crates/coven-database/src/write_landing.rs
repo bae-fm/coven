@@ -51,7 +51,7 @@ pub(crate) fn retires(
             replaces: Some(device),
             ..
         } => (Some(device.0.to_be_bytes().to_vec()), None),
-        StoreChange::RemoveMember { member } => (None, Some(member.to_bytes().to_vec())),
+        StoreChange::RemoveMember { member } => (None, Some(member.0.as_bytes().to_vec())),
         _ => (None, None),
     }
 }

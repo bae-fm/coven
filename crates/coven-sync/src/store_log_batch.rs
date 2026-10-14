@@ -52,7 +52,7 @@ impl StoreLogSync {
         let mut probed = BTreeSet::new();
         let mut pending_entries = BTreeSet::new();
         let mut bytes = BTreeMap::new();
-        let mut opened = BTreeMap::<EntryId, StoreLogEntry>::new();
+        let mut opened = BTreeMap::<EntryId, object::OpenedEntry>::new();
         let mut missing_keys = BTreeMap::new();
         let mut waits = BTreeMap::new();
         let mut entries = BTreeMap::new();
@@ -161,7 +161,7 @@ impl StoreLogSync {
                     pending_entries.insert(*id);
                     continue;
                 };
-                let scanned: Vec<_> = opened.values().collect();
+                let scanned: Vec<_> = opened.values().map(|opened| &opened.entry).collect();
                 let entry = match self
                     .open_entry(
                         &local.log,
@@ -194,7 +194,7 @@ impl StoreLogSync {
                 missing_keys.remove(id);
                 opened.insert(*id, entry);
             }
-            for entry in opened.values() {
+            for entry in opened.values().map(|opened| &opened.entry) {
                 writers.extend(entry.had_read.0.iter().map(|id| id.device));
                 if let StoreChange::AddDevice {
                     device, replaces, ..
@@ -218,15 +218,15 @@ impl StoreLogSync {
         }
         let mut batch = crate::replay::ReplayBatch::new(&local.log);
         let mut ordered: Vec<_> = opened.values().collect();
-        ordered.sort_by_key(|entry| entry.timestamp);
+        ordered.sort_by_key(|opened| opened.entry.timestamp);
         loop {
             let mut advanced = false;
-            for entry in &ordered {
-                let id = entry.position;
+            for opened in &ordered {
+                let id = opened.entry.position;
                 if batch.contains(id) || pending_entries.contains(&id) {
                     continue;
                 }
-                match batch.push(entry, &publications, local.store) {
+                match batch.push(opened, &publications, local.store) {
                     Ok(true) => advanced = true,
                     Ok(false) => (),
                     Err(failure) => {
@@ -245,7 +245,7 @@ impl StoreLogSync {
         }
         // An opened entry left out of the batch waits for the first entry of
         // its recorded past that has not applied.
-        for entry in &ordered {
+        for entry in ordered.iter().map(|opened| &opened.entry) {
             let id = entry.position;
             if batch.contains(id) || pending_entries.contains(&id) {
                 continue;
@@ -336,12 +336,12 @@ impl StoreLogSync {
             )
             .await?;
             let state = &local.log.replay.state;
-            let binding = match state.members.get(&member.member_id()) {
+            let binding = match state.members.get(&member.member()) {
                 Some(held) if held.removed => crate::send_gate::Binding::Retired,
-                Some(held) if held.sealing == member.sealing_public_key() => {
+                Some(held) if held.keys == member.keys().public_keys() => {
                     match state.devices.get(&local.device) {
                         Some(device) if device.removed() => crate::send_gate::Binding::Retired,
-                        Some(device) if device.member == member.member_id() => {
+                        Some(device) if device.member == member.member() => {
                             crate::send_gate::Binding::Device
                         }
                         None => crate::send_gate::Binding::Member,

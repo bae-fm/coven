@@ -5,7 +5,7 @@ use std::sync::Arc;
 thread_local! {
     pub(super) static DERIVATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
-use crate::{MemberKeys, StoreKey, StoreKeyring};
+use crate::{MemberIdentity, StoreKey, StoreKeyring};
 use coven_foundation::id_source::{IdSource, KeyId};
 use coven_foundation::{
     files::{StoreFile, StoreLayout},
@@ -69,7 +69,8 @@ fn wrong_passphrase_and_wrong_store_or_material_kind_fail_authentication() {
         foreign.unlock(),
         Err(KeyError::PassphraseAuthentication)
     ));
-    let swapped = PassphraseCustody::<MemberKeys>::new(Passphrase::new("right".into()), file, id);
+    let swapped =
+        PassphraseCustody::<MemberIdentity>::new(Passphrase::new("right".into()), file, id);
     assert!(matches!(
         swapped.unlock(),
         Err(KeyError::PassphraseAuthentication)

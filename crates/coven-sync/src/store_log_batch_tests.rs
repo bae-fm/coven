@@ -222,6 +222,7 @@ async fn intermediate_removal_cannot_stop_the_owner_before_batch_replay() {
     ana.create(key(1)).await;
     ana.sync
         .make_and_upload_entry(StoreChange::AddMember {
+            member: ben.member.member(),
             keys: public(&ben.member),
             role: MemberRole::Admin,
             access: MemberAccess::S3AccessKey {
@@ -239,7 +240,7 @@ async fn intermediate_removal_cannot_stop_the_owner_before_batch_replay() {
     let winner = ana
         .sync
         .make_and_upload_entry(StoreChange::RemoveMember {
-            member: ben.member.member_id(),
+            member: ben.member.member(),
         })
         .await
         .unwrap();
@@ -247,7 +248,7 @@ async fn intermediate_removal_cannot_stop_the_owner_before_batch_replay() {
     let loser = ben
         .sync
         .make_and_upload_entry(StoreChange::RemoveMember {
-            member: ana.member.member_id(),
+            member: ana.member.member(),
         })
         .await
         .unwrap();
@@ -261,8 +262,8 @@ async fn intermediate_removal_cannot_stop_the_owner_before_batch_replay() {
         log.replay.entries[&loser],
         EntryOutcome::Dropped(_)
     ));
-    assert!(!log.replay.state.members[&ana.member.member_id()].removed);
-    assert!(log.replay.state.members[&ben.member.member_id()].removed);
+    assert!(!log.replay.state.members[&ana.member.member()].removed);
+    assert!(log.replay.state.members[&ben.member.member()].removed);
 }
 
 mod waits {
@@ -323,7 +324,7 @@ mod waits {
             storage.as_ref(),
             Audience::Store,
             key(3),
-            &ben.member.member_id(),
+            &ben.member.member(),
         )
         .await
         .unwrap()

@@ -3,11 +3,11 @@
 use crate::key_introductions::{newest, Wait};
 use crate::store_log_keys::ObservedCopy;
 use crate::{PendingReason, PendingRecord, PendingSubject, SyncError};
-use coven_crypto::{DerivedKeys, MemberId, MemberKeys, ObjectHasher, StoreKeyring};
+use coven_crypto::{DerivedKeys, MemberIdentity, ObjectHasher, StoreKeyring};
 use coven_database::{DbError, StoreLog, WaitingUpload};
 use coven_format::sealed_write::{WriteObjectLayout, WriteObjectPrefix};
 use coven_format::write_stream::WriteHeaderFrame;
-use coven_foundation::id_source::{KeyId, StoreId};
+use coven_foundation::id_source::{KeyId, MemberId, StoreId};
 use coven_merge::{Audience, WriteId};
 use coven_storage::ObjectPath;
 
@@ -109,11 +109,11 @@ pub(crate) fn readable_key(
 
 pub(crate) fn check_member(
     log: &StoreLog,
-    member: &MemberKeys,
+    member: &MemberIdentity,
     device: coven_foundation::id_source::DeviceId,
 ) -> Result<(), SyncError> {
     let state = &log.replay.state;
-    let identity = member.member_id();
+    let identity = member.member();
     match crate::effects::device(state, device) {
         _ if crate::effects::member(state, &identity).is_none() => Err(SyncError::Removed),
         Some(d) if d.member != identity => Err(SyncError::Removed),
@@ -150,13 +150,13 @@ pub(crate) fn select(
     schema: u32,
     header: &WriteHeaderFrame,
     ring: &StoreKeyring,
-    member: &MemberKeys,
+    member: &MemberIdentity,
     observation: &[ObservedCopy],
 ) -> Result<WriteObjectPrefix, SyncError> {
     let write = header.header.position;
     check_member(log, member, write.device)?;
     check_upload_version(log, schema)?;
-    let me = member.member_id();
+    let me = member.member();
     let first = |audience: &Audience| {
         first_attempt(log, observation, ring, &me, audience).map_err(|error| match error {
             SyncError::KeyUnavailable(key) => SyncError::Pending(Box::new(PendingRecord {
@@ -199,7 +199,7 @@ pub(crate) fn seal(
     store: StoreId,
     upload: WaitingUpload<'_>,
     ring: &StoreKeyring,
-    member: &MemberKeys,
+    member: &MemberIdentity,
     emit: &mut dyn FnMut(&[u8]) -> Result<(), SyncError>,
 ) -> Result<(), SyncError> {
     let WaitingUpload {
@@ -245,7 +245,7 @@ pub(crate) fn seal(
             chunk(&mut layout, &part.audience, &plain?)?;
         }
     }
-    let signature = member.sign_object(path.as_str(), &hash.finish());
+    let signature = member.keys().sign_object(path.as_str(), &hash.finish());
     emit(&layout.signature(&signature)?)?;
     layout.finish(&[])?;
     Ok(())

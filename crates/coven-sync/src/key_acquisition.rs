@@ -25,8 +25,8 @@ fn refused(copy: &keys::ObservedCopy, failure: &Refusal) {
 
 /// What reading one received entry produced.
 pub(super) enum EntryOpening {
-    /// The entry, opened with an accepted key.
-    Opened(StoreLogEntry),
+    /// The entry, opened with an accepted key; its signature waits for its view.
+    Opened(crate::store_log_object::OpenedEntry),
     /// No accepted key opens it yet; its key copy subject says why.
     WaitsForKey,
     /// The entry's own bytes failed a check.
@@ -39,7 +39,7 @@ impl StoreLogSync {
     pub(super) async fn acquire_keys(
         &self,
         log: &StoreLog,
-        member: &MemberKeys,
+        member: &MemberIdentity,
         ring: &mut Option<StoreKeyring>,
     ) -> Result<(), SyncError> {
         let copies = keys::read_copies(
@@ -58,12 +58,12 @@ impl StoreLogSync {
     pub(super) async fn acquire_observed_keys(
         &self,
         log: &StoreLog,
-        member: &MemberKeys,
+        member: &MemberIdentity,
         ring: &mut Option<StoreKeyring>,
         copies: &[keys::ObservedCopy],
     ) -> Result<(), SyncError> {
         let introductions = introductions(log);
-        let me = member.member_id();
+        let me = member.member();
         let mut conditions = BTreeMap::new();
         for (audience, key) in needed(log).into_keys() {
             let Some(reason) =
@@ -79,7 +79,8 @@ impl StoreLogSync {
                 let subject = PendingSubject::KeyCopy {
                     audience,
                     key,
-                    member: me.clone(),
+                    member: me,
+                    sealing: member.keys().public_keys().sealing,
                 };
                 conditions.insert(subject, reason);
             }
@@ -90,7 +91,7 @@ impl StoreLogSync {
 
     async fn settle_key_conditions(
         &self,
-        me: &coven_crypto::MemberId,
+        me: &coven_foundation::id_source::MemberId,
         introductions: &[Introduction],
         conditions: BTreeMap<PendingSubject, PendingReason>,
     ) -> Result<(), SyncError> {
@@ -146,7 +147,7 @@ impl StoreLogSync {
         envelope: &SingleChunkObject<'_>,
         path: &ObjectPath,
         key: KeyId,
-        member: &MemberKeys,
+        member: &MemberIdentity,
         ring: &mut Option<StoreKeyring>,
     ) -> Result<EntryOpening, SyncError> {
         let held = |ring: &Option<StoreKeyring>| {
@@ -199,7 +200,7 @@ impl StoreLogSync {
         path: &ObjectPath,
         key: KeyId,
         scanned: Option<[u8; 32]>,
-        member: &MemberKeys,
+        member: &MemberIdentity,
         ring: &mut Option<StoreKeyring>,
     ) -> Result<Tentative, SyncError> {
         let storage = self.storage.as_deref().ok_or(SyncError::NoStorage)?;
@@ -218,7 +219,7 @@ impl StoreLogSync {
                 || copy.prefix.key != key
                 || !copy
                     .prefix
-                    .addressed_to(&member.member_id(), &member.sealing_public_key())
+                    .addressed_to(&member.member(), &member.keys().public_keys().sealing)
             {
                 continue;
             }
@@ -255,7 +256,7 @@ impl StoreLogSync {
                 // The key opened the entry, whose own bytes then failed.
                 Err(failure) => return Ok(Tentative::Refused(failure)),
             };
-            let commitment = match introduction(&entry.change) {
+            let commitment = match introduction(&entry.entry.change) {
                 Some((Audience::Store, introduced, hash)) if introduced == key => Some(hash),
                 _ => scanned,
             };
@@ -293,13 +294,14 @@ impl StoreLogSync {
         &self,
         audience: &Audience,
         key: KeyId,
-        member: &MemberKeys,
+        member: &MemberIdentity,
         condition: Option<PendingReason>,
     ) -> Result<Option<PendingRecord>, SyncError> {
         let subject = PendingSubject::KeyCopy {
             audience: audience.clone(),
             key,
-            member: member.member_id(),
+            member: member.member(),
+            sealing: member.keys().public_keys().sealing,
         };
         let own = self.database.local_store_log().await?.device;
         let recorded = self
@@ -334,7 +336,7 @@ impl StoreLogSync {
         audience: &Audience,
         key: KeyId,
         introductions: &[Introduction],
-        member: &MemberKeys,
+        member: &MemberIdentity,
         ring: &mut Option<StoreKeyring>,
     ) -> Result<Option<PendingReason>, SyncError> {
         let copies = keys::read_copies(
@@ -354,7 +356,7 @@ impl StoreLogSync {
         audience: &Audience,
         key: KeyId,
         introductions: &[Introduction],
-        member: &MemberKeys,
+        member: &MemberIdentity,
         ring: &mut Option<StoreKeyring>,
         copies: &[keys::ObservedCopy],
     ) -> Result<Option<PendingReason>, SyncError> {
@@ -375,7 +377,7 @@ impl StoreLogSync {
                 || copy.prefix.key != key
                 || !copy
                     .prefix
-                    .addressed_to(&member.member_id(), &member.sealing_public_key())
+                    .addressed_to(&member.member(), &member.keys().public_keys().sealing)
             {
                 continue;
             }
@@ -410,7 +412,7 @@ fn unopened(error: CryptoError) -> Refusal {
 fn open(
     copy: &keys::ObservedCopy,
     introductions: &[Introduction],
-    member: &MemberKeys,
+    member: &MemberIdentity,
     ring: &mut Option<StoreKeyring>,
 ) -> Result<(), Refusal> {
     let envelope = SealedKey::decode(&copy.bytes).map_err(Refusal::from)?;
@@ -462,14 +464,14 @@ fn open(
 fn check(
     introductions: &[Introduction],
     prefix: &coven_format::sealed_key::KeyCopyPrefix,
-    member: &MemberKeys,
+    member: &MemberIdentity,
     opened: Opened,
 ) -> Result<(), Refusal> {
     if accepts_copy(
         introductions,
         prefix,
-        &member.member_id(),
-        &member.sealing_public_key(),
+        &member.member(),
+        &member.keys().public_keys().sealing,
         &opened,
     ) {
         Ok(())

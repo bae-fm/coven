@@ -32,7 +32,7 @@ mod listing {
                 number: 1,
             },
             timestamp: coven_merge::Timestamp::new(1000 + writer, 0, DeviceId(writer)).unwrap(),
-            author: owner.member.member_id(),
+            author: owner.member.member(),
             had_read: EntryPositions(vec![creation.position]),
             change: StoreChange::AddDevice {
                 device: DeviceId(writer),
@@ -296,9 +296,13 @@ async fn finality_clock_precedes_its_scan_and_survives_reopening() {
         &storage.read(&path).await.unwrap(),
         &path,
         ring.store_key(key(1)).unwrap(),
-        &a.member.member_id(),
     )
     .unwrap();
+    // The clock names the store log its author read; that view's key signs it.
+    assert_eq!(opened.observation.store_log_read, a.log().await.positions());
+    let opened = opened
+        .verify(&a.member.keys().public_keys().signing)
+        .unwrap();
     assert_eq!(opened.device, entry.device);
     a.sync().await;
     assert_eq!(storage.status(&path).await.unwrap().unwrap(), first);

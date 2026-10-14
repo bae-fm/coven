@@ -193,7 +193,7 @@ impl StoreLogSync {
         if !device.removed() {
             return Ok(false);
         }
-        let me = self.operation_member()?.member_id();
+        let me = self.operation_member()?.member();
         if device.member == me {
             return Ok(true);
         }

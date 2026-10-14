@@ -1,8 +1,10 @@
 //! Authentication and causal checks before the replay's valid-input boundary.
 
 use crate::{Refusal, SyncError};
-use coven_crypto::{MemberKeys, ObjectHasher, StoreKey, StoreKeyring};
+use coven_crypto::{MemberIdentity, ObjectHasher, StoreKey, StoreKeyring};
 use coven_database::{Database, StoreLog, StoreLogUpload};
+
+pub(crate) use crate::entry_signature::OpenedEntry;
 use coven_format::{
     sealed_key::SealedKey,
     sealed_single::{SingleChunkObject, SingleChunkPrefix},
@@ -19,9 +21,9 @@ pub(crate) fn seal_upload(
     store: StoreId,
     upload: &StoreLogUpload,
     ring: Option<&StoreKeyring>,
-    member: &MemberKeys,
+    member: &MemberIdentity,
 ) -> Result<Vec<u8>, SyncError> {
-    if upload.entry.author != member.member_id() {
+    if upload.entry.author != member.member() {
         return Err(SyncError::Rejected(coven_database::DropReason::NotAllowed));
     }
     let id = upload.sealing.key;
@@ -119,7 +121,7 @@ pub(crate) fn seal(
     entry: &StoreLogEntry,
     format: coven_format::FormatVersion,
     key: &StoreKey,
-    member: &MemberKeys,
+    member: &MemberIdentity,
 ) -> Result<Vec<u8>, SyncError> {
     let coven_format::FormatVersion::V1 = format;
     let path = path(store, entry.position);
@@ -131,7 +133,12 @@ pub(crate) fn seal(
     let mut bytes = prefix.encode_chunk_in(format, &chunk)?;
     let mut hash = ObjectHasher::new();
     hash.update(&bytes);
-    bytes.extend_from_slice(member.sign_object(path.as_str(), &hash.finish()).as_bytes());
+    bytes.extend_from_slice(
+        member
+            .keys()
+            .sign_object(path.as_str(), &hash.finish())
+            .as_bytes(),
+    );
     Ok(bytes)
 }
 
@@ -143,11 +150,13 @@ pub(crate) fn path(store: StoreId, id: EntryId) -> ObjectPath {
     )
 }
 
+/// Decrypt one entry and check its path and store identity. Its signature
+/// is checked by [`OpenedEntry::verify`] once its recorded view is known.
 pub(crate) fn open(
     object: &SingleChunkObject<'_>,
     path: &ObjectPath,
     key: &StoreKey,
-) -> Result<StoreLogEntry, Refusal> {
+) -> Result<OpenedEntry, Refusal> {
     let SingleChunkObject::StoreLog {
         key: declared,
         signature,
@@ -171,21 +180,20 @@ pub(crate) fn open(
     let Object::StoreLog(entry) = Object::decode(&plain).map_err(Refusal::from)? else {
         return Err(Refusal::WrongIdentity { cause: None });
     };
-    let mut hash = ObjectHasher::new();
-    hash.update(&object.signed_bytes().map_err(Refusal::from)?);
-    entry
-        .author
-        .verify_object(path.as_str(), &hash.finish(), signature)
-        .map_err(|error| Refusal::Signature {
-            cause: Some(Arc::new(error)),
-        })?;
     if *path != self::path(path.store(), entry.position) {
         return Err(Refusal::WrongIdentity { cause: None });
     }
     if matches!(entry.change, StoreChange::CreateStore { store, .. } if store != path.store()) {
         return Err(Refusal::WrongIdentity { cause: None });
     }
-    Ok(entry)
+    let mut hash = ObjectHasher::new();
+    hash.update(&object.signed_bytes().map_err(Refusal::from)?);
+    Ok(OpenedEntry::new(
+        entry,
+        path.clone(),
+        hash.finish(),
+        signature.clone(),
+    ))
 }
 
 /// Check the registered owner in the entry's complete, causally checked past.

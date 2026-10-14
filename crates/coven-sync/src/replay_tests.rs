@@ -5,13 +5,13 @@ use std::{
 };
 
 use crate::effects::tests::snapshot;
-use coven_crypto::MemberId;
 use coven_database::{DatabaseBuilder, DropReason, EntryOutcome, StoreLog, StoreLogReplay};
 use coven_format::{
     store_log::{MemberPublicKeys, MemberRole, StoreChange, StoreLogEntry},
     value::{EntryId, EntryPositions},
     Object,
 };
+use coven_foundation::id_source::MemberId;
 use coven_foundation::{
     files::StoreLayout,
     id_source::{CircleId, DeviceId, KeyId, SequentialIds, StoreId},
@@ -63,17 +63,15 @@ pub(crate) fn newest_key(h: &History, audience: Audience) -> Option<KeyId> {
     crate::key_introductions::newest(&checked_log(&h.entries), &audience)
 }
 
+/// Member `n`'s public pair, from seeds `n + 1` like the device fixtures.
 pub(crate) fn keys(n: u8) -> MemberPublicKeys {
-    let mut bytes = b"CVMK\x01".to_vec();
-    bytes.extend([n + 1; 64]);
-    let keys = coven_crypto::MemberKeys::from_secret_bytes(&bytes).unwrap();
-    MemberPublicKeys {
-        signing: keys.member_id(),
-        sealing: keys.sealing_public_key(),
-    }
+    crate::store_log_sync::tests::member(n + 1)
+        .keys()
+        .public_keys()
 }
+/// Member `n`'s stable id, independent of its keys.
 pub(crate) fn member(n: u8) -> MemberId {
-    keys(n).signing
+    crate::store_log_sync::tests::member(n + 1).member()
 }
 pub(crate) fn circle(n: u64) -> CircleId {
     CircleId(uuid::Uuid::from_u128(u128::from(n)))
@@ -83,6 +81,7 @@ pub(crate) fn key(n: u64) -> KeyId {
 }
 pub(crate) fn add(n: u8, role: MemberRole) -> StoreChange {
     StoreChange::AddMember {
+        member: member(n),
         access: coven_format::MemberAccess::S3AccessKey {
             access_key_id: "fixture-access-key".into(),
             principal: coven_format::S3Principal::Console,
@@ -274,7 +273,7 @@ fn creation_registers_its_author_and_named_device() {
     assert_eq!(replay(&[]), StoreLogReplay::default());
     History::new().every_order(|r| {
         assert_eq!(r.state.members[&member(0)].role, Admin);
-        assert_eq!(r.state.members[&member(0)].sealing, keys(0).sealing);
+        assert_eq!(r.state.members[&member(0)].keys, keys(0));
         assert_eq!(r.state.devices[&DeviceId(0)].member, member(0));
         assert_eq!(r.state.devices[&DeviceId(0)].name, "Ana’s phone");
         assert!(r.state.schema.is_empty());
@@ -390,7 +389,7 @@ fn three_admins_removing_one_another_keep_two_removals_and_one_admin() {
             r.state
                 .members
                 .iter()
-                .filter_map(|(id, m)| (!m.removed).then_some(id.clone()))
+                .filter_map(|(id, m)| (!m.removed).then_some(*id))
                 .collect::<BTreeSet<_>>(),
             [member(0)].into()
         );
@@ -399,7 +398,7 @@ fn three_admins_removing_one_another_keep_two_removals_and_one_admin() {
             r.entries[&h.entries[7].position],
             EntryOutcome::Dropped(DropReason::NoAdminLeft)
         );
-        assert_eq!(r.state.members[&member(1)].sealing, keys(1).sealing);
+        assert_eq!(r.state.members[&member(1)].keys, keys(1));
     });
 }
 

@@ -1,6 +1,9 @@
 use super::*;
 use crate::{encode_frame, test_utils, Object};
 
+// Frame prefix 7, position 16, timestamp 16, 16-byte author id, empty had_read 4.
+const HEADER: usize = 59;
+
 #[test]
 fn device_registration_decodes_optional_replacement() {
     for (replaces, payload) in [None, Some(DeviceId(1))].into_iter().zip([
@@ -8,7 +11,7 @@ fn device_registration_decodes_optional_replacement() {
         &b"\x04\0\0\0\0\0\0\0\x02\0\0\0\x01D\x01\0\0\0\0\0\0\0\x01"[..],
     ]) {
         let mut bytes = Object::StoreLog(test_utils::store_log()).encode().unwrap();
-        bytes.truncate(75);
+        bytes.truncate(HEADER);
         bytes.extend_from_slice(payload);
         set_length(&mut bytes);
         let expected = frame(StoreChange::AddDevice {
@@ -94,7 +97,7 @@ fn device_registration_rejects_malformed_replacement_payloads() {
         .encode()
         .unwrap();
         // Tag, device and length-prefixed name precede the D2 option tag.
-        let option = 75 + 1 + 8 + 4 + 1;
+        let option = HEADER + 1 + 8 + 4 + 1;
         for tag in 2..=u8::MAX {
             let mut malformed = bytes.clone();
             malformed[option] = tag;
@@ -122,16 +125,16 @@ fn device_registration_rejects_malformed_replacement_payloads() {
 
 #[test]
 fn removal_payloads_contain_only_their_targets() {
-    let member = test_utils::member().signing;
+    let member = test_utils::other_member_id();
     for (tag, target) in [
-        (2, member.to_bytes().to_vec()),
+        (2, member.0.as_bytes().to_vec()),
         (
             10,
-            [circle(1).0.as_bytes().as_slice(), &member.to_bytes()].concat(),
+            [circle(1).0.as_bytes().as_slice(), member.0.as_bytes()].concat(),
         ),
     ] {
         let mut bytes = Object::StoreLog(test_utils::store_log()).encode().unwrap();
-        bytes.truncate(75);
+        bytes.truncate(HEADER);
         bytes.push(tag);
         bytes.extend(target);
         let length = (bytes.len() - crate::FRAME_PREFIX_LEN) as u32;
@@ -194,7 +197,7 @@ fn introduction_layouts_preserve_exact_key_ids_and_hashes() {
                 vec![0],
                 vec![0x10; 16],
                 b"\0\0\0\x01S".to_vec(),
-                admin.signing.to_bytes().to_vec(),
+                admin.signing.as_bytes().to_vec(),
                 admin.sealing.as_bytes().to_vec(),
                 b"\0\0\0\0\x01a\0\0\0\x01D".to_vec(),
             ]
@@ -214,7 +217,7 @@ fn introduction_layouts_preserve_exact_key_ids_and_hashes() {
                 let object = frame(change);
                 let bytes = object.encode().unwrap();
                 let expected = [prefix, key_bytes.to_vec(), key_hash.to_vec()].concat();
-                assert_eq!(&bytes[75..], expected);
+                assert_eq!(&bytes[HEADER..], expected);
                 assert_eq!(Object::decode(&bytes).unwrap(), object);
                 for hash_length in 0..32 {
                     let mut shortened = bytes[..bytes.len() - 32 + hash_length].to_vec();
@@ -232,13 +235,13 @@ fn introduction_layouts_preserve_exact_key_ids_and_hashes() {
 
 #[test]
 fn store_changes_keep_their_tags_and_reject_truncated_or_extended_payloads() {
-    let tags = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 14, 15, 15];
+    let tags = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 14, 15, 15, 16];
     let changes = test_utils::store_changes();
     assert_eq!(changes.len(), tags.len());
     for (change, tag) in changes.into_iter().zip(tags) {
         let bytes = frame(change).encode().unwrap();
-        assert_eq!(bytes[75], tag);
-        for end in 76..bytes.len() {
+        assert_eq!(bytes[HEADER], tag);
+        for end in HEADER + 1..bytes.len() {
             let mut truncated = bytes[..end].to_vec();
             set_length(&mut truncated);
             assert!(Object::decode(&truncated).is_err(), "tag {tag}, end {end}");
@@ -257,7 +260,7 @@ fn store_changes_keep_their_tags_and_reject_truncated_or_extended_payloads() {
 }
 
 #[test]
-fn rotation_rejects_unknown_audiences_and_removal_rejects_invalid_members() {
+fn rotation_rejects_unknown_audiences_and_member_ids_need_no_key_validation() {
     let mut rotation = frame(StoreChange::RotateKey {
         audience: Audience::Store,
         key: KeyId(uuid::Uuid::nil()),
@@ -265,14 +268,20 @@ fn rotation_rejects_unknown_audiences_and_removal_rejects_invalid_members() {
     })
     .encode()
     .unwrap();
-    rotation[76] = 2;
+    rotation[HEADER + 1] = 2;
     assert!(matches!(
         Object::decode(&rotation),
         Err(Error::UnknownTag { tag: 2, .. })
     ));
+    // A member id is a UUID, not a key: the nil id decodes.
     let mut removal = frame(test_utils::member_removal().change).encode().unwrap();
-    removal[76..].fill(0);
-    assert!(Object::decode(&removal).is_err());
+    removal[HEADER + 1..].fill(0);
+    assert_eq!(
+        Object::decode(&removal).unwrap(),
+        frame(StoreChange::RemoveMember {
+            member: MemberId(uuid::Uuid::nil())
+        })
+    );
 }
 
 #[test]
@@ -306,8 +315,8 @@ fn unused_tag_12_is_rejected() {
         snapshot: test_utils::snapshot_header().id,
     };
     let mut bytes = Object::StoreLog(entry).encode().unwrap();
-    bytes[75] = 12;
-    bytes.splice(76..76, 1u16.to_be_bytes());
+    bytes[HEADER] = 12;
+    bytes.splice(HEADER + 1..HEADER + 1, 1u16.to_be_bytes());
     let length = (bytes.len() - crate::FRAME_PREFIX_LEN) as u32;
     bytes[3..7].copy_from_slice(&length.to_be_bytes());
     assert_eq!(
@@ -344,19 +353,29 @@ fn had_read_refuses_every_explicit_own_device_position() {
 }
 
 #[test]
-fn first_entry_and_versions_are_checked() {
-    let mut entry = test_utils::store_log();
-    entry.author = "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a"
-        .parse()
-        .unwrap();
-    assert!(matches!(
-        Object::decode(&encode_frame(4, &entry).unwrap()),
-        Err(Error::Invalid {
-            field: "first admin",
-            rule: Rule::Required
-        })
-    ));
-    assert!(Object::StoreLog(entry).encode().is_err());
+fn creation_author_is_the_header_id_and_versions_are_checked() {
+    // The header author is the first admin's stable id; the payload carries
+    // only that admin's pair, with no duplicate id and no key-derived id.
+    let entry = test_utils::store_log();
+    let bytes = Object::StoreLog(entry.clone()).encode().unwrap();
+    assert_eq!(&bytes[39..55], test_utils::member_id().0.as_bytes());
+    let id = test_utils::member_id();
+    assert_eq!(
+        bytes
+            .windows(16)
+            .filter(|window| *window == id.0.as_bytes())
+            .count(),
+        1
+    );
+    let mut other = entry.clone();
+    other.author = test_utils::other_member_id();
+    let other_bytes = Object::StoreLog(other.clone()).encode().unwrap();
+    assert_eq!(&other_bytes[39..55], other.author.0.as_bytes());
+    assert_eq!(other_bytes[55..], bytes[55..]);
+    assert_eq!(
+        Object::decode(&other_bytes).unwrap(),
+        Object::StoreLog(other)
+    );
     let entry = StoreLogEntry {
         change: StoreChange::RaiseSchema {
             version: 0,
@@ -430,7 +449,7 @@ fn member_access_bound_applies_before_decoding_its_declared_bytes() {
         };
         assert!(matches!(
             frame(StoreChange::SetAccess {
-                member: test_utils::member().signing,
+                member: test_utils::member_id(),
                 access
             })
             .encode(),
@@ -441,7 +460,7 @@ fn member_access_bound_applies_before_decoding_its_declared_bytes() {
             })
         ));
         let mut bytes = frame(StoreChange::SetAccess {
-            member: test_utils::member().signing,
+            member: test_utils::member_id(),
             access: crate::MemberAccess::ProviderAccount(String::new()),
         })
         .encode()
@@ -517,4 +536,77 @@ fn entry_numbers_timestamps_and_creation_past_are_checked() {
             assert!(matches!(result, Err(Error::Invalid { rule: actual, .. }) if actual == rule));
         }
     }
+}
+
+#[test]
+fn member_key_changes_pin_ids_pairs_and_tag_order() {
+    let ana = test_utils::member_id();
+    let ben = test_utils::other_member_id();
+    let pair = |keys: MemberPublicKeys| {
+        [
+            keys.signing.as_bytes().as_slice(),
+            keys.sealing.as_bytes().as_slice(),
+        ]
+        .concat()
+    };
+    let add = frame(StoreChange::AddMember {
+        member: ben,
+        keys: test_utils::other_member(),
+        role: MemberRole::Member,
+        access: crate::MemberAccess::ProviderAccount("b".into()),
+    })
+    .encode()
+    .unwrap();
+    assert_eq!(
+        add[HEADER..],
+        [
+            vec![1],
+            ben.0.as_bytes().to_vec(),
+            pair(test_utils::other_member()),
+            vec![1, 0, 0, 0, 0, 1, b'b'],
+        ]
+        .concat()
+    );
+    let replace = frame(StoreChange::ReplaceMemberKeys {
+        member: ana,
+        keys: test_utils::replacement(),
+    })
+    .encode()
+    .unwrap();
+    assert_eq!(
+        replace[HEADER..],
+        [
+            vec![16],
+            ana.0.as_bytes().to_vec(),
+            pair(test_utils::replacement())
+        ]
+        .concat()
+    );
+    assert_eq!(replace.len(), HEADER + 1 + 16 + 64);
+    // Every pair field refuses invalid and weak signing points; a sealing key
+    // has no point check in the frame.
+    let mut weak = [0; 32];
+    weak[0] = 1;
+    let mut invalid = [0; 32];
+    invalid[0] = 2;
+    for (bytes, signing) in [(&add, HEADER + 1 + 16), (&replace, HEADER + 1 + 16)] {
+        for bad in [weak, invalid] {
+            let mut changed = bytes.clone();
+            changed[signing..signing + 32].copy_from_slice(&bad);
+            assert_eq!(Object::decode(&changed), Err(Error::InvalidSigningKey));
+        }
+        let mut sealing = bytes.clone();
+        sealing[signing + 32..signing + 64].fill(0);
+        assert!(Object::decode(&sealing).is_ok());
+    }
+    let creation = Object::StoreLog(test_utils::store_log()).encode().unwrap();
+    // Creation's admin pair follows its tag, store id and one-byte name "S".
+    let signing = HEADER + 1 + 16 + 5;
+    assert_eq!(
+        creation[signing..signing + 64],
+        pair(test_utils::member())[..]
+    );
+    let mut changed = creation.clone();
+    changed[signing..signing + 32].copy_from_slice(&weak);
+    assert_eq!(Object::decode(&changed), Err(Error::InvalidSigningKey));
 }

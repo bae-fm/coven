@@ -2,12 +2,11 @@
 
 use std::time::SystemTime;
 
-use coven_crypto::MemberId;
 use coven_format::{
     store_log::{StoreChange, StoreLogEntry},
     Object,
 };
-use coven_foundation::id_source::{DeviceId, KeyId, StoreId};
+use coven_foundation::id_source::{DeviceId, KeyId, MemberId, StoreId};
 
 use crate::{sqlite::DatabaseConnection, write_encoding::decoded, DbError, EntryId, StoreLog};
 

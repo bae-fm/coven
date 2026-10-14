@@ -18,9 +18,9 @@ async fn oversized_access_reserves_neither_an_entry_nor_key_copies() {
     let entry = crate::tests::store_log();
     let result = db
         .prepare_store_log(
-            entry.author.clone(),
+            entry.author,
             StoreChange::SetAccess {
-                member: entry.author.clone(),
+                member: entry.author,
                 access: coven_format::MemberAccess::ProviderAccount("a".repeat(4 * 1024 * 1024)),
             },
             |_, _, _| -> Result<StoreLogSealing, DbError> {
@@ -110,7 +110,7 @@ async fn batch_clock_uses_saved_and_queued_timestamps_without_decoding_entries()
     db.test_track_work(work.clone()).await.unwrap();
     let entry = crate::tests::store_log();
     db.prepare_store_log(
-        entry.author.clone(),
+        entry.author,
         StoreChange::SetAccess {
             member: entry.author,
             access: coven_format::MemberAccess::ProviderAccount("account".into()),
@@ -148,7 +148,7 @@ async fn failed_sealing_reserves_nothing_and_pending_entry_blocks_another() {
     let db = store.builder(vec![], vec![]).open().await.unwrap();
     let entry = crate::tests::store_log();
     assert!(matches!(
-        db.prepare_store_log(entry.author.clone(), entry.change.clone(), |_, _, _| Err::<
+        db.prepare_store_log(entry.author, entry.change.clone(), |_, _, _| Err::<
             StoreLogSealing,
             _,
         >(
@@ -159,17 +159,13 @@ async fn failed_sealing_reserves_nothing_and_pending_entry_blocks_another() {
     ));
     assert!(db.local_store_log().await.unwrap().upload.is_none());
     let id = db
-        .prepare_store_log(
-            entry.author.clone(),
-            entry.change.clone(),
-            |_, _, mut copies| {
-                copies.push(|_| Ok::<_, DbError>(vec![3, 4]))?;
-                Ok::<_, DbError>(StoreLogSealing {
-                    key: KeyId(uuid::Uuid::from_u128(1)),
-                    keys: copies.into_uploads(),
-                })
-            },
-        )
+        .prepare_store_log(entry.author, entry.change.clone(), |_, _, mut copies| {
+            copies.push(|_| Ok::<_, DbError>(vec![3, 4]))?;
+            Ok::<_, DbError>(StoreLogSealing {
+                key: KeyId(uuid::Uuid::from_u128(1)),
+                keys: copies.into_uploads(),
+            })
+        })
         .await
         .unwrap();
     assert_eq!(id.number, 1);
@@ -300,11 +296,9 @@ async fn entry_copies_and_operation_commit_or_roll_back_as_one_reservation() {
         )
     });
     assert!(db
-        .prepare_operation_entry(
-            entry.author.clone(),
-            entry.change.clone(),
-            move |_, _, copies| reserve(copies, operation)
-        )
+        .prepare_operation_entry(entry.author, entry.change.clone(), move |_, _, copies| {
+            reserve(copies, operation)
+        })
         .await
         .is_err());
     assert!(db.local_store_log().await.unwrap().upload.is_none());

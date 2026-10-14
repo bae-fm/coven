@@ -223,7 +223,8 @@ mod fixture {
      WITH RECURSIVE numbers(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM numbers WHERE i<4096)
      SELECT i, counter(i) AS n, counter((i-1)%64+1) AS device,
             'table_' || ((i-1)%32) AS tab, 'audience_' || ((i-1)%64) AS audience,
-            CAST(printf('%032d',i) AS BLOB) AS key FROM numbers;
+            CAST(printf('%032d',i) AS BLOB) AS key,
+            CAST(printf('%016d',i) AS BLOB) AS member FROM numbers;
      INSERT INTO _coven_operations(id,kind,last_step,data,started_by)
        SELECT i,'kind_' || (i%32),1,x'00','app' FROM fixture;
      INSERT INTO _coven_provider_access SELECT 'account_' || i,i%2,NULL,NULL,i,i%2 FROM fixture;
@@ -232,7 +233,7 @@ mod fixture {
               CAST(x'00' || device || n AS BLOB),'1' FROM fixture;
      INSERT INTO _coven_store_log(device,number,record,timestamp,author_view,stored_at,outcome,retires_device,retires_member)
        SELECT device,n,zeroblob(128),CAST(n || device AS BLOB),x'00',zeroblob(13),'kept',
-              CASE WHEN i%3=0 THEN device END,CASE WHEN i%3=1 THEN key END FROM fixture;
+              CASE WHEN i%3=0 THEN device END,CASE WHEN i%3=1 THEN member END FROM fixture;
      INSERT INTO _coven_write_landings SELECT device,n,zeroblob(13),x'00',i%2 FROM fixture;
      INSERT INTO _coven_write_landing_parts SELECT device,n,audience FROM fixture;
      INSERT INTO _coven_store_log_uploads VALUES(counter(1),counter(1),zeroblob(128),CAST(counter(1) || counter(1) AS BLOB),zeroblob(16));
@@ -244,10 +245,10 @@ mod fixture {
      INSERT INTO _coven_key_uploads
        SELECT device,n,zeroblob(128),CASE WHEN i%4=0 THEN counter(1) END,
               CASE WHEN i%4=0 THEN counter(1) END FROM fixture;
-     INSERT INTO _coven_members SELECT key,key,x'00','member',i%2 FROM fixture;
-     INSERT INTO _coven_devices SELECT n,key,'device ' || i,CASE i%3 WHEN 0 THEN 'active' WHEN 1 THEN 'removed' ELSE 'replaced' END FROM fixture;
+     INSERT INTO _coven_members SELECT member,key,key,x'00','member',i%2 FROM fixture;
+     INSERT INTO _coven_devices SELECT n,member,'device ' || i,CASE i%3 WHEN 0 THEN 'active' WHEN 1 THEN 'removed' ELSE 'replaced' END FROM fixture;
      INSERT INTO _coven_circles SELECT 'circle_' || i,'circle ' || i FROM fixture;
-     INSERT INTO _coven_circle_members SELECT 'circle_' || i,key FROM fixture;
+     INSERT INTO _coven_circle_members SELECT 'circle_' || i,member FROM fixture;
      INSERT INTO _coven_circle_deletions SELECT 'circle_' || i,device,n FROM fixture;
      INSERT INTO _coven_data_inputs SELECT i,audience,'snapshot',device,n,1,x'00' FROM fixture;
      INSERT INTO _coven_row_file_refs SELECT device,substr(key,1,16),tab,key FROM fixture;
@@ -400,7 +401,7 @@ mod scans {
         Some("release checks every audience that still retains replay inputs"),
     ("entry_inputs.rs", "SELECT DISTINCT entry_device,entry_number FROM _coven_pending_resets", "_coven_pending_resets") =>
         Some("release checks every reset that still conditionally suppresses observations"),
-    ("members.rs", "SELECT member,role,sealing FROM _coven_members WHERE removed=0", "_coven_members") =>
+    ("members.rs", "SELECT member,role,signing,sealing FROM _coven_members WHERE removed=0", "_coven_members") =>
         Some("the member list returns every current member"),
     ("write_landing.rs", "SELECT device,number,stored_at,header,late FROM _coven_write_landings", "_coven_write_landings") =>
         Some("replay rejudges every verdict a retirement can still change; final ones are released"),
@@ -448,7 +449,7 @@ mod scans {
         Some("replay verifies the complete previously committed entry set"),
     ("store_log_tables.rs", "SELECT record,outcome,beaten_device,beaten_number,target,author_view,stored_at FROM _coven_store_log", "_coven_store_log") =>
         Some("store_log() returns every replay entry"),
-    ("store_log_tables.rs", "SELECT member,sealing,role,removed,access FROM _coven_members", "_coven_members") =>
+    ("store_log_tables.rs", "SELECT member,signing,sealing,role,removed,access FROM _coven_members", "_coven_members") =>
         Some("store_log() returns the complete member map"),
     ("store_log_tables.rs", "SELECT device,member,name,state FROM _coven_devices", "_coven_devices") =>
         Some("store_log() returns the complete device map"),

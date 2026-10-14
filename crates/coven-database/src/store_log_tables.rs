@@ -2,9 +2,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use coven_crypto::{MemberId, SealingPublicKey};
+use coven_crypto::{MemberPublicKeys, SealingKey, SigningKey};
 use coven_format::{store_log::MemberRole, value::EntryId, Object};
-use coven_foundation::id_source::{CircleId, DeviceId};
+use coven_foundation::id_source::{CircleId, DeviceId, MemberId};
 use coven_merge::Audience;
 use rusqlite::{params, types::Type, Row};
 
@@ -23,8 +23,7 @@ pub(crate) fn entry_id(row: &Row<'_>, start: usize) -> rusqlite::Result<EntryId>
 }
 
 pub(crate) fn member(row: &Row<'_>, column: usize) -> rusqlite::Result<MemberId> {
-    MemberId::from_bytes(row.get(column)?)
-        .map_err(|error| decode_failure(column, Type::Blob, error))
+    Ok(MemberId(uuid::Uuid::from_bytes(row.get(column)?)))
 }
 
 /// A `_coven_devices.state` value.
@@ -148,10 +147,10 @@ pub(crate) fn read(database: &DatabaseConnection) -> Result<StoreLog, DbError> {
     let state = &mut log.replay.state;
     state.members = database
         .query(
-            "SELECT member,sealing,role,removed,access FROM _coven_members",
+            "SELECT member,signing,sealing,role,removed,access FROM _coven_members",
             [],
             |row| {
-                let role = match row.get::<_, String>(2)?.as_str() {
+                let role = match row.get::<_, String>(3)?.as_str() {
                     "admin" => MemberRole::Admin,
                     "member" => MemberRole::Member,
                     _ => return Err(rusqlite::Error::InvalidQuery),
@@ -159,11 +158,15 @@ pub(crate) fn read(database: &DatabaseConnection) -> Result<StoreLog, DbError> {
                 Ok((
                     member(row, 0)?,
                     StoreMember {
-                        sealing: SealingPublicKey::from_bytes(row.get(1)?),
+                        keys: MemberPublicKeys {
+                            signing: SigningKey::from_bytes(row.get(1)?)
+                                .map_err(|error| decode_failure(1, Type::Blob, error))?,
+                            sealing: SealingKey::from_bytes(row.get(2)?),
+                        },
                         role,
-                        removed: row.get(3)?,
-                        access: serde_json::from_slice(&row.get::<_, Vec<u8>>(4)?)
-                            .map_err(|error| decode_failure(4, Type::Blob, error))?,
+                        removed: row.get(4)?,
+                        access: serde_json::from_slice(&row.get::<_, Vec<u8>>(5)?)
+                            .map_err(|error| decode_failure(5, Type::Blob, error))?,
                     },
                 ))
             },
@@ -235,7 +238,7 @@ pub(crate) fn replace(
                 DropReason::BeatenBy(entry) => ("beaten", Some(entry), None),
                 DropReason::TargetGone(target) => match target {
                     EntryTarget::Member(id) => {
-                        ("target-member", None, Some(id.to_bytes().to_vec()))
+                        ("target-member", None, Some(id.0.as_bytes().to_vec()))
                     }
                     EntryTarget::Device(id) => {
                         ("target-device", None, Some(id.0.to_be_bytes().to_vec()))
@@ -277,10 +280,12 @@ pub(crate) fn replace(
             MemberRole::Member => "member",
         };
         database.internal_execute(
-            "INSERT INTO _coven_members(member,sealing,role,removed,access) VALUES(?1,?2,?3,?4,?5)",
+            "INSERT INTO _coven_members(member,signing,sealing,role,removed,access)
+             VALUES(?1,?2,?3,?4,?5,?6)",
             params![
-                id.to_bytes().as_slice(),
-                member.sealing.as_bytes().as_slice(),
+                id.0.as_bytes().as_slice(),
+                member.keys.signing.as_bytes().as_slice(),
+                member.keys.sealing.as_bytes().as_slice(),
                 role,
                 member.removed,
                 serde_json::to_vec(&member.access).expect("member access encoding")
@@ -292,7 +297,7 @@ pub(crate) fn replace(
             "INSERT INTO _coven_devices(device,member,name,state) VALUES(?1,?2,?3,?4)",
             params![
                 id.0.to_be_bytes().as_slice(),
-                device.member.to_bytes().as_slice(),
+                device.member.0.as_bytes().as_slice(),
                 device.name,
                 match device.state {
                     DeviceState::Active => "active",
@@ -310,7 +315,7 @@ pub(crate) fn replace(
         for member in &circle.members {
             database.internal_execute(
                 "INSERT INTO _coven_circle_members(circle,member) VALUES(?1,?2)",
-                (id.to_string(), member.to_bytes().as_slice()),
+                (id.to_string(), member.0.as_bytes().as_slice()),
             )?;
         }
     }

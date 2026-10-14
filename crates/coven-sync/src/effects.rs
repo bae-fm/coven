@@ -1,12 +1,11 @@
 //! Appendix C's authority, already-in-place and checked effects, with retained data.
 
-use coven_crypto::MemberId;
 use coven_database::{
     CircleRemoval, DeviceState, DropReason, EntryTarget, StoreCircle, StoreDevice, StoreIdentity,
     StoreLogCheck, StoreLogState, StoreMember,
 };
 use coven_format::store_log::{MemberRole, StoreChange, StoreLogEntry};
-use coven_foundation::id_source::{CircleId, DeviceId};
+use coven_foundation::id_source::{CircleId, DeviceId, MemberId};
 use coven_merge::Audience;
 
 pub(crate) fn member<'a>(state: &'a StoreLogState, id: &MemberId) -> Option<&'a StoreMember> {
@@ -83,13 +82,18 @@ impl Authority {
         }
     }
 
-    fn for_change(change: &StoreChange) -> Self {
+    fn for_change(change: &StoreChange) -> Option<Self> {
         use StoreChange::*;
-        match change {
+        Some(match change {
+            // Sentinel: removed in T105, which introduces the keyed replay of
+            // member-key replacements (self or another admin, fresh keys, and
+            // their own conflicts and landing windows). Until then no view
+            // authorizes one, so its entry drops as `NotAllowed`.
+            ReplaceMemberKeys { .. } => return None,
             CreateStore { .. } => Self::Creation,
             AddMember { .. } | RemoveMember { .. } | ChangeRole { .. } => Self::Admin,
             SetAccess { member, access } => Self::Access {
-                target: member.clone(),
+                target: *member,
                 s3: matches!(access, coven_format::MemberAccess::S3AccessKey { .. }),
             },
             AddDevice { .. } | CreateCircle { .. } => Self::Member,
@@ -101,7 +105,7 @@ impl Authority {
             | AddCircleMember { circle, .. }
             | RemoveCircleMember { circle, .. } => Self::Circle(*circle),
             Reset { snapshot } => Self::reset(&snapshot.audience),
-        }
+        })
     }
 
     pub(crate) fn audience(audience: &Audience) -> Self {
@@ -129,8 +133,19 @@ fn check_change(view: &StoreLogState, author: &MemberId, change: &StoreChange) -
     #[cfg(test)]
     crate::replay::tests::author_check();
     use StoreChange::*;
-    if Authority::for_change(change).check(view, author).is_err() {
+    if Authority::for_change(change).is_none_or(|authority| authority.check(view, author).is_err())
+    {
         return StoreLogCheck::NotAllowed;
+    }
+    // An addition cannot change an active member's keys; only a replacement
+    // does (§9, D6).
+    if let AddMember {
+        member: id, keys, ..
+    } = change
+    {
+        if member(view, id).is_some_and(|added| added.keys != *keys) {
+            return StoreLogCheck::NotAllowed;
+        }
     }
     // Only the old id's own member replaces it, with a distinct new id (D6).
     if let AddDevice {
@@ -147,12 +162,9 @@ fn check_change(view: &StoreLogState, author: &MemberId, change: &StoreChange) -
         }
     }
     match change {
-        RemoveDevice { device: id } => StoreLogCheck::DeviceOwner(
-            device(view, *id)
-                .expect("authorized device removal")
-                .member
-                .clone(),
-        ),
+        RemoveDevice { device: id } => {
+            StoreLogCheck::DeviceOwner(device(view, *id).expect("authorized device removal").member)
+        }
         RemoveMember { member, .. } | RemoveCircleMember { member, .. } => {
             let circles = view
                 .circles
@@ -188,11 +200,15 @@ pub(crate) fn change_in_place(
 ) -> bool {
     use StoreChange::*;
     match change {
-        RotateKey { .. } => false,
+        // A replacement is an event even when its payload repeats (§9).
+        RotateKey { .. } | ReplaceMemberKeys { .. } => false,
         CreateStore { .. } => state.store.is_some(),
-        AddMember { keys, role, .. } => {
-            member(state, &keys.signing).is_some_and(|m| m.role == *role)
-        }
+        AddMember {
+            member: id,
+            keys,
+            role,
+            ..
+        } => member(state, id).is_some_and(|m| m.role == *role && m.keys == *keys),
         SetAccess { member: id, access } => {
             member(state, id).is_some_and(|m| m.access.same_credential(access))
         }
@@ -248,19 +264,20 @@ pub(crate) fn validate_effect(
     }
     let missing = match change {
         RotateKey { .. } | CreateStore { .. } | AddMember { .. } => None,
+        ReplaceMemberKeys { .. } => unreachable!("no view authorizes a key replacement"),
         SetAccess { member: id, .. } => member(state, id)
             .is_none()
-            .then(|| EntryTarget::Member(id.clone())),
+            .then_some(EntryTarget::Member(*id)),
         RemoveMember { member: id } | ChangeRole { member: id, .. } => member(state, id)
             .is_none()
-            .then(|| EntryTarget::Member(id.clone())),
+            .then_some(EntryTarget::Member(*id)),
         AddDevice {
             device: id,
             replaces,
             ..
         } => {
             if member(state, author).is_none() {
-                Some(EntryTarget::Member(author.clone()))
+                Some(EntryTarget::Member(*author))
             } else if let Some(old) = replaces.filter(|old| !state.devices.contains_key(old)) {
                 Some(EntryTarget::Device(old))
             } else {
@@ -279,7 +296,7 @@ pub(crate) fn validate_effect(
         }
         CreateCircle { circle: id, .. } => {
             if member(state, author).is_none() {
-                Some(EntryTarget::Member(author.clone()))
+                Some(EntryTarget::Member(*author))
             } else {
                 circle(state, *id)
                     .is_some()
@@ -303,7 +320,7 @@ pub(crate) fn validate_effect(
                     AddCircleMember { .. } => member(state, who).is_some(),
                     _ => circle.members.contains(who),
                 };
-                (!exists).then(|| EntryTarget::Member(who.clone()))
+                (!exists).then_some(EntryTarget::Member(*who))
             }
         },
         RaiseSchema { snapshot, .. } | Reset { snapshot } => match snapshot.audience {
@@ -329,7 +346,7 @@ pub(crate) fn validate_effect(
             ..
         } => return Ok(false),
         RemoveMember { member, .. } | ChangeRole { member, .. } => Some(member),
-        AddMember { keys, .. } => Some(&keys.signing),
+        AddMember { member, .. } => Some(member),
         _ => None,
     };
     if state.store.is_some()
@@ -363,9 +380,9 @@ pub(crate) fn apply_effect(next: &mut StoreLogState, view: &StoreLogCheck, entry
                 name: name.clone(),
             });
             next.members.insert(
-                entry.author.clone(),
+                entry.author,
                 StoreMember {
-                    sealing: admin.sealing,
+                    keys: *admin,
                     access: access.clone(),
                     role: MemberRole::Admin,
                     removed: false,
@@ -374,17 +391,22 @@ pub(crate) fn apply_effect(next: &mut StoreLogState, view: &StoreLogCheck, entry
             next.devices.insert(
                 entry.position.device,
                 StoreDevice {
-                    member: entry.author.clone(),
+                    member: entry.author,
                     name: device_name.clone(),
                     state: DeviceState::Active,
                 },
             );
         }
-        AddMember { keys, role, access } => {
+        AddMember {
+            member,
+            keys,
+            role,
+            access,
+        } => {
             next.members.insert(
-                keys.signing.clone(),
+                *member,
                 StoreMember {
-                    sealing: keys.sealing,
+                    keys: *keys,
                     access: access.clone(),
                     role: *role,
                     removed: false,
@@ -420,7 +442,7 @@ pub(crate) fn apply_effect(next: &mut StoreLogState, view: &StoreLogCheck, entry
             next.devices.insert(
                 *id,
                 StoreDevice {
-                    member: entry.author.clone(),
+                    member: entry.author,
                     name: name.clone(),
                     state: DeviceState::Active,
                 },
@@ -445,7 +467,7 @@ pub(crate) fn apply_effect(next: &mut StoreLogState, view: &StoreLogCheck, entry
                 *id,
                 StoreCircle {
                     name: name.clone(),
-                    members: [entry.author.clone()].into(),
+                    members: [entry.author].into(),
                 },
             );
         }
@@ -465,7 +487,7 @@ pub(crate) fn apply_effect(next: &mut StoreLogState, view: &StoreLogCheck, entry
                 .get_mut(id)
                 .expect("checked circle")
                 .members
-                .insert(who.clone());
+                .insert(*who);
         }
         RemoveCircleMember {
             circle: id,
@@ -483,6 +505,7 @@ pub(crate) fn apply_effect(next: &mut StoreLogState, view: &StoreLogCheck, entry
                 .expect("matched boundary entry")
                 .apply(next);
         }
+        ReplaceMemberKeys { .. } => unreachable!("no view authorizes a key replacement"),
     }
 }
 

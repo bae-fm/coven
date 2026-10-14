@@ -2,15 +2,18 @@ use super::*;
 use crate::StoreLogSync;
 use coven_crypto::{
     custody::{InMemoryCustody, KeySession},
-    MemberKeys, StoreKey, StoreKeyring,
+    MemberIdentity, StoreKey, StoreKeyring,
 };
-use coven_format::store_log::{MemberPublicKeys, StoreChange};
+use coven_format::store_log::StoreChange;
 use coven_foundation::id_source::KeyId;
 use coven_merge::Audience;
 use coven_storage::{ObjectPath, ObjectPrefix, Storage};
 
-async fn sync(f: &Fixture) -> (StoreLogSync, MemberKeys, crate::DeviceLogSync) {
-    let member = MemberKeys::generate().unwrap();
+async fn sync(f: &Fixture) -> (StoreLogSync, MemberIdentity, crate::DeviceLogSync) {
+    let member = MemberIdentity::generate(coven_foundation::id_source::MemberId(
+        uuid::Uuid::from_u128(0x5f),
+    ))
+    .unwrap();
     let key = KeyId(uuid::Uuid::from_u128(500));
     let store_keys = Arc::new(
         KeySession::store(Arc::new(InMemoryCustody::new(StoreKeyring::new(
@@ -42,10 +45,7 @@ async fn sync(f: &Fixture) -> (StoreLogSync, MemberKeys, crate::DeviceLogSync) {
         access: coven_format::MemberAccess::ProviderAccount("owner".into()),
         store: f.directory.id(),
         name: f.directory.settings().unwrap().name,
-        admin: MemberPublicKeys {
-            signing: member.member_id(),
-            sealing: member.sealing_public_key(),
-        },
+        admin: member.keys().public_keys(),
         key,
         key_hash: sync.test_key(coven_merge::Audience::Store, key),
         device_name: "Uploader".into(),
@@ -85,7 +85,7 @@ async fn an_excluded_snapshot_prevents_proving_file_absence() {
     let mut prefix = SnapshotObjectPrefix::decode(&bytes[..end]).unwrap();
     prefix.key = KeyId(uuid::Uuid::from_u128(501));
     let clear = prefix.encode().unwrap();
-    let signature = author.sign_prefix(object.path.as_str(), &clear);
+    let signature = author.keys().sign_prefix(object.path.as_str(), &clear);
     bytes.splice(..end, clear);
     bytes[end..end + 64].copy_from_slice(signature.as_bytes());
     f.storage.delete(&object.path).await.unwrap();

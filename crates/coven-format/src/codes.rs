@@ -5,7 +5,7 @@ use crate::value::name;
 use crate::wire::{decode_frame, Decoder, Wire};
 use crate::{FORMAT_VERSION, FRAME_PREFIX_LEN};
 use coven_crypto::{InviteSecret, MemberKeys, SecretBytes};
-use coven_foundation::id_source::{DeviceId, InviteId, KeyId, StoreId};
+use coven_foundation::id_source::{DeviceId, InviteId, KeyId, MemberId, StoreId};
 use zeroize::Zeroizing;
 
 const MAX_STORAGE: usize = 16 * 1024;
@@ -19,6 +19,9 @@ pub struct RestoreCode {
     pub store: StoreId,
     /// The store's display name.
     pub name: String,
+    /// The stable member the private pair belongs to. Restore requires this
+    /// id's current pair; an old code cannot rebind it (D13).
+    pub member: MemberId,
     /// Crypto owns both member key pairs, their encoding and erasure.
     pub member_keys: MemberKeys,
     /// Storage location only, interpreted by storage; never credentials.
@@ -33,6 +36,7 @@ impl RestoreCode {
             self.store,
             &self.name,
             &[
+                self.member.0.as_bytes(),
                 &(keys.as_bytes().len() as u32).to_be_bytes(),
                 keys.as_bytes(),
             ],
@@ -46,6 +50,7 @@ impl RestoreCode {
         require(kind == 10, "restore code kind", Rule::Kind)?;
         let store = Wire::get(&mut input)?;
         let label = crate::wire::get_name(&mut input)?;
+        let member = Wire::get(&mut input)?;
         let keys_len = u32::get(&mut input)? as usize;
         let member_keys =
             MemberKeys::from_secret_bytes(input.take(keys_len)?).map_err(Error::Material)?;
@@ -54,6 +59,7 @@ impl RestoreCode {
         Ok(Self {
             store,
             name: label,
+            member,
             member_keys,
             storage,
         })
@@ -77,6 +83,9 @@ pub struct InviteCode {
     pub name: String,
     /// The invite named by the join request.
     pub invite: InviteId,
+    /// The member id the admin fixed: fresh for an addition, or an existing
+    /// active id for a re-binding. The signed request must repeat it (D13).
+    pub member: MemberId,
     /// Crypto owns the one-time secret and its erasure.
     pub secret: InviteSecret,
     /// The store key introduced by the creation entry, even after rotations.
@@ -99,6 +108,7 @@ impl InviteCode {
             &self.name,
             &[
                 self.invite.0.as_bytes(),
+                self.member.0.as_bytes(),
                 secret.as_bytes(),
                 self.initial_key.0.as_bytes(),
                 &self.inviting_writer.0.to_be_bytes(),
@@ -115,6 +125,7 @@ impl InviteCode {
         let store = Wire::get(&mut input)?;
         let label = crate::wire::get_name(&mut input)?;
         let invite = Wire::get(&mut input)?;
+        let member = Wire::get(&mut input)?;
         let mut secret = Zeroizing::new([0; 32]);
         secret.copy_from_slice(input.take(32)?);
         let secret = InviteSecret::from_bytes(*secret);
@@ -128,6 +139,7 @@ impl InviteCode {
             store,
             name: label,
             invite,
+            member,
             secret,
             initial_key,
             inviting_writer,

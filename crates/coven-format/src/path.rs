@@ -113,7 +113,7 @@ impl ObjectPath {
     /// A member's new S3 key, sealed to them, named by its mint attempt (§13).
     pub fn access_key(
         store: StoreId,
-        member: &coven_crypto::MemberId,
+        member: &coven_foundation::id_source::MemberId,
         attempt: uuid::Uuid,
     ) -> Self {
         Self(format!("{store}/access-keys/{member}/{attempt}"))
@@ -268,7 +268,7 @@ impl ObjectPrefix {
         Self(format!("{store}/positions/"))
     }
     /// The S3 keys delivered to one member (§13).
-    pub fn access_keys(store: StoreId, member: &coven_crypto::MemberId) -> Self {
+    pub fn access_keys(store: StoreId, member: &coven_foundation::id_source::MemberId) -> Self {
         Self(format!("{store}/access-keys/{member}/"))
     }
     /// The store whose objects this prefix selects.
@@ -332,7 +332,9 @@ fn decimal(part: &str, nonzero: bool) -> bool {
     }
 }
 fn member_id(value: &str) -> bool {
-    value.parse::<coven_crypto::MemberId>().is_ok()
+    value
+        .parse::<coven_foundation::id_source::MemberId>()
+        .is_ok()
 }
 fn canonical_uuid(value: &str) -> bool {
     match uuid::Uuid::parse_str(value) {

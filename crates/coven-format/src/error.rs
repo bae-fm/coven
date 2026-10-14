@@ -56,8 +56,8 @@ pub enum Error {
     Merge(coven_merge::MergeError),
     /// Crypto rejected encoded secret material.
     Material(coven_crypto::MaterialError),
-    /// Crypto rejected an invalid or weak Ed25519 member identity.
-    InvalidMemberId,
+    /// Crypto rejected an invalid or weak Ed25519 signing key.
+    InvalidSigningKey,
     /// More bytes were required to finish the object.
     Truncated,
     /// Bytes remained after the end of an object.
@@ -105,7 +105,7 @@ impl std::fmt::Display for Error {
         match self {
             Self::Merge(e) => write!(f, "invalid merge input: {e}"),
             Self::Material(e) => write!(f, "invalid secret material: {e}"),
-            Self::InvalidMemberId => f.write_str("invalid or weak member public key"),
+            Self::InvalidSigningKey => f.write_str("invalid or weak signing key"),
             Self::Truncated => f.write_str("object is truncated"),
             Self::TrailingBytes => f.write_str("bytes follow the object's end"),
             Self::UnsupportedVersion(v) => write!(f, "unsupported format version {v}"),

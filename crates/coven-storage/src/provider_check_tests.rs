@@ -23,12 +23,7 @@ async fn absent_malformed_and_authenticated_clocks_remain_distinct() {
     storage.replace(&path, &[]).await.unwrap();
     let malformed = storage.read(&path).await.unwrap();
     assert!(matches!(
-        clock::open(
-            &malformed,
-            &path,
-            &format::store_key(),
-            &format::member().signing
-        ),
+        clock::open(&malformed, &path, &format::store_key()),
         Err(clock::ClockError::Format(coven_format::Error::Truncated))
     ));
     assert_eq!(
@@ -43,14 +38,11 @@ async fn absent_malformed_and_authenticated_clocks_remain_distinct() {
     storage.replace(&path, &sealed).await.unwrap();
     let stored = storage.read(&path).await.unwrap();
     assert_eq!(
-        clock::open(
-            &stored,
-            &path,
-            &format::store_key(),
-            &format::member().signing
-        )
-        .unwrap()
-        .device,
+        clock::open(&stored, &path, &format::store_key())
+            .unwrap()
+            .verify(&format::member().signing)
+            .unwrap()
+            .device,
         DeviceId(1)
     );
     let test_path = ObjectPath::file(STORE_ID, DeviceId(1), FileId(uuid::Uuid::from_u128(1)));

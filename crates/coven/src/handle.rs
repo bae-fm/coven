@@ -24,6 +24,7 @@ pub struct CovenHandle {
     storage: Arc<crate::storage::StorageConnections>,
     codes: coven_sync::RestoreCodes,
     custody: Arc<Mutex<Option<StoreCustody>>>,
+    ids: IdSourceRef,
 }
 
 impl std::fmt::Debug for CovenHandle {
@@ -41,6 +42,7 @@ impl CovenHandle {
         sync: coven_sync::SyncLoop,
         storage: Arc<crate::storage::StorageConnections>,
         codes: coven_sync::RestoreCodes,
+        ids: IdSourceRef,
     ) -> Self {
         Self {
             closing: Arc::new(database.closing_guard()),
@@ -51,6 +53,7 @@ impl CovenHandle {
             storage,
             codes,
             custody: Arc::new(Mutex::new(Some(custody))),
+            ids,
         }
     }
 
@@ -417,16 +420,16 @@ impl CovenHandle {
         self.database.user_file(table, key).await
     }
 
-    /// Makes this member's two key pairs and puts them in identity custody,
-    /// for the person creating a store. Fails if custody already holds keys.
-    /// Joining and restoring put the keys there themselves.
+    /// Generates an independent member UUID and two key pairs in identity
+    /// custody, for the person creating a store. Fails if custody already
+    /// holds keys. Joining and restoring put the keys there themselves.
     pub fn initialize_identity(&self) -> Result<MemberId, IdentityError> {
         self.custody
             .lock()
             .expect("custody lock poisoned")
             .as_mut()
             .ok_or(KeyError::StoreClosed)?
-            .initialize_identity()
+            .initialize_identity(MemberId(self.ids.new_id()))
     }
 
     /// Removes the store keys from key custody. A failed removal leaves the

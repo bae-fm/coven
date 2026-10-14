@@ -9,12 +9,12 @@
 //! clears an obligation; replay, time and retries never do.
 
 use crate::{effects, operation_data::Data, AccessKeyToDelete, SyncError};
-use coven_crypto::MemberId;
 use coven_database::{AccessKeyDeletion, ReplayEntry, StoreLogCheck, StoreLogReplay};
 use coven_format::{
     store_log::{StoreChange, StoreLogEntry},
     MemberAccess,
 };
+use coven_foundation::id_source::MemberId;
 use coven_storage::StorageError;
 
 /// The access an entry records and its member: creation's first admin, an
@@ -22,7 +22,7 @@ use coven_storage::StorageError;
 pub(crate) fn recorded(entry: &StoreLogEntry) -> Option<(&MemberId, &MemberAccess)> {
     match &entry.change {
         StoreChange::CreateStore { access, .. } => Some((&entry.author, access)),
-        StoreChange::AddMember { keys, access, .. } => Some((&keys.signing, access)),
+        StoreChange::AddMember { member, access, .. } => Some((member, access)),
         StoreChange::SetAccess { member, access } => Some((member, access)),
         _ => None,
     }
@@ -66,7 +66,7 @@ pub(crate) fn deletions(
         if matches!(access, MemberAccess::S3AccessKey { .. })
             && !keys.iter().any(|(known, _)| known.same_credential(access))
         {
-            keys.push((access.clone(), member.clone()));
+            keys.push((access.clone(), *member));
         }
     };
     // A key stops being intended when its member is no longer active or no

@@ -48,11 +48,7 @@ async fn circle_deletion_publishes_only_an_entry_and_does_not_wait_for_a_row_upl
     let Output::CircleId(circle) = finish(&mut a, id).await else {
         panic!()
     };
-    let id = begin(
-        &mut a,
-        Command::AddCircleMember(circle, b.member.member_id()),
-    )
-    .await;
+    let id = begin(&mut a, Command::AddCircleMember(circle, b.member.member())).await;
     finish(&mut a, id).await;
     b.sync().await;
     write(&a, circle, 1).await;
@@ -97,11 +93,7 @@ async fn dropping_circle_deletion_restores_existing_and_arriving_rows() {
     let Output::CircleId(circle) = finish(&mut a, create).await else {
         panic!("created circle")
     };
-    let add = begin(
-        &mut a,
-        Command::AddCircleMember(circle, b.member.member_id()),
-    )
-    .await;
+    let add = begin(&mut a, Command::AddCircleMember(circle, b.member.member())).await;
     finish(&mut a, add).await;
     b.sync().await;
     write(&a, circle, 1).await;
@@ -109,7 +101,7 @@ async fn dropping_circle_deletion_restores_existing_and_arriving_rows() {
     transfer(&a, &b).await;
 
     // Ana fixes a concurrent store removal before Ben publishes his deletion.
-    queue_removal(&mut a, Command::RemoveMember(b.member.member_id())).await;
+    queue_removal(&mut a, Command::RemoveMember(b.member.member())).await;
     let deletion = begin(&mut b, Command::DeleteCircle(circle)).await;
     finish(&mut b, deletion).await;
     assert_eq!(count(&b).await, 0);
@@ -155,11 +147,7 @@ async fn circle_deletion_survives_an_earlier_concurrent_circle_removal() {
     let Output::CircleId(circle) = finish(&mut a, id).await else {
         panic!()
     };
-    let id = begin(
-        &mut a,
-        Command::AddCircleMember(circle, b.member.member_id()),
-    )
-    .await;
+    let id = begin(&mut a, Command::AddCircleMember(circle, b.member.member())).await;
     finish(&mut a, id).await;
     b.sync().await;
     write(&a, circle, 1).await;
@@ -169,7 +157,7 @@ async fn circle_deletion_survives_an_earlier_concurrent_circle_removal() {
     // Ben fixes his earlier removal before Ana publishes her deletion.
     queue_removal(
         &mut b,
-        Command::RemoveCircleMember(circle, a.member.member_id()),
+        Command::RemoveCircleMember(circle, a.member.member()),
     )
     .await;
     a.clock.set(UNIX_EPOCH + Duration::from_secs(3));
@@ -204,7 +192,7 @@ async fn concurrent_circle_removal_keeps_deletion_entry_only() {
         panic!()
     };
     for member in [&b.member, &c.member] {
-        let id = begin(&mut a, Command::AddCircleMember(circle, member.member_id())).await;
+        let id = begin(&mut a, Command::AddCircleMember(circle, member.member())).await;
         finish(&mut a, id).await;
     }
     b.sync().await;
@@ -213,7 +201,7 @@ async fn concurrent_circle_removal_keeps_deletion_entry_only() {
     write(&b, circle, 2).await;
     queue_removal(
         &mut b,
-        Command::RemoveCircleMember(circle, c.member.member_id()),
+        Command::RemoveCircleMember(circle, c.member.member()),
     )
     .await;
     a.clock.set(UNIX_EPOCH + Duration::from_secs(3));
@@ -224,7 +212,7 @@ async fn concurrent_circle_removal_keeps_deletion_entry_only() {
     // Carol's copy exposes the circle key; Ben's pass replaces it before the
     // first attempt of his earlier write (§11).
     b.sync
-        .rotate_if_exposed(coven_merge::Audience::Circle(circle), &b.member.member_id())
+        .rotate_if_exposed(coven_merge::Audience::Circle(circle), &b.member.member())
         .await
         .unwrap();
     transfer(&b, &a).await;
@@ -250,10 +238,10 @@ async fn resumed_removal_lists_original_and_replaced_access() {
     b.sync.load_new_device("Ben", None).await.unwrap();
     c.sync.load_new_device("Carol", None).await.unwrap();
     a.sync().await;
-    queue_removal(&mut a, Command::RemoveMember(b.member.member_id())).await;
+    queue_removal(&mut a, Command::RemoveMember(b.member.member())).await;
     b.sync
         .make_and_upload_entry(StoreChange::SetAccess {
-            member: b.member.member_id(),
+            member: b.member.member(),
             access: coven_format::MemberAccess::S3AccessKey {
                 access_key_id: "replacement-key".into(),
                 principal: coven_format::S3Principal::Console,
@@ -262,7 +250,7 @@ async fn resumed_removal_lists_original_and_replaced_access() {
         .await
         .unwrap();
     c.sync().await;
-    publish(&mut c, Command::RemoveMember(b.member.member_id())).await;
+    publish(&mut c, Command::RemoveMember(b.member.member())).await;
     a.sync().await;
     // Both admins list both: the replaced key from its recording, the
     // replacement since the removal (§13).
@@ -290,9 +278,9 @@ async fn late_access_survives_restart_and_cannot_revive_confirmed_keys() {
         } else {
             (&mut b, &mut a)
         };
-        queue_removal(observer, Command::RemoveMember(target.member.member_id())).await;
+        queue_removal(observer, Command::RemoveMember(target.member.member())).await;
         let replacement = StoreChange::SetAccess {
-            member: target.member.member_id(),
+            member: target.member.member(),
             access: coven_format::MemberAccess::S3AccessKey {
                 access_key_id: "late-key".into(),
                 principal: coven_format::S3Principal::Console,
@@ -354,14 +342,14 @@ async fn late_access_survives_restart_and_cannot_revive_confirmed_keys() {
 async fn removal_revokes_accounts_in_dropped_additions_and_access_updates() {
     let storage = google();
     let [mut a, mut b, _c] = accounts(storage.clone()).await;
-    queue_removal(&mut a, Command::RemoveMember(b.member.member_id())).await;
+    queue_removal(&mut a, Command::RemoveMember(b.member.member())).await;
     for account in ["replacement@example.com", "addition@example.com"] {
         storage.grant_access(account).await.unwrap();
     }
     let replacement = b
         .sync
         .make_and_upload_entry(StoreChange::SetAccess {
-            member: b.member.member_id(),
+            member: b.member.member(),
             access: coven_format::MemberAccess::ProviderAccount("replacement@example.com".into()),
         })
         .await
@@ -369,6 +357,7 @@ async fn removal_revokes_accounts_in_dropped_additions_and_access_updates() {
     let addition = b
         .sync
         .make_and_upload_entry(StoreChange::AddMember {
+            member: b.member.member(),
             keys: public(&b.member),
             role: MemberRole::Member,
             access: coven_format::MemberAccess::ProviderAccount("addition@example.com".into()),
@@ -409,7 +398,7 @@ async fn a_retained_grant_on_old_access_stays_pending_after_removal() {
         .unwrap();
     b.sync
         .make_and_upload_entry(StoreChange::SetAccess {
-            member: b.member.member_id(),
+            member: b.member.member(),
             access: coven_format::MemberAccess::ProviderAccount("replacement@example.com".into()),
         })
         .await
@@ -424,10 +413,7 @@ async fn a_retained_grant_on_old_access_stays_pending_after_removal() {
         .await;
     let files = file_owner(&a);
     let operations = operation_owner(a.sync, files);
-    operations
-        .remove_member(&b.member.member_id())
-        .await
-        .unwrap();
+    operations.remove_member(&b.member.member()).await.unwrap();
     let conditions = pending(&operations, &a.db).await;
     assert!(
         matches!(MemoryStorage::for_recipient(&storage, "replacement@example.com")
@@ -465,7 +451,7 @@ async fn grants_retained_on_two_accounts_are_each_reported_and_retried_alone() {
         .unwrap();
     b.sync
         .make_and_upload_entry(StoreChange::SetAccess {
-            member: b.member.member_id(),
+            member: b.member.member(),
             access: coven_format::MemberAccess::ProviderAccount("replacement@example.com".into()),
         })
         .await
@@ -485,10 +471,7 @@ async fn grants_retained_on_two_accounts_are_each_reported_and_retried_alone() {
     }
     let files = file_owner(&a);
     let operations = operation_owner(a.sync, files);
-    operations
-        .remove_member(&b.member.member_id())
-        .await
-        .unwrap();
+    operations.remove_member(&b.member.member()).await.unwrap();
     // Each account is its own provider access record; the removal is done.
     let conditions = pending(&operations, &a.db).await;
     assert_eq!(

@@ -2,11 +2,11 @@
 
 use crate::object_input::InputStream;
 use crate::{replay_cache::ReplayCache, DamagedObject, Refusal, SyncError};
-use coven_crypto::{MemberId, ObjectHasher, StoreKeyring};
+use coven_crypto::{ObjectHasher, SigningKey, StoreKeyring};
 use coven_database::{StoreLog, WriteWait};
 use coven_format::sealed_write::{WriteObjectLayout, WriteObjectPrefix};
 use coven_format::write_stream::WriteHeaderFrame;
-use coven_foundation::id_source::KeyId;
+use coven_foundation::id_source::{KeyId, MemberId};
 use coven_merge::Audience;
 use coven_storage::{ObjectPath, StoredObject};
 use std::sync::Arc;
@@ -195,7 +195,7 @@ fn parts(
 pub(crate) async fn finish<S: PartSink>(
     input: &mut InputStream<'_>,
     ring: &StoreKeyring,
-    author: &MemberId,
+    signer: &SigningKey,
     mut opened: OpenedWrite,
     sink: &mut S,
 ) -> Result<(), SyncError> {
@@ -250,7 +250,7 @@ pub(crate) async fn finish<S: PartSink>(
             ));
         }
         checked(&object.path, opened.layout.finish(&[]))?;
-        author
+        signer
             .verify_object(object.path.as_str(), &opened.hash.finish(), &signature)
             .map_err(|e| {
                 damaged(
@@ -296,8 +296,8 @@ fn key_audience_contains(
             log.replay.entries[&applied.entry.position] == coven_database::EntryOutcome::Kept
                 && crate::replay::had_read_position(&applied.entry, introduction.position)
                 && match (&applied.entry.change, audience) {
-                    (StoreChange::AddMember { keys, .. }, Audience::Store) => {
-                        &keys.signing == member
+                    (StoreChange::AddMember { member: added, .. }, Audience::Store) => {
+                        added == member
                     }
                     (
                         StoreChange::AddCircleMember {
@@ -314,7 +314,9 @@ fn key_audience_contains(
 /// The header is authenticated before history, author and audience checks.
 pub(crate) struct ReadyWrite {
     pub(crate) opened: OpenedWrite,
-    pub(crate) author: MemberId,
+    /// The device owner's current signing key in the header's
+    /// `store_log_read` view, which must verify the whole object (§10).
+    pub(crate) signer: SigningKey,
     pub(crate) parts: Vec<bool>,
 }
 
@@ -372,7 +374,7 @@ pub(crate) async fn download(
         if !missing.is_empty() {
             return Ok(Err(Unready::History(WriteWait::StoreLog(missing))));
         }
-        let author = authority(log, replays, &opened.header.header)
+        let signer = authority(log, replays, &opened.header.header)
             .map_err(|failure| damaged(&object.path, failure))?;
         let parts = match parts(
             &opened,
@@ -386,7 +388,7 @@ pub(crate) async fn download(
         };
         Ok(Ok(ReadyWrite {
             opened,
-            author,
+            signer,
             parts,
         }))
     }
@@ -401,7 +403,7 @@ pub(crate) fn authority(
     log: &StoreLog,
     replays: &mut ReplayCache<'_>,
     header: &coven_format::write::WriteHeader,
-) -> Result<MemberId, Refusal> {
+) -> Result<SigningKey, Refusal> {
     for applied in &log.entries {
         let entry = &applied.entry;
         if !header.store_log_read.covers(entry.position) {
@@ -425,16 +427,10 @@ pub(crate) fn authority(
         .devices
         .get(&header.position.device)
         .ok_or(Refusal::NotAuthorized)?;
-    if !device.active()
-        || view
-            .state
-            .members
-            .get(&device.member)
-            .is_none_or(|m| m.removed)
-    {
-        return Err(Refusal::NotAuthorized);
+    match view.state.members.get(&device.member) {
+        Some(owner) if device.active() && !owner.removed => Ok(owner.keys.signing),
+        _ => Err(Refusal::NotAuthorized),
     }
-    Ok(device.member.clone())
 }
 
 /// Only object checks become permanent; local database and input I/O failures propagate.

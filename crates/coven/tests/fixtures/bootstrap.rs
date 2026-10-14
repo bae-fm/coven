@@ -18,7 +18,7 @@ pub(super) struct Owner {
     network: crate::tests::Network,
     pub(super) directory: StoreDir,
     pub(super) handle: CovenHandle,
-    pub(super) member: MemberKeys,
+    pub(super) member: MemberIdentity,
     pub(super) storage: Arc<MemoryStorage>,
     pub(super) clock: Arc<FixedClock>,
     pub(super) code: RestoreCode,
@@ -33,7 +33,7 @@ impl Owner {
         let storage = device.storage.clone();
         let clock = network.clock.clone();
         let code = coven_sync::read_restore_code(&handle.restore_code().await.unwrap()).unwrap();
-        let member = code.member_keys.clone();
+        let member = MemberIdentity::new(code.member, code.member_keys.clone());
         handle
             .write(move |sql| {
                 sql.execute(

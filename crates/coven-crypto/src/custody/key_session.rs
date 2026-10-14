@@ -1,7 +1,7 @@
 //! One unlocked custody session shared by the handle's workers.
 
 use super::{KeyError, MemberKeyCustody, StoreKeyCustody};
-use crate::{MemberKeys, StoreKeyring};
+use crate::{MemberIdentity, StoreKeyring};
 use std::sync::{Arc, Mutex};
 
 /// Held keys and the capability that saves them, released together on close.
@@ -82,7 +82,7 @@ impl KeySession<StoreKeyring> {
     }
 }
 
-impl KeySession<MemberKeys> {
+impl KeySession<MemberIdentity> {
     /// Unlock member custody once at the opening composition root.
     pub fn member(custody: Arc<dyn MemberKeyCustody>) -> Result<Self, KeyError> {
         Self::open(Box::new(Custody(custody)))
@@ -117,11 +117,11 @@ impl CustodyPersistence<StoreKeyring> for Custody<dyn StoreKeyCustody> {
     }
 }
 
-impl CustodyPersistence<MemberKeys> for Custody<dyn MemberKeyCustody> {
-    fn unlock(&self) -> Result<Option<MemberKeys>, KeyError> {
+impl CustodyPersistence<MemberIdentity> for Custody<dyn MemberKeyCustody> {
+    fn unlock(&self) -> Result<Option<MemberIdentity>, KeyError> {
         self.0.as_ref().unlock()
     }
-    fn persist(&self, keys: &MemberKeys) -> Result<(), KeyError> {
+    fn persist(&self, keys: &MemberIdentity) -> Result<(), KeyError> {
         self.0.as_ref().persist(keys)
     }
     fn forget(&self) -> Result<(), KeyError> {

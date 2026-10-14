@@ -3,7 +3,7 @@
 use crate::{
     store_log_keys as keys, store_log_object as object, DamagedObject, Refusal, SyncError,
 };
-use coven_crypto::{custody::KeySession, MemberKeys, StoreKeyring};
+use coven_crypto::{custody::KeySession, MemberIdentity, StoreKeyring};
 use coven_database::{Database, LocalStoreLog, StoreLog};
 use coven_format::{
     sealed_key::SealedKey,
@@ -34,7 +34,7 @@ pub struct StoreLogSync {
     storage: Option<Arc<dyn Storage>>,
     database: Database,
     store_keys: Arc<KeySession<StoreKeyring>>,
-    member_keys: Arc<KeySession<MemberKeys>>,
+    member_keys: Arc<KeySession<MemberIdentity>>,
     clock: ClockRef,
     ids: IdSourceRef,
     directory: coven_foundation::files::StoreDir,
@@ -50,7 +50,7 @@ impl StoreLogSync {
         storage: Arc<dyn Storage>,
         database: Database,
         store_keys: Arc<KeySession<StoreKeyring>>,
-        member_keys: Arc<KeySession<MemberKeys>>,
+        member_keys: Arc<KeySession<MemberIdentity>>,
         clock: ClockRef,
         send: Arc<crate::SendGate>,
         ids: IdSourceRef,
@@ -78,7 +78,7 @@ impl StoreLogSync {
     pub fn disconnected(
         database: Database,
         store_keys: Arc<KeySession<StoreKeyring>>,
-        member_keys: Arc<KeySession<MemberKeys>>,
+        member_keys: Arc<KeySession<MemberIdentity>>,
         clock: ClockRef,
         send: Arc<crate::SendGate>,
         ids: IdSourceRef,
@@ -187,7 +187,7 @@ impl StoreLogSync {
         let author = member.clone();
         let id = self
             .database
-            .prepare_store_log(member.member_id(), change, move |log, entry, copies| {
+            .prepare_store_log(member.member(), change, move |log, entry, copies| {
                 keys::seal(copies, log, entry, ring.as_ref(), &author, &observed)
             })
             .await?;
@@ -248,11 +248,15 @@ impl StoreLogSync {
         Ok(None)
     }
 
-    fn check_stopped(&self, local: &LocalStoreLog, member: &MemberKeys) -> Result<(), SyncError> {
+    fn check_stopped(
+        &self,
+        local: &LocalStoreLog,
+        member: &MemberIdentity,
+    ) -> Result<(), SyncError> {
         let state = &local.log.replay.state;
         if state
             .members
-            .get(&member.member_id())
+            .get(&member.member())
             .is_some_and(|m| m.removed)
             || state
                 .devices
@@ -268,7 +272,7 @@ impl StoreLogSync {
     async fn publish(
         &self,
         local: &mut LocalStoreLog,
-        member: &MemberKeys,
+        member: &MemberIdentity,
         ring: &mut Option<StoreKeyring>,
     ) -> Result<(), SyncError> {
         if self.can_publish(local).await? {
@@ -310,7 +314,7 @@ impl StoreLogSync {
     async fn publish_queued(
         &self,
         local: &mut LocalStoreLog,
-        member: &MemberKeys,
+        member: &MemberIdentity,
         ring: &mut Option<StoreKeyring>,
     ) -> Result<(), SyncError> {
         if let Some(entry) = self.upload_queued(local, member, ring).await? {
@@ -335,7 +339,7 @@ impl StoreLogSync {
     async fn upload_queued(
         &self,
         local: &LocalStoreLog,
-        member: &MemberKeys,
+        member: &MemberIdentity,
         ring: &mut Option<StoreKeyring>,
     ) -> Result<Option<StoreLogEntry>, SyncError> {
         if let Some(upload) = &local.upload {
@@ -412,14 +416,14 @@ impl StoreLogSync {
         &'a self,
         local: &LocalStoreLog,
         upload: &coven_database::StoreLogUpload,
-        member: &MemberKeys,
+        member: &MemberIdentity,
     ) -> Result<Option<crate::PublicationScope<'a>>, SyncError> {
         let membership = match &upload.entry.change {
             StoreChange::CreateStore { store, admin, .. }
                 if local.log.replay.state.store.is_none()
                     && *store == local.store
-                    && admin.signing == member.member_id()
-                    && admin.sealing == member.sealing_public_key() =>
+                    && upload.entry.author == member.member()
+                    && *admin == member.keys().public_keys() =>
             {
                 false
             }
@@ -431,7 +435,7 @@ impl StoreLogSync {
             }
             _ => return Ok(None),
         };
-        if upload.entry.author != member.member_id() {
+        if upload.entry.author != member.member() {
             return Err(coven_database::DropReason::NotAllowed.into());
         }
         let paths = std::iter::once(object::path(local.store, upload.entry.position))
@@ -451,7 +455,7 @@ impl StoreLogSync {
         local: &mut LocalStoreLog,
         entry: StoreLogEntry,
         publications: &BTreeMap<EntryId, std::time::SystemTime>,
-        member: &MemberKeys,
+        member: &MemberIdentity,
         ring: &mut Option<StoreKeyring>,
     ) -> Result<(), SyncError> {
         let (entry, replay) = crate::replay_entry(&local.log, entry, publications);
@@ -464,7 +468,7 @@ impl StoreLogSync {
         local: &mut LocalStoreLog,
         entries: Vec<coven_database::ReplayEntry>,
         replay: coven_database::StoreLogReplay,
-        member: &MemberKeys,
+        member: &MemberIdentity,
     ) -> Result<(), SyncError> {
         let mut operations = Vec::new();
         let records = self.database.operations().await?;
@@ -499,7 +503,7 @@ impl StoreLogSync {
         changed.extend(
             local
                 .log
-                .returning_circles(after, &member.member_id())
+                .returning_circles(after, &member.member())
                 .into_iter()
                 .map(Audience::Circle),
         );
@@ -551,7 +555,7 @@ impl StoreLogSync {
     async fn update_keys(
         &self,
         log: &StoreLog,
-        member: &MemberKeys,
+        member: &MemberIdentity,
         ring: &mut Option<StoreKeyring>,
     ) -> Result<(), SyncError> {
         if !self.send.can_send() {
@@ -600,7 +604,7 @@ impl StoreLogSync {
                     continue;
                 }
                 let recipient = *recipient;
-                let member = member.clone();
+                let member = *member;
                 match audience {
                     Audience::Store => {
                         let key = ring.store_key(key)?.clone();

@@ -1,6 +1,6 @@
 use super::*;
-use crate::{CircleId, CircleKey, StoreKey};
-use coven_foundation::id_source::{IdSource, KeyId};
+use crate::{CircleId, CircleKey, MemberIdentity, StoreKey};
+use coven_foundation::id_source::{IdSource, KeyId, MemberId};
 use coven_foundation::{
     files::{StoreDir, StoreFile, StoreLayout},
     id_source::{SequentialIds, StoreId},
@@ -42,14 +42,24 @@ fn exercise_store_custody(custody: &KeySession<StoreKeyring>) {
     assert!(custody.read().unwrap().is_none());
 }
 
-fn exercise_member_custody(custody: &KeySession<MemberKeys>) {
-    let keys = MemberKeys::generate().unwrap();
-    custody.persist(&keys).unwrap();
+fn identity() -> MemberIdentity {
+    MemberIdentity::generate(MemberId(Uuid::from_u128(0x77))).unwrap()
+}
+
+fn exercise_member_custody(custody: &KeySession<MemberIdentity>) {
+    let identity = identity();
+    custody.persist(&identity).unwrap();
     let unlocked = custody.read().unwrap().unwrap();
-    assert_eq!(unlocked.member_id(), keys.member_id());
-    assert_eq!(unlocked.sealing_public_key(), keys.sealing_public_key());
-    keys.member_id()
-        .verify(b"custody round-trip", &unlocked.sign(b"custody round-trip"))
+    assert_eq!(unlocked.member(), identity.member());
+    assert_eq!(unlocked.keys().public_keys(), identity.keys().public_keys());
+    identity
+        .keys()
+        .public_keys()
+        .signing
+        .verify(
+            b"custody round-trip",
+            &unlocked.keys().sign(b"custody round-trip"),
+        )
         .unwrap();
     custody.forget().unwrap();
     custody.forget().unwrap();
@@ -62,7 +72,7 @@ fn in_memory_custody_keeps_both_material_kinds_for_one_session() {
     let store = InMemoryCustody::new(StoreKeyring::new(
         StoreKey::generate(KeyId(key_ids.new_id())).unwrap(),
     ));
-    let member = InMemoryCustody::new(MemberKeys::generate().unwrap());
+    let member = InMemoryCustody::new(identity());
     assert!(store.unlock().unwrap().is_some());
     assert!(member.unlock().unwrap().is_some());
     exercise_store_custody(&KeySession::store(Arc::new(store)).unwrap());
@@ -93,7 +103,7 @@ fn passphrase_files_round_trip_both_material_kinds() {
     assert!(store.read().unwrap().is_none());
     assert!(member.read().unwrap().is_none());
     let keys = StoreKeyring::new(StoreKey::generate(KeyId(Uuid::from_u128(3))).unwrap());
-    let identity = MemberKeys::generate().unwrap();
+    let identity = identity();
     store.persist(&keys).unwrap();
     member.persist(&identity).unwrap();
     store.close();
@@ -105,11 +115,13 @@ fn passphrase_files_round_trip_both_material_kinds() {
         keys.to_secret_bytes().as_bytes()
     );
     let reopened = member.read().unwrap().unwrap();
-    assert_eq!(reopened.member_id(), identity.member_id());
-    assert_eq!(reopened.sealing_public_key(), identity.sealing_public_key());
+    assert_eq!(reopened.member(), identity.member());
+    assert_eq!(reopened.keys().public_keys(), identity.keys().public_keys());
     identity
-        .member_id()
-        .verify(b"reopened", &reopened.sign(b"reopened"))
+        .keys()
+        .public_keys()
+        .signing
+        .verify(b"reopened", &reopened.keys().sign(b"reopened"))
         .unwrap();
     exercise_store_custody(&store);
     exercise_member_custody(&member);
@@ -135,7 +147,7 @@ fn keyring_custody_uses_the_fake_and_isolates_stores_and_material_kinds() {
     ));
     let second = Arc::new(StoreKeychain::new(keychain, StoreId(Uuid::from_u128(2))));
     let store = KeyringCustody::<StoreKeyring>::new(first.clone());
-    let member = KeyringCustody::<MemberKeys>::new(first);
+    let member = KeyringCustody::<MemberIdentity>::new(first);
     assert!(store.unlock().unwrap().is_none());
     assert!(member.unlock().unwrap().is_none());
     let keys = StoreKeyring::new(StoreKey::generate(KeyId(key_ids.new_id())).unwrap());
@@ -145,8 +157,8 @@ fn keyring_custody_uses_the_fake_and_isolates_stores_and_material_kinds() {
         .unlock()
         .unwrap()
         .is_none());
-    member.persist(&MemberKeys::generate().unwrap()).unwrap();
-    assert!(KeyringCustody::<MemberKeys>::new(second)
+    member.persist(&identity()).unwrap();
+    assert!(KeyringCustody::<MemberIdentity>::new(second)
         .unlock()
         .unwrap()
         .is_none());
@@ -205,7 +217,7 @@ fn custody_debug_never_prints_secrets() {
             [88; 32],
         ))
     };
-    let member = || MemberKeys::generate().unwrap();
+    let member = identity;
     let (_temp, directory) = directory();
     let fake = Keychain::in_memory("debug").unwrap();
     let keychain = Arc::new(StoreKeychain::new(fake.clone(), directory.id()));
@@ -229,7 +241,7 @@ fn custody_debug_never_prints_secrets() {
         ),
         format!("{fake:?}"),
         format!("{keychain:?}"),
-        format!("{:?}", KeyringCustody::<MemberKeys>::new(keychain)),
+        format!("{:?}", KeyringCustody::<MemberIdentity>::new(keychain)),
         format!(
             "{:?}",
             KeyCustody::Custom(Arc::new(InMemoryCustody::new(keys())))

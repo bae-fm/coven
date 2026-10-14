@@ -51,8 +51,9 @@ impl StoreLogSync {
             .store_keys
             .read()?
             .ok_or(SyncError::KeyUnavailable(newest))?;
-        // The clock object carries only this device's id, which no key
-        // protects from members; any readable store key serves (§9).
+        // The clock object carries only this device's id and the store log it
+        // read, which no key protects from members; any readable store key
+        // serves (§9). Its recorded view locates the signer (D8, D9).
         let key_id =
             crate::write_seal::readable_key(&local.log, &ring, &coven_merge::Audience::Store)?;
         let key = ring.store_key(key_id)?;
@@ -61,6 +62,7 @@ impl StoreLogSync {
         let plain =
             coven_format::Object::ClockObservation(coven_format::objects::ClockObservation {
                 device: local.device,
+                store_log_read: local.log.positions(),
             })
             .encode()?;
         let chunk =
@@ -69,7 +71,12 @@ impl StoreLogSync {
         let mut bytes = prefix.encode_chunk(&chunk)?;
         let mut hash = coven_crypto::ObjectHasher::new();
         hash.update(&bytes);
-        bytes.extend_from_slice(member.sign_object(path.as_str(), &hash.finish()).as_bytes());
+        bytes.extend_from_slice(
+            member
+                .keys()
+                .sign_object(path.as_str(), &hash.finish())
+                .as_bytes(),
+        );
         let storage = self.storage.as_deref().ok_or(SyncError::NoStorage)?;
         // Elapsed time counts from before the replacement, so the request,
         // the status call and any sleep between them all count (§15).

@@ -41,12 +41,12 @@ async fn app_reopening_resumes_operations_and_files_using_one_storage_capability
             .build()
             .unwrap(),
     );
-    let member = MemberKeys::generate().unwrap();
+    let member = MemberIdentity::generate(MemberId(uuid::Uuid::from_u128(0x4d))).unwrap();
     let scoped = Arc::new(StoreKeychain::new(
         app.builder(layout.clone()).keychain().unwrap(),
         directory.id(),
     ));
-    let identity = Arc::new(KeyringCustody::<MemberKeys>::new(scoped.clone()));
+    let identity = Arc::new(KeyringCustody::<MemberIdentity>::new(scoped.clone()));
     identity.persist(&member).unwrap();
     let keys = Arc::new(KeyringCustody::<StoreKeyring>::new(scoped));
     let open = || {
@@ -150,7 +150,7 @@ async fn app_reopening_resumes_operations_and_files_using_one_storage_capability
     assert_eq!(circle.name, "Interrupted");
     handle.circles().rename(circle.id, "Family").await.unwrap();
     assert!(handle.circles().members(circle.id).await.unwrap()[0].is_self);
-    let outsider = MemberKeys::generate().unwrap().member_id();
+    let outsider = MemberId(uuid::Uuid::from_u128(0x0e));
     assert!(matches!(
         handle.circles().add_member(circle.id, &outsider).await,
         Err(SyncError::Rejected(coven_database::DropReason::TargetGone(coven_database::EntryTarget::Member(id)))) if id == outsider
@@ -174,7 +174,7 @@ async fn app_reopening_resumes_operations_and_files_using_one_storage_capability
         .unwrap();
     assert!(matches!(
         handle
-            .set_member_role(&member.member_id(), MemberRole::Member)
+            .set_member_role(&member.member(), MemberRole::Member)
             .await,
         Err(SyncError::Rejected(coven_database::DropReason::NoAdminLeft))
     ));

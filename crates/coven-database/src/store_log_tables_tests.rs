@@ -349,7 +349,7 @@ mod identity {
         };
         assert!(mismatch(
             db.prepare_store_log(
-                creation.author.clone(),
+                creation.author,
                 creation.change.clone(),
                 |_, _, _| -> Result<StoreLogSealing, DbError> {
                     panic!("a mismatched creation cannot reach sealing")

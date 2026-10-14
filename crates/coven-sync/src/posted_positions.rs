@@ -292,13 +292,14 @@ pub(crate) fn open(
     else {
         return invalid(Refusal::WrongIdentity { cause: None });
     };
-    let author = match crate::object_author::member(log, path.device().expect("positions path")) {
-        Ok(author) => author,
-        Err(reason) => return Ok(Err(reason)),
-    };
+    let (author, signer) =
+        match crate::object_author::owner(log, path.device().expect("positions path")) {
+            Ok(owner) => owner,
+            Err(reason) => return Ok(Err(reason)),
+        };
     let mut hash = ObjectHasher::new();
     hash.update(&bytes[..bytes.len() - 64]);
-    if let Err(error) = author.verify_object(path.as_str(), &hash.finish(), signature) {
+    if let Err(error) = signer.verify_object(path.as_str(), &hash.finish(), signature) {
         return invalid(Refusal::Signature {
             cause: Some(Arc::new(error)),
         });
@@ -330,7 +331,7 @@ pub(crate) fn open(
     if path.device() != Some(positions.device) {
         return invalid(Refusal::WrongIdentity { cause: None });
     }
-    Ok(checked(positions.validate_reporter(author, path.store())).map(|()| positions))
+    Ok(checked(positions.validate_reporter(&author, path.store())).map(|()| positions))
 }
 
 /// A newer format waits for an update; any other format failure refuses

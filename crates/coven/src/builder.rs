@@ -398,7 +398,7 @@ struct OpeningOwners {
     directory: StoreDir,
     custody: StoreCustody,
     keys: Arc<KeySession<StoreKeyring>>,
-    identity: Arc<KeySession<MemberKeys>>,
+    identity: Arc<KeySession<MemberIdentity>>,
     send: Arc<coven_sync::SendGate>,
     clock: ClockRef,
     ids: IdSourceRef,
@@ -498,6 +498,7 @@ impl OpeningOwners {
             self.device,
             self.has_storage_credentials,
         );
+        let ids = self.ids.clone();
         let storage = Arc::new(crate::storage::StorageConnections::new(
             codes.clone(),
             self.initial_name,
@@ -520,6 +521,7 @@ impl OpeningOwners {
             sync,
             storage,
             codes,
+            ids,
         )
     }
 }

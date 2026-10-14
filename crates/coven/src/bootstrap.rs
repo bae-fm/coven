@@ -295,7 +295,7 @@ async fn prepare_and_load(
     let directory = pending.directory();
     let (member, mut data, device_name, mut admission) = match request {
         BootstrapRequest::Restore { code, data, name } => (
-            code.member_keys.clone(),
+            MemberIdentity::new(code.member, code.member_keys.clone()),
             data.clone(),
             name.as_str(),
             Admission::Restoring,
@@ -304,7 +304,7 @@ async fn prepare_and_load(
             let (joining, data) =
                 join::prepare_request(builder, &directory, code, name, cancel).await?;
             (
-                joining.member_keys(),
+                joining.identity(),
                 data,
                 name.as_str(),
                 Admission::Joining(joining),
@@ -404,7 +404,8 @@ async fn prepare_and_load(
             RestoreCode {
                 store: settings.id,
                 name: settings.name,
-                member_keys: member,
+                member: member.member(),
+                member_keys: member.keys().clone(),
                 storage: data.location.encode().map_err(SyncError::from)?,
             },
             data.credentials,

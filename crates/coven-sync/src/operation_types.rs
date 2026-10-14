@@ -1,8 +1,8 @@
 //! Application values for operations, members, circles and invitations (Appendix E).
 
-use coven_crypto::{MemberId, SecretText};
+use coven_crypto::SecretText;
 use coven_format::store_log::MemberRole;
-use coven_foundation::id_source::InviteId;
+use coven_foundation::id_source::{InviteId, MemberId};
 use std::time::SystemTime;
 
 pub use coven_database::{
@@ -111,7 +111,7 @@ pub struct Invite {
 pub struct JoinRequest {
     /// Invitation being answered.
     pub invite: InviteId,
-    /// The new member's signing key.
+    /// The stable member id the invite fixed and the request repeats.
     pub member: MemberId,
     /// The device's name, covered by its signature.
     pub device_name: String,

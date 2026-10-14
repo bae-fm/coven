@@ -44,7 +44,7 @@ pub(crate) async fn reset_device(
         keychain.clone(),
     );
     builder.identity = IdentityCustody::Custom(identity.clone());
-    let member_keys = KeySession::member(identity)?
+    let member = KeySession::member(identity)?
         .read()?
         .ok_or(SyncError::from(StorageFailure::MemberKeysMissing))?;
     let keys = CovenBuilder::make_keys(
@@ -86,7 +86,8 @@ pub(crate) async fn reset_device(
     let code = RestoreCode {
         store,
         name: settings.name,
-        member_keys,
+        member: member.member(),
+        member_keys: member.keys().clone(),
         storage: data.location.encode().map_err(SyncError::from)?,
     };
     let (_, never) = watch::channel(false);

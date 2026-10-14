@@ -372,7 +372,7 @@ async fn a_circle_is_raised_by_its_first_updating_member_after_the_store() {
     // Both the store's first updater and the circle's first updater are
     // ordinary members; migration publication does not require an admin.
     for index in [2, 0] {
-        let member = devices[index].identity.read().unwrap().unwrap().member_id();
+        let member = devices[index].identity.read().unwrap().unwrap().member();
         devices[0]
             .sync
             .make_and_upload_entry(StoreChange::ChangeRole {

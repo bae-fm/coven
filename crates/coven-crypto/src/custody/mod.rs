@@ -1,6 +1,6 @@
 //! Where this device keeps its opened keys and its member's two key pairs (E1).
 
-use crate::{MemberKeys, StoreKeyring};
+use crate::{MemberIdentity, StoreKeyring};
 use std::sync::Arc;
 
 mod error;
@@ -34,13 +34,13 @@ pub trait StoreKeyCustody: Send + Sync {
     fn close(&self);
 }
 
-/// The app's own store for this member's keys.
+/// The app's own store for the stable member id and its held private pair.
 pub trait MemberKeyCustody: Send + Sync {
     /// Called once at open; persistence reuses the held session capability.
-    fn unlock(&self) -> Result<Option<MemberKeys>, KeyError>;
-    /// Keeps the member's keys, replacing what was kept.
-    fn persist(&self, keys: &MemberKeys) -> Result<(), KeyError>;
-    /// Removes the member's keys; succeeds if none were kept.
+    fn unlock(&self) -> Result<Option<MemberIdentity>, KeyError>;
+    /// Keeps the member's identity, replacing what was kept.
+    fn persist(&self, identity: &MemberIdentity) -> Result<(), KeyError>;
+    /// Removes the member's identity; succeeds if none was kept.
     fn forget(&self) -> Result<(), KeyError>;
     /// Erase held memory after users finish; performs no persistence or IO.
     fn close(&self);
@@ -58,7 +58,7 @@ pub enum KeyCustody {
     Custom(Arc<dyn StoreKeyCustody>),
 }
 
-/// Where this device keeps its member's signing and sealing key pairs (E1).
+/// Where this device keeps its stable member id and private key pairs (E1).
 pub enum IdentityCustody {
     /// The OS keychain under the service registered at startup.
     Keyring,
@@ -141,11 +141,11 @@ impl StoreKeyCustody for KeyringCustody<StoreKeyring> {
     fn close(&self) {}
 }
 
-impl MemberKeyCustody for InMemoryCustody<MemberKeys> {
-    fn unlock(&self) -> Result<Option<MemberKeys>, KeyError> {
+impl MemberKeyCustody for InMemoryCustody<MemberIdentity> {
+    fn unlock(&self) -> Result<Option<MemberIdentity>, KeyError> {
         Ok(self.read())
     }
-    fn persist(&self, keys: &MemberKeys) -> Result<(), KeyError> {
+    fn persist(&self, keys: &MemberIdentity) -> Result<(), KeyError> {
         self.write(keys);
         Ok(())
     }
@@ -158,13 +158,15 @@ impl MemberKeyCustody for InMemoryCustody<MemberKeys> {
     }
 }
 
-impl MemberKeyCustody for PassphraseCustody<MemberKeys> {
-    fn unlock(&self) -> Result<Option<MemberKeys>, KeyError> {
+impl MemberKeyCustody for PassphraseCustody<MemberIdentity> {
+    fn unlock(&self) -> Result<Option<MemberIdentity>, KeyError> {
         self.read(MEMBER_KEYS_ENTRY)?
-            .map(|bytes| MemberKeys::from_secret_bytes(bytes.as_bytes()).map_err(KeyError::from))
+            .map(|bytes| {
+                MemberIdentity::from_secret_bytes(bytes.as_bytes()).map_err(KeyError::from)
+            })
             .transpose()
     }
-    fn persist(&self, keys: &MemberKeys) -> Result<(), KeyError> {
+    fn persist(&self, keys: &MemberIdentity) -> Result<(), KeyError> {
         self.write(MEMBER_KEYS_ENTRY, keys.to_secret_bytes().as_bytes())
     }
     fn forget(&self) -> Result<(), KeyError> {
@@ -175,13 +177,15 @@ impl MemberKeyCustody for PassphraseCustody<MemberKeys> {
     }
 }
 
-impl MemberKeyCustody for KeyringCustody<MemberKeys> {
-    fn unlock(&self) -> Result<Option<MemberKeys>, KeyError> {
+impl MemberKeyCustody for KeyringCustody<MemberIdentity> {
+    fn unlock(&self) -> Result<Option<MemberIdentity>, KeyError> {
         self.read(MEMBER_KEYS_ENTRY)?
-            .map(|bytes| MemberKeys::from_secret_bytes(bytes.as_bytes()).map_err(KeyError::from))
+            .map(|bytes| {
+                MemberIdentity::from_secret_bytes(bytes.as_bytes()).map_err(KeyError::from)
+            })
             .transpose()
     }
-    fn persist(&self, keys: &MemberKeys) -> Result<(), KeyError> {
+    fn persist(&self, keys: &MemberIdentity) -> Result<(), KeyError> {
         self.write(MEMBER_KEYS_ENTRY, keys.to_secret_bytes().as_bytes())
     }
     fn forget(&self) -> Result<(), KeyError> {

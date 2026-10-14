@@ -159,7 +159,7 @@ impl StoreLogSync {
         let record = record.clone();
         self.database
             .prepare_operation_entry(
-                member.member_id(),
+                member.member(),
                 StoreChange::RaiseSchema { version, snapshot },
                 move |log, entry, copies| {
                     let sealed = crate::store_log_keys::seal(

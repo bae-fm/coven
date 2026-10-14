@@ -1,23 +1,24 @@
 //! Fixed joining keys and request bytes, sealed locally using the scanned invite.
 
 use crate::SyncError;
-use coven_crypto::{MemberKeys, ObjectHasher};
+use coven_crypto::{MemberIdentity, MemberKeys, ObjectHasher};
 use coven_format::{
     codes::InviteCode,
     objects::JoinRequest,
     sealed_single::{SingleChunkObject, SingleChunkPrefix},
-    store_log::MemberPublicKeys,
     Object,
 };
 use coven_foundation::files::{AtomicFile, StoreDir, StoreFile};
 use coven_storage::{ObjectPath, Storage, StorageFailure};
 use zeroize::Zeroizing;
 
-/// An unpublished member identity and its immutable request. The only durable
-/// local copy is encrypted with the invite secret, bound to the complete code.
-/// No member keys or provider credentials enter final custody while waiting.
+/// An unpublished member identity and its immutable request. The member id
+/// is the one the invite fixes; the keys are this device's fresh pair. The
+/// only durable local copy is encrypted with the invite secret, bound to the
+/// complete code. No member keys or provider credentials enter final custody
+/// while waiting.
 pub struct JoiningIdentity {
-    keys: MemberKeys,
+    identity: MemberIdentity,
     request: Vec<u8>,
     path: ObjectPath,
     attempted: bool,
@@ -66,11 +67,15 @@ impl JoiningIdentity {
             let end = 5usize
                 .checked_add(key_length)
                 .ok_or(coven_database::DbError::DamagedDatabase)?;
-            let keys = MemberKeys::from_secret_bytes(
-                bytes
-                    .get(5..end)
-                    .ok_or(coven_database::DbError::DamagedDatabase)?,
-            )?;
+            let identity = MemberIdentity::new(
+                code.member,
+                MemberKeys::from_secret_bytes(
+                    bytes
+                        .get(5..end)
+                        .ok_or(coven_database::DbError::DamagedDatabase)?,
+                )?,
+            );
+            let keys = identity.keys().public_keys();
             let request = bytes
                 .get(end..)
                 .ok_or(coven_database::DbError::DamagedDatabase)?
@@ -81,7 +86,7 @@ impl JoiningIdentity {
             };
             let mut hash = ObjectHasher::new();
             hash.update(&object.signed_bytes()?);
-            keys.member_id()
+            keys.signing
                 .verify_object(path.as_str(), &hash.finish(), signature)?;
             let plain = code.secret.join_request_key().open_object_chunk(
                 path.as_str(),
@@ -94,14 +99,14 @@ impl JoiningIdentity {
                 return Err(coven_database::DbError::DamagedDatabase.into());
             };
             if opened.invite != code.invite
-                || opened.keys.signing != keys.member_id()
-                || opened.keys.sealing != keys.sealing_public_key()
+                || opened.member != code.member
+                || opened.keys != keys
                 || opened.device_name != device_name
             {
                 return Err(SyncError::InvitationChanged);
             }
             return Ok(Self {
-                keys,
+                identity,
                 request,
                 path,
                 attempted,
@@ -110,13 +115,13 @@ impl JoiningIdentity {
                 key_copy_number: code.key_copy_number,
             });
         }
-        let keys = MemberKeys::generate()?;
+        // The request repeats the id the invite fixed and names this
+        // device's fresh pair, which signs it (D8).
+        let identity = MemberIdentity::generate(code.member)?;
         let plain = Object::JoinRequest(JoinRequest {
             invite: code.invite,
-            keys: MemberPublicKeys {
-                signing: keys.member_id(),
-                sealing: keys.sealing_public_key(),
-            },
+            member: code.member,
+            keys: identity.keys().public_keys(),
             device_name: device_name.into(),
         })
         .encode()?;
@@ -131,11 +136,11 @@ impl JoiningIdentity {
         hash.update(&prefix.encode_chunk(&chunk)?);
         let request = SingleChunkObject::JoinRequest {
             chunk: &chunk,
-            signature: keys.sign_object(path.as_str(), &hash.finish()),
+            signature: identity.keys().sign_object(path.as_str(), &hash.finish()),
         }
         .encode()?;
         let identity = Self {
-            keys,
+            identity,
             request,
             path,
             attempted: false,
@@ -147,9 +152,10 @@ impl JoiningIdentity {
         Ok(identity)
     }
 
-    /// Secret material for composing the unpublished member custody.
-    pub fn member_keys(&self) -> MemberKeys {
-        self.keys.clone()
+    /// The invite's member id with this device's pair, for composing the
+    /// unpublished member custody.
+    pub fn identity(&self) -> MemberIdentity {
+        self.identity.clone()
     }
 
     /// Whether publication may already have happened before an interruption.
@@ -169,7 +175,7 @@ impl JoiningIdentity {
     }
 
     fn save(&self, file: &AtomicFile, code: &InviteCode) -> Result<(), SyncError> {
-        let keys = self.keys.to_secret_bytes();
+        let keys = self.identity.keys().to_secret_bytes();
         let mut plain = Zeroizing::new(Vec::with_capacity(
             5 + keys.as_bytes().len() + self.request.len(),
         ));
@@ -249,9 +255,12 @@ impl JoiningIdentity {
             let prefix = sealed.prefix();
             if prefix.audience == coven_merge::Audience::Store
                 && prefix.key == self.initial_key
-                && prefix.addressed_to(&self.keys.member_id(), &self.keys.sealing_public_key())
+                && prefix.addressed_to(
+                    &self.identity.member(),
+                    &self.identity.keys().public_keys().sealing,
+                )
             {
-                match sealed.open_store_key(&self.keys, read.metadata.path.as_str()) {
+                match sealed.open_store_key(&self.identity, read.metadata.path.as_str()) {
                     Ok(key) => return Ok(Some(key)),
                     Err(error) => {
                         tracing::warn!(path = read.metadata.path.as_str(), %error, "unusable invitation key copy")

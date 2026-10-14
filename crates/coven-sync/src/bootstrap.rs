@@ -43,11 +43,16 @@ impl StoreLogSync {
         self.step().await?;
         let local = self.database.local_store_log().await?;
         let member = self.operation_member()?;
-        if crate::effects::member(&local.log.replay.state, &member.member_id()).is_some() {
+        let keys = member.keys().public_keys();
+        // Membership is effective only with this id bound to this device's pair.
+        if crate::effects::member(&local.log.replay.state, &member.member())
+            .is_some_and(|current| current.keys == keys)
+        {
             return Ok(true);
         }
         for entry in &local.log.entries {
-            if matches!(&entry.entry.change, StoreChange::AddMember { keys: added, .. } if added.signing == member.member_id())
+            if matches!(&entry.entry.change, StoreChange::AddMember { member: added, keys: pair, .. }
+                if *added == member.member() && *pair == keys)
             {
                 if let EntryOutcome::Dropped(reason) =
                     &local.log.replay.entries[&entry.entry.position]
@@ -110,7 +115,7 @@ impl StoreLogSync {
         let member = self.operation_member()?;
         let local = self.database.local_store_log().await?;
         self.check_stopped(&local, &member)?;
-        if crate::effects::member(&local.log.replay.state, &member.member_id()).is_none() {
+        if crate::effects::member(&local.log.replay.state, &member.member()).is_none() {
             return Err(SyncError::Rejected(coven_database::DropReason::NotAllowed));
         }
         // A snapshot that fails its checks is recorded; a reload whose current
@@ -118,7 +123,7 @@ impl StoreLogSync {
         // only a reload that cannot finish fails this call.
         self.resume_snapshots().await?;
         match local.log.replay.state.devices.get(&local.device) {
-            Some(device) if device.member != member.member_id() => {
+            Some(device) if device.member != member.member() => {
                 return Err(SyncError::Rejected(coven_database::DropReason::NotAllowed))
             }
             Some(_) => {}

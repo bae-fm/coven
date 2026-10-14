@@ -27,7 +27,7 @@ async fn selected(device: &Device) -> Result<KeyId, SyncError> {
         &device.log().await,
         &observed(device).await,
         &ring,
-        &device.member.member_id(),
+        &device.member.member(),
         &Audience::Store,
     )
 }
@@ -46,7 +46,7 @@ async fn a_forged_copy_to_an_outsider_exposes_the_key_and_costs_one_rotation() {
     assert_eq!(selected(&ana).await.unwrap(), key(1));
     // Ben publishes a box naming the store key for Dan, who is not a member.
     // Nobody but Dan can open it, so it counts whatever it holds.
-    let (dan_id, dan_sealing) = (dan.member_id(), dan.sealing_public_key());
+    let (dan_id, dan_sealing) = (dan.member(), dan.keys().public_keys().sealing);
     ben.db
         .prepare_key_upload(move |path| {
             keys::store_copy(
@@ -83,7 +83,7 @@ async fn a_forged_copy_to_an_outsider_exposes_the_key_and_costs_one_rotation() {
     );
     for (who, has) in [(&ana.member, true), (&ben.member, true), (&dan, false)] {
         assert_eq!(
-            find_copy(storage.as_ref(), Audience::Store, fresh, &who.member_id())
+            find_copy(storage.as_ref(), Audience::Store, fresh, &who.member())
                 .await
                 .is_some(),
             has
@@ -152,7 +152,7 @@ async fn rotation_is_journaled_before_any_copy_or_entry_publication() {
     ana.add(&member(2), MemberRole::Member).await;
     ana.sync
         .make_and_upload_entry(StoreChange::RemoveMember {
-            member: member(2).member_id(),
+            member: member(2).member(),
         })
         .await
         .unwrap();
@@ -200,7 +200,7 @@ async fn exposed_store() -> Device {
     ana.add(&member(2), MemberRole::Member).await;
     ana.sync
         .make_and_upload_entry(StoreChange::RemoveMember {
-            member: member(2).member_id(),
+            member: member(2).member(),
         })
         .await
         .unwrap();
@@ -338,14 +338,14 @@ async fn lean_differential_rotation_phases() {
                 ana.sync
                     .make_and_upload_entry(StoreChange::AddCircleMember {
                         circle,
-                        member: member(2).member_id(),
+                        member: member(2).member(),
                     })
                     .await
                     .unwrap();
                 ana.sync
                     .make_and_upload_entry(StoreChange::RemoveCircleMember {
                         circle,
-                        member: member(2).member_id(),
+                        member: member(2).member(),
                     })
                     .await
                     .unwrap();
@@ -353,7 +353,7 @@ async fn lean_differential_rotation_phases() {
             } else {
                 ana.sync
                     .make_and_upload_entry(StoreChange::RemoveMember {
-                        member: member(2).member_id(),
+                        member: member(2).member(),
                     })
                     .await
                     .unwrap();
@@ -381,7 +381,7 @@ async fn lean_differential_rotation_phases() {
                     &ana.log().await,
                     &observed(&ana).await,
                     &ana.custody.read().unwrap().unwrap(),
-                    &ana.member.member_id(),
+                    &ana.member.member(),
                     &audience,
                 ) {
                     Ok(key) => Some(key),
@@ -424,7 +424,7 @@ async fn lean_differential_rotation_phases() {
                         })
                         .unwrap();
                     let member = (1..=2)
-                        .find(|&n| member(n).member_id() == copy.prefix.member)
+                        .find(|&n| member(n).member() == copy.prefix.member)
                         .unwrap()
                         - 1;
                     [index, usize::from(member)]
@@ -457,7 +457,7 @@ async fn ordinary_members_can_rotate_concurrently_and_both_keys_remain_readable(
     ana.sync().await;
     ana.sync
         .make_and_upload_entry(StoreChange::RemoveMember {
-            member: member(3).member_id(),
+            member: member(3).member(),
         })
         .await
         .unwrap();
@@ -534,7 +534,7 @@ async fn dropped_rotation_restarts_with_new_material_only_after_revalidation() {
             ben.sync
                 .make_and_upload_entry(StoreChange::AddCircleMember {
                     circle,
-                    member: who.member_id(),
+                    member: who.member(),
                 })
                 .await
                 .unwrap();
@@ -542,7 +542,7 @@ async fn dropped_rotation_restarts_with_new_material_only_after_revalidation() {
         ben.sync
             .make_and_upload_entry(StoreChange::RemoveCircleMember {
                 circle,
-                member: member(3).member_id(),
+                member: member(3).member(),
             })
             .await
             .unwrap();
@@ -557,7 +557,7 @@ async fn dropped_rotation_restarts_with_new_material_only_after_revalidation() {
         let witness = if authority_lost {
             StoreChange::RemoveCircleMember {
                 circle,
-                member: ben.member.member_id(),
+                member: ben.member.member(),
             }
         } else {
             StoreChange::AddDevice {
@@ -684,7 +684,12 @@ async fn an_exposed_replacement_is_rotated_again_without_reusing_its_material() 
     let dan = member(4);
     ana.db
         .prepare_key_upload(move |path| {
-            keys::store_copy(path, &held, &dan.member_id(), &dan.sealing_public_key())
+            keys::store_copy(
+                path,
+                &held,
+                &dan.member(),
+                &dan.keys().public_keys().sealing,
+            )
         })
         .await
         .unwrap();
@@ -730,7 +735,7 @@ async fn only_a_remaining_circle_member_schedules_its_rotation() {
     ben.sync
         .make_and_upload_entry(StoreChange::AddCircleMember {
             circle,
-            member: carol.member.member_id(),
+            member: carol.member.member(),
         })
         .await
         .unwrap();
@@ -739,7 +744,7 @@ async fn only_a_remaining_circle_member_schedules_its_rotation() {
     ana.sync().await;
     ana.sync
         .make_and_upload_entry(StoreChange::RemoveMember {
-            member: ben.member.member_id(),
+            member: ben.member.member(),
         })
         .await
         .unwrap();
@@ -770,7 +775,7 @@ async fn only_a_remaining_circle_member_schedules_its_rotation() {
         storage.as_ref(),
         Audience::Circle(circle),
         fresh,
-        &ana.member.member_id()
+        &ana.member.member()
     )
     .await
     .is_none());

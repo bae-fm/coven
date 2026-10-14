@@ -4,6 +4,7 @@ use crate::sealed_snapshot::{SnapshotObjectLayout, SnapshotObjectPrefix};
 use crate::sealed_write::{ObjectChunk, WriteObjectLayout, WriteObjectPrefix};
 use crate::snapshot::SnapshotRecord;
 use crate::snapshot_stream::SnapshotChunkDecoder;
+use crate::store_log::StoreChange;
 use crate::tests::mutations;
 use crate::write_stream::{PartDecoder, WriteEncoder, WriteHeaderFrame};
 use crate::{test_utils, tests::hex, Object};
@@ -307,10 +308,17 @@ fn single_chunk_fixtures_open_with_their_own_keys_and_authors() {
                         .reseal_object_chunk(path, &prefix, 0, 0, &plain),
                     object.chunk(),
                 );
-                entry.author
+                // Creation verifies with its supplied initial pair, not its id.
+                assert_eq!(entry.author, test_utils::member_id());
+                let StoreChange::CreateStore { admin, .. } = entry.change else {
+                    panic!("fixture is the creation entry")
+                };
+                admin.signing
             }
             Object::JoinRequest(request) => {
                 assert_eq!(kind, 36);
+                assert_eq!(request, test_utils::join_request());
+                // The requested replacement pair signs a re-binding request.
                 request.keys.signing
             }
             Object::PostedPositions(_) => {
@@ -319,7 +327,7 @@ fn single_chunk_fixtures_open_with_their_own_keys_and_authors() {
             }
             Object::ClockObservation(clock) => {
                 assert_eq!(kind, 39);
-                assert_eq!(clock.device, coven_foundation::id_source::DeviceId(1));
+                assert_eq!(clock, test_utils::clock());
                 test_utils::member().signing
             }
         };

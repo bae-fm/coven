@@ -69,17 +69,16 @@ fn pinned_text_restores_member_identity_and_location_and_invite_secrets() {
     assert_eq!(invite.to_text().unwrap().as_str(), expected[1]);
     let restored = RestoreCode::from_text(expected[0]).unwrap();
     assert_eq!(restored.to_bytes().unwrap(), restore.to_bytes().unwrap());
+    // The unchanged private-pair blob belongs explicitly to Ana's stable id.
+    assert_eq!(restored.member, test_utils::member_id());
     assert_eq!(
-        restored.member_keys.member_id(),
-        restore.member_keys.member_id()
-    );
-    assert_eq!(
-        restored.member_keys.sealing_public_key(),
-        restore.member_keys.sealing_public_key()
+        restored.member_keys.public_keys(),
+        restore.member_keys.public_keys()
     );
     restored
         .member_keys
-        .member_id()
+        .public_keys()
+        .signing
         .verify(b"restored", &restored.member_keys.sign(b"restored"))
         .unwrap();
     assert_eq!(restored.storage.as_bytes(), restore.storage.as_bytes());
@@ -90,6 +89,8 @@ fn pinned_text_restores_member_identity_and_location_and_invite_secrets() {
         invite.secret.to_secret_bytes().as_bytes()
     );
     assert_eq!(invited.storage.as_bytes(), invite.storage.as_bytes());
+    // A re-binding invite fixes Ana's existing id for the signed request.
+    assert_eq!(invited.member, test_utils::member_id());
     assert_eq!(invited.initial_key, test_utils::store_key().id());
     assert_eq!(invited.inviting_writer, DeviceId(1));
     assert_eq!(invited.key_copy_number, 12);
@@ -168,14 +169,15 @@ fn padding_material_lengths_and_hostile_sizes_are_errors() {
     code.storage = SecretBytes::new(vec![1; MAX_STORAGE + 1]);
     assert!(code.to_text().is_err());
     let mut encoded = test_utils::restore().to_bytes().unwrap();
-    // Prefix, store id, name length, name, key length, then crypto's CVMK header.
-    encoded[32] = b'X';
+    // Prefix, store id, name length, name, member id, key length, then
+    // crypto's CVMK header.
+    encoded[48] = b'X';
     assert!(matches!(
         RestoreCode::from_bytes(&encoded),
         Err(Error::Material(_))
     ));
     let mut encoded = test_utils::invite().to_bytes().unwrap();
-    encoded[108..112].copy_from_slice(&u32::MAX.to_be_bytes());
+    encoded[124..128].copy_from_slice(&u32::MAX.to_be_bytes());
     assert!(matches!(
         InviteCode::from_bytes(&encoded),
         Err(Error::Limit { .. })
@@ -193,7 +195,7 @@ fn invite_cursor_round_trips_zero_and_unsigned_numbers_but_requires_a_next_copy(
         assert_eq!(decoded.key_copy_number, number);
     }
     let mut bytes = invite.to_bytes().unwrap();
-    bytes[100..108].copy_from_slice(&u64::MAX.to_be_bytes());
+    bytes[116..124].copy_from_slice(&u64::MAX.to_be_bytes());
     assert!(matches!(
         InviteCode::from_bytes(&bytes),
         Err(Error::Invalid {
@@ -215,7 +217,7 @@ fn invite_cursor_round_trips_zero_and_unsigned_numbers_but_requires_a_next_copy(
 #[test]
 fn invite_frames_require_initial_key_and_writer_cursor_evidence() {
     let mut bytes = test_utils::invite().to_bytes().unwrap();
-    bytes.drain(76..108);
+    bytes.drain(92..124);
     let payload_length = (bytes.len() - FRAME_PREFIX_LEN) as u32;
     bytes[3..7].copy_from_slice(&payload_length.to_be_bytes());
     assert!(matches!(

@@ -162,8 +162,8 @@ async fn malformed_copy_does_not_hide_a_later_valid_copy() {
     let bytes = crate::store_log_keys::store_copy(
         &second,
         &material,
-        &receiver.member.member_id(),
-        &receiver.member.sealing_public_key(),
+        &receiver.member.member(),
+        &receiver.member.keys().public_keys().sealing,
     )
     .unwrap();
     storage.create(&bad_box, &bytes).await.unwrap();

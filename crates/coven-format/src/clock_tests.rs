@@ -1,11 +1,22 @@
 use super::*;
 use crate::sealed_single::SingleChunkPrefix;
-use crate::test_utils::{member, member_keys, store_key, STORE_ID};
+use crate::test_utils::{member, member_keys, replacement, store_key, STORE_ID};
 use crate::tests::{hex, mutations};
+use crate::value::{EntryId, EntryPositions};
 use coven_foundation::id_source::{DeviceId, KeyId, StoreId};
 
 fn path() -> ObjectPath {
     ObjectPath::clock(STORE_ID, DeviceId(1))
+}
+
+// Decrypt, then verify with the signer the caller resolved from the view.
+fn open_signed(
+    bytes: &[u8],
+    path: &ObjectPath,
+    key: &StoreKey,
+    signer: &coven_crypto::SigningKey,
+) -> Result<ClockObservation, ClockError> {
+    open(bytes, path, key)?.verify(signer)
 }
 
 // Compose the production envelope and crypto primitives so malformed plaintext
@@ -34,13 +45,20 @@ fn clock_fixture_authenticates_and_preserves_its_wire_bytes() {
     // Independently generated with Python hashlib/hmac and libsodium: store key
     // 0x11, key id 0x01, signing seed 0x33, nonce 0x39 (all public test material).
     let bytes = hex(include_str!("../fixtures/sealed-clock.hex"));
-    assert_eq!(bytes.len(), 19 + 4 + 24 + 15 + 16 + 64);
+    assert_eq!(bytes.len(), 19 + 4 + 24 + 35 + 16 + 64);
     assert_eq!(&bytes[..3], &[39, 0, 1]);
-    let clock = open(&bytes, &path(), &store_key(), &member().signing).unwrap();
+    // The decrypted view locates the signer before the signature is checked.
+    let opened = open(&bytes, &path(), &store_key()).unwrap();
+    assert_eq!(opened.observation, crate::test_utils::clock());
+    let clock = opened.verify(&member().signing).unwrap();
     assert_eq!(
         clock,
         ClockObservation {
-            device: DeviceId(1)
+            device: DeviceId(1),
+            store_log_read: EntryPositions(vec![EntryId {
+                device: DeviceId(1),
+                number: 2
+            }]),
         }
     );
     assert_eq!(
@@ -62,16 +80,16 @@ fn clock_refuses_every_truncation_bit_change_and_extra_byte() {
     let key = store_key();
     let author = member().signing;
     mutations(&bytes, |changed| {
-        assert!(open(changed, &path(), &key, &author).is_err());
+        assert!(open_signed(changed, &path(), &key, &author).is_err());
     });
     assert!(matches!(
-        open(&[], &path(), &key, &author),
+        open_signed(&[], &path(), &key, &author),
         Err(ClockError::Format(Error::Truncated))
     ));
 }
 
 #[test]
-fn clock_signature_binds_the_member_device_store_and_object_kind() {
+fn clock_binds_its_device_store_object_kind_and_signing_key() {
     let bytes = hex(include_str!("../fixtures/sealed-clock.hex"));
     let key = store_key();
     let author = member().signing;
@@ -80,18 +98,24 @@ fn clock_signature_binds_the_member_device_store_and_object_kind() {
         ObjectPath::clock(StoreId(uuid::Uuid::from_bytes([0x20; 16])), DeviceId(1)),
         ObjectPath::positions(STORE_ID, DeviceId(1)),
     ] {
+        // The chunk's associated data binds the path before any signer is used.
         assert!(matches!(
-            open(&bytes, &other, &key, &author),
+            open_signed(&bytes, &other, &key, &author),
+            Err(ClockError::Crypto(CryptoError::Authentication))
+        ));
+    }
+    // The same member's replacement key is not the key that signed it.
+    for other in [
+        replacement().signing,
+        crate::test_utils::keys_from_seed(0x44)
+            .public_keys()
+            .signing,
+    ] {
+        assert!(matches!(
+            open_signed(&bytes, &path(), &key, &other),
             Err(ClockError::Crypto(CryptoError::Signature))
         ));
     }
-    let mut secret = b"CVMK\x01".to_vec();
-    secret.extend_from_slice(&[0x44; 64]);
-    let other = coven_crypto::MemberKeys::from_secret_bytes(&secret).unwrap();
-    assert!(matches!(
-        open(&bytes, &path(), &key, &other.member_id()),
-        Err(ClockError::Crypto(CryptoError::Signature))
-    ));
 }
 
 #[test]
@@ -99,18 +123,18 @@ fn clock_requires_the_declared_key_and_authenticated_ciphertext() {
     let bytes = hex(include_str!("../fixtures/sealed-clock.hex"));
     let other_id = StoreKey::from_bytes(KeyId(uuid::Uuid::from_bytes([2; 16])), [0x11; 32]);
     assert!(matches!(
-        open(&bytes, &path(), &other_id, &member().signing),
+        open_signed(&bytes, &path(), &other_id, &member().signing),
         Err(ClockError::WrongIdentity)
     ));
     let other_secret = StoreKey::from_bytes(store_key().id(), [0x12; 32]);
     assert!(matches!(
-        open(&bytes, &path(), &other_secret, &member().signing),
+        open_signed(&bytes, &path(), &other_secret, &member().signing),
         Err(ClockError::Crypto(CryptoError::Authentication))
     ));
     let mut damaged = bytes[..bytes.len() - 64].to_vec();
     damaged[19 + 4 + 24] ^= 1;
     assert!(matches!(
-        open(
+        open_signed(
             &sign(&path(), damaged),
             &path(),
             &store_key(),
@@ -134,7 +158,7 @@ fn authenticated_clock_payload_must_match_the_exact_clock_path() {
             &frame,
         );
         assert!(matches!(
-            open(&bytes, &wrong, &store_key(), &member().signing),
+            open_signed(&bytes, &wrong, &store_key(), &member().signing),
             Err(ClockError::WrongIdentity)
         ));
     }
@@ -151,7 +175,7 @@ fn clock_rejects_other_envelopes_frames_and_payload_lengths() {
         &frame,
     );
     assert!(matches!(
-        open(&wrong_envelope, &path(), &key, &author),
+        open_signed(&wrong_envelope, &path(), &key, &author),
         Err(ClockError::Format(Error::Invalid {
             field: "clock object",
             rule: Rule::Kind
@@ -166,13 +190,13 @@ fn clock_rejects_other_envelopes_frames_and_payload_lengths() {
         &other_frame,
     );
     assert!(matches!(
-        open(&wrong_frame, &path(), &key, &author),
+        open_signed(&wrong_frame, &path(), &key, &author),
         Err(ClockError::Format(Error::Invalid {
             field: "clock frame",
             rule: Rule::Kind
         }))
     ));
-    for length in [0, 7, 9, 16] {
+    for length in [0, 7, 9, 16, 27, 29] {
         let mut malformed = frame[..7].to_vec();
         malformed[3..7].copy_from_slice(&(length as u32).to_be_bytes());
         malformed.extend(vec![0; length]);
@@ -182,7 +206,7 @@ fn clock_rejects_other_envelopes_frames_and_payload_lengths() {
             &malformed,
         );
         assert!(matches!(
-            open(&bytes, &path(), &key, &author),
+            open_signed(&bytes, &path(), &key, &author),
             Err(ClockError::Format(Error::Truncated | Error::TrailingBytes))
         ));
     }
@@ -193,10 +217,12 @@ fn clock_device_uses_the_full_unsigned_range() {
     for device in [0, u64::MAX] {
         let clock = ClockObservation {
             device: DeviceId(device),
+            store_log_read: EntryPositions(Vec::new()),
         };
-        let frame = Object::ClockObservation(clock).encode().unwrap();
-        assert_eq!(&frame[..7], &[12, 0, 1, 0, 0, 0, 8]);
-        assert_eq!(&frame[7..], &device.to_be_bytes());
+        let frame = Object::ClockObservation(clock.clone()).encode().unwrap();
+        assert_eq!(&frame[..7], &[12, 0, 1, 0, 0, 0, 12]);
+        assert_eq!(&frame[7..15], &device.to_be_bytes());
+        assert_eq!(&frame[15..], &[0; 4]);
         let path = ObjectPath::clock(STORE_ID, clock.device);
         let bytes = seal(
             SingleChunkPrefix::ClockObservation(store_key().id()),
@@ -204,7 +230,7 @@ fn clock_device_uses_the_full_unsigned_range() {
             &frame,
         );
         assert_eq!(
-            open(&bytes, &path, &store_key(), &member().signing).unwrap(),
+            open_signed(&bytes, &path, &store_key(), &member().signing).unwrap(),
             clock
         );
     }

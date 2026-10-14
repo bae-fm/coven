@@ -2,10 +2,9 @@
 
 use super::pending_encoding as encoding;
 use crate::{OperationId, OperationKind, Refusal};
-use coven_crypto::MemberId;
 use coven_database::{DropReason, PendingValue};
 use coven_format::{path::ObjectPath, store_log::SnapshotId, value::EntryId};
-use coven_foundation::id_source::{DeviceId, FileId, InviteId, KeyId};
+use coven_foundation::id_source::{DeviceId, FileId, InviteId, KeyId, MemberId};
 use coven_merge::{Audience, WriteId};
 use coven_storage::{CloudProvider, RetainedAccess, StorageFailure};
 use serde::{Deserialize, Serialize};
@@ -38,8 +37,10 @@ pub enum PendingSubject {
         /// The key identity.
         key: KeyId,
         /// The recipient.
-        #[serde(with = "encoding::member")]
         member: MemberId,
+        /// The recipient's exact sealing credential (D8).
+        #[serde(with = "encoding::sealing")]
+        sealing: coven_crypto::SealingKey,
     },
     /// A numbered snapshot.
     Snapshot(#[serde(with = "crate::snapshot_data::snapshot_id")] SnapshotId),
@@ -393,13 +394,15 @@ impl Ord for PendingSubject {
                     audience: a,
                     key: ak,
                     member: am,
+                    sealing: asl,
                 },
                 Self::KeyCopy {
                     audience: b,
                     key: bk,
                     member: bm,
+                    sealing: bsl,
                 },
-            ) => (a, ak, am).cmp(&(b, bk, bm)),
+            ) => (a, ak, am, asl).cmp(&(b, bk, bm, bsl)),
             (Self::Snapshot(a), Self::Snapshot(b)) => {
                 (&a.audience, a.device, a.number).cmp(&(&b.audience, b.device, b.number))
             }
