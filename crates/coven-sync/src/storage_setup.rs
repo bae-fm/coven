@@ -23,22 +23,56 @@ impl StoreLogSync {
         let previous_finality =
             std::mem::take(self.finality.get_mut().expect("finality lock poisoned"));
         let result = async {
-            let damages = self.sync_store_log().await?;
-            if let Some(damage) = damages.into_iter().next() {
-                return Err(SyncError::Damaged(damage));
-            }
+            // Unlock needs only a usable store key (§11). Other damaged
+            // objects and refused key copies stay in their pending records.
+            self.sync_store_log().await?;
             let local = self.database.local_store_log().await?;
+            let member = self.operation_member()?.member_id();
+            let store_copy = |record: &crate::PendingRecord| {
+                record.reported_by == local.device
+                    && matches!(&record.subject, crate::PendingSubject::KeyCopy {
+                        audience: Audience::Store,
+                        member: recipient,
+                        ..
+                    } if *recipient == member)
+            };
             if local.log.replay.state.store.is_none() {
-                return Err(coven_storage::StorageFailure::NotFound.into());
+                // Without its store key this device cannot read the creation.
+                return Err(self
+                    .database
+                    .pending::<crate::PendingRecord>()
+                    .await?
+                    .into_iter()
+                    .find(store_copy)
+                    .map_or(coven_storage::StorageFailure::NotFound.into(), |record| {
+                        SyncError::Pending(Box::new(record))
+                    }));
             }
             let key = crate::key_introductions::newest(&local.log, &Audience::Store)
                 .ok_or(coven_storage::StorageFailure::NotFound)?;
-            let ring = self
-                .store_keys
-                .read()?
-                .ok_or(SyncError::KeyUnavailable(key))?;
-            crate::write_seal::current_store(&local.log, &ring)?;
-            Ok(())
+            let selected = match self.store_keys.read()? {
+                Some(ring) => crate::write_seal::current_store(&local.log, &ring),
+                None => Err(SyncError::KeyUnavailable(key)),
+            };
+            match selected {
+                Ok(_) => Ok(()),
+                Err(SyncError::KeyUnavailable(key)) => {
+                    // The store key's copy subject names why it cannot open yet.
+                    Err(self
+                        .database
+                        .pending::<crate::PendingRecord>()
+                        .await?
+                        .into_iter()
+                        .find(|record| {
+                            store_copy(record)
+                                && matches!(&record.subject, crate::PendingSubject::KeyCopy { key: k, .. } if *k == key)
+                        })
+                        .map_or(SyncError::KeyUnavailable(key), |record| {
+                            SyncError::Pending(Box::new(record))
+                        }))
+                }
+                Err(error) => Err(error),
+            }
         }
         .await;
         if result.is_err() {
@@ -116,9 +150,18 @@ impl StoreLogSync {
             }
             let recovered;
             let sealing_ring = if upload.sealing.keys.is_empty() && previous.is_none() {
+                let StoreChange::CreateStore { key_hash, .. } = &upload.entry.change else {
+                    unreachable!("checked reserved creation")
+                };
                 recovered = StoreKeyring::new(
-                    keys::read_store_key(storage.as_ref(), store_id, upload.sealing.key, &member)
-                        .await?,
+                    keys::read_store_key(
+                        storage.as_ref(),
+                        store_id,
+                        upload.sealing.key,
+                        Some(key_hash),
+                        &member,
+                    )
+                    .await?,
                 );
                 Some(&recovered)
             } else {
@@ -169,8 +212,14 @@ impl StoreLogSync {
             let needed = crate::key_introductions::needed(&local.log);
             let key = crate::key_introductions::newest(&local.log, &Audience::Store)
                 .ok_or(coven_database::DbError::DamagedDatabase)?;
-            let opened = keys::read_store_key(storage.as_ref(), store_id, key, &member).await?;
-            opened.check_hash(&needed[&(Audience::Store, key)])?;
+            let opened = keys::read_store_key(
+                storage.as_ref(),
+                store_id,
+                key,
+                Some(&needed[&(Audience::Store, key)]),
+                &member,
+            )
+            .await?;
             ring.insert_store_key(opened)?;
             let current = local
                 .log
@@ -312,11 +361,22 @@ async fn read_setup_entry(
             crate::write_object::invalid("expected a store-log envelope"),
         ));
     };
-    let key = keys::read_store_key(storage, path.store(), *key, member).await?;
+    // Tentative until the creation it opens commits to its hash (§11).
+    let key = keys::read_store_key(storage, path.store(), *key, None, member).await?;
     let entry = object::open(&envelope, path, &key).map_err(|failure| crate::DamagedObject {
         path: path.as_str().into(),
         failure,
     })?;
+    if let StoreChange::CreateStore {
+        key: introduced,
+        key_hash,
+        ..
+    } = &entry.change
+    {
+        if *introduced == key.id() {
+            key.check_hash(key_hash)?;
+        }
+    }
     Ok((entry, key))
 }
 

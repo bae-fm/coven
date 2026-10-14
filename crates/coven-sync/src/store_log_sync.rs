@@ -343,10 +343,10 @@ impl StoreLogSync {
                         self.storage.as_deref().ok_or(SyncError::NoStorage)?,
                         self.directory.id(),
                         upload.sealing.key,
+                        Some(key_hash),
                         member,
                     )
                     .await?;
-                    key.check_hash(key_hash)?;
                     match ring {
                         Some(ring) => ring.insert_store_key(key)?,
                         None => *ring = Some(StoreKeyring::new(key)),
@@ -475,20 +475,6 @@ impl StoreLogSync {
         self.share_keys(log, ring, damages).await
     }
 
-    async fn acquire_keys(
-        &self,
-        log: &StoreLog,
-        member: &MemberKeys,
-        ring: &mut Option<StoreKeyring>,
-        damages: &mut Vec<DamagedObject>,
-    ) -> Result<(), SyncError> {
-        for ((audience, key), hash) in crate::key_introductions::needed(log) {
-            self.acquire(&audience, key, Some(&hash), member, ring, damages)
-                .await?;
-        }
-        Ok(())
-    }
-
     async fn share_keys(
         &self,
         log: &StoreLog,
@@ -562,118 +548,6 @@ impl StoreLogSync {
         }
     }
 
-    async fn acquire(
-        &self,
-        audience: &Audience,
-        key: KeyId,
-        hash: Option<&[u8; 32]>,
-        member: &MemberKeys,
-        ring: &mut Option<StoreKeyring>,
-        damages: &mut Vec<DamagedObject>,
-    ) -> Result<bool, SyncError> {
-        if keys::holds(ring.as_ref(), audience, key) {
-            return Ok(true);
-        }
-        let storage = self.storage.as_deref().ok_or(SyncError::NoStorage)?;
-        for copy in keys::read_copies(storage, self.directory.id(), damages).await? {
-            if copy.prefix.audience != *audience
-                || copy.prefix.key != key
-                || copy.prefix.member != member.member_id()
-            {
-                continue;
-            }
-            let path = copy.path;
-            if damages.iter().any(|damage| damage.path == path.as_str()) {
-                continue;
-            }
-            let envelope = SealedKey::decode(&copy.bytes)?;
-            let opened = match audience {
-                Audience::Store => envelope
-                    .open_store_key(member, path.as_str())
-                    .map(|opened| {
-                        if opened.id() != key {
-                            return Err(Refusal::WrongIdentity { cause: None });
-                        }
-                        // The authorized introduction's commitment decides acceptance (§11).
-                        if let Some(hash) = hash {
-                            opened
-                                .check_hash(hash)
-                                .map_err(|e| Refusal::WrongIdentity {
-                                    cause: Some(Arc::new(e)),
-                                })?;
-                        }
-                        match ring {
-                            Some(ring) => {
-                                ring.insert_store_key(opened)
-                                    .map_err(|e| Refusal::WrongIdentity {
-                                        cause: Some(Arc::new(e)),
-                                    })
-                            }
-                            None => {
-                                *ring = Some(StoreKeyring::new(opened));
-                                Ok(())
-                            }
-                        }
-                    }),
-                Audience::Circle(circle) => {
-                    envelope
-                        .open_circle_key(member, path.as_str())
-                        .map(|opened| {
-                            if opened.id() != key || opened.circle() != *circle {
-                                return Err(Refusal::WrongIdentity { cause: None });
-                            }
-                            if let Some(hash) = hash {
-                                opened
-                                    .check_hash(hash)
-                                    .map_err(|e| Refusal::WrongIdentity {
-                                        cause: Some(Arc::new(e)),
-                                    })?;
-                            }
-                            // A circle introduction follows an opened store-log entry.
-                            ring.as_mut()
-                                .expect("circle key follows an opened store key")
-                                .insert_circle_key(opened)
-                                .map_err(|e| Refusal::WrongIdentity {
-                                    cause: Some(Arc::new(e)),
-                                })
-                        })
-                }
-            };
-            match opened {
-                Err(error @ coven_crypto::CryptoError::KeyIdentity) => {
-                    Self::damage(
-                        damages,
-                        &path,
-                        Refusal::WrongIdentity {
-                            cause: Some(Arc::new(error)),
-                        },
-                    )?;
-                    continue;
-                }
-                Err(error) => {
-                    Self::damage(
-                        damages,
-                        &path,
-                        Refusal::Decryption {
-                            cause: Some(Arc::new(error)),
-                        },
-                    )?;
-                    continue;
-                }
-                Ok(Err(failure)) => {
-                    Self::damage(damages, &path, failure)?;
-                    continue;
-                }
-                Ok(Ok(())) => {
-                    self.store_keys
-                        .persist(ring.as_ref().expect("opened keyring"))?;
-                    return Ok(true);
-                }
-            }
-        }
-        Ok(false)
-    }
-
     pub(crate) fn damage(
         damages: &mut Vec<DamagedObject>,
         path: &ObjectPath,
@@ -729,3 +603,6 @@ mod store_log_finality;
 
 #[path = "store_log_batch.rs"]
 mod store_log_batch;
+
+#[path = "key_acquisition.rs"]
+mod key_acquisition;

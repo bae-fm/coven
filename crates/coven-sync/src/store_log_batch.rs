@@ -132,41 +132,35 @@ impl StoreLogSync {
                     pending_entries.insert(*id);
                     continue;
                 };
-                // A key not yet introduced is tentative: it may open the entry
-                // that introduces it, and is accepted only through that commitment.
-                let hash = crate::key_introductions::needed(&local.log)
-                    .get(&(Audience::Store, *key))
-                    .copied();
-                if !self
-                    .acquire(
-                        &Audience::Store,
+                let scanned: Vec<_> = opened.values().collect();
+                let entry = match self
+                    .open_entry(
+                        &local.log,
+                        &scanned,
+                        &envelope,
+                        &stored.path,
                         *key,
-                        hash.as_ref(),
                         &member,
                         &mut ring,
                         &mut damages,
                     )
                     .await?
                 {
-                    missing_keys.insert(*id, *key);
-                    continue;
-                }
-                #[cfg(test)]
-                if let Some(counter) = &self.received_entry_decodes {
-                    counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                }
-                let entry = match object::open(
-                    &envelope,
-                    &stored.path,
-                    ring.as_ref().expect("acquired keyring").store_key(*key)?,
-                ) {
-                    Ok(entry) => entry,
-                    Err(failure) => {
+                    super::key_acquisition::EntryOpening::Opened(entry) => entry,
+                    super::key_acquisition::EntryOpening::WaitsForKey => {
+                        missing_keys.insert(*id, *key);
+                        continue;
+                    }
+                    super::key_acquisition::EntryOpening::Refused(failure) => {
                         self.stuck_entry(*id, &stored.path, failure).await?;
                         pending_entries.insert(*id);
                         continue;
                     }
                 };
+                #[cfg(test)]
+                if let Some(counter) = &self.received_entry_decodes {
+                    counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
                 missing_keys.remove(id);
                 opened.insert(*id, entry);
             }

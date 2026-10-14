@@ -278,24 +278,55 @@ pub(crate) async fn read_copies(
     Ok(copies)
 }
 
+/// Open this member's copy of a store key, trying each copy in listing order.
+/// A copy that fails to open, names another key or misses `expected` is refused
+/// by itself and a later copy can still supply the key (§11). Without a
+/// commitment the key is tentative and its introducing entry must check it.
 pub(crate) async fn read_store_key(
     storage: &dyn coven_storage::Storage,
     store: coven_foundation::id_source::StoreId,
     key: KeyId,
+    expected: Option<&[u8; 32]>,
     member: &MemberKeys,
 ) -> Result<StoreKey, SyncError> {
     let mut damages = Vec::new();
+    let mut refused = None;
     for copy in read_copies(storage, store, &mut damages).await? {
-        if copy.prefix.audience == Audience::Store
-            && copy.prefix.key == key
-            && copy.prefix.member == member.member_id()
+        if copy.prefix.audience != Audience::Store
+            || copy.prefix.key != key
+            || copy.prefix.member != member.member_id()
         {
-            return Ok(coven_format::sealed_key::SealedKey::decode(&copy.bytes)?
-                .open_store_key(member, copy.path.as_str())?);
+            continue;
+        }
+        let opened = coven_format::sealed_key::SealedKey::decode(&copy.bytes)
+            .map_err(crate::Refusal::from)
+            .and_then(|sealed| {
+                sealed
+                    .open_store_key(member, copy.path.as_str())
+                    .map_err(|error| crate::Refusal::Decryption {
+                        cause: Some(std::sync::Arc::new(error)),
+                    })
+            })
+            .and_then(|opened| {
+                let committed = expected.is_none_or(|hash| opened.check_hash(hash).is_ok());
+                if opened.id() == key && committed {
+                    Ok(opened)
+                } else {
+                    Err(crate::Refusal::WrongIdentity { cause: None })
+                }
+            });
+        match opened {
+            Ok(opened) => return Ok(opened),
+            Err(failure) => {
+                refused.get_or_insert(crate::DamagedObject {
+                    path: copy.path.as_str().into(),
+                    failure,
+                });
+            }
         }
     }
-    if let Some(damage) = damages.into_iter().next() {
-        return Err(damage.into());
+    match refused {
+        Some(damage) => Err(damage.into()),
+        None => Err(SyncError::KeyUnavailable(key)),
     }
-    Err(SyncError::KeyUnavailable(key))
 }

@@ -741,8 +741,11 @@ Rust correspondence is checked by the current-policy differential
 described in C9. The runner's introductions mode also compares Rust's
 received authorized introductions and agreed commitments with
 `receivedIntroductions` and `hashFor` for every received prefix, including
-late, beaten, unauthorized and conflicting introductions. Key selection and
-cryptographic operations are not compared.
+late, beaten, unauthorized and conflicting introductions. Its copies mode
+compares Rust's per-copy acceptance with `acceptedCopy`, using the identity
+hash on bytes: copies to this member or another, unopened, committed, other
+bytes and another identity. Key selection and cryptographic operations are not
+compared.
 
 ### C13 Stable members and replaceable keys — checked proposal
 

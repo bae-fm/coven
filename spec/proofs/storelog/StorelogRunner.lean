@@ -20,6 +20,31 @@ private def introductionsJson (input : StorelogJson.Input) (subset : List Nat) :
         | some h => hashJson h
         | none => Json.null]))]
 
+private def readBytes (j : Json) (name : String) : Except String CurrentReplay.KeyBytes := do
+  let bytes ← j.getObjValAs? (Array Nat) name
+  if bytes.any (· > 255) then throw "key bytes must contain 32 bytes"
+  let bytes := bytes.map UInt8.ofNat
+  if h : bytes.size = 32 then pure ⟨bytes, h⟩ else throw "key bytes must contain 32 bytes"
+
+private def readKeyId (j : Json) : Except String CurrentKeys.KeyId := do
+  pure ⟨← readAudience j, ← j.getObjValAs? Nat "key"⟩
+
+private def readCopy (j : Json) : Except String CurrentKeys.Copy := do
+  let opened ← match j.getObjVal? "opened" with
+    | .ok .null | .error _ => pure none
+    | .ok payload => pure (some ⟨← readKeyId payload, ← readBytes payload "bytes"⟩)
+  pure ⟨← readKeyId j, ← j.getObjValAs? Nat "recipient", opened⟩
+
+/-- C12 `acceptedCopy` with the identity hash: each copy's accepted payload. -/
+private def copiesJson (input : StorelogJson.Input) (self : Nat)
+    (copies : Array CurrentKeys.Copy) (subset : List Nat) : Json :=
+  let is := CurrentKeys.receivedIntroductions input.history input.window input.bound
+    (entrySet subset)
+  toJson (copies.map fun copy => match CurrentKeys.acceptedCopy id is self copy with
+    | some p => Json.arr #[toJson (audienceNumber p.key.audience), toJson p.key.id,
+        hashJson p.bytes]
+    | none => Json.null)
+
 private def run (j : Json) : Except String Json := do
   let input ← StorelogJson.read j
   let H := input.history
@@ -27,6 +52,12 @@ private def run (j : Json) : Except String Json := do
   if (← j.getObj?).contains "checks" then
     let checks ← j.getObjValAs? (Array Nat) "checks"
     return toJson (checks.map fun T => Horizon.recovered H.membership window input.bound T)
+  if (← j.getObj?).contains "copies" then
+    let _ ← StorelogJson.checkedViews input
+    let received ← StorelogJson.received j input
+    let copies ← (← j.getObjValAs? (Array Json) "copies").mapM readCopy
+    let self ← j.getObjValAs? Nat "self"
+    return toJson (received.map (copiesJson input self copies))
   if (← j.getObj?).contains "introductions" then
     let _ ← StorelogJson.checkedViews input
     let received ← StorelogJson.received j input

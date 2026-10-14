@@ -407,3 +407,160 @@ fn lean_differential_introductions() {
         }
     }
 }
+
+/// Copies of every introduced identity (and one never introduced), addressed to
+/// `me` or another member, opening to nothing, the committed bytes, other bytes
+/// or another identity. The runner's hash is the identity on bytes.
+fn copies(h: &History, me: u8) -> Vec<(KeyCopyPrefix, Option<Opened>)> {
+    let log = landed_log(h, &vec![0; h.entries.len()]);
+    let introductions = introductions(&log);
+    let mut identities: Vec<_> = introductions
+        .iter()
+        .map(|i| (i.audience.clone(), i.key))
+        .collect();
+    identities.push((Audience::Store, history::key(999)));
+    identities.dedup();
+    let mut copies = Vec::new();
+    for (audience, key) in identities {
+        let mut hashes: Vec<_> = introductions
+            .iter()
+            .filter(|i| i.audience == audience && i.key == key)
+            .map(|i| i.key_hash)
+            .collect();
+        hashes.push([0xee; 32]);
+        for recipient in [me, me + 1] {
+            let prefix = KeyCopyPrefix {
+                audience: audience.clone(),
+                key,
+                member: history::member(recipient),
+            };
+            copies.push((prefix.clone(), None));
+            for hash in &hashes {
+                copies.push((
+                    prefix.clone(),
+                    Some(Opened {
+                        audience: audience.clone(),
+                        key,
+                        hash: *hash,
+                    }),
+                ));
+            }
+            copies.push((
+                prefix.clone(),
+                Some(Opened {
+                    audience: Audience::Circle(history::circle(5)),
+                    key,
+                    hash: hashes[0],
+                }),
+            ));
+            copies.push((
+                prefix,
+                Some(Opened {
+                    audience: audience.clone(),
+                    key: history::key(998),
+                    hash: hashes[0],
+                }),
+            ));
+        }
+    }
+    copies
+}
+
+#[test]
+#[ignore = "requires COVEN_STORELOG_LEAN, supplied by scripts/check.sh"]
+fn lean_differential_accepted_copies() {
+    use crate::tests::{audience_number, key_number};
+    let me = 1;
+    let cases: Vec<_> = introduction_histories()
+        .into_iter()
+        .map(|(h, stored)| {
+            let copies = copies(&h, me);
+            (h, stored, copies)
+        })
+        .collect();
+    let member_number =
+        |id: &coven_crypto::MemberId| (0..8).find(|&i| history::member(i) == *id).unwrap() as u64;
+    let key_json = |audience: &Audience, key: KeyId| serde_json::json!({"audience": audience_number(audience), "key": key_number(key)});
+    let inputs: Vec<_> = cases
+        .iter()
+        .map(|(h, stored, copies)| {
+            let mut input = crate::tests::input(
+                h,
+                stored,
+                &crate::tests::received_prefixes(&crate::tests::orders(h)),
+            );
+            input["self"] = serde_json::json!(me);
+            input["copies"] = copies
+                .iter()
+                .map(|(prefix, opened)| {
+                    let mut copy = key_json(&prefix.audience, prefix.key);
+                    copy["recipient"] = serde_json::json!(member_number(&prefix.member));
+                    copy["opened"] = opened.as_ref().map_or(serde_json::Value::Null, |o| {
+                        let mut payload = key_json(&o.audience, o.key);
+                        payload["bytes"] = serde_json::json!(o.hash);
+                        payload
+                    });
+                    copy
+                })
+                .collect();
+            input
+        })
+        .collect();
+    let output = crate::tests::run_lean(
+        "COVEN_STORELOG_LEAN",
+        &serde_json::json!({"histories": inputs}),
+    );
+    assert!(
+        output.status.success(),
+        "Lean runner failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let actual: Vec<Vec<serde_json::Value>> = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(actual.len(), cases.len());
+    for ((h, stored, copies), results) in cases.iter().zip(actual) {
+        let publications = crate::tests::publication_times(h, stored);
+        let orders = crate::tests::orders(h);
+        let project = |log: &StoreLog| {
+            let introductions = introductions(log);
+            serde_json::Value::Array(
+                copies
+                    .iter()
+                    .map(|(prefix, opened)| match opened {
+                        Some(opened)
+                            if accepts_copy(
+                                &introductions,
+                                prefix,
+                                &history::member(me),
+                                opened,
+                            ) =>
+                        {
+                            serde_json::json!([
+                                audience_number(&opened.audience),
+                                key_number(opened.key),
+                                opened.hash
+                            ])
+                        }
+                        _ => serde_json::Value::Null,
+                    })
+                    .collect(),
+            )
+        };
+        for (order, results) in orders.iter().zip(results.chunks_exact(h.entries.len() + 1)) {
+            let mut log = StoreLog::default();
+            assert_eq!(results[0], project(&log));
+            for (n, &i) in order.iter().enumerate() {
+                let (checked, replay) =
+                    crate::replay_entry(&log, h.entries[i].clone(), &publications);
+                log.entries.push(checked);
+                log.entries.sort_by_key(|applied| applied.entry.timestamp);
+                log.replay = replay;
+                assert_eq!(
+                    results[n + 1],
+                    project(&log),
+                    "order {order:?}, prefix {}",
+                    n + 1
+                );
+            }
+        }
+    }
+}

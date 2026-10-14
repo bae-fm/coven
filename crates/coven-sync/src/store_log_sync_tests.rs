@@ -614,11 +614,22 @@ async fn far_future_entry_waits_for_missing_or_damaged_sealed_keys() {
     let last = damaged.len() - 1;
     damaged[last] ^= 1;
     storage.create(&path, &damaged).await.unwrap();
-    let damages = b.sync.step().await.unwrap();
-    assert_eq!(damages[0].path, path.as_str());
+    // A refused copy is the key copy's own pending record, not a pass failure.
+    let store_copy = crate::PendingSubject::KeyCopy {
+        audience: Audience::Store,
+        key: key(1),
+        member: b.member.member_id(),
+    };
+    let copy_reason = |records: Vec<crate::PendingRecord>| {
+        records
+            .into_iter()
+            .find(|record| record.subject == store_copy)
+            .map(|record| record.reason)
+    };
+    assert!(b.sync.step().await.unwrap().is_empty());
     assert!(matches!(
-        damages[0].failure,
-        Refusal::Decryption { cause: Some(_) }
+        copy_reason(b.db.pending().await.unwrap()),
+        Some(crate::PendingReason::Refused(Refusal::Decryption { .. }))
     ));
     assert!(b.log().await.entries.is_empty());
     storage.delete(&path).await.unwrap();
@@ -637,11 +648,21 @@ async fn far_future_entry_waits_for_missing_or_damaged_sealed_keys() {
         .unwrap();
         let wrong = prefix.encode_box(&wrong).unwrap();
         storage.create(&path, &wrong).await.unwrap();
-        let damages = b.sync.step().await.unwrap();
+        assert!(b.sync.step().await.unwrap().is_empty());
+        let reason = copy_reason(b.db.pending().await.unwrap());
         if claimed_key == key(1) {
-            assert!(matches!(damages[0].failure, Refusal::WrongIdentity { .. }));
+            assert!(matches!(
+                reason,
+                Some(crate::PendingReason::Refused(Refusal::WrongIdentity { .. }))
+            ));
         } else {
-            assert!(damages.is_empty());
+            assert_eq!(
+                reason,
+                Some(crate::PendingReason::KeyUnavailable {
+                    audience: Audience::Store,
+                    key: key(1),
+                })
+            );
         }
         assert!(b.custody.read().unwrap().is_none());
         storage.delete(&path).await.unwrap();
@@ -649,6 +670,7 @@ async fn far_future_entry_waits_for_missing_or_damaged_sealed_keys() {
     storage.create(&path, &original).await.unwrap();
     b.sync().await;
     assert_eq!(a.log().await, b.log().await);
+    assert_eq!(copy_reason(b.db.pending().await.unwrap()), None);
 }
 
 #[tokio::test]

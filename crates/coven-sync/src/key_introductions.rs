@@ -1,9 +1,9 @@
 //! Key provenance: authorized received introductions and their agreed
 //! commitments (§11, Appendix C12).
 
-use coven_crypto::StoreKeyring;
+use coven_crypto::{MemberId, StoreKeyring};
 use coven_database::StoreLog;
-use coven_format::{store_log::StoreChange, value::EntryId};
+use coven_format::{sealed_key::KeyCopyPrefix, store_log::StoreChange, value::EntryId};
 use coven_foundation::id_source::KeyId;
 use coven_merge::Audience;
 use std::collections::BTreeMap;
@@ -92,6 +92,30 @@ pub(crate) fn newest(log: &StoreLog, audience: &Audience) -> Option<KeyId> {
         .rev()
         .find(|i| &i.audience == audience && needed.contains_key(&(i.audience.clone(), i.key)))
         .map(|i| i.key)
+}
+
+/// What an opened sealed box names: its key's identity and the SHA-256 of the
+/// key bytes. Only the recipient can produce this.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Opened {
+    pub(crate) audience: Audience,
+    pub(crate) key: KeyId,
+    pub(crate) hash: [u8; 32],
+}
+
+/// Appendix C12 `acceptedCopy`: a copy addressed to `me` supplies its key only
+/// when the opened box names the prefix's key and its bytes match the one
+/// agreed commitment. Any other copy is refused by itself (§11).
+pub(crate) fn accepts_copy(
+    introductions: &[Introduction],
+    prefix: &KeyCopyPrefix,
+    me: &MemberId,
+    opened: &Opened,
+) -> bool {
+    prefix.member == *me
+        && opened.audience == prefix.audience
+        && opened.key == prefix.key
+        && hash_for(introductions, &prefix.audience, prefix.key) == Some(opened.hash)
 }
 
 /// Held material whose hash matches its agreed commitment.
