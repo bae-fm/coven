@@ -652,7 +652,7 @@ the file's ranges under `F`.
     `cf-copy-destination-if-none-match: *`); the native multipart timestamp
     (completion or start); the checksum policy (scope stated, unstated scope
     ignored, or none returned); listing V2 or V1; ETag or generation revision;
-    HEAD or zero-entry LIST bucket check; S3 or Google response headers; and
+    S3 or Google response headers; and
     whether reads request checksums. Each behavior is implemented once in the
     adapter; apps do not supply capability flags or service branches.
   - A location's profile is one of three: none, selecting by endpoint host; a
@@ -714,7 +714,7 @@ the file's ranges under `F`.
       time is later than its source's;
     - V2 against paginated V1 listing of the probe objects;
     - checksum mode, returned checksums and their scope, Google generation
-      and hash headers, and HEAD Bucket against a zero-entry listing.
+      and hash headers, and a zero-entry listing at a missing object's key.
   - Detection pauses only where elapsed time distinguishes outcomes. Times
     are whole-second `Last-Modified` values, so it waits 1 second after the
     marker written after initiation, then rewrites a marker, pausing 250 ms
@@ -737,9 +737,8 @@ the file's ranges under `F`.
     probe, unstated-scope ignoring when one arrived without its scope, and
     stated scope otherwise; checksum requests only when checksum mode is
     accepted and checksums do not arrive without it; generation revision and
-    Google headers when GCS's headers arrive; V2 when it agrees with V1; and
-    HEAD Bucket unless only the listing is permitted or the catalogued entry
-    uses the listing. Where no behavior holds, the setting keeps the plain
+    Google headers when GCS's headers arrive; and V2 when it agrees with V1.
+    Where no behavior holds, the setting keeps the plain
     S3 value and the setup check below names the failure.
   - **Every S3 setup checks safety against the server** before the provider
     check below, whatever selected its settings: detection runs, and the
@@ -760,7 +759,7 @@ the file's ranges under `F`.
       checksum policy where one was returned, stated scope where scope was
       missing, checksum requests the service refused, generation revision or
       Google headers without GCS's headers, S3 headers where GCS's arrived,
-      or a bucket check the service refused.
+      or a refused zero-entry listing at a missing object's key.
     A manual override contradicting the observations is refused this way and
     never silently accepted. Where no setting in the menu makes a check hold,
     no override can either: a server that accepts writes to an occupied
@@ -772,13 +771,13 @@ the file's ranges under `F`.
     **uncertified**: there is no live account. The table's selected behaviors
     are:
 
-    | Profile | Signing | Single PUT | Multipart publication | Native multipart time | Checksums | Listing | Revision | Bucket check |
-    | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-    | AWS (uncertified) | AWS SigV4 | `If-None-Match: *` | Copy with `If-None-Match: *` | Start | Scope stated | V2 | ETag | HEAD |
-    | GCS (certified) | Google HMAC | `x-goog-if-generation-match: 0` | Copy with the same generation condition | Completion | Scope stated | V2 | Generation | Zero-entry LIST |
-    | R2 (certified) | AWS SigV4 | `If-None-Match: *` | Conditional completion | Completion | Unstated scope ignored | V2 | ETag | HEAD |
-    | RustFS (certified) | AWS SigV4 | `If-None-Match: *` | Conditional completion | Completion | None returned | V2 | ETag | HEAD |
-    | SeaweedFS (certified) | AWS SigV4 | `If-None-Match: *` | Conditional completion | Completion | None returned | V2 | ETag | HEAD |
+    | Profile | Signing | Single PUT | Multipart publication | Native multipart time | Checksums | Listing | Revision |
+    | --- | --- | --- | --- | --- | --- | --- | --- |
+    | AWS (uncertified) | AWS SigV4 | `If-None-Match: *` | Copy with `If-None-Match: *` | Start | Scope stated | V2 | ETag |
+    | GCS (certified) | Google HMAC | `x-goog-if-generation-match: 0` | Copy with the same generation condition | Completion | Scope stated | V2 | Generation |
+    | R2 (certified) | AWS SigV4 | `If-None-Match: *` | Conditional completion | Completion | Unstated scope ignored | V2 | ETag |
+    | RustFS (certified) | AWS SigV4 | `If-None-Match: *` | Conditional completion | Completion | None returned | V2 | ETag |
+    | SeaweedFS (certified) | AWS SigV4 | `If-None-Match: *` | Conditional completion | Completion | None returned | V2 | ETag |
 
     AWS and R2 request checksums; every profile but GCS consumes S3
     response headers. RustFS and SeaweedFS are not asked for checksums they
@@ -1028,9 +1027,13 @@ the file's ranges under `F`.
 
   File status and upload confirmation use this call, not a folder listing.
   Count any name lookup and missing-container check separately. S3 HEAD's
-  bodyless 404 requires a bucket check: HEAD Bucket on AWS and R2, a zero-entry
-  ListObjectsV2 on GCS (whose HEAD Bucket requires additional bucket-metadata
-  permission). Object absence comes from the exact HEAD, never from that listing.
+  bodyless 404 requires a bucket check: every S3 service uses a zero-entry
+  listing with the exact object's key as its prefix, under the configured
+  prefix and store id. Catalogued profiles use ListObjectsV2; a custom V1
+  profile uses ListObjects. A member key is scoped to the store's prefix;
+  HEAD Bucket requires bucket-list permission without a prefix condition,
+  which that key does not grant. Object absence comes from the exact HEAD,
+  never from the listing. A miss remains two requests: one HEAD and one listing.
   A revision proves freshness, not byte
   equality: occupied immutable paths still require §10's complete comparison.
   Snapshot confirmation still checks the complete-object checksum (§15).

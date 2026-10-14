@@ -1632,8 +1632,6 @@ pub struct S3Settings {
     pub listing: S3Listing,
     /// Where a replaceable object's revision comes from.
     pub revision: S3Revision,
-    /// How a bodyless HEAD 404 is told apart from a missing bucket.
-    pub bucket_check: S3BucketCheck,
     pub response_headers: S3ResponseHeaders,
     /// Whether HEAD and GET request checksum mode.
     pub request_checksums: bool,
@@ -1663,8 +1661,6 @@ pub enum S3Checksums {
 pub enum S3Listing { V2, V1 }
 /// ETag uses native versions or `coven-revision` metadata for replacements.
 pub enum S3Revision { ETag, Generation }
-/// HEAD Bucket, or a zero-entry listing.
-pub enum S3BucketCheck { Head, List }
 pub enum S3ResponseHeaders { S3, Google }
 
 /// What detection observed at one location (§4).
@@ -1725,9 +1721,8 @@ pub enum S3Probe {
     GoogleGeneration,
     /// GCS's `x-goog-hash` or generation arrived.
     GoogleHeaders,
-    /// HEAD Bucket is accepted.
-    BucketHead,
-    /// A zero-entry listing is accepted.
+    /// A zero-entry listing at a missing object's key is accepted; status
+    /// uses it to tell a missing bucket from a missing object.
     BucketList,
 }
 

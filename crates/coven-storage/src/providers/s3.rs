@@ -356,29 +356,18 @@ impl ProviderOps for S3Storage {
             Ok(response) => Ok(Some(metadata::head(self, path, &response)?)),
             Err(error) if error.failure() == StorageFailure::NotFound => {
                 // HEAD's 404 has no body: distinguish the object from its bucket.
-                // GCS HEAD Bucket requires bucket-metadata permission beyond the
-                // object access Coven uses. A zero-entry listing checks the bucket
-                // using the existing object-list permission, not object absence.
-                match self.settings.bucket_check {
-                    S3BucketCheck::List => self
-                        .list_page(
-                            self.settings.listing,
-                            &path.under(&self.prefix),
-                            None,
-                            None,
-                            Some(0),
-                        )
-                        .await
-                        .map(|_| ()),
-                    S3BucketCheck::Head => self
-                        .client
-                        .head_bucket()
-                        .bucket(&self.bucket)
-                        .send()
-                        .await
-                        .map(|_| ())
-                        .map_err(s3_error),
-                }
+                // A member key's list permission is scoped to this store's prefix;
+                // HEAD Bucket sends no prefix and needs an unconditioned grant.
+                // The zero-entry listing checks the bucket. Object absence comes
+                // from the exact HEAD, never from the listing.
+                self.list_page(
+                    self.settings.listing,
+                    &path.under(&self.prefix),
+                    None,
+                    None,
+                    Some(0),
+                )
+                .await
                 .map_err(super::http::container_error)?;
                 Ok(None)
             }

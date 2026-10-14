@@ -928,7 +928,6 @@ pub const DETECTED_S3_SETTINGS: S3Settings = S3Settings {
     checksums: S3Checksums::Absent,
     listing: S3Listing::V2,
     revision: S3Revision::ETag,
-    bucket_check: S3BucketCheck::Head,
     response_headers: S3ResponseHeaders::S3,
     request_checksums: false,
 };
@@ -965,13 +964,7 @@ pub fn conforming_detection(settings: S3Settings) -> S3Detection {
             S3Probe::GoogleHeaders,
             settings.response_headers == S3ResponseHeaders::Google,
         ),
-        (
-            match settings.bucket_check {
-                S3BucketCheck::Head => S3Probe::BucketHead,
-                S3BucketCheck::List => S3Probe::BucketList,
-            },
-            true,
-        ),
+        (S3Probe::BucketList, true),
     ]
     .into_iter()
     .chain(match settings.multipart {

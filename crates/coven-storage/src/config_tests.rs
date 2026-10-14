@@ -56,7 +56,6 @@ fn catalogued_hosts_require_https_and_their_own_profile_name() {
         checksums: S3Checksums::Absent,
         listing: S3Listing::V1,
         revision: S3Revision::ETag,
-        bucket_check: S3BucketCheck::Head,
         response_headers: S3ResponseHeaders::S3,
         request_checksums: false,
     }));

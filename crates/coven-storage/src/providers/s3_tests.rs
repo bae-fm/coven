@@ -24,6 +24,9 @@ struct PendingUpload {
 #[derive(Default)]
 struct Remote {
     gcs: bool,
+    allowed_prefix: Option<String>,
+    bucket_error: Option<(&'static str, u16)>,
+    requests: Vec<(Method, Uri)>,
     response_headers: BTreeMap<String, String>,
     fail_copy_reply: bool,
     refuse_copy: bool,
@@ -62,6 +65,7 @@ fn respond(
     body: Bytes,
 ) -> Response<Body> {
     let mut state = state.lock().unwrap();
+    state.requests.push((method.clone(), uri.clone()));
     if state.gcs {
         assert!(headers["authorization"]
             .to_str()
@@ -77,10 +81,29 @@ fn respond(
             format!("<Error><Code>{code}</Code><Message>credential-echo</Message></Error>"),
         );
     }
+    // A member key's list grant carries a prefix condition, which refuses
+    // HEAD Bucket; no adapter call may need it.
     if method == Method::HEAD && uri.path() == "/bucket/" {
-        return response(if state.gcs { 403 } else { 200 }, Vec::new());
+        return response(403, Vec::new());
     }
     let q = query(&uri);
+    if method == Method::GET && uri.path() == "/bucket/" {
+        if state.allowed_prefix.as_ref().is_some_and(|allowed| {
+            !q.get("prefix")
+                .is_some_and(|prefix| prefix.starts_with(allowed))
+        }) {
+            return response(403, "<Error><Code>AccessDenied</Code></Error>");
+        }
+        if let Some((code, status)) = state.bucket_error {
+            return response(status, format!("<Error><Code>{code}</Code></Error>"));
+        }
+        if q.get("max-keys").is_some_and(|value| value == "0") {
+            return response(
+                200,
+                "<ListBucketResult><IsTruncated>false</IsTruncated></ListBucketResult>",
+            );
+        }
+    }
     let key = uri.path().strip_prefix("/bucket/").unwrap_or("").to_owned();
     if q.contains_key("uploads") {
         let token = headers[if state.gcs {

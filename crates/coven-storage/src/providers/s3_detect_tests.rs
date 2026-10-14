@@ -35,7 +35,6 @@ struct Service {
     checksum: Checksum,
     generation: bool,
     v2: bool,
-    bucket_head: bool,
 }
 const AWS: Service = Service {
     signers: &[S3Signing::AwsSigV4],
@@ -47,7 +46,6 @@ const AWS: Service = Service {
     checksum: Checksum::Scoped,
     generation: false,
     v2: true,
-    bucket_head: true,
 };
 const GCS: Service = Service {
     signers: &[S3Signing::GoogleHmac, S3Signing::AwsSigV4],
@@ -57,7 +55,6 @@ const GCS: Service = Service {
     copy: Some(S3CopyCondition::GenerationMatch),
     checksum: Checksum::GoogleHash,
     generation: true,
-    bucket_head: false,
     ..AWS
 };
 const R2: Service = Service {
@@ -100,6 +97,9 @@ struct Remote {
     written: Vec<String>,
     next: u64,
     fail_copies: bool,
+    /// The status a V2 listing with `max-keys=0` answers instead of a page.
+    empty_v2_listing: Option<u16>,
+    bucket_heads: usize,
 }
 
 fn now() -> u64 {
@@ -154,8 +154,10 @@ async fn serve(
         .to_owned();
     if key.is_empty() {
         return match method {
-            Method::HEAD if service.bucket_head => response(200, Vec::new()),
-            Method::HEAD => response(403, Vec::new()),
+            Method::HEAD => {
+                state.bucket_heads += 1;
+                response(403, Vec::new())
+            }
             _ => list(&state, &q),
         };
     }
@@ -311,7 +313,20 @@ fn list(state: &Remote, q: &BTreeMap<String, String>) -> Response<Body> {
     if v2 && !state.service.v2 {
         return error(501, "NotImplemented");
     }
+    if let Some(status) = state.empty_v2_listing {
+        if v2 && q.get("max-keys").is_some_and(|value| value == "0") {
+            let code = if status == 501 {
+                "NotImplemented"
+            } else {
+                "ServiceUnavailable"
+            };
+            return error(status, code);
+        }
+    }
     let prefix = q.get("prefix").map(String::as_str).unwrap_or("");
+    if !prefix.starts_with(&format!("store/{STORE}/")) {
+        return error(403, "AccessDenied");
+    }
     let after = q.get(if v2 { "continuation-token" } else { "marker" });
     let limit: usize = q
         .get("max-keys")
@@ -367,6 +382,8 @@ impl Fixture {
             written: Vec::new(),
             next: 0,
             fail_copies: false,
+            empty_v2_listing: None,
+            bucket_heads: 0,
         }));
         let server = TestServer::new(Router::new().fallback(serve).with_state(state.clone())).await;
         Self { state, server }
@@ -395,6 +412,10 @@ impl Fixture {
         let state = self.state.lock().unwrap();
         assert!(state.objects.is_empty(), "probe objects remain");
         assert!(state.uploads.is_empty(), "probe uploads remain");
+        assert_eq!(
+            state.bucket_heads, 0,
+            "detection uses only prefix-scoped access"
+        );
         let namespace = format!("store/{STORE}/.coven-check/");
         let runs: std::collections::BTreeSet<_> = state
             .written
@@ -570,6 +591,25 @@ async fn a_visible_unfinished_upload_rules_out_conditional_completion() {
         StorageCheck::MultipartCreateOnce
     );
     fixture.assert_clean();
+}
+
+#[tokio::test]
+async fn a_refused_zero_entry_listing_fails_the_behavior_check_and_an_outage_fails_detection() {
+    let fixture = Fixture::new(RUSTFS).await;
+    fixture.state.lock().unwrap().empty_v2_listing = Some(501);
+    let detection = fixture.detect(None).await.unwrap();
+    assert!(!detection.held(S3Probe::BucketList));
+    assert!(detection.held(S3Probe::Listing(S3Listing::V2)));
+    assert_eq!(
+        refused_check(detection.resolve(fixture.location(None))),
+        StorageCheck::Behavior
+    );
+    fixture.assert_clean();
+    fixture.state.lock().unwrap().empty_v2_listing = Some(503);
+    let error = fixture.detect(None).await.unwrap_err();
+    assert_eq!(error.failure(), StorageFailure::Network);
+    let state = fixture.state.lock().unwrap();
+    assert!(state.objects.is_empty() && state.uploads.is_empty());
 }
 
 #[tokio::test]

@@ -10,7 +10,6 @@ const SERVICE: S3Settings = S3Settings {
     checksums: S3Checksums::Absent,
     listing: S3Listing::V2,
     revision: S3Revision::ETag,
-    bucket_check: S3BucketCheck::Head,
     response_headers: S3ResponseHeaders::S3,
     request_checksums: false,
 };
@@ -41,6 +40,23 @@ fn derivation_keeps_each_held_behavior_and_conforming_settings_pass() {
     let derived = S3Detection::derive(detection.observations.clone(), SERVICE);
     assert_eq!(derived.settings, SERVICE);
     derived.check(&SERVICE).unwrap();
+}
+
+#[test]
+fn setup_requires_the_prefix_scoped_bucket_listing() {
+    let mut detection = conforming_detection(SERVICE);
+    detection
+        .observations
+        .retain(|observation| observation.probe != S3Probe::BucketList);
+    assert_eq!(failed(detection.check(&SERVICE)), StorageCheck::Behavior);
+    detection.observations.push(S3Observation {
+        probe: S3Probe::BucketList,
+        held: false,
+        detail: "PermissionDenied HTTP 403".into(),
+    });
+    assert_eq!(failed(detection.check(&SERVICE)), StorageCheck::Behavior);
+    detection.observations.last_mut().unwrap().held = true;
+    detection.check(&SERVICE).unwrap();
 }
 
 #[test]
@@ -89,13 +105,6 @@ fn checks_run_in_order_and_name_the_first_failure() {
         (
             S3Settings {
                 revision: S3Revision::Generation,
-                ..SERVICE
-            },
-            StorageCheck::Behavior,
-        ),
-        (
-            S3Settings {
-                bucket_check: S3BucketCheck::List,
                 ..SERVICE
             },
             StorageCheck::Behavior,

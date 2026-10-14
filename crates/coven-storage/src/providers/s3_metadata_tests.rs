@@ -148,6 +148,85 @@ async fn exact_status_distinguishes_absence_from_failed_lookup_and_missing_bucke
 }
 
 #[tokio::test]
+async fn every_profile_checks_missing_objects_with_a_prefix_scoped_listing() {
+    let path = ObjectPath::store_log(
+        STORE_ID,
+        coven_foundation::id_source::DeviceId(31),
+        std::num::NonZeroU64::MIN,
+    );
+    let settings = profile::PROFILES
+        .iter()
+        .map(|profile| profile.settings)
+        .chain([S3Settings {
+            listing: S3Listing::V1,
+            ..profile::PLAIN
+        }]);
+    for settings in settings {
+        let state = Arc::new(Mutex::new(Remote {
+            gcs: settings.signing == S3Signing::GoogleHmac,
+            allowed_prefix: Some(ObjectPrefix::all(STORE_ID).under("store")),
+            ..Remote::default()
+        }));
+        let server =
+            TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
+        let storage = super::profile_tests::profile_provider(&server.url, settings);
+        for (bucket_error, expected) in [
+            (None, None),
+            (
+                Some(("NoSuchBucket", 404)),
+                Some(StorageFailure::ContainerNotFound),
+            ),
+            (
+                Some(("AccessDenied", 403)),
+                Some(StorageFailure::PermissionDenied),
+            ),
+            (
+                Some(("ServiceUnavailable", 503)),
+                Some(StorageFailure::Network),
+            ),
+        ] {
+            state.lock().unwrap().bucket_error = bucket_error;
+            state.lock().unwrap().requests.clear();
+            let result = storage.status(&path).await;
+            match expected {
+                None => assert_eq!(result.unwrap(), None, "{settings:?}"),
+                Some(expected) => {
+                    let error = result.unwrap_err();
+                    assert_eq!(error.failure(), expected, "{settings:?}");
+                    assert!(std::error::Error::source(&error).is_some());
+                }
+            }
+            let requests = &state.lock().unwrap().requests;
+            assert_eq!(requests.len(), 2, "one exact HEAD and one bucket listing");
+            assert_eq!(requests[0].0, Method::HEAD);
+            assert_eq!(
+                requests[0].1.path(),
+                format!("/bucket/{}", path.under("store"))
+            );
+            assert_eq!(requests[1].0, Method::GET);
+            assert_eq!(requests[1].1.path(), "/bucket/");
+            let q = query(&requests[1].1);
+            assert_eq!(q["prefix"], path.under("store"));
+            assert_eq!(q["max-keys"], "0");
+            assert_eq!(
+                q.get("list-type").map(String::as_str),
+                match settings.listing {
+                    S3Listing::V2 => Some("2"),
+                    S3Listing::V1 => None,
+                }
+            );
+        }
+        state.lock().unwrap().bucket_error = None;
+        storage.create(&path, b"published").await.unwrap();
+        state.lock().unwrap().requests.clear();
+        assert!(storage.status(&path).await.unwrap().is_some());
+        let requests = &state.lock().unwrap().requests;
+        assert_eq!(requests.len(), 1, "a present object needs only exact HEAD");
+        assert_eq!(requests[0].0, Method::HEAD);
+    }
+}
+
+#[tokio::test]
 async fn gcs_generation_changes_for_equal_bytes_and_hash_has_full_object_scope() {
     let state = Arc::new(Mutex::new(Remote {
         gcs: true,

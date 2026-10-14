@@ -38,13 +38,12 @@ fn restore_storage_is_exactly_the_location_for_every_provider() {
                     checksums: crate::S3Checksums::Absent,
                     listing: crate::S3Listing::V1,
                     revision: crate::S3Revision::ETag,
-                    bucket_check: crate::S3BucketCheck::List,
                     response_headers: crate::S3ResponseHeaders::S3,
                     request_checksums: false,
                 })),
                 prefix: "store".into(),
             },
-            r#"{"S3":{"bucket":"bucket","region":"region","endpoint":"http://localhost:9000/","profile":{"Custom":{"signing":"AwsSigV4","single_put":"IfNoneMatch","multipart":{"Copy":"CloudflareIfNoneMatch"},"multipart_timestamp":"Start","checksums":"Absent","listing":"V1","revision":"ETag","bucket_check":"List","response_headers":"S3","request_checksums":false}},"prefix":"store"}}"#,
+            r#"{"S3":{"bucket":"bucket","region":"region","endpoint":"http://localhost:9000/","profile":{"Custom":{"signing":"AwsSigV4","single_put":"IfNoneMatch","multipart":{"Copy":"CloudflareIfNoneMatch"},"multipart_timestamp":"Start","checksums":"Absent","listing":"V1","revision":"ETag","response_headers":"S3","request_checksums":false}},"prefix":"store"}}"#,
         ),
         (
             StorageConfig::GoogleDrive {

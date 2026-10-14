@@ -45,8 +45,6 @@ pub struct S3Settings {
     pub listing: S3Listing,
     /// Where a replaceable object's revision comes from.
     pub revision: S3Revision,
-    /// How a bodyless HEAD 404 is told apart from a missing bucket.
-    pub bucket_check: S3BucketCheck,
     /// Which response headers carry metadata, generation and hashes.
     pub response_headers: S3ResponseHeaders,
     /// Whether HEAD and GET request checksum mode.
@@ -127,15 +125,6 @@ pub enum S3Revision {
     ETag,
     /// GCS's `x-goog-generation`.
     Generation,
-}
-
-/// How a bodyless HEAD 404 is told apart from a missing bucket.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum S3BucketCheck {
-    /// HEAD Bucket.
-    Head,
-    /// A zero-entry listing, using only object-list permission.
-    List,
 }
 
 /// Which response headers carry metadata, generation and hashes.

@@ -17,6 +17,10 @@ Account endpoints, keys and object names are omitted. `list_end_s` measures
 elapsed time from the successful upload reply through the listing response;
 these samples do not establish the one-hour completeness bound. Every case's
 cleanup passed after deleting its objects and aborting its remaining uploads.
+The bucket-check setting was removed after these runs: every profile tells a
+missing bucket by a zero-entry listing at the missing object's key (§4). Its
+`selected=` and `bucket_check` values are omitted below; the HEAD Bucket
+observations are kept as recorded.
 
 ## GCS
 
@@ -34,8 +38,8 @@ native copy header=x-goog-if-generation-match empty=accepted taken=AlreadyExists
 native copy header=cf-copy-destination-if-none-match empty=accepted taken=accepted preserved=false later_than_source=true
 native listing=V2 objects=8 pages_forced_at=1
 native checksum_mode=accepted
-native bucket_head=accepted bucket_list=accepted selected=List
-native checksum_present=true checksum_scope=ScopeStated revision=Generation response_headers=Google bucket_check=List
+native bucket_head=accepted bucket_list=accepted
+native checksum_present=true checksum_scope=ScopeStated revision=Generation response_headers=Google
 §4 native_behavior_detection PASS cleanup=PASS
 §4 create_once_single_put PASS cleanup=PASS
 §4 whole_object_reads PASS cleanup=PASS
@@ -136,8 +140,8 @@ native multipart_timestamp=Completion start_before=SystemTime { tv_sec: 17919024
 native conditional_completion taken=AlreadyExists HTTP 412 preserved=true enforced=true
 native listing=V2 objects=5 pages_forced_at=1
 native checksum_mode=accepted
-native bucket_head=accepted bucket_list=accepted selected=Head
-native checksum_present=true checksum_scope=UnstatedIgnored revision=ETag response_headers=S3 bucket_check=Head
+native bucket_head=accepted bucket_list=accepted
+native checksum_present=true checksum_scope=UnstatedIgnored revision=ETag response_headers=S3
 §4 native_behavior_detection PASS cleanup=PASS
 §4 create_once_single_put PASS cleanup=PASS
 §4 whole_object_reads PASS cleanup=PASS
@@ -255,8 +259,8 @@ native multipart_timestamp=Completion start_before=SystemTime { tv_sec: 17919183
 native conditional_completion taken=AlreadyExists HTTP 412 preserved=true enforced=true
 native listing=V2 objects=5 pages_forced_at=1
 native checksum_mode=accepted
-native bucket_head=accepted bucket_list=accepted selected=Head
-native checksum_present=false checksum_scope=Absent revision=ETag response_headers=S3 bucket_check=Head
+native bucket_head=accepted bucket_list=accepted
+native checksum_present=false checksum_scope=Absent revision=ETag response_headers=S3
 §4 native_behavior_detection PASS cleanup=PASS
 §4 create_once_single_put PASS cleanup=PASS
 §4 whole_object_reads PASS cleanup=PASS
@@ -350,7 +354,6 @@ S3Profile {
     checksums: Checksums::Absent,
     listing: Listing::V2,
     revision: Revision::ETag,
-    bucket_check: BucketCheck::Head,
     response_headers: ResponseHeaders::S3,
     request_checksums: false,
     certification: Certification::Passed { date: "2026-10-13", suite: 2 },
@@ -378,8 +381,8 @@ native multipart_timestamp=Completion start_before=SystemTime { tv_sec: 17919183
 native conditional_completion taken=AlreadyExists HTTP 412 preserved=true enforced=true
 native listing=V2 objects=5 pages_forced_at=1
 native checksum_mode=accepted
-native bucket_head=accepted bucket_list=accepted selected=Head
-native checksum_present=false checksum_scope=Absent revision=ETag response_headers=S3 bucket_check=Head
+native bucket_head=accepted bucket_list=accepted
+native checksum_present=false checksum_scope=Absent revision=ETag response_headers=S3
 §4 native_behavior_detection PASS cleanup=PASS
 §4 create_once_single_put PASS cleanup=PASS
 §4 whole_object_reads PASS cleanup=PASS
@@ -473,7 +476,6 @@ S3Profile {
     checksums: Checksums::Absent,
     listing: Listing::V2,
     revision: Revision::ETag,
-    bucket_check: BucketCheck::Head,
     response_headers: ResponseHeaders::S3,
     request_checksums: false,
     certification: Certification::Passed { date: "2026-10-13", suite: 2 },
@@ -515,7 +517,7 @@ detect BucketHead held=true accepted
 detect BucketList held=true accepted
 detect Listing(V1) held=true objects=10 pages_forced_at=1
 detect Listing(V2) held=true objects=10 pages_forced_at=1 agrees_with_v1=true
-detected S3Settings { signing: GoogleHmac, single_put: GenerationMatch, multipart: Copy(GenerationMatch), multipart_timestamp: Completion, checksums: ScopeStated, listing: V2, revision: Generation, bucket_check: List, response_headers: Google, request_checksums: false }
+detected S3Settings { signing: GoogleHmac, single_put: GenerationMatch, multipart: Copy(GenerationMatch), multipart_timestamp: Completion, checksums: ScopeStated, listing: V2, revision: Generation, response_headers: Google, request_checksums: false }
 setup_safety_check PASS
 catalogued entries reproduced: [Gcs]
 ```
@@ -544,7 +546,7 @@ detect BucketHead held=true accepted
 detect BucketList held=true accepted
 detect Listing(V1) held=true objects=10 pages_forced_at=1
 detect Listing(V2) held=true objects=10 pages_forced_at=1 agrees_with_v1=true
-detected S3Settings { signing: AwsSigV4, single_put: IfNoneMatch, multipart: ConditionalCompletion, multipart_timestamp: Completion, checksums: UnstatedIgnored, listing: V2, revision: ETag, bucket_check: Head, response_headers: S3, request_checksums: true }
+detected S3Settings { signing: AwsSigV4, single_put: IfNoneMatch, multipart: ConditionalCompletion, multipart_timestamp: Completion, checksums: UnstatedIgnored, listing: V2, revision: ETag, response_headers: S3, request_checksums: true }
 setup_safety_check PASS
 catalogued entries reproduced: [R2]
 ```
@@ -573,7 +575,7 @@ detect BucketHead held=true accepted
 detect BucketList held=true accepted
 detect Listing(V1) held=true objects=10 pages_forced_at=1
 detect Listing(V2) held=true objects=10 pages_forced_at=1 agrees_with_v1=true
-detected S3Settings { signing: AwsSigV4, single_put: IfNoneMatch, multipart: ConditionalCompletion, multipart_timestamp: Completion, checksums: Absent, listing: V2, revision: ETag, bucket_check: Head, response_headers: S3, request_checksums: false }
+detected S3Settings { signing: AwsSigV4, single_put: IfNoneMatch, multipart: ConditionalCompletion, multipart_timestamp: Completion, checksums: Absent, listing: V2, revision: ETag, response_headers: S3, request_checksums: false }
 setup_safety_check PASS
 catalogued entries reproduced: [RustFs, SeaweedFs]
 ```
@@ -602,7 +604,7 @@ detect BucketHead held=true accepted
 detect BucketList held=true accepted
 detect Listing(V1) held=true objects=10 pages_forced_at=1
 detect Listing(V2) held=true objects=10 pages_forced_at=1 agrees_with_v1=true
-detected S3Settings { signing: AwsSigV4, single_put: IfNoneMatch, multipart: ConditionalCompletion, multipart_timestamp: Completion, checksums: Absent, listing: V2, revision: ETag, bucket_check: Head, response_headers: S3, request_checksums: false }
+detected S3Settings { signing: AwsSigV4, single_put: IfNoneMatch, multipart: ConditionalCompletion, multipart_timestamp: Completion, checksums: Absent, listing: V2, revision: ETag, response_headers: S3, request_checksums: false }
 setup_safety_check PASS
 catalogued entries reproduced: [RustFs, SeaweedFs]
 ```

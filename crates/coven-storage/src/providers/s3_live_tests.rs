@@ -92,7 +92,6 @@ fn differences(entry: &S3Settings, detected: &S3Settings) -> String {
         checksums,
         listing,
         revision,
-        bucket_check,
         response_headers,
         request_checksums
     );

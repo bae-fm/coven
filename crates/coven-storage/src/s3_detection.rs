@@ -2,9 +2,9 @@
 //! safety check of effective settings against it (§4). The probes themselves
 //! run in the adapter; this is the pure decision over their observations.
 use crate::{
-    S3BucketCheck, S3Checksums, S3CopyCondition, S3Listing, S3Multipart, S3MultipartTimestamp,
-    S3Profile, S3ResponseHeaders, S3Revision, S3Settings, S3Signing, S3SinglePut, StorageCheck,
-    StorageConfig, StorageFailure, StorageSetupError,
+    S3Checksums, S3CopyCondition, S3Listing, S3Multipart, S3MultipartTimestamp, S3Profile,
+    S3ResponseHeaders, S3Revision, S3Settings, S3Signing, S3SinglePut, StorageCheck, StorageConfig,
+    StorageFailure, StorageSetupError,
 };
 
 /// What detection observed at one location (§4).
@@ -58,9 +58,8 @@ pub enum S3Probe {
     GoogleGeneration,
     /// GCS's `x-goog-hash` or generation arrived.
     GoogleHeaders,
-    /// HEAD Bucket is accepted.
-    BucketHead,
-    /// A zero-entry listing is accepted.
+    /// A zero-entry listing at a missing object's key is accepted; status
+    /// uses it to tell a missing bucket from a missing object.
     BucketList,
 }
 
@@ -76,8 +75,7 @@ pub(crate) const COPY_CONDITIONS: [S3CopyCondition; 3] = [
 
 impl S3Detection {
     /// Derive settings from observations. Where no behavior holds, `plain`'s
-    /// value stays and [`Self::check`] names the failure. `plain`'s bucket
-    /// check is kept when both bucket checks are permitted.
+    /// value stays and [`Self::check`] names the failure.
     pub(crate) fn derive(observations: Vec<S3Observation>, plain: S3Settings) -> Self {
         let detection = Self {
             settings: plain,
@@ -135,13 +133,6 @@ impl S3Detection {
             S3ResponseHeaders::Google
         } else {
             S3ResponseHeaders::S3
-        };
-        // Keep a least-permission listing check when both work; extra bucket
-        // privileges do not prove they are required.
-        settings.bucket_check = match (held(S3Probe::BucketHead), held(S3Probe::BucketList)) {
-            (true, true) => plain.bucket_check,
-            (false, true) => S3BucketCheck::List,
-            _ => S3BucketCheck::Head,
         };
         Self {
             settings,
@@ -237,11 +228,8 @@ impl S3Detection {
                 "the response-header setting contradicts the headers returned",
             ),
             (
-                held(match settings.bucket_check {
-                    S3BucketCheck::Head => S3Probe::BucketHead,
-                    S3BucketCheck::List => S3Probe::BucketList,
-                }),
-                "the service refused this bucket check",
+                held(S3Probe::BucketList),
+                "the service refused the zero-entry bucket listing",
             ),
         ];
         match behavior.into_iter().find(|(agrees, _)| !agrees) {

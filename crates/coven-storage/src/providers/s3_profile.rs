@@ -7,9 +7,9 @@
 //! entry stays uncertified. Commit either with the evidence. A location that
 //! names no profile at an uncatalogued endpoint gets detected settings at setup.
 use crate::{
-    S3BucketCheck, S3Checksums, S3CopyCondition, S3Listing, S3Multipart, S3MultipartTimestamp,
-    S3Profile, S3ProfileName, S3ResponseHeaders, S3Revision, S3Settings, S3Signing, S3SinglePut,
-    StorageError, StorageFailure,
+    S3Checksums, S3CopyCondition, S3Listing, S3Multipart, S3MultipartTimestamp, S3Profile,
+    S3ProfileName, S3ResponseHeaders, S3Revision, S3Settings, S3Signing, S3SinglePut, StorageError,
+    StorageFailure,
 };
 use url::Url;
 
@@ -75,7 +75,6 @@ pub(super) const PLAIN: S3Settings = S3Settings {
     checksums: S3Checksums::ScopeStated,
     listing: S3Listing::V2,
     revision: S3Revision::ETag,
-    bucket_check: S3BucketCheck::Head,
     response_headers: S3ResponseHeaders::S3,
     request_checksums: true,
 };
@@ -104,7 +103,6 @@ const GCS: CataloguedProfile = CataloguedProfile {
         checksums: S3Checksums::ScopeStated,
         listing: S3Listing::V2,
         revision: S3Revision::Generation,
-        bucket_check: S3BucketCheck::List,
         response_headers: S3ResponseHeaders::Google,
         request_checksums: false,
     },

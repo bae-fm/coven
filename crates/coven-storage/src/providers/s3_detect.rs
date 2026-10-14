@@ -195,7 +195,7 @@ impl Probes<'_> {
         self.put(&checksum, b"checksum observation", None).await?;
         let multipart = self.key("multipart");
         headers::observe(self, &[checksum, multipart]).await?;
-        self.bucket_checks(listing).await?;
+        self.bucket_check(listing).await?;
         self.listings(v2_accepted).await
     }
 
@@ -377,27 +377,20 @@ impl Probes<'_> {
         Ok(())
     }
 
-    /// As status does after a bodyless 404: HEAD Bucket, or a zero-entry
-    /// listing at the missing object's key.
-    async fn bucket_checks(&mut self, listing: S3Listing) -> Result<(), StorageError> {
-        let head = self
-            .s
-            .client
-            .head_bucket()
-            .bucket(&self.s.bucket)
-            .send()
-            .await
-            .map_err(s3_error);
+    /// As status does after a bodyless 404: a zero-entry listing at a missing
+    /// object's key, inside the store's prefix. A refused listing is observed
+    /// for the setup check; any other failure stops detection.
+    async fn bucket_check(&mut self, listing: S3Listing) -> Result<(), StorageError> {
         let list = self
             .s
             .list_page(listing, &self.key("absent"), None, None, Some(0))
             .await;
-        // Neither check permitted: status could never tell absence apart.
-        if head.is_err() && list.is_err() {
-            return head.map(|_| ());
+        let detail = outcome(&list);
+        match list {
+            Ok(_) => self.observe(S3Probe::BucketList, true, detail),
+            Err(error) if unsupported(&error) => self.observe(S3Probe::BucketList, false, detail),
+            Err(error) => return Err(error),
         }
-        self.observe(S3Probe::BucketHead, head.is_ok(), outcome(&head));
-        self.observe(S3Probe::BucketList, list.is_ok(), outcome(&list));
         Ok(())
     }
 
