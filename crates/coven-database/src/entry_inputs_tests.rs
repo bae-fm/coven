@@ -5,7 +5,11 @@ use crate::test_utils::tests::{column_id, insert, run_lean, tables, SCHEMA};
 use crate::tests::TestStore;
 use crate::{Boundary, BoundaryCoverage, EntryId, PendingValue, SnapshotReload, StoreVersion};
 use coven_format::{
-    loss::LossCause, store_log::SnapshotId, value::WritePositions, write::WriteRecord,
+    loss::LossCause,
+    store_log::SnapshotId,
+    value::WritePositions,
+    write::WriteRecord,
+    write_sources::{CellSource, ChangeId, WriteSources},
 };
 use coven_foundation::id_source::{DeviceId, SequentialIds};
 use coven_merge::{Audience, Operation};
@@ -19,6 +23,7 @@ fn writes() -> Vec<WriteRecord> {
         writes[n].header.had_read = WritePositions(vec![writes[parent].header.position]);
         if n >= 4 {
             let original = writes[1].parts[0].rows[0].clone();
+            let original_write = writes[1].header.position;
             let row = &mut writes[n].parts[0].rows[0];
             row.row = original.row;
             row.change.generation = 1;
@@ -31,6 +36,21 @@ fn writes() -> Vec<WriteRecord> {
                 unreachable!()
             };
             row.old = BTreeMap::from([("a".into(), original["a"].value.clone())]);
+            // Write 1's insert established generation 1 and set `a` (Appendix D).
+            let source = ChangeId {
+                write: original_write,
+                row: row.row.clone(),
+            };
+            row.sources = WriteSources {
+                generation: Some(source.clone()),
+                setters: BTreeMap::from([(
+                    "a".into(),
+                    CellSource {
+                        change: source,
+                        column: "a".into(),
+                    },
+                )]),
+            };
         }
     }
     writes
