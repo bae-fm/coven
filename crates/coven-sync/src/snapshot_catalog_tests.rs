@@ -740,42 +740,6 @@ async fn a_late_landing_is_ignored_even_when_it_covers_more_writes() {
     );
 }
 
-#[tokio::test]
-async fn newer_schema_snapshot_is_passed_over_for_an_older_supported_one() {
-    let storage = snapshot_storage();
-    let mut a = notes_device(storage.clone(), 1).await;
-    a.create(key(1)).await;
-    let mut b = notes_device(storage.clone(), 2).await;
-    add_device(&mut b).await;
-    a.sync().await;
-    write_rows(&a, 0, 1, 17, Audience::Store).await;
-    b.db.apply_downloaded(a.db.test_queued_writes().await.unwrap().remove(0).into())
-        .await
-        .unwrap();
-    upload(&a, &storage).await;
-    let supported = b.sync.write_snapshot(Audience::Store).await.unwrap();
-    write_rows(&a, 1, 1, 17, Audience::Store).await;
-    upload(&a, &storage).await;
-    let mut migrations = notes_migrations();
-    migrations.push(Migration::sql(
-        2,
-        "addition",
-        "ALTER TABLE notes ADD COLUMN added TEXT",
-    ));
-    a.reopen(storage.clone(), notes_tables(), migrations).await;
-    if !a.send.can_send() {
-        a.catch_up().await;
-    }
-    a.sync.write_snapshot(Audience::Store).await.unwrap();
-    let mut c = notes_device(storage.clone(), 3).await;
-    add_device(&mut c).await;
-    assert_eq!(
-        selected_snapshot(&mut c).await.snapshot_id(),
-        Some(supported)
-    );
-    assert_eq!(tables(&a).await, tables(&c).await);
-}
-
 /// Snapshots prepared concurrently, each covering only its author's write,
 /// tie on covered writes; the smaller path selects Ana's own (§15). Ben's
 /// write outside it stays in his log, since deletion needs the current
@@ -845,7 +809,7 @@ async fn a_device_reloads_its_own_tied_snapshot_and_reads_the_rest_from_logs() {
 }
 
 #[tokio::test]
-async fn selection_orders_coverage_then_path_and_passes_over_damaged_objects() {
+async fn selection_orders_coverage_then_path_and_waits_on_a_damaged_newest() {
     let storage = snapshot_storage();
     let mut a = notes_device(storage.clone(), 1).await;
     a.create(key(1)).await;
@@ -891,21 +855,30 @@ async fn selection_orders_coverage_then_path_and_passes_over_damaged_objects() {
         .unwrap();
     // The reader that already authenticated the object keeps its checked bytes.
     assert_eq!(selected_snapshot(&mut c).await, newer);
+    // A reader whose check of the newest body fails refuses it and waits on
+    // it, rather than loading the older snapshot (storelog-data
+    // `missingDecision`). Its verified prefix still counts (§19.1).
+    let waits_on_newer = |result: Result<(), SyncError>| {
+        assert!(
+            matches!(&result, Err(SyncError::Pending(waiting)) if waiting.reason
+                == crate::PendingReason::Waits(crate::Prerequisite::Object(newer.clone()))),
+            "{result:?}"
+        );
+    };
     let mut c = notes_device(storage.clone(), 4).await;
     add_device(&mut c).await;
-    c.sync.reload_from_snapshots().await.unwrap();
+    waits_on_newer(c.sync.reload_from_snapshots().await);
     assert!(matches!(
         snapshot_record(&c, &newer).await,
         Some(crate::PendingReason::Refused(_))
     ));
-    // The refusal passes the snapshot over without reading its bytes again,
-    // while its verified prefix still counts as required history (§19.1).
+    // Waiting again does not read the refused bytes again.
     let reads = storage.reads().await.len();
-    assert_eq!(selected_snapshot(&mut c).await, path(b_id.clone()));
+    waits_on_newer(c.sync.reload_from_snapshots().await);
     assert!(!storage.reads().await[reads..]
         .iter()
         .any(|(read, _, _)| read == &newer));
-    assert_eq!(tables(&a).await, tables(&c).await);
+    assert!(tables(&c).await.is_empty());
     // A malformed clear prefix is refused by itself; it establishes nothing.
     let malformed = ObjectPath::snapshot(
         store(1),
@@ -914,40 +887,40 @@ async fn selection_orders_coverage_then_path_and_passes_over_damaged_objects() {
         NonZeroU64::new(999).unwrap(),
     );
     storage.create_once(&malformed, b"x").await.unwrap();
-    c.sync.reload_from_snapshots().await.unwrap();
+    waits_on_newer(c.sync.reload_from_snapshots().await);
     assert!(matches!(
         snapshot_record(&c, &malformed).await,
         Some(crate::PendingReason::Refused(crate::Refusal::Parse { .. }))
     ));
-    // Without the write only the refused snapshot covers, its prefix makes
-    // a new reader's reload wait for that history instead of skipping it.
-    let only = coven_merge::WriteId {
-        device: a.device().await,
-        number: 2,
-    };
-    let only_path = crate::write_seal::path(store(1), only);
-    let bytes = storage.read(&only_path).await.unwrap();
-    storage.delete(&only_path).await.unwrap();
+    // Without the write only the refused snapshot covers, a new reader's
+    // reload waits on that snapshot instead of skipping the write. The
+    // first attempt refuses the body; the second reads only its retained
+    // prefix.
+    let only = crate::write_seal::path(
+        store(1),
+        coven_merge::WriteId {
+            device: a.device().await,
+            number: 2,
+        },
+    );
+    let bytes = storage.read(&only).await.unwrap();
+    storage.delete(&only).await.unwrap();
     let mut d = notes_device(storage.clone(), 5).await;
     add_device(&mut d).await;
-    // The first attempt refuses the body; the second reads only the retained
-    // prefix of the refused snapshot, and both wait for the same history.
     for _ in 0..2 {
-        let result = d.sync.reload_from_snapshots().await;
-        assert!(
-            matches!(&result, Err(SyncError::Database(coven_database::DbError::Snapshot(
-                coven_database::SnapshotError::MissingWrites { missing }
-            ))) if missing.contains(&only)),
-            "{result:?}"
-        );
+        waits_on_newer(d.sync.reload_from_snapshots().await);
         assert!(snapshot_record(&d, &newer).await.is_some());
     }
-    storage.create(&only_path, &bytes).await.unwrap();
-    // Each record lasts while its object is listed.
+    storage.create(&only, &bytes).await.unwrap();
+    // Each record lasts while its object is listed. Once the damaged
+    // snapshot is gone, the waiting reload loads the newest left and the
+    // logs supply the rest.
     storage.delete(&newer).await.unwrap();
     c.sync.reload_from_snapshots().await.unwrap();
     assert_eq!(snapshot_record(&c, &newer).await, None);
     assert!(snapshot_record(&c, &malformed).await.is_some());
+    c.writes.download_writes().await.unwrap();
+    assert_eq!(tables(&a).await, tables(&c).await);
 }
 
 #[tokio::test]

@@ -564,12 +564,26 @@ async fn a_refused_body_still_decides_log_retention_by_its_prefix() {
         .corrupt_byte(&ben, readable.len() - 1)
         .await
         .unwrap();
-    // Ana's reload refuses Ben's body and loads her own snapshot.
-    a.sync.reload_from_snapshots().await.unwrap();
+    // Ana's reload refuses Ben's body and waits on his snapshot rather than
+    // loading her own (storelog-data `missingDecision`).
+    let result = a.sync.reload_from_snapshots().await;
+    let Err(SyncError::Pending(waiting)) = result else {
+        panic!("{result:?}")
+    };
+    assert_eq!(
+        waiting.reason,
+        crate::PendingReason::Waits(crate::Prerequisite::Object(ben.clone()))
+    );
     assert!(matches!(
         snapshot_record(&a, &ben).await,
         Some(crate::PendingReason::Refused(_))
     ));
+    // A body refusal also comes from reading it for file retention, with no
+    // reload waiting; end this one so the retention below sees the refusal.
+    let crate::PendingSubject::Operation { id, .. } = waiting.subject else {
+        panic!("{waiting:?}")
+    };
+    a.db.finish_operation(id).await.unwrap();
     a.sync.run_retention().await.unwrap();
     assert_eq!(retained(&storage, &writes).await, JUDGED_BY_BENS);
     storage.delete(&ben).await.unwrap();
@@ -599,6 +613,16 @@ async fn a_snapshot_whose_key_is_not_accepted_still_decides_log_retention() {
     a.sync.run_retention().await.unwrap();
     assert_eq!(retained(&storage, &writes).await, JUDGED_BY_BENS);
     assert_eq!(snapshot_record(&a, &ben).await, None);
+    // Ana's reload waits for that key rather than loading her own snapshot.
+    let result = a.sync.reload_from_snapshots().await;
+    assert!(
+        matches!(&result, Err(SyncError::Pending(waiting)) if waiting.reason
+        == crate::PendingReason::KeyUnavailable {
+            audience: Audience::Store,
+            key: key(2),
+        }),
+        "{result:?}"
+    );
     storage.delete(&ben).await.unwrap();
     storage.create(&ben, &readable).await.unwrap();
     a_passing_version_needs_write_4(&storage, &ben).await;

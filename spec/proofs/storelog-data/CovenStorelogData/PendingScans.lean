@@ -323,8 +323,10 @@ def catalog (device : Nat) (audience : Audience) (work : List Work)
     | .verified _ true true => if refusedHere device work (.snapshot s.1) then none else some s.1
     | _ => none
 
-/-- Rust `load_snapshot`: try the candidates in order. The first whose
-complete body checks loads; each one before it whose body fails is refused. -/
+/-- Loading: try the offered candidates in order. The first whose complete
+body checks loads; each one before it whose body fails is refused. Rust's
+reload offers only an audience's current newest snapshot and waits when its
+body fails (`missingDecision`), so its list has at most one element. -/
 def load (body : SnapshotId → Bool) : List SnapshotId → Option SnapshotId × List SnapshotId
   | [] => (none, [])
   | id :: rest =>

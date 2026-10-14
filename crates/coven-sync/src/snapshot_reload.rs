@@ -80,8 +80,7 @@ impl StoreLogSync {
                 for audience in &audiences {
                     catalogs.push((
                         audience,
-                        self.current_snapshot_candidates(audience, &local.log)
-                            .await?,
+                        self.snapshot_candidates(audience, &local.log).await?,
                     ));
                 }
                 // A newer snapshot may be the one to load: the reload waits
@@ -89,30 +88,48 @@ impl StoreLogSync {
                 if let Some(update) = catalogs.iter().find_map(|(_, catalog)| catalog.update) {
                     return Err(SyncError::UpdateRequired(update));
                 }
-                let count = catalogs
-                    .iter()
-                    .map(|(_, catalog)| catalog.candidates.len())
-                    .sum();
-                let mut names = self
-                    .reserve_snapshot_files(record, &mut task, count)
-                    .await?
-                    .into_iter();
-                for (audience, candidates) in catalogs {
-                    super::include_positions(&mut highest, &candidates.required_positions.0);
-                    let newest_unknown = candidates.newest_unknown;
-                    match self
-                        .load_snapshot(candidates.candidates, &mut names)
-                        .await?
-                    {
-                        Some(snapshot) => files.snapshots.push(snapshot),
-                        None if self.has_snapshot_boundary(&local.log, audience) => {
+                // Each audience loads its current newest counting snapshot:
+                // the newest verified prefix that follows its boundary,
+                // whatever this device found in its body or key. One it cannot
+                // load makes the reload wait, never pass it over for an older
+                // one whose coverage would skip a deleted write's part in that
+                // audience (§15; storelog-data `missingDecision`,
+                // `holding_never_skips`).
+                let mut selections = Vec::new();
+                for (audience, mut catalog) in catalogs {
+                    super::include_positions(&mut highest, &catalog.required_positions.0);
+                    let candidate = match catalog.take_current(&local.log) {
+                        Ok(Some(candidate)) => candidate,
+                        Err(reason) => {
+                            return Err(SyncError::Pending(Box::new(
+                                self.operation_condition(record, reason).await?,
+                            )))
+                        }
+                        Ok(None) if self.has_snapshot_boundary(&local.log, audience) => {
                             return Err(inconsistent(
                                 "no valid snapshot follows the selected reset or version boundary",
                             ))
                         }
-                        None => {
-                            unknown_empty |= newest_unknown;
+                        Ok(None) => {
+                            unknown_empty |= catalog.newest_unknown;
                             files.empty.push(audience.clone());
+                            continue;
+                        }
+                    };
+                    selections.push(candidate);
+                }
+                let mut names = self
+                    .reserve_snapshot_files(record, &mut task, selections.len())
+                    .await?
+                    .into_iter();
+                for candidate in selections {
+                    let file = names.next().expect("reserved snapshot files");
+                    match self.load_snapshot(candidate, file).await? {
+                        Ok(snapshot) => files.snapshots.push(snapshot),
+                        Err(reason) => {
+                            return Err(SyncError::Pending(Box::new(
+                                self.operation_condition(record, reason).await?,
+                            )))
                         }
                     }
                 }

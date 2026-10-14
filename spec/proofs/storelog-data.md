@@ -428,8 +428,8 @@ verified and counts still adds its positions to the required history
 (`refused_prefix_requires_history`), but is never offered for loading
 (`refused_never_offered`). `never_loads_refused` proves loading applies only
 a snapshot whose complete body checked and which this device had not
-refused; `load_refuses_failed` proves each snapshot passed over failed its
-check. `refused_stays_unoffered` follows a history: the refusal a failed load
+refused; `load_refuses_failed` proves each snapshot it does not load failed
+its check. `refused_stays_unoffered` follows a history: the refusal a failed load
 records keeps that snapshot out of every later catalog while listings still
 name it. A newer installed version may retry a refusal (§19.1); loading
 here runs one version, so that retry is outside it. Retention across
@@ -532,6 +532,22 @@ classification premise. `as_written_safe_for_bodies` proves §15 as written
 safe while no listed prefix is refused. The prefix counterexample shows that
 treating the signature refusal as permanent is unsound.
 
+Rust's reload follows `missingDecision`'s selection (`Catalog::take_current`
+in `snapshot_catalog.rs`): each audience loads its current newest counting
+snapshot, the newest verified prefix that follows its boundary, and waits
+on that snapshot when this version refused its body or does not accept its
+key, rather than loading an older one. Passing over it skips history when
+the reload spans two audiences: a deleted write that the store's selected
+snapshot covers counts as having no part in Gifts once Gifts' older
+selection stops before it, though Gifts' newest covers it.
+`a_reload_waits_on_a_newest_snapshot_whose_body_it_refused`
+(`snapshot_boundaries_tests.rs`) runs this, and loads the newer Gifts
+snapshot once one lands. The reload's own record names
+the snapshot it waits on (`Waits(Object(path))`), whose record is the
+refusal, so it retries on later passes. The model reads this wait as the
+`.load` outcome when the body is refused here; it has no separate waiting
+outcome, and the two-audience skip is not modeled.
+
 What the safe rule costs. A body refusal, or a key this device does not
 accept, never holds retention (`retention_ignores_bodies`). A refused prefix
 holds every write of its audience (`refused_prefix_holds`) until a newer
@@ -547,7 +563,9 @@ it keeps both.
 Readings: the current newest counting snapshot, in §15's deletion rule and
 its missing-write rule, is chosen among verified prefixes whatever their
 bodies (§19.1: a damaged snapshot's verified prefix still establishes
-required history; "passed over" applies to loading). A version's verdict on
+required history). §19.1 says a damaged snapshot is "passed over for the next
+latest, or the logs"; `missingDecision` and Rust's reload wait on it instead
+while it is the current newest. A version's verdict on
 a prefix is the same on every device running it. The listing is fixed, as in
 `waiting_retention_safe`; new arrivals and snapshot deletion between the two
 versions are outside the model, as are the other deletion gates, the

@@ -27,6 +27,10 @@ pub(super) struct Candidate {
 pub(super) struct Verified {
     pub(super) object: StoredObject,
     pub(super) prefix: SnapshotObjectPrefix,
+    /// What loading its rows waits for: the snapshot itself, whose own record
+    /// is this version's refusal of its body, or its key's introduction. None
+    /// for a loading candidate.
+    pub(super) load_waits: Option<PendingReason>,
 }
 
 pub(super) struct Catalog {
@@ -50,6 +54,35 @@ pub(super) struct Catalog {
     /// A listed snapshot in a newer format: work that selects among this
     /// audience's snapshots waits for that update (§15, §17.2).
     pub(super) update: Option<crate::RequiredUpdate>,
+}
+
+impl Catalog {
+    /// Take the audience's current newest counting snapshot for loading: the
+    /// newest verified prefix that follows the replay's reset/version
+    /// boundary, whatever this device found in its body or key. Fails with
+    /// what loading it waits for; an older snapshot never stands in for it
+    /// (§15; storelog-data `missingDecision`).
+    pub(super) fn take_current(
+        &mut self,
+        log: &StoreLog,
+    ) -> Result<Option<Candidate>, PendingReason> {
+        let Some(newest) = self
+            .verified
+            .iter()
+            .find(|snapshot| snapshot.follows_boundary(log))
+        else {
+            return Ok(None);
+        };
+        if let Some(reason) = &newest.load_waits {
+            return Err(reason.clone());
+        }
+        let index = self
+            .candidates
+            .iter()
+            .position(|candidate| candidate.object.path == newest.object.path)
+            .expect("a verified snapshot without a load wait is a candidate");
+        Ok(Some(self.candidates.swap_remove(index)))
+    }
 }
 
 impl Verified {
@@ -140,12 +173,25 @@ impl StoreLogSync {
                 tracing::debug!(path = object.path.as_str(), "late snapshot does not count");
                 continue;
             }
+            // A refused body never authorizes loading its rows (§19.1).
+            let load_waits = if refusal.is_some() {
+                Some(PendingReason::Waits(crate::Prerequisite::Object(
+                    object.path.clone(),
+                )))
+            } else if !keys.contains_key(&(audience.clone(), prefix.key)) {
+                Some(PendingReason::KeyUnavailable {
+                    audience: audience.clone(),
+                    key: prefix.key,
+                })
+            } else {
+                None
+            };
             verified.push(Verified {
                 object: object.clone(),
                 prefix: prefix.clone(),
+                load_waits: load_waits.clone(),
             });
-            // A refused body never authorizes loading its rows (§19.1).
-            if refusal.is_none() && keys.contains_key(&(audience.clone(), prefix.key)) {
+            if load_waits.is_none() {
                 candidates.push(candidate);
             }
         }
@@ -435,36 +481,39 @@ impl StoreLogSync {
         Ok((covered, own))
     }
 
+    /// Load an audience's current newest snapshot into `file`. A body that
+    /// fails its check is refused, and loading waits on that snapshot rather
+    /// than passing it over for an older one: a version that loads the body
+    /// selects it (§15, §19.1; storelog-data `missingDecision`). A schema
+    /// outside the app's supported range fails the caller with that error.
     pub(super) async fn load_snapshot(
         &self,
-        candidates: Vec<Candidate>,
-        files: &mut impl Iterator<Item = String>,
-    ) -> Result<Option<SavedSnapshot>, SyncError> {
-        for candidate in candidates {
-            let file = files.next().expect("reserved snapshot candidates");
-            match self.open_snapshot(&candidate, &file).await {
-                Ok(_) => {
-                    return Ok(Some(SavedSnapshot {
-                        path: candidate.object.path,
-                        file,
-                        prefix: candidate.prefix.encode()?,
-                    }))
-                }
-                Err(SyncError::Database(coven_database::DbError::Snapshot(
-                    coven_database::SnapshotError::Schema { snapshot, database },
-                ))) => {
-                    tracing::debug!(
-                        path = candidate.object.path.as_str(),
-                        snapshot,
-                        database,
-                        "snapshot schema is outside the app's supported range"
-                    );
-                }
-                Err(error) => self.refuse_snapshot(&candidate.object, error).await?,
+        candidate: Candidate,
+        file: String,
+    ) -> Result<Result<SavedSnapshot, PendingReason>, SyncError> {
+        let result = self.open_snapshot(&candidate, &file).await;
+        let waits = match result {
+            Ok(()) => {
+                return Ok(Ok(SavedSnapshot {
+                    path: candidate.object.path,
+                    file,
+                    prefix: candidate.prefix.encode()?,
+                }))
             }
-            io::remove(&self.directory, &file)?;
-        }
-        Ok(None)
+            Err(
+                error @ SyncError::Database(coven_database::DbError::Snapshot(
+                    coven_database::SnapshotError::Schema { .. },
+                )),
+            ) => Err(error),
+            Err(error) => {
+                self.refuse_snapshot(&candidate.object, error).await?;
+                Ok(Err(PendingReason::Waits(crate::Prerequisite::Object(
+                    candidate.object.path,
+                ))))
+            }
+        };
+        io::remove(&self.directory, &file)?;
+        waits
     }
 
     pub(super) async fn open_snapshot(

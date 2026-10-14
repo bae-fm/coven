@@ -41,25 +41,32 @@ async fn unusable_snapshots_do_not_turn_deleted_history_into_an_empty_audience()
         write_rows(&b, 99, 1, 17, Audience::Store).await;
         let before = tables(&b).await;
         let result = b.sync.reload_from_snapshots().await;
-        if deleted {
-            if damaged_prefix {
-                assert!(matches!(
-                    result,
-                    Err(SyncError::Database(coven_database::DbError::Snapshot(
-                        coven_database::SnapshotError::Inconsistent(_)
-                    )))
-                ));
-            } else {
-                assert!(matches!(
-                    result,
-                    Err(SyncError::Database(coven_database::DbError::Snapshot(
-                        coven_database::SnapshotError::MissingWrites { .. }
-                    )))
-                ));
-            }
+        if !damaged_prefix {
+            // The damaged body's verified prefix makes its snapshot the newest:
+            // the reload waits on it, the refused subject, rather than reading
+            // the logs as if the audience had no snapshot.
+            assert!(
+                matches!(&result, Err(SyncError::Pending(waiting)) if waiting.reason
+                == crate::PendingReason::Waits(crate::Prerequisite::Object(
+                    object.path.clone()
+                ))),
+                "{result:?}"
+            );
+            assert!(matches!(
+                snapshot_record(&b, &object.path).await,
+                Some(crate::PendingReason::Refused(_))
+            ));
+            assert_eq!(tables(&b).await, before);
+        } else if deleted {
+            assert!(matches!(
+                result,
+                Err(SyncError::Database(coven_database::DbError::Snapshot(
+                    coven_database::SnapshotError::Inconsistent(_)
+                )))
+            ));
             assert_eq!(tables(&b).await, before);
         } else {
-            // The unusable snapshot is its own refused subject.
+            // The refused prefix establishes nothing; the logs supply history.
             result.unwrap();
             assert!(matches!(
                 snapshot_record(&b, &object.path).await,
@@ -73,6 +80,156 @@ async fn unusable_snapshots_do_not_turn_deleted_history_into_an_empty_audience()
     }
 }
 
+/// Ana's write with a note in both the store and Gifts.
+async fn write_both(device: &Device, gifts: coven_foundation::id_source::CircleId, number: usize) {
+    let circle = gifts.to_string();
+    device
+        .db
+        .write(move |sql| {
+            for audience in ["store".to_owned(), circle] {
+                sql.execute(
+                    "INSERT INTO notes VALUES(?1,?2,?3,?4)",
+                    coven_database::params![
+                        number.to_string(),
+                        audience,
+                        "gift",
+                        vec![number as u8; 13]
+                    ],
+                )?;
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+}
+
+/// storelog-data `missingDecision`: Ana's writes 1 and 2 each have a store
+/// and a Gifts part, and her store and newest Gifts snapshots cover both, so
+/// write 2 may be deleted. Ben's version refuses that Gifts snapshot's body.
+/// Loading an older Gifts state instead, with the store snapshot covering
+/// write 2's absence, would skip write 2's Gifts part: Ben's reload waits on
+/// the refused snapshot. Once a newer Gifts snapshot lands it loads that one.
+#[tokio::test]
+async fn a_reload_waits_on_a_newest_snapshot_whose_body_it_refused() {
+    let storage = snapshot_storage();
+    let mut a = notes_device(storage.clone(), 1).await;
+    a.create(key(1)).await;
+    let gifts = circle(1);
+    a.sync
+        .make_and_upload_entry(StoreChange::CreateCircle {
+            circle: gifts,
+            name: "Gifts".into(),
+            key: key(2),
+            key_hash: a
+                .sync
+                .test_key(coven_merge::Audience::Circle(gifts), key(2)),
+        })
+        .await
+        .unwrap();
+    let mut newest = None;
+    for number in 0..2 {
+        write_both(&a, gifts, number).await;
+        upload(&a, &storage).await;
+        newest = Some(
+            a.sync
+                .write_snapshot(Audience::Circle(gifts))
+                .await
+                .unwrap(),
+        );
+    }
+    a.sync.write_snapshot(Audience::Store).await.unwrap();
+    let newest = newest.unwrap();
+    let refused = ObjectPath::snapshot(
+        store(1),
+        newest.audience,
+        newest.device,
+        NonZeroU64::new(newest.number).unwrap(),
+    );
+    let deleted = coven_merge::WriteId {
+        device: a.device().await,
+        number: 2,
+    };
+    storage
+        .delete(&crate::write_seal::path(store(1), deleted))
+        .await
+        .unwrap();
+    let size = storage.read(&refused).await.unwrap().len();
+    storage.corrupt_byte(&refused, size - 1).await.unwrap();
+    let mut b = notes_device(storage.clone(), 2).await;
+    add_device(&mut b).await;
+    let result = b.sync.reload_from_snapshots().await;
+    assert!(
+        matches!(&result, Err(SyncError::Pending(waiting)) if waiting.reason
+            == crate::PendingReason::Waits(crate::Prerequisite::Object(refused.clone()))),
+        "{result:?}"
+    );
+    assert!(matches!(
+        snapshot_record(&b, &refused).await,
+        Some(crate::PendingReason::Refused(_))
+    ));
+    assert!(tables(&b).await.is_empty());
+    write_both(&a, gifts, 2).await;
+    upload(&a, &storage).await;
+    a.sync
+        .write_snapshot(Audience::Circle(gifts))
+        .await
+        .unwrap();
+    b.sync.reload_from_snapshots().await.unwrap();
+    b.writes.download_writes().await.unwrap();
+    assert_eq!(tables(&a).await, tables(&b).await);
+    assert_eq!(fingerprint(&a).await, fingerprint(&b).await);
+}
+
+/// The newest snapshot is at a schema newer than the app's: the reload waits
+/// for the app update rather than loading an older snapshot (§15).
+#[tokio::test]
+async fn a_newer_schema_snapshot_makes_the_reload_wait_for_the_app_update() {
+    let storage = snapshot_storage();
+    let mut a = notes_device(storage.clone(), 1).await;
+    a.create(key(1)).await;
+    let mut b = notes_device(storage.clone(), 2).await;
+    add_device(&mut b).await;
+    a.sync().await;
+    write_rows(&a, 0, 1, 17, Audience::Store).await;
+    b.db.apply_downloaded(a.db.test_queued_writes().await.unwrap().remove(0).into())
+        .await
+        .unwrap();
+    upload(&a, &storage).await;
+    b.sync.write_snapshot(Audience::Store).await.unwrap();
+    write_rows(&a, 1, 1, 17, Audience::Store).await;
+    upload(&a, &storage).await;
+    let mut migrations = notes_migrations();
+    migrations.push(Migration::sql(
+        2,
+        "addition",
+        "ALTER TABLE notes ADD COLUMN added TEXT",
+    ));
+    a.reopen(storage.clone(), notes_tables(), migrations.clone())
+        .await;
+    if !a.send.can_send() {
+        a.catch_up().await;
+    }
+    let newer = a.sync.write_snapshot(Audience::Store).await.unwrap();
+    let mut c = notes_device(storage.clone(), 3).await;
+    add_device(&mut c).await;
+    let result = c.sync.reload_from_snapshots().await;
+    assert!(
+        matches!(
+            result,
+            Err(SyncError::Database(coven_database::DbError::Snapshot(
+                coven_database::SnapshotError::Schema {
+                    snapshot: 2,
+                    database: 1
+                }
+            )))
+        ),
+        "{result:?}"
+    );
+    assert!(tables(&c).await.is_empty());
+    c.reopen(storage.clone(), notes_tables(), migrations).await;
+    assert_eq!(selected_snapshot(&mut c).await.snapshot_id(), Some(newer));
+    assert_eq!(tables(&a).await, tables(&c).await);
+}
 #[tokio::test]
 async fn a_removed_device_cannot_start_or_resume_snapshot_publication() {
     for recorded_step in [None, Some(0), Some(1)] {
