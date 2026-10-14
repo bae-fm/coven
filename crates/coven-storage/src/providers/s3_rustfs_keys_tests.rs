@@ -27,6 +27,8 @@ struct Remote {
     objects: BTreeMap<String, Vec<u8>>,
     next: u32,
     lose_create_reply: bool,
+    /// Answer every delete as RustFS answers one of an absent account.
+    refuse_delete: bool,
     bad_signatures: u32,
 }
 
@@ -120,9 +122,11 @@ fn admin_api(
                     .to_string(),
             )
         }
+        // RustFS answers a delete of an absent account with HTTP 400.
+        "delete-service-account" if state.refuse_delete => s3_error(400, "InvalidRequest"),
         "delete-service-account" => match state.accounts.remove(&q["accessKey"]) {
             Some(_) => response(204, ""),
-            None => response(404, "{}"),
+            None => s3_error(400, "InvalidRequest"),
         },
         "info-service-account" => match state.accounts.get(&q["accessKey"]) {
             Some(_) => response(200, "{}"),
@@ -264,6 +268,18 @@ async fn service_accounts_share_one_parent_and_reach_only_the_store() {
     admin.probe(&scope, &minted.credentials).await.unwrap();
     let key = minted.credentials.access_key_id.clone();
     assert!(admin.key_exists(&key, &minted.principal).await.unwrap());
+    // A refused delete of a present account is not mistaken for absence.
+    state.lock().unwrap().refuse_delete = true;
+    assert_eq!(
+        admin
+            .revoke(&key, &minted.principal)
+            .await
+            .unwrap_err()
+            .failure(),
+        StorageFailure::Refused
+    );
+    assert!(admin.key_exists(&key, &minted.principal).await.unwrap());
+    state.lock().unwrap().refuse_delete = false;
     admin.revoke(&key, &minted.principal).await.unwrap();
     admin.revoke(&key, &minted.principal).await.unwrap();
     assert!(!admin.key_exists(&key, &minted.principal).await.unwrap());

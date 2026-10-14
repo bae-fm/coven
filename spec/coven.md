@@ -1305,6 +1305,9 @@ the file's ranges under `F`.
     deletes it. Accounts an earlier attempt named are deleted first.
     Requests are signed with Signature Version 4 for `s3`. Revocation calls
     `delete-service-account`; absence is read with `info-service-account`.
+    RustFS answers a delete of an absent account with HTTP 400
+    `InvalidRequest`, a status other refusals share, so a refused delete
+    succeeds only when `info-service-account` then reads the account absent.
   - The member policy allows `s3:GetObject`, `s3:PutObject`,
     `s3:DeleteObject`, `s3:AbortMultipartUpload` and
     `s3:ListMultipartUploadParts` on `arn:aws:s3:::<bucket>/<prefix>/<store>/*`,

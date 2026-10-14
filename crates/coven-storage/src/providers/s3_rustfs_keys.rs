@@ -217,16 +217,37 @@ impl<'a> Admin<'a> {
             .collect()
     }
 
+    /// Delete a service account; absence succeeds. RustFS answers a delete
+    /// of an absent account with HTTP 400 `InvalidRequest`, a status other
+    /// refusals share, so a refused delete succeeds only once the account
+    /// reads as absent.
     async fn delete(&self, access_key: &str) -> Result<(), StorageError> {
-        self.call(
-            Method::DELETE,
-            "delete-service-account",
-            &[("accessKey", access_key)],
-            None,
-            &[404],
-        )
-        .await?;
-        Ok(())
+        let deleted = self
+            .call(
+                Method::DELETE,
+                "delete-service-account",
+                &[("accessKey", access_key)],
+                None,
+                &[400, 404],
+            )
+            .await?;
+        if deleted.is_some() || !self.exists(access_key).await? {
+            return Ok(());
+        }
+        Err(StorageFailure::Refused.with_source("RustFS refused to delete a service account"))
+    }
+
+    async fn exists(&self, access_key: &str) -> Result<bool, StorageError> {
+        Ok(self
+            .call(
+                Method::GET,
+                "info-service-account",
+                &[("accessKey", access_key)],
+                None,
+                &[404],
+            )
+            .await?
+            .is_some())
     }
 }
 
@@ -301,16 +322,7 @@ async fn key_exists(
     principal: &S3Principal,
 ) -> Result<bool, StorageError> {
     service_account(principal)?;
-    Ok(Admin::new(context)?
-        .call(
-            Method::GET,
-            "info-service-account",
-            &[("accessKey", access_key_id)],
-            None,
-            &[404],
-        )
-        .await?
-        .is_some())
+    Admin::new(context)?.exists(access_key_id).await
 }
 
 #[cfg(test)]
