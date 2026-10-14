@@ -2316,6 +2316,17 @@ Carol's tablet:
   primary key, or repeated target columns is refused on open and after
   migrating with `SchemaError::ForeignKeyNotPrimaryKey`, naming the table
   and foreign key ([Appendix A.9](#a9-references-to-non-key-columns)).
+- A foreign key of a synced table that is one generated column is refused
+  on open and after migrating with `SchemaError::GeneratedForeignKey`,
+  naming the table and foreign key.
+  - Coven merges the column's inputs cell by cell. Ana setting `a` while Ben
+    sets `b` would make `ref AS (a || b)` name a parent neither write named,
+    and the foreign key would fail on every device
+    ([`unwritten_reference`](proofs/merge/CovenMerge/GeneratedReference.lean)).
+  - A key of several columns captures its generated components' inputs with
+    it, so every reference a device shows is a tuple one write set
+    ([`accepted_reference_written`](proofs/merge/CovenMerge/GeneratedReference.lean),
+    [B19](proofs/merge.md#b19-foreign-keys-on-generated-columns)).
 - Coven refuses `ON DELETE SET DEFAULT` and `ON UPDATE SET DEFAULT` on
   any foreign key of a synced table, and on a foreign key from a local
   table into a synced table, checked when the database opens and after

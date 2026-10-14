@@ -566,6 +566,14 @@ pub enum SchemaError {
         /// The foreign key's columns and referenced table and columns, as SQL.
         key: String,
     },
+    /// A synced foreign key is a single generated column (§8.4).
+    #[error("foreign key {table}: {key} cannot be a single generated column")]
+    GeneratedForeignKey {
+        /// The referencing synced table.
+        table: String,
+        /// The foreign key's columns and referenced table and columns, as SQL.
+        key: String,
+    },
     /// SET DEFAULT is on a synced table or references one (§8.4).
     #[error("foreign key {table}: {key} cannot use SET DEFAULT")]
     SetDefault {

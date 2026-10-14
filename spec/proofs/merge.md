@@ -1171,3 +1171,37 @@ travels with copies. Transporting snapshots, discovering unreadable evidence,
 SQL capture, local commit rollback, schema conversion, and atomic installation
 remain implementation obligations. The existing Rust differential paths are
 unchanged; this package adds no Rust ownership implementation or differential.
+
+### B19 Foreign keys on generated columns
+
+A generated column is computed by SQL from the stored columns it reads, and
+coven merges stored cells one at a time. `GeneratedReference.lean` checks
+what that means for a foreign key on such a column
+([§8.4](../coven.md#84-foreign-keys)).
+
+**A single generated key column is unsafe.** `Unwritten` is the table
+`c(a, b, ref AS (a || b) REFERENCES p(id))`. One write inserts `a = x`,
+`b = y`. Ana then sets `a = q` while Ben, concurrently, sets `b = z`.
+`unwritten_reference` runs both arrival orders through the proven step: each
+shows `ref = qz`. The insert recorded `xy`, Ana `qy` and Ben `xz`; no write
+recorded `qz`, so no author checked that parent, and the foreign-key check
+fails on every device. `valid` and `orders_causal` check that the history is
+a legal one, so this is the merge result every device reaches.
+
+**Capturing the inputs with the key is safe.** `grouped_cells_share_winner`
+proves that when every change sets either all columns of a group or none,
+every cell of the group holds the same write in the merge result.
+`accepted_reference_written` applies it to the schema check: a key the check
+accepts has no generated column, or spans several columns, and then its capture
+group holds the key's columns and every generated column's inputs. Every
+reference a device shows is the tuple one write set (or, for one stored
+column, that cell's own value). `device_reference_written` states this for
+any causal order of valid writes. `grouped_reference_recorded` reruns the
+counterexample with the inputs captured together: both orders show Ben's
+whole tuple `xz`, which he recorded.
+
+**Outside the model.** Which stored columns a generated expression reads,
+and capturing a group's components together, are SQL facts supplied as the
+`Columns` record and the `Grouped` hypothesis, as for the composite-reference
+differential in B11. A key whose generated column reads no column at all is
+refused too; the model does not need that case.

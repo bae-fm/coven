@@ -88,6 +88,71 @@ async fn set_default_is_refused_on_open_and_after_migrating() {
     }
 }
 
+/// A single-column key on a generated column could merge its inputs into a
+/// reference no write named (§8.4, `unwritten_reference`); a key of several
+/// columns captures the inputs with it, and local tables do not merge.
+#[tokio::test]
+async fn a_single_generated_reference_column_is_refused_on_open_and_after_migrating() {
+    for kind in ["VIRTUAL", "STORED"] {
+        let parent = "CREATE TABLE p(id TEXT NOT NULL PRIMARY KEY)";
+        let schema = format!("{parent}; CREATE TABLE c(id TEXT NOT NULL PRIMARY KEY,a TEXT,b TEXT,ref TEXT AS (a||b) {kind} REFERENCES p(id) ON DELETE CASCADE)");
+        let expected = SchemaError::GeneratedForeignKey {
+            table: "c".into(),
+            key: "(\"ref\") REFERENCES \"p\" (\"id\")".into(),
+        };
+        let store = TestStore::new();
+        let migration = schema.clone();
+        let error = store
+            .builder(
+                vec![shared("c")],
+                vec![Migration::run(1, "generated reference", move |sql| {
+                    sql.execute_batch(&migration)?;
+                    Ok(())
+                })],
+            )
+            .open()
+            .await
+            .err()
+            .expect("generated reference refused after migrating");
+        assert!(matches!(database_error(error), DbError::Schema(found) if found == expected));
+        let db = store.builder(vec![], vec![]).open().await.unwrap();
+        db.inspect_writer(|writer| writer.batch(&schema).unwrap());
+        db.close().await.unwrap();
+        let error = store
+            .builder(vec![shared("c")], vec![])
+            .open()
+            .await
+            .err()
+            .expect("generated reference refused on open");
+        assert!(matches!(database_error(error), DbError::Schema(found) if found == expected));
+        // Undeclared, the table is local and nothing merges its inputs.
+        store
+            .builder(vec![shared("p")], vec![])
+            .open()
+            .await
+            .unwrap()
+            .close()
+            .await
+            .unwrap();
+
+        let composite = format!("CREATE TABLE p(x TEXT NOT NULL,y TEXT NOT NULL,PRIMARY KEY(x,y)); CREATE TABLE c(id TEXT NOT NULL PRIMARY KEY,a TEXT,b TEXT,ref TEXT AS (a||b) {kind},FOREIGN KEY(ref,b) REFERENCES p(x,y))");
+        TestStore::new()
+            .builder(
+                vec![shared("p").key_columns(["x", "y"]), shared("c")],
+                vec![Migration::run(1, "composite", move |sql| {
+                    sql.execute_batch(&composite)?;
+                    Ok(())
+                })],
+            )
+            .open()
+            .await
+            .unwrap()
+            .close()
+            .await
+            .unwrap();
+    }
+}
+
 #[tokio::test]
 async fn set_default_errors_identify_composite_implicit_and_self_references() {
     for (schema, key) in [

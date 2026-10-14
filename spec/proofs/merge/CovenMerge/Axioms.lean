@@ -303,3 +303,11 @@ open CovenMerge
 #print axioms Ownership.TransientForeignKey.changed_trace_refused
 #print axioms Ownership.TransientForeignKey.applied
 #print axioms Ownership.TransientForeignKey.dropped_root_reverses
+-- foreign keys on generated columns (§8.4)
+#print axioms GeneratedReference.grouped_cells_share_winner
+#print axioms GeneratedReference.accepted_reference_written
+#print axioms GeneratedReference.device_reference_written
+#print axioms GeneratedReference.Unwritten.valid
+#print axioms GeneratedReference.Unwritten.unwritten_reference
+#print axioms GeneratedReference.Unwritten.orders_causal
+#print axioms GeneratedReference.Unwritten.grouped_reference_recorded

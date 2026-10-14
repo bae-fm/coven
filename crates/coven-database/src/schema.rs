@@ -261,6 +261,22 @@ impl Schema {
                     }
                     .into());
                 }
+                // Only a key of several columns captures a generated column's
+                // inputs with it (§8.4); one generated column could merge into a
+                // reference no write named.
+                if let [column] = foreign_key.columns.as_slice() {
+                    if table
+                        .columns
+                        .iter()
+                        .any(|c| c.generated && c.name.eq_ignore_ascii_case(column))
+                    {
+                        return Err(SchemaError::GeneratedForeignKey {
+                            table: table.name.clone(),
+                            key: foreign_key.description(),
+                        }
+                        .into());
+                    }
+                }
             }
             let audience_key = match &declaration.audience {
                 AudienceSource::Both { .. } => {

@@ -33,6 +33,7 @@ import CovenMerge.OwnerFilterExamples
 import CovenMerge.OwnerCellAccounting
 import CovenMerge.OwnerCascadeAuthorization
 import CovenMerge.ForeignKeyActions
+import CovenMerge.GeneratedReference
 import CovenMerge.OwnerAdmission
 import CovenMerge.OwnerForeignKeyExamples
 import CovenMerge.OwnerTransientForeignKey
