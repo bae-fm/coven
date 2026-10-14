@@ -262,6 +262,13 @@ impl PendingReason {
 }
 
 impl PendingValue for PendingRecord {
+    fn reload(audience: Audience, reported_by: DeviceId) -> Self {
+        Self {
+            subject: PendingSubject::Audience(audience.clone()),
+            reason: PendingReason::Waits(Prerequisite::Reload(audience)),
+            reported_by,
+        }
+    }
     fn dropped_entry(entry: EntryId, reason: DropReason) -> Self {
         Self {
             subject: PendingSubject::Entry(entry),

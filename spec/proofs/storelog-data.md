@@ -498,7 +498,24 @@ compares repeated no-ops, concurrent raises and resets, arrival orders and batch
 partitions with those functions. SQL tests separately cover retained coverage,
 selection reversal, restart, and failed replacement rollback. Checked entries
 own one `_coven_boundaries` row each; kept entries determine selection, while
-coverage survives a dropped verdict. `scripts/check.sh` runs the differential,
+coverage survives a dropped verdict.
+
+The entry-effects differential (`StorelogDataEffects`, Rust
+`entry_inputs_tests.rs`) drives the real database through checked
+entry fates: a reset and a raise are loaded, then each is dropped and kept again
+in both write arrival orders. After every fate it compares each row's
+generation, setters and losses, the writes a boundary rejects and the visible
+pending records with `EntryFate.rebuild` over `ReplayEffects.applyKept`,
+`Pending.visible` and `EntryFate.tell`. The device received the original writes
+individually; a write that arrived only inside a loaded snapshot cannot be
+rebuilt locally, so Rust reloads instead (an SQL test). A second comparison
+runs `CurrentData.observe` and `circleLossCause` on an entry-only circle
+deletion and its reversal, with the row's write arriving before or after the
+deletion. SQL tests cover the rest: a failed rebuild leaves the previous replay
+and data committed, readers never observe a replay without its data, an
+unavailable input keeps the old rows and refuses writes, and inputs and reset
+suppressions are released only once every boundary entry of the audience is
+strictly before the horizon. `scripts/check.sh` runs both differentials,
 rebuilds every selected module and checks `Axioms.lean`; the audit permits only
 Lean's own `propext`, `Classical.choice`, and `Quot.sound`.
 

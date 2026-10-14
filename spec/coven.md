@@ -4144,7 +4144,9 @@ Carol's tablet:
   - When a kept reset or breaking-schema entry is received, writes into
     its audience wait for the atomic reload with `DbError::AudienceReloading`.
     Other audiences stay writable. A write must not claim to have adopted
-    the boundary while still using the state it discards.
+    the boundary while still using the state it discards. An app older than
+    a kept raise's version keeps queuing its old-version writes until it
+    updates (§17.1); those never claim the newer boundary.
   - E.g. while the store is staged through 2 and Gifts through 1, Ben's app
     still reads the preceding committed state; it sees both at 2 only after
     Gifts' part and the eligible waiting writes commit together

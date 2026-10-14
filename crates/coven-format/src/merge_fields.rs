@@ -198,6 +198,53 @@ pub fn encode_loss(value: &crate::loss::Loss) -> Result<Vec<u8>, Error> {
     encode(value)
 }
 
+/// Decode one retained loss using the snapshot loss fields.
+pub fn decode_loss(bytes: &[u8]) -> Result<crate::loss::Loss, Error> {
+    let value: crate::loss::Loss = decode(bytes)?;
+    value.validate()?;
+    Ok(value)
+}
+
+/// Encode retained generations and winning cells using the snapshot merge fields.
+pub fn encode_merge_row(value: &crate::snapshot_rows::MergeRow) -> Result<Vec<u8>, Error> {
+    value.validate()?;
+    let mut out = Encoder::new();
+    value.put(&mut out)?;
+    Ok(out.bytes)
+}
+
+/// Decode a retained merge row against its original checked write metadata.
+pub fn decode_merge_row(
+    bytes: &[u8],
+    oracle: &impl coven_merge::WriteOracle,
+) -> Result<crate::snapshot_rows::MergeRow, Error> {
+    let value = decode_with(bytes, |input| {
+        crate::snapshot_rows::MergeRow::get(input, oracle)
+    })?;
+    value.validate()?;
+    Ok(value)
+}
+
+/// Encode a received write header for local retention, using its D5 field bytes.
+/// The receiving transaction checks the write; a refused write commits nothing.
+pub fn encode_write_header(value: &crate::write::WriteHeader) -> Result<Vec<u8>, Error> {
+    encode(value)
+}
+
+/// Decode a retained write header. Its checks ran when the write was accepted.
+pub fn decode_write_header(bytes: &[u8]) -> Result<crate::write::WriteHeader, Error> {
+    decode(bytes)
+}
+
+/// Encode a received row change or dismissal as its D5 frame for local retention.
+/// Decoding with `WriteFrame::decode` checks it again before it is reapplied.
+pub fn encode_write_frame(value: &crate::dismissal::WriteFrame) -> Result<Vec<u8>, Error> {
+    match value {
+        crate::dismissal::WriteFrame::Change(row) => crate::encode_frame(2, row),
+        crate::dismissal::WriteFrame::Dismissal(dismissal) => crate::encode_frame(3, dismissal),
+    }
+}
+
 /// Encode a loss identity without its values or changing replacement details.
 pub fn encode_loss_identity(value: &crate::loss::Loss) -> Result<Vec<u8>, Error> {
     use crate::loss::{LossCause, LossValues};

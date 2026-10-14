@@ -9,6 +9,8 @@ use serde::{de::DeserializeOwned, Serialize};
 pub trait PendingValue: Serialize + DeserializeOwned + Send + 'static {
     /// Report a local entry rejected by committed replay.
     fn dropped_entry(entry: crate::EntryId, reason: crate::DropReason) -> Self;
+    /// Report an audience whose selected boundary has no committed data input.
+    fn reload(audience: coven_merge::Audience, reporter: DeviceId) -> Self;
     /// Stable identity, ordered as the app presents it.
     type Subject: Serialize + Ord;
     /// The work that cannot advance.
@@ -59,8 +61,16 @@ impl StoredRecord {
 }
 
 pub(crate) fn read<P: PendingValue>(db: &DatabaseConnection) -> Result<Vec<P>, DbError> {
+    read_query(db, &format!("{SELECT} WHERE suppressed=0"))
+}
+
+pub(crate) fn retained<P: PendingValue>(db: &DatabaseConnection) -> Result<Vec<P>, DbError> {
+    read_query(db, SELECT)
+}
+
+fn read_query<P: PendingValue>(db: &DatabaseConnection, sql: &str) -> Result<Vec<P>, DbError> {
     let mut records = db
-        .query(SELECT, [], StoredRecord::read)?
+        .query(sql, [], StoredRecord::read)?
         .iter()
         .map(StoredRecord::decode::<P>)
         .collect::<Result<Vec<_>, _>>()?;
@@ -72,10 +82,11 @@ pub(crate) fn save<P: PendingValue>(db: &DatabaseConnection, record: &P) -> Resu
     db.pending_change(|| {
         let subject = serde_json::to_vec(record.subject()).map_err(DbError::PendingEncoding)?;
         let value = serde_json::to_vec(record).map_err(DbError::PendingEncoding)?;
+        db.internal_execute("DELETE FROM _coven_pending_resets WHERE subject=?1 AND reporter=?2", (&subject, record.reported_by().0.to_be_bytes().as_slice()))?;
         db.internal_execute(
             "INSERT INTO _coven_pending(subject,reporter,value,operation,object,coven_version) VALUES(?1,?2,?3,?4,?5,?6)
-             ON CONFLICT(subject,reporter) DO UPDATE SET value=excluded.value,operation=excluded.operation,object=excluded.object,coven_version=excluded.coven_version
-             WHERE value!=excluded.value OR coven_version!=excluded.coven_version",
+             ON CONFLICT(subject,reporter) DO UPDATE SET value=excluded.value,operation=excluded.operation,object=excluded.object,coven_version=excluded.coven_version,suppressed=0
+             WHERE value!=excluded.value OR coven_version!=excluded.coven_version OR suppressed!=0",
             (subject, record.reported_by().0.to_be_bytes().as_slice(), value, record.operation().map(|id| id.0), record.log_object().map(object_key), env!("CARGO_PKG_VERSION")),
         )?;
         Ok(())
@@ -111,7 +122,7 @@ pub(crate) fn operation<P: PendingValue>(
     id: OperationId,
 ) -> Result<Option<P>, DbError> {
     db.query(
-        &format!("{SELECT} WHERE operation=?1"),
+        &format!("{SELECT} WHERE suppressed=0 AND operation=?1"),
         [id.0],
         StoredRecord::read,
     )?
@@ -127,7 +138,7 @@ pub(crate) fn retry<P: PendingValue>(
 ) -> Result<bool, DbError> {
     let record = db
         .query(
-            &format!("{SELECT} WHERE subject=?1 AND reporter=?2"),
+            &format!("{SELECT} WHERE suppressed=0 AND subject=?1 AND reporter=?2"),
             (
                 serde_json::to_vec(subject).map_err(DbError::PendingEncoding)?,
                 reporter.0.to_be_bytes().as_slice(),
@@ -151,6 +162,41 @@ fn object_key(object: crate::LogObject) -> Vec<u8> {
     key.extend(object.device().0.to_be_bytes());
     key.extend(object.number().to_be_bytes());
     key
+}
+
+pub(crate) fn suppress(db: &DatabaseConnection, resets: &[crate::EntryId]) -> Result<(), DbError> {
+    if resets.is_empty() {
+        return Ok(());
+    }
+    db.pending_change(|| {
+        for entry in resets {
+            db.internal_execute(
+                "INSERT INTO _coven_pending_resets(subject,reporter,entry_device,entry_number)
+                 SELECT subject,reporter,?1,?2 FROM _coven_pending WHERE true ON CONFLICT DO NOTHING",
+                (entry.device.0.to_be_bytes().as_slice(), entry.number.to_be_bytes().as_slice()),
+            )?;
+        }
+        refresh(db)
+    })
+}
+
+pub(crate) fn refresh(db: &DatabaseConnection) -> Result<(), DbError> {
+    db.pending_change(|| {
+        db.internal_execute(
+            "UPDATE _coven_pending AS p SET suppressed=EXISTS(
+                SELECT 1 FROM _coven_pending_resets s
+                JOIN _coven_boundaries b ON b.entry_device=s.entry_device AND b.entry_number=s.entry_number
+                JOIN _coven_store_log l ON l.device=b.entry_device AND l.number=b.entry_number
+                WHERE s.subject=p.subject AND s.reporter=p.reporter AND b.applied=1 AND l.outcome='kept')
+             WHERE suppressed!=EXISTS(
+                SELECT 1 FROM _coven_pending_resets s
+                JOIN _coven_boundaries b ON b.entry_device=s.entry_device AND b.entry_number=s.entry_number
+                JOIN _coven_store_log l ON l.device=b.entry_device AND l.number=b.entry_number
+                WHERE s.subject=p.subject AND s.reporter=p.reporter AND b.applied=1 AND l.outcome='kept')",
+            [],
+        )?;
+        Ok(())
+    })
 }
 
 /// Kept progress removes only this installation's condition, in its transaction.

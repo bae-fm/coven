@@ -12,12 +12,25 @@ impl crate::Database {
         &self,
         boundary: crate::Boundary,
     ) -> Result<EntryId, crate::DbError> {
+        self.check_boundary_fixture_at(boundary, std::time::UNIX_EPOCH)
+            .await
+    }
+    pub(crate) async fn check_boundary_fixture_at(
+        &self,
+        boundary: crate::Boundary,
+        stored_at: std::time::SystemTime,
+    ) -> Result<EntryId, crate::DbError> {
         use coven_format::{
             store_log::{StoreChange, StoreLogEntry},
             value::EntryPositions,
         };
         let log = self.store_log().await.unwrap();
         let id = boundary.entry();
+        let stored_at = log
+            .entries
+            .iter()
+            .find(|e| e.entry.position == id)
+            .map_or(stored_at, |e| e.stored_at);
         let entry = if let Some(existing) = log.entries.iter().find(|e| e.entry.position == id) {
             existing.entry.clone()
         } else {
@@ -49,11 +62,10 @@ impl crate::Database {
         if !boundary.already_in_place(&replay.state) {
             boundary.apply(&mut replay.state);
         }
-        self.apply_store_log::<crate::pending::tests::Record>(
-            crate::store_log::tests::checked(entry),
-            replay,
-        )
-        .await?;
+        let mut checked = crate::store_log::tests::checked(entry);
+        checked.stored_at = stored_at;
+        self.apply_store_log::<crate::pending::tests::Record>(checked, replay)
+            .await?;
         Ok(id)
     }
     pub(crate) async fn schema_fixture(
@@ -88,10 +100,14 @@ impl crate::Database {
         version: u32,
         included: WritePositions,
     ) -> Result<bool, crate::DbError> {
-        let boundary = self.schema_fixture(audience, version).await?;
+        let boundary = self.schema_fixture(audience.clone(), version).await?;
         let entry = self.check_boundary_fixture(boundary).await?;
         self.inspect_writer(|sql| {
-            sql.transaction(|sql| crate::BoundaryCoverage { entry, included }.record_inside(sql))
+            sql.transaction(|sql| {
+                let changed = crate::BoundaryCoverage { entry, included }.record_inside(sql)?;
+                crate::entry_effects::ready(sql, &audience)?;
+                Ok(changed)
+            })
         })
     }
     pub(crate) async fn install_reset_fixture(
@@ -103,14 +119,18 @@ impl crate::Database {
         let boundary = crate::Boundary::Reset {
             entry,
             snapshot: coven_format::store_log::SnapshotId {
-                audience,
+                audience: audience.clone(),
                 device: entry.device,
                 number: entry.number,
             },
         };
         self.check_boundary_fixture(boundary).await?;
         self.inspect_writer(|sql| {
-            sql.transaction(|sql| crate::BoundaryCoverage { entry, included }.record_inside(sql))
+            sql.transaction(|sql| {
+                let changed = crate::BoundaryCoverage { entry, included }.record_inside(sql)?;
+                crate::entry_effects::ready(sql, &audience)?;
+                Ok(changed)
+            })
         })
     }
 }

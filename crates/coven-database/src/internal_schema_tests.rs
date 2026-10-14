@@ -106,6 +106,11 @@ async fn only_the_spec_tables_are_created() {
                 "_coven_claims",
                 "_coven_columns",
                 "_coven_constraints",
+                "_coven_data_inputs",
+                "_coven_data_losses",
+                "_coven_data_origins",
+                "_coven_data_reloads",
+                "_coven_data_rows",
                 "_coven_device_files",
                 "_coven_devices",
                 "_coven_file_chunks",
@@ -123,6 +128,7 @@ async fn only_the_spec_tables_are_created() {
                 "_coven_members",
                 "_coven_operations",
                 "_coven_pending",
+                "_coven_pending_resets",
                 "_coven_positions",
                 "_coven_reference_values",
                 "_coven_references",
@@ -133,6 +139,8 @@ async fn only_the_spec_tables_are_created() {
                 "_coven_store_log_uploads",
                 "_coven_uploads",
                 "_coven_user_files",
+                "_coven_write_input_frames",
+                "_coven_write_inputs",
                 "_coven_write_upload_sessions",
                 "_coven_writes",
                 "sqlite_sequence"
@@ -262,7 +270,15 @@ mod query_plans {
          INSERT INTO _coven_circle_members SELECT 'circle_' || i,key FROM fixture;
          INSERT INTO _coven_circle_deletions SELECT 'circle_' || i,device,n FROM fixture;
          INSERT INTO _coven_store VALUES('store','store',zeroblob(16));
-         INSERT INTO _coven_boundaries SELECT device,n,'schema',1,audience,device,n,x'00',1 FROM fixture;
+         INSERT INTO _coven_data_inputs SELECT i,audience,'snapshot',device,n,1,x'00' FROM fixture;
+         INSERT INTO _coven_data_origins SELECT 'audience_' || i,i,x'' FROM fixture;
+         INSERT INTO _coven_data_reloads SELECT 'audience_' || i,key,i%2 FROM fixture;
+         INSERT INTO _coven_data_rows SELECT i,tab,key,x'00' FROM fixture;
+         INSERT INTO _coven_data_losses SELECT i,0,x'00' FROM fixture;
+         INSERT INTO _coven_write_inputs SELECT audience,CAST(n || device AS BLOB),x'00' FROM fixture;
+         INSERT INTO _coven_write_input_frames SELECT audience,CAST(n || device AS BLOB),0,x'00' FROM fixture;
+         INSERT INTO _coven_boundaries SELECT device,n,'schema',1,audience,device,n,x'00',i,1 FROM fixture;
+         INSERT INTO _coven_pending_resets SELECT key,device,device,n FROM fixture;
          INSERT INTO _coven_loaded_audiences SELECT 'audience_' || i FROM fixture;
          INSERT INTO _coven_fingerprint_sums SELECT 'audience_' || i,zeroblob(32) FROM fixture;
          INSERT INTO _coven_fingerprint_leaves SELECT audience,key,key,key FROM fixture;
@@ -369,6 +385,18 @@ mod query_plans {
             let file = statement.file.as_str();
             let sql = statement.template.as_str();
             match (file, sql, relation) {
+        ("pending.rs", "INSERT INTO _coven_pending_resets(subject,reporter,entry_device,entry_number) SELECT subject,reporter,?1,?2 FROM _coven_pending WHERE true ON CONFLICT DO NOTHING", "_coven_pending") =>
+            Some("a newly applied reset suppresses every earlier observation"),
+        ("pending.rs", sql, "p") if sql.starts_with("UPDATE _coven_pending AS p SET suppressed=EXISTS(") =>
+            Some("replay rejudges each observation against its indexed reset causes"),
+        ("entry_inputs.rs", "INSERT INTO temp._coven_snapshot_writes SELECT substr(timestamp,9,8),number,timestamp,had_read FROM _coven_writes", "_coven_writes") =>
+            Some("retained snapshots validate references against all applied write metadata"),
+        ("entry_inputs.rs", "SELECT DISTINCT audience FROM _coven_data_inputs", "_coven_data_inputs") =>
+            Some("release checks every audience that still retains replay inputs"),
+        ("entry_inputs.rs", "SELECT DISTINCT entry_device,entry_number FROM _coven_pending_resets", "_coven_pending_resets") =>
+            Some("release checks every reset that still conditionally suppresses observations"),
+        ("database_sync.rs", "SELECT audience FROM _coven_data_reloads", "_coven_data_reloads") =>
+            Some("sync reads every audience awaiting replacement data"),
         ("sqlite.rs", "PRAGMA integrity_check", "database") =>
             Some("corruption detection checks every stored row and index"),
         ("database_recovery.rs", "PRAGMA table_info({table})", "database") =>
@@ -396,14 +424,12 @@ mod query_plans {
             Some("the key-copy queue reader returns every reserved copy"),
         ("operation.rs", "SELECT id,kind,last_step,data,started_by FROM _coven_operations ORDER BY id", "_coven_operations") =>
             Some("operations() returns every unfinished journal entry"),
-        ("pending.rs", "SELECT subject,reporter,value,operation,object,coven_version FROM _coven_pending", "_coven_pending") =>
+        ("pending.rs", "SELECT subject,reporter,value,operation,object,coven_version FROM _coven_pending" | "{SELECT} WHERE suppressed=0", "_coven_pending") =>
             Some("pending() returns every recorded condition"),
         ("snapshot_coverage.rs", "SELECT audience FROM _coven_loaded_audiences UNION SELECT audience FROM _coven_rows UNION SELECT audience FROM _coven_lost UNION SELECT 'store'", "_coven_loaded_audiences" | "_coven_rows" | "_coven_lost") =>
             Some("reload discovers the union of all locally represented audiences"),
         ("snapshot_load.rs", "SELECT device,number FROM _coven_store_log ORDER BY device,number", "_coven_store_log") =>
             Some("reload compares the entire committed entry set with its captured set"),
-        ("snapshot_load.rs", "DELETE FROM _coven_pending", "_coven_pending") =>
-            Some("a new reset clears every pending observation atomically"),
         ("snapshot_state.rs", "SELECT EXISTS(SELECT 1 FROM temp._coven_snapshot_values v WHERE matched=0 OR (matched=2) != EXISTS(SELECT 1 FROM _coven_lost l WHERE l.table_name=v.table_name AND l.key=v.key AND l.audience=v.audience AND l.retired=0 AND l.replacement_kind='rules'))", "v") =>
             Some("snapshot validation checks every staged row; its loss lookup must be indexed"),
         ("snapshot_write.rs", "SELECT {WRITE_DEVICE_SQL},number FROM _coven_writes", "_coven_writes") =>
@@ -755,6 +781,11 @@ mod query_plans {
                     "{local_table}",
                     &["_coven_user_files", "_coven_device_files"],
                 );
+            }
+            if sql.contains("{FINAL}") {
+                assert_eq!(file, "entry_inputs.rs");
+                let condition = select_constant(&source.strings, "(substr(l.stored_at");
+                return vec![sql.replace("{FINAL}", &condition)];
             }
             if sql.contains("{table}") || sql.contains("{child}") {
                 let variable = if sql.contains("{table}") {

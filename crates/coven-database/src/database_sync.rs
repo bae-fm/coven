@@ -4,6 +4,25 @@ use super::Database;
 use crate::{CovenResult, DbError};
 
 impl Database {
+    /// Audiences whose selected entry effects still require readable replacement
+    /// data. A replay that rebuilds from retained inputs removes its requirement
+    /// in the same transaction, so sync need not load that audience again.
+    pub async fn reloading_audiences(
+        &self,
+    ) -> Result<std::collections::BTreeSet<coven_merge::Audience>, DbError> {
+        self.call(move |inner| {
+            inner.access.readers.acquire_reader().with_reader(|db| {
+                Ok(db
+                    .query("SELECT audience FROM _coven_data_reloads", [], |r| {
+                        crate::write_encoding::audience(&r.get::<_, String>(0)?)
+                    })?
+                    .into_iter()
+                    .collect())
+            })
+        })
+        .await
+    }
+
     /// Current pending records, decoded as the sync owner's typed values.
     pub async fn pending<P: crate::PendingValue>(&self) -> CovenResult<Vec<P>> {
         self.read(|sql| sql.pending()).await
@@ -64,7 +83,7 @@ impl Database {
                         return Err(DbError::DamagedDatabase);
                     }
                 }
-                let previous: Vec<_> = crate::pending::read::<P>(writer)?
+                let previous: Vec<_> = crate::pending::retained::<P>(writer)?
                     .into_iter()
                     .filter(|r| r.reported_by() != inner.access.device)
                     .collect();
@@ -81,10 +100,15 @@ impl Database {
                 }
                 writer.pending_transaction(|db| {
                     for report in previous {
-                        crate::pending::clear(db, report.subject(), report.reported_by())?;
+                        if !identities.contains(&(report.subject(), report.reported_by())) {
+                            crate::pending::clear(db, report.subject(), report.reported_by())?;
+                        }
                     }
-                    for report in reports {
-                        crate::pending::save(db, &report)?;
+                    for report in &reports {
+                        let bytes = serde_json::to_vec(report).map_err(DbError::PendingEncoding)?;
+                        if !previous_values.contains(&bytes) {
+                            crate::pending::save(db, report)?;
+                        }
                     }
                     Ok(())
                 })
@@ -381,7 +405,8 @@ impl Database {
                             "UPDATE _coven_finality SET horizon=?1 WHERE singleton=1",
                             [crate::store_log_tables::encode_horizon(horizon)],
                         )?;
-                        Ok(())
+                        // Inputs whose boundary entries all became final are released.
+                        crate::entry_inputs::release(database)
                     })?;
                     current.horizon = Some(horizon);
                     Ok(())

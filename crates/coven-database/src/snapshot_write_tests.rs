@@ -54,7 +54,7 @@ impl SnapshotFrames {
         std::io::Cursor<Vec<u8>>,
     ) {
         (
-            id(self.prefix.audience.clone()),
+            decode(self).0.id,
             self.prefix.clone(),
             std::io::Cursor::new(self.concat()),
         )
@@ -73,13 +73,17 @@ pub(crate) fn prefix(
 }
 
 pub(crate) async fn frames(database: &Database, audience: Audience) -> SnapshotFrames {
+    frames_for(database, id(audience)).await
+}
+
+pub(crate) async fn frames_for(database: &Database, id: SnapshotId) -> SnapshotFrames {
     let frames = Arc::new(Mutex::new(Vec::new()));
     let metadata = Arc::new(Mutex::new(None));
     let output = frames.clone();
     let start = metadata.clone();
     database
         .write_snapshot(
-            id(audience),
+            id,
             move |header| {
                 *start.lock().unwrap() = Some(prefix(header));
                 Ok(())

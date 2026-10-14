@@ -4,10 +4,20 @@ use serde::Deserialize;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Record {
-    subject: u64,
+    subject: Subject,
     reported_by: DeviceId,
     reason: Reason,
     operation: Option<OperationId>,
+}
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub(crate) enum Subject {
+    Number(u64),
+    Audience(String),
+}
+impl From<u64> for Subject {
+    fn from(value: u64) -> Self {
+        Self::Number(value)
+    }
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 enum Reason {
@@ -17,16 +27,24 @@ enum Reason {
     Dropped,
 }
 impl PendingValue for Record {
+    fn reload(audience: coven_merge::Audience, reported_by: DeviceId) -> Self {
+        Self {
+            subject: Subject::Audience(crate::write_encoding::audience_text(&audience)),
+            reported_by,
+            reason: Reason::Missing,
+            operation: None,
+        }
+    }
     fn dropped_entry(entry: crate::EntryId, _reason: crate::DropReason) -> Self {
         Self {
-            subject: entry.number,
+            subject: entry.number.into(),
             reported_by: entry.device,
             reason: Reason::Dropped,
             operation: None,
         }
     }
-    type Subject = u64;
-    fn subject(&self) -> &u64 {
+    type Subject = Subject;
+    fn subject(&self) -> &Subject {
         &self.subject
     }
     fn reported_by(&self) -> DeviceId {
@@ -36,9 +54,12 @@ impl PendingValue for Record {
         self.operation
     }
     fn log_object(&self) -> Option<crate::LogObject> {
+        let Subject::Number(number) = self.subject else {
+            return None;
+        };
         matches!(self.reason, Reason::Dropped).then_some(crate::LogObject::Entry(crate::EntryId {
             device: self.reported_by,
-            number: self.subject,
+            number,
         }))
     }
     fn can_retry(&self, version: &str, schema: u32) -> bool {
@@ -52,7 +73,7 @@ impl PendingValue for Record {
 }
 pub(crate) async fn operation_record(db: &Database, id: OperationId) -> Record {
     Record {
-        subject: id.0.try_into().unwrap(),
+        subject: Subject::Number(id.0.try_into().unwrap()),
         reported_by: own(db).await,
         reason: Reason::Missing,
         operation: Some(id),
@@ -63,7 +84,7 @@ async fn own(db: &Database) -> DeviceId {
 }
 async fn record(db: &Database, subject: u64) -> Record {
     Record {
-        subject,
+        subject: subject.into(),
         reported_by: own(db).await,
         reason: Reason::Refused,
         operation: None,
@@ -87,7 +108,7 @@ async fn subjects_and_reporters_are_independent_and_reasons_replace_atomically()
         .await
         .unwrap();
     let mut expected = vec![local.clone(), peer.clone()];
-    expected.sort_by_key(|r| (r.subject, r.reported_by));
+    expected.sort_by_key(|r| (r.subject.clone(), r.reported_by));
     assert_eq!(live.next().await.unwrap(), expected);
     let next = Record {
         reason: Reason::Missing,
@@ -120,14 +141,14 @@ async fn reopening_preserves_conditions_and_a_version_change_rearms_without_eras
     let db = store.builder(vec![], vec![]).open().await.unwrap();
     let pending = record(&db, 1).await;
     db.record_pending(pending.clone()).await.unwrap();
-    assert!(!db.pending_can_retry::<Record>(1).await.unwrap());
+    assert!(!db.pending_can_retry::<Record>(1.into()).await.unwrap());
     db.close().await.unwrap();
     let db = store.builder(vec![], vec![]).open().await.unwrap();
     assert_eq!(
         db.pending::<Record>().await.unwrap(),
         std::slice::from_ref(&pending)
     );
-    assert!(!db.pending_can_retry::<Record>(1).await.unwrap());
+    assert!(!db.pending_can_retry::<Record>(1.into()).await.unwrap());
     db.test_pending_version("previous-version").await.unwrap();
     db.close().await.unwrap();
     let db = store.builder(vec![], vec![]).open().await.unwrap();
@@ -135,9 +156,9 @@ async fn reopening_preserves_conditions_and_a_version_change_rearms_without_eras
         db.pending::<Record>().await.unwrap(),
         std::slice::from_ref(&pending)
     );
-    assert!(db.pending_can_retry::<Record>(1).await.unwrap());
+    assert!(db.pending_can_retry::<Record>(1.into()).await.unwrap());
     db.record_pending(pending).await.unwrap();
-    assert!(!db.pending_can_retry::<Record>(1).await.unwrap());
+    assert!(!db.pending_can_retry::<Record>(1.into()).await.unwrap());
 }
 
 #[tokio::test]
@@ -247,7 +268,7 @@ async fn losing_a_pending_update_fails_all_calls_and_subscriptions_until_reopen(
             })
             .await
         } else {
-            db.clear_pending(pending.subject).await
+            db.clear_pending(pending.subject.clone()).await
         };
         let original = cause(failed.unwrap_err());
         let failures = [
@@ -346,7 +367,7 @@ async fn judgments_clear_only_with_a_committed_changed_reset() {
     };
     db.record_pending(record(&db, 1).await).await.unwrap();
     assert!(db.load_snapshots(reload(Vec::new())).await.is_err());
-    assert_eq!(db.pending::<Record>().await.unwrap().len(), 1);
+    assert_eq!(db.pending::<Record>().await.unwrap().len(), 2);
     db.load_snapshots(reload(vec![crate::SnapshotSource::Empty(
         coven_merge::Audience::Store,
     )]))

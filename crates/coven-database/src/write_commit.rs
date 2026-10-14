@@ -26,7 +26,7 @@ pub(crate) fn commit(
     )?;
     database.internal_execute(
         "INSERT INTO _coven_positions(device,number) VALUES(?1,?2)
-         ON CONFLICT(device) DO UPDATE SET number=excluded.number",
+         ON CONFLICT(device) DO UPDATE SET number=max(number,excluded.number)",
         params![
             record.header.position.device.0.to_be_bytes().as_slice(),
             record.header.position.number.to_be_bytes().as_slice()
@@ -158,6 +158,9 @@ pub(crate) fn persist(
 /// commit, so a membership change cannot race the authorization.
 pub(crate) fn queue(database: &DatabaseConnection, record: &WriteRecord) -> Result<(), DbError> {
     for part in &record.parts {
+        if crate::entry_effects::refuses_writes(database, &part.audience)? {
+            return Err(DbError::AudienceReloading(part.audience.clone()));
+        }
         check_membership(database, record.header.position.device, &part.audience)?;
     }
     retain_queue(database, record)
@@ -198,6 +201,7 @@ pub(crate) fn retain_queue(
     database: &DatabaseConnection,
     record: &WriteRecord,
 ) -> Result<(), DbError> {
+    crate::retained_writes::record(database, record)?;
     let encoder = encoded(WriteEncoder::new(record))?;
     let bytes = plaintext(database, encoder)?;
     database.internal_execute(

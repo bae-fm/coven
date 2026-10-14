@@ -178,7 +178,7 @@ impl BoundaryCoverage {
     pub(crate) fn replace(
         database: &DatabaseConnection,
         boundaries: Vec<Self>,
-    ) -> Result<bool, DbError> {
+    ) -> Result<Vec<EntryId>, DbError> {
         let selected = Boundary::load_selected(database)?;
         let selected_ids: BTreeSet<_> = selected.iter().map(Boundary::entry).collect();
         let mut ids = BTreeSet::new();
@@ -193,14 +193,22 @@ impl BoundaryCoverage {
             "SELECT entry_device,entry_number FROM _coven_boundaries WHERE applied=1 AND kind='reset'",
             [], |row| crate::store_log_tables::entry_id(row, 0),
         )?.into_iter().collect();
-        let changed_reset = selected.iter().any(|boundary| {
-            matches!(boundary, Boundary::Reset { entry, .. } if ids.contains(entry) && !previous.contains(entry))
-        });
+        let changed_resets = selected
+            .iter()
+            .filter_map(|boundary| match boundary {
+                Boundary::Reset { entry, .. }
+                    if ids.contains(entry) && !previous.contains(entry) =>
+                {
+                    Some(*entry)
+                }
+                _ => None,
+            })
+            .collect();
         database.internal_execute("UPDATE _coven_boundaries SET applied=0 WHERE applied=1", [])?;
         for boundary in boundaries {
             boundary.record_inside(database)?;
         }
-        Ok(changed_reset)
+        Ok(changed_resets)
     }
 }
 

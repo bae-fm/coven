@@ -717,6 +717,8 @@ mod stuck {
             .make_and_upload_entry(StoreChange::Reset { snapshot })
             .await
             .unwrap();
+        // The resetting device reloads its own snapshot too (§19.3).
+        devices[0].sync.sync_store_log().await.unwrap();
         devices[1].sync.sync_store_log().await.unwrap();
         assert!(devices[1]
             .db

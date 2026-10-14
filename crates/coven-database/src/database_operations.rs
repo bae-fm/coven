@@ -37,16 +37,43 @@ impl Database {
                 }
                 next.entries.sort_by_key(|entry| entry.entry.timestamp);
                 next.replay = replay;
+                if !next
+                    .entries
+                    .iter()
+                    .map(|entry| entry.entry.position)
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .iter()
+                    .eq(next.replay.entries.keys())
+                {
+                    return Err(DbError::StoreLogEntriesChanged);
+                }
+                let changes_projection = next.boundaries().ne(current.boundaries())
+                    || next.replay.state.circles != current.replay.state.circles
+                    || next.replay.state.circle_deletions != current.replay.state.circle_deletions;
+                let reader = changes_projection.then(|| inner.access.readers.acquire_reader());
                 inner.with_files(Vec::new(), |writer, files| {
-                    crate::store_log::apply::<P>(
-                        writer,
-                        &inner.access.write_schema,
-                        &entries,
-                        &next.replay,
-                        files,
-                        &operations,
-                        &updates,
-                    )?;
+                    let apply = |before: &crate::sqlite::DatabaseConnection| {
+                        crate::store_log::apply::<P>(
+                            writer,
+                            before,
+                            &inner.access.write_schema,
+                            &entries,
+                            &next.replay,
+                            files,
+                            &operations,
+                            &updates,
+                        )
+                    };
+                    if let Some(reader) = reader {
+                        reader.with_reader(|reader| {
+                            reader.read_transaction(|| {
+                                inner.access.write_schema.prepare(reader)?;
+                                apply(reader)
+                            })
+                        })?;
+                    } else {
+                        apply(writer)?;
+                    }
                     *current = next;
                     #[cfg(any(test, feature = "test-utils"))]
                     writer.record_work(|work| work.store_log_commits += 1);

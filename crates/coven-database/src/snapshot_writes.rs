@@ -101,7 +101,11 @@ pub(crate) fn apply<R: Read>(
         let result = (|| -> Result<(), DbError> {
             let supplied = matches!(source, Source::Download(_));
             let write = match source {
-                Source::Download(stream) => stream.read()?,
+                Source::Download(stream) => {
+                    let write = stream.read()?;
+                    crate::retained_writes::download(database, &write)?;
+                    write
+                }
                 Source::Deleted(write) => {
                     let positions = crate::download::positions(database)?;
                     if !positions.covers(write.id) {

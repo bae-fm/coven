@@ -40,10 +40,88 @@ macro_rules! coven_tables {
                 operation INTEGER REFERENCES _coven_operations(id),
                 object BLOB CHECK(object IS NULL OR length(object)=17),
                 coven_version TEXT NOT NULL,
+                suppressed INTEGER NOT NULL DEFAULT 0 CHECK(suppressed IN (0,1)),
                 PRIMARY KEY(subject,reporter)
             ) STRICT, WITHOUT ROWID;
             CREATE INDEX _coven_pending_object ON _coven_pending(object,reporter);
             CREATE UNIQUE INDEX _coven_pending_operation ON _coven_pending(operation) WHERE operation IS NOT NULL;
+        ");
+        $visit!(_coven_pending_resets, "
+            CREATE TABLE _coven_pending_resets (
+                subject BLOB NOT NULL,
+                reporter BLOB NOT NULL,
+                entry_device BLOB NOT NULL,
+                entry_number BLOB NOT NULL,
+                PRIMARY KEY(subject,reporter,entry_device,entry_number),
+                FOREIGN KEY(subject,reporter) REFERENCES _coven_pending(subject,reporter) ON DELETE CASCADE,
+                FOREIGN KEY(entry_device,entry_number) REFERENCES _coven_boundaries(entry_device,entry_number)
+            ) STRICT, WITHOUT ROWID;
+            CREATE INDEX _coven_pending_resets_entry ON _coven_pending_resets(entry_device,entry_number);
+        ");
+        $visit!(_coven_data_reloads, "
+            CREATE TABLE _coven_data_reloads (
+                audience TEXT PRIMARY KEY NOT NULL,
+                subject BLOB NOT NULL,
+                update_required INTEGER NOT NULL CHECK(update_required IN (0,1))
+            ) STRICT, WITHOUT ROWID;
+        ");
+        $visit!(_coven_data_inputs, "
+            CREATE TABLE _coven_data_inputs (
+                id INTEGER PRIMARY KEY,
+                audience TEXT NOT NULL,
+                kind TEXT NOT NULL CHECK(kind IN ('local','snapshot','empty')),
+                device BLOB,
+                number BLOB,
+                version INTEGER NOT NULL CHECK(version>=0),
+                positions BLOB NOT NULL,
+                CHECK((kind='snapshot' AND device IS NOT NULL AND length(device)=8
+                     AND number IS NOT NULL AND length(number)=8 AND number>x'0000000000000000')
+                   OR (kind!='snapshot' AND device IS NULL AND number IS NULL))
+            ) STRICT;
+            CREATE INDEX _coven_data_inputs_audience ON _coven_data_inputs(audience,kind,device,number);
+        ");
+        $visit!(_coven_data_origins, "
+            CREATE TABLE _coven_data_origins (
+                audience TEXT PRIMARY KEY NOT NULL,
+                input INTEGER NOT NULL REFERENCES _coven_data_inputs(id),
+                basis BLOB NOT NULL CHECK(length(basis)%16=0)
+            ) STRICT, WITHOUT ROWID;
+            CREATE INDEX _coven_data_origins_input ON _coven_data_origins(input);
+        ");
+        $visit!(_coven_data_rows, "
+            CREATE TABLE _coven_data_rows (
+                input INTEGER NOT NULL REFERENCES _coven_data_inputs(id) ON DELETE CASCADE,
+                table_name TEXT NOT NULL,
+                key BLOB NOT NULL,
+                record BLOB NOT NULL,
+                PRIMARY KEY(input,table_name,key)
+            ) STRICT, WITHOUT ROWID;
+        ");
+        $visit!(_coven_data_losses, "
+            CREATE TABLE _coven_data_losses (
+                input INTEGER NOT NULL REFERENCES _coven_data_inputs(id) ON DELETE CASCADE,
+                ordinal INTEGER NOT NULL,
+                record BLOB NOT NULL,
+                PRIMARY KEY(input,ordinal)
+            ) STRICT, WITHOUT ROWID;
+        ");
+        $visit!(_coven_write_inputs, "
+            CREATE TABLE _coven_write_inputs (
+                audience TEXT NOT NULL,
+                timestamp BLOB NOT NULL CHECK(length(timestamp)=16),
+                header BLOB NOT NULL,
+                PRIMARY KEY(audience,timestamp)
+            ) STRICT, WITHOUT ROWID;
+        ");
+        $visit!(_coven_write_input_frames, "
+            CREATE TABLE _coven_write_input_frames (
+                audience TEXT NOT NULL,
+                timestamp BLOB NOT NULL,
+                ordinal INTEGER NOT NULL CHECK(ordinal>=0),
+                frame BLOB NOT NULL,
+                PRIMARY KEY(audience,timestamp,ordinal),
+                FOREIGN KEY(audience,timestamp) REFERENCES _coven_write_inputs(audience,timestamp) ON DELETE CASCADE
+            ) STRICT, WITHOUT ROWID;
         ");
         $visit!(_coven_store_log, "
             CREATE TABLE _coven_store_log (
@@ -165,6 +243,7 @@ macro_rules! coven_tables {
                 snapshot_device BLOB NOT NULL CHECK(length(snapshot_device)=8),
                 snapshot_number BLOB NOT NULL CHECK(length(snapshot_number)=8 AND snapshot_number>x'0000000000000000'),
                 included BLOB,
+                input INTEGER REFERENCES _coven_data_inputs(id),
                 applied INTEGER NOT NULL DEFAULT 0 CHECK(applied IN (0,1)),
                 CHECK((kind='schema' AND version IS NOT NULL AND version>0)
                    OR (kind='reset' AND version IS NULL)),
@@ -173,6 +252,8 @@ macro_rules! coven_tables {
                 FOREIGN KEY(entry_device,entry_number) REFERENCES _coven_store_log(device,number)
             ) STRICT, WITHOUT ROWID;
             CREATE INDEX _coven_boundaries_applied ON _coven_boundaries(applied,kind);
+            CREATE INDEX _coven_boundaries_input ON _coven_boundaries(input);
+            CREATE INDEX _coven_boundaries_audience ON _coven_boundaries(audience,applied);
         ");
         $visit!(_coven_snapshot_schema, "
             CREATE TABLE _coven_snapshot_schema (

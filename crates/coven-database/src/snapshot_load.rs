@@ -43,15 +43,26 @@ pub(crate) fn load<R: Read, W: Read>(
                 return Err(DbError::StoreLogEntriesChanged);
             }
         }
-        if let Some(boundaries) = boundaries {
-            if crate::BoundaryCoverage::replace(database, boundaries)? {
-                // Failed ciphertext can conceal every audience. A committed reset
-                // clears all pending observations with the replacement.
-                database.pending_change(|| {
-                    database.internal_execute("DELETE FROM _coven_pending", [])?;
-                    Ok(())
-                })?;
+        if snapshots.is_empty() {
+            return Err(invalid("reload has no snapshots"));
+        }
+        let mut selected = BTreeSet::new();
+        for source in &snapshots {
+            let audience = match source {
+                crate::SnapshotSource::Stored { id, .. } => &id.audience,
+                crate::SnapshotSource::Empty(audience) => audience,
+            };
+            if !selected.insert(audience.clone()) {
+                return Err(invalid("reload repeats an audience"));
             }
+            // The rows being replaced, under the boundaries they were applied with.
+            crate::entry_inputs::original(database, &schema.schema, audience)?;
+        }
+        let applied = crate::download::positions(database)?;
+        if let Some(boundaries) = boundaries {
+            let resets = crate::BoundaryCoverage::replace(database, boundaries)?;
+            crate::pending::suppress(database, &resets)?;
+            crate::pending::refresh(database)?;
             if let Some(version) = crate::write_boundary::WriteBoundary::load(database)?
                 .into_iter()
                 .filter_map(|boundary| match boundary.boundary {
@@ -71,19 +82,6 @@ pub(crate) fn load<R: Read, W: Read>(
                 )?;
             }
         }
-        if snapshots.is_empty() {
-            return Err(invalid("reload has no snapshots"));
-        }
-        let mut selected = BTreeSet::new();
-        for source in &snapshots {
-            let audience = match source {
-                crate::SnapshotSource::Stored { id, .. } => &id.audience,
-                crate::SnapshotSource::Empty(audience) => audience,
-            };
-            if !selected.insert(audience.clone()) {
-                return Err(invalid("reload repeats an audience"));
-            }
-        }
         let mut coverage = crate::snapshot_coverage::SnapshotCoverage::new(database, device)?;
         let visible = AppView::after(before, schema);
         let old_store = MergeStore::from_schema(before, &schema.schema);
@@ -97,11 +95,34 @@ pub(crate) fn load<R: Read, W: Read>(
             match source {
                 crate::SnapshotSource::Stored { id, prefix, input } => {
                     let (header, rows) = read(database, schema, &id, prefix, input)?;
+                    // Writes covered here but never applied individually are not
+                    // retained, so earlier inputs cannot reproduce this audience.
+                    if !header.writes.0.iter().all(|write| applied.covers(*write)) {
+                        crate::entry_inputs::forget(database, &id.audience, None)?;
+                    }
+                    let store = MergeStore::from_snapshot(database, &schema.schema, &selected);
+                    let retained = crate::entry_inputs::retain(
+                        database,
+                        crate::entry_inputs::Origin::Snapshot(&id),
+                        header.schema_version,
+                        &header.writes,
+                        &store,
+                    )?;
+                    crate::entry_inputs::selected(database, &id.audience, retained)?;
                     coverage.loaded(id.audience, header.writes);
                     touched.extend(rows);
                 }
                 crate::SnapshotSource::Empty(audience) => {
                     touched.extend(crate::snapshot_state::begin(database, &audience)?);
+                    let store = MergeStore::from_snapshot(database, &schema.schema, &selected);
+                    let retained = crate::entry_inputs::retain(
+                        database,
+                        crate::entry_inputs::Origin::Empty(&audience),
+                        database.schema_version()?,
+                        &coven_format::value::WritePositions(Vec::new()),
+                        &store,
+                    )?;
+                    crate::entry_inputs::selected(database, &audience, retained)?;
                     coverage.loaded(audience, coven_format::value::WritePositions(Vec::new()));
                 }
             }
@@ -118,6 +139,10 @@ pub(crate) fn load<R: Read, W: Read>(
         // Retention sees the final state, including every replayed waiting write.
         files.retain_rows(affected, &deleted)?;
         files.before_commit()?;
+        for audience in &selected {
+            crate::entry_effects::ready(database, audience)?;
+        }
+        crate::entry_inputs::release(database)?;
         if let Some(operation) = operation {
             crate::operation::advance(database, &operation)?;
         }

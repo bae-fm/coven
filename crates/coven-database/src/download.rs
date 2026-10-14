@@ -67,6 +67,8 @@ pub enum WriteWait {
     SchemaVersion(u32),
     /// The local breaking migration awaits publication and snapshot reload.
     SchemaPublication(u32),
+    /// The selected boundary has not committed its replacement data.
+    Reload(Audience),
 }
 
 pub(crate) fn positions(database: &DatabaseConnection) -> Result<WritePositions, DbError> {
@@ -104,8 +106,18 @@ pub(crate) fn apply(
         if let Some(wait) = prerequisite(database, header)? {
             return Ok(ApplyOutcome::Waiting(wait));
         }
+        for part in &download.parts {
+            if let DownloadedPart::Opened(part) = part {
+                if crate::entry_effects::reloading(database, &part.audience)? {
+                    return Ok(ApplyOutcome::Waiting(WriteWait::Reload(
+                        part.audience.clone(),
+                    )));
+                }
+            }
+        }
         crate::pending::clear_log(database, crate::LogObject::Write(header.position))?;
         let deleted = crate::store_log_tables::deleted_circles(database)?;
+        crate::retained_writes::download(database, &download)?;
         let affected = apply_opened(database, schema, download, &deleted)?;
         files.retain_rows(affected, &deleted)?;
         files.before_commit()?;

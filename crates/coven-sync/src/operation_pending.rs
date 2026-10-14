@@ -193,6 +193,9 @@ fn write_wait(
     wait: &coven_database::WriteWait,
 ) -> Result<PendingReason, SyncError> {
     Ok(match wait {
+        coven_database::WriteWait::Reload(audience) => {
+            PendingReason::Waits(Prerequisite::Reload(audience.clone()))
+        }
         coven_database::WriteWait::Writes(missing) => {
             PendingReason::Waits(Prerequisite::Object(crate::write_seal::path(
                 store,

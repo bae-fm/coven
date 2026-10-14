@@ -51,6 +51,15 @@ impl<R: Read> DownloadedWriteStream<R> {
             if let Some(wait) = crate::download::prerequisite(database, &self.header.header)? {
                 return Ok(crate::ApplyOutcome::Waiting(wait));
             }
+            for (part, stream) in self.header.parts.iter().zip(&self.parts) {
+                if matches!(stream, DownloadedPartStream::Opened(_))
+                    && crate::entry_effects::reloading(database, &part.audience)?
+                {
+                    return Ok(crate::ApplyOutcome::Waiting(crate::WriteWait::Reload(
+                        part.audience.clone(),
+                    )));
+                }
+            }
             crate::download_stage::begin(database)?;
             let deleted = crate::store_log_tables::deleted_circles(database)?;
             for (header, stream) in self.header.parts.into_iter().zip(self.parts) {

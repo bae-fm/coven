@@ -1,6 +1,7 @@
 import StorelogJson
 import CovenStorelogData.ReplayEffects
 import CovenStorelogData.Snapshots
+import StorelogDataEffects
 
 /-! Compare replay realization and effective snapshot boundaries with Rust.
 The adapter calls the model's selection functions on checked causal histories. -/
@@ -36,8 +37,12 @@ def main : IO UInt32 := do
   let input ← (← IO.getStdin).readToEnd
   let output := do
     let j ← Json.parse input
-    let histories ← j.getObjValAs? (Array Json) "histories"
-    toJson <$> histories.mapM run
+    match j.getObjVal? "circles", j.getObjVal? "effects" with
+    | .ok circles, _ => toJson <$> (← circles.getArr?).mapM StorelogDataEffects.circles
+    | _, .ok effects => toJson <$> (← effects.getArr?).mapM StorelogDataEffects.run
+    | .error _, .error _ =>
+        let histories ← j.getObjValAs? (Array Json) "histories"
+        toJson <$> histories.mapM run
   match output with
   | .ok result => (← IO.getStdout).putStrLn result.compress; pure 0
   | .error err => (← IO.getStderr).putStrLn err; pure 1

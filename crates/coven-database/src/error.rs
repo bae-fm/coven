@@ -154,6 +154,9 @@ pub enum DbError {
     /// A local write targets a circle this member is not in or the store does not have (§14).
     #[error("not a member of circle {0}")]
     NotInCircle(coven_foundation::id_source::CircleId),
+    /// This audience still exposes its previous data while its selected boundary reloads (§15).
+    #[error("audience {0:?} is reloading")]
+    AudienceReloading(coven_merge::Audience),
     /// An inserted row's independent key holds no UUID (§8.5).
     #[error("independent key {key:?} of {table} does not contain a canonical lowercase UUIDv4 or UUIDv7")]
     KeyNotUuid {

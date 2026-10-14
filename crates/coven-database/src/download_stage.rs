@@ -39,6 +39,7 @@ pub(crate) fn frame(
     audience: &Audience,
     frame: WriteFrame,
 ) -> Result<(), DbError> {
+    crate::retained_writes::frame(database, header, audience, &frame)?;
     let mut part = WritePart {
         audience: audience.clone(),
         rows: Vec::new(),

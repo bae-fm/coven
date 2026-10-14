@@ -207,6 +207,7 @@ pub enum DropReason {
 
 pub(crate) fn apply<P: crate::PendingValue>(
     database: &DatabaseConnection,
+    before: &DatabaseConnection,
     schema: &WriteSchema,
     incoming: &[ReplayEntry],
     replay: &StoreLogReplay,
@@ -235,6 +236,7 @@ pub(crate) fn apply<P: crate::PendingValue>(
         })
         .collect::<Result<Vec<_>, DbError>>()?;
     database.transaction(|database| {
+        let previous_boundaries = crate::Boundary::load_selected(database)?;
         for (incoming, bytes, author_view, stored_at, _) in &encoded {
             let id = incoming.entry.position;
             for (record, view, time) in database.query(
@@ -282,6 +284,13 @@ pub(crate) fn apply<P: crate::PendingValue>(
         let previous = crate::store_log_tables::deleted_circles(database)?;
         crate::store_log_tables::replace(database, replay, &outcomes)?;
         let deleted = crate::store_log_tables::deleted_circles(database)?;
+        let mut affected = crate::entry_effects::replay::<P>(
+            database,
+            before,
+            schema,
+            &previous_boundaries,
+            &deleted,
+        )?;
         let mut touched = BTreeSet::new();
         let changed: BTreeSet<_> = previous.keys().chain(deleted.keys()).copied()
             .filter(|circle| previous.get(circle) != deleted.get(circle)).collect();
@@ -294,10 +303,10 @@ pub(crate) fn apply<P: crate::PendingValue>(
         }
         let visible = crate::write_rows::AppView::after(database, schema);
         let store = crate::merge_store::MergeStore::new(database, &visible);
-        let affected = crate::write_apply::WriteApply::new(
+        affected.extend(crate::write_apply::WriteApply::new(
             database, schema, &store, &visible, &visible, &deleted,
         )
-        .apply(None, touched)?;
+        .apply(None, touched)?);
         files.retain_rows(affected, &deleted)?;
         files.before_commit()?;
         for update in updates {
@@ -327,6 +336,7 @@ pub(crate) fn apply<P: crate::PendingValue>(
                 crate::pending::clear_log(database, crate::LogObject::Entry(entry.entry.position))?;
             }
         }
+        crate::entry_inputs::release(database)?;
         Ok(())
     })
 }

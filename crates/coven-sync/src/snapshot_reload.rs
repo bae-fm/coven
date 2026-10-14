@@ -34,7 +34,10 @@ impl StoreLogSync {
                     unreachable!()
                 };
                 if let ReloadScope::Changed(changed) = scope {
-                    audiences.retain(|audience, _| changed.contains(audience));
+                    let required = self.database.reloading_audiences().await?;
+                    audiences.retain(|audience, _| {
+                        changed.contains(audience) && required.contains(audience)
+                    });
                 }
                 if audiences.is_empty() {
                     self.database.finish_operation(record.id).await?;

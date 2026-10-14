@@ -12,6 +12,9 @@ path = "../storelog"
 [[lean_lib]]
 name = "CovenStorelogData"
 
+[[lean_lib]]
+name = "StorelogDataEffects"
+
 [[lean_exe]]
 name = "storelogDataRunner"
 root = "StorelogDataRunner"
