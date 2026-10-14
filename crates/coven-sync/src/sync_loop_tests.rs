@@ -839,8 +839,9 @@ async fn io_counts_file_fetch_baseline() {
         "{counts:#?}"
     );
     // No fixed non-idle writer/commit total is stated; observed counts. The
-    // eager fill reserves its request and retires it once cached (§16.4).
-    assert_eq!((counts.work.writer_holds, counts.work.commits), (79, 30));
+    // eager fill reserves its request and retires it once cached (§16.4),
+    // and each fetched range publishes in one transaction.
+    assert_eq!((counts.work.writer_holds, counts.work.commits), (78, 28));
 }
 
 #[tokio::test]

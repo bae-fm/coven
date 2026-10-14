@@ -456,17 +456,22 @@ impl FileDatabase {
         self.run(move |db, _, directory, _| cache::read(db, directory, &file, index))
             .await
     }
-    /// Keep verified ciphertext durably before publishing its cache metadata.
-    pub async fn cache_chunk(
+    /// Keep one verified range of `chunks` consecutive encrypted chunks from
+    /// `first`, or the header (`first` = -1), durably before publishing its
+    /// cache metadata in one transaction.
+    pub async fn cache_range(
         &self,
         file: &FileRef,
-        index: i64,
+        first: i64,
+        chunks: i64,
         name: FileName,
         bytes: Vec<u8>,
     ) -> Result<(), DbError> {
         let file = file.clone();
-        self.run(move |db, _, directory, _| cache::put(db, directory, &file, index, &name, &bytes))
-            .await
+        self.run(move |db, _, directory, _| {
+            cache::put(db, directory, &file, first, chunks, &name, &bytes)
+        })
+        .await
     }
     /// Evict unpinned chunks in least-recently-read order, independently per namespace.
     pub async fn trim_cache(&self, namespace: &str) -> Result<(), DbError> {

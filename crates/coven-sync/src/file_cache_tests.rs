@@ -532,3 +532,146 @@ async fn pin_progress_reads_committed_coverage() {
     );
     f.close().await;
 }
+
+/// Files in the store's cache folder, published or not.
+fn cache_files(f: &Fixture) -> usize {
+    std::fs::read_dir(
+        f.root
+            .path()
+            .join("stores")
+            .join(f.directory.id().to_string())
+            .join("cache"),
+    )
+    .map(|entries| entries.count())
+    .unwrap_or(0)
+}
+
+/// A fetched range is authenticated whole, then published as one file and
+/// one row; reopening serves it without a request (§16.3, §16.6).
+#[tokio::test]
+async fn a_verified_range_publishes_as_one_entry() {
+    let mut f = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
+    let bytes: Vec<u8> = (0..CHUNK * 4).map(|i| (i % 249) as u8).collect();
+    let file = f.uploaded("range", bytes.clone()).await;
+    let stream = f.files.open_file_stream(&file).await.unwrap();
+    assert_eq!(stream.read_at(0, 4 * CHUNK as u64).await.unwrap(), bytes);
+    drop(stream);
+    // The header and one four-chunk range.
+    assert_eq!(cache_files(&f), 2);
+    f.reopen().await;
+    let requests = f.storage.request_count();
+    let stream = f.files.open_file_stream(&file).await.unwrap();
+    assert_eq!(
+        stream
+            .read_at(2 * CHUNK as u64 + 5, CHUNK as u64)
+            .await
+            .unwrap(),
+        bytes[2 * CHUNK + 5..3 * CHUNK + 5]
+    );
+    assert_eq!(f.storage.request_count(), requests);
+    f.close().await;
+}
+
+/// A chunk failing authentication in the middle of a range publishes none
+/// of the range, and leaves no unnamed bytes behind.
+#[tokio::test]
+async fn a_failed_chunk_publishes_none_of_its_range() {
+    let f = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
+    let file = f.uploaded("damaged-range", vec![61; CHUNK * 3]).await;
+    f.storage
+        .corrupt_byte(&f.path(&file), 11 + (CHUNK + 16) + 3)
+        .await
+        .unwrap();
+    let stream = f.files.open_file_stream(&file).await.unwrap();
+    assert!(matches!(
+        stream.read_at(0, 3 * CHUNK as u64).await,
+        Err(FileReadError::Integrity { .. })
+    ));
+    assert_eq!(cache_files(&f), 1, "only the header");
+    assert_eq!(
+        f.database
+            .pin_progress(vec![file])
+            .await
+            .unwrap()
+            .bytes_cached,
+        0
+    );
+    f.close().await;
+}
+
+/// Overlapping readers share one transfer: the second waits for the first
+/// range and reads it from the cache (SP step 7).
+#[tokio::test]
+async fn overlapping_readers_fetch_each_byte_once() {
+    let f = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
+    let bytes: Vec<u8> = (0..CHUNK * 4).map(|i| (i % 241) as u8).collect();
+    let file = f.uploaded("shared", bytes.clone()).await;
+    let first = f.files.open_file_stream(&file).await.unwrap();
+    let second = f.files.open_file_stream(&file).await.unwrap();
+    f.storage
+        .set_faults(coven_storage::test_utils::Faults {
+            delay: Duration::from_millis(50),
+            ..coven_storage::test_utils::Faults::none()
+        })
+        .await;
+    let path = f.path(&file);
+    let before: u64 = f
+        .storage
+        .reads()
+        .await
+        .iter()
+        .filter(|(read, _, _)| *read == path)
+        .map(|(_, _, length)| *length)
+        .sum();
+    let (a, b) = tokio::join!(
+        first.read_at(0, 3 * CHUNK as u64),
+        second.read_at(CHUNK as u64, 3 * CHUNK as u64)
+    );
+    assert_eq!(a.unwrap(), bytes[..3 * CHUNK]);
+    assert_eq!(b.unwrap(), bytes[CHUNK..]);
+    let fetched: u64 = f
+        .storage
+        .reads()
+        .await
+        .iter()
+        .filter(|(read, _, _)| *read == path)
+        .map(|(_, _, length)| *length)
+        .sum::<u64>()
+        - before;
+    assert_eq!(fetched, 4 * (CHUNK as u64 + 16));
+    f.close().await;
+}
+
+/// A cancelled fetch publishes nothing and leaves no bytes behind.
+#[tokio::test]
+async fn a_cancelled_range_leaves_no_bytes() {
+    let mut f = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
+    let file = f.uploaded("cancelled", vec![62; CHUNK * 2]).await;
+    let stream = f.files.open_file_stream(&file).await.unwrap();
+    f.storage
+        .set_faults(coven_storage::test_utils::Faults {
+            delay: Duration::from_millis(200),
+            ..coven_storage::test_utils::Faults::none()
+        })
+        .await;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), stream.read_at(0, 1))
+            .await
+            .is_err()
+    );
+    drop(stream);
+    f.storage
+        .set_faults(coven_storage::test_utils::Faults::none())
+        .await;
+    f.reopen().await;
+    assert_eq!(cache_files(&f), 1, "only the header");
+    assert_eq!(
+        f.database
+            .pin_progress(vec![file])
+            .await
+            .unwrap()
+            .bytes_cached,
+        0
+    );
+    f.close().await;
+}

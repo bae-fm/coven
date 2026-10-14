@@ -18,40 +18,101 @@ fn tick(db: &DatabaseConnection) -> Result<i64, DbError> {
         |r| r.get(0),
     )
 }
+/// One stored entry and where `index` lies in it: a verified range of
+/// consecutive chunks, a header, or a checked whole file.
+fn covering(
+    db: &DatabaseConnection,
+    file: &FileRef,
+    index: i64,
+) -> Result<Option<(String, i64, i64, i64)>, DbError> {
+    let id = id(file)?;
+    if let Some(whole) = db
+        .query(
+            "SELECT path,chunk,chunks,size FROM _coven_cache
+             WHERE namespace=?1 AND file_id=?2 AND chunk=?3",
+            (file.namespace(), &id, COMPLETE_FILE),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )?
+        .pop()
+    {
+        return Ok(Some(whole));
+    }
+    let lower = if index == HEADER { HEADER } else { 0 };
+    Ok(db
+        .query(
+            "SELECT path,chunk,chunks,size FROM _coven_cache
+             WHERE namespace=?1 AND file_id=?2 AND chunk>=?3 AND chunk<=?4
+             ORDER BY chunk DESC LIMIT 1",
+            (file.namespace(), &id, lower, index),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )?
+        .pop()
+        .filter(|(_, first, chunks, _): &(String, i64, i64, i64)| index < first + chunks))
+}
+/// Encrypted byte offset and length of `index` in the stored entry
+/// beginning at `first`.
+fn within(file: &FileRef, first: i64, index: i64) -> Result<(u64, usize), DbError> {
+    if index == HEADER {
+        return Ok((0, coven_format::file::FILE_HEADER_LEN));
+    }
+    let header = coven_format::file::FileHeader::new(file.plaintext_size());
+    let chunk = |index: i64| -> Result<_, DbError> {
+        Ok(header.chunk(u64::try_from(index).map_err(|_| DbError::DamagedDatabase)?)?)
+    };
+    let target = chunk(index)?;
+    let base = if first == COMPLETE_FILE {
+        0
+    } else {
+        chunk(first)?.offset
+    };
+    Ok((
+        target.offset - base,
+        target.plaintext_length + FILE_CHUNK_TAG_LEN,
+    ))
+}
 pub(super) fn read(
     db: &DatabaseConnection,
     directory: &StoreDir,
     file: &FileRef,
     index: i64,
 ) -> Result<Option<Vec<u8>>, DbError> {
-    let id = id(file)?;
     db.transaction(|db| {
-        let paths=db.query("SELECT path,chunk,size FROM _coven_cache WHERE namespace=?1 AND file_id=?2 AND chunk IN (?3,?4) ORDER BY chunk LIMIT 1",(file.namespace(),&id,index,COMPLETE_FILE),|r|Ok((r.get::<_,String>(0)?,r.get::<_,i64>(1)?,r.get::<_,i64>(2)?)))?;
-        let Some((path,kind,length))=paths.first() else {return Ok(None)};
-        let name=FileName::new(path).map_err(|_|DbError::DamagedDatabase)?;
-        let reader=directory.file(FileArea::Cache,&name).open_reader().map_err(observation)?;
-        if reader.size()!=u64::try_from(*length).map_err(|_|DbError::DamagedDatabase)? {return Err(DbError::DamagedDatabase)}
-        let (offset,length)=if *kind==COMPLETE_FILE {
-            let bytes=reader.read_at(0,coven_format::file::FILE_HEADER_LEN).map_err(observation)?;
-            let header=coven_format::file::FileHeader::decode(&bytes)?;
-            if index==HEADER {(0,coven_format::file::FILE_HEADER_LEN)} else {
-                let chunk=header.chunk(u64::try_from(index).map_err(|_|DbError::DamagedDatabase)?)?;
-                (chunk.offset,chunk.plaintext_length+FILE_CHUNK_TAG_LEN)
-            }
-        }else {(0,usize::try_from(*length).map_err(|_|DbError::DamagedDatabase)?)};
-        let bytes=reader.read_at(offset,length).map_err(observation)?;
-        db.internal_execute("UPDATE _coven_cache SET last_read=?2 WHERE path=?1",(path,tick(db)?))?;
+        let Some((path, first, _, length)) = covering(db, file, index)? else {
+            return Ok(None);
+        };
+        let name = FileName::new(&path).map_err(|_| DbError::DamagedDatabase)?;
+        let reader = directory
+            .file(FileArea::Cache, &name)
+            .open_reader()
+            .map_err(observation)?;
+        if reader.size() != u64::try_from(length).map_err(|_| DbError::DamagedDatabase)? {
+            return Err(DbError::DamagedDatabase);
+        }
+        let (offset, length) = within(file, first, index)?;
+        let bytes = reader.read_at(offset, length).map_err(observation)?;
+        db.internal_execute(
+            "UPDATE _coven_cache SET last_read=?2 WHERE path=?1",
+            (&path, tick(db)?),
+        )?;
         Ok(Some(bytes))
     })
 }
+/// Publish one verified range of `chunks` consecutive chunks from `first`,
+/// or the header (`first` = -1), as one file and one row: its name is
+/// recorded for removal before any byte is written, and the row replaces
+/// that record in the transaction that publishes it (§16.6).
 pub(super) fn put(
     db: &DatabaseConnection,
     directory: &StoreDir,
     file: &FileRef,
-    index: i64,
+    first: i64,
+    chunks: i64,
     name: &FileName,
     bytes: &[u8],
 ) -> Result<(), DbError> {
+    if chunks < 1 || (first < 0 && chunks != 1) {
+        return Err(DbError::DamagedDatabase);
+    }
     let id = id(file)?;
     db.transaction(|db| {
         if db.query_row(
@@ -69,13 +130,42 @@ pub(super) fn put(
     })?;
     // The immediate transaction excludes another process's eviction and startup
     // cleanup. If cleanup won the interval, no bytes have been written yet.
-    let result=db.transaction(|db| {
-        if !db.query_row("SELECT EXISTS(SELECT 1 FROM _coven_file_removals WHERE area='cache' AND path=?1)",[name.as_str()],|r|r.get::<_,bool>(0))? {return Err(DbError::DamagedDatabase)}
-        if !db.query_row("SELECT EXISTS(SELECT 1 FROM _coven_cache WHERE namespace=?1 AND file_id=?2 AND chunk IN (?3,?4))",(file.namespace(),&id,index,COMPLETE_FILE),|r|r.get::<_,bool>(0))? {
-            directory.file(FileArea::Cache,name).replace(bytes)?;
-            db.internal_execute("INSERT INTO _coven_cache(namespace,file_id,chunk,path,size,last_read,pinned) VALUES(?1,?2,?3,?4,?5,?6,0)",rusqlite::params![file.namespace(),id,index,name.as_str(),bytes.len() as i64,tick(db)?])?;
+    let result = db.transaction(|db| {
+        if !db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM _coven_file_removals WHERE area='cache' AND path=?1)",
+            [name.as_str()],
+            |r| r.get::<_, bool>(0),
+        )? {
+            return Err(DbError::DamagedDatabase);
         }
-        db.internal_execute("DELETE FROM _coven_file_removals WHERE area='cache' AND path=?1",[name.as_str()])?;Ok(())
+        // Another reader may have published part of this range meanwhile;
+        // stored entries never overlap, so these bytes are then left unused.
+        let overlapping = (first..first + chunks)
+            .map(|index| covering(db, file, index).map(|entry| entry.is_some()))
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .any(|covered| covered);
+        if !overlapping {
+            directory.file(FileArea::Cache, name).replace(bytes)?;
+            db.internal_execute(
+                "INSERT INTO _coven_cache(namespace,file_id,chunk,chunks,path,size,last_read,pinned)
+                 VALUES(?1,?2,?3,?4,?5,?6,?7,0)",
+                rusqlite::params![
+                    file.namespace(),
+                    id,
+                    first,
+                    chunks,
+                    name.as_str(),
+                    bytes.len() as i64,
+                    tick(db)?
+                ],
+            )?;
+        }
+        db.internal_execute(
+            "DELETE FROM _coven_file_removals WHERE area='cache' AND path=?1",
+            [name.as_str()],
+        )?;
+        Ok(())
     });
     if result.is_err() {
         let cleanup = remove_pending(db, directory, name);

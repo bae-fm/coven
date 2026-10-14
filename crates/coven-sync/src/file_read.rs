@@ -221,7 +221,7 @@ impl UploadedFile {
             });
         }
         if cached.is_none() {
-            cache(&owner, &file, -1, bytes).await?;
+            cache(&owner, &file, -1, 1, bytes).await?;
             owner.trim(file.namespace()).await;
         }
         drop(_guard);
@@ -429,19 +429,25 @@ impl UploadedFile {
                 .header
                 .open_chunk(&self.key, self.path.as_str(), index, sealed)
                 .map_err(|_| self.integrity())?;
-            if matches!(destination, ChunkDestination::Cache) {
-                cache(&self.owner, &self.file, index as i64, sealed.to_vec()).await?;
-            }
             plain.push(OpenedChunk {
                 plaintext: opened,
                 ciphertext: sealed.to_vec(),
             });
             cursor += length;
         }
-        // A pin writes these bytes directly to its reserved whole file. Adding
-        // them to the chunk cache too could evict a cached tail before pinning
-        // reaches it, causing unnecessary downloads.
+        // Every chunk of the range authenticated: it is published as one
+        // file and one row. A failed chunk publishes none of it. A pin writes
+        // these bytes to its reserved whole file instead; adding them to the
+        // cache too could evict a cached tail before pinning reaches it.
         if matches!(destination, ChunkDestination::Cache) {
+            cache(
+                &self.owner,
+                &self.file,
+                first as i64,
+                (end_index - first + 1) as i64,
+                bytes,
+            )
+            .await?;
             self.owner.trim(self.file.namespace()).await;
         }
         Ok((end_index, plain))
@@ -455,11 +461,15 @@ struct OpenedChunk {
 async fn cache(
     owner: &FilesInner,
     file: &FileRef,
-    index: i64,
+    first: i64,
+    chunks: i64,
     bytes: Vec<u8>,
 ) -> Result<(), FileReadError> {
     let name = FileName::new(owner.ids.new_id().to_string()).expect("UUID cache name");
-    owner.database.cache_chunk(file, index, name, bytes).await?;
+    owner
+        .database
+        .cache_range(file, first, chunks, name, bytes)
+        .await?;
     Ok(())
 }
 async fn fetch(

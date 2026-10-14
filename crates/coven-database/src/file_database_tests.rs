@@ -431,3 +431,62 @@ async fn attachment_and_upload_queue_commit_or_roll_back_together() {
         database.close().await.unwrap();
     }
 }
+
+/// One verified range is one cache file and one row; each chunk in it reads
+/// back at its own offset. A range overlapping a published one leaves its
+/// bytes unnamed, and a crash after naming them leaves bytes that opening
+/// removes (§16.6).
+#[tokio::test]
+async fn cache_ranges_publish_whole_and_never_overlap() {
+    use crate::file_write::tests::{local_count, SCHEMA};
+    const CHUNK: usize = 64 * 1024 + 16;
+    let store = TestStore::new();
+    let open = || store.schema(tables(Provenance::AppProvided), SCHEMA);
+    let db = open().await.unwrap();
+    attach(&db, vec![5; 2 * 64 * 1024 + 5], true).await.unwrap();
+    let file = db.file_ref("files", "7").await.unwrap();
+    let owner = FileDatabase::new(db.clone());
+    let range: Vec<u8> = (0..2 * CHUNK + 21).map(|i| (i % 251) as u8).collect();
+    owner
+        .cache_range(&file, 0, 3, FileName::new("range").unwrap(), range.clone())
+        .await
+        .unwrap();
+    assert_eq!(local_count(&db, "_coven_cache"), 1);
+    assert_eq!(
+        owner.cached(&file, 1).await.unwrap().unwrap(),
+        range[CHUNK..2 * CHUNK]
+    );
+    assert_eq!(
+        owner.cached(&file, 2).await.unwrap().unwrap(),
+        range[2 * CHUNK..]
+    );
+    assert_eq!(owner.cached(&file, -1).await.unwrap(), None);
+    owner
+        .cache_range(
+            &file,
+            1,
+            1,
+            FileName::new("overlap").unwrap(),
+            range[CHUNK..2 * CHUNK].to_vec(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(local_count(&db, "_coven_cache"), 1);
+    let cache = store.database_path().parent().unwrap().join("cache");
+    assert!(!cache.join("overlap").exists());
+    // A crash after the range's name was recorded and its bytes written.
+    db.inspect_writer(|sql| {
+        sql.internal_execute(
+            "INSERT INTO _coven_file_removals(area,path) VALUES('cache','interrupted')",
+            [],
+        )
+        .unwrap();
+    });
+    std::fs::write(cache.join("interrupted"), b"bytes").unwrap();
+    db.close().await.unwrap();
+    let db = open().await.unwrap();
+    assert!(!cache.join("interrupted").exists());
+    assert!(cache.join("range").exists());
+    assert_eq!(local_count(&db, "_coven_file_removals"), 0);
+    db.close().await.unwrap();
+}

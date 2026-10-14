@@ -58,7 +58,7 @@ pub(crate) fn covered(
         return Ok(file.plaintext_size());
     }
     let cached = db.query_row(
-        "SELECT coalesce(sum(size-?3),0) FROM _coven_cache
+        "SELECT coalesce(sum(size-chunks*?3),0) FROM _coven_cache
          WHERE namespace=?1 AND file_id=?2 AND chunk>=0",
         (
             file.namespace(),

@@ -739,6 +739,7 @@ macro_rules! coven_tables {
                 namespace TEXT NOT NULL,
                 file_id TEXT NOT NULL,
                 chunk INTEGER NOT NULL CHECK(chunk>={CACHE_COMPLETE_FILE}),
+                chunks INTEGER NOT NULL DEFAULT 1 CHECK(chunks>=1) CHECK(chunk>=0 OR chunks=1),
                 path TEXT NOT NULL UNIQUE,
                 size INTEGER NOT NULL CHECK(size>=0),
                 last_read INTEGER NOT NULL,

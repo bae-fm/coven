@@ -302,18 +302,19 @@ async fn recorded_sessions_continue_or_restart_with_the_same_encrypted_bytes() {
             .await;
 
         let item = f.files.inner.database.uploads().await.unwrap().remove(0);
-        f.files
-            .inner
-            .paused
-            .store(false, std::sync::atomic::Ordering::Release);
         f.storage
             .set_faults(Faults {
                 lose_part_reply: true,
                 ..Faults::none()
             })
             .await;
-        // Hold the drain lock so the commit-driven worker cannot consume this item.
+        // Hold the drain lock so the commit-driven worker cannot consume this
+        // item, or reset the pause it reads from the database meanwhile.
         let guard = f.files.inner.drain.lock().await;
+        f.files
+            .inner
+            .paused
+            .store(false, std::sync::atomic::Ordering::Release);
         assert!(matches!(
             f.files.inner.upload(&item).await,
             Err(UploadFailure::Storage(_))
