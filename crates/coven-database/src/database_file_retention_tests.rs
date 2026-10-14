@@ -173,7 +173,8 @@ async fn a_schema_loss_protects_its_file_without_a_displayed_row_change() {
     let file = FileId(uuid::Uuid::from_u128(9));
     record.header.position = coven_merge::WriteId { device, number: 1 };
     record.header.timestamp = coven_merge::Timestamp::new(3, 0, device).unwrap();
-    record.header.disposition = coven_format::write::WriteDisposition::Lost(1);
+    record.header.schema_version = 0;
+    db.exclude_version_zero().await;
     let Operation::Insert(columns) = &mut record.parts[0].rows[0].change.operation else {
         panic!()
     };
@@ -283,7 +284,8 @@ async fn frozen_losses_keep_file_paths_after_their_declaration_is_removed() {
         number: 1,
     };
     record.header.timestamp = coven_merge::Timestamp::new(3, 0, DeviceId(4)).unwrap();
-    record.header.disposition = coven_format::write::WriteDisposition::Lost(1);
+    record.header.schema_version = 0;
+    db.exclude_version_zero().await;
     record.parts[0].rows[0].row.table = "removed_files".into();
     let Operation::Insert(columns) = &mut record.parts[0].rows[0].change.operation else {
         panic!()
@@ -306,10 +308,22 @@ async fn frozen_losses_keep_file_paths_after_their_declaration_is_removed() {
         .await
         .unwrap()
         .contains(&(DeviceId(4), file)));
+    // Dismissing the loss releases its own reference. The raise that excluded
+    // the write is not final, so its retained inputs still hold the file in
+    // case the raise drops and the write applies after all (§17.1).
     db.dismiss_lost_values(&db.lost_values().await.unwrap())
         .await
         .unwrap();
-    assert!(!db
+    let row_references: i64 = db.inspect_writer(|db| {
+        db.query_row(
+            "SELECT count(*) FROM _coven_row_file_refs WHERE device=?1 AND file=?2",
+            (DeviceId(4).0.to_be_bytes(), file.0.as_bytes()),
+            |r| r.get(0),
+        )
+        .unwrap()
+    });
+    assert_eq!(row_references, 0);
+    assert!(db
         .retained_files()
         .await
         .unwrap()

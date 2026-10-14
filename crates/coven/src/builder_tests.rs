@@ -244,10 +244,28 @@ async fn app_reopening_resumes_operations_and_files_using_one_storage_capability
         .await
         .unwrap();
     handle.unlock_store_key().await.unwrap();
-    tokio::time::timeout(std::time::Duration::from_secs(20), handle.barrier())
-        .await
-        .unwrap()
-        .unwrap();
+    // A sync pass uploads the captured old prefix and marker, then the raise
+    // snapshot and entry publish (§18.1).
+    let mut pending = handle.subscribe_pending();
+    handle.start_sync().await.unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        loop {
+            let records = pending.next().await.unwrap();
+            if !records.iter().any(|r| {
+                matches!(
+                    r.subject,
+                    coven_sync::PendingSubject::Operation {
+                        kind: coven_sync::OperationKind::SchemaChange,
+                        ..
+                    }
+                )
+            }) {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
     handle.close().await.unwrap();
     let db = database().open().await.unwrap();
     assert_eq!(

@@ -407,9 +407,28 @@ macro_rules! coven_tables {
             CREATE TABLE _coven_snapshot_schema (
                 singleton INTEGER PRIMARY KEY CHECK(singleton=1),
                 minimum INTEGER NOT NULL CHECK(minimum>=0),
-                publication INTEGER NOT NULL CHECK(publication>=minimum)
+                publication INTEGER NOT NULL CHECK(publication>=0)
             ) STRICT;
             INSERT INTO _coven_snapshot_schema VALUES(1,0,0);
+        ");
+        $visit!(_coven_raise_captures, "
+            CREATE TABLE _coven_raise_captures (
+                audience TEXT PRIMARY KEY NOT NULL,
+                version INTEGER NOT NULL CHECK(version>0),
+                through BLOB NOT NULL CHECK(length(through)=8 AND through>x'0000000000000000'),
+                schema_version INTEGER NOT NULL,
+                writes BLOB NOT NULL,
+                store_log BLOB NOT NULL,
+                counts BLOB NOT NULL CHECK(length(counts)=48)
+            ) STRICT, WITHOUT ROWID;
+        ");
+        $visit!(_coven_raise_capture_frames, "
+            CREATE TABLE _coven_raise_capture_frames (
+                audience TEXT NOT NULL REFERENCES _coven_raise_captures(audience) ON DELETE CASCADE,
+                sequence INTEGER NOT NULL CHECK(sequence>0),
+                frame BLOB NOT NULL,
+                PRIMARY KEY(audience,sequence)
+            ) STRICT, WITHOUT ROWID;
         ");
         $visit!(_coven_loaded_audiences, "
             CREATE TABLE _coven_loaded_audiences (
@@ -616,7 +635,6 @@ macro_rules! coven_tables {
                 number BLOB NOT NULL CHECK(length(number) = 8 AND number > x'0000000000000000'),
                 record BLOB NOT NULL,
                 sealing_keys BLOB,
-                interpretation BLOB,
                 PRIMARY KEY(device, number)
             ) STRICT;
         ");

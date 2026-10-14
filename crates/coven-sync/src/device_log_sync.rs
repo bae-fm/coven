@@ -185,8 +185,10 @@ impl DeviceLogSync {
 
     /// Publish queued writes in number order, fixing the sealing keys before the first
     /// request and retaining provider sessions across interruptions. Returns the
-    /// positions confirmed stored. A newer store schema stops this step; a local
-    /// breaking migration waits for its store-log raise without recording an attempt.
+    /// positions confirmed stored. A newer store schema stops this step. After a
+    /// local breaking migration the old-schema records and the empty migration
+    /// marker still upload unchanged; an ordinary write made after it waits,
+    /// without recording an attempt, until replay keeps a raise to its version.
     /// A write with an audience lacking a usable key records that wait and stops
     /// this log's sends, later numbers included; the pass goes on (§11).
     pub async fn upload_writes(&mut self) -> Result<Vec<WriteId>, SyncError> {
@@ -234,15 +236,15 @@ impl DeviceLogSync {
                 .ok_or(coven_storage::StorageFailure::MemberKeysMissing)?;
             crate::write_seal::check_member(&local.log, &member, local.device)?;
             crate::write_seal::check_upload_version(&local.log, state.schema_version)?;
-            if state.breaking_version
-                > local
-                    .log
-                    .replay
-                    .state
-                    .schema
-                    .get(&Audience::Store)
-                    .map_or(0, |v| v.number)
-            {
+            let Some(head) = self
+                .database
+                .read_oldest_upload(|upload| Ok::<_, SyncError>(upload.header.header.clone()))
+                .await
+                .map_err(upload::read_error)?
+            else {
+                break;
+            };
+            if !uploadable(&local.log, state.breaking_version, &head) {
                 break;
             }
             let store_key = crate::key_introductions::newest(&local.log, &Audience::Store)
@@ -511,3 +513,23 @@ impl DeviceLogSync {
 
 #[path = "position_publication.rs"]
 mod positions;
+
+/// §17.1's upload gate: a record made before the local breaking migration and
+/// the migration's empty marker send while the store is still at the old
+/// version; an ordinary write made after it needs a kept raise to that version.
+pub(crate) fn uploadable(
+    log: &coven_database::StoreLog,
+    publication: u32,
+    head: &coven_format::write::WriteHeader,
+) -> bool {
+    let kept = log
+        .replay
+        .state
+        .schema
+        .get(&Audience::Store)
+        .map_or(0, |v| v.number);
+    head.disposition == coven_format::write::WriteDisposition::Migration
+        || publication == 0
+        || head.schema_version < publication
+        || kept >= publication
+}

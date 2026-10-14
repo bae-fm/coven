@@ -246,7 +246,6 @@ fn sum_arithmetic_wraps_and_carries_across_all_256_bits() {
 #[tokio::test]
 async fn sums_agree_in_every_order_of_concurrent_and_excluded_writes() {
     use crate::write::tests::records;
-    use coven_format::write::WriteDisposition;
     use coven_foundation::{clock::FixedClock, id_source::SequentialIds};
     use coven_merge::Audience;
     use std::{
@@ -292,7 +291,7 @@ async fn sums_agree_in_every_order_of_concurrent_and_excluded_writes() {
     .await
     .unwrap();
     let mut excluded = records(&sources[2]).remove(0);
-    excluded.header.disposition = WriteDisposition::Lost(1);
+    excluded.header.schema_version = 0;
     let changes = [
         records(&sources[0]).remove(1),
         records(&sources[1]).remove(0),
@@ -311,6 +310,7 @@ async fn sums_agree_in_every_order_of_concurrent_and_excluded_writes() {
     ] {
         let store = TestStore::with_ids(&ids);
         let db = store.schema(notes(), NOTES).await.unwrap();
+        db.exclude_version_zero().await;
         db.receive(initial.clone().into()).await.unwrap();
         for index in order {
             db.receive(changes[index].clone().into()).await.unwrap();

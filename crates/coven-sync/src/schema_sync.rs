@@ -74,6 +74,7 @@ impl StoreLogSync {
             return Ok(());
         }
         crate::write_seal::check_upload_version(&local.log, state.schema_version)?;
+        // A breaking migration records its publication intent with its captures.
         if state.breaking_version == 0 {
             return Ok(());
         }
@@ -93,22 +94,21 @@ impl StoreLogSync {
                 pending.push((audience, version));
             }
         }
-        let mut audiences: Vec<_> =
-            super::snapshots::audiences_for_member(&local.log, &device.member)?
-                .into_iter()
-                .collect();
+        // The migration captured one raise per audience it read, through its marker.
+        let mut captures = self.database.raise_captures().await?;
         // The store raise releases writes, so publish the readable circles first.
-        audiences.sort_by_key(|a| matches!(a, Audience::Store));
-        for audience in audiences {
-            let version = state.breaking_version;
-            if !schema_in_place(&local.log.replay.state, &audience, version)
-                && !pending.contains(&(audience.clone(), version))
-            {
+        captures.sort_by_key(|c| matches!(c.audience, Audience::Store));
+        for capture in captures {
+            if schema_in_place(&local.log.replay.state, &capture.audience, capture.version) {
+                self.database
+                    .discard_raise_capture(capture.audience, capture.version)
+                    .await?;
+            } else if !pending.contains(&(capture.audience.clone(), capture.version)) {
                 self.start_snapshot_task(SnapshotJob::Write {
-                    audience,
+                    audience: capture.audience,
                     device: local.device,
                     trigger: SnapshotTrigger::Raise {
-                        version,
+                        version: capture.version,
                         entry: None,
                     },
                     session: None,
@@ -129,6 +129,9 @@ impl StoreLogSync {
         let mut data = Data::Snapshots(task.clone());
         if record.last_step >= data.entry_step_number(5) {
             self.clear_snapshot_files(record, &mut task).await?;
+            self.database
+                .discard_raise_capture(snapshot.audience.clone(), version)
+                .await?;
             self.database.finish_operation(record.id).await?;
             return Ok(Progress::Finished(Output::Unit));
         }
@@ -152,6 +155,9 @@ impl StoreLogSync {
         }
         if schema_in_place(&local.log.replay.state, &snapshot.audience, version) {
             self.clear_snapshot_files(record, &mut task).await?;
+            self.database
+                .discard_raise_capture(snapshot.audience.clone(), version)
+                .await?;
             self.database.finish_operation(record.id).await?;
             return Ok(Progress::Finished(Output::Unit));
         }

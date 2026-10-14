@@ -285,6 +285,12 @@ proofs() {
         COVEN_QUEUE_LEAN="$runner" cargo test -p coven-database --all-features queue_reset_differential_histories -- --ignored
     fi
 
+    if proof_selected queue || crate_selected coven-sync; then
+        runner=$(runner queue queueRunner)
+        step "Rust / Lean upload queue and raise publication"
+        COVEN_QUEUE_LEAN="$runner" cargo test -p coven-sync --all-features queue_raise_differential_histories -- --ignored
+    fi
+
     if proof_selected storelog || crate_selected coven-sync; then
         runner=$(runner storelog storelogRunner)
         step "Rust / Lean CurrentReplay agreement"
@@ -395,7 +401,7 @@ proofs() {
             io_differential_recent_return io_differential_streaming_download_dispositions \
             io_differential_positions io_differential_retained_ranges_and_refusal_eviction \
             io_differential_send_gate io_differential_retired_drain \
-            io_differential_pass_phases; do
+            io_differential_pass_phases io_differential_snapshot_writes; do
             if ! printf '%s\n' "$io_tests" | grep -q "::$test: test\$"; then
                 echo "the Rust test binary is missing $test" >&2
                 exit 1
@@ -412,7 +418,8 @@ proofs() {
             object_input::tests::io_differential_retained_ranges_and_refusal_eviction \
             send_gate::tests::io_differential_send_gate \
             device_log_sync::drain::tests::io_differential_retired_drain \
-            operations::pass::tests::io_differential_pass_phases
+            operations::pass::tests::io_differential_pass_phases \
+            device_log_sync::tests::schema::raise_publication::differential::io_differential_snapshot_writes
     fi
 
     if proof_selected merge || crate_selected coven-sync; then

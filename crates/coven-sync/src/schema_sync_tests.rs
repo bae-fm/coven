@@ -47,6 +47,16 @@ async fn reopen(
     device.reopen(storage, tables, migrations).await;
 }
 
+/// A migrated device sends its old prefix and empty marker, confirmed before
+/// its raise snapshot, then publishes the raise (§17.1, §18.1).
+async fn publish_raise(device: &mut Device) {
+    if !device.send.can_send() {
+        device.catch_up().await;
+    }
+    device.writes.upload_writes().await.unwrap();
+    device.sync.sync_store_log().await.unwrap();
+}
+
 async fn sync_all(devices: &mut [Device]) {
     for device in &mut *devices {
         if !device.send.can_send() {
@@ -119,8 +129,7 @@ async fn rename_holds_uploads_then_converts_or_loses_offline_edits_everywhere() 
             sql(&devices[1].db, "UPDATE notes SET title='Shopping'").await;
             let original = devices[1].db.test_queued_writes().await.unwrap().remove(0);
             update(&mut devices[0], storage.clone(), true, convert).await;
-            assert!(devices[0].writes.upload_writes().await.unwrap().is_empty());
-            devices[0].sync.sync_store_log().await.unwrap();
+            publish_raise(&mut devices[0]).await;
             let log = devices[0].db.store_log().await.unwrap();
             assert_eq!(log.replay.state.schema[&Audience::Store].number, 2);
             assert!(matches!(
@@ -177,7 +186,7 @@ async fn an_old_write_converts_on_receipt_independently_of_attempt_status() {
             assert_eq!(rows(&devices[2].db).await[0].1, "Unseen");
         }
         update(&mut devices[0], storage.clone(), true, true).await;
-        devices[0].sync.sync_store_log().await.unwrap();
+        publish_raise(&mut devices[0]).await;
         for device in devices.iter_mut().skip(1) {
             assert!(matches!(
                 device.sync.sync_store_log().await,
@@ -205,7 +214,7 @@ async fn concurrent_raises_choose_the_earlier_timestamp_even_when_it_arrives_las
     for device in devices.iter_mut().take(2) {
         update(device, storage.clone(), true, true).await;
     }
-    devices[0].sync.sync_store_log().await.unwrap();
+    publish_raise(&mut devices[0]).await;
     let first =
         devices[0].db.store_log().await.unwrap().replay.state.schema[&Audience::Store].clone();
     let path = crate::store_log_object::path(STORE_ID, first.entry);
@@ -219,7 +228,7 @@ async fn concurrent_raises_choose_the_earlier_timestamp_even_when_it_arrives_las
     );
     let snapshot = storage.read(&snapshot_path).await.unwrap();
     storage.delete(&snapshot_path).await.unwrap();
-    devices[1].sync.sync_store_log().await.unwrap();
+    publish_raise(&mut devices[1]).await;
     let winner =
         devices[1].db.store_log().await.unwrap().replay.state.schema[&Audience::Store].clone();
     assert_ne!(first.snapshot, winner.snapshot);
@@ -252,6 +261,9 @@ async fn a_raise_resumes_after_reopening_at_every_publication_step() {
         seed(&mut devices).await;
         let device = &mut devices[0];
         update(device, storage.clone(), true, true).await;
+        // The captured prefix, through the marker, is confirmed first.
+        device.catch_up().await;
+        device.writes.upload_writes().await.unwrap();
         device.sync.schedule_version_changes().await.unwrap();
         let id = device.db.operations().await.unwrap()[0].id;
         for _ in 0..crash {
@@ -335,7 +347,7 @@ async fn a_losing_migrations_derived_value_disappears_without_a_loss() {
         .unwrap();
     assert!(marker.parts.is_empty());
     // Publish Ben's snapshot first while Ana still sees only their common log.
-    devices[1].sync.sync_store_log().await.unwrap();
+    publish_raise(&mut devices[1]).await;
     let loser =
         devices[1].db.store_log().await.unwrap().replay.state.schema[&Audience::Store].clone();
     let path = crate::store_log_object::path(STORE_ID, loser.entry);
@@ -349,7 +361,7 @@ async fn a_losing_migrations_derived_value_disappears_without_a_loss() {
     );
     let snapshot = storage.read(&snapshot_path).await.unwrap();
     storage.delete(&snapshot_path).await.unwrap();
-    devices[0].sync.sync_store_log().await.unwrap();
+    publish_raise(&mut devices[0]).await;
     storage.create(&snapshot_path, &snapshot).await.unwrap();
     storage.create(&path, &entry).await.unwrap();
     sync_all(&mut devices).await;
@@ -404,7 +416,7 @@ async fn a_circle_is_raised_by_its_first_updating_member_after_the_store() {
             vec![SyncedTable::new("notes", RowIdentity::SharedKey), SyncedTable::new("pins", RowIdentity::IndependentUuid).audience_column("audience")],
             vec![initial(), Migration::sql(2,"circles","CREATE TABLE pins(id TEXT NOT NULL PRIMARY KEY,audience TEXT NOT NULL,title TEXT NOT NULL);"),
                 Migration::sql(3,"names","ALTER TABLE notes RENAME COLUMN title TO name; ALTER TABLE pins RENAME COLUMN title TO name").writes(|row| {row.rename_column("title", "name"); Ok(())})]).await;
-        devices[index].sync.sync_store_log().await.unwrap();
+        publish_raise(&mut devices[index]).await;
         devices[index].writes.upload_writes().await.unwrap();
         let log = devices[index].db.store_log().await.unwrap();
         assert_eq!(log.replay.state.schema[&Audience::Store].number, 3);
@@ -442,13 +454,14 @@ async fn a_circle_is_raised_by_its_first_updating_member_after_the_store() {
 }
 
 #[tokio::test]
-async fn a_batch_raises_its_final_version_and_accepts_an_already_converted_waiting_write() {
+async fn a_batch_raises_its_final_version_and_converts_an_earlier_migrations_waiting_write() {
     let storage = storage();
     let mut devices = group(storage.clone(), 2).await;
     seed(&mut devices).await;
     devices[1].clock.set(UNIX_EPOCH + Duration::from_secs(2));
     sql(&devices[1].db, "UPDATE notes SET title='Shopping'").await;
-    // Ben ran the rename in a previous app update but has not published it.
+    // Ben ran the rename in a previous app update but has not published it;
+    // his edit stays in its original schema in the queue.
     update(&mut devices[1], storage.clone(), true, true).await;
     for index in [0, 1] {
         reopen(
@@ -462,7 +475,7 @@ async fn a_batch_raises_its_final_version_and_accepts_an_already_converted_waiti
             ],
         )
         .await;
-        devices[index].sync.sync_store_log().await.unwrap();
+        publish_raise(&mut devices[index]).await;
         assert_eq!(
             devices[index]
                 .db
@@ -515,6 +528,7 @@ async fn concurrent_raises_to_different_versions_are_both_kept() {
     )
     .await;
     devices[1].catch_up().await;
+    devices[1].writes.upload_writes().await.unwrap();
     devices[1].sync.schedule_version_changes().await.unwrap();
     let id = devices[1].db.operations().await.unwrap()[0].id;
     for _ in 0..3 {
@@ -532,8 +546,7 @@ async fn concurrent_raises_to_different_versions_are_both_kept() {
             .await
             .unwrap();
     }
-    devices[0].sync.sync_store_log().await.unwrap();
-    devices[0].writes.upload_writes().await.unwrap();
+    publish_raise(&mut devices[0]).await;
     let first =
         devices[0].db.store_log().await.unwrap().replay.state.schema[&Audience::Store].clone();
     devices[1].sync.sync_store_log().await.unwrap();
@@ -588,7 +601,7 @@ async fn reference_checks_do_not_reject_writes_from_before_a_table_rename() {
     .await;
     devices[0].writes.download_writes().await.unwrap();
     assert!(devices[0].db.lost_values().await.unwrap().is_empty());
-    devices[0].sync.sync_store_log().await.unwrap();
+    publish_raise(&mut devices[0]).await;
     devices[0].writes.download_writes().await.unwrap();
     assert_eq!(devices[0].db.lost_values().await.unwrap().len(), 1);
     let title: String = devices[0]
@@ -600,6 +613,9 @@ async fn reference_checks_do_not_reject_writes_from_before_a_table_rename() {
 }
 
 use crate::operation_data::Data;
+
+#[path = "snapshot_seal_tests.rs"]
+mod raise_publication;
 
 #[tokio::test]
 async fn a_newer_snapshot_format_stays_pending_until_the_required_update() {
@@ -656,7 +672,7 @@ async fn publication_intent_can_be_scheduled_while_member_keys_are_unavailable()
     devices[0].sync.schedule_version_changes().await.unwrap();
     assert_eq!(devices[0].db.operations().await.unwrap().len(), 1);
     devices[0].identity.persist(&member()).unwrap();
-    devices[0].sync.sync_store_log().await.unwrap();
+    publish_raise(&mut devices[0]).await;
     assert_eq!(
         devices[0].db.store_log().await.unwrap().replay.state.schema[&Audience::Store].number,
         2
@@ -819,8 +835,7 @@ mod recovery {
                         recovery_migrations(convert),
                     )
                     .await;
-                    devices[0].sync.sync_store_log().await.unwrap();
-                    devices[0].writes.upload_writes().await.unwrap();
+                    publish_raise(&mut devices[0]).await;
                     let device = &mut devices[1];
                     reopen(
                         device,

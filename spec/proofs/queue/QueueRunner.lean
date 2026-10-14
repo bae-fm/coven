@@ -1,5 +1,6 @@
 import CovenQueue.Checked
 import CovenQueue.RowMerge
+import CovenQueue.RaiseProgress
 import Lean
 
 /-! JSON adapter for the queue differentials. Inputs are checked records in
@@ -110,9 +111,108 @@ private def receive (j : Json) : Except String Json := do
   else
     pure (Json.mkObj [("dataValid", toJson false)])
 
+/-! Raise mode: one device's queue and its captured raise, driven by events.
+Each event applies the model's own queue functions (`Queue.commit`,
+`RaiseUpload.migrate`, `Queue.prepare`, `World.send`, `World.land`,
+`Queue.finish`) under the `Uploadable` gate, and the raise advances only when
+`RaiseUpload.Confirmed` holds. Bytes are the attempt's identity: sealing and
+real encodings are outside this comparison. -/
+
+private def sealAttempt : Seal := fun a => [a.record.identity.id.number, a.format]
+
+private structure Raising where
+  world : World
+  stage : Option RaiseUpload.Stage
+  kept : Nat
+  app : Nat
+  plan : Option (RaiseUpload.Plan × Nat)
+
+/-- One upload pass. `fault` 1 loses the first request before it lands;
+2 loses the reply of the first request that stores new bytes, as the
+provider's lost completion does; an already occupied path is confirmed by
+comparing bytes instead. Each head first needs the gate. -/
+private def uploadPass (kept : Nat) : Nat → Nat → World → World
+  | 0, _, s => s
+  | fuel + 1, fault, s =>
+    match s.queue.waiting with
+    | [] => s
+    | p :: _ =>
+      if !decide (Uploadable kept p.record) then s else
+      let s := { s with queue := s.queue.prepare 1 [1] }
+      match s.queue.head with
+      | none => s
+      | some a =>
+        let s := s.send
+        if fault = 1 then s else
+        let occupied := (s.stored a.record.identity.id.number).isSome
+        let s := s.land sealAttempt a
+        if fault = 2 && !occupied then s else
+        if s.stored a.record.identity.id.number = some (sealAttempt a) then
+          uploadPass kept fuel (if fault = 2 then 2 else 0) { s with queue := s.queue.finish }
+        else s
+
+private def raiseStep (s : Raising) (event : Json) : Except String Raising := do
+  let kind ← event.getObjValAs? String "event"
+  let identity (n : Nat) : Identity := ⟨⟨s.world.queue.device, n⟩, n, [], []⟩
+  match kind with
+  | "write" =>
+    let q := s.world.queue.commit ⟨identity 0, s.app, .ordinary, []⟩
+    let world : World := { s.world with queue := q }
+    pure { s with world := world }
+  | "migrate" =>
+    let version ← event.getObjValAs? Nat "version"
+    let q := RaiseUpload.migrate s.world.queue version (identity 0)
+    let through := q.reserved
+    let covers := (List.range through).map fun n => (⟨q.device, n + 1⟩ : WriteId)
+    let plan : RaiseUpload.Plan := ⟨through, covers, [], []⟩
+    let world : World := { s.world with queue := q }
+    let captured : Raising := { s with world := world, app := version }
+    pure { captured with stage := some RaiseUpload.Stage.captured, plan := some (plan, version) }
+  | "upload" =>
+    let fault ← event.getObjValAs? Nat "fault"
+    let world := uploadPass s.kept (s.world.queue.waiting.length + 1) fault s.world
+    pure { s with world := world }
+  | "raise" =>
+    match s.stage, s.plan with
+    | some .captured, some (plan, version) =>
+      let own := plan.covers.all fun id => id.device == s.world.queue.device &&
+        0 < id.number && id.number ≤ plan.through
+      if plan.through ≤ s.world.queue.settled && own then
+        pure { s with stage := some RaiseUpload.Stage.entryStored, kept := max s.kept version }
+      else pure s
+    | _, _ => pure s
+  | "crash" => pure { s with world := s.world.crash }
+  | _ => throw "unknown raise event"
+
+private def raisingJson (s : Raising) : Json :=
+  let waiting := s.world.queue.waiting.map fun p =>
+    let tried := match p with | .tried _ => true | .untried _ => false
+    let kind := match p.record.disposition with
+      | .migration => "migration" | .ordinary => "ordinary" | .lost _ => "lost"
+    Json.mkObj [("number", toJson p.record.identity.id.number), ("tried", toJson tried),
+      ("version", toJson p.record.version), ("kind", toJson kind)]
+  let stage := match s.stage with
+    | none => "none" | some .captured => "captured" | some .entryStored => "entryStored"
+    | some _ => "requested"
+  Json.mkObj [("settled", toJson s.world.queue.settled), ("waiting", toJson waiting),
+    ("stage", toJson stage), ("kept", toJson s.kept)]
+
+private def raise (j : Json) : Except String Json := do
+  let events ← j.getObjValAs? (Array Json) "events"
+  -- Before any raise the store is at the version its writes were made with.
+  let app ← j.getObjValAs? Nat "app"
+  let start : Raising := ⟨⟨⟨1, 0, []⟩, fun _ => none, [], .empty⟩, none, app, app, none⟩
+  let mut s := start
+  let mut out := #[]
+  for event in events do
+    s ← raiseStep s event
+    out := out.push (raisingJson s)
+  pure (toJson out)
+
 private def run (j : Json) : Except String Json := do
   match ← j.getObjValAs? String "mode" with
   | "receive" => receive j
+  | "raise" => raise j
   | _ => throw "unknown queue runner mode"
 
 def main : IO UInt32 := do

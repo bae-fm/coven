@@ -236,6 +236,16 @@ its circle part from the actual log. The 2/1 replacement history in
 `replacement_fills_other_audience` also has checked publication/confirmation
 executions and still commits both audiences through 2, under all three orders.
 
+`io_differential_snapshot_writes` in `coven-sync` compares a breaking
+migration's raise on a real device with the runner's `snapshot_writes` check.
+Ana's and Ben's app writes become reservations, their upload passes landings
+and confirmations, Ana's migration a reservation for its marker and a capture
+of her raise's actual positions, and each raise attempt a request. Over 32
+generated histories the Rust request is sent exactly when `Step.request`'s
+precondition admits it, both admitted and refused requests occur, every
+capture satisfies `Captured`, and every landed raise covers only published
+numbers. Ordinary snapshots are outside this comparison.
+
 The [queue proposal](queue.md#spec-edits-required-by-this-proposal) keeps old
 upload records unchanged and drains the captured prefix before the raise.
 It includes the empty migration marker in that prefix; later app writes wait

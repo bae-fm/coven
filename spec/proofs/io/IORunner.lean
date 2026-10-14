@@ -3,6 +3,7 @@ import CovenIO.Trace
 import CovenIO.Downloads
 import CovenIO.Retired
 import CovenIO.PassPhases
+import CovenIO.SnapshotWrites
 import Lean
 
 /-! The IO differential runner. Each case names the executable transition it
@@ -263,6 +264,62 @@ private def phases (j : Json) : Except String Json := do
     ("first_attempt", toJson (sent.any fun w => match w with | .first _ => true | _ => false)),
     ("retried", toJson (sent.any fun w => match w with | .retry _ => true | _ => false))]
 
+/-- `SnapshotWrites` driven by an actual device's trace: log reservations,
+landings and confirmations, local captures, and snapshot requests. A request
+is admitted exactly when `Step.request`'s precondition holds; every landed
+snapshot reports whether all its covered numbers are published. -/
+private def snapshotWrites (j : Json) : Except String Json := do
+  let events ← j.getObjValAs? (Array Json) "events"
+  let mut s : SnapshotWrites.State := SnapshotWrites.initial
+  let mut snaps : Array Snapshot := #[]
+  let mut out := #[]
+  for event in events do
+    let kind ← event.getObjValAs? String "event"
+    let writer := (event.getObjValAs? Nat "writer").toOption.getD 0
+    let log := s.logs writer
+    match kind with
+    | "reserve" =>
+      s := SnapshotWrites.changeLog s writer
+        { log with reserved := log.reserved ++ [[log.reserved.length + 1]] }
+      out := out.push (Json.mkObj [])
+    | "land" =>
+      match log.reserved.drop log.published.length with
+      | bytes :: _ =>
+        if log.confirmed ≠ log.published.length then throw "landing before confirmation"
+        s := SnapshotWrites.changeLog s writer { log with published := log.published ++ [bytes] }
+      | [] => throw "landing an unreserved number"
+      out := out.push (Json.mkObj [])
+    | "confirm" =>
+      if log.published.length ≠ log.confirmed + 1 then throw "confirming without a landing"
+      s := SnapshotWrites.changeLog s writer { log with confirmed := log.confirmed + 1 }
+      out := out.push (Json.mkObj [])
+    | "capture" =>
+      let positions ← event.getObjValAs? (List (Nat × Nat)) "positions"
+      let snap : Snapshot := ⟨0, writer, snaps.size, 0, 0, positions⟩
+      let own := decide (snap.position writer ≤ log.reserved.length)
+      let others := positions.all fun (w, n) => w == writer ||
+        decide (n ≤ (s.logs w).published.length)
+      snaps := snaps.push snap
+      s := { s with captured := snap :: s.captured }
+      out := out.push (Json.mkObj [("captured", toJson (own && others))])
+    | "request" =>
+      let index ← event.getObjValAs? Nat "snapshot"
+      let some snap := snaps[index]? | throw "request names no capture"
+      let admitted := decide (snap ∈ s.captured) &&
+        decide (snap.position snap.writer ≤ (s.logs snap.writer).confirmed)
+      if admitted then s := { s with requested := snap :: s.requested }
+      out := out.push (Json.mkObj [("admitted", toJson admitted)])
+    | "landSnapshot" =>
+      let index ← event.getObjValAs? Nat "snapshot"
+      let some snap := snaps[index]? | throw "landing names no capture"
+      if !decide (snap ∈ s.requested) then throw "landing an unrequested snapshot"
+      s := { s with landed := snap :: s.landed }
+      let published := snap.positions.all fun (w, _) =>
+        decide (snap.position w ≤ (s.logs w).published.length)
+      out := out.push (Json.mkObj [("published", toJson published)])
+    | _ => throw "unknown snapshot write event"
+  pure (toJson out)
+
 private def run (j : Json) : Except String Json := do
   match ← j.getObjValAs? String "check" with
   | "discovery" => discovery j
@@ -277,6 +334,7 @@ private def run (j : Json) : Except String Json := do
   | "send_gate" => sendGate j
   | "drain" => drain j
   | "phases" => phases j
+  | "snapshot_writes" => snapshotWrites j
   | check => throw s!"unknown IO check {check}"
 
 def main : IO UInt32 := do

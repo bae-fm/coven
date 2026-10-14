@@ -281,16 +281,6 @@ pub enum DbError {
         /// The repeated converted reference.
         reference: coven_merge::ForeignKey,
     },
-    /// A waiting write is not older than the migration converting it.
-    #[error("waiting write {write:?} has schema {schema_version}, not older than migration {migration_version}")]
-    MigrationWriteVersion {
-        /// The waiting write.
-        write: coven_merge::WriteId,
-        /// The recorded schema version.
-        schema_version: u32,
-        /// The migration being applied.
-        migration_version: u32,
-    },
     /// A write tried to replace a file declared write-once (§16).
     #[error("file on {table} at {key:?} cannot be replaced")]
     FileWriteOnce {

@@ -12,6 +12,13 @@ use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::time::SystemTime;
 
+/// What one run changed: each step's outcome and, for a breaking batch, its
+/// empty migration marker.
+pub(crate) struct MigrationRun {
+    pub(crate) outcomes: Vec<MigrationOutcome>,
+    pub(crate) marker: Option<coven_merge::WriteId>,
+}
+
 /// The device and wall clock authoring a migration's local write.
 #[derive(Clone, Copy)]
 pub(crate) struct MigrationOrigin(pub(crate) DeviceId, pub(crate) SystemTime);
@@ -31,7 +38,7 @@ pub(crate) fn run<'a>(
     supported: u32,
     origin: MigrationOrigin,
     at: &mut &'a Migration,
-) -> Result<Vec<MigrationOutcome>, DbError> {
+) -> Result<MigrationRun, DbError> {
     let mut before = Schema::read(database)?;
     let capture = RefCell::new(MigrationCapture::new(database, tables)?);
     let mut breaking = false;
@@ -96,8 +103,6 @@ pub(crate) fn run<'a>(
     }
     outcomes.reverse();
     database.batch(&format!("PRAGMA user_version = {}", supported as i32))?;
-    // Waiting writes were made under the schema this database had.
-    let waiting_version = current;
     for (index, step) in steps.iter().enumerate() {
         if outcomes[index].change == MigrationChange::Breaking {
             *at = step.migration;
@@ -112,27 +117,12 @@ pub(crate) fn run<'a>(
                 after,
                 &step.effects.names,
             )?;
-            if step.migration.version <= waiting_version {
-                continue;
-            }
-            step.migration.convert_waiting(
-                database,
-                &step.before,
-                after,
-                &step.effects.names,
-                supported,
-            )?;
         }
-    }
-    if let Some(first) = outcomes
-        .iter()
-        .find(|o| o.change == MigrationChange::Breaking && o.version > waiting_version)
-    {
-        crate::migration_writes::advance_version(database, first.version, supported)?;
     }
     let MigrationOrigin(device, now) = origin;
     let author = (device, now);
     *at = steps.last().expect("pending migrations").migration;
+    let mut marker = None;
     if let Some(first) = outcomes
         .iter()
         .position(|o| o.change == MigrationChange::Breaking)
@@ -160,7 +150,7 @@ pub(crate) fn run<'a>(
                 .retain(|(table, _), _| names.tables.contains_key(table));
         }
         crate::source_names::record(database, current, supported, &final_schema, &names)?;
-        finish(
+        marker = Some(finish(
             database,
             tables,
             &steps[0].before,
@@ -172,10 +162,10 @@ pub(crate) fn run<'a>(
                 .snapshot
                 .expect("breaking statement captured its before state"),
             author,
-        )?;
+        )?);
     }
     crate::file_protection::migrate(database, tables)?;
-    Ok(outcomes)
+    Ok(MigrationRun { outcomes, marker })
 }
 
 fn finish(
@@ -187,7 +177,7 @@ fn finish(
     baseline_names: &MigrationMatch,
     mut snapshot: crate::migration_snapshot::MigrationSnapshot,
     (device, now): (DeviceId, SystemTime),
-) -> Result<(), DbError> {
+) -> Result<coven_merge::WriteId, DbError> {
     let schema = crate::write_schema::WriteSchema::read(database, tables.to_vec())?;
     schema.with_evaluators(database, || {
         let refresh = crate::migration_state::carry(database, initial_schema, names, &schema)?;
@@ -240,7 +230,7 @@ fn finish(
         crate::write_commit::queue(database, &record)?;
         crate::migration_state::refresh(database, &schema, &refresh)?;
         snapshot.drop(database)?;
-        Ok(())
+        Ok(record.header.position)
     })
 }
 

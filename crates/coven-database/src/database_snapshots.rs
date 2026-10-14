@@ -134,6 +134,69 @@ impl Database {
         .await
     }
 
+    /// The raise snapshots a breaking migration captured through its marker,
+    /// one per audience this device read then (§17.1, §18.1).
+    pub async fn raise_captures(&self) -> Result<Vec<crate::RaiseCapture>, DbError> {
+        self.call(move |inner| {
+            let reader = inner.access.readers.acquire_reader();
+            reader.with_reader(|reader| crate::raise_capture::captures(reader, inner.access.device))
+        })
+        .await
+    }
+
+    /// The first own write of a captured prefix not yet confirmed stored.
+    /// A raise snapshot is sent only once this is `None` (§15).
+    pub async fn unconfirmed_raise_prefix(
+        &self,
+        through: coven_merge::WriteId,
+    ) -> Result<Option<coven_merge::WriteId>, DbError> {
+        self.call(move |inner| {
+            let reader = inner.access.readers.acquire_reader();
+            reader.with_reader(|reader| crate::raise_capture::unconfirmed(reader, through))
+        })
+        .await
+    }
+
+    /// Stream an audience's captured raise snapshot under its published
+    /// identity, like `write_snapshot` but from the migration's capture.
+    pub async fn write_raise_snapshot<B, F, E>(
+        &self,
+        id: coven_format::store_log::SnapshotId,
+        version: u32,
+        begin: B,
+        emit: F,
+    ) -> Result<(), crate::SnapshotWriteError<E>>
+    where
+        B: FnOnce(&coven_format::snapshot::SnapshotHeader) -> Result<(), E> + Send + 'static,
+        F: FnMut(Vec<u8>) -> Result<(), E> + Send + 'static,
+        E: Send + 'static,
+    {
+        self.call(move |inner| {
+            let reader = inner.access.readers.acquire_reader();
+            reader.with_reader(|reader| {
+                reader.read_transaction(|| {
+                    crate::raise_capture::write(reader, id, version, begin, emit)
+                })
+            })
+        })
+        .await
+    }
+
+    /// Forget a capture whose raise is published or superseded.
+    pub async fn discard_raise_capture(
+        &self,
+        audience: coven_merge::Audience,
+        version: u32,
+    ) -> Result<(), DbError> {
+        self.call(move |inner| {
+            inner.access.with_writer(|writer| {
+                writer
+                    .transaction(|writer| crate::raise_capture::discard(writer, &audience, version))
+            })
+        })
+        .await
+    }
+
     /// Load authenticated snapshots and gap writes supplied by sync. Each stored
     /// snapshot supplies its identity, authenticated prefix and plaintext. Snapshot
     /// frames and write parts are read in chunks of at most 64 KiB; only one

@@ -146,6 +146,31 @@ impl Database {
         .await
     }
 
+    /// Each queued write in number order, with whether its first attempt fixed
+    /// its keys. Queue differentials compare this with the model's tried flags.
+    pub async fn test_queued_attempts(&self) -> Result<Vec<(coven_merge::WriteId, bool)>, DbError> {
+        self.call(move |inner| {
+            inner.access.with_writer(|writer| {
+                writer.query(
+                    "SELECT device,number,sealing_keys IS NOT NULL FROM _coven_uploads ORDER BY device,number",
+                    [],
+                    |r| {
+                        Ok((
+                            coven_merge::WriteId {
+                                device: coven_foundation::id_source::DeviceId(
+                                    crate::write_encoding::counter(r.get(0)?),
+                                ),
+                                number: crate::write_encoding::counter(r.get(1)?),
+                            },
+                            r.get(2)?,
+                        ))
+                    },
+                )
+            })
+        })
+        .await
+    }
+
     /// Test transport: read actual queued records without reauthoring their writes.
     pub async fn test_queued_writes(
         &self,

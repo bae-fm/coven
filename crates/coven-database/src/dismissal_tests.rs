@@ -192,7 +192,8 @@ async fn excluded_cells_can_be_dismissed_without_their_app_table() {
         .await
         .unwrap();
     let mut record = records(&source).remove(0);
-    record.header.disposition = coven_format::write::WriteDisposition::Lost(1);
+    record.header.schema_version = 0;
+    receiver.exclude_version_zero().await;
     receiver.receive(record.into()).await.unwrap();
     let losses = receiver.lost_values().await.unwrap();
     assert_eq!(losses.len(), 1);

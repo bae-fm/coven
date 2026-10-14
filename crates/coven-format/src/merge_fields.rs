@@ -71,6 +71,19 @@ pub fn decode_write_positions(bytes: &[u8]) -> Result<WritePositions, Error> {
     Ok(value)
 }
 
+/// Encode store-log positions using their snapshot prefix bytes.
+pub fn encode_entry_positions(value: &crate::value::EntryPositions) -> Result<Vec<u8>, Error> {
+    value.validate()?;
+    encode(value)
+}
+
+/// Decode exactly one field containing store-log positions.
+pub fn decode_entry_positions(bytes: &[u8]) -> Result<crate::value::EntryPositions, Error> {
+    let value: crate::value::EntryPositions = decode(bytes)?;
+    value.validate()?;
+    Ok(value)
+}
+
 /// Encode a foreign key's stable identity using its snapshot field bytes.
 pub fn encode_foreign_key(value: &coven_merge::ForeignKey) -> Result<Vec<u8>, Error> {
     merge_wire::foreign_key(value)?;

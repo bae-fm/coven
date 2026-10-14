@@ -239,7 +239,9 @@ async fn a_failed_device_identity_prevents_publication() {
 }
 
 #[tokio::test]
-async fn a_breaking_migration_converts_the_waiting_write() {
+/// A local migration never converts the queue: the waiting write keeps its
+/// original schema and the callback serves only received late writes (§17.1).
+async fn a_breaking_migration_keeps_the_waiting_write_as_authored() {
     let root = tempfile::tempdir().unwrap();
     let layout = StoreLayout::new(root.path().to_owned());
     let app = TestCoven::new();
@@ -291,14 +293,7 @@ async fn a_breaking_migration_converts_the_waiting_write() {
         .open(directory.id())
         .await
         .unwrap();
-    {
-        let converted = converted.lock().unwrap();
-        assert_eq!(converted.len(), 1);
-        assert!(converted[0]
-            .columns
-            .iter()
-            .any(|column| column.name == "name"));
-    }
+    assert!(converted.lock().unwrap().is_empty());
     assert_eq!(
         handle
             .read(

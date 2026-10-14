@@ -389,8 +389,6 @@ pub enum DbError {
     MigrationTableMissing { table: String },
     /// Distinct original references became the same converted reference.
     MigrationReferenceCollision { table: String, reference: coven_merge::ForeignKey },
-    /// A received write is not older than the migration converting it.
-    MigrationWriteVersion { write: coven_merge::WriteId, schema_version: u32, migration_version: u32 },
     /// A write changes a file declared write-once (E2).
     FileWriteOnce { table: String, key: RowKey },
     /// A file reference no longer names the row's file (§16.3).

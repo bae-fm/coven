@@ -480,6 +480,9 @@ mod differential {
     struct SchemaHistory {
         reload: ReloadHistory,
         raised: bool,
+        /// Covered writes the snapshot's author excluded under its own raise:
+        /// the snapshot carries them as frozen schema losses.
+        frozen: BTreeSet<coven_merge::WriteId>,
     }
     impl SchemaHistory {
         fn generate(rng: &mut Generator) -> Self {
@@ -496,9 +499,8 @@ mod differential {
                 };
                 w.header.store_log_read.0.clear();
             }
+            // An old-schema write the snapshot's author excluded (§17.1).
             let mut frozen = insert(400, 400);
-            frozen.header.schema_version = 2;
-            frozen.header.disposition = WriteDisposition::Lost(2);
             let Operation::Insert(columns) = &mut frozen.parts[0].rows[0].change.operation else {
                 unreachable!()
             };
@@ -510,10 +512,10 @@ mod differential {
                 },
             );
             reload.covered.insert(frozen.header.position);
+            let frozen_writes = BTreeSet::from([frozen.header.position]);
             reload.writes.push(frozen);
             // Empty-valued deletions still have an identity in a frozen loss.
             let mut deletion = insert(401, 0);
-            deletion.header.disposition = WriteDisposition::Lost(2);
             let original = reload
                 .writes
                 .iter()
@@ -563,10 +565,12 @@ mod differential {
             Self {
                 reload,
                 raised: true,
+                frozen: frozen_writes,
             }
         }
         fn admitted(&self, w: &WriteRecord) -> bool {
             w.header.disposition == WriteDisposition::Apply
+                && !self.frozen.contains(&w.header.position)
                 && (self.reload.covered.contains(&w.header.position)
                     || !self.raised
                     || w.header.schema_version >= 2)
@@ -605,8 +609,8 @@ mod differential {
                 let id = write_id(w.header.position);
                 let verdict = match w.header.disposition {
                     WriteDisposition::Migration => json!({"id": id, "kind": 2}),
-                    WriteDisposition::Lost(version) => {
-                        json!({"id": id, "kind": 1, "version": version})
+                    WriteDisposition::Apply if self.frozen.contains(&w.header.position) => {
+                        json!({"id": id, "kind": 1, "version": 2})
                     }
                     WriteDisposition::Apply if self.raised && w.header.schema_version < 2 => {
                         json!({"id": id, "kind": 1, "version": 2})
@@ -616,6 +620,7 @@ mod differential {
                 schema.push(verdict);
                 if self.reload.covered.contains(&w.header.position)
                     && w.header.disposition == WriteDisposition::Apply
+                    && !self.frozen.contains(&w.header.position)
                 {
                     snapshot.push(id);
                 }
@@ -628,10 +633,10 @@ mod differential {
                         Operation::Delete => change.old.keys().map(|c| column_id(c)).collect(),
                     };
                     values.push(json!({"write": id, "row": row, "cols": columns}));
-                    if self.reload.covered.contains(&w.header.position) {
-                        if let WriteDisposition::Lost(version) = w.header.disposition {
-                            frozen.push(json!({"row": row, "gen": change.change.generation, "version": version, "write": id}));
-                        }
+                    if self.reload.covered.contains(&w.header.position)
+                        && self.frozen.contains(&w.header.position)
+                    {
+                        frozen.push(json!({"row": row, "gen": change.change.generation, "version": 2, "write": id}));
                     }
                 }
             }
@@ -668,6 +673,40 @@ mod differential {
         let target_store = TestStore::with_ids(&ids);
         let source = schema_database(&source_store).await;
         let target = schema_database(&target_store).await;
+        // The snapshot's author raised to version 2 covering every other
+        // covered write, so it excluded exactly the frozen ones.
+        let frozen: Vec<_> = history
+            .reload
+            .writes
+            .iter()
+            .filter(|w| history.frozen.contains(&w.header.position))
+            .collect();
+        if !frozen.is_empty() {
+            let included = history
+                .reload
+                .writes
+                .iter()
+                .map(|w| w.header.position)
+                .filter(|id| history.reload.covered.contains(id) && !history.frozen.contains(id))
+                .fold(BTreeMap::<DeviceId, u64>::new(), |mut max, id| {
+                    let n = max.entry(id.device).or_default();
+                    *n = (*n).max(id.number);
+                    max
+                });
+            source
+                .install_schema_fixture(
+                    Audience::Store,
+                    2,
+                    WritePositions(
+                        included
+                            .into_iter()
+                            .map(|(device, number)| coven_merge::WriteId { device, number })
+                            .collect(),
+                    ),
+                )
+                .await
+                .unwrap();
+        }
         for w in history
             .reload
             .writes
@@ -720,6 +759,12 @@ mod differential {
                 .reductions()
                 .into_iter()
                 .map(|reload| SchemaHistory {
+                    frozen: history
+                        .frozen
+                        .iter()
+                        .copied()
+                        .filter(|id| reload.covered.contains(id))
+                        .collect(),
                     reload,
                     raised: history.raised,
                 })
@@ -730,15 +775,10 @@ mod differential {
                     ..history.clone()
                 });
             }
-            for i in 0..history.reload.writes.len() {
-                if matches!(
-                    history.reload.writes[i].header.disposition,
-                    WriteDisposition::Lost(_)
-                ) {
-                    let mut candidate = history.clone();
-                    candidate.reload.writes[i].header.disposition = WriteDisposition::Apply;
-                    candidates.push(candidate);
-                }
+            for id in &history.frozen {
+                let mut candidate = history.clone();
+                candidate.frozen.remove(id);
+                candidates.push(candidate);
             }
             let mut smaller = None;
             for candidate in candidates {

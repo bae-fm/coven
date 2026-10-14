@@ -67,24 +67,6 @@ pub(crate) fn load<P: crate::PendingValue, R: Read, W: Read>(
             let resets = crate::BoundaryCoverage::replace(database, boundaries)?;
             crate::pending::suppress(database, &resets)?;
             crate::pending::refresh(database)?;
-            if let Some(version) = crate::write_boundary::WriteBoundary::load(database)?
-                .into_iter()
-                .filter_map(|boundary| match boundary.boundary {
-                    crate::Boundary::SchemaChange(version)
-                        if version.snapshot.audience == coven_merge::Audience::Store =>
-                    {
-                        Some(version.number)
-                    }
-                    _ => None,
-                })
-                .max()
-            {
-                crate::migration_writes::advance_version(
-                    database,
-                    *schema.versions.start(),
-                    version,
-                )?;
-            }
         }
         let mut coverage = crate::snapshot_coverage::SnapshotCoverage::new(database, device)?;
         let visible = AppView::after(before, schema);

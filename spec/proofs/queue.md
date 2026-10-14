@@ -593,3 +593,32 @@ Run it with:
 COVEN_QUEUE_LEAN="$PWD/spec/proofs/queue/.lake/build/bin/queueRunner" \
   cargo test -p coven-database queue_reset_differential_histories -- --ignored --nocapture
 ```
+
+The runner's raise mode drives one device's queue through app writes,
+breaking migrations, upload passes, raise publication and crashes, using
+`Queue.commit`, `RaiseUpload.migrate`, `Queue.prepare`, `World.send`,
+`World.land` and `Queue.finish` under the `Uploadable` gate; the raise
+advances only when `RaiseUpload.Confirmed` holds. A pass's injected fault
+loses the first request before it lands, or the reply of the first request
+that stores new bytes, as the provider's lost completion does; an occupied
+path settles by equal bytes (`confirmation_requires_equal`).
+`queue_raise_differential_histories` in `coven-sync` runs 48 generated
+histories on a real device with memory storage and compares, after every
+event, the settled count, each waiting record's number, tried flag, schema
+version and kind, the raise stage and the kept version. It also checks that a
+migration leaves every queued record's bytes unchanged. Before any raise the
+model's kept version is the version the store's writes were made with.
+
+The model's gate compares each record with one kept version, so it does not
+cover a write made between two local breaking migrations whose first raise
+was never published: that write is new-schema for the first marker, and no
+raise to its version will be kept. Rust treats it as part of the later
+captured prefix, so it uploads before that raise
+(`a_write_between_unpublished_migrations_joins_the_later_prefix`); the
+generator therefore permits a second migration only with no app write since
+the first. A model of successive captured prefixes would close this gap.
+
+```sh
+COVEN_QUEUE_LEAN="$PWD/spec/proofs/queue/.lake/build/bin/queueRunner" \
+  cargo test -p coven-sync queue_raise_differential_histories -- --ignored --nocapture
+```

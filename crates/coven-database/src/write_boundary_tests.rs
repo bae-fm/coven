@@ -5,6 +5,14 @@ use coven_format::value::WritePositions;
 use coven_foundation::id_source::{DeviceId, SequentialIds};
 use coven_merge::{Audience, WriteId};
 
+/// The notes schema followed by an addition-only version 2.
+pub(crate) fn notes_v2() -> Vec<crate::Migration> {
+    vec![
+        crate::Migration::sql(1, "notes", NOTES),
+        crate::Migration::sql(2, "local", "CREATE TABLE local_extra(id TEXT PRIMARY KEY)"),
+    ]
+}
+
 // These fixtures supply checked replay input; coverage still passes through the
 // production entry-keyed persistence and transaction functions.
 impl crate::Database {
@@ -109,6 +117,22 @@ impl crate::Database {
                 Ok(changed)
             })
         })
+    }
+    /// Exclude writes authored at schema version 0 from the store audience,
+    /// as a kept raise to version 1 that covers none of them does (§17.1).
+    /// Writes at version 1 are unaffected.
+    pub(crate) async fn exclude_version_zero(&self) {
+        self.install_schema_fixture(Audience::Store, 1, WritePositions(Vec::new()))
+            .await
+            .unwrap();
+    }
+    /// A kept raise to `version` covering every write consumed so far: a
+    /// later write authored at an older version is excluded (§17.1).
+    pub(crate) async fn exclude_later_writes(&self, version: u32) {
+        let included = self.sync_state(Vec::new()).await.unwrap().positions;
+        self.install_schema_fixture(Audience::Store, version, included)
+            .await
+            .unwrap();
     }
     pub(crate) async fn install_reset_fixture(
         &self,

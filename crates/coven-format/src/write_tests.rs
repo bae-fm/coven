@@ -197,29 +197,36 @@ fn timestamp_had_read_and_parent_generation_are_checked() {
     refuses(write, Error::Merge(MergeError::ParentGeneration(2)));
 }
 #[test]
-fn schema_change_marker_uses_a_positive_schema_version() {
-    let mut write = test_utils::write();
-    write.header.disposition = WriteDisposition::Lost(u32::MAX);
-    assert_eq!(
-        decode_plaintext(&test_utils::write_plaintext(&write).unwrap()).unwrap(),
-        write
-    );
-    write.header.disposition = WriteDisposition::Lost(0);
-    refuses(
-        write,
-        Error::Invalid {
-            field: "breaking schema version",
-            rule: Rule::Required,
-        },
-    );
+fn a_lost_disposition_is_never_transmitted() {
+    // Tag 1 is unused: exclusion is a received interpretation (D5).
+    let write = test_utils::write();
+    let mut bytes = test_utils::write_plaintext(&write).unwrap();
+    // Frame prefix, position, timestamp, both counted position lists, then
+    // the schema version precede the disposition byte.
+    let at = crate::FRAME_PREFIX_LEN
+        + 32
+        + 4
+        + 16 * write.header.had_read.0.len()
+        + 4
+        + 16 * write.header.store_log_read.0.len()
+        + 4;
+    assert_eq!(bytes[at], 0);
+    bytes[at] = 1;
+    assert!(matches!(
+        decode_plaintext(&bytes),
+        Err(Error::UnknownTag {
+            field: "write disposition",
+            tag: 1
+        })
+    ));
 }
 
 #[test]
 fn only_migration_writes_have_no_parts() {
     let mut write = test_utils::write();
     write.parts.clear();
-    for disposition in [WriteDisposition::Apply, WriteDisposition::Lost(2)] {
-        write.header.disposition = disposition;
+    {
+        write.header.disposition = WriteDisposition::Apply;
         refuses(
             write.clone(),
             Error::Invalid {

@@ -241,25 +241,37 @@ impl DatabaseConnection {
         let _profile = self.profile_statements();
         let publishes = author.is_some();
         let result = self.transaction(|db| {
-            let outcomes = crate::migration_run::run(
-                db,
-                tables,
-                migrations,
-                current,
-                supported,
-                author.expect("writable migration"),
-                &mut at,
-            )?;
+            let crate::migration_run::MigrationRun { outcomes, marker } =
+                crate::migration_run::run(
+                    db,
+                    tables,
+                    migrations,
+                    current,
+                    supported,
+                    author.expect("writable migration"),
+                    &mut at,
+                )?;
             if let Some(minimum) = outcomes
                 .iter()
                 .filter(|outcome| outcome.change == crate::MigrationChange::Breaking)
                 .map(|outcome| outcome.version)
                 .max()
             {
-                db.internal_execute(
-                    "UPDATE _coven_snapshot_schema SET minimum=?1,publication=?2 WHERE singleton=1",
-                    (minimum, supported),
-                )?;
+                // The raise snapshots are captured through the marker before any
+                // later app write; with no store there is no shared version to raise.
+                let schema = crate::write_schema::WriteSchema::read(db, tables.to_vec())?;
+                let marker = marker.expect("a breaking batch appends its marker");
+                if crate::raise_capture::capture(db, &schema, marker, supported)? {
+                    db.internal_execute(
+                        "UPDATE _coven_snapshot_schema SET minimum=?1,publication=?2 WHERE singleton=1",
+                        (minimum, supported),
+                    )?;
+                } else {
+                    db.internal_execute(
+                        "UPDATE _coven_snapshot_schema SET minimum=?1 WHERE singleton=1",
+                        [minimum],
+                    )?;
+                }
                 if let Some(operation) = operation.filter(|_| publishes) {
                     let new = operation(supported)?;
                     let id = crate::operation::insert(db, &new)?;

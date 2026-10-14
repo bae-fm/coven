@@ -345,21 +345,55 @@ impl StoreLogSync {
                 .map_err(|_| coven_database::DbError::DamagedDatabase)?,
         };
         let path = snapshot_path(self.directory.id(), &id)?;
+        let mut raise = None;
         if let SnapshotTrigger::Raise { version, ref entry } = trigger {
             if entry.is_none()
                 && super::schema_sync::schema_in_place(&local.log.replay.state, &audience, version)
             {
                 self.discard_snapshot(record, task).await?;
+                self.database
+                    .discard_raise_capture(audience.clone(), version)
+                    .await?;
                 self.database.finish_operation(record.id).await?;
                 return Ok(Progress::Finished(Output::Unit));
             }
             if record.last_step >= 2 {
                 return self.raise_snapshot_step(record, task, version, id).await;
             }
+            if record.last_step == 0 {
+                // A later breaking migration replaced this capture: its own
+                // raise supersedes this one before anything was sealed.
+                let Some(capture) = self
+                    .database
+                    .raise_captures()
+                    .await?
+                    .into_iter()
+                    .find(|c| c.audience == audience && c.version == version)
+                else {
+                    self.discard_snapshot(record, task).await?;
+                    self.database.finish_operation(record.id).await?;
+                    return Ok(Progress::Finished(Output::Unit));
+                };
+                // Confirm the captured own prefix, marker included, before
+                // sending the snapshot that covers it (§15, §17.1).
+                if let Some(write) = self
+                    .database
+                    .unconfirmed_raise_prefix(capture.through)
+                    .await?
+                {
+                    return Ok(Progress::Waiting(crate::PendingReason::Waits(
+                        crate::Prerequisite::Object(crate::write_seal::path(
+                            self.directory.id(),
+                            write,
+                        )),
+                    )));
+                }
+                raise = Some(version);
+            }
         }
         match record.last_step {
             0 => {
-                self.prepare_snapshot(record, task, &path, &local.log, &member)
+                self.prepare_snapshot(record, task, &path, &local.log, &member, raise)
                     .await
             }
             1 => self.upload_snapshot(record, task, &path).await,
@@ -375,6 +409,7 @@ impl StoreLogSync {
         path: &ObjectPath,
         log: &StoreLog,
         member: &coven_crypto::MemberIdentity,
+        raise: Option<u32>,
     ) -> Result<Progress, SyncError> {
         let id = path.snapshot_id().expect("snapshot path");
         self.clear_snapshot_files(record, &mut task).await?;
@@ -423,7 +458,7 @@ impl StoreLogSync {
             .reserve_snapshot_files(record, &mut task, 1)
             .await?
             .remove(0);
-        self.seal_snapshot(id, key_id, caught_at, key, member, path, &name)
+        self.seal_snapshot(id, raise, (key_id, key), caught_at, member, path, &name)
             .await?;
         self.save_snapshot_task(record, &task, 1).await?;
         Ok(Progress::Advanced)

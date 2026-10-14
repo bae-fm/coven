@@ -43,21 +43,16 @@ impl WriteHeader {
             Rule::TimestampDevice,
         )?;
         self.had_read.without_own_device(self.position.device)?;
-        self.store_log_read.validate()?;
-        if let WriteDisposition::Lost(version) = self.disposition {
-            require(version > 0, "breaking schema version", Rule::Required)?;
-        }
-        Ok(())
+        self.store_log_read.validate()
     }
 }
 
-/// How an uploaded write is treated after an app schema change (§17.1).
+/// An ordinary write or a breaking migration's empty marker (D5). Schema
+/// exclusion is a received interpretation, never transmitted (§17.1).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WriteDisposition {
     /// Apply its changes under the merge rules.
     Apply,
-    /// Keep the whole write as lost, naming the version reached by the breaking change.
-    Lost(u32),
     /// Its changes travel only in the breaking change's snapshot; the log has no parts.
     Migration,
 }
@@ -65,7 +60,7 @@ impl WriteDisposition {
     pub(crate) fn validate_parts(self, count: usize) -> Result<(), Error> {
         match self {
             Self::Migration => require(count == 0, "migration write parts", Rule::StreamLength),
-            Self::Apply | Self::Lost(_) => require(count > 0, "write parts", Rule::Required),
+            Self::Apply => require(count > 0, "write parts", Rule::Required),
         }
     }
 }
@@ -73,17 +68,12 @@ impl Wire for WriteDisposition {
     fn put(&self, out: &mut Encoder) -> Result<(), Error> {
         match self {
             Self::Apply => 0u8.put(out),
-            Self::Lost(p) => {
-                1u8.put(out)?;
-                p.put(out)
-            }
             Self::Migration => 2u8.put(out),
         }
     }
     fn get(input: &mut Decoder<'_>) -> Result<Self, Error> {
         match u8::get(input)? {
             0 => Ok(Self::Apply),
-            1 => Ok(Self::Lost(Wire::get(input)?)),
             2 => Ok(Self::Migration),
             tag => Err(Error::UnknownTag {
                 field: "write disposition",

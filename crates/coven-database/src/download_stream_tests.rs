@@ -1,7 +1,6 @@
 use super::*;
 use crate::{DownloadedPartStream, DownloadedWriteStream};
 use coven_format::value::Value;
-use coven_format::write::WriteDisposition;
 use coven_format::write_stream::WriteEncoder;
 use std::io::Cursor;
 
@@ -201,10 +200,11 @@ async fn streamed_excluded_rows_use_the_common_snapshot_loss_section() {
     .await
     .unwrap();
     let mut record = records(&a).remove(0);
-    record.header.disposition = WriteDisposition::Lost(1);
+    record.header.schema_version = 0;
+    b.exclude_version_zero().await;
     b.receive_stream(
         stream(&record),
-        coven_format::value::EntryPositions(Vec::new()),
+        b.store_log().await.unwrap().positions(),
         || Ok(()),
     )
     .await

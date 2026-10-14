@@ -139,6 +139,8 @@ async fn only_the_spec_tables_are_created() {
                 "_coven_positions_post",
                 "_coven_provider_access",
                 "_coven_queued_file_refs",
+                "_coven_raise_capture_frames",
+                "_coven_raise_captures",
                 "_coven_references",
                 "_coven_retirement_finality",
                 "_coven_row_file_refs",
@@ -266,6 +268,8 @@ mod fixture {
      INSERT INTO _coven_boundaries SELECT device,n,'schema',1,audience,device,n,x'00',i,1 FROM fixture;
      INSERT INTO _coven_pending_resets SELECT key,device,device,n FROM fixture;
      INSERT INTO _coven_loaded_audiences SELECT 'audience_' || i FROM fixture;
+     INSERT INTO _coven_raise_captures SELECT 'audience_' || i,2,n,2,x'00',x'00',zeroblob(48) FROM fixture;
+     INSERT INTO _coven_raise_capture_frames SELECT 'audience_' || i,1,x'00' FROM fixture;
      INSERT INTO _coven_local_effects SELECT i,tab,key,audience FROM fixture;
      INSERT INTO _coven_local_effect_causes SELECT i,device,n FROM fixture;
      INSERT INTO _coven_local_effect_rows SELECT i,0,tab,'row',NULL,x'00',
@@ -299,7 +303,7 @@ mod fixture {
        (table_name,key,audience,generation,column_id,value,set_by,retired,replacement_kind,replaced_by)
        SELECT tab,key,audience,counter(1),CASE WHEN i%3=0 THEN i END,
               zeroblob(64),n,i%2,CASE WHEN i%3=0 THEN 'write' ELSE 'rules' END,n FROM fixture;
-     INSERT INTO _coven_uploads SELECT device,n,zeroblob(256),NULL,NULL FROM fixture;
+     INSERT INTO _coven_uploads SELECT device,n,zeroblob(256),NULL FROM fixture;
      INSERT INTO _coven_queued_file_refs SELECT device,substr(key,1,16),device,n FROM fixture;
      INSERT INTO _coven_write_upload_sessions SELECT device,n,x'00' FROM fixture;
      INSERT INTO _coven_user_files SELECT tab,key,'file',key,key,n,zeroblob(13) FROM fixture;
@@ -482,12 +486,14 @@ mod scans {
         Some("the queue reader lists every waiting write in insertion order"),
     ("write_boundary.rs", "SELECT b.kind,b.version,b.audience,b.snapshot_device,b.snapshot_number,b.entry_device,b.entry_number,b.included,b.applied FROM _coven_store_log l JOIN _coven_boundaries b ON b.entry_device=l.device AND b.entry_number=l.number WHERE l.outcome='kept' ORDER BY l.timestamp", "l") =>
         Some("boundary selection reads every kept boundary in replay order"),
+    ("raise_capture.rs", "DELETE FROM _coven_raise_captures", "_coven_raise_captures") =>
+        Some("once per breaking migration: replace the previous unpublished capture"),
+    ("raise_capture.rs", "SELECT audience,version,through,writes FROM _coven_raise_captures ORDER BY audience", "_coven_raise_captures") =>
+        Some("one capture per readable audience; scheduling lists them all"),
     ("migration_snapshot.rs", "SELECT DISTINCT lower(table_name) FROM _coven_columns", "_coven_columns") =>
         Some("once per migration: discover every table with retained column metadata"),
     ("migration_receive.rs", "SELECT version,before_schema,after_schema,tables,columns FROM _coven_conversion_schemas ORDER BY version", "_coven_conversion_schemas") =>
         Some("opening retains every breaking migration's conversion schema"),
-    ("migration_writes.rs", "SELECT device,number,coalesce(interpretation,record) FROM _coven_uploads WHERE sealing_keys IS NULL ORDER BY device,number", "_coven_uploads") =>
-        Some("once per migration: interpret every unattempted queued write in the local schema"),
     ("migration_state.rs", "CREATE TEMP TABLE _coven_migration_retired AS SELECT DISTINCT table_name,key,audience FROM _coven_lost WHERE retired=0 AND replacement_kind='rules'", "_coven_lost") =>
         Some("once per migration: freeze all removed rows before changing their schema"),
     ("migration_state.rs", "SELECT id,table_name,column_name FROM _coven_columns", "_coven_columns") =>

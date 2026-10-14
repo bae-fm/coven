@@ -129,7 +129,7 @@ pub(crate) fn apply<P: crate::PendingValue, R: Read>(
                 }
                 Source::Queue(rowid) => database
                     .query_row(
-                        "SELECT coalesce(interpretation,record) FROM _coven_uploads WHERE rowid=?1",
+                        "SELECT record FROM _coven_uploads WHERE rowid=?1",
                         [rowid],
                         |r| {
                             decoded(coven_format::write_stream::decode_plaintext(
@@ -145,8 +145,7 @@ pub(crate) fn apply<P: crate::PendingValue, R: Read>(
                 if supplied {
                     crate::download::retain_sources(database, &write)?;
                 }
-                // Validate supplied copies, but replay the queue's current plaintext
-                // (which an app migration may have converted) from the queue itself.
+                // Validate supplied copies; the queue's original record is the same write.
                 crate::write_commit::retain_metadata(
                     database,
                     &AppliedWrite {

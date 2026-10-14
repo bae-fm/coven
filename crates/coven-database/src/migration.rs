@@ -72,34 +72,15 @@ impl Migration {
         }
     }
 
-    /// Interpret old-schema row changes in this version, on receipt and when
-    /// preparing a local waiting interpretation. Original records remain unchanged;
-    /// without a converter, the interpretation retains schema losses (§17.1).
+    /// Interpret received late old-schema row changes in this version (§17.1).
+    /// Upload records never change; without a converter, the received
+    /// interpretation retains each original change as a schema loss.
     pub fn writes<F>(mut self, f: F) -> Self
     where
         F: Fn(&mut crate::RowChange) -> Result<(), DbError> + Send + Sync + 'static,
     {
         self.conversion = Some(Arc::new(f));
         self
-    }
-
-    pub(crate) fn convert_waiting(
-        &self,
-        database: &DatabaseConnection,
-        before: &crate::schema::Schema,
-        after: &crate::schema::Schema,
-        names: &crate::migration_names::MigrationMatch,
-        publication: u32,
-    ) -> Result<(), DbError> {
-        crate::migration_writes::convert(
-            database,
-            before,
-            after,
-            names,
-            self.version,
-            publication,
-            self.conversion.as_deref(),
-        )
     }
 
     pub(crate) fn apply(&self, context: &MigrationContext<'_>) -> Result<(), DbError> {

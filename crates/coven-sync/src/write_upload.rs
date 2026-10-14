@@ -247,7 +247,7 @@ impl DeviceLogSync {
     }
 }
 
-fn read_error(error: UploadReadError<SyncError>) -> SyncError {
+pub(super) fn read_error(error: UploadReadError<SyncError>) -> SyncError {
     match error {
         UploadReadError::Database(e) => e.into(),
         UploadReadError::Consumer(e) => e,

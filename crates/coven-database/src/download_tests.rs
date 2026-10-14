@@ -223,7 +223,8 @@ async fn author_marked_loss_keeps_values_and_cause_without_needing_the_old_table
         .await
         .unwrap();
     let mut record = records(&source).remove(0);
-    record.header.disposition = WriteDisposition::Lost(1);
+    record.header.schema_version = 0;
+    receiver.exclude_version_zero().await;
     assert_eq!(
         receiver.receive(record.clone().into()).await.unwrap(),
         ApplyOutcome::Applied
@@ -791,8 +792,8 @@ async fn excluded_values_do_not_replace_a_removed_rows_merge_values() {
         receiver.receive(record.into()).await.unwrap();
     }
     sql(&b, "UPDATE notes SET title='excluded'").await.unwrap();
-    let mut excluded = records(&b).remove(1);
-    excluded.header.disposition = WriteDisposition::Lost(1);
+    let excluded = records(&b).remove(1);
+    receiver.exclude_later_writes(2).await;
     receiver.receive(excluded.into()).await.unwrap();
     assert_eq!(count(&receiver, "_coven_lost"), 2);
     sql(&receiver, "INSERT INTO notes VALUES('b','restored','')")
@@ -802,7 +803,7 @@ async fn excluded_values_do_not_replace_a_removed_rows_merge_values() {
     assert_eq!(losses.len(), 1);
     assert_eq!(
         losses[0].replaced_by,
-        crate::Replacement::SchemaChange { version: 1 }
+        crate::Replacement::SchemaChange { version: 2 }
     );
     for db in [a, b, receiver] {
         db.close().await.unwrap();

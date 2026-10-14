@@ -12,12 +12,14 @@ use coven_storage::ObjectPath;
 use tokio::sync::{mpsc, oneshot};
 
 impl StoreLogSync {
+    /// Seal an audience's live state, or with `raise` the frames its breaking
+    /// migration captured through the marker, under the named key.
     pub(super) async fn seal_snapshot(
         &self,
         id: SnapshotId,
-        key_id: KeyId,
+        raise: Option<u32>,
+        (key_id, key): (KeyId, DerivedKeys),
         caught_at: coven_format::value::StorageTime,
-        key: DerivedKeys,
         member: &MemberIdentity,
         path: &ObjectPath,
         name: &str,
@@ -31,24 +33,32 @@ impl StoreLogSync {
             .create_writer(self.directory.lock_read_only()?)?;
         let (send, receive) = mpsc::channel(1);
         let (send_prefix, receive_prefix) = oneshot::channel();
-        let produce = self.database.write_snapshot(
-            id,
-            move |header| {
-                send_prefix
-                    .send(SnapshotObjectPrefix {
-                        audience: header.id.audience.clone(),
-                        key: key_id,
-                        caught_at,
-                        writes: header.writes.clone(),
-                        store_log: header.store_log.clone(),
-                    })
-                    .map_err(|_| std::io::Error::from(std::io::ErrorKind::BrokenPipe))
-            },
-            move |frame| {
-                send.blocking_send(frame)
-                    .map_err(|_| std::io::Error::from(std::io::ErrorKind::BrokenPipe))
-            },
-        );
+        let database = self.database.clone();
+        let begin = move |header: &coven_format::snapshot::SnapshotHeader| {
+            send_prefix
+                .send(SnapshotObjectPrefix {
+                    audience: header.id.audience.clone(),
+                    key: key_id,
+                    caught_at,
+                    writes: header.writes.clone(),
+                    store_log: header.store_log.clone(),
+                })
+                .map_err(|_| std::io::Error::from(std::io::ErrorKind::BrokenPipe))
+        };
+        let emit = move |frame| {
+            send.blocking_send(frame)
+                .map_err(|_| std::io::Error::from(std::io::ErrorKind::BrokenPipe))
+        };
+        let produce = async move {
+            match raise {
+                Some(version) => {
+                    database
+                        .write_raise_snapshot(id, version, begin, emit)
+                        .await
+                }
+                None => database.write_snapshot(id, begin, emit).await,
+            }
+        };
         let consume = seal_frames(writer, receive_prefix, receive, path, key, member);
         let (produced, consumed) = tokio::join!(produce, consume);
         // A failed producer can close before the first frame. A failed consumer

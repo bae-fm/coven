@@ -408,7 +408,8 @@ async fn frozen_display_and_dismissal_preserve_original_parents_sources_and_admi
     .await
     .unwrap();
     let mut write = records(&source).remove(0);
-    write.header.disposition = coven_format::write::WriteDisposition::Lost(2);
+    write.header.schema_version = 0;
+    target.exclude_version_zero().await;
     target.receive(write.clone().into()).await.unwrap();
     let original = write.parts[0]
         .rows
@@ -467,7 +468,7 @@ async fn frozen_display_and_dismissal_preserve_original_parents_sources_and_admi
         for (_, admission) in before {
             assert_eq!(
                 merge_fields::decode_change_verdict(&admission).unwrap(),
-                coven_format::snapshot_rows::ChangeVerdict::Excluded(2)
+                coven_format::snapshot_rows::ChangeVerdict::Excluded(1)
             );
         }
     });

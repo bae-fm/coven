@@ -760,18 +760,20 @@ have the model's setter-and-cell meaning; scalar conversion is not tested.
 All 128 seeds pass, each in three causal arrival orders at both a full history
 and a random prefix (768 comparisons). The histories include covered ordinary
 writes, covered frozen losses, uncovered old-version writes, admitted
-new-version writes, explicitly lost writes, deletes without old values, and
-migration log records with no row changes. Frozen rows also carry an old
-column absent from the current SQL schema. Covered excluded positions do not
-become snapshot merge inputs. The reducer preserves these distinctions while
-removing writes, changes, values, coverage and the schema raise; it can also
-remove an explicit lost mark.
+new-version writes, deletes without old values, and migration log records
+with no row changes. A covered frozen loss comes from an old-version write
+the snapshot's author excluded under its own raise; no write carries a lost
+disposition (format D5). Frozen rows also carry an old column absent from
+the current SQL schema. Covered excluded positions do not become snapshot
+merge inputs. The reducer preserves these distinctions while removing
+writes, changes, values, coverage and the schema raise; it can also return
+an author-excluded write to the snapshot's merge inputs.
 
 The reading is [§17.1](../coven.md#171-host-application): “S already determines
 the effects of writes it covers” and “An old-version write outside S is
 excluded: keep its values as frozen losses, and pass its position without
 applying its changes.” The adapter supplies the eligibility verdict from the
-write's version or explicit disposition, and tests the boundary's use of it.
+write's version, and tests the boundary's use of it.
 Conversion callbacks, per-change data dependencies, and competing
 store-log selection remain outside this comparison. Schema tests use no reset.
 

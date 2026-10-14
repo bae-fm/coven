@@ -405,6 +405,7 @@ async fn rejected_timestamps_cannot_advance_skipped_or_excluded_writes() {
     sql(&a, "UPDATE notes SET title='valid'").await.unwrap();
     let writes = records(&a);
     b.receive(writes[0].clone().into()).await.unwrap();
+    b.exclude_version_zero().await;
     for lost in [false, true] {
         let mut invalid: crate::DownloadedWrite = writes[1].clone().into();
         invalid.header.timestamp = coven_merge::Timestamp::new(
@@ -414,7 +415,7 @@ async fn rejected_timestamps_cannot_advance_skipped_or_excluded_writes() {
         )
         .unwrap();
         if lost {
-            invalid.header.disposition = coven_format::write::WriteDisposition::Lost(1);
+            invalid.header.schema_version = 0;
         } else {
             invalid.parts = vec![crate::DownloadedPart::Skipped(coven_merge::Audience::Store)];
         }

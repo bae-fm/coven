@@ -13,20 +13,6 @@ use coven_format::{
 use coven_merge::{ColumnValue, Operation};
 use std::collections::BTreeMap;
 
-/// The part's direct admission before its changes' data sources are followed.
-fn part_verdict(
-    boundaries: &[crate::write_boundary::WriteBoundary],
-    header: &WriteHeader,
-    part: &WritePart,
-) -> Option<ChangeVerdict> {
-    let boundary = crate::write_boundary::WriteBoundary::part_verdict(boundaries, header, part);
-    match (header.disposition, boundary) {
-        (_, Some(ChangeVerdict::Ignored(entry))) => Some(ChangeVerdict::Ignored(entry)),
-        (WriteDisposition::Lost(version), _) => Some(ChangeVerdict::Excluded(version)),
-        (_, boundary) => boundary,
-    }
-}
-
 pub(crate) fn accepted(
     database: &DatabaseConnection,
     schema: &WriteSchema,
@@ -75,7 +61,9 @@ pub(crate) fn interpret(
             continue;
         }
         let originals: Vec<_> = part.rows.iter().map(|row| row.row.clone()).collect();
-        let mut verdict = part_verdict(&boundaries, &record.header, &part);
+        // The part's direct admission before its changes' sources are followed.
+        let mut verdict =
+            crate::write_boundary::WriteBoundary::part_verdict(&boundaries, &record.header, &part);
         let mut converted = false;
         if let Some(ChangeVerdict::Excluded(version)) = verdict {
             if record.header.disposition == WriteDisposition::Apply

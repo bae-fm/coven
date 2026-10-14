@@ -164,7 +164,11 @@ async fn a_snapshot_round_trips_rows_history_and_excluded_changes() {
     let source_store = TestStore::with_ids(&ids);
     let receiver_store = TestStore::with_ids(&ids);
     let source = source_store.schema(notes(), NOTES).await.unwrap();
-    let receiver = receiver_store.schema(notes(), NOTES).await.unwrap();
+    let receiver = receiver_store
+        .builder(notes(), crate::write_boundary::tests::notes_v2())
+        .open()
+        .await
+        .unwrap();
     sql(
         &source,
         "INSERT INTO notes VALUES('n','first','body'); INSERT INTO local_rows VALUES('private')",
@@ -185,11 +189,11 @@ async fn a_snapshot_round_trips_rows_history_and_excluded_changes() {
     sql(&source, "UPDATE notes SET title='excluded'")
         .await
         .unwrap();
-    let mut excluded = records(&source).pop().unwrap();
-    excluded.header.disposition = coven_format::write::WriteDisposition::Lost(1);
+    let excluded = records(&source).pop().unwrap();
+    receiver.exclude_later_writes(2).await;
     receiver.receive(excluded.clone().into()).await.unwrap();
     let (header, snapshot) = decode(&frames(&receiver, Audience::Store).await);
-    assert_eq!(header.schema_version, 1);
+    assert_eq!(header.schema_version, 2);
     assert_eq!(header.writes.0, [excluded.header.position]);
     // Five original changes travel as source evidence with their verdicts.
     assert_eq!(header.counts, [1, 5, 3, 1, 1, 5]);
@@ -208,7 +212,7 @@ async fn a_snapshot_round_trips_rows_history_and_excluded_changes() {
             ChangeVerdict::Applied,
             ChangeVerdict::Applied,
             ChangeVerdict::Applied,
-            ChangeVerdict::Excluded(1),
+            ChangeVerdict::Excluded(2),
         ]
     );
     let synced = snapshot
@@ -250,7 +254,12 @@ async fn a_snapshot_round_trips_rows_history_and_excluded_changes() {
     // The source holds the excluded write's original header, which this test
     // altered for the receiver; a loader of the receiver's evidence must not.
     let target_store = TestStore::with_ids(&ids);
-    let target = target_store.schema(notes(), NOTES).await.unwrap();
+    let target = target_store
+        .builder(notes(), crate::write_boundary::tests::notes_v2())
+        .open()
+        .await
+        .unwrap();
+    target.exclude_later_writes(2).await;
     assert_loaded_losses(&receiver, &target).await;
     target.close().await.unwrap();
     source.close().await.unwrap();
@@ -605,9 +614,30 @@ async fn snapshots_keep_the_written_reference_when_the_app_reads_null() {
     }
 }
 
+/// A database whose app went through an addition-only version 2, so a raise
+/// to 2 can exclude version-1 writes (§17.1).
+async fn version_two(store: &TestStore, notes_table: bool) -> Database {
+    let (tables, schema) = if notes_table {
+        (notes(), NOTES)
+    } else {
+        (Vec::new(), "SELECT 1")
+    };
+    store
+        .builder(
+            tables,
+            vec![
+                crate::Migration::sql(1, "initial", schema),
+                crate::Migration::sql(2, "local", "CREATE TABLE local_extra(id TEXT PRIMARY KEY)"),
+            ],
+        )
+        .open()
+        .await
+        .unwrap()
+}
+
 #[tokio::test]
 async fn excluded_snapshots_keep_only_undismissed_cells_and_rows() {
-    use coven_format::{dismissal::Dismissal, write::WriteDisposition};
+    use coven_format::dismissal::Dismissal;
     for (operation, lost_dismissal) in ["insert", "update", "delete"]
         .into_iter()
         .flat_map(|operation| [false, true].map(|lost| (operation, lost)))
@@ -616,11 +646,7 @@ async fn excluded_snapshots_keep_only_undismissed_cells_and_rows() {
         let source_store = TestStore::with_ids(&ids);
         let receiver_store = TestStore::with_ids(&ids);
         let source = source_store.schema(notes(), NOTES).await.unwrap();
-        let receiver = if operation == "insert" {
-            receiver_store.schema(Vec::new(), "SELECT 1").await.unwrap()
-        } else {
-            receiver_store.schema(notes(), NOTES).await.unwrap()
-        };
+        let receiver = version_two(&receiver_store, operation != "insert").await;
         sql(
             &source,
             "INSERT INTO notes VALUES('a','excluded','body'),('b','excluded too','body')",
@@ -643,8 +669,8 @@ async fn excluded_snapshots_keep_only_undismissed_cells_and_rows() {
             .await
             .unwrap();
         }
-        let mut excluded = records(&source).pop().unwrap();
-        excluded.header.disposition = WriteDisposition::Lost(1);
+        let excluded = records(&source).pop().unwrap();
+        receiver.exclude_later_writes(2).await;
         receiver.receive(excluded.clone().into()).await.unwrap();
         sql(&source, "INSERT INTO notes VALUES('next','later','')")
             .await
@@ -656,8 +682,9 @@ async fn excluded_snapshots_keep_only_undismissed_cells_and_rows() {
             column: "title".into(),
             write: excluded.header.position,
         }];
-        if lost_dismissal {
-            dismissal.header.disposition = WriteDisposition::Lost(1);
+        // An old-schema dismissal is excluded too; a migrated one applies.
+        if !lost_dismissal {
+            dismissal.header.schema_version = 2;
         }
         receiver.receive(dismissal.into()).await.unwrap();
         let (header, snapshot) = decode(&frames(&receiver, Audience::Store).await);
@@ -686,11 +713,8 @@ async fn excluded_snapshots_keep_only_undismissed_cells_and_rows() {
             .all(|cell| cell.write == excluded.header.position));
         assert_eq!(rows[1].row, excluded.parts[0].rows[1].row);
         let target_store = TestStore::with_ids(&ids);
-        let target = if operation == "insert" {
-            target_store.schema(Vec::new(), "SELECT 1").await.unwrap()
-        } else {
-            target_store.schema(notes(), NOTES).await.unwrap()
-        };
+        let target = version_two(&target_store, operation != "insert").await;
+        target.exclude_later_writes(2).await;
         assert_loaded_losses(&receiver, &target).await;
         receiver
             .dismiss_lost_values(&receiver.lost_values().await.unwrap())
@@ -750,8 +774,9 @@ async fn excluded_deletions_without_old_values_keep_distinct_write_identities() 
     let receiver_store = TestStore::with_ids(&ids);
     let target_store = TestStore::with_ids(&ids);
     let source = source_store.schema(notes(), NOTES).await.unwrap();
-    let receiver = receiver_store.schema(notes(), NOTES).await.unwrap();
-    let target = target_store.schema(notes(), NOTES).await.unwrap();
+    let receiver = version_two(&receiver_store, true).await;
+    let target = version_two(&target_store, true).await;
+    target.exclude_later_writes(2).await;
     sql(&source, "INSERT INTO notes VALUES('n','value','body')")
         .await
         .unwrap();
@@ -761,8 +786,8 @@ async fn excluded_deletions_without_old_values_keep_distinct_write_identities() 
         .unwrap();
     sql(&source, "DELETE FROM notes").await.unwrap();
     let mut deletion = records(&source).pop().unwrap();
-    deletion.header.disposition = coven_format::write::WriteDisposition::Lost(1);
     deletion.parts[0].rows[0].old.clear();
+    receiver.exclude_later_writes(2).await;
     receiver.receive(deletion.clone().into()).await.unwrap();
     let first = deletion.header.position;
     // Excluded writes do not run merge: another deletion at the same generation
