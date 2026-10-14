@@ -253,8 +253,12 @@ impl StoreLogSync {
                             devices: state
                                 .devices
                                 .iter()
-                                .filter(|(_, d)| !d.removed && d.member == *id)
-                                .map(|(id, _)| *id)
+                                .filter(|(_, d)| d.member == *id)
+                                .map(|(id, d)| crate::DeviceInfo {
+                                    id: *id,
+                                    name: d.name.clone(),
+                                    state: d.state,
+                                })
                                 .collect(),
                         })
                         .collect(),
@@ -333,7 +337,7 @@ impl StoreLogSync {
                             .state
                             .devices
                             .get(&device)
-                            .is_some_and(|d| d.removed)
+                            .is_some_and(|d| d.removed())
                         {
                             return Err(SyncError::Removed);
                         }

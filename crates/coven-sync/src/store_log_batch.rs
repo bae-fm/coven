@@ -340,7 +340,7 @@ impl StoreLogSync {
                 Some(held) if held.removed => crate::send_gate::Binding::Retired,
                 Some(held) if held.sealing == member.sealing_public_key() => {
                     match state.devices.get(&local.device) {
-                        Some(device) if device.removed => crate::send_gate::Binding::Retired,
+                        Some(device) if device.removed() => crate::send_gate::Binding::Retired,
                         Some(device) if device.member == member.member_id() => {
                             crate::send_gate::Binding::Device
                         }

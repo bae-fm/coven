@@ -378,7 +378,7 @@ fn same_members_concurrent_device_additions_both_survive() {
         for id in [8, 9] {
             let added = &r.state.devices[&coven_foundation::id_source::DeviceId(id)];
             assert_eq!(added.member, member(1));
-            assert!(!added.removed);
+            assert!(!added.removed());
         }
     });
 }

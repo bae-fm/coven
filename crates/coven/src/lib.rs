@@ -86,11 +86,11 @@ pub use circles::Circles;
 pub use coven_format::store_log::{MemberRole, SnapshotId};
 pub use coven_storage::{ProviderSignOut, RetainedAccess, RetainedAccessReason};
 pub use coven_sync::{
-    AccessKeyReplacement, AccessKeyToDelete, Circle, CircleMemberInfo, DamagedObject,
-    FileMissingReason, FileSourceFailure, Invite, InviteAccess, JoinRequest, LocalFailure,
-    MemberInfo, OldKeyDeletion, OperationError, OperationId, OperationKind, PendingReason,
-    PendingRecord, PendingSubject, Prerequisite, ProviderAccessAction, Refusal, RequiredUpdate,
-    Retry, SyncError, SyncFailure, SyncStatus,
+    AccessKeyReplacement, AccessKeyToDelete, Circle, CircleMemberInfo, DamagedObject, DeviceInfo,
+    DeviceState, FileMissingReason, FileSourceFailure, Invite, InviteAccess, JoinRequest,
+    LocalFailure, MemberInfo, OldKeyDeletion, OperationError, OperationId, OperationKind,
+    PendingReason, PendingRecord, PendingSubject, Prerequisite, ProviderAccessAction, Refusal,
+    RequiredUpdate, Retry, SyncError, SyncFailure, SyncStatus,
 };
 
 #[cfg(not(any(target_os = "ios", target_os = "android")))]

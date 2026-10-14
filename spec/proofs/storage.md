@@ -181,6 +181,11 @@ for the Rust differential tests of coven-sync's pre-send check; key-copy
 counters stay equal on both sides of those cases. It also runs `beginReset`,
 `retryReset`, `finishReset` and the first `commitWrite` against coven's
 recorded reset, failed `reset_device` retries and the published replacement.
+It executes `ReplacementRead.accepts` and `load` against coven-sync's write
+authority and entry replay for old-id objects whose recorded pasts read any
+subset of kept, concurrent and unauthorized replacements. Rust judges each object in its own
+recorded view, as §7.1 judges removal; those cases keep the same replacements
+in every view, so the model's single kept set applies to all of them.
 
 `Identity` also contains a separate model with recorded replacement ends.
 Its `ends_*`, `combined_end_keeps_completed` and `beyond_end_waits` results

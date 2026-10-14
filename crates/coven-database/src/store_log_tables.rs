@@ -155,7 +155,7 @@ pub(crate) fn read(database: &DatabaseConnection) -> Result<StoreLog, DbError> {
         .collect();
     state.devices = database
         .query(
-            "SELECT device,member,name,removed FROM _coven_devices",
+            "SELECT device,member,name,state FROM _coven_devices",
             [],
             |row| {
                 Ok((
@@ -163,7 +163,12 @@ pub(crate) fn read(database: &DatabaseConnection) -> Result<StoreLog, DbError> {
                     StoreDevice {
                         member: member(row, 1)?,
                         name: row.get(2)?,
-                        removed: row.get(3)?,
+                        state: match row.get::<_, String>(3)?.as_str() {
+                            "active" => DeviceState::Active,
+                            "removed" => DeviceState::Removed,
+                            "replaced" => DeviceState::Replaced,
+                            _ => return Err(rusqlite::Error::InvalidQuery),
+                        },
                     },
                 ))
             },
@@ -272,12 +277,16 @@ pub(crate) fn replace(
     }
     for (id, device) in &state.devices {
         database.internal_execute(
-            "INSERT INTO _coven_devices(device,member,name,removed) VALUES(?1,?2,?3,?4)",
+            "INSERT INTO _coven_devices(device,member,name,state) VALUES(?1,?2,?3,?4)",
             params![
                 id.0.to_be_bytes().as_slice(),
                 device.member.to_bytes().as_slice(),
                 device.name,
-                device.removed
+                match device.state {
+                    DeviceState::Active => "active",
+                    DeviceState::Removed => "removed",
+                    DeviceState::Replaced => "replaced",
+                }
             ],
         )?;
     }

@@ -5,7 +5,7 @@ use coven_format::store_log::MemberRole;
 use coven_foundation::id_source::{CircleId, DeviceId, InviteId};
 use std::time::SystemTime;
 
-pub use coven_database::{AccessKeyToDelete, OperationId};
+pub use coven_database::{AccessKeyToDelete, DeviceState, OperationId};
 /// An operation failure retains the same typed causes as an ordinary sync call.
 pub type OperationError = crate::SyncError;
 
@@ -72,17 +72,28 @@ pub enum OldKeyDeletion {
     },
 }
 
-/// A live member and the devices still belonging to them.
+/// A live member and every device they registered (E9).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MemberInfo {
     /// Signing identity.
     pub id: MemberId,
     /// Current store role.
     pub role: MemberRole,
-    /// Active devices.
-    pub devices: Vec<DeviceId>,
+    /// Every registered device, including removed and replaced ids.
+    pub devices: Vec<DeviceInfo>,
     /// Whether this is the local member.
     pub is_self: bool,
+}
+
+/// One of a member's device ids as replay has it (E9).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DeviceInfo {
+    /// The device id.
+    pub id: DeviceId,
+    /// Its name from its registration.
+    pub name: String,
+    /// Active, removed, or replaced by a kept registration (§10).
+    pub state: DeviceState,
 }
 
 /// A circle the local member belongs to.

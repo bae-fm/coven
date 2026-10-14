@@ -336,3 +336,144 @@ fn replay_rejections_identify_each_target() {
         );
     }
 }
+
+fn state(r: &coven_database::StoreLogReplay, device: u64) -> coven_database::DeviceState {
+    r.state.devices[&DeviceId(device)].state
+}
+
+/// Ben's phone 1 restored twice from one backup: both copies register.
+#[test]
+fn concurrent_replacements_keep_both_new_ids_and_the_old_id_replaced() {
+    use coven_database::DeviceState::{Active, Replaced};
+    let mut h = household(Admin, Member);
+    h.push(1, 5, &[0, 1, 2, 3, 4], replace(5, 1));
+    h.push(1, 6, &[0, 1, 2, 3, 4], replace(6, 1));
+    h.every_order(|r| {
+        assert_eq!(h.drops(r), Vec::<usize>::new());
+        assert_eq!(
+            (state(r, 1), state(r, 5), state(r, 6)),
+            (Replaced, Active, Active)
+        );
+        assert_eq!(r.state.devices[&DeviceId(5)].member, member(1));
+    });
+    // A later replacement of an already replaced id still registers its copy.
+    h.all(1, 7, replace(7, 1));
+    h.every_order(|r| {
+        assert_eq!(h.drops(r), Vec::<usize>::new());
+        assert_eq!((state(r, 1), state(r, 7)), (Replaced, Active));
+    });
+}
+
+/// Only the old id's member replaces it, and only an id its view has (D6).
+#[test]
+fn only_the_old_ids_member_replaces_an_observed_id() {
+    use coven_database::{DeviceState::Active, DropReason, EntryOutcome};
+    for (author, new, old) in [(2, 7, 1), (0, 8, 1), (1, 9, 33)] {
+        let mut h = household(Admin, Member);
+        h.all(author, new, replace(new, old));
+        h.every_order(|r| {
+            assert_eq!(
+                r.entries[&h.entries[5].position],
+                EntryOutcome::Dropped(DropReason::NotAllowed)
+            );
+            if old == 1 {
+                assert_eq!(state(r, 1), Active);
+            }
+        });
+    }
+}
+
+/// An old id's entry counts only before its recorded past, including its own
+/// earlier entries, reads a kept replacement of that id (§9, §10).
+#[test]
+fn old_id_entries_count_only_before_reading_their_replacement() {
+    use coven_database::{DropReason, EntryOutcome};
+    for read in [false, true] {
+        let mut h = household(Admin, Member);
+        h.push(1, 5, &[0, 1, 2, 3, 4], replace(5, 1));
+        let past: Vec<usize> = if read {
+            vec![0, 1, 2, 3, 4, 5]
+        } else {
+            vec![0, 1, 2, 3, 4]
+        };
+        h.push(1, 1, &past, make(3, "Gifts"));
+        h.push(1, 1, &past, rename(3, "Presents"));
+        h.every_order(|r| {
+            let outcome = |i: usize| r.entries[&h.entries[i].position].clone();
+            if read {
+                for i in [6, 7] {
+                    assert_eq!(outcome(i), EntryOutcome::Dropped(DropReason::NotAllowed));
+                }
+            } else {
+                assert_eq!(
+                    (outcome(6), outcome(7)),
+                    (EntryOutcome::Kept, EntryOutcome::Kept)
+                );
+            }
+        });
+    }
+}
+
+/// A removal stays a removal: replacement neither revives nor softens it,
+/// and a later removal stops a replaced id's copies for good (§10, §13).
+#[test]
+fn removal_and_replacement_leave_a_removed_id_removed() {
+    use coven_database::DeviceState::{Active, Removed};
+    let remove_phone = StoreChange::RemoveDevice {
+        device: DeviceId(1),
+    };
+    for removal_first in [true, false] {
+        let mut h = household(Admin, Member);
+        if removal_first {
+            h.all(1, 1, remove_phone.clone());
+            h.all(1, 5, replace(5, 1));
+        } else {
+            h.all(1, 5, replace(5, 1));
+            h.all(1, 5, remove_phone.clone());
+        }
+        h.every_order(|r| {
+            assert_eq!(h.drops(r), Vec::<usize>::new());
+            assert_eq!((state(r, 1), state(r, 5)), (Removed, Active));
+        });
+    }
+    let mut h = household(Admin, Member);
+    h.all(1, 5, replace(5, 1));
+    h.all(0, 0, remove(1));
+    h.every_order(|r| assert_eq!((state(r, 1), state(r, 5)), (Removed, Removed)));
+}
+
+/// Replay that later drops a kept replacement restores the old id, while an
+/// object judged by a recorded past that kept it stays excluded (§9, §10).
+#[test]
+fn a_dropped_replacement_restores_the_old_id_without_rejudging_recorded_pasts() {
+    use coven_database::{
+        DeviceState::{Active, Replaced},
+        DropReason, EntryOutcome,
+    };
+    let mut h = household(Admin, Member);
+    // Ana registers id 5 for herself; Ben's restored copy, unaware, reuses it.
+    h.push(0, 0, &[0, 1, 2, 3, 4], device(5));
+    h.push(1, 5, &[0, 1, 2, 3, 4], replace(5, 1));
+    h.push(1, 1, &[0, 1, 2, 3, 4, 6], make(3, "Gifts"));
+    let before = checked_log(&[&h.entries[..5], &h.entries[6..7]].concat());
+    assert_eq!(before.replay.state.devices[&DeviceId(1)].state, Replaced);
+    assert!(crate::identity::replaced(&before, DeviceId(1)));
+    h.every_order(|r| {
+        assert_eq!(
+            r.entries[&h.entries[6].position],
+            EntryOutcome::Dropped(DropReason::TargetGone(coven_database::EntryTarget::Device(
+                DeviceId(5)
+            )))
+        );
+        assert_eq!((state(r, 1), state(r, 5)), (Active, Active));
+        assert_eq!(r.state.devices[&DeviceId(5)].member, member(0));
+        assert_eq!(
+            r.entries[&h.entries[7].position],
+            EntryOutcome::Dropped(DropReason::NotAllowed)
+        );
+    });
+    assert!(!crate::identity::replaced(
+        &checked_log(&h.entries),
+        DeviceId(1)
+    ));
+}

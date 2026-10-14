@@ -795,7 +795,8 @@ async fn an_internal_reload_failure_reports_sync_status_and_retries_without_app_
         .into_iter()
         .find(|m| m.is_self)
         .unwrap()
-        .devices[0];
+        .devices[0]
+        .id;
     let positions = ObjectPath::positions(network.devices[0].store, device);
     let before = storage.read(&positions).await.unwrap();
     reader.start_sync().await.unwrap();

@@ -3,8 +3,7 @@
 
 use crate::{SendGate, SyncError};
 use coven_crypto::{ObjectDigest, ObjectHasher};
-use coven_database::{EntryOutcome, IdentityReservations, StoreLog};
-use coven_format::store_log::StoreChange;
+use coven_database::{DeviceState, IdentityReservations, StoreLog};
 use coven_foundation::{files::DeviceResetReason, id_source::DeviceId};
 use coven_storage::{ObjectPath, Storage, StorageFailure};
 
@@ -100,31 +99,14 @@ pub(crate) fn check(
     }
 }
 
-/// A kept registration names `device` as the id it replaces (D6, §10).
+/// Any kept registration naming `device` as the id it replaces stops it,
+/// whichever new id it registered (D6, §10). A removal stays a removal.
 pub(crate) fn replaced(log: &StoreLog, device: DeviceId) -> bool {
-    replaced_by(
-        log.entries
-            .iter()
-            .filter_map(|applied| match &applied.entry.change {
-                StoreChange::AddDevice {
-                    replaces: Some(old),
-                    ..
-                } if matches!(
-                    log.replay.entries.get(&applied.entry.position),
-                    Some(EntryOutcome::Kept)
-                ) =>
-                {
-                    Some(*old)
-                }
-                _ => None,
-            }),
-        device,
-    )
-}
-
-/// Any kept replacement of this id stops it, whichever new id it registered.
-pub(crate) fn replaced_by(mut kept_olds: impl Iterator<Item = DeviceId>, device: DeviceId) -> bool {
-    kept_olds.any(|old| old == device)
+    log.replay
+        .state
+        .devices
+        .get(&device)
+        .is_some_and(|d| d.state == DeviceState::Replaced)
 }
 
 /// Length and SHA-256 of bytes this copy would send.

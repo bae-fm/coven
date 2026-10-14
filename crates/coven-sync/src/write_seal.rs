@@ -114,12 +114,16 @@ pub(crate) fn check_member(
 ) -> Result<(), SyncError> {
     let state = &log.replay.state;
     let identity = member.member_id();
-    if crate::effects::member(state, &identity).is_none()
-        || crate::effects::device(state, device).is_none_or(|d| d.member != identity)
-    {
-        return Err(SyncError::Removed);
+    match crate::effects::device(state, device) {
+        _ if crate::effects::member(state, &identity).is_none() => Err(SyncError::Removed),
+        Some(d) if d.member != identity => Err(SyncError::Removed),
+        // A kept replacement of this id resets this copy; it never sends (§10).
+        Some(d) if d.state == coven_database::DeviceState::Replaced => Err(SyncError::DeviceReset(
+            coven_foundation::files::DeviceResetReason::Replaced,
+        )),
+        Some(_) => Ok(()),
+        None => Err(SyncError::Removed),
     }
-    Ok(())
 }
 
 pub(crate) fn check_upload_version(log: &StoreLog, schema: u32) -> Result<(), SyncError> {

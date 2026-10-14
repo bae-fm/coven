@@ -93,7 +93,7 @@ pub(crate) fn circle_history(circle: CircleId) -> Vec<(StoreLogEntry, StoreLogRe
         StoreDevice {
             member: ana.signing.clone(),
             name: "Ana’s phone".into(),
-            removed: false,
+            state: DeviceState::Active,
         },
     );
     replay.entries.insert(first.position, EntryOutcome::Kept);
@@ -602,7 +602,16 @@ async fn removed_identities_keys_versions_resets_and_every_drop_reason_round_tri
         .devices
         .get_mut(&DeviceId(u64::MAX))
         .unwrap()
-        .removed = true;
+        .state = DeviceState::Removed;
+    // A replaced id keeps its member and name with its own state (§10, E9).
+    replay.state.devices.insert(
+        DeviceId(u64::MAX - 1),
+        StoreDevice {
+            member: keys(2).signing,
+            name: "Restored".into(),
+            state: DeviceState::Replaced,
+        },
+    );
     for (index, reason) in [
         DropReason::TargetGone(EntryTarget::Member(keys(2).signing)),
         DropReason::TargetGone(EntryTarget::Device(DeviceId(u64::MAX))),

@@ -297,7 +297,7 @@ macro_rules! coven_tables {
                 device BLOB PRIMARY KEY NOT NULL CHECK(length(device)=8),
                 member BLOB NOT NULL REFERENCES _coven_members(member),
                 name TEXT NOT NULL,
-                removed INTEGER NOT NULL CHECK(removed IN (0,1))
+                state TEXT NOT NULL CHECK(state IN ('active','removed','replaced'))
             ) STRICT, WITHOUT ROWID;
             CREATE INDEX _coven_devices_member ON _coven_devices(member);
         ");

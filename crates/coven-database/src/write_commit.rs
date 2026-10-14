@@ -191,7 +191,7 @@ pub(crate) fn check_membership(
                 JOIN _coven_members m ON m.member=d.member
                 WHERE cm.circle=?1 AND d.device=?2
                   AND NOT EXISTS(SELECT 1 FROM _coven_circle_deletions WHERE circle=c.circle)
-                  AND d.removed=0 AND m.removed=0
+                  AND d.state<>'removed' AND m.removed=0
             )",
             params![circle.to_string(), device.0.to_be_bytes()],
             |row| row.get(0),

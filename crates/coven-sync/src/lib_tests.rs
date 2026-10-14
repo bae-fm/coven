@@ -125,7 +125,7 @@ impl Generator {
                 let devices: Vec<_> = view
                     .devices
                     .iter()
-                    .filter_map(|(id, d)| (!d.removed).then_some(*id))
+                    .filter_map(|(id, d)| (!d.removed()).then_some(*id))
                     .collect();
                 if devices.is_empty() {
                     device(self.pick(9) as u64)
@@ -216,7 +216,7 @@ pub(crate) fn input(h: &History, stored: &[u64], received: &[Vec<usize>]) -> Val
             StoreChange::RemoveDevice { device } => {
                 let view = crate::replay(&past.iter().map(|&i| h.entries[i].clone()).collect::<Vec<_>>(), &publications).state;
                 let owner = &view.devices[device];
-                assert!(!owner.removed, "generator may remove only an observed device");
+                assert!(!owner.removed(), "generator may remove only an observed device");
                 json!({"kind":5,"member":member_number(&owner.member),"device":device.0})
             }
             StoreChange::CreateCircle { circle, name, key, key_hash } => json!({"kind":6,"circle":circle_number(*circle),"name":name,"key":key_number(*key),"key_hash":key_hash}),
@@ -253,7 +253,7 @@ pub(crate) fn projected(h: &History, replay: &StoreLogReplay) -> Value {
     let devices: Vec<_> = state
         .devices
         .iter()
-        .filter_map(|(id, d)| (!d.removed).then_some([id.0, member_number(&d.member)]))
+        .filter_map(|(id, d)| (!d.removed()).then_some([id.0, member_number(&d.member)]))
         .collect();
     let circles: Vec<_> = state
         .circles

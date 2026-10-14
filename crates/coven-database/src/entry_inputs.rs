@@ -79,7 +79,7 @@ fn reads(db: &DatabaseConnection, audience: &Audience) -> Result<bool, DbError> 
     let device = db.pending_device().ok_or(DbError::DamagedDatabase)?;
     db.query_row(
         "SELECT EXISTS(SELECT 1 FROM _coven_devices d JOIN _coven_circle_members m ON m.member=d.member
-         WHERE d.device=?1 AND d.removed=0 AND m.circle=?2)",
+         WHERE d.device=?1 AND d.state<>'removed' AND m.circle=?2)",
         params![device.0.to_be_bytes().as_slice(), circle.to_string()],
         |r| r.get(0),
     )

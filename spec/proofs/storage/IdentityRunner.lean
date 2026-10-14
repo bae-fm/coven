@@ -1,8 +1,8 @@
 import CovenStorage.ReplacementRead
 import Lean
 
-/-! JSON adapter comparing the Rust pre-send identity check and replacement
-observation with `checkIdentity` and `ReplacementRead`. -/
+/-! JSON adapter comparing the Rust pre-send identity check, replacement
+observation and replacement admission with `checkIdentity` and `ReplacementRead`. -/
 
 open Lean CovenStorage
 
@@ -78,6 +78,30 @@ private def reset (j : Json) : Except String Json := do
     ("queue", toJson finished.queue.length),
     ("first", toJson (commitWrite finished []).reserved.logs.writes)]
 
+private def entryPath (j : Json) : Except String Path := do
+  pure (.entry (← j.getObjValAs? Nat "device") (← j.getObjValAs? Nat "number"))
+
+private def registration (j : Json) : Except String ReplacementRead.Registration := do
+  pure ⟨← j.getObjValAs? Nat "old", ← j.getObjValAs? Nat "fresh", ← j.getObjValAs? Nat "number"⟩
+
+private def logObject (j : Json) : Except String ReplacementRead.LogObject := do
+  let kind ← match ← j.getObjValAs? String "kind" with
+    | "write" => pure LogKind.writes
+    | "entry" => pure LogKind.entries
+    | other => throw s!"unknown log object kind {other}"
+  pure ⟨← j.getObjValAs? Nat "device", ← j.getObjValAs? Nat "number", kind,
+    ← (← j.getObjValAs? (Array Json) "past").toList.mapM entryPath⟩
+
+/-- Judge old-id objects by their recorded pasts against the kept registrations,
+then rebuild the applied set from all of them with `load`. -/
+private def admission (j : Json) : Except String Json := do
+  let kept ← (← j.getObjValAs? (Array Json) "kept").toList.mapM registration
+  let objects ← (← j.getObjValAs? (Array Json) "objects").toList.mapM logObject
+  let loaded := ReplacementRead.load kept objects
+  return Json.mkObj [
+    ("accepts", toJson (objects.map (ReplacementRead.accepts kept))),
+    ("loaded", toJson (objects.map fun o => decide (o.path ∈ loaded)))]
+
 private def run (j : Json) : Except String Json := do
   let cases ← fromJson? j (α := Array Json)
   Json.arr <$> cases.mapM fun c => do
@@ -85,6 +109,7 @@ private def run (j : Json) : Except String Json := do
     | "identity" => identity c
     | "replacement" => replacement c
     | "reset" => reset c
+    | "admission" => admission c
     | other => throw s!"unknown identity check {other}"
 
 def main : IO UInt32 := do

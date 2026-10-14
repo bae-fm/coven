@@ -81,8 +81,8 @@ impl TestStore {
                     ),
                 )?;
                 db.internal_execute(
-                    "INSERT INTO _coven_devices(device,member,name,removed)
-                     VALUES(?1,?2,'Local device',0) ON CONFLICT(device) DO NOTHING",
+                    "INSERT INTO _coven_devices(device,member,name,state)
+                     VALUES(?1,?2,'Local device','active') ON CONFLICT(device) DO NOTHING",
                     (device.0.to_be_bytes(), keys.signing.to_bytes()),
                 )?;
                 db.internal_execute(

@@ -173,8 +173,11 @@ async fn missing_custody_resets_as_a_new_device_and_keeps_the_notice() {
         .unwrap()
         .into_iter()
         .flat_map(|member| member.devices)
+        .map(|device| (device.id, device.state))
         .collect();
-    assert!(devices.contains(&reset.new_device));
+    // The registration names the old id it replaces; both ids stay listed (E9).
+    assert!(devices.contains(&(reset.new_device, crate::DeviceState::Active)));
+    assert!(devices.contains(&(reset.old_device, crate::DeviceState::Replaced)));
     let mut notices = handle.subscribe_device_reset();
     assert_eq!(notices.next().await.unwrap(), Some(reset));
     handle.close().await.unwrap();

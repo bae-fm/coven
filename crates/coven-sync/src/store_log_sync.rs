@@ -254,7 +254,10 @@ impl StoreLogSync {
             .members
             .get(&member.member_id())
             .is_some_and(|m| m.removed)
-            || state.devices.get(&local.device).is_some_and(|d| d.removed)
+            || state
+                .devices
+                .get(&local.device)
+                .is_some_and(|d| d.removed())
         {
             self.send.invalidate();
             return Err(SyncError::Removed);

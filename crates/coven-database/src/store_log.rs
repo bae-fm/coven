@@ -224,15 +224,40 @@ pub struct StoreMember {
     pub removed: bool,
 }
 
-/// One install, retained after removal so its older writes remain attributable.
+/// One install, retained after removal or replacement so its older objects
+/// remain attributable (§10).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StoreDevice {
     /// The member who added the device.
     pub member: MemberId,
     /// The device's name from its addition.
     pub name: String,
-    /// Whether the device or its member has been removed.
-    pub removed: bool,
+    /// Whether kept entries removed or replaced it.
+    pub state: DeviceState,
+}
+
+impl StoreDevice {
+    /// Neither removed nor replaced: it may still author objects (§10).
+    pub fn active(&self) -> bool {
+        self.state == DeviceState::Active
+    }
+
+    /// Removed, by its own removal or its member's: it stops for good.
+    pub fn removed(&self) -> bool {
+        self.state == DeviceState::Removed
+    }
+}
+
+/// What kept entries did to a device id (E9). Replacement carries no log
+/// ends: older objects are judged by their recorded reads (§10, D6).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DeviceState {
+    /// Registered and neither removed nor replaced.
+    Active,
+    /// A kept removal of the device or of its member.
+    Removed,
+    /// A kept add-device entry names this id as the one it replaces.
+    Replaced,
 }
 
 /// A circle and its current membership; deleted circles retain their name.

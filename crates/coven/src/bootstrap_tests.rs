@@ -611,7 +611,7 @@ async fn a_device_removed_during_loading_receives_the_provider_refusal() {
             .devices;
         assert_eq!(devices.len(), 1);
         assert!(matches!(
-            owner.handle.remove_device(devices[0]).await.unwrap(),
+            owner.handle.remove_device(devices[0].id).await.unwrap(),
             ProviderSignOut::RemoveAppAccess {
                 provider: CloudProvider::GoogleDrive
             }

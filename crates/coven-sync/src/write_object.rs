@@ -397,7 +397,7 @@ pub(crate) async fn download(
     input.checked(result).await
 }
 
-fn authority(
+pub(crate) fn authority(
     log: &StoreLog,
     replays: &mut ReplayCache<'_>,
     header: &coven_format::write::WriteHeader,
@@ -417,13 +417,15 @@ fn authority(
             return Err(Refusal::InvalidCausality { cause: None });
         }
     }
+    // A write made after reading its device's kept removal or replacement
+    // never counts: its recorded view no longer has the device active (§7.1, §10).
     let view = replays.at(&header.store_log_read);
     let device = view
         .state
         .devices
         .get(&header.position.device)
         .ok_or(Refusal::NotAuthorized)?;
-    if device.removed
+    if !device.active()
         || view
             .state
             .members

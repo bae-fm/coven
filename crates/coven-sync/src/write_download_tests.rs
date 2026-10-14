@@ -123,8 +123,25 @@ async fn damaged_objects_roll_back_and_block_only_their_device() {
     }
 }
 
+/// A removed or replaced id's write counts only if its recorded past did not
+/// include that retirement (§7.1, §10).
 #[tokio::test]
-async fn removal_checks_the_authors_past_not_the_receivers_present() {
+async fn retirement_checks_the_authors_past_not_the_receivers_present() {
+    for retirement in [
+        StoreChange::RemoveDevice {
+            device: DeviceId(1),
+        },
+        StoreChange::AddDevice {
+            device: DeviceId(9),
+            name: "restored".into(),
+            replaces: Some(DeviceId(1)),
+        },
+    ] {
+        retired_write_is_judged_by_its_recorded_past(retirement).await;
+    }
+}
+
+async fn retired_write_is_judged_by_its_recorded_past(retirement: StoreChange) {
     let storage = storage();
     let mut devices = group(storage.clone(), 3).await;
     sql(
@@ -136,9 +153,7 @@ async fn removal_checks_the_authors_past_not_the_receivers_present() {
     devices[0].writes.upload_writes().await.unwrap();
     devices[1]
         .sync
-        .make_and_upload_entry(StoreChange::RemoveDevice {
-            device: DeviceId(1),
-        })
+        .make_and_upload_entry(retirement)
         .await
         .unwrap();
     devices[2].sync.sync_store_log().await.unwrap();
@@ -184,6 +199,21 @@ async fn removal_checks_the_authors_past_not_the_receivers_present() {
         before
     );
     assert_eq!(rows(&devices[2].db).await[0].1, "before");
+    let refused = devices[2]
+        .db
+        .pending::<crate::PendingRecord>()
+        .await
+        .unwrap()
+        .into_iter()
+        .filter_map(|record| record.as_log_refusal())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        refused,
+        [LogRefusal {
+            object: LogObject::Write(after.header.position),
+            failure: coven_format::pending::RefusalCode::NotAuthorized,
+        }]
+    );
 }
 
 #[tokio::test]

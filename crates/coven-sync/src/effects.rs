@@ -2,8 +2,8 @@
 
 use coven_crypto::MemberId;
 use coven_database::{
-    CircleRemoval, DropReason, EntryTarget, StoreCircle, StoreDevice, StoreIdentity, StoreLogCheck,
-    StoreLogState, StoreMember,
+    CircleRemoval, DeviceState, DropReason, EntryTarget, StoreCircle, StoreDevice, StoreIdentity,
+    StoreLogCheck, StoreLogState, StoreMember,
 };
 use coven_format::store_log::{MemberRole, StoreChange, StoreLogEntry};
 use coven_foundation::id_source::{CircleId, DeviceId};
@@ -13,8 +13,10 @@ pub(crate) fn member<'a>(state: &'a StoreLogState, id: &MemberId) -> Option<&'a 
     state.members.get(id).filter(|member| !member.removed)
 }
 
+/// A registered device that is not removed. A replaced id can still be removed,
+/// which stops its old copies for good instead of resetting them (§10, §13).
 pub(crate) fn device(state: &StoreLogState, id: DeviceId) -> Option<&StoreDevice> {
-    state.devices.get(&id).filter(|device| !device.removed)
+    state.devices.get(&id).filter(|device| !device.removed())
 }
 
 pub(crate) fn circle(state: &StoreLogState, id: CircleId) -> Option<&StoreCircle> {
@@ -110,7 +112,16 @@ impl Authority {
     }
 }
 
+/// An old id's entry must precede its reading a kept replacement of that id,
+/// judged in its recorded past including its own earlier entries (§9, §10).
 pub(crate) fn check(view: &StoreLogState, entry: &StoreLogEntry) -> StoreLogCheck {
+    if view
+        .devices
+        .get(&entry.position.device)
+        .is_some_and(|device| device.state == DeviceState::Replaced)
+    {
+        return StoreLogCheck::NotAllowed;
+    }
     check_change(view, &entry.author, &entry.change)
 }
 
@@ -120,6 +131,20 @@ fn check_change(view: &StoreLogState, author: &MemberId, change: &StoreChange) -
     use StoreChange::*;
     if Authority::for_change(change).check(view, author).is_err() {
         return StoreLogCheck::NotAllowed;
+    }
+    // Only the old id's own member replaces it, with a distinct new id (D6).
+    if let AddDevice {
+        replaces: Some(old),
+        ..
+    } = change
+    {
+        if view
+            .devices
+            .get(old)
+            .is_none_or(|old| old.member != *author)
+        {
+            return StoreLogCheck::NotAllowed;
+        }
     }
     match change {
         RemoveDevice { device: id } => StoreLogCheck::DeviceOwner(
@@ -173,7 +198,14 @@ pub(crate) fn change_in_place(
         }
         ChangeRole { member: id, role } => member(state, id).is_some_and(|m| m.role == *role),
         RemoveMember { member: id, .. } => member(state, id).is_none(),
-        AddDevice { device: id, .. } => device(state, *id).is_some_and(|d| d.member == *author),
+        AddDevice {
+            device: id,
+            replaces,
+            ..
+        } => {
+            device(state, *id).is_some_and(|d| d.member == *author)
+                && replaces.is_none_or(|old| state.devices.get(&old).is_none_or(|d| !d.active()))
+        }
         RemoveDevice { device: id } => device(state, *id).is_none(),
         CreateCircle {
             circle: id, name, ..
@@ -222,9 +254,15 @@ pub(crate) fn validate_effect(
         RemoveMember { member: id } | ChangeRole { member: id, .. } => member(state, id)
             .is_none()
             .then(|| EntryTarget::Member(id.clone())),
-        AddDevice { device: id, .. } => {
+        AddDevice {
+            device: id,
+            replaces,
+            ..
+        } => {
             if member(state, author).is_none() {
                 Some(EntryTarget::Member(author.clone()))
+            } else if let Some(old) = replaces.filter(|old| !state.devices.contains_key(old)) {
+                Some(EntryTarget::Device(old))
             } else {
                 device(state, *id)
                     .is_some()
@@ -338,7 +376,7 @@ pub(crate) fn apply_effect(next: &mut StoreLogState, view: &StoreLogCheck, entry
                 StoreDevice {
                     member: entry.author.clone(),
                     name: device_name.clone(),
-                    removed: false,
+                    state: DeviceState::Active,
                 },
             );
         }
@@ -356,7 +394,7 @@ pub(crate) fn apply_effect(next: &mut StoreLogState, view: &StoreLogCheck, entry
         RemoveMember { member: id } => {
             next.members.get_mut(id).expect("checked member").removed = true;
             for device in next.devices.values_mut().filter(|d| d.member == *id) {
-                device.removed = true;
+                device.state = DeviceState::Removed;
             }
             for (circle_id, circle) in &mut next.circles {
                 if !next.circle_deletions.contains_key(circle_id) {
@@ -375,19 +413,29 @@ pub(crate) fn apply_effect(next: &mut StoreLogState, view: &StoreLogCheck, entry
             next.members.get_mut(id).expect("checked member").role = *role;
         }
         AddDevice {
-            device: id, name, ..
+            device: id,
+            name,
+            replaces,
         } => {
             next.devices.insert(
                 *id,
                 StoreDevice {
                     member: entry.author.clone(),
                     name: name.clone(),
-                    removed: false,
+                    state: DeviceState::Active,
                 },
             );
+            // Concurrent replacements each keep their new id; the old id stays
+            // replaced, and a removal stays a removal (§10).
+            if let Some(old) = replaces {
+                let old = next.devices.get_mut(old).expect("checked replaced device");
+                if old.active() {
+                    old.state = DeviceState::Replaced;
+                }
+            }
         }
         RemoveDevice { device: id } => {
-            next.devices.get_mut(id).expect("checked device").removed = true;
+            next.devices.get_mut(id).expect("checked device").state = DeviceState::Removed;
         }
         CreateCircle {
             circle: id, name, ..

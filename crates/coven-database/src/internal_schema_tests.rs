@@ -240,7 +240,7 @@ mod fixture {
        SELECT device,n,zeroblob(128),CASE WHEN i%4=0 THEN counter(1) END,
               CASE WHEN i%4=0 THEN counter(1) END FROM fixture;
      INSERT INTO _coven_members SELECT key,key,x'00','member',i%2 FROM fixture;
-     INSERT INTO _coven_devices SELECT n,key,'device ' || i,i%2 FROM fixture;
+     INSERT INTO _coven_devices SELECT n,key,'device ' || i,CASE i%3 WHEN 0 THEN 'active' WHEN 1 THEN 'removed' ELSE 'replaced' END FROM fixture;
      INSERT INTO _coven_circles SELECT 'circle_' || i,'circle ' || i FROM fixture;
      INSERT INTO _coven_circle_members SELECT 'circle_' || i,key FROM fixture;
      INSERT INTO _coven_circle_deletions SELECT 'circle_' || i,device,n FROM fixture;
@@ -440,7 +440,7 @@ mod scans {
         Some("store_log() returns every replay entry"),
     ("store_log_tables.rs", "SELECT member,sealing,role,removed,access FROM _coven_members", "_coven_members") =>
         Some("store_log() returns the complete member map"),
-    ("store_log_tables.rs", "SELECT device,member,name,removed FROM _coven_devices", "_coven_devices") =>
+    ("store_log_tables.rs", "SELECT device,member,name,state FROM _coven_devices", "_coven_devices") =>
         Some("store_log() returns the complete device map"),
     ("store_log_tables.rs", "SELECT circle,name FROM _coven_circles", "_coven_circles") =>
         Some("store_log() returns the complete circle map"),

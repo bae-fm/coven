@@ -107,6 +107,14 @@ pub(crate) fn device(n: u64) -> StoreChange {
         replaces: None,
     }
 }
+/// A restored copy registering `new`, naming the old id it replaces (D6).
+pub(crate) fn replace(new: u64, old: u64) -> StoreChange {
+    StoreChange::AddDevice {
+        device: DeviceId(new),
+        name: format!("Device {new}"),
+        replaces: Some(DeviceId(old)),
+    }
+}
 
 #[derive(Clone)]
 pub(crate) struct History {
@@ -308,7 +316,7 @@ fn ben_registers_his_phone_and_anas_concurrent_member_removal_defeats_it() {
     h.push(0, 0, &[0, 1, 2], remove(1));
     h.every_order(|r| {
         assert!(r.state.members[&member(1)].removed);
-        assert!(r.state.devices[&DeviceId(1)].removed);
+        assert!(r.state.devices[&DeviceId(1)].removed());
         assert!(!r.state.devices.contains_key(&DeviceId(4)));
         assert_eq!(h.drops(r), [3]);
     });
@@ -355,7 +363,7 @@ fn independent_store_removal_keeps_carols_addition_and_her_device() {
     h.push(2, 2, &[0, 1, 2, 3, 4], device(2));
     h.every_order(|r| {
         assert_eq!(r.state.devices[&DeviceId(2)].member, member(2));
-        assert!(!r.state.devices[&DeviceId(2)].removed);
+        assert!(!r.state.devices[&DeviceId(2)].removed());
         assert!(h.drops(r).is_empty());
     });
 }
@@ -459,7 +467,7 @@ fn device_removal_requires_observed_ownership_even_when_already_absent() {
         },
     );
     unseen.every_order(|r| {
-        assert!(!r.state.devices[&DeviceId(4)].removed);
+        assert!(!r.state.devices[&DeviceId(4)].removed());
         assert_eq!(
             r.entries[&unseen.entries[4].position],
             EntryOutcome::Dropped(DropReason::NotAllowed)
@@ -475,7 +483,7 @@ fn device_removal_requires_observed_ownership_even_when_already_absent() {
             },
         );
         h.every_order(|r| {
-            assert_eq!(r.state.devices[&DeviceId(1)].removed, author != 2);
+            assert_eq!(r.state.devices[&DeviceId(1)].removed(), author != 2);
             assert_eq!(h.drops(r), if author == 2 { vec![5] } else { vec![] });
         });
     }
@@ -653,7 +661,7 @@ fn removing_carol_preserves_shared_keys_and_deletes_her_private_circle() {
     h.all(0, 0, remove(2));
     h.every_order(|r| {
         assert!(r.state.members[&member(2)].removed);
-        assert!(r.state.devices[&DeviceId(2)].removed);
+        assert!(r.state.devices[&DeviceId(2)].removed());
         assert_eq!(r.state.circles[&circle(0)].members, [member(1)].into());
         assert!(r.state.circle_deletions.contains_key(&circle(1)));
         assert!(h.drops(r).is_empty());
@@ -828,7 +836,7 @@ fn concurrent_store_removals_preserve_keys() {
         for m in [3, 4] {
             assert!(r.state.members[&member(m)].removed);
             let device = &r.state.devices[&DeviceId(u64::from(m))];
-            assert!(device.removed);
+            assert!(device.removed());
             assert_eq!(device.member, member(m));
             assert_eq!(device.name, format!("Device {m}"));
         }

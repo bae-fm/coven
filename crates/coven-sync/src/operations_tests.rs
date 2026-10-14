@@ -211,7 +211,7 @@ async fn owner_removal_preserves_keys_and_revokes_the_account() {
     assert_eq!(a.newest(Audience::Store).await, old_store);
     assert_eq!(a.newest(Audience::Circle(circle)).await, old_circle);
     assert!(state.members[&b.member.member_id()].removed);
-    assert!(state.devices[&b.device().await].removed);
+    assert!(state.devices[&b.device().await].removed());
     let ring = c.custody.read().unwrap().unwrap();
     assert!(ring.store_key(old_store).is_ok());
     assert!(ring.circle_key(circle, old_circle).is_ok());
@@ -594,8 +594,8 @@ async fn removing_a_member_cuts_off_every_device_of_their_account() {
     drive_access(&mut a).await;
     let state = a.log().await.replay.state;
     let store_key = a.newest(Audience::Store).await;
-    assert!(state.devices[&phone_id].removed);
-    assert!(state.devices[&b.device().await].removed);
+    assert!(state.devices[&phone_id].removed());
+    assert!(state.devices[&b.device().await].removed());
     assert!(
         matches!(phone.sync.sync_store_log().await, Err(SyncError::Storage(error)) if error.failure() == StorageFailure::PermissionDenied)
     );
@@ -634,7 +634,7 @@ async fn plain_device_removal_preserves_member_keys_and_returns_provider_sign_ou
     let state = a.log().await.replay.state;
     assert_eq!(a.newest(Audience::Store).await, previous_key);
     assert!(!state.members[&b.member.member_id()].removed);
-    assert!(state.devices[&b_id].removed);
+    assert!(state.devices[&b_id].removed());
     assert!(a.db.operations().await.unwrap().is_empty());
     assert!(matches!(
         b.sync.sync_store_log().await,

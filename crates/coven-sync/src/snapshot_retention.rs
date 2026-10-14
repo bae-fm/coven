@@ -161,7 +161,7 @@ impl StoreLogSync {
                 .state
                 .devices
                 .iter()
-                .filter(|(_, d)| !d.removed)
+                .filter(|(_, d)| d.active())
                 .all(|(device, _)| positions.get(device).is_some_and(|p| p.covers(id)));
             let aged = self
                 .clock
@@ -190,7 +190,7 @@ impl StoreLogSync {
         let Some(device) = log.replay.state.devices.get(&uploader) else {
             return Ok(false);
         };
-        if !device.removed {
+        if !device.removed() {
             return Ok(false);
         }
         let me = self.operation_member()?.member_id();
