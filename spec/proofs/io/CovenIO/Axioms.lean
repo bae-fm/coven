@@ -88,6 +88,16 @@ import CovenIO
 #print axioms CovenIO.Retired.drain_complete
 #print axioms CovenIO.Retired.failed_scan_not_complete
 #print axioms CovenIO.Retired.completed_scan_retained
+#print axioms CovenIO.Writers.mem_known
+#print axioms CovenIO.Writers.known_monotone
+#print axioms CovenIO.Writers.effect_devices
+#print axioms CovenIO.Writers.scan_registered
+#print axioms CovenIO.Writers.settleN_registered
+#print axioms CovenIO.Writers.registered_named
+#print axioms CovenIO.Writers.counting_write_discovered
+#print axioms CovenIO.Writers.known_requests
+#print axioms CovenIO.Writers.replay_devices_miss_counting_write
+#print axioms CovenIO.Writers.dropped_registration_polled
 #print axioms CovenIO.create_once
 #print axioms CovenIO.create_visible
 #print axioms CovenIO.replacement_revision

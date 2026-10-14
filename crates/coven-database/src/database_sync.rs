@@ -64,22 +64,29 @@ impl Database {
     }
 
     /// Writers known without listing storage: this device, every device a
-    /// received entry wrote from or registered (including removed and replaced
-    /// ones), and every writer folder remembered from an earlier listing.
+    /// received entry wrote from or names in a registration, and every writer
+    /// folder remembered from an earlier listing. Kept and dropped entries
+    /// count alike, so no replay verdict removes a writer; replay registers a
+    /// device only through such an entry (`Writers.registered_named`). One set
+    /// serves the entry, key-copy and write logs (§6).
     pub async fn known_log_writers(
         &self,
     ) -> Result<std::collections::BTreeSet<coven_foundation::id_source::DeviceId>, DbError> {
+        use coven_format::store_log::StoreChange;
         self.call(move |inner| {
             let mut writers = inner.with_store_log(|log| {
-                Ok::<_, DbError>(
-                    log.replay
-                        .state
-                        .devices
-                        .keys()
-                        .copied()
-                        .chain(log.entries.iter().map(|entry| entry.entry.position.device))
-                        .collect::<std::collections::BTreeSet<_>>(),
-                )
+                let mut writers = std::collections::BTreeSet::new();
+                for entry in log.entries.iter().map(|applied| &applied.entry) {
+                    writers.insert(entry.position.device);
+                    if let StoreChange::AddDevice {
+                        device, replaces, ..
+                    } = &entry.change
+                    {
+                        writers.insert(*device);
+                        writers.extend(replaces);
+                    }
+                }
+                Ok::<_, DbError>(writers)
             })?;
             writers.insert(inner.access.device);
             inner.access.readers.acquire_reader().with_reader(|reader| {

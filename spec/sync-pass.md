@@ -199,9 +199,12 @@ No unchanged positions post supplies this observation.
 
 List the immediate **`<store>/store-log/` device folders**, following every
 folder page without entering their history. Union them with known writers
-and devices named by received registrations, including removed or replaced
-devices. §4 gives each provider's scoped operation, including CloudKit's
-query for permanent entry 1 records. Unknown writers start at entry 1.
+and every device a received entry was written from or names in a
+registration, kept or dropped, including removed or replaced devices.
+Replay verdicts never remove a writer from this set; one set serves all
+three logs ([`counting_write_discovered`](proofs/io/CovenIO/Writers.lean)).
+§4 gives each provider's scoped operation, including CloudKit's query for
+permanent entry 1 records. Unknown writers start at entry 1.
 Include writers learned from arriving registrations before completing this
 observation; each needs its entry and copy reads too.
 
@@ -484,10 +487,13 @@ For example, old write 1 and marker 2 confirm before the snapshot and raise
 publish, while new-schema write 3 remains queued
 ([`raise_publishes_with_new_tail`](proofs/queue/CovenQueue/RaiseExamples.lean)).
 
-For downloads, GET each undrained device's next write number, reusing this
-device's identity read. At each use of a miss, including a cached or parallel
-read's result, check `T + monotonic elapsed < S + 29 days` (§15), counting
-sleep. A pass-start check cannot authorize a later miss.
+For downloads, GET the next write number of each undrained writer in step 2's
+set, reusing this device's identity read. A device whose addition replay
+dropped stays in that set: its writes can still count (§7.1)
+([`replay_devices_miss_counting_write`](proofs/io/CovenIO/WritersExamples.lean)).
+At each use of a miss, including a cached or parallel read's result, check
+`T + monotonic elapsed < S + 29 days` (§15), counting sleep. A pass-start
+check cannot authorize a later miss.
 At equality or later, take step 3's away-device snapshot discovery and
 complete any required reload before using further write misses. Discovery
 from before expiry is insufficient. A new device or one without usable time

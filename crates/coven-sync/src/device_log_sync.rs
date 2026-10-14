@@ -358,17 +358,14 @@ impl DeviceLogSync {
             })
             .collect();
         let mut drains = Vec::new();
-        // Every other device that ever registered, including removed and
-        // replaced ones. The first phase reads this device's own next write.
-        let writers: std::collections::BTreeSet<_> = local
-            .log
-            .replay
-            .state
-            .devices
-            .keys()
-            .copied()
-            .filter(|device| *device != local.device)
-            .collect();
+        // The first phase's writer set: every other device a received entry
+        // wrote from or registers, kept or dropped, and every remembered
+        // folder. A device whose addition replay dropped can still author
+        // counting writes (§7.1), so every reader probes it until drained
+        // (`Writers.counting_write_discovered`). The first phase reads this
+        // device's own next write.
+        let mut writers = self.database.known_log_writers().await?;
+        writers.remove(&local.device);
         for writer in writers {
             // A refused write stops its log: nothing at or past it is read.
             let stop = refused

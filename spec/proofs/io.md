@@ -202,6 +202,43 @@ bytes are refused; entry 2 remains unread. There is no failed provider request.
 Thus “no failed request” alone is insufficient. A completed terminal scan and
 successful durable retention are the conditions used in the theorems.
 
+**The writer set ignores replay verdicts — proved, with the old rule's
+counterexample.** [`Writers`](io/CovenIO/Writers.lean) gives one writer set
+for all three logs. `known` holds the remembered folders and every device a
+received store-log entry was written from or registers. Kept and dropped
+entries count alike; no verdict is an input. `known_monotone` shows that more
+entries or folders never remove a writer.
+
+`registered_named` connects this set to the store-log model's replay. If the
+replay of a set of entries registers a device, an entry of that set names it.
+The proof follows each effect (`effect_devices`) through a complete pass and
+restarts (`scan_registered`, `settleN_registered`). A write counts only if
+the replay of its own recorded view registers its device (§7.1).
+`counting_write_discovered` then proves that every reader holding that view's
+entries probes the device, or has drained it, whatever its own replay keeps
+or drops.
+
+[`WritersExamples`](io/CovenIO/WritersExamples.lean) checks §7.1's history.
+Ben's phone registers itself while Ana concurrently removes Ben. The phone's
+write reads its own registration and counts. A reader that receives the write
+first holds the phone among its replay's devices; a reader that receives the
+removal first does not. Under the old rule, which probed only the devices the
+current replay registers, the second reader never discovered the write.
+`replay_devices_miss_counting_write` shows both orders and that `known` holds
+the phone in each.
+
+`known_requests` keeps the idle bound: two listings and three GETs per known
+writer not yet drained, and none naming a drained writer.
+`dropped_registration_polled` counts that history's pass: Ana's device, Ben's
+laptop and the phone give 11 requests. Draining is the only way a known
+writer leaves the polled set. A device named only by dropped registrations
+drains only through a kept retirement of that device; which kept entries
+retire it is outside this model.
+[`IORunner.lean`](io/IORunner.lean)'s `writers` case computes `known` less
+drained writers and the reader;
+[a Rust test](../../crates/coven-sync/src/write_object_tests.rs) compares the
+write logs each reader actually probes, in both arrival orders.
+
 **Snapshot positions name published writes — proved.**
 [`SnapshotWrites`](io/CovenIO/SnapshotWrites.lean) composes the existing
 `Publication.Writer` events across devices with snapshot capture, request and
@@ -656,8 +693,9 @@ access and reference-safe deletion remain implementation obligations.
 
 **8. Cost and reuse — proved for modeled traces.** `idle_two_listings`,
 `idle_gets` and `idle_requests` give exactly two listings and 3N next-number
-GETs. N is active devices, including this one, plus retired devices not
-yet drained. Drained ids add no log probes; their permanent folders and
+GETs. N counts the known writers not yet drained, including this one:
+active, removed and replaced devices, and devices named only by dropped
+registrations (`Writers.known_requests`). Drained ids add no log probes; their permanent folders and
 positions still occupy listing pages. The trace depends on no history or
 file count. Three devices give 11 requests (`idle_three_devices`).
 Each listing is one complete logical page here; extra provider pages and

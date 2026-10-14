@@ -5,6 +5,7 @@ import CovenIO.Retired
 import CovenIO.PassPhases
 import CovenIO.SnapshotWrites
 import CovenIO.Waiting
+import CovenIO.Writers
 import Lean
 
 /-! The IO differential runner. Each case names the executable transition it
@@ -340,6 +341,25 @@ private def waiting (j : Json) : Except String Json := do
     ("due", toJson (Waiting.due timer time)),
     ("retried", toJson (Waiting.due (Waiting.appRetry timer time) time))]
 
+/-- `Writers.known`: the received entries, by writing device and registered
+device, and remembered folders give the write logs probed, less drained ids
+and the reader itself. No replay verdict is an input. -/
+private def writers (j : Json) : Except String Json := do
+  let entries ← j.getObjValAs? (Array Json) "entries"
+  let listed ← j.getObjValAs? (List Nat) "listed"
+  let drained ← j.getObjValAs? (List Nat) "drained"
+  let own ← j.getObjValAs? Nat "self"
+  let blank : CovenStorelog.Entry := ⟨0, 0, [], .rotateKey .store 0⟩
+  let log ← entries.mapM fun e => do
+    let writer ← e.getObjValAs? Nat "writer"
+    let action := match ← e.getObjValAs? (Option Nat) "registers" with
+      | some device => CovenStorelog.Action.addDevice 0 device
+      | none => .rotateKey .store 0
+    pure ({ blank with device := writer, action } : CovenStorelog.Entry)
+  let life : Nat → Retired.Life := fun w => if w ∈ drained then .drained else .active
+  let known := Writers.known (fun w => log.getD w blank) (List.range log.size) listed
+  return toJson ((Retired.polling life known).filter (· ≠ own) |>.mergeSort)
+
 private def run (j : Json) : Except String Json := do
   match ← j.getObjValAs? String "check" with
   | "discovery" => discovery j
@@ -353,6 +373,7 @@ private def run (j : Json) : Except String Json := do
   | "post" => post j
   | "send_gate" => sendGate j
   | "drain" => drain j
+  | "writers" => writers j
   | "phases" => phases j
   | "snapshot_writes" => snapshotWrites j
   | "waiting" => waiting j

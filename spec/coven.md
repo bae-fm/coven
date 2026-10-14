@@ -415,9 +415,12 @@ a zero-body pass cannot hide a listing of the whole history.
   These HEADs contribute to `M`; other providers return revisions in listings.
   List store-log device folders and `positions/`, and make one next-number
   miss per polled device for each of three logs: store-log entries, writes
-  and key copies. `N` is active devices plus retired devices not yet drained
-  (§6). With each listing fitting one page,
-  `D = 2 + 3 * N` on every provider. Folder ids are already known in this
+  and key copies. `N` counts §6's known writers not yet drained: active,
+  removed and replaced devices, and devices named only by registrations
+  replay dropped
+  ([`known_requests`](proofs/io/CovenIO/Writers.lean),
+  [`dropped_registration_polled`](proofs/io/CovenIO/WritersExamples.lean)).
+  With each listing fitting one page, `D = 2 + 3 * N` on every provider. Folder ids are already known in this
   warm count. All extra pages, initialization lookups and retries are charged.
   Drive's unknown-name miss is one exact parent/name query; a hit needs
   that query, exact metadata and the download (§4). Metadata requests and
@@ -1559,17 +1562,24 @@ File uploads run in their own worker (§16.5); a pass does not wait for them.
     miss is exact. Write misses use the return-from-absence rule in §15.
     Snapshots and files are not discovered by next number.
 - Discover unknown writers by listing only the immediate device folders in
-  `<store>/store-log/`. Keep that set together with every device named by
-  received registrations, including removed and replaced devices. A newly
-  discovered writer starts at entry 1 and key copy 1; its writes start at
-  the device's applied snapshot coverage, or 1 without coverage.
+  `<store>/store-log/`. Keep that set together with every device a received
+  entry was written from or names in a registration, kept or dropped,
+  including removed and replaced devices. This one set serves all three
+  logs; a replay verdict never removes a device from it. A write from a
+  device whose addition a later entry drops still counts (§7.1), so every
+  reader holding the write's recorded view probes that device until its
+  drain completes, in either arrival order
+  ([`registered_named`, `counting_write_discovered`](proofs/io/CovenIO/Writers.lean),
+  [`replay_devices_miss_counting_write`](proofs/io/CovenIO/WritersExamples.lean)).
+  A newly discovered writer starts at entry 1 and key copy 1; its writes
+  start at the device's applied snapshot coverage, or 1 without coverage.
   Read writers learned from arriving registrations in this observation
   too, before treating its membership and copy evidence as complete.
   Registration precedes ordinary writes and independent historical sharing;
   creation's prerequisite copies are also reachable through its writer.
 - Poll removed and replaced devices like active ones until a kept entry
   retiring them has been final for more than one day and five minutes (§9,
-  §10). Finality itself requires a provider sample more than 30 storage days
+  §10). Only that drain stops polling a known writer. Finality itself requires a provider sample more than 30 storage days
   plus one hour plus δ after that entry, and can take longer while late
   entries arrive.
 
