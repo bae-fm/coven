@@ -1262,11 +1262,15 @@ the file's ranges under `F`.
     conditions and refuses `s3:ListMultipartUploadParts`. Ceph RGW accounts
     (Squid or newer) take the inline form at the location's RGW endpoint and
     region, using an account-root key or a user's delegated IAM access
-    ([RGW IAM](https://docs.ceph.com/en/squid/radosgw/iam/)). Its inline-policy
-    `s3:prefix` enforcement has not been verified live; the member-side check
-    below refuses a key that can list outside its store.
+    ([RGW IAM](https://docs.ceph.com/en/squid/radosgw/iam/)).
     GCS, R2 and RustFS have their own minters; a custom profile uses
-    guided console steps.
+    guided console steps. On **2026-10-14** the RustFS, SeaweedFS and Ceph
+    RGW 20.2.4 minters each made a key live with an admin key, passed the
+    member-side check below, were refused writes, reads and listings outside
+    the store's prefix, revoked the key twice, read it absent and saw the
+    service refuse it ([evidence](s3-certification.md#member-keys)). Run
+    `COVEN_LIVE_S3_ENV=<file holding the admin key> COVEN_LIVE_S3_PROFILE=<name>
+    cargo test -p coven-storage s3_member_key_lifecycle -- --ignored --nocapture`.
   - On GCS each member key is the HMAC key of its own service account. The
     minter reads the bucket's project through the JSON API and refuses a
     bucket without uniform bucket-level access, which managed folders need.

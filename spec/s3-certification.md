@@ -831,3 +831,50 @@ RustFS and SeaweedFS's test containers were unavailable, so neither was run
 with versioning enabled. Both profiles refuse enabled, suspended and unknown
 versioning until a versioned certification is recorded. AWS has no reachable
 live account and likewise has no versioned certificate.
+
+## Member keys
+
+On 2026-10-14 `s3_member_key_lifecycle` ran each self-hosted minter against a
+local podman container with the profile named by `COVEN_LIVE_S3_PROFILE` and
+the location prefix `coven-live`. With the service's admin key it mints a key
+for a fresh store and reads it listed, runs setup's member-side check, then
+uses the member key to write and list another store's prefix, read an object
+the admin wrote there, and write at the bucket's root outside the base
+prefix; each must be refused with permission denied. It then revokes the key,
+reads it absent, revokes it again, and lists its own prefix with it until the
+service refuses the key. A rollback of the attempt's name and the cleanup of
+both stores follow. Before RustFS passed, its second revocation failed: RustFS
+answers a delete of an absent service account with HTTP 400
+`InvalidRequest` ("service account not exist") where `info-service-account`
+answers 404; the minter now reads absence back after a refused delete.
+
+- RustFS 1.0.1 (`rustfs/rustfs:latest`, built 2026-10-03,
+  `sha256:3bc0a69f7636`), admin access the server's root key.
+- SeaweedFS 4.48 (`chrislusf/seaweedfs:latest`, `530be3e37`,
+  `sha256:f1f303474940`) run as `weed server -s3 -s3.config=<identities>
+  -s3.iam.readOnly=false`, admin access a static identity with the `Admin`
+  action. Afterwards its IAM listed no users or policies but that identity.
+- Ceph RGW 20.2.4 (`quay.io/ceph/ceph:v20.2.4`, `sha256:6e6bc7b28fa1`), admin
+  access the root user of an RGW account (`radosgw-admin account create`,
+  then `user create --account-id=<id> --account-root`), which also created
+  the bucket so the account owns it.
+
+Each run printed, apart from the cargo harness lines:
+
+```text
+mint PASS principal=RustFsServiceAccount
+key_exists_after_mint=true
+member_check PASS
+write_other_store refused=PermissionDenied
+read_other_store refused=PermissionDenied
+list_other_store refused=PermissionDenied
+write_outside_base_prefix refused=PermissionDenied
+revoke PASS
+key_exists_after_revoke=false
+revoke_again PASS
+revoked_key refused=Authentication after_s=0
+member_key_lifecycle PASS
+roll_back PASS cleanup PASS
+```
+
+SeaweedFS and Ceph RGW printed the same lines with `principal=IamUser`.

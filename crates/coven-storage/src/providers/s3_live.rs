@@ -94,6 +94,14 @@ impl LiveS3 {
         };
         crate::transfer::with_cleanup(result, cleanup)
     }
+    /// The env key as the service's admin access, for minting member keys.
+    pub(super) fn admin(&self) -> crate::AdminCredential {
+        crate::AdminCredential::AccessKey {
+            access_key_id: self.credentials.access_key_id.clone(),
+            secret_access_key: self.credentials.secret_access_key.clone(),
+            session_token: None,
+        }
+    }
     pub(super) fn connect(&self, settings: Option<S3Settings>) -> StorageConnection<S3Storage> {
         let config = self.config.clone();
         let credentials = self.credentials.clone();
