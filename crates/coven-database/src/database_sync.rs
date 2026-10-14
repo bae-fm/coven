@@ -171,6 +171,17 @@ impl Database {
         self.subscribe(|sql| sql.pending())
     }
 
+    /// The upload queue, its pause setting and each file's recorded provider
+    /// session in one committed snapshot, available while disconnected (E7).
+    pub async fn upload_queue(&self) -> CovenResult<crate::UploadQueueState> {
+        self.read(|sql| sql.upload_queue()).await
+    }
+
+    /// The same pre-built upload queue query, observing committed changes.
+    pub fn subscribe_upload_queue(&self) -> crate::LiveQuery<crate::UploadQueueState> {
+        self.subscribe(|sql| sql.upload_queue())
+    }
+
     /// Record one local first unmet condition, replacing its previous reason.
     pub async fn record_pending<P: crate::PendingValue>(&self, record: P) -> Result<(), DbError> {
         self.call(move |inner| {

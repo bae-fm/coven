@@ -704,10 +704,15 @@ macro_rules! coven_tables {
                 original BLOB,
                 modified_at BLOB CHECK(modified_at IS NULL OR length(modified_at)=13),
                 queued_at BLOB NOT NULL,
-                failure BLOB,
                 session BLOB,
                 UNIQUE(device,file),
                 CHECK((original IS NULL)=(modified_at IS NULL))
+            ) STRICT;
+        ");
+        // Present while the app has paused uploads (E7).
+        $visit!(_coven_upload_pause, "
+            CREATE TABLE _coven_upload_pause (
+                paused INTEGER PRIMARY KEY CHECK(paused=1)
             ) STRICT;
         ");
         $visit!(_coven_file_chunks, "

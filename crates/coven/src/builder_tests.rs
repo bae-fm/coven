@@ -70,7 +70,7 @@ async fn app_reopening_resumes_operations_and_files_using_one_storage_capability
         .unwrap();
     handle.close().await.unwrap();
     let handle = open().open(directory.id()).await.unwrap();
-    handle.set_uploads_paused(true);
+    handle.set_uploads_paused(true).await.unwrap();
     handle
         .write_with_files(
             |batch| {
@@ -117,6 +117,9 @@ async fn app_reopening_resumes_operations_and_files_using_one_storage_capability
     storage.set_online(true);
     let handle = open().open(directory.id()).await.unwrap();
     handle.unlock_store_key().await.unwrap();
+    // The pause setting survived reopening; the app resumes uploads.
+    assert!(handle.uploads().await.unwrap().paused);
+    handle.set_uploads_paused(false).await.unwrap();
     let mut uploads = handle.subscribe_uploads();
     tokio::time::timeout(std::time::Duration::from_secs(20), async {
         loop {
@@ -124,11 +127,17 @@ async fn app_reopening_resumes_operations_and_files_using_one_storage_capability
             if queue.files.is_empty() {
                 break;
             }
-            assert!(queue.files.iter().all(|file| file.last_failure.is_none()));
         }
     })
     .await
     .unwrap();
+    // No attempt left a record about its file.
+    assert!(handle
+        .pending()
+        .await
+        .unwrap()
+        .iter()
+        .all(|record| !matches!(record.subject, PendingSubject::File { .. })));
     // Upload completion changes no row, so the reference taken before upload
     // still names the file and now reads it from the cache or storage.
     let file = handle.file_ref("attachments", "shared").await.unwrap();

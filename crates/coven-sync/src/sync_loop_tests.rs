@@ -314,8 +314,9 @@ impl DeviceData {
             .await
             .unwrap();
         let outcome = self.files.retry_uploads_now().await.unwrap();
-        assert!(
-            matches!(outcome, DrainOutcome::Drained { ref failures, .. } if failures.is_empty()),
+        assert_eq!(
+            outcome,
+            DrainOutcome::Drained { uploaded: 1 },
             "file upload must finish without failures"
         );
     }

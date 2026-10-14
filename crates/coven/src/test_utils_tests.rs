@@ -281,7 +281,7 @@ fn every_post_commit_crash_preserves_the_write_for_upload() {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let f = runtime.block_on(async {
             let (f, handle) = Fixture::new().await;
-            handle.set_uploads_paused(true);
+            handle.set_uploads_paused(true).await.unwrap();
             handle
                 .write_with_files(
                     |batch| {
@@ -419,7 +419,7 @@ async fn app_reads_and_writes_finish_while_a_sync_pass_is_held() {
 #[tokio::test]
 async fn identical_app_files_have_distinct_stored_ciphertext() {
     let (f, handle) = Fixture::new().await;
-    handle.set_uploads_paused(true);
+    handle.set_uploads_paused(true).await.unwrap();
     let content = vec![42; 2 * 65536 + 17];
     let input = content.clone();
     handle
@@ -437,15 +437,19 @@ async fn identical_app_files_have_distinct_stored_ciphertext() {
         )
         .await
         .unwrap();
-    handle.set_uploads_paused(false);
+    handle.set_uploads_paused(false).await.unwrap();
     let mut uploads = handle.subscribe_uploads();
     loop {
-        let queue = uploads.next().await.unwrap();
-        assert!(queue.files.iter().all(|file| file.last_failure.is_none()));
-        if queue.files.is_empty() {
+        if uploads.next().await.unwrap().files.is_empty() {
             break;
         }
     }
+    assert!(handle
+        .pending()
+        .await
+        .unwrap()
+        .iter()
+        .all(|record| !matches!(record.subject, PendingSubject::File { .. })));
     let objects = f
         .storage
         .list(&ObjectPrefix::files(f.directory.id()))

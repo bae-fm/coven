@@ -5,8 +5,8 @@ use coven_foundation::{
     files::{FileError as DiskError, StoreLockError},
     id_source::DeviceId,
 };
-use coven_storage::{StorageError, StorageFailure};
-use std::{path::PathBuf, sync::Arc};
+use coven_storage::StorageError;
+use std::path::PathBuf;
 
 /// Reading a file failed with a cause the app can distinguish (E8).
 #[derive(Debug, thiserror::Error)]
@@ -106,51 +106,17 @@ impl From<LocalFileError> for FileReadError {
     }
 }
 
-/// A durable failure category. OS and provider error objects remain available
-/// in the live failure; after reopening, this records the actionable category.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub enum RecordedUploadFailure {
-    /// No storage was connected.
-    NoStorage,
-    /// Source bytes were absent or changed, or failed authentication.
-    File,
-    /// Local database or filesystem failed.
-    Local,
-    /// The provider's classified failure.
-    Storage(StorageFailure),
-}
-
-/// An upload attempt failed. Sharing the cause preserves native error objects
-/// in both a drain result and the live queue without converting them to text.
+/// An upload attempt failed. Its pending record keeps the category; the
+/// native cause stays in this process's log.
 #[derive(Debug, thiserror::Error)]
-pub enum UploadFailure {
+pub(crate) enum UploadFailure {
     /// Reading or checking the source failed.
     #[error(transparent)]
     File(#[from] FileReadError),
     /// The provider failed.
     #[error(transparent)]
     Storage(#[from] StorageError),
-    /// A previous process recorded this failure category.
-    #[error("recorded upload failure: {0:?}")]
-    Recorded(RecordedUploadFailure),
 }
-impl UploadFailure {
-    pub(crate) fn recording(&self) -> RecordedUploadFailure {
-        match self {
-            Self::File(FileReadError::NoStorage) => RecordedUploadFailure::NoStorage,
-            Self::File(
-                FileReadError::Database(_) | FileReadError::Disk(_) | FileReadError::Lock(_),
-            ) => RecordedUploadFailure::Local,
-            Self::File(FileReadError::Storage(error)) | Self::Storage(error) => {
-                RecordedUploadFailure::Storage(error.failure())
-            }
-            Self::File(_) => RecordedUploadFailure::File,
-            Self::Recorded(recorded) => recorded.clone(),
-        }
-    }
-}
-/// Failed files and their shared, typed causes from a drain.
-pub type UploadFailures = Vec<(coven_database::FileRef, Arc<UploadFailure>)>;
 
 impl From<DbError> for UploadFailure {
     fn from(error: DbError) -> Self {

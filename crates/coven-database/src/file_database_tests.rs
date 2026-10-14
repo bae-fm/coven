@@ -174,7 +174,7 @@ async fn completion_retires_the_queue_without_writing_whatever_the_row_became() 
             assert_eq!(owned_paths(&store).len(), 2);
         }
         let writes = db.test_queued_writes().await.unwrap().len();
-        owner.complete_upload(first_id).await.unwrap();
+        owner.complete_upload(first_id, ()).await.unwrap();
         assert!(owner.open_upload_source(&first).await.unwrap().is_none());
         assert_eq!(db.file_ref("files", "7").await.ok(), current);
         assert_eq!(db.test_queued_writes().await.unwrap().len(), writes);
@@ -208,7 +208,7 @@ async fn completion_retires_the_queue_without_writing_whatever_the_row_became() 
             assert!(owner.open_local(&after).await.unwrap().is_none());
         }
         assert!(matches!(
-            owner.complete_upload(first_id).await,
+            owner.complete_upload(first_id, ()).await,
             Err(DbError::DamagedDatabase)
         ));
         db.close().await.unwrap();
@@ -315,7 +315,7 @@ async fn chunk_hashes_belong_to_the_queued_file_whatever_its_row_becomes() {
                 .find(|upload| upload.file == first)
                 .unwrap()
                 .id;
-            owner.complete_upload(first_id).await.unwrap();
+            owner.complete_upload(first_id, ()).await.unwrap();
             // Completing A cannot delete B's facts.
             assert_eq!(
                 local_count(&db, "_coven_file_chunks"),

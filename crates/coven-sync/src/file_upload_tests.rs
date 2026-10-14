@@ -51,13 +51,19 @@ async fn same_size_edits_with_restored_mtime_send_no_changed_chunks() {
                     })
                     .await;
                 let guard = f.files.inner.drain.lock().await;
-                f.files.inner.state.lock().unwrap().paused = false;
+                f.files
+                    .inner
+                    .paused
+                    .store(false, std::sync::atomic::Ordering::Release);
                 let item = f.files.inner.database.uploads().await.unwrap().remove(0);
                 assert!(matches!(
                     f.files.inner.upload(&item).await,
                     Err(UploadFailure::Storage(_))
                 ));
-                f.files.inner.state.lock().unwrap().paused = true;
+                f.files
+                    .inner
+                    .paused
+                    .store(true, std::sync::atomic::Ordering::Release);
                 drop(guard);
                 let item = f.files.inner.database.uploads().await.unwrap().remove(0);
                 let mut session =
@@ -77,7 +83,10 @@ async fn same_size_edits_with_restored_mtime_send_no_changed_chunks() {
             let before = f.storage.transferred().await.0;
             let before_requests = f.storage.request_count();
             let guard = f.files.inner.drain.lock().await;
-            f.files.inner.state.lock().unwrap().paused = false;
+            f.files
+                .inner
+                .paused
+                .store(false, std::sync::atomic::Ordering::Release);
             let item = f.files.inner.database.uploads().await.unwrap().remove(0);
             let mut requests = f.storage.subscribe_requests();
             let mut upload = Box::pin(f.files.inner.upload(&item));
@@ -95,7 +104,10 @@ async fn same_size_edits_with_restored_mtime_send_no_changed_chunks() {
                 .set_times(std::fs::FileTimes::new().set_modified(modified))
                 .unwrap();
             let result = upload.await;
-            f.files.inner.state.lock().unwrap().paused = true;
+            f.files
+                .inner
+                .paused
+                .store(true, std::sync::atomic::Ordering::Release);
             drop(guard);
             match provenance {
                 Provenance::UserProvided => assert!(
@@ -166,7 +178,7 @@ async fn an_upload_reader_retains_the_store_after_its_database_closes() {
 }
 
 #[tokio::test]
-async fn a_single_request_reports_uploading_while_storage_is_pending() {
+async fn a_single_request_stays_waiting_until_confirmed_completion_retires_it() {
     let f = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
     f.attach("files", "single", vec![44; 19]).await;
 
@@ -179,22 +191,21 @@ async fn a_single_request_reports_uploading_while_storage_is_pending() {
             resume,
         )
         .await;
-    f.files.inner.state.lock().unwrap().paused = false;
+    f.files.set_uploads_paused(false).await.unwrap();
     let files = f.files.clone();
     let task = tokio::spawn(async move { files.retry_uploads_now().await });
     tokio::time::timeout(Duration::from_secs(20), receiving)
         .await
         .unwrap()
         .unwrap();
-    let mut uploads = f.files.subscribe_uploads();
+    // Bytes in flight are not progress: the file waits until storage confirms.
+    let mut uploads = f.subscribe_queue();
     let phase = uploads.next().await.unwrap().files.remove(0).phase;
+    assert_eq!(phase, UploadPhase::Waiting);
     release.send(()).unwrap();
     task.await.unwrap().unwrap();
+    assert!(uploads.next().await.unwrap().files.is_empty());
     f.close().await;
-    assert!(
-        matches!(phase, UploadPhase::Uploading { bytes_sent: 0, .. }),
-        "{phase:?}"
-    );
 }
 
 #[tokio::test]
@@ -291,7 +302,10 @@ async fn recorded_sessions_continue_or_restart_with_the_same_encrypted_bytes() {
             .await;
 
         let item = f.files.inner.database.uploads().await.unwrap().remove(0);
-        f.files.inner.state.lock().unwrap().paused = false;
+        f.files
+            .inner
+            .paused
+            .store(false, std::sync::atomic::Ordering::Release);
         f.storage
             .set_faults(Faults {
                 lose_part_reply: true,
@@ -304,7 +318,10 @@ async fn recorded_sessions_continue_or_restart_with_the_same_encrypted_bytes() {
             f.files.inner.upload(&item).await,
             Err(UploadFailure::Storage(_))
         ));
-        f.files.inner.state.lock().unwrap().paused = true;
+        f.files
+            .inner
+            .paused
+            .store(true, std::sync::atomic::Ordering::Release);
         drop(guard);
         let item = f.files.inner.database.uploads().await.unwrap().remove(0);
         let session = UploadSession::decode(item.session.as_ref().unwrap().as_bytes()).unwrap();
@@ -360,10 +377,16 @@ async fn lost_completion_reply_resumes_the_published_object() {
         })
         .await;
     let guard = f.files.inner.drain.lock().await;
-    f.files.inner.state.lock().unwrap().paused = false;
+    f.files
+        .inner
+        .paused
+        .store(false, std::sync::atomic::Ordering::Release);
     let item = f.files.inner.database.uploads().await.unwrap().remove(0);
     assert!(f.files.inner.upload(&item).await.is_err());
-    f.files.inner.state.lock().unwrap().paused = true;
+    f.files
+        .inner
+        .paused
+        .store(true, std::sync::atomic::Ordering::Release);
     drop(guard);
     assert_eq!(f.database.file_ref("files", "one").await.unwrap(), file);
     assert_eq!(
@@ -398,7 +421,10 @@ pub(super) async fn retargeted_upload(f: &Fixture) -> (FileRef, FileRef) {
         )
         .await;
     let guard = f.files.inner.drain.lock().await;
-    f.files.inner.state.lock().unwrap().paused = false;
+    f.files
+        .inner
+        .paused
+        .store(false, std::sync::atomic::Ordering::Release);
     let item = f.files.inner.database.uploads().await.unwrap().remove(0);
     let mut uploading = Box::pin(f.files.inner.upload(&item));
     tokio::select! {
@@ -410,7 +436,10 @@ pub(super) async fn retargeted_upload(f: &Fixture) -> (FileRef, FileRef) {
     let writes = f.database.test_queued_writes().await.unwrap().len();
     release.send(()).unwrap();
     assert!(uploading.await.unwrap());
-    f.files.inner.state.lock().unwrap().paused = true;
+    f.files
+        .inner
+        .paused
+        .store(true, std::sync::atomic::Ordering::Release);
     drop(guard);
     assert_eq!(f.database.file_ref("files", "old").await.unwrap(), new);
     assert_eq!(f.database.test_queued_writes().await.unwrap().len(), writes);
@@ -510,7 +539,10 @@ async fn deleting_a_row_during_its_upload_is_not_undone_by_completion() {
         )
         .await;
     let guard = f.files.inner.drain.lock().await;
-    f.files.inner.state.lock().unwrap().paused = false;
+    f.files
+        .inner
+        .paused
+        .store(false, std::sync::atomic::Ordering::Release);
     let item = f.files.inner.database.uploads().await.unwrap().remove(0);
     let mut uploading = Box::pin(f.files.inner.upload(&item));
     tokio::select! {
@@ -527,7 +559,10 @@ async fn deleting_a_row_during_its_upload_is_not_undone_by_completion() {
     let writes = f.database.test_queued_writes().await.unwrap().len();
     release.send(()).unwrap();
     assert!(uploading.await.unwrap());
-    f.files.inner.state.lock().unwrap().paused = true;
+    f.files
+        .inner
+        .paused
+        .store(true, std::sync::atomic::Ordering::Release);
     drop(guard);
     assert!(matches!(
         f.database.file_ref("files", "gone").await,
@@ -542,9 +577,9 @@ async fn deleting_a_row_during_its_upload_is_not_undone_by_completion() {
 #[tokio::test]
 async fn attaching_starts_upload_after_commit_and_checks_changed_originals() {
     let f = Fixture::new(Provenance::AppProvided, CacheFill::CacheEager).await;
-    f.files.set_uploads_paused(false);
-    let mut uploads = f.files.subscribe_uploads();
+    f.files.set_uploads_paused(false).await.unwrap();
     f.attach("files", "one", vec![14; CHUNK]).await;
+    let mut uploads = f.subscribe_queue();
     tokio::time::timeout(Duration::from_secs(20), async {
         loop {
             if uploads.next().await.unwrap().files.is_empty() {
@@ -644,7 +679,10 @@ mod differential {
         let f = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
         // Hold the worker away from the queue; each finish is one attempt.
         let guard = f.files.inner.drain.lock().await;
-        f.files.inner.state.lock().unwrap().paused = false;
+        f.files
+            .inner
+            .paused
+            .store(false, std::sync::atomic::Ordering::Release);
         let mut attached: Vec<FileRef> = Vec::new();
         let mut rows: Vec<u64> = Vec::new();
         let mut held = None;
@@ -773,7 +811,10 @@ mod differential {
             .iter()
             .map(|upload| reference(number(&attached, &upload.file)))
             .collect();
-        f.files.inner.state.lock().unwrap().paused = true;
+        f.files
+            .inner
+            .paused
+            .store(true, std::sync::atomic::Ordering::Release);
         drop(guard);
         f.close().await;
         json!({"finishes": finishes, "deletes": deletes, "rows": row_refs, "queue": queue})

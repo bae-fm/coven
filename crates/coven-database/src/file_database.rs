@@ -215,21 +215,57 @@ impl FileDatabase {
     pub async fn uploads(&self) -> Result<Vec<FileUpload>, DbError> {
         self.run(|db, _, _, _| file_queue::read(db)).await
     }
-    /// Record a failed attempt's typed payload with its retry wait, or with
-    /// none when it waits for the app (§16.5). Native errors are interpreted by sync.
-    pub async fn fail_upload(
+    /// Whether the app paused uploads, as persisted (E7).
+    pub async fn uploads_paused(&self) -> Result<bool, DbError> {
+        self.run(|db, _, _, _| file_queue::paused(db)).await
+    }
+    /// Persist the app's pause setting. A paused upload keeps its place and
+    /// its provider session.
+    pub async fn set_uploads_paused(&self, paused: bool) -> Result<(), DbError> {
+        self.require_writer()?;
+        self.run(move |db, _, _, _| db.transaction(|db| file_queue::set_paused(db, paused)))
+            .await
+    }
+    /// Each queued upload with this device's pending record about its file,
+    /// read in one committed state: the reason an earlier attempt left decides
+    /// whether automatic work retries it (§16.5).
+    pub async fn upload_work<P: crate::PendingValue>(
+        &self,
+        subject: impl Fn(&FileRef) -> P::Subject + Send + 'static,
+    ) -> Result<Vec<(FileUpload, Option<P>)>, DbError> {
+        self.run(move |db, _, _, device| {
+            db.read_transaction(|| {
+                file_queue::read(db)?
+                    .into_iter()
+                    .map(|upload| {
+                        let record = crate::pending::find::<P>(db, &subject(&upload.file), device)?;
+                        Ok((upload, record))
+                    })
+                    .collect()
+            })
+        })
+        .await
+    }
+    /// Record a failed attempt as this device's pending record about its file,
+    /// with its retry wait or none when it waits for a prerequisite or the app,
+    /// in one transaction (§16.5, §19.1).
+    pub async fn fail_upload<P: crate::PendingValue>(
         &self,
         id: i64,
-        failure: SecretBytes,
+        record: impl FnOnce(DeviceId) -> P + Send + 'static,
         retry: Option<crate::RetryWait>,
     ) -> Result<(), DbError> {
         self.require_writer()?;
-        self.run(move |db, _, _, _| {
+        self.run(move |db, _, _, device| {
             db.transaction(|db| {
-                changed(db.internal_execute(
-                    "UPDATE _coven_file_uploads SET failure=?2 WHERE id=?1",
-                    (id, failure.as_bytes()),
-                )?)?;
+                if !db.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM _coven_file_uploads WHERE id=?1)",
+                    [id],
+                    |r| r.get::<_, bool>(0),
+                )? {
+                    return Err(DbError::DamagedDatabase);
+                }
+                crate::pending::save(db, &record(device))?;
                 let subject = crate::RetrySubject::Upload(id);
                 match &retry {
                     Some(wait) => crate::retry::save(db, subject, wait),
@@ -276,18 +312,27 @@ impl FileDatabase {
         .await
     }
     /// Retire an upload once storage confirms its complete bytes (§16.5): one
-    /// transaction removes the queue row, its chunk hashes and the copy kept
-    /// for it. No app row, file reference or write changes, so a row retargeted,
-    /// moved or deleted meanwhile keeps its newer state. Afterwards this device
-    /// reads the file from the cache or storage.
-    pub async fn complete_upload(&self, id: i64) -> Result<(), DbError> {
+    /// transaction removes the queue row, its chunk hashes, the copy kept for
+    /// it and this device's pending record about the file. No app row, file
+    /// reference or write changes, so a row retargeted, moved or deleted
+    /// meanwhile keeps its newer state. Afterwards this device reads the file
+    /// from the cache or storage.
+    pub async fn complete_upload<S: serde::Serialize + Send + 'static>(
+        &self,
+        id: i64,
+        subject: S,
+    ) -> Result<(), DbError> {
         let FileDatabaseAccess::Writer(database) = &self.access else {
             return Err(read_only());
         };
         database
             .call(move |inner| {
                 inner.access.with_writer(|writer| {
-                    let result = writer.transaction(|db| file_queue::complete(db, id));
+                    let device = inner.access.device;
+                    let result = writer.transaction(|db| {
+                        file_queue::complete(db, id)?;
+                        crate::pending::clear(db, &subject, device)
+                    });
                     let active = inner.staging.lock().expect("staging lock poisoned");
                     crate::file_removals::FileRemovals::new(
                         writer,

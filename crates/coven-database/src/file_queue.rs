@@ -8,6 +8,7 @@ use std::time::SystemTime;
 
 /// One durable upload; its plaintext chunk hashes are owned child rows.
 /// The captured reference carries the path and key fixed by the attaching write.
+/// Failures live in `_coven_pending` under the file's subject, not here.
 #[derive(Debug)]
 pub struct FileUpload {
     /// Local queue identity, stable across retries.
@@ -19,10 +20,70 @@ pub struct FileUpload {
     pub queued_at: SystemTime,
     /// The persisted automatic retry wait, if the last attempt armed one.
     pub retry: Option<crate::RetryWait>,
-    /// Sync's typed failure recording, interpreted only by sync.
-    pub failure: Option<SecretBytes>,
-    /// Opaque provider session, interpreted only by storage.
+    /// Opaque provider session, interpreted only by storage. It records each
+    /// provider-confirmed part before progress reports it.
     pub session: Option<SecretBytes>,
+}
+impl Clone for FileUpload {
+    fn clone(&self) -> Self {
+        Self {
+            id: self.id,
+            file: self.file.clone(),
+            queued_at: self.queued_at,
+            retry: self.retry,
+            session: self
+                .session
+                .as_ref()
+                .map(|session| SecretBytes::new(session.as_bytes().to_vec())),
+        }
+    }
+}
+impl PartialEq for FileUpload {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+            && self.file == other.file
+            && self.queued_at == other.queued_at
+            && self.retry == other.retry
+            && self.session.as_ref().map(SecretBytes::as_bytes)
+                == other.session.as_ref().map(SecretBytes::as_bytes)
+    }
+}
+
+/// The queue as the app observes it: the pause setting and every queued file
+/// with its recorded session, from one committed state (E7).
+#[derive(Clone, Debug, PartialEq)]
+pub struct UploadQueueState {
+    /// Whether the app paused uploads; persisted across reopening.
+    pub paused: bool,
+    /// Queued files, oldest first.
+    pub uploads: Vec<FileUpload>,
+}
+
+pub(crate) fn state(db: &DatabaseConnection) -> Result<UploadQueueState, DbError> {
+    Ok(UploadQueueState {
+        paused: paused(db)?,
+        uploads: read(db)?,
+    })
+}
+
+pub(crate) fn paused(db: &DatabaseConnection) -> Result<bool, DbError> {
+    db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM _coven_upload_pause)",
+        [],
+        |r| r.get(0),
+    )
+}
+
+pub(crate) fn set_paused(db: &DatabaseConnection, paused: bool) -> Result<(), DbError> {
+    if paused {
+        db.internal_execute(
+            "INSERT INTO _coven_upload_pause(paused) VALUES(1) ON CONFLICT DO NOTHING",
+            [],
+        )?;
+    } else {
+        db.internal_execute("DELETE FROM _coven_upload_pause", [])?;
+    }
+    Ok(())
 }
 
 /// Where a queued upload reads its bytes, fixed by the attaching write and
@@ -91,7 +152,7 @@ pub(crate) fn enqueue(
 
 pub(crate) fn read(db: &DatabaseConnection) -> Result<Vec<FileUpload>, DbError> {
     let rows = db.query(
-        "SELECT u.id,u.reference,u.queued_at,u.failure,u.session,r.failures,r.not_before,r.wait
+        "SELECT u.id,u.reference,u.queued_at,u.session,r.failures,r.not_before,r.wait
          FROM _coven_file_uploads AS u LEFT JOIN _coven_retries AS r ON r.upload=u.id ORDER BY u.id",
         [],
         |r| {
@@ -100,17 +161,16 @@ pub(crate) fn read(db: &DatabaseConnection) -> Result<Vec<FileUpload>, DbError> 
                 r.get::<_, Vec<u8>>(1)?,
                 r.get::<_, Vec<u8>>(2)?,
                 r.get::<_, Option<Vec<u8>>>(3)?,
-                r.get::<_, Option<Vec<u8>>>(4)?,
                 (
-                    r.get::<_, Option<i64>>(5)?,
-                    r.get::<_, Option<Vec<u8>>>(6)?,
-                    r.get::<_, Option<i64>>(7)?,
+                    r.get::<_, Option<i64>>(4)?,
+                    r.get::<_, Option<Vec<u8>>>(5)?,
+                    r.get::<_, Option<i64>>(6)?,
                 ),
             ))
         },
     )?;
     rows.into_iter()
-        .map(|(id, reference, queued, failure, session, retry)| {
+        .map(|(id, reference, queued, session, retry)| {
             let retry = match retry {
                 (None, None, None) => None,
                 (Some(failures), Some(not_before), Some(wait)) => Some(crate::RetryWait {
@@ -127,7 +187,6 @@ pub(crate) fn read(db: &DatabaseConnection) -> Result<Vec<FileUpload>, DbError> 
                 file: FileRef::decode(&reference)?,
                 queued_at: crate::user_file::decode_time(&queued)?,
                 retry,
-                failure: failure.map(SecretBytes::new),
                 session: session.map(SecretBytes::new),
             })
         })

@@ -8,18 +8,27 @@ impl CovenHandle {
     pub async fn file_status(&self, file: &FileRef) -> Result<FileStatus, FileReadError> {
         self.files.file_status(file).await
     }
-    /// Current and subsequent upload queue states.
-    pub fn subscribe_uploads(&self) -> UploadsLiveQuery {
-        self.files.subscribe_uploads()
+    /// Queue, pause setting and provider-confirmed session progress in one
+    /// committed database snapshot, available while disconnected (E7).
+    pub async fn uploads(&self) -> CovenResult<UploadQueue> {
+        UploadQueue::from_state(self.database.upload_queue().await?)
+    }
+    /// The same pre-built query, through the app's live-query mechanism.
+    pub fn subscribe_uploads(&self) -> LiveQuery<UploadQueue> {
+        self.database
+            .subscribe_upload_queue()
+            .process(UploadQueue::from_state)
     }
     /// Attempt waiting uploads now, overriding their ordinary backoff and
     /// app-action waits; a provider cooldown still holds them (§16.5).
+    /// Individual failures stay in pending().
     pub async fn retry_uploads_now(&self) -> Result<DrainOutcome, SyncError> {
         self.files.retry_uploads_now().await
     }
-    /// Pause or resume file transfers at provider part boundaries.
-    pub fn set_uploads_paused(&self, paused: bool) {
-        self.files.set_uploads_paused(paused)
+    /// Pause uploads, or resume them. A paused upload keeps its place,
+    /// including a provider upload session in progress; the setting persists.
+    pub async fn set_uploads_paused(&self, paused: bool) -> CovenResult<()> {
+        Ok(self.files.set_uploads_paused(paused).await?)
     }
     /// Retain uploaded files regardless of the namespace's cache budget.
     pub async fn pin(

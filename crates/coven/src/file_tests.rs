@@ -33,7 +33,7 @@ async fn transfer_limits_bound_requests_and_an_active_batch_keeps_its_limit() {
         handle.stop_sync();
         status.wait_for(|s| matches!(s, SyncStatus::Stopped)).await.unwrap();
         handle.unlock_store_key().await.unwrap();
-        handle.set_uploads_paused(true);
+        handle.set_uploads_paused(true).await.unwrap();
         handle.write_with_files(|batch| {
             for id in 0..4 {
                 batch.put_file("files", id.to_string(), FileSource::Stream(Box::pin(std::io::Cursor::new(vec![id as u8; 2048]))));
@@ -46,7 +46,7 @@ async fn transfer_limits_bound_requests_and_an_active_batch_keeps_its_limit() {
         memory.set_faults(Faults { delay: Duration::from_millis(100), ..Faults::none() }).await;
         memory.reset_request_peak();
         let mut requests = memory.subscribe_requests();
-        handle.set_uploads_paused(false);
+        handle.set_uploads_paused(false).await.unwrap();
         requests.wait_for(|_| memory.peak_requests() == 2).await.unwrap();
         handle.set_transfer_limits(TransferLimits { uploads: NonZeroUsize::MIN, downloads: NonZeroUsize::new(2).unwrap() });
         memory.reset_request_peak();
@@ -437,7 +437,7 @@ async fn uploaded_files_pins_and_read_only_ranges_use_the_composed_owner() {
         .await
         .unwrap();
     handle.unlock_store_key().await.unwrap();
-    handle.set_uploads_paused(true);
+    handle.set_uploads_paused(true).await.unwrap();
     let note = ids.new_id().to_string();
     let thumbnail = ids.new_id().to_string();
     let supplied = thumbnail.clone();
@@ -485,7 +485,7 @@ async fn uploaded_files_pins_and_read_only_ranges_use_the_composed_owner() {
         .await
         .unwrap()
         .is_empty());
-    handle.set_uploads_paused(false);
+    handle.set_uploads_paused(false).await.unwrap();
     handle.retry_uploads_now().await.unwrap();
     let file = handle
         .file_ref("thumbnails", thumbnail.as_str())

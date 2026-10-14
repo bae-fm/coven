@@ -328,7 +328,7 @@ async fn stopping_finishes_a_held_file_upload_and_restarting_resumes_the_queue()
 async fn an_uploads_retry_after_holds_the_next_pass() {
     let network = file_network().await;
     let device = &network.devices[0];
-    device.handle.set_uploads_paused(true);
+    device.handle.set_uploads_paused(true).await.unwrap();
     attach(&device.handle, "photo", vec![3; 2048]).await;
     network.sync(0).await;
     device
@@ -341,18 +341,14 @@ async fn an_uploads_retry_after_holds_the_next_pass() {
             ..Faults::none()
         })
         .await;
-    let mut uploads = device.handle.subscribe_uploads();
-    device.handle.set_uploads_paused(false);
+    let mut pending = device.handle.subscribe_pending();
+    device.handle.set_uploads_paused(false).await.unwrap();
+    // The upload's 429 is its file's record.
     tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            let queue = uploads.next().await.unwrap();
-            if queue.files.iter().any(|file| {
-                matches!(file.last_failure.as_deref(),
-                    Some(UploadFailure::Storage(error)) if error.failure() == StorageFailure::RateLimited)
-            }) {
-                break;
-            }
-        }
+        while !pending.next().await.unwrap().iter().any(|record| {
+            matches!(record.subject, PendingSubject::File { .. })
+                && matches!(record.reason, PendingReason::Storage { failure, .. } if failure == StorageFailure::RateLimited)
+        }) {}
     })
     .await
     .unwrap();

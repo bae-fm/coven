@@ -1,8 +1,9 @@
 use super::*;
+use coven_storage::StorageFailure;
 use std::error::Error;
 
 #[test]
-fn upload_recordings_preserve_storage_failures_from_reads_and_writes() {
+fn upload_failures_keep_native_storage_causes_from_reads_and_writes() {
     for failure in [
         StorageFailure::Network,
         StorageFailure::RateLimited,
@@ -26,11 +27,11 @@ fn upload_recordings_preserve_storage_failures_from_reads_and_writes() {
                 .unwrap()
                 .downcast_ref::<std::io::Error>()
                 .is_some());
-            let recording = serde_json::to_vec(&upload.recording()).unwrap();
-            let reopened = UploadFailure::Recorded(serde_json::from_slice(&recording).unwrap());
-            assert!(
-                matches!(reopened.recording(), RecordedUploadFailure::Storage(actual) if actual == failure)
-            );
+            assert!(matches!(
+                &upload,
+                UploadFailure::Storage(actual) | UploadFailure::File(FileReadError::Storage(actual))
+                    if actual.failure() == failure
+            ));
         }
     }
 }

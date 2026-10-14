@@ -18,10 +18,10 @@ use coven_foundation::{files::StoreDir, id_source::IdSourceRef};
 use coven_storage::Storage;
 use file_cache::EagerAttempts;
 pub use file_cache::{EagerCacheFillStatus, PinProgress, RowsPinnedLiveQuery};
-pub use file_error::{FileReadError, RecordedUploadFailure, UploadFailure, UploadFailures};
+pub use file_error::FileReadError;
 pub use file_read::{FileRangeStream, FileStream};
 pub use file_status::FileStatus;
-pub use file_upload::{DrainOutcome, QueuedUpload, UploadPhase, UploadQueue, UploadsLiveQuery};
+pub use file_upload::{DrainOutcome, QueuedUpload, UploadPhase, UploadQueue};
 use std::{
     collections::BTreeMap,
     sync::{
@@ -67,7 +67,9 @@ struct FilesInner {
     send: Arc<crate::SendGate>,
     waits: Arc<crate::RetryWaits>,
     ids: IdSourceRef,
-    state: Mutex<UploadState>,
+    /// The persisted pause setting as of the last drain or app change; parts
+    /// check it between sends.
+    paused: AtomicBool,
     changed: watch::Sender<u64>,
     wake: Arc<Notify>,
     drain: tokio::sync::Mutex<()>,
@@ -79,11 +81,6 @@ struct FilesInner {
     eager: watch::Sender<crate::EagerCacheFillStatus>,
     eager_attempts: tokio::sync::Mutex<EagerAttempts>,
     cancel_eager: watch::Sender<u64>,
-}
-struct UploadState {
-    paused: bool,
-    active: BTreeMap<i64, UploadPhase>,
-    failures: BTreeMap<i64, Arc<UploadFailure>>,
 }
 struct FileWorker {
     stop: watch::Sender<bool>,
@@ -118,11 +115,7 @@ impl Files {
             send,
             waits,
             ids,
-            state: Mutex::new(UploadState {
-                paused: false,
-                active: BTreeMap::new(),
-                failures: BTreeMap::new(),
-            }),
+            paused: AtomicBool::new(false),
             changed,
             wake: Arc::new(Notify::new()),
             drain: tokio::sync::Mutex::new(()),
@@ -219,17 +212,16 @@ impl Files {
     pub async fn retry_uploads_now(&self) -> Result<DrainOutcome, SyncError> {
         self.inner.drain_uploads(true).await
     }
-    /// Pause between confirmed parts, preserving the current provider session.
-    pub fn set_uploads_paused(&self, paused: bool) {
-        self.inner
-            .state
-            .lock()
-            .expect("upload state poisoned")
-            .paused = paused;
-        self.inner.notify();
+    /// Persist the pause setting; a running upload stops between confirmed
+    /// parts, preserving its provider session (E7).
+    pub async fn set_uploads_paused(&self, paused: bool) -> Result<(), DbError> {
+        self.inner.check_open()?;
+        self.inner.database.set_uploads_paused(paused).await?;
+        self.inner.paused.store(paused, Ordering::Release);
         if !paused {
             self.inner.wake.notify_one();
         }
+        Ok(())
     }
 
     /// SP step 7: wake the upload worker, and fill the eager cache with new
@@ -291,15 +283,7 @@ impl FilesInner {
         }
     }
     pub(crate) fn paused(&self) -> bool {
-        self.state.lock().expect("upload state poisoned").paused
-    }
-    pub(crate) fn phase(&self, id: i64, phase: UploadPhase) {
-        self.state
-            .lock()
-            .expect("upload state poisoned")
-            .active
-            .insert(id, phase);
-        self.notify();
+        self.paused.load(Ordering::Acquire)
     }
     pub(crate) async fn trim(&self, namespace: &str) {
         if let Err(error) = self.database.trim_cache(namespace).await {

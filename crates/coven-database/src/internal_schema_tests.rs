@@ -151,6 +151,7 @@ async fn only_the_spec_tables_are_created() {
                 "_coven_store_log",
                 "_coven_store_log_uploads",
                 "_coven_table_origins",
+                "_coven_upload_pause",
                 "_coven_uploads",
                 "_coven_user_files",
                 "_coven_write_headers",
@@ -317,6 +318,7 @@ mod fixture {
      INSERT INTO _coven_retries(scope,failures,not_before,wait)
        VALUES('join',1,zeroblob(13),1000),('provider',0,zeroblob(13),600000);
      INSERT INTO _coven_device_files SELECT device,substr(key,17,16),'path_' || i FROM fixture;
+     INSERT INTO _coven_upload_pause VALUES(1);
      INSERT INTO _coven_file_chunks SELECT device,substr(key,17,16),0,key FROM fixture;
      INSERT INTO _coven_cache(namespace,file_id,chunk,path,size,last_read,pinned,checked_hash)
        SELECT audience,'file_' || i,CASE WHEN (i/64)%4=0 THEN -2 ELSE 0 END,'cache_' || i,
@@ -351,6 +353,7 @@ mod fixture {
                 | "_coven_positions_post"
                 | "_coven_device_reset"
                 | "_coven_catch_up"
+                | "_coven_upload_pause"
                 | "_coven_finality" => {
                     assert_eq!(count, 1)
                 }
@@ -442,8 +445,10 @@ mod scans {
         Some("unfiltered EXISTS stops after the first queue row"),
     ("download.rs", "SELECT (SELECT publication FROM _coven_snapshot_schema WHERE EXISTS(SELECT 1 FROM _coven_members))", "_coven_snapshot_schema" | "_coven_members") =>
         Some("the schema row is singular; unfiltered membership EXISTS stops after its first row"),
-    ("file_queue.rs", "SELECT u.id,u.reference,u.queued_at,u.failure,u.session,r.failures,r.not_before,r.wait FROM _coven_file_uploads AS u LEFT JOIN _coven_retries AS r ON r.upload=u.id ORDER BY u.id", "u") =>
+    ("file_queue.rs", "SELECT u.id,u.reference,u.queued_at,u.session,r.failures,r.not_before,r.wait FROM _coven_file_uploads AS u LEFT JOIN _coven_retries AS r ON r.upload=u.id ORDER BY u.id", "u") =>
         Some("the file queue reader returns every queued attachment"),
+    ("file_queue.rs", "SELECT EXISTS(SELECT 1 FROM _coven_upload_pause)", "_coven_upload_pause") =>
+        Some("the pause table holds at most one row"),
     ("retry.rs", "SELECT scope,operation,upload,download,failures,not_before,wait FROM _coven_retries", "_coven_retries") =>
         Some("reopening arms every persisted retry wait"),
     ("file_removals.rs", "SELECT path,area FROM _coven_file_removals ORDER BY area,path", "_coven_file_removals") =>

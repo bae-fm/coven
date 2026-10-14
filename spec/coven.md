@@ -5143,6 +5143,8 @@ Carol's tablet:
       operating-system or provider error from text.
     - A stored file whose row changed is considered for storage deletion
       under the same retained-reference checks; no marking write is queued;
+  - `_coven_upload_pause`: a row while the app has paused uploads, read
+    with the queue by `uploads()`;
   - `_coven_cache`: each cached file or chunk, its namespace, verified range,
     size, when it was last read, and whether it is pinned. Cache reservations
     retain the fixed references requested for eager fill and cancellation,

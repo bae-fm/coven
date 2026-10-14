@@ -108,7 +108,8 @@ async fn an_operation_wait_ends_with_its_condition() {
 }
 
 #[tokio::test]
-async fn an_upload_failure_records_its_wait_atomically_and_completion_removes_it() {
+async fn an_upload_failure_records_its_wait_and_pending_record_and_completion_removes_both() {
+    use crate::pending::tests::{missing, Record, Subject};
     let store = TestStore::new();
     let db = store
         .schema(tables(Provenance::AppProvided), SCHEMA)
@@ -117,25 +118,70 @@ async fn an_upload_failure_records_its_wait_atomically_and_completion_removes_it
     let owner = FileDatabase::new(db.clone());
     attach(&db, b"bytes".to_vec(), true).await.unwrap();
     let id = owner.uploads().await.unwrap()[0].id;
-    assert_eq!(owner.uploads().await.unwrap()[0].retry, None);
+    let work = || owner.upload_work::<Record>(|_| Subject::Number(7));
+    assert_eq!(work().await.unwrap()[0].1, None);
     owner
-        .fail_upload(id, SecretBytes::new(b"network".to_vec()), Some(wait(1, 1)))
+        .fail_upload(id, |device| missing(7, device), Some(wait(1, 1)))
         .await
         .unwrap();
     assert_eq!(owner.uploads().await.unwrap()[0].retry, Some(wait(1, 1)));
+    // The failure is this device's pending record about the file, read with
+    // its queue entry.
+    let recorded = work().await.unwrap().remove(0).1.unwrap();
+    assert_eq!(db.pending::<Record>().await.unwrap(), vec![recorded]);
     // A failure that waits for the app keeps no automatic deadline.
     owner
-        .fail_upload(id, SecretBytes::new(b"quota".to_vec()), None)
+        .fail_upload(id, |device| missing(7, device), None)
         .await
         .unwrap();
-    let queued = owner.uploads().await.unwrap();
-    assert_eq!(queued[0].retry, None);
-    assert_eq!(queued[0].failure.as_ref().unwrap().as_bytes(), b"quota");
+    assert_eq!(owner.uploads().await.unwrap()[0].retry, None);
     owner
-        .fail_upload(id, SecretBytes::new(b"network".to_vec()), Some(wait(2, 2)))
+        .fail_upload(id, |device| missing(7, device), Some(wait(2, 2)))
         .await
         .unwrap();
-    owner.complete_upload(id).await.unwrap();
+    // One transaction retires the queue row, its wait and its record.
+    owner.complete_upload(id, Subject::Number(7)).await.unwrap();
     assert_eq!(local_count(&db, "_coven_retries"), 0);
+    assert!(owner.uploads().await.unwrap().is_empty());
+    assert!(db.pending::<Record>().await.unwrap().is_empty());
+    db.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn the_pause_setting_and_queue_survive_reopening_in_one_query() {
+    let store = TestStore::new();
+    let db = store
+        .schema(tables(Provenance::AppProvided), SCHEMA)
+        .await
+        .unwrap();
+    attach(&db, b"bytes".to_vec(), true).await.unwrap();
+    let owner = FileDatabase::new(db.clone());
+    let mut queue = db.subscribe_upload_queue();
+    let first = queue.next().await.unwrap();
+    assert!(!first.paused);
+    assert_eq!(first.uploads.len(), 1);
+    owner.set_uploads_paused(true).await.unwrap();
+    assert!(queue.next().await.unwrap().paused);
+    let session = SecretBytes::new(b"session".to_vec());
+    owner
+        .record_session(first.uploads[0].id, session)
+        .await
+        .unwrap();
+    let recorded = queue.next().await.unwrap();
+    assert_eq!(
+        recorded.uploads[0].session.as_ref().unwrap().as_bytes(),
+        b"session"
+    );
+    drop(queue);
+    db.close().await.unwrap();
+    let db = store
+        .schema(tables(Provenance::AppProvided), SCHEMA)
+        .await
+        .unwrap();
+    assert_eq!(db.upload_queue().await.unwrap(), recorded);
+    let owner = FileDatabase::new(db.clone());
+    assert!(owner.uploads_paused().await.unwrap());
+    owner.set_uploads_paused(false).await.unwrap();
+    assert!(!db.upload_queue().await.unwrap().paused);
     db.close().await.unwrap();
 }

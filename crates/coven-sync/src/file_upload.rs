@@ -1,141 +1,100 @@
 //! The persistent upload queue and its bounded-memory transfer state machine.
 
-use crate::{
-    files::file_error::*,
-    files::{Files, FilesInner},
-    SyncError,
-};
+use crate::{files::file_error::*, files::FilesInner, PendingRecord, PendingSubject, SyncError};
 use coven_crypto::{FileKey, FILE_CHUNK_TAG_LEN};
-use coven_database::{DbError, FileRef, FileUpload, LocalFileStream, RetrySubject};
+use coven_database::{
+    CovenResult, DbError, FileRef, FileUpload, LocalFileStream, RetrySubject, UploadQueueState,
+};
 use coven_format::{
     chunks::CHUNK_SIZE,
     file::{FileHeader, FILE_HEADER_LEN},
 };
 use coven_storage::{ObjectPath, UploadSession};
 use futures_util::StreamExt;
-use std::{sync::Arc, time::SystemTime};
+use std::{sync::atomic::Ordering, time::SystemTime};
 
-/// Observable upload queue state (E7).
+/// Observable upload queue state (E7), projected from one committed snapshot.
+#[derive(Clone, Debug, PartialEq)]
 pub struct UploadQueue {
-    /// Whether transfer work is paused.
+    /// Whether transfer work is paused; persisted across reopening.
     pub paused: bool,
     /// Waiting files, oldest first.
     pub files: Vec<QueuedUpload>,
 }
-/// One waiting upload and its latest progress.
+/// One waiting upload and its committed progress.
+#[derive(Clone, Debug, PartialEq)]
 pub struct QueuedUpload {
     /// Captured row version.
     pub file: FileRef,
-    /// Current transfer phase.
+    /// Progress the provider confirmed and this device persisted.
     pub phase: UploadPhase,
-    /// Latest failure, retaining the native cause while this process lives.
-    pub last_failure: Option<Arc<UploadFailure>>,
     /// Enqueue time.
     pub queued_at: SystemTime,
 }
-/// Progress is advanced only over prepared or provider-confirmed bytes.
-#[derive(Clone, Debug)]
+/// Progress is advanced only over provider-confirmed, persisted bytes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UploadPhase {
-    /// Not started, or waiting for its retry delay.
+    /// Not started, a one-request upload, or waiting for its retry delay.
     Waiting,
-    /// Checking the source before sending any file bytes.
-    Preparing {
-        /// Plaintext bytes checked.
-        bytes_read: u64,
-        /// Whole plaintext size.
-        bytes_total: u64,
-    },
-    /// Verifying chunks, encrypting them and sending the matching ciphertext.
+    /// Encrypted bytes confirmed by the provider and persisted in the
+    /// resumable session. Sending bytes alone does not advance this value.
     Uploading {
         /// Provider-confirmed ciphertext bytes.
-        bytes_sent: u64,
+        bytes_confirmed: u64,
         /// Whole ciphertext size.
         bytes_total: u64,
     },
 }
-/// Result of one explicit upload drain.
+/// Result of one explicit upload drain. Individual failures stay in
+/// `pending()`.
+#[derive(Debug, PartialEq, Eq)]
 pub enum DrainOutcome {
-    /// Every eligible item was attempted.
+    /// Every eligible item was attempted; this many were stored and retired.
     Drained {
         /// Files storage confirmed, each retired from the queue.
         uploaded: usize,
-        /// Failed attempts and their causes.
-        failures: UploadFailures,
     },
     /// No waiting upload exists.
     QueueEmpty,
-    /// Every waiting item waits for its retry delay, the app, or a provider
-    /// cooldown.
-    AllInBackoff,
     /// Uploads were paused.
     Paused,
 }
-/// Live upload results, ending when the store closes.
-pub struct UploadsLiveQuery {
-    files: Files,
-    changes: tokio::sync::watch::Receiver<u64>,
-    first: bool,
-    commits: coven_database::DatabaseChanges,
-}
-impl UploadsLiveQuery {
-    /// Current queue immediately, then each change.
-    pub async fn next(&mut self) -> Result<UploadQueue, DbError> {
-        if !self.first {
-            tokio::select! {
-                result=self.changes.changed()=>result.map_err(|_|DbError::StoreClosed)?,
-                result=self.commits.next()=>result?,
-            }
-        }
-        self.first = false;
-        self.changes.borrow_and_update();
-        self.files.inner.check_open()?;
-        let uploads = self.files.inner.database.uploads().await?;
-        let state = self
-            .files
-            .inner
-            .state
-            .lock()
-            .expect("upload state poisoned");
-        let mut files = Vec::new();
-        for upload in uploads {
-            let last_failure = match state.failures.get(&upload.id) {
-                Some(error) => Some(error.clone()),
-                None => upload
-                    .failure
-                    .as_ref()
-                    .map(|bytes| {
-                        serde_json::from_slice(bytes.as_bytes())
-                            .map(|value| Arc::new(UploadFailure::Recorded(value)))
-                            .map_err(|_| DbError::DamagedDatabase)
-                    })
-                    .transpose()?,
-            };
-            let phase = match state.active.get(&upload.id) {
-                Some(phase) => phase.clone(),
-                None => UploadPhase::Waiting,
-            };
-            files.push(QueuedUpload {
-                file: upload.file,
-                phase,
-                last_failure,
-                queued_at: upload.queued_at,
-            });
-        }
-        Ok(UploadQueue {
+impl UploadQueue {
+    /// Project the committed queue: a recorded provider session's confirmed
+    /// bytes are progress, and a file without one is waiting (E7).
+    pub fn from_state(state: UploadQueueState) -> CovenResult<Self> {
+        let files = state
+            .uploads
+            .into_iter()
+            .map(|upload| {
+                let phase = match &upload.session {
+                    None => UploadPhase::Waiting,
+                    Some(bytes) => {
+                        let session = UploadSession::decode(bytes.as_bytes())
+                            .map_err(|_| DbError::DamagedDatabase)?;
+                        UploadPhase::Uploading {
+                            bytes_confirmed: session.confirmed_bytes(),
+                            bytes_total: session.total_bytes(),
+                        }
+                    }
+                };
+                Ok(QueuedUpload {
+                    file: upload.file,
+                    phase,
+                    queued_at: upload.queued_at,
+                })
+            })
+            .collect::<CovenResult<_>>()?;
+        Ok(Self {
             paused: state.paused,
             files,
         })
     }
 }
-impl Files {
-    /// Observe queue and transfer changes without polling.
-    pub fn subscribe_uploads(&self) -> UploadsLiveQuery {
-        UploadsLiveQuery {
-            files: self.clone(),
-            changes: self.inner.changed.subscribe(),
-            first: true,
-            commits: self.inner.database.changes(),
-        }
+fn file_subject(file: &FileRef) -> PendingSubject {
+    PendingSubject::File {
+        device: file.uploader(),
+        file: file.id(),
     }
 }
 impl FilesInner {
@@ -152,10 +111,16 @@ impl FilesInner {
         {
             return Err(SyncError::NoStorage);
         }
-        if self.paused() {
+        // The persisted setting governs; parts check this copy between sends.
+        let paused = self.database.uploads_paused().await?;
+        self.paused.store(paused, Ordering::Release);
+        if paused {
             return Ok(DrainOutcome::Paused);
         }
-        let waiting = self.database.uploads().await?;
+        let waiting = self
+            .database
+            .upload_work::<PendingRecord>(file_subject)
+            .await?;
         if waiting.is_empty() {
             return Ok(DrainOutcome::QueueEmpty);
         }
@@ -169,17 +134,13 @@ impl FilesInner {
                     .with_source(coven_storage::CoolingDown { remaining })
                     .into());
             }
-            return Ok(DrainOutcome::AllInBackoff);
+            return Ok(DrainOutcome::Drained { uploaded: 0 });
         }
-        let mut eligible = Vec::new();
-        for item in waiting {
-            if force || self.retry_due(&item)? {
-                eligible.push(item);
-            }
-        }
-        if eligible.is_empty() {
-            return Ok(DrainOutcome::AllInBackoff);
-        }
+        let eligible: Vec<_> = waiting
+            .into_iter()
+            .filter(|(item, record)| force || self.retry_due(item, record.as_ref()))
+            .map(|(item, _)| item)
+            .collect();
         let limit = self
             .limits
             .read()
@@ -190,43 +151,34 @@ impl FilesInner {
             .map(|item| self.attempt_upload(item))
             .buffer_unordered(limit);
         let mut uploaded = 0;
-        let mut failures = Vec::new();
         while let Some(attempt) = attempts.next().await {
-            match attempt? {
-                AttemptOutcome::Stored => uploaded += 1,
-                AttemptOutcome::Unchanged => (),
-                AttemptOutcome::Failed(file, error) => failures.push((file, error)),
+            if attempt? {
+                uploaded += 1;
             }
         }
-        Ok(DrainOutcome::Drained { uploaded, failures })
+        Ok(DrainOutcome::Drained { uploaded })
     }
 
-    async fn attempt_upload(&self, item: FileUpload) -> Result<AttemptOutcome, SyncError> {
+    /// Whether this attempt stored the file. A failure becomes the file's
+    /// pending record; its native cause stays in this process's log.
+    async fn attempt_upload(&self, item: FileUpload) -> Result<bool, SyncError> {
         if self.paused() {
-            return Ok(AttemptOutcome::Unchanged);
+            return Ok(false);
         }
-        let _activity = UploadActivity {
-            owner: self,
-            id: item.id,
-        };
         match self.upload(&item).await {
-            Ok(true) => {
-                self.waits.forget(RetrySubject::Upload(item.id));
-                Ok(AttemptOutcome::Stored)
+            Ok(stored) => {
+                if stored {
+                    self.waits.forget(RetrySubject::Upload(item.id));
+                }
+                Ok(stored)
             }
-            Ok(false) => Ok(AttemptOutcome::Unchanged),
             Err(UploadFailure::File(FileReadError::Database(
                 error @ DbError::FileCleanup { write: Ok(()), .. },
             ))) => Err(error.into()),
             Err(error) => {
-                self.record_failure(&item, error.recording()).await?;
-                let error = Arc::new(error);
-                self.state
-                    .lock()
-                    .expect("upload state poisoned")
-                    .failures
-                    .insert(item.id, error.clone());
-                Ok(AttemptOutcome::Failed(item.file, error))
+                tracing::debug!(?error, file = %item.file.id(), "file upload attempt failed");
+                self.record_failure(&item, &error).await?;
+                Ok(false)
             }
         }
     }
@@ -243,13 +195,6 @@ impl FilesInner {
             .expect("storage lock poisoned")
             .clone()
             .ok_or(FileReadError::NoStorage)?;
-        self.phase(
-            item.id,
-            UploadPhase::Preparing {
-                bytes_read: 0,
-                bytes_total: item.file.plaintext_size(),
-            },
-        );
         // The queue fixed this source at attachment; the row may have been
         // retargeted, moved or deleted since without affecting it (§16.5).
         let source = self
@@ -262,13 +207,6 @@ impl FilesInner {
             .map_err(|_| FileReadError::Integrity {
                 id: item.file.id().to_string(),
             })?;
-        self.phase(
-            item.id,
-            UploadPhase::Preparing {
-                bytes_read: item.file.plaintext_size(),
-                bytes_total: item.file.plaintext_size(),
-            },
-        );
         let mut transfer = FileTransfer {
             owner: self,
             item,
@@ -280,13 +218,6 @@ impl FilesInner {
         // A single request is bounded even for providers accepting GiB bodies.
         if item.session.is_none() && total <= storage.single_request_limit().min(1024 * 1024) {
             let bytes = transfer.read_encrypted(0, total as usize).await?;
-            self.phase(
-                item.id,
-                UploadPhase::Uploading {
-                    bytes_sent: 0,
-                    bytes_total: total,
-                },
-            );
             match storage.create(&path, &bytes).await {
                 Ok(()) => {}
                 Err(error)
@@ -322,14 +253,9 @@ impl FilesInner {
             }
         }
         self.database
-            .complete_upload(item.id)
+            .complete_upload(item.id, file_subject(&item.file))
             .await
             .map_err(FileReadError::from)?;
-        self.state
-            .lock()
-            .expect("upload state poisoned")
-            .failures
-            .remove(&item.id);
         Ok(true)
     }
     /// A file path is this device's own: different occupant bytes mean another
@@ -356,26 +282,6 @@ impl FilesInner {
     }
 }
 
-enum AttemptOutcome {
-    Stored,
-    Unchanged,
-    Failed(FileRef, Arc<UploadFailure>),
-}
-struct UploadActivity<'a> {
-    owner: &'a FilesInner,
-    id: i64,
-}
-impl Drop for UploadActivity<'_> {
-    fn drop(&mut self) {
-        self.owner
-            .state
-            .lock()
-            .expect("upload state poisoned")
-            .active
-            .remove(&self.id);
-        self.owner.notify();
-    }
-}
 struct FileTransfer<'a> {
     owner: &'a FilesInner,
     item: &'a FileUpload,
@@ -433,13 +339,6 @@ impl FileTransfer<'_> {
 impl crate::recorded_upload::UploadSource for FileTransfer<'_> {
     type Error = UploadFailure;
     async fn read(&mut self, offset: u64, length: usize) -> Result<Vec<u8>, UploadFailure> {
-        self.owner.phase(
-            self.item.id,
-            UploadPhase::Uploading {
-                bytes_sent: offset,
-                bytes_total: self.total,
-            },
-        );
         self.read_encrypted(offset, length).await
     }
     async fn save(&mut self, session: UploadSession) -> Result<(), UploadFailure> {

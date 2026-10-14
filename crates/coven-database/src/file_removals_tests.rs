@@ -214,7 +214,7 @@ fn crashing_file_writer() {
 async fn complete(db: &Database) -> Result<(), DbError> {
     let owner = FileDatabase::new(db.clone());
     let id = owner.uploads().await?[0].id;
-    owner.complete_upload(id).await
+    owner.complete_upload(id, ()).await
 }
 
 struct CrashingReader(bool);

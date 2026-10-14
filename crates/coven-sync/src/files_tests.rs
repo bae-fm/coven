@@ -80,7 +80,7 @@ impl Fixture {
             ids.clone(),
             crate::TransferLimits::default(),
         );
-        files.set_uploads_paused(true);
+        files.set_uploads_paused(true).await.unwrap();
         Self {
             root,
             directory,
@@ -120,7 +120,7 @@ impl Fixture {
             self.ids.clone(),
             crate::TransferLimits::default(),
         );
-        self.files.set_uploads_paused(true);
+        self.files.set_uploads_paused(true).await.unwrap();
     }
     async fn attach(&self, table: &str, id: &str, bytes: Vec<u8>) -> FileRef {
         let namespace = table.to_owned();
@@ -165,10 +165,10 @@ impl Fixture {
         self.database.file_ref("files", id).await.unwrap()
     }
     async fn drain(&self) {
-        self.files.inner.state.lock().unwrap().paused = false;
-        let result = self.files.retry_uploads_now().await.unwrap();
-        if let DrainOutcome::Drained { failures, .. } = result {
-            assert!(failures.is_empty(), "{failures:?}");
+        self.files.set_uploads_paused(false).await.unwrap();
+        self.files.retry_uploads_now().await.unwrap();
+        for upload in self.queue().await.files {
+            assert_eq!(self.upload_reason(&upload.file).await, None);
         }
     }
     async fn uploaded(&self, id: &str, bytes: Vec<u8>) -> FileRef {
@@ -189,6 +189,29 @@ impl Fixture {
             .unwrap()
             .iter()
             .any(|upload| upload.file == *file)
+    }
+    /// The committed queue as the app reads it (E7).
+    async fn queue(&self) -> UploadQueue {
+        UploadQueue::from_state(self.database.upload_queue().await.unwrap()).unwrap()
+    }
+    fn subscribe_queue(&self) -> coven_database::LiveQuery<UploadQueue> {
+        self.database
+            .subscribe_upload_queue()
+            .process(UploadQueue::from_state)
+    }
+    /// This device's pending reason about one of its queued files.
+    async fn upload_reason(&self, file: &FileRef) -> Option<crate::PendingReason> {
+        let subject = crate::PendingSubject::File {
+            device: file.uploader(),
+            file: file.id(),
+        };
+        self.database
+            .pending::<crate::PendingRecord>()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|record| record.subject == subject && record.reported_by == file.uploader())
+            .map(|record| record.reason)
     }
     fn path(&self, file: &FileRef) -> coven_storage::ObjectPath {
         coven_storage::ObjectPath::file(self.directory.id(), file.uploader(), file.id())
@@ -660,7 +683,7 @@ async fn waiting_files_name_the_attaching_device_until_its_automatic_upload() {
             .set_storage(None, std::future::ready(Ok(())))
             .await
             .unwrap();
-        a.files.set_uploads_paused(false);
+        a.files.set_uploads_paused(false).await.unwrap();
         let local = match provenance {
             Provenance::AppProvided => a.attach("files", "waiting", b"content".to_vec()).await,
             Provenance::UserProvided => a.original("waiting", b"content").await,
@@ -671,7 +694,7 @@ async fn waiting_files_name_the_attaching_device_until_its_automatic_upload() {
         assert_eq!(queued.len(), 1);
         assert_eq!(queued[0].file, local);
         assert!(queued[0].retry.is_none());
-        assert!(queued[0].failure.is_none());
+        assert_eq!(a.upload_reason(&local).await, None);
         let attaching = a.database.test_queued_writes().await.unwrap();
         for write in attaching.clone() {
             b.database
@@ -685,7 +708,7 @@ async fn waiting_files_name_the_attaching_device_until_its_automatic_upload() {
         assert!(matches!(b.files.read_file(&remote).await,
             Err(FileReadError::Uploading { device: owner, .. }) if owner == device));
         assert!(b.files.inner.database.uploads().await.unwrap().is_empty());
-        let mut uploads = a.files.subscribe_uploads();
+        let mut uploads = a.subscribe_queue();
         a.files
             .set_storage(Some(a.storage.clone()), std::future::ready(Ok(())))
             .await

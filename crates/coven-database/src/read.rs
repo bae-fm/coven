@@ -76,6 +76,10 @@ impl<'connection> SqlReadContext<'connection> {
         Ok(crate::pending::read(self.database)?)
     }
 
+    pub(crate) fn upload_queue(&self) -> CovenResult<crate::UploadQueueState> {
+        Ok(crate::file_queue::state(self.database)?)
+    }
+
     pub(crate) fn device_reset(&self) -> CovenResult<Option<coven_foundation::files::DeviceReset>> {
         Ok(crate::device_reset::read(self.database)?)
     }

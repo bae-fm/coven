@@ -128,7 +128,7 @@ async fn one_files_failure_leaves_its_record_while_the_fill_continues() {
     let other = a.uploaded("c-other-content", vec![83; 30]).await;
     let good = a.uploaded("d-good", vec![84; CHUNK * 2]).await;
     // Attached after the drains with uploads paused, so it is still waiting.
-    a.files.set_uploads_paused(true);
+    a.files.set_uploads_paused(true).await.unwrap();
     let waiting = a.attach("files", "a-waiting", vec![81; 40]).await;
     a.storage
         .corrupt_byte(&a.path(&damaged), 11 + 3)
