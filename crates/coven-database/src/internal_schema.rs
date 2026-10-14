@@ -123,6 +123,39 @@ macro_rules! coven_tables {
                 FOREIGN KEY(audience,timestamp) REFERENCES _coven_write_inputs(audience,timestamp) ON DELETE CASCADE
             ) STRICT, WITHOUT ROWID;
         ");
+        $visit!(_coven_local_effects, "
+            CREATE TABLE _coven_local_effects (
+                id INTEGER PRIMARY KEY,
+                table_name TEXT NOT NULL,
+                key BLOB NOT NULL,
+                audience TEXT NOT NULL
+            ) STRICT;
+            CREATE INDEX _coven_local_effects_parent ON _coven_local_effects(table_name,key,audience);
+        ");
+        $visit!(_coven_local_effect_causes, "
+            CREATE TABLE _coven_local_effect_causes (
+                effect INTEGER NOT NULL REFERENCES _coven_local_effects(id) ON DELETE CASCADE,
+                entry_device BLOB NOT NULL,
+                entry_number BLOB NOT NULL,
+                PRIMARY KEY(effect,entry_device,entry_number),
+                FOREIGN KEY(entry_device,entry_number) REFERENCES _coven_store_log(device,number)
+            ) STRICT, WITHOUT ROWID;
+        ");
+        $visit!(_coven_local_effect_rows, "
+            CREATE TABLE _coven_local_effect_rows (
+                effect INTEGER NOT NULL REFERENCES _coven_local_effects(id) ON DELETE CASCADE,
+                ordinal INTEGER NOT NULL CHECK(ordinal>=0),
+                table_name TEXT NOT NULL,
+                kind TEXT NOT NULL CHECK(kind IN ('row','null')),
+                rowid INTEGER,
+                columns BLOB NOT NULL,
+                wait_table TEXT,
+                wait_values BLOB,
+                CHECK((wait_table IS NULL) = (wait_values IS NULL)),
+                PRIMARY KEY(effect,ordinal)
+            ) STRICT, WITHOUT ROWID;
+            CREATE INDEX _coven_local_effect_rows_wait ON _coven_local_effect_rows(wait_table) WHERE wait_table IS NOT NULL;
+        ");
         $visit!(_coven_store_log, "
             CREATE TABLE _coven_store_log (
                 device BLOB NOT NULL CHECK(length(device)=8),

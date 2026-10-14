@@ -511,7 +511,12 @@ individually; a write that arrived only inside a loaded snapshot cannot be
 rebuilt locally, so Rust reloads instead (an SQL test). A second comparison
 runs `CurrentData.observe` and `circleLossCause` on an entry-only circle
 deletion and its reversal, with the row's write arriving before or after the
-deletion. SQL tests cover the rest: a failed rebuild leaves the previous replay
+deletion; a local child the app made while it saw the row is compared with
+`EntryFate.View.children`, so it returns with the row instead of staying
+cascaded. SQL tests cover the actual SQLite actions: cascade and set-null
+chains through local tables, a child waiting for its second hidden parent,
+explicit local edits made while hidden, repeated replay and release once the
+removal is final. They also cover the rest: a failed rebuild leaves the previous replay
 and data committed, readers never observe a replay without its data, an
 unavailable input keeps the old rows and refuses writes, and inputs and reset
 suppressions are released only once every boundary entry of the audience is

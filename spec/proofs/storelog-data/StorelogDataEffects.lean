@@ -97,9 +97,13 @@ def run (j : Json) : Except String Json := do
   pure (toJson result)
 
 /-- The current-data model's deletion/reversal history, with data arriving
-before or after the deletion. Only the merge input changes with write receipt. -/
+before or after the deletion. Only the merge input changes with write receipt.
+A local child exists as a retained resource only when the app saw its parent;
+its presence is `EntryFate.View.children`: the retained children whose parent
+the current view shows, never an irreversible cascade. -/
 def circles (j : Json) : Except String Json := do
   let states ← j.getObjValAs? (Array Json) "states"
+  let child ← j.getObjValAs? Bool "children"
   toJson <$> states.mapM fun state => do
     let arrivals ← state.getObjValAs? (List Nat) "arrivals"
     let received ← state.getObjValAs? Bool "write"
@@ -113,8 +117,10 @@ def circles (j : Json) : Except String Json := do
       | some (.deletedCircle entry) => some entry
       | _ => none
       else none
+    let children := (if child then [row] else []).filter data.view.shown
     pure (Json.mkObj [("shown", toJson (data.view.shown row)),
       ("generation", toJson (data.merged.gen row)),
-      ("setter", toJson ((data.merged.cell row ()).isSome)), ("cause", toJson cause)])
+      ("setter", toJson ((data.merged.cell row ()).isSome)), ("cause", toJson cause),
+      ("child", toJson !children.isEmpty)])
 
 end StorelogDataEffects

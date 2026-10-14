@@ -59,6 +59,10 @@ pub(crate) fn load<R: Read, W: Read>(
             crate::entry_inputs::original(database, &schema.schema, audience)?;
         }
         let applied = crate::download::positions(database)?;
+        let mut causes = BTreeSet::new();
+        for audience in &selected {
+            causes.extend(crate::entry_inputs::applied(database, audience)?);
+        }
         if let Some(boundaries) = boundaries {
             let resets = crate::BoundaryCoverage::replace(database, boundaries)?;
             crate::pending::suppress(database, &resets)?;
@@ -127,10 +131,19 @@ pub(crate) fn load<R: Read, W: Read>(
                 }
             }
         }
+        // Rows the loaded data replaces depend on the boundaries applied before
+        // and on those selecting it now; their local children are kept (§8.4).
+        causes.extend(
+            crate::Boundary::load_selected(database)?
+                .iter()
+                .filter(|boundary| selected.contains(&boundary.snapshot().audience))
+                .map(crate::Boundary::entry),
+        );
         let current = MergeStore::from_snapshot(database, &schema.schema, &selected);
         let mut affected = crate::write_apply::WriteApply::new(
             database, schema, &current, &visible, &visible, &deleted,
         )
+        .caused_by(causes)
         .replace(&old, touched)?;
         crate::snapshot_state::drop_tables(database)?;
         affected.extend(crate::snapshot_writes::apply(

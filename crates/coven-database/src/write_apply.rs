@@ -17,6 +17,8 @@ pub(crate) struct WriteApply<'a> {
     before: &'a AppView<'a>,
     visible: &'a AppView<'a>,
     deleted: &'a BTreeMap<CircleId, crate::EntryId>,
+    /// Entries whose replacement of this data the transaction installs (§9).
+    causes: BTreeSet<crate::EntryId>,
 }
 
 impl<'a> WriteApply<'a> {
@@ -35,7 +37,15 @@ impl<'a> WriteApply<'a> {
             before,
             visible,
             deleted,
+            causes: BTreeSet::new(),
         }
+    }
+
+    /// Rows this application takes out depend on these entries as well as on
+    /// their own removal rules; local children they change are kept (§8.4).
+    pub(crate) fn caused_by(mut self, causes: BTreeSet<crate::EntryId>) -> Self {
+        self.causes = causes;
+        self
     }
 
     pub(crate) fn apply(
@@ -138,7 +148,14 @@ impl<'a> WriteApply<'a> {
         self.store.retain_materialization_values(&removal.region)?;
         persist()?;
         self.database.batch("PRAGMA defer_foreign_keys=ON")?;
-        crate::removal::materialize(self.database, self.schema, self.visible, new, &removal)?;
+        crate::removal::materialize(
+            self.database,
+            self.schema,
+            self.visible,
+            new,
+            &removal,
+            &self.causes,
+        )?;
         crate::fingerprint::update(self.database, new, &fingerprint)?;
         Ok(removal
             .region

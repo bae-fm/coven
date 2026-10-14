@@ -32,6 +32,7 @@ mod key_scope;
 mod key_upload;
 pub use key_upload::{KeyUpload, KeyUploadBatch};
 mod live_query;
+mod local_effects;
 mod log_refusal;
 mod loss_record;
 mod lost;

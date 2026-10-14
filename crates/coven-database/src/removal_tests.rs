@@ -924,7 +924,7 @@ pub(crate) fn materialize_deleted(
                     panic!("database removal view: {error}")
                 }
             };
-            crate::removal::materialize(db, schema, &app, &view, &result)
+            crate::removal::materialize(db, schema, &app, &view, &result, &Default::default())
         })
     })
 }

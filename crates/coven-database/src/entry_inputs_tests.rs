@@ -239,7 +239,8 @@ async fn data_differential_entry_effects_circles() {
     for late in [false, true] {
         let store = TestStore::new();
         let db = store.schema(vec![crate::SyncedTable::new("rows", crate::RowIdentity::IndependentUuid).audience_column("audience")],
-            "CREATE TABLE rows(id TEXT NOT NULL PRIMARY KEY,audience TEXT NOT NULL,a TEXT,b TEXT)").await.unwrap();
+            "CREATE TABLE rows(id TEXT NOT NULL PRIMARY KEY,audience TEXT NOT NULL,a TEXT,b TEXT);
+             CREATE TABLE pins(row TEXT REFERENCES rows(id) ON DELETE CASCADE)").await.unwrap();
         for (entry, replay) in &history[..4] {
             db.apply_store_log::<Record>(checked(entry.clone()), replay.clone())
                 .await
@@ -309,6 +310,15 @@ async fn data_differential_entry_effects_circles() {
             }
             if stage == usize::from(late) {
                 db.apply_downloaded(write.clone().into()).await.unwrap();
+                // A local child can point only at a row the app sees.
+                if !late {
+                    crate::write::tests::sql(
+                        &db,
+                        "INSERT INTO pins VALUES('00000000-0000-4000-8000-000000000001')",
+                    )
+                    .await
+                    .unwrap();
+                }
             }
             let (generation, setter) = db.inspect_writer(|sql| {
                 let schema = crate::schema::Schema::read(sql).unwrap();
@@ -335,12 +345,15 @@ async fn data_differential_entry_effects_circles() {
                     _ => None,
                 });
             let shown = crate::write::tests::count(&db, "rows") != 0;
-            results
-                .push(json!({"shown":shown,"generation":generation,"setter":setter,"cause":cause}));
+            let child = crate::write::tests::count(&db, "pins") != 0;
+            results.push(
+                json!({"shown":shown,"generation":generation,"setter":setter,
+                "cause":cause,"child":child}),
+            );
             cases.push(json!({"arrivals": match stage { 0 => vec![], 1 => vec![6], _ => vec![6,5] }, "write":stage >= usize::from(late)}));
         }
         expected.push(results);
-        inputs.push(json!({"states":cases}));
+        inputs.push(json!({"states":cases,"children":!late}));
         db.close().await.unwrap();
     }
     assert_eq!(

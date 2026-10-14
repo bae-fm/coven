@@ -115,7 +115,20 @@ pub(crate) fn replay<P: PendingValue>(
             _ => require_reload::<P>(db, audience, update)?,
         }
     }
-    let affected = crate::entry_inputs::restore(db, before, schema, &inputs, deleted)?;
+    // The entries selecting either the previous or the new data of a rebuilt
+    // audience decide whether the rebuild's removals can still reverse.
+    let causes = inputs
+        .keys()
+        .flat_map(|audience| {
+            previous
+                .get(audience)
+                .into_iter()
+                .chain(current.get(audience))
+        })
+        .flatten()
+        .map(Boundary::entry)
+        .collect();
+    let affected = crate::entry_inputs::restore(db, before, schema, &inputs, deleted, causes)?;
     crate::pending::suppress(db, &resets)?;
     for audience in inputs.keys() {
         ready(db, audience)?;

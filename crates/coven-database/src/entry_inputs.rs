@@ -293,7 +293,7 @@ fn collect(db: &DatabaseConnection, audience: &Audience) -> Result<(), DbError> 
 }
 
 /// Entries stored strictly before the persisted horizon (§9); no horizon means none.
-const FINAL: &str = "(substr(l.stored_at,1,1)=x'01' OR substr(l.stored_at,2) < coalesce((SELECT horizon FROM _coven_finality WHERE singleton=1),x''))";
+pub(crate) const FINAL: &str = "(substr(l.stored_at,1,1)=x'01' OR substr(l.stored_at,2) < coalesce((SELECT horizon FROM _coven_finality WHERE singleton=1),x''))";
 
 /// Release every audience whose boundary entries are all final (§9): no later
 /// arrival can change its selection, so its current rows are its only input.
@@ -319,6 +319,7 @@ pub(crate) fn release(db: &DatabaseConnection) -> Result<(), DbError> {
             forget(db, &audience, None)?;
         }
     }
+    crate::local_effects::release(db)?;
     let resets = db.query(
         "SELECT DISTINCT entry_device,entry_number FROM _coven_pending_resets",
         [],
@@ -365,6 +366,7 @@ pub(crate) fn restore(
     schema: &WriteSchema,
     inputs: &BTreeMap<Audience, i64>,
     deleted: &BTreeMap<coven_foundation::id_source::CircleId, EntryId>,
+    causes: BTreeSet<EntryId>,
 ) -> Result<BTreeSet<crate::write_rows::AppKey>, DbError> {
     if inputs.is_empty() {
         return Ok(BTreeSet::new());
@@ -440,6 +442,7 @@ pub(crate) fn restore(
     let current = crate::merge_store::MergeStore::from_snapshot(db, &schema.schema, &selected);
     let mut affected =
         crate::write_apply::WriteApply::new(db, schema, &current, &visible, &visible, deleted)
+            .caused_by(causes)
             .replace(&old, touched)?;
     crate::snapshot_state::drop_tables(db)?;
     for (audience, positions) in coverage {

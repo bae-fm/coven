@@ -18,6 +18,7 @@ pub(crate) fn materialize(
     visible: &AppView<'_>,
     view: &DatabaseRemovalView<'_>,
     result: &RemovalResult,
+    causes: &BTreeSet<crate::EntryId>,
 ) -> Result<(), DbError> {
     let mut removed_visible = BTreeSet::new();
     for id in &result.region {
@@ -107,16 +108,25 @@ pub(crate) fn materialize(
     }
     let ordered = dependency_order(actions, &dependencies);
     database.materialize(|database| {
+        // Kept local rows can only return with a synced parent coven inserts.
+        let kept = crate::local_effects::any(database)?;
         for id in ordered {
             let table = schema.table(&id.table);
             if removed_visible.contains(&id) {
                 // A native CASCADE may have already deleted another member of
                 // a removal cycle. No surviving synced child remains attached.
                 if let Some(values) = crate::write_rows::read_values(database, table, &id.key)? {
+                    // SQLite's own actions reach only local children; keep them
+                    // while the removal can still be reversed by replay (§8.4).
+                    let causes = crate::local_effects::provisional(database, &removal_causes(view, result, &id, causes)?)?;
+                    crate::local_effects::capture(database, schema, &id, &values, &causes)?;
                     changed_once(database.app_execute(&format!("DELETE FROM main.{} WHERE {}",identifier(&table.name),predicate(table)),params_from_iter(key_columns(table).iter().map(|c| sql_value(&values[&c.name]))))?)?;
                 }
             } else {
-                put(database,table,&id,&view.evaluated(&id)?.values,visible)?;
+                let values = view.evaluated(&id)?.values;
+                if put(database,table,&id,&values,visible)? && kept {
+                    crate::local_effects::restore(database, schema, &id, &values)?;
+                }
             }
         }
         for id in &result.region {
@@ -166,6 +176,43 @@ pub(crate) fn materialize(
     Ok(())
 }
 
+/// Store-log entries a row's removal depends on: the transaction's own causes,
+/// a deleted circle hiding it, and those hiding the parents it references.
+fn removal_causes(
+    view: &DatabaseRemovalView<'_>,
+    result: &RemovalResult,
+    id: &RowId,
+    context: &BTreeSet<crate::EntryId>,
+) -> Result<BTreeSet<crate::EntryId>, DbError> {
+    let mut causes = context.clone();
+    let mut seen = BTreeSet::new();
+    let mut pending = vec![id.clone()];
+    while let Some(row) = pending.pop() {
+        if !seen.insert(row.clone()) {
+            continue;
+        }
+        for rule in result.removed.get(&row).into_iter().flatten() {
+            if let coven_merge::Rule::DeletedCircle(entry) = rule {
+                causes.insert(*entry);
+            }
+        }
+        if let coven_merge::RemovalRow::Present {
+            deleted_circle,
+            references,
+            ..
+        } = view.evaluated(&row)?.facts
+        {
+            causes.extend(deleted_circle);
+            pending.extend(
+                references
+                    .into_values()
+                    .map(|reference| reference.parent.row),
+            );
+        }
+    }
+    Ok(causes)
+}
+
 /// Visit dependencies first. A back edge is a SQLite-deferred cycle; native
 /// actions still execute, and any constraint failure rolls back the write.
 fn dependency_order(
@@ -203,7 +250,7 @@ fn put(
     id: &RowId,
     values: &AppValues,
     visible: &AppView<'_>,
-) -> Result<(), DbError> {
+) -> Result<bool, DbError> {
     let before = visible
         .row(&(id.table.clone(), id.key.clone()))?
         .filter(|app| app.audience == id.audience);
@@ -254,9 +301,10 @@ fn put(
                 ),
                 params_from_iter(columns.iter().map(|c| sql_value(&values[&c.name]))),
             )?)?;
+            return Ok(true);
         }
     }
-    Ok(())
+    Ok(false)
 }
 
 fn predicate(table: &TableSchema) -> String {

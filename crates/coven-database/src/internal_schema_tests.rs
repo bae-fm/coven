@@ -124,6 +124,9 @@ async fn only_the_spec_tables_are_created() {
                 "_coven_key_publications",
                 "_coven_key_uploads",
                 "_coven_loaded_audiences",
+                "_coven_local_effect_causes",
+                "_coven_local_effect_rows",
+                "_coven_local_effects",
                 "_coven_lost",
                 "_coven_members",
                 "_coven_operations",
@@ -280,6 +283,10 @@ mod query_plans {
          INSERT INTO _coven_boundaries SELECT device,n,'schema',1,audience,device,n,x'00',i,1 FROM fixture;
          INSERT INTO _coven_pending_resets SELECT key,device,device,n FROM fixture;
          INSERT INTO _coven_loaded_audiences SELECT 'audience_' || i FROM fixture;
+         INSERT INTO _coven_local_effects SELECT i,tab,key,audience FROM fixture;
+         INSERT INTO _coven_local_effect_causes SELECT i,device,n FROM fixture;
+         INSERT INTO _coven_local_effect_rows SELECT i,0,tab,'row',NULL,x'00',
+           CASE WHEN i%2=0 THEN tab END,CASE WHEN i%2=0 THEN x'00' END FROM fixture;
          INSERT INTO _coven_fingerprint_sums SELECT 'audience_' || i,zeroblob(32) FROM fixture;
          INSERT INTO _coven_fingerprint_leaves SELECT audience,key,key,key FROM fixture;
          INSERT INTO _coven_writes
@@ -391,6 +398,10 @@ mod query_plans {
             Some("replay rejudges each observation against its indexed reset causes"),
         ("entry_inputs.rs", "INSERT INTO temp._coven_snapshot_writes SELECT substr(timestamp,9,8),number,timestamp,had_read FROM _coven_writes", "_coven_writes") =>
             Some("retained snapshots validate references against all applied write metadata"),
+        ("local_effects.rs", "SELECT EXISTS(SELECT 1 FROM _coven_local_effects)", "_coven_local_effects") =>
+            Some("the emptiness check stops at the first kept effect"),
+        ("local_effects.rs", sql, "_coven_local_effects") if sql.starts_with("DELETE FROM _coven_local_effects WHERE NOT EXISTS(") =>
+            Some("release checks every kept local effect against finality"),
         ("entry_inputs.rs", "SELECT DISTINCT audience FROM _coven_data_inputs", "_coven_data_inputs") =>
             Some("release checks every audience that still retains replay inputs"),
         ("entry_inputs.rs", "SELECT DISTINCT entry_device,entry_number FROM _coven_pending_resets", "_coven_pending_resets") =>
@@ -783,8 +794,9 @@ mod query_plans {
                 );
             }
             if sql.contains("{FINAL}") {
-                assert_eq!(file, "entry_inputs.rs");
-                let condition = select_constant(&source.strings, "(substr(l.stored_at");
+                assert!(matches!(file, "entry_inputs.rs" | "local_effects.rs"));
+                let condition =
+                    select_constant(&sources()["entry_inputs.rs"].strings, "(substr(l.stored_at");
                 return vec![sql.replace("{FINAL}", &condition)];
             }
             if sql.contains("{table}") || sql.contains("{child}") {
@@ -839,6 +851,7 @@ mod query_plans {
                         | "file_row.rs"
                         | "file_write.rs"
                         | "key_scope.rs"
+                        | "local_effects.rs"
                         | "migration_run.rs"
                         | "migration_snapshot.rs"
                         | "removal.rs"
