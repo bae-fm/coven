@@ -290,44 +290,6 @@ async fn a_check_that_forbids_null_preserves_the_written_reference_as_a_removed_
 }
 
 #[tokio::test]
-async fn concurrent_composite_reference_columns_without_a_parent_roll_back_apply() {
-    let ids = coven_foundation::id_source::SequentialIds::new();
-    let a_store = TestStore::with_ids(&ids);
-    let b_store = TestStore::with_ids(&ids);
-    let tables = || vec![table("parents").key_columns(["a", "b"]), table("children")];
-    let schema = "CREATE TABLE parents(a TEXT NOT NULL,b TEXT NOT NULL,PRIMARY KEY(a,b)); CREATE TABLE children(id TEXT NOT NULL PRIMARY KEY,a TEXT,b TEXT,FOREIGN KEY(a,b) REFERENCES parents(a,b))";
-    let a = a_store.schema(tables(), schema).await.unwrap();
-    let b = b_store.schema(tables(), schema).await.unwrap();
-    sql(&a, "INSERT INTO children VALUES('child',NULL,NULL)")
-        .await
-        .unwrap();
-    b.apply_downloaded(records(&a)[0].clone().into())
-        .await
-        .unwrap();
-    sql(&a, "UPDATE children SET a='a'").await.unwrap();
-    sql(&b, "UPDATE children SET b='b'").await.unwrap();
-    let a_write = records(&a).pop().unwrap();
-    let b_write = records(&b).pop().unwrap();
-    // Neither authored tuple names a parent. Their merged tuple ('a','b')
-    // has no parent metadata for removal, and SQLite refuses it.
-    for (db, write) in [(&a, b_write), (&b, a_write)] {
-        let before = crate::tests::contents(db);
-        let error = db.apply_downloaded(write.into()).await.unwrap_err();
-        let crate::DbError::PendingPersistence(cause) = &error else {
-            panic!("expected deferred foreign-key failure: {error:?}")
-        };
-        assert!(
-            matches!(cause.as_ref(), crate::DbError::Sqlite(rusqlite::Error::SqliteFailure(e, _))
-            if e.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_FOREIGNKEY),
-            "{error:?}"
-        );
-        assert_eq!(crate::tests::contents(db), before);
-    }
-    a.close().await.unwrap();
-    b.close().await.unwrap();
-}
-
-#[tokio::test]
 async fn a_check_on_one_generated_column_can_fail_when_its_inputs_merge() {
     let ids = coven_foundation::id_source::SequentialIds::new();
     let a_store = TestStore::with_ids(&ids);
@@ -906,12 +868,10 @@ async fn concurrent_change_to_a_referenced_nonkey_column_depends_on_arrival_orde
         .apply_downloaded(child_write.clone().into())
         .await
         .unwrap_err();
-    let crate::DbError::PendingPersistence(cause) = &error else {
-        panic!("expected deferred foreign-key failure: {error:?}")
-    };
     assert!(
-        matches!(cause.as_ref(), crate::DbError::Sqlite(rusqlite::Error::SqliteFailure(e, _))
-        if e.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_FOREIGNKEY)
+        matches!(&error, crate::DbError::Sqlite(rusqlite::Error::SqliteFailure(e, _))
+        if e.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_FOREIGNKEY),
+        "expected deferred foreign-key failure: {error:?}"
     );
     assert_eq!(crate::tests::contents(&a), before);
 

@@ -534,3 +534,60 @@ async fn retargeting_a_reference_replaces_its_retained_pre_null_value() {
         fingerprint(&b, Audience::Store).await
     );
 }
+
+#[tokio::test]
+async fn a_constraint_refused_at_commit_reports_itself_and_keeps_the_handle_usable() {
+    let ids = SequentialIds::new();
+    let a_store = TestStore::with_ids(&ids);
+    let b_store = TestStore::with_ids(&ids);
+    let table = |name| SyncedTable::new(name, RowIdentity::SharedKey);
+    let tables = || vec![table("parents").key_columns(["a", "b"]), table("children")];
+    let schema = "CREATE TABLE parents(a TEXT NOT NULL,b TEXT NOT NULL,PRIMARY KEY(a,b)); CREATE TABLE children(id TEXT NOT NULL PRIMARY KEY,a TEXT,b TEXT,FOREIGN KEY(a,b) REFERENCES parents(a,b))";
+    let a = a_store.schema(tables(), schema).await.unwrap();
+    let b = b_store.schema(tables(), schema).await.unwrap();
+    sql(&a, "INSERT INTO children VALUES('child',NULL,NULL)")
+        .await
+        .unwrap();
+    b.apply_downloaded(records(&a)[0].clone().into())
+        .await
+        .unwrap();
+    sql(&a, "UPDATE children SET a='a'").await.unwrap();
+    sql(&b, "UPDATE children SET b='b'").await.unwrap();
+    let a_write = records(&a).pop().unwrap();
+    let b_write = records(&b).pop().unwrap();
+    // Neither authored tuple names a parent. Their merged tuple ('a','b') has
+    // no parent metadata for removal, and SQLite refuses it at COMMIT, after
+    // the apply cleared the write's pending observation in its transaction.
+    for (db, write) in [(&a, b_write), (&b, a_write)] {
+        let mut parents = db.subscribe(|sql| {
+            Ok(sql.query("SELECT a||b FROM parents", [], |r| r.get::<_, String>(0))?)
+        });
+        assert!(parents.next().await.unwrap().is_empty());
+        for streamed in [false, true] {
+            let before = crate::tests::contents(db);
+            let error = if streamed {
+                db.apply_downloaded_stream(
+                    stream(&write),
+                    coven_format::value::EntryPositions(Vec::new()),
+                    || Ok(()),
+                )
+                .await
+            } else {
+                db.apply_downloaded(write.clone().into()).await
+            }
+            .unwrap_err();
+            assert!(
+                matches!(&error, DbError::Sqlite(rusqlite::Error::SqliteFailure(e, _))
+                if e.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_FOREIGNKEY),
+                "{error:?}"
+            );
+            assert_eq!(crate::tests::contents(db), before);
+        }
+        sql(db, "INSERT INTO parents VALUES('x','y')")
+            .await
+            .unwrap();
+        assert_eq!(parents.next().await.unwrap(), ["xy"]);
+    }
+    a.close().await.unwrap();
+    b.close().await.unwrap();
+}

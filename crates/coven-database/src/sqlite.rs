@@ -441,12 +441,7 @@ impl DatabaseConnection {
 
     pub(crate) fn batch(&self, sql: &str) -> Result<(), DbError> {
         let _scope = self.authorization.internal();
-        let result = self.connection.execute_batch(sql).map_err(DbError::from);
-        if sql == "COMMIT" && self.pending_changed.get() {
-            result.map_err(|error| self.pending_failure(error))
-        } else {
-            result
-        }
+        self.connection.execute_batch(sql).map_err(Into::into)
     }
 
     pub(crate) fn columns_read(&self, sql: &str) -> Result<Vec<String>, DbError> {
@@ -768,6 +763,7 @@ impl DatabaseConnection {
         run: impl FnOnce(&Self) -> Result<T, DbError>,
     ) -> Result<T, DbError> {
         self.transaction_captured(false, run)
+            .map_err(|error| self.unresolved_pending(error))
     }
 
     /// Streaming transfers publish table invalidations without a session's
@@ -777,6 +773,28 @@ impl DatabaseConnection {
         run: impl FnOnce(&Self) -> Result<T, DbError>,
     ) -> Result<T, DbError> {
         self.transaction_captured(true, run)
+            .map_err(|error| self.unresolved_pending(error))
+    }
+
+    /// A failure that rolled back cleanly left pending state as it was, so the
+    /// caller receives it unchanged. When rolling back also failed, this
+    /// connection may still hold the uncommitted pending change, so the handle
+    /// refuses calls until reopened.
+    fn unresolved_pending(&self, error: DbError) -> DbError {
+        match error {
+            DbError::Rollback {
+                operation,
+                rollback,
+            } if self.pending_changed.get()
+                && !matches!(*operation, DbError::PendingPersistence(_)) =>
+            {
+                self.pending_failure(DbError::Rollback {
+                    operation,
+                    rollback,
+                })
+            }
+            error => error,
+        }
     }
 
     fn transaction_captured<T, E: crate::WriteFailure>(
@@ -807,19 +825,12 @@ impl DatabaseConnection {
             let result = run(self)?;
             self.require_transaction()?;
             let changes = match &mut capture {
-                Some(capture) => capture.take_changes(),
+                Some(capture) => capture.take_changes()?,
                 None => match &tables {
-                    Some(tables) => tables.changes(),
-                    None => Ok(Vec::new()),
+                    Some(tables) => tables.changes()?,
+                    None => Vec::new(),
                 },
-            }
-            .map_err(|error| {
-                if self.pending_changed.get() {
-                    self.pending_failure(error)
-                } else {
-                    error
-                }
-            })?;
+            };
             self.batch("COMMIT")?;
             #[cfg(any(test, feature = "test-utils"))]
             self.record_work(|work| work.commits += 1);
