@@ -23,8 +23,7 @@ struct Flavor {
     /// otherwise CreatePolicy and AttachUserPolicy on a plain user.
     inline: bool,
     /// AWS IAM's global endpoint, signing for us-east-1; otherwise the
-    /// location's S3 endpoint and region. Ceph RGW accounts take the inline
-    /// policy at the RGW endpoint once a profile names that service.
+    /// location's S3 endpoint and region.
     global: bool,
 }
 const AWS: Flavor = Flavor {
@@ -33,6 +32,10 @@ const AWS: Flavor = Flavor {
 };
 const SEAWEEDFS: Flavor = Flavor {
     inline: false,
+    global: false,
+};
+const CEPH_RGW: Flavor = Flavor {
+    inline: true,
     global: false,
 };
 
@@ -87,6 +90,14 @@ minter!(
     "SeaweedFS IAM",
     SEAWEEDFS,
     Duration::from_secs(30)
+);
+// Squid+ account IAM shares the RGW endpoint. Sixty seconds is the retry
+// window for the member-side check, not a verified propagation guarantee.
+minter!(
+    CEPH_RGW_IAM,
+    "Ceph RGW IAM",
+    CEPH_RGW,
+    Duration::from_secs(60)
 );
 
 struct Iam<'a> {

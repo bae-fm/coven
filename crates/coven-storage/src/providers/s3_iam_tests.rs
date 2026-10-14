@@ -11,15 +11,35 @@ use axum::{
     http::{HeaderMap, Method, Response, Uri},
     Router,
 };
-use coven_foundation::{clock::SystemClock, id_source::UuidIds};
+use coven_foundation::{clock::Clock, id_source::UuidIds};
 use std::{
     collections::BTreeMap,
     sync::{Arc, Mutex},
+    time::SystemTime,
 };
 use url::Url;
 
 const ADMIN_ID: &str = "admin-key";
 const ADMIN_SECRET: &str = "admin-secret";
+const REGION: &str = "rgw-zone";
+
+struct ProbeClock {
+    sleeps: Mutex<Vec<Duration>>,
+}
+
+impl Clock for ProbeClock {
+    fn now(&self) -> SystemTime {
+        SystemTime::UNIX_EPOCH + Duration::from_secs(1_791_936_000)
+    }
+
+    fn sleep(
+        &self,
+        duration: Duration,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
+        self.sleeps.lock().unwrap().push(duration);
+        Box::pin(std::future::ready(()))
+    }
+}
 
 #[derive(Default)]
 struct User {
@@ -37,7 +57,10 @@ struct Remote {
     policies: BTreeMap<String, (String, String)>,
     objects: BTreeMap<String, Vec<u8>>,
     next: u32,
-    actions: Vec<String>,
+    /// (Endpoint path, IAM action).
+    actions: Vec<(String, String)>,
+    /// Refuse this action without changing provider state.
+    fail_action: Option<&'static str>,
     /// CreateAccessKey creates its key but answers with a server error.
     lose_key_reply: bool,
     /// New keys are refused this many times before they work.
@@ -55,6 +78,10 @@ fn iam_error(status: u16, code: &str) -> Response<Body> {
     )
 }
 
+fn s3_reply_error(status: u16, code: &str) -> Response<Body> {
+    response(status, format!("<Error><Code>{code}</Code></Error>"))
+}
+
 fn reply(action: &str, inner: String) -> Response<Body> {
     response(
         200,
@@ -62,8 +89,8 @@ fn reply(action: &str, inner: String) -> Response<Body> {
     )
 }
 
-/// The prefix a key's user may list, from its inline or attached policy.
-fn allowed(state: &Remote, key: &str) -> Option<String> {
+/// The policy applied to a key, inline or attached to its user.
+fn policy(state: &Remote, key: &str) -> Option<serde_json::Value> {
     let user = state
         .users
         .values()
@@ -72,11 +99,7 @@ fn allowed(state: &Remote, key: &str) -> Option<String> {
         Some((_, document)) => document.clone(),
         None => state.policies.get(user.attached.first()?)?.1.clone(),
     };
-    let policy: serde_json::Value = serde_json::from_str(&document).unwrap();
-    let prefix = policy["Statement"][1]["Condition"]["StringLike"]["s3:prefix"]
-        .as_str()
-        .unwrap();
-    Some(prefix.trim_end_matches('*').to_owned())
+    Some(serde_json::from_str(&document).unwrap())
 }
 
 fn admin(state: &mut Remote, uri: &Uri, headers: &HeaderMap, body: &Bytes) -> Response<Body> {
@@ -88,7 +111,11 @@ fn admin(state: &mut Remote, uri: &Uri, headers: &HeaderMap, body: &Bytes) -> Re
     ))
     .unwrap();
     let sent = headers["authorization"].to_str().unwrap();
-    let region = sent.split('/').nth(2).unwrap();
+    let region = match uri.path() {
+        "/iam/" => "us-east-1",
+        "/" => REGION,
+        _ => return iam_error(404, "InvalidEndpoint"),
+    };
     let signed: Vec<(&str, String)> = ["content-type", "host", "x-amz-date"]
         .into_iter()
         .map(|name| (name, headers[name].to_str().unwrap().to_owned()))
@@ -111,7 +138,11 @@ fn admin(state: &mut Remote, uri: &Uri, headers: &HeaderMap, body: &Bytes) -> Re
         return iam_error(403, "SignatureDoesNotMatch");
     }
     let action = form["Action"].clone();
-    state.actions.push(action.clone());
+    state.actions.push((uri.path().into(), action.clone()));
+    assert_eq!(form["Version"], "2010-05-08");
+    if state.fail_action == Some(action.as_str()) {
+        return iam_error(403, "AccessDenied");
+    }
     let user_name = form.get("UserName").cloned().unwrap_or_default();
     match action.as_str() {
         "CreateUser" => {
@@ -277,12 +308,33 @@ fn s3(
         .to_owned();
     if state.propagation > 0 {
         state.propagation -= 1;
-        return iam_error(403, "InvalidAccessKeyId");
+        return s3_reply_error(403, "InvalidAccessKeyId");
     }
-    let Some(prefix) = allowed(state, &key_id) else {
-        return iam_error(403, "InvalidAccessKeyId");
+    let Some(policy) = policy(state, &key_id) else {
+        return s3_reply_error(403, "InvalidAccessKeyId");
     };
     let q = query(uri);
+    if q.contains_key("versioning") {
+        let permitted = policy["Statement"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|statement| {
+                statement["Effect"] == "Allow"
+                    && statement["Action"] == "s3:GetBucketVersioning"
+                    && statement["Resource"] == "arn:aws:s3:::bucket"
+                    && statement.get("Condition").is_none()
+            });
+        return if permitted {
+            response(200, "<VersioningConfiguration/>")
+        } else {
+            s3_reply_error(403, "AccessDenied")
+        };
+    }
+    let prefix = policy["Statement"][1]["Condition"]["StringLike"]["s3:prefix"]
+        .as_str()
+        .unwrap()
+        .trim_end_matches('*');
     let object = uri
         .path()
         .strip_prefix("/bucket")
@@ -294,8 +346,8 @@ fn s3(
     } else {
         object.clone()
     };
-    if !state.broad && !reach.starts_with(&prefix) {
-        return iam_error(403, "AccessDenied");
+    if !state.broad && !reach.starts_with(prefix) {
+        return s3_reply_error(403, "AccessDenied");
     }
     if object.is_empty() {
         let contents: String = state
@@ -309,7 +361,7 @@ fn s3(
     match method {
         Method::PUT => {
             if headers.contains_key("if-none-match") && state.objects.contains_key(&object) {
-                return iam_error(412, "PreconditionFailed");
+                return s3_reply_error(412, "PreconditionFailed");
             }
             state.objects.insert(object, body.to_vec());
             Response::builder()
@@ -324,13 +376,13 @@ fn s3(
                 .header("content-length", bytes.len())
                 .body(Body::from(bytes.clone()))
                 .unwrap(),
-            None => iam_error(404, "NoSuchKey"),
+            None => s3_reply_error(404, "NoSuchKey"),
         },
         Method::DELETE => {
             state.objects.remove(&object);
             response(204, Vec::new())
         }
-        _ => iam_error(400, "InvalidRequest"),
+        _ => s3_reply_error(400, "InvalidRequest"),
     }
 }
 
@@ -352,25 +404,36 @@ async fn serve(
 struct Fake {
     state: Arc<Mutex<Remote>>,
     server: TestServer,
+    clock: Arc<ProbeClock>,
 }
 
 impl Fake {
     async fn new() -> Self {
         let state = Arc::new(Mutex::new(Remote::default()));
         let server = TestServer::new(Router::new().fallback(serve).with_state(state.clone())).await;
-        Self { state, server }
+        Self {
+            state,
+            server,
+            clock: Arc::new(ProbeClock {
+                sleeps: Mutex::new(Vec::new()),
+            }),
+        }
+    }
+
+    fn config(&self, name: S3ProfileName) -> StorageConfig {
+        StorageConfig::S3 {
+            bucket: "bucket".into(),
+            region: REGION.into(),
+            endpoint: Some(Url::parse(&self.server.url).unwrap()),
+            profile: Some(S3Profile::Named(name)),
+            prefix: "base".into(),
+        }
     }
 
     fn admin(&self, name: S3ProfileName) -> Arc<dyn AccessKeyAdmin> {
         let url = Url::parse(&self.server.url).unwrap();
         minting::key_admin(
-            StorageConfig::S3 {
-                bucket: "bucket".into(),
-                region: "us-east-1".into(),
-                endpoint: Some(url.clone()),
-                profile: Some(S3Profile::Named(name)),
-                prefix: "base".into(),
-            },
+            self.config(name),
             AdminCredential::AccessKey {
                 access_key_id: ADMIN_ID.into(),
                 secret_access_key: SecretText::new(ADMIN_SECRET.into()),
@@ -380,7 +443,7 @@ impl Fake {
                 aws_iam: url.join("/iam/").unwrap(),
                 ..minting::AdminEndpoints::production()
             },
-            Arc::new(SystemClock),
+            self.clock.clone(),
             Arc::new(UuidIds),
         )
         .unwrap()
@@ -471,45 +534,231 @@ async fn aws_puts_an_inline_policy_on_a_tagged_user_at_the_iam_endpoint() {
 
 #[tokio::test]
 async fn a_retry_replaces_keys_whose_secret_was_lost() {
-    let fake = Fake::new().await;
-    let admin = fake.admin(S3ProfileName::Aws);
-    let scope = scope();
-    fake.state.lock().unwrap().lose_key_reply = true;
-    assert_eq!(
-        admin.mint(&scope).await.err().unwrap().failure(),
-        StorageFailure::Network
-    );
-    assert_eq!(fake.state.lock().unwrap().users[&scope.name].keys.len(), 1);
-    // The user already exists; the lost key is deleted before a new one.
-    let minted = admin.mint(&scope).await.unwrap();
-    let again = admin.mint(&scope).await.unwrap();
-    let state = fake.state.lock().unwrap();
-    let keys = &state.users[&scope.name].keys;
-    assert_eq!(keys.len(), 1);
-    assert_eq!(keys[0].0, again.credentials.access_key_id);
-    assert_ne!(
-        minted.credentials.access_key_id,
-        again.credentials.access_key_id
-    );
+    for profile in [
+        S3ProfileName::Aws,
+        S3ProfileName::SeaweedFs,
+        S3ProfileName::CephRgw,
+    ] {
+        let fake = Fake::new().await;
+        let admin = fake.admin(profile);
+        let scope = scope();
+        fake.state.lock().unwrap().lose_key_reply = true;
+        assert_eq!(
+            admin.mint(&scope).await.err().unwrap().failure(),
+            StorageFailure::Network
+        );
+        assert_eq!(fake.state.lock().unwrap().users[&scope.name].keys.len(), 1);
+        // The user already exists; the lost key is deleted before a new one.
+        let minted = admin.mint(&scope).await.unwrap();
+        let again = admin.mint(&scope).await.unwrap();
+        let state = fake.state.lock().unwrap();
+        let keys = &state.users[&scope.name].keys;
+        assert_eq!(keys.len(), 1);
+        assert_eq!(keys[0].0, again.credentials.access_key_id);
+        assert_ne!(
+            minted.credentials.access_key_id,
+            again.credentials.access_key_id
+        );
+    }
 }
 
 #[tokio::test]
 async fn the_member_check_waits_for_propagation_and_refuses_a_broad_policy() {
+    for profile in [S3ProfileName::SeaweedFs, S3ProfileName::CephRgw] {
+        let fake = Fake::new().await;
+        let admin = fake.admin(profile);
+        let scope = scope();
+        let minted = admin.mint(&scope).await.unwrap();
+        fake.state.lock().unwrap().propagation = 2;
+        admin.probe(&scope, &minted.credentials).await.unwrap();
+        fake.state.lock().unwrap().broad = true;
+        assert_eq!(
+            admin
+                .probe(&scope, &minted.credentials)
+                .await
+                .unwrap_err()
+                .failure(),
+            StorageFailure::KeyBeyondStore
+        );
+        assert_eq!(*fake.clock.sleeps.lock().unwrap(), [Duration::from_secs(1)]);
+        admin.roll_back(&scope).await.unwrap();
+        let state = fake.state.lock().unwrap();
+        assert!(state.users.is_empty() && state.policies.is_empty() && state.objects.is_empty());
+    }
+}
+
+#[tokio::test]
+async fn ceph_mints_an_inline_key_at_rgw_and_revokes_its_user_and_policy() {
     let fake = Fake::new().await;
-    let admin = fake.admin(S3ProfileName::SeaweedFs);
+    let admin = fake.admin(S3ProfileName::CephRgw);
     let scope = scope();
     let minted = admin.mint(&scope).await.unwrap();
-    fake.state.lock().unwrap().propagation = 2;
+    assert_eq!(
+        minted.principal,
+        S3Principal::IamUser {
+            user: scope.name.clone(),
+            policy: IamPolicy::Inline {
+                name: "coven-member".into()
+            },
+        }
+    );
+    assert_eq!(
+        minted.credentials.secret_access_key.as_str(),
+        "member+secret/1&"
+    );
+    {
+        let state = fake.state.lock().unwrap();
+        assert_eq!(
+            state.actions,
+            [
+                "CreateUser",
+                "PutUserPolicy",
+                "ListAccessKeys",
+                "CreateAccessKey"
+            ]
+            .map(|action| ("/".into(), action.into()))
+        );
+        let user = &state.users[&scope.name];
+        assert!(user.attached.is_empty() && state.policies.is_empty());
+        let (name, document) = user.inline.as_ref().unwrap();
+        assert_eq!(name, "coven-member");
+        let document: serde_json::Value = serde_json::from_str(document).unwrap();
+        assert_eq!(
+            document,
+            serde_json::json!({
+                "Version": "2012-10-17",
+                "Statement": [
+                    {
+                        "Effect": "Allow",
+                        "Action": ["s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:AbortMultipartUpload", "s3:ListMultipartUploadParts"],
+                        "Resource": format!("arn:aws:s3:::bucket/base/{}/*", scope.store),
+                    },
+                    {
+                        "Effect": "Allow",
+                        "Action": "s3:ListBucket",
+                        "Resource": "arn:aws:s3:::bucket",
+                        "Condition": {"StringLike": {"s3:prefix": format!("base/{}/*", scope.store)}},
+                    },
+                    {
+                        "Effect": "Allow",
+                        "Action": "s3:GetBucketVersioning",
+                        "Resource": "arn:aws:s3:::bucket",
+                    },
+                ],
+            })
+        );
+    }
     admin.probe(&scope, &minted.credentials).await.unwrap();
-    fake.state.lock().unwrap().broad = true;
+    let id = &minted.credentials.access_key_id;
+    assert!(admin.key_exists(id, &minted.principal).await.unwrap());
+    assert!(!admin
+        .key_exists("another-key", &minted.principal)
+        .await
+        .unwrap());
+    fake.state.lock().unwrap().fail_action = Some("ListAccessKeys");
+    assert_eq!(
+        admin
+            .key_exists(id, &minted.principal)
+            .await
+            .unwrap_err()
+            .failure(),
+        StorageFailure::PermissionDenied
+    );
+    fake.state.lock().unwrap().fail_action = None;
+    admin.revoke(id, &minted.principal).await.unwrap();
+    assert!(!admin.key_exists(id, &minted.principal).await.unwrap());
+    admin.revoke(id, &minted.principal).await.unwrap();
+    let state = fake.state.lock().unwrap();
+    assert!(state.users.is_empty() && state.policies.is_empty() && state.objects.is_empty());
+    assert!(state.actions.iter().all(|(path, _)| path == "/"));
+    assert_eq!(state.bad_signatures, 0);
+}
+
+#[tokio::test]
+async fn minted_iam_keys_can_read_bucket_versioning_without_listing_other_stores() {
+    for profile in [
+        S3ProfileName::Aws,
+        S3ProfileName::SeaweedFs,
+        S3ProfileName::CephRgw,
+    ] {
+        let fake = Fake::new().await;
+        let admin = fake.admin(profile);
+        let scope = scope();
+        let minted = admin.mint(&scope).await.unwrap();
+        let storage = S3Storage::new(
+            fake.config(profile),
+            minted.credentials,
+            fake.clock.clone(),
+            Arc::new(UuidIds),
+        )
+        .unwrap();
+        assert_eq!(
+            storage.bucket_versioning().await.unwrap(),
+            S3BucketVersioning::Disabled
+        );
+        storage.outside_store_refused(scope.store).await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn ceph_rolls_back_partial_mints_and_reports_failed_deletion() {
+    for action in ["CreateUser", "PutUserPolicy", "CreateAccessKey"] {
+        let fake = Fake::new().await;
+        let admin = fake.admin(S3ProfileName::CephRgw);
+        let scope = scope();
+        fake.state.lock().unwrap().fail_action = Some(action);
+        assert_eq!(
+            admin.mint(&scope).await.unwrap_err().failure(),
+            StorageFailure::PermissionDenied
+        );
+        fake.state.lock().unwrap().fail_action = None;
+        admin.roll_back(&scope).await.unwrap();
+        admin.roll_back(&scope).await.unwrap();
+        let state = fake.state.lock().unwrap();
+        assert!(state.users.is_empty() && state.policies.is_empty());
+    }
+    let fake = Fake::new().await;
+    let admin = fake.admin(S3ProfileName::CephRgw);
+    let scope = scope();
+    fake.state.lock().unwrap().lose_key_reply = true;
+    assert_eq!(
+        admin.mint(&scope).await.unwrap_err().failure(),
+        StorageFailure::Network
+    );
+    fake.state.lock().unwrap().fail_action = Some("DeleteAccessKey");
+    assert_eq!(
+        admin.roll_back(&scope).await.unwrap_err().failure(),
+        StorageFailure::PermissionDenied
+    );
+    assert_eq!(fake.state.lock().unwrap().users[&scope.name].keys.len(), 1);
+    fake.state.lock().unwrap().fail_action = None;
+    admin.roll_back(&scope).await.unwrap();
+    admin.roll_back(&scope).await.unwrap();
+    let state = fake.state.lock().unwrap();
+    assert!(state.users.is_empty() && state.policies.is_empty());
+}
+
+#[tokio::test]
+async fn ceph_stops_retrying_an_unusable_key_after_sixty_seconds() {
+    let fake = Fake::new().await;
+    let admin = fake.admin(S3ProfileName::CephRgw);
+    let scope = scope();
+    let minted = admin.mint(&scope).await.unwrap();
+    fake.state.lock().unwrap().propagation = u32::MAX;
     assert_eq!(
         admin
             .probe(&scope, &minted.credentials)
             .await
             .unwrap_err()
             .failure(),
-        StorageFailure::KeyBeyondStore
+        StorageFailure::Authentication
     );
+    assert_eq!(
+        *fake.clock.sleeps.lock().unwrap(),
+        vec![Duration::from_secs(1); 60]
+    );
+    admin.roll_back(&scope).await.unwrap();
+    assert!(fake.state.lock().unwrap().users.is_empty());
 }
 
 #[tokio::test]

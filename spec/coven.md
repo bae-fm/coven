@@ -1246,8 +1246,12 @@ the file's ranges under `F`.
     (the operator sets `-iam.readOnly=false`), takes the same policy through
     `CreatePolicy` and `AttachUserPolicy`: its `PutUserPolicy` drops
     conditions and refuses `s3:ListMultipartUploadParts`. Ceph RGW accounts
-    take the inline form at the RGW endpoint once a profile names that
-    service. GCS, R2 and RustFS have their own minters; a custom profile uses
+    (Squid or newer) take the inline form at the location's RGW endpoint and
+    region, using an account-root key or a user's delegated IAM access
+    ([RGW IAM](https://docs.ceph.com/en/squid/radosgw/iam/)). Its inline-policy
+    `s3:prefix` enforcement has not been verified live; the member-side check
+    below refuses a key that can list outside its store.
+    GCS, R2 and RustFS have their own minters; a custom profile uses
     guided console steps.
   - On GCS each member key is the HMAC key of its own service account. The
     minter reads the bucket's project through the JSON API and refuses a
@@ -1291,7 +1295,10 @@ the file's ranges under `F`.
     `s3:DeleteObject`, `s3:AbortMultipartUpload` and
     `s3:ListMultipartUploadParts` on `arn:aws:s3:::<bucket>/<prefix>/<store>/*`,
     and `s3:ListBucket` on the bucket under the condition `StringLike`
-    `s3:prefix` `<prefix>/<store>/*`. It never adds a `Deny` on
+    `s3:prefix` `<prefix>/<store>/*`. A separate, unconditioned statement
+    allows `s3:GetBucketVersioning` on the bucket, so the member's setup can
+    read the owner's versioning setting without granting bucket-wide listing
+    or writes outside its store. It never adds a `Deny` on
     `StringNotLike` `s3:prefix`: a request carrying no prefix, such as a bucket
     check, matches the negated condition and would be denied.
   - Making a key is one journaled operation (§18). Before the first provider
@@ -1309,8 +1316,10 @@ the file's ranges under `F`.
     listing must be. Otherwise the check fails with
     `StorageFailure::KeyBeyondStore`. Authentication and
     permission failures are retried each second within the service's
-    propagation bound: 60 seconds for AWS IAM, which states none, and 30 for
-    SeaweedFS, whose gateways read identity changes asynchronously.
+    retry window: 60 seconds for AWS IAM and Ceph RGW, and 30 for SeaweedFS,
+    whose gateways read identity changes asynchronously. The 60-second window
+    is a retry limit, not a verified provider propagation guarantee; a key
+    still refused at the limit fails the operation.
   - A failed mint or check rolls back what the attempt's name created — keys,
     policy and user — and reports the failure, with the rollback's own failure
     if that fails too. Admin access is held only by the operation that needs

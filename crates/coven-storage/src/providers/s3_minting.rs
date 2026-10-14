@@ -26,7 +26,7 @@ pub(crate) struct KeyMinter {
     /// Read whether the provider still has this exact key.
     pub(super) key_exists:
         for<'a> fn(&'a AdminRequest, &'a str, &'a S3Principal) -> Pending<'a, bool>,
-    /// The longest a new key takes to work; the member-side check retries within it.
+    /// How long the member-side check retries authentication and permission failures.
     pub(super) propagation: Duration,
 }
 // Profiles compare by their service; minters are named constants.
@@ -188,7 +188,8 @@ impl AccessKeyAdmin for ProfileKeyAdmin {
 }
 
 /// The policy a prefix-scoped member key needs, also shown for console steps
-/// (§4): object access under the store's prefix, and listing only there.
+/// (§4): object access under the store's prefix, listing only there, and a
+/// bucket-versioning read so setup can check the owner's setting.
 /// Never a `Deny` on `s3:prefix`: a request without one, such as a bucket
 /// check, would match the negated condition and be denied.
 pub(crate) fn member_policy(
@@ -215,6 +216,11 @@ pub(crate) fn member_policy(
                 "Action": "s3:ListBucket",
                 "Resource": format!("arn:aws:s3:::{bucket}"),
                 "Condition": {"StringLike": {"s3:prefix": format!("{scope}*")}},
+            },
+            {
+                "Effect": "Allow",
+                "Action": "s3:GetBucketVersioning",
+                "Resource": format!("arn:aws:s3:::{bucket}"),
             },
         ],
     })

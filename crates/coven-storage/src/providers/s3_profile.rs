@@ -209,8 +209,7 @@ const CEPH_RGW: CataloguedProfile = CataloguedProfile {
     // under the store's prefix.
     key_scope: S3KeyScope::Prefix,
     versioned_buckets: Certification::Uncertified,
-    // RGW accounts take IAM CreateUser/PutUserPolicy/CreateAccessKey; no minter yet (T143).
-    minter: None,
+    minter: Some(&super::iam::CEPH_RGW_IAM),
     certification: Certification::Passed {
         date: "2026-10-14",
         suite: 4,
