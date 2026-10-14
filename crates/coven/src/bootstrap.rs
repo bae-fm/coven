@@ -23,6 +23,10 @@ mod commit;
 #[path = "bootstrap_join.rs"]
 mod join;
 
+#[path = "bootstrap_reset.rs"]
+mod reset;
+pub(super) use reset::reset_device;
+
 #[path = "restore_credentials.rs"]
 mod credentials;
 use credentials::restore_connection;
@@ -326,6 +330,8 @@ async fn prepare_and_load(
     let identity = Arc::new(KeySession::member(Arc::new(InMemoryCustody::new(
         member.clone(),
     )))?);
+    // Completing a reset registers the fresh id as the old one's replacement.
+    let reset = pending.device_reset().map_err(SyncError::from)?;
     let database = builder.database(directory.clone())?.open().await?;
     let mut writes = coven_sync::DeviceLogSync::new(
         storage.clone(),
@@ -368,8 +374,16 @@ async fn prepare_and_load(
         }
         status("Loading snapshots and later writes");
         refresh_sign_in(builder, &mut data, storage.as_ref(), cancel).await?;
-        sync.load_new_device(device_name).await?;
+        sync.load_new_device(device_name, reset.map(|reset| reset.old_device))
+            .await?;
         sync.download_later_writes(&mut writes).await?;
+        // The notice commits before any handle is published (E5).
+        if let Some(reset) = reset {
+            database
+                .record_device_reset(reset)
+                .await
+                .map_err(CovenError::from)?;
+        }
         Ok::<_, BootstrapError>(true)
     };
     let mut cancellation = cancel.clone();

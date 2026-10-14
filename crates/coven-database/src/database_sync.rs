@@ -662,3 +662,7 @@ impl Database {
 
 #[path = "database_positions.rs"]
 mod positions;
+
+#[path = "database_device.rs"]
+mod device;
+pub use device::IdentityReservations;

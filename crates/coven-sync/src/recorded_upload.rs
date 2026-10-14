@@ -17,15 +17,47 @@ pub(crate) trait UploadSource: Send {
     fn keep_going(&self) -> bool;
 }
 
+/// How a recorded upload ended for this invocation.
+#[derive(Debug)]
+pub(crate) enum Uploaded {
+    /// The provider confirmed these bytes at the path.
+    Stored,
+    /// A paused session remains intact for the next invocation.
+    Paused,
+    /// The path was already occupied. The caller compares the occupant with
+    /// this length and digest of the source bytes before counting it (§10).
+    Occupied((u64, coven_crypto::ObjectDigest)),
+}
+
+/// The digest of the complete repeatable source, read one part at a time.
+async fn source_digest<S: UploadSource>(source: &mut S, total: u64) -> Result<Uploaded, S::Error> {
+    let mut hasher = coven_crypto::ObjectHasher::new();
+    let mut offset = 0;
+    while offset < total {
+        let length = (total - offset).min(1024 * 1024) as usize;
+        let bytes = source.read(offset, length).await?;
+        if bytes.len() != length {
+            return Err(StorageError::from(StorageFailure::InvalidPart).into());
+        }
+        hasher.update(&bytes);
+        offset += length as u64;
+    }
+    Ok(Uploaded::Occupied((total, hasher.finish())))
+}
+
+fn occupied(error: &StorageError) -> bool {
+    error.failure() == StorageFailure::AlreadyExists
+        && !matches!(error, StorageError::Cleanup { .. })
+}
+
 /// Persist every confirmed session before continuing; read only its next part.
-/// Returning false leaves a paused session intact for the next invocation.
 pub(crate) async fn upload<S: UploadSource>(
     storage: &dyn Storage,
     path: &ObjectPath,
     total: u64,
     recorded: Option<UploadSession>,
     source: &mut S,
-) -> Result<bool, S::Error> {
+) -> Result<Uploaded, S::Error> {
     let mut session = match recorded {
         Some(mut session) => {
             if session.path() != path || session.total_bytes() != total {
@@ -36,12 +68,21 @@ pub(crate) async fn upload<S: UploadSource>(
                     Ok(()) => (),
                     Err(error) => {
                         let error = save_failure(source, session.clone(), error).await?;
+                        if occupied(&error) {
+                            return source_digest(source, total).await;
+                        }
                         if error.failure() != StorageFailure::SessionExpired
                             || matches!(error, StorageError::Cleanup { .. })
                         {
                             return Err(error.into());
                         }
-                        session = storage.restart_upload(&session).await?;
+                        session = match storage.restart_upload(&session).await {
+                            Ok(session) => session,
+                            Err(error) if occupied(&error) => {
+                                return source_digest(source, total).await
+                            }
+                            Err(error) => return Err(error.into()),
+                        };
                     }
                 }
             } else {
@@ -49,23 +90,22 @@ pub(crate) async fn upload<S: UploadSource>(
                 // belong to the old location. Send the same bytes in a new one.
                 match storage.begin_upload(path, total).await {
                     Ok(replacement) => session = replacement,
-                    Err(error)
-                        if error.failure() == StorageFailure::AlreadyExists
-                            && !matches!(error, StorageError::Cleanup { .. }) =>
-                    {
-                        return Ok(true)
-                    }
+                    Err(error) if occupied(&error) => return source_digest(source, total).await,
                     Err(error) => return Err(error.into()),
                 }
             }
             session
         }
-        None => storage.begin_upload(path, total).await?,
+        None => match storage.begin_upload(path, total).await {
+            Ok(session) => session,
+            Err(error) if occupied(&error) => return source_digest(source, total).await,
+            Err(error) => return Err(error.into()),
+        },
     };
     source.save(session.clone()).await?;
     while !session.is_complete() && session.confirmed_bytes() < total {
         if !source.keep_going() {
-            return Ok(false);
+            return Ok(Uploaded::Paused);
         }
         let offset = session.confirmed_bytes();
         let length = (session.part_size() as u64 - offset % session.part_size() as u64)
@@ -79,13 +119,16 @@ pub(crate) async fn upload<S: UploadSource>(
         source.save(session.clone()).await?;
     }
     if !source.keep_going() {
-        return Ok(false);
+        return Ok(Uploaded::Paused);
     }
     if let Err(error) = storage.finish_upload(&mut session).await {
+        if occupied(&error) {
+            return source_digest(source, total).await;
+        }
         return Err(save_failure(source, session, error).await?.into());
     }
     source.save(session).await?;
-    Ok(true)
+    Ok(Uploaded::Stored)
 }
 
 async fn save_failure<S: UploadSource>(

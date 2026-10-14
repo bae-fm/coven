@@ -29,7 +29,7 @@ pub(crate) struct Device {
     pub(crate) clock: Arc<FixedClock>,
     pub(crate) send: Arc<crate::SendGate>,
     pub(crate) ids: coven_foundation::id_source::IdSourceRef,
-    _temporary: tempfile::TempDir,
+    pub(crate) _temporary: tempfile::TempDir,
 }
 
 pub(crate) fn key(n: u128) -> KeyId {
@@ -265,7 +265,11 @@ impl Device {
         tables: Vec<SyncedTable>,
         migrations: Vec<Migration>,
     ) {
-        self.db.close().await.unwrap();
+        // A test may already have closed it, e.g. to copy the closed files.
+        match self.db.close().await {
+            Ok(()) | Err(coven_database::DbError::StoreClosed) => {}
+            Err(error) => panic!("closing before reopening failed: {error}"),
+        }
         self.db = DatabaseBuilder::new(self.directory.clone())
             .synced_tables(tables)
             .migrations(migrations)
@@ -396,8 +400,8 @@ async fn three_devices_publish_concurrent_changes_and_converge() {
     a.add(&c.member, MemberRole::Member).await;
     b.sync().await;
     c.sync().await;
-    b.sync.load_new_device("Ben").await.unwrap();
-    c.sync.load_new_device("Carol").await.unwrap();
+    b.sync.load_new_device("Ben", None).await.unwrap();
+    c.sync.load_new_device("Carol", None).await.unwrap();
     for device in [&mut a, &mut b, &mut c] {
         device.sync().await;
     }
@@ -445,7 +449,7 @@ async fn far_future_entry_waits_for_its_missing_causal_entry_then_applies() {
         .await
         .unwrap();
     b.sync().await;
-    b.sync.load_new_device("second").await.unwrap();
+    b.sync.load_new_device("second", None).await.unwrap();
     let third = b
         .sync
         .make_and_upload_entry(StoreChange::RenameCircle {
@@ -748,7 +752,7 @@ async fn circle_member_rotates_after_outside_admin_removal_and_repeated_removal_
     a.add(&b.member, MemberRole::Member).await;
     a.add(&c.member, MemberRole::Member).await;
     b.sync().await;
-    b.sync.load_new_device("Ben").await.unwrap();
+    b.sync.load_new_device("Ben", None).await.unwrap();
     b.sync
         .make_and_upload_entry(StoreChange::CreateCircle {
             circle: circle(1),
@@ -769,7 +773,7 @@ async fn circle_member_rotates_after_outside_admin_removal_and_repeated_removal_
         .unwrap();
     a.sync().await;
     c.sync().await;
-    c.sync.load_new_device("Carol").await.unwrap();
+    c.sync.load_new_device("Carol", None).await.unwrap();
     a.sync().await;
     a.sync
         .make_and_upload_entry(StoreChange::RemoveMember {

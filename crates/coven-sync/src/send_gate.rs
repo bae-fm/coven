@@ -1,6 +1,6 @@
 //! Session authority for every publisher, measured from read-only catch-up start.
 use crate::{store_log_keys::ObservedCopy, SyncError};
-use coven_foundation::clock::ClockRef;
+use coven_foundation::{clock::ClockRef, files::DeviceResetReason};
 use coven_storage::{ObjectPath, PublicationGate, StorageError, StorageFailure};
 use std::{
     collections::BTreeSet,
@@ -29,6 +29,21 @@ struct Session {
     starting: Option<Duration>,
     completed: Option<Completed>,
     bootstrap: Vec<Arc<Bootstrap>>,
+    /// Snapshot and own-post evidence read once after opening or reconnecting.
+    evidence: Option<crate::identity::SessionEvidence>,
+    /// A copy that must reset never sends again in this process (§10).
+    stopped: Option<DeviceResetReason>,
+}
+impl Session {
+    fn closed(stopped: Option<DeviceResetReason>) -> Self {
+        Self {
+            starting: None,
+            completed: None,
+            bootstrap: Vec::new(),
+            evidence: None,
+            stopped,
+        }
+    }
 }
 struct Bootstrap {
     paths: BTreeSet<ObjectPath>,
@@ -48,11 +63,7 @@ impl SendGate {
     pub fn new(clock: ClockRef) -> Self {
         Self {
             clock,
-            session: Mutex::new(Session {
-                starting: None,
-                completed: None,
-                bootstrap: Vec::new(),
-            }),
+            session: Mutex::new(Session::closed(None)),
             changed: watch::channel(0).0,
         }
     }
@@ -74,6 +85,9 @@ impl SendGate {
         copies: Vec<ObservedCopy>,
     ) -> Result<(), SyncError> {
         let mut session = self.session.lock().expect("send gate poisoned");
+        if let Some(reason) = session.stopped {
+            return Err(SyncError::DeviceReset(reason));
+        }
         let started = session
             .starting
             .take()
@@ -94,12 +108,32 @@ impl SendGate {
     }
     /// Forget observations when reconnecting or resetting this installation.
     pub fn invalidate(&self) {
-        *self.session.lock().expect("send gate poisoned") = Session {
-            starting: None,
-            completed: None,
-            bootstrap: Vec::new(),
+        {
+            let mut session = self.session.lock().expect("send gate poisoned");
+            *session = Session::closed(session.stopped);
+        }
+        self.notify();
+    }
+    /// Close this installation for good: its copy is stale or replaced, and
+    /// only a reset as a new device may send again (§10). The first reason wins.
+    pub(crate) fn stop(&self, reason: DeviceResetReason) -> SyncError {
+        let reason = {
+            let mut session = self.session.lock().expect("send gate poisoned");
+            let reason = *session.stopped.get_or_insert(reason);
+            *session = Session::closed(Some(reason));
+            reason
         };
         self.notify();
+        SyncError::DeviceReset(reason)
+    }
+    pub(crate) fn stopped(&self) -> Option<DeviceResetReason> {
+        self.session.lock().expect("send gate poisoned").stopped
+    }
+    pub(crate) fn session_evidence(&self) -> Option<crate::identity::SessionEvidence> {
+        self.session.lock().expect("send gate poisoned").evidence
+    }
+    pub(crate) fn keep_session_evidence(&self, evidence: crate::identity::SessionEvidence) {
+        self.session.lock().expect("send gate poisoned").evidence = Some(evidence);
     }
     fn fresh(&self, completed: &Completed) -> bool {
         let now = self.clock.elapsed();
@@ -178,6 +212,9 @@ impl SendGate {
 impl PublicationGate for SendGate {
     fn check(&self, path: &ObjectPath) -> Result<(), StorageError> {
         let session = self.session.lock().expect("send gate poisoned");
+        if session.stopped.is_some() {
+            return Err(StorageFailure::CatchUpRequired.into());
+        }
         let current = session
             .completed
             .as_ref()

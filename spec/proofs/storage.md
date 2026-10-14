@@ -176,6 +176,9 @@ log reads, positions and conditional snapshot discovery. Establishing that
 these requests supply the model's complete evidence, including after log
 deletion, is an [IO verification obligation](io.md#discovery-obligations).
 The model has no key-copy counter and does not prove that added check.
+`IdentityRunner` executes `checkIdentity` and `ReplacementRead.observe`/`gate`
+for the Rust differential tests of coven-sync's pre-send check; key-copy
+counters stay equal on both sides of those cases.
 
 `Identity` also contains a separate model with recorded replacement ends.
 Its `ends_*`, `combined_end_keeps_completed` and `beyond_end_waits` results

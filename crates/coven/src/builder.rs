@@ -175,6 +175,19 @@ impl CovenBuilder {
             .await
     }
 
+    /// Replace this installation with a new device loaded from storage (§10,
+    /// §19.2), completing a reset that sync or opening decided. Uses saved
+    /// settings, credentials and member keys; nothing unsent is salvaged.
+    /// An interrupted call resumes with the same fresh id. The returned
+    /// handle's `device_reset()` names the old and new ids.
+    pub async fn reset_device(
+        self,
+        store: StoreId,
+        device_name: &str,
+    ) -> Result<CovenHandle, BootstrapError> {
+        bootstrap::reset_device(self, store, device_name).await
+    }
+
     /// Opens the store for reading only, alongside a handle that has it open.
     /// Its shared lock protects both read connections and local cache metadata.
     /// It runs no migration and refuses a database whose schema is newer or
@@ -272,10 +285,29 @@ impl CovenBuilder {
                     Err(StoreLockError::RecoveryPending(_)) => false,
                     Err(error) => return Err(error.into()),
                 };
-            if new_recovery || keychain.device_id()? != Some(settings.device_id) {
+            if new_recovery {
                 let device = self.ids.new_device_id();
                 lock.set_device_id(device)?;
                 keychain.set_device_id(device)?;
+            } else {
+                // A copy restored without its non-backed-up custody id, or one
+                // sync already decided to replace, resets as a new device (§10).
+                let reset = match directory.unfinished_device_reset()? {
+                    Some(reset) => Some(reset),
+                    None if keychain.device_id()? != Some(settings.device_id) => Some(
+                        directory
+                            .record_device_reset(&DeviceReset {
+                                old_device: settings.device_id,
+                                new_device: self.ids.new_device_id(),
+                                reason: DeviceResetReason::IdentityMismatch,
+                            })
+                            .map_err(StoreLockError::from)?,
+                    ),
+                    None => None,
+                };
+                if reset.is_some() {
+                    return Err(StoreLockError::BootstrapPending(settings.id).into());
+                }
             }
             Ok(OpeningStore {
                 database,

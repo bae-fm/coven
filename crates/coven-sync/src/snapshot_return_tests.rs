@@ -116,7 +116,10 @@ async fn returning_after_thirty_days_reloads_history_deleted_meanwhile() {
         .await;
     let before = storage.request_trace().len();
     b.sync.prepare_return().await.unwrap();
-    assert_eq!(snapshot_lists(&storage, before), 1);
+    // The reopened session's identity evidence lists every snapshot before
+    // the clock replacement it sends (§10); the return lists the audience's
+    // snapshots after that fresh storage sample (§15).
+    assert_eq!(snapshot_lists(&storage, before), 2);
     assert_eq!(tables(&a).await, tables(&b).await);
 }
 

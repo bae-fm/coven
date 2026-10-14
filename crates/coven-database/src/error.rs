@@ -74,6 +74,10 @@ pub enum DbError {
     /// this handle, read-only or not, refuses calls until reopened (§5).
     #[error("an earlier rollback failed; reopen the store")]
     RollbackFailed,
+    /// This copy of the installation is being replaced by a new device (§10).
+    /// Every later call and live query fails until `reset_device` finishes.
+    #[error("this installation is being replaced as device {}", .0.new_device.0)]
+    DeviceReset(coven_foundation::files::DeviceReset),
     /// Sync's part of a database transaction failed, keeping sync's own typed
     /// cause, and the transaction did not commit: a streamed transfer's
     /// producer or final authentication check, or the schema publication

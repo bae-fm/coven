@@ -412,6 +412,17 @@ pub(crate) const POLICY: Policy = Policy {
             "<free>",
             "prepare_request",
         ),
+        // Finishing a recorded reset composes the new installation.
+        (
+            "crates/coven/src/bootstrap_reset.rs",
+            "<free>",
+            "reset_device",
+        ),
+        (
+            "crates/coven/src/bootstrap_reset.rs",
+            "<free>",
+            "reset_unconnected",
+        ),
         (
             "crates/coven/src/builder.rs",
             "CovenBuilder",
@@ -430,6 +441,11 @@ pub(crate) const POLICY: Policy = Policy {
         ("crates/coven/src/builder.rs", "CovenBuilder", "oauth_flow"),
         ("crates/coven/src/builder.rs", "CovenBuilder", "open"),
         ("crates/coven/src/builder.rs", "CovenBuilder", "open_graph"),
+        (
+            "crates/coven/src/builder.rs",
+            "CovenBuilder",
+            "reset_device",
+        ),
         (
             "crates/coven/src/builder.rs",
             "CovenBuilder",

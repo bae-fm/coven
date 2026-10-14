@@ -169,7 +169,7 @@ async fn a_queued_publication_follows_the_committed_read_only_catch_up() {
     author.create(key(1)).await;
     let mut receiver = device(storage.clone(), 2, member(1), store(1)).await;
     receiver.sync.step().await.unwrap();
-    receiver.sync.load_new_device("second").await.unwrap();
+    receiver.sync.load_new_device("second", None).await.unwrap();
     author.sync.step().await.unwrap();
     receiver.interrupt_entry(2).await;
     assert!(receiver
@@ -232,7 +232,7 @@ async fn intermediate_removal_cannot_stop_the_owner_before_batch_replay() {
         .await
         .unwrap();
     ben.sync.step().await.unwrap();
-    ben.sync.load_new_device("Ben").await.unwrap();
+    ben.sync.load_new_device("Ben", None).await.unwrap();
     ana.sync.step().await.unwrap();
     let receiver = device(storage, 3, member(1), store(1)).await;
     receiver.sync.step().await.unwrap();
@@ -361,7 +361,7 @@ mod waits {
         a.create(key(1)).await;
         let read = a.sync.make_and_upload_entry(add_device(20)).await.unwrap();
         b.sync().await;
-        b.sync.load_new_device("second").await.unwrap();
+        b.sync.load_new_device("second", None).await.unwrap();
         let later = b.sync.make_and_upload_entry(add_device(21)).await.unwrap();
         let own = EntryId {
             device: later.device,

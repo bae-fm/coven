@@ -292,23 +292,42 @@ impl FilesInner {
                         bytes_total: total,
                     },
                 );
-                storage.create_once(&path, &bytes).await?;
+                match storage.create(&path, &bytes).await {
+                    Ok(()) => {}
+                    Err(error)
+                        if error.failure() == coven_storage::StorageFailure::AlreadyExists
+                            && !matches!(error, coven_storage::StorageError::Cleanup { .. }) =>
+                    {
+                        self.settle_occupied(
+                            storage.as_ref(),
+                            &path,
+                            crate::identity::digest(&bytes),
+                        )
+                        .await?;
+                    }
+                    Err(error) => return Err(error.into()),
+                }
             } else {
                 let session = item
                     .session
                     .as_ref()
                     .map(|bytes| UploadSession::decode(bytes.as_bytes()))
                     .transpose()?;
-                let uploaded = crate::recorded_upload::upload(
+                match crate::recorded_upload::upload(
                     storage.as_ref(),
                     &path,
                     total,
                     session,
                     &mut transfer,
                 )
-                .await?;
-                if !uploaded {
-                    return Ok(false);
+                .await?
+                {
+                    crate::recorded_upload::Uploaded::Stored => {}
+                    crate::recorded_upload::Uploaded::Paused => return Ok(false),
+                    crate::recorded_upload::Uploaded::Occupied(expected) => {
+                        self.settle_occupied(storage.as_ref(), &path, expected)
+                            .await?;
+                    }
                 }
             }
             self.database
@@ -329,6 +348,25 @@ impl FilesInner {
             .failures
             .remove(&item.id);
         Ok(changed)
+    }
+    /// A file path is this device's own: different occupant bytes mean another
+    /// copy holds its id, which stops every send until the store resets (§10).
+    async fn settle_occupied(
+        &self,
+        storage: &dyn coven_storage::Storage,
+        path: &coven_storage::ObjectPath,
+        expected: (u64, coven_crypto::ObjectDigest),
+    ) -> Result<(), UploadFailure> {
+        match crate::identity::settle_occupied(storage, &self.send, path, expected).await {
+            Ok(()) => Ok(()),
+            Err(SyncError::Storage(error)) => Err(error.into()),
+            Err(SyncError::DeviceReset(_)) => Err(coven_storage::StorageFailure::AlreadyExists
+                .with_source("another copy of this device published different bytes")
+                .into()),
+            Err(error) => Err(coven_storage::StorageFailure::Protocol
+                .with_source(error)
+                .into()),
+        }
     }
     pub(super) async fn fix_identity(&self, item: &mut FileUpload) -> Result<(), UploadFailure> {
         let id = FileId(self.ids.new_id());

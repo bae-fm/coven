@@ -516,6 +516,15 @@ impl OperationRun {
     }
 
     async fn sync_pass(&mut self) -> Result<(), SyncError> {
+        let result = self.pass_steps().await;
+        // Any sender may have stopped this copy; decide its reset durably.
+        if self.sync.send_stopped() {
+            return Err(self.sync.record_device_reset().await);
+        }
+        result
+    }
+
+    async fn pass_steps(&mut self) -> Result<(), SyncError> {
         let _pass = self.sync.begin_pass(&mut self.writes);
         self.sync.sync_store_log().await?;
         self.writes.observe_positions().await?;

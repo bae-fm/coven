@@ -236,7 +236,10 @@ async fn a_dropped_witness_arriving_after_the_late_entry_cannot_grant_authority(
     let mut b = device(storage.clone(), 2, member(1), store(1)).await;
     a.create(key(1)).await;
     b.sync().await;
-    b.sync.load_new_device("delayed writer").await.unwrap();
+    b.sync
+        .load_new_device("delayed writer", None)
+        .await
+        .unwrap();
     // Writer 3 has no membership authority, but publishes a correctly signed
     // entry. Writer 2's delayed addition is decoded and consumed before it.
     let witness = StoreLogEntry {
@@ -472,7 +475,7 @@ async fn setup_consumes_a_late_access_entry_before_committing_credentials() {
     let mut b = device(storage.clone(), 2, member(1), store(1)).await;
     a.create(key(1)).await;
     b.sync().await;
-    b.sync.load_new_device("access writer").await.unwrap();
+    b.sync.load_new_device("access writer", None).await.unwrap();
     let access = coven_format::MemberAccess::S3AccessKey {
         access_key_id: "replacement".into(),
         principal: coven_format::S3Principal::Console,
@@ -599,7 +602,7 @@ async fn a_late_removal_revalidates_changed_authority_before_a_new_number() {
             .unwrap();
     }
     b.sync().await;
-    b.sync.load_new_device("delayed admin").await.unwrap();
+    b.sync.load_new_device("delayed admin", None).await.unwrap();
     b.interrupt_entry(2).await;
     assert!(matches!(b
         .sync

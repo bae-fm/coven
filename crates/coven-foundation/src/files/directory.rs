@@ -159,6 +159,37 @@ impl StoreDir {
         super::DatabaseRecovery::begin(&self.path, self.id, lock, name)
     }
 
+    /// The recorded replacement of this installation, if one is unfinished
+    /// or its record outlived publication (§10).
+    pub fn device_reset(&self) -> Result<Option<super::DeviceReset>, super::FileError> {
+        super::device_reset::read(&self.path)
+    }
+
+    /// Durably decide to replace this installation; the first decision wins.
+    /// Its owner stops using the database; the next bootstrap moves it aside.
+    pub fn record_device_reset(
+        &self,
+        reset: &super::DeviceReset,
+    ) -> Result<super::DeviceReset, super::FileError> {
+        super::device_reset::record(&self.path, reset)
+    }
+
+    /// Whether a reset record remains only because publication was interrupted
+    /// after removing the bootstrap marker: settings already name the new device.
+    /// Such a record is removed; an unfinished one is returned.
+    pub fn unfinished_device_reset(&self) -> Result<Option<super::DeviceReset>, SettingsError> {
+        let Some(reset) = self.device_reset()? else {
+            return Ok(None);
+        };
+        if self.settings()?.device_id == reset.new_device
+            && !super::bootstrap::is_pending(&self.path)?
+        {
+            super::device_reset::finish(&self.path)?;
+            return Ok(None);
+        }
+        Ok(Some(reset))
+    }
+
     /// The settings written when this store was created, restored or joined.
     /// Reading takes no lock; a read-only open uses it alongside a writer.
     pub fn settings(&self) -> Result<StoreSettings, SettingsError> {

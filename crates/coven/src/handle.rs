@@ -147,6 +147,17 @@ impl CovenHandle {
         self.sync.subscribe()
     }
 
+    /// The latest completed replacement stored in this installation, or None.
+    /// It survives reopening; unsent edits of the old copy were discarded (§10).
+    pub async fn device_reset(&self) -> CovenResult<Option<DeviceReset>> {
+        self.database.device_reset().await
+    }
+
+    /// The same pre-built query, including a replacement completed before opening.
+    pub fn subscribe_device_reset(&self) -> LiveQuery<Option<DeviceReset>> {
+        self.database.subscribe_device_reset()
+    }
+
     /// Current local conditions and authenticated peer reports, including while disconnected.
     pub async fn pending(&self) -> CovenResult<Vec<PendingRecord>> {
         self.database.pending().await

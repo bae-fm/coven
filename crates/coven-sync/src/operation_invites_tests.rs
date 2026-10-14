@@ -122,7 +122,7 @@ async fn invite_cursor_excludes_reserved_copies_until_the_invites_catch_up_publi
     a.sync.test_rotate(Audience::Store, key(2)).await;
     let mut b = device(storage.clone(), 2, member(1), store(1)).await;
     b.sync().await;
-    b.sync.load_new_device("Second phone").await.unwrap();
+    b.sync.load_new_device("Second phone", None).await.unwrap();
     assert_eq!(a.db.published_key_copy_number().await.unwrap(), 2);
     assert_eq!(b.db.published_key_copy_number().await.unwrap(), 0);
     for (d, expected) in [(&mut a, 2), (&mut b, 0)] {

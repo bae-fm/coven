@@ -53,8 +53,8 @@ pub use coven_format::{IamPolicy, MemberAccess, S3Principal};
 pub use coven_foundation::clock::{Clock, ClockRef, SystemClock};
 pub use coven_foundation::files::FileError as DiskError;
 pub use coven_foundation::files::{
-    BootstrapDirectoryError, FileError, FileName, FileNameError, SettingsError, StoreDir,
-    StoreInfo, StoreLayout, StoreLayoutError, StoreLockError,
+    BootstrapDirectoryError, DeviceReset, DeviceResetReason, FileError, FileName, FileNameError,
+    SettingsError, StoreDir, StoreInfo, StoreLayout, StoreLayoutError, StoreLockError,
 };
 pub use coven_foundation::id_source::{
     CircleId, DeviceId, FileId, IdSource, IdSourceRef, InviteId, KeyId, StoreId, UuidIds,

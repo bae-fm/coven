@@ -1,0 +1,183 @@
+//! The check that this installation still owns its counters before it sends,
+//! and the comparison of an occupied immutable path with this copy's bytes (§10).
+
+use crate::{SendGate, SyncError};
+use coven_crypto::{ObjectDigest, ObjectHasher};
+use coven_database::{EntryOutcome, IdentityReservations, StoreLog};
+use coven_format::store_log::StoreChange;
+use coven_foundation::{files::DeviceResetReason, id_source::DeviceId};
+use coven_storage::{ObjectPath, Storage, StorageFailure};
+
+/// The greatest own write and entry numbers one kind of evidence shows.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Ends {
+    pub(crate) writes: u64,
+    pub(crate) entries: u64,
+}
+
+impl Ends {
+    fn combine(self, other: Self) -> Self {
+        Self {
+            writes: self.writes.max(other.writes),
+            entries: self.entries.max(other.entries),
+        }
+    }
+}
+
+/// Own numbers found in storage by next-number reads and listings.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Counters {
+    pub(crate) logs: Ends,
+    pub(crate) key_copies: u64,
+    pub(crate) snapshots: u64,
+}
+
+/// Initialization evidence kept for the running session: signed snapshot
+/// coverage, the checked own post and own snapshot numbers. Reopening,
+/// reconnecting or a reset discards it with the send gate's session.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct SessionEvidence {
+    pub(crate) covered: Ends,
+    pub(crate) posted: Ends,
+    pub(crate) snapshots: u64,
+}
+
+/// One complete observation of everything §10 compares with the reservations.
+/// A failed read or listing produces no evidence at all.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Evidence {
+    pub(crate) listed: Counters,
+    pub(crate) covered: Ends,
+    pub(crate) posted: Ends,
+    pub(crate) replaced: bool,
+    pub(crate) removed: bool,
+}
+
+impl Evidence {
+    pub(crate) fn observed(&self) -> Counters {
+        Counters {
+            logs: self.listed.logs.combine(self.covered).combine(self.posted),
+            ..self.listed
+        }
+    }
+}
+
+/// The identity verdict before any send (Lean `CovenStorage.checkIdentity`).
+#[derive(Debug)]
+pub(crate) enum Gate {
+    Send,
+    Pending(SyncError),
+    Reset(DeviceResetReason),
+    Stopped,
+}
+
+/// Storage proves a counter beyond this database's reservations. Equality,
+/// including an upload confirmed just before a crash, is not stale.
+pub(crate) fn ahead(observed: &Counters, reserved: &IdentityReservations) -> bool {
+    observed.logs.writes > reserved.writes
+        || observed.logs.entries > reserved.entries
+        || observed.key_copies > reserved.key_copies
+        || observed.snapshots > reserved.snapshots
+}
+
+pub(crate) fn check(
+    device: DeviceId,
+    reserved: &IdentityReservations,
+    custody: Option<DeviceId>,
+    scan: Result<Evidence, SyncError>,
+) -> Gate {
+    if custody != Some(device) {
+        return Gate::Reset(DeviceResetReason::IdentityMismatch);
+    }
+    match scan {
+        Err(error) => Gate::Pending(error),
+        Ok(evidence) if evidence.removed => Gate::Stopped,
+        Ok(evidence) if evidence.replaced => Gate::Reset(DeviceResetReason::Replaced),
+        Ok(evidence) if ahead(&evidence.observed(), reserved) => {
+            Gate::Reset(DeviceResetReason::StorageAhead)
+        }
+        Ok(_) => Gate::Send,
+    }
+}
+
+/// A kept registration names `device` as the id it replaces (D6, §10).
+pub(crate) fn replaced(log: &StoreLog, device: DeviceId) -> bool {
+    replaced_by(
+        log.entries
+            .iter()
+            .filter_map(|applied| match &applied.entry.change {
+                StoreChange::AddDevice {
+                    replaces: Some(old),
+                    ..
+                } if matches!(
+                    log.replay.entries.get(&applied.entry.position),
+                    Some(EntryOutcome::Kept)
+                ) =>
+                {
+                    Some(*old)
+                }
+                _ => None,
+            }),
+        device,
+    )
+}
+
+/// Any kept replacement of this id stops it, whichever new id it registered.
+pub(crate) fn replaced_by(mut kept_olds: impl Iterator<Item = DeviceId>, device: DeviceId) -> bool {
+    kept_olds.any(|old| old == device)
+}
+
+/// Length and SHA-256 of bytes this copy would send.
+pub(crate) fn digest(bytes: &[u8]) -> (u64, ObjectDigest) {
+    let mut hasher = ObjectHasher::new();
+    hasher.update(bytes);
+    (bytes.len() as u64, hasher.finish())
+}
+
+/// Read the complete occupant of an immutable path. A failed read keeps the
+/// attempt pending; occupation alone proves nothing (§10).
+async fn stored_digest(
+    storage: &dyn Storage,
+    path: &ObjectPath,
+) -> Result<(u64, ObjectDigest), SyncError> {
+    let mut stream = storage.stream_object(path, None).await?;
+    if &stream.metadata().path != path {
+        return Err(StorageFailure::Protocol
+            .with_source("occupant response names another path")
+            .into());
+    }
+    let mut hasher = ObjectHasher::new();
+    let mut length = 0u64;
+    let mut buffer = vec![0; 64 * 1024];
+    loop {
+        let read = stream.read(&mut buffer).await?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+        length += read as u64;
+    }
+    Ok((length, hasher.finish()))
+}
+
+/// Equal complete bytes count as stored. Different bytes on this device's own
+/// path mean another copy holds its id: stop every send and reset (§10).
+pub(crate) async fn settle_occupied(
+    storage: &dyn Storage,
+    send: &SendGate,
+    path: &ObjectPath,
+    expected: (u64, ObjectDigest),
+) -> Result<(), SyncError> {
+    if stored_digest(storage, path).await? == expected {
+        return Ok(());
+    }
+    tracing::warn!(
+        path = path.as_str(),
+        "own immutable path holds another copy's bytes"
+    );
+    Err(send.stop(DeviceResetReason::SlotMismatch))
+}
+
+#[cfg(test)]
+#[path = "identity_tests.rs"]
+pub(crate) mod tests;

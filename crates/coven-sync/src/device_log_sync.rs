@@ -311,8 +311,8 @@ impl DeviceLogSync {
         };
         let mut objects = BTreeMap::new();
         let mut ends = BTreeMap::new();
-        // Every device that ever registered, including removed and replaced
-        // ones, and this device's own log for its identity read.
+        // Every other device that ever registered, including removed and
+        // replaced ones. The first phase reads this device's own next write.
         let writers: std::collections::BTreeSet<_> = local
             .log
             .replay
@@ -320,7 +320,7 @@ impl DeviceLogSync {
             .devices
             .keys()
             .copied()
-            .chain([local.device])
+            .filter(|device| *device != local.device)
             .collect();
         for writer in writers {
             // A refused write stops its log: nothing at or past it is read.

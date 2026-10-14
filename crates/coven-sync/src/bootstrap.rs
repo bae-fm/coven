@@ -102,7 +102,11 @@ impl StoreLogSync {
 
     /// Register this installation with its member's signature, then atomically
     /// load snapshots and later writes through the ordinary snapshot owner.
-    pub async fn load_new_device(&mut self, name: &str) -> Result<(), SyncError> {
+    pub async fn load_new_device(
+        &mut self,
+        name: &str,
+        replaces: Option<coven_foundation::id_source::DeviceId>,
+    ) -> Result<(), SyncError> {
         let member = self.operation_member()?;
         let local = self.database.local_store_log().await?;
         self.check_stopped(&local, &member)?;
@@ -121,7 +125,7 @@ impl StoreLogSync {
                 self.make_and_upload_entry(StoreChange::AddDevice {
                     device: local.device,
                     name: name.into(),
-                    replaces: None,
+                    replaces,
                 })
                 .await?;
             }

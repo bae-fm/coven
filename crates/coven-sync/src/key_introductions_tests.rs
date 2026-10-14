@@ -170,7 +170,7 @@ async fn conflicting_commitments_reject_acquisition() {
     ana.add(&ben.member, MemberRole::Admin).await;
     ana.add(&erin.member, MemberRole::Member).await;
     ben.sync().await;
-    ben.sync.load_new_device("Ben").await.unwrap();
+    ben.sync.load_new_device("Ben", None).await.unwrap();
     ana.sync().await;
     erin.sync().await;
     // Ana's rotation is fixed before Ben's is published, and lands after it.
@@ -233,7 +233,7 @@ async fn an_unauthorized_rotation_and_its_copy_supply_no_key() {
     ana.create(key(1)).await;
     ana.add(&ben.member, MemberRole::Member).await;
     ben.sync().await;
-    ben.sync.load_new_device("Ben").await.unwrap();
+    ben.sync.load_new_device("Ben", None).await.unwrap();
     ana.sync().await;
     ana.sync
         .make_and_upload_entry(StoreChange::CreateCircle {

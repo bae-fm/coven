@@ -7,6 +7,9 @@ async fn setup_key_failure_restores_the_separate_synced_values() {
     f.handle.close().await.unwrap();
     let keychain = Keychain::in_memory("setup-rollback").unwrap();
     let scoped = StoreKeychain::new(keychain.clone(), f.directory.id());
+    scoped
+        .set_device_id(f.directory.settings().unwrap().device_id)
+        .unwrap();
     let old_code = SecretBytes::new(b"previous synced code".to_vec());
     let old_key = SecretBytes::new(b"previous synced S3 key".to_vec());
     scoped.set_synced_restore_code(&old_code).unwrap();

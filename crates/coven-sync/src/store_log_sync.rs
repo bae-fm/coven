@@ -123,6 +123,10 @@ impl StoreLogSync {
         self.send.invalidate();
     }
 
+    pub(crate) fn send_stopped(&self) -> bool {
+        self.send.stopped().is_some()
+    }
+
     pub(crate) fn copy_observation(&self) -> Result<Vec<keys::ObservedCopy>, SyncError> {
         self.send.observation()
     }
@@ -678,6 +682,8 @@ mod store_log_finality;
 
 #[path = "store_log_batch.rs"]
 mod store_log_batch;
+#[path = "store_log_identity.rs"]
+mod store_log_identity;
 
 #[path = "key_acquisition.rs"]
 mod key_acquisition;

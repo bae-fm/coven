@@ -19,6 +19,10 @@ impl DeviceLogSync {
         let storage = self.storage.as_deref().ok_or(SyncError::NoStorage)?;
         let database = &self.database;
         let path = crate::write_seal::path(store, write);
+        let occupied = {
+            let (ring, member, path) = (ring.clone(), member.clone(), path.clone());
+            move || self.settle_occupied_write(store, write, ring, member, path)
+        };
         let total = database
             .read_oldest_upload(|upload| {
                 coven_format::sealed_write::sealed_length(
@@ -51,7 +55,7 @@ impl DeviceLogSync {
                         if error.failure() == StorageFailure::AlreadyExists
                             && !matches!(error, StorageError::Cleanup { .. }) =>
                     {
-                        return Ok(())
+                        return occupied().await
                     }
                     Err(SyncError::Storage(error))
                         if error.failure() == StorageFailure::SessionExpired
@@ -63,7 +67,7 @@ impl DeviceLogSync {
                                 if error.failure() == StorageFailure::AlreadyExists
                                     && !matches!(error, StorageError::Cleanup { .. }) =>
                             {
-                                return Ok(())
+                                return occupied().await
                             }
                             Err(error) => return Err(error.into()),
                         };
@@ -79,7 +83,7 @@ impl DeviceLogSync {
                     if error.failure() == StorageFailure::AlreadyExists
                         && !matches!(error, StorageError::Cleanup { .. }) =>
                 {
-                    return Ok(())
+                    return occupied().await
                 }
                 Err(error) => return Err(error.into()),
             },
@@ -160,7 +164,8 @@ impl DeviceLogSync {
                 if bytes.len() as u64 != total {
                     return Err(StorageFailure::InvalidPart.into());
                 }
-                storage.create_once(&path, &bytes).await?;
+                return crate::store_log_object::create_own(storage, &self.send, &path, &bytes)
+                    .await;
             }
             Ok::<_, SyncError>(())
         };
@@ -178,10 +183,42 @@ impl DeviceLogSync {
                 if error.failure() == StorageFailure::AlreadyExists
                     && !matches!(error, StorageError::Cleanup { .. }) =>
             {
-                Ok(())
+                occupied().await
             }
             result => result,
         }
+    }
+
+    /// Re-seal the fixed bytes into a digest and compare them with the occupant
+    /// of this write's path. Equal bytes count as stored (§6, §10).
+    async fn settle_occupied_write(
+        &self,
+        store: coven_foundation::id_source::StoreId,
+        write: WriteId,
+        ring: coven_crypto::StoreKeyring,
+        member: coven_crypto::MemberKeys,
+        path: coven_storage::ObjectPath,
+    ) -> Result<(), SyncError> {
+        let storage = self.storage.as_deref().ok_or(SyncError::NoStorage)?;
+        let expected = self
+            .database
+            .read_oldest_upload(move |upload| {
+                if upload.header.header.position != write {
+                    return Err(DbError::UploadNotOldest { write }.into());
+                }
+                let mut hasher = coven_crypto::ObjectHasher::new();
+                let mut length = 0u64;
+                crate::write_seal::seal(store, upload, &ring, &member, &mut |piece| {
+                    hasher.update(piece);
+                    length += piece.len() as u64;
+                    Ok(())
+                })?;
+                Ok::<_, SyncError>((length, hasher.finish()))
+            })
+            .await
+            .map_err(read_error)?
+            .ok_or(DbError::UploadNotOldest { write })?;
+        crate::identity::settle_occupied(storage, &self.send, &path, expected).await
     }
 
     async fn record_upload_failure(

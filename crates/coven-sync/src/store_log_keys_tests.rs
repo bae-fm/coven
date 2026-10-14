@@ -214,7 +214,7 @@ async fn household(storage: &Arc<MemoryStorage>) -> [Device; 4] {
     ana.add(&dan.member, MemberRole::Member).await;
     ana.add(&erin.member, MemberRole::Member).await;
     ben.sync().await;
-    ben.sync.load_new_device("Ben").await.unwrap();
+    ben.sync.load_new_device("Ben", None).await.unwrap();
     ana.sync().await;
     erin.sync().await;
     ana.clock.set(UNIX_EPOCH + Duration::from_secs(2));
@@ -239,7 +239,7 @@ async fn concurrent_addition(
     ana.add(&ben.member, MemberRole::Admin).await;
     ana.add(&dan.member, MemberRole::Member).await;
     ben.sync().await;
-    ben.sync.load_new_device("Ben").await.unwrap();
+    ben.sync.load_new_device("Ben", None).await.unwrap();
     ana.sync().await;
     ana.clock.set(UNIX_EPOCH + Duration::from_secs(2));
     ben.clock.set(UNIX_EPOCH + Duration::from_secs(3));
@@ -634,7 +634,7 @@ async fn cancelling_publication_retains_prerequisites_and_leaves_no_number_gap()
 }
 
 #[tokio::test]
-async fn unequal_occupant_keeps_the_copy_pending() {
+async fn unequal_occupant_of_an_own_copy_path_stops_the_copy_and_keeps_it_queued() {
     let storage = storage();
     let mut ana = device(storage.clone(), 1, member(1), store(1)).await;
     ana.create(key(1)).await;
@@ -647,7 +647,13 @@ async fn unequal_occupant_keeps_the_copy_pending() {
         .create(&copy.path(store(1)), b"different")
         .await
         .unwrap();
-    assert!(matches!(ana.sync.step().await, Err(SyncError::Damaged(_))));
+    // Another live copy holds this device's key-copy number (§10).
+    assert!(matches!(
+        ana.sync.step().await,
+        Err(SyncError::DeviceReset(
+            coven_foundation::files::DeviceResetReason::SlotMismatch
+        ))
+    ));
     assert_eq!(ana.db.key_uploads().await.unwrap(), [copy]);
 }
 

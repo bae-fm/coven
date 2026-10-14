@@ -518,10 +518,7 @@ impl StoreLogSync {
         mut task: SnapshotTask,
         path: &ObjectPath,
     ) -> Result<Progress, SyncError> {
-        let SnapshotJob::Write {
-            audience, session, ..
-        } = task.job.clone()
-        else {
+        let SnapshotJob::Write { session, .. } = task.job.clone() else {
             unreachable!("snapshot upload step")
         };
         let name = task
@@ -530,32 +527,23 @@ impl StoreLogSync {
             .ok_or(coven_database::DbError::DamagedDatabase)?;
         let input = io::SnapshotInput::open(&self.directory, name)?;
         let storage = self.storage.as_deref().ok_or(SyncError::NoStorage)?;
-        if storage
-            .list(&ObjectPrefix::audience_snapshots(
-                self.directory.id(),
-                &audience,
-            ))
-            .await?
-            .iter()
-            .any(|o| &o.path == path)
+        let recorded = session.clone();
+        let mut transfer = SnapshotTransfer {
+            sync: self,
+            record,
+            task: &mut task,
+            input: &input,
+        };
+        if let crate::recorded_upload::Uploaded::Occupied(expected) =
+            crate::recorded_upload::upload(storage, path, input.size(), session, &mut transfer)
+                .await?
         {
-            if let Some(session) = &session {
+            // A lost reply may have published this snapshot; another copy of
+            // this device may also have used its number (§10).
+            crate::identity::settle_occupied(storage, &self.send, path, expected).await?;
+            if let Some(session) = &recorded {
                 storage.abort_upload(session).await?;
             }
-        } else {
-            crate::recorded_upload::upload(
-                storage,
-                path,
-                input.size(),
-                session,
-                &mut SnapshotTransfer {
-                    sync: self,
-                    record,
-                    task: &mut task,
-                    input: &input,
-                },
-            )
-            .await?;
         }
         self.save_snapshot_task(record, &task, 2).await?;
         Ok(Progress::Advanced)

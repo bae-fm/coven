@@ -449,6 +449,10 @@ pub enum DbError {
     /// that transaction, holding its uncommitted changes or its old snapshot;
     /// this handle, read-only or not, refuses calls until reopened (§5).
     RollbackFailed,
+    /// Sync found this copy stale, replaced or holding another copy's slot.
+    /// Every later call and live query of this handle fails; reopening
+    /// requires `reset_device` (§10).
+    DeviceReset(DeviceReset),
     /// Saving pending state failed. The call that lost the update and every
     /// later call and live query fail with this same cause until the store is
     /// reopened (E5).
@@ -845,7 +849,9 @@ impl CovenBuilder {
     pub async fn open(self, store: StoreId) -> CovenResult<CovenHandle>;
 
     /// Replaces a damaged local database with a new device loaded from storage
-    /// (§19.2). Uses saved settings and custody, with no data salvage.
+    /// (§19.2), or finishes a stale copy's recorded reset (§10), which `open`
+    /// refuses with `BootstrapPending`. Uses saved settings and custody, with
+    /// no data salvage.
     /// Checks storage and keys before moving the old directory aside.
     /// Uses the existing bootstrap state and errors; an interrupted call
     /// resumes with the same fresh id. The returned handle holds a device-reset
@@ -2091,6 +2097,9 @@ pub enum SyncError {
     Damaged(DamagedObject),
     /// This device or its member was removed; syncing stops for good (§10).
     Removed,
+    /// This copy cannot keep its device id. It sends nothing more; the reset
+    /// is recorded and `reset_device` finishes it (§10).
+    DeviceReset(DeviceResetReason),
     /// Held signing credentials are no longer current for this stable id.
     /// Sending stops; restoring with current keys registers a new device.
     MemberKeysReplaced { member: MemberId },

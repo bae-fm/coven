@@ -220,6 +220,14 @@ macro_rules! coven_tables {
             ) STRICT;
             INSERT INTO _coven_finality VALUES(1,NULL);
         ");
+        $visit!(_coven_device_reset, "
+            CREATE TABLE _coven_device_reset (
+                singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+                old_device BLOB NOT NULL CHECK(length(old_device)=8),
+                new_device BLOB NOT NULL CHECK(length(new_device)=8),
+                reason TEXT NOT NULL CHECK(reason IN ('identity-mismatch','storage-ahead','slot-mismatch','replaced','database-damage'))
+            ) STRICT;
+        ");
         $visit!(_coven_catch_up, "
             CREATE TABLE _coven_catch_up (
                 singleton INTEGER PRIMARY KEY CHECK(singleton=1),

@@ -48,6 +48,7 @@ mod recovery;
 #[path = "database_sync.rs"]
 mod sync;
 pub use builder::DatabaseBuilder;
+pub use sync::IdentityReservations;
 
 /// Shared ownership of the database. Closing any clone closes them all.
 #[derive(Clone)]

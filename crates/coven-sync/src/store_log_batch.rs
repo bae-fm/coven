@@ -13,7 +13,15 @@ impl StoreLogSync {
         &self,
         require_complete: bool,
     ) -> Result<bool, SyncError> {
+        if self.send.stopped().is_some() {
+            return Err(self.record_device_reset().await);
+        }
         self.send.begin();
+        // Reservations precede the scan: received own entries must not hide
+        // that storage was ahead of this copy (§10).
+        let reserved = self.database.identity_reservations().await?;
+        let mut listed_entries = 0;
+        let mut listed_copies = 0;
         let _scope = self.reads.enter();
         self.reads.reset_discovery();
         let (through, sample) = {
@@ -66,6 +74,9 @@ impl StoreLogSync {
                     .path
                     .store_log_position()
                     .ok_or(StorageFailure::InvalidPath)?;
+                if device == local.device {
+                    listed_entries = listed_entries.max(number.get());
+                }
                 bytes.insert(
                     EntryId {
                         device,
@@ -75,7 +86,7 @@ impl StoreLogSync {
                 );
                 crate::store_log_landing::add_observation(&mut paths, received.metadata)?;
             }
-            crate::discovery::scan(
+            for copy in crate::discovery::scan(
                 &self.database,
                 &self.reads,
                 storage,
@@ -84,7 +95,14 @@ impl StoreLogSync {
                 &unseen,
                 self.download_limit,
             )
-            .await?;
+            .await?
+            {
+                if let Some((writer, number)) = copy.metadata.path.key_copy_position() {
+                    if writer == local.device {
+                        listed_copies = listed_copies.max(number.get());
+                    }
+                }
+            }
             probed.extend(&writers);
             for stored in &paths {
                 let (device, number) = stored.path.store_log_position().ok_or(
@@ -332,6 +350,20 @@ impl StoreLogSync {
                 }
                 _ => crate::send_gate::Binding::Absent,
             };
+            if binding == crate::send_gate::Binding::Device {
+                match self
+                    .identity_gate(&local, &reserved, listed_entries, listed_copies)
+                    .await
+                {
+                    crate::identity::Gate::Send => {}
+                    crate::identity::Gate::Pending(error) => return Err(error),
+                    crate::identity::Gate::Reset(reason) => {
+                        self.send.stop(reason);
+                        return Err(self.record_device_reset().await);
+                    }
+                    crate::identity::Gate::Stopped => return Err(SyncError::Removed),
+                }
+            }
             // A copy without a readable prefix leaves the reading incomplete:
             // it supplies no sending authority (§11).
             match reading.unreadable {

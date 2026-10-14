@@ -288,7 +288,7 @@ async fn originals_owned_copies_ranges_references_and_deletion_use_the_app_api()
 }
 
 #[tokio::test]
-async fn a_restored_install_gets_a_new_id_before_its_first_write() {
+async fn a_restored_install_resets_as_a_new_device_before_its_first_write() {
     let root = tempfile::tempdir().unwrap();
     let layout = StoreLayout::new(root.path().to_owned());
     let original = TestCoven::new();
@@ -329,23 +329,45 @@ async fn a_restored_install_gets_a_new_id_before_its_first_write() {
         .unwrap();
     handle.close().await.unwrap();
     // Backup bytes survive, but the new installation has no device-only entry.
+    // It resets as a new device; nothing of the old copy is renumbered (§10).
     let restored = TestCoven::new();
+    let old_device = directory.settings().unwrap().device_id;
+    assert!(matches!(
+        builder(&restored, layout.clone(), ids.clone())
+            .open(directory.id())
+            .await,
+        Err(CovenError::Lock(StoreLockError::BootstrapPending(_)))
+    ));
     let handle = builder(&restored, layout.clone(), ids.clone())
-        .open(directory.id())
+        .reset_device(directory.id(), "Restored")
         .await
         .unwrap();
-    assert!(matches!(
-        handle.read_file(&old).await,
-        Err(FileReadError::OnOtherDevice { .. })
-    ));
+    let reset = handle.device_reset().await.unwrap().unwrap();
+    assert_eq!(reset.old_device, old_device);
+    assert_eq!(reset.reason, DeviceResetReason::IdentityMismatch);
+    assert_eq!(directory.settings().unwrap().device_id, reset.new_device);
+    // The discarded copy's unsent rows and files do not come back.
+    assert!(handle
+        .file_ref("thumbnails", thumbnail.as_str())
+        .await
+        .is_err());
     let supplied = thumbnail.clone();
+    let inserted = thumbnail.clone();
+    let parent = note.clone();
     handle
         .write_with_files(
             move |batch| {
                 batch.put_file("thumbnails", supplied, b"new".to_vec());
                 Ok(())
             },
-            |_| Ok(()),
+            move |sql| {
+                sql.execute("INSERT INTO notes VALUES(?1,'note','store')", [&parent])?;
+                sql.execute(
+                    "INSERT INTO thumbnails(id,note_id,title) VALUES(?1,?2,'new')",
+                    (&inserted, &parent),
+                )?;
+                Ok(())
+            },
         )
         .await
         .unwrap();
@@ -360,6 +382,7 @@ async fn a_restored_install_gets_a_new_id_before_its_first_write() {
         .open(directory.id())
         .await
         .unwrap();
+    assert_eq!(handle.device_reset().await.unwrap(), Some(reset));
     assert_eq!(
         handle
             .file_ref("thumbnails", thumbnail.as_str())

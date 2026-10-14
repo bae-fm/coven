@@ -135,6 +135,10 @@ async fn handle_sign_in_setup_refresh_and_reopen_keep_tokens_in_coven() {
         .await
         .unwrap();
     let keychain = Keychain::in_memory("oauth-custody").unwrap();
+    // The same installation: its device-only custody holds the directory's id.
+    StoreKeychain::new(keychain.clone(), directory.id())
+        .set_device_id(directory.settings().unwrap().device_id)
+        .unwrap();
     let scoped = StoreKeychain::new(keychain.clone(), directory.id());
     let clock = Arc::new(FixedClock::new(std::time::SystemTime::UNIX_EPOCH));
     let sign_in = SignIn::new(clock.clone()).await;
@@ -266,6 +270,10 @@ async fn builder_sign_in_is_provider_bound_and_refreshes_before_setup() {
         .await
         .unwrap();
     let keychain = Keychain::in_memory("oauth-builder").unwrap();
+    // The same installation: its device-only custody holds the directory's id.
+    StoreKeychain::new(keychain.clone(), directory.id())
+        .set_device_id(directory.settings().unwrap().device_id)
+        .unwrap();
     let clock = Arc::new(FixedClock::new(std::time::SystemTime::UNIX_EPOCH));
     let sign_in = SignIn::new(clock.clone()).await;
     let storage = Arc::new(
@@ -331,6 +339,9 @@ mod provider_access_tests {
                 .await
                 .unwrap();
             let keychain = Keychain::in_memory("provider-access").unwrap();
+            StoreKeychain::new(keychain.clone(), directory.id())
+                .set_device_id(directory.settings().unwrap().device_id)
+                .unwrap();
             let clock: ClockRef = Arc::new(FixedClock::new(std::time::UNIX_EPOCH));
             let sign_in = SignIn::new(clock.clone()).await;
             let storage = Arc::new(

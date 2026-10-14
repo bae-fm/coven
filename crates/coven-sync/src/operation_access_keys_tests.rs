@@ -54,7 +54,7 @@ async fn household() -> (
     a.create(key(1)).await;
     a.add(&b.member, MemberRole::Member).await;
     b.sync().await;
-    b.sync.load_new_device("Ben").await.unwrap();
+    b.sync.load_new_device("Ben", None).await.unwrap();
     a.sync().await;
     (storage, a, b)
 }
@@ -205,7 +205,7 @@ async fn a_replacement_lost_to_removal_is_reported_and_its_key_stays_pending() {
     let mut c = device(storage.clone(), 3, member(3), store(1)).await;
     a.add(&c.member, MemberRole::Admin).await;
     c.sync().await;
-    c.sync.load_new_device("Carol").await.unwrap();
+    c.sync.load_new_device("Carol", None).await.unwrap();
     a.sync().await;
     let admin = MemoryKeyAdmin::default();
     let ben = b.member.member_id();

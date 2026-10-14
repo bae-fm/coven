@@ -147,7 +147,7 @@ async fn dropped_attempt_revalidates_before_reserving_a_retry() {
     .await;
     finish(&mut a, add).await;
     b.sync().await;
-    b.sync.load_new_device("Ben").await.unwrap();
+    b.sync.load_new_device("Ben", None).await.unwrap();
     let operation = begin(
         &mut a,
         Command::AddCircleMember(circle, member(3).member_id()),
@@ -206,7 +206,7 @@ async fn removal_downloads_authority_changes() {
     a.add(&b.member, MemberRole::Admin).await;
     a.add(&member(3), MemberRole::Member).await;
     b.sync().await;
-    b.sync.load_new_device("Ben").await.unwrap();
+    b.sync.load_new_device("Ben", None).await.unwrap();
     b.sync
         .make_and_upload_entry(StoreChange::ChangeRole {
             member: a.member.member_id(),

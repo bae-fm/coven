@@ -222,7 +222,7 @@ async fn a_new_device_registers_itself_before_publishing_other_entries() {
         Err(SyncError::Rejected(coven_database::DropReason::NotAllowed))
     ));
     assert!(b.db.local_store_log().await.unwrap().upload.is_none());
-    b.sync.load_new_device("new install").await.unwrap();
+    b.sync.load_new_device("new install", None).await.unwrap();
     let first = EntryId {
         device: DeviceId(2),
         number: 1,
@@ -575,7 +575,7 @@ async fn damaged_entries_block_only_their_device_and_retain_each_cause() {
             .await
             .unwrap();
         b.sync().await;
-        b.sync.load_new_device("second").await.unwrap();
+        b.sync.load_new_device("second", None).await.unwrap();
         a.sync().await;
         c.catch_up().await;
         let broken = a
@@ -708,7 +708,7 @@ async fn invalid_causal_past_and_timestamps_are_damaged() {
         let mut b = device(storage.clone(), 2, member(1), store(1)).await;
         let creation = a.create(key(1)).await;
         b.sync().await;
-        b.sync.load_new_device("second").await.unwrap();
+        b.sync.load_new_device("second", None).await.unwrap();
         a.sync().await;
         let prior = a
             .sync
@@ -919,7 +919,7 @@ async fn a_waiting_entry_reseals_with_its_recorded_key_after_rotation() {
     a.add(&member(2), MemberRole::Member).await;
     let mut b = device(storage.clone(), 2, member(1), store(1)).await;
     b.sync().await;
-    b.sync.load_new_device("second").await.unwrap();
+    b.sync.load_new_device("second", None).await.unwrap();
     a.sync().await;
     storage
         .set_faults(Faults {

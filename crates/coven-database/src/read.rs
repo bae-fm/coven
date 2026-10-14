@@ -76,6 +76,10 @@ impl<'connection> SqlReadContext<'connection> {
         Ok(crate::pending::read(self.database)?)
     }
 
+    pub(crate) fn device_reset(&self) -> CovenResult<Option<coven_foundation::files::DeviceReset>> {
+        Ok(crate::device_reset::read(self.database)?)
+    }
+
     pub(crate) fn store_log(&self) -> CovenResult<crate::StoreLog> {
         Ok(crate::store_log_tables::read(self.database)?)
     }

@@ -6,6 +6,7 @@ mod conflicts;
 mod device_log_sync;
 mod effects;
 mod finality;
+mod identity;
 mod pass_reads;
 mod recent_return;
 mod send_gate;

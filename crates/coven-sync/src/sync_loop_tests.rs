@@ -745,13 +745,13 @@ async fn io_counts_first_catchup_baseline() {
     assert_eq!(
         (counts.requests, counts.requests_by_kind()),
         (
-            62,
+            65,
             RequestCounts {
-                lists: 7,
+                lists: 8,
                 gets: 40,
                 creates: 1,
                 replaces: 2,
-                statuses: 8,
+                statuses: 10,
                 other: 4,
                 ..Default::default()
             }
@@ -882,12 +882,12 @@ async fn io_counts_reopen_baseline() {
     assert_eq!(
         (counts.requests, counts.requests_by_kind()),
         (
-            19,
+            21,
             RequestCounts {
-                lists: 6,
+                lists: 7,
                 gets: 7,
                 replaces: 1,
-                statuses: 4,
+                statuses: 5,
                 other: 1,
                 ..Default::default()
             }

@@ -41,7 +41,7 @@ async fn a_forged_copy_to_an_outsider_exposes_the_key_and_costs_one_rotation() {
     ana.create(key(1)).await;
     ana.add(&ben.member, MemberRole::Member).await;
     ben.sync().await;
-    ben.sync.load_new_device("Ben").await.unwrap();
+    ben.sync.load_new_device("Ben", None).await.unwrap();
     ana.sync().await;
     assert_eq!(selected(&ana).await.unwrap(), key(1));
     // Ben publishes a box naming the store key for Dan, who is not a member.
@@ -109,24 +109,18 @@ async fn a_forged_copy_to_an_outsider_exposes_the_key_and_costs_one_rotation() {
 async fn an_incomplete_copy_observation_blocks_first_attempts() {
     let storage = storage();
     let mut ana = device(storage.clone(), 1, member(1), store(1)).await;
+    let mut ben = device(storage.clone(), 2, member(2), store(1)).await;
     ana.create(key(1)).await;
-    // An undecodable copy in a known writer's log leaves an observation
+    ana.add(&ben.member, MemberRole::Member).await;
+    ben.sync().await;
+    ben.sync.load_new_device("Ben", None).await.unwrap();
+    ana.sync().await;
+    // An undecodable copy in another known writer's log leaves an observation
     // incomplete. It cannot renew the earlier completion once that expires.
-    let writer = ana.db.local_store_log().await.unwrap().device;
-    let next = storage
-        .list(&coven_storage::ObjectPrefix::keys(store(1)))
-        .await
-        .unwrap()
-        .len() as u64
-        + 1;
-    storage
-        .create(
-            &coven_storage::ObjectPath::key_copy(store(1), writer, next.try_into().unwrap()),
-            b"not a sealed key",
-        )
-        .await
-        .unwrap();
-    let bad = coven_storage::ObjectPath::key_copy(store(1), writer, next.try_into().unwrap());
+    // (A number in this device's own log would instead prove a stale copy.)
+    let writer = ben.db.local_store_log().await.unwrap().device;
+    let bad = coven_storage::ObjectPath::key_copy(store(1), writer, 1.try_into().unwrap());
+    storage.create(&bad, b"not a sealed key").await.unwrap();
     let now = coven_foundation::clock::Clock::now(ana.clock.as_ref());
     ana.clock.set(now + std::time::Duration::from_secs(300));
     // A catch-up that must be complete fails on that copy; a pass's scan
@@ -140,11 +134,12 @@ async fn an_incomplete_copy_observation_blocks_first_attempts() {
         ana.send.observation(),
         Err(SyncError::Storage(error)) if error.failure() == coven_storage::StorageFailure::CatchUpRequired
     ));
+    let entries = ana.log().await.entries.len();
     ana.sync.rotate_exposed_keys().await.unwrap();
     finish_rotation(&mut ana).await;
     assert_eq!(
         ana.log().await.entries.len(),
-        1,
+        entries,
         "no rotation without an observation"
     );
 }
@@ -458,7 +453,7 @@ async fn ordinary_members_can_rotate_concurrently_and_both_keys_remain_readable(
     ana.add(&ben.member, MemberRole::Member).await;
     ana.add(&member(3), MemberRole::Member).await;
     ben.sync().await;
-    ben.sync.load_new_device("Ben").await.unwrap();
+    ben.sync.load_new_device("Ben", None).await.unwrap();
     ana.sync().await;
     ana.sync
         .make_and_upload_entry(StoreChange::RemoveMember {
@@ -523,7 +518,7 @@ async fn dropped_rotation_restarts_with_new_material_only_after_revalidation() {
         ana.add(&ben.member, MemberRole::Member).await;
         ana.add(&member(3), MemberRole::Member).await;
         ben.sync().await;
-        ben.sync.load_new_device("Ben").await.unwrap();
+        ben.sync.load_new_device("Ben", None).await.unwrap();
         let circle = crate::store_log_sync::tests::circle(1);
         let key_hash = ben.sync.test_key(Audience::Circle(circle), key(2));
         ben.sync
@@ -720,7 +715,7 @@ async fn only_a_remaining_circle_member_schedules_its_rotation() {
     ana.add(&ben.member, MemberRole::Member).await;
     ana.add(&carol.member, MemberRole::Member).await;
     ben.sync().await;
-    ben.sync.load_new_device("Ben").await.unwrap();
+    ben.sync.load_new_device("Ben", None).await.unwrap();
     let circle = crate::store_log_sync::tests::circle(1);
     let key_hash = ben.sync.test_key(Audience::Circle(circle), key(2));
     ben.sync
@@ -740,7 +735,7 @@ async fn only_a_remaining_circle_member_schedules_its_rotation() {
         .await
         .unwrap();
     carol.sync().await;
-    carol.sync.load_new_device("Carol").await.unwrap();
+    carol.sync.load_new_device("Carol", None).await.unwrap();
     ana.sync().await;
     ana.sync
         .make_and_upload_entry(StoreChange::RemoveMember {

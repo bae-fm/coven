@@ -80,7 +80,10 @@ impl KeyUploadBatch {
     }
 }
 
-fn last_reserved(database: &DatabaseConnection, writer: DeviceId) -> Result<u64, DbError> {
+pub(crate) fn last_reserved(
+    database: &DatabaseConnection,
+    writer: DeviceId,
+) -> Result<u64, DbError> {
     Ok(database.query_row(
         "SELECT max(number) FROM (SELECT max(number) AS number FROM _coven_key_uploads WHERE writer=?1 UNION ALL SELECT number FROM _coven_key_publications WHERE writer=?1)",
         [writer.0.to_be_bytes().as_slice()],

@@ -110,6 +110,7 @@ async fn only_the_spec_tables_are_created() {
                 "_coven_data_reloads",
                 "_coven_data_rows",
                 "_coven_device_files",
+                "_coven_device_reset",
                 "_coven_devices",
                 "_coven_file_chunks",
                 "_coven_file_removals",
@@ -265,6 +266,7 @@ mod fixture {
        SELECT i,CAST(n || device AS BLOB),n,x'00' FROM fixture;
      INSERT INTO _coven_peer_positions SELECT n,x'00' FROM fixture;
      INSERT INTO _coven_positions_post VALUES(1,x'00');
+     INSERT INTO _coven_device_reset VALUES(1,zeroblob(8),counter(1),'storage-ahead');
      INSERT INTO _coven_positions SELECT n,n FROM fixture;
      INSERT INTO _coven_write_headers SELECT device,n,x'00' FROM fixture;
      INSERT INTO _coven_authored_parts SELECT CAST(device || n AS BLOB),audience,x'00',1 FROM fixture;
@@ -327,6 +329,7 @@ mod fixture {
                 "_coven_store_log_uploads"
                 | "_coven_snapshot_schema"
                 | "_coven_positions_post"
+                | "_coven_device_reset"
                 | "_coven_catch_up"
                 | "_coven_finality" => {
                     assert_eq!(count, 1)
@@ -418,6 +421,8 @@ mod scans {
         Some("file removal visits every queued filesystem deletion"),
     ("key_upload.rs", "SELECT writer,number,bytes,before_device,before_number FROM _coven_key_uploads ORDER BY writer,number", "_coven_key_uploads") =>
         Some("the key-copy queue reader returns every reserved copy"),
+    ("device_reset.rs", "SELECT seq FROM sqlite_sequence WHERE name='_coven_operations'", "sqlite_sequence") =>
+        Some("SQLite keeps one sequence row per AUTOINCREMENT table; snapshot numbers are operation ids"),
     ("operation.rs", "SELECT id,kind,last_step,data,started_by FROM _coven_operations ORDER BY id", "_coven_operations") =>
         Some("operations() returns every unfinished journal entry"),
     ("pending.rs", "SELECT subject,reporter,value,operation,object,coven_version FROM _coven_pending" | "{SELECT} WHERE suppressed=0", "_coven_pending") =>

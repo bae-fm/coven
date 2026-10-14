@@ -401,6 +401,44 @@ impl StoreLogSync {
         }
     }
 
+    /// Own-counter evidence from every listed snapshot (§10): this device's
+    /// own snapshot numbers and the signed coverage of its writes and entries.
+    /// Rolled-back writes may already be deleted, so coverage is required. A
+    /// prefix that cannot be checked yet supplies no evidence; a failed read or
+    /// listing supplies none at all.
+    pub(crate) async fn snapshot_identity_evidence(
+        &self,
+        log: &StoreLog,
+        device: coven_foundation::id_source::DeviceId,
+    ) -> Result<(crate::identity::Ends, u64), SyncError> {
+        let storage = self.storage.as_deref().ok_or(SyncError::NoStorage)?;
+        let mut covered = crate::identity::Ends::default();
+        let mut own = 0;
+        for object in storage
+            .list(&ObjectPrefix::snapshots(self.directory.id()))
+            .await?
+        {
+            let Some(id) = object.path.snapshot_id() else {
+                continue;
+            };
+            if id.device == device {
+                own = own.max(id.number);
+            }
+            let prefix = match self.snapshot_prefix(&object, log).await {
+                Ok(Ok(candidate)) => candidate.prefix,
+                Ok(Err(_)) | Err(SyncError::Damaged(_)) => continue,
+                Err(error) => return Err(error),
+            };
+            for write in prefix.writes.0.iter().filter(|w| w.device == device) {
+                covered.writes = covered.writes.max(write.number);
+            }
+            for entry in prefix.store_log.0.iter().filter(|e| e.device == device) {
+                covered.entries = covered.entries.max(entry.number);
+            }
+        }
+        Ok((covered, own))
+    }
+
     pub(super) async fn load_snapshot(
         &self,
         candidates: Vec<Candidate>,

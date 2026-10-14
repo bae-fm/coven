@@ -88,6 +88,10 @@ pub enum SyncError {
     /// This device or its member was removed; syncing stops for good (§10).
     #[error("this device or its member was removed")]
     Removed,
+    /// This copy cannot keep its device id; it sends nothing more and the
+    /// store must be reset as a new device before further use (§10).
+    #[error("this installation must reset as a new device: {0:?}")]
+    DeviceReset(coven_foundation::files::DeviceResetReason),
     /// This call needs a newer app schema or coven format (§17).
     #[error("an update is required: {0:?}")]
     UpdateRequired(crate::RequiredUpdate),
@@ -129,6 +133,7 @@ impl From<DbError> for SyncError {
                 failure: crate::LocalFailure::Database,
                 source: Arc::new(error),
             },
+            DbError::DeviceReset(reset) => Self::DeviceReset(reset.reason),
             error => Self::Database(error),
         }
     }
@@ -197,6 +202,9 @@ pub enum SyncFailure {
     /// This device or its member has been removed.
     #[error("this device or its member was removed")]
     Removed,
+    /// This copy stopped for good; reopening requires `reset_device` (§10).
+    #[error("this installation must reset as a new device: {0:?}")]
+    DeviceReset(coven_foundation::files::DeviceResetReason),
     /// The provider refused or failed a request.
     #[error("storage failed: {0}")]
     Storage(#[source] Arc<StorageError>),
@@ -221,6 +229,7 @@ impl From<SyncError> for SyncFailure {
     fn from(error: SyncError) -> Self {
         match error {
             SyncError::Removed => Self::Removed,
+            SyncError::DeviceReset(reason) => Self::DeviceReset(reason),
             SyncError::UpdateRequired(update) => Self::UpdateRequired(update),
             SyncError::Storage(error) => Self::Storage(Arc::new(error)),
             error => Self::Other(Arc::new(error)),

@@ -1,5 +1,5 @@
 name = "covenStorage"
-defaultTargets = ["CovenStorage", "clockRunner", "createRunner"]
+defaultTargets = ["CovenStorage", "clockRunner", "createRunner", "identityRunner"]
 
 [[lean_lib]]
 name = "CovenStorage"
@@ -11,3 +11,7 @@ root = "ClockRunner"
 [[lean_exe]]
 name = "createRunner"
 root = "CreateRunner"
+
+[[lean_exe]]
+name = "identityRunner"
+root = "IdentityRunner"

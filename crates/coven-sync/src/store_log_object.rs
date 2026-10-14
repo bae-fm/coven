@@ -62,11 +62,32 @@ pub(crate) async fn upload(
     bytes: &[u8],
 ) -> Result<(), SyncError> {
     upload_keys(store, storage, database, send).await?;
-    storage
-        .ok_or(SyncError::NoStorage)?
-        .create_once(&path(store, upload.entry.position), bytes)
-        .await?;
-    Ok(())
+    create_own(
+        storage.ok_or(SyncError::NoStorage)?,
+        send,
+        &path(store, upload.entry.position),
+        bytes,
+    )
+    .await
+}
+
+/// Create one of this device's immutable objects. An occupied path counts as
+/// stored only with equal complete bytes; others reset this copy (§10).
+pub(crate) async fn create_own(
+    storage: &dyn Storage,
+    send: &crate::SendGate,
+    path: &ObjectPath,
+    bytes: &[u8],
+) -> Result<(), SyncError> {
+    match storage.create(path, bytes).await {
+        Ok(()) => Ok(()),
+        Err(error @ coven_storage::StorageError::Cleanup { .. }) => Err(error.into()),
+        Err(error) if error.failure() == coven_storage::StorageFailure::AlreadyExists => {
+            crate::identity::settle_occupied(storage, send, path, crate::identity::digest(bytes))
+                .await
+        }
+        Err(error) => Err(error.into()),
+    }
 }
 
 /// Settle every reserved copy in writer/number order, regardless of its current
@@ -80,21 +101,13 @@ pub(crate) async fn upload_keys(
     send: &crate::SendGate,
 ) -> Result<(), SyncError> {
     for copy in database.key_uploads().await? {
-        let storage = storage.ok_or(SyncError::NoStorage)?;
-        let path = copy.path(store);
-        match storage.create(&path, &copy.bytes).await {
-            Ok(()) => (),
-            Err(error @ coven_storage::StorageError::Cleanup { .. }) => return Err(error.into()),
-            Err(error) if error.failure() == coven_storage::StorageFailure::AlreadyExists => {
-                if storage.read(&path).await? != copy.bytes {
-                    return Err(crate::write_object::damaged(
-                        &path,
-                        Refusal::WrongIdentity { cause: None },
-                    ));
-                }
-            }
-            Err(error) => return Err(error.into()),
-        }
+        create_own(
+            storage.ok_or(SyncError::NoStorage)?,
+            send,
+            &copy.path(store),
+            &copy.bytes,
+        )
+        .await?;
         database.complete_key_upload(copy.clone()).await?;
         send.published_copy(store, &copy)?;
     }
