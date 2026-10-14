@@ -394,6 +394,8 @@ pub(crate) fn classify(provider: CloudProvider, status: u16, body: &[u8]) -> Sto
         409 if provider == CloudProvider::Dropbox => StorageFailure::Refused,
         409 | 412 => StorageFailure::AlreadyExists,
         416 => StorageFailure::InvalidRange,
+        // Another party's lock on the item lasts only while its work runs.
+        423 => StorageFailure::Conflict,
         429 => StorageFailure::RateLimited,
         507 => StorageFailure::QuotaExceeded,
         408 | 500..=599 => StorageFailure::Network,
@@ -435,6 +437,7 @@ fn onedrive_failure(value: &Value) -> Option<StorageFailure> {
         "itemNotFound" => StorageFailure::NotFound,
         "nameAlreadyExists" => StorageFailure::AlreadyExists,
         "activityLimitReached" => StorageFailure::RateLimited,
+        "resourceLocked" => StorageFailure::Conflict,
         _ => return None,
     })
 }

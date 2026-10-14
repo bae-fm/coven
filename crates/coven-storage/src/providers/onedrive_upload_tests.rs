@@ -398,3 +398,85 @@ async fn a_recorded_copy_refusal_can_restart_after_its_temporary_is_deleted() {
         assert_eq!(state.lock().unwrap().files.len(), 1);
     }
 }
+
+#[tokio::test]
+async fn an_overlapping_fragment_resumes_the_sessions_confirmed_progress() {
+    let state = remote();
+    let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
+    let storage = provider(&server.url);
+    let part = crate::session::ONEDRIVE_PART_SIZE;
+    let total = part as u64 + 1;
+    let mut upload = storage.begin_upload(&path(), total).await.unwrap();
+    let first = vec![3; part];
+    // The service stores the fragment but its reply is lost.
+    state.lock().unwrap().fail_reply = true;
+    assert_eq!(
+        storage
+            .upload_part(&mut upload, &first)
+            .await
+            .unwrap_err()
+            .failure(),
+        StorageFailure::Network
+    );
+    assert_eq!(upload.confirmed_bytes(), 0);
+    let before = state.lock().unwrap().requests.len();
+    // Resending overlaps what the service holds: coven takes its progress.
+    storage.upload_part(&mut upload, &first).await.unwrap();
+    assert_eq!(upload.confirmed_bytes(), part as u64);
+    let requests = state.lock().unwrap().requests[before..].to_vec();
+    assert_eq!(
+        requests
+            .iter()
+            .map(|(method, _)| method.clone())
+            .collect::<Vec<_>>(),
+        [Method::PUT, Method::GET],
+        "the refused fragment, then the session's status"
+    );
+    storage.upload_part(&mut upload, &[4]).await.unwrap();
+    storage.finish_upload(&mut upload).await.unwrap();
+    let mut expected = first;
+    expected.push(4);
+    assert_eq!(storage.read(&path()).await.unwrap(), expected);
+}
+
+#[tokio::test]
+async fn an_invalid_fragment_range_stays_an_error_without_resuming() {
+    let state = remote();
+    let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
+    let storage = provider(&server.url);
+    let mut upload = storage.begin_upload(&path(), 4).await.unwrap();
+    state.lock().unwrap().invalid_range = true;
+    let before = state.lock().unwrap().requests.len();
+    assert_eq!(
+        storage
+            .upload_part(&mut upload, b"data")
+            .await
+            .unwrap_err()
+            .failure(),
+        StorageFailure::InvalidRange
+    );
+    assert_eq!(state.lock().unwrap().requests.len(), before + 1);
+    assert_eq!(upload.confirmed_bytes(), 0);
+}
+
+#[tokio::test]
+async fn a_locked_copy_waits_for_a_retry_and_keeps_its_temporary() {
+    let state = remote();
+    let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
+    let storage = provider(&server.url);
+    let mut upload = storage.begin_upload(&path(), 4).await.unwrap();
+    let temporary = temporary_path(&upload);
+    storage.upload_part(&mut upload, b"data").await.unwrap();
+    state.lock().unwrap().lock_copy = true;
+    let error = storage.finish_upload(&mut upload).await.unwrap_err();
+    assert_eq!(error.failure(), StorageFailure::Conflict);
+    assert!(error.retryable());
+    assert_eq!(
+        error.retry_after(),
+        Some(crate::RetryAfter::Wait(std::time::Duration::from_secs(30)))
+    );
+    assert!(state.lock().unwrap().files.contains_key(&temporary));
+    storage.finish_upload(&mut upload).await.unwrap();
+    assert!(upload.is_complete());
+    assert_eq!(storage.read(&path()).await.unwrap(), b"data");
+}

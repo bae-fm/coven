@@ -71,6 +71,10 @@ pub(super) struct Remote {
     refuse_temporary_delete: bool,
     lose_temporary_delete_reply: bool,
     expected_ranges: Option<Value>,
+    /// Refuse the next fragment with an invalid range, as for a bad request.
+    invalid_range: bool,
+    /// Another party locks the next copy's source.
+    lock_copy: bool,
     members: BTreeSet<String>,
     permissions: BTreeMap<String, Value>,
     deleted_permissions: Vec<String>,
@@ -131,6 +135,7 @@ pub(super) async fn endpoint(
                 return reply(json!({"nextExpectedRanges": ranges}));
             }
         }
+        let invalid_range = std::mem::take(&mut state.invalid_range);
         let Some((path, bytes)) = state.uploads.get_mut(id) else {
             return response(404, "{}");
         };
@@ -145,6 +150,16 @@ pub(super) async fn endpoint(
         let (bounds, total) = range.split_once('/').unwrap();
         let start: usize = bounds.split('-').next().unwrap().parse().unwrap();
         let total: usize = total.parse().unwrap();
+        if invalid_range {
+            return response(416, json!({"error":{"code":"invalidRange"}}).to_string());
+        }
+        if start < bytes.len() {
+            return response(
+                416,
+                json!({"error":{"code":"invalidRange","innererror":{"code":"fragmentOverlap"}}})
+                    .to_string(),
+            );
+        }
         assert_eq!(start, bytes.len());
         bytes.extend_from_slice(&body);
         let path = path.clone();
@@ -224,6 +239,13 @@ pub(super) async fn endpoint(
         assert_eq!(method, Method::POST);
         assert_eq!(q["@microsoft.graph.conflictBehavior"], "fail");
         assert_eq!(value["parentReference"]["driveId"], "drive");
+        if std::mem::take(&mut state.lock_copy) {
+            let mut locked = response(423, json!({"error":{"code":"resourceLocked"}}).to_string());
+            locked
+                .headers_mut()
+                .insert("retry-after", "30".parse().unwrap());
+            return locked;
+        }
         state.copies += 1;
         if state.refuse_copy {
             return response(403, json!({"error":{"code":"accessDenied"}}).to_string());

@@ -27,6 +27,24 @@ fn set_upload(session: &mut UploadSession, next: OneDriveUpload) -> Result<(), S
     }
 }
 
+/// Graph refuses a fragment overlapping bytes its session already received
+/// with 416 and `fragmentOverlap`, as its own or an inner error's code.
+fn fragment_overlap(error: &StorageError) -> bool {
+    let StorageError::Provider { source, .. } = error else {
+        return false;
+    };
+    let Some(response) = source.downcast_ref::<http::ProviderResponse>() else {
+        return false;
+    };
+    let Ok(value) = serde_json::from_slice::<Value>(response.body()) else {
+        return false;
+    };
+    std::iter::successors(Some(&value["error"]), |error| {
+        Some(&error["innererror"]).filter(|inner| inner.is_object())
+    })
+    .any(|error| error["code"].as_str() == Some("fragmentOverlap"))
+}
+
 impl OneDriveStorage {
     fn temporary_url(
         &self,
@@ -274,7 +292,29 @@ impl OneDriveStorage {
                         false,
                     )
                     .await?;
-                self.progress(session, response).await?;
+                if response.status().as_u16() == 416 {
+                    let error = http::response_error(PROVIDER, response).await;
+                    if !fragment_overlap(&error) {
+                        // An invalid range coven sent stays its error.
+                        return Err(error);
+                    }
+                    // The session already holds bytes of this fragment, as after
+                    // a lost reply: take its confirmed progress, never resend over it.
+                    let status = self
+                        .session
+                        .publish(
+                            publication,
+                            Method::GET,
+                            url.as_str(),
+                            &[],
+                            Body::Empty,
+                            false,
+                        )
+                        .await?;
+                    self.progress(session, status).await?;
+                } else {
+                    self.progress(session, response).await?;
+                }
                 if session.confirmed < end {
                     return Err(StorageFailure::Protocol
                         .with_source("OneDrive did not store the entire part"));
