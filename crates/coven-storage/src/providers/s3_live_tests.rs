@@ -122,7 +122,18 @@ async fn s3_detection() {
 #[ignore = "COVEN_LIVE_S3_ENV; reads bucket versioning without writing objects"]
 async fn s3_bucket_versioning() {
     let settings = live::LiveS3::load();
-    let s = settings.connect(None);
+    let StorageConfig::S3 {
+        endpoint, profile, ..
+    } = &settings.config
+    else {
+        unreachable!()
+    };
+    // An uncatalogued endpoint naming no profile has no settings before
+    // detection; the versioning read needs only the plain S3 signer.
+    let selected = profile::settings(endpoint.as_ref(), profile.as_ref())
+        .expect("valid live location")
+        .unwrap_or(profile::PLAIN);
+    let s = settings.connect(Some(selected));
     let versioning = s.provider.bucket_versioning().await.map_err(Arc::new);
     match &versioning {
         Ok(state) => println!("bucket versioning={state:?}"),
@@ -132,12 +143,6 @@ async fn s3_bucket_versioning() {
             error::native_status(error)
         ),
     }
-    let StorageConfig::S3 {
-        endpoint, profile, ..
-    } = &settings.config
-    else {
-        unreachable!()
-    };
     match versioning::check(endpoint.as_ref(), profile.as_ref(), &versioning) {
         Ok(()) => println!("setup_versioning_check PASS"),
         Err(error) => println!("setup_versioning_check refused: {error}"),
