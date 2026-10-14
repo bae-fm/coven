@@ -88,6 +88,7 @@ impl crate::Database {
             // even when other permissions remain. Retain neither confirmation.
             db.internal_execute("UPDATE _coven_provider_access SET granted=NULL,invitation=NULL,target=intended WHERE account=?1", [&account])?;
             db.internal_execute("UPDATE _coven_operations SET last_step=1 WHERE id=?1", [id.0])?;
+            crate::retry::clear(db, crate::RetrySubject::Operation(id))?;
             crate::pending::save(db,&P::provider_access(id,inner.access.device,account,state.intended,true))?;
             Ok(state.intended)
         }))).await
@@ -143,12 +144,15 @@ impl crate::Database {
                             "UPDATE _coven_operations SET last_step=0 WHERE id=?1",
                             [id.0],
                         )?;
+                        crate::retry::clear(db, crate::RetrySubject::Operation(id))?;
                         db.internal_execute(
                             "UPDATE _coven_provider_access SET target=NULL WHERE account=?1",
                             [&account],
                         )?;
                         state.intended
                     };
+                    // An app retry overrides the ordinary backoff (§16.5).
+                    crate::retry::clear(db, crate::RetrySubject::Operation(id))?;
                     crate::pending::save(
                         db,
                         &P::provider_access(id, inner.access.device, account, target, owner),
@@ -177,6 +181,7 @@ impl crate::Database {
                 Ok(true)
             } else {
                 db.internal_execute("UPDATE _coven_operations SET last_step=0 WHERE id=?1", [id.0])?;
+                crate::retry::clear(db, crate::RetrySubject::Operation(id))?;
                 crate::pending::save(db,&P::provider_access(id,inner.access.device,account,state.intended,true))?;
                 Ok(false)
             }

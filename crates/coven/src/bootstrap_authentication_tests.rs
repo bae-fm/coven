@@ -1,5 +1,6 @@
 use super::*;
 use crate::authentication::SignIn;
+use std::time::Duration;
 
 #[tokio::test]
 async fn restore_and_keychain_restore_use_builder_sign_in_without_returning_tokens() {

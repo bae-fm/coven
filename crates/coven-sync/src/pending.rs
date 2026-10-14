@@ -241,6 +241,18 @@ impl PendingRecord {
     }
 }
 
+/// Storage failures that transient work retries automatically (E5).
+pub(crate) fn automatic_storage(failure: StorageFailure) -> bool {
+    matches!(
+        failure,
+        StorageFailure::Network
+            | StorageFailure::Conflict
+            | StorageFailure::RateLimited
+            | StorageFailure::NotFound
+            | StorageFailure::SessionExpired
+    )
+}
+
 impl PendingReason {
     fn retry(&self) -> Retry {
         match self {
@@ -250,16 +262,8 @@ impl PendingReason {
             | Self::ProviderPending { .. }
             | Self::PendingOwner { .. }
             | Self::AccountInUse { .. }
-            | Self::InvalidPositions(_)
-            | Self::Storage {
-                failure:
-                    StorageFailure::Network
-                    | StorageFailure::Conflict
-                    | StorageFailure::RateLimited
-                    | StorageFailure::NotFound
-                    | StorageFailure::SessionExpired,
-                ..
-            } => Retry::Automatic,
+            | Self::InvalidPositions(_) => Retry::Automatic,
+            Self::Storage { failure, .. } if automatic_storage(*failure) => Retry::Automatic,
             Self::Refused(_) | Self::UpdateRequired(_) => Retry::AfterUpdate,
             Self::Dropped(_) | Self::Removed => Retry::Never,
             _ => Retry::AppAction,

@@ -42,6 +42,7 @@ pub(crate) struct StorageConnections {
     ids: IdSourceRef,
     clock: ClockRef,
     send: Arc<coven_sync::SendGate>,
+    waits: Arc<coven_sync::RetryWaits>,
     calls: tokio::sync::Mutex<()>,
 }
 
@@ -80,6 +81,7 @@ impl StorageConnections {
                             data.credentials.clone(),
                             self.device,
                             self.send.clone(),
+                            self.waits.clone(),
                         )
                         .await?;
                     let account = before.account().await?;
@@ -97,6 +99,7 @@ impl StorageConnections {
                             StorageCredentials::OAuth(tokens.clone()),
                             self.device,
                             self.send.clone(),
+                            self.waits.clone(),
                         )
                         .await?;
                     if candidate.account().await? != account {
@@ -122,6 +125,7 @@ impl StorageConnections {
         ids: IdSourceRef,
         clock: ClockRef,
         send: Arc<coven_sync::SendGate>,
+        waits: Arc<coven_sync::RetryWaits>,
     ) -> Self {
         Self {
             codes,
@@ -136,6 +140,7 @@ impl StorageConnections {
             ids,
             clock,
             send,
+            waits,
             calls: tokio::sync::Mutex::new(()),
         }
     }
@@ -295,6 +300,7 @@ impl StorageConnections {
                 credentials.clone(),
                 self.device,
                 self.send.clone(),
+                self.waits.clone(),
             )
             .await?;
         let path = ObjectPath::file(self.store, self.device, FileId(self.ids.new_id()));
@@ -358,6 +364,7 @@ impl StorageConnections {
                     data.credentials,
                     owner.device,
                     owner.send.clone(),
+                    owner.waits.clone(),
                 )
                 .await?;
             owner.sync.unlock(storage).await.map_err(unlock_error)?;

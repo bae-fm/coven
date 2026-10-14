@@ -8,6 +8,8 @@ use coven_crypto::SecretText;
 use reqwest::Method;
 use serde_json::{json, Value};
 const PROVIDER: CloudProvider = CloudProvider::Dropbox;
+/// Member-removal job checks before reporting a timeout.
+const REMOVAL_CHECKS: u32 = 7;
 
 /// Dropbox objects rooted in the app folder or a shared namespace.
 pub(crate) struct DropboxStorage {
@@ -16,7 +18,8 @@ pub(crate) struct DropboxStorage {
     api: String,
     content: String,
     single_request_limit: u64,
-    removal_poll_interval: std::time::Duration,
+    /// One second; the job-status backoff counts in these units (SP waiting).
+    removal_poll_unit: std::time::Duration,
 }
 impl DropboxStorage {
     /// Construct with this device's own Dropbox sign-in.
@@ -35,7 +38,7 @@ impl DropboxStorage {
             api: "https://api.dropboxapi.com/2".into(),
             content: "https://content.dropboxapi.com/2".into(),
             single_request_limit: 150 * 1024 * 1024,
-            removal_poll_interval: std::time::Duration::from_secs(1),
+            removal_poll_unit: std::time::Duration::from_secs(1),
         })
     }
     fn namespace(&self) -> Result<&str, StorageError> {
@@ -195,7 +198,9 @@ impl DropboxStorage {
             return Err(StorageFailure::Protocol.with_source("invalid Dropbox remove launch"));
         }
         let job = http::string(&value, "async_job_id")?;
-        for _ in 0..60 {
+        // Status checks back off like every automatic wait: about a minute
+        // across seven checks, 1, 2, 4, …, 32 seconds apart.
+        for attempt in 0..REMOVAL_CHECKS {
             let (value, original) = http::json_response(
                 PROVIDER,
                 self.rpc_response(
@@ -209,7 +214,11 @@ impl DropboxStorage {
                 // MemberAccessLevelResult is a struct: Dropbox inlines its fields
                 // beside .tag, including when all optional fields are absent.
                 "complete" => return remaining_parent_access(&value, member),
-                "in_progress" => self.session.sleep(self.removal_poll_interval).await,
+                "in_progress" if attempt + 1 < REMOVAL_CHECKS => {
+                    let delay = crate::retry_delay(attempt).as_secs() as u32;
+                    self.session.sleep(self.removal_poll_unit * delay).await
+                }
+                "in_progress" => break,
                 "failed" => return Err(original.into_error(PROVIDER)),
                 _ => {
                     return Err(

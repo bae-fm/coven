@@ -730,8 +730,8 @@ async fn a_migration_waits_for_an_operation_that_already_reserved_the_entry_numb
             coven_database::FileDatabase::new(device.db.clone()),
             device.directory.clone(),
             Some(storage),
-            device.clock.clone(),
             device.send.clone(),
+            device.waits.clone(),
             device.ids.clone(),
             crate::TransferLimits::default(),
         );

@@ -8,12 +8,14 @@ use std::sync::{
 
 /// Applies the storage contract around native provider calls and records whether
 /// this connection has reached storage (E5). Every consumer uses this capability,
-/// so a successful file read counts even before a sync succeeds. Reconnecting
-/// creates a new observation lifetime.
+/// so a successful file read counts even before a sync succeeds, and every
+/// consumer waits for the same provider cooldown. Reconnecting creates a new
+/// observation lifetime.
 pub struct StorageConnection<P: ?Sized = dyn ProviderOps> {
     pub(crate) provider: Arc<P>,
     reached: AtomicBool,
     pub(crate) publications: Arc<dyn PublicationGate>,
+    pub(crate) cooldown: Arc<dyn Cooldown>,
 }
 
 impl<P: ProviderOps + ?Sized> StorageConnection<P> {
@@ -23,14 +25,31 @@ impl<P: ProviderOps + ?Sized> StorageConnection<P> {
         Self::with_gate(
             provider,
             Arc::new(crate::test_utils::UnrestrictedPublications),
+            Arc::new(NoCooldown),
         )
     }
 
-    pub(crate) fn with_gate(provider: Arc<P>, publications: Arc<dyn PublicationGate>) -> Self {
+    pub(crate) fn with_gate(
+        provider: Arc<P>,
+        publications: Arc<dyn PublicationGate>,
+        cooldown: Arc<dyn Cooldown>,
+    ) -> Self {
         Self {
             provider,
             publications,
+            cooldown,
             reached: AtomicBool::new(false),
+        }
+    }
+
+    /// Refuse, without sending, while a provider cooldown is live. A refused
+    /// request has not reached storage.
+    fn cooling(&self) -> Result<(), StorageError> {
+        match self.cooldown.remaining() {
+            Some(remaining) => {
+                Err(StorageFailure::RateLimited.with_source(CoolingDown { remaining }))
+            }
+            None => Ok(()),
         }
     }
 
@@ -51,7 +70,9 @@ impl<P: ProviderOps + ?Sized> StorageConnection<P> {
         self.reached.load(Ordering::Acquire)
     }
 
-    fn observed<T>(&self, result: Result<T, StorageError>) -> Result<T, StorageError> {
+    /// Record whether storage answered, and a requested cooldown before any
+    /// consumer sees the response that asked for it (SP waiting).
+    async fn observed<T>(&self, result: Result<T, StorageError>) -> Result<T, StorageError> {
         if !result.as_ref().is_err_and(|error| {
             matches!(
                 error.failure(),
@@ -60,7 +81,28 @@ impl<P: ProviderOps + ?Sized> StorageConnection<P> {
         }) {
             self.reached.store(true, Ordering::Release);
         }
-        result
+        let error = match result {
+            Ok(value) => return Ok(value),
+            Err(error) => error,
+        };
+        let Some(after) = error.retry_after() else {
+            return Err(error);
+        };
+        if after == RetryAfter::NoTimeBasis {
+            tracing::warn!(
+                provider = ?self.config().provider(),
+                "Retry-After names a date without a response Date; waiting the longest ordinary delay"
+            );
+        }
+        let wait = after.wait();
+        match self.cooldown.record(wait).await {
+            Ok(()) => Err(error),
+            Err(cause) => Err(StorageFailure::File.with_source(CooldownNotRecorded {
+                wait,
+                response: error,
+                cause,
+            })),
+        }
     }
     async fn list_checked(&self, prefix: &ObjectPrefix) -> Result<Vec<StoredObject>, StorageError> {
         let mut listing = ObjectListing::new(prefix.clone(), self.config().provider());
@@ -151,9 +193,11 @@ impl<P: ProviderOps + ?Sized> Storage for StorageConnection<P> {
         self.provider.set_oauth_tokens(tokens).await
     }
     async fn account(&self) -> Result<String, StorageError> {
-        self.observed(self.provider.account().await)
+        self.cooling()?;
+        self.observed(self.provider.account().await).await
     }
     async fn create(&self, path: &ObjectPath, bytes: &[u8]) -> Result<(), StorageError> {
+        self.cooling()?;
         let _guard = self.provider.lock_create().await;
         let publication = self.publication(path)?;
         self.observed(
@@ -165,8 +209,10 @@ impl<P: ProviderOps + ?Sized> Storage for StorageConnection<P> {
             )
             .await,
         )
+        .await
     }
     async fn replace(&self, path: &ObjectPath, bytes: &[u8]) -> Result<(), StorageError> {
+        self.cooling()?;
         let result = async {
             if !path.is_replaceable() {
                 return Err(StorageFailure::InvalidPath.into());
@@ -177,9 +223,10 @@ impl<P: ProviderOps + ?Sized> Storage for StorageConnection<P> {
                 .await
         }
         .await;
-        self.observed(result)
+        self.observed(result).await
     }
     async fn status(&self, path: &ObjectPath) -> Result<Option<StoredObject>, StorageError> {
+        self.cooling()?;
         self.observed(
             async {
                 let object = self.provider.status(path).await?;
@@ -190,12 +237,14 @@ impl<P: ProviderOps + ?Sized> Storage for StorageConnection<P> {
             }
             .await,
         )
+        .await
     }
     async fn stream_object(
         &self,
         path: &ObjectPath,
         range: Option<ByteRange>,
     ) -> Result<ObjectStream<'_>, StorageError> {
+        self.cooling()?;
         self.observed(
             async {
                 let stream = self.provider.stream_object(path, range).await?;
@@ -204,34 +253,44 @@ impl<P: ProviderOps + ?Sized> Storage for StorageConnection<P> {
             }
             .await,
         )
+        .await
     }
     async fn list(&self, prefix: &ObjectPrefix) -> Result<Vec<StoredObject>, StorageError> {
-        self.observed(self.list_checked(prefix).await)
+        self.cooling()?;
+        self.observed(self.list_checked(prefix).await).await
     }
     async fn list_writers(
         &self,
         store: coven_foundation::id_source::StoreId,
     ) -> Result<Vec<coven_foundation::id_source::DeviceId>, StorageError> {
-        self.observed(self.provider.list_writers(store).await)
+        self.cooling()?;
+        self.observed(self.provider.list_writers(store).await).await
     }
     async fn delete(&self, path: &ObjectPath) -> Result<(), StorageError> {
-        self.observed(self.provider.delete(path).await)
+        self.cooling()?;
+        self.observed(self.provider.delete(path).await).await
     }
     async fn grant_access(&self, account: &str) -> Result<AccessGrant, StorageError> {
+        if self.config().provider() != CloudProvider::S3 {
+            self.cooling()?;
+        }
         let result = self.provider.grant_access(account).await;
         // S3 returns console instructions without making a provider request.
         if self.config().provider() == CloudProvider::S3 {
             result
         } else {
-            self.observed(result)
+            self.observed(result).await
         }
     }
     async fn revoke_access(&self, account: &str) -> Result<Vec<RetainedAccess>, StorageError> {
+        if self.config().provider() != CloudProvider::S3 {
+            self.cooling()?;
+        }
         let result = self.provider.revoke_access(account).await;
         if self.config().provider() == CloudProvider::S3 {
             result
         } else {
-            self.observed(result)
+            self.observed(result).await
         }
     }
     async fn join(
@@ -239,6 +298,7 @@ impl<P: ProviderOps + ?Sized> Storage for StorageConnection<P> {
         store: coven_foundation::id_source::StoreId,
         invitation: &StorageInvitation,
     ) -> Result<(), StorageError> {
+        self.cooling()?;
         let result = async {
             invitation.check(&self.config())?;
             self.provider.join(invitation).await?;
@@ -246,16 +306,19 @@ impl<P: ProviderOps + ?Sized> Storage for StorageConnection<P> {
             Ok(())
         }
         .await;
-        self.observed(result)
+        self.observed(result).await
     }
     async fn begin_upload(
         &self,
         path: &ObjectPath,
         total: u64,
     ) -> Result<UploadSession, StorageError> {
+        self.cooling()?;
         self.observed(self.begin_upload_checked(path, total).await)
+            .await
     }
     async fn restart_upload(&self, expired: &UploadSession) -> Result<UploadSession, StorageError> {
+        self.cooling()?;
         let result = async {
             expired.check(&self.config())?;
             if expired.is_complete() {
@@ -271,9 +334,10 @@ impl<P: ProviderOps + ?Sized> Storage for StorageConnection<P> {
                 .await
         }
         .await;
-        self.observed(result)
+        self.observed(result).await
     }
     async fn resume_upload(&self, session: &mut UploadSession) -> Result<(), StorageError> {
+        self.cooling()?;
         let result = async {
             session.check(&self.config())?;
             if session.is_complete() {
@@ -284,20 +348,26 @@ impl<P: ProviderOps + ?Sized> Storage for StorageConnection<P> {
                 .await
         }
         .await;
-        self.observed(result)
+        self.observed(result).await
     }
     async fn upload_part(
         &self,
         session: &mut UploadSession,
         bytes: &[u8],
     ) -> Result<(), StorageError> {
+        self.cooling()?;
         self.observed(self.upload_part_checked(session, bytes).await)
+            .await
     }
     async fn finish_upload(&self, session: &mut UploadSession) -> Result<(), StorageError> {
+        self.cooling()?;
         self.observed(self.finish_upload_checked(session).await)
+            .await
     }
     async fn abort_upload(&self, session: &UploadSession) -> Result<(), StorageError> {
+        self.cooling()?;
         self.observed(self.abort_upload_checked(session).await)
+            .await
     }
 }
 

@@ -11,6 +11,11 @@ mod provider_access;
 pub use provider_access::*;
 mod connection;
 mod connection_credentials;
+mod cooldown;
+pub use cooldown::{
+    retry_delay, Cooldown, CooldownNotRecorded, CoolingDown, NoCooldown, RetryAfter,
+    LONGEST_RETRY_DELAY,
+};
 mod credentials;
 mod error;
 mod invitation;

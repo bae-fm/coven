@@ -204,6 +204,68 @@ impl ProviderResponse {
     pub fn headers(&self) -> &reqwest::header::HeaderMap {
         &self.headers
     }
+    /// A response carrying `headers`, as a native adapter or fixture saw it.
+    pub(crate) fn new(status: u16, headers: reqwest::header::HeaderMap, body: Vec<u8>) -> Self {
+        Self {
+            status,
+            headers,
+            body: SecretBytes::new(body),
+        }
+    }
+    /// An HTTP 429 asking for `seconds` of `Retry-After`, classified as
+    /// `failure`, as the in-memory provider injects it.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub(crate) fn throttled(
+        provider: CloudProvider,
+        failure: StorageFailure,
+        seconds: u64,
+    ) -> StorageError {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(reqwest::header::RETRY_AFTER, seconds.into());
+        StorageError::Provider {
+            provider,
+            failure,
+            source: Box::new(Self::new(429, headers, Vec::new())),
+        }
+    }
+    /// The provider's requested wait: `Retry-After` as delay-seconds, or as an
+    /// HTTP-date less this response's own `Date` (SP waiting). Dropbox also
+    /// states it in its error body.
+    pub(crate) fn retry_after(&self, provider: CloudProvider) -> Option<crate::RetryAfter> {
+        use reqwest::header::{DATE, RETRY_AFTER};
+        if let Some(value) = self.headers.get(RETRY_AFTER) {
+            let value = value.to_str().unwrap_or_default().trim();
+            if let Ok(seconds) = value.parse::<u64>() {
+                return Some(crate::RetryAfter::Wait(std::time::Duration::from_secs(
+                    seconds,
+                )));
+            }
+            let date = |value: &str| {
+                use aws_sdk_s3::primitives::{DateTime, DateTimeFormat};
+                DateTime::from_str(value.trim(), DateTimeFormat::HttpDate)
+                    .ok()
+                    .map(|time| time.secs())
+            };
+            let basis = self
+                .headers
+                .get(DATE)
+                .and_then(|value| value.to_str().ok())
+                .and_then(date);
+            return Some(match (date(value), basis) {
+                (Some(retry), Some(basis)) => crate::RetryAfter::Wait(
+                    std::time::Duration::from_secs(retry.saturating_sub(basis).max(0) as u64),
+                ),
+                _ => crate::RetryAfter::NoTimeBasis,
+            });
+        }
+        if provider == CloudProvider::Dropbox {
+            let value: Value = serde_json::from_slice(self.body()).ok()?;
+            return value["error"]["retry_after"]
+                .as_u64()
+                .map(|seconds| crate::RetryAfter::Wait(std::time::Duration::from_secs(seconds)));
+        }
+        None
+    }
     pub(crate) fn into_error(self, provider: CloudProvider) -> StorageError {
         StorageError::Provider {
             provider,
@@ -239,11 +301,7 @@ pub(crate) fn invalid_response(
     StorageError::Provider {
         provider,
         failure: StorageFailure::Protocol,
-        source: Box::new(ProviderResponse {
-            status,
-            headers,
-            body: SecretBytes::new(body),
-        }),
+        source: Box::new(ProviderResponse::new(status, headers, body)),
     }
 }
 
@@ -263,12 +321,7 @@ pub(crate) async fn response_error(provider: CloudProvider, response: Response) 
         Ok(body) => body.to_vec(),
         Err(error) => return transport(provider, error),
     };
-    ProviderResponse {
-        status,
-        headers,
-        body: SecretBytes::new(body),
-    }
-    .into_error(provider)
+    ProviderResponse::new(status, headers, body).into_error(provider)
 }
 pub(crate) fn container_error(mut error: StorageError) -> StorageError {
     match &mut error {
@@ -429,14 +482,7 @@ pub(crate) async fn json_response(
         .map_err(|error| transport(provider, error))?;
     let value = serde_json::from_slice(&body)
         .map_err(|_| invalid_response(provider, status, headers.clone(), body.to_vec()))?;
-    Ok((
-        value,
-        ProviderResponse {
-            status,
-            headers,
-            body: SecretBytes::new(body.to_vec()),
-        },
-    ))
+    Ok((value, ProviderResponse::new(status, headers, body.to_vec())))
 }
 pub(crate) fn string<'a>(value: &'a Value, field: &str) -> Result<&'a str, StorageError> {
     value[field]

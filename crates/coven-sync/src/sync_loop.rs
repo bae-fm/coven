@@ -65,6 +65,8 @@ enum SyncCommand {
     Close(Reply),
 }
 type Reply = oneshot::Sender<Result<(), SyncError>>;
+type Backoff =
+    futures_util::future::Shared<std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>>;
 
 struct SyncRun {
     operations: Operations,
@@ -72,6 +74,11 @@ struct SyncRun {
     changes: DatabaseChanges,
     clock: ClockRef,
     send: Arc<crate::SendGate>,
+    waits: Arc<crate::RetryWaits>,
+    /// Consecutive failed passes on this connection, and the monotonic
+    /// deadline and timer before which no new automatic pass starts (SP waiting).
+    failures: u32,
+    backoff: Option<(Duration, Backoff)>,
     commands: mpsc::UnboundedReceiver<SyncCommand>,
     status: watch::Sender<SyncStatus>,
     connection: Option<Arc<StorageConnection>>,
@@ -91,6 +98,7 @@ impl SyncLoop {
         changes: DatabaseChanges,
         clock: ClockRef,
         send: Arc<crate::SendGate>,
+        waits: Arc<crate::RetryWaits>,
         connection: Option<Arc<StorageConnection>>,
         connector: Arc<dyn StorageConnector>,
         device: DeviceId,
@@ -110,6 +118,9 @@ impl SyncLoop {
                 changes,
                 clock,
                 send,
+                waits,
+                failures: 0,
+                backoff: None,
                 commands: receiver,
                 status,
                 connection,
@@ -196,7 +207,9 @@ impl SyncLoop {
         result.await.map_err(|_| DbError::StoreClosed)?
     }
 
-    /// Request a pass while started. Requests during a pass cause another pass.
+    /// Request a pass while started. Requests during a pass cause another pass;
+    /// while a failed connection backs off or a provider cooldown is live,
+    /// requests coalesce into the pass that follows it.
     pub fn sync_now(&self) {
         let _ = self.commands.send(SyncCommand::Now);
     }
@@ -230,8 +243,12 @@ impl SyncRun {
                 data.credentials,
                 self.device,
                 self.send.clone(),
+                self.waits.clone(),
             )
             .await?;
+        // A new connection starts its own backoff; provider cooldowns hold.
+        self.failures = 0;
+        self.backoff = None;
         self.operations
             .set_storage(Some(connection.clone()))
             .await?;
@@ -326,10 +343,37 @@ impl SyncRun {
         Ok(())
     }
 
+    /// What a pass must still wait for: the failed connection's backoff and
+    /// a provider cooldown. Requests made meanwhile coalesce (SP waiting).
+    fn held(&self) -> Option<crate::retry_waits::Wake> {
+        use futures_util::FutureExt;
+        let backoff = self.backoff.as_ref().and_then(|(due, timer)| {
+            (*due > self.clock.elapsed() && timer.clone().now_or_never().is_none())
+                .then(|| timer.clone())
+        });
+        match (backoff, self.waits.cooldown_wake()) {
+            (None, None) => None,
+            (backoff, cooldown) => Some(Box::pin(async move {
+                if let Some(backoff) = backoff {
+                    backoff.await;
+                }
+                if let Some(cooldown) = cooldown {
+                    cooldown.await;
+                }
+            })),
+        }
+    }
+
     async fn run(mut self) {
         let mut delay = self.clock.sleep(Duration::from_secs(30));
         let mut pending = false;
         loop {
+            let mut held = if self.started && pending {
+                self.held()
+            } else {
+                None
+            };
+            let holding = held.is_some();
             tokio::select! {
                 biased;
                 command = self.commands.recv() => {
@@ -409,7 +453,8 @@ impl SyncRun {
                     }
                 }
                 _ = &mut delay, if self.started && !pending => { pending = true; }
-                _ = std::future::ready(()), if self.started && pending => {
+                _ = async { if let Some(held) = held.as_mut() { held.await } }, if holding => {}
+                _ = std::future::ready(()), if self.started && pending && !holding => {
                     pending = false;
                     self.status.send_replace(SyncStatus::Syncing);
                     let result = async {
@@ -431,9 +476,17 @@ impl SyncRun {
                     }.await;
                     match result {
                         Ok(()) => {
+                            self.failures = 0;
+                            self.backoff = None;
                             self.status.send_replace(SyncStatus::Synced { finished_at: self.clock.now() });
                         }
                         Err(error) => {
+                            self.failures = self.failures.saturating_add(1);
+                            let wait = coven_storage::retry_delay(self.failures - 1);
+                            self.backoff = Some((
+                                self.clock.elapsed() + wait,
+                                futures_util::FutureExt::shared(self.clock.sleep(wait)),
+                            ));
                             let error = SyncFailure::from(error);
                             self.started = !matches!(error, SyncFailure::Removed | SyncFailure::DeviceReset(_) | SyncFailure::UpdateRequired(_));
                             let reached = self.connection.as_ref().is_some_and(|connection| connection.reached());

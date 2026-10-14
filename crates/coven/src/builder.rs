@@ -184,6 +184,8 @@ impl CovenBuilder {
         let ids = self.ids.clone();
         let clock = self.clock.clone();
         let send = Arc::new(coven_sync::SendGate::new(clock.clone()));
+        // A read-only handle cannot persist a cooldown; it holds its own requests.
+        let waits = Arc::new(coven_sync::RetryWaits::in_memory(clock.clone()));
         let connector = self.connector();
         let limits = self.limits;
         let database = self.database(directory.clone())?;
@@ -207,6 +209,7 @@ impl CovenBuilder {
                         data.credentials,
                         directory.settings().map_err(CovenError::from)?.device_id,
                         send.clone(),
+                        waits.clone(),
                     )
                     .await
                     .map_err(SyncError::from)?,
@@ -217,8 +220,8 @@ impl CovenBuilder {
             coven_database::FileDatabase::read_only(database.clone()),
             directory,
             storage,
-            clock,
             send,
+            waits,
             ids,
             limits,
         );
@@ -411,16 +414,23 @@ impl OpeningStore {
         if let Some(identity) = database.local_store_log().await?.log.replay.state.store {
             identity.check_settings(&self.directory.settings()?)?;
         }
+        let waits = Arc::new(
+            coven_sync::RetryWaits::open(database.clone(), self.builder.clock.clone()).await?,
+        );
         let owners =
             crate::coven::blocking(move || self.builder.owners(self.directory, self.keychain))
                 .await?;
-        let sync = owners.sync(database.clone());
-        Ok(owners.handle(database, sync))
+        let sync = owners.sync(database.clone(), waits.clone());
+        Ok(owners.handle(database, sync, waits))
     }
 }
 
 impl OpeningOwners {
-    fn sync(&self, database: coven_database::Database) -> coven_sync::StoreLogSync {
+    fn sync(
+        &self,
+        database: coven_database::Database,
+        waits: Arc<coven_sync::RetryWaits>,
+    ) -> coven_sync::StoreLogSync {
         match &self.storage {
             Some(storage) => coven_sync::StoreLogSync::new(
                 storage.clone(),
@@ -431,6 +441,7 @@ impl OpeningOwners {
                 self.send.clone(),
                 self.ids.clone(),
                 self.directory.clone(),
+                waits,
             ),
             None => coven_sync::StoreLogSync::disconnected(
                 database,
@@ -440,6 +451,7 @@ impl OpeningOwners {
                 self.send.clone(),
                 self.ids.clone(),
                 self.directory.clone(),
+                waits,
             ),
         }
     }
@@ -448,6 +460,7 @@ impl OpeningOwners {
         self,
         database: coven_database::Database,
         sync: coven_sync::StoreLogSync,
+        waits: Arc<coven_sync::RetryWaits>,
     ) -> CovenHandle {
         let writes = match &self.storage {
             Some(storage) => coven_sync::DeviceLogSync::new(
@@ -472,8 +485,8 @@ impl OpeningOwners {
             self.storage
                 .clone()
                 .map(|storage| storage as Arc<dyn coven_storage::Storage>),
-            self.clock.clone(),
             self.send.clone(),
+            waits.clone(),
             self.ids.clone(),
             self.limits,
         );
@@ -493,6 +506,7 @@ impl OpeningOwners {
             database.sync_changes(),
             self.clock.clone(),
             self.send.clone(),
+            waits.clone(),
             self.storage,
             self.connector.clone(),
             self.device,
@@ -512,6 +526,7 @@ impl OpeningOwners {
             self.ids,
             self.clock,
             self.send,
+            waits,
         ));
         CovenHandle::new(
             database,

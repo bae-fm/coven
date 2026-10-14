@@ -269,6 +269,11 @@ pub(crate) const POLICY: Policy = Policy {
         (
             "crates/coven-storage/src/test_utils.rs",
             "MemoryStorage",
+            "with_cooldown",
+        ),
+        (
+            "crates/coven-storage/src/test_utils.rs",
+            "MemoryStorage",
             "for_device",
         ),
         (
@@ -298,6 +303,14 @@ pub(crate) const POLICY: Policy = Policy {
         ),
         ("crates/coven-sync/src/file_read.rs", "UploadedFile", "open"),
         ("crates/coven-sync/src/files.rs", "Files", "new"),
+        // One retry schedule per opened installation, injected into every
+        // worker and connection; a read-only handle keeps its own in memory.
+        ("crates/coven-sync/src/retry_waits.rs", "RetryWaits", "open"),
+        (
+            "crates/coven-sync/src/retry_waits.rs",
+            "RetryWaits",
+            "in_memory",
+        ),
         // One sending gate per opened installation, injected into every sender.
         ("crates/coven-sync/src/send_gate.rs", "SendGate", "new"),
         ("crates/coven-sync/src/operations.rs", "Operations", "new"),

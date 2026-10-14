@@ -231,8 +231,8 @@ async fn a_file_named_only_by_a_retained_log_write_stays_until_that_log_goes() {
         FileDatabase::new(a.db.clone()),
         a.directory.clone(),
         Some(storage.clone()),
-        a.clock.clone(),
         a.send.clone(),
+        a.waits.clone(),
         Arc::new(coven_foundation::id_source::UuidIds),
         crate::TransferLimits::default(),
     );

@@ -65,6 +65,8 @@ pub(crate) async fn reset_device(
             data.credentials.clone(),
             settings.device_id,
             probe,
+            // The damaged database cannot hold a cooldown for this one probe.
+            Arc::new(coven_storage::NoCooldown),
         )
         .await
         .map_err(SyncError::from)?
@@ -144,9 +146,14 @@ async fn reset_unconnected(
                 .map_err(BootstrapError::from),
         );
     }
+    let waits = Arc::new(
+        coven_sync::RetryWaits::open(database.clone(), builder.clock.clone())
+            .await
+            .map_err(CovenError::from)?,
+    );
     let owners = builder.owners(directory, keychain)?;
-    let sync = owners.sync(database.clone());
-    Ok(owners.handle(database, sync))
+    let sync = owners.sync(database.clone(), waits.clone());
+    Ok(owners.handle(database, sync, waits))
 }
 
 #[cfg(test)]

@@ -110,6 +110,8 @@ struct OperationRun {
     commands: mpsc::UnboundedReceiver<Request>,
     joins: watch::Sender<Vec<JoinRequest>>,
     waiters: BTreeMap<OperationId, Reply>,
+    /// The earliest expiry among open invitations, read with the journal.
+    invite_expiry: Option<std::time::SystemTime>,
 }
 
 impl Operations {
@@ -127,6 +129,7 @@ impl Operations {
             commands: receiver,
             joins,
             waiters: BTreeMap::new(),
+            invite_expiry: None,
         };
         Self {
             inner: Arc::new(RunningOperations {
@@ -408,7 +411,8 @@ impl Drop for RunningOperations {
 
 impl OperationRun {
     async fn run(mut self) {
-        // Opening drives retained work immediately; commands keep the same deadline.
+        // Opening drives retained work immediately. Afterwards the worker wakes
+        // for commands and the earliest due retry, never on a fixed tick.
         let mut retry = self.clock.sleep(Duration::ZERO);
         loop {
             let mut response = None;
@@ -424,6 +428,8 @@ impl OperationRun {
                             continue;
                         }
                         self.writes.set_storage(storage.clone());
+                        // A connection is a prerequisite of waiting storage work.
+                        self.sync.prerequisites_changed();
                     }
                     if matches!(command, Command::ForgetKeys) {
                         let result = self.files.set_storage(None, async {
@@ -436,12 +442,14 @@ impl OperationRun {
                         let result = self.files.set_storage(Some(storage.clone()), self.sync.unlock_storage(storage.clone())).await;
                         if result.is_ok() {
                             self.writes.set_storage(Some(storage));
+                            self.sync.prerequisites_changed();
                         }
                         let _ = reply.send(result.map(|()| Output::Unit));
                     } else if let Command::Setup(storage, access, device_name, commit) = command {
                         let result = self.files.set_storage(Some(storage.clone()), self.sync.setup_storage(storage.clone(), access, device_name, commit)).await;
                         if result.is_ok() {
                             self.writes.set_storage(Some(storage));
+                            self.sync.prerequisites_changed();
                         }
                         if result.is_err() { self.sync.invalidate_sends(); }
                         let _ = reply.send(result.map(|()| Output::Unit));
@@ -461,9 +469,7 @@ impl OperationRun {
                         }
                     }
                 }
-                _ = &mut retry => {
-                    retry = self.clock.sleep(Duration::from_secs(1));
-                }
+                _ = &mut retry => {}
             }
             if let Err(error) = self.drive().await {
                 // A journal failure cannot be recorded in the journal. Stop this
@@ -485,6 +491,27 @@ impl OperationRun {
             if let Some((reply, result)) = response {
                 let _ = reply.send(result);
             }
+            retry = self
+                .next_wake()
+                .unwrap_or_else(|| Box::pin(std::future::pending()));
+        }
+    }
+
+    /// When the worker must next run without a command: the earliest due
+    /// operation retry, or an open invitation's expiry. There is no tick.
+    fn next_wake(&self) -> Option<crate::retry_waits::Wake> {
+        let retry = self.sync.next_operation_wake();
+        // An invitation already expired is settled by the drive that read it.
+        let expiry = self
+            .invite_expiry
+            .and_then(|expiry| expiry.duration_since(self.clock.now()).ok())
+            .map(|left| self.clock.sleep(left));
+        match (retry, expiry) {
+            (Some(retry), Some(expiry)) => Some(Box::pin(futures_util::FutureExt::map(
+                futures_util::future::select(retry, expiry),
+                |_| (),
+            ))),
+            (retry, expiry) => retry.or(expiry),
         }
     }
 
@@ -508,7 +535,8 @@ impl OperationRun {
     async fn drive(&mut self) -> Result<Option<SyncError>, SyncError> {
         self.sync
             .set_discovery_download_limit(self.files.transfer_limits().downloads);
-        let mut maintenance_failure = None;
+        // Maintenance that failed and has not recovered within this drive.
+        let mut maintenance_failures: Vec<(OperationId, SyncError)> = Vec::new();
         loop {
             match self.sync.schedule_version_changes().await {
                 Ok(()) | Err(SyncError::UpdateRequired(_)) => (),
@@ -521,6 +549,23 @@ impl OperationRun {
                 .into_iter()
                 .map(|record| Ok((crate::operation_data::Data::read(&record)?, record)))
                 .collect::<Result<Vec<_>, SyncError>>()?;
+            self.sync
+                .retain_operation_waits(&records.iter().map(|(_, record)| record.id).collect());
+            self.invite_expiry = records
+                .iter()
+                .filter_map(|(data, _)| match data {
+                    crate::operation_data::Data::Invite(work)
+                        if matches!(
+                            work.state,
+                            crate::operation_data::InviteState::Grant
+                                | crate::operation_data::InviteState::Waiting { .. }
+                        ) =>
+                    {
+                        Some(work.expires_at)
+                    }
+                    _ => None,
+                })
+                .min();
             let reloading = records.iter().any(|(data, _)| data.is_reload());
             let mut advanced = false;
             let raising = records.iter().any(|(data, _)| data.raises_version());
@@ -555,9 +600,7 @@ impl OperationRun {
                     continue;
                 };
                 let data = crate::operation_data::Data::read(&record)?;
-                if !self.sync.operation_can_retry(&record).await?
-                    && !self.sync.invite_expired(&data)
-                {
+                if !self.sync.operation_ready(&record).await? && !self.sync.invite_expired(&data) {
                     continue;
                 }
                 if raising_first && data.is_reload() {
@@ -584,15 +627,20 @@ impl OperationRun {
                             }
                         }
                     }
-                    Ok(Progress::Advanced) => advanced = true,
+                    Ok(Progress::Advanced) => {
+                        advanced = true;
+                        maintenance_failures.retain(|(id, _)| *id != record.id);
+                    }
                     Ok(Progress::Reply(result)) => {
                         advanced = true;
+                        maintenance_failures.retain(|(id, _)| *id != record.id);
                         if let Some(reply) = self.waiters.remove(&record.id) {
                             let _ = reply.send(result);
                         }
                     }
                     Ok(Progress::Finished(value)) => {
                         advanced = true;
+                        maintenance_failures.retain(|(id, _)| *id != record.id);
                         if let Some(reply) = self.waiters.remove(&record.id) {
                             let _ = reply.send(Ok(value));
                         }
@@ -601,8 +649,9 @@ impl OperationRun {
                         self.sync.record_operation_error(&record, &error).await?;
                         if let Some(reply) = self.waiters.remove(&record.id) {
                             let _ = reply.send(Err(error));
-                        } else if maintenance && maintenance_failure.is_none() {
-                            maintenance_failure = Some(error);
+                        } else if maintenance {
+                            maintenance_failures.retain(|(id, _)| *id != record.id);
+                            maintenance_failures.push((record.id, error));
                         }
                     }
                 }
@@ -617,8 +666,15 @@ impl OperationRun {
                 }
             });
             if !advanced {
-                return Ok(maintenance_failure);
+                // A failure its own retry resolved within this drive, after
+                // other work advanced, does not fail the pass.
+                return Ok(maintenance_failures
+                    .into_iter()
+                    .next()
+                    .map(|(_, error)| error));
             }
+            // Progress is committed evidence for every waiting operation.
+            self.sync.prerequisites_changed();
         }
     }
 }

@@ -457,7 +457,7 @@ pub(super) fn provider(url: &str) -> StorageConnection<DropboxStorage> {
     .unwrap();
     storage.api = format!("{url}/2");
     storage.content = storage.api.clone();
-    storage.removal_poll_interval = std::time::Duration::from_millis(1);
+    storage.removal_poll_unit = std::time::Duration::from_millis(1);
     StorageConnection::from_provider(Arc::new(storage))
 }
 #[tokio::test]
@@ -753,9 +753,10 @@ async fn asynchronous_removal_times_out_without_hiding_remaining_access() {
         std::io::ErrorKind::TimedOut
     );
     assert!(state.lock().unwrap().members.contains_key("member"));
+    // Status checks back off; one unit is a millisecond here.
     assert_eq!(
         *clock.0.lock().unwrap(),
-        [std::time::Duration::from_millis(1); 60]
+        [1, 2, 4, 8, 16, 32].map(std::time::Duration::from_millis)
     );
     state.lock().unwrap().removal_job.as_mut().unwrap().statuses =
         [json!({".tag":"complete"})].into();
@@ -963,4 +964,33 @@ async fn stale_abort_cannot_close_another_native_session() {
         storage.read(&first).await.unwrap_err().failure(),
         StorageFailure::NotFound
     );
+}
+#[tokio::test]
+async fn throttling_is_one_request_then_a_cooldown_for_the_whole_connection() {
+    use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+    let hits = Arc::new(AtomicUsize::new(0));
+    let counted = hits.clone();
+    let body = r#"{"error_summary":"too_many_requests/..","error":{"retry_after":600}}"#;
+    let server = TestServer::new(Router::new().fallback(move || {
+        counted.fetch_add(1, SeqCst);
+        async move { response(429, body) }
+    }))
+    .await;
+    let cooldown = Arc::new(crate::cooldown::tests::RecordingCooldown::default());
+    let publications = Arc::new(crate::test_utils::UnrestrictedPublications);
+    let storage = StorageConnection::with_gate(
+        provider(&server.url).provider,
+        publications,
+        cooldown.clone(),
+    );
+    let prefix = crate::ObjectPrefix::all(STORE_ID);
+    let rate_limited = |error: StorageError| error.failure() == StorageFailure::RateLimited;
+    assert!(rate_limited(storage.list(&prefix).await.unwrap_err()));
+    // The HTTP client retries nothing; the cooldown then sends nothing.
+    assert_eq!(
+        *cooldown.recorded.lock().unwrap(),
+        [std::time::Duration::from_secs(600)]
+    );
+    assert!(rate_limited(storage.list(&prefix).await.unwrap_err()));
+    assert_eq!(hits.load(SeqCst), 1);
 }

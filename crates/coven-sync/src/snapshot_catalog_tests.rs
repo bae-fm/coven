@@ -316,6 +316,7 @@ async fn signed_coverage_does_not_require_opening_the_body_but_loading_does() {
         a.catch_up().await;
     }
     a.sync.write_snapshot(Audience::Store).await.unwrap();
+    b.elapse_retry_delays();
     b.sync.reload_from_snapshots().await.unwrap();
     assert_eq!(tables(&a).await, tables(&b).await);
 }
@@ -887,6 +888,7 @@ async fn selection_orders_coverage_then_path_and_waits_on_a_damaged_newest() {
     ));
     // Waiting again does not read the refused bytes again.
     let reads = storage.reads().await.len();
+    c.elapse_retry_delays();
     waits_on_newer(c.sync.reload_from_snapshots().await);
     assert!(!storage.reads().await[reads..]
         .iter()
@@ -900,6 +902,7 @@ async fn selection_orders_coverage_then_path_and_waits_on_a_damaged_newest() {
         NonZeroU64::new(999).unwrap(),
     );
     storage.create(&malformed, b"x").await.unwrap();
+    c.elapse_retry_delays();
     waits_on_newer(c.sync.reload_from_snapshots().await);
     assert!(matches!(
         snapshot_record(&c, &malformed).await,
@@ -929,6 +932,7 @@ async fn selection_orders_coverage_then_path_and_waits_on_a_damaged_newest() {
     // snapshot is gone, the waiting reload loads the newest left and the
     // logs supply the rest.
     storage.delete(&newer).await.unwrap();
+    c.elapse_retry_delays();
     c.sync.reload_from_snapshots().await.unwrap();
     assert_eq!(snapshot_record(&c, &newer).await, None);
     assert!(snapshot_record(&c, &malformed).await.is_some());

@@ -33,7 +33,11 @@ async fn the_sdk_checks_again_at_transmission_and_preserves_the_local_refusal() 
         crate::providers::s3::profile::PLAIN,
     );
     let gate = Arc::new(ExpiresAfterConnectionCheck(AtomicUsize::new(0)));
-    let storage = StorageConnection::with_gate(raw.provider.clone(), gate.clone());
+    let storage = StorageConnection::with_gate(
+        raw.provider.clone(),
+        gate.clone(),
+        Arc::new(crate::NoCooldown),
+    );
     let path = ObjectPath::store_log(
         crate::test_utils::STORE_ID,
         DeviceId(1),

@@ -37,9 +37,10 @@ impl StorageConnector for Overwrites {
         credentials: StorageCredentials,
         device: DeviceId,
         publications: Arc<dyn coven_storage::PublicationGate>,
+        cooldown: Arc<dyn coven_storage::Cooldown>,
     ) -> Result<Arc<StorageConnection>, StorageError> {
         self.0
-            .connect(config, credentials, device, publications)
+            .connect(config, credentials, device, publications, cooldown)
             .await
     }
     async fn detect_s3(
@@ -82,9 +83,10 @@ impl StorageConnector for BucketState {
         credentials: StorageCredentials,
         device: DeviceId,
         publications: Arc<dyn coven_storage::PublicationGate>,
+        cooldown: Arc<dyn coven_storage::Cooldown>,
     ) -> Result<Arc<StorageConnection>, StorageError> {
         self.storage
-            .connect(config, credentials, device, publications)
+            .connect(config, credentials, device, publications, cooldown)
             .await
     }
     async fn detect_s3(

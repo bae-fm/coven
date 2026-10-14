@@ -724,6 +724,7 @@ async fn a_candidate_connection_does_not_replace_the_active_connections_tokens()
             tokens(None),
             DeviceId(1),
             Arc::new(crate::test_utils::UnrestrictedPublications),
+            Arc::new(crate::NoCooldown),
         )
         .await
         .unwrap();
@@ -733,6 +734,7 @@ async fn a_candidate_connection_does_not_replace_the_active_connections_tokens()
             tokens(Some(std::time::UNIX_EPOCH)),
             DeviceId(1),
             Arc::new(crate::test_utils::UnrestrictedPublications),
+            Arc::new(crate::NoCooldown),
         )
         .await
         .unwrap();

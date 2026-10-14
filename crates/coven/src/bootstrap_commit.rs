@@ -9,6 +9,7 @@ pub(super) fn publish_bootstrap(
     ring: StoreKeyring,
     owners: OpeningOwners,
     database: Database,
+    waits: Arc<coven_sync::RetryWaits>,
 ) -> Result<CovenHandle, BootstrapError> {
     let directory = pending.directory();
     let keys = &owners.keys;
@@ -79,8 +80,8 @@ pub(super) fn publish_bootstrap(
             return Err(error);
         }
     };
-    let sync = owners.sync(database.clone());
-    let handle = owners.handle(database, sync);
+    let sync = owners.sync(database.clone(), waits.clone());
+    let handle = owners.handle(database, sync, waits);
     let cleanup = directory
         .owned_file(StoreFile::Bootstrap)
         .remove()

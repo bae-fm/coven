@@ -6,6 +6,7 @@ use coven_storage::{
     ObjectPath, ObjectPrefix, S3Credentials, Storage, StorageFailure,
 };
 use std::num::NonZeroUsize;
+use std::time::Duration;
 
 #[path = "../tests/fixtures/bootstrap.rs"]
 mod fixtures;

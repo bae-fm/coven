@@ -5135,7 +5135,12 @@ Carol's tablet:
     including requests that have not received any bytes;
   - `_coven_cache_budgets`: each namespace's budget and cached byte total,
     updated with its cache records so a budget check needs no full sum;
-  - `_coven_file_removals`: unused local copies waiting to be deleted.
+  - `_coven_file_removals`: unused local copies waiting to be deleted;
+  - `_coven_retries`: each waiting upload's, operation's and approval
+    poll's persisted deadline `T` and full wait `W` with the consecutive
+    failures that chose `W`, and the provider cooldown (§16.5). An upload's
+    or operation's row goes with its work, an operation's also when its
+    condition clears.
 - Reading a not-yet-uploaded original finds its hashes through the row's
   fixed where-column reference. There is no row-and-column hash copy to keep
   in sync with the queue. After upload, reads use cache or storage (§16.1).

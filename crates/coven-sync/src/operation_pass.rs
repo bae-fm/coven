@@ -13,7 +13,9 @@ impl OperationRun {
         let caught_up = self.sync.catch_up_membership().await?;
         self.writes.observe_positions().await?;
         // Phase 2: replace exposed keys and share historical ones before any
-        // first attempt (§11), then resume due operations (SP step 5).
+        // first attempt (§11), then resume due operations (SP step 5): those
+        // whose retry delay elapsed, and all waiting ones if this pass
+        // received or published anything they may need (SP waiting).
         if caught_up {
             self.sync.match_keys().await?;
             self.sync.settle_queued_entry().await?;
@@ -36,6 +38,7 @@ impl OperationRun {
             self.writes.retry_attempted_writes().await?
         };
         if !uploaded.is_empty() {
+            self.sync.prerequisites_changed();
             self.drive_pass().await?;
         }
         let mut discovery = self.writes.download_writes().await?;

@@ -10,7 +10,7 @@ use coven_storage::{
     ConnectionCredentials, InviteStorage, StorageCredentials, StorageFailure, StorageSettings,
 };
 use coven_sync::StoreLogSync;
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 use tokio::sync::watch;
 
 #[path = "bootstrap_authentication.rs"]
@@ -222,7 +222,7 @@ async fn bootstrap_device(
         .await?;
     let result = prepare_and_load(&mut builder, &pending, &request, &status, cancel).await;
     match result {
-        Ok(Some((code, credentials, ring, database, storage, send))) => {
+        Ok(Some((code, credentials, ring, database, storage, send, waits))) => {
             status("Keeping keys and credentials");
             let result = check_cancel(cancel).and_then(|()| {
                 builder.authentication.take();
@@ -242,6 +242,7 @@ async fn bootstrap_device(
                     ring,
                     owners,
                     database.clone(),
+                    waits,
                 )
             });
             match result {
@@ -289,6 +290,7 @@ async fn prepare_and_load(
         Database,
         Arc<coven_storage::StorageConnection>,
         Arc<coven_sync::SendGate>,
+        Arc<coven_sync::RetryWaits>,
     )>,
     BootstrapError,
 > {
@@ -314,16 +316,6 @@ async fn prepare_and_load(
     check_cancel(cancel)?;
     let settings = directory.settings().map_err(CovenError::from)?;
     let send = Arc::new(coven_sync::SendGate::new(builder.clock.clone()));
-    let storage = builder
-        .connector()
-        .connect(
-            data.location.clone(),
-            data.credentials.clone(),
-            settings.device_id,
-            send.clone(),
-        )
-        .await
-        .map_err(SyncError::from)?;
     let ring = Arc::new(KeySession::store(Arc::new(
         InMemoryCustody::<StoreKeyring>::empty(),
     ))?);
@@ -332,7 +324,42 @@ async fn prepare_and_load(
     )))?);
     // Completing a reset registers the fresh id as the old one's replacement.
     let reset = pending.device_reset().map_err(SyncError::from)?;
+    // The database opens before connecting: its persisted waits and provider
+    // cooldown hold the joiner's polls and every request across restarts (§16.5).
     let database = builder.database(directory.clone())?.open().await?;
+    let connected = async {
+        let waits = Arc::new(
+            coven_sync::RetryWaits::open(database.clone(), builder.clock.clone())
+                .await
+                .map_err(CovenError::from)?,
+        );
+        let storage = builder
+            .connector()
+            .connect(
+                data.location.clone(),
+                data.credentials.clone(),
+                settings.device_id,
+                send.clone(),
+                waits.clone(),
+            )
+            .await
+            .map_err(SyncError::from)?;
+        Ok::<_, BootstrapError>((waits, storage))
+    }
+    .await;
+    let (waits, storage) = match connected {
+        Ok(connected) => connected,
+        Err(error) => {
+            return combine(
+                Err(error),
+                database
+                    .close()
+                    .await
+                    .map_err(CovenError::from)
+                    .map_err(BootstrapError::from),
+            )
+        }
+    };
     let mut writes = coven_sync::DeviceLogSync::new(
         storage.clone(),
         database.clone(),
@@ -350,6 +377,7 @@ async fn prepare_and_load(
         send.clone(),
         builder.ids.clone(),
         directory,
+        waits.clone(),
     );
     let loading = async {
         if let Admission::Joining(joining) = &mut admission {
@@ -413,9 +441,15 @@ async fn prepare_and_load(
         )))
     });
     match result {
-        Ok(Some((code, credentials, ring))) => {
-            Ok(Some((code, credentials, ring, database, storage, send)))
-        }
+        Ok(Some((code, credentials, ring))) => Ok(Some((
+            code,
+            credentials,
+            ring,
+            database,
+            storage,
+            send,
+            waits,
+        ))),
         result => {
             let closed = database
                 .close()

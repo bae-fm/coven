@@ -49,6 +49,18 @@ impl MemberKeyCustody for RefusedIdentity {
     fn close(&self) {}
 }
 
+/// The bootstrap database's retry waits, as `prepare_and_load` opens them.
+async fn waits(database: &Database) -> Arc<coven_sync::RetryWaits> {
+    Arc::new(
+        coven_sync::RetryWaits::open(
+            database.clone(),
+            Arc::new(coven_foundation::clock::SystemClock),
+        )
+        .await
+        .unwrap(),
+    )
+}
+
 async fn prepared(
     layout: &StoreLayout,
     id: StoreId,
@@ -106,6 +118,7 @@ async fn custody_failure_restores_the_prior_keys_without_publishing() {
         next,
         owners,
         database.clone(),
+        waits(&database).await,
     )
     .unwrap_err();
     assert!(matches!(
@@ -161,6 +174,7 @@ async fn settings_rollback_failure_retains_both_causes_and_restores_other_custod
         next,
         owners,
         database.clone(),
+        waits(&database).await,
     )
     .unwrap_err();
     let BootstrapError::Cleanup { operation, cleanup } = error else {
@@ -222,6 +236,7 @@ async fn publication_failure_rolls_back_settings_and_custody() {
         next,
         owners,
         database.clone(),
+        waits(&database).await,
     )
     .unwrap_err();
     assert!(matches!(
@@ -288,6 +303,7 @@ async fn credential_publication_failures_restore_every_prior_custody_value() {
             ring,
             owners,
             database.clone(),
+            waits(&database).await,
         )
         .unwrap_err();
         assert!(
@@ -345,6 +361,7 @@ async fn bootstrap_reports_synced_key_rollback_failure_with_the_publication_fail
         ring,
         owners,
         database.clone(),
+        waits(&database).await,
     )
     .unwrap_err();
     assert!(
@@ -387,8 +404,16 @@ async fn cleanup_failure_returns_the_open_handle_with_its_session_keys() {
         .join("bootstrap.sealed");
     std::fs::create_dir(leftover).unwrap();
     let location = StorageConfig::decode(code.storage.as_bytes()).unwrap();
-    let error =
-        publish_bootstrap(&pending, code, credentials(), ring, owners, database).unwrap_err();
+    let error = publish_bootstrap(
+        &pending,
+        code,
+        credentials(),
+        ring,
+        owners,
+        database.clone(),
+        waits(&database).await,
+    )
+    .unwrap_err();
     let BootstrapError::Published { handle, .. } = error else {
         panic!("expected published handle")
     };

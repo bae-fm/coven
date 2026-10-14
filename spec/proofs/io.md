@@ -927,6 +927,9 @@ prevents an app retry from shortening it. The forward-clock example returns
 zero: no real-time cooldown guarantee under arbitrary forward clock jumps
 is asserted. Persistence, monotonic scheduling, HTTP-date interpretation
 and failure to persist a delay remain Rust obligations.
+[`io_differential_waiting`](../../crates/coven-sync/src/retry_waits_tests.rs)
+runs the IO runner's `waiting` check against the Rust delay, restart arm and
+due decisions before and after an app retry.
 
 ## Delivery refinement
 

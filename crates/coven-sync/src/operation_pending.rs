@@ -8,6 +8,13 @@ use crate::{
 use coven_database::OperationRecord;
 use coven_merge::Audience;
 
+pub(crate) type EvidenceMark = (
+    Vec<(coven_foundation::id_source::DeviceId, u64)>,
+    Vec<(coven_foundation::id_source::DeviceId, u64)>,
+    usize,
+    Option<coven_format::value::EntryId>,
+);
+
 impl StoreLogSync {
     pub(crate) async fn operation_can_retry(
         &self,
@@ -61,6 +68,75 @@ impl StoreLogSync {
             .await?)
     }
 
+    /// Whether automatic work may run this operation now: its condition
+    /// permits a retry, and its retry wait has elapsed or its prerequisites
+    /// changed since, outside any provider cooldown (§16.5, SP step 5).
+    pub(crate) async fn operation_ready(
+        &self,
+        record: &OperationRecord,
+    ) -> Result<bool, SyncError> {
+        let subject = coven_database::RetrySubject::Operation(record.id);
+        if !self.operation_can_retry(record).await? {
+            self.waits.seen(subject);
+            return Ok(false);
+        }
+        let persisted = self.database.retry_wait(subject).await?;
+        Ok(self.waits.due(subject, persisted.as_ref()))
+    }
+
+    /// Committed work may satisfy waiting operations' prerequisites: each
+    /// becomes due once, keeping its backoff (SP waiting).
+    pub(crate) fn prerequisites_changed(&self) {
+        self.waits.prerequisites_changed();
+    }
+
+    /// Forget the waits of operations that no longer exist.
+    pub(crate) fn retain_operation_waits(&self, live: &std::collections::BTreeSet<OperationId>) {
+        self.waits.retain_operations(live);
+    }
+
+    /// When the earliest waiting operation's retry is due.
+    pub(crate) fn next_operation_wake(&self) -> Option<crate::retry_waits::Wake> {
+        self.waits
+            .next_wake(|subject| matches!(subject, coven_database::RetrySubject::Operation(_)))
+    }
+
+    /// What store-log scans received or applied: entry and key-copy
+    /// download positions, applied entries and the queued entry. A change
+    /// is new evidence for every waiting operation (SP waiting).
+    pub(crate) async fn evidence_mark(&self) -> Result<EvidenceMark, SyncError> {
+        let local = self.database.local_store_log().await?;
+        Ok((
+            self.database
+                .log_downloads(coven_database::LogKind::Entry)
+                .await?,
+            self.database
+                .log_downloads(coven_database::LogKind::KeyCopy)
+                .await?,
+            local.log.entries.len(),
+            local.upload.map(|upload| upload.entry.position),
+        ))
+    }
+
+    /// After an unsuccessful attempt, persist the next retry wait before the
+    /// operation waits; a condition that waits for anything but time keeps no
+    /// wait. A completed catch-up is the next pass's, so it is no backoff.
+    pub(crate) async fn schedule_retry(
+        &self,
+        record: &OperationRecord,
+        pending: &PendingRecord,
+    ) -> Result<(), SyncError> {
+        let subject = coven_database::RetrySubject::Operation(record.id);
+        if pending.retry() == Retry::Automatic
+            && pending.reason != PendingReason::Waits(Prerequisite::CatchUp)
+        {
+            let previous = self.database.retry_wait(subject).await?;
+            self.waits.fail(subject, previous.as_ref()).await
+        } else {
+            self.waits.clear(subject).await
+        }
+    }
+
     pub(super) async fn reload_condition(
         &self,
         id: OperationId,
@@ -97,6 +173,7 @@ impl StoreLogSync {
     ) -> Result<PendingRecord, SyncError> {
         let pending = self.operation_condition(record, reason).await?;
         self.database.record_pending(pending.clone()).await?;
+        self.schedule_retry(record, &pending).await?;
         Ok(pending)
     }
 
@@ -173,9 +250,13 @@ impl StoreLogSync {
             if record.last_step == 1 {
                 let pending = self.operation_condition(record, reason).await?;
                 self.database
-                    .fail_provider_request(account.clone(), data.update(record, 2)?, pending)
+                    .fail_provider_request(
+                        account.clone(),
+                        data.update(record, 2)?,
+                        pending.clone(),
+                    )
                     .await?;
-                return Ok(());
+                return self.schedule_retry(record, &pending).await;
             }
         }
         self.record_operation_condition(record, reason).await?;

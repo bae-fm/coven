@@ -328,7 +328,8 @@ async fn publication_checks_after_the_provider_creation_permit() {
         .unwrap(),
     );
     let gate = Arc::new(SwitchGate(std::sync::atomic::AtomicBool::new(true)));
-    let storage = StorageConnection::with_gate(provider.clone(), gate.clone());
+    let storage =
+        StorageConnection::with_gate(provider.clone(), gate.clone(), Arc::new(NoCooldown));
     let held = provider.lock_create().await;
     let path = ObjectPath::store_log(STORE_ID, DeviceId(31), std::num::NonZeroU64::MIN);
     let mut request = Box::pin(storage.create(&path, b"entry"));

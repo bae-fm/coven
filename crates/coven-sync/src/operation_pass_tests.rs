@@ -19,12 +19,13 @@ fn start(device: Device) -> (Operations, Device) {
         coven_database::FileDatabase::new(device.db.clone()),
         device.directory.clone(),
         Some(device.storage.clone() as Arc<dyn Storage>),
-        device.clock.clone(),
         device.send.clone(),
+        device.waits.clone(),
         device.ids.clone(),
         TransferLimits::default(),
     );
     let mut device = device;
+    let waits = device.waits.clone();
     let sync = std::mem::replace(
         &mut device.sync,
         crate::StoreLogSync::disconnected(
@@ -35,6 +36,7 @@ fn start(device: Device) -> (Operations, Device) {
             device.send.clone(),
             device.ids.clone(),
             device.directory.clone(),
+            waits,
         ),
     );
     let spare = device.writes();

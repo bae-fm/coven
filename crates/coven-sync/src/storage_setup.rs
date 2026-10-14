@@ -387,6 +387,7 @@ impl StoreLogSync {
             self.send.clone(),
             self.ids.clone(),
             self.directory.clone(),
+            self.waits.clone(),
         );
         candidate.set_discovery_download_limit(self.download_limit);
         candidate.catch_up().await?;

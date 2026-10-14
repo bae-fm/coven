@@ -179,7 +179,7 @@ impl StoreLogSync {
             let mut work = Vec::new();
             for record in self.database.operations().await? {
                 if let Data::Snapshots(task) = Data::read(&record)? {
-                    if self.operation_can_retry(&record).await?
+                    if self.operation_ready(&record).await?
                         && !matches!(
                             task.job,
                             SnapshotJob::Write {
@@ -257,7 +257,7 @@ impl StoreLogSync {
     async fn drive_snapshot(&mut self, id: crate::OperationId) -> Result<bool, SyncError> {
         loop {
             let record = self.snapshot_record(id).await?;
-            if !self.operation_can_retry(&record).await? {
+            if !self.operation_ready(&record).await? {
                 let pending = self
                     .database
                     .operation_pending::<crate::PendingRecord>(id)

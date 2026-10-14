@@ -1,5 +1,8 @@
 use super::*;
+use coven_database::{RetrySubject, RetryWait};
+use coven_storage::test_utils::Faults;
 use serde_json::{json, Value};
+use std::time::Duration;
 
 #[tokio::test]
 async fn maintenance_failures_are_visible_and_wait_for_a_changed_connection() {
@@ -118,6 +121,11 @@ async fn app_reload_and_reset_stay_pending_until_explicit_retry() {
             a.send.clone(),
             Arc::new(coven_foundation::id_source::UuidIds),
             a.directory.clone(),
+            Arc::new(
+                crate::RetryWaits::open(a.db.clone(), a.clock.clone())
+                    .await
+                    .unwrap(),
+            ),
         );
         let files = file_owner(&a);
         let operations = operation_owner(a.sync, files);
@@ -179,22 +187,12 @@ async fn a_reload_call_receives_its_native_failure_and_automatic_retry_replaces_
     let storage = storage();
     let mut a = device(storage.clone(), 1, member(1), store(1)).await;
     a.create(key(1)).await;
-    let (sleeps, mut sleeping) = tokio::sync::watch::channel(0);
-    a.sync.clock = Arc::new(invites::RetryClock {
-        time: a.clock.clone(),
-        sleeps,
-    });
+    let clock = a.clock.clone();
     let files = file_owner(&a);
     let operations = operation_owner(a.sync, files);
-    // Consume the initial retry before reconnecting storage; only the sync call
+    // Finish the opening drive before reconnecting storage; only the sync call
     // below may encounter the missing snapshot.
-    tokio::time::timeout(
-        Duration::from_secs(5),
-        sleeping.wait_for(|count| *count == 2),
-    )
-    .await
-    .expect("operation worker did not schedule its injected retry")
-    .unwrap();
+    operations.barrier().await.unwrap();
     operations.reset_store().await.unwrap();
     let snapshot = storage
         .list(&ObjectPrefix::snapshots(store(1)))
@@ -229,6 +227,8 @@ async fn a_reload_call_receives_its_native_failure_and_automatic_retry_replaces_
     );
     storage.set_online(true);
     storage.delete(&snapshot).await.unwrap();
+    // The failed reload backs off one second before its automatic retry.
+    clock.set(coven_foundation::clock::Clock::now(clock.as_ref()) + Duration::from_secs(1));
     // The pass reports the reload that holds its data phase; the reload's
     // own native failure is its recorded reason below.
     let error = operations.sync().await.unwrap_err();
@@ -669,4 +669,145 @@ async fn missing_original_source_is_reported_as_a_write_object_prerequisite() {
             .reason,
         expected
     );
+}
+
+// Operation and joining retries share durable delays and the provider
+// cooldown with every other consumer (§16.5, SP waiting).
+
+fn fail_next(failure: StorageFailure, retry_after: Option<u64>) -> Faults {
+    Faults {
+        fail_next: 1,
+        failure,
+        retry_after,
+        ..Faults::none()
+    }
+}
+
+async fn wait_of(d: &Device, id: OperationId) -> Option<RetryWait> {
+    d.db.retry_wait(RetrySubject::Operation(id)).await.unwrap()
+}
+
+/// One unsuccessful attempt, recorded as the worker records it.
+async fn attempt_fails(d: &mut Device, id: OperationId) -> SyncError {
+    let Err(error) = step(d, id).await else {
+        panic!("the attempt did not fail");
+    };
+    let record = d.operation(id).await;
+    d.sync
+        .record_operation_error(&record, &error)
+        .await
+        .unwrap();
+    error
+}
+
+#[tokio::test]
+async fn a_failed_operation_waits_its_delay_and_an_app_retry_overrides_only_that() {
+    let storage = google();
+    let [mut a, _b, _c] = accounts(storage.clone()).await;
+    let id = begin(&mut a, Command::CreateCircle("Gifts".into())).await;
+    for wait in [1, 2, 4] {
+        storage
+            .set_faults(fail_next(StorageFailure::Network, None))
+            .await;
+        attempt_fails(&mut a, id).await;
+        // T and W persist before the operation waits.
+        let persisted = wait_of(&a, id).await.unwrap();
+        assert_eq!(persisted.wait, Duration::from_secs(wait));
+        let record = a.operation(id).await;
+        assert!(!a.sync.operation_ready(&record).await.unwrap());
+        a.elapse_retry_delays();
+        assert!(a.sync.operation_ready(&record).await.unwrap());
+    }
+    storage
+        .set_faults(fail_next(StorageFailure::Network, None))
+        .await;
+    attempt_fails(&mut a, id).await;
+    assert_eq!(wait_of(&a, id).await.unwrap().wait, Duration::from_secs(8));
+    // An explicit retry overrides the ordinary backoff at once.
+    a.sync
+        .begin_operation_call(Command::Retry(id))
+        .await
+        .unwrap();
+    assert_eq!(wait_of(&a, id).await, None);
+    let record = a.operation(id).await;
+    assert!(a.sync.operation_ready(&record).await.unwrap());
+    // Progress ends the wait: the next failure starts from one second.
+    finish(&mut a, id).await;
+    assert!(a.db.retry_waits().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_provider_cooldown_holds_operations_requests_and_explicit_retries() {
+    let storage = google();
+    let [mut a, _b, _c] = accounts(storage.clone()).await;
+    let id = begin(&mut a, Command::CreateCircle("Gifts".into())).await;
+    // An operation's request receives the provider's 600-second Retry-After.
+    storage
+        .set_faults(fail_next(StorageFailure::RateLimited, Some(600)))
+        .await;
+    let error = attempt_fails(&mut a, id).await;
+    assert!(
+        matches!(&error, SyncError::Storage(error) if error.failure() == StorageFailure::RateLimited)
+    );
+    let cooldown =
+        a.db.retry_wait(RetrySubject::Provider)
+            .await
+            .unwrap()
+            .unwrap();
+    assert_eq!(cooldown.wait, Duration::from_secs(600));
+    assert_eq!(a.waits.cooldown(), Some(Duration::from_secs(600)));
+    // The operation's own one-second delay passes; the cooldown holds it,
+    // and an explicit retry overrides only the ordinary delay.
+    a.clock
+        .set(coven_foundation::clock::Clock::now(a.clock.as_ref()) + Duration::from_secs(1));
+    a.sync
+        .begin_operation_call(Command::Retry(id))
+        .await
+        .unwrap();
+    let record = a.operation(id).await;
+    assert!(!a.sync.operation_ready(&record).await.unwrap());
+    // Every consumer of the connection waits: no request is sent.
+    let requests = storage.request_trace().len();
+    assert!(matches!(
+        a.storage.list_writers(store(1)).await,
+        Err(error) if error.failure() == StorageFailure::RateLimited
+    ));
+    assert_eq!(storage.request_trace().len(), requests);
+    a.clock
+        .set(coven_foundation::clock::Clock::now(a.clock.as_ref()) + Duration::from_secs(599));
+    assert_eq!(a.waits.cooldown(), None);
+    assert!(a.sync.operation_ready(&record).await.unwrap());
+    finish(&mut a, id).await;
+}
+
+#[tokio::test]
+async fn approval_polls_back_off_across_reopening_and_end_with_the_outcome() {
+    let storage = google();
+    let [mut a, _b, _c] = accounts(storage.clone()).await;
+    a.sync.join_poll_due().await.unwrap();
+    for _ in 0..3 {
+        a.sync.join_poll_waiting().await.unwrap();
+    }
+    let persisted = a.db.retry_wait(RetrySubject::Join).await.unwrap().unwrap();
+    assert_eq!(
+        (persisted.failures, persisted.wait),
+        (3, Duration::from_secs(4))
+    );
+    // Reopening keeps the remaining wait: the next poll is not due yet.
+    a.reopen(storage.clone(), vec![], vec![]).await;
+    let polled = tokio::time::timeout(Duration::from_millis(50), a.sync.join_poll_due()).await;
+    assert!(polled.is_err(), "the poll ran before its persisted delay");
+    a.elapse_retry_delays();
+    a.sync.join_poll_due().await.unwrap();
+    a.sync.join_poll_waiting().await.unwrap();
+    assert_eq!(
+        a.db.retry_wait(RetrySubject::Join)
+            .await
+            .unwrap()
+            .unwrap()
+            .wait,
+        Duration::from_secs(8)
+    );
+    a.sync.join_poll_settled().await.unwrap();
+    assert_eq!(a.db.retry_wait(RetrySubject::Join).await.unwrap(), None);
 }

@@ -147,6 +147,7 @@ async fn a_rejoined_member_reloads_the_part_its_passed_position_skipped() {
     assert!(reports_gifts(&ben.db).await);
 
     storage.create(&path, &bytes).await.unwrap();
+    ben.elapse_retry_delays();
     ben.sync.sync_store_log().await.unwrap();
     assert!(ben.db.reloading_audiences().await.unwrap().is_empty());
     assert_eq!(pins(&ben.db).await, ["before leaving", "while away"]);

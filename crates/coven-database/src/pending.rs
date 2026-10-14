@@ -134,7 +134,10 @@ pub(crate) fn clear<S: Serialize>(
     })
 }
 
+/// An operation's retry wait lives only while its condition does: advancing,
+/// finishing or an explicit retry ends both (§16.5).
 pub(crate) fn clear_operation(db: &DatabaseConnection, id: OperationId) -> Result<(), DbError> {
+    crate::retry::clear(db, crate::RetrySubject::Operation(id))?;
     db.pending_change(|| {
         db.internal_execute("DELETE FROM _coven_pending WHERE operation=?1", [id.0])?;
         Ok(())

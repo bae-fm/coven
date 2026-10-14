@@ -61,7 +61,16 @@ async fn restored(
         .unwrap(),
     );
     let send = Arc::new(crate::SendGate::new(original.clock.clone()));
-    let storage = Arc::new(storage.with_publication_gate(send.clone()));
+    let waits = Arc::new(
+        crate::RetryWaits::open(db.clone(), original.clock.clone())
+            .await
+            .unwrap(),
+    );
+    let storage = Arc::new(
+        storage
+            .with_publication_gate(send.clone())
+            .with_cooldown(waits.clone()),
+    );
     let writes = crate::DeviceLogSync::new(
         storage.clone(),
         db.clone(),
@@ -79,8 +88,10 @@ async fn restored(
         send.clone(),
         original.ids.clone(),
         directory.clone(),
+        waits.clone(),
     );
     Device {
+        waits,
         storage,
         sync,
         writes,

@@ -12,8 +12,8 @@ async fn eager_commit_observation_handles_download_apply() {
         FileDatabase::new(b.database.clone()),
         b.directory.clone(),
         Some(a.storage.clone()),
-        b.clock.clone(),
         b.send.clone(),
+        b.files.inner.waits.clone(),
         b.ids.clone(),
         crate::TransferLimits::default(),
     );

@@ -17,10 +17,8 @@ pub struct FileUpload {
     pub file: FileRef,
     /// When this device queued the file.
     pub queued_at: SystemTime,
-    /// Failed attempts so far.
-    pub attempts: u64,
-    /// When the latest attempt began.
-    pub last_attempt_at: Option<SystemTime>,
+    /// The persisted automatic retry wait, if the last attempt armed one.
+    pub retry: Option<crate::RetryWait>,
     /// Sync's typed failure recording, interpreted only by sync.
     pub failure: Option<SecretBytes>,
     /// Opaque provider session, interpreted only by storage.
@@ -92,27 +90,47 @@ pub(crate) fn enqueue(
 }
 
 pub(crate) fn read(db: &DatabaseConnection) -> Result<Vec<FileUpload>, DbError> {
-    let rows = db.query("SELECT id,reference,queued_at,attempts,last_attempt_at,failure,session FROM _coven_file_uploads ORDER BY id", [], |r| {
-        Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?, r.get::<_, Vec<u8>>(2)?, r.get::<_, i64>(3)?, r.get::<_, Option<Vec<u8>>>(4)?, r.get::<_, Option<Vec<u8>>>(5)?, r.get::<_, Option<Vec<u8>>>(6)?))
-    })?;
+    let rows = db.query(
+        "SELECT u.id,u.reference,u.queued_at,u.failure,u.session,r.failures,r.not_before,r.wait
+         FROM _coven_file_uploads AS u LEFT JOIN _coven_retries AS r ON r.upload=u.id ORDER BY u.id",
+        [],
+        |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, Vec<u8>>(1)?,
+                r.get::<_, Vec<u8>>(2)?,
+                r.get::<_, Option<Vec<u8>>>(3)?,
+                r.get::<_, Option<Vec<u8>>>(4)?,
+                (
+                    r.get::<_, Option<i64>>(5)?,
+                    r.get::<_, Option<Vec<u8>>>(6)?,
+                    r.get::<_, Option<i64>>(7)?,
+                ),
+            ))
+        },
+    )?;
     rows.into_iter()
-        .map(
-            |(id, reference, queued, attempts, last, failure, session)| {
-                let file = FileRef::decode(&reference)?;
-                Ok(FileUpload {
-                    id,
-                    file,
-                    queued_at: crate::user_file::decode_time(&queued)?,
-                    attempts: u64::try_from(attempts).map_err(|_| DbError::DamagedDatabase)?,
-                    last_attempt_at: last
-                        .as_deref()
-                        .map(crate::user_file::decode_time)
-                        .transpose()?,
-                    failure: failure.map(SecretBytes::new),
-                    session: session.map(SecretBytes::new),
-                })
-            },
-        )
+        .map(|(id, reference, queued, failure, session, retry)| {
+            let retry = match retry {
+                (None, None, None) => None,
+                (Some(failures), Some(not_before), Some(wait)) => Some(crate::RetryWait {
+                    failures: u32::try_from(failures).map_err(|_| DbError::DamagedDatabase)?,
+                    not_before: crate::user_file::decode_time(&not_before)?,
+                    wait: std::time::Duration::from_millis(
+                        u64::try_from(wait).map_err(|_| DbError::DamagedDatabase)?,
+                    ),
+                }),
+                _ => return Err(DbError::DamagedDatabase),
+            };
+            Ok(FileUpload {
+                id,
+                file: FileRef::decode(&reference)?,
+                queued_at: crate::user_file::decode_time(&queued)?,
+                retry,
+                failure: failure.map(SecretBytes::new),
+                session: session.map(SecretBytes::new),
+            })
+        })
         .collect()
 }
 

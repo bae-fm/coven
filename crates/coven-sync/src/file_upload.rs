@@ -5,18 +5,15 @@ use crate::{
     files::{Files, FilesInner},
     SyncError,
 };
-use coven_crypto::{FileKey, SecretBytes, FILE_CHUNK_TAG_LEN};
-use coven_database::{DbError, FileRef, FileUpload, LocalFileStream};
+use coven_crypto::{FileKey, FILE_CHUNK_TAG_LEN};
+use coven_database::{DbError, FileRef, FileUpload, LocalFileStream, RetrySubject};
 use coven_format::{
     chunks::CHUNK_SIZE,
     file::{FileHeader, FILE_HEADER_LEN},
 };
 use coven_storage::{ObjectPath, UploadSession};
 use futures_util::StreamExt;
-use std::{
-    sync::Arc,
-    time::{Duration, SystemTime},
-};
+use std::{sync::Arc, time::SystemTime};
 
 /// Observable upload queue state (E7).
 pub struct UploadQueue {
@@ -31,19 +28,15 @@ pub struct QueuedUpload {
     pub file: FileRef,
     /// Current transfer phase.
     pub phase: UploadPhase,
-    /// Failed attempts.
-    pub attempts: u64,
     /// Latest failure, retaining the native cause while this process lives.
     pub last_failure: Option<Arc<UploadFailure>>,
     /// Enqueue time.
     pub queued_at: SystemTime,
-    /// Start of latest attempt.
-    pub last_attempt_at: Option<SystemTime>,
 }
 /// Progress is advanced only over prepared or provider-confirmed bytes.
 #[derive(Clone, Debug)]
 pub enum UploadPhase {
-    /// Not running, or in backoff.
+    /// Not started, or waiting for its retry delay.
     Waiting,
     /// Checking the source before sending any file bytes.
     Preparing {
@@ -71,7 +64,8 @@ pub enum DrainOutcome {
     },
     /// No waiting upload exists.
     QueueEmpty,
-    /// Every waiting item is in backoff.
+    /// Every waiting item waits for its retry delay, the app, or a provider
+    /// cooldown.
     AllInBackoff,
     /// Uploads were paused.
     Paused,
@@ -123,10 +117,8 @@ impl UploadsLiveQuery {
             files.push(QueuedUpload {
                 file: upload.file,
                 phase,
-                attempts: upload.attempts,
                 last_failure,
                 queued_at: upload.queued_at,
-                last_attempt_at: upload.last_attempt_at,
             });
         }
         Ok(UploadQueue {
@@ -170,9 +162,18 @@ impl FilesInner {
         if !self.send.can_send() {
             return Err(coven_storage::StorageFailure::CatchUpRequired.into());
         }
+        // An app retry overrides ordinary backoff, never a provider cooldown.
+        if let Some(remaining) = self.waits.cooldown() {
+            if force {
+                return Err(coven_storage::StorageFailure::RateLimited
+                    .with_source(coven_storage::CoolingDown { remaining })
+                    .into());
+            }
+            return Ok(DrainOutcome::AllInBackoff);
+        }
         let mut eligible = Vec::new();
         for item in waiting {
-            if force || !in_backoff(&item, self.clock.now())? {
+            if force || self.retry_due(&item)? {
                 eligible.push(item);
             }
         }
@@ -200,7 +201,7 @@ impl FilesInner {
         Ok(DrainOutcome::Drained { uploaded, failures })
     }
 
-    async fn attempt_upload(&self, item: FileUpload) -> Result<AttemptOutcome, DbError> {
+    async fn attempt_upload(&self, item: FileUpload) -> Result<AttemptOutcome, SyncError> {
         if self.paused() {
             return Ok(AttemptOutcome::Unchanged);
         }
@@ -208,21 +209,17 @@ impl FilesInner {
             owner: self,
             id: item.id,
         };
-        self.database
-            .begin_attempt(item.id, self.clock.now())
-            .await?;
         match self.upload(&item).await {
-            Ok(true) => Ok(AttemptOutcome::Stored),
+            Ok(true) => {
+                self.waits.forget(RetrySubject::Upload(item.id));
+                Ok(AttemptOutcome::Stored)
+            }
             Ok(false) => Ok(AttemptOutcome::Unchanged),
             Err(UploadFailure::File(FileReadError::Database(
                 error @ DbError::FileCleanup { write: Ok(()), .. },
-            ))) => Err(error),
+            ))) => Err(error.into()),
             Err(error) => {
-                let bytes =
-                    serde_json::to_vec(&error.recording()).map_err(|_| DbError::DamagedDatabase)?;
-                self.database
-                    .fail_upload(item.id, SecretBytes::new(bytes))
-                    .await?;
+                self.record_failure(&item, error.recording()).await?;
                 let error = Arc::new(error);
                 self.state
                     .lock()
@@ -376,28 +373,6 @@ impl Drop for UploadActivity<'_> {
         self.owner.notify();
     }
 }
-fn in_backoff(item: &FileUpload, now: SystemTime) -> Result<bool, DbError> {
-    let Some(failure) = &item.failure else {
-        return Ok(false);
-    };
-    let failure: RecordedUploadFailure =
-        serde_json::from_slice(failure.as_bytes()).map_err(|_| DbError::DamagedDatabase)?;
-    if matches!(
-        failure,
-        RecordedUploadFailure::Storage(coven_storage::StorageFailure::CatchUpRequired)
-    ) {
-        return Ok(false);
-    }
-    let Some(last) = item.last_attempt_at else {
-        return Ok(false);
-    };
-    let seconds = (1u64 << item.attempts.saturating_sub(1).min(9)).min(300);
-    Ok(match now.duration_since(last) {
-        Ok(elapsed) => elapsed < Duration::from_secs(seconds),
-        Err(_) => true,
-    })
-}
-
 struct FileTransfer<'a> {
     owner: &'a FilesInner,
     item: &'a FileUpload,

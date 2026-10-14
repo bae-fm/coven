@@ -704,8 +704,6 @@ macro_rules! coven_tables {
                 original BLOB,
                 modified_at BLOB CHECK(modified_at IS NULL OR length(modified_at)=13),
                 queued_at BLOB NOT NULL,
-                attempts INTEGER NOT NULL DEFAULT 0 CHECK(attempts>=0),
-                last_attempt_at BLOB,
                 failure BLOB,
                 session BLOB,
                 UNIQUE(device,file),
@@ -764,6 +762,21 @@ macro_rules! coven_tables {
                 started_by TEXT NOT NULL
             );
             CREATE INDEX _coven_operations_kind ON _coven_operations(kind);
+        ");
+        // One persisted retry wait, T and W, per waiting operation, queued
+        // upload, joiner poll or provider cooldown (§16.5). Work rows take
+        // their waits with them.
+        $visit!(_coven_retries, "
+            CREATE TABLE _coven_retries (
+                id INTEGER PRIMARY KEY,
+                scope TEXT UNIQUE CHECK(scope IN ('join','provider')),
+                operation INTEGER UNIQUE REFERENCES _coven_operations(id) ON DELETE CASCADE,
+                upload INTEGER UNIQUE REFERENCES _coven_file_uploads(id) ON DELETE CASCADE,
+                failures INTEGER NOT NULL CHECK(failures>=0),
+                not_before BLOB NOT NULL CHECK(length(not_before)=13),
+                wait INTEGER NOT NULL CHECK(wait>=0),
+                CHECK((scope IS NOT NULL)+(operation IS NOT NULL)+(upload IS NOT NULL)=1)
+            ) STRICT;
         ");
     };
 }

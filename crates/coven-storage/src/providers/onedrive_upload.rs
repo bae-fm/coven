@@ -385,6 +385,8 @@ impl OneDriveStorage {
         validate_download_url(&self.api, monitor.as_str())?;
         let monitor = monitor.clone();
         let copying = async {
+            // Status checks back off like every automatic wait (SP waiting).
+            let mut checks = 0;
             loop {
                 let response = self
                     .session
@@ -436,7 +438,8 @@ impl OneDriveStorage {
                     set_upload(session, OneDriveUpload::Published)?;
                     return self.finish_cleanup(publication, session).await;
                 }
-                self.session.sleep(Duration::from_secs(1)).await;
+                self.session.sleep(crate::retry_delay(checks)).await;
+                checks += 1;
             }
         };
         tokio::select! {

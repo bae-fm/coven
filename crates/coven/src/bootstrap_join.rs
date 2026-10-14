@@ -86,14 +86,22 @@ impl Joining<'_> {
             sync.submit_join(&self.identity).await?;
         }
         status("Waiting for approval");
+        // Polls back off 1, 2, 4, … 300 seconds apart; the persisted delay
+        // survives reopening and a provider cooldown holds them (§16.5).
         loop {
+            sync.join_poll_due().await?;
             refresh_sign_in(builder, data, storage, cancel).await?;
             match sync.join_outcome(&self.identity).await? {
-                JoinOutcome::Admitted => return Ok(true),
-                JoinOutcome::Declined => return Ok(false),
-                JoinOutcome::Waiting => {}
+                JoinOutcome::Admitted => {
+                    sync.join_poll_settled().await?;
+                    return Ok(true);
+                }
+                JoinOutcome::Declined => {
+                    sync.join_poll_settled().await?;
+                    return Ok(false);
+                }
+                JoinOutcome::Waiting => sync.join_poll_waiting().await?,
             }
-            builder.clock.sleep(Duration::from_secs(1)).await;
         }
     }
 }

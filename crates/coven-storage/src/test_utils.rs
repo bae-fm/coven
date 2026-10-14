@@ -39,6 +39,9 @@ pub struct Faults {
     pub body_failures: BTreeMap<ObjectPath, BodyFailure>,
     /// The classification of injected failures.
     pub failure: StorageFailure,
+    /// Injected failures arrive as an HTTP 429 response asking every
+    /// consumer to wait this many seconds (`Retry-After`).
+    pub retry_after: Option<u64>,
     /// Delay each call without blocking its executor.
     pub delay: Duration,
     /// Drop the next part before it is stored.
@@ -68,6 +71,7 @@ impl Faults {
             read_chunk_size: 64 * 1024,
             body_failures: BTreeMap::new(),
             failure: StorageFailure::Network,
+            retry_after: None,
             delay: Duration::ZERO,
             drop_part: false,
             lose_part_reply: false,
@@ -219,7 +223,11 @@ pub struct MemoryProvider {
 }
 impl Clone for MemoryStorage {
     fn clone(&self) -> Self {
-        Self::with_gate(self.provider.clone(), self.publications.clone())
+        Self::with_gate(
+            self.provider.clone(),
+            self.publications.clone(),
+            self.cooldown.clone(),
+        )
     }
 }
 
@@ -235,7 +243,12 @@ impl MemoryStorage {
     /// Bind a simulated installation to the real synchronization gate, preserving
     /// this provider's credentials, durable objects and request observations.
     pub fn with_publication_gate(&self, publications: Arc<dyn PublicationGate>) -> Self {
-        Self::with_gate(self.provider.clone(), publications)
+        Self::with_gate(self.provider.clone(), publications, self.cooldown.clone())
+    }
+
+    /// Bind this connection to the store's shared provider cooldown.
+    pub fn with_cooldown(&self, cooldown: Arc<dyn crate::Cooldown>) -> Self {
+        Self::with_gate(self.provider.clone(), self.publications.clone(), cooldown)
     }
 
     /// An S3 test location at the Unix epoch, with four-MiB single requests
@@ -316,6 +329,7 @@ impl MemoryStorage {
         Arc::new(StorageConnection::with_gate(
             self.provider.clone() as Arc<dyn ProviderOps>,
             self.publications.clone(),
+            self.cooldown.clone(),
         ))
     }
 
@@ -424,7 +438,7 @@ impl MemoryProvider {
             }
             let failure = if state.faults.fail_next > 0 {
                 state.faults.fail_next -= 1;
-                Some(state.faults.failure)
+                Some((state.faults.failure, state.faults.retry_after))
             } else {
                 None
             };
@@ -434,7 +448,12 @@ impl MemoryProvider {
             self.clock.sleep(delay).await;
         }
         match failure {
-            Some(failure) => Err(StorageError::Failure(failure)),
+            Some((failure, None)) => Err(StorageError::Failure(failure)),
+            Some((failure, Some(seconds))) => Err(crate::providers::ProviderResponse::throttled(
+                self.config.provider(),
+                failure,
+                seconds,
+            )),
             None => {
                 if self.tokens.lock().await.as_ref().is_some_and(|tokens| {
                     tokens

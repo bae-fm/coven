@@ -925,6 +925,7 @@ mod stuck {
         // The reload waits on the refused write, whose own record is the
         // refusal; the wait retries, without downloading the write again (§15).
         for attempt in 0..2 {
+            devices[1].elapse_retry_delays();
             let before = storage.reads().await;
             assert!(matches!(
                 devices[1].sync.reload_from_snapshots().await,
@@ -956,6 +957,7 @@ mod stuck {
             .await
             .unwrap();
         let before = storage.reads().await;
+        devices[1].elapse_retry_delays();
         devices[1].sync.reload_from_snapshots().await.unwrap();
         assert!(!storage.reads().await[before.len()..]
             .iter()

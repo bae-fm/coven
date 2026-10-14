@@ -49,7 +49,7 @@ impl StoreLogSync {
                         .operation(record.id)
                         .await?
                         .ok_or(coven_database::DbError::OperationChanged(record.id))?;
-                    if !self.operation_can_retry(&record).await? {
+                    if !self.operation_ready(&record).await? {
                         let pending = self
                             .database
                             .operation_pending::<crate::PendingRecord>(record.id)

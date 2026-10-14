@@ -11,10 +11,7 @@ use coven_foundation::{
     files::{FileName, StoreDir},
     id_source::DeviceId,
 };
-use std::{
-    sync::{Arc, RwLock},
-    time::SystemTime,
-};
+use std::sync::{Arc, RwLock};
 
 #[path = "file_cache.rs"]
 mod cache;
@@ -202,28 +199,26 @@ impl FileDatabase {
     pub async fn uploads(&self) -> Result<Vec<FileUpload>, DbError> {
         self.run(|db, _, _, _| file_queue::read(db)).await
     }
-    /// Record the attempt before contacting storage.
-    pub async fn begin_attempt(&self, id: i64, now: SystemTime) -> Result<(), DbError> {
+    /// Record a failed attempt's typed payload with its retry wait, or with
+    /// none when it waits for the app (§16.5). Native errors are interpreted by sync.
+    pub async fn fail_upload(
+        &self,
+        id: i64,
+        failure: SecretBytes,
+        retry: Option<crate::RetryWait>,
+    ) -> Result<(), DbError> {
         self.require_writer()?;
         self.run(move |db, _, _, _| {
             db.transaction(|db| {
                 changed(db.internal_execute(
-                    "UPDATE _coven_file_uploads SET last_attempt_at=?2 WHERE id=?1",
-                    (id, crate::user_file::encode_time(now)),
-                )?)
-            })
-        })
-        .await
-    }
-    /// Record a failed attempt's typed payload. Native errors are interpreted by sync.
-    pub async fn fail_upload(&self, id: i64, failure: SecretBytes) -> Result<(), DbError> {
-        self.require_writer()?;
-        self.run(move |db, _, _, _| {
-            db.transaction(|db| {
-                changed(db.internal_execute(
-                    "UPDATE _coven_file_uploads SET attempts=attempts+1,failure=?2 WHERE id=?1",
+                    "UPDATE _coven_file_uploads SET failure=?2 WHERE id=?1",
                     (id, failure.as_bytes()),
-                )?)
+                )?)?;
+                let subject = crate::RetrySubject::Upload(id);
+                match &retry {
+                    Some(wait) => crate::retry::save(db, subject, wait),
+                    None => crate::retry::clear(db, subject),
+                }
             })
         })
         .await

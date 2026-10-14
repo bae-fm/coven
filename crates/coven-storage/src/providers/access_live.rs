@@ -64,6 +64,7 @@ async fn provider_access_live_google_upgrade() {
             StorageCredentials::OAuth(narrow.clone()),
             DeviceId(31),
             Arc::new(crate::test_utils::UnrestrictedPublications),
+            Arc::new(crate::NoCooldown),
         )
         .await
         .unwrap();
@@ -87,6 +88,7 @@ async fn provider_access_live_google_upgrade() {
                     StorageCredentials::OAuth(full),
                     DeviceId(32),
                     Arc::new(crate::test_utils::UnrestrictedPublications),
+                    Arc::new(crate::NoCooldown),
                 )
                 .await
                 .unwrap();
@@ -164,6 +166,7 @@ async fn provider_access_live_dropbox_app_folder() {
             StorageCredentials::OAuth(tokens.clone()),
             DeviceId(31),
             Arc::new(crate::test_utils::UnrestrictedPublications),
+            Arc::new(crate::NoCooldown),
         )
         .await
         .unwrap();
@@ -179,7 +182,7 @@ async fn provider_access_live_dropbox_app_folder() {
             .connect(
                 StorageConfig::decode(location.encode().unwrap().as_bytes()).unwrap(),
                 StorageCredentials::OAuth(tokens),
-                DeviceId(32), Arc::new(crate::test_utils::UnrestrictedPublications))
+                DeviceId(32), Arc::new(crate::test_utils::UnrestrictedPublications), Arc::new(crate::NoCooldown))
             .await
             .unwrap();
         let after = restored.read_object(&path, None).await.unwrap();

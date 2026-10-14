@@ -105,6 +105,45 @@ impl StoreLogSync {
         })
     }
 
+    /// Wait until the next approval poll is due: its persisted delay, armed
+    /// again after reopening, and any provider cooldown (§16.5, SP waiting).
+    pub async fn join_poll_due(&self) -> Result<(), SyncError> {
+        let subject = coven_database::RetrySubject::Join;
+        loop {
+            let persisted = self.database.retry_wait(subject).await?;
+            if self.waits.due(subject, persisted.as_ref()) {
+                return Ok(());
+            }
+            let wake = self
+                .waits
+                .next_wake(|candidate| *candidate == subject)
+                .or_else(|| self.waits.cooldown_wake())
+                .ok_or_else(|| {
+                    coven_storage::StorageFailure::File
+                        .with_source("the approval poll's delay was not persisted")
+                })?;
+            wake.await;
+        }
+    }
+
+    /// A poll that found the request still waiting persists its next delay
+    /// before waiting, continuing the backoff across reopening.
+    pub async fn join_poll_waiting(&self) -> Result<(), SyncError> {
+        let subject = coven_database::RetrySubject::Join;
+        let previous = self.database.retry_wait(subject).await?;
+        self.waits.fail(subject, previous.as_ref()).await
+    }
+
+    /// The outcome is known: approval polling ends.
+    pub async fn join_poll_settled(&self) -> Result<(), SyncError> {
+        let subject = coven_database::RetrySubject::Join;
+        if self.database.retry_wait(subject).await?.is_some() {
+            self.database.clear_retry(subject).await?;
+        }
+        self.waits.forget(subject);
+        Ok(())
+    }
+
     /// Register this installation with its member's signature, then atomically
     /// load snapshots and later writes through the ordinary snapshot owner.
     pub async fn load_new_device(

@@ -40,6 +40,11 @@ async fn sync(f: &Fixture) -> (StoreLogSync, MemberIdentity, crate::DeviceLogSyn
         f.send.clone(),
         f.ids.clone(),
         f.directory.clone(),
+        Arc::new(
+            crate::RetryWaits::open(f.database.clone(), f.clock.clone())
+                .await
+                .unwrap(),
+        ),
     );
     sync.make_and_upload_entry(StoreChange::CreateStore {
         access: coven_format::MemberAccess::ProviderAccount("owner".into()),

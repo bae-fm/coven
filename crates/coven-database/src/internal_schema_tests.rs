@@ -143,6 +143,7 @@ async fn only_the_spec_tables_are_created() {
                 "_coven_raise_captures",
                 "_coven_references",
                 "_coven_retirement_finality",
+                "_coven_retries",
                 "_coven_row_file_refs",
                 "_coven_rows",
                 "_coven_snapshot_reservation",
@@ -311,6 +312,10 @@ mod fixture {
      INSERT INTO _coven_access_keys SELECT 'access_' || i,CASE WHEN i%2=0 THEN i END FROM fixture;
      INSERT INTO _coven_file_uploads(id,reference,device,file,queued_at)
        SELECT i,key,device,substr(key,17,16),zeroblob(13) FROM fixture;
+     INSERT INTO _coven_retries(operation,upload,failures,not_before,wait)
+       SELECT CASE WHEN i%2=0 THEN i END,CASE WHEN i%2=1 THEN i END,1,zeroblob(13),1000 FROM fixture;
+     INSERT INTO _coven_retries(scope,failures,not_before,wait)
+       VALUES('join',1,zeroblob(13),1000),('provider',0,zeroblob(13),600000);
      INSERT INTO _coven_device_files SELECT device,substr(key,17,16),'path_' || i FROM fixture;
      INSERT INTO _coven_file_chunks SELECT device,substr(key,17,16),0,key FROM fixture;
      INSERT INTO _coven_cache(namespace,file_id,chunk,path,size,last_read,pinned,checked_hash)
@@ -437,8 +442,10 @@ mod scans {
         Some("unfiltered EXISTS stops after the first queue row"),
     ("download.rs", "SELECT (SELECT publication FROM _coven_snapshot_schema WHERE EXISTS(SELECT 1 FROM _coven_members))", "_coven_snapshot_schema" | "_coven_members") =>
         Some("the schema row is singular; unfiltered membership EXISTS stops after its first row"),
-    ("file_queue.rs", "SELECT id,reference,queued_at,attempts,last_attempt_at,failure,session FROM _coven_file_uploads ORDER BY id", "_coven_file_uploads") =>
+    ("file_queue.rs", "SELECT u.id,u.reference,u.queued_at,u.failure,u.session,r.failures,r.not_before,r.wait FROM _coven_file_uploads AS u LEFT JOIN _coven_retries AS r ON r.upload=u.id ORDER BY u.id", "u") =>
         Some("the file queue reader returns every queued attachment"),
+    ("retry.rs", "SELECT scope,operation,upload,failures,not_before,wait FROM _coven_retries", "_coven_retries") =>
+        Some("reopening arms every persisted retry wait"),
     ("file_removals.rs", "SELECT path,area FROM _coven_file_removals ORDER BY area,path", "_coven_file_removals") =>
         Some("file removal visits every queued filesystem deletion"),
     ("key_upload.rs", "SELECT writer,number,bytes,before_device,before_number FROM _coven_key_uploads ORDER BY writer,number", "_coven_key_uploads") =>

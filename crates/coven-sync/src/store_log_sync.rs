@@ -42,6 +42,8 @@ pub struct StoreLogSync {
     /// needs it and never written anywhere (§4).
     admin_access:
         std::collections::BTreeMap<crate::OperationId, Arc<dyn coven_storage::AccessKeyAdmin>>,
+    /// Operation and joining retry waits, and the provider cooldown (§16.5).
+    waits: Arc<crate::RetryWaits>,
 }
 
 impl StoreLogSync {
@@ -55,6 +57,7 @@ impl StoreLogSync {
         send: Arc<crate::SendGate>,
         ids: IdSourceRef,
         directory: coven_foundation::files::StoreDir,
+        waits: Arc<crate::RetryWaits>,
     ) -> Self {
         Self {
             #[cfg(test)]
@@ -63,6 +66,7 @@ impl StoreLogSync {
             finality: Arc::default(),
             reads: crate::pass_reads::PassReads::default(),
             send,
+            waits,
             storage: Some(storage),
             database,
             store_keys,
@@ -83,6 +87,7 @@ impl StoreLogSync {
         send: Arc<crate::SendGate>,
         ids: IdSourceRef,
         directory: coven_foundation::files::StoreDir,
+        waits: Arc<crate::RetryWaits>,
     ) -> Self {
         Self {
             #[cfg(test)]
@@ -91,6 +96,7 @@ impl StoreLogSync {
             finality: Arc::default(),
             reads: crate::pass_reads::PassReads::default(),
             send,
+            waits,
             storage: None,
             database,
             store_keys,
@@ -189,6 +195,10 @@ impl StoreLogSync {
         // binding must be observed before any ordinary send (§10).
         let admission = !self.send.can_send();
         self.publish(&mut local, &member, &mut ring).await?;
+        if local.upload.is_none() {
+            // The published entry may be what a waiting operation needs.
+            self.waits.prerequisites_changed();
+        }
         if admission && local.upload.is_none() {
             self.scan_store_log_once(true).await?;
         }

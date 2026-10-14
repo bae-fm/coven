@@ -801,8 +801,8 @@ async fn idle_pass_uses_bounded_header_ranges_and_reuses_overread_bytes() {
         coven_database::FileDatabase::new(a.db.clone()),
         a.directory.clone(),
         Some(storage.clone()),
-        a.clock.clone(),
         a.send.clone(),
+        a.waits.clone(),
         a.sync.ids.clone(),
         crate::TransferLimits::default(),
     );
@@ -874,8 +874,8 @@ async fn a_pass_reuses_loaded_snapshot_and_write_references() {
             coven_database::FileDatabase::new(a.db.clone()),
             a.directory.clone(),
             Some(storage.clone()),
-            a.clock.clone(),
             a.send.clone(),
+            a.waits.clone(),
             a.sync.ids.clone(),
             crate::TransferLimits::default(),
         );

@@ -461,11 +461,15 @@ async fn errors_and_manual_key_instructions() {
         ("ServiceUnavailable", 503, StorageFailure::Network),
     ] {
         state.lock().unwrap().forced_error = Some((code, status));
+        let before = state.lock().unwrap().requests.len();
         let error = storage
             .list(&ObjectPrefix::all(STORE_ID))
             .await
             .unwrap_err();
         assert_eq!(error.failure(), failure);
+        // The SDK retries nothing: a throttled or failed call is one request,
+        // and coven's shared backoff decides the next attempt (SP waiting).
+        assert_eq!(state.lock().unwrap().requests.len(), before + 1, "{code}");
         assert!(!format!("{error:?} {error}").contains("credential-echo"));
     }
     assert!(matches!(

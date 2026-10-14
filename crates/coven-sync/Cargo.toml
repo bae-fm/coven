@@ -7,6 +7,7 @@ edition.workspace = true
 test-utils = []
 
 [dependencies]
+async-trait.workspace = true
 futures-util.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
@@ -29,7 +30,6 @@ coven-database = { workspace = true, features = ["test-utils"] }
 coven-storage = { workspace = true, features = ["test-utils"] }
 coven-foundation = { workspace = true, features = ["test-utils"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
-async-trait.workspace = true
 tempfile.workspace = true
 uuid.workspace = true
 

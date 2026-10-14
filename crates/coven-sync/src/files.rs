@@ -10,9 +10,11 @@ mod file_read;
 mod file_status;
 #[path = "file_upload.rs"]
 pub(crate) mod file_upload;
+#[path = "file_upload_retry.rs"]
+mod file_upload_retry;
 use crate::SyncError;
 use coven_database::{DbError, FileDatabase};
-use coven_foundation::{clock::ClockRef, files::StoreDir, id_source::IdSourceRef};
+use coven_foundation::{files::StoreDir, id_source::IdSourceRef};
 use coven_storage::Storage;
 use file_cache::{EagerAttempts, EagerWork};
 pub use file_cache::{EagerCacheFillStatus, PinProgress, RowsPinnedLiveQuery};
@@ -62,8 +64,8 @@ struct FilesInner {
     database: FileDatabase,
     directory: StoreDir,
     storage: std::sync::RwLock<Option<Arc<dyn Storage>>>,
-    clock: ClockRef,
     send: Arc<crate::SendGate>,
+    waits: Arc<crate::RetryWaits>,
     ids: IdSourceRef,
     state: Mutex<UploadState>,
     changed: watch::Sender<u64>,
@@ -98,8 +100,8 @@ impl Files {
         database: FileDatabase,
         directory: StoreDir,
         storage: Option<Arc<dyn Storage>>,
-        clock: ClockRef,
         send: Arc<crate::SendGate>,
+        waits: Arc<crate::RetryWaits>,
         ids: IdSourceRef,
         limits: TransferLimits,
     ) -> Self {
@@ -113,8 +115,8 @@ impl Files {
             database,
             directory,
             storage: std::sync::RwLock::new(storage),
-            clock,
             send,
+            waits,
             ids,
             state: Mutex::new(UploadState {
                 paused: false,
@@ -136,6 +138,9 @@ impl Files {
         let weak = Arc::downgrade(&inner);
         let wake = inner.wake.clone();
         let task = tokio::spawn(async move {
+            // The earliest due upload retry, armed after each drain (§16.5).
+            let mut retry: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> =
+                Box::pin(std::future::pending());
             loop {
                 tokio::select! {
                     biased;
@@ -146,6 +151,7 @@ impl Files {
                     },
                     _=wake.notified()=>{},
                     result=sending.changed()=>if result.is_err() { break; },
+                    _=&mut retry=>{},
                 }
                 let Some(owner) = weak.upgrade() else { break };
                 let work = async {
@@ -166,6 +172,9 @@ impl Files {
                 };
                 tokio::select! { biased; _=stopping.changed()=>break, _=work=>{} }
                 owner.notify();
+                retry = owner
+                    .next_retry()
+                    .unwrap_or_else(|| Box::pin(std::future::pending()));
             }
         });
         Self {
@@ -204,7 +213,8 @@ impl Files {
         let _cache = self.inner.cache.write().await;
         self.inner.notify();
     }
-    /// Retry all waiting files now; no timer or implicit retry is installed.
+    /// Retry all waiting files now, overriding their ordinary backoff and
+    /// app-action waits. A live provider cooldown still holds (§16.5).
     pub async fn retry_uploads_now(&self) -> Result<DrainOutcome, SyncError> {
         self.inner.drain_uploads(true).await
     }

@@ -4,7 +4,7 @@ use coven_database::{
     SyncedTable,
 };
 use coven_foundation::{
-    clock::ClosureClock,
+    clock::{ClockRef, ClosureClock},
     files::StoreLayout,
     id_source::{StoreId, UuidIds},
 };
@@ -61,13 +61,22 @@ impl Fixture {
                 .unwrap(),
         );
         let send = completed_send_gate(clock.clone());
-        let storage = Arc::new(storage.with_publication_gate(send.clone()));
+        let waits = Arc::new(
+            crate::RetryWaits::open(database.clone(), clock.clone())
+                .await
+                .unwrap(),
+        );
+        let storage = Arc::new(
+            storage
+                .with_publication_gate(send.clone())
+                .with_cooldown(waits.clone()),
+        );
         let files = Files::new(
             FileDatabase::new(database.clone()),
             directory.clone(),
             Some(storage.clone()),
-            clock.clone(),
             send.clone(),
+            waits,
             ids.clone(),
             crate::TransferLimits::default(),
         );
@@ -92,13 +101,22 @@ impl Fixture {
             .await
             .unwrap();
         self.send = completed_send_gate(self.clock.clone());
-        self.storage = Arc::new(self.storage.with_publication_gate(self.send.clone()));
+        let waits = Arc::new(
+            crate::RetryWaits::open(self.database.clone(), self.clock.clone())
+                .await
+                .unwrap(),
+        );
+        self.storage = Arc::new(
+            self.storage
+                .with_publication_gate(self.send.clone())
+                .with_cooldown(waits.clone()),
+        );
         self.files = Files::new(
             FileDatabase::new(self.database.clone()),
             self.directory.clone(),
             Some(self.storage.clone()),
-            self.clock.clone(),
             self.send.clone(),
+            waits,
             self.ids.clone(),
             crate::TransferLimits::default(),
         );
@@ -286,8 +304,8 @@ async fn budgets_pins_eviction_and_second_device_reads() {
         FileDatabase::new(second.database.clone()),
         second.directory.clone(),
         Some(f.storage.clone()),
-        second.clock.clone(),
         second.send.clone(),
+        second.files.inner.waits.clone(),
         second.ids.clone(),
         crate::TransferLimits::default(),
     );
@@ -460,6 +478,8 @@ async fn cancelling_a_pin_releases_partial_budget_exemptions() {
 mod cache;
 #[path = "file_status_tests.rs"]
 mod status;
+#[path = "file_upload_retry_tests.rs"]
+mod upload_retry;
 #[path = "file_upload_tests.rs"]
 mod uploads;
 
@@ -516,8 +536,8 @@ async fn whole_reads_and_pins_check_the_row_hash_after_authenticating_chunks() {
         FileDatabase::new(b.database.clone()),
         b.directory.clone(),
         Some(a.storage.clone()),
-        b.clock.clone(),
         b.send.clone(),
+        b.files.inner.waits.clone(),
         b.ids.clone(),
         crate::TransferLimits::default(),
     );
@@ -650,8 +670,7 @@ async fn waiting_files_name_the_attaching_device_until_its_automatic_upload() {
         let queued = a.files.inner.database.uploads().await.unwrap();
         assert_eq!(queued.len(), 1);
         assert_eq!(queued[0].file, local);
-        assert_eq!(queued[0].attempts, 0);
-        assert!(queued[0].last_attempt_at.is_none());
+        assert!(queued[0].retry.is_none());
         assert!(queued[0].failure.is_none());
         let attaching = a.database.test_queued_writes().await.unwrap();
         for write in attaching.clone() {
@@ -729,52 +748,4 @@ fn completed_send_gate(clock: ClockRef) -> Arc<crate::SendGate> {
     send.complete(crate::send_gate::Binding::Device, Vec::new())
         .unwrap();
     send
-}
-
-#[tokio::test]
-async fn completed_catch_up_wakes_a_worker_blocked_between_file_sends() {
-    use coven_foundation::clock::FixedClock;
-    use coven_storage::{ObjectPrefix, StorageFailure};
-    let clock = Arc::new(FixedClock::new(SystemTime::UNIX_EPOCH));
-    let f = Fixture::with_clock(Provenance::AppProvided, CacheFill::CacheLazy, clock.clone()).await;
-    f.attach("files", "first", b"first".to_vec()).await;
-    f.attach("files", "second", b"second".to_vec()).await;
-    let (started, observed) = tokio::sync::oneshot::channel();
-    let (resume, held) = tokio::sync::oneshot::channel();
-    f.storage
-        .hold_next_creation(ObjectPrefix::files(f.directory.id()), started, held)
-        .await;
-    let mut uploads = f.files.subscribe_uploads();
-    f.files.set_uploads_paused(false);
-    observed.await.unwrap();
-    clock.set(SystemTime::UNIX_EPOCH + Duration::from_secs(300));
-    resume.send(()).unwrap();
-    tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            let queue = uploads.next().await.unwrap();
-            if queue.files.iter().any(|file| matches!(file.last_failure.as_deref(),
-                Some(UploadFailure::Storage(error)) if error.failure() == StorageFailure::CatchUpRequired)) {
-                break;
-            }
-        }
-    }).await.unwrap();
-    let first = f.database.file_ref("files", "first").await.unwrap();
-    let second = f.database.file_ref("files", "second").await.unwrap();
-    assert!(!f.queued(&first).await);
-    assert!(f.queued(&second).await);
-    f.send.begin();
-    f.send
-        .complete(crate::send_gate::Binding::Device, Vec::new())
-        .unwrap();
-    tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            uploads.next().await.unwrap();
-            if !f.queued(&second).await {
-                break;
-            }
-        }
-    })
-    .await
-    .unwrap();
-    f.close().await;
 }

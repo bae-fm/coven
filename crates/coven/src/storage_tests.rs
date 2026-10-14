@@ -105,6 +105,7 @@ impl StorageConnector for TrackingConnector {
         credentials: coven_storage::StorageCredentials,
         _device: DeviceId,
         publications: Arc<dyn coven_storage::PublicationGate>,
+        cooldown: Arc<dyn coven_storage::Cooldown>,
     ) -> Result<Arc<StorageConnection>, StorageError> {
         if let Some((entered, resume)) = self.held.lock().await.take() {
             entered.send(()).unwrap();
@@ -118,7 +119,8 @@ impl StorageConnector for TrackingConnector {
             .storage
             .connect_device(config, credentials)
             .await?
-            .with_publication_gate(publications);
+            .with_publication_gate(publications)
+            .with_cooldown(cooldown);
         let client = provider.shared_connection();
         self.providers.lock().unwrap().push(provider);
         self.clients.lock().unwrap().push(Arc::downgrade(&client));
@@ -552,6 +554,7 @@ impl StorageConnector for Locations {
         credentials: coven_storage::StorageCredentials,
         device: DeviceId,
         publications: Arc<dyn coven_storage::PublicationGate>,
+        cooldown: Arc<dyn coven_storage::Cooldown>,
     ) -> Result<Arc<StorageConnection>, StorageError> {
         let storage = self
             .0
@@ -559,7 +562,7 @@ impl StorageConnector for Locations {
             .find(|storage| storage.config() == config)
             .ok_or(StorageFailure::InvalidConfiguration.with_source("unknown test location"))?;
         storage
-            .connect(config, credentials, device, publications)
+            .connect(config, credentials, device, publications, cooldown)
             .await
     }
     async fn detect_s3(

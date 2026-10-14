@@ -89,7 +89,10 @@ fn builder(
         .id_source(ids)
         .storage_connector(storage)
 }
-/// Preserve the fixture's timestamps while polling without production delays.
+/// Preserve the fixture's timestamps while polling without production delays:
+/// retry delays and cooldowns, up to five minutes, pass a thousand times
+/// faster; their timers, not the fixed clock, report them over. The
+/// 30-second idle interval keeps its length, so passes run when asked.
 #[cfg(test)]
 pub(crate) struct PollingClock(pub(crate) ClockRef);
 impl Clock for PollingClock {
@@ -103,11 +106,14 @@ impl Clock for PollingClock {
         &self,
         duration: Duration,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
-        Box::pin(tokio::time::sleep(if duration == Duration::from_secs(1) {
-            Duration::from_millis(1)
-        } else {
-            duration
-        }))
+        let idle = Duration::from_secs(30);
+        Box::pin(tokio::time::sleep(
+            if duration != idle && duration <= Duration::from_secs(300) {
+                duration / 1000
+            } else {
+                duration
+            },
+        ))
     }
 }
 

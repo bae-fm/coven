@@ -145,12 +145,13 @@ impl Device<StoreLogSync> {
         assert_eq!(member_custody.unlocks.load(Ordering::Relaxed), 1);
         let work = WorkCounter::default();
         db.test_track_work(work.clone()).await.unwrap();
+        let waits = Arc::new(RetryWaits::open(db.clone(), clock.clone()).await.unwrap());
         let files = Files::new(
             FileDatabase::new(db.clone()),
             directory.clone(),
             Some(storage.clone()),
-            clock.clone(),
             send.clone(),
+            waits.clone(),
             ids.clone(),
             TransferLimits::default(),
         );
@@ -164,6 +165,7 @@ impl Device<StoreLogSync> {
             send.clone(),
             ids.clone(),
             directory.clone(),
+            waits,
         );
         let entry_decodes = Arc::new(AtomicUsize::new(0));
         sync.test_track_received_entries(entry_decodes.clone());
@@ -400,12 +402,17 @@ impl Device<Operations> {
         data.storage = Arc::new(data.storage.with_publication_gate(data.send.clone()));
         data.work.take();
         data.db.test_track_work(data.work.clone()).await.unwrap();
+        let waits = Arc::new(
+            RetryWaits::open(data.db.clone(), data.clock.clone())
+                .await
+                .unwrap(),
+        );
         data.files = Files::new(
             FileDatabase::new(data.db.clone()),
             data.directory.clone(),
             Some(data.storage.clone()),
-            data.clock.clone(),
             data.send.clone(),
+            waits.clone(),
             data.ids.clone(),
             TransferLimits::default(),
         );
@@ -419,6 +426,7 @@ impl Device<Operations> {
             data.send.clone(),
             data.ids.clone(),
             data.directory.clone(),
+            waits,
         );
         data.entry_decodes = Arc::new(AtomicUsize::new(0));
         sync.test_track_received_entries(data.entry_decodes.clone());

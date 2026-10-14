@@ -4,6 +4,7 @@ import CovenIO.Downloads
 import CovenIO.Retired
 import CovenIO.PassPhases
 import CovenIO.SnapshotWrites
+import CovenIO.Waiting
 import Lean
 
 /-! The IO differential runner. Each case names the executable transition it
@@ -320,6 +321,25 @@ private def snapshotWrites (j : Json) : Except String Json := do
     | _ => throw "unknown snapshot write event"
   pure (toJson out)
 
+/-- `Waiting`: the delay after `failures` unsuccessful attempts, the restart
+arm `max 0 (min (T - now) W)`, and whether a timer whose ordinary deadline is
+`ordinary` and whose provider cooldown ends at `provider` is due at `at`,
+before and after an app retry (`app_retry_keeps_cooldown`). -/
+private def waiting (j : Json) : Except String Json := do
+  let failures ← j.getObjValAs? Nat "failures"
+  let deadline ← j.getObjValAs? Int "deadline"
+  let now ← j.getObjValAs? Int "now"
+  let wait ← j.getObjValAs? Nat "wait"
+  let ordinary ← j.getObjValAs? Nat "ordinary"
+  let provider ← j.getObjValAs? Nat "provider"
+  let time ← j.getObjValAs? Nat "at"
+  let timer : Waiting.Timer := ⟨ordinary, provider⟩
+  return Json.mkObj [
+    ("delay", toJson (Waiting.delay failures)),
+    ("restart", toJson (Waiting.restart deadline now wait)),
+    ("due", toJson (Waiting.due timer time)),
+    ("retried", toJson (Waiting.due (Waiting.appRetry timer time) time))]
+
 private def run (j : Json) : Except String Json := do
   match ← j.getObjValAs? String "check" with
   | "discovery" => discovery j
@@ -335,6 +355,7 @@ private def run (j : Json) : Except String Json := do
   | "drain" => drain j
   | "phases" => phases j
   | "snapshot_writes" => snapshotWrites j
+  | "waiting" => waiting j
   | check => throw s!"unknown IO check {check}"
 
 def main : IO UInt32 := do

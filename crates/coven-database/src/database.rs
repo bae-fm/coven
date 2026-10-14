@@ -43,6 +43,8 @@ use crate::{LiveQuery, LostValue, Read, ReconfigurableLiveQuery, SqlReadContext}
 
 #[path = "database_builder.rs"]
 mod builder;
+#[path = "database_retry.rs"]
+mod retry;
 #[path = "database_sync.rs"]
 mod sync;
 pub use builder::DatabaseBuilder;

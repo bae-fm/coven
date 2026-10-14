@@ -158,6 +158,20 @@ impl StorageError {
         }
     }
 
+    /// The wait a provider response asked every consumer to observe, from
+    /// its `Retry-After` or, for Dropbox, its error's `retry_after`.
+    pub(crate) fn retry_after(&self) -> Option<crate::RetryAfter> {
+        match self {
+            Self::Provider {
+                provider, source, ..
+            } => source
+                .downcast_ref::<crate::providers::ProviderResponse>()?
+                .retry_after(*provider),
+            Self::Cleanup { operation, .. } => operation.retry_after(),
+            Self::Failure(_) | Self::Caused { .. } => None,
+        }
+    }
+
     /// Transport interruptions, conditional conflicts and throttling invite retry.
     pub fn retryable(&self) -> bool {
         matches!(

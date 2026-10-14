@@ -105,6 +105,7 @@ pub(crate) fn adopt<P: PendingValue>(
                     "UPDATE _coven_operations SET last_step=0 WHERE id=?1 AND last_step!=0",
                     [request.operation.0],
                 )?;
+                crate::retry::clear(db, crate::RetrySubject::Operation(request.operation))?;
                 db.internal_execute("UPDATE _coven_provider_access SET target=NULL WHERE account=?1 AND target IS NOT NULL", [&change.account])?;
                 request.operation
             }

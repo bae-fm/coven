@@ -174,6 +174,7 @@ async fn a_reload_waits_on_a_newest_snapshot_whose_body_it_refused() {
         .write_snapshot(Audience::Circle(gifts))
         .await
         .unwrap();
+    b.elapse_retry_delays();
     b.sync.reload_from_snapshots().await.unwrap();
     b.writes.download_writes().await.unwrap();
     assert_eq!(tables(&a).await, tables(&b).await);
@@ -398,6 +399,8 @@ async fn queued_entries_wait_for_reload_and_finishing_a_queued_reset_blocks_new_
         )
         .await
         .unwrap();
+    // The recorded wait's delay elapses before the next scan resumes it.
+    a.elapse_retry_delays();
     a.sync.sync_store_log().await.unwrap();
     assert_eq!(
         storage
@@ -444,6 +447,8 @@ async fn a_failed_internal_reload_prevents_snapshot_publication_until_it_can_res
     let bytes = storage.read(&snapshot).await.unwrap();
     storage.delete(&snapshot).await.unwrap();
     for _ in 0..2 {
+        // Each explicit call retries the reload once its delay has elapsed.
+        a.elapse_retry_delays();
         let error = a.sync.write_snapshot(Audience::Store).await.unwrap_err();
         assert!(
             matches!(&error, SyncError::Storage(error) if error.failure() == StorageFailure::NotFound),
@@ -469,6 +474,7 @@ async fn a_failed_internal_reload_prevents_snapshot_publication_until_it_can_res
         .unwrap()
         .is_some());
     storage.create(&snapshot, &bytes).await.unwrap();
+    a.elapse_retry_delays();
     a.sync.write_snapshot(Audience::Store).await.unwrap();
     assert!(a.db.operations().await.unwrap().is_empty());
 }

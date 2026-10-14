@@ -10,6 +10,8 @@ mod finality;
 mod identity;
 mod pass_reads;
 mod recent_return;
+mod retry_waits;
+pub use retry_waits::RetryWaits;
 mod send_gate;
 pub use send_gate::{PublicationScope, SendGate};
 mod replay;

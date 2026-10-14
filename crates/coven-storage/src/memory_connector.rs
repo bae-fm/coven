@@ -24,11 +24,13 @@ impl crate::providers::StorageConnector for MemoryStorage {
         credentials: StorageCredentials,
         _device: coven_foundation::id_source::DeviceId,
         publications: Arc<dyn crate::PublicationGate>,
+        cooldown: Arc<dyn crate::Cooldown>,
     ) -> Result<Arc<StorageConnection>, StorageError> {
         Ok(self
             .connect_device(config, credentials)
             .await?
             .with_publication_gate(publications)
+            .with_cooldown(cooldown)
             .shared_connection())
     }
     /// Memory behaves as any settings demand: the detection conforms to the

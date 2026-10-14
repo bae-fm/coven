@@ -546,14 +546,15 @@ mod provider_access_tests {
             credentials: StorageCredentials,
             device: DeviceId,
             publications: Arc<dyn coven_storage::PublicationGate>,
+            cooldown: Arc<dyn coven_storage::Cooldown>,
         ) -> Result<Arc<coven_storage::StorageConnection>, coven_storage::StorageError> {
             if matches!(&credentials, StorageCredentials::OAuth(tokens) if tokens.access == FULL) {
                 MemoryStorage::for_recipient(&self.0, "another@example.test")?
-                    .connect(config, credentials, device, publications)
+                    .connect(config, credentials, device, publications, cooldown)
                     .await
             } else {
                 self.0
-                    .connect(config, credentials, device, publications)
+                    .connect(config, credentials, device, publications, cooldown)
                     .await
             }
         }

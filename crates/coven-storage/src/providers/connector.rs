@@ -25,13 +25,15 @@ pub trait StorageConnector: Send + Sync {
         Err(StorageFailure::ProviderUnavailable.into())
     }
     /// Validate settings and wrap the selected native provider once. The caller
-    /// verifies the connection before publication.
+    /// verifies the connection before publication. Every request waits for
+    /// the store's shared `cooldown`.
     async fn connect(
         &self,
         config: StorageConfig,
         credentials: StorageCredentials,
         device: DeviceId,
         publications: Arc<dyn crate::PublicationGate>,
+        cooldown: Arc<dyn crate::Cooldown>,
     ) -> Result<Arc<StorageConnection>, StorageError>;
     /// Probe an S3 location's service (§4), writing only fresh objects under
     /// the store's `.coven-check` prefix and deleting them, also on failure.
@@ -103,6 +105,7 @@ impl StorageConnector for ProviderConnector {
         credentials: StorageCredentials,
         device: DeviceId,
         publications: Arc<dyn crate::PublicationGate>,
+        cooldown: Arc<dyn crate::Cooldown>,
     ) -> Result<Arc<StorageConnection>, StorageError> {
         crate::ConnectionCredentials {
             location: config.clone(),
@@ -143,6 +146,7 @@ impl StorageConnector for ProviderConnector {
         Ok(Arc::new(StorageConnection::with_gate(
             provider,
             publications,
+            cooldown,
         )))
     }
     async fn detect_s3(

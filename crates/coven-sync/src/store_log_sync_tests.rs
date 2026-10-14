@@ -1,4 +1,5 @@
 use super::*;
+use crate::retry_waits::tests::connected;
 use coven_crypto::{custody::InMemoryCustody, MemberIdentity, MemberKeys, StoreKey};
 use coven_database::{DatabaseBuilder, EntryOutcome, Migration, SyncedTable};
 use coven_format::sealed_single::SingleChunkObject;
@@ -28,6 +29,8 @@ pub(crate) struct Device {
     pub(crate) member: MemberIdentity,
     pub(crate) clock: Arc<FixedClock>,
     pub(crate) send: Arc<crate::SendGate>,
+    /// The retry waits `sync` and `storage` share, as the handle composes them.
+    pub(crate) waits: Arc<crate::RetryWaits>,
     pub(crate) ids: coven_foundation::id_source::IdSourceRef,
     pub(crate) _temporary: tempfile::TempDir,
 }
@@ -201,6 +204,12 @@ impl Device {
         ));
     }
 
+    /// Let the armed retry delays elapse, as before a later automatic
+    /// attempt (§16.5). Only that long passes, so a catch-up stays fresh.
+    pub(crate) fn elapse_retry_delays(&self) {
+        crate::retry_waits::tests::elapse_retry_delays(&self.waits, &self.clock);
+    }
+
     /// Undo [`Self::interrupt_entry`], reconnecting to the shared storage.
     pub(crate) fn restore_storage(&mut self) {
         self.sync.storage = Some(self.storage.clone());
@@ -235,7 +244,7 @@ impl Device {
         let identity =
             Arc::new(KeySession::member(Arc::new(InMemoryCustody::new(member.clone()))).unwrap());
         let send = Arc::new(crate::SendGate::new(clock.clone()));
-        let storage = Arc::new(storage.with_publication_gate(send.clone()));
+        let (waits, storage) = connected(&storage, &db, &clock, &send).await;
         let writes = crate::DeviceLogSync::new(
             storage.clone(),
             db.clone(),
@@ -253,8 +262,10 @@ impl Device {
             send.clone(),
             ids.clone(),
             directory.clone(),
+            waits.clone(),
         );
         Self {
+            waits,
             storage,
             sync,
             writes,
@@ -289,7 +300,8 @@ impl Device {
             .await
             .unwrap();
         self.send = Arc::new(crate::SendGate::new(self.clock.clone()));
-        self.storage = Arc::new(storage.with_publication_gate(self.send.clone()));
+        let waits;
+        (waits, self.storage) = connected(&storage, &self.db, &self.clock, &self.send).await;
         self.writes = self.writes();
         self.sync = StoreLogSync::new(
             self.storage.clone(),
@@ -300,7 +312,9 @@ impl Device {
             self.send.clone(),
             self.ids.clone(),
             self.directory.clone(),
+            waits.clone(),
         );
+        self.waits = waits;
     }
 
     pub(crate) async fn operation(

@@ -377,6 +377,10 @@ impl StoreLogSync {
         } else {
             self.database.retry_operation(record.id).await?;
         }
+        // An app retry overrides the ordinary backoff, never a provider
+        // cooldown (§16.5).
+        self.waits
+            .forget(coven_database::RetrySubject::Operation(record.id));
         Ok(())
     }
 

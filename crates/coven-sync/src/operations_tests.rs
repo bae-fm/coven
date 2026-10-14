@@ -31,8 +31,8 @@ fn file_owner(d: &Device) -> Files {
         coven_database::FileDatabase::new(d.db.clone()),
         d.directory.clone(),
         d.sync.storage.clone(),
-        d.clock.clone(),
         d.send.clone(),
+        d.waits.clone(),
         d.sync.ids.clone(),
         crate::TransferLimits::default(),
     )
