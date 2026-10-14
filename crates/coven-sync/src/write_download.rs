@@ -2,13 +2,19 @@
 
 use super::DeviceLogSync;
 use crate::stream_input::{ChannelParts, WithReferences};
-use crate::{replay_cache::ReplayCache, write_object::ReadyWrite, SyncError};
+use crate::write_object::{ReadyWrite, Unready};
+use crate::{replay_cache::ReplayCache, PendingReason, PendingRecord, PendingSubject, SyncError};
 use coven_crypto::{MemberId, StoreKeyring};
 use coven_database::{ApplyOutcome, DbError, StoreLog};
+use coven_foundation::id_source::DeviceId;
 use coven_storage::StoredObject;
 use tokio::sync::oneshot;
 
 impl DeviceLogSync {
+    /// Download, check and apply one write, routing its outcome to the write
+    /// itself (§19.1): a wait or required update becomes its pending record, a
+    /// failed check of its complete bytes its permanent refusal. Neither fails
+    /// the caller; transport and local failures do, leaving no judgment.
     pub(super) async fn receive_write(
         &self,
         object: &StoredObject,
@@ -16,9 +22,60 @@ impl DeviceLogSync {
         log: &StoreLog,
         replays: &mut ReplayCache<'_>,
         member: &MemberId,
+        reporter: DeviceId,
     ) -> Result<ApplyOutcome, SyncError> {
         let retained = crate::object_input::ObjectInput::observe(&self.database, object).await?;
         let storage = self.storage.as_deref().ok_or(SyncError::NoStorage)?;
+        let write = object.path.write_id().expect("write path");
+        let waits = |reason| PendingRecord {
+            subject: PendingSubject::Write(write),
+            reason,
+            reported_by: reporter,
+        };
+        let unready = match self
+            .apply_write(&retained, ring, log, replays, member)
+            .await
+        {
+            Ok(Ok(applied)) => return Ok(applied),
+            Ok(Err(unready)) => unready,
+            Err(SyncError::UpdateRequired(update)) => {
+                let reason = PendingReason::UpdateRequired(update);
+                self.database.record_pending(waits(reason)).await?;
+                return Err(SyncError::UpdateRequired(update));
+            }
+            Err(SyncError::Damaged(damage)) => {
+                crate::write_object::refuse(&self.database, storage, retained, &damage.failure)
+                    .await?;
+                return Err(SyncError::Damaged(damage));
+            }
+            Err(error) => return Err(error),
+        };
+        match unready {
+            Unready::History(wait) => {
+                let reason = crate::pending_logs::write_wait(object.path.store(), &wait)?;
+                self.database.record_pending(waits(reason)).await?;
+                Ok(ApplyOutcome::Waiting(wait))
+            }
+            Unready::Key { audience, key } => {
+                let reason = PendingReason::KeyUnavailable { audience, key };
+                self.database.record_pending(waits(reason)).await?;
+                Err(SyncError::KeyUnavailable(key))
+            }
+        }
+    }
+
+    /// The write's own outcome: applied, or its first unmet condition, before
+    /// that is routed to its subject. A database wait is the same condition.
+    async fn apply_write(
+        &self,
+        retained: &crate::object_input::ObjectInput,
+        ring: &StoreKeyring,
+        log: &StoreLog,
+        replays: &mut ReplayCache<'_>,
+        member: &MemberId,
+    ) -> Result<Result<ApplyOutcome, Unready>, SyncError> {
+        let storage = self.storage.as_deref().ok_or(SyncError::NoStorage)?;
+        let object = retained.object();
         let mut stream = retained.stream(storage).await;
         let ReadyWrite {
             opened,
@@ -30,7 +87,7 @@ impl DeviceLogSync {
         .await?
         {
             Ok(ready) => ready,
-            Err(reason) => return Ok(ApplyOutcome::Waiting(reason)),
+            Err(unready) => return Ok(Err(unready)),
         };
         let (primary, download) = ChannelParts::new(opened.header.clone(), &opens);
         let (references, input) = ChannelParts::new(opened.header.clone(), &opens);
@@ -77,12 +134,12 @@ impl DeviceLogSync {
         };
         let applied =
             applied.map_err(|error| crate::write_object::database_failure(&object.path, error))?;
-        if matches!(
-            applied,
-            ApplyOutcome::Applied | ApplyOutcome::AlreadyApplied
-        ) {
-            retained.release_ranges().await?;
+        match applied {
+            ApplyOutcome::Waiting(wait) => Ok(Err(Unready::History(wait))),
+            applied => {
+                retained.clone().release_ranges().await?;
+                Ok(Ok(applied))
+            }
         }
-        Ok(applied)
     }
 }

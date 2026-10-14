@@ -3,6 +3,7 @@ import CovenStorelogData.ReplayEffects
 import CovenStorelogData.Snapshots
 import CovenStorelogData.CurrentData
 import StorelogDataEffects
+import PendingJson
 
 /-! Compare replay realization, effective snapshot boundaries and circle
 reloads with Rust. The adapter calls the model's functions on checked causal
@@ -84,11 +85,13 @@ def main : IO UInt32 := do
   let input ← (← IO.getStdin).readToEnd
   let output := do
     let j ← Json.parse input
-    match j.getObjVal? "reloads", j.getObjVal? "circles", j.getObjVal? "effects" with
-    | .ok histories, _, _ => toJson <$> (← histories.getArr?).mapM reloads
-    | _, .ok circles, _ => toJson <$> (← circles.getArr?).mapM StorelogDataEffects.circles
-    | _, _, .ok effects => toJson <$> (← effects.getArr?).mapM StorelogDataEffects.run
-    | .error _, .error _, .error _ =>
+    match j.getObjVal? "reloads", j.getObjVal? "circles", j.getObjVal? "effects",
+        j.getObjVal? "pending" with
+    | .ok histories, _, _, _ => toJson <$> (← histories.getArr?).mapM reloads
+    | _, .ok circles, _, _ => toJson <$> (← circles.getArr?).mapM StorelogDataEffects.circles
+    | _, _, .ok effects, _ => toJson <$> (← effects.getArr?).mapM StorelogDataEffects.run
+    | _, _, _, .ok cases => toJson <$> (← cases.getArr?).mapM PendingJson.run
+    | .error _, .error _, .error _, .error _ =>
         let histories ← j.getObjValAs? (Array Json) "histories"
         toJson <$> histories.mapM run
   match output with

@@ -6,8 +6,10 @@ use coven_crypto::{MemberId, ObjectHasher, StoreKeyring};
 use coven_database::{StoreLog, WriteWait};
 use coven_format::sealed_write::{WriteObjectLayout, WriteObjectPrefix};
 use coven_format::write_stream::WriteHeaderFrame;
+use coven_foundation::id_source::KeyId;
+use coven_merge::Audience;
 use coven_storage::{ObjectPath, StoredObject};
-use std::{io, sync::Arc};
+use std::sync::Arc;
 
 pub(crate) struct OpenedWrite {
     pub(crate) header: WriteHeaderFrame,
@@ -30,24 +32,27 @@ pub(crate) trait PartSink: Send {
     ) -> impl std::future::Future<Output = Result<(), SyncError>> + Send;
 }
 
-/// Persist a judgment only after the entire listed immutable object is readable.
-pub(crate) async fn record_damage(
+/// Record a write's permanent refusal from the input that observed it. The
+/// verdict needs the complete object (§19.1): a stream that already reached
+/// EOF is not read again, and a header-only reader continues from its retained
+/// prefix, so no earlier response is repeated to justify the verdict.
+pub(crate) async fn refuse(
     database: &coven_database::Database,
     storage: &dyn coven_storage::Storage,
-    object: &StoredObject,
+    input: crate::object_input::ObjectInput,
     failure: &Refusal,
 ) -> Result<coven_database::LogRefusal, SyncError> {
-    let input = crate::object_input::ObjectInput::observe(database, object).await?;
+    let path = input.object().path.clone();
     if !input.received().await? {
         input.stream(storage).await.drain().await?;
     }
     let record = coven_database::LogRefusal {
-        object: coven_database::LogObject::Write(object.path.write_id().expect("write path")),
+        object: coven_database::LogObject::Write(path.write_id().expect("write path")),
         failure: failure.into(),
     };
     crate::pending_logs::record_refusal(database, record).await?;
     input.release_ranges().await?;
-    tracing::warn!(path = object.path.as_str(), error = %failure, "write log is stuck");
+    tracing::warn!(path = path.as_str(), error = %failure, "write log is stuck");
     Ok(record)
 }
 
@@ -88,7 +93,7 @@ fn open_header(
     let sealed = checked(&object.path, WriteObjectPrefix::header_chunk(bytes))?;
     let key = crate::write_seal::derive(
         ring.ok_or(SyncError::KeyUnavailable(prefix.store_key))?,
-        &coven_merge::Audience::Store,
+        &Audience::Store,
         prefix.store_key,
     )?;
     let plain = key
@@ -119,11 +124,10 @@ fn open_header(
                 .collect::<Vec<_>>(),
         ),
     )?;
+    // The header's framing must describe exactly the listed object; a
+    // different length is the bytes violating their format, with no native error.
     if expected != object.size {
-        return Err(damaged(
-            &object.path,
-            invalid("listed write size differs from its header"),
-        ));
+        return Err(damaged(&object.path, Refusal::Parse { cause: None }));
     }
     let layout = checked(
         &object.path,
@@ -160,28 +164,32 @@ fn parts(
     log: &StoreLog,
     replays: &mut ReplayCache<'_>,
     member: &MemberId,
-) -> Result<Vec<bool>, SyncError> {
+) -> Result<Result<Vec<bool>, Unready>, SyncError> {
     let mut selected = Vec::new();
     let needed = crate::key_introductions::needed(log);
     for (part, key) in opened.header.parts.iter().zip(&opened.prefix.part_keys) {
+        let waits = Unready::Key {
+            audience: part.audience.clone(),
+            key: *key,
+        };
         // Only an authorized received introduction names a readable key (§11).
         let introduction = crate::key_introductions::introductions(log)
             .into_iter()
             .find(|i| i.audience == part.audience && i.key == *key)
             .and_then(|i| log.entries.iter().find(|e| e.entry.position == i.entry));
         let Some(introduction) = introduction else {
-            return Err(SyncError::KeyUnavailable(*key));
+            return Ok(Err(waits));
         };
         let holds = crate::key_introductions::accepted(Some(ring), &needed, &part.audience, *key);
         // Current audience members wait for historical keys before applying a part.
         if !holds
             && key_audience_contains(log, replays, &introduction.entry, &part.audience, member)
         {
-            return Err(SyncError::KeyUnavailable(*key));
+            return Ok(Err(waits));
         }
         selected.push(holds);
     }
-    Ok(selected)
+    Ok(Ok(selected))
 }
 
 pub(crate) async fn finish<S: PartSink>(
@@ -265,11 +273,10 @@ fn key_audience_contains(
     log: &StoreLog,
     replays: &mut ReplayCache<'_>,
     introduction: &coven_format::store_log::StoreLogEntry,
-    audience: &coven_merge::Audience,
+    audience: &Audience,
     member: &MemberId,
 ) -> bool {
     use coven_format::store_log::StoreChange;
-    use coven_merge::Audience;
     if crate::store_log_keys::recipients(log, audience).any(|(id, _)| id == member) {
         return true;
     }
@@ -311,16 +318,48 @@ pub(crate) struct ReadyWrite {
     pub(crate) parts: Vec<bool>,
 }
 
+/// A write that cannot be checked further yet, by its first unmet condition
+/// in processing order (§19.1). Its bytes stay retained for the next attempt.
+#[derive(Debug)]
+pub(crate) enum Unready {
+    /// Recorded history the database requires has not applied.
+    History(WriteWait),
+    /// No usable copy of the header's store key or a part's key has arrived.
+    Key { audience: Audience, key: KeyId },
+}
+
+impl Unready {
+    /// Snapshot inputs keep their waits in the reload's own error vocabulary.
+    pub(crate) fn into_snapshot_error(self) -> SyncError {
+        match self {
+            Self::History(wait) => {
+                coven_database::DbError::Snapshot(coven_database::SnapshotError::WriteWaiting(wait))
+                    .into()
+            }
+            Self::Key { key, .. } => SyncError::KeyUnavailable(key),
+        }
+    }
+}
+
 pub(crate) async fn download(
     input: &mut InputStream<'_>,
     ring: Option<&StoreKeyring>,
     log: &StoreLog,
     replays: &mut ReplayCache<'_>,
     member: impl FnOnce() -> Result<MemberId, SyncError>,
-) -> Result<Result<ReadyWrite, WriteWait>, SyncError> {
+) -> Result<Result<ReadyWrite, Unready>, SyncError> {
     let object = input.object().clone();
     let result = async {
-        let opened = stream_header(input, ring).await?;
+        let opened = match stream_header(input, ring).await {
+            Ok(opened) => opened,
+            Err(SyncError::KeyUnavailable(key)) => {
+                return Ok(Err(Unready::Key {
+                    audience: Audience::Store,
+                    key,
+                }))
+            }
+            Err(error) => return Err(error),
+        };
         let missing: Vec<_> = opened
             .header
             .header
@@ -331,17 +370,20 @@ pub(crate) async fn download(
             .filter(|id| !log.replay.entries.contains_key(id))
             .collect();
         if !missing.is_empty() {
-            return Ok(Err(WriteWait::StoreLog(missing)));
+            return Ok(Err(Unready::History(WriteWait::StoreLog(missing))));
         }
         let author = authority(log, replays, &opened.header.header)
             .map_err(|failure| damaged(&object.path, failure))?;
-        let parts = parts(
+        let parts = match parts(
             &opened,
             ring.expect("opened header has its store key"),
             log,
             replays,
             &member()?,
-        )?;
+        )? {
+            Ok(parts) => parts,
+            Err(unready) => return Ok(Err(unready)),
+        };
         Ok(Ok(ReadyWrite {
             opened,
             author,
@@ -456,14 +498,6 @@ pub(crate) fn checked<T>(
             crate::error::required_format(&error).expect("newer format"),
         )),
         value => value.map_err(|e| damaged(path, Refusal::from(e))),
-    }
-}
-pub(crate) fn invalid(message: &'static str) -> Refusal {
-    Refusal::Parse {
-        cause: Some(Arc::new(io::Error::new(
-            io::ErrorKind::InvalidData,
-            message,
-        ))),
     }
 }
 pub(crate) fn damaged(path: &ObjectPath, failure: Refusal) -> SyncError {

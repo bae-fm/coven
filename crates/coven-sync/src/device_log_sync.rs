@@ -412,7 +412,14 @@ impl DeviceLogSync {
                     continue;
                 }
                 match self
-                    .receive_write(object, &ring, &local.log, &mut replays, &member.member_id())
+                    .receive_write(
+                        object,
+                        &ring,
+                        &local.log,
+                        &mut replays,
+                        &member.member_id(),
+                        local.device,
+                    )
                     .await
                 {
                     Ok(ApplyOutcome::Applied | ApplyOutcome::AlreadyApplied) => {
@@ -425,23 +432,21 @@ impl DeviceLogSync {
                         }
                         progressed = true;
                     }
+                    // Waits and refusals are already the write's pending record;
+                    // the pass continues with independent logs (§19.1).
                     Ok(ApplyOutcome::Waiting(reason)) => {
                         tracing::debug!(?write, ?reason, "write is waiting for its prerequisites");
                         waits.insert(*write, reason);
                     }
-                    Err(SyncError::Damaged(damage)) => {
-                        stuck.push(
-                            crate::write_object::record_damage(
-                                &self.database,
-                                self.storage.as_deref().ok_or(SyncError::NoStorage)?,
-                                object,
-                                &damage.failure,
-                            )
-                            .await?,
-                        );
-                    }
+                    Err(SyncError::Damaged(damage)) => stuck.push(LogRefusal {
+                        object: LogObject::Write(*write),
+                        failure: (&damage.failure).into(),
+                    }),
                     Err(SyncError::KeyUnavailable(key)) => {
                         tracing::debug!(?write, ?key, "write key is unavailable");
+                    }
+                    Err(SyncError::UpdateRequired(update)) => {
+                        tracing::debug!(?write, ?update, "write needs a newer coven");
                     }
                     Err(error) => return Err(error),
                 }
@@ -518,7 +523,8 @@ impl DeviceLogSync {
 
     /// Compare this committed state with every other device's posted state.
     /// Only equal write positions, store-log positions, schema versions and
-    /// fingerprint keys are comparable. Damage counts as no post (§19.1).
+    /// fingerprint keys are comparable. A positions object that waits or fails
+    /// a check counts as not posted and is its subject's pending record (§19.1).
     /// Signed peer reports about our objects are retained independently of agreement.
     async fn compare_fingerprints(&mut self) -> Result<(), SyncError> {
         let own = self.current_positions().await?;
@@ -527,6 +533,7 @@ impl DeviceLogSync {
         let log = local.log;
         let state = self.database.sync_state(Vec::new()).await?;
         let mut reports = Vec::new();
+        let mut unposted = Vec::new();
         for object in self
             .storage
             .as_deref()
@@ -555,21 +562,23 @@ impl DeviceLogSync {
                 Err(error) => return Err(error),
             };
             let peer =
-                match crate::posted_positions::open(&bytes, &object.path, ring.as_ref(), &log) {
+                match crate::posted_positions::open(&bytes, &object.path, ring.as_ref(), &log)? {
                     Ok(peer) => peer,
-                    Err(SyncError::Damaged(object)) => {
-                        tracing::warn!(error = %object, "damaged positions count as not posted");
-                        continue;
-                    }
-                    Err(SyncError::KeyUnavailable(key)) => {
+                    Err(reason) => {
                         tracing::debug!(
                             path = object.path.as_str(),
-                            ?key,
-                            "positions key is unavailable"
+                            ?reason,
+                            "positions not posted"
                         );
+                        unposted.push(PendingRecord {
+                            subject: PendingSubject::Positions(
+                                object.path.device().expect("positions path"),
+                            ),
+                            reason,
+                            reported_by: local.device,
+                        });
                         continue;
                     }
-                    Err(error) => return Err(error),
                 };
             reports.extend(
                 peer.pending
@@ -612,6 +621,13 @@ impl DeviceLogSync {
                     .into_iter()
                     .map(|(peer, record)| crate::PendingRecord::log_refusal(record, peer))
                     .collect(),
+            )
+            .await?;
+        // This completed listing decides every peer's positions record.
+        self.database
+            .replace_local_pending(
+                |record: &PendingRecord| matches!(record.subject, PendingSubject::Positions(_)),
+                unposted,
             )
             .await?;
         Ok(())

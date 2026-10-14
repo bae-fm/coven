@@ -29,8 +29,7 @@ impl StoreLogSync {
         let ring = self.store_keys.read()?;
         let result = crate::write_object::open(storage, object, ring.as_ref(), &retained).await;
         if let Err(SyncError::Damaged(damage)) = &result {
-            crate::write_object::record_damage(&self.database, storage, object, &damage.failure)
-                .await?;
+            crate::write_object::refuse(&self.database, storage, retained, &damage.failure).await?;
         }
         Ok(result?.header)
     }
@@ -54,10 +53,10 @@ impl StoreLogSync {
             result => result,
         };
         if let Err(SyncError::Damaged(damage)) = &result {
-            crate::write_object::record_damage(
+            crate::write_object::refuse(
                 &self.database,
                 self.storage.as_deref().ok_or(SyncError::NoStorage)?,
-                object,
+                crate::object_input::ObjectInput::observe(&self.database, object).await?,
                 &damage.failure,
             )
             .await?;
@@ -85,8 +84,7 @@ impl StoreLogSync {
             Ok(self.operation_member()?.member_id())
         })
         .await?
-        .map_err(coven_database::SnapshotError::WriteWaiting)
-        .map_err(coven_database::DbError::Snapshot)?;
+        .map_err(crate::write_object::Unready::into_snapshot_error)?;
         let ring = ring.as_ref().expect("opened header has its store key");
         let mut files = Vec::new();
         let mut targets = Vec::new();

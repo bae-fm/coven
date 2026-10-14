@@ -355,6 +355,13 @@ proofs() {
             exit 1
         fi
         COVEN_STORELOG_DATA_LEAN="$runner" cargo test -p coven-sync --all-features data_differential_circle_returns -- --ignored
+        step "Rust / Lean first unmet condition per subject"
+        if ! cargo test -p coven-sync --all-features data_differential_pending_records -- --list |
+            grep '::data_differential_pending_records: test$' > /dev/null; then
+            echo "the Rust test binary is missing the pending records differential" >&2
+            exit 1
+        fi
+        COVEN_STORELOG_DATA_LEAN="$runner" cargo test -p coven-sync --all-features data_differential_pending_records -- --ignored
     fi
 
     if proof_selected io || crate_selected coven-sync; then
@@ -366,7 +373,7 @@ proofs() {
         io_tests=$(cargo test -p coven-sync --all-features -- --list --ignored)
         for test in io_differential_discovery io_differential_snapshot_counts \
             io_differential_catalog_current io_differential_needs_snapshots \
-            io_differential_recent_return; do
+            io_differential_recent_return io_differential_streaming_download_dispositions; do
             if ! printf '%s\n' "$io_tests" | grep -q "::$test: test\$"; then
                 echo "the Rust test binary is missing $test" >&2
                 exit 1
@@ -377,7 +384,8 @@ proofs() {
             store_log_sync::tests::snapshots::signatures::io_differential_snapshot_counts \
             store_log_sync::tests::snapshots::signatures::io_differential_catalog_current \
             recent_return::tests::io_differential_needs_snapshots \
-            recent_return::tests::io_differential_recent_return
+            recent_return::tests::io_differential_recent_return \
+            device_log_sync::tests::validation::io_differential_streaming_download_dispositions
     fi
 
     if proof_selected storage || crate_selected coven-database; then

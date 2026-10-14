@@ -309,6 +309,12 @@ impl PendingValue for PendingRecord {
             _ => None,
         }
     }
+    fn ends_when_covered(&self) -> bool {
+        !matches!(
+            self.reason,
+            PendingReason::Refused(_) | PendingReason::Dropped(_)
+        )
+    }
     fn can_retry(&self, recorded_version: &str, schema_version: u32) -> bool {
         match &self.reason {
             PendingReason::Refused(_) => recorded_version != env!("CARGO_PKG_VERSION"),

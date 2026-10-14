@@ -397,7 +397,7 @@ async fn read_setup_entry(
     let SingleChunkObject::StoreLog { key, .. } = &envelope else {
         return Err(crate::write_object::damaged(
             path,
-            crate::write_object::invalid("expected a store-log envelope"),
+            crate::Refusal::WrongIdentity { cause: None },
         ));
     };
     // Tentative until the creation it opens commits to its hash (§11).

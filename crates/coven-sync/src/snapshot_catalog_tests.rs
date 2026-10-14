@@ -384,24 +384,52 @@ async fn authors_must_be_in_the_applied_store_log_and_remain_known_after_removal
     ));
     {
         let ring = a.custody.read().unwrap().unwrap();
-        assert!(
-            matches!(crate::posted_positions::open(&bytes, &path, Some(&ring), &before),
-            Err(SyncError::Damaged(object)) if object.path == path.as_str())
+        // An unregistered author's positions wait for its registration.
+        assert_eq!(
+            crate::posted_positions::open(&bytes, &path, Some(&ring), &before).unwrap(),
+            Err(crate::PendingReason::Waits(
+                crate::Prerequisite::DeviceRegistration(b.device().await)
+            ))
         );
     }
     a.sync().await;
     let registered = a.log().await;
     let pending = a.db.pending::<crate::PendingRecord>().await.unwrap();
-    let crate::PendingSubject::Operation { id, .. } = pending[0].subject else {
-        panic!()
+    // The unregistered author's snapshot was a wait, never a damaged object.
+    let snapshot = pending
+        .iter()
+        .find_map(|record| match &record.subject {
+            crate::PendingSubject::Snapshot(id) => Some((id.clone(), record.reason.clone())),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(snapshot.0.device, b.device().await);
+    assert_eq!(
+        snapshot.1,
+        crate::PendingReason::Waits(crate::Prerequisite::DeviceRegistration(b.device().await))
+    );
+    let operation = pending
+        .iter()
+        .find(|record| matches!(record.subject, crate::PendingSubject::Operation { .. }))
+        .unwrap();
+    let crate::PendingSubject::Operation { id, .. } = operation.subject else {
+        unreachable!()
     };
     assert_eq!(
-        pending[0].reason,
+        operation.reason,
         crate::PendingReason::Failed(crate::LocalFailure::Database)
     );
-    // Explicit retry checks author validation against the applied registration.
+    // Explicit retry checks author validation against the applied registration;
+    // the next listing finds the snapshot checks and ends its wait.
     a.db.retry_operation(id).await.unwrap();
     assert!(a.sync.reload_from_snapshots().await.unwrap().is_empty());
+    assert!(!a
+        .db
+        .pending::<crate::PendingRecord>()
+        .await
+        .unwrap()
+        .iter()
+        .any(|record| matches!(record.subject, crate::PendingSubject::Snapshot(_))));
     a.sync
         .make_and_upload_entry(StoreChange::RemoveDevice {
             device: b.device().await,
@@ -411,7 +439,9 @@ async fn authors_must_be_in_the_applied_store_log_and_remain_known_after_removal
     assert!(a.sync.reload_from_snapshots().await.unwrap().is_empty());
     let ring = a.custody.read().unwrap().unwrap();
     for log in [registered, a.log().await] {
-        crate::posted_positions::open(&bytes, &path, Some(&ring), &log).unwrap();
+        crate::posted_positions::open(&bytes, &path, Some(&ring), &log)
+            .unwrap()
+            .unwrap();
     }
 }
 

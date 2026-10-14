@@ -197,6 +197,77 @@ impl Database {
         .await
     }
 
+    /// Replace this device's observations of one completed scan atomically:
+    /// its records matching `scanned` become exactly `records`, so a subject
+    /// that now checks, or is no longer listed, loses its record in the same
+    /// transaction. An unchanged set writes nothing.
+    pub async fn replace_local_pending<P: crate::PendingValue>(
+        &self,
+        scanned: impl Fn(&P) -> bool + Send + 'static,
+        records: Vec<P>,
+    ) -> Result<(), DbError> {
+        use std::collections::BTreeSet;
+        self.call(move |inner| {
+            let mut identities = BTreeSet::new();
+            for record in &records {
+                if record.reported_by() != inner.access.device
+                    || record.operation().is_some()
+                    || !scanned(record)
+                    || !identities.insert(record.subject())
+                {
+                    return Err(DbError::DamagedDatabase);
+                }
+            }
+            let encode = |r: &P| serde_json::to_vec(r).map_err(DbError::PendingEncoding);
+            let next = records
+                .iter()
+                .map(encode)
+                .collect::<Result<BTreeSet<_>, _>>()?;
+            // The usual unchanged scan reads its class without taking the writer.
+            let unchanged = inner
+                .access
+                .readers
+                .acquire_reader()
+                .with_reader(|reader| {
+                    let current = crate::pending::retained::<P>(reader)?
+                        .into_iter()
+                        .filter(|r| r.reported_by() == inner.access.device && scanned(r))
+                        .map(|r| encode(&r))
+                        .collect::<Result<BTreeSet<_>, _>>()?;
+                    Ok::<_, DbError>(current == next)
+                })?;
+            if unchanged {
+                return Ok(());
+            }
+            inner.access.with_writer(|writer| {
+                let previous: Vec<_> = crate::pending::retained::<P>(writer)?
+                    .into_iter()
+                    .filter(|r| r.reported_by() == inner.access.device && scanned(r))
+                    .collect();
+                if previous
+                    .iter()
+                    .map(encode)
+                    .collect::<Result<BTreeSet<_>, _>>()?
+                    == next
+                {
+                    return Ok(());
+                }
+                writer.pending_transaction(|db| {
+                    for record in &previous {
+                        if !identities.contains(record.subject()) {
+                            crate::pending::clear(db, record.subject(), inner.access.device)?;
+                        }
+                    }
+                    for record in &records {
+                        crate::pending::save(db, record)?;
+                    }
+                    Ok(())
+                })
+            })
+        })
+        .await
+    }
+
     /// Replace a completed authenticated peer scan atomically, preserving local records.
     /// The sync owner selects reports relevant to this installation before calling.
     pub async fn replace_pending_reports<P: crate::PendingValue>(

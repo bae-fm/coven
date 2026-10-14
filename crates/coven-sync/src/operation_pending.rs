@@ -124,16 +124,20 @@ impl StoreLogSync {
             SyncError::Rejected(reason) => PendingReason::Dropped(reason.clone()),
             SyncError::ReloadPending(id) => self.reload_condition(*id).await?,
             SyncError::Database(coven_database::DbError::Snapshot(error)) => match error {
-                coven_database::SnapshotError::MissingWrites { missing } => write_wait(
-                    self.directory.id(),
-                    &coven_database::WriteWait::Writes(missing.clone()),
-                )?,
-                coven_database::SnapshotError::StoreLog { missing } => write_wait(
-                    self.directory.id(),
-                    &coven_database::WriteWait::StoreLog(missing.clone()),
-                )?,
+                coven_database::SnapshotError::MissingWrites { missing } => {
+                    crate::pending_logs::write_wait(
+                        self.directory.id(),
+                        &coven_database::WriteWait::Writes(missing.clone()),
+                    )?
+                }
+                coven_database::SnapshotError::StoreLog { missing } => {
+                    crate::pending_logs::write_wait(
+                        self.directory.id(),
+                        &coven_database::WriteWait::StoreLog(missing.clone()),
+                    )?
+                }
                 coven_database::SnapshotError::WriteWaiting(wait) => {
-                    write_wait(self.directory.id(), wait)?
+                    crate::pending_logs::write_wait(self.directory.id(), wait)?
                 }
                 coven_database::SnapshotError::Schema { snapshot, database }
                     if snapshot > database =>
@@ -166,49 +170,4 @@ fn reload_audience(data: &Data) -> Result<Audience, SyncError> {
         },
         _ => Err(coven_database::DbError::DamagedDatabase.into()),
     }
-}
-
-fn write_wait(
-    store: coven_foundation::id_source::StoreId,
-    wait: &coven_database::WriteWait,
-) -> Result<PendingReason, SyncError> {
-    Ok(match wait {
-        coven_database::WriteWait::Reload(audience) => {
-            PendingReason::Waits(Prerequisite::Reload(audience.clone()))
-        }
-        coven_database::WriteWait::Writes(missing) => {
-            PendingReason::Waits(Prerequisite::Object(crate::write_seal::path(
-                store,
-                *missing
-                    .first()
-                    .ok_or(coven_database::DbError::DamagedDatabase)?,
-            )))
-        }
-        coven_database::WriteWait::Sources(missing) => {
-            PendingReason::Waits(Prerequisite::Object(crate::write_seal::path(
-                store,
-                missing
-                    .first()
-                    .ok_or(coven_database::DbError::DamagedDatabase)?
-                    .write,
-            )))
-        }
-        coven_database::WriteWait::StoreLog(missing) => {
-            PendingReason::Waits(Prerequisite::Object(crate::store_log_object::path(
-                store,
-                *missing
-                    .first()
-                    .ok_or(coven_database::DbError::DamagedDatabase)?,
-            )))
-        }
-        coven_database::WriteWait::SchemaVersion(version) => {
-            PendingReason::UpdateRequired(RequiredUpdate::AppSchema { version: *version })
-        }
-        coven_database::WriteWait::SchemaPublication(version) => {
-            PendingReason::Waits(Prerequisite::SchemaPublication {
-                audience: Audience::Store,
-                version: *version,
-            })
-        }
-    })
 }

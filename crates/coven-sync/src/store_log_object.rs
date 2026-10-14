@@ -1,6 +1,6 @@
 //! Authentication and causal checks before the replay's valid-input boundary.
 
-use crate::{write_object::invalid, Refusal, SyncError};
+use crate::{Refusal, SyncError};
 use coven_crypto::{MemberKeys, ObjectHasher, StoreKey, StoreKeyring};
 use coven_database::{Database, StoreLog, StoreLogUpload};
 use coven_format::{
@@ -140,7 +140,9 @@ pub(crate) fn open(
         ..
     } = object
     else {
-        return Err(invalid("expected a store-log envelope"));
+        // The path names a store-log entry; another object kind there has the
+        // wrong identity for its path.
+        return Err(Refusal::WrongIdentity { cause: None });
     };
     if *declared != key.id() {
         return Err(Refusal::WrongIdentity { cause: None });
@@ -153,7 +155,7 @@ pub(crate) fn open(
             cause: Some(Arc::new(error)),
         })?;
     let Object::StoreLog(entry) = Object::decode(&plain).map_err(Refusal::from)? else {
-        return Err(invalid("expected a store-log frame"));
+        return Err(Refusal::WrongIdentity { cause: None });
     };
     let mut hash = ObjectHasher::new();
     hash.update(&object.signed_bytes().map_err(Refusal::from)?);

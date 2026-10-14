@@ -15,6 +15,9 @@ name = "CovenStorelogData"
 [[lean_lib]]
 name = "StorelogDataEffects"
 
+[[lean_lib]]
+name = "PendingJson"
+
 [[lean_exe]]
 name = "storelogDataRunner"
 root = "StorelogDataRunner"

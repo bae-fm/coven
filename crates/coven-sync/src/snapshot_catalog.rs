@@ -3,6 +3,7 @@
 use super::{io, StoreLogSync};
 use crate::write_object::{checked, damaged};
 use crate::{snapshot_data::SavedSnapshot, DamagedObject, SyncError};
+use crate::{PendingReason, PendingRecord, PendingSubject};
 use coven_crypto::{MemberId, ObjectHasher, Signature};
 use coven_database::StoreLog;
 use coven_format::sealed_snapshot::{SnapshotObjectLayout, SnapshotObjectPrefix};
@@ -52,9 +53,16 @@ impl StoreLogSync {
         let mut candidates = Vec::new();
         let mut positions = BTreeMap::new();
         let mut unreadable_prefix = false;
+        let mut waiting = Vec::new();
         for object in objects {
             let candidate = match self.snapshot_prefix(&object, log).await {
-                Ok(candidate) => candidate,
+                Ok(Ok(candidate)) => candidate,
+                // Not damaged, yet unable to establish coverage until it checks.
+                Ok(Err(reason)) => {
+                    unreadable_prefix = true;
+                    waiting.push((object.path.snapshot_id().expect("snapshot path"), reason));
+                    continue;
+                }
                 Err(error) => {
                     unreadable_prefix = true;
                     snapshot_damage(damages, &object.path, error)?;
@@ -91,6 +99,7 @@ impl StoreLogSync {
                 candidates.push(candidate);
             }
         }
+        self.replace_snapshot_waits(audience, waiting).await?;
         candidates.sort_by(|a, b| newest_first((&a.object, &a.prefix), (&b.object, &b.prefix)));
         Ok(Catalog {
             listed,
@@ -126,14 +135,48 @@ impl StoreLogSync {
         Ok(catalog)
     }
 
+    /// This audience's completed listing decides its snapshots' wait records:
+    /// one that now checks, or is no longer listed, loses its record (§19.1).
+    async fn replace_snapshot_waits(
+        &self,
+        audience: &Audience,
+        waiting: Vec<(coven_format::store_log::SnapshotId, PendingReason)>,
+    ) -> Result<(), SyncError> {
+        let records = if waiting.is_empty() {
+            Vec::new()
+        } else {
+            let reported_by = self.database.local_store_log().await?.device;
+            waiting
+                .into_iter()
+                .map(|(id, reason)| PendingRecord {
+                    subject: PendingSubject::Snapshot(id),
+                    reason,
+                    reported_by,
+                })
+                .collect()
+        };
+        let audience = audience.clone();
+        self.database
+            .replace_local_pending(
+                move |record: &PendingRecord| {
+                    matches!(&record.subject, PendingSubject::Snapshot(id) if id.audience == audience)
+                },
+                records,
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// Read and authenticate a listed snapshot's signed prefix. The inner
+    /// error is its first unmet condition: an author whose registration this
+    /// device has not applied waits on the retained prefix bytes (§19.1).
     pub(super) async fn snapshot_prefix(
         &self,
         object: &StoredObject,
         log: &StoreLog,
-    ) -> Result<Candidate, SyncError> {
+    ) -> Result<Result<Candidate, PendingReason>, SyncError> {
         let storage = self.storage.as_deref().ok_or(SyncError::NoStorage)?;
         let path = &object.path;
-        let author = crate::object_author::member(log, path)?;
         let input = crate::object_input::ObjectInput::observe(&self.database, object).await?;
         let bytes = match input.metadata().await? {
             Some(bytes) => bytes,
@@ -155,6 +198,11 @@ impl StoreLogSync {
                 .ok_or(coven_format::Error::Truncated),
         )?;
         let (prefix, signature) = checked(path, SnapshotObjectPrefix::decode_signed(signed))?;
+        let author = match crate::object_author::member(log, path.device().expect("snapshot path"))
+        {
+            Ok(author) => author,
+            Err(reason) => return Ok(Err(reason)),
+        };
         author
             .verify_prefix(path.as_str(), &signed[..length], &signature)
             .map_err(|error| {
@@ -172,12 +220,12 @@ impl StoreLogSync {
             return Err(damaged(path, crate::Refusal::WrongIdentity { cause: None }));
         }
         input.keep_metadata(bytes).await?;
-        Ok(Candidate {
+        Ok(Ok(Candidate {
             object: object.clone(),
             prefix,
             author: author.clone(),
             signature,
-        })
+        }))
     }
 
     pub(super) async fn load_snapshot(

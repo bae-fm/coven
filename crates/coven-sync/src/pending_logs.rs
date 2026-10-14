@@ -85,3 +85,50 @@ pub(crate) async fn reports(
     reports.sort_by(|a: &coven_format::pending::PendingReport, b| a.subject.cmp(&b.subject));
     Ok(reports)
 }
+
+/// A write's first unmet history or schema condition, named by the object or
+/// update it waits for (§19.1).
+pub(crate) fn write_wait(
+    store: coven_foundation::id_source::StoreId,
+    wait: &coven_database::WriteWait,
+) -> Result<PendingReason, SyncError> {
+    Ok(match wait {
+        coven_database::WriteWait::Reload(audience) => {
+            PendingReason::Waits(crate::Prerequisite::Reload(audience.clone()))
+        }
+        coven_database::WriteWait::Writes(missing) => {
+            PendingReason::Waits(crate::Prerequisite::Object(crate::write_seal::path(
+                store,
+                *missing
+                    .first()
+                    .ok_or(coven_database::DbError::DamagedDatabase)?,
+            )))
+        }
+        coven_database::WriteWait::Sources(missing) => {
+            PendingReason::Waits(crate::Prerequisite::Object(crate::write_seal::path(
+                store,
+                missing
+                    .first()
+                    .ok_or(coven_database::DbError::DamagedDatabase)?
+                    .write,
+            )))
+        }
+        coven_database::WriteWait::StoreLog(missing) => {
+            PendingReason::Waits(crate::Prerequisite::Object(crate::store_log_object::path(
+                store,
+                *missing
+                    .first()
+                    .ok_or(coven_database::DbError::DamagedDatabase)?,
+            )))
+        }
+        coven_database::WriteWait::SchemaVersion(version) => {
+            PendingReason::UpdateRequired(crate::RequiredUpdate::AppSchema { version: *version })
+        }
+        coven_database::WriteWait::SchemaPublication(version) => {
+            PendingReason::Waits(crate::Prerequisite::SchemaPublication {
+                audience: coven_merge::Audience::Store,
+                version: *version,
+            })
+        }
+    })
+}

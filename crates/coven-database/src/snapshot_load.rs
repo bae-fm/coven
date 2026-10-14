@@ -151,6 +151,8 @@ pub(crate) fn load<R: Read, W: Read>(
         affected.extend(crate::snapshot_writes::apply(
             database, schema, writes, absent, coverage, &deleted,
         )?);
+        // Waits for writes these positions now cover end with this commit.
+        crate::pending::clear_covered_writes(database)?;
         // Retention sees the final state, including every replayed waiting write.
         files.retain_rows(affected, &deleted)?;
         files.before_commit()?;

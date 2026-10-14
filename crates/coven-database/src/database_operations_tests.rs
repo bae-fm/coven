@@ -54,6 +54,38 @@ impl Database {
         .await
     }
 
+    /// Model a snapshot load's position jump: install consumed positions
+    /// without applying their writes, clearing covered waits in that commit.
+    pub async fn test_cover_positions(&self, positions: Vec<(u64, u64)>) -> Result<(), DbError> {
+        self.call(move |inner| {
+            inner.access.with_writer(|writer| {
+                writer.transaction(|db| {
+                    for (device, number) in &positions {
+                        db.internal_execute(
+                            "INSERT INTO _coven_positions(device,number) VALUES(?1,?2)",
+                            (
+                                device.to_be_bytes().as_slice(),
+                                number.to_be_bytes().as_slice(),
+                            ),
+                        )?;
+                    }
+                    crate::pending::clear_covered_writes(db)
+                })
+            })
+        })
+        .await
+    }
+
+    /// The progress hook an applied log object runs in its transaction.
+    pub async fn test_clear_log(&self, object: crate::LogObject) -> Result<(), DbError> {
+        self.call(move |inner| {
+            inner.access.with_writer(|writer| {
+                writer.transaction(|db| crate::pending::clear_log(db, object))
+            })
+        })
+        .await
+    }
+
     /// Inject an agreement fault without changing positions or application rows.
     /// Recovery tests use the actual incremental sum and production reload path.
     pub async fn test_damage_fingerprint(

@@ -211,8 +211,13 @@ impl StoreLogSync {
             .await?
         {
             match self.open_retention_positions(&object, log).await {
-                Ok((device, writes)) => {
+                Ok(Ok((device, writes))) => {
                     positions.insert(device, writes);
+                }
+                // Positions that wait or fail a check count as not posted;
+                // the agreement scan keeps their pending record (§19.1).
+                Ok(Err(reason)) => {
+                    tracing::debug!(path = object.path.as_str(), ?reason, "positions not posted");
                 }
                 Err(error) => snapshot_damage(damages, &object.path, error)?,
             }
@@ -224,13 +229,15 @@ impl StoreLogSync {
         &self,
         object: &coven_storage::StoredObject,
         log: &StoreLog,
-    ) -> Result<(DeviceId, WritePositions), SyncError> {
+    ) -> Result<Result<(DeviceId, WritePositions), crate::PendingReason>, SyncError> {
         let storage = self.storage.as_deref().ok_or(SyncError::NoStorage)?;
         let input = crate::object_input::ObjectInput::observe(&self.database, object).await?;
         let bytes = input.whole(storage).await?;
         let ring = self.store_keys.read()?;
-        let positions = crate::posted_positions::open(&bytes, &object.path, ring.as_ref(), log)?;
-        Ok((positions.device, positions.writes))
+        Ok(
+            crate::posted_positions::open(&bytes, &object.path, ring.as_ref(), log)?
+                .map(|positions| (positions.device, positions.writes)),
+        )
     }
 }
 

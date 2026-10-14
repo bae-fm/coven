@@ -61,6 +61,10 @@ impl ObjectInput {
         Ok(bytes)
     }
 
+    /// The observation whose bytes this input retains.
+    pub(crate) fn object(&self) -> &StoredObject {
+        &self.object
+    }
     pub(crate) async fn metadata(&self) -> Result<Option<Vec<u8>>, SyncError> {
         Ok(self.retained.metadata().await?)
     }

@@ -51,7 +51,16 @@ impl StoreLogSync {
                 .iter()
                 .find(|object| object.path == path)
                 .ok_or(coven_storage::StorageFailure::NotFound)?;
-            let candidate = self.snapshot_prefix(object, log).await?;
+            let candidate = match self.snapshot_prefix(object, log).await? {
+                Ok(candidate) => candidate,
+                Err(reason) => {
+                    return Err(SyncError::Pending(Box::new(crate::PendingRecord {
+                        subject: crate::PendingSubject::Snapshot(id.clone()),
+                        reason,
+                        reported_by: self.database.local_store_log().await?.device,
+                    })))
+                }
+            };
             // A named snapshot that landed late is ignored like any other:
             // the boundary waits as if it had not arrived.
             if !candidate.prefix.counts(super::catalog::landing(object)?) {

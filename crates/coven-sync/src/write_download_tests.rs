@@ -62,7 +62,14 @@ async fn damaged_objects_roll_back_and_block_only_their_device() {
         let mut replays = crate::replay_cache::ReplayCache::new(&log);
         let error = devices[2]
             .writes
-            .receive_write(&object, &ring, &log, &mut replays, &member().member_id())
+            .receive_write(
+                &object,
+                &ring,
+                &log,
+                &mut replays,
+                &member().member_id(),
+                DeviceId(3),
+            )
             .await
             .unwrap_err();
         let SyncError::Damaged(damage) = error else {
@@ -311,11 +318,30 @@ async fn only_a_newer_format_requires_an_update() {
             .await
             .unwrap()
             .positions;
-        let result = devices[1].writes.download_writes().await;
+        // Either way the write's own record holds the condition; the pass goes on.
+        devices[1].writes.download_writes().await.unwrap();
+        let pending = devices[1]
+            .db
+            .pending::<crate::PendingRecord>()
+            .await
+            .unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(
+            pending[0].subject,
+            crate::PendingSubject::Write(path.write_id().unwrap())
+        );
         if version == 2 {
-            assert!(matches!(result, Err(SyncError::UpdateRequired(_))));
+            assert_eq!(
+                pending[0].reason,
+                crate::PendingReason::UpdateRequired(crate::RequiredUpdate::CovenFormat {
+                    version: 2
+                })
+            );
         } else {
-            result.unwrap();
+            assert!(matches!(
+                pending[0].reason,
+                crate::PendingReason::Refused(crate::Refusal::Parse { .. })
+            ));
         }
         assert_eq!(
             devices[1]
@@ -336,12 +362,7 @@ async fn only_a_newer_format_requires_an_update() {
             .is_empty());
         assert_eq!(storage.read(&path).await.unwrap(), bytes);
         let reads = storage.reads().await;
-        let repeated = devices[1].writes.download_writes().await;
-        if version == 2 {
-            assert!(matches!(repeated, Err(SyncError::UpdateRequired(_))));
-        } else {
-            repeated.unwrap();
-        }
+        devices[1].writes.download_writes().await.unwrap();
         assert_eq!(storage.reads().await, reads);
         assert_eq!(rows(&devices[1].db).await.len(), 1);
         assert_eq!(queued(&devices[1].db).await, waiting);
@@ -381,7 +402,14 @@ async fn a_newer_schema_does_not_hide_a_damaged_signature() {
     assert!(matches!(
         devices[1]
             .writes
-            .receive_write(&object, &ring, &log, &mut replays, &member().member_id())
+            .receive_write(
+                &object,
+                &ring,
+                &log,
+                &mut replays,
+                &member().member_id(),
+                DeviceId(2)
+            )
             .await,
         Err(SyncError::Damaged(crate::DamagedObject {
             failure: crate::Refusal::Signature { cause: Some(_) },
@@ -458,7 +486,14 @@ async fn missing_read_view_waits_then_replays_after_the_store_log_arrives() {
         let mut replays = crate::replay_cache::ReplayCache::new(&log);
         let result = devices[1]
             .writes
-            .receive_write(&object, &ring, &log, &mut replays, &member().member_id())
+            .receive_write(
+                &object,
+                &ring,
+                &log,
+                &mut replays,
+                &member().member_id(),
+                DeviceId(2),
+            )
             .await
             .unwrap();
         assert!(
@@ -561,7 +596,14 @@ async fn authorization_causality_and_identity_refusals_keep_their_report_tags() 
         let mut replays = crate::replay_cache::ReplayCache::new(&log);
         let error = devices[1]
             .writes
-            .receive_write(&object, &ring, &log, &mut replays, &member().member_id())
+            .receive_write(
+                &object,
+                &ring,
+                &log,
+                &mut replays,
+                &member().member_id(),
+                DeviceId(2),
+            )
             .await
             .unwrap_err();
         let SyncError::Damaged(damage) = error else {
@@ -671,7 +713,14 @@ async fn streamed_write_requests(inspect_header: bool) {
     assert_eq!(
         devices[1]
             .writes
-            .receive_write(&object, &ring, &log, &mut replays, &member().member_id())
+            .receive_write(
+                &object,
+                &ring,
+                &log,
+                &mut replays,
+                &member().member_id(),
+                DeviceId(2)
+            )
             .await
             .unwrap(),
         ApplyOutcome::Applied
@@ -765,24 +814,40 @@ async fn streamed_disposition(
     let mut replays = crate::replay_cache::ReplayCache::new(&log);
     let result = devices[1]
         .writes
-        .receive_write(&object, &ring, &log, &mut replays, &member().member_id())
+        .receive_write(
+            &object,
+            &ring,
+            &log,
+            &mut replays,
+            &member().member_id(),
+            DeviceId(2),
+        )
         .await;
     let complete = matches!(&result, Ok(ApplyOutcome::Applied));
     let automatic = matches!(&result, Err(SyncError::Storage(_) | SyncError::Database(_)));
-    if let Err(SyncError::Damaged(damage)) = &result {
-        crate::write_object::record_damage(
-            &devices[1].db,
-            storage.as_ref(),
-            &object,
-            &damage.failure,
-        )
+    // Receiving routes the verdict to the write itself: only a failed check of
+    // the complete bytes is recorded, and a transport failure records nothing.
+    let pending = devices[1]
+        .db
+        .pending::<crate::PendingRecord>()
         .await
         .unwrap();
-    }
     let refused = !crate::pending_logs::local_refusals(&devices[1].db)
         .await
         .unwrap()
         .is_empty();
+    assert_eq!(
+        pending
+            .iter()
+            .map(|r| r.subject.clone())
+            .collect::<Vec<_>>(),
+        if refused {
+            vec![crate::PendingSubject::Write(record.header.position)]
+        } else {
+            Vec::new()
+        },
+        "{defect}"
+    );
     assert_eq!(complete, defect == "valid", "{defect}: {result:?}");
     assert_eq!(
         refused,

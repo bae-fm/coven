@@ -161,10 +161,11 @@ impl StoreLogSync {
                 Err(error) if super::retention::waiting(&object.path, &error) => return Ok(()),
                 Err(error) => {
                     if let SyncError::Damaged(damage) = &error {
-                        crate::write_object::record_damage(
+                        crate::write_object::refuse(
                             &self.database,
                             storage,
-                            &object,
+                            crate::object_input::ObjectInput::observe(&self.database, &object)
+                                .await?,
                             &damage.failure,
                         )
                         .await?;
@@ -213,8 +214,7 @@ impl StoreLogSync {
             Ok(self.operation_member()?.member_id())
         })
         .await?
-        .map_err(coven_database::SnapshotError::WriteWaiting)
-        .map_err(coven_database::DbError::Snapshot)?;
+        .map_err(crate::write_object::Unready::into_snapshot_error)?;
         let ring = ring.as_ref().expect("opened header has its store key");
         for (opens, part) in opens.iter_mut().zip(&opened.header.parts) {
             *opens &= readable.contains(&part.audience);

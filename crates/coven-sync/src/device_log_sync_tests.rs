@@ -284,6 +284,8 @@ async fn fixed_bytes_survive_restart_and_a_lost_completion_reply() {
 #[path = "write_seal_tests.rs"]
 pub(crate) mod circles;
 
+#[path = "pending_logs_tests.rs"]
+mod routing;
 #[path = "schema_sync_tests.rs"]
 mod schema;
 #[path = "write_upload_tests.rs"]
@@ -647,7 +649,21 @@ mod stuck {
             .await
             .unwrap();
         devices[0].writes.download_writes().await.unwrap();
-        assert!(author.next().await.unwrap().is_empty());
+        // The damaged positions are this device's own observation instead.
+        let pending = devices[0]
+            .db
+            .pending::<crate::PendingRecord>()
+            .await
+            .unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(
+            pending[0].subject,
+            crate::PendingSubject::Positions(DeviceId(2))
+        );
+        assert!(matches!(
+            pending[0].reason,
+            crate::PendingReason::InvalidPositions(_)
+        ));
     }
 
     async fn reopen(storage: Arc<MemoryStorage>, device: &mut Device) {
@@ -873,69 +889,6 @@ mod stuck {
             assert_eq!(super::writes::queued(&devices[1].db).await, queued);
         }
     }
-}
-
-#[tokio::test]
-async fn multiple_reported_subjects_in_one_log_retain_each_condition() {
-    let storage = storage();
-    let mut devices = group(storage.clone(), 2).await;
-    for title in ["first", "second"] {
-        devices[0]
-            .db
-            .write(move |sql| {
-                sql.execute("INSERT INTO notes VALUES(?1,?1,'body')", [title])?;
-                Ok(())
-            })
-            .await
-            .unwrap();
-        devices[0].writes.upload_writes().await.unwrap();
-    }
-    let first = coven_database::LogRefusal {
-        object: LogObject::Write(WriteId {
-            device: DeviceId(1),
-            number: 1,
-        }),
-        failure: RefusalCode::Parse,
-    };
-    let second = coven_database::LogRefusal {
-        object: LogObject::Write(WriteId {
-            device: DeviceId(1),
-            number: 2,
-        }),
-        failure: RefusalCode::Signature,
-    };
-    let mut positions = devices[1]
-        .writes
-        .current_positions()
-        .await
-        .unwrap()
-        .unwrap();
-    positions.pending = vec![first.into(), second.into()];
-    let path = ObjectPath::positions(STORE_ID, positions.device);
-    storage
-        .replace(&path, &signed_positions(&devices[1], positions))
-        .await
-        .unwrap();
-    devices[0].writes.compare_fingerprints().await.unwrap();
-    assert_eq!(
-        devices[0]
-            .db
-            .pending::<crate::PendingRecord>()
-            .await
-            .unwrap(),
-        vec![
-            crate::PendingRecord::log_refusal(first, DeviceId(2)),
-            crate::PendingRecord::log_refusal(second, DeviceId(2))
-        ]
-    );
-    assert!(devices[0]
-        .writes
-        .current_positions()
-        .await
-        .unwrap()
-        .unwrap()
-        .pending
-        .is_empty());
 }
 
 #[tokio::test]

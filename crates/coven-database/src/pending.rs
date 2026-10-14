@@ -27,6 +27,10 @@ pub trait PendingValue: Serialize + DeserializeOwned + Send + 'static {
     fn operation(&self) -> Option<OperationId>;
     /// Numbered log object whose progress clears this observation.
     fn log_object(&self) -> Option<crate::LogObject>;
+    /// Whether positions covering `log_object` without applying it, as a
+    /// loaded snapshot's do, also end this observation: true for a write that
+    /// waits, false for a verdict on its bytes, which loading never clears (§19.1).
+    fn ends_when_covered(&self) -> bool;
     /// Whether automatic work can retry with these installed versions.
     fn can_retry(&self, recorded_coven_version: &str, schema_version: u32) -> bool;
 }
@@ -58,7 +62,7 @@ impl StoredRecord {
         if serde_json::to_vec(record.subject()).map_err(DbError::PendingEncoding)? != self.subject
             || record.reported_by().0.to_be_bytes() != self.reporter
             || record.operation().map(|id| id.0) != self.operation
-            || record.log_object().map(object_key) != self.object
+            || stored_object(&record) != self.object
         {
             return Err(DbError::DamagedDatabase);
         }
@@ -93,7 +97,7 @@ pub(crate) fn save<P: PendingValue>(db: &DatabaseConnection, record: &P) -> Resu
             "INSERT INTO _coven_pending(subject,reporter,value,operation,object,coven_version) VALUES(?1,?2,?3,?4,?5,?6)
              ON CONFLICT(subject,reporter) DO UPDATE SET value=excluded.value,operation=excluded.operation,object=excluded.object,coven_version=excluded.coven_version,suppressed=0
              WHERE value!=excluded.value OR coven_version!=excluded.coven_version OR suppressed!=0",
-            (subject, record.reported_by().0.to_be_bytes().as_slice(), value, record.operation().map(|id| id.0), record.log_object().map(object_key), env!("CARGO_PKG_VERSION")),
+            (subject, record.reported_by().0.to_be_bytes().as_slice(), value, record.operation().map(|id| id.0), stored_object(record), env!("CARGO_PKG_VERSION")),
         )?;
         Ok(())
     })
@@ -160,14 +164,26 @@ pub(crate) fn retry<P: PendingValue>(
     }
 }
 
-fn object_key(object: crate::LogObject) -> Vec<u8> {
+/// The indexed key of a record's log object. Its first byte also says which
+/// progress ends it: applying the object, or any position covering a write.
+fn object_key(object: crate::LogObject, covered: bool) -> Vec<u8> {
     let mut key = vec![match object {
+        crate::LogObject::Write(_) if covered => COVERED_WRITE,
         crate::LogObject::Write(_) => 0,
         crate::LogObject::Entry(_) => 1,
     }];
     key.extend(object.device().0.to_be_bytes());
     key.extend(object.number().to_be_bytes());
     key
+}
+const COVERED_WRITE: u8 = 2;
+
+fn stored_object<P: PendingValue>(record: &P) -> Option<Vec<u8>> {
+    let object = record.log_object()?;
+    Some(object_key(
+        object,
+        matches!(object, crate::LogObject::Write(_)) && record.ends_when_covered(),
+    ))
 }
 
 pub(crate) fn suppress(db: &DatabaseConnection, resets: &[crate::EntryId]) -> Result<(), DbError> {
@@ -214,10 +230,53 @@ pub(crate) fn clear_log(db: &DatabaseConnection, object: crate::LogObject) -> Re
         return Ok(());
     };
     db.pending_change(|| {
-        db.internal_execute(
-            "DELETE FROM _coven_pending WHERE object=?1 AND reporter=?2",
-            (object_key(object), device.0.to_be_bytes().as_slice()),
-        )?;
+        for covered in [false, true] {
+            db.internal_execute(
+                "DELETE FROM _coven_pending WHERE object=?1 AND reporter=?2",
+                (
+                    object_key(object, covered),
+                    device.0.to_be_bytes().as_slice(),
+                ),
+            )?;
+        }
+        Ok(())
+    })
+}
+
+/// Positions that jump past a waiting write, as a snapshot load's do, end that
+/// wait in the same transaction. Verdicts on a write's bytes remain (§19.1).
+pub(crate) fn clear_covered_writes(db: &DatabaseConnection) -> Result<(), DbError> {
+    let Some(device) = db.pending_device() else {
+        return Ok(());
+    };
+    let reporter = device.0.to_be_bytes();
+    let waiting = db.query(
+        "SELECT object FROM _coven_pending WHERE object>=?1 AND object<?2 AND reporter=?3",
+        (
+            [COVERED_WRITE].as_slice(),
+            [COVERED_WRITE + 1].as_slice(),
+            reporter.as_slice(),
+        ),
+        |row| row.get::<_, Vec<u8>>(0),
+    )?;
+    if waiting.is_empty() {
+        return Ok(());
+    }
+    let positions = crate::download::positions(db)?;
+    db.pending_change(|| {
+        for object in waiting {
+            let (device, number) = object[1..].split_at(8);
+            let write = coven_merge::WriteId {
+                device: DeviceId(u64::from_be_bytes(device.try_into().expect("8 bytes"))),
+                number: u64::from_be_bytes(number.try_into().expect("8 bytes")),
+            };
+            if positions.covers(write) {
+                db.internal_execute(
+                    "DELETE FROM _coven_pending WHERE object=?1 AND reporter=?2",
+                    (object, reporter.as_slice()),
+                )?;
+            }
+        }
         Ok(())
     })
 }

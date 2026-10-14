@@ -32,13 +32,12 @@ impl StoreLogSync {
     }
 
     /// Apply the signed store log and open this member's sealed keys. Returns
-    /// false until membership is effective; damaged required objects fail loudly.
-    /// Snapshot work waits until the member has actually been admitted.
+    /// false until membership is effective. A refused entry stops admission
+    /// and fails loudly with its pending record; a damaged key copy is passed
+    /// over for a later copy, as any reader does (§11, §19.1). Snapshot work
+    /// waits until the member has actually been admitted.
     pub async fn bootstrap_member(&mut self) -> Result<bool, SyncError> {
-        let damages = self.step().await?;
-        if let Some(damage) = damages.into_iter().next() {
-            return Err(damage.into());
-        }
+        self.step().await?;
         let local = self.database.local_store_log().await?;
         let member = self.operation_member()?;
         if crate::effects::member(&local.log.replay.state, &member.member_id()).is_some() {
@@ -107,10 +106,9 @@ impl StoreLogSync {
         if crate::effects::member(&local.log.replay.state, &member.member_id()).is_none() {
             return Err(SyncError::Rejected(coven_database::DropReason::NotAllowed));
         }
-        let damages = self.resume_snapshots().await?;
-        if let Some(damage) = damages.into_iter().next() {
-            return Err(damage.into());
-        }
+        // Snapshots that fail their checks are passed over for the next latest
+        // or the logs (§19.1); only a reload that cannot finish fails this call.
+        self.resume_snapshots().await?;
         match local.log.replay.state.devices.get(&local.device) {
             Some(device) if device.member != member.member_id() => {
                 return Err(SyncError::Rejected(coven_database::DropReason::NotAllowed))
@@ -125,9 +123,16 @@ impl StoreLogSync {
                 .await?;
             }
         }
-        let damages = self.reload_from_snapshots().await?;
-        if let Some(damage) = damages.into_iter().next() {
-            return Err(damage.into());
+        self.reload_from_snapshots().await?;
+        // A reload still waiting, e.g. for history every usable snapshot
+        // lacks, leaves this device unloaded: report its first unmet condition.
+        if let Some(id) = self.pending_reload().await? {
+            let pending = self
+                .database
+                .operation_pending::<crate::PendingRecord>(id)
+                .await?
+                .ok_or(SyncError::ReloadPending(id))?;
+            return Err(SyncError::Pending(Box::new(pending)));
         }
         Ok(())
     }

@@ -137,12 +137,8 @@ impl StoreLogSync {
                     }
                 };
                 let SingleChunkObject::StoreLog { key, .. } = &envelope else {
-                    self.stuck_entry(
-                        *id,
-                        &stored.path,
-                        crate::write_object::invalid("expected a store-log envelope"),
-                    )
-                    .await?;
+                    self.stuck_entry(*id, &stored.path, Refusal::WrongIdentity { cause: None })
+                        .await?;
                     pending_entries.insert(*id);
                     continue;
                 };

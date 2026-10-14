@@ -67,9 +67,12 @@ async fn authenticated_key_copy_reports_are_limited_to_the_posters_member() {
         let bytes = signed_positions(&devices[0], positions.clone());
         let result = crate::posted_positions::open(&bytes, &path, Some(&ring), &log);
         if member == own {
-            assert_eq!(result.unwrap(), positions);
+            assert_eq!(result.unwrap().unwrap(), positions);
         } else {
-            assert!(matches!(result, Err(SyncError::Damaged(_))));
+            assert!(matches!(
+                result,
+                Ok(Err(crate::PendingReason::InvalidPositions(_)))
+            ));
         }
     }
 }
@@ -111,9 +114,12 @@ async fn authenticated_report_paths_are_limited_to_the_posted_store() {
             let bytes = signed_positions(&devices[0], positions.clone());
             let result = open(&bytes, &path, Some(&ring), &log);
             if store == STORE_ID {
-                assert_eq!(result.unwrap(), positions);
+                assert_eq!(result.unwrap().unwrap(), positions);
             } else {
-                assert!(matches!(result, Err(SyncError::Damaged(_))));
+                assert!(matches!(
+                    result,
+                    Ok(Err(crate::PendingReason::InvalidPositions(_)))
+                ));
             }
         }
     }
