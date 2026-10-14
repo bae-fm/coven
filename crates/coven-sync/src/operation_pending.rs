@@ -184,6 +184,15 @@ fn write_wait(
                     .ok_or(coven_database::DbError::DamagedDatabase)?,
             )))
         }
+        coven_database::WriteWait::Sources(missing) => {
+            PendingReason::Waits(Prerequisite::Object(crate::write_seal::path(
+                store,
+                missing
+                    .first()
+                    .ok_or(coven_database::DbError::DamagedDatabase)?
+                    .write,
+            )))
+        }
         coven_database::WriteWait::StoreLog(missing) => {
             PendingReason::Waits(Prerequisite::Object(crate::store_log_object::path(
                 store,

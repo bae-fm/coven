@@ -1,5 +1,5 @@
 name = "covenQueue"
-defaultTargets = ["CovenQueue"]
+defaultTargets = ["CovenQueue", "authoredRunner"]
 
 [[require]]
 name = "covenMerge"
@@ -7,3 +7,7 @@ path = "../merge"
 
 [[lean_lib]]
 name = "CovenQueue"
+
+[[lean_exe]]
+name = "authoredRunner"
+root = "AuthoredRunner"

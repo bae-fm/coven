@@ -257,7 +257,7 @@ async fn a_downloaded_upload_releases_this_devices_owned_copy() {
         device: original.device,
         number: original.number + 1,
     };
-    record.header.had_read = WritePositions(vec![original]);
+    record.header.had_read = WritePositions(vec![]);
     record.header.timestamp = Timestamp::new(
         record.header.timestamp.milliseconds() + 1,
         0,
@@ -281,6 +281,18 @@ async fn a_downloaded_upload_releases_this_devices_owned_copy() {
     ));
     row.change.operation = Operation::Update(columns);
     row.change.generation = 1;
+    *row = db.inspect_writer_schema(|db, schema| {
+        let app = crate::write_rows::AppView::after(db, schema);
+        let store = crate::merge_store::MergeStore::new(db, &app);
+        crate::write_sources::authored(
+            db,
+            &store,
+            row.row.clone(),
+            row.change.clone(),
+            row.old.clone(),
+        )
+        .unwrap()
+    });
     let reference = db.file_ref("files", "7").await.unwrap();
     db.apply_downloaded(record.into()).await.unwrap();
     assert_eq!(local_count(&db, "_coven_device_files"), 0);

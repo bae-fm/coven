@@ -33,6 +33,7 @@ pub mod value;
 mod version;
 mod wire;
 pub mod write;
+pub mod write_sources;
 pub mod write_stream;
 
 #[cfg(any(test, feature = "test-utils"))]

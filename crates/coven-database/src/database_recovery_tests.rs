@@ -110,7 +110,11 @@ async fn rebuilding_converts_older_waiting_writes_or_marks_them_lost() {
             )
             .await
             .unwrap();
-        let records = db.test_queued_writes().await.unwrap();
+        assert_eq!(
+            db.test_queued_writes().await.unwrap(),
+            std::slice::from_ref(&original)
+        );
+        let records = crate::write::tests::records(&db);
         assert_eq!(records.len(), 1);
         let record = &records[0];
         assert_eq!(record.header.position, original.header.position);
@@ -221,7 +225,8 @@ async fn a_failed_rebuild_conversion_retries_from_the_archived_schema() {
             ));
         } else {
             let db = result.unwrap();
-            let records = db.test_queued_writes().await.unwrap();
+            assert_eq!(db.test_queued_writes().await.unwrap(), original);
+            let records = crate::write::tests::records(&db);
             assert_eq!(records.len(), original.len());
             let old = original.last().unwrap();
             let new = records.last().unwrap();
@@ -239,4 +244,44 @@ async fn a_failed_rebuild_conversion_retries_from_the_archived_schema() {
             db.close().await.unwrap();
         }
     }
+}
+
+#[tokio::test]
+async fn recovery_preserves_original_queue_and_its_local_interpretation_separately() {
+    use crate::{
+        tests::TestStore,
+        write::tests::{notes, records, sql, NOTES},
+    };
+    let source_store = TestStore::new();
+    let target_store = TestStore::new();
+    let source = source_store.schema(notes(), NOTES).await.unwrap();
+    sql(&source, "INSERT INTO notes VALUES('n','title','body')")
+        .await
+        .unwrap();
+    let original = source.test_queued_writes().await.unwrap();
+    source.close().await.unwrap();
+    let migrations = || {
+        vec![
+            Migration::sql(1, "notes", NOTES),
+            Migration::sql(2, "rename", "ALTER TABLE notes RENAME COLUMN title TO name").writes(
+                |r| {
+                    r.rename_column("title", "name");
+                    Ok(())
+                },
+            ),
+        ]
+    };
+    let source = source_store
+        .builder(notes(), migrations())
+        .open()
+        .await
+        .unwrap();
+    let target = target_store.builder(vec![], vec![]).open().await.unwrap();
+    source.inspect_writer(|source| {
+        target.inspect_writer(|target| super::salvage(source, target).unwrap())
+    });
+    assert_eq!(records(&target), records(&source));
+    assert_eq!(target.test_queued_writes().await.unwrap()[0], original[0]);
+    source.close().await.unwrap();
+    target.close().await.unwrap();
 }

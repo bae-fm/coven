@@ -162,8 +162,17 @@ pub(crate) fn queue(database: &DatabaseConnection, record: &WriteRecord) -> Resu
             return Err(DbError::AudienceReloading(part.audience.clone()));
         }
         check_membership(database, record.header.position.device, &part.audience)?;
+        for row in &part.rows {
+            crate::write_sources::validate(database, &record.header, row)?;
+        }
     }
-    retain_queue(database, record)
+    retain_queue(database, record)?;
+    for part in &record.parts {
+        for row in &part.rows {
+            crate::write_sources::admit(database, &record.header, &row.row, None)?;
+        }
+    }
+    Ok(())
 }
 
 /// Check row writes and file attachments against the same committed membership.
@@ -201,6 +210,12 @@ pub(crate) fn retain_queue(
     database: &DatabaseConnection,
     record: &WriteRecord,
 ) -> Result<(), DbError> {
+    for part in &record.parts {
+        for row in &part.rows {
+            crate::write_sources::retain(database, &record.header, row)?;
+        }
+        crate::write_sources::complete(database, &record.header, &part.audience)?;
+    }
     crate::retained_writes::record(database, record)?;
     let encoder = encoded(WriteEncoder::new(record))?;
     let bytes = plaintext(database, encoder)?;

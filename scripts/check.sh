@@ -274,6 +274,12 @@ proofs() {
         COVEN_MERGE_LEAN="$runner" cargo test -p coven-database --all-features migration_differential_counterexample -- --ignored
     fi
 
+    if proof_selected merge || proof_selected queue || crate_selected coven-database; then
+        runner=$(runner queue authoredRunner)
+        step "Rust / Lean authored source evidence and data validity"
+        COVEN_AUTHORED_LEAN="$runner" cargo test -p coven-database --all-features authored_sources_differential -- --ignored
+    fi
+
     if proof_selected storelog || crate_selected coven-sync; then
         runner=$(runner storelog storelogRunner)
         step "Rust / Lean CurrentReplay agreement"

@@ -131,14 +131,16 @@ pub(crate) fn changes(
                 assert_eq!(generation % 2, 1, "visible row has no present generation");
                 changes.insert(
                     row.clone(),
-                    RowChange {
+                    crate::write_sources::authored(
+                        database,
+                        stored,
                         row,
-                        change: Change {
+                        Change {
                             generation,
                             operation: Operation::Delete,
                         },
-                        old: old.values.clone(),
-                    },
+                        old.values.clone(),
+                    )?,
                 );
             }
         }
@@ -199,14 +201,16 @@ pub(crate) fn changes(
             };
             changes.insert(
                 row.clone(),
-                RowChange {
+                crate::write_sources::authored(
+                    database,
+                    stored,
                     row,
-                    change: Change {
+                    Change {
                         generation,
                         operation,
                     },
-                    old: old_values,
-                },
+                    old_values,
+                )?,
             );
         }
     }
@@ -217,19 +221,21 @@ pub(crate) fn changes(
         }
         changes.insert(
             old.clone(),
-            RowChange {
-                row: old.clone(),
-                change: Change {
+            crate::write_sources::authored(
+                database,
+                stored,
+                old.clone(),
+                Change {
                     generation: state.state.generation(),
                     operation: Operation::Delete,
                 },
-                old: state
+                state
                     .state
                     .cells()
                     .iter()
                     .map(|(n, c)| (n.clone(), c.value.value.clone()))
                     .collect(),
-            },
+            )?,
         );
         let generation = generation(database, new)?;
         let values = state
@@ -246,14 +252,18 @@ pub(crate) fn changes(
         } else {
             (Operation::Insert(values), BTreeMap::new())
         };
-        changes.entry(new.clone()).or_insert(RowChange {
-            row: new.clone(),
-            change: Change {
-                generation,
-                operation,
-            },
-            old: old_values,
-        });
+        if let std::collections::btree_map::Entry::Vacant(entry) = changes.entry(new.clone()) {
+            entry.insert(crate::write_sources::authored(
+                database,
+                stored,
+                new.clone(),
+                Change {
+                    generation,
+                    operation,
+                },
+                old_values,
+            )?);
+        }
     }
     for key in validate {
         if let Some(row) = after.row(&key)? {

@@ -144,6 +144,10 @@ pub(crate) fn insert(n: u64, r: usize) -> WriteRecord {
                     ),
                 },
                 old: BTreeMap::new(),
+                sources: coven_format::write_sources::WriteSources {
+                    generation: None,
+                    setters: BTreeMap::new(),
+                },
             }],
             dismissals: Vec::new(),
         }],
@@ -211,6 +215,13 @@ impl ReloadHistory {
                     }
                 }
                 target.change.generation = state.generation();
+                target.sources.generation =
+                    state.generations().get(&state.generation()).map(|write| {
+                        coven_format::write_sources::ChangeId {
+                            write: *write,
+                            row: target.row.clone(),
+                        }
+                    });
                 if state.present() {
                     if rng.pick(4) == 0 {
                         target.change.operation = Operation::Delete;
@@ -242,6 +253,27 @@ impl ReloadHistory {
                             .unwrap()
                             .remove(0);
                 }
+                target.sources.setters = state
+                    .cells()
+                    .iter()
+                    .filter(|(column, _)| match &target.change.operation {
+                        Operation::Insert(_) => false,
+                        Operation::Update(columns) => columns.contains_key(*column),
+                        Operation::Delete => true,
+                    })
+                    .map(|(column, cell)| {
+                        (
+                            column.clone(),
+                            coven_format::write_sources::CellSource {
+                                change: coven_format::write_sources::ChangeId {
+                                    write: cell.write,
+                                    row: target.row.clone(),
+                                },
+                                column: column.clone(),
+                            },
+                        )
+                    })
+                    .collect();
             }
             write.header.had_read = WritePositions(past.into_iter().collect());
             writes.push(write);

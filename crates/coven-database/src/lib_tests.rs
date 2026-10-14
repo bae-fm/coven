@@ -204,6 +204,11 @@ pub(crate) async fn remote_update(
 
 pub(crate) async fn remote_write(database: &crate::Database, row: coven_format::write::RowChange) {
     use coven_format::write::{WriteHeader, WritePart, WriteRecord};
+    let row = database.inspect_writer_schema(|db, schema| {
+        let app = crate::write_rows::AppView::after(db, schema);
+        let store = crate::merge_store::MergeStore::new(db, &app);
+        crate::write_sources::authored(db, &store, row.row, row.change, row.old).unwrap()
+    });
     let state = database.sync_state(vec![]).await.unwrap();
     let previous = crate::write::tests::records(database)
         .pop()

@@ -197,6 +197,11 @@
     operation   u8                     0 insert · 1 update · 2 delete
     columns     map<name, ColumnValue> new values; insert and update only, nonempty
     old         map<name, Value>       insert none; update the same columns; delete any
+    generation_source option<ChangeId> absent exactly at generation zero
+    replaced_setters  map<name, CellSource>
+
+    ChangeId   = write:WriteId | row:RowId
+    CellSource = change:ChangeId | column:name
     ```
 
   - A delete omits the `columns` field completely; every operation carries
@@ -216,7 +221,18 @@
     or cell in that incarnation. Unavailable evidence waits; invalid evidence
     is refused. Numeric generations, old scalar values, read frontiers and
     the current canonical generation winner cannot substitute for it.
-    The compact fields above do not themselves encode these source identities.
+    `ChangeId.row` and `CellSource.column` use the source's original authored
+    names, before conversion. Setter map keys use this change's authored column
+    names, in strictly increasing name order. An insert has no replaced setters;
+    an update includes each previously set cell it replaces, and a delete includes
+    every current cell setter independently of its `old` scalar map. A cell never
+    set in the author's merge state has no setter (the model's `St.cell = none`).
+    Generation is the first source role, followed by setter map order; repeated
+    source identities in distinct roles are retained. Schema name matching tracks
+    the original table and column identities across explicit renames, never scalar
+    equality or the receiver's current generation winner. The authenticated original
+    header and row frame, including parent links, and the row's own admission are
+    retained independently of received interpretations and dismissible loss values.
   - Source evidence and received frozen-change representations must preserve
     original write, row and column identities through conversion and renaming.
     A frozen dependent change keeps its generation, operation, old names and

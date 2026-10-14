@@ -125,7 +125,7 @@ pub(crate) fn apply<R: Read>(
                 }
                 Source::Queue(rowid) => database
                     .query_row(
-                        "SELECT record FROM _coven_uploads WHERE rowid=?1",
+                        "SELECT coalesce(interpretation,record) FROM _coven_uploads WHERE rowid=?1",
                         [rowid],
                         |r| {
                             decoded(coven_format::write_stream::decode_plaintext(
@@ -138,6 +138,9 @@ pub(crate) fn apply<R: Read>(
             if (supplied && queued.contains(&write.header.position))
                 || crate::download::positions(database)?.covers(write.header.position)
             {
+                if supplied {
+                    crate::download::retain_sources(database, &write)?;
+                }
                 // Validate supplied copies, but replay the queue's current plaintext
                 // (which an app migration may have converted) from the queue itself.
                 crate::write_commit::retain_metadata(
@@ -157,12 +160,28 @@ pub(crate) fn apply<R: Read>(
                 }
                 .into());
             }
+            if supplied {
+                crate::download::retain_sources(database, &write)?;
+            }
             let write = coverage.uncovered(write)?;
-            affected.extend(crate::download::apply_opened(
-                database, schema, write, deleted,
-            )?);
+            if supplied {
+                affected.extend(crate::download::apply_opened(
+                    database, schema, write, deleted,
+                )?);
+            } else {
+                let record = crate::download::interpret(database, schema, write)?;
+                affected.extend(crate::download::apply_interpreted(
+                    database, schema, &record, deleted,
+                )?);
+            }
             Ok(())
         })();
+        let result = match result {
+            Err(DbError::MissingWriteSources(sources)) => {
+                Err(SnapshotError::WriteWaiting(WriteWait::Sources(sources)).into())
+            }
+            result => result,
+        };
         match downloaded {
             Some(_)
                 if matches!(

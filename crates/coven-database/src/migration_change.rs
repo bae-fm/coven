@@ -20,6 +20,7 @@ pub struct RowChange {
     pub op: ChangeOp,
     /// The changed columns, including old and new values.
     pub columns: Vec<ColumnChange>,
+    original: WrittenRow,
 }
 
 impl RowChange {
@@ -88,15 +89,16 @@ impl RowChange {
             ),
             op,
             columns,
+            original: row.clone(),
         })
     }
 
     pub(crate) fn write(
         &self,
-        original: &WrittenRow,
         schema: &Schema,
         names: &MigrationMatch,
     ) -> Result<WrittenRow, DbError> {
+        let original = &self.original;
         let table = table(schema, &self.table)?;
         let renames = self
             .sources()
@@ -201,7 +203,22 @@ impl RowChange {
                 actual: key.len(),
             });
         }
+        let original_op = match original.change.operation {
+            Operation::Insert(_) => ChangeOp::Insert,
+            Operation::Update(_) => ChangeOp::Update,
+            Operation::Delete => ChangeOp::Delete,
+        };
         let key = crate::write_rows::equality_key(&key, &primary.collations)?;
+        if self.op != original_op
+            || key != original.row.key
+            || names.tables.get(&original.row.table) != Some(&table.name)
+        {
+            return Err(coven_format::Error::Invalid {
+                field: "converted row identity or operation",
+                rule: coven_format::error::Rule::ColumnOperation,
+            }
+            .into());
+        }
         Ok(WrittenRow {
             row: coven_merge::RowId {
                 table: table.name.clone(),
@@ -217,6 +234,27 @@ impl RowChange {
                 },
             },
             old,
+            sources: coven_format::write_sources::WriteSources {
+                generation: original.sources.generation.clone(),
+                setters: original
+                    .sources
+                    .setters
+                    .iter()
+                    .filter_map(|(name, source)| {
+                        let mapped = self
+                            .columns
+                            .iter()
+                            .find(|c| c.source.as_ref().is_some_and(|s| s.name == *name));
+                        match mapped {
+                            Some(column) => Some((column.name.clone(), source.clone())),
+                            None if self.op == ChangeOp::Delete => {
+                                Some((name.clone(), source.clone()))
+                            }
+                            None => None,
+                        }
+                    })
+                    .collect(),
+            },
         })
     }
 

@@ -522,7 +522,8 @@ async fn a_chunked_waiting_record_converts_and_reopens_as_one_write() {
     let migrations = || vec![initial(), rename(2, "title", "name")];
     let db = store.builder(notes(), migrations()).open().await.unwrap();
     let bytes = queued_bytes(&db);
-    let converted = decode_plaintext(&bytes[0]).unwrap();
+    assert_eq!(decode_plaintext(&bytes[0]).unwrap(), original);
+    let converted = records(&db).remove(0);
     assert_eq!(converted.header.position, original.header.position);
     assert_eq!(converted.header.timestamp, original.header.timestamp);
     assert_eq!(converted.header.schema_version, 2);
@@ -681,6 +682,23 @@ async fn a_late_converted_title_competes_with_the_title_setter_and_leaves_the_sl
                     ),
                 },
                 old: [("name".into(), WireValue::Text("title".into()))].into(),
+                sources: coven_format::write_sources::WriteSources {
+                    generation: Some(coven_format::write_sources::ChangeId {
+                        write: original[0].header.position,
+                        row: row.clone(),
+                    }),
+                    setters: [(
+                        "name".into(),
+                        coven_format::write_sources::CellSource {
+                            change: coven_format::write_sources::ChangeId {
+                                write: original[0].header.position,
+                                row: row.clone(),
+                            },
+                            column: "title".into(),
+                        },
+                    )]
+                    .into(),
+                },
             }],
         }],
     };

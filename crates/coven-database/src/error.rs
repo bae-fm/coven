@@ -202,6 +202,10 @@ pub enum DbError {
         #[source]
         error: coven_merge::MergeError,
     },
+    /// Original row-change evidence is unavailable. Receipt waits without
+    /// consuming the position; local authoring rolls back instead of guessing.
+    #[error("missing original write sources: {0:?}")]
+    MissingWriteSources(Vec<coven_format::write_sources::ChangeId>),
     /// A waiting record or its conversion violates the write format (E13).
     #[error(transparent)]
     WriteFormat(coven_format::Error),

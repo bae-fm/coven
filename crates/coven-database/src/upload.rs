@@ -1,4 +1,4 @@
-//! A waiting write's plaintext, format and keys fixed by its first upload attempt.
+//! Original authored plaintext, with format and keys fixed by its first upload attempt.
 
 use crate::sqlite::DatabaseConnection;
 use crate::write_encoding::{counter, encoded};
@@ -20,7 +20,7 @@ pub struct WaitingUpload<'a> {
     pub header_frame: Vec<u8>,
     /// Each audience's record stream, in header order, cut into 64 KiB chunks.
     pub parts: UploadParts<'a>,
-    /// Format and keys fixed by the first attempt; absence permits conversion.
+    /// Format and keys fixed by the first attempt; plaintext is fixed at commit.
     pub keys: Option<WriteObjectPrefix>,
 }
 

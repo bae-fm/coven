@@ -15,6 +15,7 @@ pub(crate) struct WriteSchema {
     pub(crate) versions: std::ops::RangeInclusive<u32>,
     pub(crate) declarations: Vec<SyncedTable>,
     pub(crate) rules: BTreeMap<String, TableRules>,
+    pub(crate) conversions: BTreeMap<u32, crate::migration_receive::ReceivedMigration>,
 }
 
 impl WriteSchema {
@@ -51,6 +52,7 @@ impl WriteSchema {
             )?..=db.schema_version()?,
             declarations,
             rules,
+            conversions: BTreeMap::new(),
         };
         Ok(result)
     }

@@ -63,6 +63,8 @@ pub enum WriteWait {
     StoreLog(Vec<crate::EntryId>),
     /// These positions must have applied, including the author's preceding write.
     Writes(Vec<WriteId>),
+    /// These original row changes are unavailable even if their positions passed.
+    Sources(Vec<coven_format::write_sources::ChangeId>),
     /// The app must support this schema version.
     SchemaVersion(u32),
     /// The local breaking migration awaits publication and snapshot reload.
@@ -90,7 +92,7 @@ pub(crate) fn apply(
     download: DownloadedWrite,
     files: &crate::file_write::FileWrite<'_>,
 ) -> Result<ApplyOutcome, DbError> {
-    database.transaction(|database| {
+    source_wait(database.transaction(|database| {
         for part in &download.parts {
             if let DownloadedPart::Opened(part) = part {
                 for dismissal in &part.dismissals {
@@ -101,6 +103,15 @@ pub(crate) fn apply(
         let positions = positions(database)?;
         let header = &download.header;
         if positions.covers(header.position) {
+            crate::write_commit::retain_metadata(
+                database,
+                &coven_format::snapshot_rows::AppliedWrite {
+                    id: header.position,
+                    timestamp: header.timestamp,
+                    had_read: header.had_read.clone(),
+                },
+            )?;
+            retain_sources(database, &download)?;
             return Ok(ApplyOutcome::AlreadyApplied);
         }
         if let Some(wait) = prerequisite(database, header)? {
@@ -122,7 +133,16 @@ pub(crate) fn apply(
         files.retain_rows(affected, &deleted)?;
         files.before_commit()?;
         Ok(ApplyOutcome::Applied)
-    })
+    }))
+}
+
+pub(crate) fn source_wait(result: Result<ApplyOutcome, DbError>) -> Result<ApplyOutcome, DbError> {
+    match result {
+        Err(DbError::MissingWriteSources(sources)) => {
+            Ok(ApplyOutcome::Waiting(WriteWait::Sources(sources)))
+        }
+        other => other,
+    }
 }
 
 pub(crate) fn prerequisite(
@@ -185,13 +205,77 @@ pub(crate) fn apply_opened(
     deleted: &BTreeMap<CircleId, crate::EntryId>,
 ) -> Result<BTreeSet<crate::write_rows::AppKey>, DbError> {
     let record = accepted(database, schema, download)?;
+    apply_interpreted(database, schema, &record, deleted)
+}
+
+/// Merge a locally derived interpretation whose original evidence is retained.
+pub(crate) fn apply_interpreted(
+    database: &DatabaseConnection,
+    schema: &WriteSchema,
+    record: &WriteRecord,
+    deleted: &BTreeMap<CircleId, crate::EntryId>,
+) -> Result<BTreeSet<crate::write_rows::AppKey>, DbError> {
     let visible = AppView::after(database, schema);
     let store = MergeStore::new(database, &visible);
     crate::write_apply::WriteApply::new(database, schema, &store, &visible, &visible, deleted)
-        .apply(Some(&record), BTreeSet::new())
+        .apply(Some(record), BTreeSet::new())
+}
+
+/// Authenticated covered writes may supply missing originals without repeating
+/// any app effect. This also checks originals supplied alongside snapshot gaps.
+pub(crate) fn retain_sources(
+    database: &DatabaseConnection,
+    download: &DownloadedWrite,
+) -> Result<(), DbError> {
+    retain_source_rows(database, download)?;
+    for part in &download.parts {
+        if let DownloadedPart::Opened(part) = part {
+            crate::write_sources::complete(database, &download.header, &part.audience)?;
+        }
+    }
+    Ok(())
+}
+
+/// A streamed fragment cannot establish absence of other original rows.
+pub(crate) fn retain_source_rows(
+    database: &DatabaseConnection,
+    download: &DownloadedWrite,
+) -> Result<(), DbError> {
+    for part in &download.parts {
+        if let DownloadedPart::Opened(part) = part {
+            for row in &part.rows {
+                crate::write_sources::validate(database, &download.header, row)?;
+                crate::write_sources::retain(database, &download.header, row)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn source_cause(
+    boundaries: &[crate::write_boundary::WriteBoundary],
+    header: &WriteHeader,
+    part: &WritePart,
+) -> Option<LostWriteCause> {
+    match header.disposition {
+        WriteDisposition::Migration => None,
+        WriteDisposition::Lost(version) => Some(LostWriteCause::SchemaChange(version)),
+        WriteDisposition::Apply => boundaries
+            .iter()
+            .find_map(|boundary| boundary.excludes(header, part)),
+    }
 }
 
 pub(crate) fn accepted(
+    database: &DatabaseConnection,
+    schema: &WriteSchema,
+    download: DownloadedWrite,
+) -> Result<WriteRecord, DbError> {
+    retain_sources(database, &download)?;
+    interpret(database, schema, download)
+}
+
+pub(crate) fn interpret(
     database: &DatabaseConnection,
     schema: &WriteSchema,
     download: DownloadedWrite,
@@ -209,14 +293,45 @@ pub(crate) fn accepted(
     };
     let boundaries = crate::write_boundary::WriteBoundary::load(database)?;
     let mut kept = Vec::new();
-    for part in record.parts {
-        let cause = match record.header.disposition {
-            WriteDisposition::Migration => continue,
-            WriteDisposition::Lost(version) => Some(LostWriteCause::SchemaChange(version)),
-            WriteDisposition::Apply => boundaries
+    for mut part in record.parts {
+        if record.header.disposition == WriteDisposition::Migration {
+            continue;
+        }
+        let originals: Vec<_> = part.rows.iter().map(|row| row.row.clone()).collect();
+        let mut cause = source_cause(&boundaries, &record.header, &part);
+        if matches!(cause, Some(LostWriteCause::SchemaChange(_)))
+            && record.header.disposition == WriteDisposition::Apply
+        {
+            let version = boundaries
                 .iter()
-                .find_map(|boundary| boundary.excludes(&record.header, &part)),
-        };
+                .filter_map(|boundary| match boundary.excludes(&record.header, &part) {
+                    Some(LostWriteCause::SchemaChange(version)) => Some(version),
+                    _ => None,
+                })
+                .max()
+                .expect("schema exclusion has a boundary");
+            if !boundaries.iter().any(|b| {
+                matches!(
+                    b.excludes(&record.header, &part),
+                    Some(LostWriteCause::Reset(_))
+                )
+            }) && crate::migration_receive::available(
+                &schema.conversions,
+                record.header.schema_version,
+                version,
+            ) {
+                crate::migration_receive::convert(
+                    &schema.conversions,
+                    record.header.schema_version,
+                    version,
+                    &mut part,
+                )?;
+                cause = None;
+            }
+        }
+        for row in originals {
+            crate::write_sources::admit(database, &record.header, &row, cause)?;
+        }
         if let Some(cause) = cause {
             exclude(database, schema, &record.header, &part, cause)?;
             if !part.dismissals.is_empty() {
@@ -254,7 +369,7 @@ fn exclude_row(
     reason: LostWriteCause,
     change: &coven_format::write::RowChange,
 ) -> Result<(), DbError> {
-    let values = match &change.change.operation {
+    let mut values = match &change.change.operation {
         Operation::Insert(values) | Operation::Update(values) => values.clone(),
         Operation::Delete => change
             .old
@@ -270,6 +385,9 @@ fn exclude_row(
             })
             .collect(),
     };
+    for value in values.values_mut() {
+        value.parents.clear();
+    }
     let loss = coven_format::loss::Loss {
         row: change.row.clone(),
         generation: change.change.generation,

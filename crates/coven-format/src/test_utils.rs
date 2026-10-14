@@ -100,6 +100,29 @@ pub fn write() -> WriteRecord {
                     operation: Operation::Update(BTreeMap::from([("x".into(), new)])),
                 },
                 old: BTreeMap::from([("x".into(), Value::Integer(1))]),
+                sources: crate::write_sources::WriteSources {
+                    generation: Some(crate::write_sources::ChangeId {
+                        write: WriteId {
+                            device: DeviceId(1),
+                            number: 1,
+                        },
+                        row: row(),
+                    }),
+                    setters: [(
+                        "x".into(),
+                        crate::write_sources::CellSource {
+                            change: crate::write_sources::ChangeId {
+                                write: WriteId {
+                                    device: DeviceId(2),
+                                    number: 1,
+                                },
+                                row: row(),
+                            },
+                            column: "x".into(),
+                        },
+                    )]
+                    .into(),
+                },
             }],
         }],
     }

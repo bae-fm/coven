@@ -142,6 +142,13 @@ async fn active_loss_records_require_their_merge_history_and_removed_rows_can_re
         assert_eq!(contents(target), original, "damage {damage}");
     }
     let reads = measured_load(a, target).await;
+    for change in [&initial, &losing, &records(c)[0]] {
+        target
+            .apply_downloaded(change.clone().into())
+            .await
+            .unwrap();
+    }
+
     sql(extra, "UPDATE notes SET body=2").await.unwrap();
     let additional = records(extra)[0].clone();
     a.apply_downloaded(additional.clone().into()).await.unwrap();
@@ -151,6 +158,12 @@ async fn active_loss_records_require_their_merge_history_and_removed_rows_can_re
         reads,
         "additional losses must not reload row history"
     );
+    for change in [&initial, &losing, &records(c)[0]] {
+        larger_target
+            .apply_downloaded(change.clone().into())
+            .await
+            .unwrap();
+    }
     target.apply_downloaded(additional.into()).await.unwrap();
     sql(c, "UPDATE notes SET body=5").await.unwrap();
     let restoring = records(c).pop().unwrap();

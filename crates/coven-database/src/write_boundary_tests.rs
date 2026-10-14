@@ -505,7 +505,14 @@ async fn repeated_boundaries_keep_their_original_coverage_and_application_order(
             )
             .await
             .is_err());
-        db.apply_downloaded(writes[1].clone().into()).await.unwrap();
+        assert_eq!(
+            db.apply_downloaded(writes[0].clone().into()).await.unwrap(),
+            ApplyOutcome::AlreadyApplied
+        );
+        assert_eq!(
+            db.apply_downloaded(writes[1].clone().into()).await.unwrap(),
+            ApplyOutcome::Applied
+        );
         assert_eq!(count(&db, "_coven_boundaries"), 2);
         assert_eq!(count(&db, "notes"), 0);
         let losses = db.lost_values().await.unwrap();

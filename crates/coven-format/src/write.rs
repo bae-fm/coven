@@ -131,8 +131,10 @@ pub struct RowChange {
     /// Previous SQL values: empty on insert, matching updated columns on update,
     /// and optionally populated on delete. SQL NULL is a value, not absence.
     pub old: BTreeMap<String, Value>,
+    /// Authenticated original generation and cell sources, independent of scalars.
+    pub sources: crate::write_sources::WriteSources,
 }
-wire_struct!(RowChange, row, change, old => crate::wire::get_name_map);
+wire_struct!(RowChange, row, change, old => crate::wire::get_name_map, sources);
 impl RowChange {
     /// Validate and encode one bounded row-change frame (kind 2).
     pub fn encode(&self) -> Result<Vec<u8>, Error> {
@@ -170,6 +172,15 @@ impl RowChange {
             name(n)?;
             value.validate()?;
         }
+        self.sources.validate(self.change.generation)?;
+        let valid = match &self.change.operation {
+            Operation::Insert(_) => self.sources.setters.is_empty(),
+            Operation::Update(columns) => {
+                self.sources.setters.keys().all(|n| columns.contains_key(n))
+            }
+            Operation::Delete => true,
+        };
+        require(valid, "replaced setters", Rule::ColumnOperation)?;
         Ok(())
     }
 }
@@ -253,6 +264,9 @@ impl WriteRecord {
         )?;
         for part in &self.parts {
             part.validate()?;
+            for row in &part.rows {
+                row.sources.validate_past(&self.header)?;
+            }
             for dismissal in &part.dismissals {
                 dismissal.validate_past(&self.header)?;
             }

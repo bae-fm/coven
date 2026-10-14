@@ -361,3 +361,52 @@ fn stored_length_refuses_invalid_boundaries_and_overflow_without_allocating() {
     assert!(sealed_length(crate::FRAME_PREFIX_LEN, &[0]).is_err());
     assert!(sealed_length(crate::FRAME_PREFIX_LEN, &[u64::MAX]).is_err());
 }
+
+#[test]
+fn changing_only_source_evidence_changes_the_authenticated_object() {
+    let pieces = object();
+    let path = "10101010-1010-1010-1010-101010101010/devices/1/3";
+    let signature = Signature::from_bytes(pieces.last().unwrap().as_slice().try_into().unwrap());
+    let mut altered = test_utils::chunked_write();
+    // Keep frame lengths and scalar values identical; change only the original setter.
+    let row = &mut altered.parts[0].rows[0];
+    row.sources.setters.get_mut("x").unwrap().change.write =
+        row.sources.generation.as_ref().unwrap().write;
+    let encoder = WriteEncoder::new(&altered).unwrap();
+    let prefix = &pieces[0];
+    let mut hash = ObjectHasher::new();
+    hash.update(prefix);
+    hash.update(&pieces[1]);
+    let mut layout = WriteObjectPrefix::decode(prefix)
+        .unwrap()
+        .opened_header(
+            encoder.header_frame(),
+            encoder
+                .header()
+                .parts
+                .iter()
+                .map(|p| p.plaintext_length)
+                .collect(),
+        )
+        .unwrap();
+    for part in 0..altered.parts.len() {
+        for plaintext in encoder.part_chunks(part).unwrap() {
+            let coordinate = layout.next_chunk().unwrap();
+            let sealed = key(part as u8 + 1)
+                .derive()
+                .seal_object_chunk(
+                    path,
+                    prefix,
+                    coordinate.section,
+                    coordinate.index,
+                    &plaintext.unwrap(),
+                )
+                .unwrap();
+            hash.update(&layout.encode_chunk(&sealed).unwrap());
+        }
+    }
+    assert!(test_utils::member()
+        .signing
+        .verify_object(path, &hash.finish(), &signature)
+        .is_err());
+}

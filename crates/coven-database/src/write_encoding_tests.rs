@@ -320,7 +320,7 @@ async fn far_future_snapshot_and_tail_apply_with_their_causes_and_preserve_queue
             ))
             .await,
         Err(crate::DbError::Snapshot(
-            SnapshotError::MissingWrites { .. }
+            SnapshotError::MissingWrites { .. } | SnapshotError::WriteWaiting(_)
         ))
     ));
     assert_eq!(contents(&receiver), before);
@@ -340,7 +340,7 @@ async fn far_future_snapshot_and_tail_apply_with_their_causes_and_preserve_queue
     receiver
         .load_snapshots(SnapshotReload::new(
             vec![snapshot.input()],
-            vec![stream(&writes[2]), stream(&writes[1])],
+            writes.iter().rev().map(stream).collect(),
         ))
         .await
         .unwrap();
@@ -432,7 +432,7 @@ async fn lean_differential_clocks() {
                     );
                     db.load_snapshots(SnapshotReload::new(
                         vec![snapshot.input()],
-                        Vec::<crate::DownloadedWriteStream<std::io::Cursor<Vec<u8>>>>::new(),
+                        writes.iter().map(stream).collect(),
                     ))
                     .await
                     .unwrap();
@@ -559,9 +559,38 @@ async fn queued_row_frames_pin_operation_tags_and_delete_field_omission() {
         ],
     ];
     assert_eq!(records.len(), expected.len());
-    for (record, expected) in records.iter().zip(expected) {
+    let source = |number: u64| {
+        // Device 2, original table t, ordered key k, store audience.
+        let mut bytes = vec![0, 0, 0, 0, 0, 0, 0, 2];
+        bytes.extend(number.to_be_bytes());
+        bytes.extend([0, 0, 0, 1, b't', 0, 0, 0, 4, 32, b'k', 0, 0, 0]);
+        bytes
+    };
+    for (index, (record, expected)) in records.iter().zip(expected).enumerate() {
+        let mut expected = expected.to_vec();
+        if index == 0 {
+            expected.extend([0, 0, 0, 0, 0]);
+        } else {
+            expected.push(1);
+            expected.extend(source(1));
+            let setters: &[(&[u8], u64)] = if index == 1 {
+                &[(b"v", 1)]
+            } else {
+                &[(b"id", 1), (b"v", 2)]
+            };
+            expected.extend((setters.len() as u32).to_be_bytes());
+            for (column, write) in setters {
+                expected.extend((column.len() as u32).to_be_bytes());
+                expected.extend(*column);
+                expected.extend(source(*write));
+                expected.extend((column.len() as u32).to_be_bytes());
+                expected.extend(*column);
+            }
+        }
+        let length = (expected.len() - 7) as u32;
+        expected[3..7].copy_from_slice(&length.to_be_bytes());
         let header = coven_format::frame_length(record).unwrap();
-        assert_eq!(&record[header..], *expected);
+        assert_eq!(&record[header..], expected);
     }
     db.close().await.unwrap();
 }

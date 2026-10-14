@@ -612,3 +612,59 @@ fn lean_differential_access_rejects_invalid_inputs() {
         assert!(!output.stderr.is_empty());
     }
 }
+
+#[tokio::test]
+async fn missing_original_source_is_reported_as_a_write_object_prerequisite() {
+    let storage = storage();
+    let mut a = device(storage.clone(), 1, member(1), store(1)).await;
+    a.create(key(1)).await;
+    let id =
+        a.db.start_operation(StoreLogSync::migration_operation(2).unwrap())
+            .await
+            .unwrap();
+    let record = a.db.operation(id).await.unwrap().unwrap();
+    let source = coven_format::write_sources::ChangeId {
+        write: coven_merge::WriteId {
+            device: DeviceId(77),
+            number: 3,
+        },
+        row: coven_merge::RowId {
+            table: "notes".into(),
+            key: coven_format::key::encode_key(&[coven_format::value::Value::Text("n".into())])
+                .unwrap(),
+            audience: Audience::Store,
+        },
+    };
+    a.sync
+        .record_operation_error(
+            &record,
+            &SyncError::Database(coven_database::DbError::Snapshot(
+                coven_database::SnapshotError::WriteWaiting(coven_database::WriteWait::Sources(
+                    vec![source.clone()],
+                )),
+            )),
+        )
+        .await
+        .unwrap();
+    let expected = PendingReason::Waits(Prerequisite::Object(crate::write_seal::path(
+        store(1),
+        source.write,
+    )));
+    assert_eq!(
+        a.db.operation_pending::<PendingRecord>(id)
+            .await
+            .unwrap()
+            .unwrap()
+            .reason,
+        expected
+    );
+    a.restart(storage).await;
+    assert_eq!(
+        a.db.operation_pending::<PendingRecord>(id)
+            .await
+            .unwrap()
+            .unwrap()
+            .reason,
+        expected
+    );
+}

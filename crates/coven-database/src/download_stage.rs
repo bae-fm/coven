@@ -56,14 +56,12 @@ pub(crate) fn frame(
             return Ok(());
         }
     }
-    let record = crate::download::accepted(
-        database,
-        schema,
-        crate::DownloadedWrite {
-            header: header.clone(),
-            parts: vec![crate::DownloadedPart::Opened(part)],
-        },
-    )?;
+    let download = crate::DownloadedWrite {
+        header: header.clone(),
+        parts: vec![crate::DownloadedPart::Opened(part)],
+    };
+    crate::download::retain_source_rows(database, &download)?;
+    let record = crate::download::interpret(database, schema, download)?;
     let store = MergeStore::from_staged(database, &schema.schema);
     let updates = store.apply(&record)?;
     crate::write_commit::commit(database, &record, &store, &updates)?;

@@ -118,6 +118,10 @@ async fn file_loss_fixture() -> (
                     ])),
                 },
                 old: BTreeMap::new(),
+                sources: coven_format::write_sources::WriteSources {
+                    generation: None,
+                    setters: BTreeMap::new(),
+                },
             }],
         }],
     };

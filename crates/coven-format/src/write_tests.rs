@@ -71,6 +71,13 @@ fn merge_operations_own_generation_checks_and_preserve_old_values() {
             operation,
         };
         row.old = old;
+        if generation == 0 {
+            row.sources.generation = None;
+        }
+        if matches!(row.change.operation, Operation::Insert(_)) {
+            row.sources.setters.clear();
+        }
+
         assert_eq!(
             decode_plaintext(&test_utils::write_plaintext(&write).unwrap()).unwrap(),
             write
@@ -231,5 +238,92 @@ fn only_migration_writes_have_no_parts() {
             field: "migration write parts",
             rule: Rule::StreamLength,
         },
+    );
+}
+
+#[test]
+fn source_presence_reads_and_replaced_roles_are_checked_by_both_codecs() {
+    let mut missing = test_utils::write();
+    missing.parts[0].rows[0].sources.generation = None;
+    refuses(
+        missing,
+        Error::Invalid {
+            field: "generation source",
+            rule: Rule::Generation,
+        },
+    );
+    let mut unread = test_utils::write();
+    unread.parts[0].rows[0]
+        .sources
+        .generation
+        .as_mut()
+        .unwrap()
+        .write = unread.header.position;
+    refuses(
+        unread,
+        Error::Invalid {
+            field: "source read",
+            rule: Rule::Coverage,
+        },
+    );
+    let mut wrong_role = test_utils::write();
+    let row = &mut wrong_role.parts[0].rows[0];
+    row.sources
+        .setters
+        .insert("absent".into(), row.sources.setters["x"].clone());
+    refuses(
+        wrong_role,
+        Error::Invalid {
+            field: "replaced setters",
+            rule: Rule::ColumnOperation,
+        },
+    );
+}
+
+#[test]
+fn source_roles_are_canonical_and_repeated_identities_are_preserved() {
+    let mut write = test_utils::write();
+    let row = &mut write.parts[0].rows[0];
+    row.change.operation = Operation::Delete;
+    row.old.clear();
+    let change = row.sources.generation.clone().unwrap();
+    let setter = crate::write_sources::CellSource {
+        change: change.clone(),
+        column: "original".into(),
+    };
+    row.sources.setters = BTreeMap::from([("b".into(), setter.clone()), ("a".into(), setter)]);
+    assert_eq!(
+        row.sources.changes().collect::<Vec<_>>(),
+        vec![&change, &change, &change]
+    );
+    let sources = encode_frame(99, &row.sources).unwrap();
+    let generation = encode_frame(99, &row.sources.generation).unwrap();
+    let encoded = row.encode().unwrap();
+    assert!(encoded.ends_with(&sources[7..]));
+    assert_eq!(RowChange::decode(&encoded).unwrap(), *row);
+    let mut malformed = encoded.clone();
+    let source_offset = encoded.len() - (sources.len() - 7);
+    // Move the first setter key after the second: the map must refuse this order.
+    let first_name = source_offset + (generation.len() - 7) + 4 + 4;
+    assert_eq!(malformed[first_name], b'a');
+    malformed[first_name] = b'c';
+    assert!(matches!(
+        RowChange::decode(&malformed),
+        Err(Error::Invalid {
+            rule: Rule::Order,
+            ..
+        })
+    ));
+    malformed[first_name] = b'b';
+    assert!(matches!(
+        RowChange::decode(&malformed),
+        Err(Error::Invalid {
+            rule: Rule::Order,
+            ..
+        })
+    ));
+    assert_eq!(
+        decode_plaintext(&test_utils::write_plaintext(&write).unwrap()).unwrap(),
+        write
     );
 }

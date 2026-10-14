@@ -47,7 +47,7 @@ pub struct Migration {
     pub(crate) version: u32,
     pub(crate) name: &'static str,
     body: Arc<MigrationBody>,
-    conversion: Option<Arc<WriteConversion>>,
+    pub(crate) conversion: Option<Arc<WriteConversion>>,
 }
 
 impl Migration {
@@ -72,8 +72,9 @@ impl Migration {
         }
     }
 
-    /// Convert each row change of an unattempted waiting write to this version.
-    /// Without a converter, a breaking migration marks those writes lost (§17.1).
+    /// Interpret old-schema row changes in this version, on receipt and when
+    /// preparing a local waiting interpretation. Original records remain unchanged;
+    /// without a converter, the interpretation retains schema losses (§17.1).
     pub fn writes<F>(mut self, f: F) -> Self
     where
         F: Fn(&mut crate::RowChange) -> Result<(), DbError> + Send + Sync + 'static,

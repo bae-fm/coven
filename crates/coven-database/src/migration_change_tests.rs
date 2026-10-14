@@ -330,7 +330,7 @@ async fn replacing_a_reference_target_cannot_reuse_the_old_parents_generation() 
 #[tokio::test]
 async fn invalid_conversions_report_typed_causes_and_roll_back() {
     const SCHEMA: &str = "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,title TEXT)";
-    for case in 0..6 {
+    for case in 0..9 {
         let store = TestStore::new();
         let declarations = || vec![SyncedTable::new("notes", RowIdentity::SharedKey)];
         let db = store.schema(declarations(), SCHEMA).await.unwrap();
@@ -342,7 +342,7 @@ async fn invalid_conversions_report_typed_causes_and_roll_back() {
         let migration = Migration::sql(
             2,
             "conversion",
-            "CREATE TABLE no_key(id TEXT,title TEXT); UPDATE notes SET title='after'",
+            "CREATE TABLE no_key(id TEXT,title TEXT); CREATE TABLE other(id TEXT NOT NULL PRIMARY KEY,title TEXT); UPDATE notes SET title='after'",
         )
         .writes(move |row| {
             let column = row
@@ -358,6 +358,14 @@ async fn invalid_conversions_report_typed_causes_and_roll_back() {
                 3 => row.key = RowKey(vec!["7".to_owned().into(), "extra".to_owned().into()]),
                 4 => row.table = "missing".into(),
                 5 => row.table = "no_key".into(),
+                6 => row.key = RowKey(vec!["different".to_owned().into()]),
+                7 => {
+                    row.op = ChangeOp::Delete;
+                    for column in &mut row.columns {
+                        column.old = column.new.take();
+                    }
+                }
+                8 => row.table = "other".into(),
                 _ => unreachable!(),
             }
             Ok(())
@@ -396,6 +404,13 @@ async fn invalid_conversions_report_typed_causes_and_roll_back() {
             5 => assert!(
                 matches!(*source, DbError::MigrationPrimaryKeyMissing { table } if table == "no_key")
             ),
+            6..=8 => assert!(matches!(
+                *source,
+                DbError::WriteFormat(coven_format::Error::Invalid {
+                    field: "converted row identity or operation",
+                    ..
+                })
+            )),
             _ => unreachable!(),
         }
         let db = store.schema(declarations(), SCHEMA).await.unwrap();

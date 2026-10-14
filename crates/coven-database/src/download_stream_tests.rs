@@ -60,7 +60,6 @@ async fn rejects_schema_violation(
         "invalid writes accepted (streamed, outcome): {accepted:?}"
     );
 }
-
 #[tokio::test]
 async fn downloads_refuse_non_uuid_independent_keys() {
     let store = TestStore::new();
@@ -80,7 +79,6 @@ async fn downloads_refuse_non_uuid_independent_keys() {
     )
     .await;
 }
-
 #[tokio::test]
 async fn downloads_refuse_a_descendant_in_another_audience_than_its_parent() {
     let store = TestStore::new();
@@ -103,7 +101,6 @@ async fn downloads_refuse_a_descendant_in_another_audience_than_its_parent() {
     source.close().await.unwrap();
     rejects_schema_violation(record, circle_tables(), CIRCLE_SCHEMA).await;
 }
-
 #[tokio::test]
 async fn streamed_retarget_is_one_write_including_local_trigger_effects() {
     let ids = SequentialIds::new();
@@ -503,37 +500,51 @@ async fn retargeting_a_reference_replaces_its_retained_pre_null_value() {
     let ids = SequentialIds::new();
     let sa = TestStore::with_ids(&ids);
     let sb = TestStore::with_ids(&ids);
-    let schema = "CREATE TABLE parents(id TEXT NOT NULL PRIMARY KEY); CREATE TABLE links(id TEXT NOT NULL PRIMARY KEY,parent TEXT REFERENCES parents(id) ON DELETE SET NULL); CREATE INDEX links_parent ON links(parent)";
-    let a = sa.schema(references(), schema).await.unwrap();
-    let b = sb.schema(references(), schema).await.unwrap();
-    for statement in [
-        "INSERT INTO parents VALUES('old'),('new'); INSERT INTO links VALUES('link','old')",
-        "DELETE FROM parents WHERE id='old'",
-        "UPDATE links SET parent='new'",
-    ] {
-        sql(&a, statement).await.unwrap();
-        let mut record = records(&a).pop().unwrap();
-        if statement == "DELETE FROM parents WHERE id='old'" {
-            // A parent-only write must also update children its author cannot read.
-            record.parts[0]
-                .rows
-                .retain(|row| row.row.table == "parents");
-        }
-        b.apply_downloaded_stream(
-            stream(&record),
+    let sc = TestStore::with_ids(&ids);
+    let a = reference_db(&sa).await;
+    let b = reference_db(&sb).await;
+    let c = reference_db(&sc).await;
+    sql(&a, "INSERT INTO parents VALUES('old'),('new')")
+        .await
+        .unwrap();
+    for db in [&b, &c] {
+        db.apply_downloaded(records(&a)[0].clone().into())
+            .await
+            .unwrap();
+    }
+    sql(&b, "INSERT INTO links VALUES('link','old')")
+        .await
+        .unwrap();
+    c.apply_downloaded(records(&b)[0].clone().into())
+        .await
+        .unwrap();
+    // This author has never received the child, so its real delete has no child change.
+    sql(&a, "DELETE FROM parents WHERE id='old'").await.unwrap();
+    for db in [&b, &c] {
+        db.apply_downloaded_stream(
+            stream(&records(&a)[1]),
             coven_format::value::EntryPositions(Vec::new()),
             || Ok(()),
         )
         .await
         .unwrap();
-        if statement == "DELETE FROM parents WHERE id='old'" {
-            assert_eq!(count(&b, "_coven_reference_values"), 1);
-        }
+        assert_eq!(count(db, "_coven_reference_values"), 1);
     }
+    sql(&c, "UPDATE links SET parent='new'").await.unwrap();
+    b.apply_downloaded_stream(
+        stream(&records(&c)[0]),
+        coven_format::value::EntryPositions(Vec::new()),
+        || Ok(()),
+    )
+    .await
+    .unwrap();
     assert_eq!(
-        fingerprint(&a, Audience::Store).await,
-        fingerprint(&b, Audience::Store).await
+        fingerprint(&b, Audience::Store).await,
+        fingerprint(&c, Audience::Store).await
     );
+    for db in [a, b, c] {
+        db.close().await.unwrap();
+    }
 }
 
 #[tokio::test]
@@ -822,6 +833,7 @@ async fn incomplete_or_inconsistent_composite_references_are_refused() {
                 0 => {
                     columns.remove("b");
                     change.old.remove("b");
+                    change.sources.setters.remove("b");
                 }
                 1 => {
                     columns.get_mut("b").unwrap().parents.clear();

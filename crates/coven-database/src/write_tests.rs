@@ -5,11 +5,12 @@ use coven_merge::Operation;
 use crate::tests::TestStore;
 use crate::{Database, DbError, RowIdentity, SyncedTable};
 
+/// Locally interpreted queued records; upload tests read the original byte stream.
 pub(crate) fn records(database: &Database) -> Vec<WriteRecord> {
     database
         .inspect_writer(|db| {
             db.query(
-                "SELECT record FROM _coven_uploads ORDER BY number",
+                "SELECT coalesce(interpretation,record) FROM _coven_uploads ORDER BY number",
                 [],
                 |r| r.get::<_, Vec<u8>>(0),
             )

@@ -177,7 +177,7 @@ impl DatabaseBuilder {
         } else {
             crate::migration_run::MigrationOrigin::Device(settings.device_id, clock.now())
         };
-        let migrations = writer.prepare_schema(
+        let outcomes = writer.prepare_schema(
             &tables,
             &migrations,
             Some(origin),
@@ -187,7 +187,8 @@ impl DatabaseBuilder {
             crate::file_removals::FileRemovals::new(&writer, &self.directory, &BTreeSet::new())
                 .finish(Ok::<_, DbError>(()))?;
         }
-        let write_schema = crate::write_schema::WriteSchema::read(&writer, tables.clone())?;
+        let mut write_schema = crate::write_schema::WriteSchema::read(&writer, tables.clone())?;
+        write_schema.conversions = crate::migration_receive::read(&writer, &migrations)?;
         write_schema.prepare(&writer)?;
         writer.prepare_file_triggers()?;
         let observer = CommitObserver::new();
@@ -236,7 +237,7 @@ impl DatabaseBuilder {
                     lock,
                 },
                 name: settings.name,
-                migrations,
+                migrations: outcomes,
                 clock,
                 ids,
                 staging: Mutex::new(BTreeSet::new()),

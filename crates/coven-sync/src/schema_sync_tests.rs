@@ -134,18 +134,8 @@ async fn rename_holds_uploads_then_converts_or_loses_offline_edits_everywhere() 
                 update(device, storage.clone(), true, convert).await;
                 device.sync.sync_store_log().await.unwrap();
             }
-            let converted = devices[1].db.test_queued_writes().await.unwrap().remove(0);
-            assert_eq!(converted.header.position, original.header.position);
-            assert_eq!(converted.header.timestamp, original.header.timestamp);
-            assert_eq!(converted.header.had_read, original.header.had_read);
-            assert_eq!(
-                converted.header.disposition,
-                if convert {
-                    WriteDisposition::Apply
-                } else {
-                    WriteDisposition::Lost(2)
-                }
-            );
+            let waiting = devices[1].db.test_queued_writes().await.unwrap().remove(0);
+            assert_eq!(waiting, original);
             for device in &mut devices {
                 device.writes.upload_writes().await.unwrap();
             }
@@ -166,7 +156,7 @@ async fn rename_holds_uploads_then_converts_or_loses_offline_edits_everywhere() 
 }
 
 #[tokio::test]
-async fn an_old_write_uploaded_without_being_read_by_the_change_is_lost_everywhere() {
+async fn an_old_write_converts_on_receipt_independently_of_attempt_status() {
     for tried in [false, true] {
         let storage = storage();
         let mut devices = group(storage.clone(), 3).await;
@@ -196,9 +186,9 @@ async fn an_old_write_uploaded_without_being_read_by_the_change_is_lost_everywhe
         }
         sync_all(&mut devices).await;
         let losses = devices[0].db.lost_values().await.unwrap();
-        assert_eq!(losses.len(), 1);
+        assert!(losses.is_empty());
         for device in &devices {
-            assert_eq!(name(&device.db).await, "Groceries");
+            assert_eq!(name(&device.db).await, "Unseen");
             assert_eq!(device.db.lost_values().await.unwrap(), losses);
         }
     }
@@ -901,21 +891,9 @@ mod recovery {
                         .iter()
                         .find(|w| w.header.position == original.header.position)
                         .unwrap();
-                    assert_eq!(waiting.header.timestamp, original.header.timestamp);
-                    assert_eq!(waiting.header.had_read, original.header.had_read);
+                    assert_eq!(waiting, &original);
                     if attempted {
-                        assert_eq!(waiting, &original);
                         assert_eq!(writes::resealed(device).await.1, sealed.unwrap());
-                    } else {
-                        assert_eq!(
-                            waiting.header.disposition,
-                            if convert {
-                                WriteDisposition::Apply
-                            } else {
-                                WriteDisposition::Lost(3)
-                            }
-                        );
-                        assert_eq!(waiting.header.schema_version, if convert { 3 } else { 1 });
                     }
                     device.sync.sync_store_log().await.unwrap();
                     device.sync.reload_from_snapshots().await.unwrap();
@@ -940,15 +918,11 @@ mod recovery {
                     .await;
                     sync_all(&mut devices).await;
                     let losses = devices[0].db.lost_values().await.unwrap();
-                    assert_eq!(losses.is_empty(), convert && !attempted);
+                    assert_eq!(losses.is_empty(), convert);
                     for device in &mut devices {
                         assert_eq!(
                             name(&device.db).await,
-                            if convert && !attempted {
-                                "Shopping"
-                            } else {
-                                "Groceries"
-                            }
+                            if convert { "Shopping" } else { "Groceries" }
                         );
                         assert_eq!(device.db.lost_values().await.unwrap(), losses);
                         device.writes.post_positions().await.unwrap();

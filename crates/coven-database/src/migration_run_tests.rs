@@ -380,6 +380,23 @@ async fn a_removed_row_is_forgotten_but_its_loss_survives_migration_and_reinsert
                     ),
                 },
                 old: [("title".into(), Value::Text("good".into()))].into(),
+                sources: coven_format::write_sources::WriteSources {
+                    generation: Some(coven_format::write_sources::ChangeId {
+                        write: original.header.position,
+                        row: original.parts[0].rows[0].row.clone(),
+                    }),
+                    setters: [(
+                        "title".into(),
+                        coven_format::write_sources::CellSource {
+                            change: coven_format::write_sources::ChangeId {
+                                write: original.header.position,
+                                row: original.parts[0].rows[0].row.clone(),
+                            },
+                            column: "title".into(),
+                        },
+                    )]
+                    .into(),
+                },
             }],
         }],
     };
@@ -828,6 +845,22 @@ fn downloaded_update(
         .iter()
         .map(|(name, value, _)| ((*name).into(), Value::Text((*value).into())))
         .collect();
+    row.sources.generation = Some(coven_format::write_sources::ChangeId {
+        write: past,
+        row: row.row.clone(),
+    });
+    row.sources.setters = columns
+        .iter()
+        .map(|(column, _, _)| {
+            (
+                (*column).into(),
+                coven_format::write_sources::CellSource {
+                    change: row.sources.generation.clone().unwrap(),
+                    column: (*column).into(),
+                },
+            )
+        })
+        .collect();
     original
 }
 
@@ -851,4 +884,66 @@ fn assert_same_loss_values(actual: &[crate::LostValue], expected: &[crate::LostV
             )
         );
     }
+}
+
+#[tokio::test]
+async fn migrations_change_present_values_without_a_second_copy() {
+    use coven_format::value::Value;
+
+    fn declarations() -> Vec<SyncedTable> {
+        vec![SyncedTable::new("notes", RowIdentity::IndependentUuid)
+            .key_columns(["id", "number"])
+            .audience_column("audience")]
+    }
+
+    fn migrations() -> Vec<Migration> {
+        vec![Migration::sql(1, "notes", "CREATE TABLE notes(id TEXT NOT NULL, number INTEGER NOT NULL, audience TEXT NOT NULL, title TEXT, body BLOB, PRIMARY KEY(id,number))")]
+    }
+
+    let store = TestStore::new();
+    let db = store
+        .builder(declarations(), migrations())
+        .open()
+        .await
+        .unwrap();
+    crate::write::tests::sql(&db, "INSERT INTO notes VALUES('f47ac10b-58cc-4372-a567-0e02b2c3d479',1,'store','before',x'00ff2a')").await.unwrap();
+    let original = crate::write::tests::records(&db).remove(0);
+    db.close().await.unwrap();
+    let mut migrations = migrations();
+    migrations.push(Migration::sql(
+        2,
+        "rewrite title",
+        "UPDATE notes SET title='migrated'",
+    ));
+    let db = store
+        .builder(declarations(), migrations)
+        .open()
+        .await
+        .unwrap();
+    let migration = crate::write::tests::records(&db).pop().unwrap();
+    db.inspect_writer_schema(|sql, schema| {
+        let visible = crate::write_rows::AppView::after(sql, schema);
+        let merge = crate::merge_store::MergeStore::new(sql, &visible);
+        let state = merge.row(&original.parts[0].rows[0].row).unwrap().state;
+        assert_eq!(
+            state.cells()["title"].value.value,
+            Value::Text("migrated".into())
+        );
+        assert_eq!(state.cells()["title"].write, migration.header.position);
+        assert_eq!(state.cells()["body"].write, original.header.position);
+        assert_eq!(
+            state.cells()["body"].value.value,
+            Value::Blob(vec![0, 255, 42])
+        );
+        assert!(state.lost().is_empty());
+        let cells = sql
+            .query(
+                "SELECT name FROM pragma_table_info('_coven_cells') ORDER BY cid",
+                [],
+                |r| r.get::<_, String>(0),
+            )
+            .unwrap();
+        assert_eq!(cells, ["column_id", "row_id", "write_id"]);
+    });
+    db.close().await.unwrap();
 }

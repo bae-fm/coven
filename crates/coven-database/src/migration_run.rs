@@ -46,6 +46,13 @@ pub(crate) fn run<'a>(
         let ((), changed) = database.migration_changes(|| migration.apply(&context))?;
         let after = Schema::read(database)?;
         let effects = context.finish(&before, &after);
+        crate::source_names::record(
+            database,
+            migration.version - 1,
+            migration.version,
+            &after,
+            &effects.names,
+        )?;
         let synced = capture.borrow().synced.clone();
         breaking |= changed.iter().any(|t| synced.contains(t))
             || effects.dropped.iter().any(|t| synced.contains(t))
@@ -98,14 +105,22 @@ pub(crate) fn run<'a>(
         MigrationOrigin::Snapshot { waiting_version } => waiting_version,
     };
     for (index, step) in steps.iter().enumerate() {
-        if outcomes[index].change == MigrationChange::Breaking
-            && waiting_version.is_some_and(|version| step.migration.version > version)
-        {
+        if outcomes[index].change == MigrationChange::Breaking {
             *at = step.migration;
             let after = match steps.get(index + 1) {
                 Some(next) => &next.before,
                 None => &final_schema,
             };
+            crate::migration_receive::retain(
+                database,
+                step.migration.version,
+                &step.before,
+                after,
+                &step.effects.names,
+            )?;
+            if waiting_version.is_none_or(|version| step.migration.version <= version) {
+                continue;
+            }
             step.migration.convert_waiting(
                 database,
                 &step.before,
@@ -167,6 +182,7 @@ pub(crate) fn run<'a>(
                 .columns
                 .retain(|(table, _), _| names.tables.contains_key(table));
         }
+        crate::source_names::record(database, current, supported, &final_schema, &names)?;
         finish(
             database,
             tables,
@@ -227,6 +243,16 @@ fn finish(
         crate::write_apply::WriteApply::new(database, &schema, &store, &before, &visible, &deleted)
             .apply(Some(&record), BTreeSet::new())?;
         record.header.disposition = WriteDisposition::Migration;
+        // Migration row changes belong to the published snapshot, but remain
+        // original source evidence for writes authored after the migration.
+        for part in &record.parts {
+            for row in &part.rows {
+                crate::write_sources::validate(database, &record.header, row)?;
+                crate::write_sources::retain(database, &record.header, row)?;
+                crate::write_sources::admit(database, &record.header, &row.row, None)?;
+            }
+            crate::write_sources::complete(database, &record.header, &part.audience)?;
+        }
         record.parts.clear();
         crate::write_commit::queue(database, &record)?;
         crate::migration_state::refresh(database, &schema, &refresh)?;

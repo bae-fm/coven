@@ -563,17 +563,11 @@ mod stuck {
         )
         .await;
         let mut record = queued(&devices[0].db).await;
-        let coven_merge::Operation::Insert(values) =
-            record.parts[0].rows[0].change.operation.clone()
+        let coven_merge::Operation::Insert(values) = &mut record.parts[0].rows[0].change.operation
         else {
             panic!("insert")
         };
-        record.parts[0].rows[0].old = values
-            .iter()
-            .map(|(name, value)| (name.clone(), value.value.clone()))
-            .collect();
-        record.parts[0].rows[0].change.operation = coven_merge::Operation::Update(values);
-        record.parts[0].rows[0].change.generation = 1;
+        values.get_mut("id").unwrap().value = coven_format::value::Value::Text("another".into());
         devices[0].writes.upload_writes().await.unwrap();
         storage
             .delete(&crate::write_seal::path(STORE_ID, record.header.position))

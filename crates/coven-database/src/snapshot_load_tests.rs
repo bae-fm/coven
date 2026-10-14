@@ -62,7 +62,7 @@ async fn store_at_40_and_circle_at_38_replay_only_the_circles_missing_parts() {
             b.load_snapshots(crate::SnapshotReload::new(snapshots(), supplied))
                 .await,
             Err(crate::DbError::Snapshot(
-                crate::SnapshotError::MissingWrites { .. }
+                crate::SnapshotError::MissingWrites { .. } | crate::SnapshotError::WriteWaiting(_)
             ))
         ));
         assert_eq!(contents(&b), original);
@@ -79,7 +79,7 @@ async fn store_at_40_and_circle_at_38_replay_only_the_circles_missing_parts() {
     // Supply the later write first: the loader chooses causal order.
     b.load_snapshots(crate::SnapshotReload::new(
         snapshots(),
-        vec![stream(&writes[39]), stream(&writes[38])],
+        writes.iter().rev().map(stream).collect(),
     ))
     .await
     .unwrap();
@@ -615,6 +615,9 @@ async fn an_empty_loaded_audience_still_limits_later_snapshot_reloads() {
     for audience in [Audience::Store, circle.clone()] {
         load(&b, audience.clone(), frames(&a, audience).await).await;
     }
+    b.apply_downloaded(records(&a)[0].clone().into())
+        .await
+        .unwrap();
     sql(&a, "UPDATE notes SET value=2").await.unwrap();
     b.apply_downloaded(records(&a).remove(1).into())
         .await

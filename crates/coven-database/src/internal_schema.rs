@@ -14,6 +14,8 @@
 //! entry keeps its format in `record`'s frame prefix. No ciphertext is kept for either.
 //! `_coven_uploads` retains its rowid for queue order and incremental BLOB reads.
 //! Cell keys start with the row; column-wide cell edits occur only in migrations.
+//! Original-change admission is NULL until judged, an empty blob when admitted,
+//! or the encoded exclusion cause. Consumed positions do not establish admission.
 //! Write-id indexes serve SQLite's incoming foreign-key checks on INSERT with
 //! RETURNING, which EXPLAIN QUERY PLAN includes alongside explicit lookups.
 
@@ -375,6 +377,58 @@ macro_rules! coven_tables {
                 number BLOB NOT NULL CHECK(length(number)=8 AND number>x'0000000000000000')
             ) STRICT, WITHOUT ROWID;
         ");
+        $visit!(_coven_authored_parts, "
+            CREATE TABLE _coven_authored_parts (
+                write_id BLOB NOT NULL CHECK(length(write_id)=16),
+                audience TEXT NOT NULL,
+                header BLOB NOT NULL,
+                complete INTEGER NOT NULL CHECK(complete IN (0,1)),
+                PRIMARY KEY(write_id,audience)
+            ) STRICT, WITHOUT ROWID;
+        ");
+        $visit!(_coven_authored_changes, "
+            CREATE TABLE _coven_authored_changes (
+                write_id BLOB NOT NULL,
+                audience TEXT NOT NULL,
+                table_name TEXT NOT NULL,
+                key BLOB NOT NULL,
+                record BLOB NOT NULL,
+                admission BLOB,
+                PRIMARY KEY(write_id,audience,table_name,key),
+                FOREIGN KEY(write_id,audience) REFERENCES _coven_authored_parts(write_id,audience)
+            ) STRICT, WITHOUT ROWID;
+        ");
+        $visit!(_coven_conversion_schemas, "
+            CREATE TABLE _coven_conversion_schemas (
+                version INTEGER PRIMARY KEY,
+                before_schema BLOB NOT NULL,
+                after_schema BLOB NOT NULL,
+                tables BLOB NOT NULL,
+                columns BLOB NOT NULL
+            ) STRICT;
+        ");
+        $visit!(_coven_table_origins, "
+            CREATE TABLE _coven_table_origins (
+                version INTEGER NOT NULL,
+                name TEXT NOT NULL,
+                origin_version INTEGER NOT NULL,
+                origin_name TEXT NOT NULL,
+                PRIMARY KEY(version,name)
+            ) STRICT, WITHOUT ROWID;
+            CREATE INDEX _coven_table_origin ON _coven_table_origins(version,origin_version,origin_name);
+        ");
+        $visit!(_coven_column_origins, "
+            CREATE TABLE _coven_column_origins (
+                version INTEGER NOT NULL,
+                table_name TEXT NOT NULL,
+                name TEXT NOT NULL,
+                origin_version INTEGER NOT NULL,
+                origin_table TEXT NOT NULL,
+                origin_name TEXT NOT NULL,
+                PRIMARY KEY(version,table_name,name)
+            ) STRICT, WITHOUT ROWID;
+            CREATE INDEX _coven_column_origin ON _coven_column_origins(version,table_name,origin_version,origin_table,origin_name);
+        ");
         $visit!(_coven_columns, "
             CREATE TABLE _coven_columns (
                 id INTEGER PRIMARY KEY,
@@ -483,6 +537,7 @@ macro_rules! coven_tables {
                 number BLOB NOT NULL CHECK(length(number) = 8 AND number > x'0000000000000000'),
                 record BLOB NOT NULL,
                 sealing_keys BLOB,
+                interpretation BLOB,
                 PRIMARY KEY(device, number)
             ) STRICT;
         ");

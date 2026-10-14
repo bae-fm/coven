@@ -609,7 +609,11 @@ async fn a_write_with_incomplete_causal_history_is_refused_as_causality() {
     sql(&devices[1].db, "UPDATE notes SET title='second'").await;
     devices[1].writes.upload_writes().await.unwrap();
     devices[2].writes.download_writes().await.unwrap();
-    sql(&devices[1].db, "UPDATE notes SET title='third'").await;
+    sql(
+        &devices[1].db,
+        "INSERT INTO notes VALUES('two','third','body')",
+    )
+    .await;
     let mut record = queued(&devices[1].db).await;
     assert!(!record.header.had_read.0.is_empty());
     record.header.had_read.0.clear();

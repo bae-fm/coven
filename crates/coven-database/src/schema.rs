@@ -12,12 +12,13 @@ pub(crate) struct Schema {
     pub(crate) tables: BTreeMap<String, TableSchema>,
 }
 
-#[derive(Eq, PartialEq)]
+#[derive(Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 struct SchemaObject {
     table: String,
     sql: Option<String>,
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
 pub(crate) struct TableSchema {
     pub(crate) name: String,
     pub(crate) sql: String,
@@ -27,6 +28,7 @@ pub(crate) struct TableSchema {
     pub(crate) without_rowid: bool,
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
 pub(crate) struct SchemaColumn {
     pub(crate) name: String,
     pub(crate) kind: String,
@@ -36,6 +38,7 @@ pub(crate) struct SchemaColumn {
     pub(crate) generated: bool,
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
 pub(crate) struct SchemaIndex {
     pub(crate) name: String,
     pub(crate) sql: Option<String>,
@@ -44,6 +47,7 @@ pub(crate) struct SchemaIndex {
     pub(crate) collations: Vec<String>,
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
 pub(crate) struct SchemaForeignKey {
     pub(crate) target: String,
     pub(crate) columns: Vec<String>,
@@ -53,6 +57,23 @@ pub(crate) struct SchemaForeignKey {
 }
 
 impl Schema {
+    pub(crate) fn encode(&self) -> Vec<u8> {
+        serde_json::to_vec(&(self.objects.iter().collect::<Vec<_>>(), &self.tables))
+            .expect("schema contains only JSON-compatible fields")
+    }
+
+    pub(crate) fn decode(bytes: &[u8]) -> rusqlite::Result<Self> {
+        type Objects = Vec<((String, String), SchemaObject)>;
+        let (objects, tables): (Objects, BTreeMap<String, TableSchema>) =
+            serde_json::from_slice(bytes).map_err(|error| {
+                crate::write_encoding::decode_failure(0, rusqlite::types::Type::Blob, error)
+            })?;
+        Ok(Self {
+            objects: objects.into_iter().collect(),
+            tables,
+        })
+    }
+
     pub(crate) fn read(db: &DatabaseConnection) -> Result<Self, DbError> {
         let objects = db.query(
             "SELECT type, name, tbl_name, sql FROM main.sqlite_schema WHERE name NOT LIKE 'sqlite_%' AND substr(lower(name),1,7) != '_coven_' ORDER BY type, name",

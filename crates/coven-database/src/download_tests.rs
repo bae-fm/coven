@@ -29,7 +29,6 @@ async fn fingerprint(db: &Database, audience: Audience) -> coven_crypto::Fingerp
         .fingerprints[0]
         .1
 }
-
 #[tokio::test]
 async fn downloaded_writes_share_merge_and_observation_without_uploading() {
     let ids = SequentialIds::new();
@@ -105,7 +104,6 @@ async fn downloaded_writes_share_merge_and_observation_without_uploading() {
     receiver.close().await.unwrap();
     source.close().await.unwrap();
 }
-
 #[tokio::test]
 async fn causal_gate_covers_other_devices_and_skipped_parts_count_as_applied() {
     let ids = SequentialIds::new();
@@ -146,7 +144,6 @@ async fn causal_gate_covers_other_devices_and_skipped_parts_count_as_applied() {
         db.close().await.unwrap();
     }
 }
-
 #[tokio::test]
 async fn waiting_downloads_do_not_advance_local_timestamps_even_after_reopen() {
     let ids = SequentialIds::new();
@@ -179,7 +176,6 @@ async fn waiting_downloads_do_not_advance_local_timestamps_even_after_reopen() {
     receiver.close().await.unwrap();
     source.close().await.unwrap();
 }
-
 #[tokio::test]
 async fn older_schema_inserts_use_new_defaults_without_inventing_cell_setters() {
     let ids = SequentialIds::new();
@@ -231,7 +227,6 @@ async fn older_schema_inserts_use_new_defaults_without_inventing_cell_setters() 
     receiver.close().await.unwrap();
     source.close().await.unwrap();
 }
-
 #[tokio::test]
 async fn author_marked_loss_keeps_values_and_cause_without_needing_the_old_table() {
     let ids = SequentialIds::new();
@@ -712,6 +707,12 @@ async fn reset_exclusion_is_audience_scoped_and_counts_implicit_own_reads() {
             .install_reset_fixture(entry, audience, included)
             .await
             .unwrap());
+        if lost {
+            assert_eq!(
+                db.apply_downloaded(writes[0].clone().into()).await.unwrap(),
+                ApplyOutcome::AlreadyApplied
+            );
+        }
         assert_eq!(
             db.apply_downloaded(writes[1].clone().into()).await.unwrap(),
             ApplyOutcome::Applied

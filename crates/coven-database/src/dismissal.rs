@@ -9,7 +9,7 @@ use crate::write_schema::WriteSchema;
 use crate::{DbError, LostValue};
 use coven_format::{
     dismissal::Dismissal,
-    write::{RowChange, WritePart, WriteRecord},
+    write::{WritePart, WriteRecord},
 };
 use coven_foundation::id_source::DeviceId;
 use coven_merge::{Change, Operation, RowId};
@@ -40,19 +40,20 @@ pub(crate) fn dismiss(
                     if old.loss.is_some() && old.state.generation() == *generation {
                         changes.insert(
                             row.clone(),
-                            RowChange {
-                                row: row.clone(),
-                                change: Change {
+                            crate::write_sources::authored(
+                                database,
+                                &store,
+                                row.clone(),
+                                Change {
                                     generation: *generation,
                                     operation: Operation::Delete,
                                 },
-                                old: old
-                                    .state
+                                old.state
                                     .cells()
                                     .iter()
                                     .map(|(name, cell)| (name.clone(), cell.value.value.clone()))
                                     .collect(),
-                            },
+                            )?,
                         );
                     }
                 }

@@ -34,7 +34,7 @@ impl<R: Read> DownloadedWriteStream<R> {
         store_log: &coven_format::value::EntryPositions,
         authenticate: impl FnOnce() -> Result<(), crate::DbError>,
     ) -> Result<crate::ApplyOutcome, crate::DbError> {
-        database.stream_transaction(|database| {
+        crate::download::source_wait(database.stream_transaction(|database| {
             if crate::store_log::positions(database)? != *store_log {
                 return Err(crate::DbError::StoreLogEntriesChanged);
             }
@@ -47,6 +47,39 @@ impl<R: Read> DownloadedWriteStream<R> {
                 .into());
             }
             if crate::download::positions(database)?.covers(self.header.header.position) {
+                crate::write_commit::retain_metadata(
+                    database,
+                    &coven_format::snapshot_rows::AppliedWrite {
+                        id: self.header.header.position,
+                        timestamp: self.header.header.timestamp,
+                        had_read: self.header.header.had_read.clone(),
+                    },
+                )?;
+                for (header, stream) in self.header.parts.into_iter().zip(self.parts) {
+                    let DownloadedPartStream::Opened(input) = stream else {
+                        continue;
+                    };
+                    let audience = header.audience.clone();
+                    read_part(input, header, &self.header.header, |frame| {
+                        let rows = match frame {
+                            WriteFrame::Change(row) => vec![row],
+                            WriteFrame::Dismissal(_) => Vec::new(),
+                        };
+                        crate::download::retain_source_rows(
+                            database,
+                            &DownloadedWrite {
+                                header: self.header.header.clone(),
+                                parts: vec![DownloadedPart::Opened(WritePart {
+                                    audience: audience.clone(),
+                                    rows,
+                                    dismissals: Vec::new(),
+                                })],
+                            },
+                        )
+                    })?;
+                    crate::write_sources::complete(database, &self.header.header, &audience)?;
+                }
+                authenticate()?;
                 return Ok(crate::ApplyOutcome::AlreadyApplied);
             }
             if let Some(wait) = crate::download::prerequisite(database, &self.header.header)? {
@@ -77,6 +110,7 @@ impl<R: Read> DownloadedWriteStream<R> {
                         frame,
                     )
                 })?;
+                crate::write_sources::complete(database, &self.header.header, &audience)?;
             }
             authenticate()?;
             crate::write_headers::retain(database, &original_header)?;
@@ -94,7 +128,7 @@ impl<R: Read> DownloadedWriteStream<R> {
             )?;
             files.before_commit()?;
             Ok(crate::ApplyOutcome::Applied)
-        })
+        }))
     }
 
     pub(crate) fn read(self) -> Result<DownloadedWrite, SnapshotError> {
@@ -151,8 +185,9 @@ pub(crate) fn read_part<R: Read, E: From<SnapshotError> + From<coven_format::Err
                 .map_err(|error| SnapshotError::Read(error).into())
         },
         |frame| {
-            if let WriteFrame::Dismissal(dismissal) = &frame {
-                dismissal.validate_past(write)?;
+            match &frame {
+                WriteFrame::Dismissal(dismissal) => dismissal.validate_past(write)?,
+                WriteFrame::Change(row) => row.sources.validate_past(write)?,
             }
             consume(frame)
         },
