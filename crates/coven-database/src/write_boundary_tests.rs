@@ -254,14 +254,20 @@ async fn reset_coverage_survives_noops_reversal_and_failed_replacement() {
         [id(1)]
     );
     assert!(
-        db.load_snapshots(reload(vec![coverage(2)])).await.is_err(),
+        db.load_snapshots::<crate::pending::tests::Record, _, _>(reload(vec![coverage(2)]))
+            .await
+            .is_err(),
         "kept no-op has no effective boundary"
     );
     assert!(
-        db.load_snapshots(reload(vec![coverage(3)])).await.is_err(),
+        db.load_snapshots::<crate::pending::tests::Record, _, _>(reload(vec![coverage(3)]))
+            .await
+            .is_err(),
         "coverage cannot introduce an unchecked entry"
     );
-    db.load_snapshots(reload(vec![coverage(1)])).await.unwrap();
+    db.load_snapshots::<crate::pending::tests::Record, _, _>(reload(vec![coverage(1)]))
+        .await
+        .unwrap();
     let retained = || {
         db.inspect_writer(|sql| {
             sql.query(
@@ -284,7 +290,10 @@ async fn reset_coverage_survives_noops_reversal_and_failed_replacement() {
         device: DeviceId(55),
         number: 1,
     }]);
-    assert!(db.load_snapshots(reload(vec![changed])).await.is_err());
+    assert!(db
+        .load_snapshots::<crate::pending::tests::Record, _, _>(reload(vec![changed]))
+        .await
+        .is_err());
     assert_eq!(
         retained(),
         before,
@@ -299,7 +308,9 @@ async fn reset_coverage_survives_noops_reversal_and_failed_replacement() {
     db.apply_store_log::<crate::pending::tests::Record>(log.entries[1].clone(), replay, Vec::new())
         .await
         .unwrap();
-    db.load_snapshots(reload(vec![coverage(2)])).await.unwrap();
+    db.load_snapshots::<crate::pending::tests::Record, _, _>(reload(vec![coverage(2)]))
+        .await
+        .unwrap();
     let after = retained();
     assert_eq!(
         after[0].1, before[0].1,
@@ -314,7 +325,9 @@ async fn reset_coverage_survives_noops_reversal_and_failed_replacement() {
     )
     .await
     .unwrap();
-    db.load_snapshots(reload(vec![coverage(1)])).await.unwrap();
+    db.load_snapshots::<crate::pending::tests::Record, _, _>(reload(vec![coverage(1)]))
+        .await
+        .unwrap();
     assert_eq!(retained()[0], before[0]);
     db.close().await.unwrap();
     let db = store.schema(notes(), NOTES).await.unwrap();
@@ -397,7 +410,7 @@ async fn reset_successors_can_read_post_reset_writes_from_another_device() {
         .unwrap();
     let initial = records(&a).remove(0);
     for db in [&b, &receiver] {
-        db.apply_downloaded(initial.clone().into()).await.unwrap();
+        db.receive(initial.clone().into()).await.unwrap();
     }
     receiver
         .install_reset_fixture(
@@ -414,7 +427,7 @@ async fn reset_successors_can_read_post_reset_writes_from_another_device() {
         .await
         .unwrap();
     let first = records(&a).remove(1);
-    b.apply_downloaded(first.clone().into()).await.unwrap();
+    b.receive(first.clone().into()).await.unwrap();
     sql(&b, "UPDATE notes SET title='read post reset'")
         .await
         .unwrap();
@@ -422,7 +435,7 @@ async fn reset_successors_can_read_post_reset_writes_from_another_device() {
     assert!(second.header.had_read.covers(first.header.position));
     for write in [first, second] {
         assert_eq!(
-            receiver.apply_downloaded(write.into()).await.unwrap(),
+            receiver.receive(write.into()).await.unwrap(),
             ApplyOutcome::Applied
         );
     }
@@ -460,7 +473,7 @@ async fn repeated_boundaries_keep_their_original_coverage_and_application_order(
     for reset_first in [false, true] {
         let store = TestStore::with_ids(&ids);
         let db = store.schema(notes(), NOTES).await.unwrap();
-        db.apply_downloaded(DownloadedWrite {
+        db.receive(DownloadedWrite {
             header: writes[0].header.clone(),
             parts: vec![DownloadedPart::Skipped(Audience::Store)],
         })
@@ -506,11 +519,11 @@ async fn repeated_boundaries_keep_their_original_coverage_and_application_order(
             .await
             .is_err());
         assert_eq!(
-            db.apply_downloaded(writes[0].clone().into()).await.unwrap(),
+            db.receive(writes[0].clone().into()).await.unwrap(),
             ApplyOutcome::AlreadyApplied
         );
         assert_eq!(
-            db.apply_downloaded(writes[1].clone().into()).await.unwrap(),
+            db.receive(writes[1].clone().into()).await.unwrap(),
             ApplyOutcome::Applied
         );
         assert_eq!(count(&db, "_coven_boundaries"), 2);
@@ -586,7 +599,7 @@ mod differential {
             .filter(|w| history.covered.contains(&w.header.position))
         {
             assert_eq!(
-                source.apply_downloaded(write.clone().into()).await.unwrap(),
+                source.receive(write.clone().into()).await.unwrap(),
                 crate::ApplyOutcome::Applied
             );
         }
@@ -607,7 +620,10 @@ mod differential {
         } else {
             Vec::new()
         });
-        target.load_snapshots(reload).await.unwrap();
+        target
+            .load_snapshots::<crate::pending::tests::Record, _, _>(reload)
+            .await
+            .unwrap();
         let result = result_json(&target, &history.rows());
         let positions = target.sync_state(Vec::new()).await.unwrap().positions;
         assert!(

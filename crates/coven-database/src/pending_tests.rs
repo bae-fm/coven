@@ -29,6 +29,16 @@ enum Reason {
     Dropped,
 }
 impl Record {
+    /// The write a dropped-write report names.
+    pub(crate) fn dropped_write(&self) -> Option<coven_merge::WriteId> {
+        match (&self.subject, &self.reason) {
+            (Subject::Write(device, number), Reason::Dropped) => Some(coven_merge::WriteId {
+                device: DeviceId(*device),
+                number: *number,
+            }),
+            _ => None,
+        }
+    }
     pub(crate) fn access_key(&self) -> Option<&str> {
         match &self.reason {
             Reason::AccessKey(key) => Some(key),
@@ -60,6 +70,18 @@ impl PendingValue for Record {
             reported_by,
             reason: Reason::AccessKey(key.access_key_id),
             operation: Some(id),
+        }
+    }
+    fn dropped_write(
+        write: coven_merge::WriteId,
+        _reason: crate::DropReason,
+        reported_by: DeviceId,
+    ) -> Self {
+        Self {
+            subject: Subject::Write(write.device.0, write.number),
+            reported_by,
+            reason: Reason::Dropped,
+            operation: None,
         }
     }
     fn dropped_entry(entry: crate::EntryId, _reason: crate::DropReason) -> Self {
@@ -405,18 +427,21 @@ async fn judgments_clear_only_with_a_committed_changed_reset() {
         operation: None,
     };
     db.record_pending(record(&db, 1).await).await.unwrap();
-    assert!(db.load_snapshots(reload(Vec::new())).await.is_err());
+    assert!(db
+        .load_snapshots::<crate::pending::tests::Record, _, _>(reload(Vec::new()))
+        .await
+        .is_err());
     assert_eq!(db.pending::<Record>().await.unwrap().len(), 2);
-    db.load_snapshots(reload(vec![crate::SnapshotSource::Empty(
-        coven_merge::Audience::Store,
-    )]))
+    db.load_snapshots::<crate::pending::tests::Record, _, _>(reload(vec![
+        crate::SnapshotSource::Empty(coven_merge::Audience::Store),
+    ]))
     .await
     .unwrap();
     assert!(db.pending::<Record>().await.unwrap().is_empty());
     db.record_pending(record(&db, 1).await).await.unwrap();
-    db.load_snapshots(reload(vec![crate::SnapshotSource::Empty(
-        coven_merge::Audience::Store,
-    )]))
+    db.load_snapshots::<crate::pending::tests::Record, _, _>(reload(vec![
+        crate::SnapshotSource::Empty(coven_merge::Audience::Store),
+    ]))
     .await
     .unwrap();
     assert_eq!(db.pending::<Record>().await.unwrap().len(), 1);

@@ -314,7 +314,11 @@ impl StoreLogSync {
                     ),
                     operation: Some(Data::Snapshots(task.clone()).update(record, 2)?),
                 };
-                let result = match self.database.load_snapshots(reload).await {
+                let result = match self
+                    .database
+                    .load_snapshots::<crate::PendingRecord, _, _>(reload)
+                    .await
+                {
                     Err(coven_database::DbError::Snapshot(
                         coven_database::SnapshotError::Write { write, error },
                     )) => {
@@ -422,6 +426,7 @@ impl StoreLogSync {
         Ok(DownloadedWriteStream {
             header: WriteHeaderFrame::decode(&write.header)?,
             parts,
+            stored_at: write.stored_at,
         })
     }
 }

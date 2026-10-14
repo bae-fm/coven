@@ -19,9 +19,7 @@ async fn download_suppresses_shared_triggers_and_runs_local_triggers_with_applyi
     let a = a_store.schema(tables(), schema).await.unwrap();
     let b = b_store.schema(tables(), schema).await.unwrap();
     sql(&a, "INSERT INTO notes VALUES('one')").await.unwrap();
-    b.apply_downloaded(records(&a).remove(0).into())
-        .await
-        .unwrap();
+    b.receive(records(&a).remove(0).into()).await.unwrap();
     let result = b
         .read(|sql| {
             Ok((
@@ -66,7 +64,7 @@ async fn a_trigger_ending_the_transaction_returns_its_original_sqlite_error() {
     let record = records(&a).remove(0);
     b.inspect_writer(|sql| sql.batch("CREATE TRIGGER fail_apply AFTER INSERT ON notes BEGIN SELECT RAISE(ROLLBACK,'transaction refused'); END").unwrap());
     assert!(
-        matches!(b.apply_downloaded(record.clone().into()).await,Err(DbError::Sqlite(rusqlite::Error::SqliteFailure(_,Some(message)))) if message=="transaction refused")
+        matches!(b.receive(record.clone().into()).await,Err(DbError::Sqlite(rusqlite::Error::SqliteFailure(_,Some(message)))) if message=="transaction refused")
     );
     for table in [
         "notes",
@@ -86,7 +84,7 @@ async fn a_trigger_ending_the_transaction_returns_its_original_sqlite_error() {
         .unwrap();
     assert_eq!(records(&b)[0].header.timestamp.milliseconds(), 1_000);
     assert_eq!(
-        b.apply_downloaded(record.into()).await.unwrap(),
+        b.receive(record.into()).await.unwrap(),
         ApplyOutcome::Applied
     );
     for db in [a, b] {
@@ -137,7 +135,7 @@ async fn failure_after_every_remote_mutation_rolls_back_rows_metadata_and_notifi
             .open()
             .await
             .unwrap();
-        db.apply_downloaded(initial.clone().into()).await.unwrap();
+        db.receive(initial.clone().into()).await.unwrap();
         sql(&db, "UPDATE notes SET body='local' WHERE id='a'; INSERT INTO notes VALUES('c','collision','local')").await.unwrap();
         let before = contents(&db);
         let mut query = db.subscribe(|sql| {
@@ -172,6 +170,7 @@ async fn failure_after_every_remote_mutation_rolls_back_rows_metadata_and_notifi
             let result = if streamed {
                 let encoder = coven_format::write_stream::WriteEncoder::new(&incoming).unwrap();
                 let input = crate::DownloadedWriteStream {
+                    stored_at: std::time::UNIX_EPOCH,
                     header: encoder.header().clone(),
                     parts: (0..incoming.parts.len())
                         .map(|i| {
@@ -186,14 +185,14 @@ async fn failure_after_every_remote_mutation_rolls_back_rows_metadata_and_notifi
                         })
                         .collect(),
                 };
-                db.apply_downloaded_stream(
+                db.receive_stream(
                     input,
                     coven_format::value::EntryPositions(Vec::new()),
                     || Ok(()),
                 )
                 .await
             } else {
-                db.apply_downloaded(incoming.clone().into()).await
+                db.receive(incoming.clone().into()).await
             };
             match result {
                 Err(DbError::Sqlite(rusqlite::Error::SqliteFailure(_, Some(message))))
@@ -266,7 +265,7 @@ async fn failure_after_every_remote_mutation_rolls_back_rows_metadata_and_notifi
             "downloads never enter the local upload queue"
         );
         assert_eq!(
-            db.apply_downloaded(incoming.clone().into()).await.unwrap(),
+            db.receive(incoming.clone().into()).await.unwrap(),
             ApplyOutcome::AlreadyApplied
         );
         db.close().await.unwrap();
@@ -284,7 +283,7 @@ async fn assert_rejected_download(
         .subscribe(|sql| Ok(sql.query("SELECT * FROM notes", [], |r| r.get::<_, String>(0))?));
     query.next().await.unwrap();
     for _ in 0..2 {
-        let error = database.apply_downloaded(record.clone()).await.unwrap_err();
+        let error = database.receive(record.clone()).await.unwrap_err();
         assert!(
             matches!(error, DbError::InvalidWrite { write, error } if write == record.header.position && error == expected)
         );
@@ -305,7 +304,7 @@ async fn downloaded_timestamps_no_later_than_their_past_are_refused() {
         .unwrap();
     sql(&a, "UPDATE notes SET title='valid'").await.unwrap();
     let writes = records(&a);
-    b.apply_downloaded(writes[0].clone().into()).await.unwrap();
+    b.receive(writes[0].clone().into()).await.unwrap();
     for timestamp in [
         writes[0].header.timestamp,
         coven_merge::Timestamp::new(
@@ -325,7 +324,7 @@ async fn downloaded_timestamps_no_later_than_their_past_are_refused() {
         .await;
     }
     assert_eq!(
-        b.apply_downloaded(writes[1].clone().into()).await.unwrap(),
+        b.receive(writes[1].clone().into()).await.unwrap(),
         ApplyOutcome::Applied
     );
     for db in [a, b] {
@@ -350,7 +349,7 @@ async fn a_downloaded_update_naming_a_stale_deleted_generation_is_refused() {
     }
     let writes = records(&a);
     for write in &writes[..3] {
-        b.apply_downloaded(write.clone().into()).await.unwrap();
+        b.receive(write.clone().into()).await.unwrap();
     }
     let mut invalid = writes[3].clone();
     assert_eq!(invalid.parts[0].rows[0].change.generation, 3);
@@ -362,7 +361,7 @@ async fn a_downloaded_update_naming_a_stale_deleted_generation_is_refused() {
     )
     .await;
     assert_eq!(
-        b.apply_downloaded(writes[3].clone().into()).await.unwrap(),
+        b.receive(writes[3].clone().into()).await.unwrap(),
         ApplyOutcome::Applied
     );
     for db in [a, b] {
@@ -405,7 +404,7 @@ async fn rejected_timestamps_cannot_advance_skipped_or_excluded_writes() {
         .unwrap();
     sql(&a, "UPDATE notes SET title='valid'").await.unwrap();
     let writes = records(&a);
-    b.apply_downloaded(writes[0].clone().into()).await.unwrap();
+    b.receive(writes[0].clone().into()).await.unwrap();
     for lost in [false, true] {
         let mut invalid: crate::DownloadedWrite = writes[1].clone().into();
         invalid.header.timestamp = coven_merge::Timestamp::new(
@@ -427,7 +426,7 @@ async fn rejected_timestamps_cannot_advance_skipped_or_excluded_writes() {
         .await;
     }
     assert_eq!(
-        b.apply_downloaded(writes[1].clone().into()).await.unwrap(),
+        b.receive(writes[1].clone().into()).await.unwrap(),
         ApplyOutcome::Applied
     );
     for db in [a, b] {

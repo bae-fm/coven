@@ -145,7 +145,7 @@ impl Database {
     /// Supply each readable audience's parts, including those needed by waiting
     /// writes and the device's own earlier writes. Other audiences retain their
     /// merge history. Upload records, numbers and sealing key ids stay unchanged.
-    pub async fn load_snapshots<R, W>(
+    pub async fn load_snapshots<P: crate::PendingValue, R, W>(
         &self,
         reload: crate::SnapshotReload<R, W>,
     ) -> Result<(), DbError>
@@ -161,7 +161,7 @@ impl Database {
                 reader.with_reader(|reader| {
                     reader.read_transaction(|| {
                         inner.access.write_schema.prepare(reader)?;
-                        crate::snapshot_load::load(
+                        crate::snapshot_load::load::<P, _, _>(
                             writer,
                             reader,
                             &inner.access.write_schema,

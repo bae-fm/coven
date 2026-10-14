@@ -284,6 +284,63 @@ async fn fixed_bytes_survive_restart_and_a_lost_completion_reply() {
     assert!(device.writes.upload_writes().await.unwrap().is_empty());
 }
 
+/// A removed device's write counts only when storage first published it no
+/// more than thirty storage days after the removal; a later one is consumed
+/// without effects and reported as landed too late (§10, D5).
+#[tokio::test]
+async fn a_removed_devices_write_counts_only_within_thirty_storage_days() {
+    use coven_foundation::clock::{Clock, FixedClock};
+    for (offset, counts) in [(0, true), (1, false)] {
+        let clock = Arc::new(FixedClock::new(UNIX_EPOCH + Duration::from_secs(1)));
+        let storage = Arc::new(
+            MemoryStorage::builder()
+                .transfer_limits(1024 * 1024, 64 * 1024)
+                .clock(clock.clone())
+                .build()
+                .unwrap(),
+        );
+        let mut devices = group(storage.clone(), 3).await;
+        sql(
+            &devices[0].db,
+            "INSERT INTO notes VALUES('one','title','body')",
+        )
+        .await;
+        let record = writes::queued(&devices[0].db).await;
+        devices[1]
+            .sync
+            .make_and_upload_entry(StoreChange::RemoveDevice {
+                device: DeviceId(1),
+            })
+            .await
+            .unwrap();
+        clock.set(clock.now() + Duration::from_secs(30 * 24 * 60 * 60 + offset));
+        writes::publish(&storage, &record).await;
+        devices[2].sync.sync_store_log().await.unwrap();
+        devices[2].writes.download_writes().await.unwrap();
+        assert_eq!(rows(&devices[2].db).await.len(), usize::from(counts));
+        let dropped = devices[2]
+            .db
+            .pending::<crate::PendingRecord>()
+            .await
+            .unwrap()
+            .into_iter()
+            .any(|r| {
+                r.subject == crate::PendingSubject::Write(record.header.position)
+                    && r.reason
+                        == crate::PendingReason::Dropped(coven_database::DropReason::LandedTooLate)
+            });
+        assert_eq!(dropped, !counts);
+        // Consumed either way: a later write of the same log is not held back.
+        assert!(devices[2]
+            .db
+            .sync_state(vec![])
+            .await
+            .unwrap()
+            .positions
+            .covers(record.header.position));
+    }
+}
+
 #[path = "write_seal_tests.rs"]
 pub(crate) mod circles;
 

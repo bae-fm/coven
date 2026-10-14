@@ -203,11 +203,11 @@ async fn open(store: &TestStore, clock: &Arc<FixedClock>) -> Database {
 
 async fn receive(db: &Database, write: &WriteRecord, streamed: bool) -> ApplyOutcome {
     if streamed {
-        db.apply_downloaded_stream(stream(write), EntryPositions(vec![]), || Ok(()))
+        db.receive_stream(stream(write), EntryPositions(vec![]), || Ok(()))
             .await
             .unwrap()
     } else {
-        db.apply_downloaded(write.clone().into()).await.unwrap()
+        db.receive(write.clone().into()).await.unwrap()
     }
 }
 
@@ -314,7 +314,7 @@ async fn far_future_snapshot_and_tail_apply_with_their_causes_and_preserve_queue
     let before = contents(&receiver);
     assert!(matches!(
         receiver
-            .load_snapshots(SnapshotReload::new(
+            .load_snapshots::<crate::pending::tests::Record, _, _>(SnapshotReload::new(
                 vec![snapshot.input()],
                 vec![stream(&writes[2])]
             ))
@@ -325,7 +325,7 @@ async fn far_future_snapshot_and_tail_apply_with_their_causes_and_preserve_queue
     ));
     assert_eq!(contents(&receiver), before);
     receiver
-        .load_snapshots(SnapshotReload::new(
+        .load_snapshots::<crate::pending::tests::Record, _, _>(SnapshotReload::new(
             vec![snapshot.input()],
             vec![] as Vec<crate::DownloadedWriteStream<std::io::Cursor<Vec<u8>>>>,
         ))
@@ -338,7 +338,7 @@ async fn far_future_snapshot_and_tail_apply_with_their_causes_and_preserve_queue
     assert!(queued[0].header.timestamp > writes[0].header.timestamp);
     receiver_clock.set(UNIX_EPOCH - Duration::from_secs(1));
     receiver
-        .load_snapshots(SnapshotReload::new(
+        .load_snapshots::<crate::pending::tests::Record, _, _>(SnapshotReload::new(
             vec![snapshot.input()],
             writes.iter().rev().map(stream).collect(),
         ))
@@ -430,7 +430,7 @@ async fn lean_differential_clocks() {
                             "snapshot": true, "causes": true,
                         }),
                     );
-                    db.load_snapshots(SnapshotReload::new(
+                    db.load_snapshots::<crate::pending::tests::Record, _, _>(SnapshotReload::new(
                         vec![snapshot.input()],
                         writes.iter().map(stream).collect(),
                     ))
@@ -617,7 +617,7 @@ async fn schema_version_zero_round_trips_through_streamed_receive() {
             .unwrap();
     assert_eq!(input.header.header, record.header);
     assert_eq!(
-        db.apply_downloaded_stream(input, EntryPositions(vec![]), || Ok(()))
+        db.receive_stream(input, EntryPositions(vec![]), || Ok(()))
             .await
             .unwrap(),
         ApplyOutcome::Applied

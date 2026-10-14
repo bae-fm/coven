@@ -88,21 +88,28 @@ fn decode_horizon(bytes: &[u8]) -> Result<std::time::Duration, DbError> {
     Ok(std::time::Duration::new(seconds, nanos))
 }
 
+/// The persisted finality horizon; absence differs from an empty final prefix (§9).
+pub(crate) fn horizon(
+    database: &DatabaseConnection,
+) -> Result<Option<std::time::Duration>, DbError> {
+    database.query_row(
+        "SELECT horizon FROM _coven_finality WHERE singleton=1",
+        [],
+        |row| {
+            row.get::<_, Option<Vec<u8>>>(0)?
+                .map(|bytes| {
+                    decode_horizon(&bytes).map_err(|error| decode_failure(0, Type::Blob, error))
+                })
+                .transpose()
+        },
+    )
+}
+
 pub(crate) fn read(database: &DatabaseConnection) -> Result<StoreLog, DbError> {
     #[cfg(any(test, feature = "test-utils"))]
     database.record_work(|work| work.full_log_decodes += 1);
     let mut log = StoreLog {
-        horizon: database.query_row(
-            "SELECT horizon FROM _coven_finality WHERE singleton=1",
-            [],
-            |row| {
-                row.get::<_, Option<Vec<u8>>>(0)?
-                    .map(|bytes| {
-                        decode_horizon(&bytes).map_err(|error| decode_failure(0, Type::Blob, error))
-                    })
-                    .transpose()
-            },
-        )?,
+        horizon: horizon(database)?,
         ..StoreLog::default()
     };
     for (entry, outcome) in database.query(

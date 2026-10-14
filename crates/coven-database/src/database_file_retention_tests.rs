@@ -39,6 +39,7 @@ async fn overwritten_and_deleted_old_values_protect_their_uploaded_files() {
             .collect();
         let references = db
             .write_file_references(DownloadedWriteStream {
+                stored_at: std::time::UNIX_EPOCH,
                 header,
                 parts: vec![DownloadedPartStream::Opened(std::io::Cursor::new(bytes))],
             })
@@ -126,7 +127,7 @@ async fn file_loss_fixture() -> (
         }],
     };
     assert_eq!(
-        db.apply_downloaded(record.clone().into()).await.unwrap(),
+        db.receive(record.clone().into()).await.unwrap(),
         crate::ApplyOutcome::Applied
     );
     let original = record.clone();
@@ -147,7 +148,7 @@ async fn file_loss_fixture() -> (
         ))),
     );
     assert_eq!(
-        db.apply_downloaded(record.into()).await.unwrap(),
+        db.receive(record.into()).await.unwrap(),
         crate::ApplyOutcome::Applied
     );
     assert!(!db.lost_values().await.unwrap().is_empty());
@@ -181,7 +182,7 @@ async fn a_schema_loss_protects_its_file_without_a_displayed_row_change() {
         coven_format::test_utils::column(Value::Text(format!("file 4 {file} {}", "ef".repeat(32)))),
     );
     assert_eq!(
-        db.apply_downloaded(record.into()).await.unwrap(),
+        db.receive(record.into()).await.unwrap(),
         crate::ApplyOutcome::Applied
     );
     assert!(db
@@ -291,7 +292,7 @@ async fn frozen_losses_keep_file_paths_after_their_declaration_is_removed() {
         "x".into(),
         coven_format::test_utils::column(Value::Text(format!("file 4 {file} {}", "ef".repeat(32)))),
     );
-    db.apply_downloaded(record.into()).await.unwrap();
+    db.receive(record.into()).await.unwrap();
     assert!(db
         .retained_files()
         .await

@@ -90,7 +90,9 @@ async fn reset(db: &crate::Database, writes: &[WriteRecord], included: WritePosi
     );
     reload.snapshots = vec![SnapshotSource::Empty(Audience::Store)];
     reload.boundaries = Some(vec![BoundaryCoverage { entry, included }]);
-    db.load_snapshots(reload).await.unwrap();
+    db.load_snapshots::<crate::pending::tests::Record, _, _>(reload)
+        .await
+        .unwrap();
     entry
 }
 
@@ -106,7 +108,7 @@ async fn reversed_reset_restores_cascaded_and_nulled_local_rows_after_local_edit
         .await
         .unwrap();
     target
-        .apply_downloaded(records(&source).remove(0).into())
+        .receive(records(&source).remove(0).into())
         .await
         .unwrap();
     sql(
@@ -240,7 +242,7 @@ async fn a_child_of_two_provisionally_hidden_parents_returns_when_both_do() {
     let mut outside = circle_write(2, STORE_ROW, &Audience::Store);
     outside.header.had_read = WritePositions(vec![other.header.position]);
     for write in [&inside, &other, &outside] {
-        db.apply_downloaded(write.clone().into()).await.unwrap();
+        db.receive(write.clone().into()).await.unwrap();
     }
     sql(
         &db,

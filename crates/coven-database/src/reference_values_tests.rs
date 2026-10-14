@@ -52,24 +52,18 @@ async fn restored_parents_restore_live_references_while_losses_keep_written_valu
         sql(&a, "INSERT INTO parents VALUES('parent'),('Inbox')")
             .await
             .unwrap();
-        b.apply_downloaded(records(&a).remove(0).into())
-            .await
-            .unwrap();
+        b.receive(records(&a).remove(0).into()).await.unwrap();
         sql(&b, "INSERT INTO children VALUES('child','PaReNt')")
             .await
             .unwrap();
         if lost {
             let c_store = TestStore::with_ids(&ids);
             let c = open(&c_store, 3).await;
-            c.apply_downloaded(records(&a).remove(0).into())
-                .await
-                .unwrap();
+            c.receive(records(&a).remove(0).into()).await.unwrap();
             sql(&c, "INSERT INTO children VALUES('child','Inbox')")
                 .await
                 .unwrap();
-            b.apply_downloaded(records(&c).remove(0).into())
-                .await
-                .unwrap();
+            b.receive(records(&c).remove(0).into()).await.unwrap();
             c.close().await.unwrap();
         }
         // Save only the parent's input metadata for the reset fixture. The
@@ -83,9 +77,7 @@ async fn restored_parents_restore_live_references_while_losses_keep_written_valu
         sql(&a, "DELETE FROM parents WHERE id='parent'")
             .await
             .unwrap();
-        b.apply_downloaded(records(&a).remove(1).into())
-            .await
-            .unwrap();
+        b.receive(records(&a).remove(1).into()).await.unwrap();
         assert_eq!(
             reference(&b, lost).await,
             if lost { Some("PaReNt".into()) } else { None }
@@ -187,21 +179,15 @@ async fn migrations_freeze_retired_losses_and_preserve_surviving_written_referen
     sql(&a, "INSERT INTO parents VALUES('parent'),('Inbox')")
         .await
         .unwrap();
-    c.apply_downloaded(records(&a).remove(0).into())
-        .await
-        .unwrap();
-    b.apply_downloaded(records(&a).remove(0).into())
-        .await
-        .unwrap();
+    c.receive(records(&a).remove(0).into()).await.unwrap();
+    b.receive(records(&a).remove(0).into()).await.unwrap();
     sql(
         &a,
         "INSERT INTO children VALUES('removed','PaReNt','parent'),('live','PaReNt','Inbox')",
     )
     .await
     .unwrap();
-    b.apply_downloaded(records(&a).remove(1).into())
-        .await
-        .unwrap();
+    b.receive(records(&a).remove(1).into()).await.unwrap();
     // Concurrent assignments leave a cell loss on the row that CASCADE removes.
     sql(&a, "UPDATE children SET parent='Inbox' WHERE id='removed'")
         .await
@@ -209,15 +195,11 @@ async fn migrations_freeze_retired_losses_and_preserve_surviving_written_referen
     sql(&b, "UPDATE children SET parent='PARENT' WHERE id='removed'")
         .await
         .unwrap();
-    a.apply_downloaded(records(&b).remove(0).into())
-        .await
-        .unwrap();
+    a.receive(records(&b).remove(0).into()).await.unwrap();
     sql(&c, "DELETE FROM parents WHERE id='parent'")
         .await
         .unwrap();
-    a.apply_downloaded(records(&c).remove(0).into())
-        .await
-        .unwrap();
+    a.receive(records(&c).remove(0).into()).await.unwrap();
     c.close().await.unwrap();
     let losses = a.lost_values().await.unwrap();
     let row = losses
@@ -306,7 +288,7 @@ async fn migrations_freeze_retired_losses_and_preserve_surviving_written_referen
         .await
         .unwrap();
     for write in records(&snapshot_target) {
-        a.apply_downloaded(write.into()).await.unwrap();
+        a.receive(write.into()).await.unwrap();
     }
     crate::snapshot_write::tests::assert_loaded_losses(&a, &snapshot_target).await;
     snapshot_target.close().await.unwrap();
@@ -328,10 +310,7 @@ async fn dropping_a_lost_reference_keeps_its_written_value_as_plain_data() {
         .await
         .unwrap();
     for target in [&b, &c] {
-        target
-            .apply_downloaded(records(&a).remove(0).into())
-            .await
-            .unwrap();
+        target.receive(records(&a).remove(0).into()).await.unwrap();
     }
     sql(&b, "INSERT INTO children VALUES('child','PaReNt')")
         .await
@@ -339,19 +318,13 @@ async fn dropping_a_lost_reference_keeps_its_written_value_as_plain_data() {
     sql(&c, "INSERT INTO children VALUES('child','Inbox')")
         .await
         .unwrap();
-    b.apply_downloaded(records(&c).remove(0).into())
-        .await
-        .unwrap();
+    b.receive(records(&c).remove(0).into()).await.unwrap();
     sql(&c, "DELETE FROM children").await.unwrap();
-    b.apply_downloaded(records(&c).remove(1).into())
-        .await
-        .unwrap();
+    b.receive(records(&c).remove(1).into()).await.unwrap();
     sql(&a, "DELETE FROM parents WHERE id='parent'")
         .await
         .unwrap();
-    b.apply_downloaded(records(&a).remove(1).into())
-        .await
-        .unwrap();
+    b.receive(records(&a).remove(1).into()).await.unwrap();
     assert_eq!(reference(&b, true).await, Some("PaReNt".into()));
     b.close().await.unwrap();
     let b = b_store.builder(tables(), vec![

@@ -56,6 +56,8 @@ pub(crate) struct SavedSnapshot {
 pub(crate) struct SavedWrite {
     pub(crate) header: Vec<u8>,
     pub(crate) parts: Vec<Option<String>>,
+    /// First complete publication time, for the retirement window (§10).
+    pub(crate) stored_at: std::time::SystemTime,
 }
 
 pub(crate) mod audience {

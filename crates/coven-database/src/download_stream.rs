@@ -14,6 +14,8 @@ pub struct DownloadedWriteStream<R> {
     pub header: WriteHeaderFrame,
     /// Opened plaintext or an explicit unreadable audience, in header order.
     pub parts: Vec<DownloadedPartStream<R>>,
+    /// The object's first complete publication time, from provider metadata (§10).
+    pub stored_at: std::time::SystemTime,
 }
 
 /// Whether sync could decrypt the corresponding part in the header.
@@ -25,7 +27,7 @@ pub enum DownloadedPartStream<R> {
 }
 
 impl<R: Read> DownloadedWriteStream<R> {
-    pub(crate) fn apply(
+    pub(crate) fn apply<P: crate::PendingValue>(
         self,
         database: &crate::sqlite::DatabaseConnection,
         before: &crate::sqlite::DatabaseConnection,
@@ -94,6 +96,26 @@ impl<R: Read> DownloadedWriteStream<R> {
                     )));
                 }
             }
+            crate::pending::clear_log(
+                database,
+                crate::LogObject::Write(self.header.header.position),
+            )?;
+            let opened: Vec<_> = self
+                .header
+                .parts
+                .iter()
+                .zip(&self.parts)
+                .filter(|(_, stream)| matches!(stream, DownloadedPartStream::Opened(_)))
+                .map(|(part, _)| part.audience.clone())
+                .collect();
+            let late = crate::write_landing::land::<P>(
+                database,
+                schema,
+                &self.header.header,
+                self.stored_at,
+                &opened,
+                true,
+            )?;
             crate::download_stage::begin(database)?;
             let deleted = crate::store_log_tables::deleted_circles(database)?;
             for (header, stream) in self.header.parts.into_iter().zip(self.parts) {
@@ -102,6 +124,21 @@ impl<R: Read> DownloadedWriteStream<R> {
                 };
                 let audience = header.audience.clone();
                 read_part(input, header, &self.header.header, |frame| {
+                    if late {
+                        // Authored evidence and retained parts only: a late
+                        // write has no effects or losses (§10).
+                        crate::retained_writes::frame(
+                            database,
+                            &self.header.header,
+                            &audience,
+                            &frame,
+                        )?;
+                        if let WriteFrame::Change(row) = frame {
+                            crate::write_sources::validate(database, &self.header.header, &row)?;
+                            crate::write_sources::retain(database, &self.header.header, &row)?;
+                        }
+                        return Ok(());
+                    }
                     crate::download_stage::frame(
                         database,
                         schema,
@@ -121,10 +158,6 @@ impl<R: Read> DownloadedWriteStream<R> {
                 &self.header.header,
                 &deleted,
                 files,
-            )?;
-            crate::pending::clear_log(
-                database,
-                crate::LogObject::Write(self.header.header.position),
             )?;
             files.before_commit()?;
             Ok(crate::ApplyOutcome::Applied)

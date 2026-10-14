@@ -294,7 +294,7 @@ async fn a_downloaded_reference_change_releases_this_devices_owned_copy() {
         .unwrap()
     });
     let reference = db.file_ref("files", "7").await.unwrap();
-    db.apply_downloaded(record.into()).await.unwrap();
+    db.receive(record.into()).await.unwrap();
     assert_eq!(local_count(&db, "_coven_device_files"), 0);
     assert_eq!(local_count(&db, "_coven_file_removals"), 0);
     assert!(owned_paths(&store).is_empty());

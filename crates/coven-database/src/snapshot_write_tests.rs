@@ -128,6 +128,7 @@ pub(crate) fn stream(
 ) -> crate::DownloadedWriteStream<std::io::Cursor<Vec<u8>>> {
     let encoder = coven_format::write_stream::WriteEncoder::new(record).unwrap();
     crate::DownloadedWriteStream {
+        stored_at: std::time::UNIX_EPOCH,
         header: encoder.header().clone(),
         parts: (0..record.parts.len())
             .map(|index| {
@@ -150,7 +151,7 @@ pub(crate) async fn load_one<R: std::io::Read + Send + 'static>(
     plaintext: R,
 ) -> Result<(), crate::DbError> {
     database
-        .load_snapshots(crate::SnapshotReload::new(
+        .load_snapshots::<crate::pending::tests::Record, _, _>(crate::SnapshotReload::new(
             vec![(expected, prefix, plaintext)],
             Vec::<crate::DownloadedWriteStream<std::io::Cursor<Vec<u8>>>>::new(),
         ))
@@ -179,20 +180,14 @@ async fn a_snapshot_round_trips_rows_history_and_excluded_changes() {
         .unwrap();
     let writes = records(&source);
     for write in &writes {
-        receiver
-            .apply_downloaded(write.clone().into())
-            .await
-            .unwrap();
+        receiver.receive(write.clone().into()).await.unwrap();
     }
     sql(&source, "UPDATE notes SET title='excluded'")
         .await
         .unwrap();
     let mut excluded = records(&source).pop().unwrap();
     excluded.header.disposition = coven_format::write::WriteDisposition::Lost(1);
-    receiver
-        .apply_downloaded(excluded.clone().into())
-        .await
-        .unwrap();
+    receiver.receive(excluded.clone().into()).await.unwrap();
     let (header, snapshot) = decode(&frames(&receiver, Audience::Store).await);
     assert_eq!(header.schema_version, 1);
     assert_eq!(header.writes.0, [excluded.header.position]);
@@ -403,11 +398,11 @@ async fn a_migration_preserves_removed_rows_and_their_concurrent_losses_in_snaps
         .await
         .unwrap();
     let inserted = records(&b)[0].clone();
-    c.apply_downloaded(inserted.clone().into()).await.unwrap();
+    c.receive(inserted.clone().into()).await.unwrap();
     sql(&b, "UPDATE notes SET body='b edit'").await.unwrap();
     sql(&c, "UPDATE notes SET body='c edit'").await.unwrap();
     for write in [inserted, records(&b)[1].clone(), records(&c)[0].clone()] {
-        a.apply_downloaded(write.into()).await.unwrap();
+        a.receive(write.into()).await.unwrap();
     }
     let losses = a.lost_values().await.unwrap();
     assert_eq!(losses.len(), 2);
@@ -491,7 +486,7 @@ async fn a_migration_preserves_removed_rows_and_their_concurrent_losses_in_snaps
     // The empty device also authored its schema migration. Compare snapshots
     // only after both devices have consumed the same writes.
     for write in records(&d) {
-        a.apply_downloaded(write.into()).await.unwrap();
+        a.receive(write.into()).await.unwrap();
     }
     for _ in 0..2 {
         assert_loaded_losses(&a, &d).await;
@@ -547,18 +542,14 @@ async fn snapshots_keep_the_written_reference_when_the_app_reads_null() {
     sql(&a, "INSERT INTO parents VALUES('parent')")
         .await
         .unwrap();
-    b.apply_downloaded(records(&a).remove(0).into())
-        .await
-        .unwrap();
+    b.receive(records(&a).remove(0).into()).await.unwrap();
     sql(&b, "INSERT INTO children VALUES('child','PaReNt')")
         .await
         .unwrap();
     sql(&a, "DELETE FROM parents WHERE id='parent'")
         .await
         .unwrap();
-    b.apply_downloaded(records(&a).remove(1).into())
-        .await
-        .unwrap();
+    b.receive(records(&a).remove(1).into()).await.unwrap();
     let displayed: Option<String> = b
         .read(|sql| Ok(sql.query_row("SELECT parent FROM children", [], |r| r.get(0))?))
         .await
@@ -611,7 +602,7 @@ async fn excluded_snapshots_keep_only_undismissed_cells_and_rows() {
         .unwrap();
         if operation != "insert" {
             receiver
-                .apply_downloaded(records(&source)[0].clone().into())
+                .receive(records(&source)[0].clone().into())
                 .await
                 .unwrap();
             sql(
@@ -627,10 +618,7 @@ async fn excluded_snapshots_keep_only_undismissed_cells_and_rows() {
         }
         let mut excluded = records(&source).pop().unwrap();
         excluded.header.disposition = WriteDisposition::Lost(1);
-        receiver
-            .apply_downloaded(excluded.clone().into())
-            .await
-            .unwrap();
+        receiver.receive(excluded.clone().into()).await.unwrap();
         sql(&source, "INSERT INTO notes VALUES('next','later','')")
             .await
             .unwrap();
@@ -644,7 +632,7 @@ async fn excluded_snapshots_keep_only_undismissed_cells_and_rows() {
         if lost_dismissal {
             dismissal.header.disposition = WriteDisposition::Lost(1);
         }
-        receiver.apply_downloaded(dismissal.into()).await.unwrap();
+        receiver.receive(dismissal.into()).await.unwrap();
         let (header, snapshot) = decode(&frames(&receiver, Audience::Store).await);
         assert_eq!(header.counts[4], 2);
         let rows: Vec<_> = snapshot
@@ -741,17 +729,14 @@ async fn excluded_deletions_without_old_values_keep_distinct_write_identities() 
         .await
         .unwrap();
     receiver
-        .apply_downloaded(records(&source)[0].clone().into())
+        .receive(records(&source)[0].clone().into())
         .await
         .unwrap();
     sql(&source, "DELETE FROM notes").await.unwrap();
     let mut deletion = records(&source).pop().unwrap();
     deletion.header.disposition = coven_format::write::WriteDisposition::Lost(1);
     deletion.parts[0].rows[0].old.clear();
-    receiver
-        .apply_downloaded(deletion.clone().into())
-        .await
-        .unwrap();
+    receiver.receive(deletion.clone().into()).await.unwrap();
     let first = deletion.header.position;
     // Excluded writes do not run merge: another deletion at the same generation
     // remains a distinct loss even when neither carries an old cell value.
@@ -762,10 +747,7 @@ async fn excluded_deletions_without_old_values_keep_distinct_write_identities() 
         deletion.header.position.device,
     )
     .unwrap();
-    receiver
-        .apply_downloaded(deletion.clone().into())
-        .await
-        .unwrap();
+    receiver.receive(deletion.clone().into()).await.unwrap();
     let (header, snapshot) = decode(&frames(&receiver, Audience::Store).await);
     assert_eq!(header.counts[4], 2);
     let writes: Vec<_> = snapshot

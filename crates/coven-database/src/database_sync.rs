@@ -307,7 +307,7 @@ impl Database {
     /// runs after every stream ends and must confirm the complete sealed object,
     /// including its signature. Any stream or final-check error rolls back all
     /// rows, losses, file references and positions. No whole write is collected.
-    pub async fn apply_downloaded_stream<R, F>(
+    pub async fn apply_downloaded_stream<P: crate::PendingValue, R, F>(
         &self,
         write: crate::DownloadedWriteStream<R>,
         store_log: coven_format::value::EntryPositions,
@@ -325,7 +325,7 @@ impl Database {
                         inner.access.write_schema.prepare(reader)?;
                         // Pin the before view before the streamed transaction changes merge state.
                         reader.schema_version()?;
-                        write.apply(
+                        write.apply::<P>(
                             writer,
                             reader,
                             &inner.access.write_schema,
@@ -392,13 +392,21 @@ impl Database {
     }
     /// Apply one authenticated download, or report the prerequisite it awaits.
     /// Row changes, merge state, fingerprints and positions commit together.
-    pub async fn apply_downloaded(
+    /// `stored_at` is the write's first complete publication time (§10).
+    pub async fn apply_downloaded<P: crate::PendingValue>(
         &self,
         write: crate::DownloadedWrite,
+        stored_at: std::time::SystemTime,
     ) -> Result<crate::ApplyOutcome, DbError> {
         self.call(move |inner| {
             inner.with_files(Vec::new(), |writer, files| {
-                crate::download::apply(writer, &inner.access.write_schema, write, files)
+                crate::download::apply::<P>(
+                    writer,
+                    &inner.access.write_schema,
+                    write,
+                    stored_at,
+                    files,
+                )
             })
         })
         .await

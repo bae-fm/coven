@@ -145,15 +145,12 @@ async fn data_differential_entry_effects() {
             .open()
             .await
             .unwrap();
-        source
-            .apply_downloaded(writes[1].clone().into())
-            .await
-            .unwrap();
+        source.receive(writes[1].clone().into()).await.unwrap();
         // The target received writes 0 and 1 before any boundary; the model's
         // original state is that receipt. Writes covered by a loaded snapshot
         // but never received individually could not be rebuilt locally.
         for write in &writes[..2] {
-            target.apply_downloaded(write.clone().into()).await.unwrap();
+            target.receive(write.clone().into()).await.unwrap();
         }
         let id = |number| SnapshotId {
             audience: Audience::Store,
@@ -215,7 +212,10 @@ async fn data_differential_entry_effects() {
                     })
                     .collect(),
             );
-            target.load_snapshots(reload).await.unwrap();
+            target
+                .load_snapshots::<crate::pending::tests::Record, _, _>(reload)
+                .await
+                .unwrap();
             results.push(observed(&target, &writes, &mut trace).await);
             cases.push(json!({"kept": (1..=number).collect::<Vec<_>>(), "received": [0,1,2,3,4,5], "observations": [{"subject":200,"resets":[1]}]}));
         }
@@ -329,7 +329,7 @@ async fn data_differential_entry_effects_circles() {
                     .unwrap();
             }
             if stage == usize::from(late) {
-                db.apply_downloaded(write.clone().into()).await.unwrap();
+                db.receive(write.clone().into()).await.unwrap();
                 // A local child can point only at a row the app sees.
                 if !late {
                     crate::write::tests::sql(

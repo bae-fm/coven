@@ -400,7 +400,7 @@ async fn a_removed_row_is_forgotten_but_its_loss_survives_migration_and_reinsert
             }],
         }],
     };
-    db.apply_downloaded(record.into()).await.unwrap();
+    db.receive(record.into()).await.unwrap();
     assert_eq!(count(&db, "notes"), 0);
     let lost = db.lost_values().await.unwrap();
     assert_eq!(lost.len(), 1);
@@ -738,7 +738,7 @@ async fn retiring_a_removed_row_keeps_its_cell_loss_names_while_live_cells_are_r
         latest.header.timestamp,
         &[("title", "good", "bad")],
     );
-    db.apply_downloaded(remote.into()).await.unwrap();
+    db.receive(remote.into()).await.unwrap();
     let lost = db.lost_values().await.unwrap();
     assert_eq!(lost.len(), 2);
     db.close().await.unwrap();
@@ -772,7 +772,7 @@ async fn a_renamed_unique_constraint_replaces_the_dropped_columns_constraint() {
         timestamp,
         &[("x", "other-x", "x"), ("y", "other-y", "y")],
     );
-    db.apply_downloaded(remote.into()).await.unwrap();
+    db.receive(remote.into()).await.unwrap();
     assert_eq!(count(&db, "_coven_constraints"), 2);
     let original = db.inspect_writer(|db| {
         db.query_row(

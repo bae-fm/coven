@@ -272,7 +272,7 @@ async fn comparison(history: &MigrationHistory) -> Comparison {
         .unwrap();
     for w in &history.writes {
         assert_eq!(
-            db.apply_downloaded(w.clone().into()).await.unwrap(),
+            db.receive(w.clone().into()).await.unwrap(),
             crate::ApplyOutcome::Applied
         );
     }

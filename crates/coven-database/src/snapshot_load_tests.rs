@@ -59,8 +59,11 @@ async fn store_at_40_and_circle_at_38_replay_only_the_circles_missing_parts() {
     let writes = records(&a);
     for supplied in [vec![], vec![stream(&writes[39])], vec![stream(&writes[38])]] {
         assert!(matches!(
-            b.load_snapshots(crate::SnapshotReload::new(snapshots(), supplied))
-                .await,
+            b.load_snapshots::<crate::pending::tests::Record, _, _>(crate::SnapshotReload::new(
+                snapshots(),
+                supplied
+            ))
+            .await,
             Err(crate::DbError::Snapshot(
                 crate::SnapshotError::MissingWrites { .. } | crate::SnapshotError::WriteWaiting(_)
             ))
@@ -77,7 +80,7 @@ async fn store_at_40_and_circle_at_38_replay_only_the_circles_missing_parts() {
     });
     assert!(query.next().await.unwrap().is_empty());
     // Supply the later write first: the loader chooses causal order.
-    b.load_snapshots(crate::SnapshotReload::new(
+    b.load_snapshots::<crate::pending::tests::Record, _, _>(crate::SnapshotReload::new(
         snapshots(),
         writes.iter().rev().map(stream).collect(),
     ))
@@ -99,7 +102,7 @@ async fn store_at_40_and_circle_at_38_replay_only_the_circles_missing_parts() {
     sql(&b, "UPDATE notes SET value=41").await.unwrap();
     let written = records(&b).pop().unwrap();
     assert_eq!(written.header.had_read.0, [writes[39].header.position]);
-    a.apply_downloaded(written.into()).await.unwrap();
+    a.receive(written.into()).await.unwrap();
     for audience in [Audience::Store, circle] {
         assert_eq!(
             frames(&b, audience.clone()).await,
@@ -138,9 +141,7 @@ async fn waiting_writes_keep_their_numbers_and_merge_as_late_writes_on_every_loa
     sql(&a, "INSERT INTO notes VALUES('n','base','')")
         .await
         .unwrap();
-    b.apply_downloaded(records(&a).remove(0).into())
-        .await
-        .unwrap();
+    b.receive(records(&a).remove(0).into()).await.unwrap();
     a.inspect_writer(|db| {
         db.internal_execute("DELETE FROM _coven_uploads", [])
             .unwrap()
@@ -297,12 +298,8 @@ async fn loading_a_parent_snapshot_recomputes_other_audiences_without_rewriting_
         sql(&a, "INSERT INTO parents VALUES('parent')")
             .await
             .unwrap();
-        b.apply_downloaded(records(&a).remove(0).into())
-            .await
-            .unwrap();
-        c.apply_downloaded(records(&a)[0].clone().into())
-            .await
-            .unwrap();
+        b.receive(records(&a).remove(0).into()).await.unwrap();
+        c.receive(records(&a)[0].clone().into()).await.unwrap();
         sql(&c, "INSERT INTO parents VALUES('reset branch')")
             .await
             .unwrap();
@@ -320,7 +317,7 @@ async fn loading_a_parent_snapshot_recomputes_other_audiences_without_rewriting_
             .await
             .unwrap();
         let missing = records(&a).into_iter().skip(1).collect::<Vec<_>>();
-        b.load_snapshots(crate::SnapshotReload::new(
+        b.load_snapshots::<crate::pending::tests::Record, _, _>(crate::SnapshotReload::new(
             vec![frames(&a, Audience::Store).await.input()],
             missing.iter().map(stream).collect(),
         ))
@@ -353,7 +350,7 @@ async fn loading_a_parent_snapshot_recomputes_other_audiences_without_rewriting_
         )
         .await
         .unwrap();
-        b.load_snapshots(crate::SnapshotReload::new(
+        b.load_snapshots::<crate::pending::tests::Record, _, _>(crate::SnapshotReload::new(
             vec![(
                 id(Audience::Store),
                 before.prefix.clone(),
@@ -615,17 +612,13 @@ async fn an_empty_loaded_audience_still_limits_later_snapshot_reloads() {
     for audience in [Audience::Store, circle.clone()] {
         load(&b, audience.clone(), frames(&a, audience).await).await;
     }
-    b.apply_downloaded(records(&a)[0].clone().into())
-        .await
-        .unwrap();
+    b.receive(records(&a)[0].clone().into()).await.unwrap();
     sql(&a, "UPDATE notes SET value=2").await.unwrap();
-    b.apply_downloaded(records(&a).remove(1).into())
-        .await
-        .unwrap();
+    b.receive(records(&a).remove(1).into()).await.unwrap();
     b.close().await.unwrap();
     let b = b_store.schema(tables(), SCHEMA).await.unwrap();
     sql(&a,"UPDATE notes SET value=3; INSERT INTO notes VALUES('00000000-0000-4000-8000-000000000002','00000000-0000-0000-0000-00000000000a',3)").await.unwrap();
-    b.load_snapshots(crate::SnapshotReload::new(
+    b.load_snapshots::<crate::pending::tests::Record, _, _>(crate::SnapshotReload::new(
         vec![frames(&a, Audience::Store).await.input()],
         vec![stream(&records(&a)[2])],
     ))
@@ -652,7 +645,7 @@ async fn reloading_keeps_uploaded_own_history_before_authoring_another() {
         db.internal_execute("DELETE FROM _coven_uploads", [])
             .unwrap()
     });
-    db.load_snapshots(crate::SnapshotReload::new(
+    db.load_snapshots::<crate::pending::tests::Record, _, _>(crate::SnapshotReload::new(
         vec![(
             id(Audience::Store),
             snapshot.prefix.clone(),
@@ -787,7 +780,7 @@ async fn removing_a_file_in_a_snapshot_discards_bytes_only_after_a_successful_co
         .await
         .unwrap();
     source
-        .apply_downloaded(records(&db)[0].clone().into())
+        .receive(records(&db)[0].clone().into())
         .await
         .unwrap();
     sql(&source, "DELETE FROM files").await.unwrap();
@@ -873,7 +866,7 @@ async fn waiting_changes_replay_after_their_missing_own_predecessor() {
         let waiting = records(&db);
         let expected = frames(&db, Audience::Store).await;
         for _ in 0..2 {
-            db.load_snapshots(crate::SnapshotReload::new(
+            db.load_snapshots::<crate::pending::tests::Record, _, _>(crate::SnapshotReload::new(
                 vec![(
                     id(Audience::Store),
                     old_prefix.clone(),
@@ -916,7 +909,7 @@ async fn an_edit_after_reload_reads_the_generation_from_the_newer_snapshot() {
     )
     .await
     .unwrap();
-    b.load_snapshots(crate::SnapshotReload::new(
+    b.load_snapshots::<crate::pending::tests::Record, _, _>(crate::SnapshotReload::new(
         vec![
             (id(circle), empty_prefix.clone(), Cursor::new(empty)),
             frames(&a, Audience::Store).await.input(),
@@ -930,7 +923,7 @@ async fn an_edit_after_reload_reads_the_generation_from_the_newer_snapshot() {
         .unwrap();
     let edited = records(&b).pop().unwrap();
     assert_eq!(edited.header.had_read.0, [records(&a)[0].header.position]);
-    a.apply_downloaded(edited.into()).await.unwrap();
+    a.receive(edited.into()).await.unwrap();
     assert_eq!(
         frames(&b, Audience::Store).await,
         frames(&a, Audience::Store).await

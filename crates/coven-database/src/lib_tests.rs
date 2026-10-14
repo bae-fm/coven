@@ -247,7 +247,7 @@ pub(crate) async fn remote_write(database: &crate::Database, row: coven_format::
         }],
     };
     assert_eq!(
-        database.apply_downloaded(record.into()).await.unwrap(),
+        database.receive(record.into()).await.unwrap(),
         crate::ApplyOutcome::Applied
     );
 }
@@ -361,5 +361,35 @@ pub(crate) fn independent_logs(
                 number,
             );
         }
+    }
+}
+
+impl crate::Database {
+    /// Apply a received write published at the epoch, as no retirement affects.
+    pub(crate) async fn receive(
+        &self,
+        write: crate::DownloadedWrite,
+    ) -> Result<crate::ApplyOutcome, DbError> {
+        self.apply_downloaded::<crate::pending::tests::Record>(write, std::time::UNIX_EPOCH)
+            .await
+    }
+
+    /// Apply a streamed received write, reporting with the test record.
+    pub(crate) async fn receive_stream<R, F>(
+        &self,
+        write: crate::DownloadedWriteStream<R>,
+        store_log: coven_format::value::EntryPositions,
+        authenticate: F,
+    ) -> Result<crate::ApplyOutcome, DbError>
+    where
+        R: std::io::Read + Send + 'static,
+        F: FnOnce() -> Result<(), DbError> + Send + 'static,
+    {
+        self.apply_downloaded_stream::<crate::pending::tests::Record, _, _>(
+            write,
+            store_log,
+            authenticate,
+        )
+        .await
     }
 }

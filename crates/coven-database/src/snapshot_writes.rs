@@ -20,7 +20,7 @@ enum Source<R> {
     Deleted(AppliedWrite),
 }
 
-pub(crate) fn apply<R: Read>(
+pub(crate) fn apply<P: crate::PendingValue, R: Read>(
     database: &DatabaseConnection,
     schema: &WriteSchema,
     downloads: Vec<DownloadedWriteStream<R>>,
@@ -100,6 +100,10 @@ pub(crate) fn apply<R: Read>(
         };
         let result = (|| -> Result<(), DbError> {
             let supplied = matches!(source, Source::Download(_));
+            let stored_at = match &source {
+                Source::Download(stream) => Some(stream.stored_at),
+                _ => None,
+            };
             let write = match source {
                 Source::Download(stream) => {
                     crate::write_headers::retain(database, &stream.header)?;
@@ -159,6 +163,24 @@ pub(crate) fn apply<R: Read>(
                     wait => SnapshotError::WriteWaiting(wait),
                 }
                 .into());
+            }
+            if let Some(stored_at) = stored_at {
+                let opened: Vec<_> = write
+                    .parts
+                    .iter()
+                    .filter_map(|part| match part {
+                        crate::DownloadedPart::Opened(part) => Some(part.audience.clone()),
+                        crate::DownloadedPart::Skipped(_) => None,
+                    })
+                    .collect();
+                crate::write_landing::land::<P>(
+                    database,
+                    schema,
+                    &write.header,
+                    stored_at,
+                    &opened,
+                    false,
+                )?;
             }
             if supplied {
                 crate::download::retain_sources(database, &write)?;

@@ -979,8 +979,14 @@ reload, dismissal and finality. Concrete conversion obligations are in
 
 **Rust comparison.** `ReceiveRunner.lean` still calls the proved frontier
 readiness function. `lean_differential_receive` calls the real database
-prerequisite function across three logs and consumed prefixes. The Boolean,
-reset and schema runners retain their existing paths and comparison scope.
+prerequisite function across three logs and consumed prefixes. Its `window`
+check runs `withinWindow` for `mg_differential_retirement_window`, which
+compares coven-database's retirement window over every subset of kept
+retirements, reads of them, and publication times at and around thirty days.
+For each case with a kept retirement it also keeps the final prefix through
+the earliest one, adds a later retirement, and checks both runs agree, as
+`retirement_verdict_final` states. The Boolean, reset and schema runners
+retain their existing paths and comparison scope.
 This comparison does not cover a Rust implementation of per-change data losses.
 
 ### B18 Owner tables and row authenticity

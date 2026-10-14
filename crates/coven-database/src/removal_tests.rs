@@ -234,7 +234,7 @@ async fn a_check_that_forbids_null_preserves_the_written_reference_as_a_removed_
     sql(&source, "INSERT INTO notes VALUES('43'),('44')")
         .await
         .unwrap();
-    db.apply_downloaded(records(&source)[0].clone().into())
+    db.receive(records(&source)[0].clone().into())
         .await
         .unwrap();
     sql(&db, "INSERT INTO links VALUES('6','43')")
@@ -244,7 +244,7 @@ async fn a_check_that_forbids_null_preserves_the_written_reference_as_a_removed_
     sql(&source, "DELETE FROM notes WHERE id='43'")
         .await
         .unwrap();
-    db.apply_downloaded(records(&source)[1].clone().into())
+    db.receive(records(&source)[1].clone().into())
         .await
         .unwrap();
 
@@ -300,15 +300,13 @@ async fn a_check_on_one_generated_column_can_fail_when_its_inputs_merge() {
     sql(&a, "INSERT INTO ranges(id,start,end) VALUES('r',0,1)")
         .await
         .unwrap();
-    b.apply_downloaded(records(&a)[0].clone().into())
-        .await
-        .unwrap();
+    b.receive(records(&a)[0].clone().into()).await.unwrap();
     sql(&a, "UPDATE ranges SET start=1").await.unwrap();
     sql(&b, "UPDATE ranges SET end=0").await.unwrap();
     let a_write = records(&a).pop().unwrap();
     let b_write = records(&b).pop().unwrap();
     for (db, write) in [(&a, b_write), (&b, a_write)] {
-        db.apply_downloaded(write.into()).await.unwrap();
+        db.receive(write.into()).await.unwrap();
         assert_eq!(count(db, "ranges"), 0);
         assert_eq!(losses(db)[0].2, [Rule::Check("nonnegative".into())].into());
     }

@@ -65,7 +65,7 @@ async fn size_ten_concurrent_replacements_keep_all_four_columns_from_the_later_w
         .unwrap();
     attach(&a, vec![b'I'; 10], true).await.unwrap();
     let initial = records(&a).remove(0);
-    b.apply_downloaded(initial.clone().into()).await.unwrap();
+    b.receive(initial.clone().into()).await.unwrap();
     clock.set(UNIX_EPOCH + Duration::from_secs(2));
     attach(&a, vec![b'A'; 20], false).await.unwrap();
     clock.set(UNIX_EPOCH + Duration::from_secs(3));
@@ -93,9 +93,9 @@ async fn size_ten_concurrent_replacements_keep_all_four_columns_from_the_later_w
             .schema(tables(Provenance::AppProvided), SCHEMA)
             .await
             .unwrap();
-        db.apply_downloaded(initial.clone().into()).await.unwrap();
+        db.receive(initial.clone().into()).await.unwrap();
         for write in changes {
-            db.apply_downloaded(write.into()).await.unwrap();
+            db.receive(write.into()).await.unwrap();
         }
         let size = db
             .read(|sql| Ok(sql.query_row("SELECT size FROM files", [], |r| r.get::<_, i64>(0))?))
@@ -698,9 +698,7 @@ async fn downloaded_deletion_removes_records_and_bytes_after_commit() {
         .await
         .unwrap();
     attach(&a, b"original".to_vec(), true).await.unwrap();
-    b.apply_downloaded(records(&a).remove(0).into())
-        .await
-        .unwrap();
+    b.receive(records(&a).remove(0).into()).await.unwrap();
     b.write(|sql| {
         sql.execute("DELETE FROM files", [])?;
         Ok(())
@@ -717,14 +715,14 @@ async fn downloaded_deletion_removes_records_and_bytes_after_commit() {
     });
     let paths = owned_paths(&a_store);
     assert!(matches!(
-        a.apply_downloaded(deletion.clone().into()).await,
+        a.receive(deletion.clone().into()).await,
         Err(DbError::Sqlite(_))
     ));
     assert_eq!(local_count(&a, "files"), 1);
     assert_eq!(local_count(&a, "_coven_device_files"), 1);
     assert_eq!(owned_paths(&a_store), paths);
     a.inspect_writer(|sql| sql.batch("DROP TRIGGER fail_delete").unwrap());
-    a.apply_downloaded(deletion.into()).await.unwrap();
+    a.receive(deletion.into()).await.unwrap();
     assert_eq!(local_count(&a, "files"), 0);
     assert_eq!(local_count(&a, "_coven_device_files"), 0);
     assert!(owned_paths(&a_store).is_empty());
@@ -772,9 +770,7 @@ async fn constraint_removal_preserves_bytes_until_the_row_is_restored() {
     })
     .await
     .unwrap();
-    a.apply_downloaded(records(&b).remove(0).into())
-        .await
-        .unwrap();
+    a.receive(records(&b).remove(0).into()).await.unwrap();
     let present = a
         .read(|sql| Ok(sql.query_row("SELECT id FROM files", [], |r| r.get::<_, String>(0))?))
         .await
@@ -788,9 +784,7 @@ async fn constraint_removal_preserves_bytes_until_the_row_is_restored() {
     })
     .await
     .unwrap();
-    a.apply_downloaded(records(&b).remove(1).into())
-        .await
-        .unwrap();
+    a.receive(records(&b).remove(1).into()).await.unwrap();
     let present = a
         .read(|sql| Ok(sql.query_row("SELECT id FROM files", [], |r| r.get::<_, String>(0))?))
         .await

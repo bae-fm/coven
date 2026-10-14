@@ -318,6 +318,13 @@ impl PendingValue for PendingRecord {
             reported_by: entry.device,
         }
     }
+    fn dropped_write(write: coven_merge::WriteId, reason: DropReason, reporter: DeviceId) -> Self {
+        Self {
+            subject: PendingSubject::Write(write),
+            reason: PendingReason::Dropped(reason),
+            reported_by: reporter,
+        }
+    }
     type Subject = PendingSubject;
     fn subject(&self) -> &PendingSubject {
         &self.subject

@@ -72,7 +72,7 @@ pub(crate) fn applied(
 
 /// Whether this device reads the audience's parts: the store, or a circle its
 /// member belongs to. A deleted circle's member still holds its hidden rows.
-fn reads(db: &DatabaseConnection, audience: &Audience) -> Result<bool, DbError> {
+pub(crate) fn reads(db: &DatabaseConnection, audience: &Audience) -> Result<bool, DbError> {
     let Audience::Circle(circle) = audience else {
         return Ok(true);
     };
@@ -317,7 +317,9 @@ pub(crate) fn release(db: &DatabaseConnection) -> Result<(), DbError> {
         [],
         |r| crate::write_encoding::audience(&r.get::<_, String>(0)?),
     )?;
-    for audience in audiences {
+    // A retired write's verdict that can still change keeps its audience's inputs.
+    let windows = crate::write_landing::open_audiences(db)?;
+    for audience in audiences.into_iter().filter(|a| !windows.contains(a)) {
         let open: bool = db.query_row(
             &format!(
                 "SELECT EXISTS(SELECT 1 FROM _coven_boundaries b JOIN _coven_store_log l ON l.device=b.entry_device AND l.number=b.entry_number
@@ -331,6 +333,7 @@ pub(crate) fn release(db: &DatabaseConnection) -> Result<(), DbError> {
         }
     }
     crate::local_effects::release(db)?;
+    crate::write_landing::release(db)?;
     let resets = db.query(
         "SELECT DISTINCT entry_device,entry_number FROM _coven_pending_resets",
         [],

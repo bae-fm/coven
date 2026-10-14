@@ -384,12 +384,14 @@ pub(crate) fn apply<P: crate::PendingValue>(
         }
         for (incoming, bytes, author_view, stored_at, timestamp) in &encoded {
             let id = incoming.entry.position;
+            let (retires_device, retires_member) = crate::write_landing::retires(&incoming.entry);
             database.internal_execute(
-                "INSERT INTO _coven_store_log(device,number,record,author_view,stored_at,outcome,timestamp)
-                 VALUES(?1,?2,?3,?4,?5,?6,?7) ON CONFLICT(device,number) DO NOTHING",
-                (id.device.0.to_be_bytes().as_slice(), id.number.to_be_bytes().as_slice(),
+                "INSERT INTO _coven_store_log(device,number,record,author_view,stored_at,outcome,timestamp,retires_device,retires_member)
+                 VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9) ON CONFLICT(device,number) DO NOTHING",
+                rusqlite::params![id.device.0.to_be_bytes().as_slice(), id.number.to_be_bytes().as_slice(),
                  bytes, author_view, stored_at,
-                 if incoming.check.landed_too_late() { "late" } else { "kept" }, timestamp),
+                 if incoming.check.landed_too_late() { "late" } else { "kept" }, timestamp,
+                 retires_device, retires_member],
             )?;
             if let Some(boundary) = crate::Boundary::from_entry(&incoming.entry) {
                 boundary.record(database)?;
@@ -399,6 +401,8 @@ pub(crate) fn apply<P: crate::PendingValue>(
         let previous = crate::store_log_tables::deleted_circles(database)?;
         crate::store_log_tables::replace(database, replay, &outcomes)?;
         let deleted = crate::store_log_tables::deleted_circles(database)?;
+        // Retired writes whose window verdict this replay changed (§10).
+        let rejudged = crate::write_landing::rejudge::<P>(database)?;
         let mut affected = crate::entry_effects::replay::<P>(
             database,
             before,
@@ -406,6 +410,7 @@ pub(crate) fn apply<P: crate::PendingValue>(
             &previous_boundaries,
             &deleted,
             circles,
+            &rejudged,
         )?;
         let mut touched = BTreeSet::new();
         let changed: BTreeSet<_> = previous.keys().chain(deleted.keys()).copied()

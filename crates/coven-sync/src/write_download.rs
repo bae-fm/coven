@@ -91,12 +91,14 @@ impl DeviceLogSync {
         };
         // The apply below holds the database writer; it reads only local input.
         stream.retain_rest().await?;
-        let (primary, download) = ChannelParts::new(opened.header.clone(), &opens);
-        let (references, input) = ChannelParts::new(opened.header.clone(), &opens);
+        let (primary, download) =
+            ChannelParts::new(opened.header.clone(), &opens, object.stored_at);
+        let (references, input) =
+            ChannelParts::new(opened.header.clone(), &opens, object.stored_at);
         let (validation, validated) = oneshot::channel();
         let apply = self
             .database
-            .apply_downloaded_stream(download, log.positions(), move || {
+            .apply_downloaded_stream::<PendingRecord, _, _>(download, log.positions(), move || {
                 validated
                     .blocking_recv()
                     .map_err(|e| DbError::SyncStream(Box::new(e)))

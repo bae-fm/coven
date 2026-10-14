@@ -86,10 +86,11 @@ pub(crate) fn positions(database: &DatabaseConnection) -> Result<WritePositions,
     )?))
 }
 
-pub(crate) fn apply(
+pub(crate) fn apply<P: crate::PendingValue>(
     database: &DatabaseConnection,
     schema: &WriteSchema,
     download: DownloadedWrite,
+    stored_at: std::time::SystemTime,
     files: &crate::file_write::FileWrite<'_>,
 ) -> Result<ApplyOutcome, DbError> {
     source_wait(database.transaction(|database| {
@@ -128,12 +129,32 @@ pub(crate) fn apply(
         }
         crate::pending::clear_log(database, crate::LogObject::Write(header.position))?;
         let deleted = crate::store_log_tables::deleted_circles(database)?;
+        crate::write_landing::land::<P>(
+            database,
+            schema,
+            header,
+            stored_at,
+            &opened_audiences(&download),
+            true,
+        )?;
         crate::retained_writes::download(database, &download)?;
         let affected = apply_opened(database, schema, download, &deleted)?;
         files.retain_rows(affected, &deleted)?;
         files.before_commit()?;
         Ok(ApplyOutcome::Applied)
     }))
+}
+
+/// The audiences whose parts this device opened.
+fn opened_audiences(download: &DownloadedWrite) -> Vec<Audience> {
+    download
+        .parts
+        .iter()
+        .filter_map(|part| match part {
+            DownloadedPart::Opened(part) => Some(part.audience.clone()),
+            DownloadedPart::Skipped(_) => None,
+        })
+        .collect()
 }
 
 pub(crate) fn source_wait(result: Result<ApplyOutcome, DbError>) -> Result<ApplyOutcome, DbError> {
@@ -291,6 +312,12 @@ pub(crate) fn interpret(
             })
             .collect(),
     };
+    // A write outside its own retirement window is consumed without effects
+    // or losses; later readers never rescue it (§10).
+    if crate::write_landing::late(database, record.header.position)? {
+        record.parts.clear();
+        return Ok(record);
+    }
     let boundaries = crate::write_boundary::WriteBoundary::load(database)?;
     let mut kept = Vec::new();
     for mut part in record.parts {

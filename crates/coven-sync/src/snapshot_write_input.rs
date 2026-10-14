@@ -112,7 +112,7 @@ impl StoreLogSync {
         };
         let opens = files.iter().map(Option::is_some).collect::<Vec<_>>();
         let (references, input) =
-            crate::stream_input::ChannelParts::new(opened.header.clone(), &opens);
+            crate::stream_input::ChannelParts::new(opened.header.clone(), &opens, object.stored_at);
         let transfer = async {
             let mut sink = crate::stream_input::WithReferences {
                 primary,
@@ -127,6 +127,7 @@ impl StoreLogSync {
         Ok(SavedWrite {
             header,
             parts: files,
+            stored_at: object.stored_at,
         })
     }
 }

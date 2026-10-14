@@ -295,7 +295,11 @@ async fn a_cause_past_its_writers_miss_requires_snapshot_discovery() {
     let mut devices = crate::device_log_sync::tests::group(storage.clone(), 3).await;
     note(&devices[1], 1).await;
     let cause = devices[1].db.test_queued_writes().await.unwrap().remove(0);
-    devices[2].db.apply_downloaded(cause.into()).await.unwrap();
+    devices[2]
+        .db
+        .apply_downloaded::<crate::PendingRecord>(cause.into(), std::time::UNIX_EPOCH)
+        .await
+        .unwrap();
     note(&devices[2], 2).await;
     devices[2].writes.upload_writes().await.unwrap();
     let reader = &mut devices[0];

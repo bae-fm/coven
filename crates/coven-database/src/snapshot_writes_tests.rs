@@ -20,7 +20,7 @@ async fn waiting_changes_and_their_missing_history_commit_in_one_reload() {
         .unwrap();
     let first = records(&a).remove(0);
     for db in [&b, &c] {
-        db.apply_downloaded(first.clone().into()).await.unwrap();
+        db.receive(first.clone().into()).await.unwrap();
     }
     let snapshot = frames(&a, Audience::Store).await;
     let snapshot_prefix = snapshot.prefix.clone();
@@ -28,7 +28,7 @@ async fn waiting_changes_and_their_missing_history_commit_in_one_reload() {
     sql(&a, "UPDATE notes SET title='second'").await.unwrap();
     let missing = records(&a).pop().unwrap();
     for db in [&b, &c] {
-        db.apply_downloaded(missing.clone().into()).await.unwrap();
+        db.receive(missing.clone().into()).await.unwrap();
     }
     sql(&b, "UPDATE notes SET title='waiting'").await.unwrap();
     sql(&b, "UPDATE notes SET body='next waiting write'")
@@ -36,7 +36,7 @@ async fn waiting_changes_and_their_missing_history_commit_in_one_reload() {
         .unwrap();
     let waiting = records(&b);
     for write in &waiting {
-        c.apply_downloaded(write.clone().into()).await.unwrap();
+        c.receive(write.clone().into()).await.unwrap();
     }
     let original = contents(&b);
     let mut query = b.subscribe(|db| {
@@ -59,7 +59,7 @@ async fn waiting_changes_and_their_missing_history_commit_in_one_reload() {
     assert!(!query.is_marked_for_rerun());
     b.inspect_writer(|db| db.batch("CREATE TEMP TRIGGER refuse_waiting AFTER UPDATE ON notes WHEN new.title='waiting' BEGIN SELECT RAISE(ABORT,'replay failed'); END").unwrap());
     assert!(b
-        .load_snapshots(crate::SnapshotReload::new(
+        .load_snapshots::<crate::pending::tests::Record, _, _>(crate::SnapshotReload::new(
             vec![(
                 id(Audience::Store),
                 snapshot_prefix.clone(),
@@ -78,7 +78,7 @@ async fn waiting_changes_and_their_missing_history_commit_in_one_reload() {
         if duplicate {
             supplied.push(stream(&waiting[0]));
         }
-        b.load_snapshots(crate::SnapshotReload::new(
+        b.load_snapshots::<crate::pending::tests::Record, _, _>(crate::SnapshotReload::new(
             vec![(
                 id(Audience::Store),
                 snapshot_prefix.clone(),
@@ -111,7 +111,7 @@ async fn waiting_changes_and_their_missing_history_commit_in_one_reload() {
         next.header.position.number,
         waiting.last().unwrap().header.position.number + 1
     );
-    c.apply_downloaded(next.into()).await.unwrap();
+    c.receive(next.into()).await.unwrap();
     assert_eq!(
         frames(&b, Audience::Store).await,
         frames(&c, Audience::Store).await
@@ -158,7 +158,7 @@ async fn waiting_files_survive_intermediate_snapshot_and_gap_write_states() {
     .is_err());
     assert_eq!(contents(&db), before);
     assert_eq!(owned_paths(&store), paths);
-    db.load_snapshots(crate::SnapshotReload::new(
+    db.load_snapshots::<crate::pending::tests::Record, _, _>(crate::SnapshotReload::new(
         vec![(
             id(Audience::Store),
             snapshot_prefix.clone(),
@@ -205,10 +205,8 @@ async fn supplied_write_streams_are_bounded_and_fail_atomically() {
     .await
     .unwrap();
     let missing = records(&a).pop().unwrap();
-    b.apply_downloaded(records(&a)[0].clone().into())
-        .await
-        .unwrap();
-    b.apply_downloaded(missing.clone().into()).await.unwrap();
+    b.receive(records(&a)[0].clone().into()).await.unwrap();
+    b.receive(missing.clone().into()).await.unwrap();
     sql(&b, "UPDATE notes SET title='waiting'").await.unwrap();
     let before = contents(&b);
     let input = stream(&missing);
@@ -231,13 +229,14 @@ async fn supplied_write_streams_are_bounded_and_fail_atomically() {
             }
         }
         assert!(b
-            .load_snapshots(crate::SnapshotReload::new(
+            .load_snapshots::<crate::pending::tests::Record, _, _>(crate::SnapshotReload::new(
                 vec![(
                     id(Audience::Store),
                     snapshot_prefix.clone(),
                     Cursor::new(snapshot.clone())
                 )],
                 vec![DownloadedWriteStream {
+                    stored_at: std::time::UNIX_EPOCH,
                     header: input.header.clone(),
                     parts: vec![DownloadedPartStream::Opened(Cursor::new(bytes.clone()))],
                 }]
@@ -247,13 +246,14 @@ async fn supplied_write_streams_are_bounded_and_fail_atomically() {
         assert_eq!(contents(&b), before);
     }
     assert!(b
-        .load_snapshots(crate::SnapshotReload::new(
+        .load_snapshots::<crate::pending::tests::Record, _, _>(crate::SnapshotReload::new(
             vec![(
                 id(Audience::Store),
                 snapshot_prefix.clone(),
                 Cursor::new(snapshot.clone())
             )],
             vec![DownloadedWriteStream::<Cursor<Vec<u8>>> {
+                stored_at: std::time::UNIX_EPOCH,
                 header: input.header.clone(),
                 parts: vec![DownloadedPartStream::Skipped],
             }]
@@ -264,22 +264,21 @@ async fn supplied_write_streams_are_bounded_and_fail_atomically() {
     let mut file = tempfile::tempfile().unwrap();
     file.write_all(&original).unwrap();
     file.rewind().unwrap();
-    b.load_snapshots(crate::SnapshotReload::new(
+    b.load_snapshots::<crate::pending::tests::Record, _, _>(crate::SnapshotReload::new(
         vec![(
             id(Audience::Store),
             snapshot_prefix.clone(),
             Cursor::new(snapshot),
         )],
         vec![DownloadedWriteStream {
+            stored_at: std::time::UNIX_EPOCH,
             header: input.header,
             parts: vec![DownloadedPartStream::Opened(BoundedFile(file))],
         }],
     ))
     .await
     .unwrap();
-    a.apply_downloaded(records(&b)[0].clone().into())
-        .await
-        .unwrap();
+    a.receive(records(&b)[0].clone().into()).await.unwrap();
     assert_eq!(
         frames(&b, Audience::Store).await,
         frames(&a, Audience::Store).await
@@ -321,10 +320,10 @@ async fn snapshots_with_the_same_key_in_different_audiences_recompute_together()
     let gifts = gifts.concat();
     let a_write = records(&a)[0].clone();
     let b_write = records(&b)[0].clone();
-    a.apply_downloaded(b_write.clone().into()).await.unwrap();
+    a.receive(b_write.clone().into()).await.unwrap();
     let original = contents(&c);
     assert!(c
-        .load_snapshots(crate::SnapshotReload::new(
+        .load_snapshots::<crate::pending::tests::Record, _, _>(crate::SnapshotReload::new(
             vec![
                 (
                     id(Audience::Store),
@@ -362,7 +361,7 @@ async fn snapshots_with_the_same_key_in_different_audiences_recompute_together()
                 snapshots.pop();
             }
         }
-        c.load_snapshots(crate::SnapshotReload::new(
+        c.load_snapshots::<crate::pending::tests::Record, _, _>(crate::SnapshotReload::new(
             snapshots,
             vec![stream(&b_write), stream(&a_write)],
         ))
@@ -393,24 +392,14 @@ async fn supplied_dismissals_apply_before_waiting_changes_and_validate_their_pas
         .await
         .unwrap();
     for db in [&b, &c] {
-        db.apply_downloaded(records(&a)[0].clone().into())
-            .await
-            .unwrap();
+        db.receive(records(&a)[0].clone().into()).await.unwrap();
     }
     sql(&a, "UPDATE notes SET title='a'").await.unwrap();
     sql(&b, "UPDATE notes SET title='b'").await.unwrap();
-    a.apply_downloaded(records(&b)[0].clone().into())
-        .await
-        .unwrap();
-    b.apply_downloaded(records(&a)[1].clone().into())
-        .await
-        .unwrap();
-    c.apply_downloaded(records(&a)[1].clone().into())
-        .await
-        .unwrap();
-    c.apply_downloaded(records(&b)[0].clone().into())
-        .await
-        .unwrap();
+    a.receive(records(&b)[0].clone().into()).await.unwrap();
+    b.receive(records(&a)[1].clone().into()).await.unwrap();
+    c.receive(records(&a)[1].clone().into()).await.unwrap();
+    c.receive(records(&b)[0].clone().into()).await.unwrap();
     let snapshot = frames(&a, Audience::Store).await;
     let snapshot_prefix = snapshot.prefix.clone();
     let snapshot = snapshot.concat();
@@ -420,11 +409,11 @@ async fn supplied_dismissals_apply_before_waiting_changes_and_validate_their_pas
     let dismissal = records(&a).pop().unwrap();
     assert_eq!(dismissal.parts[0].dismissals.len(), 1);
     for db in [&b, &c] {
-        db.apply_downloaded(dismissal.clone().into()).await.unwrap();
+        db.receive(dismissal.clone().into()).await.unwrap();
     }
     sql(&b, "UPDATE notes SET body='waiting'").await.unwrap();
     let waiting = records(&b);
-    c.apply_downloaded(waiting.last().unwrap().clone().into())
+    c.receive(waiting.last().unwrap().clone().into())
         .await
         .unwrap();
     let before = contents(&b);
@@ -433,7 +422,7 @@ async fn supplied_dismissals_apply_before_waiting_changes_and_validate_their_pas
     invalid.header.header.position.number = 1;
     let invalid_position = invalid.header.header.position;
     assert!(matches!(
-        b.load_snapshots(crate::SnapshotReload::new(
+        b.load_snapshots::<crate::pending::tests::Record, _, _>(crate::SnapshotReload::new(
             vec![(
                 id(Audience::Store),
                 snapshot_prefix.clone(),
@@ -446,7 +435,7 @@ async fn supplied_dismissals_apply_before_waiting_changes_and_validate_their_pas
             if write == invalid_position && matches!(*error, crate::DbError::Snapshot(crate::SnapshotError::Format(_)))
     ));
     assert_eq!(contents(&b), before);
-    b.load_snapshots(crate::SnapshotReload::new(
+    b.load_snapshots::<crate::pending::tests::Record, _, _>(crate::SnapshotReload::new(
         vec![(
             id(Audience::Store),
             snapshot_prefix.clone(),
@@ -680,7 +669,7 @@ mod differential {
             .filter(|w| history.reload.covered.contains(&w.header.position))
         {
             assert_eq!(
-                source.apply_downloaded(w.clone().into()).await.unwrap(),
+                source.receive(w.clone().into()).await.unwrap(),
                 crate::ApplyOutcome::Applied
             );
         }
@@ -700,7 +689,10 @@ mod differential {
             history.reload.writes.iter().map(stream).collect(),
         );
         reload.boundaries = Some(boundary);
-        target.load_snapshots(reload).await.unwrap();
+        target
+            .load_snapshots::<crate::pending::tests::Record, _, _>(reload)
+            .await
+            .unwrap();
         let result = result_json(&target, &history.reload.rows());
         let positions = target.sync_state(Vec::new()).await.unwrap().positions;
         assert!(history

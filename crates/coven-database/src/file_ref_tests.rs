@@ -512,14 +512,14 @@ async fn a_downloaded_clear_drops_original_facts_and_invalidates_the_reference()
     .await
     .unwrap();
     let reference = a.file_ref("files", "7").await.unwrap();
-    b.apply_downloaded(crate::write::tests::records(&a).remove(0).into())
+    b.receive(crate::write::tests::records(&a).remove(0).into())
         .await
         .unwrap();
     assert!(b.user_file("files", "7").await.unwrap().is_none());
     b.write(|sql| sql.clear_user_file("files", "7"))
         .await
         .unwrap();
-    a.apply_downloaded(crate::write::tests::records(&b).remove(0).into())
+    a.receive(crate::write::tests::records(&b).remove(0).into())
         .await
         .unwrap();
     assert!(a.user_file("files", "7").await.unwrap().is_none());

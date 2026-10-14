@@ -66,6 +66,7 @@ pub(crate) fn replay<P: PendingValue>(
     previous: &[Boundary],
     deleted: &BTreeMap<CircleId, EntryId>,
     circles: &CircleReads,
+    rejudged: &crate::write_landing::Rejudged,
 ) -> Result<BTreeSet<crate::write_rows::AppKey>, DbError> {
     // Positions this device passed while it could not read a returning circle
     // never show that it opened the circle's parts, and the inputs retained
@@ -88,7 +89,10 @@ pub(crate) fn replay<P: PendingValue>(
     let mut inputs = BTreeMap::new();
     let mut resets = Vec::new();
     for audience in changed.difference(&returned) {
-        crate::entry_inputs::original(db, schema, audience)?;
+        // An origin captured now would already hold a rejudged write's effects.
+        if !rejudged.audiences.contains_key(audience) {
+            crate::entry_inputs::original(db, schema, audience)?;
+        }
         let selected = current.get(audience).map(Vec::as_slice).unwrap_or(&[]);
         let ids: BTreeSet<_> = selected.iter().map(Boundary::entry).collect();
         let applied = crate::entry_inputs::applied(db, audience)?;
@@ -134,6 +138,40 @@ pub(crate) fn replay<P: PendingValue>(
             _ => (),
         }
     }
+    // A retired write whose window verdict changed is rebuilt from an input
+    // retained before it applied (§10). Without one, the audience keeps its
+    // rows, refuses writes and waits for a reload.
+    for (audience, writes) in &rejudged.audiences {
+        if returned.contains(audience)
+            || changed.contains(audience)
+            || !crate::entry_inputs::reads(db, audience)?
+        {
+            continue;
+        }
+        let selected = current.get(audience).map(Vec::as_slice).unwrap_or(&[]);
+        let mut input = crate::entry_inputs::selected_input(db, audience, selected)?;
+        if let Some(id) = input {
+            let (version, positions): (u32, Vec<u8>) = db.query_row(
+                "SELECT version,positions FROM _coven_data_inputs WHERE id=?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?;
+            let positions = crate::write_encoding::decoded(
+                coven_format::merge_fields::decode_write_positions(&positions),
+            )?;
+            input = input.filter(|_| {
+                schema.versions.contains(&version)
+                    && writes.iter().all(|write| !positions.covers(*write))
+            });
+        }
+        match input {
+            Some(input) => {
+                inputs.insert(audience.clone(), input);
+            }
+            None if circles.reloadable(audience) => require_reload::<P>(db, audience, false)?,
+            None => (),
+        }
+    }
     // Replay removes the need for a reload that the device can no longer
     // perform, and its pending record with it (§19.1).
     for audience in reloading_audiences(db)? {
@@ -153,6 +191,7 @@ pub(crate) fn replay<P: PendingValue>(
         })
         .flatten()
         .map(Boundary::entry)
+        .chain(rejudged.causes.iter().copied())
         .collect();
     let affected = crate::entry_inputs::restore(db, before, schema, &inputs, deleted, causes)?;
     crate::pending::suppress(db, &resets)?;

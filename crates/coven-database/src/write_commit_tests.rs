@@ -327,7 +327,7 @@ async fn seed(database: &Database) {
     };
     columns.get_mut("title").unwrap().value = Value::Text("Shopping".into());
     assert_eq!(
-        database.apply_downloaded(concurrent.into()).await.unwrap(),
+        database.receive(concurrent.into()).await.unwrap(),
         crate::ApplyOutcome::Applied
     );
     assert_eq!(count(database, "_coven_lost"), 1);

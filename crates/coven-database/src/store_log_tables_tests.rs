@@ -74,7 +74,7 @@ async fn replacing_and_dropping_circle_causes_preserves_generations_and_setters(
     let expected = states(&author);
     let writes = crate::write::tests::records(&author);
     assert_eq!(
-        db.apply_downloaded(writes[0].clone().into()).await.unwrap(),
+        db.receive(writes[0].clone().into()).await.unwrap(),
         crate::ApplyOutcome::Applied
     );
     let initial = states(&db);
@@ -85,7 +85,7 @@ async fn replacing_and_dropping_circle_causes_preserves_generations_and_setters(
     assert_eq!(states(&db), initial);
     causes(&db, deletion.position, 1).await;
     assert_eq!(
-        db.apply_downloaded(writes[1].clone().into()).await.unwrap(),
+        db.receive(writes[1].clone().into()).await.unwrap(),
         crate::ApplyOutcome::Applied
     );
     assert_eq!(states(&db), expected);

@@ -16,7 +16,7 @@ use rusqlite::params;
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
 
-pub(crate) fn load<R: Read, W: Read>(
+pub(crate) fn load<P: crate::PendingValue, R: Read, W: Read>(
     database: &DatabaseConnection,
     before: &DatabaseConnection,
     schema: &WriteSchema,
@@ -148,7 +148,7 @@ pub(crate) fn load<R: Read, W: Read>(
         .caused_by(causes)
         .replace(&old, touched)?;
         crate::snapshot_state::drop_tables(database)?;
-        affected.extend(crate::snapshot_writes::apply(
+        affected.extend(crate::snapshot_writes::apply::<P, _>(
             database, schema, writes, absent, coverage, &deleted,
         )?);
         // Waits for writes these positions now cover end with this commit.

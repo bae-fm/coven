@@ -51,20 +51,14 @@ async fn captures_each_actual_setter_and_keeps_empty_delete_sources() {
     let receiver = receiver_store.schema(notes(), NOTES).await.unwrap();
     for record in &records[..3] {
         assert_eq!(
-            receiver
-                .apply_downloaded(record.clone().into())
-                .await
-                .unwrap(),
+            receiver.receive(record.clone().into()).await.unwrap(),
             ApplyOutcome::Applied
         );
     }
     let mut deletion = records[3].clone();
     deletion.parts[0].rows[0].old.clear();
     assert_eq!(
-        receiver
-            .apply_downloaded(deletion.clone().into())
-            .await
-            .unwrap(),
+        receiver.receive(deletion.clone().into()).await.unwrap(),
         ApplyOutcome::Applied
     );
     receiver.inspect_writer(|db| {
@@ -114,7 +108,7 @@ async fn author_source_survives_a_different_canonical_generation_winner() {
     let later = records(&b);
     for record in [&early, &later[0], &later[1]] {
         assert_eq!(
-            c.apply_downloaded(record.clone().into()).await.unwrap(),
+            c.receive(record.clone().into()).await.unwrap(),
             ApplyOutcome::Applied
         );
     }
@@ -179,17 +173,14 @@ async fn missing_originals_wait_even_when_the_position_was_consumed() {
     sql(&author, "UPDATE notes SET title='two'").await.unwrap();
     let history = records(&author);
     receiver
-        .apply_downloaded(crate::DownloadedWrite {
+        .receive(crate::DownloadedWrite {
             header: history[0].header.clone(),
             parts: vec![crate::DownloadedPart::Skipped(coven_merge::Audience::Store)],
         })
         .await
         .unwrap();
     let before = crate::tests::contents(&receiver);
-    let outcome = receiver
-        .apply_downloaded(history[1].clone().into())
-        .await
-        .unwrap();
+    let outcome = receiver.receive(history[1].clone().into()).await.unwrap();
     assert_eq!(
         outcome,
         ApplyOutcome::Waiting(crate::WriteWait::Sources(vec![history[1].parts[0].rows[0]
@@ -220,10 +211,7 @@ async fn forged_roles_refuse_without_consumption_or_partial_rows() {
         let store = TestStore::new();
         let receiver = store.schema(notes(), NOTES).await.unwrap();
         for record in &history[..2] {
-            receiver
-                .apply_downloaded(record.clone().into())
-                .await
-                .unwrap();
+            receiver.receive(record.clone().into()).await.unwrap();
         }
         let mut record = history[2].clone();
         let row = &mut record.parts[0].rows[0];
@@ -239,7 +227,7 @@ async fn forged_roles_refuse_without_consumption_or_partial_rows() {
             _ => unreachable!(),
         }
         let before = crate::tests::contents(&receiver);
-        let error = receiver.apply_downloaded(record.into()).await.unwrap_err();
+        let error = receiver.receive(record.into()).await.unwrap_err();
         assert!(
             matches!(
                 error,
@@ -266,10 +254,7 @@ async fn schema_renames_preserve_original_sources_and_authored_records() {
     let original = records(&db);
     let receiver = receiver_store.schema(notes(), NOTES).await.unwrap();
     for record in &original {
-        receiver
-            .apply_downloaded(record.clone().into())
-            .await
-            .unwrap();
+        receiver.receive(record.clone().into()).await.unwrap();
     }
     receiver.close().await.unwrap();
     db.close().await.unwrap();
@@ -336,7 +321,7 @@ async fn schema_renames_preserve_original_sources_and_authored_records() {
     for bytes in transmitted.iter().skip(original.len()) {
         let record = coven_format::write_stream::decode_plaintext(bytes).unwrap();
         assert_eq!(
-            receiver.apply_downloaded(record.into()).await.unwrap(),
+            receiver.receive(record.into()).await.unwrap(),
             ApplyOutcome::Applied
         );
     }
@@ -368,10 +353,7 @@ async fn old_incarnation_setters_and_nonexistent_rows_refuse_before_consumption(
     }
     let history = records(&db);
     for record in &history[..3] {
-        target
-            .apply_downloaded(record.clone().into())
-            .await
-            .unwrap();
+        target.receive(record.clone().into()).await.unwrap();
     }
     for damage in 0..3 {
         let mut record = history[3].clone();
@@ -391,7 +373,7 @@ async fn old_incarnation_setters_and_nonexistent_rows_refuse_before_consumption(
         }
         let before = crate::tests::contents(&target);
         assert!(
-            target.apply_downloaded(record.into()).await.is_err(),
+            target.receive(record.into()).await.is_err(),
             "damage {damage}"
         );
         assert_eq!(crate::tests::contents(&target), before);
@@ -423,7 +405,7 @@ async fn frozen_display_and_dismissal_preserve_original_parents_sources_and_admi
     .unwrap();
     let mut write = records(&source).remove(0);
     write.header.disposition = coven_format::write::WriteDisposition::Lost(2);
-    target.apply_downloaded(write.clone().into()).await.unwrap();
+    target.receive(write.clone().into()).await.unwrap();
     let original = write.parts[0]
         .rows
         .iter()
@@ -463,7 +445,7 @@ async fn frozen_display_and_dismissal_preserve_original_parents_sources_and_admi
         .unwrap();
     assert!(target.lost_values().await.unwrap().is_empty());
     assert_eq!(
-        target.apply_downloaded(write.clone().into()).await.unwrap(),
+        target.receive(write.clone().into()).await.unwrap(),
         ApplyOutcome::AlreadyApplied
     );
     target.inspect_writer(|db| {
@@ -506,7 +488,7 @@ async fn covered_source_streams_authenticate_atomically_and_refuse_conflicting_c
         .unwrap();
     let writes = records(&source);
     target
-        .apply_downloaded(crate::DownloadedWrite {
+        .receive(crate::DownloadedWrite {
             header: writes[0].header.clone(),
             parts: vec![crate::DownloadedPart::Skipped(coven_merge::Audience::Store)],
         })
@@ -515,7 +497,7 @@ async fn covered_source_streams_authenticate_atomically_and_refuse_conflicting_c
     let before = crate::tests::contents(&target);
     let stream = || crate::snapshot_write::tests::stream(&writes[0]);
     assert!(target
-        .apply_downloaded_stream(
+        .receive_stream(
             stream(),
             coven_format::value::EntryPositions(vec![]),
             || Err(DbError::DamagedDatabase)
@@ -526,7 +508,7 @@ async fn covered_source_streams_authenticate_atomically_and_refuse_conflicting_c
     let update = || crate::snapshot_write::tests::stream(&writes[1]);
     assert!(matches!(
         target
-            .apply_downloaded_stream(
+            .receive_stream(
                 update(),
                 coven_format::value::EntryPositions(vec![]),
                 || Ok(())
@@ -538,7 +520,7 @@ async fn covered_source_streams_authenticate_atomically_and_refuse_conflicting_c
     assert_eq!(crate::tests::contents(&target), before);
     assert_eq!(
         target
-            .apply_downloaded_stream(
+            .receive_stream(
                 stream(),
                 coven_format::value::EntryPositions(vec![]),
                 || Ok(())
@@ -583,7 +565,7 @@ async fn covered_source_streams_authenticate_atomically_and_refuse_conflicting_c
             }
             _ => unreachable!(),
         }
-        assert!(target.apply_downloaded(record.into()).await.is_err());
+        assert!(target.receive(record.into()).await.is_err());
         assert_eq!(crate::tests::contents(&target), retained);
     }
     for db in [source, target] {
@@ -616,7 +598,7 @@ async fn a_schema_default_has_no_setter_until_a_write_sets_the_cell() {
         .await
         .unwrap();
     let first = records(&source).remove(0);
-    author.apply_downloaded(first.clone().into()).await.unwrap();
+    author.receive(first.clone().into()).await.unwrap();
     author.inspect_writer(|db| {
         assert_eq!(
             crate::source_names::table(db, 2, "notes", 1).unwrap(),
@@ -709,7 +691,7 @@ async fn authored_sources_differential() {
             if random.pick(3) == 0 {
                 for record in &history {
                     assert!(matches!(
-                        db.apply_downloaded(record.clone().into()).await.unwrap(),
+                        db.receive(record.clone().into()).await.unwrap(),
                         crate::ApplyOutcome::Applied | crate::ApplyOutcome::AlreadyApplied
                     ));
                 }

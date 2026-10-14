@@ -92,6 +92,7 @@ mod write_commit;
 mod write_encoding;
 mod write_failure;
 mod write_headers;
+mod write_landing;
 mod write_record;
 mod write_rows;
 mod write_schema;

@@ -157,9 +157,12 @@ async fn removed_member_logs_belong_to_the_store_owner_and_stay_on_google_drive(
         add_device(&mut c).await;
         a.sync().await;
         write_rows(&b, 0, 1, 17, Audience::Store).await;
-        a.db.apply_downloaded(b.db.test_queued_writes().await.unwrap().remove(0).into())
-            .await
-            .unwrap();
+        a.db.apply_downloaded::<crate::PendingRecord>(
+            b.db.test_queued_writes().await.unwrap().remove(0).into(),
+            std::time::UNIX_EPOCH,
+        )
+        .await
+        .unwrap();
         upload(&b, &storage).await;
         a.sync.write_snapshot(Audience::Store).await.unwrap();
         a.sync
@@ -307,9 +310,12 @@ async fn a_snapshot_keeps_its_key_when_a_removal_is_dropped() {
     b.sync().await;
     write_rows(&a, 0, 1, 17, Audience::Store).await;
     assert_eq!(
-        b.db.apply_downloaded(a.db.test_queued_writes().await.unwrap().remove(0).into())
-            .await
-            .unwrap(),
+        b.db.apply_downloaded::<crate::PendingRecord>(
+            a.db.test_queued_writes().await.unwrap().remove(0).into(),
+            std::time::UNIX_EPOCH
+        )
+        .await
+        .unwrap(),
         coven_database::ApplyOutcome::Applied
     );
     a.sync.write_snapshot(Audience::Store).await.unwrap();
@@ -402,7 +408,9 @@ async fn bens_snapshot_is_newest(
         a.sync().await;
     }
     for write in writes.iter().take(3) {
-        b.db.apply_downloaded(write.clone().into()).await.unwrap();
+        b.db.apply_downloaded::<crate::PendingRecord>(write.clone().into(), std::time::UNIX_EPOCH)
+            .await
+            .unwrap();
     }
     write_rows(&b, 10, 1, 17, Audience::Store).await;
     write_rows(&b, 11, 1, 17, Audience::Store).await;
@@ -499,13 +507,17 @@ async fn ana_ten_ben_twenty() -> (Arc<MemoryStorage>, Device, ObjectPath, Vec<Ob
         write_rows(&a, n, 1, 17, Audience::Store).await;
     }
     for write in a.db.test_queued_writes().await.unwrap() {
-        b.db.apply_downloaded(write.into()).await.unwrap();
+        b.db.apply_downloaded::<crate::PendingRecord>(write.into(), std::time::UNIX_EPOCH)
+            .await
+            .unwrap();
     }
     for n in 100..120 {
         write_rows(&b, n, 1, 17, Audience::Store).await;
     }
     for write in b.db.test_queued_writes().await.unwrap().into_iter().take(2) {
-        a.db.apply_downloaded(write.into()).await.unwrap();
+        a.db.apply_downloaded::<crate::PendingRecord>(write.into(), std::time::UNIX_EPOCH)
+            .await
+            .unwrap();
     }
     upload(&b, &storage).await;
     for n in 3..10 {

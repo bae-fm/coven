@@ -9,6 +9,12 @@ use serde::{de::DeserializeOwned, Serialize};
 pub trait PendingValue: Serialize + DeserializeOwned + Send + 'static {
     /// Report a local entry rejected by committed replay.
     fn dropped_entry(entry: crate::EntryId, reason: crate::DropReason) -> Self;
+    /// Report a received write consumed without effects, as `reporter` judged it.
+    fn dropped_write(
+        write: coven_merge::WriteId,
+        reason: crate::DropReason,
+        reporter: DeviceId,
+    ) -> Self;
     /// Report an audience whose selected boundary has no committed data input.
     fn reload(audience: coven_merge::Audience, reporter: DeviceId) -> Self;
     /// Report an S3 key awaiting deletion on its journal operation (§13).

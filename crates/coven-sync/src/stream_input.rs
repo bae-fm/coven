@@ -48,6 +48,7 @@ impl ChannelParts {
     pub(crate) fn new(
         header: WriteHeaderFrame,
         opens: &[bool],
+        stored_at: std::time::SystemTime,
     ) -> (Self, DownloadedWriteStream<StreamInput>) {
         let (senders, parts) = opens
             .iter()
@@ -60,7 +61,14 @@ impl ChannelParts {
                 }
             })
             .unzip();
-        (Self(senders), DownloadedWriteStream { header, parts })
+        (
+            Self(senders),
+            DownloadedWriteStream {
+                header,
+                parts,
+                stored_at,
+            },
+        )
     }
 }
 

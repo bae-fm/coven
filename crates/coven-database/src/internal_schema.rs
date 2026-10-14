@@ -201,6 +201,9 @@ macro_rules! coven_tables {
                 beaten_device BLOB CHECK(length(beaten_device)=8),
                 beaten_number BLOB CHECK(length(beaten_number)=8),
                 target BLOB,
+                retires_device BLOB CHECK(length(retires_device)=8),
+                retires_member BLOB CHECK(length(retires_member)=32),
+                CHECK(retires_device IS NULL OR retires_member IS NULL),
                 CHECK((author_view IN (x'0400',x'0401'))=(outcome='late')),
                 CHECK((outcome='target-member' AND target IS NOT NULL AND length(target)=32)
                    OR (outcome='target-device' AND target IS NOT NULL AND length(target)=8)
@@ -212,6 +215,29 @@ macro_rules! coven_tables {
                    OR (outcome!='beaten' AND beaten_device IS NULL AND beaten_number IS NULL))
             ) STRICT, WITHOUT ROWID;
             CREATE INDEX _coven_store_log_timestamp ON _coven_store_log(timestamp);
+            CREATE INDEX _coven_store_log_retires_device ON _coven_store_log(retires_device) WHERE retires_device IS NOT NULL;
+            CREATE INDEX _coven_store_log_retires_member ON _coven_store_log(retires_member) WHERE retires_member IS NOT NULL;
+        ");
+        // A received write's first complete publication time and its window
+        // verdict, kept while a retirement it depends on could still change.
+        $visit!(_coven_write_landings, "
+            CREATE TABLE _coven_write_landings (
+                device BLOB NOT NULL CHECK(length(device)=8),
+                number BLOB NOT NULL CHECK(length(number)=8 AND number>x'0000000000000000'),
+                stored_at BLOB NOT NULL CHECK(length(stored_at)=13),
+                header BLOB NOT NULL,
+                late INTEGER NOT NULL CHECK(late IN (0,1)),
+                PRIMARY KEY(device,number)
+            ) STRICT, WITHOUT ROWID;
+        ");
+        $visit!(_coven_write_landing_parts, "
+            CREATE TABLE _coven_write_landing_parts (
+                device BLOB NOT NULL,
+                number BLOB NOT NULL,
+                audience TEXT NOT NULL,
+                PRIMARY KEY(device,number,audience),
+                FOREIGN KEY(device,number) REFERENCES _coven_write_landings(device,number) ON DELETE CASCADE
+            ) STRICT, WITHOUT ROWID;
         ");
         $visit!(_coven_finality, "
             CREATE TABLE _coven_finality (

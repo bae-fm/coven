@@ -817,9 +817,12 @@ async fn selection_orders_coverage_then_path_and_waits_on_a_damaged_newest() {
     add_device(&mut b).await;
     a.sync().await;
     write_rows(&a, 0, 1, 17, Audience::Store).await;
-    b.db.apply_downloaded(a.db.test_queued_writes().await.unwrap().remove(0).into())
-        .await
-        .unwrap();
+    b.db.apply_downloaded::<crate::PendingRecord>(
+        a.db.test_queued_writes().await.unwrap().remove(0).into(),
+        std::time::UNIX_EPOCH,
+    )
+    .await
+    .unwrap();
     upload(&a, &storage).await;
     let a_id = a.sync.write_snapshot(Audience::Store).await.unwrap();
     let b_id = b.sync.write_snapshot(Audience::Store).await.unwrap();

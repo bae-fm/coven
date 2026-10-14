@@ -76,7 +76,10 @@ async fn empty(target: &crate::Database) {
             })
             .collect(),
     );
-    target.load_snapshots(reload).await.unwrap();
+    target
+        .load_snapshots::<crate::pending::tests::Record, _, _>(reload)
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -90,7 +93,7 @@ async fn dropping_a_loaded_reset_restores_rows_and_suppressed_judgments() {
         .await
         .unwrap();
     let write = records(&source).remove(0);
-    target.apply_downloaded(write.into()).await.unwrap();
+    target.receive(write.into()).await.unwrap();
     let own = target.sync_state(vec![]).await.unwrap().device;
     let pending = Record::dropped_entry(
         EntryId {
@@ -121,7 +124,10 @@ async fn dropping_a_loaded_reset_restores_rows_and_suppressed_judgments() {
         entry,
         included: WritePositions(vec![]),
     }]);
-    target.load_snapshots(reload).await.unwrap();
+    target
+        .load_snapshots::<crate::pending::tests::Record, _, _>(reload)
+        .await
+        .unwrap();
     assert_eq!(count(&target, "notes"), 0);
     assert!(target.pending::<Record>().await.unwrap().is_empty());
     drop_boundary(&target, entry).await;
@@ -153,13 +159,16 @@ async fn dropping_a_raise_rejudges_retained_late_writes() {
         entry,
         included: WritePositions(vec![]),
     }]);
-    target.load_snapshots(reload).await.unwrap();
+    target
+        .load_snapshots::<crate::pending::tests::Record, _, _>(reload)
+        .await
+        .unwrap();
     sql(&source, "INSERT INTO notes VALUES('n','late','body')")
         .await
         .unwrap();
     let write = records(&source).remove(0);
     let position = write.header.position;
-    target.apply_downloaded(write.into()).await.unwrap();
+    target.receive(write.into()).await.unwrap();
     assert_eq!(count(&target, "notes"), 0);
     assert_eq!(target.lost_values().await.unwrap().len(), 1);
     drop_boundary(&target, entry).await;
@@ -201,7 +210,7 @@ async fn an_unavailable_boundary_keeps_the_old_view_and_rejects_writes_until_rev
         .unwrap();
     let write = records(&source).remove(0);
     assert_eq!(
-        target.apply_downloaded(write.clone().into()).await.unwrap(),
+        target.receive(write.clone().into()).await.unwrap(),
         crate::ApplyOutcome::Waiting(crate::WriteWait::Reload(Audience::Store))
     );
     assert!(!target
@@ -217,7 +226,7 @@ async fn an_unavailable_boundary_keeps_the_old_view_and_rejects_writes_until_rev
         .await
         .unwrap();
     assert_eq!(
-        target.apply_downloaded(write.into()).await.unwrap(),
+        target.receive(write.into()).await.unwrap(),
         crate::ApplyOutcome::Applied
     );
     assert_eq!(count(&target, "notes"), 2);
@@ -330,9 +339,7 @@ async fn failed_projection_rolls_back_replay_and_readers_observe_only_its_commit
     sql(&source, "INSERT INTO notes VALUES('n','retained','')")
         .await
         .unwrap();
-    db.apply_downloaded(records(&source).remove(0).into())
-        .await
-        .unwrap();
+    db.receive(records(&source).remove(0).into()).await.unwrap();
     let entry = reset(&db, 1).await;
     empty(&db).await;
     let log = db.store_log().await.unwrap();
@@ -460,7 +467,7 @@ async fn final_boundaries_release_inputs_and_a_later_boundary_retains_again() {
         .await
         .unwrap();
     target
-        .apply_downloaded(records(&source).remove(0).into())
+        .receive(records(&source).remove(0).into())
         .await
         .unwrap();
     assert_eq!(
@@ -487,7 +494,7 @@ async fn final_boundaries_release_inputs_and_a_later_boundary_retains_again() {
         .unwrap();
     assert_eq!(
         target
-            .apply_downloaded(records(&other).remove(0).into())
+            .receive(records(&other).remove(0).into())
             .await
             .unwrap(),
         crate::ApplyOutcome::Applied
@@ -544,10 +551,7 @@ async fn a_reload_covering_unreceived_writes_reloads_again_when_its_boundary_dro
     .await
     .unwrap();
     let writes = records(&source);
-    target
-        .apply_downloaded(writes[0].clone().into())
-        .await
-        .unwrap();
+    target.receive(writes[0].clone().into()).await.unwrap();
     let entry = reset(&target, 1).await;
     let snapshot = crate::snapshot_write::tests::frames_for(
         &source,
@@ -563,7 +567,10 @@ async fn a_reload_covering_unreceived_writes_reloads_again_when_its_boundary_dro
         entry,
         included: WritePositions(vec![writes[1].header.position]),
     }]);
-    target.load_snapshots(reload).await.unwrap();
+    target
+        .load_snapshots::<crate::pending::tests::Record, _, _>(reload)
+        .await
+        .unwrap();
     assert_eq!(count(&target, "notes"), 2);
     // The origin cannot reproduce write b, which arrived only inside the snapshot.
     drop_boundary(&target, entry).await;

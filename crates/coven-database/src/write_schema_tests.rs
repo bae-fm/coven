@@ -27,7 +27,7 @@ async fn declaration_case_preserves_downloads_and_file_retention() {
     let record = records(&source).pop().unwrap();
     assert_eq!(record.parts[0].rows[0].row.table, "Notes");
     let retained = source.retained_files().await.map(|_| ());
-    let downloaded = receiver.apply_downloaded(record.into()).await;
+    let downloaded = receiver.receive(record.into()).await;
     assert!(
         retained.is_ok() && downloaded.is_ok(),
         "retention: {retained:?}; download: {downloaded:?}"

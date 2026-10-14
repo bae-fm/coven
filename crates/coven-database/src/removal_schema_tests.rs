@@ -254,7 +254,7 @@ async fn unnamed_checks_on_one_generated_column_keep_each_loss_identity() {
             .await
             .unwrap();
         let initial = records(&a).remove(0);
-        b.apply_downloaded(initial.clone().into()).await.unwrap();
+        b.receive(initial.clone().into()).await.unwrap();
         for (db, statement) in [(&a, "UPDATE notes SET x=?1"), (&b, "UPDATE notes SET y=?1")] {
             db.write(move |sql| {
                 sql.execute(statement, [changed])?;
@@ -302,7 +302,7 @@ async fn unnamed_checks_on_one_generated_column_keep_each_loss_identity() {
                 .await
                 .unwrap();
             for i in order {
-                db.apply_downloaded(writes[i].clone().into()).await.unwrap();
+                db.receive(writes[i].clone().into()).await.unwrap();
             }
             assert_eq!(count(&db, "notes"), 0);
             let losses = db.lost_values().await.unwrap();
@@ -332,7 +332,7 @@ async fn unnamed_checks_on_one_generated_column_keep_each_loss_identity() {
                 .await
                 .unwrap();
             assert_eq!(db.lost_values().await.unwrap(), losses);
-            db.apply_downloaded(repaired.clone().into()).await.unwrap();
+            db.receive(repaired.clone().into()).await.unwrap();
             assert_eq!(count(&db, "notes"), 1);
             assert!(!db
                 .lost_values()

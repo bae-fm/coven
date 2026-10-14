@@ -42,17 +42,11 @@ async fn dismissed_cell_is_removed_on_both_devices_and_after_reopen() {
     sql(&a, "INSERT INTO notes VALUES('n','initial','')")
         .await
         .unwrap();
-    b.apply_downloaded(records(&a)[0].clone().into())
-        .await
-        .unwrap();
+    b.receive(records(&a)[0].clone().into()).await.unwrap();
     sql(&a, "UPDATE notes SET title='a'").await.unwrap();
     sql(&b, "UPDATE notes SET title='b'").await.unwrap();
-    a.apply_downloaded(records(&b)[0].clone().into())
-        .await
-        .unwrap();
-    b.apply_downloaded(records(&a)[1].clone().into())
-        .await
-        .unwrap();
+    a.receive(records(&b)[0].clone().into()).await.unwrap();
+    b.receive(records(&a)[1].clone().into()).await.unwrap();
     let loss = a.lost_values().await.unwrap();
     assert_eq!(loss.len(), 1);
     assert_eq!(loss, b.lost_values().await.unwrap());
@@ -64,8 +58,8 @@ async fn dismissed_cell_is_removed_on_both_devices_and_after_reopen() {
     assert_eq!(count(&a, "_coven_lost"), 0);
     assert_ne!(fingerprint(&a).await, before);
     let dismissal = records(&a).last().unwrap().clone();
-    b.apply_downloaded(dismissal.clone().into()).await.unwrap();
-    b.apply_downloaded(dismissal.into()).await.unwrap();
+    b.receive(dismissal.clone().into()).await.unwrap();
+    b.receive(dismissal.into()).await.unwrap();
     assert_eq!(count(&b, "_coven_lost"), 0);
     assert_eq!(fingerprint(&a).await, fingerprint(&b).await);
     let queued = records(&a).len();
@@ -93,12 +87,8 @@ async fn dismissed_removed_row_stays_deleted_and_concurrent_edit_is_lost() {
     sql(&b, "INSERT INTO notes VALUES('b','same','b body')")
         .await
         .unwrap();
-    a.apply_downloaded(records(&b)[0].clone().into())
-        .await
-        .unwrap();
-    b.apply_downloaded(records(&a)[0].clone().into())
-        .await
-        .unwrap();
+    a.receive(records(&b)[0].clone().into()).await.unwrap();
+    b.receive(records(&a)[0].clone().into()).await.unwrap();
     let loss = a.lost_values().await.unwrap();
     assert_eq!(loss.len(), 1);
     a.dismiss_lost_values(&loss).await.unwrap();
@@ -109,12 +99,8 @@ async fn dismissed_removed_row_stays_deleted_and_concurrent_edit_is_lost() {
     )
     .await
     .unwrap();
-    a.apply_downloaded(records(&b)[1].clone().into())
-        .await
-        .unwrap();
-    b.apply_downloaded(records(&a)[1].clone().into())
-        .await
-        .unwrap();
+    a.receive(records(&b)[1].clone().into()).await.unwrap();
+    b.receive(records(&a)[1].clone().into()).await.unwrap();
     assert_eq!(
         a.lost_values().await.unwrap(),
         b.lost_values().await.unwrap()
@@ -124,9 +110,7 @@ async fn dismissed_removed_row_stays_deleted_and_concurrent_edit_is_lost() {
     sql(&a, "UPDATE notes SET title='other' WHERE id='a'")
         .await
         .unwrap();
-    b.apply_downloaded(records(&a)[2].clone().into())
-        .await
-        .unwrap();
+    b.receive(records(&a)[2].clone().into()).await.unwrap();
     for db in [&a, &b] {
         assert_eq!(
             db.read(|s| Ok(s
@@ -164,12 +148,8 @@ async fn set_null_child_returns_when_its_removed_parent_is_dismissed() {
     )
     .await
     .unwrap();
-    a.apply_downloaded(records(&b)[0].clone().into())
-        .await
-        .unwrap();
-    b.apply_downloaded(records(&a)[0].clone().into())
-        .await
-        .unwrap();
+    a.receive(records(&b)[0].clone().into()).await.unwrap();
+    b.receive(records(&a)[0].clone().into()).await.unwrap();
     assert_eq!(count(&a, "children"), 0);
     let losses = a
         .lost_values()
@@ -179,9 +159,7 @@ async fn set_null_child_returns_when_its_removed_parent_is_dismissed() {
         .filter(|loss| loss.table == "parents")
         .collect::<Vec<_>>();
     a.dismiss_lost_values(&losses).await.unwrap();
-    b.apply_downloaded(records(&a)[1].clone().into())
-        .await
-        .unwrap();
+    b.receive(records(&a)[1].clone().into()).await.unwrap();
     for db in [&a, &b] {
         assert_eq!(
             db.read(|s| Ok(s
@@ -215,7 +193,7 @@ async fn excluded_cells_can_be_dismissed_without_their_app_table() {
         .unwrap();
     let mut record = records(&source).remove(0);
     record.header.disposition = coven_format::write::WriteDisposition::Lost(1);
-    receiver.apply_downloaded(record.into()).await.unwrap();
+    receiver.receive(record.into()).await.unwrap();
     let losses = receiver.lost_values().await.unwrap();
     assert_eq!(losses.len(), 1);
     receiver.dismiss_lost_values(&losses).await.unwrap();
@@ -239,9 +217,7 @@ async fn a_failed_dismissal_rolls_back_its_delete_losses_position_and_queue() {
     sql(&b, "INSERT INTO notes VALUES('b','same','b')")
         .await
         .unwrap();
-    a.apply_downloaded(records(&b)[0].clone().into())
-        .await
-        .unwrap();
+    a.receive(records(&b)[0].clone().into()).await.unwrap();
     let losses = a.lost_values().await.unwrap();
     let before = fingerprint(&a).await;
     a.inspect_writer(|sql| sql.fail_at("refuse", "BEFORE INSERT ON _coven_uploads", "refuse"));

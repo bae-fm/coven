@@ -50,34 +50,22 @@ async fn downloaded_writes_share_merge_and_observation_without_uploading() {
         .unwrap();
     let writes = records(&source);
     assert_eq!(
-        receiver
-            .apply_downloaded(writes[1].clone().into())
-            .await
-            .unwrap(),
+        receiver.receive(writes[1].clone().into()).await.unwrap(),
         ApplyOutcome::Waiting(WriteWait::Writes(vec![writes[0].header.position]))
     );
     assert_eq!(count(&receiver, "notes"), 0);
     assert_eq!(
-        receiver
-            .apply_downloaded(writes[0].clone().into())
-            .await
-            .unwrap(),
+        receiver.receive(writes[0].clone().into()).await.unwrap(),
         ApplyOutcome::Applied
     );
     assert_eq!(query.next().await.unwrap(), ["first"]);
     assert_eq!(
-        receiver
-            .apply_downloaded(writes[1].clone().into())
-            .await
-            .unwrap(),
+        receiver.receive(writes[1].clone().into()).await.unwrap(),
         ApplyOutcome::Applied
     );
     assert_eq!(query.next().await.unwrap(), ["second"]);
     assert_eq!(
-        receiver
-            .apply_downloaded(writes[1].clone().into())
-            .await
-            .unwrap(),
+        receiver.receive(writes[1].clone().into()).await.unwrap(),
         ApplyOutcome::AlreadyApplied
     );
     assert_eq!(count(&receiver, "_coven_uploads"), 0);
@@ -89,10 +77,7 @@ async fn downloaded_writes_share_merge_and_observation_without_uploading() {
     receiver.close().await.unwrap();
     let receiver = open(&receiver_store).await;
     assert_eq!(
-        receiver
-            .apply_downloaded(writes[0].clone().into())
-            .await
-            .unwrap(),
+        receiver.receive(writes[0].clone().into()).await.unwrap(),
         ApplyOutcome::AlreadyApplied
     );
     sql(&receiver, "UPDATE notes SET body='received'")
@@ -121,22 +106,19 @@ async fn causal_gate_covers_other_devices_and_skipped_parts_count_as_applied() {
         header: first.header.clone(),
         parts: vec![DownloadedPart::Skipped(Audience::Store)],
     };
-    assert_eq!(
-        b.apply_downloaded(skipped).await.unwrap(),
-        ApplyOutcome::Applied
-    );
+    assert_eq!(b.receive(skipped).await.unwrap(), ApplyOutcome::Applied);
     assert_eq!(count(&b, "notes"), 0);
     sql(&b, "INSERT INTO notes VALUES('b','b','')")
         .await
         .unwrap();
     let dependent = records(&b).remove(0);
     assert_eq!(
-        c.apply_downloaded(dependent.clone().into()).await.unwrap(),
+        c.receive(dependent.clone().into()).await.unwrap(),
         ApplyOutcome::Waiting(WriteWait::Writes(vec![first.header.position]))
     );
-    c.apply_downloaded(first.clone().into()).await.unwrap();
+    c.receive(first.clone().into()).await.unwrap();
     assert_eq!(
-        c.apply_downloaded(dependent.into()).await.unwrap(),
+        c.receive(dependent.into()).await.unwrap(),
         ApplyOutcome::Applied
     );
     assert_eq!(count(&c, "notes"), 2);
@@ -159,10 +141,7 @@ async fn waiting_downloads_do_not_advance_local_timestamps_even_after_reopen() {
         Timestamp::new(31_536_000_000, 0, write.header.position.device).unwrap();
     write.header.schema_version = 2;
     assert_eq!(
-        receiver
-            .apply_downloaded(write.clone().into())
-            .await
-            .unwrap(),
+        receiver.receive(write.clone().into()).await.unwrap(),
         ApplyOutcome::Waiting(WriteWait::SchemaVersion(2))
     );
     assert_eq!(count(&receiver, "_coven_writes"), 0);
@@ -205,7 +184,7 @@ async fn older_schema_inserts_use_new_defaults_without_inventing_cell_setters() 
         .unwrap();
     for record in records(&source) {
         assert_eq!(
-            receiver.apply_downloaded(record.into()).await.unwrap(),
+            receiver.receive(record.into()).await.unwrap(),
             ApplyOutcome::Applied
         );
     }
@@ -244,10 +223,7 @@ async fn author_marked_loss_keeps_values_and_cause_without_needing_the_old_table
     let mut record = records(&source).remove(0);
     record.header.disposition = WriteDisposition::Lost(1);
     assert_eq!(
-        receiver
-            .apply_downloaded(record.clone().into())
-            .await
-            .unwrap(),
+        receiver.receive(record.clone().into()).await.unwrap(),
         ApplyOutcome::Applied
     );
     assert_eq!(count(&receiver, "_coven_rows"), 0);
@@ -263,7 +239,7 @@ async fn author_marked_loss_keeps_values_and_cause_without_needing_the_old_table
         matches!(&losses[0].lost,crate::Lost::Row(cells) if cells.len()==3 && cells.iter().all(|c| c.set_by==record.header.position))
     );
     assert_eq!(
-        receiver.apply_downloaded(record.into()).await.unwrap(),
+        receiver.receive(record.into()).await.unwrap(),
         ApplyOutcome::AlreadyApplied
     );
     assert_eq!(count(&receiver, "_coven_lost"), 1);
@@ -282,7 +258,7 @@ async fn local_delete_trigger_refuses_only_that_device_and_rolls_back_apply() {
         .await
         .unwrap();
     let inserted = records(&source).remove(0);
-    receiver.apply_downloaded(inserted.into()).await.unwrap();
+    receiver.receive(inserted.into()).await.unwrap();
     sql(&receiver, "INSERT INTO pins VALUES('n')")
         .await
         .unwrap();
@@ -293,7 +269,7 @@ async fn local_delete_trigger_refuses_only_that_device_and_rolls_back_apply() {
     sql(&source, "DELETE FROM notes").await.unwrap();
     let deleted = records(&source).remove(1);
     assert!(
-        matches!(receiver.apply_downloaded(deleted.into()).await,Err(DbError::Sqlite(rusqlite::Error::SqliteFailure(_,Some(message)))) if message=="pinned locally")
+        matches!(receiver.receive(deleted.into()).await,Err(DbError::Sqlite(rusqlite::Error::SqliteFailure(_,Some(message)))) if message=="pinned locally")
     );
     assert_eq!(count(&source, "notes"), 0);
     assert_eq!(count(&receiver, "notes"), 1);
@@ -397,7 +373,7 @@ async fn lost_references_keep_the_written_parent_in_every_arrival_order() {
     .unwrap();
     let initial = records(&a).remove(0);
     for db in [&b, &c] {
-        db.apply_downloaded(initial.clone().into()).await.unwrap();
+        db.receive(initial.clone().into()).await.unwrap();
     }
     sql(&b, "UPDATE links SET parent='p'").await.unwrap();
     sql(&c, "UPDATE links SET parent='q'").await.unwrap();
@@ -419,12 +395,10 @@ async fn lost_references_keep_the_written_parent_in_every_arrival_order() {
     ] {
         let store = TestStore::with_ids(&ids);
         let db = reference_db(&store).await;
-        db.apply_downloaded(initial.clone().into()).await.unwrap();
+        db.receive(initial.clone().into()).await.unwrap();
         for (position, index) in order.into_iter().enumerate() {
             let loaded = db.inspect_writer(|db| db.merge_loads());
-            db.apply_downloaded(changes[index].clone().into())
-                .await
-                .unwrap();
+            db.receive(changes[index].clone().into()).await.unwrap();
             if index == 0 && position == 2 {
                 // Only the lost value points at P: its deletion need not load the child.
                 assert_eq!(
@@ -525,7 +499,7 @@ async fn fingerprints_ignore_other_audience_removal_and_its_descendants() {
         (&reverse, [rb.clone(), ra.clone()]),
     ] {
         for write in writes {
-            db.apply_downloaded(write.into()).await.unwrap();
+            db.receive(write.into()).await.unwrap();
         }
         assert_eq!(count(db, "notes"), 1);
         assert_eq!(count(db, "children"), 1);
@@ -576,7 +550,7 @@ async fn deleted_circle_takes_out_late_downloads_and_deletion_rolls_back_on_trig
     circle_note(&source, circle, "00000000-0000-4000-8000-000000000002").await;
     assert_eq!(
         receiver
-            .apply_downloaded(records(&source).remove(0).into())
+            .receive(records(&source).remove(0).into())
             .await
             .unwrap(),
         ApplyOutcome::Applied
@@ -634,7 +608,7 @@ async fn applied_schema_boundaries_exclude_only_uncovered_older_writes() {
             .await
             .unwrap());
         assert_eq!(
-            db.apply_downloaded(initial.clone().into()).await.unwrap(),
+            db.receive(initial.clone().into()).await.unwrap(),
             ApplyOutcome::Applied
         );
         assert_eq!(count(&db, "notes"), i64::from(!lost));
@@ -695,7 +669,7 @@ async fn reset_exclusion_is_audience_scoped_and_counts_implicit_own_reads() {
         } else {
             writes[0].clone().into()
         };
-        db.apply_downloaded(first).await.unwrap();
+        db.receive(first).await.unwrap();
         let included = WritePositions(included);
         assert!(db
             .install_reset_fixture(entry, audience.clone(), included.clone())
@@ -709,12 +683,12 @@ async fn reset_exclusion_is_audience_scoped_and_counts_implicit_own_reads() {
             .unwrap());
         if lost {
             assert_eq!(
-                db.apply_downloaded(writes[0].clone().into()).await.unwrap(),
+                db.receive(writes[0].clone().into()).await.unwrap(),
                 ApplyOutcome::AlreadyApplied
             );
         }
         assert_eq!(
-            db.apply_downloaded(writes[1].clone().into()).await.unwrap(),
+            db.receive(writes[1].clone().into()).await.unwrap(),
             ApplyOutcome::Applied
         );
         assert_eq!(count(&db, "notes"), i64::from(!lost));
@@ -799,12 +773,12 @@ async fn excluded_values_do_not_replace_a_removed_rows_merge_values() {
         .await
         .unwrap();
     for record in [records(&a).remove(0), records(&b).remove(0)] {
-        receiver.apply_downloaded(record.into()).await.unwrap();
+        receiver.receive(record.into()).await.unwrap();
     }
     sql(&b, "UPDATE notes SET title='excluded'").await.unwrap();
     let mut excluded = records(&b).remove(1);
     excluded.header.disposition = WriteDisposition::Lost(1);
-    receiver.apply_downloaded(excluded.into()).await.unwrap();
+    receiver.receive(excluded.into()).await.unwrap();
     assert_eq!(count(&receiver, "_coven_lost"), 2);
     sql(&receiver, "INSERT INTO notes VALUES('b','restored','')")
         .await
@@ -837,10 +811,7 @@ async fn a_reset_successor_can_read_another_post_reset_write() {
         .await
         .unwrap();
     let writes = records(&source);
-    receiver
-        .apply_downloaded(writes[0].clone().into())
-        .await
-        .unwrap();
+    receiver.receive(writes[0].clone().into()).await.unwrap();
     receiver
         .install_reset_fixture(
             coven_format::value::EntryId {
@@ -854,10 +825,7 @@ async fn a_reset_successor_can_read_another_post_reset_write() {
         .unwrap();
     for write in &writes[1..] {
         assert_eq!(
-            receiver
-                .apply_downloaded(write.clone().into())
-                .await
-                .unwrap(),
+            receiver.receive(write.clone().into()).await.unwrap(),
             ApplyOutcome::Applied
         );
     }
@@ -894,11 +862,11 @@ async fn migration_download_advances_position_without_rows_or_losses() {
         parts: vec![],
     };
     assert_eq!(
-        db.apply_downloaded(record.clone().into()).await.unwrap(),
+        db.receive(record.clone().into()).await.unwrap(),
         ApplyOutcome::Applied
     );
     assert_eq!(
-        db.apply_downloaded(record.clone().into()).await.unwrap(),
+        db.receive(record.clone().into()).await.unwrap(),
         ApplyOutcome::AlreadyApplied
     );
     assert_eq!(

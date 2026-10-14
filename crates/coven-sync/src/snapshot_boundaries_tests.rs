@@ -191,9 +191,12 @@ async fn a_newer_schema_snapshot_makes_the_reload_wait_for_the_app_update() {
     add_device(&mut b).await;
     a.sync().await;
     write_rows(&a, 0, 1, 17, Audience::Store).await;
-    b.db.apply_downloaded(a.db.test_queued_writes().await.unwrap().remove(0).into())
-        .await
-        .unwrap();
+    b.db.apply_downloaded::<crate::PendingRecord>(
+        a.db.test_queued_writes().await.unwrap().remove(0).into(),
+        std::time::UNIX_EPOCH,
+    )
+    .await
+    .unwrap();
     upload(&a, &storage).await;
     b.sync.write_snapshot(Audience::Store).await.unwrap();
     write_rows(&a, 1, 1, 17, Audience::Store).await;
@@ -545,7 +548,9 @@ mod reset {
         write_rows(&a, 1, 1, 7, Audience::Store).await;
         write_rows(&b, 2, 1, 7, Audience::Store).await;
         let omitted = b.db.test_queued_writes().await.unwrap().remove(0);
-        c.db.apply_downloaded(omitted.into()).await.unwrap();
+        c.db.apply_downloaded::<crate::PendingRecord>(omitted.into(), std::time::UNIX_EPOCH)
+            .await
+            .unwrap();
         write_rows(&c, 3, 1, 7, Audience::Store).await;
         upload(&a, &storage).await;
         let reset = begin_reset(&mut a, Audience::Store).await;
@@ -553,7 +558,9 @@ mod reset {
         reset_step(&mut a, reset).await;
         for d in [&b, &c] {
             for write in d.db.test_queued_writes().await.unwrap() {
-                a.db.apply_downloaded(write.into()).await.unwrap();
+                a.db.apply_downloaded::<crate::PendingRecord>(write.into(), std::time::UNIX_EPOCH)
+                    .await
+                    .unwrap();
             }
             upload(d, &storage).await;
         }

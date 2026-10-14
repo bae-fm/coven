@@ -356,15 +356,13 @@ async fn another_applied_winner_is_preserved_while_older_waiting_writes_convert(
     sql(&db, "INSERT INTO notes VALUES('42','one','body')")
         .await
         .unwrap();
-    peer.apply_downloaded(records(&db).remove(0).into())
-        .await
-        .unwrap();
+    peer.receive(records(&db).remove(0).into()).await.unwrap();
     sql(&peer, "UPDATE notes SET title='other device'")
         .await
         .unwrap();
     let record = records(&peer).remove(0);
     let remote = record.header.position.device;
-    db.apply_downloaded(record.into()).await.unwrap();
+    db.receive(record.into()).await.unwrap();
     peer.close().await.unwrap();
     db.close().await.unwrap();
     let db = store
@@ -703,7 +701,7 @@ async fn a_late_converted_title_competes_with_the_title_setter_and_leaves_the_sl
         }],
     };
     assert_eq!(
-        db.apply_downloaded(record.into()).await.unwrap(),
+        db.receive(record.into()).await.unwrap(),
         ApplyOutcome::Applied
     );
     let current = state(&db, &row);

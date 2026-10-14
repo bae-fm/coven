@@ -194,8 +194,11 @@ impl StoreLogSync {
             retained.keep_files(None).await?;
             return Ok(None);
         }
-        let (mut sink, input) =
-            crate::stream_input::ChannelParts::new(opened.header.clone(), &opens);
+        let (mut sink, input) = crate::stream_input::ChannelParts::new(
+            opened.header.clone(),
+            &opens,
+            retained.object().stored_at,
+        );
         let transfer = async {
             let result =
                 crate::write_object::finish(&mut stream, ring, &author, opened, &mut sink).await;

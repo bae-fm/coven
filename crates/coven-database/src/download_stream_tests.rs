@@ -7,6 +7,7 @@ use std::io::Cursor;
 fn stream(record: &WriteRecord) -> DownloadedWriteStream<Cursor<Vec<u8>>> {
     let encoder = WriteEncoder::new(record).unwrap();
     DownloadedWriteStream {
+        stored_at: std::time::UNIX_EPOCH,
         header: encoder.header().clone(),
         parts: (0..record.parts.len())
             .map(|part| {
@@ -34,14 +35,14 @@ async fn rejects_schema_violation(
         let db = store.schema(tables.clone(), schema).await.unwrap();
         let before = fingerprint(&db, Audience::Store).await;
         let result = if streamed {
-            db.apply_downloaded_stream(
+            db.receive_stream(
                 stream(&record),
                 coven_format::value::EntryPositions(Vec::new()),
                 || Ok(()),
             )
             .await
         } else {
-            db.apply_downloaded(record.clone().into()).await
+            db.receive(record.clone().into()).await
         };
         match result {
             Ok(outcome) => accepted.push((streamed, outcome)),
@@ -115,7 +116,7 @@ async fn streamed_retarget_is_one_write_including_local_trigger_effects() {
     )
     .await
     .unwrap();
-    b.apply_downloaded_stream(
+    b.receive_stream(
         stream(&records(&a)[0]),
         coven_format::value::EntryPositions(Vec::new()),
         || Ok(()),
@@ -123,7 +124,7 @@ async fn streamed_retarget_is_one_write_including_local_trigger_effects() {
     .await
     .unwrap();
     sql(&a,"INSERT INTO parents VALUES('new'); UPDATE links SET parent='new'; DELETE FROM parents WHERE id='old'").await.unwrap();
-    b.apply_downloaded_stream(
+    b.receive_stream(
         stream(&records(&a)[1]),
         coven_format::value::EntryPositions(Vec::new()),
         || Ok(()),
@@ -157,7 +158,7 @@ async fn authentication_failure_rolls_back_rows_positions_losses_and_observation
     let record = records(&a).remove(0);
     let before = fingerprint(&b, Audience::Store).await;
     assert!(b
-        .apply_downloaded_stream(
+        .receive_stream(
             stream(&record),
             coven_format::value::EntryPositions(Vec::new()),
             || Err(DbError::SyncStream(Box::new(std::io::Error::other(
@@ -175,7 +176,7 @@ async fn authentication_failure_rolls_back_rows_positions_losses_and_observation
             .await
             .is_err()
     );
-    b.apply_downloaded_stream(
+    b.receive_stream(
         stream(&record),
         coven_format::value::EntryPositions(Vec::new()),
         || Ok(()),
@@ -200,7 +201,7 @@ async fn streamed_excluded_rows_use_the_common_snapshot_loss_section() {
     .unwrap();
     let mut record = records(&a).remove(0);
     record.header.disposition = WriteDisposition::Lost(1);
-    b.apply_downloaded_stream(
+    b.receive_stream(
         stream(&record),
         coven_format::value::EntryPositions(Vec::new()),
         || Ok(()),
@@ -234,21 +235,21 @@ async fn a_write_must_include_the_transitive_past_of_its_frontier() {
         .await
         .unwrap();
     let wa = records(&a).remove(0);
-    b.apply_downloaded(wa.clone().into()).await.unwrap();
-    c.apply_downloaded(wa.into()).await.unwrap();
+    b.receive(wa.clone().into()).await.unwrap();
+    c.receive(wa.into()).await.unwrap();
     sql(&b, "INSERT INTO notes VALUES('b','second','')")
         .await
         .unwrap();
     let wb = records(&b).remove(0);
-    c.apply_downloaded(wb.clone().into()).await.unwrap();
+    c.receive(wb.clone().into()).await.unwrap();
     sql(&c, "INSERT INTO notes VALUES('c','third','')")
         .await
         .unwrap();
     let mut wc = records(&c).remove(0);
     wc.header.had_read = WritePositions(vec![wb.header.position]);
-    a.apply_downloaded(wb.into()).await.unwrap();
+    a.receive(wb.into()).await.unwrap();
     assert!(a
-        .apply_downloaded_stream(
+        .receive_stream(
             stream(&wc),
             coven_format::value::EntryPositions(Vec::new()),
             || Ok(())
@@ -287,7 +288,7 @@ async fn unknown_tables_and_columns_are_rejected_without_panicking() {
             );
         }
         assert!(b
-            .apply_downloaded_stream(
+            .receive_stream(
                 stream(&invalid),
                 coven_format::value::EntryPositions(Vec::new()),
                 || Ok(())
@@ -313,7 +314,7 @@ async fn a_stale_store_log_view_cannot_commit_a_download() {
         .unwrap();
     let record = records(&a).remove(0);
     assert!(matches!(
-        b.apply_downloaded_stream(
+        b.receive_stream(
             stream(&record),
             coven_format::value::EntryPositions(Vec::new()),
             || Ok(())
@@ -339,7 +340,7 @@ async fn a_panicking_authenticator_rolls_back_without_poisoning_the_writer() {
     let clone = b.clone();
     assert!(tokio::spawn(async move {
         clone
-            .apply_downloaded_stream(
+            .receive_stream(
                 input,
                 coven_format::value::EntryPositions(Vec::new()),
                 || panic!("authenticator panicked"),
@@ -350,7 +351,7 @@ async fn a_panicking_authenticator_rolls_back_without_poisoning_the_writer() {
     .unwrap_err()
     .is_panic());
     assert_eq!(count(&b, "notes"), 0);
-    b.apply_downloaded_stream(
+    b.receive_stream(
         stream(&record),
         coven_format::value::EntryPositions(Vec::new()),
         || Ok(()),
@@ -463,6 +464,7 @@ mod memory {
             }).collect();
             assert!(held.iter().map(|bytes| bytes.len()).sum::<usize>() > 32 * 1024 * 1024);
             let input = || DownloadedWriteStream {
+                stored_at: std::time::UNIX_EPOCH,
                 header: prepared.header.clone(),
                 parts: held.iter().map(|bytes| DownloadedPartStream::Opened(Cursor::new(bytes.clone()))).collect(),
             };
@@ -475,10 +477,10 @@ mod memory {
             assert!(sqlite_baseline > 0, "SQLite memory accounting must be enabled");
             let prior = fingerprint(receiver, Audience::Store).await;
             let rows = count(receiver, "links");
-            assert!(receiver.apply_downloaded_stream(input(), coven_format::value::EntryPositions(Vec::new()), || Err(DbError::TransactionEnded)).await.is_err());
+            assert!(receiver.receive_stream(input(), coven_format::value::EntryPositions(Vec::new()), || Err(DbError::TransactionEnded)).await.is_err());
             assert_eq!(count(receiver, "links"), rows);
             assert_eq!(fingerprint(receiver, Audience::Store).await, prior);
-            receiver.apply_downloaded_stream(input(), coven_format::value::EntryPositions(Vec::new()), || Ok(())).await.unwrap();
+            receiver.receive_stream(input(), coven_format::value::EntryPositions(Vec::new()), || Ok(())).await.unwrap();
             let rust_extra = PEAK.load(Ordering::SeqCst).checked_sub(baseline).unwrap();
             let sqlite_extra = unsafe { rusqlite::ffi::sqlite3_memory_highwater(0) } - sqlite_baseline;
             let extra = rust_extra + usize::try_from(sqlite_extra).unwrap();
@@ -508,20 +510,16 @@ async fn retargeting_a_reference_replaces_its_retained_pre_null_value() {
         .await
         .unwrap();
     for db in [&b, &c] {
-        db.apply_downloaded(records(&a)[0].clone().into())
-            .await
-            .unwrap();
+        db.receive(records(&a)[0].clone().into()).await.unwrap();
     }
     sql(&b, "INSERT INTO links VALUES('link','old')")
         .await
         .unwrap();
-    c.apply_downloaded(records(&b)[0].clone().into())
-        .await
-        .unwrap();
+    c.receive(records(&b)[0].clone().into()).await.unwrap();
     // This author has never received the child, so its real delete has no child change.
     sql(&a, "DELETE FROM parents WHERE id='old'").await.unwrap();
     for db in [&b, &c] {
-        db.apply_downloaded_stream(
+        db.receive_stream(
             stream(&records(&a)[1]),
             coven_format::value::EntryPositions(Vec::new()),
             || Ok(()),
@@ -531,7 +529,7 @@ async fn retargeting_a_reference_replaces_its_retained_pre_null_value() {
         assert_eq!(count(db, "_coven_reference_values"), 1);
     }
     sql(&c, "UPDATE links SET parent='new'").await.unwrap();
-    b.apply_downloaded_stream(
+    b.receive_stream(
         stream(&records(&c)[0]),
         coven_format::value::EntryPositions(Vec::new()),
         || Ok(()),
@@ -566,14 +564,14 @@ async fn a_constraint_refused_at_commit_reports_itself_and_keeps_the_handle_usab
     for streamed in [false, true] {
         let before = crate::tests::contents(&b);
         let error = if streamed {
-            b.apply_downloaded_stream(
+            b.receive_stream(
                 stream(&write),
                 coven_format::value::EntryPositions(Vec::new()),
                 || Ok(()),
             )
             .await
         } else {
-            b.apply_downloaded(write.clone().into()).await
+            b.receive(write.clone().into()).await
         }
         .unwrap_err();
         assert!(
@@ -585,7 +583,7 @@ async fn a_constraint_refused_at_commit_reports_itself_and_keeps_the_handle_usab
     sql(&b, "INSERT INTO parents VALUES('absent')")
         .await
         .unwrap();
-    b.apply_downloaded(write.into()).await.unwrap();
+    b.receive(write.into()).await.unwrap();
     assert_eq!(count(&b, "notes"), 1);
     assert_eq!(observed.next().await.unwrap(), ["title"]);
     a.close().await.unwrap();
@@ -612,7 +610,7 @@ async fn history(null: bool, hybrid_parent: bool) -> Vec<WriteRecord> {
         "INSERT INTO parents VALUES('A',3),('B',3),('A',5); INSERT INTO children VALUES('child','A',3)"
     }).await.unwrap();
     let initial = records(&a).remove(0);
-    b.apply_downloaded(initial.clone().into()).await.unwrap();
+    b.receive(initial.clone().into()).await.unwrap();
     sql(&a, "UPDATE children SET a='B'").await.unwrap();
     sql(&b, "UPDATE children SET b=5").await.unwrap();
     let result = vec![
@@ -662,7 +660,7 @@ async fn compare(lean: bool) {
                     let db = fixture.schema(tables(), SCHEMA).await.unwrap();
                     for i in order {
                         if streamed {
-                            db.apply_downloaded_stream(
+                            db.receive_stream(
                                 stream(&writes[i]),
                                 coven_format::value::EntryPositions(Vec::new()),
                                 || Ok(()),
@@ -670,7 +668,7 @@ async fn compare(lean: bool) {
                             .await
                             .unwrap();
                         } else {
-                            db.apply_downloaded(writes[i].clone().into()).await.unwrap();
+                            db.receive(writes[i].clone().into()).await.unwrap();
                         }
                     }
                     let tuple = db.inspect_writer(|db| {
@@ -864,17 +862,17 @@ async fn incomplete_or_inconsistent_composite_references_are_refused() {
             for streamed in [false, true] {
                 let fixture = TestStore::new();
                 let db = fixture.schema(tables(), SCHEMA).await.unwrap();
-                db.apply_downloaded(writes[0].clone().into()).await.unwrap();
+                db.receive(writes[0].clone().into()).await.unwrap();
                 let before = crate::tests::contents(&db);
                 let result = if streamed {
-                    db.apply_downloaded_stream(
+                    db.receive_stream(
                         stream(&write),
                         coven_format::value::EntryPositions(Vec::new()),
                         || Ok(()),
                     )
                     .await
                 } else {
-                    db.apply_downloaded(write.clone().into()).await
+                    db.receive(write.clone().into()).await
                 };
                 assert!(
                     matches!(result, Err(DbError::Snapshot(_))),
@@ -925,15 +923,13 @@ async fn generated_composite_reference_keeps_the_inputs_of_its_tuple() {
     let a = sa.schema(tables(), schema).await.unwrap();
     let b = sb.schema(tables(), schema).await.unwrap();
     sql(&a,"INSERT INTO parents VALUES('3',3),('4',3),('3',5); INSERT INTO children(id,x,y,b) VALUES('child',1,2,3)").await.unwrap();
-    b.apply_downloaded(records(&a)[0].clone().into())
-        .await
-        .unwrap();
+    b.receive(records(&a)[0].clone().into()).await.unwrap();
     sql(&a, "UPDATE children SET x=2").await.unwrap();
     sql(&b, "UPDATE children SET b=5").await.unwrap();
     let wa = records(&a).pop().unwrap();
     let wb = records(&b).pop().unwrap();
     for (db, write) in [(&a, wb), (&b, wa)] {
-        db.apply_downloaded(write.into()).await.unwrap();
+        db.receive(write.into()).await.unwrap();
     }
     assert_eq!(
         fingerprint(&a, Audience::Store).await,

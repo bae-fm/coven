@@ -278,10 +278,7 @@ async fn sums_agree_in_every_order_of_concurrent_and_excluded_writes() {
     .await
     .unwrap();
     let initial = records(&sources[0]).remove(0);
-    sources[1]
-        .apply_downloaded(initial.clone().into())
-        .await
-        .unwrap();
+    sources[1].receive(initial.clone().into()).await.unwrap();
     sql(&sources[0], "UPDATE notes SET title='a'")
         .await
         .unwrap();
@@ -314,11 +311,9 @@ async fn sums_agree_in_every_order_of_concurrent_and_excluded_writes() {
     ] {
         let store = TestStore::with_ids(&ids);
         let db = store.schema(notes(), NOTES).await.unwrap();
-        db.apply_downloaded(initial.clone().into()).await.unwrap();
+        db.receive(initial.clone().into()).await.unwrap();
         for index in order {
-            db.apply_downloaded(changes[index].clone().into())
-                .await
-                .unwrap();
+            db.receive(changes[index].clone().into()).await.unwrap();
         }
         assert_eq!(db.lost_values().await.unwrap().len(), 2);
         // Read the persisted sum itself, as well as the keyed value sync posts.

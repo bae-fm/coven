@@ -255,7 +255,7 @@ async fn budgets_pins_eviction_and_second_device_reads() {
     for write in f.database.test_queued_writes().await.unwrap() {
         second
             .database
-            .apply_downloaded(write.into())
+            .apply_downloaded::<crate::PendingRecord>(write.into(), std::time::UNIX_EPOCH)
             .await
             .unwrap();
     }
@@ -324,7 +324,10 @@ async fn eager_commit_observation_handles_download_apply() {
     );
     let mut status = files.subscribe_eager_cache_fill_status();
     for write in a.database.test_queued_writes().await.unwrap() {
-        b.database.apply_downloaded(write.into()).await.unwrap();
+        b.database
+            .apply_downloaded::<crate::PendingRecord>(write.into(), std::time::UNIX_EPOCH)
+            .await
+            .unwrap();
     }
     tokio::time::timeout(Duration::from_secs(20), async {
         loop {
@@ -524,7 +527,10 @@ async fn whole_reads_and_pins_check_the_row_hash_after_authenticating_chunks() {
                 }
             }
         }
-        b.database.apply_downloaded(write.into()).await.unwrap();
+        b.database
+            .apply_downloaded::<crate::PendingRecord>(write.into(), std::time::UNIX_EPOCH)
+            .await
+            .unwrap();
     }
     let files = Files::new(
         FileDatabase::new(b.database.clone()),
@@ -657,7 +663,10 @@ async fn a_sync_preserves_eager_cancellation_and_retries_network_failures() {
     a.storage.set_online(false);
     let mut status = b.files.subscribe_eager_cache_fill_status();
     for write in a.database.test_queued_writes().await.unwrap() {
-        b.database.apply_downloaded(write.into()).await.unwrap();
+        b.database
+            .apply_downloaded::<crate::PendingRecord>(write.into(), std::time::UNIX_EPOCH)
+            .await
+            .unwrap();
     }
     status
         .wait_for(|s| matches!(s, EagerCacheFillStatus::Failed { .. }))
@@ -679,7 +688,10 @@ async fn a_sync_preserves_eager_cancellation_and_retries_network_failures() {
     // A newly observed version is eligible; cancel after its first request.
     let second = a.uploaded("another", vec![73; CHUNK * 2]).await;
     for write in a.database.test_queued_writes().await.unwrap() {
-        b.database.apply_downloaded(write.into()).await.unwrap();
+        b.database
+            .apply_downloaded::<crate::PendingRecord>(write.into(), std::time::UNIX_EPOCH)
+            .await
+            .unwrap();
     }
     status
         .wait_for(|s| matches!(s, EagerCacheFillStatus::Downloading(_)))
@@ -720,7 +732,10 @@ async fn waiting_files_name_the_attaching_device_until_its_automatic_upload() {
         assert!(queued[0].failure.is_none());
         let attaching = a.database.test_queued_writes().await.unwrap();
         for write in attaching.clone() {
-            b.database.apply_downloaded(write.into()).await.unwrap();
+            b.database
+                .apply_downloaded::<crate::PendingRecord>(write.into(), std::time::UNIX_EPOCH)
+                .await
+                .unwrap();
         }
         let remote = b.database.file_ref("files", "waiting").await.unwrap();
         assert_eq!((remote.uploader(), remote.id()), (device, local.id()));
