@@ -34,6 +34,7 @@ import CovenStorelog.CurrentKeyExamples
 import CovenStorelog.EntryKeys
 import CovenStorelog.EntryKeyExamples
 import CovenStorelog.PositionFingerprints
+import CovenStorelog.PositionPublication
 import CovenStorelog.ReplayMachine
 import CovenStorelog.ReplayMachineTermination
 import CovenStorelog.MemberKeys

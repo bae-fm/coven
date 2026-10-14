@@ -878,6 +878,55 @@ fingerprints use the usable keys while the envelope uses her newest store key. N
 added for metadata sealing. All named results are included in the package's
 axiom audit.
 
+#### Posting positions without a fresh copy observation
+
+[`PositionPublication`](storelog/CovenStorelog/PositionPublication.lean)
+models step 9 of the [sync pass](../sync-pass.md#9-post-changed-positions-and-finish)
+with T164's two rules: an audience with no usable key omits its fingerprint,
+and without a fresh, complete key-copy observation the current positions wait
+while the confirmed post stands. Fresh means less than five minutes after the
+catch-up started, the same window that permits sending (§10). The model
+compares this with the other reading, which takes keys from this pass's
+completed observation whatever its age, sending still gated by freshness.
+Positions, store-log positions, schema and pending reports are abstracted to
+two numbers that key choice never reads.
+
+**Holding the post never leaks.** `send_has_fresh_observation` proves the
+publication gate implies a fresh observation, so `hold_sends_nothing`: while
+positions wait, nothing is sent and storage keeps the post it had.
+`sent_through_gate` covers every send under either reading, and
+`posted_fingerprints_usable` traces each posted fingerprint to `select`, so
+`usable_fingerprint_untestable` applies to it. `omission_keeps_positions`
+shows an omitted fingerprint changes nothing else in the post.
+
+**Nothing that reads storage stalls.** `readings_store_alike` proves both
+readings store and send exactly the same in every state: with the gate open
+their observations coincide (`readings_agree_when_fresh`), and with it closed
+neither sends (`closed_keeps_storage`). Peers' retention, finality and
+agreement read only posted positions, so the waiting rule cannot delay them.
+
+**This device's return checkpoint can stall: a checked counterexample.**
+The readings differ only in confirmation. Step 9 keeps the catch-up's storage
+time as the return checkpoint (§15) when every discovered write is realized
+and positions are confirmed, and confirming an unchanged post sends nothing.
+In `late_step_nine_unconfirmed`, Ana's pass completes catch-up at 0 and
+reaches step 9 at 300 seconds, after long file or snapshot work, with
+positions unchanged. The pass's observation yields exactly the stored post,
+which the other reading confirms without a send; the fresh rule has no
+observation, so the pass ends unconfirmed (`waiting_unconfirmed`). At 299
+seconds both confirm. `late_passes_stall` extends this to any run of passes
+that each reach step 9 after their window: the checkpoint never moves, so
+§15's 29-day bound eventually forces snapshot discovery on a device that
+synced throughout. `pass_reading_advances` shows the other reading moves it
+on every such pass, and `pass_confirms_unchanged` proves it confirms any
+unchanged post with no send at any age. A literal Lean `example` checks the
+300-second pass.
+
+The model takes the gate's copies as given and does not model bootstrap
+publication scopes, the reload's held post, failed requests or retries. It
+does not prove that passes finish within the window. No Rust comparison is
+added.
+
 ### C13 Stable members and replaceable keys — checked proposal
 
 `CurrentReplay.Keyed` models the stable-member decision separately from the
