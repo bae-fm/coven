@@ -4725,6 +4725,10 @@ Carol's tablet:
 - File status makes a fresh single-object status call (§4), then combines
   that observation with the current uploader and reports (E8), in this order:
   - **Available:** storage contains the complete file at its fixed path.
+  - **Integrity error:** storage holds an object at the fixed path whose
+    size is not the file's complete encrypted size. That is damage, never
+    Available and never absence, whatever the reports say
+    ([`available_iff`, `wrong_size_is_damage`](proofs/storage/CovenStorage/Files.lean)).
   - **Missing:** storage confirms absence, and its uploader was removed
     or replaced, or reports that it cannot upload this file (§19.1, D8).
   - **Uploading on D:** storage confirms absence and D is still active,
@@ -4736,7 +4740,14 @@ Carol's tablet:
     absence does not mean the object exists.
 - A read can still use a checked local source or cached bytes. If it needs
   absent remote bytes, its typed error distinguishes uploading from missing
-  and names the uploader. The app can ask for a missing file to be attached again.
+  and names the uploader, with the verdict file status gives
+  ([`read_absence_matches_status`](proofs/storage/CovenStorage/Files.lean)).
+  The app can ask for a missing file to be attached again.
+- Every range a read requests lies within the file's complete encrypted
+  size, because the header is checked against the row first. So a range
+  the provider refuses as reaching past the object's end means the object
+  is too short: an integrity error, never absence
+  ([`past_end_is_damage`, `present_never_absent`, `complete_object_reads`](proofs/storage/CovenStorage/Files.lean)).
 - After a successful upload, reads on the attaching device use the cache
   or storage; coven never reads its user-provided original again.
   - The original stays where it is and is never changed or deleted.
@@ -4888,6 +4899,11 @@ Carol's tablet:
   time when applicable, and queue-owned chunk hashes. Retargeting the row
   cannot replace the source facts of an already queued file. It keeps no
   encrypted copy.
+  - Deleting or retargeting the row while its file uploads keeps the
+    upload queued; it settles by its own reference, and only a confirmed
+    upload retires it. Completion writes no row, so a deleted row stays
+    deleted
+    ([`steps_keep_upload`, `inflight_upload_settles`](proofs/storage/CovenStorage/Files.lean)).
 - Every attempt, including retries and resumed provider sessions, checks
   the source's size and whole-file content hash, and a user-provided
   original's recorded modification time, before sending file bytes.

@@ -578,7 +578,8 @@ async fn attaching_starts_upload_after_commit_and_checks_changed_originals() {
 }
 
 /// ST `Files`: attachment, row deletion and settled uploads leave the rows,
-/// queue and write count that `Files.attach` and `Files.finish` describe.
+/// queue and write count that `Files.attach`, `Files.deleteRow` and
+/// `Files.finish` describe.
 mod differential {
     use super::{files_runner, Fixture};
     use crate::files::file_error::*;
@@ -648,6 +649,7 @@ mod differential {
         let mut rows: Vec<u64> = Vec::new();
         let mut held = None;
         let mut finishes = Vec::new();
+        let mut deletes = Vec::new();
         for event in events {
             let file = event["file"].as_u64();
             match event["op"].as_str().unwrap() {
@@ -662,6 +664,7 @@ mod differential {
                 }
                 "delete" => {
                     let row = format!("r{}", event["row"].as_u64().unwrap());
+                    let writes = f.database.test_queued_writes().await.unwrap().len();
                     f.database
                         .write(move |sql| {
                             sql.execute("DELETE FROM files WHERE id=?1", [row])?;
@@ -669,6 +672,8 @@ mod differential {
                         })
                         .await
                         .unwrap();
+                    let changed = f.database.test_queued_writes().await.unwrap().len() != writes;
+                    deletes.push(json!({ "writes_changed": changed }));
                 }
                 "begin" => {
                     // The attempt opens and checks its source, then waits at the
@@ -771,7 +776,7 @@ mod differential {
         f.files.inner.state.lock().unwrap().paused = true;
         drop(guard);
         f.close().await;
-        json!({"finishes": finishes, "rows": row_refs, "queue": queue})
+        json!({"finishes": finishes, "deletes": deletes, "rows": row_refs, "queue": queue})
     }
 
     /// The model keeps its queue newest first; the order carries no meaning.
@@ -812,6 +817,33 @@ mod differential {
                 begin(1),
                 attach(2, 3),
                 finish(1, "stored"),
+            ],
+            // A deleted row's upload survives a failed attempt and settles later.
+            vec![
+                attach(1, 1),
+                delete(1),
+                finish(1, "error"),
+                finish(1, "stored"),
+            ],
+            // Deleting another row while one uploads touches neither upload.
+            vec![
+                attach(1, 1),
+                attach(2, 2),
+                begin(1),
+                delete(2),
+                finish(1, "stored"),
+                finish(2, "stored"),
+            ],
+            // The row is deleted and attached again while its first file uploads:
+            // each settlement retires only its own file.
+            vec![
+                attach(1, 1),
+                begin(1),
+                delete(1),
+                attach(1, 2),
+                finish(1, "stored"),
+                finish(2, "error"),
+                finish(2, "stored"),
             ],
             // Different bytes at the fixed path never count as stored.
             vec![

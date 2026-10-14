@@ -2754,7 +2754,8 @@ impl CovenHandle {
 
     /// Calls single-object status, then checks the uploader's current state and its signed
     /// undeliverable-file report (§16.1). Checks the reference against its row.
-    /// Network failures and denied access are errors, not Missing.
+    /// Network failures and denied access are errors, not Missing; an object
+    /// at the fixed path of any size but the file's complete one is `Integrity`.
     pub async fn file_status(&self, file: &FileRef) -> Result<FileStatus, FileReadError>;
 
     /// Reads a whole file, checking it against its row.
@@ -2874,7 +2875,8 @@ pub enum FileReadError {
     /// A user-provided file's size, modification time or checked content no
     /// longer matches what coven recorded.
     UserFileChanged { id: String, path: PathBuf },
-    /// A chunk, or a copy on this device, failed its check.
+    /// A chunk, a copy on this device, or the object at the fixed path failed
+    /// its check; a stored object of the wrong size is damage, not absence (§16.1).
     Integrity { id: String },
     /// The range lies outside the file.
     RangeOutOfBounds { id: String, offset: u64, end: u64, size: u64 },

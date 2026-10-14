@@ -149,13 +149,50 @@ def activeReports : Reports := ⟨fun _ => .active, fun _ _ => none⟩
 def missingReports : Reports := ⟨fun _ => .active, fun _ _ => some .missing⟩
 
 theorem status_cases :
-    status photoA (.ok none) activeReports = .ok (.uploading 7) ∧
-    status photoA (.ok none) missingReports = .ok (.missing 7 (.source .missing)) ∧
-    status photoA (.ok (some ⟨[1], 0⟩)) missingReports = .ok .available ∧
-    status photoA (.ok none) { activeReports with device := fun _ => .replaced } =
+    status photoA 1 (.ok none) activeReports = .ok (.uploading 7) ∧
+    status photoA 1 (.ok none) missingReports = .ok (.missing 7 (.source .missing)) ∧
+    status photoA 1 (.ok (some ⟨[1], 0⟩)) missingReports = .ok .available ∧
+    status photoA 1 (.ok none) { activeReports with device := fun _ => .replaced } =
       .ok (.missing 7 .deviceReplaced) ∧
-    status photoA (.error .permission) missingReports = .error .permission ∧
-    status photoA (.error .noStorage) activeReports = .error .noStorage := by decide
+    status photoA 1 (.error .permission) missingReports = .error (.failed .permission) ∧
+    status photoA 1 (.error .noStorage) activeReports = .error (.failed .noStorage) := by decide
+
+/-- A wrong-size object at the fixed path is damage whatever the reports say.
+A ranged read past a short object's end is damage, not absence, and a read
+meeting absence fails with status's verdict. -/
+theorem damage_cases :
+    status photoA 3 (.ok (some ⟨[1, 2], 0⟩)) missingReports = .error .integrity ∧
+    status photoA 3 (.ok (some ⟨[1, 2, 3, 4], 0⟩)) activeReports = .error .integrity ∧
+    fetch photoA activeReports 1 3 (rangeReply (.ok (some ⟨[1, 2], 0⟩)) 1 3) =
+      .error (.file .integrity) ∧
+    fetch photoA missingReports 0 2 (rangeReply (.ok none) 0 2) =
+      .error (.unavailable (.missing 7 (.source .missing))) := by decide
+
+/-- An object longer than the file: status reports damage, yet ranged reads
+within the file's size still return its leading bytes. Each chunk those
+ranges hold is then authenticated on its own (§16.2), so a genuine prefix
+reads and a changed one fails its check. -/
+theorem longer_object_reads_within_size :
+    status photoA 2 (.ok (some ⟨[1, 2, 9], 0⟩)) activeReports = .error .integrity ∧
+    fetch photoA activeReports 0 2 (rangeReply (.ok (some ⟨[1, 2, 9], 0⟩)) 0 2) =
+      .ok [1, 2] := by decide
+
+/-- Ana attaches photo A to row 7 and deletes the row while A uploads. The
+upload still settles and retires its queue entry; the row stays deleted. -/
+theorem deleted_row_upload_finishes :
+    let deleted := deleteRow (attach noFiles 7 originalPhoto) 7
+    let finished := finish deleted photoA [10, 20] (.ok (some ⟨[10, 20], 20⟩))
+    finished.2 = .stored ∧ finished.1.rows 7 = none ∧ finished.1.queue = [] ∧
+    finished.1.writes = 2 := by decide
+
+/-- Row 7 is deleted and then attached to photo B while A uploads. A's
+settlement retires only A; a failed attempt retires nothing. -/
+theorem reattached_row_keeps_new_upload :
+    let moved := attach (deleteRow (attach noFiles 7 originalPhoto) 7) 7 otherPhoto
+    let stored := finish moved photoA [10, 20] (.ok (some ⟨[10, 20], 20⟩))
+    let failed := finish moved photoA [10, 20] (.error .network)
+    stored.1.rows 7 = some otherPhoto.row ∧ stored.1.queue = [otherPhoto] ∧
+    failed.1.queue = [otherPhoto, originalPhoto] := by decide
 
 theorem older_upload_cannot_restore_photo :
     let attached := attach (attach noFiles 7 originalPhoto) 7 otherPhoto

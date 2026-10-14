@@ -428,8 +428,9 @@ proofs() {
         COVEN_IDENTITY_LEAN="$runner" cargo test -p coven-sync --all-features st_differential_replacement_admission -- --ignored
         COVEN_IDENTITY_LEAN="$runner" cargo test -p coven-sync --all-features st_differential_snapshot_sequence -- --ignored
         runner=$(runner storage filesRunner)
-        step "Rust / Lean file attachment and upload completion"
+        step "Rust / Lean file attachment, upload completion and status"
         COVEN_FILES_LEAN="$runner" cargo test -p coven-sync --all-features st_differential_files -- --ignored
+        COVEN_FILES_LEAN="$runner" cargo test -p coven-sync --all-features st_differential_file_status -- --ignored
     fi
 
     if proof_selected storage || crate_selected coven; then

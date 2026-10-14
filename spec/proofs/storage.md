@@ -395,6 +395,35 @@ participate. `presence_wins`, `read_error_not_missing`,
 The devices must have the same replayed uploader state. Equal file storage
 alone cannot make a device that has not read a replacement know about it.
 
+**A wrong-size object is damage, not presence or absence.** Status takes the
+file's complete encrypted size, which the row's plaintext size fixes.
+`available_iff` proves that status says Available exactly when storage holds
+an object of that size at the fixed path. `wrong_size_is_damage` proves that
+any other size gives an integrity error, whatever the uploader's state or
+reports, so it is never Available, Uploading or Missing.
+`absence_not_available` keeps a confirmed absence from ever reading as
+Available.
+
+**Reads agree.** `rangeReply` is what a provider that passes coven-storage's
+conformance check answers for one range: exactly those bytes, a confirmed
+absence, or a refusal for a range reaching past the object's end. A read only
+asks for ranges inside the file's complete size, because the header is checked
+against the row first. `past_end_is_damage` proves that such a refusal is an
+integrity error, and `present_never_absent` that a present object is never
+read as absent. `complete_object_reads` proves the rule never refuses a genuine
+file: a complete object returns exactly the requested bytes for every range
+inside its size. `read_absence_matches_status` proves that a read meeting a
+confirmed absence fails with the same Uploading or Missing verdict a status
+call gives, and `read_failure_kept` that a provider failure keeps its category.
+`damage_cases` checks these on small objects.
+
+A longer object is the one place status and reads differ.
+`longer_object_reads_within_size` checks it: status reports damage, while
+reads, which never ask past the file's size, return its leading bytes. Each
+chunk in those bytes is then authenticated on its own and the whole file
+against its content hash, so a genuine prefix reads and anything else fails
+there. That checking is outside this model.
+
 **Completion never changes a row.** `attachment_atomic` fixes the whole file
 reference and queues it in the attaching transaction. `completion_changes_no_row`
 proves that finishing any attempt changes neither rows nor the app-write count.
@@ -404,12 +433,30 @@ proves that finishing any attempt changes neither rows nor the app-write count.
 then A finishes uploading, leaving B in the row. `unequal_bytes_keep_queue`
 prevents a collision from retiring that upload.
 `finish_reports_result` preserves the typed error or reset request for the caller.
-`FilesRunner` executes `attach` and `finish` for coven-sync's differential test,
-which attaches app-provided files, retargets or deletes their rows while an
-upload is in flight, and compares the settlements, the write count, each row's
-fixed reference and the queue. Row deletion is an environment step in the runner.
-Its `status` cases compare `status` with coven-sync's status rule over every
-storage observation, uploader state and source report.
+
+**Deleting a row never loses or misattributes its upload.** `deleteRow` is an
+ordinary app write: it clears the row and counts as a write, and
+`delete_keeps_uploads` proves it leaves the queue and pending records alone.
+`delete_only_that_row` proves it touches no other row. `steps_keep_upload`
+proves that any sequence of attachments and row deletions keeps a queued
+upload and its pending record. `inflight_upload_settles` takes an upload from
+the queue, lets any such sequence run, then settles it: the settlement writes
+no row and changes no write count, so a deleted row stays deleted and a row
+attached again keeps its new file; a stored result retires exactly the queue
+entries with this upload's reference; and any other result keeps the upload
+queued. `deleted_row_upload_finishes` and `reattached_row_keeps_new_upload`
+check the two histories.
+
+`FilesRunner` executes `attach`, `deleteRow` and `finish` for coven-sync's
+`st_differential_files`, which attaches app-provided files, retargets or
+deletes their rows while an upload is in flight, and compares the settlements,
+whether each deletion and settlement changed the write count, each row's fixed
+reference and the queue. Its `status` cases serve `st_differential_file_status`:
+every storage observation, uploader state and source report through
+coven-sync's status rule, then absent, failing, complete, longer and
+truncated objects through the real status call and whole-file read. Those read
+cases hand the model the ranges the read actually requested and compare its
+`fetch` result with the read's.
 
 **Retried file chunks are fixed.** `encrypted_chunk_is_captured` proves that a
 successfully checked chunk has the captured plaintext, key, path, size and index.
@@ -486,6 +533,9 @@ require the [other models' hypotheses](../coven.md#3-guarantees).
   as storage and signed reports. When both removal/replacement and a source
   report explain absence, the device state supplies the reason; E8 lists the
   reasons but does not choose between simultaneous explanations.
+- The file's complete encrypted size is an input. Deriving it from the
+  plaintext size, and the header check that keeps every read range inside it,
+  are outside the model; the differential test exercises both in Rust.
 - “Past the latest timestamp” means a strictly later wall-clock millisecond.
   Negative wall time follows the increment branch. Timestamp storage has its
   specified bound; abstract device ids stand for distinct 64-bit ids.

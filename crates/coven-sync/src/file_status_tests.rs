@@ -2,9 +2,9 @@ use super::{files_runner, Fixture, CHUNK};
 use crate::files::file_status::{status, FileStatus};
 use crate::{FileMissingReason, FileReadError, PendingReason, PendingRecord, PendingSubject};
 use coven_database::{CacheFill, DeviceState, FileRef, Provenance};
-use coven_format::pending::FileSourceFailure;
+use coven_format::{file::FileHeader, pending::FileSourceFailure};
 use coven_foundation::id_source::DeviceId;
-use coven_storage::{Storage, StorageFailure};
+use coven_storage::{test_utils::MemoryRequest, Storage, StorageFailure};
 use serde_json::{json, Value};
 
 /// A second device that received the attaching write but not the bytes.
@@ -197,9 +197,64 @@ fn status_json(result: Result<FileStatus, ()>) -> Value {
     }
 }
 
-#[test]
+fn status_result(result: Result<FileStatus, FileReadError>) -> Value {
+    match result {
+        Ok(status) => status_json(Ok(status)),
+        Err(FileReadError::Integrity { .. }) => json!("integrity"),
+        Err(FileReadError::Storage(error)) if error.failure() == StorageFailure::Network => {
+            json!({"error": true})
+        }
+        Err(error) => panic!("unexpected status failure {error:?}"),
+    }
+}
+
+fn read_result(result: Result<Vec<u8>, FileReadError>, original: &[u8]) -> Value {
+    match result {
+        Ok(bytes) => {
+            assert_eq!(bytes, original);
+            json!("ok")
+        }
+        Err(FileReadError::Uploading { device, .. }) => {
+            status_json(Ok(FileStatus::Uploading { device }))
+        }
+        Err(FileReadError::Missing { device, reason, .. }) => {
+            status_json(Ok(FileStatus::Missing { device, reason }))
+        }
+        Err(error) => status_result(Err(error)),
+    }
+}
+
+/// One observation through the real status call and whole-file read on a
+/// receiving device with nothing cached, with the ranges the read requested.
+async fn observe(
+    a: &Fixture,
+    b: &Fixture,
+    remote: &FileRef,
+    original: &[u8],
+) -> (Value, Value, Vec<Value>) {
+    b.files.evict_file(remote).await.unwrap();
+    let status = status_result(b.files.file_status(remote).await);
+    let before = a.storage.request_trace().len();
+    let read = read_result(b.files.read_file(remote).await, original);
+    let path = a.path(remote);
+    let ranges = a.storage.request_trace()[before..]
+        .iter()
+        .filter_map(|request| match request {
+            MemoryRequest::Read(read, Some(range)) if *read == path => {
+                Some(json!([range.start(), range.end()]))
+            }
+            _ => None,
+        })
+        .collect();
+    (status, read, ranges)
+}
+
+/// ST `Files.status` over every observation, uploader state and report, and,
+/// through the real status call and read, `Files.status` and `Files.fetch`
+/// for absent, failing, complete, longer and truncated objects.
+#[tokio::test]
 #[ignore = "requires COVEN_FILES_LEAN; scripts/check.sh builds filesRunner"]
-fn st_differential_file_status() {
+async fn st_differential_file_status() {
     let mut cases = Vec::new();
     let mut actual = Vec::new();
     for remote in ["present", "absent", "error"] {
@@ -217,6 +272,7 @@ fn st_differential_file_status() {
                 cases.push(json!({
                     "status": true,
                     "ref": {"uploader": 3, "id": 4, "key": 4},
+                    "size": 1,
                     "remote": remote,
                     "device": state_name(state),
                     "report": report.map(failure_name),
@@ -230,5 +286,72 @@ fn st_differential_file_status() {
             }
         }
     }
+
+    let a = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
+    let original = (0..CHUNK + 9).map(|i| (i % 249) as u8).collect::<Vec<_>>();
+    let file = a.attach("files", "photo", original.clone()).await;
+    let (b, remote) = receiver(&a, &file).await;
+    let device = file.uploader();
+    let size = FileHeader::new(file.plaintext_size())
+        .encrypted_size()
+        .unwrap();
+    let mut evidence = ("active", None);
+    let mut case = |remote: &str, length: Option<u64>, evidence: (&str, Option<&str>), ranges| {
+        let mut case = json!({
+            "status": true,
+            "ref": {"uploader": device.0, "id": 1, "key": 1},
+            "size": size,
+            "remote": remote,
+            "device": evidence.0,
+            "report": evidence.1,
+            "read": ranges,
+        });
+        if let Some(length) = length {
+            case["length"] = json!(length);
+        }
+        cases.push(case);
+    };
+    let mut record = |(status, read, ranges): (Value, Value, Vec<Value>)| {
+        actual.push(json!({"status": status, "read": read}));
+        ranges
+    };
+    // Absent: judged by the uploader's evidence.
+    let ranges = record(observe(&a, &b, &remote, &original).await);
+    case("absent", None, evidence, ranges);
+    a.storage.set_online(false);
+    let ranges = record(observe(&a, &b, &remote, &original).await);
+    a.storage.set_online(true);
+    case("error", None, evidence, ranges);
+    report(&b, &remote, FileSourceFailure::Changed).await;
+    evidence = ("active", Some("changed"));
+    let ranges = record(observe(&a, &b, &remote, &original).await);
+    case("absent", None, evidence, ranges);
+    b.database
+        .test_device_state(device, DeviceState::Removed)
+        .await
+        .unwrap();
+    evidence = ("removed", Some("changed"));
+    let ranges = record(observe(&a, &b, &remote, &original).await);
+    case("absent", None, evidence, ranges);
+    // Present: the complete object, then a longer one and truncated ones.
+    a.drain().await;
+    let path = a.path(&file);
+    let stored = a.storage.read(&path).await.unwrap();
+    assert_eq!(stored.len() as u64, size);
+    let mut longer = stored.clone();
+    longer.extend_from_slice(&[0; 5]);
+    for bytes in [
+        stored.clone(),
+        longer,
+        stored[..stored.len() - 7].to_vec(),
+        stored[..5].to_vec(),
+    ] {
+        a.storage.delete(&path).await.unwrap();
+        a.storage.create(&path, &bytes).await.unwrap();
+        let ranges = record(observe(&a, &b, &remote, &original).await);
+        case("present", Some(bytes.len() as u64), evidence, ranges);
+    }
     assert_eq!(actual, files_runner(&cases));
+    b.close().await;
+    a.close().await;
 }
