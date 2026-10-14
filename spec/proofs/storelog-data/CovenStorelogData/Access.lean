@@ -108,10 +108,15 @@ def recorded (entry : CurrentReplay.Entry) : Option (Nat × String) :=
 def intended (state : State) (invites : List String) (account : String) : Bool :=
   account ∈ invites || state.access.any (fun (m, a) => member state m && a == account)
 
+/-- S3 keys cease to be intended on removal or replacement. This projection
+supplies new deletion work; S3's journal retains it through replay reversal. -/
+def credentialRetired (state : State) (m : Nat) (key : String) : Bool :=
+  !member state m || lookup state.access m != some key
+
 def revokedCredentials (log : CurrentReplay.Log) (received : List Nat) (state : State)
     (confirmed : List String) : List String :=
   (received.filterMap fun e => (recorded (log e)).bind fun (m, key) =>
-    if !member state m && key ∉ confirmed then some key else none).eraseDups
+    if credentialRetired state m key && key ∉ confirmed then some key else none).eraseDups
 
 theorem confirmed_never_reported (log : CurrentReplay.Log) (received : List Nat) (state : State)
     (confirmed : List String) (key : String) (h : key ∈ confirmed) :
@@ -205,7 +210,7 @@ theorem recorded_removed_key_visible (log : CurrentReplay.Log) (received : List 
     (removed : member state m = false) (unconfirmed : key ∉ confirmed) :
     key ∈ revokedCredentials log received state confirmed := by
   simp only [revokedCredentials, List.mem_eraseDups, List.mem_filterMap]
-  exact ⟨e, present, by simp [access, removed, unconfirmed]⟩
+  exact ⟨e, present, by simp [access, credentialRetired, removed, unconfirmed]⟩
 
 def credentialWork (device operation : Nat) (key : String) : Work :=
   ⟨.operation operation, device, [⟨false, .deleteAccessKey key⟩]⟩

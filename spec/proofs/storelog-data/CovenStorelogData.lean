@@ -22,6 +22,8 @@ import CovenStorelogData.EntryFateKeys_tests
 import CovenStorelogData.KeySelection
 import CovenStorelogData.Pending
 import CovenStorelogData.Access
+import CovenStorelogData.AccessKeys
+import CovenStorelogData.AccessKeyExamples
 import CovenStorelogData.RetentionSafety
 import CovenStorelogData.LostValues
 import CovenStorelogData.SecurityExamples
