@@ -93,6 +93,13 @@ pub(crate) enum ReadOwner<'a> {
     Reader(&'a DatabaseReadHandle),
 }
 
+impl DatabaseReadHandle {
+    /// Applied entries and their replay from one committed read-only snapshot.
+    pub async fn store_log(&self) -> CovenResult<crate::StoreLog> {
+        self.read(|sql| sql.store_log()).await
+    }
+}
+
 // The public type names the closure, rather than its result. Only poll creates
 // the running slot, as JoinHandle<CovenResult<R>> for that closure.
 enum ReadState<F> {

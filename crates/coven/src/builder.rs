@@ -191,6 +191,11 @@ impl CovenBuilder {
         let limits = self.limits;
         let database = self.database(directory.clone())?;
         let database = database.open_read_only().await?;
+        if let Some(identity) = database.store_log().await?.replay.state.store {
+            identity
+                .check_settings(&directory.settings().map_err(CovenError::from)?)
+                .map_err(CovenError::from)?;
+        }
         let settings = coven_storage::StorageSettings::new(directory.clone());
         let data = crate::coven::blocking(move || {
             let keychain = StoreKeychain::new(self.keychain()?, store);
@@ -395,6 +400,9 @@ struct OpeningOwners {
 impl OpeningStore {
     async fn open(self) -> CovenResult<CovenHandle> {
         let database = self.database.open_locked(self.lock).await?;
+        if let Some(identity) = database.local_store_log().await?.log.replay.state.store {
+            identity.check_settings(&self.directory.settings()?)?;
+        }
         let owners =
             crate::coven::blocking(move || self.builder.owners(self.directory, self.keychain))
                 .await?;

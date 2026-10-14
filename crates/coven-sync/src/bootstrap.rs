@@ -124,3 +124,7 @@ impl StoreLogSync {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "bootstrap_tests.rs"]
+mod tests;

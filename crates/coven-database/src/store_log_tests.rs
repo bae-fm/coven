@@ -56,8 +56,8 @@ pub(crate) fn circle_history(circle: CircleId) -> Vec<(StoreLogEntry, StoreLogRe
     let ana = keys(1);
     let ben = keys(2);
     let store = StoreIdentity {
-        id: StoreId(uuid::Uuid::from_u128(1)),
-        name: "Store".into(),
+        id: crate::tests::store_id(),
+        name: crate::tests::STORE_NAME.into(),
         key: key(1),
     };
     let first = entry(
@@ -599,7 +599,6 @@ async fn removed_identities_keys_versions_resets_and_every_drop_reason_round_tri
         .get_mut(&DeviceId(u64::MAX))
         .unwrap()
         .removed = true;
-    replay.state.store.as_mut().unwrap().key = key(u128::MAX);
     for (index, reason) in [
         DropReason::TargetGone(EntryTarget::Member(keys(2).signing)),
         DropReason::TargetGone(EntryTarget::Device(DeviceId(u64::MAX))),
@@ -830,7 +829,7 @@ async fn audience_versions_round_trip_and_a_failed_raise_keeps_every_audience() 
 }
 
 #[tokio::test]
-async fn store_facts_have_one_row_and_versions_and_resets_require_snapshots() {
+async fn store_identity_has_no_duplicate_table_and_boundaries_require_snapshots() {
     let store = TestStore::new();
     let db = open(&store).await;
     let (entry, replay) = circle_history(CircleId(uuid::Uuid::from_u128(2)))[0].clone();
@@ -839,16 +838,14 @@ async fn store_facts_have_one_row_and_versions_and_resets_require_snapshots() {
         .unwrap();
     let before = db.store_log().await.unwrap();
     db.inspect_writer(|sql| {
-        assert!(
-            sql.internal_execute(
-                "INSERT INTO _coven_store(id,name,key) VALUES(?1,'Another',?2)",
-                (
-                    StoreId(uuid::Uuid::from_u128(99)).to_string(),
-                    key(99).0.as_bytes().as_slice()
-                ),
-            )
-            .is_err(),
-            "a different id still cannot create a second store"
+        assert_eq!(
+            sql.query_row(
+                "SELECT count(*) FROM sqlite_schema WHERE name IN ('_coven_store','_coven_one_store')",
+                [],
+                |row| row.get::<_, u32>(0),
+            ).unwrap(),
+            0,
+            "creation is the sole persisted store identity"
         );
         assert!(
             sql.internal_execute(

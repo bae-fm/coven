@@ -917,7 +917,7 @@ async fn replay_cost() {
     let directory = layout
         .create_store_dir(
             StoreId(uuid::Uuid::from_u128(1)),
-            "Replay cost",
+            "Home",
             &SequentialIds::new(),
         )
         .unwrap();

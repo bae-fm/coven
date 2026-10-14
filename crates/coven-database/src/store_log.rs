@@ -35,6 +35,38 @@ pub struct StoreLog {
 }
 
 impl StoreLog {
+    /// Read identity from the first kept creation, using the persisted marks.
+    /// The id and name have no separately persisted replay copy.
+    pub(crate) fn created_store(&self) -> Result<Option<StoreIdentity>, DbError> {
+        use coven_format::store_log::StoreChange;
+        let mut identity: Option<StoreIdentity> = None;
+        for applied in &self.entries {
+            if self.replay.entries.get(&applied.entry.position) != Some(&EntryOutcome::Kept) {
+                continue;
+            }
+            match &applied.entry.change {
+                StoreChange::CreateStore {
+                    store, name, key, ..
+                } if identity.is_none() => {
+                    identity = Some(StoreIdentity {
+                        id: *store,
+                        name: name.clone(),
+                        key: *key,
+                    });
+                }
+                StoreChange::RotateKey {
+                    audience: Audience::Store,
+                    key,
+                    ..
+                } => {
+                    identity.as_mut().ok_or(DbError::DamagedDatabase)?.key = *key;
+                }
+                _ => {}
+            }
+        }
+        Ok(identity)
+    }
+
     /// Finality is a strict comparison with the one persisted horizon (§9).
     pub fn is_final(&self, entry: EntryId) -> bool {
         self.horizon.is_some_and(|horizon| {
@@ -120,6 +152,32 @@ pub struct StoreIdentity {
     pub name: String,
     /// The current key; an entry already in place brings no key in (§11).
     pub key: KeyId,
+}
+
+impl StoreIdentity {
+    /// Opening requires directory settings to match checked creation (§9).
+    pub fn check_settings(
+        &self,
+        settings: &coven_foundation::files::StoreSettings,
+    ) -> Result<(), DbError> {
+        check_creation(self.id, &self.name, settings.id, &settings.name)
+    }
+}
+
+/// A creation's id and name must be the ones the directory settings name (§9).
+pub(crate) fn check_creation(
+    store: StoreId,
+    name: &str,
+    settings_store: StoreId,
+    settings_name: &str,
+) -> Result<(), DbError> {
+    if store != settings_store || name != settings_name {
+        return Err(DbError::StoreSettingsMismatch {
+            store,
+            name: name.into(),
+        });
+    }
+    Ok(())
 }
 
 /// A member's signing key is the key in [`StoreLogState::members`].

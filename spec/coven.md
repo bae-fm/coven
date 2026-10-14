@@ -2672,7 +2672,9 @@ Carol's tablet:
     without replacing `H` as the finality test.
   - Ana's directory settings name “Recipes” while its first entry is being
     published. Once that entry is checked, reads derive “Recipes” from it;
-    a conflicting setting fails opening rather than choosing another name.
+    a conflicting setting fails opening, and preparing or applying that
+    entry, with `DbError::StoreSettingsMismatch` rather than choosing
+    another name.
   - Private member keys and audience key bytes are only ever in key custody
     (§11). Audience-key selection uses
     introductions in the received entries and the pass's new-copy observation

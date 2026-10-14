@@ -137,7 +137,6 @@ async fn only_the_spec_tables_are_created() {
                 "_coven_references",
                 "_coven_rows",
                 "_coven_snapshot_schema",
-                "_coven_store",
                 "_coven_store_log",
                 "_coven_store_log_uploads",
                 "_coven_uploads",
@@ -272,7 +271,6 @@ mod query_plans {
          INSERT INTO _coven_circles SELECT 'circle_' || i,'circle ' || i,zeroblob(16) FROM fixture;
          INSERT INTO _coven_circle_members SELECT 'circle_' || i,key FROM fixture;
          INSERT INTO _coven_circle_deletions SELECT 'circle_' || i,device,n FROM fixture;
-         INSERT INTO _coven_store VALUES('store','store',zeroblob(16));
          INSERT INTO _coven_data_inputs SELECT i,audience,'snapshot',device,n,1,x'00' FROM fixture;
          INSERT INTO _coven_data_origins SELECT 'audience_' || i,i,x'' FROM fixture;
          INSERT INTO _coven_data_reloads SELECT 'audience_' || i,key,i%2 FROM fixture;
@@ -345,10 +343,7 @@ mod query_plans {
                     .query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))
                     .unwrap();
                 match table.as_str() {
-                    "_coven_store"
-                    | "_coven_store_log_uploads"
-                    | "_coven_snapshot_schema"
-                    | "_coven_finality" => {
+                    "_coven_store_log_uploads" | "_coven_snapshot_schema" | "_coven_finality" => {
                         assert_eq!(count, 1)
                     }
                     _ => assert!(
@@ -425,8 +420,8 @@ mod query_plans {
             Some("snapshot coverage includes every waiting write"),
         ("database_sync.rs", "SELECT EXISTS(SELECT 1 FROM _coven_uploads)", "_coven_uploads") =>
             Some("unfiltered EXISTS stops after the first queue row"),
-        ("download.rs", "SELECT (SELECT publication FROM _coven_snapshot_schema WHERE EXISTS(SELECT 1 FROM _coven_store))", "_coven_snapshot_schema" | "_coven_store") =>
-            Some("both tables have an enforced maximum of one row"),
+        ("download.rs", "SELECT (SELECT publication FROM _coven_snapshot_schema WHERE EXISTS(SELECT 1 FROM _coven_members))", "_coven_snapshot_schema" | "_coven_members") =>
+            Some("the schema row is singular; unfiltered membership EXISTS stops after its first row"),
         ("file_queue.rs", "SELECT id,reference,queued_at,attempts,last_attempt_at,failure,identity,session,stored,unused FROM _coven_file_uploads ORDER BY id", "_coven_file_uploads") =>
             Some("the file queue reader returns every queued attachment"),
         ("file_removals.rs", "SELECT path,area FROM _coven_file_removals ORDER BY area,path", "_coven_file_removals") =>
@@ -465,8 +460,6 @@ mod query_plans {
             Some("store_log() returns every circle membership"),
         ("store_log_tables.rs", "SELECT circle,entry_device,entry_number FROM _coven_circle_deletions", "_coven_circle_deletions") =>
             Some("store_log() returns every circle deletion and its cause"),
-        ("store_log_tables.rs", "SELECT id,name,key FROM _coven_store", "_coven_store") =>
-            Some("the store identity table has an enforced maximum of one row"),
         ("store_log_tables.rs", "DELETE FROM {table}", table)
             if statement.sql == format!("DELETE FROM {table}") =>
             Some("replay replaces the entire derived table; foreign-key lookups must be indexed"),

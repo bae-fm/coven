@@ -773,7 +773,7 @@ async fn cached_author_views_survive_reopening_and_a_deletions_reversal() {
     let directory = layout
         .create_store_dir(
             StoreId(uuid::Uuid::from_u128(1)),
-            "Reversal",
+            "Home",
             &SequentialIds::new(),
         )
         .unwrap();
@@ -824,7 +824,7 @@ async fn every_author_view_check_is_durable_and_reused_after_reopening() {
     let directory = layout
         .create_store_dir(
             StoreId(uuid::Uuid::from_u128(1)),
-            "Checks",
+            "Home",
             &SequentialIds::new(),
         )
         .unwrap();

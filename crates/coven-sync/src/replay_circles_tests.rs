@@ -221,7 +221,7 @@ async fn circle_causes_and_author_view_classifications_survive_reopening() {
         let directory = layout
             .create_store_dir(
                 StoreId(uuid::Uuid::from_u128(1)),
-                "Circle causes",
+                "Home",
                 &SequentialIds::new(),
             )
             .unwrap();

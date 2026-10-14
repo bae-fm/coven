@@ -217,6 +217,7 @@ impl DatabaseBuilder {
                     device: settings.device_id,
                     lock,
                 },
+                name: settings.name,
                 migrations,
                 clock,
                 ids,

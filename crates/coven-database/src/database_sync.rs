@@ -290,6 +290,7 @@ impl Database {
     /// prerequisites together. No storage attempt may precede this commit.
     /// The callback owns sealing values, receives no database capability, and
     /// rejects a change or returns the keys to retain. Failure reserves no number.
+    /// A store creation must name the directory settings' id and name (§9).
     pub async fn prepare_store_log<F, E>(
         &self,
         author: coven_crypto::MemberId,
@@ -313,6 +314,7 @@ impl Database {
                         writer,
                         log,
                         inner.access.directory.id(),
+                        &inner.name,
                         inner.access.device,
                         inner.clock.now(),
                         author,

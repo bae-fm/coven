@@ -774,3 +774,65 @@ mod recovery {
         }
     }
 }
+
+#[tokio::test]
+async fn creation_identity_matches_settings_before_and_after_reopening() {
+    let root = tempfile::tempdir().unwrap();
+    let layout = StoreLayout::new(root.path().into());
+    let app = TestCoven::new();
+    let directory = app
+        .create_store(&layout, "Recipes", Arc::new(UuidIds))
+        .await
+        .unwrap();
+    let storage = Arc::new(MemoryStorage::builder().build().unwrap());
+    let builder = || {
+        app.builder(layout.clone())
+            .synced_tables(vec![])
+            .migrations(vec![])
+            .storage_connector(storage.clone())
+    };
+    // Directory settings identify the store before creation is published.
+    let handle = builder().open(directory.id()).await.unwrap();
+    handle.close().await.unwrap();
+    let handle = builder().open(directory.id()).await.unwrap();
+    handle.initialize_identity().unwrap();
+    handle
+        .setup_s3_storage(
+            storage.config(),
+            "Phone",
+            "owner".into(),
+            SecretText::new("secret".into()),
+        )
+        .await
+        .unwrap();
+    handle.close().await.unwrap();
+    let handle = builder().open(directory.id()).await.unwrap();
+    handle.close().await.unwrap();
+
+    let reader = builder().open_read_only(directory.id()).await.unwrap();
+    reader.close().await.unwrap();
+    let mut settings = directory.settings().unwrap();
+    settings.name = "Conflicting name".into();
+    let path = directory
+        .database_path()
+        .parent()
+        .unwrap()
+        .join("settings.json");
+    std::fs::write(&path, serde_json::to_vec(&settings).unwrap()).unwrap();
+    assert!(
+        matches!(
+            builder().open(directory.id()).await,
+            Err(CovenError::Database(DbError::StoreSettingsMismatch { .. }))
+        ),
+        "opening must reject a name that disagrees with checked creation"
+    );
+    assert!(
+        matches!(
+            builder().open_read_only(directory.id()).await,
+            Err(ReadOnlyOpenError::Local(CovenError::Database(
+                DbError::StoreSettingsMismatch { .. }
+            )))
+        ),
+        "read-only opening must check the same identity"
+    );
+}

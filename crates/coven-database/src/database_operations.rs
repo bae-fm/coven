@@ -5,7 +5,8 @@ use crate::{DbError, NewOperation, OperationId, OperationRecord, OperationUpdate
 
 impl Database {
     /// Install a ready batch and its replay, data effects, drop reports and operation
-    /// progress together. Reject a result prepared against another committed log.
+    /// progress together. Reject a result prepared against another committed log,
+    /// and a kept creation that disagrees with the directory settings (§9).
     /// The retained decoded value changes on the database thread after commit,
     /// including when the awaiting caller is cancelled or subsequent cleanup fails.
     pub async fn apply_store_log_batch<P: crate::PendingValue>(
@@ -46,6 +47,20 @@ impl Database {
                     .eq(next.replay.entries.keys())
                 {
                     return Err(DbError::StoreLogEntriesChanged);
+                }
+                // Identity is read back from the kept creation, so a replay naming
+                // another one would not survive reopening.
+                let created = next.created_store()?;
+                if next.replay.state.store != created {
+                    return Err(DbError::StoreLogEntriesChanged);
+                }
+                if let Some(created) = &created {
+                    crate::store_log::check_creation(
+                        created.id,
+                        &created.name,
+                        inner.access.directory.id(),
+                        &inner.name,
+                    )?;
                 }
                 let changes_projection = next.boundaries().ne(current.boundaries())
                     || next.replay.state.circles != current.replay.state.circles
@@ -110,6 +125,7 @@ impl Database {
                         writer,
                         log,
                         inner.access.directory.id(),
+                        &inner.name,
                         inner.access.device,
                         inner.clock.now(),
                         author,

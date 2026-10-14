@@ -89,6 +89,14 @@ pub enum DbError {
     /// SQLite's integrity check or decoding stored facts found damage (§19.1).
     #[error("damaged database")]
     DamagedDatabase,
+    /// Directory settings disagree with a store's creation entry (§9).
+    #[error("store settings disagree with creation of {store} named {name:?}")]
+    StoreSettingsMismatch {
+        /// The id in the creation entry.
+        store: coven_foundation::id_source::StoreId,
+        /// The name in the creation entry.
+        name: String,
+    },
     /// A synced table declaration or schema is invalid.
     #[error(transparent)]
     Schema(#[from] SchemaError),

@@ -258,14 +258,6 @@ macro_rules! coven_tables {
             ) STRICT, WITHOUT ROWID;
             CREATE INDEX _coven_circle_members_member ON _coven_circle_members(member);
         ");
-        $visit!(_coven_store, "
-            CREATE TABLE _coven_store (
-                id TEXT PRIMARY KEY NOT NULL,
-                name TEXT NOT NULL,
-                key BLOB NOT NULL CHECK(length(key)=16)
-            ) STRICT, WITHOUT ROWID;
-            CREATE UNIQUE INDEX _coven_one_store ON _coven_store ((1));
-        ");
         $visit!(_coven_boundaries, "
             CREATE TABLE _coven_boundaries (
                 entry_device BLOB NOT NULL CHECK(length(entry_device)=8),

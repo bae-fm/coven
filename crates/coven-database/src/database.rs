@@ -56,6 +56,9 @@ struct DatabaseInner {
     // Shared by the sync owner and its workers; only a committed replay replaces it.
     store_log: Mutex<Option<crate::StoreLog>>,
     access: DatabaseAccess<StoreLock>,
+    // The directory settings' store name, read under the writer lock. A creation
+    // entry is prepared and applied only with this name (§9).
+    name: String,
     migrations: Vec<MigrationOutcome>,
     clock: ClockRef,
     ids: IdSourceRef,

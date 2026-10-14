@@ -79,6 +79,7 @@ pub(crate) fn prepare<F, E>(
     database: &DatabaseConnection,
     log: &StoreLog,
     store: StoreId,
+    name: &str,
     device: DeviceId,
     now: SystemTime,
     author: MemberId,
@@ -97,6 +98,14 @@ where
     // No callback receives that capability, and a failed seal reserves no number.
     if let Some(upload) = read(database)? {
         return Err(DbError::StoreLogUploadPending(upload.entry.position).into());
+    }
+    if let StoreChange::CreateStore {
+        store: created,
+        name: created_name,
+        ..
+    } = &change
+    {
+        crate::store_log::check_creation(*created, created_name, store, name)?;
     }
     let mut positions = log.positions();
     // An absent prior entry starts this device at one.

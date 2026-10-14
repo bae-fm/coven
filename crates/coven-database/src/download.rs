@@ -155,7 +155,7 @@ pub(crate) fn prerequisite(
         return Ok(Some(WriteWait::SchemaVersion(header.schema_version)));
     }
     let publication: Option<u32> = database.query_row(
-        "SELECT (SELECT publication FROM _coven_snapshot_schema WHERE EXISTS(SELECT 1 FROM _coven_store))",
+        "SELECT (SELECT publication FROM _coven_snapshot_schema WHERE EXISTS(SELECT 1 FROM _coven_members))",
         [], |r| r.get(0),
     )?;
     if let Some(publication) = publication.filter(|version| *version > 0) {

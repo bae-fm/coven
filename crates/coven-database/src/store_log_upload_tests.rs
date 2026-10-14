@@ -15,7 +15,7 @@ use std::{
 async fn oversized_access_reserves_neither_an_entry_nor_key_copies() {
     let store = TestStore::new();
     let db = store.builder(vec![], vec![]).open().await.unwrap();
-    let entry = coven_format::test_utils::store_log();
+    let entry = crate::tests::store_log();
     let result = db
         .prepare_store_log(
             entry.author.clone(),
@@ -52,7 +52,7 @@ async fn local_write_follows_fixed_entry_even_after_clock_moves_back() {
         .open()
         .await
         .unwrap();
-    let entry = coven_format::test_utils::store_log();
+    let entry = crate::tests::store_log();
     db.prepare_store_log(entry.author, entry.change, |_, _, _| {
         Ok::<_, DbError>(StoreLogSealing {
             key: KeyId(uuid::Uuid::from_u128(1)),
@@ -105,7 +105,7 @@ async fn batch_clock_uses_saved_and_queued_timestamps_without_decoding_entries()
     .unwrap();
     let work = crate::test_utils::WorkCounter::default();
     db.test_track_work(work.clone()).await.unwrap();
-    let entry = coven_format::test_utils::store_log();
+    let entry = crate::tests::store_log();
     db.prepare_store_log(
         entry.author,
         StoreChange::SetAccess {
@@ -142,7 +142,7 @@ async fn batch_clock_uses_saved_and_queued_timestamps_without_decoding_entries()
 async fn failed_sealing_reserves_nothing_and_pending_entry_blocks_another() {
     let store = TestStore::new();
     let db = store.builder(vec![], vec![]).open().await.unwrap();
-    let entry = coven_format::test_utils::store_log();
+    let entry = crate::tests::store_log();
     assert!(matches!(
         db.prepare_store_log(entry.author.clone(), entry.change.clone(), |_, _, _| Err::<
             StoreLogSealing,
@@ -190,7 +190,10 @@ async fn failed_sealing_reserves_nothing_and_pending_entry_blocks_another() {
 async fn applying_entry_and_retiring_the_queue_roll_back_together() {
     let store = TestStore::new();
     let db = store.builder(vec![], vec![]).open().await.unwrap();
-    let entry = coven_format::test_utils::store_log();
+    let (entry, mut result) = crate::store_log::tests::circle_history(
+        coven_foundation::id_source::CircleId(uuid::Uuid::from_u128(2)),
+    )[0]
+    .clone();
     let id = db
         .prepare_store_log(entry.author, entry.change, |_, _, mut copies| {
             copies.push(|_| Ok::<_, DbError>(vec![2]))?;
@@ -211,11 +214,10 @@ async fn applying_entry_and_retiring_the_queue_roll_back_together() {
         stored_at: UNIX_EPOCH,
         check: crate::StoreLogCheck::Allowed,
     };
-    // Replay is caller-supplied data at this database boundary.
-    let result = crate::StoreLogReplay {
-        entries: [(id, crate::EntryOutcome::Kept)].into(),
-        ..Default::default()
-    };
+    // The supplied creation replay names the writer that reserved the entry.
+    result.entries = [(id, crate::EntryOutcome::Kept)].into();
+    let device = result.state.devices.pop_first().unwrap().1;
+    result.state.devices.insert(id.device, device);
     db.inspect_writer(|sql| {
         sql.fail_at(
             "reject_retirement",
@@ -264,7 +266,10 @@ async fn entry_copies_and_operation_commit_or_roll_back_as_one_reservation() {
         })
         .await
         .unwrap();
-    let entry = coven_format::test_utils::store_log();
+    let (entry, mut replay) = crate::store_log::tests::circle_history(
+        coven_foundation::id_source::CircleId(uuid::Uuid::from_u128(2)),
+    )[0]
+    .clone();
     let reserve = |copies: crate::KeyUploadBatch, operation| {
         let mut copies = copies;
         copies.push(|_| Ok::<_, DbError>(vec![2]))?;
@@ -328,10 +333,9 @@ async fn entry_copies_and_operation_commit_or_roll_back_as_one_reservation() {
         stored_at: UNIX_EPOCH,
         check: crate::StoreLogCheck::Allowed,
     };
-    let replay = crate::StoreLogReplay {
-        entries: [(id, crate::EntryOutcome::Kept)].into(),
-        ..Default::default()
-    };
+    replay.entries = [(id, crate::EntryOutcome::Kept)].into();
+    let device = replay.state.devices.pop_first().unwrap().1;
+    replay.state.devices.insert(id.device, device);
     assert!(db
         .apply_store_log::<PendingRecord>(checked.clone(), replay.clone())
         .await
@@ -355,7 +359,7 @@ async fn entry_copies_and_operation_commit_or_roll_back_as_one_reservation() {
 async fn a_sealing_callback_cannot_commit_a_gap() {
     let store = TestStore::new();
     let db = store.builder(vec![], vec![]).open().await.unwrap();
-    let entry = coven_format::test_utils::store_log();
+    let entry = crate::tests::store_log();
     assert!(matches!(
         db.prepare_store_log(entry.author, entry.change, |_, _, mut copies| {
             copies.push(|_| Ok::<_, DbError>(vec![1]))?;

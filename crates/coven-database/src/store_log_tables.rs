@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use coven_crypto::{MemberId, SealingPublicKey};
 use coven_format::{store_log::MemberRole, value::EntryId, Object};
-use coven_foundation::id_source::{CircleId, DeviceId, KeyId, StoreId};
+use coven_foundation::id_source::{CircleId, DeviceId, KeyId};
 use coven_merge::Audience;
 use rusqlite::{params, types::Type, Row};
 
@@ -127,6 +127,7 @@ pub(crate) fn read(database: &DatabaseConnection) -> Result<StoreLog, DbError> {
         log.entries.push(entry);
     }
     log.entries.sort_by_key(|entry| entry.entry.timestamp);
+    log.replay.state.store = log.created_store()?;
     let state = &mut log.replay.state;
     state.members = database
         .query(
@@ -195,19 +196,6 @@ pub(crate) fn read(database: &DatabaseConnection) -> Result<StoreLog, DbError> {
             .insert(member);
     }
     state.circle_deletions = deleted_circles(database)?;
-    state.store = database
-        .query("SELECT id,name,key FROM _coven_store", [], |row| {
-            let text: String = row.get(0)?;
-            let id = uuid::Uuid::parse_str(&text)
-                .map_err(|error| decode_failure(0, Type::Text, error))?;
-            Ok(StoreIdentity {
-                id: StoreId(id),
-                name: row.get(1)?,
-                key: KeyId(uuid::Uuid::from_bytes(row.get(2)?)),
-            })
-        })?
-        .into_iter()
-        .next();
     for boundary in crate::Boundary::load_selected(database)? {
         boundary.apply(state);
     }
@@ -263,7 +251,6 @@ pub(crate) fn replace(
         "_coven_devices",
         "_coven_circles",
         "_coven_members",
-        "_coven_store",
     ] {
         database.internal_execute(&format!("DELETE FROM {table}"), [])?;
     }
@@ -315,16 +302,6 @@ pub(crate) fn replace(
         database.internal_execute(
             "INSERT INTO _coven_circle_deletions(circle,entry_device,entry_number) VALUES(?1,?2,?3)",
             (circle.to_string(), entry.device.0.to_be_bytes().as_slice(), entry.number.to_be_bytes().as_slice()),
-        )?;
-    }
-    if let Some(store) = &state.store {
-        database.internal_execute(
-            "INSERT INTO _coven_store(id,name,key) VALUES(?1,?2,?3)",
-            (
-                store.id.to_string(),
-                &store.name,
-                store.key.0.as_bytes().as_slice(),
-            ),
         )?;
     }
     Ok(())

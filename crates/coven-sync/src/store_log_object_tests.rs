@@ -317,7 +317,7 @@ async fn queued_creation_rejects_a_copy_with_the_right_identity_and_wrong_materi
         a.sync
             .make_and_upload_entry(StoreChange::CreateStore {
                 store: store(1),
-                name: "Home".into(),
+                name: a.directory.settings().unwrap().name,
                 admin: public(&a.member),
                 access: coven_format::MemberAccess::S3AccessKey {
                     access_key_id: "owner".into()

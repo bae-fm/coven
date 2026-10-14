@@ -231,3 +231,127 @@ async fn horizon_persists_and_failed_or_stale_transactions_preserve_it() {
     let reopened = store.builder(vec![], vec![]).open().await.unwrap();
     assert_eq!(reopened.local_store_log().await.unwrap().log, saved);
 }
+
+// The store identity is read back from the kept creation entry (§9).
+mod identity {
+    use crate::store_log::{tests as log_tests, *};
+    use crate::{
+        pending::tests::Record, tests::TestStore, DbError, StoreLogCheck, StoreLogSealing,
+    };
+    use coven_format::store_log::StoreChange;
+    use coven_foundation::id_source::{CircleId, KeyId, StoreId};
+    use coven_merge::Audience;
+
+    #[tokio::test]
+    async fn replay_cannot_replace_the_creation_identity() {
+        let directory = TestStore::new();
+        let db = directory.builder(vec![], vec![]).open().await.unwrap();
+        let (creation, replay) =
+            log_tests::circle_history(CircleId(uuid::Uuid::from_u128(2)))[0].clone();
+        for wrong_id in [false, true] {
+            let mut changed = replay.clone();
+            let identity = changed.state.store.as_mut().unwrap();
+            if wrong_id {
+                identity.id = StoreId(uuid::Uuid::from_u128(99));
+            } else {
+                identity.name = "Conflicting name".into();
+            }
+            assert!(matches!(
+                db.apply_store_log::<Record>(log_tests::checked(creation.clone()), changed)
+                    .await,
+                Err(DbError::StoreLogEntriesChanged)
+            ));
+            assert!(db.local_store_log().await.unwrap().log.entries.is_empty());
+            assert!(db.store_log().await.unwrap().entries.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn checked_creation_supplies_identity_after_reopening() {
+        let directory = TestStore::new();
+        let db = directory.builder(vec![], vec![]).open().await.unwrap();
+        assert!(db.store_log().await.unwrap().replay.state.store.is_none());
+        let (creation, mut replay) =
+            log_tests::circle_history(CircleId(uuid::Uuid::from_u128(2)))[0].clone();
+        let identity = replay.state.store.clone().unwrap();
+        db.apply_store_log::<Record>(log_tests::checked(creation.clone()), replay.clone())
+            .await
+            .unwrap();
+        let mut rotation = creation;
+        rotation.position.number = 2;
+        rotation.timestamp = coven_merge::Timestamp::new(2, 0, rotation.position.device).unwrap();
+        let key = KeyId(uuid::Uuid::from_u128(u128::MAX));
+        rotation.change = StoreChange::RotateKey {
+            audience: Audience::Store,
+            key,
+            key_hash: [99; 32],
+        };
+        replay.entries.insert(rotation.position, EntryOutcome::Kept);
+        replay.state.store.as_mut().unwrap().key = key;
+        db.apply_store_log::<Record>(log_tests::checked(rotation), replay.clone())
+            .await
+            .unwrap();
+        db.close().await.unwrap();
+        let db = directory.builder(vec![], vec![]).open().await.unwrap();
+        let saved = db.store_log().await.unwrap();
+        assert_eq!(saved.replay, replay);
+        let saved = saved.replay.state.store.unwrap();
+        assert_eq!(saved.id, identity.id);
+        assert_eq!(saved.name, identity.name);
+        assert_eq!(saved.key, key);
+    }
+
+    #[tokio::test]
+    async fn rejected_creation_does_not_supply_an_identity() {
+        let directory = TestStore::new();
+        let db = directory.builder(vec![], vec![]).open().await.unwrap();
+        let (creation, _) =
+            log_tests::circle_history(CircleId(uuid::Uuid::from_u128(2)))[0].clone();
+        let mut replay = StoreLogReplay::default();
+        replay.entries.insert(
+            creation.position,
+            EntryOutcome::Dropped(DropReason::NotAllowed),
+        );
+        let mut checked = log_tests::checked(creation);
+        checked.check = StoreLogCheck::NotAllowed;
+        db.apply_store_log::<Record>(checked, replay).await.unwrap();
+        db.close().await.unwrap();
+        let db = directory.builder(vec![], vec![]).open().await.unwrap();
+        assert!(db.store_log().await.unwrap().replay.state.store.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_creation_disagreeing_with_settings_is_neither_reserved_nor_applied() {
+        let directory = TestStore::new();
+        let db = directory.builder(vec![], vec![]).open().await.unwrap();
+        let (mut creation, mut replay) =
+            log_tests::circle_history(CircleId(uuid::Uuid::from_u128(2)))[0].clone();
+        let StoreChange::CreateStore { name, .. } = &mut creation.change else {
+            unreachable!("the first fixture entry creates the store")
+        };
+        *name = "Another name".into();
+        replay.state.store.as_mut().unwrap().name = "Another name".into();
+        let mismatch = |result: Result<(), DbError>| {
+            matches!(result, Err(DbError::StoreSettingsMismatch { store, name })
+                if store == directory.id() && name == "Another name")
+        };
+        assert!(mismatch(
+            db.prepare_store_log(
+                creation.author.clone(),
+                creation.change.clone(),
+                |_, _, _| -> Result<StoreLogSealing, DbError> {
+                    panic!("a mismatched creation cannot reach sealing")
+                },
+            )
+            .await
+            .map(drop)
+        ));
+        assert!(db.local_store_log().await.unwrap().upload.is_none());
+        assert!(mismatch(
+            db.apply_store_log::<Record>(log_tests::checked(creation), replay)
+                .await
+        ));
+        let log = db.local_store_log().await.unwrap().log;
+        assert!(log.entries.is_empty() && log.replay.state.store.is_none());
+    }
+}

@@ -9,6 +9,26 @@ pub(crate) struct TestStore {
     _temporary: tempfile::TempDir,
 }
 
+/// The store name in every test store's settings; fixture creation entries use it.
+pub(crate) const STORE_NAME: &str = "database tests";
+
+/// The id of [`TestStore::new`]'s store, which fixture creation entries name.
+pub(crate) fn store_id() -> StoreId {
+    StoreId(SequentialIds::new().new_id())
+}
+
+/// The format crate's fixture entry, a creation naming [`TestStore::new`]'s store.
+pub(crate) fn store_log() -> coven_format::store_log::StoreLogEntry {
+    let mut entry = coven_format::test_utils::store_log();
+    let coven_format::store_log::StoreChange::CreateStore { store, name, .. } = &mut entry.change
+    else {
+        unreachable!("the format fixture creates a store")
+    };
+    *store = store_id();
+    *name = STORE_NAME.into();
+    entry
+}
+
 impl TestStore {
     pub(crate) fn new() -> Self {
         Self::with_ids(&SequentialIds::new())
@@ -17,8 +37,11 @@ impl TestStore {
     pub(crate) fn with_ids(ids: &dyn IdSource) -> Self {
         let temporary = tempfile::tempdir().unwrap();
         let layout = StoreLayout::new(temporary.path().to_owned());
+        // Every test store is a device of the one fixture store that fixture
+        // creation entries name. Drawing an id first keeps device ids unchanged.
+        ids.new_id();
         let directory = layout
-            .create_store_dir(StoreId(ids.new_id()), "database tests", ids)
+            .create_store_dir(store_id(), STORE_NAME, ids)
             .unwrap();
         Self {
             directory,

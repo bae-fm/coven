@@ -593,7 +593,7 @@ async fn callback_panics_release_the_writer_and_reserve_nothing() {
         let db = store.builder(vec![], vec![]).open().await.unwrap();
         let call = db.clone();
         let panic = tokio::spawn(async move {
-            let entry = coven_format::test_utils::store_log();
+            let entry = crate::tests::store_log();
             match callback {
                 "store log" => {
                     call.prepare_store_log(

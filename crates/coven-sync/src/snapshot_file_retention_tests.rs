@@ -38,7 +38,7 @@ async fn sync(f: &Fixture) -> (StoreLogSync, MemberKeys, crate::DeviceLogSync) {
     sync.make_and_upload_entry(StoreChange::CreateStore {
         access: coven_format::MemberAccess::ProviderAccount("owner".into()),
         store: f.directory.id(),
-        name: "Files".into(),
+        name: f.directory.settings().unwrap().name,
         admin: MemberPublicKeys {
             signing: member.member_id(),
             sealing: member.sealing_public_key(),

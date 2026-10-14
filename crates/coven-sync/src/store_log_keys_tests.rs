@@ -45,7 +45,7 @@ async fn introductions_refuse_material_that_does_not_match_the_committed_hash() 
         .sync
         .make_and_upload_entry(StoreChange::CreateStore {
             store: store(1),
-            name: "Home".into(),
+            name: ana.directory.settings().unwrap().name,
             admin: public(&ana.member),
             access: coven_format::MemberAccess::S3AccessKey {
                 access_key_id: "owner".into(),
@@ -750,7 +750,7 @@ async fn creation_recovers_after_copy_confirmation_without_resealing_the_copy() 
             ana.sync
                 .make_and_upload_entry(StoreChange::CreateStore {
                     store: store(1),
-                    name: "Home".into(),
+                    name: ana.directory.settings().unwrap().name,
                     admin: public(&ana.member),
                     access: coven_format::MemberAccess::S3AccessKey {
                         access_key_id: "owner".into()

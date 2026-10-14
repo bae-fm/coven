@@ -318,6 +318,10 @@ pub enum DbError {
     Sqlite(rusqlite::Error),
     /// SQLite's integrity check or decoding stored facts found damage (§19.1).
     DamagedDatabase,
+    /// Directory settings disagree with the store's creation entry when it
+    /// is prepared, applied or read at opening (§9); these are the id and
+    /// name in that entry.
+    StoreSettingsMismatch { store: StoreId, name: String },
     /// A synced table declaration or schema is invalid.
     Schema(SchemaError),
     /// App SQL read, changed or defined one of coven's internal objects (§5).
