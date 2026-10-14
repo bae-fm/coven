@@ -138,25 +138,13 @@ impl StoreLogSync {
         let bytes = match input.metadata().await? {
             Some(bytes) => bytes,
             None => {
-                let mut bytes = Vec::new();
-                loop {
-                    let end = checked(path, SnapshotObjectPrefix::read_length(&bytes))?;
-                    if end as u64 > object.size {
-                        return checked(path, Err(coven_format::Error::Truncated));
-                    }
-                    if bytes.len() == end {
-                        break;
-                    }
-                    bytes.extend(
-                        input
-                            .read(
-                                storage,
-                                coven_storage::ByteRange::new(bytes.len() as u64, end as u64)?,
-                            )
-                            .await?,
-                    );
-                }
-                bytes
+                input
+                    .prefix(
+                        storage,
+                        SnapshotObjectPrefix::MAX_SIGNED_PREFIX,
+                        SnapshotObjectPrefix::signed_length,
+                    )
+                    .await?
             }
         };
         let length = checked(path, SnapshotObjectPrefix::length(&bytes))?;
@@ -303,54 +291,55 @@ impl StoreLogSync {
         let key = io::key(&ring, &candidate.prefix.audience, candidate.prefix.key)?;
         let prefix = candidate.prefix.encode()?;
         let path = &candidate.object.path;
-        let mut hash = ObjectHasher::new();
-        hash.update(&prefix);
-        hash.update(candidate.signature.as_bytes());
-        let mut offset = prefix.len() as u64 + 64;
-        let end = candidate
-            .object
-            .size
-            .checked_sub(64)
-            .ok_or(coven_format::Error::Truncated)?;
-        let mut layout = SnapshotObjectLayout::new();
-        while offset < end {
-            if end - offset < 4 {
+        let mut stream = input.stream(storage).await;
+        let result = async {
+            let signed = stream.read_exact(prefix.len() + 64).await?;
+            if signed[..prefix.len()] != prefix
+                || signed[prefix.len()..] != *candidate.signature.as_bytes()
+            {
+                return Err(coven_storage::StorageFailure::Protocol
+                    .with_source("snapshot bytes disagree with its retained signed prefix")
+                    .into());
+            }
+            let mut hash = ObjectHasher::new();
+            hash.update(&signed);
+            let end = candidate
+                .object
+                .size
+                .checked_sub(64)
+                .ok_or(coven_format::Error::Truncated)?;
+            let mut layout = SnapshotObjectLayout::new();
+            while stream.position() < end {
+                if end - stream.position() < 4 {
+                    return Err(coven_format::Error::Truncated.into());
+                }
+                let mut piece = stream.read_exact(4).await?;
+                let length = layout.chunk_length(&piece)?;
+                if (length - 4) as u64 > end - stream.position() {
+                    return Err(coven_format::Error::Truncated.into());
+                }
+                piece.extend(stream.read_exact(length - 4).await?);
+                hash.update(&piece);
+                let index = layout.index();
+                let sealed = layout.decode_chunk(&piece)?;
+                let plaintext = key.open_object_chunk(path.as_str(), &prefix, 0, index, sealed)?;
+                sink.chunk(plaintext).await?;
+            }
+            if stream.position() != end {
                 return Err(coven_format::Error::Truncated.into());
             }
-            let mut piece = input
-                .read(storage, coven_storage::ByteRange::new(offset, offset + 4)?)
-                .await?;
-            let length = layout.chunk_length(&piece)?;
-            if length as u64 > end - offset {
-                return Err(coven_format::Error::Truncated.into());
-            }
-            piece.extend(
-                input
-                    .read(
-                        storage,
-                        coven_storage::ByteRange::new(offset + 4, offset + length as u64)?,
-                    )
-                    .await?,
-            );
-            hash.update(&piece);
-            let index = layout.index();
-            let sealed = layout.decode_chunk(&piece)?;
-            let plaintext = key.open_object_chunk(path.as_str(), &prefix, 0, index, sealed)?;
-            sink.chunk(plaintext).await?;
-            offset += length as u64;
+            let signature = layout.read_signature(&stream.read_exact(64).await?)?;
+            candidate
+                .author
+                .verify_object(path.as_str(), &hash.finish(), &signature)?;
+            Ok(())
         }
-        if offset != end {
-            return Err(coven_format::Error::Truncated.into());
+        .await;
+        let result = stream.checked(result).await;
+        if result.is_ok() {
+            stream.drain().await?;
         }
-        let signature = layout.read_signature(
-            &input
-                .read(storage, coven_storage::ByteRange::new(end, end + 64)?)
-                .await?,
-        )?;
-        candidate
-            .author
-            .verify_object(path.as_str(), &hash.finish(), &signature)?;
-        Ok(())
+        result
     }
 }
 

@@ -133,33 +133,38 @@ impl GoogleDriveStorage {
         &self,
         path: &ObjectPath,
         range: Option<ByteRange>,
-    ) -> Result<ObjectRead, StorageError> {
+    ) -> Result<ObjectStream<'_>, StorageError> {
         let item = self.find(path).await?.ok_or(StorageFailure::NotFound)?;
         let url = self.url(&["files", http::string(&item, "id")?], &[("alt", "media")])?;
         let headers = range
             .map(|range| vec![("Range", range.header())])
             .unwrap_or_default();
         let metadata = object_metadata::drive(path, &item)?;
-        let bytes = http::bytes(
+        let stream = super::http_body::stream(
             PROVIDER,
             self.session
                 .send(Method::GET, &url, &headers, Body::Empty, true)
                 .await?,
+            metadata.clone(),
             range,
         )
         .await?;
         if path.is_replaceable() {
-            let after = self
-                .file_metadata(path, &metadata.object_id)
-                .await?
-                .ok_or(StorageFailure::NotFound)?;
-            if object_metadata::drive(path, &after)? != metadata {
-                return Err(
-                    StorageFailure::Protocol.with_source("Drive object changed during read")
-                );
-            }
+            let path = path.clone();
+            return Ok(stream.after(async move {
+                let after = self
+                    .file_metadata(&path, &metadata.object_id)
+                    .await?
+                    .ok_or(StorageFailure::NotFound)?;
+                if object_metadata::drive(&path, &after)? != metadata {
+                    return Err(
+                        StorageFailure::Protocol.with_source("Drive object changed during read")
+                    );
+                }
+                Ok(())
+            }));
         }
-        Ok(ObjectRead { metadata, bytes })
+        Ok(stream)
     }
     async fn verify_completed(&self, session: &mut UploadSession) -> Result<(), StorageError> {
         let SessionState::GoogleDrive { file_id, .. } = &session.state else {
@@ -457,11 +462,11 @@ impl ProviderOps for GoogleDriveStorage {
             .map(|item| object_metadata::drive(path, &item))
             .transpose()
     }
-    async fn read_object(
+    async fn stream_object(
         &self,
         path: &ObjectPath,
         range: Option<ByteRange>,
-    ) -> Result<ObjectRead, StorageError> {
+    ) -> Result<ObjectStream<'_>, StorageError> {
         self.get(path, range).await
     }
     async fn list(&self, listing: &mut ObjectListing) -> Result<(), StorageError> {

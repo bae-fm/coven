@@ -184,12 +184,25 @@ pub trait Storage: Send + Sync {
     async fn status(&self, path: &ObjectPath) -> Result<Option<StoredObject>, StorageError>;
     /// Read bytes and metadata from the same object revision. A range still
     /// reports the complete encrypted size and whole-object checksum semantics.
+    async fn stream_object(
+        &self,
+        path: &ObjectPath,
+        range: Option<ByteRange>,
+    ) -> Result<crate::ObjectStream<'_>, StorageError>;
+    /// Collect a bounded response through the streaming implementation. Large
+    /// writes and snapshots consume `stream_object` directly. This convenience
+    /// reader holds at most 32 MiB, regardless of provider metadata.
     async fn read_object(
         &self,
         path: &ObjectPath,
         range: Option<ByteRange>,
-    ) -> Result<ObjectRead, StorageError>;
-    /// Read the whole encrypted object when the caller needs only bytes.
+    ) -> Result<ObjectRead, StorageError> {
+        self.stream_object(path, range)
+            .await?
+            .collect(crate::object_stream::BUFFERED_READ_LIMIT)
+            .await
+    }
+    /// Read a bounded whole encrypted object; the limit is the same as `read_object`.
     async fn read(&self, path: &ObjectPath) -> Result<Vec<u8>, StorageError> {
         Ok(self.read_object(path, None).await?.bytes)
     }

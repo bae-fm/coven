@@ -246,7 +246,7 @@ async fn coverage_checks_read_exactly_the_signed_prefix_without_an_audience_key(
     let before = storage.ranges().await.len();
     b.sync.discover_snapshots().await.unwrap();
     let ranges = storage.ranges().await;
-    assert_eq!(ranges.len() - before, 4);
+    assert_eq!(ranges.len() - before, 2);
     assert_eq!(ranges[before].start(), 0);
     let bytes = storage.read(&object.path).await.unwrap();
     let length = SnapshotObjectPrefix::length(&bytes).unwrap();

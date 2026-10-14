@@ -702,6 +702,7 @@ pub(crate) const POLICY: Policy = Policy {
         "SnapshotInput",
         "RetainedInput",
         "ObjectInput",
+        "InputStream",
         "SnapshotWriteParts",
         "SnapshotTransfer",
         "FileTransfer",

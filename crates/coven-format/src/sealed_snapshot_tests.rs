@@ -49,7 +49,7 @@ fn listed_snapshot_size_recovers_plaintext_at_chunk_boundaries() {
 }
 
 #[test]
-fn prefix_read_boundaries_stop_at_the_signature_and_bound_each_count() {
+fn signed_prefix_length_bounds_each_count() {
     for audience in [
         Audience::Store,
         Audience::Circle(coven_crypto::CircleId(uuid::Uuid::from_u128(1))),
@@ -63,23 +63,17 @@ fn prefix_read_boundaries_stop_at_the_signature_and_bound_each_count() {
         };
         let mut signed = prefix.encode().unwrap();
         signed.extend([0; 64]);
-        let mut read = Vec::new();
-        loop {
-            let end = SnapshotObjectPrefix::read_length(&read).unwrap();
-            if end == read.len() {
-                break;
-            }
-            assert!(end <= signed.len());
-            read.extend_from_slice(&signed[read.len()..end]);
-        }
-        assert_eq!(read, signed);
+        assert_eq!(
+            SnapshotObjectPrefix::signed_length(&signed).unwrap(),
+            signed.len()
+        );
         let first = SnapshotObjectPrefix::routing_length(&signed).unwrap();
         let second = positions_end(&signed, first).unwrap();
         for offset in [first, second] {
             let mut bad = signed[..offset + 4].to_vec();
             bad[offset..].copy_from_slice(&u32::MAX.to_be_bytes());
             assert!(matches!(
-                SnapshotObjectPrefix::read_length(&bad),
+                SnapshotObjectPrefix::signed_length(&bad),
                 Err(Error::Limit { .. })
             ));
         }

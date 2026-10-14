@@ -658,6 +658,7 @@ macro_rules! coven_input_tables {
         identity BLOB NOT NULL,
         observation BLOB NOT NULL,
         released INTEGER NOT NULL DEFAULT 0 CHECK(released IN (0,1)),
+        received INTEGER NOT NULL DEFAULT 0 CHECK(received IN (0,1)),
         metadata BLOB,
         files_complete INTEGER CHECK(files_complete IN (0,1))
     ) STRICT;

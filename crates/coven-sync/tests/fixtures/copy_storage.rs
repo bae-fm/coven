@@ -99,11 +99,11 @@ impl Storage for CopyStorage {
         }
         self.storage.status(path).await
     }
-    async fn read_object(
+    async fn stream_object(
         &self,
         path: &ObjectPath,
         range: Option<ByteRange>,
-    ) -> Result<coven_storage::ObjectRead, StorageError> {
+    ) -> Result<coven_storage::ObjectStream<'_>, StorageError> {
         if self.paths.contains(path) {
             match self.action {
                 CopyAttempt::FailComparison => return Err(StorageFailure::Network.into()),
@@ -111,7 +111,7 @@ impl Storage for CopyStorage {
                 _ => (),
             }
         }
-        self.storage.read_object(path, range).await
+        self.storage.stream_object(path, range).await
     }
     async fn list_writers(&self, store: StoreId) -> Result<Vec<DeviceId>, StorageError> {
         self.storage.list_writers(store).await

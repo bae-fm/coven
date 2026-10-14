@@ -161,7 +161,7 @@ async fn ranged_reads_refuse_ignored_ranges_and_wrong_offsets() {
         TestServer::new(Router::new().fallback(|| async { response(200, "abcdefgh") })).await;
     let response = client().unwrap().get(&server.url).send().await.unwrap();
     assert!(matches!(
-        bytes(
+        read_response(
             CloudProvider::Dropbox,
             response,
             Some(ByteRange::new(3, 7).unwrap())
@@ -552,7 +552,7 @@ async fn interrupted_bodies_keep_the_transport_failure() {
             .send()
             .await
             .unwrap();
-        let error = bytes(provider, response, Some(ByteRange::new(3, 7).unwrap()))
+        let error = read_response(provider, response, Some(ByteRange::new(3, 7).unwrap()))
             .await
             .unwrap_err();
         assert_eq!(error.failure(), StorageFailure::Network);
@@ -577,7 +577,7 @@ async fn ranged_body_must_match_the_entire_requested_interval() {
         .await;
         let response = client().unwrap().get(&server.url).send().await.unwrap();
         assert_eq!(
-            bytes(
+            read_response(
                 CloudProvider::Dropbox,
                 response,
                 Some(ByteRange::new(3, 7).unwrap())
@@ -610,4 +610,30 @@ fn a_valid_provider_clamp_identifies_a_range_past_eof() {
             StorageFailure::Protocol
         );
     }
+}
+
+async fn read_response(
+    provider: CloudProvider,
+    response: reqwest::Response,
+    range: Option<ByteRange>,
+) -> Result<Vec<u8>, StorageError> {
+    let metadata = crate::StoredObject {
+        path: crate::ObjectPath::positions(
+            crate::test_utils::STORE_ID,
+            coven_foundation::id_source::DeviceId(1),
+        ),
+        size: 8,
+        stored_at: std::time::UNIX_EPOCH,
+        time_resolution: std::time::Duration::from_secs(1),
+        object_id: "object".into(),
+        revision: "1".into(),
+        checksum: None,
+    };
+    Ok(
+        crate::providers::http_body::stream(provider, response, metadata, range)
+            .await?
+            .collect(8)
+            .await?
+            .bytes,
+    )
 }

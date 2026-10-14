@@ -624,3 +624,220 @@ async fn a_write_with_incomplete_causal_history_is_refused_as_causality() {
     assert_eq!(u8::from(refused[0].as_log_refusal().unwrap().failure), 5);
     assert_eq!(rows(&devices[2].db).await[0].1, "second");
 }
+
+async fn streamed_write_requests(inspect_header: bool) {
+    let storage = storage();
+    let mut devices = group(storage.clone(), 2).await;
+    devices[0]
+        .db
+        .write(|sql| {
+            sql.execute(
+                "INSERT INTO notes VALUES('stream','title',?1)",
+                ["x".repeat(200_000)],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let record = queued(&devices[0].db).await;
+    devices[0].writes.upload_writes().await.unwrap();
+    let path = crate::write_seal::path(STORE_ID, record.header.position);
+    let object = storage.status(&path).await.unwrap().unwrap();
+    let log = devices[1].db.store_log().await.unwrap();
+    let ring = devices[1].custody.read().unwrap().unwrap();
+    let before = storage.reads().await.len();
+    if inspect_header {
+        let retained = crate::object_input::ObjectInput::observe(&devices[1].db, &object)
+            .await
+            .unwrap();
+        crate::write_object::open(storage.as_ref(), &object, Some(&ring), &retained)
+            .await
+            .unwrap();
+        let reads = storage.reads().await;
+        assert!(
+            reads[before..]
+                .iter()
+                .filter(|(read, _, _)| read == &path)
+                .count()
+                <= 2
+        );
+    }
+    let before_body = storage.reads().await.len();
+    let mut replays = crate::replay_cache::ReplayCache::new(&log);
+    assert_eq!(
+        devices[1]
+            .writes
+            .receive_write(&object, &ring, &log, &mut replays, &member().member_id())
+            .await
+            .unwrap(),
+        ApplyOutcome::Applied
+    );
+    let reads = storage.reads().await;
+    let bodies: Vec<_> = reads[before_body..]
+        .iter()
+        .filter(|(read, _, _)| read == &path)
+        .collect();
+    assert_eq!(
+        bodies.len(),
+        1,
+        "one response must carry the whole uncached body: {bodies:?}"
+    );
+    let mut through = 0;
+    for (_, offset, length) in reads[before..].iter().filter(|(read, _, _)| read == &path) {
+        assert_eq!(*offset, through, "received bytes must not overlap or skip");
+        through += length;
+    }
+    assert_eq!(through, object.size);
+    assert_eq!(rows(&devices[1].db).await[0].2.len(), 200_000);
+}
+
+#[tokio::test]
+async fn direct_write_uses_one_body_response_without_header_requests() {
+    streamed_write_requests(false).await;
+}
+
+#[tokio::test]
+async fn inspected_write_uses_two_header_ranges_and_one_remaining_body() {
+    streamed_write_requests(true).await;
+}
+
+async fn streamed_disposition(
+    defect: &str,
+    split: usize,
+) -> (serde_json::Value, serde_json::Value) {
+    use coven_storage::test_utils::BodyFailure;
+    use serde_json::json;
+    let storage = storage();
+    let mut devices = group(storage.clone(), 2).await;
+    devices[0]
+        .db
+        .write(|sql| {
+            sql.execute(
+                "INSERT INTO notes VALUES('stream','title',?1)",
+                ["x".repeat(150_000)],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let record = queued(&devices[0].db).await;
+    devices[0].writes.upload_writes().await.unwrap();
+    let path = crate::write_seal::path(STORE_ID, record.header.position);
+    let object = storage.status(&path).await.unwrap().unwrap();
+    if matches!(
+        defect,
+        "header" | "chunk" | "signature" | "chunk_interrupted"
+    ) {
+        let bytes = storage.read(&path).await.unwrap();
+        let offset = match defect {
+            "header" => 60,
+            "chunk" | "chunk_interrupted" => {
+                coven_format::sealed_write::WriteObjectPrefix::header_end(&bytes).unwrap() + 8
+            }
+            "signature" => bytes.len() - 1,
+            _ => unreachable!(),
+        };
+        storage.corrupt_byte(&path, offset).await.unwrap();
+    }
+    let mut faults = Faults::none();
+    faults.read_chunk_size = split;
+    let failure = match defect {
+        "truncated" => Some(BodyFailure::Truncated(object.size - 1)),
+        "interrupted" | "chunk_interrupted" => Some(BodyFailure::Interrupted(object.size)),
+        "extra" => Some(BodyFailure::ExtraByte),
+        _ => None,
+    };
+    if let Some(failure) = failure {
+        faults.body_failures.insert(path.clone(), failure);
+    }
+    storage.set_faults(faults).await;
+    if defect == "disk" {
+        let retained = devices[1].db.input_budget().await.unwrap().retained;
+        devices[1].db.set_input_budget(retained).await.unwrap();
+    }
+    let log = devices[1].db.store_log().await.unwrap();
+    let ring = devices[1].custody.read().unwrap().unwrap();
+    let before = storage.reads().await.len();
+    let mut replays = crate::replay_cache::ReplayCache::new(&log);
+    let result = devices[1]
+        .writes
+        .receive_write(&object, &ring, &log, &mut replays, &member().member_id())
+        .await;
+    let complete = matches!(&result, Ok(ApplyOutcome::Applied));
+    let automatic = matches!(&result, Err(SyncError::Storage(_) | SyncError::Database(_)));
+    if let Err(SyncError::Damaged(damage)) = &result {
+        crate::write_object::record_damage(
+            &devices[1].db,
+            storage.as_ref(),
+            &object,
+            &damage.failure,
+        )
+        .await
+        .unwrap();
+    }
+    let refused = !crate::pending_logs::local_refusals(&devices[1].db)
+        .await
+        .unwrap()
+        .is_empty();
+    assert_eq!(complete, defect == "valid", "{defect}: {result:?}");
+    assert_eq!(
+        refused,
+        matches!(defect, "header" | "chunk" | "signature"),
+        "{defect}: {result:?}"
+    );
+    let reads = storage.reads().await;
+    assert_eq!(
+        reads[before..]
+            .iter()
+            .filter(|(read, _, _)| read == &path)
+            .count(),
+        1,
+        "{defect}"
+    );
+    assert_eq!(rows(&devices[1].db).await.len(), usize::from(complete));
+    let case = json!({"check":"download", "fetched": !matches!(defect, "truncated" | "interrupted" | "chunk_interrupted" | "extra"), "authenticated": !matches!(defect, "header" | "chunk" | "chunk_interrupted"), "hash": defect != "signature", "disk": defect != "disk"});
+    (
+        case,
+        json!({"complete":complete,"refused":refused,"automatic":automatic}),
+    )
+}
+
+#[tokio::test]
+async fn streaming_dispositions_require_eof_and_complete_authentication() {
+    for defect in [
+        "valid",
+        "header",
+        "chunk",
+        "signature",
+        "truncated",
+        "interrupted",
+        "chunk_interrupted",
+        "extra",
+        "disk",
+    ] {
+        streamed_disposition(defect, 3).await;
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires COVEN_IO_RUNNER"]
+async fn io_differential_streaming_download_dispositions() {
+    let mut cases = Vec::new();
+    let mut actual = Vec::new();
+    for defect in [
+        "valid",
+        "header",
+        "chunk",
+        "signature",
+        "truncated",
+        "interrupted",
+        "chunk_interrupted",
+        "extra",
+        "disk",
+    ] {
+        let (case, result) = streamed_disposition(defect, 65_537).await;
+        cases.push(case);
+        actual.push(result);
+    }
+    assert_eq!(actual, crate::discovery::tests::io_runner(&cases));
+}

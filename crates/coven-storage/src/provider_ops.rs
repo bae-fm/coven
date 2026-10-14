@@ -43,11 +43,24 @@ pub trait ProviderOps: Send + Sync {
     /// Exact native lookup; only a confirmed missing object returns None.
     async fn status(&self, path: &ObjectPath) -> Result<Option<StoredObject>, StorageError>;
     /// Read complete bytes or a range, retaining metadata for those exact bytes.
+    async fn stream_object(
+        &self,
+        path: &ObjectPath,
+        range: Option<ByteRange>,
+    ) -> Result<crate::ObjectStream<'_>, StorageError>;
+    /// Collect a bounded response through the streaming implementation. Large
+    /// writes and snapshots consume `stream_object` directly. This convenience
+    /// reader holds at most 32 MiB, regardless of provider metadata.
     async fn read_object(
         &self,
         path: &ObjectPath,
         range: Option<ByteRange>,
-    ) -> Result<ObjectRead, StorageError>;
+    ) -> Result<ObjectRead, StorageError> {
+        self.stream_object(path, range)
+            .await?
+            .collect(crate::object_stream::BUFFERED_READ_LIMIT)
+            .await
+    }
     /// Consume native pages into the connection's checked listing. Drive selects
     /// its earliest copy before adding each object.
     async fn list(&self, listing: &mut ObjectListing) -> Result<(), StorageError>;

@@ -59,6 +59,18 @@ pub struct WriteObjectPrefix {
     pub part_keys: Vec<KeyId>,
 }
 impl WriteObjectPrefix {
+    /// Greatest permitted end of the clear prefix and sealed header (D1/D2).
+    pub const MAX_HEADER_END: usize =
+        23 + 16 * MAX_ITEMS + 4 + SEALED_OBJECT_CHUNK_OVERHEAD + MAX_OBJECT;
+
+    /// Exact end of the header once its length field is available. A truncated
+    /// prefix requires the caller's second bounded read to use MAX_HEADER_END.
+    pub fn header_end(bytes: &[u8]) -> Result<usize, Error> {
+        let prefix = Self::length(bytes)?;
+        let header = bytes.get(prefix..).ok_or(Error::Truncated)?;
+        Ok(prefix + Self::header_chunk_length(header)?)
+    }
+
     /// Exact prefix size for this many parts, before their key ids are selected.
     pub fn encoded_length(parts: usize) -> Result<usize, Error> {
         bound(parts, MAX_ITEMS, "write section keys")?;

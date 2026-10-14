@@ -41,7 +41,7 @@ pub struct RetainedInput {
     reading: Arc<InputRead>,
 }
 
-/// An encrypted range committed after a complete range response.
+/// Encrypted bytes received for one provider observation; completion is separate.
 pub struct RetainedRange {
     /// Byte offset in the encrypted object.
     pub offset: u64,
@@ -205,10 +205,10 @@ fn evict(
     let mut after = 0;
     while retained > before.maximum {
         let next = db.query(
-            "SELECT r.id,length(r.bytes),r.object FROM _coven_input_ranges r JOIN _coven_input_objects o ON o.id=r.object WHERE o.released=1 AND r.id>?1 ORDER BY r.id LIMIT 1",
-            [after], |r| Ok((r.get::<_,i64>(0)?, r.get::<_,i64>(1)? as u64,r.get::<_,i64>(2)?)),
+            "SELECT r.id,r.object FROM _coven_input_ranges r JOIN _coven_input_objects o ON o.id=r.object WHERE o.released=1 AND r.id>?1 ORDER BY r.id LIMIT 1",
+            [after], |r| Ok((r.get::<_,i64>(0)?, r.get::<_,i64>(1)?)),
         )?.into_iter().next();
-        let Some((id, length, object)) = next else {
+        let Some((id, object)) = next else {
             return Err(DbError::InputBudgetExceeded {
                 required: retained,
                 maximum: before.maximum,
@@ -221,8 +221,10 @@ fn evict(
         {
             continue;
         }
-        db.internal_execute("DELETE FROM _coven_input_ranges WHERE id=?1", [id])?;
-        retained -= length;
+        // Evict a complete input together: retaining only its suffix would
+        // turn the next read into separate requests around an internal gap.
+        db.internal_execute("DELETE FROM _coven_input_ranges WHERE object=?1", [object])?;
+        retained = budget(db)?.retained;
     }
     let evicted = before.retained - retained;
     if evicted > 0 {
@@ -301,7 +303,7 @@ impl Database {
     }
 
     /// Configure retained encrypted input independently of application file caches.
-    /// Lowering the budget evicts oldest received ranges atomically with accounting.
+    /// Lowering the budget evicts oldest completed inputs atomically with accounting.
     /// Checked facts and file protection are never evicted with their bytes.
     pub async fn set_input_budget(&self, maximum: u64) -> Result<InputBudget, DbError> {
         self.call(move |inner| {
@@ -383,7 +385,31 @@ impl RetainedInput {
     /// Commit newly fetched, nonoverlapping bytes. Refilling an evicted range is
     /// a new insertion, while retained bytes must be consumed without fetching.
     pub async fn keep_range(&self, offset: u64, bytes: Vec<u8>) -> Result<(), DbError> {
-        if bytes.is_empty() {
+        self.keep_received_range(offset, bytes, false).await
+    }
+
+    /// Whether a whole response (or all of its bounded ranges) reached checked
+    /// transport EOF. This records receipt, never content authentication.
+    pub async fn received(&self) -> Result<bool, DbError> {
+        self.read(|db, id| {
+            db.query_row(
+                "SELECT received FROM _coven_input_objects WHERE id=?1",
+                [id],
+                |r| r.get(0),
+            )
+        })
+        .await
+    }
+
+    /// Commit received bytes and, at successful EOF, the transport completion
+    /// fact in one transaction. Neither fact can survive a failed byte commit.
+    pub async fn keep_received_range(
+        &self,
+        offset: u64,
+        bytes: Vec<u8>,
+        complete: bool,
+    ) -> Result<(), DbError> {
+        if bytes.is_empty() && (!complete || self.received().await?) {
             return Ok(());
         }
         let end = offset
@@ -393,9 +419,14 @@ impl RetainedInput {
         let end = sql_offset(end)?;
         let id = self.id;
         self.database.call(move |inner| inner.inputs.write(|db| {
-            let overlap: bool = db.query_row(RANGE_OVERLAP, (id,offset,end), |r| r.get(0))?;
-            if overlap { return Err(DbError::DamagedDatabase); }
-            db.internal_execute("INSERT INTO _coven_input_ranges(object,start,end,bytes) VALUES(?1,?2,?3,?4)", (id,offset,end,bytes))?;
+            if !bytes.is_empty() {
+                let overlap: bool = db.query_row(RANGE_OVERLAP, (id,offset,end), |r| r.get(0))?;
+                if overlap { return Err(DbError::DamagedDatabase); }
+                db.internal_execute("INSERT INTO _coven_input_ranges(object,start,end,bytes) VALUES(?1,?2,?3,?4)", (id,offset,end,bytes))?;
+            }
+            if complete {
+                db.internal_execute("UPDATE _coven_input_objects SET received=1 WHERE id=?1", [id])?;
+            }
             evict(db, &inner.inputs.active)
         })).await
     }

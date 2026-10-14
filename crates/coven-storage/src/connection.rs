@@ -157,16 +157,16 @@ impl<P: ProviderOps + ?Sized> Storage for StorageConnection<P> {
             .await,
         )
     }
-    async fn read_object(
+    async fn stream_object(
         &self,
         path: &ObjectPath,
         range: Option<ByteRange>,
-    ) -> Result<ObjectRead, StorageError> {
+    ) -> Result<ObjectStream<'_>, StorageError> {
         self.observed(
             async {
-                let read = self.provider.read_object(path, range).await?;
-                read.check(path, range)?;
-                Ok(read)
+                let stream = self.provider.stream_object(path, range).await?;
+                stream.check(path, range)?;
+                Ok(stream)
             }
             .await,
         )

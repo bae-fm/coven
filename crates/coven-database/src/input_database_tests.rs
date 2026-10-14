@@ -219,3 +219,21 @@ async fn input_commits_do_not_wait_for_the_application_writer() {
         .expect("input persistence waited for the application writer")
         .unwrap();
 }
+
+#[tokio::test]
+async fn eviction_removes_a_completed_inputs_whole_prefix() {
+    let store = TestStore::new();
+    let db = store.builder(vec![], vec![]).open().await.unwrap();
+    let saved = input(&db, "write", 1, false).await;
+    saved.keep_range(0, vec![1, 2]).await.unwrap();
+    saved.keep_range(2, vec![3, 4]).await.unwrap();
+    saved.release_ranges().await.unwrap();
+    let budget = db.set_input_budget(3).await.unwrap();
+    assert_eq!((budget.retained, budget.evicted), (0, 4));
+    assert!(input(&db, "write", 1, false)
+        .await
+        .ranges(0, 4)
+        .await
+        .unwrap()
+        .is_empty());
+}

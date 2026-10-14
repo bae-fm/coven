@@ -38,6 +38,17 @@ impl BudgetStorage {
         self.largest.fetch_max(length, Ordering::SeqCst);
     }
 }
+struct BudgetBody<'a> {
+    owner: &'a BudgetStorage,
+    stream: coven_storage::ObjectStream<'a>,
+}
+#[async_trait]
+impl coven_storage::ObjectBody for BudgetBody<'_> {
+    async fn read(&mut self, output: &mut [u8]) -> Result<usize, StorageError> {
+        self.owner.check(output.len());
+        self.stream.read(output).await
+    }
+}
 #[async_trait]
 impl Storage for BudgetStorage {
     fn config(&self) -> StorageConfig {
@@ -57,18 +68,21 @@ impl Storage for BudgetStorage {
     async fn status(&self, path: &ObjectPath) -> Result<Option<StoredObject>, StorageError> {
         self.provider.status(path).await
     }
-    async fn read_object(
+    async fn stream_object(
         &self,
         path: &ObjectPath,
         range: Option<ByteRange>,
-    ) -> Result<coven_storage::ObjectRead, StorageError> {
-        // A sender reads each small key copy whole for its copy observation.
-        if path.key_copy_position().is_some() {
-            return self.provider.read_object(path, range).await;
-        }
-        let range = range.expect("write download must use bounded ranges");
-        self.check(range.len() as usize);
-        self.provider.read_object(path, Some(range)).await
+    ) -> Result<coven_storage::ObjectStream<'_>, StorageError> {
+        let stream = self.provider.stream_object(path, range).await?;
+        let metadata = stream.metadata().clone();
+        coven_storage::ObjectStream::new(
+            metadata,
+            range,
+            BudgetBody {
+                owner: self,
+                stream,
+            },
+        )
     }
     async fn list(&self, prefix: &ObjectPrefix) -> Result<Vec<StoredObject>, StorageError> {
         self.provider.list(prefix).await

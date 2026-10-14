@@ -18,19 +18,15 @@ impl DeviceLogSync {
         member: &MemberId,
     ) -> Result<ApplyOutcome, SyncError> {
         let retained = crate::object_input::ObjectInput::observe(&self.database, object).await?;
+        let storage = self.storage.as_deref().ok_or(SyncError::NoStorage)?;
+        let mut stream = retained.stream(storage).await;
         let ReadyWrite {
             opened,
             author,
             parts: opens,
-        } = match crate::write_object::download(
-            self.storage.as_deref().ok_or(SyncError::NoStorage)?,
-            object,
-            Some(ring),
-            &retained,
-            log,
-            replays,
-            || Ok(member.clone()),
-        )
+        } = match crate::write_object::download(&mut stream, Some(ring), log, replays, || {
+            Ok(member.clone())
+        })
         .await?
         {
             Ok(ready) => ready,
@@ -51,16 +47,8 @@ impl DeviceLogSync {
                 primary,
                 references,
             };
-            let result = crate::write_object::finish(
-                self.storage.as_deref().ok_or(SyncError::NoStorage)?,
-                object,
-                &retained,
-                ring,
-                &author,
-                opened,
-                &mut sink,
-            )
-            .await;
+            let result =
+                crate::write_object::finish(&mut stream, ring, &author, opened, &mut sink).await;
             drop(sink);
             result
         };
@@ -78,6 +66,7 @@ impl DeviceLogSync {
             result
         };
         let (applied, transferred) = tokio::join!(apply, transfer);
+        drop(stream);
         let applied = match transferred {
             Ok(references) => {
                 retained.keep_files(references).await?;

@@ -4,6 +4,10 @@ use crate::SyncError;
 use coven_database::{Database, RetainedInput};
 use coven_storage::{ByteRange, Storage, StorageFailure, StoredObject};
 
+#[path = "input_stream.rs"]
+mod stream;
+pub(crate) use stream::InputStream;
+
 #[derive(Clone)]
 pub(crate) struct ObjectInput {
     retained: RetainedInput,
@@ -19,6 +23,44 @@ fn identity(object: &StoredObject) -> Result<Vec<u8>, SyncError> {
 }
 
 impl ObjectInput {
+    /// At most two header ranges. If the first buffer cannot expose
+    /// every count/length field, extend to the format's maximum header boundary.
+    /// Any body bytes in that extension remain in the shared retained input.
+    pub(crate) async fn prefix(
+        &self,
+        storage: &dyn Storage,
+        maximum: usize,
+        exact_end: fn(&[u8]) -> Result<usize, coven_format::Error>,
+    ) -> Result<Vec<u8>, SyncError> {
+        let mut bytes = if self.object.size == 0 {
+            Vec::new()
+        } else {
+            self.read(storage, ByteRange::new(0, self.object.size.min(64))?)
+                .await?
+        };
+        let end = match exact_end(&bytes) {
+            Ok(end) => end,
+            Err(coven_format::Error::Truncated) => maximum,
+            Err(error) => return crate::write_object::checked(&self.object.path, Err(error)),
+        };
+        let end = (end as u64).min(self.object.size);
+        if end > bytes.len() as u64 {
+            bytes.extend(
+                self.read(storage, ByteRange::new(bytes.len() as u64, end)?)
+                    .await?,
+            );
+        }
+        let length = crate::write_object::checked(&self.object.path, exact_end(&bytes))?;
+        if length > bytes.len() {
+            return crate::write_object::checked(
+                &self.object.path,
+                Err(coven_format::Error::Truncated),
+            );
+        }
+        bytes.truncate(length);
+        Ok(bytes)
+    }
+
     pub(crate) async fn metadata(&self) -> Result<Option<Vec<u8>>, SyncError> {
         Ok(self.retained.metadata().await?)
     }
@@ -40,12 +82,20 @@ impl ObjectInput {
         Ok(self.retained.release_ranges().await?)
     }
     pub(crate) async fn whole(&self, storage: &dyn Storage) -> Result<Vec<u8>, SyncError> {
-        // An observed zero-length version has no byte ranges to fetch.
-        if self.object.size == 0 {
-            return Ok(Vec::new());
+        let mut stream = self.stream(storage).await;
+        let length = usize::try_from(self.object.size)
+            .map_err(|error| StorageFailure::Protocol.with_source(error))?;
+        if self.object.size > coven_storage::BUFFERED_READ_LIMIT {
+            return Err(StorageFailure::Protocol
+                .with_source("object exceeds the consumer's buffered-read bound")
+                .into());
         }
-        self.read(storage, ByteRange::new(0, self.object.size)?)
-            .await
+        let bytes = stream.read_exact(length).await?;
+        stream.drain().await?;
+        Ok(bytes)
+    }
+    pub(crate) async fn received(&self) -> Result<bool, SyncError> {
+        Ok(self.retained.received().await?)
     }
     pub(crate) async fn observe(
         database: &Database,

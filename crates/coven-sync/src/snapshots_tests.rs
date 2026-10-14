@@ -572,7 +572,7 @@ async fn replay_reload_is_journaled_and_keeps_its_boundary_snapshot() {
 }
 
 #[tokio::test]
-async fn a_snapshot_exceeding_the_transfer_memory_budget_streams_in_bounded_requests() {
+async fn a_snapshot_exceeding_the_transfer_memory_budget_streams_in_bounded_buffers() {
     const MEMORY_BUDGET: u64 = 32 * 1024 * 1024;
     let storage = snapshot_storage();
     let mut a = notes_device(storage.clone(), 1).await;
@@ -593,10 +593,10 @@ async fn a_snapshot_exceeding_the_transfer_memory_budget_streams_in_bounded_requ
     assert_eq!(fingerprint(&a).await, fingerprint(&b).await);
     assert!(storage.transferred().await.1 <= 65536);
     assert!(storage
-        .ranges()
+        .received_buffers()
         .await
         .iter()
-        .all(|range| range.end() - range.start() <= 65536 + 44));
+        .all(|length| *length <= 65536));
 }
 
 #[tokio::test]
@@ -660,7 +660,7 @@ async fn reload_reselects_after_store_log_changes_and_preserves_interleaved_app_
 }
 
 #[tokio::test]
-async fn idle_pass_reads_only_snapshot_prefixes_and_log_headers() {
+async fn idle_pass_uses_bounded_header_ranges_and_reuses_overread_bytes() {
     let storage = snapshot_storage();
     let mut a = notes_device(storage.clone(), 1).await;
     a.create(key(1)).await;
@@ -690,8 +690,13 @@ async fn idle_pass_reads_only_snapshot_prefixes_and_log_headers() {
         let bytes = storage.read(&object.path).await.unwrap();
         bounds.insert(
             object.path,
-            (coven_format::sealed_snapshot::SnapshotObjectPrefix::length(&bytes).unwrap() + 64)
-                as u64,
+            (
+                (coven_format::sealed_snapshot::SnapshotObjectPrefix::length(&bytes).unwrap() + 64)
+                    as u64,
+                object.size.min(
+                    coven_format::sealed_snapshot::SnapshotObjectPrefix::MAX_SIGNED_PREFIX as u64,
+                ),
+            ),
         );
     }
     for object in storage
@@ -704,7 +709,15 @@ async fn idle_pass_reads_only_snapshot_prefixes_and_log_headers() {
         let header =
             coven_format::sealed_write::WriteObjectPrefix::header_chunk_length(&bytes[prefix..])
                 .unwrap();
-        bounds.insert(object.path, (prefix + header) as u64);
+        bounds.insert(
+            object.path,
+            (
+                (prefix + header) as u64,
+                object
+                    .size
+                    .min(coven_format::sealed_write::WriteObjectPrefix::MAX_HEADER_END as u64),
+            ),
+        );
     }
     assert_eq!(bounds.len(), 33);
     let files = crate::Files::new(
@@ -716,35 +729,28 @@ async fn idle_pass_reads_only_snapshot_prefixes_and_log_headers() {
         crate::TransferLimits::default(),
     );
     let operations = operation_owner(a.sync, files.clone());
-    let mut excess_reads = 0;
-    for pass in 0..2 {
+    let mut through = std::collections::BTreeMap::new();
+    let mut requests = std::collections::BTreeMap::new();
+    for _ in 0..2 {
         let start = storage.reads().await.len();
         operations.sync().await.unwrap();
         let reads = storage.reads().await;
-        let reads = &reads[start..];
-        let bytes: u64 = reads.iter().map(|(_, _, size)| size).sum();
-        eprintln!(
-            "idle pass {pass}: {bytes} storage bytes, {} reads",
-            reads.len()
-        );
-        let excess: Vec<_> = reads
-            .iter()
-            .filter(|(path, offset, size)| bounds.get(path).is_some_and(|end| offset + size > *end))
-            .collect();
-        excess_reads += excess.len();
-        let mut through = std::collections::BTreeMap::new();
-        for (path, offset, size) in reads {
-            if bounds.contains_key(path) {
-                let next = through.entry(path).or_insert(0);
+        for (path, offset, size) in &reads[start..] {
+            if let Some((_, maximum)) = bounds.get(path) {
+                let next = through.entry(path.clone()).or_insert(0);
                 assert_eq!(*offset, *next, "repeated or skipped bytes in {path:?}");
                 *next += size;
+                assert!(*next <= *maximum, "range exceeds the format's header bound");
+                let count = requests.entry(path.clone()).or_insert(0);
+                *count += 1;
+                assert!(*count <= 2, "more than two header requests for {path:?}");
             }
         }
-        for (path, size) in through {
-            assert_eq!(size, bounds[path]);
-        }
     }
-    assert_eq!(excess_reads, 0, "snapshot bodies or log parts were read");
+    assert!(!through.is_empty(), "fixture must inspect uncached headers");
+    for (path, size) in through {
+        assert!(size >= bounds[&path].0, "header is incomplete");
+    }
     operations.close().await.unwrap();
     files.close().await;
 }

@@ -127,6 +127,32 @@ private def retained (j : Json) : Except String Json := do
       ("refused", toJson (Downloads.pending download == some .authentication))])
   return toJson output
 
+/-- Whole-object dispositions project the actual provider, authentication and
+local byte-commit results into Downloads' ordered checks. A transport failure
+wins even when an earlier chunk already proved the contents invalid. -/
+private def download (j : Json) : Except String Json := do
+  let fetched ← j.getObjValAs? Bool "fetched"
+  let authenticated ← j.getObjValAs? Bool "authenticated"
+  let hashMatches ← j.getObjValAs? Bool "hash"
+  let diskCommitted ← j.getObjValAs? Bool "disk"
+  let attempt : Downloads.Attempt := {
+    path := .log .write 1 1
+    fetched := if fetched then .ok () else .error .network
+    authenticated, hashMatches, diskCommitted
+    databaseCommitted := true
+    range := ⟨0, [1]⟩
+    chunks := 1
+    last := true
+    pin := false
+  }
+  let result := Downloads.apply (.unfinished [] .network) attempt
+  let automatic := match Downloads.pending result with
+    | none => false | some reason => Downloads.automatic reason
+  let refused := match Downloads.pending result with
+    | none => false | some reason => !Downloads.automatic reason
+  return Json.mkObj [("complete", toJson (Downloads.completed result)),
+    ("refused", toJson refused), ("automatic", toJson automatic)]
+
 private def run (j : Json) : Except String Json := do
   match ← j.getObjValAs? String "check" with
   | "discovery" => discovery j
@@ -135,6 +161,7 @@ private def run (j : Json) : Except String Json := do
   | "needs" => needs j
   | "recent" => recent j
   | "retained" => retained j
+  | "download" => download j
   | check => throw s!"unknown IO check {check}"
 
 def main : IO UInt32 := do

@@ -134,12 +134,12 @@ impl Storage for SlowWrites {
         }
         self.storage.status(path).await
     }
-    async fn read_object(
+    async fn stream_object(
         &self,
         path: &ObjectPath,
         range: Option<ByteRange>,
-    ) -> Result<coven_storage::ObjectRead, StorageError> {
-        self.storage.read_object(path, range).await
+    ) -> Result<coven_storage::ObjectStream<'_>, StorageError> {
+        self.storage.stream_object(path, range).await
     }
     async fn list(&self, prefix: &ObjectPrefix) -> Result<Vec<StoredObject>, StorageError> {
         self.storage.list(prefix).await

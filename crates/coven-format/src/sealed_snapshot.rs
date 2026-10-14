@@ -33,23 +33,13 @@ impl SnapshotObjectPrefix {
         self.caught_at.within_day(landed)
     }
 
-    /// Next exclusive read boundary while fetching a signed prefix. Start with
-    /// no bytes and append exactly the requested range until this equals the
-    /// buffer length. Counts are bounded before reading their lists; these
-    /// unverified routing fields only delimit reads and confer no authority.
-    pub fn read_length(bytes: &[u8]) -> Result<usize, Error> {
-        if bytes.len() < 4 {
-            return Ok(4);
-        }
-        let writes = Self::routing_length(bytes)?;
-        if bytes.len() < writes + 4 {
-            return Ok(writes + 4);
-        }
-        let entries = positions_end(bytes, writes)?;
-        if bytes.len() < entries + 4 {
-            return Ok(entries + 4);
-        }
-        Ok(positions_end(bytes, entries)? + 64)
+    /// Greatest signed prefix end, allowing both independently bounded position lists.
+    pub const MAX_SIGNED_PREFIX: usize = 48 + 8 + 2 * 16 * MAX_ITEMS + 64;
+
+    /// Exact signed prefix end once both count fields are available. Counts are
+    /// bounded before use; unverified positions confer no authority.
+    pub fn signed_length(bytes: &[u8]) -> Result<usize, Error> {
+        Ok(Self::length(bytes)? + 64)
     }
 
     /// Encoded plaintext size from a listing, excluding the prefix, both

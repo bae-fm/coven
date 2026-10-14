@@ -1,11 +1,12 @@
 //! Authenticated device-log objects shared by direct application and snapshot reload.
 
+use crate::object_input::InputStream;
 use crate::{replay_cache::ReplayCache, DamagedObject, Refusal, SyncError};
 use coven_crypto::{MemberId, ObjectHasher, StoreKeyring};
 use coven_database::{StoreLog, WriteWait};
 use coven_format::sealed_write::{WriteObjectLayout, WriteObjectPrefix};
 use coven_format::write_stream::WriteHeaderFrame;
-use coven_storage::{ByteRange, ObjectPath, StoredObject};
+use coven_storage::{ObjectPath, StoredObject};
 use std::{io, sync::Arc};
 
 pub(crate) struct OpenedWrite {
@@ -13,7 +14,6 @@ pub(crate) struct OpenedWrite {
     prefix: WriteObjectPrefix,
     layout: WriteObjectLayout,
     hash: ObjectHasher,
-    offset: u64,
 }
 
 /// Each consumer chooses its opened parts and handles bounded plaintext chunks.
@@ -30,25 +30,6 @@ pub(crate) trait PartSink: Send {
     ) -> impl std::future::Future<Output = Result<(), SyncError>> + Send;
 }
 
-async fn piece(
-    storage: &dyn coven_storage::Storage,
-    object: &StoredObject,
-    input: &crate::object_input::ObjectInput,
-    offset: u64,
-    length: usize,
-) -> Result<Vec<u8>, SyncError> {
-    let end = offset
-        .checked_add(length as u64)
-        .ok_or_else(|| damaged(&object.path, invalid("object length overflow")))?;
-    if end > object.size {
-        return Err(damaged(
-            &object.path,
-            Refusal::from(coven_format::Error::Truncated),
-        ));
-    }
-    input.read(storage, ByteRange::new(offset, end)?).await
-}
-
 /// Persist a judgment only after the entire listed immutable object is readable.
 pub(crate) async fn record_damage(
     database: &coven_database::Database,
@@ -57,7 +38,9 @@ pub(crate) async fn record_damage(
     failure: &Refusal,
 ) -> Result<coven_database::LogRefusal, SyncError> {
     let input = crate::object_input::ObjectInput::observe(database, object).await?;
-    read_complete(storage, object, &input).await?;
+    if !input.received().await? {
+        input.stream(storage).await.drain().await?;
+    }
     let record = coven_database::LogRefusal {
         object: coven_database::LogObject::Write(object.path.write_id().expect("write path")),
         failure: failure.into(),
@@ -68,30 +51,6 @@ pub(crate) async fn record_damage(
     Ok(record)
 }
 
-/// Complete the transport check after an early permanent refusal, with bounded memory.
-async fn read_complete(
-    storage: &dyn coven_storage::Storage,
-    object: &StoredObject,
-    input: &crate::object_input::ObjectInput,
-) -> Result<(), SyncError> {
-    let mut offset = 0;
-    while offset < object.size {
-        let length = (object.size - offset).min(64 * 1024) as usize;
-        piece(storage, object, input, offset, length).await?;
-        offset += length as u64;
-    }
-    // An empty listed object must still be readable; absence is transient.
-    if object.size == 0 {
-        let bytes = storage.read(&object.path).await?;
-        if !bytes.is_empty() {
-            return Err(coven_storage::StorageFailure::Protocol
-                .with_source("listed object length differs from its bytes")
-                .into());
-        }
-    }
-    Ok(())
-}
-
 pub(crate) async fn open(
     storage: &dyn coven_storage::Storage,
     object: &StoredObject,
@@ -100,10 +59,27 @@ pub(crate) async fn open(
 ) -> Result<OpenedWrite, SyncError> {
     let bytes = match input.metadata().await? {
         Some(bytes) => bytes,
-        None => read_header(storage, object, input).await?,
+        None => {
+            input
+                .prefix(
+                    storage,
+                    WriteObjectPrefix::MAX_HEADER_END,
+                    WriteObjectPrefix::header_end,
+                )
+                .await?
+        }
     };
-    let retained_header = bytes.clone();
-    let prefix_length = checked(&object.path, WriteObjectPrefix::length(&bytes))?;
+    let opened = open_header(object, ring, &bytes)?;
+    input.keep_metadata(bytes).await?;
+    Ok(opened)
+}
+
+fn open_header(
+    object: &StoredObject,
+    ring: Option<&StoreKeyring>,
+    bytes: &[u8],
+) -> Result<OpenedWrite, SyncError> {
+    let prefix_length = checked(&object.path, WriteObjectPrefix::length(bytes))?;
     let (aad, bytes) = bytes.split_at(prefix_length);
     let prefix = checked(&object.path, WriteObjectPrefix::decode(aad))?;
     let mut hash = ObjectHasher::new();
@@ -156,42 +132,26 @@ pub(crate) async fn open(
             header.parts.iter().map(|p| p.plaintext_length).collect(),
         ),
     )?;
-    input.keep_metadata(retained_header).await?;
     Ok(OpenedWrite {
         header,
         prefix,
         layout,
         hash,
-        offset: (prefix_length + bytes.len()) as u64,
     })
 }
 
-async fn read_header(
-    storage: &dyn coven_storage::Storage,
-    object: &StoredObject,
-    input: &crate::object_input::ObjectInput,
-) -> Result<Vec<u8>, SyncError> {
-    let mut bytes = piece(storage, object, input, 0, 23).await?;
-    let prefix_length = checked(&object.path, WriteObjectPrefix::length(&bytes))?;
-    if prefix_length > bytes.len() {
-        bytes.extend(
-            piece(
-                storage,
-                object,
-                input,
-                bytes.len() as u64,
-                prefix_length - bytes.len(),
-            )
-            .await?,
-        );
-    }
-    bytes.extend(piece(storage, object, input, prefix_length as u64, 4).await?);
-    let length = checked(
-        &object.path,
-        WriteObjectPrefix::header_chunk_length(&bytes[prefix_length..]),
-    )?;
-    bytes.extend(piece(storage, object, input, bytes.len() as u64, length - 4).await?);
-    Ok(bytes)
+async fn stream_header(
+    input: &mut InputStream<'_>,
+    ring: Option<&StoreKeyring>,
+) -> Result<OpenedWrite, SyncError> {
+    let mut bytes = input.read_exact(23).await?;
+    let prefix_length = checked(&input.object().path, WriteObjectPrefix::length(&bytes))?;
+    bytes.extend(input.read_exact(prefix_length - bytes.len() + 4).await?);
+    let end = checked(&input.object().path, WriteObjectPrefix::header_end(&bytes))?;
+    bytes.extend(input.read_exact(end - bytes.len()).await?);
+    let opened = open_header(input.object(), ring, &bytes)?;
+    input.keep_metadata(bytes).await?;
+    Ok(opened)
 }
 
 fn parts(
@@ -225,74 +185,80 @@ fn parts(
 }
 
 pub(crate) async fn finish<S: PartSink>(
-    storage: &dyn coven_storage::Storage,
-    object: &StoredObject,
-    input: &crate::object_input::ObjectInput,
+    input: &mut InputStream<'_>,
     ring: &StoreKeyring,
     author: &MemberId,
     mut opened: OpenedWrite,
     sink: &mut S,
 ) -> Result<(), SyncError> {
-    let aad = opened.prefix.encode()?;
-    while let Some(coordinate) = opened.layout.next_chunk() {
-        let mut bytes = piece(storage, object, input, opened.offset, 4).await?;
-        let length = checked(&object.path, opened.layout.chunk_length(&bytes))?;
-        bytes.extend(piece(storage, object, input, opened.offset + 4, length - 4).await?);
-        opened.offset += length as u64;
-        opened.hash.update(&bytes);
-        let (_, sealed) = checked(&object.path, opened.layout.decode_chunk(&bytes))?;
-        let part = coordinate.section as usize - 1;
-        if sink.opens(part) {
-            let key = crate::write_seal::derive(
-                ring,
-                &opened.header.parts[part].audience,
-                coordinate.key,
-            )?;
-            let plain = key
-                .open_object_chunk(
-                    object.path.as_str(),
-                    &aad,
-                    coordinate.section,
-                    coordinate.index,
-                    sealed,
-                )
-                .map_err(|e| {
-                    damaged(
-                        &object.path,
-                        Refusal::Decryption {
-                            cause: Some(Arc::new(e)),
-                        },
+    let object = input.object().clone();
+    let result = async {
+        let aad = opened.prefix.encode()?;
+        while let Some(coordinate) = opened.layout.next_chunk() {
+            let mut bytes = input.read_exact(4).await?;
+            let length = checked(&object.path, opened.layout.chunk_length(&bytes))?;
+            bytes.extend(input.read_exact(length - 4).await?);
+            opened.hash.update(&bytes);
+            let (_, sealed) = checked(&object.path, opened.layout.decode_chunk(&bytes))?;
+            let part = coordinate.section as usize - 1;
+            if sink.opens(part) {
+                let key = crate::write_seal::derive(
+                    ring,
+                    &opened.header.parts[part].audience,
+                    coordinate.key,
+                )?;
+                let plain = key
+                    .open_object_chunk(
+                        object.path.as_str(),
+                        &aad,
+                        coordinate.section,
+                        coordinate.index,
+                        sealed,
                     )
-                })?;
-            sink.chunk(part, plain).await?;
+                    .map_err(|e| {
+                        damaged(
+                            &object.path,
+                            Refusal::Decryption {
+                                cause: Some(Arc::new(e)),
+                            },
+                        )
+                    })?;
+                sink.chunk(part, plain).await?;
+            }
+            if opened
+                .layout
+                .next_chunk()
+                .is_none_or(|next| next.section != coordinate.section)
+            {
+                sink.end(part).await?;
+            }
         }
-        if opened
-            .layout
-            .next_chunk()
-            .is_none_or(|next| next.section != coordinate.section)
-        {
-            sink.end(part).await?;
-        }
-    }
-    let bytes = piece(storage, object, input, opened.offset, 64).await?;
-    let signature = checked(&object.path, opened.layout.read_signature(&bytes))?;
-    if opened.offset + 64 != object.size {
-        return Err(damaged(
-            &object.path,
-            Refusal::from(coven_format::Error::TrailingBytes),
-        ));
-    }
-    checked(&object.path, opened.layout.finish(&[]))?;
-    author
-        .verify_object(object.path.as_str(), &opened.hash.finish(), &signature)
-        .map_err(|e| {
-            damaged(
+        let bytes = input.read_exact(64).await?;
+        let signature = checked(&object.path, opened.layout.read_signature(&bytes))?;
+        if input.position() != object.size {
+            return Err(damaged(
                 &object.path,
-                Refusal::Signature {
-                    cause: Some(Arc::new(e)),
-                },
-            )
-        })
+                Refusal::from(coven_format::Error::TrailingBytes),
+            ));
+        }
+        checked(&object.path, opened.layout.finish(&[]))?;
+        author
+            .verify_object(object.path.as_str(), &opened.hash.finish(), &signature)
+            .map_err(|e| {
+                damaged(
+                    &object.path,
+                    Refusal::Signature {
+                        cause: Some(Arc::new(e)),
+                    },
+                )
+            })
+    }
+    .await;
+    let result = input.checked(result).await;
+    if result.is_ok() {
+        input.drain().await?;
+    }
+    result
 }
 
 fn key_audience_contains(
@@ -346,41 +312,47 @@ pub(crate) struct ReadyWrite {
 }
 
 pub(crate) async fn download(
-    storage: &dyn coven_storage::Storage,
-    object: &StoredObject,
+    input: &mut InputStream<'_>,
     ring: Option<&StoreKeyring>,
-    input: &crate::object_input::ObjectInput,
     log: &StoreLog,
     replays: &mut ReplayCache<'_>,
     member: impl FnOnce() -> Result<MemberId, SyncError>,
 ) -> Result<Result<ReadyWrite, WriteWait>, SyncError> {
-    let opened = open(storage, object, ring, input).await?;
-    let missing: Vec<_> = opened
-        .header
-        .header
-        .store_log_read
-        .0
-        .iter()
-        .copied()
-        .filter(|id| !log.replay.entries.contains_key(id))
-        .collect();
-    if !missing.is_empty() {
-        return Ok(Err(WriteWait::StoreLog(missing)));
+    let object = input.object().clone();
+    let result = async {
+        let opened = stream_header(input, ring).await?;
+        let missing: Vec<_> = opened
+            .header
+            .header
+            .store_log_read
+            .0
+            .iter()
+            .copied()
+            .filter(|id| !log.replay.entries.contains_key(id))
+            .collect();
+        if !missing.is_empty() {
+            return Ok(Err(WriteWait::StoreLog(missing)));
+        }
+        let author = authority(log, replays, &opened.header.header)
+            .map_err(|failure| damaged(&object.path, failure))?;
+        let parts = parts(
+            &opened,
+            ring.expect("opened header has its store key"),
+            log,
+            replays,
+            &member()?,
+        )?;
+        Ok(Ok(ReadyWrite {
+            opened,
+            author,
+            parts,
+        }))
     }
-    let author = authority(log, replays, &opened.header.header)
-        .map_err(|failure| damaged(&object.path, failure))?;
-    let parts = parts(
-        &opened,
-        ring.expect("opened header has its store key"),
-        log,
-        replays,
-        &member()?,
-    )?;
-    Ok(Ok(ReadyWrite {
-        opened,
-        author,
-        parts,
-    }))
+    .await;
+    if matches!(&result, Ok(Err(_))) {
+        input.drain().await?;
+    }
+    input.checked(result).await
 }
 
 fn authority(

@@ -6,6 +6,8 @@ mod access;
 mod native;
 #[path = "cloudkit_query.rs"]
 mod query;
+#[path = "cloudkit_read.rs"]
+mod read;
 #[path = "cloudkit_record.rs"]
 mod record;
 #[path = "cloudkit_upload.rs"]
@@ -19,11 +21,6 @@ use objc2_cloud_kit::{CKContainer, CKDatabase, CKRecordID, CKRecordSavePolicy, C
 use objc2_foundation::NSString;
 use record::{Record, PART_SIZE};
 pub(super) use zone::prepare;
-
-enum Body {
-    Inline(Vec<u8>),
-    Parts(String),
-}
 
 pub(crate) struct CloudKitStorage {
     container_id: String,
@@ -133,79 +130,6 @@ impl CloudKitStorage {
         }
         Ok(())
     }
-    async fn read_bytes(
-        &self,
-        path: &ObjectPath,
-        range: Option<ByteRange>,
-    ) -> Result<ObjectRead, StorageError> {
-        let files = self.files.clone();
-        let request = native::fetch(
-            &self.database,
-            &self.record_id(path.as_str()),
-            &["path", "size", "upload", "data"],
-            move |record| {
-                let metadata = record.metadata()?;
-                let body = match record.optional_text("upload")? {
-                    Some(token) => Body::Parts(token),
-                    None => Body::Inline(record.asset_bytes(&files)?),
-                };
-                Ok((metadata, body))
-            },
-        );
-        let (metadata, body) = request.wait().await?;
-        if metadata.path != *path {
-            return Err(StorageFailure::Protocol.into());
-        }
-        let (start, end) = match range {
-            Some(range) if range.end() <= metadata.size => (range.start(), range.end()),
-            Some(_) => return Err(StorageFailure::InvalidRange.into()),
-            None => (0, metadata.size),
-        };
-        let token = match body {
-            Body::Inline(bytes) => {
-                if bytes.len() as u64 != metadata.size {
-                    return Err(StorageFailure::Protocol.into());
-                }
-                let bytes = match range {
-                    Some(range) => bytes[range.start() as usize..range.end() as usize].to_vec(),
-                    None => bytes,
-                };
-                return Ok(ObjectRead { metadata, bytes });
-            }
-            Body::Parts(token) => token,
-        };
-        let root = record::upload_name(path, &token)?;
-        let mut output = Vec::new();
-        let mut offset = start;
-        while offset < end {
-            let part_start = offset / PART_SIZE as u64 * PART_SIZE as u64;
-            let name = record::part_name(&root, part_start);
-            let files = self.files.clone();
-            let request = native::fetch(
-                &self.database,
-                &self.record_id(&name),
-                &["data"],
-                move |record| record.asset_bytes(&files),
-            );
-            let bytes = request.wait().await?;
-            let expected = (metadata.size - part_start).min(PART_SIZE as u64);
-            if bytes.len() as u64 != expected {
-                return Err(
-                    StorageFailure::Protocol.with_source("CloudKit returned an incomplete asset")
-                );
-            }
-            let within = usize::try_from(offset - part_start)
-                .map_err(|error| StorageFailure::InvalidRange.with_source(error))?;
-            let count = usize::try_from((end - offset).min(expected - (offset - part_start)))
-                .map_err(|error| StorageFailure::InvalidRange.with_source(error))?;
-            output.extend_from_slice(&bytes[within..within + count]);
-            offset += count as u64;
-        }
-        Ok(ObjectRead {
-            metadata,
-            bytes: output,
-        })
-    }
 }
 
 #[async_trait::async_trait]
@@ -246,12 +170,12 @@ impl ProviderOps for CloudKitStorage {
             Err(error) => Err(error),
         }
     }
-    async fn read_object(
+    async fn stream_object(
         &self,
         path: &ObjectPath,
         range: Option<ByteRange>,
-    ) -> Result<ObjectRead, StorageError> {
-        self.read_bytes(path, range).await
+    ) -> Result<ObjectStream<'_>, StorageError> {
+        self.read_stream(path, range).await
     }
     async fn list(&self, listing: &mut ObjectListing) -> Result<(), StorageError> {
         let mut cursor = None;

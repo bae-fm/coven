@@ -76,19 +76,14 @@ impl StoreLogSync {
         let storage = self.storage.as_deref().ok_or(SyncError::NoStorage)?;
         let ring = self.store_keys.read()?;
         let retained = crate::object_input::ObjectInput::observe(&self.database, object).await?;
+        let mut stream = retained.stream(storage).await;
         let crate::write_object::ReadyWrite {
             opened,
             author,
             parts: eligible,
-        } = crate::write_object::download(
-            storage,
-            object,
-            ring.as_ref(),
-            &retained,
-            log,
-            replays,
-            || Ok(self.operation_member()?.member_id()),
-        )
+        } = crate::write_object::download(&mut stream, ring.as_ref(), log, replays, || {
+            Ok(self.operation_member()?.member_id())
+        })
         .await?
         .map_err(coven_database::SnapshotError::WriteWaiting)
         .map_err(coven_database::DbError::Snapshot)?;
@@ -125,10 +120,7 @@ impl StoreLogSync {
                 primary,
                 references,
             };
-            crate::write_object::finish(
-                storage, object, &retained, ring, &author, opened, &mut sink,
-            )
-            .await
+            crate::write_object::finish(&mut stream, ring, &author, opened, &mut sink).await
         };
         let (transferred, checked) =
             tokio::join!(transfer, self.database.write_file_references(input));

@@ -28,6 +28,19 @@ pub struct StoredObject {
 }
 
 impl StoredObject {
+    pub(crate) fn read_length(
+        &self,
+        path: &ObjectPath,
+        range: Option<ByteRange>,
+    ) -> Result<u64, StorageError> {
+        self.check(path)?;
+        match range {
+            Some(range) if range.end() > self.size => Err(StorageFailure::InvalidRange.into()),
+            Some(range) => Ok(range.len()),
+            None => Ok(self.size),
+        }
+    }
+
     pub(crate) fn check(&self, path: &ObjectPath) -> Result<(), StorageError> {
         if &self.path != path
             || self.object_id.is_empty()
@@ -55,16 +68,7 @@ impl ObjectRead {
         path: &ObjectPath,
         range: Option<ByteRange>,
     ) -> Result<(), StorageError> {
-        self.metadata.check(path)?;
-        let expected = match range {
-            Some(range) => {
-                if range.end() > self.metadata.size {
-                    return Err(StorageFailure::InvalidRange.into());
-                }
-                range.len()
-            }
-            None => self.metadata.size,
-        };
+        let expected = self.metadata.read_length(path, range)?;
         if self.bytes.len() as u64 != expected {
             return Err(
                 StorageFailure::Protocol.with_source("read length disagrees with object metadata")

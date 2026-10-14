@@ -304,11 +304,11 @@ impl ProviderOps for DropboxStorage {
             Err(error) => Err(error),
         }
     }
-    async fn read_object(
+    async fn stream_object(
         &self,
         path: &ObjectPath,
         range: Option<ByteRange>,
-    ) -> Result<ObjectRead, StorageError> {
+    ) -> Result<ObjectStream<'_>, StorageError> {
         let response = http::checked(
             PROVIDER,
             self.content(
@@ -330,8 +330,7 @@ impl ProviderOps for DropboxStorage {
         )
         .map_err(|e| StorageFailure::Protocol.with_source(e))?;
         let metadata = super::object_metadata::dropbox(path, &value)?;
-        let bytes = http::bytes(PROVIDER, response, range).await?;
-        Ok(ObjectRead { metadata, bytes })
+        super::http_body::stream(PROVIDER, response, metadata, range).await
     }
     async fn list(&self, listing: &mut ObjectListing) -> Result<(), StorageError> {
         self.list_objects(listing).await

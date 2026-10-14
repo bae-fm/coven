@@ -34,6 +34,8 @@ mod gcs_signing;
 mod listing;
 #[path = "s3_metadata.rs"]
 mod metadata;
+#[path = "s3_read.rs"]
+mod read;
 #[path = "s3_restart.rs"]
 mod restart;
 pub(crate) use detect::detect;
@@ -219,53 +221,6 @@ impl S3Storage {
             .map_err(s3_error)?;
         Ok(())
     }
-    async fn get(
-        &self,
-        path: &ObjectPath,
-        range: Option<ByteRange>,
-    ) -> Result<ObjectRead, StorageError> {
-        let mut request = self
-            .client
-            .get_object()
-            .bucket(&self.bucket)
-            .key(path.under(&self.prefix));
-        if let Some(range) = range {
-            request = request.range(range.header());
-        }
-        if self.settings.request_checksums {
-            request = request.checksum_mode(aws_sdk_s3::types::ChecksumMode::Enabled);
-        }
-        let response = request.send().await.map_err(s3_error)?;
-        let length = response
-            .content_length()
-            .ok_or(StorageFailure::Protocol.with_source("S3 omitted content length"))?;
-        let complete_size = match range {
-            Some(range) => super::http::validate_content_range(
-                response.content_range().ok_or(StorageFailure::Protocol)?,
-                range,
-            )?,
-            None => u64::try_from(length).map_err(|e| StorageFailure::Protocol.with_source(e))?,
-        };
-        let metadata = metadata::get(self, path, &response, complete_size)?;
-        let bytes = response
-            .body
-            .collect()
-            .await
-            .map_err(|source| StorageError::Provider {
-                provider: CloudProvider::S3,
-                failure: StorageFailure::Network,
-                source: Box::new(source),
-            })?
-            .into_bytes()
-            .to_vec();
-        if u64::try_from(length).map_err(|error| StorageFailure::Protocol.with_source(error))?
-            != bytes.len() as u64
-            || range.is_some_and(|range| range.len() != bytes.len() as u64)
-        {
-            return Err(StorageFailure::Protocol.with_source("short S3 body"));
-        }
-        Ok(ObjectRead { metadata, bytes })
-    }
     fn upload_id<'a>(&self, session: &'a UploadSession) -> Result<&'a str, StorageError> {
         match &session.state {
             SessionState::S3 { id, .. } | SessionState::S3Restart { id, .. } => Ok(id.as_str()),
@@ -394,11 +349,11 @@ impl ProviderOps for S3Storage {
             Err(error) => Err(error),
         }
     }
-    async fn read_object(
+    async fn stream_object(
         &self,
         path: &ObjectPath,
         range: Option<ByteRange>,
-    ) -> Result<ObjectRead, StorageError> {
+    ) -> Result<ObjectStream<'_>, StorageError> {
         self.get(path, range).await
     }
     async fn list(&self, listing: &mut ObjectListing) -> Result<(), StorageError> {

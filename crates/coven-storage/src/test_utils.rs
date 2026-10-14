@@ -14,6 +14,7 @@ use tokio::sync::Mutex;
 
 #[path = "memory_reads.rs"]
 mod memory_reads;
+pub use memory_reads::BodyFailure;
 #[path = "memory_requests.rs"]
 mod memory_requests;
 #[path = "memory_writers.rs"]
@@ -30,6 +31,10 @@ pub struct Faults {
     pub fail_next: usize,
     /// Fail exact reads at these paths, retaining other in-flight responses.
     pub read_failures: BTreeMap<ObjectPath, StorageFailure>,
+    /// Maximum bytes returned by each body read; nonzero.
+    pub read_chunk_size: usize,
+    /// Failures after metadata, independently of request-start failures.
+    pub body_failures: BTreeMap<ObjectPath, BodyFailure>,
     /// The classification of injected failures.
     pub failure: StorageFailure,
     /// Delay each call without blocking its executor.
@@ -57,6 +62,8 @@ impl Faults {
         Self {
             fail_next: 0,
             read_failures: BTreeMap::new(),
+            read_chunk_size: 64 * 1024,
+            body_failures: BTreeMap::new(),
             failure: StorageFailure::Network,
             delay: Duration::ZERO,
             drop_part: false,
@@ -73,7 +80,7 @@ impl Faults {
 
 struct Object {
     upload_id: Option<u64>,
-    bytes: Vec<u8>,
+    bytes: Arc<[u8]>,
     stored_at: std::time::SystemTime,
     revision: u64,
 }
@@ -147,6 +154,7 @@ struct State {
     faults: Faults,
     ranges: Vec<ByteRange>,
     reads: Vec<(ObjectPath, u64, u64)>,
+    received_buffers: Vec<usize>,
     sent_bytes: u64,
     largest_part: usize,
     held_listing: Option<HeldRequest>,
@@ -329,11 +337,11 @@ impl MemoryStorage {
     pub async fn s3_access_key_id(&self) -> Option<String> {
         self.s3_credentials().await.map(|key| key.access_key_id)
     }
-    /// Successful ranged requests, in order.
+    /// Opened ranged responses, in order.
     pub async fn ranges(&self) -> Vec<ByteRange> {
         self.provider.state.lock().await.ranges.clone()
     }
-    /// Successful reads as (path, offset, byte count), including whole objects.
+    /// Opened responses as (path, offset, declared byte count), including whole objects.
     pub async fn reads(&self) -> Vec<(ObjectPath, u64, u64)> {
         self.provider.state.lock().await.reads.clone()
     }
@@ -345,11 +353,11 @@ impl MemoryStorage {
     /// Damage one stored byte without issuing a provider request.
     pub async fn corrupt_byte(&self, path: &ObjectPath, offset: usize) -> Result<(), StorageError> {
         let mut state = self.provider.state.lock().await;
-        let byte = state
+        let object = state
             .objects
             .get_mut(path)
-            .ok_or(StorageFailure::NotFound)?
-            .bytes
+            .ok_or(StorageFailure::NotFound)?;
+        let byte = Arc::make_mut(&mut object.bytes)
             .get_mut(offset)
             .ok_or(StorageFailure::InvalidRange)?;
         *byte ^= 1;
@@ -525,7 +533,7 @@ impl ProviderOps for MemoryProvider {
             Object {
                 revision,
                 upload_id: None,
-                bytes: bytes.to_vec(),
+                bytes: bytes.into(),
                 stored_at: self.clock.now(),
             },
         );
@@ -544,7 +552,7 @@ impl ProviderOps for MemoryProvider {
             Object {
                 revision,
                 upload_id: None,
-                bytes: bytes.to_vec(),
+                bytes: bytes.into(),
                 stored_at: self.clock.now(),
             },
         );
@@ -560,12 +568,12 @@ impl ProviderOps for MemoryProvider {
             .get(path)
             .map(|object| object.metadata(path, self.time_resolution)))
     }
-    async fn read_object(
+    async fn stream_object(
         &self,
         path: &ObjectPath,
         range: Option<ByteRange>,
-    ) -> Result<ObjectRead, StorageError> {
-        self.read_recorded(path, range).await
+    ) -> Result<ObjectStream<'_>, StorageError> {
+        self.stream_recorded(path, range).await
     }
 
     async fn list_writers(
@@ -817,7 +825,7 @@ impl ProviderOps for MemoryProvider {
             pending.path,
             Object {
                 revision,
-                bytes: pending.bytes,
+                bytes: pending.bytes.into(),
                 stored_at: self.clock.now(),
                 upload_id: Some(id),
             },

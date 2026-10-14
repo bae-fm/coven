@@ -87,6 +87,7 @@ impl MemoryStorageBuilder {
                 faults: Faults::none(),
                 ranges: Vec::new(),
                 reads: Vec::new(),
+                received_buffers: Vec::new(),
                 sent_bytes: 0,
                 largest_part: 0,
                 held_listing: None,

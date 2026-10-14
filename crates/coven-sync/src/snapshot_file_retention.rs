@@ -204,19 +204,14 @@ impl StoreLogSync {
         }
         let storage = self.storage.as_deref().ok_or(SyncError::NoStorage)?;
         let ring = self.store_keys.read()?;
+        let mut stream = retained.stream(storage).await;
         let crate::write_object::ReadyWrite {
             opened,
             author,
             parts: mut opens,
-        } = crate::write_object::download(
-            storage,
-            object,
-            ring.as_ref(),
-            &retained,
-            log,
-            replays,
-            || Ok(self.operation_member()?.member_id()),
-        )
+        } = crate::write_object::download(&mut stream, ring.as_ref(), log, replays, || {
+            Ok(self.operation_member()?.member_id())
+        })
         .await?
         .map_err(coven_database::SnapshotError::WriteWaiting)
         .map_err(coven_database::DbError::Snapshot)?;
@@ -225,16 +220,15 @@ impl StoreLogSync {
             *opens &= readable.contains(&part.audience);
         }
         if opens.contains(&false) {
+            stream.drain().await?;
             retained.keep_files(None).await?;
             return Ok(None);
         }
         let (mut sink, input) =
             crate::stream_input::ChannelParts::new(opened.header.clone(), &opens);
         let transfer = async {
-            let result = crate::write_object::finish(
-                storage, object, &retained, ring, &author, opened, &mut sink,
-            )
-            .await;
+            let result =
+                crate::write_object::finish(&mut stream, ring, &author, opened, &mut sink).await;
             drop(sink);
             result
         };

@@ -120,7 +120,7 @@ impl OneDriveStorage {
         &self,
         path: &ObjectPath,
         range: Option<ByteRange>,
-    ) -> Result<ObjectRead, StorageError> {
+    ) -> Result<ObjectStream<'_>, StorageError> {
         let value = self.metadata(path).await?;
         let url = http::string(&value, "@microsoft.graph.downloadUrl")?;
         validate_download_url(&self.api, url)?;
@@ -128,23 +128,28 @@ impl OneDriveStorage {
             .map(|range| vec![("Range", range.header())])
             .unwrap_or_default();
         let metadata = object_metadata::onedrive(path, &value)?;
-        let bytes = http::bytes(
+        let stream = super::http_body::stream(
             PROVIDER,
             self.session
                 .send(Method::GET, url, &headers, Body::Empty, false)
                 .await?,
+            metadata.clone(),
             range,
         )
         .await?;
         if path.is_replaceable() {
-            let after = object_metadata::onedrive(path, &self.metadata(path).await?)?;
-            if after != metadata {
-                return Err(
-                    StorageFailure::Protocol.with_source("OneDrive object changed during read")
-                );
-            }
+            let path = path.clone();
+            return Ok(stream.after(async move {
+                let after = object_metadata::onedrive(&path, &self.metadata(&path).await?)?;
+                if after != metadata {
+                    return Err(
+                        StorageFailure::Protocol.with_source("OneDrive object changed during read")
+                    );
+                }
+                Ok(())
+            }));
         }
-        Ok(ObjectRead { metadata, bytes })
+        Ok(stream)
     }
     async fn require_owner(&self) -> Result<(), StorageError> {
         let url = http::endpoint(&self.api, &["me", "drive"], &[("$select", "id")])?;
@@ -278,11 +283,11 @@ impl ProviderOps for OneDriveStorage {
             Err(error) => Err(error),
         }
     }
-    async fn read_object(
+    async fn stream_object(
         &self,
         path: &ObjectPath,
         range: Option<ByteRange>,
-    ) -> Result<ObjectRead, StorageError> {
+    ) -> Result<ObjectStream<'_>, StorageError> {
         self.get(path, range).await
     }
     async fn list(&self, listing: &mut ObjectListing) -> Result<(), StorageError> {

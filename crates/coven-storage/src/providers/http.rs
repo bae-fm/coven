@@ -1,7 +1,7 @@
 use crate::{ByteRange, CloudProvider, OAuthTokens, StorageError, StorageFailure};
 use coven_crypto::SecretBytes;
 use coven_foundation::clock::ClockRef;
-use reqwest::{Method, Response, StatusCode};
+use reqwest::{Method, Response};
 use serde_json::Value;
 use std::fmt;
 
@@ -459,33 +459,6 @@ pub(crate) fn same_origin(base: &str, target: &str) -> Result<(), StorageError> 
         return Err(StorageFailure::Protocol.with_source("provider URL crossed origins"));
     }
     Ok(())
-}
-pub(crate) async fn bytes(
-    provider: CloudProvider,
-    response: Response,
-    range: Option<ByteRange>,
-) -> Result<Vec<u8>, StorageError> {
-    let response = checked(provider, response).await?;
-    if let Some(range) = range {
-        if response.status() != StatusCode::PARTIAL_CONTENT {
-            return Err(StorageFailure::Protocol.with_source("provider ignored byte range"));
-        }
-        let header = response
-            .headers()
-            .get("content-range")
-            .and_then(|v| v.to_str().ok())
-            .ok_or(StorageFailure::Protocol.with_source("missing Content-Range"))?;
-        validate_content_range(header, range)?;
-    }
-    let data = response
-        .bytes()
-        .await
-        .map_err(|e| transport(provider, e))?
-        .to_vec();
-    if range.is_some_and(|r| r.len() != data.len() as u64) {
-        return Err(StorageFailure::Protocol.with_source("short ranged body"));
-    }
-    Ok(data)
 }
 pub(crate) fn validate_content_range(header: &str, range: ByteRange) -> Result<u64, StorageError> {
     let (bounds, total) = header

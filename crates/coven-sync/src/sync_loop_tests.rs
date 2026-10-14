@@ -721,7 +721,7 @@ async fn io_counts_one_write_local_baseline() {
     assert_eq!(repeated_reads(&counts.reads, &[], false), 0);
     // No fixed total is stated for non-idle writer holds or commits. These
     // are observed baselines; the saved-log decode bound is tested separately.
-    assert_eq!((counts.work.writer_holds, counts.work.commits), (69, 24));
+    assert_eq!((counts.work.writer_holds, counts.work.commits), (63, 18));
 }
 
 #[tokio::test]
@@ -733,11 +733,10 @@ async fn io_counts_first_catchup_baseline() {
     assert_eq!(
         (counts.requests, counts.requests_by_kind()),
         (
-            72,
+            60,
             RequestCounts {
                 lists: 8,
-                gets: 32,
-                ranges: 17,
+                gets: 37,
                 creates: 1,
                 replaces: 2,
                 statuses: 8,
@@ -747,7 +746,7 @@ async fn io_counts_first_catchup_baseline() {
         ),
         "{counts:#?}"
     );
-    assert_eq!((counts.work.writer_holds, counts.work.commits), (107, 51));
+    assert_eq!((counts.work.writer_holds, counts.work.commits), (95, 39));
     assert_eq!(
         counts.work.store_log_commits, 2,
         "catch-up batch and own registration"
@@ -803,11 +802,11 @@ async fn io_counts_file_fetch_baseline() {
     assert_eq!(
         (counts.requests, counts.requests_by_kind()),
         (
-            37,
+            25,
             RequestCounts {
                 lists: 7,
-                gets: 6,
-                ranges: 17,
+                gets: 9,
+                ranges: 2,
                 replaces: 1,
                 statuses: 5,
                 other: 1,
@@ -817,7 +816,7 @@ async fn io_counts_file_fetch_baseline() {
         "{counts:#?}"
     );
     // No fixed non-idle writer/commit total is stated; observed counts.
-    assert_eq!((counts.work.writer_holds, counts.work.commits), (91, 49));
+    assert_eq!((counts.work.writer_holds, counts.work.commits), (79, 37));
 }
 
 #[tokio::test]
@@ -874,8 +873,7 @@ async fn io_counts_reopen_baseline() {
             21,
             RequestCounts {
                 lists: 7,
-                gets: 6,
-                ranges: 1,
+                gets: 7,
                 replaces: 2,
                 statuses: 4,
                 other: 1,
