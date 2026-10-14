@@ -13,3 +13,5 @@ import CovenStorage.CellProof
 import CovenStorage.KeyDelivery
 import CovenStorage.KeyDeliveryExamples
 import CovenStorage.CopyPublication
+import CovenStorage.OwnCopyDamage
+import CovenStorage.OwnCopyDamageExamples

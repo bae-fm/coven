@@ -18,7 +18,10 @@ than §10's per-kind comparison (`operation_ids_hide_newer_snapshot`, below).
 
 A third result is a checked counterexample to a proposed rule: resetting on
 a mismatched S3 key delivery path can leave a made key live and unrecorded
-([S3 key deliveries](#s3-key-deliveries)).
+([S3 key deliveries](#s3-key-deliveries)). A fourth is a checked
+counterexample to a rule Rust follows: resetting when an own key-copy number
+holds undecodable bytes discards unsent edits and still leaves the first
+phase incomplete ([Undecodable own key copies](#undecodable-own-key-copies)).
 
 All named results are audited by `CovenStorage/Axioms.lean`. The package uses
 Lean 4.34.1 and its standard library, without additional axioms or unfinished
@@ -429,6 +432,77 @@ made keys sit in the journal the same way) and other members writing the
 path. The reading chosen for §10's "nothing newer in storage" is that a
 delivery stored after the backup counts as newer, so the reset itself is
 permitted; the loss is what it discards.
+
+## Undecodable own key copies
+
+T182 made a pass's scan reset the device with `SlotMismatch` when a copy
+number it reserved, `<store>/keys/<device>/<n>`, holds an object whose clear
+prefix does not decode (`scan_store_log_once` in
+[`store_log_batch.rs`](../../crates/coven-sync/src/store_log_batch.rs)). Its
+reasoning: this installation seals only decodable copies, so the object must
+be another live copy's, and waiting on it as an unreadable copy would leave
+every first phase incomplete.
+
+[OwnCopyDamage](storage/CovenStorage/OwnCopyDamage.lean) runs several
+devices' database copies over one store's key-copy logs. A copy is a live
+database, a backup, the database a restore overwrites, or a second live
+clone. Each copy reserves its next number with fixed sealed bytes, publishes
+it create-once, and compares an occupied path as §10 says. It reads every
+writer's copy log and keeps the bytes it first read, as `discovery::scan`
+retains its input. Its first phase is complete only when every copy it holds
+decodes, as in `read_copies`. The provider may corrupt any stored object,
+which §2 assumes it does not. The scan follows either T182's rule or a
+waiting rule that treats the object like any other unreadable copy.
+
+**Who put the object there (proved).** `occupant_own_or_damaged` proves,
+for every history under either rule, that an object at
+`<store>/keys/<d>/<n>` was published by a copy holding device id `d`: this
+database, a backup or a clone of it, never another device. It decodes unless
+the provider damaged it. Every copy of every database seals only decodable
+bytes, so an undecodable object, stored or as some copy read it, is always
+damage and never another copy's object (`unreadable_is_damage`). T182's
+trigger therefore fires only on damage at this device's own path
+(`trigger_is_damage`). Its comment, "holds another live copy's object", is
+never the case.
+
+**The reset does not help (checked counterexample).** In
+`damage_resets_uncopied`, Ana's phone (device 7) and Ben's laptop (device 8)
+each have one database, never backed up, restored or cloned. Ana edits a
+note, which waits unsent. She publishes key copy 1, and the provider corrupts
+it before anyone reads it. T182's rule resets her phone although no other
+copy of its database exists, and the reset discards her edit. Her new device
+101 reads every writer's log, device 7's included, finds the same bytes, and
+its first phase is still incomplete, as Ben's is. In general a reset changes
+no stored object and the new device has read nothing, so its first scan
+either resets again or leaves its first phase incomplete
+(`reset_never_completes`, from `fresh_reading_incomplete`).
+
+**Waiting loses nothing (proved).** Under the waiting rule, a database that
+is never copied never resets, whatever the provider damages
+(`uncopied_waiting_never_resets`). On the same history Ana keeps her device
+and her edit, with the same incomplete first phase
+(`damage_waits_with_edits`). A device that read the copy before the damage
+keeps the bytes it read and is not held at all
+(`read_before_damage_keeps_bytes`). Waiting does not weaken §10's
+comparison: a clone that seals copy 1 with other randomness still finds Ana's
+copy there and resets (`live_copies_still_reset`).
+
+So damage at an own copy number should be reported as a damaged copy and
+wait, like any other writer's unreadable copy; §2 already says coven does
+not recover damaged storage. A number beyond the reservations is different:
+its existence proves another copy reserved it, whatever its bytes, since a
+database that is never copied has nothing stored past its reservations (the
+invariant behind `uncopied_waiting_never_resets`). It still resets as
+storage ahead (`key_copy_ahead_resets`). §10 and §11 are
+unchanged until Rust follows the waiting rule.
+
+The model leaves out the store log, key selection, sharing, positions, the
+drain of a replaced id (whose retained history keeps the damaged object, so
+it leaves the phase incomplete as well), failed reads and the `require_complete`
+catch-up. Corruption here changes the bytes of a stored object; it never
+creates one. Someone planting bytes at an empty path is outside the model:
+§2 trusts members on storage but lets a thief with storage credentials be
+hostile. Undecodable planted bytes are not another copy's object either.
 
 ## Nonces
 

@@ -212,3 +212,19 @@ import CovenStorage
 #print axioms CovenStorage.CopyPublication.other_marker_refuses
 #print axioms CovenStorage.CopyPublication.marker_settles_bytes
 #print axioms CovenStorage.CopyPublication.check_then_write_two_winners
+
+#print axioms CovenStorage.OwnCopyDamage.step_inv
+#print axioms CovenStorage.OwnCopyDamage.run_inv
+#print axioms CovenStorage.OwnCopyDamage.start_inv
+#print axioms CovenStorage.OwnCopyDamage.occupant_own_or_damaged
+#print axioms CovenStorage.OwnCopyDamage.unreadable_is_damage
+#print axioms CovenStorage.OwnCopyDamage.trigger_is_damage
+#print axioms CovenStorage.OwnCopyDamage.fresh_reading_incomplete
+#print axioms CovenStorage.OwnCopyDamage.reset_never_completes
+#print axioms CovenStorage.OwnCopyDamage.settled_step
+#print axioms CovenStorage.OwnCopyDamage.uncopied_waiting_never_resets
+#print axioms CovenStorage.OwnCopyDamage.start_settled
+#print axioms CovenStorage.OwnCopyDamage.Examples.damage_resets_uncopied
+#print axioms CovenStorage.OwnCopyDamage.Examples.damage_waits_with_edits
+#print axioms CovenStorage.OwnCopyDamage.Examples.read_before_damage_keeps_bytes
+#print axioms CovenStorage.OwnCopyDamage.Examples.live_copies_still_reset
