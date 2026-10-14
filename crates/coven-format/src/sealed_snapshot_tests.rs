@@ -274,13 +274,15 @@ fn caught_at_follows_the_key_and_keeps_its_subsecond_sample() {
     assert_eq!(&bytes[20..28], &1_760_400_000u64.to_be_bytes());
     assert_eq!(&bytes[28..32], &123_456_789u32.to_be_bytes());
     assert_eq!(SnapshotObjectPrefix::decode(&bytes).unwrap(), prefix);
-    let sample = std::time::UNIX_EPOCH + std::time::Duration::new(1_760_400_000, 123_456_789);
+    // Windows SystemTime counts 100 ns intervals, so these samples use whole
+    // hundreds of nanoseconds to mean the same instant on every platform.
+    let sample = std::time::UNIX_EPOCH + std::time::Duration::new(1_760_400_000, 123_456_700);
     assert_eq!(
         StorageTime::from_system_time(sample).unwrap(),
-        test_utils::caught_at()
+        StorageTime::new(1_760_400_000, 123_456_700).unwrap()
     );
     assert!(StorageTime::from_system_time(
-        std::time::UNIX_EPOCH - std::time::Duration::from_nanos(1)
+        std::time::UNIX_EPOCH - std::time::Duration::from_nanos(100)
     )
     .is_err());
     for end in 20..32 {
