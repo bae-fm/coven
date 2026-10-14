@@ -6,6 +6,14 @@ pub(super) struct HeldRead {
     resume: tokio::sync::oneshot::Receiver<()>,
 }
 
+/// A response body that stops at an object offset until released.
+pub(super) struct HeldBody {
+    path: ObjectPath,
+    at: u64,
+    observed: tokio::sync::oneshot::Sender<()>,
+    resume: tokio::sync::oneshot::Receiver<()>,
+}
+
 /// Failures after response metadata has arrived.
 #[derive(Clone, Copy)]
 pub enum BodyFailure {
@@ -34,6 +42,25 @@ impl MemoryStorage {
         });
     }
 
+    /// Stall the next response body for `path` that reaches object offset `at`,
+    /// after delivering every byte before it, until `resume` is released.
+    pub async fn hold_body_at(
+        &self,
+        path: ObjectPath,
+        at: u64,
+        observed: tokio::sync::oneshot::Sender<()>,
+        resume: tokio::sync::oneshot::Receiver<()>,
+    ) {
+        let mut state = self.provider.state.lock().await;
+        assert!(state.held_body.is_none(), "a body is already held");
+        state.held_body = Some(HeldBody {
+            path,
+            at,
+            observed,
+            resume,
+        });
+    }
+
     /// Buffers delivered by response bodies, without counting metadata as bytes.
     pub async fn received_buffers(&self) -> Vec<usize> {
         self.provider.state.lock().await.received_buffers.clone()
@@ -47,6 +74,7 @@ struct MemoryBody {
     position: usize,
     chunk_size: usize,
     failure: Option<BodyFailure>,
+    hold: Option<HeldBody>,
     state: Arc<Mutex<State>>,
 }
 
@@ -71,6 +99,20 @@ impl ObjectBody for MemoryBody {
                 return Ok(1);
             }
             _ => self.end,
+        };
+        let end = match &self.hold {
+            Some(hold) if (hold.at as usize) > self.position => end.min(hold.at as usize),
+            Some(_) => {
+                let hold = self.hold.take().expect("held body");
+                hold.observed
+                    .send(())
+                    .map_err(|_| StorageFailure::Protocol.with_source("body observer dropped"))?;
+                hold.resume
+                    .await
+                    .map_err(|_| StorageFailure::Protocol.with_source("body release dropped"))?;
+                end
+            }
+            None => end,
         };
         let length = (end - self.position).min(output.len()).min(self.chunk_size);
         output[..length].copy_from_slice(&self.bytes[self.position..self.position + length]);
@@ -107,10 +149,17 @@ impl MemoryProvider {
                 position: start,
                 chunk_size: state.faults.read_chunk_size,
                 failure: state.faults.body_failures.get(path).copied(),
+                hold: None,
                 state: self.state.clone(),
             };
             if body.chunk_size == 0 {
                 return Err(StorageFailure::InvalidConfiguration.into());
+            }
+            let mut body = body;
+            if state.held_body.as_ref().is_some_and(|held| {
+                held.path == *path && (start as u64) < held.at && held.at < end as u64
+            }) {
+                body.hold = state.held_body.take();
             }
             if let Some(range) = range {
                 state.ranges.push(range);

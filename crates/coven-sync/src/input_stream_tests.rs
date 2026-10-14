@@ -211,3 +211,82 @@ async fn maximum_header_vectors_use_two_ranges_and_preserve_every_overread_byte(
         assert_eq!(reads.len() - header_reads.len(), 1);
     }
 }
+
+#[tokio::test]
+async fn retaining_the_rest_continues_over_local_input_without_another_request() {
+    let storage = Arc::new(MemoryStorage::builder().build().unwrap());
+    let receiver = device(storage.clone(), 9, member(1), store(1)).await;
+    let path = ObjectPath::device_log(store(1), DeviceId(1), 1.try_into().unwrap());
+    let bytes: Vec<_> = (0..150_001).map(|i| (i % 253) as u8).collect();
+    storage.create(&path, &bytes).await.unwrap();
+    let object = storage.status(&path).await.unwrap().unwrap();
+    let input = ObjectInput::observe(&receiver.db, &object).await.unwrap();
+    let mut stream = input.stream(storage.as_ref()).await;
+    assert_eq!(stream.read_exact(70_000).await.unwrap(), bytes[..70_000]);
+    stream.retain_rest().await.unwrap();
+    let requests = storage.request_count();
+    assert_eq!(stream.position(), 70_000);
+    assert_eq!(
+        stream.read_exact(bytes.len() - 70_000).await.unwrap(),
+        bytes[70_000..]
+    );
+    stream.drain().await.unwrap();
+    assert_eq!(storage.request_count(), requests);
+    drop(stream);
+    input.receive(storage.as_ref()).await.unwrap();
+    assert_eq!(storage.request_count(), requests);
+}
+
+/// SP 481–482: a write whose second chunk stalls in storage must not keep an
+/// app write waiting for the database writer (§3.1).
+#[tokio::test]
+async fn a_stalled_write_body_does_not_hold_the_database_writer() {
+    use crate::device_log_sync::tests::{group, sql};
+    let storage = crate::device_log_sync::tests::storage();
+    let mut devices = group(storage.clone(), 2).await;
+    let body = "x".repeat(150_000);
+    devices[0]
+        .db
+        .write(move |sql| {
+            sql.execute("INSERT INTO notes VALUES('large','title',?1)", [&body])?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    devices[0].writes.upload_writes().await.unwrap();
+    let path = ObjectPath::device_log(
+        crate::device_log_sync::tests::STORE_ID,
+        DeviceId(1),
+        1.try_into().unwrap(),
+    );
+    let size = storage.status(&path).await.unwrap().unwrap().size;
+    assert!(size > 2 * BUFFER as u64);
+    let (stalled, observed) = tokio::sync::oneshot::channel();
+    let (resume, held) = tokio::sync::oneshot::channel();
+    storage
+        .hold_body_at(path, BUFFER as u64 + 1, stalled, held)
+        .await;
+    let receiver = &mut devices[1];
+    let db = receiver.db.clone();
+    let app = async move {
+        observed.await.unwrap();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            sql(
+                &db,
+                "INSERT INTO notes VALUES('local','while','downloading')",
+            ),
+        )
+        .await
+        .expect("an app write waited for network input");
+        resume.send(()).unwrap();
+    };
+    let (downloaded, ()) = tokio::join!(receiver.writes.download_writes(), app);
+    downloaded.unwrap();
+    let ids: Vec<String> = receiver
+        .db
+        .read(|sql| Ok(sql.query("SELECT id FROM notes ORDER BY id", [], |r| r.get(0))?))
+        .await
+        .unwrap();
+    assert!(ids.contains(&"large".to_string()) && ids.contains(&"local".to_string()));
+}

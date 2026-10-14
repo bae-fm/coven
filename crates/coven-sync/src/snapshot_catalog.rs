@@ -558,6 +558,10 @@ impl StoreLogSync {
         if let Some(Some(files)) = retained.files().await? {
             return Ok(files);
         }
+        // Validation holds the database writer; it reads only local input.
+        retained
+            .receive(self.storage.as_deref().ok_or(SyncError::NoStorage)?)
+            .await?;
         let (mut send, input) = crate::stream_input::StreamInput::channel();
         let transfer = async {
             let result = self.stream_snapshot(candidate, &retained, &mut send).await;

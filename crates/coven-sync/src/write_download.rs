@@ -89,6 +89,8 @@ impl DeviceLogSync {
             Ok(ready) => ready,
             Err(unready) => return Ok(Err(unready)),
         };
+        // The apply below holds the database writer; it reads only local input.
+        stream.retain_rest().await?;
         let (primary, download) = ChannelParts::new(opened.header.clone(), &opens);
         let (references, input) = ChannelParts::new(opened.header.clone(), &opens);
         let (validation, validated) = oneshot::channel();

@@ -18,6 +18,12 @@ pub(crate) struct InputStream<'a> {
 }
 
 impl ObjectInput {
+    /// Retain the whole object before a consumer that holds the database
+    /// writer reads it, so that consumer reads only local input (§3.1).
+    pub(crate) async fn receive(&self, storage: &dyn Storage) -> Result<(), SyncError> {
+        self.stream(storage).await.drain().await
+    }
+
     pub(crate) async fn stream<'a>(&'a self, storage: &'a dyn Storage) -> InputStream<'a> {
         InputStream {
             input: self,
@@ -149,6 +155,18 @@ impl<'a> InputStream<'a> {
             .await?;
         self.complete = complete;
         Ok(bytes)
+    }
+
+    /// Receive and retain every remaining byte, then continue from the same
+    /// position over local input: a consumer holding the database writer
+    /// never waits for the provider (§3.1).
+    pub(crate) async fn retain_rest(&mut self) -> Result<(), SyncError> {
+        let resume = self.position;
+        self.drain().await?;
+        self.response = None;
+        self.chunk = Cursor::new(Vec::new());
+        self.position = resume;
+        Ok(())
     }
 
     pub(crate) async fn drain(&mut self) -> Result<(), SyncError> {

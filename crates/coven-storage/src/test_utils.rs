@@ -159,6 +159,7 @@ struct State {
     largest_part: usize,
     held_listing: Option<HeldRequest>,
     held_read: Option<memory_reads::HeldRead>,
+    held_body: Option<memory_reads::HeldBody>,
     held_creation: Option<HeldRequest>,
     held_access: Option<memory_requests::HeldAccess>,
 }
