@@ -283,13 +283,11 @@ async fn comparison(history: &MigrationHistory) -> Comparison {
             .unwrap();
         // Replay supplies finality: a final deletion lies before the horizon.
         if let Finality::Final = finality {
-            db.advance_store_log_horizon(
-                db.store_log().await.unwrap(),
-                std::time::Duration::from_secs(1),
-                std::time::UNIX_EPOCH + std::time::Duration::from_secs(1),
-            )
-            .await
-            .unwrap();
+            let second =
+                coven_format::value::StorageTime::since_epoch(std::time::Duration::from_secs(1));
+            db.advance_store_log_horizon(db.store_log().await.unwrap(), second, second)
+                .await
+                .unwrap();
         }
     }
     let (input, before) = migration_input(&db, history);
@@ -641,7 +639,9 @@ async fn late_edits_to_a_migration_deleted_row_lose_to_its_delete() {
         db.receive(edit.clone().into()).await.unwrap();
         db.apply_downloaded::<crate::pending::tests::Record>(
             dropped.clone().into(),
-            std::time::UNIX_EPOCH + std::time::Duration::from_secs(30 * DAY + 1),
+            coven_format::value::StorageTime::since_epoch(std::time::Duration::from_secs(
+                30 * DAY + 1,
+            )),
         )
         .await
         .unwrap();
