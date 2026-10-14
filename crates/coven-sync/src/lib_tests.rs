@@ -27,7 +27,7 @@ use crate::{
     replay::tests::*,
 };
 
-struct Generator(u64);
+pub(crate) struct Generator(pub(crate) u64);
 
 impl Generator {
     fn pick(&mut self, n: usize) -> usize {
@@ -37,7 +37,7 @@ impl Generator {
         (self.0 % n as u64) as usize
     }
 
-    fn history(&mut self) -> History {
+    pub(crate) fn history(&mut self) -> History {
         let mut h = household(MemberRole::Admin, MemberRole::Admin);
         for (id, name) in [(0, "Gifts"), (1, "Notes")] {
             h.all(0, 0, make(id, name));
@@ -176,7 +176,7 @@ fn member_number(id: &MemberId) -> u64 {
 fn circle_number(id: CircleId) -> u64 {
     u64::try_from(id.0.as_u128()).unwrap()
 }
-fn audience_number(a: &Audience) -> u64 {
+pub(crate) fn audience_number(a: &Audience) -> u64 {
     match a {
         Audience::Store => 0,
         Audience::Circle(id) => circle_number(*id) + 1,
@@ -311,7 +311,7 @@ pub(crate) fn projected(h: &History, replay: &StoreLogReplay) -> Value {
     json!({"landed_too_late":late,"created":state.store.is_some(),"members":members,"access":access,"devices":devices,"circles":circles,"versions":versions,"resets":resets,"kept":kept,"dropped":dropped,"circle_causes":circle_causes})
 }
 
-fn key_number(id: coven_foundation::id_source::KeyId) -> u64 {
+pub(crate) fn key_number(id: coven_foundation::id_source::KeyId) -> u64 {
     u64::try_from(id.0.as_u128()).unwrap()
 }
 
@@ -724,8 +724,8 @@ fn current_projection_preserves_commitments_and_rust_only_data() {
     assert_eq!(result.state.members[&member(1)].sealing, keys(1).sealing);
     assert_eq!(result.state.devices[&DeviceId(0)].name, "Ana’s phone");
     assert_eq!(result.state.devices[&DeviceId(1)].name, "Device 1");
-    assert_eq!(result.state.store.as_ref().unwrap().key, key(20));
-    assert_eq!(result.state.circles[&circle(0)].key, key(10));
+    assert_eq!(newest_key(&h, Audience::Store), Some(key(20)));
+    assert_eq!(newest_key(&h, Audience::Circle(circle(0))), Some(key(10)));
 }
 
 #[test]

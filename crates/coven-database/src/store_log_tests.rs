@@ -22,8 +22,8 @@ pub(crate) fn keys(seed: u8) -> MemberPublicKeys {
     }
 }
 
-fn key(n: u128) -> KeyId {
-    KeyId(uuid::Uuid::from_u128(n))
+fn key(n: u128) -> coven_foundation::id_source::KeyId {
+    coven_foundation::id_source::KeyId(uuid::Uuid::from_u128(n))
 }
 
 fn entry(number: u64, change: StoreChange) -> StoreLogEntry {
@@ -58,7 +58,6 @@ pub(crate) fn circle_history(circle: CircleId) -> Vec<(StoreLogEntry, StoreLogRe
     let store = StoreIdentity {
         id: crate::tests::store_id(),
         name: crate::tests::STORE_NAME.into(),
-        key: key(1),
     };
     let first = entry(
         1,
@@ -69,7 +68,7 @@ pub(crate) fn circle_history(circle: CircleId) -> Vec<(StoreLogEntry, StoreLogRe
             store: store.id,
             name: store.name.clone(),
             admin: ana.clone(),
-            key: store.key,
+            key: key(1),
             device_name: "Ana’s phone".into(),
             key_hash: [17; 32],
         },
@@ -133,7 +132,6 @@ pub(crate) fn circle_history(circle: CircleId) -> Vec<(StoreLogEntry, StoreLogRe
         circle,
         StoreCircle {
             name: "Gifts".into(),
-            key: key(2),
             members: [ana.signing.clone()].into(),
         },
     );
@@ -525,7 +523,7 @@ async fn late_verdict_and_first_publication_commit_together_and_cannot_be_revers
             },
         ),
         stored_at: std::time::UNIX_EPOCH + Duration::new(32 * 86400, 987_654_321),
-        check: StoreLogCheck::LandedTooLate,
+        check: StoreLogCheck::LandedTooLate { authorized: true },
     };
     result.entries.insert(
         late.entry.position,
@@ -741,7 +739,6 @@ async fn audience_versions_round_trip_and_a_failed_raise_keeps_every_audience() 
         notes,
         StoreCircle {
             name: "Notes".into(),
-            key: key(3),
             members: [keys(1).signing].into(),
         },
     );
@@ -892,7 +889,7 @@ async fn a_failed_drop_report_rolls_back_consumption_and_replay() {
     let late = ReplayEntry {
         entry: change,
         stored_at: std::time::UNIX_EPOCH + Duration::from_secs(32 * 86400),
-        check: StoreLogCheck::LandedTooLate,
+        check: StoreLogCheck::LandedTooLate { authorized: true },
     };
     result.entries.insert(
         late.entry.position,

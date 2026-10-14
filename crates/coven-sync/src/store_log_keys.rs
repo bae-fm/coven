@@ -1,11 +1,12 @@
 //! Key introductions and sharing with their current audiences.
 
+use crate::key_introductions::{accepted, needed, newest};
 use crate::SyncError;
 use coven_crypto::{
     seal_circle_key, seal_store_key, CircleKey, MemberId, MemberKeys, SealingPublicKey, StoreKey,
     StoreKeyring,
 };
-use coven_database::{EntryOutcome, KeyUploadBatch, StoreLog, StoreLogSealing};
+use coven_database::{KeyUploadBatch, StoreLog, StoreLogSealing};
 use coven_format::{
     sealed_key::KeyCopyPrefix,
     store_log::{StoreChange, StoreLogEntry},
@@ -16,20 +17,7 @@ use coven_storage::ObjectPath;
 use std::collections::BTreeSet;
 
 pub(crate) fn introduced(change: &StoreChange) -> Option<(Audience, KeyId)> {
-    match change {
-        StoreChange::CreateStore { key, .. } => Some((Audience::Store, *key)),
-        StoreChange::CreateCircle { circle, key, .. } => Some((Audience::Circle(*circle), *key)),
-        StoreChange::RotateKey { audience, key, .. } => Some((audience.clone(), *key)),
-        _ => None,
-    }
-}
-
-pub(crate) fn needed(log: &StoreLog) -> BTreeSet<(Audience, KeyId)> {
-    log.entries
-        .iter()
-        .filter(|e| log.replay.entries[&e.entry.position] == EntryOutcome::Kept)
-        .filter_map(|e| introduced(&e.entry.change))
-        .collect()
+    crate::key_introductions::introduction(change).map(|(audience, key, _)| (audience, key))
 }
 
 pub(crate) fn recipients<'a>(
@@ -62,20 +50,21 @@ pub(crate) fn holds(ring: Option<&StoreKeyring>, audience: &Audience, key: KeyId
     })
 }
 
-/// Sharing history requires every key introduced by the kept entries.
+/// Sharing history requires every key the received introductions authorize.
 pub(crate) fn check_shared_keys(
     log: &StoreLog,
     change: &StoreChange,
     ring: &Option<StoreKeyring>,
 ) -> Result<(), SyncError> {
-    for (audience, key) in needed(log) {
+    let needed = needed(log);
+    for (audience, key) in needed.keys() {
         let sharing = match change {
-            StoreChange::AddMember { .. } => audience == Audience::Store,
-            StoreChange::AddCircleMember { circle, .. } => audience == Audience::Circle(*circle),
+            StoreChange::AddMember { .. } => *audience == Audience::Store,
+            StoreChange::AddCircleMember { circle, .. } => *audience == Audience::Circle(*circle),
             _ => false,
         };
-        if sharing && !holds(ring.as_ref(), &audience, key) {
-            return Err(SyncError::KeyUnavailable(key));
+        if sharing && !accepted(ring.as_ref(), &needed, audience, *key) {
+            return Err(SyncError::KeyUnavailable(*key));
         }
     }
     Ok(())
@@ -145,14 +134,11 @@ pub(crate) fn seal(
         ring.ok_or(SyncError::KeyUnavailable(*key))?
             .store_key(*key)?
     } else {
-        let id = state
-            .store
-            .as_ref()
-            .expect("authorized entry has a store")
-            .key;
+        let id = newest(log, &Audience::Store).expect("authorized entry has a store key");
         ring.ok_or(SyncError::KeyUnavailable(id))?.store_key(id)?
     };
     let ring = ring.expect("entry holds its encryption key");
+    let shared = needed(log);
     let mut needs = Vec::new();
     let mut need =
         |audience: Audience, key: KeyId, member: &MemberId, recipient: &SealingPublicKey| {
@@ -170,7 +156,9 @@ pub(crate) fn seal(
             keys: recipient, ..
         } => {
             for id in ring.store_key_ids() {
-                need(Audience::Store, id, &recipient.signing, &recipient.sealing);
+                if accepted(Some(ring), &shared, &Audience::Store, id) {
+                    need(Audience::Store, id, &recipient.signing, &recipient.sealing);
+                }
             }
         }
         StoreChange::CreateStore {
@@ -213,13 +201,16 @@ pub(crate) fn seal(
             circle,
             member: recipient,
         } => {
+            let audience = Audience::Circle(*circle);
             for id in ring.circle_key_ids(*circle) {
-                need(
-                    Audience::Circle(*circle),
-                    id,
-                    recipient,
-                    &state.members[recipient].sealing,
-                );
+                if accepted(Some(ring), &shared, &audience, id) {
+                    need(
+                        audience.clone(),
+                        id,
+                        recipient,
+                        &state.members[recipient].sealing,
+                    );
+                }
             }
         }
         _ => (),

@@ -50,7 +50,7 @@ impl Database {
                 }
                 // Identity is read back from the kept creation, so a replay naming
                 // another one would not survive reopening.
-                let created = next.created_store()?;
+                let created = next.created_store();
                 if next.replay.state.store != created {
                     return Err(DbError::StoreLogEntriesChanged);
                 }

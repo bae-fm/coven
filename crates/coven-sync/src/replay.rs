@@ -43,15 +43,11 @@ pub fn replay(
     entries.sort_by_key(|entry| entry.timestamp);
     let mut views = Vec::with_capacity(entries.len());
     for (index, entry) in entries.iter().enumerate() {
-        if landed_too_late(entry, publications) {
-            views.push(StoreLogCheck::LandedTooLate);
-            continue;
-        }
         let past = (0..index)
             .filter(|&prior| had_read(entry, entries[prior]))
             .collect::<Vec<_>>();
         let view = settle(&entries, &views, &past).state;
-        views.push(effects::check(&view, entry));
+        views.push(check(&view, entry, landed_too_late(entry, publications)));
     }
     settle(&entries, &views, &(0..entries.len()).collect::<Vec<_>>())
 }
@@ -125,11 +121,8 @@ impl ReplayBatch {
         entry: StoreLogEntry,
         publications: &BTreeMap<EntryId, SystemTime>,
     ) {
-        let check = if landed_too_late(&entry, publications) {
-            StoreLogCheck::LandedTooLate
-        } else {
-            effects::check(&self.author_view(&entry).state, &entry)
-        };
+        let late = landed_too_late(&entry, publications);
+        let check = check(&self.author_view(&entry).state, &entry, late);
         let incoming = ReplayEntry {
             stored_at: publications[&entry.position],
             entry,
@@ -154,6 +147,19 @@ impl ReplayBatch {
             .collect();
         let replay = settle(&entries, &checks, &(0..entries.len()).collect::<Vec<_>>());
         Some((self.received, replay))
+    }
+}
+
+/// Lateness excludes an entry from every replay, but its authority in the
+/// recorded view still decides whether its key introduction counts (§9, §11).
+fn check(view: &StoreLogState, entry: &StoreLogEntry, late: bool) -> StoreLogCheck {
+    let check = effects::check(view, entry);
+    if late {
+        StoreLogCheck::LandedTooLate {
+            authorized: check.authorized(),
+        }
+    } else {
+        check
     }
 }
 
@@ -218,7 +224,8 @@ fn settle(
     let mut dropped: BTreeMap<_, _> = selected
         .iter()
         .filter_map(|&i| {
-            (views[i] == StoreLogCheck::LandedTooLate)
+            views[i]
+                .landed_too_late()
                 .then_some((entries[i].position, DropReason::LandedTooLate))
         })
         .collect();

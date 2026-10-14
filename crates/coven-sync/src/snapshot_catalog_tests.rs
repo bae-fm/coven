@@ -19,7 +19,7 @@ fn signed_snapshot(
 }
 
 async fn unsigned_snapshot(device: &Device, id: coven_format::store_log::SnapshotId) -> Vec<u8> {
-    let key_id = device.log().await.replay.state.store.unwrap().key;
+    let key_id = device.newest(Audience::Store).await;
     let path = ObjectPath::snapshot(
         store(1),
         id.audience.clone(),

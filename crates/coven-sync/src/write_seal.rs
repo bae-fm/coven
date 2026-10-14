@@ -2,7 +2,7 @@
 
 use crate::SyncError;
 use coven_crypto::{DerivedKeys, MemberId, MemberKeys, ObjectHasher, StoreKeyring};
-use coven_database::{DbError, EntryOutcome, StoreLog, WaitingUpload};
+use coven_database::{DbError, StoreLog, WaitingUpload};
 use coven_format::sealed_write::{WriteObjectLayout, WriteObjectPrefix};
 use coven_format::write_stream::WriteHeaderFrame;
 use coven_foundation::id_source::{KeyId, StoreId};
@@ -33,42 +33,70 @@ pub(crate) fn derive(
     })
 }
 
+/// The store key for a first attempt; see [`current`].
+pub(crate) fn current_store(log: &StoreLog, ring: &StoreKeyring) -> Result<KeyId, SyncError> {
+    current_key(log, ring, &Audience::Store, None)
+}
+
+/// The key for a first attempt: the newest acceptable introduction of the
+/// audience, once held. Copies that expose a key are not consulted here.
 pub(crate) fn current(
     log: &StoreLog,
     ring: &StoreKeyring,
     audience: &Audience,
     member: &MemberId,
 ) -> Result<KeyId, SyncError> {
-    let selected = match audience {
-        Audience::Store => log.replay.state.store.as_ref().map(|store| store.key),
-        Audience::Circle(circle) => log
-            .replay
-            .state
-            .circles
-            .get(circle)
-            .map(|circle| circle.key),
+    current_key(log, ring, audience, Some(member))
+}
+
+fn current_key(
+    log: &StoreLog,
+    ring: &StoreKeyring,
+    audience: &Audience,
+    member: Option<&MemberId>,
+) -> Result<KeyId, SyncError> {
+    let state = &log.replay.state;
+    match audience {
+        Audience::Store if state.store.is_none() => return Err(SyncError::NoStorage),
+        Audience::Circle(circle) if !state.circles.contains_key(circle) => {
+            return Err(SyncError::Rejected(coven_database::DropReason::TargetGone(
+                coven_database::EntryTarget::Circle(*circle),
+            )))
+        }
+        _ => {}
     }
-    .ok_or_else(|| match audience {
-        Audience::Store => SyncError::NoStorage,
-        Audience::Circle(circle) => SyncError::Rejected(coven_database::DropReason::TargetGone(
-            coven_database::EntryTarget::Circle(*circle),
-        )),
-    })?;
-    if crate::store_log_keys::holds(Some(ring), audience, selected) {
+    let needed = crate::key_introductions::needed(log);
+    let introductions = crate::key_introductions::introductions(log);
+    // An existing audience has its kept creation's introduction. When every
+    // introduction has conflicting commitments, the newest one names the wait.
+    let selected = match crate::key_introductions::newest(log, audience) {
+        Some(key) => key,
+        None => {
+            introductions
+                .iter()
+                .rev()
+                .find(|introduction| &introduction.audience == audience)
+                .ok_or(DbError::DamagedDatabase)?
+                .key
+        }
+    };
+    if crate::key_introductions::accepted(Some(ring), &needed, audience, selected) {
         return Ok(selected);
     }
     // A former circle member still writes its earlier readable history (§14.3).
-    // Select the latest held, kept introduction in replay order, never UUID order.
-    if matches!(audience, Audience::Circle(circle) if !log.replay.state.circles[circle].members.contains(member))
+    // Select the newest held, accepted introduction, never UUID order.
+    if matches!((audience, member), (Audience::Circle(circle), Some(member)) if !state.circles[circle].members.contains(member))
     {
-        for applied in log.entries.iter().rev() {
-            if log.replay.entries[&applied.entry.position] != EntryOutcome::Kept {
-                continue;
-            }
-            if let Some((owner, key)) = crate::store_log_keys::introduced(&applied.entry.change) {
-                if &owner == audience && crate::store_log_keys::holds(Some(ring), audience, key) {
-                    return Ok(key);
-                }
+        for introduction in introductions.iter().rev() {
+            if &introduction.audience == audience
+                && crate::key_introductions::accepted(
+                    Some(ring),
+                    &needed,
+                    audience,
+                    introduction.key,
+                )
+            {
+                return Ok(introduction.key);
             }
         }
     }
@@ -116,7 +144,7 @@ pub(crate) fn select(
 ) -> Result<WriteObjectPrefix, SyncError> {
     check_member(log, member, header.header.position.device)?;
     check_upload_version(log, schema)?;
-    let store_key = current(log, ring, &Audience::Store, &member.member_id())?;
+    let store_key = current_store(log, ring)?;
     Ok(WriteObjectPrefix {
         format: coven_format::FormatVersion::CURRENT,
         store_key,

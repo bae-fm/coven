@@ -98,17 +98,12 @@ impl DeviceLogSync {
             {
                 break;
             }
-            let store = local
-                .log
-                .replay
-                .state
-                .store
-                .as_ref()
+            let store_key = crate::key_introductions::newest(&local.log, &Audience::Store)
                 .expect("checked store membership");
             let ring = self
                 .store_keys
                 .read()?
-                .ok_or(SyncError::KeyUnavailable(store.key))?;
+                .ok_or(SyncError::KeyUnavailable(store_key))?;
             let selected_ring = ring.clone();
             let signer = member.clone();
             let next = self
@@ -147,14 +142,8 @@ impl DeviceLogSync {
             .read()?
             .ok_or(coven_storage::StorageFailure::MemberKeysMissing)?;
         crate::write_seal::check_member(&local.log, &member, local.device)?;
-        let key = local
-            .log
-            .replay
-            .state
-            .store
-            .as_ref()
-            .expect("checked membership")
-            .key;
+        let key = crate::key_introductions::newest(&local.log, &Audience::Store)
+            .expect("checked membership");
         let ring = self
             .store_keys
             .read()?
@@ -397,18 +386,16 @@ impl DeviceLogSync {
         member: &coven_crypto::MemberKeys,
         local: &coven_database::LocalStoreLog,
     ) -> Result<Option<PostedPositions>, SyncError> {
-        let store = local
-            .log
-            .replay
-            .state
-            .store
-            .as_ref()
+        let store_key = crate::key_introductions::newest(&local.log, &Audience::Store)
             .ok_or(SyncError::Removed)?;
         let ring = self
             .store_keys
             .read()?
-            .ok_or(SyncError::KeyUnavailable(store.key))?;
-        let mut selected = vec![(Audience::Store, store.key)];
+            .ok_or(SyncError::KeyUnavailable(store_key))?;
+        let mut selected = vec![(
+            Audience::Store,
+            crate::write_seal::current_store(&local.log, &ring)?,
+        )];
         for (circle, state) in &local.log.replay.state.circles {
             if local.log.replay.state.circle_deletions.contains_key(circle)
                 || !state.members.contains(&member.member_id())

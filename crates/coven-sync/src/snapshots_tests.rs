@@ -111,18 +111,20 @@ async fn tables(device: &Device) -> Vec<(String, String, Vec<u8>)> {
 
 async fn fingerprint(device: &Device) -> Vec<(Audience, coven_crypto::Fingerprint)> {
     let ring = device.custody.read().unwrap().unwrap();
-    let state = device.log().await.replay.state;
+    let log = device.log().await;
+    let state = log.replay.state.clone();
     let mut keys = vec![(
         Audience::Store,
-        ring.store_key(state.store.unwrap().key)
+        ring.store_key(crate::key_introductions::newest(&log, &Audience::Store).unwrap())
             .unwrap()
             .derive()
             .fingerprint_hasher(),
     )];
-    for (circle, state) in state.circles {
+    for circle in state.circles.into_keys() {
+        let key = crate::key_introductions::newest(&log, &Audience::Circle(circle)).unwrap();
         keys.push((
             Audience::Circle(circle),
-            ring.circle_key(circle, state.key)
+            ring.circle_key(circle, key)
                 .unwrap()
                 .derive()
                 .fingerprint_hasher(),

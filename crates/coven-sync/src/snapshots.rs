@@ -642,12 +642,17 @@ pub(super) fn audiences_for_member(
     if state.members.get(member).is_none_or(|m| m.removed) {
         return Err(SyncError::Rejected(coven_database::DropReason::NotAllowed));
     }
-    if let Some(store) = &state.store {
-        audiences.insert(Audience::Store, store.key);
+    let mut include = |audience: Audience| {
+        if let Some(key) = crate::key_introductions::newest(log, &audience) {
+            audiences.insert(audience, key);
+        }
+    };
+    if state.store.is_some() {
+        include(Audience::Store);
     }
     for (id, circle) in &state.circles {
         if !state.circle_deletions.contains_key(id) && circle.members.contains(member) {
-            audiences.insert(Audience::Circle(*id), circle.key);
+            include(Audience::Circle(*id));
         }
     }
     Ok(audiences)

@@ -132,8 +132,20 @@ impl StoreLogSync {
                     pending_entries.insert(*id);
                     continue;
                 };
+                // A key not yet introduced is tentative: it may open the entry
+                // that introduces it, and is accepted only through that commitment.
+                let hash = crate::key_introductions::needed(&local.log)
+                    .get(&(Audience::Store, *key))
+                    .copied();
                 if !self
-                    .acquire(&Audience::Store, *key, &member, &mut ring, &mut damages)
+                    .acquire(
+                        &Audience::Store,
+                        *key,
+                        hash.as_ref(),
+                        &member,
+                        &mut ring,
+                        &mut damages,
+                    )
                     .await?
                 {
                     missing_keys.insert(*id, *key);

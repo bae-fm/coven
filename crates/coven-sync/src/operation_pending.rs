@@ -107,9 +107,9 @@ impl StoreLogSync {
             },
             SyncError::KeyUnavailable(key) => {
                 let local = self.database.local_store_log().await?;
-                let audience = crate::store_log_keys::needed(&local.log)
+                let audience = crate::key_introductions::introductions(&local.log)
                     .into_iter()
-                    .find_map(|(audience, id)| (id == *key).then_some(audience))
+                    .find_map(|i| (i.key == *key).then_some(i.audience))
                     .ok_or(coven_database::DbError::DamagedDatabase)?;
                 PendingReason::KeyUnavailable {
                     audience,

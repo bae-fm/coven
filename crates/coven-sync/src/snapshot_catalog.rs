@@ -4,11 +4,11 @@ use super::{io, StoreLogSync};
 use crate::write_object::{checked, damaged};
 use crate::{snapshot_data::SavedSnapshot, DamagedObject, SyncError};
 use coven_crypto::{MemberId, ObjectHasher, Signature};
-use coven_database::{EntryOutcome, StoreLog};
+use coven_database::StoreLog;
 use coven_format::sealed_snapshot::{SnapshotObjectLayout, SnapshotObjectPrefix};
 use coven_merge::Audience;
 use coven_storage::{ObjectPath, ObjectPrefix, StoredObject};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 pub(super) struct Candidate {
@@ -35,12 +35,9 @@ impl StoreLogSync {
         damages: &mut Vec<DamagedObject>,
     ) -> Result<Catalog, SyncError> {
         let storage = self.storage.as_deref().ok_or(SyncError::NoStorage)?;
-        let keys: BTreeSet<_> = log
-            .entries
-            .iter()
-            .filter(|entry| log.replay.entries[&entry.entry.position] == EntryOutcome::Kept)
-            .flat_map(|entry| crate::store_log_keys::introduced(&entry.entry.change))
-            .collect();
+        // A snapshot's authorized key stays eligible when replay drops its
+        // introduction; an unauthorized or conflicting one never is (§11).
+        let keys = crate::key_introductions::needed(log);
         let objects = storage
             .list(&ObjectPrefix::audience_snapshots(
                 self.directory.id(),
@@ -80,7 +77,7 @@ impl StoreLogSync {
             ) {
                 super::include_positions(&mut positions, &prefix.writes.0);
             }
-            if keys.contains(&(audience.clone(), prefix.key)) {
+            if keys.contains_key(&(audience.clone(), prefix.key)) {
                 candidates.push(candidate);
             }
         }

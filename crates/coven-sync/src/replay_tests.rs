@@ -46,6 +46,23 @@ pub(crate) fn replay_entry(
     super::replay_entry(log, entry, &publications)
 }
 
+/// The applied log of a history in its recorded order, with its checks.
+pub(crate) fn checked_log(entries: &[StoreLogEntry]) -> StoreLog {
+    let mut log = StoreLog::default();
+    for entry in entries {
+        let (checked, replay) = replay_entry(&log, entry.clone());
+        log.entries.push(checked);
+        log.entries.sort_by_key(|applied| applied.entry.timestamp);
+        log.replay = replay;
+    }
+    log
+}
+
+/// The newest acceptable introduction of an audience after the whole history.
+pub(crate) fn newest_key(h: &History, audience: Audience) -> Option<KeyId> {
+    crate::key_introductions::newest(&checked_log(&h.entries), &audience)
+}
+
 pub(crate) fn keys(n: u8) -> MemberPublicKeys {
     let mut bytes = b"CVMK\x01".to_vec();
     bytes.extend([n + 1; 64]);
@@ -250,7 +267,6 @@ fn creation_registers_its_author_and_named_device() {
         assert_eq!(r.state.members[&member(0)].sealing, keys(0).sealing);
         assert_eq!(r.state.devices[&DeviceId(0)].member, member(0));
         assert_eq!(r.state.devices[&DeviceId(0)].name, "Ana’s phone");
-        assert_eq!(r.state.store.as_ref().unwrap().key, key(1));
         assert!(r.state.schema.is_empty());
     });
 }
@@ -333,7 +349,6 @@ fn independent_store_removal_keeps_carols_addition_and_her_device() {
         assert!(!r.state.members[&member(2)].removed);
         assert!(r.state.members[&member(3)].removed);
         assert!(h.drops(r).is_empty());
-        assert_eq!(r.state.store.as_ref().unwrap().key, key(1));
     });
     h.push(2, 2, &[0, 1, 2, 3, 4], device(2));
     h.every_order(|r| {
@@ -374,7 +389,6 @@ fn three_admins_removing_one_another_keep_two_removals_and_one_admin() {
             r.entries[&h.entries[7].position],
             EntryOutcome::Dropped(DropReason::NoAdminLeft)
         );
-        assert_eq!(r.state.store.as_ref().unwrap().key, key(1));
         assert_eq!(r.state.members[&member(1)].sealing, keys(1).sealing);
     });
 }
@@ -568,7 +582,6 @@ fn circle_removal_and_different_member_addition_both_apply() {
             r.state.circles[&circle(0)].members,
             [member(1), member(2)].into()
         );
-        assert_eq!(r.state.circles[&circle(0)].key, key(10));
         assert!(h.drops(r).is_empty());
     });
 }
@@ -640,7 +653,6 @@ fn removing_carol_preserves_shared_keys_and_deletes_her_private_circle() {
         assert!(r.state.members[&member(2)].removed);
         assert!(r.state.devices[&DeviceId(2)].removed);
         assert_eq!(r.state.circles[&circle(0)].members, [member(1)].into());
-        assert_eq!(r.state.circles[&circle(0)].key, key(10));
         assert!(r.state.circle_deletions.contains_key(&circle(1)));
         assert!(h.drops(r).is_empty());
     });
@@ -702,7 +714,6 @@ fn circle_and_store_removals_do_not_conflict_over_a_key() {
     h.every_order(|r| {
         assert!(r.state.members[&member(0)].removed);
         assert!(r.state.circle_deletions.contains_key(&circle(0)));
-        assert_eq!(r.state.circles[&circle(0)].key, key(10));
         assert!(h.drops(r).is_empty());
     });
 }
@@ -811,8 +822,6 @@ fn concurrent_store_removals_preserve_keys() {
         );
     }
     h.every_order(|r| {
-        assert_eq!(r.state.store.as_ref().unwrap().key, key(1));
-        assert_eq!(r.state.circles[&circle(0)].key, key(10));
         assert_eq!(r.state.circles[&circle(0)].members, [member(0)].into());
         for m in [3, 4] {
             assert!(r.state.members[&member(m)].removed);
@@ -826,8 +835,6 @@ fn concurrent_store_removals_preserve_keys() {
     // Repeating an effective removal keeps its entry without changing membership.
     h.all(1, 1, h.entries[13].change.clone());
     h.every_order(|r| {
-        assert_eq!(r.state.store.as_ref().unwrap().key, key(1));
-        assert_eq!(r.state.circles[&circle(0)].key, key(10));
         assert_eq!(r.state.circles[&circle(0)].members, [member(0)].into());
         assert!(r.state.members[&member(3)].removed);
         assert!(r.state.members[&member(4)].removed);

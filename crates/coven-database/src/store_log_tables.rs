@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use coven_crypto::{MemberId, SealingPublicKey};
 use coven_format::{store_log::MemberRole, value::EntryId, Object};
-use coven_foundation::id_source::{CircleId, DeviceId, KeyId};
+use coven_foundation::id_source::{CircleId, DeviceId};
 use coven_merge::Audience;
 use rusqlite::{params, types::Type, Row};
 
@@ -127,7 +127,7 @@ pub(crate) fn read(database: &DatabaseConnection) -> Result<StoreLog, DbError> {
         log.entries.push(entry);
     }
     log.entries.sort_by_key(|entry| entry.entry.timestamp);
-    log.replay.state.store = log.created_store()?;
+    log.replay.state.store = log.created_store();
     let state = &mut log.replay.state;
     state.members = database
         .query(
@@ -171,12 +171,11 @@ pub(crate) fn read(database: &DatabaseConnection) -> Result<StoreLog, DbError> {
         .into_iter()
         .collect();
     state.circles = database
-        .query("SELECT circle,name,key FROM _coven_circles", [], |row| {
+        .query("SELECT circle,name FROM _coven_circles", [], |row| {
             Ok((
                 circle(row.get(0)?)?,
                 StoreCircle {
                     name: row.get(1)?,
-                    key: KeyId(uuid::Uuid::from_bytes(row.get(2)?)),
                     members: BTreeSet::new(),
                 },
             ))
@@ -284,12 +283,8 @@ pub(crate) fn replace(
     }
     for (id, circle) in &state.circles {
         database.internal_execute(
-            "INSERT INTO _coven_circles(circle,name,key) VALUES(?1,?2,?3)",
-            params![
-                id.to_string(),
-                circle.name,
-                circle.key.0.as_bytes().as_slice()
-            ],
+            "INSERT INTO _coven_circles(circle,name) VALUES(?1,?2)",
+            params![id.to_string(), circle.name],
         )?;
         for member in &circle.members {
             database.internal_execute(

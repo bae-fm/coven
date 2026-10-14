@@ -316,7 +316,8 @@ impl StoreLogSync {
                 };
                 ring.as_mut()
                     .ok_or(SyncError::KeyUnavailable(
-                        state.store.as_ref().expect("member has a store").key,
+                        crate::key_introductions::newest(&local.log, &coven_merge::Audience::Store)
+                            .expect("member has a store"),
                     ))?
                     .insert_circle_key(material)?;
                 change

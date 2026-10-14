@@ -205,15 +205,17 @@ fn parts(
     member: &MemberId,
 ) -> Result<Vec<bool>, SyncError> {
     let mut selected = Vec::new();
+    let needed = crate::key_introductions::needed(log);
     for (part, key) in opened.header.parts.iter().zip(&opened.prefix.part_keys) {
-        let introduction = log.entries.iter().find(|e| {
-            crate::store_log_keys::introduced(&e.entry.change)
-                == Some((part.audience.clone(), *key))
-        });
+        // Only an authorized received introduction names a readable key (§11).
+        let introduction = crate::key_introductions::introductions(log)
+            .into_iter()
+            .find(|i| i.audience == part.audience && i.key == *key)
+            .and_then(|i| log.entries.iter().find(|e| e.entry.position == i.entry));
         let Some(introduction) = introduction else {
             return Err(SyncError::KeyUnavailable(*key));
         };
-        let holds = crate::store_log_keys::holds(Some(ring), &part.audience, *key);
+        let holds = crate::key_introductions::accepted(Some(ring), &needed, &part.audience, *key);
         // Current audience members wait for historical keys before applying a part.
         if !holds
             && key_audience_contains(log, replays, &introduction.entry, &part.audience, member)

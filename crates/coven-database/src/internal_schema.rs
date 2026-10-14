@@ -168,7 +168,7 @@ macro_rules! coven_tables {
                 beaten_device BLOB CHECK(length(beaten_device)=8),
                 beaten_number BLOB CHECK(length(beaten_number)=8),
                 target BLOB,
-                CHECK((author_view=x'04')=(outcome='late')),
+                CHECK((author_view IN (x'0400',x'0401'))=(outcome='late')),
                 CHECK((outcome='target-member' AND target IS NOT NULL AND length(target)=32)
                    OR (outcome='target-device' AND target IS NOT NULL AND length(target)=8)
                    OR (outcome='target-circle' AND target IS NOT NULL AND length(target)=16)
@@ -238,8 +238,7 @@ macro_rules! coven_tables {
         $visit!(_coven_circles, "
             CREATE TABLE _coven_circles (
                 circle TEXT PRIMARY KEY NOT NULL,
-                name TEXT NOT NULL,
-                key BLOB NOT NULL CHECK(length(key)=16)
+                name TEXT NOT NULL
             ) STRICT, WITHOUT ROWID;
         ");
         $visit!(_coven_circle_deletions, "

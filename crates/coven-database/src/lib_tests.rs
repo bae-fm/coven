@@ -85,9 +85,9 @@ impl TestStore {
                     (device.0.to_be_bytes(), keys.signing.to_bytes()),
                 )?;
                 db.internal_execute(
-                    "INSERT INTO _coven_circles(circle,name,key)
-                     VALUES(?1,'Circle',?2) ON CONFLICT(circle) DO NOTHING",
-                    (circle.to_string(), circle.0.as_bytes()),
+                    "INSERT INTO _coven_circles(circle,name)
+                     VALUES(?1,'Circle') ON CONFLICT(circle) DO NOTHING",
+                    [circle.to_string()],
                 )?;
                 db.internal_execute(
                     "INSERT INTO _coven_circle_members(circle,member)

@@ -146,7 +146,8 @@ async fn owner_removal_preserves_keys_and_revokes_the_account() {
     }
     b.sync().await;
     c.sync().await;
-    let old = a.log().await.replay.state;
+    let old_store = a.newest(Audience::Store).await;
+    let old_circle = a.newest(Audience::Circle(circle)).await;
     let id = begin(&mut a, Command::RemoveMember(b.member.member_id())).await;
     assert!(matches!(
         finish(&mut a, id).await,
@@ -154,13 +155,14 @@ async fn owner_removal_preserves_keys_and_revokes_the_account() {
     ));
     c.sync().await;
     let state = a.log().await.replay.state;
-    assert_eq!(state.store.as_ref().unwrap().key, old.store.unwrap().key);
-    assert_eq!(state.circles[&circle].key, old.circles[&circle].key);
+    // A removal introduces no key; rotation is the only replacement (§11).
+    assert_eq!(a.newest(Audience::Store).await, old_store);
+    assert_eq!(a.newest(Audience::Circle(circle)).await, old_circle);
     assert!(state.members[&b.member.member_id()].removed);
     assert!(state.devices[&b.device().await].removed);
     let ring = c.custody.read().unwrap().unwrap();
-    assert!(ring.store_key(state.store.as_ref().unwrap().key).is_ok());
-    assert!(ring.circle_key(circle, state.circles[&circle].key).is_ok());
+    assert!(ring.store_key(old_store).is_ok());
+    assert!(ring.circle_key(circle, old_circle).is_ok());
     let log = a.log().await;
     let removal = &log.entries.last().unwrap().entry.change;
     assert!(keys::introduced(removal).is_none());
@@ -189,7 +191,7 @@ async fn outside_admin_removes_a_member_without_learning_the_circle_key() {
     let id = begin(&mut a, Command::RemoveMember(b.member.member_id())).await;
     finish(&mut a, id).await;
     c.sync().await;
-    let key = a.log().await.replay.state.circles[&gifts].key;
+    let key = a.newest(Audience::Circle(gifts)).await;
     assert!(matches!(
         a.custody.read().unwrap().unwrap().circle_key(gifts, key),
         Err(coven_crypto::MaterialError::UnknownCircleKey { .. })
@@ -351,7 +353,10 @@ async fn independent_removals_keep_their_original_attempts() {
     assert!(!removal.had_read.0.contains(&concurrent));
     assert!(log.replay.state.members[&b.member.member_id()].removed);
     assert!(log.replay.state.members[&c.member.member_id()].removed);
-    assert_eq!(log.replay.state.store.unwrap().key, key(1));
+    assert_eq!(
+        crate::key_introductions::newest(&log, &Audience::Store),
+        Some(key(1))
+    );
     assert!(attempted.sealing.keys.is_empty());
     assert!(keys::introduced(&removal.change).is_none());
 }
@@ -371,17 +376,17 @@ async fn circle_membership_rotates_and_shares_history() {
     .await;
     finish(&mut a, add).await;
     b.sync().await;
-    let old_key = a.log().await.replay.state.circles[&circle].key;
+    let old_key = a.newest(Audience::Circle(circle)).await;
     let remove = begin(
         &mut a,
         Command::RemoveCircleMember(circle, b.member.member_id()),
     )
     .await;
     finish(&mut a, remove).await;
-    assert_eq!(a.log().await.replay.state.circles[&circle].key, old_key);
+    assert_eq!(a.newest(Audience::Circle(circle)).await, old_key);
     a.sync.test_rotate(Audience::Circle(circle), key(20)).await;
     b.sync().await;
-    let new_key = a.log().await.replay.state.circles[&circle].key;
+    let new_key = a.newest(Audience::Circle(circle)).await;
     assert_ne!(old_key, new_key);
     assert!(matches!(
         b.custody
@@ -578,6 +583,7 @@ async fn removing_a_member_cuts_off_every_device_of_their_account() {
     let operation = begin(&mut a, Command::RemoveMember(b.member.member_id())).await;
     finish(&mut a, operation).await;
     let state = a.log().await.replay.state;
+    let store_key = a.newest(Audience::Store).await;
     assert!(state.devices[&phone_id].removed);
     assert!(state.devices[&b.device().await].removed);
     assert!(
@@ -588,7 +594,7 @@ async fn removing_a_member_cuts_off_every_device_of_their_account() {
         .read()
         .unwrap()
         .unwrap()
-        .store_key(state.store.unwrap().key)
+        .store_key(store_key)
         .is_ok());
 }
 
@@ -603,7 +609,7 @@ async fn plain_device_removal_preserves_member_keys_and_returns_provider_sign_ou
             .await,
         Err(SyncError::Rejected(coven_database::DropReason::NotAllowed))
     ));
-    let previous_key = a.log().await.replay.state.store.unwrap().key;
+    let previous_key = a.newest(Audience::Store).await;
     assert!(matches!(
         a.sync
             .begin_operation_call(Command::RemoveDevice(b_id))
@@ -616,7 +622,7 @@ async fn plain_device_removal_preserves_member_keys_and_returns_provider_sign_ou
         ))
     ));
     let state = a.log().await.replay.state;
-    assert_eq!(state.store.unwrap().key, previous_key);
+    assert_eq!(a.newest(Audience::Store).await, previous_key);
     assert!(!state.members[&b.member.member_id()].removed);
     assert!(state.devices[&b_id].removed);
     assert!(a.db.operations().await.unwrap().is_empty());

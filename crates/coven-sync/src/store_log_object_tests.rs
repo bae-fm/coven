@@ -2,15 +2,7 @@ use super::*;
 use coven_database::{LogObject, LogRefusal};
 use coven_format::pending::RefusalCode;
 
-fn checked_log(entries: &[StoreLogEntry]) -> StoreLog {
-    let mut log = StoreLog::default();
-    for entry in entries {
-        let (checked, replay) = crate::replay::tests::replay_entry(&log, entry.clone());
-        log.entries.push(checked);
-        log.replay = replay;
-    }
-    log
-}
+use crate::replay::tests::checked_log;
 
 #[test]
 fn entry_sealing_reproduces_the_fixture_and_binds_plaintext_and_prefix() {

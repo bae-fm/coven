@@ -1,7 +1,24 @@
 import StorelogJson
+import CovenStorelog.CurrentKeys
 
 /-! Execute the checked store-log histories through the shared replay model. -/
 open Lean CovenStorelog StorelogJson
+
+private def hashJson (h : CurrentReplay.KeyHash) : Json :=
+  toJson (h.toList.map (·.toNat))
+
+/-- C12 `receivedIntroductions` and `hashFor` for one received set. -/
+private def introductionsJson (input : StorelogJson.Input) (subset : List Nat) : Json :=
+  let is := CurrentKeys.receivedIntroductions input.history input.window input.bound
+    (entrySet subset)
+  let identities := (is.map (·.identity)).eraseDups
+  Json.mkObj [
+    ("introductions", toJson (is.map fun i => Json.arr #[toJson i.entry,
+      toJson (audienceNumber i.audience), toJson i.key.id, hashJson i.key.keyHash])),
+    ("hashes", toJson (identities.map fun k => Json.arr #[toJson (audienceNumber k.audience),
+      toJson k.id, match CurrentKeys.hashFor is k with
+        | some h => hashJson h
+        | none => Json.null]))]
 
 private def run (j : Json) : Except String Json := do
   let input ← StorelogJson.read j
@@ -10,6 +27,10 @@ private def run (j : Json) : Except String Json := do
   if (← j.getObj?).contains "checks" then
     let checks ← j.getObjValAs? (Array Nat) "checks"
     return toJson (checks.map fun T => Horizon.recovered H.membership window input.bound T)
+  if (← j.getObj?).contains "introductions" then
+    let _ ← StorelogJson.checkedViews input
+    let received ← StorelogJson.received j input
+    return toJson (received.map (introductionsJson input))
   let views ← StorelogJson.checkedViews input
   let received ← StorelogJson.received j input
   let circles := sorted (((List.range input.bound).filterMap fun i => match (H.log i).action with

@@ -10,6 +10,7 @@ use coven_format::{
     sealed_single::SingleChunkObject,
     store_log::{MemberPublicKeys, StoreChange, StoreLogEntry},
 };
+use coven_merge::Audience;
 use coven_storage::{ObjectPath, Storage};
 use std::sync::Arc;
 
@@ -27,19 +28,16 @@ impl StoreLogSync {
                 return Err(SyncError::Damaged(damage));
             }
             let local = self.database.local_store_log().await?;
-            let key = local
-                .log
-                .replay
-                .state
-                .store
-                .as_ref()
-                .ok_or(coven_storage::StorageFailure::NotFound)?
-                .key;
-            let keys = self
+            if local.log.replay.state.store.is_none() {
+                return Err(coven_storage::StorageFailure::NotFound.into());
+            }
+            let key = crate::key_introductions::newest(&local.log, &Audience::Store)
+                .ok_or(coven_storage::StorageFailure::NotFound)?;
+            let ring = self
                 .store_keys
                 .read()?
                 .ok_or(SyncError::KeyUnavailable(key))?;
-            keys.store_key(key)?;
+            crate::write_seal::current_store(&local.log, &ring)?;
             Ok(())
         }
         .await;
@@ -167,9 +165,12 @@ impl StoreLogSync {
             ring = self.catch_up_setup(storage.clone(), ring).await?;
             local = self.database.local_store_log().await?;
         }
-        if let Some(store) = &local.log.replay.state.store {
-            let opened =
-                keys::read_store_key(storage.as_ref(), store_id, store.key, &member).await?;
+        if local.log.replay.state.store.is_some() {
+            let needed = crate::key_introductions::needed(&local.log);
+            let key = crate::key_introductions::newest(&local.log, &Audience::Store)
+                .ok_or(coven_database::DbError::DamagedDatabase)?;
+            let opened = keys::read_store_key(storage.as_ref(), store_id, key, &member).await?;
+            opened.check_hash(&needed[&(Audience::Store, key)])?;
             ring.insert_store_key(opened)?;
             let current = local
                 .log

@@ -291,16 +291,23 @@ pub(super) async fn fingerprint(
     keys: &dyn StoreKeyCustody,
 ) -> Vec<(Audience, coven_crypto::Fingerprint)> {
     let ring = keys.unlock().unwrap().unwrap();
-    let key = db
-        .local_store_log()
-        .await
-        .unwrap()
-        .log
-        .replay
-        .state
-        .store
-        .unwrap()
-        .key;
+    // The newest authorized store-key introduction this fixture's log received.
+    let log = db.local_store_log().await.unwrap().log;
+    let key = log
+        .entries
+        .iter()
+        .rev()
+        .filter(|applied| applied.check.authorized())
+        .find_map(|applied| match &applied.entry.change {
+            coven_format::store_log::StoreChange::CreateStore { key, .. }
+            | coven_format::store_log::StoreChange::RotateKey {
+                audience: Audience::Store,
+                key,
+                ..
+            } => Some(*key),
+            _ => None,
+        })
+        .unwrap();
     db.sync_state(vec![(
         Audience::Store,
         ring.store_key(key).unwrap().derive().fingerprint_hasher(),

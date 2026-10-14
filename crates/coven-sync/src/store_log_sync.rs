@@ -474,8 +474,9 @@ impl StoreLogSync {
         ring: &mut Option<StoreKeyring>,
         damages: &mut Vec<DamagedObject>,
     ) -> Result<(), SyncError> {
-        for (audience, key) in keys::needed(log) {
-            self.acquire(&audience, key, member, ring, damages).await?;
+        for ((audience, key), hash) in crate::key_introductions::needed(log) {
+            self.acquire(&audience, key, Some(&hash), member, ring, damages)
+                .await?;
         }
         Ok(())
     }
@@ -489,14 +490,14 @@ impl StoreLogSync {
         // Reserved copies precede all new sharing decisions. An observed duplicate
         // or removed recipient must never erase a writer's already reserved number.
         object::upload_keys(self.directory.id(), self.storage.as_deref(), &self.database).await?;
-        let needs = keys::needed(log);
+        let needs = crate::key_introductions::needed(log);
         if needs.is_empty() {
             return Ok(());
         }
         let storage = self.storage.as_deref().ok_or(SyncError::NoStorage)?;
         let copies = keys::read_copies(storage, self.directory.id(), damages).await?;
-        for (audience, key) in needs {
-            if !keys::holds(ring.as_ref(), &audience, key) {
+        for (audience, key) in needs.keys().cloned() {
+            if !crate::key_introductions::accepted(ring.as_ref(), &needs, &audience, key) {
                 tracing::debug!(?audience, ?key, "historical key has not arrived");
                 continue;
             }
@@ -557,6 +558,7 @@ impl StoreLogSync {
         &self,
         audience: &Audience,
         key: KeyId,
+        hash: Option<&[u8; 32]>,
         member: &MemberKeys,
         ring: &mut Option<StoreKeyring>,
         damages: &mut Vec<DamagedObject>,
@@ -584,6 +586,14 @@ impl StoreLogSync {
                         if opened.id() != key {
                             return Err(Refusal::WrongIdentity { cause: None });
                         }
+                        // The authorized introduction's commitment decides acceptance (§11).
+                        if let Some(hash) = hash {
+                            opened
+                                .check_hash(hash)
+                                .map_err(|e| Refusal::WrongIdentity {
+                                    cause: Some(Arc::new(e)),
+                                })?;
+                        }
                         match ring {
                             Some(ring) => {
                                 ring.insert_store_key(opened)
@@ -603,6 +613,13 @@ impl StoreLogSync {
                         .map(|opened| {
                             if opened.id() != key || opened.circle() != *circle {
                                 return Err(Refusal::WrongIdentity { cause: None });
+                            }
+                            if let Some(hash) = hash {
+                                opened
+                                    .check_hash(hash)
+                                    .map_err(|e| Refusal::WrongIdentity {
+                                        cause: Some(Arc::new(e)),
+                                    })?;
                             }
                             // A circle introduction follows an opened store-log entry.
                             ring.as_mut()

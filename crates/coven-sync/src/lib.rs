@@ -18,6 +18,7 @@ pub use replay::{replay, replay_entry};
 mod tests;
 
 mod error;
+mod key_introductions;
 mod object_author;
 mod object_range;
 mod posted_positions;

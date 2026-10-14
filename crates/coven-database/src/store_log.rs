@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use coven_crypto::{MemberId, SealingPublicKey};
 use coven_format::store_log::{MemberRole, SnapshotId};
 use coven_format::{value::EntryId, Object};
-use coven_foundation::id_source::{CircleId, DeviceId, KeyId, StoreId};
+use coven_foundation::id_source::{CircleId, DeviceId, StoreId};
 use coven_merge::Audience;
 
 use crate::{sqlite::DatabaseConnection, write_schema::WriteSchema, DbError, ReplayEntry};
@@ -37,34 +37,19 @@ pub struct StoreLog {
 impl StoreLog {
     /// Read identity from the first kept creation, using the persisted marks.
     /// The id and name have no separately persisted replay copy.
-    pub(crate) fn created_store(&self) -> Result<Option<StoreIdentity>, DbError> {
+    pub(crate) fn created_store(&self) -> Option<StoreIdentity> {
         use coven_format::store_log::StoreChange;
-        let mut identity: Option<StoreIdentity> = None;
-        for applied in &self.entries {
-            if self.replay.entries.get(&applied.entry.position) != Some(&EntryOutcome::Kept) {
-                continue;
-            }
-            match &applied.entry.change {
-                StoreChange::CreateStore {
-                    store, name, key, ..
-                } if identity.is_none() => {
-                    identity = Some(StoreIdentity {
-                        id: *store,
-                        name: name.clone(),
-                        key: *key,
-                    });
-                }
-                StoreChange::RotateKey {
-                    audience: Audience::Store,
-                    key,
-                    ..
-                } => {
-                    identity.as_mut().ok_or(DbError::DamagedDatabase)?.key = *key;
-                }
-                _ => {}
-            }
-        }
-        Ok(identity)
+        self.entries.iter().find_map(|applied| {
+            let StoreChange::CreateStore { store, name, .. } = &applied.entry.change else {
+                return None;
+            };
+            (self.replay.entries.get(&applied.entry.position) == Some(&EntryOutcome::Kept)).then(
+                || StoreIdentity {
+                    id: *store,
+                    name: name.clone(),
+                },
+            )
+        })
     }
 
     /// Finality is a strict comparison with the one persisted horizon (§9).
@@ -143,15 +128,13 @@ pub struct StoreLogState {
     pub resets: BTreeMap<Audience, SnapshotId>,
 }
 
-/// The created store and the current key selected in replay order (§11).
+/// The created store, as its kept creation entry names it (§9).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StoreIdentity {
     /// The store's id.
     pub id: StoreId,
     /// Its name.
     pub name: String,
-    /// The current key; an entry already in place brings no key in (§11).
-    pub key: KeyId,
 }
 
 impl StoreIdentity {
@@ -205,13 +188,12 @@ pub struct StoreDevice {
     pub removed: bool,
 }
 
-/// A circle and its current membership; deleted circles retain their name and key.
+/// A circle and its current membership; deleted circles retain their name.
+/// Its keys come from received introductions, not replay state (§11).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StoreCircle {
     /// The last kept name.
     pub name: String,
-    /// The current key selected in replay order (§11).
-    pub key: KeyId,
     /// Current members; empty after deletion.
     pub members: BTreeSet<MemberId>,
 }
@@ -332,7 +314,7 @@ pub(crate) fn apply<P: crate::PendingValue>(
                  VALUES(?1,?2,?3,?4,?5,?6,?7) ON CONFLICT(device,number) DO NOTHING",
                 (id.device.0.to_be_bytes().as_slice(), id.number.to_be_bytes().as_slice(),
                  bytes, author_view, stored_at,
-                 if incoming.check == crate::StoreLogCheck::LandedTooLate { "late" } else { "kept" }, timestamp),
+                 if incoming.check.landed_too_late() { "late" } else { "kept" }, timestamp),
             )?;
             if let Some(boundary) = crate::Boundary::from_entry(&incoming.entry) {
                 boundary.record(database)?;

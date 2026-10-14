@@ -38,16 +38,16 @@ fn different_member_circle_removals_both_apply_in_shared_or_separate_audiences()
                 [member(0), member(2)].into()
             };
             assert_eq!(r.state.circles[&circle(0)].members, remaining);
-            assert_eq!(r.state.circles[&circle(0)].key, key(10));
             if second_circle == 1 {
                 assert_eq!(
                     r.state.circles[&circle(1)].members,
                     [member(0), member(1)].into()
                 );
-                assert_eq!(r.state.circles[&circle(1)].key, key(11));
             }
             assert!(h.drops(r).is_empty());
         });
+        assert_eq!(newest_key(&h, Audience::Circle(circle(0))), Some(key(10)));
+        assert_eq!(newest_key(&h, Audience::Circle(circle(1))), Some(key(11)));
     }
 }
 
@@ -59,9 +59,9 @@ fn store_removal_and_circle_removal_have_no_key_conflict() {
     h.every_order(|r| {
         assert!(r.state.members[&member(2)].removed);
         assert_eq!(r.state.circles[&circle(0)].members, [member(0)].into());
-        assert_eq!(r.state.circles[&circle(0)].key, key(10));
         assert!(h.drops(r).is_empty());
     });
+    assert_eq!(newest_key(&h, Audience::Circle(circle(0))), Some(key(10)));
 }
 
 #[test]
@@ -76,12 +76,10 @@ fn already_in_place_removals_bring_no_key_in() {
             for entry in &h.entries[11..] {
                 assert_eq!(r.entries[&entry.position], EntryOutcome::Kept);
             }
-            if store {
-                assert_eq!(r.state.circles[&circle(1)].key, key(11));
-            }
-            assert_eq!(r.state.store.as_ref().unwrap().key, key(1));
-            assert_eq!(r.state.circles[&circle(0)].key, key(10));
         });
+        assert_eq!(newest_key(&h, Audience::Store), Some(key(1)));
+        assert_eq!(newest_key(&h, Audience::Circle(circle(0))), Some(key(10)));
+        assert_eq!(newest_key(&h, Audience::Circle(circle(1))), Some(key(11)));
     }
 }
 

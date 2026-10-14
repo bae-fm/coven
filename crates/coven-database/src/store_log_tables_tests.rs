@@ -267,7 +267,7 @@ mod identity {
     }
 
     #[tokio::test]
-    async fn checked_creation_supplies_identity_after_reopening() {
+    async fn checked_creation_supplies_identity_after_a_rotation_and_reopening() {
         let directory = TestStore::new();
         let db = directory.builder(vec![], vec![]).open().await.unwrap();
         assert!(db.store_log().await.unwrap().replay.state.store.is_none());
@@ -287,7 +287,6 @@ mod identity {
             key_hash: [99; 32],
         };
         replay.entries.insert(rotation.position, EntryOutcome::Kept);
-        replay.state.store.as_mut().unwrap().key = key;
         db.apply_store_log::<Record>(log_tests::checked(rotation), replay.clone())
             .await
             .unwrap();
@@ -298,7 +297,6 @@ mod identity {
         let saved = saved.replay.state.store.unwrap();
         assert_eq!(saved.id, identity.id);
         assert_eq!(saved.name, identity.name);
-        assert_eq!(saved.key, key);
     }
 
     #[tokio::test]

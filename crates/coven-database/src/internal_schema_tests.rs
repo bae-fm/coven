@@ -268,7 +268,7 @@ mod query_plans {
                   CASE WHEN i%4=0 THEN counter(1) END FROM fixture;
          INSERT INTO _coven_members SELECT key,key,x'00','member',i%2 FROM fixture;
          INSERT INTO _coven_devices SELECT n,key,'device ' || i,i%2 FROM fixture;
-         INSERT INTO _coven_circles SELECT 'circle_' || i,'circle ' || i,zeroblob(16) FROM fixture;
+         INSERT INTO _coven_circles SELECT 'circle_' || i,'circle ' || i FROM fixture;
          INSERT INTO _coven_circle_members SELECT 'circle_' || i,key FROM fixture;
          INSERT INTO _coven_circle_deletions SELECT 'circle_' || i,device,n FROM fixture;
          INSERT INTO _coven_data_inputs SELECT i,audience,'snapshot',device,n,1,x'00' FROM fixture;
@@ -454,7 +454,7 @@ mod query_plans {
             Some("store_log() returns the complete member map"),
         ("store_log_tables.rs", "SELECT device,member,name,removed FROM _coven_devices", "_coven_devices") =>
             Some("store_log() returns the complete device map"),
-        ("store_log_tables.rs", "SELECT circle,name,key FROM _coven_circles", "_coven_circles") =>
+        ("store_log_tables.rs", "SELECT circle,name FROM _coven_circles", "_coven_circles") =>
             Some("store_log() returns the complete circle map"),
         ("store_log_tables.rs", "SELECT circle,member FROM _coven_circle_members", "_coven_circle_members") =>
             Some("store_log() returns every circle membership"),

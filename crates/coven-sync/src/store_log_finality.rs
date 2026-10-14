@@ -28,18 +28,13 @@ impl StoreLogSync {
     async fn observe_clock(&self, local: &LocalStoreLog) -> Result<(), SyncError> {
         let member = self.operation_member()?;
         crate::write_seal::check_member(&local.log, &member, local.device)?;
-        let key_id = local
-            .log
-            .replay
-            .state
-            .store
-            .as_ref()
-            .ok_or(SyncError::NoStorage)?
-            .key;
+        let newest = crate::key_introductions::newest(&local.log, &coven_merge::Audience::Store)
+            .ok_or(SyncError::NoStorage)?;
         let ring = self
             .store_keys
             .read()?
-            .ok_or(SyncError::KeyUnavailable(key_id))?;
+            .ok_or(SyncError::KeyUnavailable(newest))?;
+        let key_id = crate::write_seal::current_store(&local.log, &ring)?;
         let key = ring.store_key(key_id)?;
         let path = ObjectPath::clock(local.store, local.device);
         let prefix = coven_format::sealed_single::SingleChunkPrefix::ClockObservation(key_id);

@@ -738,8 +738,11 @@ identical attempted retries are outside this first-attempt selection model.
 Copies made after the listing remain §11's accepted residual window. All
 named current-policy, key and example results are audited in `Axioms.lean`;
 Rust correspondence is checked by the current-policy differential
-described in C9; this replay adapter does not test key selection
-or cryptographic operations.
+described in C9. The runner's introductions mode also compares Rust's
+received authorized introductions and agreed commitments with
+`receivedIntroductions` and `hashFor` for every received prefix, including
+late, beaten, unauthorized and conflicting introductions. Key selection and
+cryptographic operations are not compared.
 
 ### C13 Stable members and replaceable keys — checked proposal
 

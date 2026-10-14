@@ -290,23 +290,14 @@ pub(crate) fn validate_effect(
 pub(crate) fn apply_effect(next: &mut StoreLogState, view: &StoreLogCheck, entry: &StoreLogEntry) {
     use StoreChange::*;
     match &entry.change {
-        RotateKey { audience, key, .. } => match audience {
-            Audience::Store => {
-                next.store.as_mut().expect("rotation follows creation").key = *key;
-            }
-            Audience::Circle(id) => {
-                // Rotation has no membership effect, including after concurrent deletion.
-                if let Some(circle) = next.circles.get_mut(id) {
-                    circle.key = *key;
-                }
-            }
-        },
+        // A rotation's key comes from its received introduction (§11); it has
+        // no membership effect, including after concurrent deletion.
+        RotateKey { .. } => {}
         CreateStore {
             store,
             name,
             admin,
             access,
-            key,
             device_name,
             ..
         } => {
@@ -314,7 +305,6 @@ pub(crate) fn apply_effect(next: &mut StoreLogState, view: &StoreLogCheck, entry
             next.store = Some(StoreIdentity {
                 id: *store,
                 name: name.clone(),
-                key: *key,
             });
             next.members.insert(
                 entry.author.clone(),
@@ -385,17 +375,13 @@ pub(crate) fn apply_effect(next: &mut StoreLogState, view: &StoreLogCheck, entry
             next.devices.get_mut(id).expect("checked device").removed = true;
         }
         CreateCircle {
-            circle: id,
-            name,
-            key,
-            ..
+            circle: id, name, ..
         } => {
             next.circle_deletions.remove(id);
             next.circles.insert(
                 *id,
                 StoreCircle {
                     name: name.clone(),
-                    key: *key,
                     members: [entry.author.clone()].into(),
                 },
             );

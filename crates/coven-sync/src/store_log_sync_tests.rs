@@ -34,7 +34,7 @@ pub(crate) struct Device {
 pub(crate) fn key(n: u128) -> KeyId {
     KeyId(Uuid::from_u128(n))
 }
-fn circle(n: u128) -> CircleId {
+pub(crate) fn circle(n: u128) -> CircleId {
     CircleId(Uuid::from_u128(n))
 }
 pub(crate) fn store(n: u128) -> StoreId {
@@ -51,10 +51,10 @@ pub(crate) fn public(member: &MemberKeys) -> MemberPublicKeys {
         sealing: member.sealing_public_key(),
     }
 }
-fn storage() -> Arc<MemoryStorage> {
+pub(crate) fn storage() -> Arc<MemoryStorage> {
     Arc::new(MemoryStorage::builder().build().unwrap())
 }
-async fn find_copy(
+pub(crate) async fn find_copy(
     storage: &dyn Storage,
     audience: Audience,
     key: KeyId,
@@ -155,6 +155,11 @@ impl Device {
             object::path(self.directory.id(), EntryId { device, number }),
             false,
         ));
+    }
+
+    /// Undo [`Self::interrupt_entry`], reconnecting to the shared storage.
+    pub(crate) fn restore_storage(&mut self) {
+        self.sync.storage = Some(self.storage.clone());
     }
 
     pub(crate) async fn new(
@@ -299,7 +304,7 @@ impl Device {
             .await
             .unwrap()
     }
-    async fn add(&mut self, other: &MemberKeys, role: MemberRole) -> EntryId {
+    pub(crate) async fn add(&mut self, other: &MemberKeys, role: MemberRole) -> EntryId {
         self.sync
             .make_and_upload_entry(StoreChange::AddMember {
                 access: coven_format::MemberAccess::S3AccessKey {
@@ -316,6 +321,10 @@ impl Device {
     }
     pub(crate) async fn log(&self) -> StoreLog {
         self.db.local_store_log().await.unwrap().log
+    }
+    /// The newest acceptable introduction of an audience in the applied log.
+    pub(crate) async fn newest(&self, audience: Audience) -> KeyId {
+        crate::key_introductions::newest(&self.log().await, &audience).expect("introduced audience")
     }
     pub(crate) async fn restart(&mut self, storage: Arc<MemoryStorage>) {
         self.reopen(storage, vec![], vec![]).await;
@@ -502,8 +511,8 @@ async fn removal_then_rotations_share_keys_only_with_remaining_members() {
         })
         .await
         .unwrap();
-    assert_eq!(a.log().await.replay.state.store.unwrap().key, key(1));
-    assert_eq!(a.log().await.replay.state.circles[&circle(1)].key, key(2));
+    assert_eq!(a.newest(Audience::Store).await, key(1));
+    assert_eq!(a.newest(Audience::Circle(circle(1))).await, key(2));
     a.sync.test_rotate(Audience::Store, key(3)).await;
     a.sync
         .test_rotate(Audience::Circle(circle(1)), key(4))
@@ -800,7 +809,7 @@ async fn circle_member_rotates_after_outside_admin_removal_and_repeated_removal_
         .unwrap();
     c.sync().await;
     for device in [&a, &c] {
-        assert_eq!(device.log().await.replay.state.store.unwrap().key, key(3));
+        assert_eq!(device.newest(Audience::Store).await, key(3));
         assert!(device
             .custody
             .read()
@@ -953,7 +962,7 @@ async fn a_waiting_entry_reseals_with_its_recorded_key_after_rotation() {
         .persist(&b.custody.read().unwrap().unwrap())
         .unwrap();
     a.restart(storage.clone()).await;
-    assert_eq!(a.log().await.replay.state.store.unwrap().key, key(2));
+    assert_eq!(a.newest(Audience::Store).await, key(2));
     assert_eq!(a.reseal(&pending), first);
     // Remove the fixture's first copy so the retry must actually reproduce it.
     storage.delete(&path).await.unwrap();

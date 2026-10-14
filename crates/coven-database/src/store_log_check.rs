@@ -34,8 +34,12 @@ pub enum CircleRemoval {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum StoreLogCheck {
     /// Permanently excluded by the landing check against complete stored history.
-    /// No author-view facts are derived for this entry.
-    LandedTooLate,
+    /// Replay never applies it, but whether its recorded view authorized it still
+    /// decides if its key introduction counts (§9, §11).
+    LandedTooLate {
+        /// Whether its author's recorded view allowed the change.
+        authorized: bool,
+    },
     /// Authorized; this change needs no further facts from its author's view.
     Allowed,
     /// The author's view did not allow the change.
@@ -49,6 +53,20 @@ pub enum StoreLogCheck {
 }
 
 impl StoreLogCheck {
+    /// Whether the author's recorded view allowed the change, landed in time or not.
+    pub fn authorized(&self) -> bool {
+        match self {
+            Self::LandedTooLate { authorized } => *authorized,
+            Self::NotAllowed => false,
+            Self::Allowed | Self::DeviceOwner(_) | Self::MemberRemoval(_) => true,
+        }
+    }
+
+    /// Whether the landing check permanently excluded the entry from replay.
+    pub fn landed_too_late(&self) -> bool {
+        matches!(self, Self::LandedTooLate { .. })
+    }
+
     /// Whether this removal deletes the circle in its immutable author view.
     pub fn deletes_circle(&self, circle: CircleId) -> bool {
         let Self::MemberRemoval(circles) = self else {
@@ -61,7 +79,7 @@ impl StoreLogCheck {
     // the payload's shape; invalid or noncanonical bytes fail the database read.
     pub(crate) fn encode(&self) -> Vec<u8> {
         match self {
-            Self::LandedTooLate => vec![4],
+            Self::LandedTooLate { authorized } => vec![4, u8::from(*authorized)],
             Self::Allowed => vec![0],
             Self::NotAllowed => vec![1],
             Self::DeviceOwner(owner) => {
@@ -85,7 +103,9 @@ impl StoreLogCheck {
 
     pub(crate) fn decode(bytes: &[u8]) -> Result<Self, DbError> {
         match bytes {
-            [4] => Ok(Self::LandedTooLate),
+            [4, authorized @ (0 | 1)] => Ok(Self::LandedTooLate {
+                authorized: *authorized == 1,
+            }),
             [0] => Ok(Self::Allowed),
             [1] => Ok(Self::NotAllowed),
             [2, owner @ ..] if owner.len() == 32 => Ok(Self::DeviceOwner(
