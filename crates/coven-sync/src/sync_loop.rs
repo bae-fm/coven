@@ -50,6 +50,7 @@ enum SyncCommand {
         access: coven_format::MemberAccess,
         device_name: String,
         connection: coven_storage::ConnectionCredentials,
+        sign_in: Option<Arc<crate::SessionSignIn>>,
         store_name: String,
         reply: Reply,
     },
@@ -138,12 +139,15 @@ impl SyncLoop {
     }
 
     /// Finish setup under this loop's connection lifetime, then start syncing.
+    /// An OAuth setup's `sign_in` is the custody `storage` refreshes in; setup
+    /// publishes it to device custody.
     pub async fn setup(
         &self,
         storage: Arc<StorageConnection>,
         access: coven_format::MemberAccess,
         device_name: String,
         connection: coven_storage::ConnectionCredentials,
+        sign_in: Option<Arc<crate::SessionSignIn>>,
         store_name: String,
     ) -> Result<(), SyncError> {
         let (reply, result) = oneshot::channel();
@@ -154,6 +158,7 @@ impl SyncLoop {
                 access,
                 device_name,
                 connection,
+                sign_in,
                 store_name,
                 reply,
             })
@@ -234,13 +239,12 @@ impl SyncRun {
     /// serialize this with stop, setup and credential removal in the command loop.
     async fn connect(&mut self) -> Result<(), SyncError> {
         self.send.invalidate();
-        self.codes.refresh_if_expired(self.clock.now()).await?;
         let data = self.codes.connection().await?.ok_or(SyncError::NoStorage)?;
         let connection = self
             .connector
             .connect(
                 data.location,
-                data.credentials,
+                self.codes.provider_auth(data.credentials),
                 self.device,
                 self.send.clone(),
                 self.waits.clone(),
@@ -290,6 +294,7 @@ impl SyncRun {
         access: coven_format::MemberAccess,
         device_name: String,
         connection: coven_storage::ConnectionCredentials,
+        sign_in: Option<Arc<crate::SessionSignIn>>,
         store_name: String,
     ) -> Result<(), SyncError> {
         // Relocation needs the old provider even when stop has released it.
@@ -306,7 +311,10 @@ impl SyncRun {
             self.connect().await?;
         }
         let result = async {
-            let commit = self.codes.prepare_setup(connection, store_name).await?;
+            let commit = self
+                .codes
+                .prepare_setup(connection, sign_in, store_name)
+                .await?;
             self.operations
                 .setup_storage(storage, access, device_name, commit)
                 .await
@@ -386,11 +394,11 @@ impl SyncRun {
                             let _ = reply.send(result);
                             break;
                         }
-                        Some(SyncCommand::Setup { storage, access, device_name, connection, store_name, reply }) => {
+                        Some(SyncCommand::Setup { storage, access, device_name, connection, sign_in, store_name, reply }) => {
                             // Acquire custody only after this command owns the loop.
                             // A queued setup must not hold the lock a running pass
                             // needs before it can finish and receive this command.
-                            let result = self.setup(storage.clone(), access, device_name, connection, store_name).await;
+                            let result = self.setup(storage.clone(), access, device_name, connection, sign_in, store_name).await;
                             if result.is_ok() {
                                 self.connection = Some(storage); self.configured = true;
                                 self.started = true; pending = true;
@@ -470,7 +478,6 @@ impl SyncRun {
                     }
                     self.status.send_replace(SyncStatus::Syncing);
                     let result = async {
-                        self.codes.refresh_if_expired(self.clock.now()).await?;
                         self.operations.sync().await?;
                         // An admin's replacement of this member's key arrives
                         // sealed to them; adopt it before the old key goes (§13).

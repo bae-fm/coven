@@ -1,6 +1,5 @@
 use super::*;
 use crate::authentication::SignIn;
-use std::time::Duration;
 
 #[tokio::test]
 async fn restore_and_keychain_restore_use_builder_sign_in_without_returning_tokens() {
@@ -108,7 +107,7 @@ async fn google_join_requires_full_access_before_contacting_storage() {
 }
 
 #[tokio::test]
-async fn join_refreshes_while_waiting_and_publishes_the_refreshed_credentials() {
+async fn a_join_waiting_past_its_token_refreshes_on_rejection_and_publishes_the_replacement() {
     let owner = Owner::new(CloudProvider::Dropbox, false).await;
     let invite = owner.invite().await;
     let install = Installation::new();
@@ -132,9 +131,7 @@ async fn join_refreshes_while_waiting_and_publishes_the_refreshed_credentials() 
     let (joined, _) = join_and_approve(&owner.handle, join, |_| async {
         install.absent(owner.directory.id()).await;
         asleep.wait_for(|sleeping| *sleeping).await.unwrap();
-        owner
-            .clock
-            .set(owner.clock.now() + Duration::from_secs(3600));
+        owner.storage.reject_access_token("access-0").await;
         owner.handle.unlock_store_key().await.unwrap();
         resume.send(true).unwrap();
     })

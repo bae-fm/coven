@@ -167,11 +167,7 @@ async fn presenter_flow_binds_state_redirect_and_pkce_for_each_provider() {
         CloudProvider::Dropbox,
         CloudProvider::OneDrive,
     ] {
-        let tokens = flow.authenticate(full_access(provider)).await.unwrap();
-        assert_eq!(
-            tokens.expires_at,
-            Some(SystemTime::UNIX_EPOCH + Duration::from_secs(3700))
-        );
+        flow.authenticate(full_access(provider)).await.unwrap();
         let presented = presenter.requests.lock().unwrap().last().unwrap().clone();
         let url = url::Url::parse(&presented).unwrap();
         let params: BTreeMap<_, _> = url.query_pairs().into_owned().collect();
@@ -291,16 +287,8 @@ async fn refresh_retains_unrotated_token() {
         access: full_access(CloudProvider::Dropbox),
         access_token: SecretText::new("old".into()),
         refresh_token: Some(SecretText::new("refresh".into())),
-        expires_at: None,
     };
-    let refreshed = flow
-        .refresh(
-            &previous.client_id,
-            previous.access,
-            previous.refresh_token.as_ref().unwrap(),
-        )
-        .await
-        .unwrap();
+    let refreshed = flow.clients.refresh(&previous).await.unwrap();
     assert_eq!(refreshed.refresh_token.unwrap().as_str(), "refresh");
 }
 
@@ -324,11 +312,13 @@ async fn google_client_secret_reaches_only_google_token_exchanges() {
     ] {
         flow.authenticate(full_access(provider)).await.unwrap();
         let refreshed = flow
-            .refresh(
-                flow.clients.config(full_access(provider)).unwrap().0,
-                full_access(provider),
-                &refresh_token,
-            )
+            .clients
+            .refresh(&OAuthTokens {
+                client_id: flow.clients.config(full_access(provider)).unwrap().0.into(),
+                access: full_access(provider),
+                access_token: SecretText::new("old".into()),
+                refresh_token: Some(refresh_token.clone()),
+            })
             .await
             .unwrap();
         assert_eq!(refreshed.refresh_token.unwrap().as_str(), "refresh");
@@ -385,7 +375,6 @@ async fn token_errors_retain_the_original_response_during_sign_in_and_refresh() 
             access: full_access(provider),
             access_token: SecretText::new("old".into()),
             refresh_token: Some(SecretText::new("refresh".into())),
-            expires_at: None,
         };
         for (status, code, expected) in [
             (400, "invalid_grant", StorageFailure::Authentication),
@@ -415,20 +404,13 @@ async fn token_errors_retain_the_original_response_during_sign_in_and_refresh() 
                 r#"{{ "error": "{code}", "error_description": "secret-description", "extra": "secret-extension" }}"#
             );
             state.lock().unwrap().error_response = Some((status, body.clone()));
-            for result in [
-                flow.authenticate(full_access(provider)).await,
-                flow.refresh(
-                    &previous.client_id,
-                    previous.access,
-                    previous.refresh_token.as_ref().unwrap(),
-                )
-                .await,
-            ] {
-                let error = result.err().unwrap();
+            let signed_in = match flow.authenticate(full_access(provider)).await {
+                Err(OAuthError::Storage(error)) => error,
+                result => panic!("{provider:?}: {code}: {:?}", result.err()),
+            };
+            let refreshed = flow.clients.refresh(&previous).await.err().unwrap();
+            for error in [signed_in, refreshed] {
                 assert!(!format!("{error} {error:?}").contains("secret"));
-                let OAuthError::Storage(error) = error else {
-                    panic!("{provider:?}: {code}: {error:?}")
-                };
                 assert_eq!(error.failure(), expected, "{provider:?}: {code}");
                 assert_eq!(
                     error.retryable(),
@@ -587,17 +569,7 @@ mod access_tests {
             assert_eq!(tokens.access, access);
             assert_eq!(tokens.client_id, key);
             tokens.refresh_token = Some(SecretText::new("refresh".into()));
-            assert_eq!(
-                flow.refresh(
-                    &tokens.client_id,
-                    tokens.access,
-                    tokens.refresh_token.as_ref().unwrap()
-                )
-                .await
-                .unwrap()
-                .access,
-                access
-            );
+            assert_eq!(flow.clients.refresh(&tokens).await.unwrap().access, access);
             let requests = std::mem::take(&mut state.lock().unwrap().requests);
             assert_eq!(requests.len(), 2);
             assert!(requests.iter().all(|request| request["client_id"] == key));
@@ -652,14 +624,19 @@ mod access_tests {
             ),
         ] {
             state.lock().unwrap().scope = None;
-            let tokens = flow.refresh(client, access, &refresh).await.unwrap();
+            let held = OAuthTokens {
+                client_id: client.into(),
+                access,
+                access_token: SecretText::new("old".into()),
+                refresh_token: Some(refresh.clone()),
+            };
+            let tokens = flow.clients.refresh(&held).await.unwrap();
             assert_eq!(tokens.access, access);
             assert_eq!(tokens.client_id, client);
             state.lock().unwrap().scope = Some(reduced.into());
             assert!(matches!(
-                flow.refresh(client, access, &refresh).await,
-                Err(OAuthError::Storage(error))
-                    if error.failure() == StorageFailure::AccessNotGranted { required: access }
+                flow.clients.refresh(&held).await,
+                Err(error) if error.failure() == StorageFailure::AccessNotGranted { required: access }
             ));
         }
     }
@@ -678,14 +655,39 @@ mod access_tests {
             access: FILE,
             access_token: SecretText::new("token".into()),
             refresh_token: Some(SecretText::new("refresh".into())),
-            expires_at: None,
         };
         assert!(
             matches!(flow.require_client(&tokens), Err(OAuthError::Storage(error)) if error.failure() == StorageFailure::InvalidConfiguration)
         );
         assert!(
-            matches!(flow.refresh(&tokens.client_id, tokens.access, tokens.refresh_token.as_ref().unwrap()).await, Err(OAuthError::Storage(error)) if error.failure() == StorageFailure::InvalidConfiguration)
+            matches!(flow.clients.refresh(&tokens).await, Err(error) if error.failure() == StorageFailure::InvalidConfiguration)
         );
         assert!(state.lock().unwrap().requests.is_empty());
     }
+}
+
+#[tokio::test]
+async fn refresh_without_a_refresh_token_or_client_names_the_needed_action() {
+    let clients = clients(Arc::new(FixedClock::new(SystemTime::UNIX_EPOCH)));
+    let mut held = OAuthTokens {
+        client_id: "onedrive".into(),
+        access: OAuthAccess::OneDrive,
+        access_token: SecretText::new("token".into()),
+        refresh_token: None,
+    };
+    let error = clients.refresh(&held).await.err().unwrap();
+    assert_eq!(error.failure(), StorageFailure::Authentication);
+    let StorageError::Provider { source, .. } = error else {
+        panic!("sign-in cause discarded")
+    };
+    assert!(matches!(
+        source.downcast_ref::<OAuthError>(),
+        Some(OAuthError::Reauthorize(CloudProvider::OneDrive))
+    ));
+    held.refresh_token = Some(SecretText::new("refresh".into()));
+    let unconfigured = OAuthClients::new(None, None, None, clients.clock.clone());
+    assert_eq!(
+        unconfigured.refresh(&held).await.err().unwrap().failure(),
+        StorageFailure::InvalidConfiguration
+    );
 }

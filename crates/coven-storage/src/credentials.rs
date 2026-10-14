@@ -46,10 +46,9 @@ pub struct OAuthTokens {
     pub access: crate::OAuthAccess,
     /// The token authorizing requests.
     pub access_token: SecretText,
-    /// The token used to obtain a new access token, when issued.
+    /// The token used to obtain a new access token, when issued. The access
+    /// token has no local expiry: it is used until the provider rejects it (§4).
     pub refresh_token: Option<SecretText>,
-    /// Expiry calculated with the injected clock; absent for non-expiring tokens.
-    pub expires_at: Option<std::time::SystemTime>,
 }
 
 /// Device credentials committed separately from provider settings.

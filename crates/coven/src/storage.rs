@@ -6,9 +6,10 @@ use crate::{
 };
 use coven_crypto::custody::KeySession;
 use coven_storage::{
-    providers::{OAuthFlow, StorageConnector},
-    ConnectionCredentials, S3Credentials, Storage, StorageCredentials,
+    providers::{OAuthClients, OAuthFlow, StorageConnector},
+    ConnectionCredentials, ProviderAuth, S3Credentials, Storage, StorageCredentials,
 };
+use coven_sync::SessionSignIn;
 use std::{future::Future, sync::Arc};
 
 /// Whether this device's custody holds opened store keys.
@@ -35,7 +36,10 @@ pub(crate) struct StorageConnections {
     keys: std::sync::Mutex<Option<Arc<KeySession<StoreKeyring>>>>,
     connector: Arc<dyn StorageConnector>,
     oauth: Option<OAuthFlow>,
-    authentication: tokio::sync::Mutex<Option<crate::authentication::Authentication>>,
+    /// The app's clients, which refresh a session sign-in.
+    clients: Option<OAuthClients>,
+    /// The latest sign-in, held for this session until setup publishes it.
+    authentication: tokio::sync::Mutex<Option<Arc<SessionSignIn>>>,
     sync: coven_sync::SyncLoop,
     store: StoreId,
     device: DeviceId,
@@ -78,7 +82,7 @@ impl StorageConnections {
                         .connector
                         .connect(
                             data.location.clone(),
-                            data.credentials.clone(),
+                            self.codes.provider_auth(data.credentials.clone()),
                             self.device,
                             self.send.clone(),
                             self.waits.clone(),
@@ -92,11 +96,16 @@ impl StorageConnections {
                     if tokens.refresh_token.is_none() {
                         tokens.refresh_token = previous.refresh_token.clone();
                     }
+                    // Until it is committed, the upgrade refreshes in this session.
+                    let upgrade = SessionSignIn::new(tokens.clone(), self.clients.clone());
                     let candidate = self
                         .connector
                         .connect(
                             data.location,
-                            StorageCredentials::OAuth(tokens.clone()),
+                            ProviderAuth::OAuth {
+                                tokens,
+                                custody: upgrade.clone(),
+                            },
                             self.device,
                             self.send.clone(),
                             self.waits.clone(),
@@ -105,7 +114,7 @@ impl StorageConnections {
                     if candidate.account().await? != account {
                         return Err(StorageFailure::AccountMismatch.into());
                     }
-                    self.codes.install_oauth(tokens).await?;
+                    self.codes.install_oauth(upgrade.tokens()?).await?;
                 }
             }
             _ => {}
@@ -118,7 +127,8 @@ impl StorageConnections {
         keys: Arc<KeySession<StoreKeyring>>,
         connector: Arc<dyn StorageConnector>,
         oauth: Option<OAuthFlow>,
-        authentication: Option<crate::authentication::Authentication>,
+        clients: Option<OAuthClients>,
+        authentication: Option<Arc<SessionSignIn>>,
         sync: coven_sync::SyncLoop,
         store: StoreId,
         device: DeviceId,
@@ -133,6 +143,7 @@ impl StorageConnections {
             keys: std::sync::Mutex::new(Some(keys)),
             connector,
             oauth,
+            clients,
             authentication: tokio::sync::Mutex::new(authentication),
             sync,
             store,
@@ -199,7 +210,7 @@ impl StorageConnections {
             .as_ref()
             .ok_or(OAuthError::Unavailable(access.provider()))?;
         let tokens = flow.authenticate(access).await?;
-        *self.authentication.lock().await = Some(crate::authentication::Authentication { tokens });
+        *self.authentication.lock().await = Some(SessionSignIn::new(tokens, self.clients.clone()));
         Ok(())
     }
 
@@ -219,18 +230,14 @@ impl StorageConnections {
             }
             owner.check_location(&storage).await?;
             let mut held = owner.authentication.lock().await;
-            let credentials = match held.as_mut() {
-                Some(authentication) => {
-                    authentication
-                        .credentials(
-                            provider,
-                            owner
-                                .oauth
-                                .as_ref()
-                                .ok_or(OAuthError::Unavailable(provider))?,
-                            owner.clock.now(),
-                        )
-                        .await?
+            let (auth, sign_in) = match held.as_ref() {
+                Some(sign_in) => {
+                    crate::authentication::check_provider(sign_in, provider)?;
+                    let auth = ProviderAuth::OAuth {
+                        tokens: sign_in.tokens().map_err(setup_error)?,
+                        custody: sign_in.clone(),
+                    };
+                    (auth, Some(sign_in.clone()))
                 }
                 None => {
                     let data = owner
@@ -241,11 +248,11 @@ impl StorageConnections {
                     if data.location.provider() != provider {
                         return Err(OAuthError::Reauthorize(provider).into());
                     }
-                    data.credentials
+                    (owner.codes.provider_auth(data.credentials), None)
                 }
             };
             let result = owner
-                .setup_connection(storage, &device_name, credentials)
+                .setup_connection(storage, &device_name, auth, sign_in)
                 .await?;
             held.take();
             Ok(result)
@@ -270,7 +277,7 @@ impl StorageConnections {
                 }
                 None => owner.connector.prepare_cloudkit(&container, owner.store).await?,
             };
-            owner.setup_connection(storage, &device_name, StorageCredentials::CloudKit).await
+            owner.setup_connection(storage, &device_name, ProviderAuth::CloudKit, None).await
         }).await
     }
 
@@ -287,17 +294,22 @@ impl StorageConnections {
         Ok(())
     }
 
+    /// Check and publish `config` reached through `auth`. A new OAuth
+    /// sign-in is `sign_in`, the session custody `auth` refreshes in until
+    /// setup commits it to device custody.
     async fn setup_connection(
         &self,
         config: StorageConfig,
         device_name: &str,
-        credentials: StorageCredentials,
+        auth: ProviderAuth,
+        sign_in: Option<Arc<SessionSignIn>>,
     ) -> Result<ConnectedStorage, StorageSetupError> {
+        let credentials = auth.credentials();
         let storage = self
             .connector
             .connect(
                 config.clone(),
-                credentials.clone(),
+                auth,
                 self.device,
                 self.send.clone(),
                 self.waits.clone(),
@@ -334,6 +346,7 @@ impl StorageConnections {
                     location: config.clone(),
                     credentials,
                 },
+                sign_in,
                 self.initial_name.clone(),
             )
             .await
@@ -345,7 +358,6 @@ impl StorageConnections {
     }
 
     async fn connection(&self) -> Result<Option<ConnectionCredentials>, SyncError> {
-        self.codes.refresh_if_expired(self.clock.now()).await?;
         self.codes.connection().await
     }
 
@@ -361,7 +373,7 @@ impl StorageConnections {
                 .connector
                 .connect(
                     config.clone(),
-                    data.credentials,
+                    owner.codes.provider_auth(data.credentials),
                     owner.device,
                     owner.send.clone(),
                     owner.waits.clone(),

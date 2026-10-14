@@ -1,34 +1,18 @@
-//! Session custody for a sign-in awaiting storage setup or bootstrap publication.
+//! Session custody for a sign-in awaiting storage setup or bootstrap
+//! publication (§4, E10): a completed sign-in is held for this session only.
 
 use crate::{CloudProvider, OAuthError};
-use coven_storage::{providers::OAuthFlow, OAuthTokens, StorageCredentials};
+use coven_sync::SessionSignIn;
 
-pub(crate) struct Authentication {
-    pub(crate) tokens: OAuthTokens,
-}
-
-impl Authentication {
-    pub(crate) async fn credentials(
-        &mut self,
-        provider: CloudProvider,
-        flow: &OAuthFlow,
-        now: std::time::SystemTime,
-    ) -> Result<StorageCredentials, OAuthError> {
-        if self.tokens.access.provider() != provider {
-            return Err(OAuthError::Reauthorize(provider));
-        }
-        if self.tokens.expires_at.is_some_and(|expiry| now >= expiry) {
-            let refresh_token = self
-                .tokens
-                .refresh_token
-                .as_ref()
-                .ok_or(OAuthError::Reauthorize(provider))?;
-            self.tokens = flow
-                .refresh(&self.tokens.client_id, self.tokens.access, refresh_token)
-                .await?;
-        }
-        Ok(StorageCredentials::OAuth(self.tokens.clone()))
+/// A held sign-in serves only its own provider; another needs a new sign-in.
+pub(crate) fn check_provider(
+    held: &SessionSignIn,
+    provider: CloudProvider,
+) -> Result<(), OAuthError> {
+    if held.provider() != provider {
+        return Err(OAuthError::Reauthorize(provider));
     }
+    Ok(())
 }
 
 #[cfg(test)]

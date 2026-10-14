@@ -30,18 +30,12 @@ pub enum OAuthError {
     /// No callback arrived before the deadline.
     #[error("sign-in timed out")]
     Timeout,
-    /// The current tokens have expired; refresh and commit them before reuse.
-    #[error("provider tokens expired")]
-    Expired,
     /// A new provider sign-in is required.
     #[error("{0:?} requires a new sign-in")]
     Reauthorize(CloudProvider),
     /// The redirect URI or callback request is malformed.
     #[error("invalid OAuth redirect")]
     InvalidRedirect,
-    /// The provider's expiry cannot be represented.
-    #[error("invalid OAuth token expiry")]
-    InvalidExpiry,
     /// The browser or local redirect listener failed.
     #[error("OAuth browser or listener: {0}")]
     Io(#[from] std::io::Error),
@@ -138,16 +132,6 @@ impl OAuthFlow {
             result = flow => result,
             _ = self.clients.clock.sleep(Duration::from_secs(300)) => Err(OAuthError::Timeout),
         }
-    }
-
-    /// Refresh for custody; a live provider must use replacements only after commit.
-    pub async fn refresh(
-        &self,
-        client_id: &str,
-        access: OAuthAccess,
-        refresh_token: &SecretText,
-    ) -> Result<OAuthTokens, OAuthError> {
-        self.clients.refresh(client_id, access, refresh_token).await
     }
 
     /// Refuse unavailable registered access without opening UI or contacting a provider.
@@ -450,10 +434,35 @@ impl OAuthClients {
             .filter(|code| !code.as_str().is_empty())
             .ok_or(OAuthError::MissingCode)
     }
-    /// Obtain replacement tokens. The facade commits them to custody before
-    /// installing them on its provider session. Omitted refresh tokens retain
-    /// the previous token as specified by OAuth.
-    async fn refresh(
+    /// One refresh of `tokens` after the provider rejected them (§4), for its
+    /// custody to commit before any connection uses it. Tokens without a
+    /// refresh token need a new sign-in; a missing client is the app's
+    /// configuration. Token-endpoint failures keep their classification.
+    pub async fn refresh(&self, tokens: &OAuthTokens) -> Result<OAuthTokens, StorageError> {
+        let provider = tokens.access.provider();
+        let refreshed = match &tokens.refresh_token {
+            Some(refresh_token) => {
+                self.refresh_grant(&tokens.client_id, tokens.access, refresh_token)
+                    .await
+            }
+            None => Err(OAuthError::Reauthorize(provider)),
+        };
+        refreshed.map_err(|error| match error {
+            OAuthError::Storage(error) => error,
+            error => StorageError::Provider {
+                provider,
+                failure: if matches!(error, OAuthError::Unavailable(_)) {
+                    StorageFailure::InvalidConfiguration
+                } else {
+                    StorageFailure::Authentication
+                },
+                source: Box::new(error),
+            },
+        })
+    }
+    /// Obtain replacement tokens. Omitted refresh tokens retain the previous
+    /// token as specified by OAuth.
+    async fn refresh_grant(
         &self,
         client_id: &str,
         access: OAuthAccess,
@@ -531,7 +540,6 @@ impl OAuthClients {
         struct Tokens {
             access_token: SecretText,
             refresh_token: Option<SecretText>,
-            expires_in: Option<u64>,
             token_type: String,
             scope: Option<String>,
         }
@@ -544,21 +552,11 @@ impl OAuthClients {
                 .with_source("invalid OAuth token response")
                 .into());
         }
-        let expires_at = tokens
-            .expires_in
-            .map(|secs| {
-                self.clock
-                    .now()
-                    .checked_add(Duration::from_secs(secs))
-                    .ok_or(OAuthError::InvalidExpiry)
-            })
-            .transpose()?;
         Ok(OAuthTokens {
             client_id: client_id.to_owned(),
             access: access.granted(tokens.scope.as_deref())?,
             access_token: tokens.access_token,
             refresh_token: tokens.refresh_token,
-            expires_at,
         })
     }
     /// Redirect token requests to an HTTP fake while retaining the real protocol.

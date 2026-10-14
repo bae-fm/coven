@@ -2,7 +2,7 @@ use super::*;
 use crate::*;
 use axum::{extract::State, Json, Router};
 use coven_crypto::custody::{Keychain, StoreKeychain};
-use coven_storage::{test_utils::MemoryStorage, Storage};
+use coven_storage::{test_utils::MemoryStorage, Storage, StorageCredentials};
 use std::sync::{
     atomic::{AtomicBool, AtomicUsize, Ordering},
     Arc,
@@ -216,12 +216,17 @@ async fn handle_sign_in_setup_refresh_and_reopen_keep_tokens_in_coven() {
     scoped.delete_synced_restore_code().unwrap();
     let held_s3_key = SecretBytes::new(b"separately held key".to_vec());
     scoped.set_synced_s3_credentials(&held_s3_key).unwrap();
-    clock.set(clock.now() + std::time::Duration::from_secs(3600));
+    // A clock set a year ahead does not expire the token; the provider's
+    // rejection does, and the next request refreshes it once.
+    clock.set(clock.now() + std::time::Duration::from_secs(365 * 24 * 3600));
     let handle = builder(layout, keychain, clock, storage.clone(), &sign_in)
         .open(directory.id())
         .await
         .unwrap();
-    handle.start_sync().await.unwrap();
+    handle.unlock_store_key().await.unwrap();
+    assert_eq!(sign_in.request_count(), 1, "a token is used until rejected");
+    storage.reject_access_token("access-0").await;
+    handle.unlock_store_key().await.unwrap();
     let StorageCredentials::OAuth(tokens) =
         StorageCredentials::decode(scoped.storage_credentials().unwrap().unwrap().as_bytes())
             .unwrap()
@@ -261,7 +266,7 @@ async fn handle_sign_in_setup_refresh_and_reopen_keep_tokens_in_coven() {
 }
 
 #[tokio::test]
-async fn builder_sign_in_is_provider_bound_and_refreshes_before_setup() {
+async fn builder_sign_in_is_provider_bound_and_refreshes_when_setup_is_rejected() {
     let root = tempfile::tempdir().unwrap();
     let layout = StoreLayout::new(root.path().into());
     let app = TestCoven::new();
@@ -283,7 +288,13 @@ async fn builder_sign_in_is_provider_bound_and_refreshes_before_setup() {
             .build()
             .unwrap(),
     );
-    let mut builder = builder(layout, keychain, clock.clone(), storage.clone(), &sign_in);
+    let mut builder = builder(
+        layout,
+        keychain.clone(),
+        clock.clone(),
+        storage.clone(),
+        &sign_in,
+    );
     builder
         .authenticate(coven_storage::OAuthAccess::GoogleDrive(
             coven_storage::GoogleDriveAccess::File,
@@ -304,13 +315,25 @@ async fn builder_sign_in_is_provider_bound_and_refreshes_before_setup() {
         ))
         .await
         .unwrap();
-    clock.set(clock.now() + std::time::Duration::from_secs(3600));
+    storage.reject_access_token("access-1").await;
     handle
         .setup_oauth_storage(storage.config(), "Laptop")
         .await
         .unwrap();
     assert_eq!(sign_in.request_count(), 3);
     assert_eq!(sign_in.presenter.calls.load(Ordering::SeqCst), 2);
+    // Setup commits the session's refreshed sign-in, not the rejected one.
+    let StorageCredentials::OAuth(tokens) = StorageCredentials::decode(
+        StoreKeychain::new(keychain, directory.id())
+            .storage_credentials()
+            .unwrap()
+            .unwrap()
+            .as_bytes(),
+    )
+    .unwrap() else {
+        panic!("OAuth credentials")
+    };
+    assert_eq!(tokens.access_token.as_str(), "access-2");
     handle.close().await.unwrap();
 }
 
@@ -543,18 +566,19 @@ mod provider_access_tests {
         async fn connect(
             &self,
             config: StorageConfig,
-            credentials: StorageCredentials,
+            auth: coven_storage::ProviderAuth,
             device: DeviceId,
             publications: Arc<dyn coven_storage::PublicationGate>,
             cooldown: Arc<dyn coven_storage::Cooldown>,
         ) -> Result<Arc<coven_storage::StorageConnection>, coven_storage::StorageError> {
-            if matches!(&credentials, StorageCredentials::OAuth(tokens) if tokens.access == FULL) {
+            if matches!(auth.credentials(), StorageCredentials::OAuth(tokens) if tokens.access == FULL)
+            {
                 MemoryStorage::for_recipient(&self.0, "another@example.test")?
-                    .connect(config, credentials, device, publications, cooldown)
+                    .connect(config, auth, device, publications, cooldown)
                     .await
             } else {
                 self.0
-                    .connect(config, credentials, device, publications, cooldown)
+                    .connect(config, auth, device, publications, cooldown)
                     .await
             }
         }

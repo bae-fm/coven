@@ -95,6 +95,7 @@ impl MemoryStorageBuilder {
                 held_body: None,
                 held_creation: None,
                 held_access: None,
+                rejected_tokens: Default::default(),
             })),
         })))
     }

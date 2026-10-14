@@ -2,10 +2,13 @@
 
 use super::*;
 
+/// An OAuth store commits `sign_in`'s current tokens, which then refresh in
+/// the handle's device custody; a rollback holds them in the session again.
 pub(super) fn publish_bootstrap(
     pending: &BootstrapStore,
     code: RestoreCode,
     credentials: StorageCredentials,
+    sign_in: Option<Arc<coven_sync::SessionSignIn>>,
     ring: StoreKeyring,
     owners: OpeningOwners,
     database: Database,
@@ -27,11 +30,18 @@ pub(super) fn publish_bootstrap(
         keys.persist(&ring)?;
         identity.persist(&MemberIdentity::new(code.member, code.member_keys.clone()))?;
         keychain.set_device_id(owners.device)?;
-        credential_rollback = Some(coven_sync::commit_credentials(
-            keychain,
-            &credentials,
-            Some(&code),
-        )?);
+        credential_rollback = Some(match &sign_in {
+            Some(session) => session.publish(&owners.credentials, |keychain, tokens| {
+                coven_sync::commit_credentials(
+                    keychain,
+                    &StorageCredentials::OAuth(tokens.clone()),
+                    Some(&code),
+                )
+            })?,
+            None => owners.credentials.write(|keychain| {
+                coven_sync::commit_credentials(keychain, &credentials, Some(&code))
+            })?,
+        });
         Ok(pending.publish()?)
     };
     let publication_error = match commit() {
@@ -64,9 +74,15 @@ pub(super) fn publish_bootstrap(
                 }
             }
             if let Some(previous) = credential_rollback {
-                if let Err(cleanup) = previous.restore(keychain) {
+                if let Err(cleanup) = owners
+                    .credentials
+                    .write(|keychain| previous.restore(keychain))
+                {
                     error =
                         combine::<()>(Err(error), Err(cleanup.into())).expect_err("failed commit");
+                }
+                if let Some(session) = &sign_in {
+                    session.unpublish();
                 }
             }
             let rollback = match old_settings {

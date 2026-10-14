@@ -1,51 +1,45 @@
-//! Refresh the builder's held sign-in while bootstrap waits and loads.
+//! The builder's held sign-in, as the custody a bootstrap connection
+//! refreshes in until publication commits it to device custody (§4, E10).
 
 use super::*;
+use coven_storage::ProviderAuth;
+use coven_sync::SessionSignIn;
 
-pub(super) async fn account_credentials(
-    builder: &mut CovenBuilder,
+/// The session sign-in for a bootstrap connection to `provider`.
+pub(super) fn account_sign_in(
+    builder: &CovenBuilder,
     provider: CloudProvider,
-    cancel: &watch::Receiver<bool>,
-) -> Result<StorageCredentials, BootstrapError> {
-    if provider == CloudProvider::CloudKit {
-        return Ok(StorageCredentials::CloudKit);
-    }
-    let flow = builder
+) -> Result<Arc<SessionSignIn>, BootstrapError> {
+    builder
         .oauth_flow()
         .ok_or(OAuthError::Unavailable(provider))?;
-    let authentication = builder
+    let held = builder
         .authentication
-        .as_mut()
+        .as_ref()
         .ok_or(OAuthError::Reauthorize(provider))?;
-    let mut cancellation = cancel.clone();
-    tokio::select! {
-        biased;
-        _ = cancelled(&mut cancellation) => Err(BootstrapError::Cancelled),
-        result = authentication.credentials(provider, &flow, builder.clock.now()) => Ok(result?),
-    }
+    crate::authentication::check_provider(held, provider)?;
+    Ok(held.clone())
 }
 
-pub(super) async fn refresh_sign_in(
-    builder: &mut CovenBuilder,
-    data: &mut ConnectionCredentials,
-    storage: &dyn coven_storage::Storage,
-    cancel: &watch::Receiver<bool>,
-) -> Result<(), BootstrapError> {
-    if let StorageCredentials::OAuth(tokens) = &data.credentials {
-        if tokens
-            .expires_at
-            .is_some_and(|expiry| builder.clock.now() >= expiry)
-        {
-            data.credentials =
-                account_credentials(builder, data.location.provider(), cancel).await?;
-            let StorageCredentials::OAuth(tokens) = &data.credentials else {
-                unreachable!("OAuth sign-in")
-            };
-            storage
-                .set_oauth_tokens(tokens.clone())
-                .await
-                .map_err(SyncError::from)?;
+/// How bootstrap reaches `data`: an S3 key, the Apple account, or the
+/// session sign-in it publishes with the store.
+pub(super) fn provider_auth(
+    data: &ConnectionCredentials,
+    sign_in: Option<&Arc<SessionSignIn>>,
+) -> Result<ProviderAuth, BootstrapError> {
+    Ok(match (&data.credentials, sign_in) {
+        (StorageCredentials::OAuth(_), Some(sign_in)) => ProviderAuth::OAuth {
+            tokens: sign_in.tokens()?,
+            custody: sign_in.clone(),
+        },
+        (StorageCredentials::S3(keys), None) => ProviderAuth::S3(keys.clone()),
+        (StorageCredentials::CloudKit, None) => ProviderAuth::CloudKit,
+        _ => {
+            return Err(SyncError::from(
+                StorageFailure::InvalidConfiguration
+                    .with_source("only an OAuth location connects through a sign-in"),
+            )
+            .into())
         }
-    }
-    Ok(())
+    })
 }

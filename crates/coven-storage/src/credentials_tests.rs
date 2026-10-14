@@ -8,7 +8,6 @@ fn credentials_encode_without_capacity_growth() {
         access: crate::OAuthAccess::Dropbox(crate::DropboxAccess::FullDropbox),
         access_token: SecretText::new("access\"\\\n\0雪".repeat(200)),
         refresh_token: Some(SecretText::new("refresh\"\\\n\0雪".repeat(300))),
-        expires_at: None,
     });
     let encoded = credentials.encode().unwrap();
     assert_eq!(encoded.capacity(), encoded.as_bytes().len());

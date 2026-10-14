@@ -458,7 +458,6 @@ async fn refreshed_tokens_reach_cached_folder_requests() {
             access: crate::OAuthAccess::OneDrive,
             access_token: SecretText::new("refreshed".into()),
             refresh_token: None,
-            expires_at: None,
         })
         .await
         .unwrap();

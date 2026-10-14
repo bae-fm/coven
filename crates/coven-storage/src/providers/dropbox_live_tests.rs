@@ -17,8 +17,13 @@ fn dropbox_live_conformance() {
 fn dropbox_live_account_sharing() {
     run(async |live, storage| {
         let recipient_tokens = tokens("COVEN_LIVE_DROPBOX_B_ENV", live.clock.clone()).await;
-        let recipient_session =
-            OAuthSession::new(PROVIDER, recipient_tokens, live.clock.clone()).unwrap();
+        let recipient_session = OAuthSession::new(
+            PROVIDER,
+            recipient_tokens,
+            Arc::new(crate::test_utils::RefusedRefresh),
+            live.clock.clone(),
+        )
+        .unwrap();
         let recipient = Arc::new(StorageConnection::from_provider(Arc::new(
             DropboxStorage::new(storage.config(), recipient_session).unwrap(),
         )));

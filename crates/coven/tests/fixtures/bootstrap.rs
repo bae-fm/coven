@@ -235,6 +235,7 @@ impl Installation {
                     owner.s3_credentials().expect("S3 restore fixture"),
                 ),
             },
+            sign_in: None,
             name: "Ana’s laptop".into(),
         }
     }

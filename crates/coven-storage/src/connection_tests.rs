@@ -29,7 +29,6 @@ async fn replacement_tokens_cannot_change_dropbox_access_or_provider() {
                     access,
                     access_token: coven_crypto::SecretText::new("token".into()),
                     refresh_token: None,
-                    expires_at: None,
                 })
                 .await;
             if access == required {
@@ -310,8 +309,8 @@ async fn publication_checks_after_the_provider_creation_permit() {
             access: OAuthAccess::GoogleDrive(crate::GoogleDriveAccess::Full),
             access_token: coven_crypto::SecretText::new("token".into()),
             refresh_token: None,
-            expires_at: None,
         },
+        Arc::new(crate::test_utils::RefusedRefresh),
         Arc::new(coven_foundation::clock::FixedClock::new(
             std::time::UNIX_EPOCH,
         )),

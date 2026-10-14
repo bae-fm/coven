@@ -789,7 +789,6 @@ async fn recipient_join_mounts_the_invited_namespace_and_retries_a_lost_reply() 
             access: crate::OAuthAccess::Dropbox(crate::DropboxAccess::FullDropbox),
             access_token: SecretText::new("recipient:member".into()),
             refresh_token: None,
-            expires_at: None,
         })
         .await
         .unwrap();

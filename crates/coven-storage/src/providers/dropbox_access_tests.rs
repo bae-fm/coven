@@ -374,7 +374,6 @@ mod app_folder_tests {
                 access: OAuthAccess::Dropbox(DropboxAccess::AppFolder),
                 access_token: SecretText::new("token".into()),
                 refresh_token: None,
-                expires_at: None,
             })
             .await;
         let mut provider = DropboxStorage::new(

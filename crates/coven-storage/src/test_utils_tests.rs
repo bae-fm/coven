@@ -447,42 +447,79 @@ async fn s3_fake_refuses_account_revocation() {
     ));
 }
 
+fn dropbox_tokens(token: &str) -> OAuthTokens {
+    OAuthTokens {
+        client_id: "dropbox".into(),
+        access: crate::OAuthAccess::Dropbox(crate::DropboxAccess::FullDropbox),
+        access_token: coven_crypto::SecretText::new(token.into()),
+        refresh_token: None,
+    }
+}
+
 #[tokio::test]
-async fn the_same_fake_uses_committed_replacement_tokens() {
-    use coven_crypto::SecretText;
+async fn a_rejected_fake_token_refreshes_once_through_custody_and_retries_once() {
+    use crate::providers::StorageConnector;
     use coven_foundation::id_source::DeviceId;
-    use std::time::{Duration, SystemTime};
     let storage = MemoryStorage::builder()
         .provider(crate::CloudProvider::Dropbox)
-        .clock(Arc::new(FixedClock::new(
-            SystemTime::UNIX_EPOCH + Duration::from_secs(10),
-        )))
+        .build()
+        .unwrap();
+    let path = ObjectPath::device_log(STORE_ID, DeviceId(31), std::num::NonZeroU64::MIN);
+    storage.create(&path, b"data").await.unwrap();
+    let custody = crate::token_custody::tests::CountingCustody::new(false);
+    let connection = storage
+        .connect(
+            storage.config(),
+            crate::ProviderAuth::OAuth {
+                tokens: dropbox_tokens("token"),
+                custody: custody.clone(),
+            },
+            DeviceId(1),
+            Arc::new(crate::test_utils::UnrestrictedPublications),
+            Arc::new(crate::NoCooldown),
+        )
+        .await
+        .unwrap();
+    storage.reject_access_token("token").await;
+    let before = storage.request_count();
+    assert_eq!(connection.read(&path).await.unwrap(), b"data");
+    assert_eq!(
+        storage.request_count(),
+        before + 2,
+        "one rejection, one retry"
+    );
+    connection.read(&path).await.unwrap();
+    assert_eq!(custody.count(), 1);
+    // A replacement the provider rejects too reaches the caller after one retry.
+    storage.reject_access_token("refreshed-0").await;
+    storage.reject_access_token("refreshed-1").await;
+    assert_eq!(
+        connection.read(&path).await.unwrap_err().failure(),
+        StorageFailure::Authentication
+    );
+    assert_eq!(custody.count(), 2);
+}
+
+#[tokio::test]
+async fn the_same_fake_uses_committed_replacement_tokens() {
+    use coven_foundation::id_source::DeviceId;
+    let storage = MemoryStorage::builder()
+        .provider(crate::CloudProvider::Dropbox)
         .build()
         .unwrap();
     let path = ObjectPath::device_log(STORE_ID, DeviceId(31), std::num::NonZeroU64::MIN);
     storage.create(&path, b"data").await.unwrap();
     storage
-        .set_oauth_tokens(OAuthTokens {
-            client_id: "dropbox".into(),
-            access: crate::OAuthAccess::Dropbox(crate::DropboxAccess::FullDropbox),
-            access_token: SecretText::new("expired".into()),
-            refresh_token: None,
-            expires_at: Some(SystemTime::UNIX_EPOCH),
-        })
+        .set_oauth_tokens(dropbox_tokens("rejected"))
         .await
         .unwrap();
+    storage.reject_access_token("rejected").await;
     assert_eq!(
         storage.read(&path).await.unwrap_err().failure(),
         StorageFailure::Authentication
     );
     storage
-        .set_oauth_tokens(OAuthTokens {
-            client_id: "dropbox".into(),
-            access: crate::OAuthAccess::Dropbox(crate::DropboxAccess::FullDropbox),
-            access_token: SecretText::new("refreshed".into()),
-            refresh_token: None,
-            expires_at: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(20)),
-        })
+        .set_oauth_tokens(dropbox_tokens("refreshed"))
         .await
         .unwrap();
     assert_eq!(storage.read(&path).await.unwrap(), b"data");
@@ -648,15 +685,10 @@ async fn recipients_keep_their_own_tokens_while_clones_share_the_same_sign_in() 
     let cloned = member.clone();
     let another_sign_in = MemoryStorage::for_recipient(&owner, "member").unwrap();
     member
-        .set_oauth_tokens(OAuthTokens {
-            client_id: "dropbox".into(),
-            access: crate::OAuthAccess::Dropbox(crate::DropboxAccess::FullDropbox),
-            access_token: coven_crypto::SecretText::new("expired".into()),
-            refresh_token: None,
-            expires_at: Some(std::time::SystemTime::UNIX_EPOCH),
-        })
+        .set_oauth_tokens(dropbox_tokens("rejected"))
         .await
         .unwrap();
+    owner.reject_access_token("rejected").await;
     assert_eq!(
         cloned
             .list(&ObjectPrefix::all(STORE_ID))
@@ -671,13 +703,7 @@ async fn recipients_keep_their_own_tokens_while_clones_share_the_same_sign_in() 
         .await
         .unwrap();
     member
-        .set_oauth_tokens(OAuthTokens {
-            client_id: "dropbox".into(),
-            access: crate::OAuthAccess::Dropbox(crate::DropboxAccess::FullDropbox),
-            access_token: coven_crypto::SecretText::new("refreshed".into()),
-            refresh_token: None,
-            expires_at: None,
-        })
+        .set_oauth_tokens(dropbox_tokens("refreshed"))
         .await
         .unwrap();
     cloned.list(&ObjectPrefix::all(STORE_ID)).await.unwrap();
@@ -716,19 +742,15 @@ async fn a_candidate_connection_does_not_replace_the_active_connections_tokens()
         .provider(crate::CloudProvider::Dropbox)
         .build()
         .unwrap();
-    let tokens = |expires_at| {
-        StorageCredentials::OAuth(OAuthTokens {
-            client_id: "dropbox".into(),
-            access: crate::OAuthAccess::Dropbox(crate::DropboxAccess::FullDropbox),
-            access_token: coven_crypto::SecretText::new("token".into()),
-            refresh_token: None,
-            expires_at,
-        })
+    let tokens = |token: &str| crate::ProviderAuth::OAuth {
+        tokens: dropbox_tokens(token),
+        custody: Arc::new(crate::test_utils::RefusedRefresh),
     };
+    storage.reject_access_token("rejected").await;
     let active = storage
         .connect(
             storage.config(),
-            tokens(None),
+            tokens("token"),
             DeviceId(1),
             Arc::new(crate::test_utils::UnrestrictedPublications),
             Arc::new(crate::NoCooldown),
@@ -738,7 +760,7 @@ async fn a_candidate_connection_does_not_replace_the_active_connections_tokens()
     let candidate = storage
         .connect(
             storage.config(),
-            tokens(Some(std::time::UNIX_EPOCH)),
+            tokens("rejected"),
             DeviceId(1),
             Arc::new(crate::test_utils::UnrestrictedPublications),
             Arc::new(crate::NoCooldown),

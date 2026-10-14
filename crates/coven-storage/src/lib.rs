@@ -42,6 +42,9 @@ mod secret_json;
 mod session;
 mod settings;
 mod storage;
+mod token_custody;
+pub(crate) use token_custody::HeldTokens;
+pub use token_custody::{ProviderAuth, TokenCustody};
 mod transfer;
 mod web_url;
 

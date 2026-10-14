@@ -355,6 +355,14 @@ pub(crate) const POLICY: Policy = Policy {
             "StoreLogSync",
             "new",
         ),
+        // A sign-in's custody: device custody once per opened installation,
+        // session custody per completed sign-in until publication (§4).
+        (
+            "crates/coven-sync/src/sign_in.rs",
+            "DeviceCredentials",
+            "new",
+        ),
+        ("crates/coven-sync/src/sign_in.rs", "SessionSignIn", "new"),
         ("crates/coven-sync/src/sync_loop.rs", "SyncLoop", "new"),
         ("crates/coven-sync/src/sync_loop.rs", "SyncLoop", "setup"),
         ("crates/coven-sync/src/sync_loop.rs", "SyncLoop", "unlock"),
@@ -394,6 +402,12 @@ pub(crate) const POLICY: Policy = Policy {
             "crates/coven/src/bootstrap_join.rs",
             "<free>",
             "prepare_request",
+        ),
+        // Restore connects through the builder's held sign-in.
+        (
+            "crates/coven/src/restore_credentials.rs",
+            "<free>",
+            "restore_connection",
         ),
         // Finishing a recorded reset composes the new installation.
         (
@@ -450,6 +464,18 @@ pub(crate) const POLICY: Policy = Policy {
             "close",
         ),
         ("crates/coven/src/read_handle.rs", "CovenReadHandle", "new"),
+        // A completed sign-in becomes this session's custody; a Drive upgrade
+        // is its own until committed.
+        (
+            "crates/coven/src/storage.rs",
+            "StorageConnections",
+            "authenticate",
+        ),
+        (
+            "crates/coven/src/storage.rs",
+            "StorageConnections",
+            "prepare_invite",
+        ),
         ("crates/coven/src/storage.rs", "StorageConnections", "call"),
         ("crates/coven/src/storage.rs", "StorageConnections", "new"),
         ("crates/coven/src/test_utils.rs", "TestCoven", "builder"),

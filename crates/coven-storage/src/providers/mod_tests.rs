@@ -50,6 +50,21 @@ pub(crate) fn full_access(provider: CloudProvider) -> crate::OAuthAccess {
     }
 }
 
+/// A held sign-in whose access token is unknown, as live credentials files
+/// supply it: refreshing it is the first request.
+pub(crate) fn refresh_only(
+    client_id: &str,
+    access: crate::OAuthAccess,
+    refresh_token: SecretText,
+) -> OAuthTokens {
+    OAuthTokens {
+        client_id: client_id.into(),
+        access,
+        access_token: SecretText::new(String::new()),
+        refresh_token: Some(refresh_token),
+    }
+}
+
 pub(crate) fn session(provider: CloudProvider) -> OAuthSession {
     session_with_clock(provider, Arc::new(FixedClock::new(SystemTime::UNIX_EPOCH)))
 }
@@ -64,8 +79,8 @@ pub(crate) fn session_with_clock(
             access: full_access(provider),
             access_token: SecretText::new("token".into()),
             refresh_token: None,
-            expires_at: None,
         },
+        Arc::new(crate::test_utils::RefusedRefresh),
         clock,
     )
     .unwrap()
@@ -146,7 +161,6 @@ pub(crate) async fn assert_token_refresh(
             access: full_access(storage.config().provider()),
             access_token: SecretText::new("refreshed".into()),
             refresh_token: None,
-            expires_at: None,
         })
         .await
         .unwrap();
@@ -565,7 +579,7 @@ pub(crate) mod google_drive {
 /// Load the live Google Desktop credentials through the production OAuth flow.
 #[cfg(not(any(target_os = "ios", target_os = "android")))]
 pub(crate) async fn live_drive_tokens(clock: coven_foundation::clock::ClockRef) -> OAuthTokens {
-    use super::{DesktopOAuthPresenter, OAuthClients, OAuthFlow};
+    use super::OAuthClients;
     let mut settings = live_settings("COVEN_LIVE_DRIVE_ENV");
     let client_id = settings
         .remove("GOOGLE_CLIENT_ID")
@@ -590,12 +604,12 @@ pub(crate) async fn live_drive_tokens(clock: coven_foundation::clock::ClockRef) 
     let refresh_token = settings
         .remove("GOOGLE_REFRESH_TOKEN")
         .expect("GOOGLE_REFRESH_TOKEN");
-    OAuthFlow::new(clients, Arc::new(DesktopOAuthPresenter))
-        .refresh(
+    clients
+        .refresh(&refresh_only(
             &client_id,
             full_access(CloudProvider::GoogleDrive),
-            &refresh_token,
-        )
+            refresh_token,
+        ))
         .await
         .unwrap()
 }

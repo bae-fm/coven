@@ -9,6 +9,7 @@ where
     let session = OAuthSession::new(
         PROVIDER,
         live_drive_tokens(clock.clone()).await,
+        Arc::new(crate::test_utils::RefusedRefresh),
         clock.clone(),
     )
     .unwrap();

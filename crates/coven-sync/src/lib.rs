@@ -80,6 +80,8 @@ pub use codes::{
 mod credential_custody;
 pub use credential_custody::{commit_credentials, CredentialRollback};
 mod restore_codes;
-pub use restore_codes::{read_connection, refreshed_credentials, RestoreCodes};
+pub use restore_codes::{read_connection, RestoreCodes};
+mod sign_in;
+pub use sign_in::{DeviceCredentials, SessionSignIn};
 
 mod discovery;

@@ -677,7 +677,7 @@ async fn publication_is_rechecked_after_waiting_for_tokens() {
             coven_foundation::id_source::DeviceId(1),
         ),
     );
-    let tokens = session.tokens.write().await;
+    let tokens = session.tokens.hold().await;
     let mut request = Box::pin(session.publish(
         &publication,
         Method::POST,
@@ -711,4 +711,164 @@ async fn publication_is_rechecked_after_waiting_for_tokens() {
         .await
         .unwrap();
     assert_eq!(requests.load(Ordering::SeqCst), 1);
+}
+
+/// A Drive endpoint that rejects every token in `rejected` with HTTP 401 and
+/// records each request's token and body.
+async fn rejecting_server(
+    rejected: &'static [&'static str],
+    body: &'static str,
+) -> (TestServer, Arc<std::sync::Mutex<Vec<(String, Vec<u8>)>>>) {
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let observed = seen.clone();
+    let server = TestServer::new(Router::new().fallback(
+        move |headers: axum::http::HeaderMap, bytes: axum::body::Bytes| {
+            let observed = observed.clone();
+            async move {
+                let token = headers["authorization"].to_str().unwrap().to_owned();
+                observed
+                    .lock()
+                    .unwrap()
+                    .push((token.clone(), bytes.to_vec()));
+                if rejected.iter().any(|t| token == format!("Bearer {t}")) {
+                    response(401, body)
+                } else {
+                    response(200, "ok")
+                }
+            }
+        },
+    ))
+    .await;
+    (server, seen)
+}
+
+fn session_with(
+    provider: CloudProvider,
+    custody: Arc<crate::token_custody::tests::CountingCustody>,
+) -> OAuthSession {
+    OAuthSession::new(
+        provider,
+        OAuthTokens {
+            client_id: "test-client".into(),
+            access: crate::providers::tests::full_access(provider),
+            access_token: coven_crypto::SecretText::new("token".into()),
+            refresh_token: None,
+        },
+        custody,
+        Arc::new(coven_foundation::clock::FixedClock::new(
+            std::time::SystemTime::UNIX_EPOCH,
+        )),
+    )
+    .unwrap()
+}
+
+const AUTH_ERROR: &str = r#"{"error":{"errors":[{"reason":"authError"}],"code":401}}"#;
+
+#[tokio::test]
+async fn a_rejected_token_refreshes_once_and_retries_the_same_request_once() {
+    let custody = crate::token_custody::tests::CountingCustody::new(false);
+    let session = session_with(CloudProvider::GoogleDrive, custody.clone());
+    let (server, seen) = rejecting_server(&["token"], AUTH_ERROR).await;
+    let reply = session
+        .send(
+            Method::PUT,
+            &server.url,
+            &[],
+            Body::Bytes(b"part".to_vec()),
+            true,
+        )
+        .await
+        .unwrap();
+    assert_eq!(reply.status(), 200);
+    session
+        .send(Method::GET, &server.url, &[], Body::Empty, true)
+        .await
+        .unwrap();
+    assert_eq!(custody.count(), 1);
+    let seen = seen.lock().unwrap();
+    let tokens: Vec<_> = seen.iter().map(|(token, _)| token.as_str()).collect();
+    assert_eq!(
+        tokens,
+        ["Bearer token", "Bearer refreshed-0", "Bearer refreshed-0"]
+    );
+    assert_eq!(seen[0].1, b"part");
+    assert_eq!(seen[1].1, b"part", "the retry resends the same body");
+}
+
+#[tokio::test]
+async fn a_second_rejection_reaches_the_caller_without_another_refresh() {
+    let custody = crate::token_custody::tests::CountingCustody::new(false);
+    let session = session_with(CloudProvider::GoogleDrive, custody.clone());
+    let (server, seen) = rejecting_server(&["token", "refreshed-0"], AUTH_ERROR).await;
+    let reply = session
+        .send(Method::GET, &server.url, &[], Body::Empty, true)
+        .await
+        .unwrap();
+    assert_eq!(
+        checked(CloudProvider::GoogleDrive, reply)
+            .await
+            .unwrap_err()
+            .failure(),
+        StorageFailure::Authentication
+    );
+    assert_eq!(custody.count(), 1);
+    assert_eq!(seen.lock().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn concurrent_rejected_requests_share_one_refresh() {
+    let custody = crate::token_custody::tests::CountingCustody::new(false);
+    let session = session_with(CloudProvider::OneDrive, custody.clone());
+    let (server, _) = rejecting_server(
+        &["token"],
+        r#"{"error":{"code":"InvalidAuthenticationToken"}}"#,
+    )
+    .await;
+    let send = || session.send(Method::GET, &server.url, &[], Body::Empty, true);
+    let (a, b, c, d) = tokio::join!(send(), send(), send(), send());
+    for reply in [a, b, c, d] {
+        assert_eq!(reply.unwrap().status(), 200);
+    }
+    assert_eq!(custody.count(), 1);
+}
+
+#[tokio::test]
+async fn rejections_a_refresh_cannot_cure_do_not_refresh() {
+    let custody = crate::token_custody::tests::CountingCustody::new(false);
+    let session = session_with(CloudProvider::Dropbox, custody.clone());
+    let (server, seen) = rejecting_server(
+        &["token"],
+        r#"{"error_summary":"missing_scope/..","error":{".tag":"missing_scope","required_scope":"files.content.write"}}"#,
+    )
+    .await;
+    let error = session
+        .send(Method::POST, &server.url, &[], Body::Empty, true)
+        .await
+        .unwrap_err();
+    assert_eq!(error.failure(), StorageFailure::InvalidConfiguration);
+    assert_eq!(custody.count(), 0);
+    assert_eq!(seen.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn a_refresh_its_custody_cannot_commit_fails_the_request_without_retrying() {
+    let custody = crate::token_custody::tests::CountingCustody::new(true);
+    let session = session_with(CloudProvider::GoogleDrive, custody.clone());
+    let (server, seen) = rejecting_server(&["token"], AUTH_ERROR).await;
+    let error = session
+        .send(Method::GET, &server.url, &[], Body::Empty, true)
+        .await
+        .unwrap_err();
+    assert_eq!(error.failure(), StorageFailure::File);
+    assert_eq!(seen.lock().unwrap().len(), 1);
+    // Nothing was installed: the next request still sends the rejected token.
+    session
+        .send(Method::GET, &server.url, &[], Body::Empty, true)
+        .await
+        .unwrap_err();
+    assert!(seen
+        .lock()
+        .unwrap()
+        .iter()
+        .all(|(token, _)| token == "Bearer token"));
 }

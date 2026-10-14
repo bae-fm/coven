@@ -45,7 +45,7 @@ impl StorageConnections {
                 .await?;
             let config = detection.resolve(config)?;
             owner
-                .setup_connection(config, &device_name, StorageCredentials::S3(credentials))
+                .setup_connection(config, &device_name, ProviderAuth::S3(credentials), None)
                 .await
         })
         .await

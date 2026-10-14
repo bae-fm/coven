@@ -21,13 +21,13 @@ impl crate::providers::StorageConnector for MemoryStorage {
     async fn connect(
         &self,
         config: StorageConfig,
-        credentials: StorageCredentials,
+        auth: crate::ProviderAuth,
         _device: coven_foundation::id_source::DeviceId,
         publications: Arc<dyn crate::PublicationGate>,
         cooldown: Arc<dyn crate::Cooldown>,
     ) -> Result<Arc<StorageConnection>, StorageError> {
         Ok(self
-            .connect_device(config, credentials)
+            .connect_device(config, auth)
             .await?
             .with_publication_gate(publications)
             .with_cooldown(cooldown)

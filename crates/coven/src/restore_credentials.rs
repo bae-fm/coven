@@ -2,12 +2,12 @@
 
 use super::*;
 
-pub(super) async fn restore_connection(
-    builder: &mut CovenBuilder,
+pub(super) fn restore_connection(
+    builder: &CovenBuilder,
     location: StorageConfig,
     s3_credentials: Option<S3Credentials>,
-    cancel: &watch::Receiver<bool>,
-) -> Result<ConnectionCredentials, BootstrapError> {
+) -> Result<(ConnectionCredentials, Option<Arc<SessionSignIn>>), BootstrapError> {
+    let mut sign_in = None;
     let credentials = match (location.provider(), s3_credentials) {
         (CloudProvider::S3, Some(keys)) => StorageCredentials::S3(keys),
         (CloudProvider::S3, None) => {
@@ -24,12 +24,18 @@ pub(super) async fn restore_connection(
             )
             .into())
         }
-        (provider, None) => account_credentials(builder, provider, cancel).await?,
+        (CloudProvider::CloudKit, None) => StorageCredentials::CloudKit,
+        (provider, None) => {
+            let held = account_sign_in(builder, provider)?;
+            let tokens = held.tokens()?;
+            sign_in = Some(held);
+            StorageCredentials::OAuth(tokens)
+        }
     };
     let data = ConnectionCredentials {
         location,
         credentials,
     };
     data.validate().map_err(SyncError::from)?;
-    Ok(data)
+    Ok((data, sign_in))
 }

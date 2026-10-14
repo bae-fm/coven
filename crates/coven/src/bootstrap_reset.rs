@@ -27,15 +27,16 @@ pub(crate) async fn reset_device(
         }
         return reset_unconnected(builder, store, &settings.name, keychain).await;
     }
-    let mut data =
-        coven_sync::read_connection(&location, &keychain)?.ok_or(SyncError::NoStorage)?;
-    if let Some(credentials) =
-        coven_sync::refreshed_credentials(&data, builder.oauth_flow().as_ref(), builder.clock.now())
-            .await?
-    {
-        coven_sync::commit_credentials(&keychain, &credentials, None)?;
-        data.credentials = credentials;
-    }
+    let data = coven_sync::read_connection(&location, &keychain)?.ok_or(SyncError::NoStorage)?;
+    // The held sign-in refreshes in this session until the new device
+    // publishes it, like any bootstrap's (§4).
+    let sign_in = match &data.credentials {
+        StorageCredentials::OAuth(tokens) => Some(coven_sync::SessionSignIn::new(
+            tokens.clone(),
+            builder.oauth.clone(),
+        )),
+        _ => None,
+    };
     // One custody instance per key kind reads now and keeps them at publication.
     let identity = CovenBuilder::make_identity(
         std::mem::replace(&mut builder.identity, IdentityCustody::InMemory),
@@ -62,7 +63,7 @@ pub(crate) async fn reset_device(
         .connector()
         .connect(
             data.location.clone(),
-            data.credentials.clone(),
+            super::provider_auth(&data, sign_in.as_ref())?,
             settings.device_id,
             probe,
             // The damaged database cannot hold a cooldown for this one probe.
@@ -98,6 +99,7 @@ pub(crate) async fn reset_device(
         BootstrapRequest::Restore {
             code,
             data,
+            sign_in,
             name: device_name.into(),
         },
         |_| {},

@@ -1,6 +1,5 @@
 //! Compose database, custody, operation and file owners at the store boundary.
 
-use crate::authentication::Authentication;
 use crate::*;
 use coven_crypto::custody::{
     InMemoryCustody, KeySession, Keychain, KeyringCustody, PassphraseCustody, StoreCustody,
@@ -25,7 +24,8 @@ pub struct CovenBuilder {
     limits: TransferLimits,
     oauth: Option<OAuthClients>,
     presenter: Option<Arc<dyn OAuthPresenter>>,
-    authentication: Option<Authentication>,
+    /// The latest sign-in, held for this session until bootstrap or setup publishes it.
+    authentication: Option<Arc<coven_sync::SessionSignIn>>,
     keys: KeyCustody,
     identity: IdentityCustody,
     #[cfg(any(test, feature = "test-utils"))]
@@ -116,7 +116,7 @@ impl CovenBuilder {
             .oauth_flow()
             .ok_or(OAuthError::Unavailable(access.provider()))?;
         let tokens = flow.authenticate(access).await?;
-        self.authentication = Some(Authentication { tokens });
+        self.authentication = Some(coven_sync::SessionSignIn::new(tokens, self.oauth.clone()));
         Ok(())
     }
 
@@ -196,9 +196,12 @@ impl CovenBuilder {
                 .map_err(CovenError::from)?;
         }
         let settings = coven_storage::StorageSettings::new(directory.clone());
-        let data = crate::coven::blocking(move || {
-            let keychain = StoreKeychain::new(self.keychain()?, store);
-            coven_sync::read_connection(&settings, &keychain)
+        let oauth = self.oauth.clone();
+        let (credentials, data) = crate::coven::blocking(move || {
+            let keychain = Arc::new(StoreKeychain::new(self.keychain()?, store));
+            let credentials = Arc::new(coven_sync::DeviceCredentials::new(keychain, oauth));
+            let data = credentials.connection(&settings)?;
+            Ok::<_, SyncError>((credentials, data))
         })
         .await?;
         let storage: Option<Arc<dyn Storage>> = match data {
@@ -206,7 +209,7 @@ impl CovenBuilder {
                 connector
                     .connect(
                         data.location,
-                        data.credentials,
+                        coven_storage::ProviderAuth::new(data.credentials, credentials),
                         directory.settings().map_err(CovenError::from)?.device_id,
                         send.clone(),
                         waits.clone(),
@@ -302,6 +305,10 @@ impl CovenBuilder {
         keychain: Arc<StoreKeychain>,
     ) -> CovenResult<OpeningOwners> {
         let oauth = self.oauth_flow();
+        let credentials = Arc::new(coven_sync::DeviceCredentials::new(
+            keychain.clone(),
+            self.oauth.clone(),
+        ));
         let connector = self.connector();
         let settings = directory.settings()?;
         let has_storage_credentials = keychain.storage_credentials()?.is_some();
@@ -322,8 +329,10 @@ impl CovenBuilder {
             has_storage_credentials,
             custody: StoreCustody::new(keys.clone(), identity.clone(), keychain.clone()),
             keychain,
+            credentials,
             connector,
             oauth,
+            clients: self.oauth,
             authentication: self.authentication,
             limits: self.limits,
             device: settings.device_id,
@@ -394,9 +403,11 @@ struct OpeningOwners {
     initial_name: String,
     limits: TransferLimits,
     keychain: Arc<StoreKeychain>,
+    credentials: Arc<coven_sync::DeviceCredentials>,
     connector: Arc<dyn StorageConnector>,
     oauth: Option<OAuthFlow>,
-    authentication: Option<Authentication>,
+    clients: Option<OAuthClients>,
+    authentication: Option<Arc<coven_sync::SessionSignIn>>,
     device: DeviceId,
     directory: StoreDir,
     custody: StoreCustody,
@@ -495,10 +506,9 @@ impl OpeningOwners {
         let codes = coven_sync::RestoreCodes::new(
             database.clone(),
             self.identity,
-            self.keychain,
+            self.credentials,
             coven_storage::StorageSettings::new(self.directory.clone()),
             operations.clone(),
-            self.oauth.clone(),
         );
         let sync = coven_sync::SyncLoop::new(
             operations.clone(),
@@ -519,6 +529,7 @@ impl OpeningOwners {
             self.keys,
             self.connector,
             self.oauth,
+            self.clients,
             self.authentication,
             sync.clone(),
             self.directory.id(),

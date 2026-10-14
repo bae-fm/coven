@@ -13,10 +13,8 @@
 use super::{DropboxStorage, PROVIDER};
 use crate::providers::http::{self, Body, OAuthSession};
 use crate::providers::tests::live_settings;
-use crate::providers::{DropboxClients, OAuthClients, OAuthError, OAuthFlow, OAuthPresenter};
+use crate::providers::{DropboxClients, OAuthClients};
 use crate::*;
-use async_trait::async_trait;
-use coven_crypto::SecretText;
 use coven_format::value::StorageTime;
 use coven_foundation::{
     clock::{ClockRef, SystemClock},
@@ -32,19 +30,6 @@ use std::{
 
 // Serialize ownership of the optional parent folder, including its cleanup.
 static LIVE_RUN: Mutex<()> = Mutex::new(());
-
-struct NoPresentation;
-
-#[async_trait]
-impl OAuthPresenter for NoPresentation {
-    fn redirect_uri(&self, _: CloudProvider) -> &str {
-        panic!("refresh must not request an authorization redirect")
-    }
-
-    async fn present(&self, _: &str) -> Result<SecretText, OAuthError> {
-        panic!("refresh must not open an authorization presenter")
-    }
-}
 
 struct Live {
     store: StoreId,
@@ -74,12 +59,12 @@ async fn tokens(variable: &str, clock: ClockRef) -> OAuthTokens {
         None,
         clock,
     );
-    OAuthFlow::new(clients, Arc::new(NoPresentation))
-        .refresh(
+    clients
+        .refresh(&crate::providers::tests::refresh_only(
             &client_id,
             OAuthAccess::Dropbox(DropboxAccess::FullDropbox),
-            &refresh_token,
-        )
+            refresh_token,
+        ))
         .await
         .expect("Dropbox OAuth refresh")
 }
@@ -88,7 +73,13 @@ async fn tokens(variable: &str, clock: ClockRef) -> OAuthTokens {
 impl Live {
     async fn authenticate(store: StoreId, clock: ClockRef) -> Self {
         let tokens = tokens("COVEN_LIVE_DROPBOX_ENV", clock.clone()).await;
-        let account = OAuthSession::new(PROVIDER, tokens.clone(), clock.clone()).unwrap();
+        let account = OAuthSession::new(
+            PROVIDER,
+            tokens.clone(),
+            Arc::new(crate::test_utils::RefusedRefresh),
+            clock.clone(),
+        )
+        .unwrap();
         Self {
             store,
             clock,
@@ -173,7 +164,13 @@ impl Live {
         }
         assert_eq!(http::string(&shared, ".tag").unwrap(), "complete");
         let namespace_id = http::string(&shared, "shared_folder_id").unwrap().into();
-        let session = OAuthSession::new(PROVIDER, self.tokens.clone(), self.clock.clone()).unwrap();
+        let session = OAuthSession::new(
+            PROVIDER,
+            self.tokens.clone(),
+            Arc::new(crate::test_utils::RefusedRefresh),
+            self.clock.clone(),
+        )
+        .unwrap();
         Arc::new(StorageConnection::from_provider(Arc::new(
             DropboxStorage::new(
                 StorageConfig::Dropbox {

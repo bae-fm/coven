@@ -2,8 +2,8 @@
 
 use super::{DropboxStorage, GoogleDriveStorage, OAuthSession, OneDriveStorage, S3Storage};
 use crate::{
-    ProviderOps, S3Credentials, S3Detection, StorageConfig, StorageConnection, StorageCredentials,
-    StorageError, StorageFailure,
+    ProviderAuth, ProviderOps, S3Credentials, S3Detection, StorageConfig, StorageConnection,
+    StorageCredentials, StorageError, StorageFailure,
 };
 use coven_foundation::{
     clock::ClockRef,
@@ -26,11 +26,12 @@ pub trait StorageConnector: Send + Sync {
     }
     /// Validate settings and wrap the selected native provider once. The caller
     /// verifies the connection before publication. Every request waits for
-    /// the store's shared `cooldown`.
+    /// the store's shared `cooldown`; a rejected OAuth token is refreshed in
+    /// the sign-in's custody (§4).
     async fn connect(
         &self,
         config: StorageConfig,
-        credentials: StorageCredentials,
+        auth: ProviderAuth,
         device: DeviceId,
         publications: Arc<dyn crate::PublicationGate>,
         cooldown: Arc<dyn crate::Cooldown>,
@@ -102,47 +103,51 @@ impl StorageConnector for ProviderConnector {
     async fn connect(
         &self,
         config: StorageConfig,
-        credentials: StorageCredentials,
+        auth: ProviderAuth,
         device: DeviceId,
         publications: Arc<dyn crate::PublicationGate>,
         cooldown: Arc<dyn crate::Cooldown>,
     ) -> Result<Arc<StorageConnection>, StorageError> {
         crate::ConnectionCredentials {
             location: config.clone(),
-            credentials: credentials.clone(),
+            credentials: auth.credentials(),
         }
         .validate()?;
-        let provider: Arc<dyn ProviderOps> = match (&config, credentials) {
-            (StorageConfig::S3 { .. }, StorageCredentials::S3(credentials)) => Arc::new(
-                S3Storage::new(config, credentials, self.clock.clone(), self.ids.clone())?,
-            ),
-            (StorageConfig::GoogleDrive { .. }, StorageCredentials::OAuth(tokens)) => {
-                let session = OAuthSession::new(config.provider(), tokens, self.clock.clone())?;
-                Arc::new(GoogleDriveStorage::new(config, device, session)?)
-            }
-            (StorageConfig::Dropbox { .. }, StorageCredentials::OAuth(tokens)) => {
-                let session = OAuthSession::new(config.provider(), tokens, self.clock.clone())?;
-                Arc::new(DropboxStorage::new(config, session)?)
-            }
-            (StorageConfig::OneDrive { .. }, StorageCredentials::OAuth(tokens)) => {
-                let session = OAuthSession::new(config.provider(), tokens, self.clock.clone())?;
-                Arc::new(OneDriveStorage::new(config, session, self.ids.clone())?)
-            }
-            (StorageConfig::CloudKit { .. }, StorageCredentials::CloudKit) => {
-                #[cfg(target_vendor = "apple")]
-                {
-                    Arc::new(super::CloudKitStorage::new(config, self.ids.clone()).await?)
+        let provider = config.provider();
+        let session =
+            |tokens, custody| OAuthSession::new(provider, tokens, custody, self.clock.clone());
+        let provider: Arc<dyn ProviderOps> =
+            match (&config, auth) {
+                (StorageConfig::S3 { .. }, ProviderAuth::S3(credentials)) => Arc::new(
+                    S3Storage::new(config, credentials, self.clock.clone(), self.ids.clone())?,
+                ),
+                (StorageConfig::GoogleDrive { .. }, ProviderAuth::OAuth { tokens, custody }) => {
+                    let session = session(tokens, custody)?;
+                    Arc::new(GoogleDriveStorage::new(config, device, session)?)
                 }
-                #[cfg(not(target_vendor = "apple"))]
-                {
-                    return Err(StorageFailure::ProviderUnavailable.into());
+                (StorageConfig::Dropbox { .. }, ProviderAuth::OAuth { tokens, custody }) => {
+                    let session = session(tokens, custody)?;
+                    Arc::new(DropboxStorage::new(config, session)?)
                 }
-            }
-            _ => {
-                return Err(StorageFailure::InvalidConfiguration
-                    .with_source("credentials do not match the provider"))
-            }
-        };
+                (StorageConfig::OneDrive { .. }, ProviderAuth::OAuth { tokens, custody }) => {
+                    let session = session(tokens, custody)?;
+                    Arc::new(OneDriveStorage::new(config, session, self.ids.clone())?)
+                }
+                (StorageConfig::CloudKit { .. }, ProviderAuth::CloudKit) => {
+                    #[cfg(target_vendor = "apple")]
+                    {
+                        Arc::new(super::CloudKitStorage::new(config, self.ids.clone()).await?)
+                    }
+                    #[cfg(not(target_vendor = "apple"))]
+                    {
+                        return Err(StorageFailure::ProviderUnavailable.into());
+                    }
+                }
+                _ => {
+                    return Err(StorageFailure::InvalidConfiguration
+                        .with_source("credentials do not match the provider"))
+                }
+            };
         Ok(Arc::new(StorageConnection::with_gate(
             provider,
             publications,

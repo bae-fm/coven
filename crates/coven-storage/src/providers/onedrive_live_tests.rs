@@ -6,7 +6,7 @@ use super::*;
 use crate::providers::{
     pagination::Pagination,
     tests::listing_lag::{observe, report, TRIALS},
-    OAuthClients, OAuthError, OAuthFlow, OAuthPresenter,
+    OAuthClients,
 };
 use coven_foundation::{
     clock::SystemClock,
@@ -23,17 +23,6 @@ use tokio::time::Instant as Monotonic;
 
 // Serialize ownership of the shared coven-live parent, including its deletion.
 static LIVE_LOCK: Mutex<()> = Mutex::new(());
-
-struct RefreshOnly;
-#[async_trait]
-impl OAuthPresenter for RefreshOnly {
-    fn redirect_uri(&self, _: CloudProvider) -> &str {
-        panic!("live evidence must use refresh, not authorization presentation")
-    }
-    async fn present(&self, _: &str) -> Result<SecretText, OAuthError> {
-        panic!("live evidence must use refresh, not authorization presentation")
-    }
-}
 
 async fn tokens(clock: ClockRef) -> OAuthTokens {
     let path = std::env::var("COVEN_LIVE_ONEDRIVE_ENV")
@@ -72,17 +61,14 @@ async fn tokens(clock: ClockRef) -> OAuthTokens {
     let client_id = take("ONEDRIVE_CLIENT_ID");
     let refresh_token = take("ONEDRIVE_REFRESH_TOKEN");
     assert!(!client_id.as_str().is_empty() && !refresh_token.as_str().is_empty());
-    OAuthFlow::new(
-        OAuthClients::new(None, None, Some(client_id.as_str().to_owned()), clock),
-        Arc::new(RefreshOnly),
-    )
-    .refresh(
-        client_id.as_str(),
-        crate::OAuthAccess::OneDrive,
-        &refresh_token,
-    )
-    .await
-    .expect("refresh OneDrive credentials through coven OAuth")
+    OAuthClients::new(None, None, Some(client_id.as_str().to_owned()), clock)
+        .refresh(&crate::providers::tests::refresh_only(
+            client_id.as_str(),
+            crate::OAuthAccess::OneDrive,
+            refresh_token,
+        ))
+        .await
+        .expect("refresh OneDrive credentials through coven OAuth")
 }
 
 fn run(test: impl AsyncFnOnce(&mut Live<'_>)) {
@@ -93,7 +79,13 @@ fn run(test: impl AsyncFnOnce(&mut Live<'_>)) {
         .unwrap();
     let clock: ClockRef = Arc::new(SystemClock);
     let tokens = runtime.block_on(tokens(clock.clone()));
-    let session = OAuthSession::new(PROVIDER, tokens.clone(), clock.clone()).unwrap();
+    let session = OAuthSession::new(
+        PROVIDER,
+        tokens.clone(),
+        Arc::new(crate::test_utils::RefusedRefresh),
+        clock.clone(),
+    )
+    .unwrap();
     let drive = runtime.block_on(async {
         http::json(
             PROVIDER,
@@ -127,7 +119,13 @@ fn run(test: impl AsyncFnOnce(&mut Live<'_>)) {
                     drive_id: folders.drive.clone(),
                     folder_id,
                 },
-                OAuthSession::new(PROVIDER, tokens, clock.clone()).unwrap(),
+                OAuthSession::new(
+                    PROVIDER,
+                    tokens,
+                    Arc::new(crate::test_utils::RefusedRefresh),
+                    clock.clone(),
+                )
+                .unwrap(),
                 Arc::new(UuidIds),
             )
             .unwrap();

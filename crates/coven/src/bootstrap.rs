@@ -15,7 +15,8 @@ use tokio::sync::watch;
 
 #[path = "bootstrap_authentication.rs"]
 mod authentication;
-use authentication::{account_credentials, refresh_sign_in};
+use authentication::{account_sign_in, provider_auth};
+use coven_sync::SessionSignIn;
 
 #[path = "bootstrap_commit.rs"]
 mod commit;
@@ -85,7 +86,7 @@ pub enum BootstrapError {
 /// providers require None and use the builder's own sign-in. Invalid key inputs
 /// fail before bootstrap begins.
 pub async fn restore_from_code(
-    mut builder: CovenBuilder,
+    builder: CovenBuilder,
     code: &str,
     s3_credentials: Option<S3Credentials>,
     device_name: &str,
@@ -95,12 +96,13 @@ pub async fn restore_from_code(
     check_cancel(cancel)?;
     let code = coven_sync::read_restore_code(code)?;
     let location = StorageConfig::decode(code.storage.as_bytes()).map_err(SyncError::from)?;
-    let data = restore_connection(&mut builder, location, s3_credentials, cancel).await?;
+    let (data, sign_in) = restore_connection(&builder, location, s3_credentials)?;
     bootstrap_device(
         builder,
         BootstrapRequest::Restore {
             code,
             data,
+            sign_in,
             name: device_name.into(),
         },
         on_status,
@@ -115,7 +117,7 @@ pub async fn restore_from_code(
 /// S3 uses the explicit key when supplied, otherwise its separately synced key.
 /// Missing keys, wrong-provider keys and keychain failures precede bootstrap.
 pub async fn restore_from_keychain(
-    mut builder: CovenBuilder,
+    builder: CovenBuilder,
     s3_credentials: Option<S3Credentials>,
     device_name: &str,
     on_status: impl Fn(&str),
@@ -135,12 +137,13 @@ pub async fn restore_from_keychain(
     } else {
         s3_credentials
     };
-    let data = restore_connection(&mut builder, location, s3_credentials, cancel).await?;
+    let (data, sign_in) = restore_connection(&builder, location, s3_credentials)?;
     bootstrap_device(
         builder,
         BootstrapRequest::Restore {
             code,
             data,
+            sign_in,
             name: device_name.into(),
         },
         on_status,
@@ -195,6 +198,8 @@ enum BootstrapRequest {
     Restore {
         code: RestoreCode,
         data: ConnectionCredentials,
+        /// The session custody an OAuth connection refreshes in.
+        sign_in: Option<Arc<SessionSignIn>>,
         name: String,
     },
     Join {
@@ -222,7 +227,16 @@ async fn bootstrap_device(
         .await?;
     let result = prepare_and_load(&mut builder, &pending, &request, &status, cancel).await;
     match result {
-        Ok(Some((code, credentials, ring, database, storage, send, waits))) => {
+        Ok(Some(Loaded {
+            code,
+            credentials,
+            sign_in,
+            ring,
+            database,
+            storage,
+            send,
+            waits,
+        })) => {
             status("Keeping keys and credentials");
             let result = check_cancel(cancel).and_then(|()| {
                 builder.authentication.take();
@@ -239,6 +253,7 @@ async fn bootstrap_device(
                     &pending,
                     code,
                     credentials,
+                    sign_in,
                     ring,
                     owners,
                     database.clone(),
@@ -276,38 +291,45 @@ enum Admission<'a> {
     Joining(join::Joining<'a>),
 }
 
+/// A loaded store awaiting publication, with what reaches its storage.
+struct Loaded {
+    code: RestoreCode,
+    credentials: StorageCredentials,
+    sign_in: Option<Arc<SessionSignIn>>,
+    ring: StoreKeyring,
+    database: Database,
+    storage: Arc<coven_storage::StorageConnection>,
+    send: Arc<coven_sync::SendGate>,
+    waits: Arc<coven_sync::RetryWaits>,
+}
+
 async fn prepare_and_load(
     builder: &mut CovenBuilder,
     pending: &BootstrapStore,
     request: &BootstrapRequest,
     status: &impl Fn(&str),
     cancel: &watch::Receiver<bool>,
-) -> Result<
-    Option<(
-        RestoreCode,
-        StorageCredentials,
-        StoreKeyring,
-        Database,
-        Arc<coven_storage::StorageConnection>,
-        Arc<coven_sync::SendGate>,
-        Arc<coven_sync::RetryWaits>,
-    )>,
-    BootstrapError,
-> {
+) -> Result<Option<Loaded>, BootstrapError> {
     let directory = pending.directory();
-    let (member, mut data, device_name, mut admission) = match request {
-        BootstrapRequest::Restore { code, data, name } => (
+    let (member, data, sign_in, device_name, mut admission) = match request {
+        BootstrapRequest::Restore {
+            code,
+            data,
+            sign_in,
+            name,
+        } => (
             MemberIdentity::new(code.member, code.member_keys.clone()),
             data.clone(),
+            sign_in.clone(),
             name.as_str(),
             Admission::Restoring,
         ),
         BootstrapRequest::Join { code, name } => {
-            let (joining, data) =
-                join::prepare_request(builder, &directory, code, name, cancel).await?;
+            let (joining, data, sign_in) = join::prepare_request(builder, &directory, code, name)?;
             (
                 joining.identity(),
                 data,
+                sign_in,
                 name.as_str(),
                 Admission::Joining(joining),
             )
@@ -337,7 +359,7 @@ async fn prepare_and_load(
             .connector()
             .connect(
                 data.location.clone(),
-                data.credentials.clone(),
+                provider_auth(&data, sign_in.as_ref())?,
                 settings.device_id,
                 send.clone(),
                 waits.clone(),
@@ -381,17 +403,7 @@ async fn prepare_and_load(
     );
     let loading = async {
         if let Admission::Joining(joining) = &mut admission {
-            if !joining
-                .admit(
-                    builder,
-                    &mut sync,
-                    &mut data,
-                    storage.as_ref(),
-                    status,
-                    cancel,
-                )
-                .await?
-            {
+            if !joining.admit(&mut sync, status).await? {
                 return Ok(false);
             }
         } else {
@@ -401,7 +413,6 @@ async fn prepare_and_load(
             }
         }
         status("Loading snapshots and later writes");
-        refresh_sign_in(builder, &mut data, storage.as_ref(), cancel).await?;
         sync.load_new_device(device_name, reset.map(|reset| reset.old_device))
             .await?;
         sync.download_later_writes(&mut writes).await?;
@@ -441,15 +452,16 @@ async fn prepare_and_load(
         )))
     });
     match result {
-        Ok(Some((code, credentials, ring))) => Ok(Some((
+        Ok(Some((code, credentials, ring))) => Ok(Some(Loaded {
             code,
             credentials,
+            sign_in,
             ring,
             database,
             storage,
             send,
             waits,
-        ))),
+        })),
         result => {
             let closed = database
                 .close()

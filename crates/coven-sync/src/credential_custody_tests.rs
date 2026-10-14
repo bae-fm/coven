@@ -185,7 +185,6 @@ fn switching_to_account_storage_removes_the_separate_s3_key_and_can_roll_back() 
         access: coven_storage::OAuthAccess::Dropbox(coven_storage::DropboxAccess::FullDropbox),
         access_token: SecretText::new("account-token".into()),
         refresh_token: None,
-        expires_at: None,
     });
     let rollback = commit_credentials(&store, &oauth, Some(&code)).unwrap();
     assert!(store.synced_s3_credentials().unwrap().is_none());
@@ -209,7 +208,6 @@ fn oauth_commit_and_compensation_touch_only_device_credentials() {
         access: coven_storage::OAuthAccess::Dropbox(coven_storage::DropboxAccess::FullDropbox),
         access_token: SecretText::new("new-access".into()),
         refresh_token: Some(SecretText::new("new-refresh".into())),
-        expires_at: None,
     });
     // Exactly one read and one write: a third operation would fail.
     keychain.fail_operations_after(&[2]);

@@ -1,15 +1,20 @@
-use crate::{ByteRange, CloudProvider, OAuthTokens, StorageError, StorageFailure};
+use crate::{
+    ByteRange, CloudProvider, HeldTokens, OAuthTokens, StorageError, StorageFailure, TokenCustody,
+};
 use coven_crypto::SecretBytes;
 use coven_foundation::clock::ClockRef;
 use reqwest::{Method, Response};
 use serde_json::Value;
 use std::fmt;
+use std::sync::Arc;
 
 /// A device's provider sign-in and HTTP connection, injected into its provider.
+/// A token is used until the provider rejects it with HTTP 401; the request
+/// then refreshes once through the sign-in's custody and is retried once (§4).
 pub struct OAuthSession {
     client: reqwest::Client,
     provider: CloudProvider,
-    tokens: tokio::sync::RwLock<OAuthTokens>,
+    tokens: HeldTokens,
     clock: ClockRef,
 }
 impl OAuthSession {
@@ -18,6 +23,7 @@ impl OAuthSession {
     pub fn new(
         provider: CloudProvider,
         tokens: OAuthTokens,
+        custody: Arc<dyn TokenCustody>,
         clock: ClockRef,
     ) -> Result<Self, StorageError> {
         if !matches!(
@@ -31,7 +37,7 @@ impl OAuthSession {
         Ok(Self {
             client: client().map_err(|e| transport(provider, e))?,
             provider,
-            tokens: tokio::sync::RwLock::new(tokens),
+            tokens: HeldTokens::new(tokens, custody),
             clock,
         })
     }
@@ -78,12 +84,12 @@ impl OAuthSession {
         }
         Ok(account.to_ascii_lowercase())
     }
-    /// Install tokens after the facade has committed their refreshed value to custody.
+    /// Install tokens after their owner committed them to custody.
     pub async fn set_tokens(&self, tokens: OAuthTokens) {
-        *self.tokens.write().await = tokens;
+        self.tokens.install(tokens).await;
     }
     pub(crate) async fn access(&self) -> crate::OAuthAccess {
-        self.tokens.read().await.access
+        self.tokens.current().await.access
     }
     pub(crate) fn provider(&self) -> CloudProvider {
         self.provider
@@ -124,23 +130,6 @@ impl OAuthSession {
         authenticated: bool,
     ) -> Result<Response, StorageError> {
         let mut request = self.client.request(method, url);
-        let access = if authenticated {
-            let tokens = self.tokens.read().await;
-            if tokens
-                .expires_at
-                .is_some_and(|expiry| self.clock.now() >= expiry)
-            {
-                return Err(StorageError::Provider {
-                    provider: self.provider,
-                    failure: StorageFailure::Authentication,
-                    source: Box::new(super::oauth::OAuthError::Expired),
-                });
-            }
-            request = request.bearer_auth(tokens.access_token.as_str());
-            Some(tokens.access)
-        } else {
-            None
-        };
         for (name, value) in headers {
             request = request.header(*name, value);
         }
@@ -149,16 +138,58 @@ impl OAuthSession {
             Body::Json(value) => request.json(&value),
             Body::Bytes(bytes) => request.body(bytes),
         };
+        let request = request.build().map_err(|e| transport(self.provider, e))?;
+        if !authenticated {
+            return self.execute(publication, request, None).await;
+        }
+        // Buffered bodies clone without copying, so the one retry resends them.
+        let retry = request.try_clone();
+        let used = self.tokens.current().await;
+        let response = self.execute(publication, request, Some(&used)).await?;
+        if response.status() != reqwest::StatusCode::UNAUTHORIZED {
+            return Ok(response);
+        }
+        let rejection = response_error(self.provider, response).await;
+        // Refreshing cannot cure a rejection other than the token's, such as
+        // Dropbox's missing scope or a suspended account.
+        if rejection.failure() != StorageFailure::Authentication {
+            return Err(rejection);
+        }
+        let Some(retry) = retry else {
+            return Err(rejection);
+        };
+        let replacement = self.tokens.rejected(&used).await?;
+        self.execute(publication, retry, Some(&replacement)).await
+    }
+    /// Send one request with `tokens`, labelling the response with the access
+    /// they carried: a later replacement must not relabel it.
+    async fn execute(
+        &self,
+        publication: Option<&crate::PublicationRequest>,
+        mut request: reqwest::Request,
+        tokens: Option<&OAuthTokens>,
+    ) -> Result<Response, StorageError> {
+        if let Some(tokens) = tokens {
+            let mut value = reqwest::header::HeaderValue::try_from(format!(
+                "Bearer {}",
+                tokens.access_token.as_str()
+            ))
+            .map_err(|error| StorageFailure::InvalidConfiguration.with_source(error))?;
+            value.set_sensitive(true);
+            request
+                .headers_mut()
+                .insert(reqwest::header::AUTHORIZATION, value);
+        }
         if let Some(publication) = publication {
             publication.check()?;
         }
-        let mut response = request
-            .send()
+        let mut response = self
+            .client
+            .execute(request)
             .await
             .map_err(|e| transport(self.provider, e))?;
-        // Token replacement must not relabel a request already in flight.
-        if let Some(access) = access {
-            response.extensions_mut().insert(access);
+        if let Some(tokens) = tokens {
+            response.extensions_mut().insert(tokens.access);
         }
         Ok(response)
     }

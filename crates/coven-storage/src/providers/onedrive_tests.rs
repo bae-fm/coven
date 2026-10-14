@@ -701,7 +701,6 @@ async fn recipient_join_redeems_only_the_invited_destination_and_keeps_native_re
             access: crate::OAuthAccess::OneDrive,
             access_token: SecretText::new("recipient:member".into()),
             refresh_token: None,
-            expires_at: None,
         })
         .await
         .unwrap();

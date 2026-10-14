@@ -48,7 +48,6 @@ fn tokens(access: GoogleDriveAccess) -> OAuthTokens {
         access: OAuthAccess::GoogleDrive(access),
         access_token: coven_crypto::SecretText::new("token".into()),
         refresh_token: None,
-        expires_at: None,
     }
 }
 

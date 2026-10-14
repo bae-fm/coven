@@ -102,7 +102,7 @@ impl StorageConnector for TrackingConnector {
     async fn connect(
         &self,
         config: StorageConfig,
-        credentials: coven_storage::StorageCredentials,
+        auth: coven_storage::ProviderAuth,
         _device: DeviceId,
         publications: Arc<dyn coven_storage::PublicationGate>,
         cooldown: Arc<dyn coven_storage::Cooldown>,
@@ -114,10 +114,10 @@ impl StorageConnector for TrackingConnector {
         if self.refuse.swap(false, Ordering::SeqCst) {
             return Err(StorageError::Failure(StorageFailure::Authentication));
         }
-        self.credentials.lock().unwrap().push(credentials.clone());
+        self.credentials.lock().unwrap().push(auth.credentials());
         let provider = self
             .storage
-            .connect_device(config, credentials)
+            .connect_device(config, auth)
             .await?
             .with_publication_gate(publications)
             .with_cooldown(cooldown);
@@ -551,7 +551,7 @@ impl StorageConnector for Locations {
     async fn connect(
         &self,
         config: StorageConfig,
-        credentials: coven_storage::StorageCredentials,
+        auth: coven_storage::ProviderAuth,
         device: DeviceId,
         publications: Arc<dyn coven_storage::PublicationGate>,
         cooldown: Arc<dyn coven_storage::Cooldown>,
@@ -562,7 +562,7 @@ impl StorageConnector for Locations {
             .find(|storage| storage.config() == config)
             .ok_or(StorageFailure::InvalidConfiguration.with_source("unknown test location"))?;
         storage
-            .connect(config, credentials, device, publications, cooldown)
+            .connect(config, auth, device, publications, cooldown)
             .await
     }
     async fn detect_s3(

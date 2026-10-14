@@ -15,26 +15,37 @@ pub(super) struct Joining<'a> {
 }
 
 /// Restore or fix the request, then obtain credentials for the invite's
-/// location: S3 invites carry them, account providers sign in.
-pub(super) async fn prepare_request<'a>(
-    builder: &mut CovenBuilder,
+/// location: S3 invites carry them, account providers use the held sign-in.
+pub(super) fn prepare_request<'a>(
+    builder: &CovenBuilder,
     directory: &StoreDir,
     code: &'a InviteCode,
     name: &str,
-    cancel: &watch::Receiver<bool>,
-) -> Result<(Joining<'a>, ConnectionCredentials), BootstrapError> {
+) -> Result<
+    (
+        Joining<'a>,
+        ConnectionCredentials,
+        Option<Arc<SessionSignIn>>,
+    ),
+    BootstrapError,
+> {
     let identity = JoiningIdentity::prepare(directory, code, name)?;
+    let mut sign_in = None;
     let (invitation, credentials) =
         match InviteStorage::decode(code.storage.as_bytes()).map_err(SyncError::from)? {
             InviteStorage::S3 {
                 invitation,
                 credentials,
             } => (invitation, StorageCredentials::S3(credentials)),
-            InviteStorage::Account(invitation) => {
-                let provider = invitation.location().provider();
-                let credentials = account_credentials(builder, provider, cancel).await?;
-                (invitation, credentials)
-            }
+            InviteStorage::Account(invitation) => match invitation.location().provider() {
+                CloudProvider::CloudKit => (invitation, StorageCredentials::CloudKit),
+                provider => {
+                    let held = account_sign_in(builder, provider)?;
+                    let tokens = held.tokens()?;
+                    sign_in = Some(held);
+                    (invitation, StorageCredentials::OAuth(tokens))
+                }
+            },
         };
     let data = ConnectionCredentials {
         location: invitation.location().clone(),
@@ -59,6 +70,7 @@ pub(super) async fn prepare_request<'a>(
             file: directory.owned_file(StoreFile::Bootstrap),
         },
         data,
+        sign_in,
     ))
 }
 
@@ -69,14 +81,12 @@ impl Joining<'_> {
 
     /// Accept provider access, send the request once, and wait for its outcome.
     /// Returns false when the request was declined or expired.
+    /// The connection refreshes its sign-in on rejection however long the
+    /// wait lasts (§4).
     pub(super) async fn admit(
         &mut self,
-        builder: &mut CovenBuilder,
         sync: &mut StoreLogSync,
-        data: &mut ConnectionCredentials,
-        storage: &dyn coven_storage::Storage,
         status: &impl Fn(&str),
-        cancel: &watch::Receiver<bool>,
     ) -> Result<bool, BootstrapError> {
         status("Accepting provider access");
         sync.accept_join(&self.invitation).await?;
@@ -90,7 +100,6 @@ impl Joining<'_> {
         // survives reopening and a provider cooldown holds them (§16.5).
         loop {
             sync.join_poll_due().await?;
-            refresh_sign_in(builder, data, storage, cancel).await?;
             match sync.join_outcome(&self.identity).await? {
                 JoinOutcome::Admitted => {
                     sync.join_poll_settled().await?;

@@ -49,8 +49,13 @@ async fn provider_access_live_google_upgrade() {
     let flow = OAuthFlow::new(clients, Arc::new(DesktopOAuthPresenter));
     let narrow = flow.authenticate(FILE).await.unwrap();
     assert_eq!(narrow.access, FILE);
-    let cleanup_session =
-        OAuthSession::new(CloudProvider::GoogleDrive, narrow.clone(), clock.clone()).unwrap();
+    let cleanup_session = OAuthSession::new(
+        CloudProvider::GoogleDrive,
+        narrow.clone(),
+        Arc::new(crate::test_utils::RefusedRefresh),
+        clock.clone(),
+    )
+    .unwrap();
     let store = StoreId(UuidIds.new_id());
     let folder = http::json(CloudProvider::GoogleDrive, cleanup_session.send(Method::POST, "https://www.googleapis.com/drive/v3/files?fields=id", &[], Body::Json(json!({"name":format!("coven-access-test-{store}"), "mimeType":"application/vnd.google-apps.folder"})), true).await.unwrap()).await.unwrap();
     let folder_id = http::string(&folder, "id").unwrap().to_owned();
@@ -61,7 +66,10 @@ async fn provider_access_live_google_upgrade() {
     let storage = connector
         .connect(
             location.clone(),
-            StorageCredentials::OAuth(narrow.clone()),
+            crate::ProviderAuth::OAuth {
+                tokens: narrow.clone(),
+                custody: Arc::new(crate::test_utils::RefusedRefresh),
+            },
             DeviceId(31),
             Arc::new(crate::test_utils::UnrestrictedPublications),
             Arc::new(crate::NoCooldown),
@@ -85,7 +93,10 @@ async fn provider_access_live_google_upgrade() {
             let upgraded = connector
                 .connect(
                     location,
-                    StorageCredentials::OAuth(full),
+                    crate::ProviderAuth::OAuth {
+                        tokens: full,
+                        custody: Arc::new(crate::test_utils::RefusedRefresh),
+                    },
                     DeviceId(32),
                     Arc::new(crate::test_utils::UnrestrictedPublications),
                     Arc::new(crate::NoCooldown),
@@ -136,26 +147,28 @@ async fn provider_access_live_dropbox_app_folder() {
         .remove("DROPBOX_REFRESH_TOKEN")
         .expect("Dropbox refresh token");
     let clock: ClockRef = Arc::new(SystemClock);
-    let flow = OAuthFlow::new(
-        OAuthClients::new(
-            None,
-            Some(DropboxClients::AppFolder {
-                app_key: client_id.clone(),
-            }),
-            None,
-            clock.clone(),
-        ),
-        Arc::new(DesktopOAuthPresenter),
-    );
-    let tokens = flow
-        .refresh(
-            &client_id,
-            OAuthAccess::Dropbox(DropboxAccess::AppFolder),
-            &refresh_token,
-        )
-        .await
-        .unwrap();
-    let session = OAuthSession::new(CloudProvider::Dropbox, tokens.clone(), clock.clone()).unwrap();
+    let tokens = OAuthClients::new(
+        None,
+        Some(DropboxClients::AppFolder {
+            app_key: client_id.clone(),
+        }),
+        None,
+        clock.clone(),
+    )
+    .refresh(&crate::providers::tests::refresh_only(
+        &client_id,
+        OAuthAccess::Dropbox(DropboxAccess::AppFolder),
+        refresh_token,
+    ))
+    .await
+    .unwrap();
+    let session = OAuthSession::new(
+        CloudProvider::Dropbox,
+        tokens.clone(),
+        Arc::new(crate::test_utils::RefusedRefresh),
+        clock.clone(),
+    )
+    .unwrap();
     let connector = ProviderConnector::new(clock.clone(), Arc::new(UuidIds));
     let location = StorageConfig::Dropbox {
         location: DropboxLocation::AppFolder,
@@ -163,7 +176,10 @@ async fn provider_access_live_dropbox_app_folder() {
     let storage = connector
         .connect(
             location.clone(),
-            StorageCredentials::OAuth(tokens.clone()),
+            crate::ProviderAuth::OAuth {
+                tokens: tokens.clone(),
+                custody: Arc::new(crate::test_utils::RefusedRefresh),
+            },
             DeviceId(31),
             Arc::new(crate::test_utils::UnrestrictedPublications),
             Arc::new(crate::NoCooldown),
@@ -181,7 +197,7 @@ async fn provider_access_live_dropbox_app_folder() {
         let restored = connector
             .connect(
                 StorageConfig::decode(location.encode().unwrap().as_bytes()).unwrap(),
-                StorageCredentials::OAuth(tokens),
+                crate::ProviderAuth::OAuth { tokens, custody: Arc::new(crate::test_utils::RefusedRefresh) },
                 DeviceId(32), Arc::new(crate::test_utils::UnrestrictedPublications), Arc::new(crate::NoCooldown))
             .await
             .unwrap();

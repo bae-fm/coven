@@ -169,6 +169,7 @@ struct State {
     held_body: Option<memory_reads::HeldBody>,
     held_creation: Option<HeldRequest>,
     held_access: Option<memory_requests::HeldAccess>,
+    rejected_tokens: std::collections::BTreeSet<String>,
 }
 
 impl State {
@@ -196,6 +197,9 @@ struct HeldRequest {
 /// Grants and acceptance govern that account's reads, writes and uploads; revoking
 /// it leaves the owner and other recipients untouched. Clones share their account's
 /// tokens, and replacement tokens govern subsequent calls on the same adapter.
+/// A token named by [`Self::reject_access_token`] is refused as a provider 401
+/// would be: the call refreshes once through its connection's custody and
+/// retries once, as the HTTP adapters do (§4).
 /// S3 console keys are outside this account-sharing model.
 /// Implements [`crate::providers::StorageConnector`] so application tests can
 /// exercise saved settings and credential custody through the `test-utils`
@@ -216,7 +220,7 @@ pub struct MemoryProvider {
     account: Account,
     clock: ClockRef,
     time_resolution: Duration,
-    tokens: Arc<Mutex<Option<OAuthTokens>>>,
+    tokens: Arc<Mutex<Option<Arc<crate::HeldTokens>>>>,
     s3_key: Arc<Mutex<Option<S3Credentials>>>,
     key_admin: MemoryKeyAdmin,
     state: Arc<Mutex<State>>,
@@ -228,6 +232,16 @@ impl Clone for MemoryStorage {
             self.publications.clone(),
             self.cooldown.clone(),
         )
+    }
+}
+
+/// Custody for tokens installed directly on a fake connection: a rejection
+/// cannot be refreshed and reaches the caller as `Authentication`.
+pub struct RefusedRefresh;
+#[async_trait]
+impl crate::TokenCustody for RefusedRefresh {
+    async fn replace(&self, _: &OAuthTokens) -> Result<OAuthTokens, StorageError> {
+        Err(StorageFailure::Authentication.with_source("this sign-in has no custody to refresh it"))
     }
 }
 
@@ -300,11 +314,11 @@ impl MemoryStorage {
     pub async fn connect_device(
         &self,
         config: StorageConfig,
-        credentials: StorageCredentials,
+        auth: crate::ProviderAuth,
     ) -> Result<Self, StorageError> {
         crate::ConnectionCredentials {
             location: config.clone(),
-            credentials: credentials.clone(),
+            credentials: auth.credentials(),
         }
         .validate()?;
         if config != self.provider.config {
@@ -316,10 +330,13 @@ impl MemoryStorage {
         // controls and request observations still belong to this test device.
         connection.tokens = Arc::new(Mutex::new(None));
         connection.s3_key = Arc::new(Mutex::new(None));
-        match credentials {
-            StorageCredentials::OAuth(tokens) => connection.set_oauth_tokens(tokens).await?,
-            StorageCredentials::S3(keys) => connection.set_s3_credentials(keys).await?,
-            StorageCredentials::CloudKit => {}
+        match auth {
+            crate::ProviderAuth::OAuth { tokens, custody } => {
+                *connection.tokens.lock().await =
+                    Some(Arc::new(crate::HeldTokens::new(tokens, custody)));
+            }
+            crate::ProviderAuth::S3(keys) => connection.set_s3_credentials(keys).await?,
+            crate::ProviderAuth::CloudKit => {}
         }
         Ok(Self::from_provider(Arc::new(connection)))
     }
@@ -397,6 +414,16 @@ impl MemoryStorage {
         *byte ^= 1;
         Ok(())
     }
+    /// Refuse this access token from now on, on every connection, as a
+    /// provider 401 would (§4).
+    pub async fn reject_access_token(&self, token: &str) {
+        self.provider
+            .state
+            .lock()
+            .await
+            .rejected_tokens
+            .insert(token.into());
+    }
     /// Set faults absolutely, so repeating the command has the same effect.
     pub async fn set_faults(&self, faults: Faults) {
         self.provider.state.lock().await.faults = faults;
@@ -425,7 +452,7 @@ impl MemoryProvider {
         self.request_trace
             .lock()
             .expect("request trace poisoned")
-            .push(request);
+            .push(request.clone());
         self.requests.send_modify(|count| *count += 1);
         if !self.online.load(std::sync::atomic::Ordering::SeqCst) {
             return Err(StorageFailure::Network
@@ -454,17 +481,33 @@ impl MemoryProvider {
                 failure,
                 seconds,
             )),
-            None => {
-                if self.tokens.lock().await.as_ref().is_some_and(|tokens| {
-                    tokens
-                        .expires_at
-                        .is_some_and(|expiry| self.clock.now() >= expiry)
-                }) {
-                    return Err(StorageFailure::Authentication.into());
-                }
-                Ok(())
-            }
+            None => self.authorize(request).await,
         }
+    }
+    /// Send the held token; a rejected one is replaced once and the request
+    /// retried once, counted as a second request.
+    async fn authorize(&self, request: MemoryRequest) -> Result<(), StorageError> {
+        let Some(held) = self.tokens.lock().await.clone() else {
+            return Ok(());
+        };
+        let rejected = |tokens: &OAuthTokens| {
+            let token = tokens.access_token.as_str().to_owned();
+            async move { self.state.lock().await.rejected_tokens.contains(&token) }
+        };
+        let used = held.current().await;
+        if !rejected(&used).await {
+            return Ok(());
+        }
+        let replacement = held.rejected(&used).await?;
+        self.request_trace
+            .lock()
+            .expect("request trace poisoned")
+            .push(request);
+        self.requests.send_modify(|count| *count += 1);
+        if rejected(&replacement).await {
+            return Err(StorageFailure::Authentication.into());
+        }
+        Ok(())
     }
     async fn before(&self, request: MemoryRequest) -> Result<(), StorageError> {
         self.before_request(request).await?;
@@ -529,7 +572,16 @@ impl ProviderOps for MemoryProvider {
                 StorageFailure::InvalidConfiguration.with_source("provider does not use OAuth")
             );
         }
-        *self.tokens.lock().await = Some(tokens);
+        let mut held = self.tokens.lock().await;
+        match held.as_ref() {
+            Some(held) => held.install(tokens).await,
+            None => {
+                *held = Some(Arc::new(crate::HeldTokens::new(
+                    tokens,
+                    Arc::new(RefusedRefresh),
+                )))
+            }
+        }
         Ok(())
     }
     fn single_request_limit(&self) -> u64 {

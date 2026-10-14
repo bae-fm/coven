@@ -1,6 +1,9 @@
 //! Restore-code generation and credential replacement (§12.1, E9).
 
-use crate::{commit_credentials, credential_custody::cleanup_error, CredentialRollback, SyncError};
+use crate::{
+    commit_credentials, credential_custody::cleanup_error, CredentialRollback, DeviceCredentials,
+    SessionSignIn, SyncError,
+};
 use coven_crypto::{
     custody::{KeySession, StoreKeychain},
     MemberIdentity, SecretText,
@@ -18,14 +21,14 @@ use std::sync::Arc;
 #[derive(Clone)]
 pub struct RestoreCodes {
     inner: Arc<tokio::sync::Mutex<Option<RestoreCodesInner>>>,
+    credentials: Arc<DeviceCredentials>,
 }
 struct RestoreCodesInner {
     database: Database,
     identity: Arc<KeySession<MemberIdentity>>,
-    keychain: Arc<StoreKeychain>,
+    credentials: Arc<DeviceCredentials>,
     settings: StorageSettings,
     operations: crate::Operations,
-    oauth: Option<coven_storage::providers::OAuthFlow>,
 }
 
 impl RestoreCodes {
@@ -41,21 +44,27 @@ impl RestoreCodes {
     pub fn new(
         database: Database,
         identity: Arc<KeySession<MemberIdentity>>,
-        keychain: Arc<StoreKeychain>,
+        credentials: Arc<DeviceCredentials>,
         settings: StorageSettings,
         operations: crate::Operations,
-        oauth: Option<coven_storage::providers::OAuthFlow>,
     ) -> Self {
         Self {
             inner: Arc::new(tokio::sync::Mutex::new(Some(RestoreCodesInner {
                 database,
                 identity,
-                keychain,
+                credentials: credentials.clone(),
                 settings,
                 operations,
-                oauth,
             }))),
+            credentials,
         }
+    }
+
+    /// How a connection reaches storage with these committed credentials: a
+    /// rejected OAuth token refreshes in this installation's device custody,
+    /// which takes no lock held by credential changes (§4).
+    pub fn provider_auth(&self, credentials: StorageCredentials) -> coven_storage::ProviderAuth {
+        coven_storage::ProviderAuth::new(credentials, self.credentials.clone())
     }
 
     /// Encode this member's identity, store id and name, and storage location only.
@@ -189,17 +198,19 @@ impl RestoreCodes {
         guard
             .as_ref()
             .ok_or(DbError::StoreClosed)?
-            .keychain
-            .delete_storage_credentials()?;
-        Ok(())
+            .credentials
+            .write(|keychain| Ok(keychain.delete_storage_credentials()?))
     }
 
     /// Reserve the credential owner until remote setup either commits or fails.
     /// The returned commit includes the synced restore code and location, and its
     /// compensation remains available until store keys and the origin are applied.
+    /// An OAuth setup commits `sign_in`'s current tokens, which then refresh in
+    /// device custody; a rollback holds them in the session again.
     pub(crate) async fn prepare_setup(
         &self,
         data: ConnectionCredentials,
+        sign_in: Option<Arc<SessionSignIn>>,
         initial_name: String,
     ) -> Result<crate::StorageCommit, SyncError> {
         data.validate()?;
@@ -226,37 +237,35 @@ impl RestoreCodes {
         let previous_location = owner.settings.read()?;
         Ok(Box::new(move || {
             let owner = guard.as_ref().expect("reserved credential owner");
-            let previous = commit_credentials(&owner.keychain, &data.credentials, Some(&code))?;
+            let previous = match &sign_in {
+                Some(session) => session.publish(&owner.credentials, |keychain, tokens| {
+                    commit_credentials(
+                        keychain,
+                        &StorageCredentials::OAuth(tokens.clone()),
+                        Some(&code),
+                    )
+                })?,
+                None => owner.credentials.write(|keychain| {
+                    commit_credentials(keychain, &data.credentials, Some(&code))
+                })?,
+            };
+            let rollback = move |owner: &RestoreCodesInner, previous| {
+                let result = owner.restore_connection(previous_location, previous);
+                if let Some(session) = &sign_in {
+                    session.unpublish();
+                }
+                result
+            };
             if let Err(error) = owner.settings.commit(&data.location) {
-                return Err(
-                    match owner.restore_connection(previous_location, previous) {
-                        Ok(()) => error.into(),
-                        Err(cleanup) => cleanup_error(error.into(), cleanup),
-                    },
-                );
+                return Err(match rollback(owner, previous) {
+                    Ok(()) => error.into(),
+                    Err(cleanup) => cleanup_error(error.into(), cleanup),
+                });
             }
             Ok(Box::new(move || {
-                guard
-                    .as_ref()
-                    .expect("reserved credential owner")
-                    .restore_connection(previous_location, previous)
+                rollback(guard.as_ref().expect("reserved credential owner"), previous)
             }))
         }))
-    }
-
-    /// Refresh expired credentials before a connection or sync pass. Commit
-    /// refreshed tokens before installing the live session; the code stays unchanged.
-    pub async fn refresh_if_expired(&self, now: std::time::SystemTime) -> Result<(), SyncError> {
-        let guard = self.inner.lock().await;
-        let owner = guard.as_ref().ok_or(DbError::StoreClosed)?;
-        let Some(mut data) = owner.connection()? else {
-            return Ok(());
-        };
-        if let Some(credentials) = refreshed_credentials(&data, owner.oauth.as_ref(), now).await? {
-            data.credentials = credentials;
-            owner.install(data, false).await?;
-        }
-        Ok(())
     }
 
     /// Finish the current update, then release custody and connection owners.
@@ -272,7 +281,9 @@ impl RestoreCodesInner {
         location: Option<StorageConfig>,
         credentials: CredentialRollback,
     ) -> Result<(), SyncError> {
-        let credentials = credentials.restore(&self.keychain);
+        let credentials = self
+            .credentials
+            .write(|keychain| credentials.restore(keychain));
         let location = match location {
             Some(location) => self.settings.commit(&location),
             None => self.settings.remove(),
@@ -285,7 +296,7 @@ impl RestoreCodesInner {
     }
 
     fn connection(&self) -> Result<Option<ConnectionCredentials>, SyncError> {
-        read_connection(&self.settings, &self.keychain)
+        self.credentials.connection(&self.settings)
     }
 
     async fn code(&self) -> Result<RestoreCode, SyncError> {
@@ -329,15 +340,18 @@ impl RestoreCodesInner {
         next.validate()?;
         let previous = self.connection()?;
         let credentials = next.credentials.clone();
-        let keychain = self.keychain.clone();
+        let custody = self.credentials.clone();
         self.operations
             .install_credentials(
                 previous,
                 next,
                 require_connected,
                 Box::new(move || {
-                    let previous = commit_credentials(&keychain, &credentials, None)?;
-                    Ok(Box::new(move || previous.restore(&keychain)))
+                    let previous = custody
+                        .write(|keychain| commit_credentials(keychain, &credentials, None))?;
+                    Ok(Box::new(move || {
+                        custody.write(|keychain| previous.restore(keychain))
+                    }))
                 }),
             )
             .await
@@ -374,42 +388,4 @@ pub fn read_connection(
     };
     data.validate()?;
     Ok(Some(data))
-}
-
-/// Refresh expired OAuth credentials without changing custody or a live client.
-/// The caller commits the replacement before installing it; recovery can do so
-/// before opening SQLite, while normal sync serializes it with live operations.
-pub async fn refreshed_credentials(
-    data: &ConnectionCredentials,
-    oauth: Option<&coven_storage::providers::OAuthFlow>,
-    now: std::time::SystemTime,
-) -> Result<Option<StorageCredentials>, SyncError> {
-    let StorageCredentials::OAuth(tokens) = &data.credentials else {
-        return Ok(None);
-    };
-    if tokens.expires_at.is_none_or(|expiry| now < expiry) {
-        return Ok(None);
-    }
-    let clients = oauth.ok_or(
-        coven_storage::StorageFailure::InvalidConfiguration.with_source("OAuth clients are absent"),
-    )?;
-    let refreshed = match &tokens.refresh_token {
-        Some(refresh_token) => {
-            clients
-                .refresh(&tokens.client_id, tokens.access, refresh_token)
-                .await
-        }
-        None => Err(coven_storage::providers::OAuthError::Reauthorize(
-            data.location.provider(),
-        )),
-    };
-    let tokens = refreshed.map_err(|error| match error {
-        coven_storage::providers::OAuthError::Storage(error) => error,
-        error => coven_storage::StorageError::Provider {
-            provider: data.location.provider(),
-            failure: coven_storage::StorageFailure::Authentication,
-            source: Box::new(error),
-        },
-    })?;
-    Ok(Some(StorageCredentials::OAuth(tokens)))
 }

@@ -405,7 +405,9 @@ mod recovery {
             handle.close().await.unwrap();
             let damaged = b"damaged SQLite";
             std::fs::write(directory.database_path(), damaged).unwrap();
-            clock.set(UNIX_EPOCH + std::time::Duration::from_secs(3600));
+            // The provider now rejects the saved token; recovery refreshes it
+            // once and publishes the replacement with the new device.
+            storage.reject_access_token("access-0").await;
             let scoped = coven_crypto::custody::StoreKeychain::new(
                 builder().keychain().unwrap(),
                 directory.id(),
@@ -490,8 +492,17 @@ mod recovery {
                 assert_eq!(
                     sign_in.request_count(),
                     2,
-                    "recovery refreshes the saved token once"
+                    "recovery refreshes the rejected token once"
                 );
+                let coven_storage::StorageCredentials::OAuth(tokens) =
+                    coven_storage::StorageCredentials::decode(
+                        scoped.storage_credentials().unwrap().unwrap().as_bytes(),
+                    )
+                    .unwrap()
+                else {
+                    panic!("OAuth credentials")
+                };
+                assert_eq!(tokens.access_token.as_str(), "access-1");
             }
             assert!(matches!(
                 *recovered.subscribe_sync_status().borrow(),
