@@ -120,7 +120,8 @@ impl WriteSchema {
     }
 
     /// Inserts and present snapshot rows supply their key and reference cells;
-    /// updates can omit unchanged cells. Both obey identical identity checks.
+    /// updates can omit unchanged cells outside a touched reference group.
+    /// Both obey identical identity checks.
     pub(crate) fn row_columns<'a>(
         &self,
         row: &coven_merge::RowId,
@@ -160,6 +161,41 @@ impl WriteSchema {
                 .any(|name| !columns.contains_key(name))
         {
             return Err(invalid("present row is missing a key or reference cell"));
+        }
+        for group in &self.rules[&table.name].reference_groups {
+            if group.iter().any(|name| columns.contains_key(name.as_str()))
+                && group
+                    .iter()
+                    .any(|name| !columns.contains_key(name.as_str()))
+            {
+                return Err(invalid("partial multi-column reference"));
+            }
+        }
+        for foreign in table
+            .foreign_keys
+            .iter()
+            .filter(|key| key.columns.len() > 1)
+        {
+            let name = self.foreign_key(table, foreign);
+            let Some(first) = columns.get(name.columns.0[0].as_str()) else {
+                continue;
+            };
+            let parent = first.parents.get(&name);
+            let mut null = false;
+            for column in &name.columns.0 {
+                let value = columns
+                    .get(column.as_str())
+                    .expect("complete reference group");
+                if value.parents.get(&name) != parent {
+                    return Err(invalid("multi-column reference parents disagree"));
+                }
+                null |= matches!(value.value, Value::Null);
+            }
+            if null != parent.is_none() {
+                return Err(invalid(
+                    "multi-column reference parent disagrees with NULL values",
+                ));
+            }
         }
         let mut keys: AppValues = key_columns(table)
             .into_iter()

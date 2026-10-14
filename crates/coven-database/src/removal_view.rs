@@ -165,12 +165,7 @@ impl<'a> DatabaseRemovalView<'a> {
         let mut references = BTreeMap::new();
         for fk in &table.foreign_keys {
             let name = self.schema.foreign_key(table, fk);
-            let Some(setter) = fk
-                .columns
-                .iter()
-                .filter_map(|c| state.cells().get(column_name(table, c)))
-                .max_by_key(|c| self.stamp(c.write))
-            else {
+            let Some(setter) = state.cells().get(column_name(table, &fk.columns[0])) else {
                 // The before view of an added reference has no cells yet.
                 continue;
             };

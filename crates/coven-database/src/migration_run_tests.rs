@@ -634,7 +634,7 @@ async fn changing_primary_key_arity_deletes_old_rows_and_inserts_new_ones() {
 }
 
 #[tokio::test]
-async fn renaming_a_partially_updated_composite_reference_keeps_both_setters() {
+async fn renaming_a_composite_reference_keeps_its_shared_setter() {
     const INITIAL: &str = "CREATE TABLE parents(id TEXT NOT NULL PRIMARY KEY,a TEXT,b TEXT,UNIQUE(a,b)); CREATE TABLE children(id TEXT NOT NULL PRIMARY KEY,a TEXT,b TEXT,FOREIGN KEY(a,b) REFERENCES parents(a,b))";
     let tables = || {
         vec![
@@ -664,7 +664,7 @@ async fn renaming_a_partially_updated_composite_reference_keeps_both_setters() {
         .unwrap();
     assert_eq!(
         setters(&db, "children", "child"),
-        [("id".into(), 1), ("renamed".into(), 1), ("b".into(), 2)].into()
+        [("id".into(), 1), ("renamed".into(), 2), ("b".into(), 2)].into()
     );
     db.close().await.unwrap();
 }

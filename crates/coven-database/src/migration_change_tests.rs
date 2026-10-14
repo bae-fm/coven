@@ -162,7 +162,7 @@ async fn a_null_reference_is_still_a_reference_when_converting() {
 }
 
 #[tokio::test]
-async fn partial_composite_reference_updates_keep_renamed_unchanged_columns() {
+async fn composite_reference_updates_keep_the_complete_tuple_through_renames() {
     let schema = "CREATE TABLE parents(id TEXT NOT NULL PRIMARY KEY,a TEXT NOT NULL,b TEXT NOT NULL,UNIQUE(a,b)); CREATE TABLE children(id TEXT NOT NULL PRIMARY KEY,a TEXT,b TEXT,FOREIGN KEY(a,b) REFERENCES parents(a,b) ON DELETE CASCADE)";
     let store = TestStore::new();
     let db = store.schema(reference_tables(), schema).await.unwrap();
@@ -204,6 +204,8 @@ async fn partial_composite_reference_updates_keep_renamed_unchanged_columns() {
         columns["b"].parents.keys().next().unwrap().columns.0,
         ["renamed", "b"]
     );
+    assert_eq!(columns["renamed"].parents, columns["b"].parents);
+    assert_eq!(columns["renamed"].value, WireValue::Text("a".into()));
     db.close().await.unwrap();
 }
 

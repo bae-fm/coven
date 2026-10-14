@@ -62,13 +62,7 @@ pub(crate) fn changes(
         };
         let state = store.row(&row_id(&key, &old))?;
         for fk in keys {
-            let Some(setter) = fk
-                .columns
-                .0
-                .iter()
-                .filter_map(|c| state.state.cells().get(c))
-                .max_by_key(|c| store.stamp(c.write))
-            else {
+            let Some(setter) = state.state.cells().get(&fk.columns.0[0]) else {
                 continue;
             };
             let old = setter.value.parents.get(&fk);

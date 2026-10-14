@@ -256,6 +256,14 @@ proofs() {
 
     if proof_selected merge || crate_selected coven-database; then
         runner=$(runner merge mergeRunner)
+        step "Rust / Lean composite reference differential"
+        if ! cargo test -p coven-database --all-features composite_reference_differential -- --list |
+            grep '::composite_reference_differential: test$' > /dev/null; then
+            echo "the Rust test binary is missing the composite reference differential" >&2
+            exit 1
+        fi
+        COVEN_MERGE_LEAN="$runner" cargo test -p coven-database --all-features composite_reference_differential -- --ignored
+
         step "Rust / Lean reset counterexample"
         COVEN_MERGE_LEAN="$runner" cargo test -p coven-database --all-features reset_differential_counterexample -- --ignored
 

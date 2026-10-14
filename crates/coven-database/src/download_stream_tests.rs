@@ -1,5 +1,6 @@
 use super::*;
 use crate::{DownloadedPartStream, DownloadedWriteStream};
+use coven_format::value::Value;
 use coven_format::write_stream::WriteEncoder;
 use std::io::Cursor;
 
@@ -540,54 +541,448 @@ async fn a_constraint_refused_at_commit_reports_itself_and_keeps_the_handle_usab
     let ids = SequentialIds::new();
     let a_store = TestStore::with_ids(&ids);
     let b_store = TestStore::with_ids(&ids);
-    let table = |name| SyncedTable::new(name, RowIdentity::SharedKey);
-    let tables = || vec![table("parents").key_columns(["a", "b"]), table("children")];
-    let schema = "CREATE TABLE parents(a TEXT NOT NULL,b TEXT NOT NULL,PRIMARY KEY(a,b)); CREATE TABLE children(id TEXT NOT NULL PRIMARY KEY,a TEXT,b TEXT,FOREIGN KEY(a,b) REFERENCES parents(a,b))";
+    let schema = "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,title TEXT,body TEXT); CREATE TABLE parents(id TEXT PRIMARY KEY); CREATE TABLE guard(parent TEXT REFERENCES parents(id) DEFERRABLE INITIALLY DEFERRED); CREATE TRIGGER guarded AFTER INSERT ON notes WHEN coven_applying() BEGIN INSERT INTO guard VALUES('absent'); END";
+    let tables = || vec![SyncedTable::new("notes", RowIdentity::SharedKey)];
     let a = a_store.schema(tables(), schema).await.unwrap();
     let b = b_store.schema(tables(), schema).await.unwrap();
-    sql(&a, "INSERT INTO children VALUES('child',NULL,NULL)")
+    sql(&a, "INSERT INTO notes VALUES('note','title','body')")
         .await
         .unwrap();
+    let write = records(&a).pop().unwrap();
+    let mut observed =
+        b.subscribe(|sql| Ok(sql.query("SELECT title FROM notes", [], |r| r.get::<_, String>(0))?));
+    assert!(observed.next().await.unwrap().is_empty());
+    for streamed in [false, true] {
+        let before = crate::tests::contents(&b);
+        let error = if streamed {
+            b.apply_downloaded_stream(
+                stream(&write),
+                coven_format::value::EntryPositions(Vec::new()),
+                || Ok(()),
+            )
+            .await
+        } else {
+            b.apply_downloaded(write.clone().into()).await
+        }
+        .unwrap_err();
+        assert!(
+            matches!(&error, DbError::Sqlite(rusqlite::Error::SqliteFailure(e, _)) if e.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_FOREIGNKEY),
+            "{error:?}"
+        );
+        assert_eq!(crate::tests::contents(&b), before);
+    }
+    sql(&b, "INSERT INTO parents VALUES('absent')")
+        .await
+        .unwrap();
+    b.apply_downloaded(write.into()).await.unwrap();
+    assert_eq!(count(&b, "notes"), 1);
+    assert_eq!(observed.next().await.unwrap(), ["title"]);
+    a.close().await.unwrap();
+    b.close().await.unwrap();
+}
+
+const SCHEMA: &str = "CREATE TABLE parents(a TEXT NOT NULL,b INT NOT NULL,PRIMARY KEY(a,b)); CREATE TABLE children(id TEXT NOT NULL PRIMARY KEY,a TEXT,b INT,FOREIGN KEY(a,b) REFERENCES parents(a,b))";
+fn tables() -> Vec<SyncedTable> {
+    vec![
+        SyncedTable::new("parents", RowIdentity::SharedKey).key_columns(["a", "b"]),
+        SyncedTable::new("children", RowIdentity::SharedKey),
+    ]
+}
+
+async fn history(null: bool, hybrid_parent: bool) -> Vec<WriteRecord> {
+    let ids = SequentialIds::new();
+    let sa = TestStore::with_ids(&ids);
+    let sb = TestStore::with_ids(&ids);
+    let a = sa.schema(tables(), SCHEMA).await.unwrap();
+    let b = sb.schema(tables(), SCHEMA).await.unwrap();
+    sql(&a, if null { "INSERT INTO children VALUES('child',NULL,NULL)" } else if hybrid_parent {
+        "INSERT INTO parents VALUES('A',3),('B',3),('A',5),('B',5); INSERT INTO children VALUES('child','A',3)"
+    } else {
+        "INSERT INTO parents VALUES('A',3),('B',3),('A',5); INSERT INTO children VALUES('child','A',3)"
+    }).await.unwrap();
+    let initial = records(&a).remove(0);
+    b.apply_downloaded(initial.clone().into()).await.unwrap();
+    sql(&a, "UPDATE children SET a='B'").await.unwrap();
+    sql(&b, "UPDATE children SET b=5").await.unwrap();
+    let result = vec![
+        initial,
+        records(&a).pop().unwrap(),
+        records(&b).pop().unwrap(),
+    ];
+    a.close().await.unwrap();
+    b.close().await.unwrap();
+    result
+}
+
+#[tokio::test]
+async fn concurrent_composite_reference_columns_keep_one_authored_tuple() {
+    compare(false).await;
+}
+
+#[tokio::test]
+#[ignore = "requires COVEN_MERGE_LEAN"]
+async fn composite_reference_differential() {
+    compare(true).await;
+}
+
+async fn compare(lean: bool) {
+    for (null, hybrid_parent) in [(false, false), (false, true), (true, false)] {
+        let original = history(null, hybrid_parent).await;
+        for winner in [1, 2] {
+            let mut writes = original.clone();
+            let base = writes[0].header.timestamp.milliseconds();
+            for (i, write) in writes.iter_mut().enumerate().skip(1) {
+                write.header.timestamp = coven_merge::Timestamp::new(
+                    base + if i == winner { 2 } else { 1 },
+                    0,
+                    write.header.position.device,
+                )
+                .unwrap();
+            }
+            let expected = if winner == 1 {
+                (Some("B".to_owned()), if null { None } else { Some(3) })
+            } else {
+                (if null { None } else { Some("A".to_owned()) }, Some(5))
+            };
+            let mut fingerprints = Vec::new();
+            for streamed in [false, true] {
+                for order in [[0, 1, 2], [0, 2, 1]] {
+                    let fixture = TestStore::new();
+                    let db = fixture.schema(tables(), SCHEMA).await.unwrap();
+                    for i in order {
+                        if streamed {
+                            db.apply_downloaded_stream(
+                                stream(&writes[i]),
+                                coven_format::value::EntryPositions(Vec::new()),
+                                || Ok(()),
+                            )
+                            .await
+                            .unwrap();
+                        } else {
+                            db.apply_downloaded(writes[i].clone().into()).await.unwrap();
+                        }
+                    }
+                    let tuple = db.inspect_writer(|db| {
+                        db.query_row("SELECT a,b FROM children", [], |r| {
+                            Ok((r.get::<_, Option<String>>(0)?, r.get::<_, Option<i64>>(1)?))
+                        })
+                        .unwrap()
+                    });
+                    assert_eq!(tuple, expected);
+                    let child = &writes[1].parts[0].rows[0].row;
+                    db.inspect_writer_schema(|writer, schema| {
+                        let app = crate::write_rows::AppView::after(writer, schema);
+                        let store = crate::merge_store::MergeStore::new(writer, &app);
+                        let state = store.row(child).unwrap().state;
+                        for column in ["a", "b"] {
+                            assert_eq!(state.cells()[column].write, writes[winner].header.position);
+                        }
+                        assert_eq!(
+                            state.cells()["a"].value.parents,
+                            state.cells()["b"].value.parents
+                        );
+                        assert_eq!(state.cells()["a"].value.parents.is_empty(), null);
+                        if !null {
+                            let parent = state.cells()["a"].value.parents.values().next().unwrap();
+                            assert_eq!(
+                                coven_format::key::decode_key(&parent.row.key).unwrap(),
+                                [
+                                    Value::Text(expected.0.clone().unwrap()),
+                                    Value::Integer(expected.1.unwrap())
+                                ]
+                            );
+                        }
+                        assert_eq!(state.lost().len(), 2);
+                    });
+                    if lean {
+                        compare_lean(&writes, &order, &db);
+                    }
+                    fingerprints.push(fingerprint(&db, Audience::Store).await);
+                    db.close().await.unwrap();
+                }
+            }
+            assert!(fingerprints.windows(2).all(|pair| pair[0] == pair[1]));
+        }
+    }
+}
+
+fn compare_lean(writes: &[WriteRecord], order: &[usize], db: &Database) {
+    use serde_json::json;
+    let columns = ["id", "a", "b"];
+    let rows: Vec<_> = writes
+        .iter()
+        .flat_map(|w| &w.parts)
+        .flat_map(|p| &p.rows)
+        .map(|r| r.row.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let id = |write| {
+        writes
+            .iter()
+            .position(|w| w.header.position == write)
+            .unwrap()
+    };
+    let row_id = |row: &coven_merge::RowId| rows.iter().position(|r| r == row).unwrap();
+    let column_id = |column: &str| columns.iter().position(|c| *c == column).unwrap();
+    let input_writes: Vec<_> = writes
+        .iter()
+        .enumerate()
+        .map(|(i, w)| {
+            let changes: Vec<_> = w
+                .parts
+                .iter()
+                .flat_map(|p| &p.rows)
+                .map(|row| {
+                    let (kind, values) = match &row.change.operation {
+                        Operation::Insert(c) => (0, c),
+                        Operation::Update(c) => (1, c),
+                        _ => panic!("setter"),
+                    };
+                    json!({"row": row_id(&row.row),"gen": row.change.generation,"kind": kind,
+                "cols": values.keys().map(|c| column_id(c)).collect::<Vec<_>>()})
+                })
+                .collect();
+            json!({"id": i, "ts": crate::test_utils::tests::stamp(w.header.timestamp).to_string(),
+            "past": if i == 0 { vec![] } else { vec![0] }, "changes": changes})
+        })
+        .collect();
+    let states = db.inspect_writer_schema(|writer, schema| {
+        let app = crate::write_rows::AppView::after(writer, schema);
+        let store = crate::merge_store::MergeStore::new(writer, &app);
+        rows.iter()
+            .map(|r| store.row(r).unwrap().state)
+            .collect::<Vec<_>>()
+    });
+    let input_rows: Vec<_> = states.iter().enumerate().map(|(i,state)| {
+        // Each composite key supplies one reference, independent of its column count.
+        let references: BTreeMap<_,_> = state.cells().values().flat_map(|c| &c.value.parents).collect();
+        let references: Vec<_> = references.values().map(|p| json!({"parent": row_id(&p.row),
+            "stale": states[row_id(&p.row)].generation() != p.generation})).collect();
+        json!({"id":i,"present":state.present(),"refs":references,"check":false,"deleted":false,"claims":[],"rank":i})
+    }).collect();
+    let input =
+        json!({"mode":"boolean","writes":input_writes,"order":order,"columns":3,"rows":input_rows});
+    let runner = std::env::var_os("COVEN_MERGE_LEAN").expect("built mergeRunner");
+    let actual = crate::test_utils::tests::run_lean(&runner, &input);
+    let expected: Vec<_> = states
+        .iter()
+        .enumerate()
+        .map(|(i, state)| {
+            let mut cells: Vec<_> = state
+                .cells()
+                .iter()
+                .map(|(c, v)| [column_id(c), id(v.write)])
+                .collect();
+            cells.sort();
+            let mut lost: Vec<_> = state
+                .lost()
+                .iter()
+                .map(|(k, v)| {
+                    [
+                        column_id(&k.column),
+                        id(k.write),
+                        v.incarnation as usize,
+                        id(v.replaced_by),
+                    ]
+                })
+                .collect();
+            lost.sort();
+            json!({"id":i,"gen":state.generation(),
+            "gw":state.generations().iter().map(|(g,w)| [*g,id(*w) as u64]).collect::<Vec<_>>(),
+            "cells":cells,"lost":lost,"removed":false,"rules":[]})
+        })
+        .collect();
+    assert_eq!(actual, json!(expected));
+}
+
+#[tokio::test]
+async fn incomplete_or_inconsistent_composite_references_are_refused() {
+    for null in [false, true] {
+        let writes = history(null, false).await;
+        for broken in 0..4 {
+            let mut write = writes[1].clone();
+            let change = &mut write.parts[0].rows[0];
+            let Operation::Update(columns) = &mut change.change.operation else {
+                panic!("update")
+            };
+            let parent = coven_merge::Parent {
+                row: coven_merge::RowId {
+                    table: "parents".into(),
+                    key: coven_format::key::encode_key(&[
+                        Value::Text("B".into()),
+                        Value::Integer(3),
+                    ])
+                    .unwrap(),
+                    audience: Audience::Store,
+                },
+                generation: 1,
+            };
+            match broken {
+                0 => {
+                    columns.remove("b");
+                    change.old.remove("b");
+                }
+                1 => {
+                    columns.get_mut("b").unwrap().parents.clear();
+                    if null {
+                        columns.get_mut("a").unwrap().parents = BTreeMap::from([(
+                            coven_merge::ForeignKey::new(["a", "b"], "parents", ["a", "b"]),
+                            parent.clone(),
+                        )]);
+                    }
+                }
+                2 => {
+                    columns.values_mut().for_each(|c| c.parents.clear());
+                    if null {
+                        columns.get_mut("b").unwrap().value = Value::Integer(3);
+                    }
+                }
+                3 => {
+                    columns.get_mut("b").unwrap().value = Value::Null;
+                    for value in columns.values_mut() {
+                        value.parents.insert(
+                            coven_merge::ForeignKey::new(["a", "b"], "parents", ["a", "b"]),
+                            parent.clone(),
+                        );
+                    }
+                }
+                _ => unreachable!(),
+            }
+            for streamed in [false, true] {
+                let fixture = TestStore::new();
+                let db = fixture.schema(tables(), SCHEMA).await.unwrap();
+                db.apply_downloaded(writes[0].clone().into()).await.unwrap();
+                let before = crate::tests::contents(&db);
+                let result = if streamed {
+                    db.apply_downloaded_stream(
+                        stream(&write),
+                        coven_format::value::EntryPositions(Vec::new()),
+                        || Ok(()),
+                    )
+                    .await
+                } else {
+                    db.apply_downloaded(write.clone().into()).await
+                };
+                assert!(
+                    matches!(result, Err(DbError::Snapshot(_))),
+                    "{null} {broken} {streamed}: {result:?}"
+                );
+                assert_eq!(crate::tests::contents(&db), before);
+                db.close().await.unwrap();
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn overlapping_composite_references_capture_the_connected_columns() {
+    let fixture = TestStore::new();
+    let schema = "CREATE TABLE parents(a TEXT NOT NULL,b INT NOT NULL,PRIMARY KEY(a,b)); CREATE TABLE children(id TEXT NOT NULL PRIMARY KEY,a TEXT,b INT,c TEXT,FOREIGN KEY(a,b) REFERENCES parents(a,b),FOREIGN KEY(c,b) REFERENCES parents(a,b))";
+    let db = fixture.schema(tables(), schema).await.unwrap();
+    sql(
+        &db,
+        "INSERT INTO parents VALUES('A',3),('B',3); INSERT INTO children VALUES('child','A',3,'A')",
+    )
+    .await
+    .unwrap();
+    sql(&db, "UPDATE children SET a='B'").await.unwrap();
+    let write = records(&db).pop().unwrap();
+    let change = &write.parts[0].rows[0];
+    let Operation::Update(columns) = &change.change.operation else {
+        panic!("update")
+    };
+    assert_eq!(
+        columns.keys().map(String::as_str).collect::<Vec<_>>(),
+        ["a", "b", "c"]
+    );
+    assert_eq!(
+        change.old.keys().collect::<Vec<_>>(),
+        columns.keys().collect::<Vec<_>>()
+    );
+    assert_eq!(columns["b"].parents.len(), 2);
+    db.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn generated_composite_reference_keeps_the_inputs_of_its_tuple() {
+    let ids = SequentialIds::new();
+    let sa = TestStore::with_ids(&ids);
+    let sb = TestStore::with_ids(&ids);
+    let schema = "CREATE TABLE parents(a TEXT NOT NULL,b INT NOT NULL,PRIMARY KEY(a,b)); CREATE TABLE children(id TEXT NOT NULL PRIMARY KEY,x INT,y INT,a TEXT AS(x+y),b INT,FOREIGN KEY(a,b) REFERENCES parents(a,b))";
+    let a = sa.schema(tables(), schema).await.unwrap();
+    let b = sb.schema(tables(), schema).await.unwrap();
+    sql(&a,"INSERT INTO parents VALUES('3',3),('4',3),('3',5); INSERT INTO children(id,x,y,b) VALUES('child',1,2,3)").await.unwrap();
     b.apply_downloaded(records(&a)[0].clone().into())
         .await
         .unwrap();
-    sql(&a, "UPDATE children SET a='a'").await.unwrap();
-    sql(&b, "UPDATE children SET b='b'").await.unwrap();
-    let a_write = records(&a).pop().unwrap();
-    let b_write = records(&b).pop().unwrap();
-    // Neither authored tuple names a parent. Their merged tuple ('a','b') has
-    // no parent metadata for removal, and SQLite refuses it at COMMIT, after
-    // the apply cleared the write's pending observation in its transaction.
-    for (db, write) in [(&a, b_write), (&b, a_write)] {
-        let mut parents = db.subscribe(|sql| {
-            Ok(sql.query("SELECT a||b FROM parents", [], |r| r.get::<_, String>(0))?)
-        });
-        assert!(parents.next().await.unwrap().is_empty());
-        for streamed in [false, true] {
-            let before = crate::tests::contents(db);
-            let error = if streamed {
-                db.apply_downloaded_stream(
-                    stream(&write),
-                    coven_format::value::EntryPositions(Vec::new()),
-                    || Ok(()),
-                )
-                .await
-            } else {
-                db.apply_downloaded(write.clone().into()).await
-            }
-            .unwrap_err();
-            assert!(
-                matches!(&error, DbError::Sqlite(rusqlite::Error::SqliteFailure(e, _))
-                if e.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_FOREIGNKEY),
-                "{error:?}"
-            );
-            assert_eq!(crate::tests::contents(db), before);
-        }
-        sql(db, "INSERT INTO parents VALUES('x','y')")
-            .await
-            .unwrap();
-        assert_eq!(parents.next().await.unwrap(), ["xy"]);
+    sql(&a, "UPDATE children SET x=2").await.unwrap();
+    sql(&b, "UPDATE children SET b=5").await.unwrap();
+    let wa = records(&a).pop().unwrap();
+    let wb = records(&b).pop().unwrap();
+    for (db, write) in [(&a, wb), (&b, wa)] {
+        db.apply_downloaded(write.into()).await.unwrap();
     }
+    assert_eq!(
+        fingerprint(&a, Audience::Store).await,
+        fingerprint(&b, Audience::Store).await
+    );
+    a.close().await.unwrap();
+    b.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn snapshots_require_one_setter_for_a_composite_reference() {
+    use crate::snapshot_write::tests::{decode, frames, id, load_one};
+    use coven_format::snapshot::{SnapshotEncoder, SnapshotRecord};
+    use coven_merge::WritePast;
+    let sa = TestStore::new();
+    let sb = TestStore::new();
+    let a = sa.schema(tables(), SCHEMA).await.unwrap();
+    let b = sb.schema(tables(), SCHEMA).await.unwrap();
+    sql(&a, "INSERT INTO children VALUES('child',NULL,NULL)")
+        .await
+        .unwrap();
+    sql(&a, "UPDATE children SET a='A'").await.unwrap();
+    let writes = records(&a);
+    let oracle = coven_merge::History::new(writes.iter().map(|record| {
+        let mut write = crate::test_utils::tests::merge_write(record);
+        let past = record.header.had_read.causal_past(record.header.position);
+        write.had_read = writes
+            .iter()
+            .map(|r| r.header.position)
+            .filter(|id| past.contains(id))
+            .collect();
+        write
+    }))
+    .unwrap();
+    let snapshot = frames(&a, Audience::Store).await;
+    let (header, mut rows) = decode(&snapshot);
+    for row in &mut rows {
+        if let SnapshotRecord::Merge(merged) = row {
+            let state = &merged.state;
+            let mut cells = state.cells().clone();
+            cells.get_mut("b").unwrap().write = writes[0].header.position;
+            merged.state = coven_merge::RowState::from_parts(
+                state.row().clone(),
+                state.generations().clone(),
+                cells,
+                state.lost().clone(),
+                &oracle,
+            )
+            .unwrap();
+        }
+    }
+    let (mut encoder, mut bytes) = SnapshotEncoder::start(header).unwrap();
+    for row in rows {
+        bytes.extend(encoder.record(row).unwrap());
+    }
+    bytes.extend(encoder.finish().unwrap());
+    let before = crate::tests::contents(&b);
+    let result = load_one(&b, id(Audience::Store), snapshot.prefix, Cursor::new(bytes)).await;
+    assert!(matches!(result, Err(DbError::Snapshot(_))), "{result:?}");
+    assert_eq!(crate::tests::contents(&b), before);
+    crate::snapshot_write::tests::assert_loaded_losses(&a, &b).await;
     a.close().await.unwrap();
     b.close().await.unwrap();
 }

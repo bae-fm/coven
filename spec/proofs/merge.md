@@ -474,8 +474,13 @@ It has no live parent links in loss records; clearing serialized parent maps
 is outside it. Frozen records are held separately from the merge state and
 are never supplied to current removal rules.
 
-The rules take references, CHECK results and claims as inputs. Computing
-those inputs from SQL, reference null substitution, and local insert-to-update
+The rules take references, CHECK results and claims as inputs. A multi-column
+reference is one input: capture sets all its components together, so the
+ordinary cell rule selects the same setter for each. The database differential
+`composite_reference_differential` compares captured whole-tuple setters and
+losses with `MergeRunner` in both arrival and timestamp orders, including NULL
+components. SQL capture and generated-input expansion remain outside Lean.
+Computing those inputs from SQL, reference null substitution, and local insert-to-update
 normalization remain outside the general proofs. The examples compute the
 inputs they use. Same-key uniqueness assumes the ordered audience claims
 specified by §14.2; the proof does not establish those claims from SQL.

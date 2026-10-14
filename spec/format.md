@@ -202,6 +202,11 @@
     the `old` map's count, including an insert's zero count. Generations and
     references obey merge's parity, advancement without overflow, and
     parent-generation/audience checks (§8).
+  - Setting any component of a multi-column foreign key supplies all its
+    components in `columns` (and in `old` for an update), even unchanged
+    ones, with the same recorded parent on every component. A tuple containing
+    NULL records no parent for that key. Overlapping keys and the inputs of generated
+    components expand together (§8.4); incomplete tuples are refused.
   - Each row change requires authenticated evidence of the actual
     generation-source write and the setter of every cell it replaced on the
     authoring device (§8). Sources name changes at the same table, key and

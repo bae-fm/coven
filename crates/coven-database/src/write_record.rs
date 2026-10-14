@@ -158,15 +158,30 @@ pub(crate) fn changes(
                 if new_values.is_empty() {
                     continue;
                 }
-                if let Some(file) = &schema.declaration(&key.0).files {
-                    if file
-                        .columns()
-                        .iter()
-                        .any(|column| new_values.contains_key(*column))
-                    {
-                        for column in file.columns() {
-                            new_values.insert(column.to_owned(), new.values[column].clone());
+                // Capture every column that must share this setter. Expanding a
+                // reference can touch another reference or the file tuple.
+                loop {
+                    let before = new_values.len();
+                    if let Some(file) = &schema.declaration(&key.0).files {
+                        if file
+                            .columns()
+                            .iter()
+                            .any(|column| new_values.contains_key(*column))
+                        {
+                            for column in file.columns() {
+                                new_values.insert(column.to_owned(), new.values[column].clone());
+                            }
                         }
+                    }
+                    for group in &schema.rules[&key.0].reference_groups {
+                        if group.iter().any(|column| new_values.contains_key(column)) {
+                            for column in group {
+                                new_values.insert(column.clone(), new.values[column].clone());
+                            }
+                        }
+                    }
+                    if new_values.len() == before {
+                        break;
                     }
                 }
                 let old_values = new_values

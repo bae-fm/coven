@@ -31,9 +31,15 @@ async fn a_lost_composite_key_cell_keeps_the_parent_its_own_write_named() {
     let Operation::Update(columns) = &mut incoming.parts[0].rows[0].change.operation else {
         panic!("update")
     };
-    let expected = columns["a"].parents.clone();
+    let Operation::Update(previous) = &records[2].parts[0].rows[0].change.operation else {
+        panic!("update")
+    };
+    let expected = previous["a"].parents.clone();
     columns.get_mut("a").unwrap().value = Value::Text("c".into());
-    for parent in columns.get_mut("a").unwrap().parents.values_mut() {
+    for parent in columns
+        .values_mut()
+        .flat_map(|value| value.parents.values_mut())
+    {
         parent.row.key =
             coven_format::key::encode_key(&[Value::Text("c".into()), Value::Text("0".into())])
                 .unwrap();
@@ -44,7 +50,7 @@ async fn a_lost_composite_key_cell_keeps_the_parent_its_own_write_named() {
             let store = super::MergeStore::new(db,&app);
             let updates = store.apply(&incoming)?;
             crate::write_commit::commit(db,&incoming,&store,&updates)?;
-            db.internal_execute("UPDATE children SET a='c'",[])?;
+            db.internal_execute("UPDATE children SET a='c',b='0'",[])?;
             Ok(())
         }).unwrap();
         let value = db.query_row("SELECT value FROM _coven_lost WHERE table_name='children' AND column_id=(SELECT id FROM _coven_columns WHERE table_name='children' AND column_name='a')",[],|r| Ok(merge_fields::decode_column_value(&r.get::<_,Vec<u8>>(0)?).unwrap())).unwrap();

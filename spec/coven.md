@@ -2047,6 +2047,15 @@ Carol's tablet:
 
 - A row change that points at a parent also carries the parent's
   generation ([§8.3](#83-deletes)).
+- A reference spanning several columns merges as one value. Changing any
+  component records every component, including unchanged values, and the
+  same parent identity and generation on each component. The write with the
+  larger timestamp wins the whole tuple, including a tuple containing NULL.
+  - Overlapping keys expand together until every touched key is complete.
+    Generated components include their input columns in this group, so SQL
+    cannot recompute a different tuple from independently merged inputs.
+  - For `FOREIGN KEY(a,b)`, concurrent changes from `(A,3)` to `(B,3)` and
+    `(A,5)` yield either `(B,3)` or `(A,5)`, never `(B,5)`.
 - On the device that deletes a parent, SQLite runs each child's foreign key
   action, and the write records the results as derived row changes with their
   causes (§8.8). They use the ordinary generation and cell merge rules.

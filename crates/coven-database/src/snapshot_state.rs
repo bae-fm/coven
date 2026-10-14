@@ -112,6 +112,14 @@ pub(crate) fn merged(
         state.present(),
         state.cells().iter().map(|(name, cell)| (name, &cell.value)),
     )?;
+    for group in &schema.rules[&table.name].reference_groups {
+        let mut setters = group.iter().filter_map(|column| state.cells().get(column));
+        if let Some(first) = setters.next() {
+            if setters.any(|cell| cell.write != first.write) {
+                return Err(invalid("multi-column reference setters disagree"));
+            }
+        }
+    }
     if state.generations().is_empty() {
         return Err(invalid("merge row has no generations"));
     }
