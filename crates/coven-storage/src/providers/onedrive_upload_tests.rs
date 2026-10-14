@@ -262,7 +262,7 @@ async fn lean_differential_onedrive_create() {
         Arc::get_mut(&mut storage.provider)
             .unwrap()
             .single_request_limit = limit;
-        crate::providers::tests::compare_create_model(&storage).await;
+        crate::providers::tests::compare_create_model(&storage, false).await;
         assert!(state.lock().unwrap().uploads.is_empty());
         assert_eq!(state.lock().unwrap().files.len(), 4);
     }

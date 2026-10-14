@@ -15,10 +15,61 @@ async fn lean_differential_s3_create() {
             Arc::get_mut(&mut storage.provider)
                 .unwrap()
                 .single_request_limit = limit;
-            crate::providers::tests::compare_create_model(&storage).await;
+            // Multipart creates below the limit publish by copy on copy profiles.
+            let copy = limit == 3 && profile.settings.multipart.uses_copy();
+            crate::providers::tests::compare_create_model(&storage, copy).await;
             assert!(state.lock().unwrap().uploads.is_empty());
             assert_eq!(state.lock().unwrap().objects.len(), 4);
+            if copy {
+                compare_copy_race(&storage, &state).await;
+            }
         }
+    }
+}
+
+/// Racing sessions on one name, each with its temporary assembled, publish
+/// in a chosen order: compared with `CopyPublication.run` (`race_one_winner`).
+async fn compare_copy_race(storage: &StorageConnection<S3Storage>, state: &Arc<Mutex<Remote>>) {
+    for (number, order) in [(5u64, [1usize, 0, 2]), (6, [2, 1, 0])] {
+        let path = ObjectPath::device_log(
+            STORE_ID,
+            coven_foundation::id_source::DeviceId(31),
+            std::num::NonZeroU64::new(number).unwrap(),
+        );
+        let payloads: Vec<Vec<u8>> = (0..3u8).map(|i| vec![10 * i + 1; 4]).collect();
+        let mut sessions = Vec::new();
+        let mut ops = Vec::new();
+        for (index, bytes) in payloads.iter().enumerate() {
+            let mut session = storage.begin_upload(&path, 4).await.unwrap();
+            storage.upload_part(&mut session, bytes).await.unwrap();
+            sessions.push(session);
+            ops.push(serde_json::json!({"op": "stage", "session": index, "bytes": bytes}));
+        }
+        let mut outcomes = Vec::new();
+        for index in order {
+            ops.push(serde_json::json!({"op": "publish", "session": index, "path": number}));
+            outcomes.push(match storage.finish_upload(&mut sessions[index]).await {
+                Ok(()) => "copied",
+                Err(error) if error.failure() == StorageFailure::AlreadyExists => "refused",
+                Err(error) => panic!("copy race failed: {error:?}"),
+            });
+        }
+        let expected = crate::providers::tests::create_runner(&serde_json::json!({ "ops": ops }));
+        assert_eq!(serde_json::json!(outcomes), expected["outcomes"]);
+        let stored = storage.read(&path).await.unwrap();
+        assert_eq!(serde_json::json!(stored), expected["objects"][0]["bytes"]);
+        let temporaries = state
+            .lock()
+            .unwrap()
+            .objects
+            .keys()
+            .filter(|key| key.contains(".coven-uploads/"))
+            .count();
+        assert_eq!(serde_json::json!(temporaries), expected["staged"]);
+        for session in &sessions {
+            storage.abort_upload(session).await.unwrap();
+        }
+        assert_eq!(storage.read(&path).await.unwrap(), stored);
     }
 }
 
@@ -334,5 +385,50 @@ async fn an_occupied_create_does_not_hide_failed_temporary_cleanup() {
     assert!(matches!(
         storage.create(&path, b"replacement").await,
         Err(StorageError::Cleanup { .. })
+    ));
+}
+
+/// One `CopyObject` copies at most 5 GiB, so an S3 copy profile refuses a
+/// larger upload before any request; GCS's copy has no such limit (§4).
+#[tokio::test]
+async fn s3_copy_profiles_refuse_uploads_above_the_single_copy_limit() {
+    let limit = 5 * 1024 * 1024 * 1024;
+    for profile in profile::PROFILES {
+        let state = Arc::new(Mutex::new(Remote {
+            gcs: profile.settings.signing == S3Signing::GoogleHmac,
+            ..Remote::default()
+        }));
+        let server =
+            TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
+        let storage = profile_provider(&server.url, profile.settings);
+        let path = ObjectPath::device_log(
+            STORE_ID,
+            coven_foundation::id_source::DeviceId(31),
+            std::num::NonZeroU64::MIN,
+        );
+        let result = storage.begin_upload(&path, limit + 1).await;
+        let limited = matches!(
+            profile.settings.multipart,
+            S3Multipart::Copy(
+                S3CopyCondition::IfNoneMatch | S3CopyCondition::CloudflareIfNoneMatch
+            )
+        );
+        if limited {
+            assert!(matches!(
+                result,
+                Err(error) if error.failure() == StorageFailure::CopyTooLarge { size: limit + 1, limit }
+            ));
+            assert!(state.lock().unwrap().requests.is_empty());
+        } else {
+            let session = result.unwrap();
+            storage.abort_upload(&session).await.unwrap();
+        }
+        assert!(storage.begin_upload(&path, limit).await.is_ok() || !limited);
+    }
+    assert!(matches!(
+        profile::CataloguedProfile::named(S3ProfileName::SeaweedFs)
+            .settings
+            .multipart,
+        S3Multipart::Copy(S3CopyCondition::IfNoneMatch)
     ));
 }

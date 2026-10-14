@@ -1976,6 +1976,14 @@ pub enum StorageFailure {
         /// The adapter's single-request limit in bytes.
         limit: u64,
     },
+    /// An S3 object published by `CopyObject` exceeds its single-copy limit,
+    /// so it cannot be published atomically on this profile (§4).
+    CopyTooLarge {
+        /// Encrypted body length in bytes.
+        size: u64,
+        /// The single-copy limit in bytes.
+        limit: u64,
+    },
     /// Parsing recorded provider data failed.
     Encoding,
     /// Local file access or persisting provider settings or upload progress failed.

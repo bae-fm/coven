@@ -25,9 +25,47 @@ Lean 4.34.1 and its standard library, without additional axioms or unfinished
 proofs. `scripts/check.sh` builds it and runs the audit alongside the other
 proofs. `clockRunner`, `createRunner`, `identityRunner` and `filesRunner`
 expose the model to the Rust differential tests run by that script. The create-once comparison drives
-the S3 adapter against the test server through every profile (AWS, GCS and R2),
+the S3 adapter against the test server through every catalogued profile,
 and the OneDrive adapter through Graph. It checks occupied-path refusals and
-stored bytes for single-request and multipart uploads.
+stored bytes for single-request and multipart uploads. For profiles publishing
+multipart uploads by copy (AWS, GCS and SeaweedFS) it compares the multipart
+creates with `CopyPublication.publish`, and races three assembled sessions on
+one name in two arrival orders against `CopyPublication.run`: which copy wins,
+the stored bytes, and that no temporary is left.
+
+## Copy publication
+
+[`CopyPublication`](storage/CovenStorage/CopyPublication.lean) models §4's
+multipart publication by copy. A session assembles its bytes at a temporary
+named by the session. Temporaries are keyed by session, not by a D10 path, so
+no published read or listing can reach one. One copy, conditioned on an absent
+destination, publishes the temporary with the copy's own time and the
+session's marker; the temporary is then deleted. The copy is assumed atomic:
+it checks and writes the destination in one step.
+
+- `copy_is_create`: a copy changes the published objects exactly as `create`
+  does, so `create_preserves` and `stored_history_preserved` apply to it.
+  `copy_outcome` gives its result: refused when the name is occupied.
+- `stage_hidden` and `discard_hidden`: assembling or deleting a temporary
+  changes no published object.
+- `race_one_winner`: sessions racing on a free name, each with its temporary
+  assembled, publish in their arrival order. The first copy publishes its own
+  bytes and marker; every other copy refuses the condition. Every temporary
+  is deleted. `race_occupied` covers a name that was already taken.
+- `lost_reply_settles`: after a copy whose reply was lost, reading the
+  destination finds this session's marker whatever else is staged or
+  published in between. `other_marker_refuses` covers another session's object.
+- `marker_settles_bytes`: when each session's bytes are fixed, a destination
+  carrying this session's marker holds this session's bytes.
+- `check_then_write_two_winners` is a checked example of why atomicity is the
+  premise. A completion that checks a free name, then writes it, lets two
+  racers both report success while the later one's bytes stay. This is how
+  SeaweedFS 4.48's conditional multipart completion behaved in certification
+  suite 4.
+
+Outside the model: whether a real provider's copy is atomic, which suite 4's
+races test live; the 5 GiB single-copy limit, which the adapter enforces
+before any request; and the provider's metadata copying of the marker.
 
 ## Restore, another live copy, and writes
 

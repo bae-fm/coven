@@ -846,7 +846,7 @@ the file's ranges under `F`.
     | GCS (certified) | Google HMAC | `x-goog-if-generation-match: 0` | Copy with the same generation condition | Completion | Scope stated | V2 | Generation |
     | R2 (certified) | AWS SigV4 | `If-None-Match: *` | Conditional completion | Completion | Unstated scope ignored | V2 | ETag |
     | RustFS (certified, versioned too) | AWS SigV4 | `If-None-Match: *` | Conditional completion | Completion | None returned | V2 | ETag |
-    | SeaweedFS (uncertified, refused) | AWS SigV4 | `If-None-Match: *` | Conditional completion | Completion | None returned | V2 | ETag |
+    | SeaweedFS (uncertified, refused) | AWS SigV4 | `If-None-Match: *` | Copy with `If-None-Match: *` | Completion | None returned | V2 | ETag |
     | Ceph RGW (certified, unversioned) | AWS SigV4 | `If-None-Match: *` | Conditional completion | Completion | None returned | V2 | ETag |
 
     RustFS alone supports versioned buckets: RustFS 1.0.1 passed every suite 4
@@ -944,6 +944,23 @@ the file's ranges under `F`.
     Network failures and throttling retain it for the same session.
     A failed deletion fails the call and retains the recording for retry;
     an operation error and deletion error are both preserved.
+  - Given a copy that checks and publishes its destination atomically,
+    copy publication is create-once: the copy changes published objects
+    exactly as a create does, a temporary is never visible as a published
+    object, and of sessions racing on one name the first copy to arrive
+    publishes its own bytes while every other copy refuses the condition and
+    deletes its temporary. A lost copy reply settles by reading this session's
+    marker at the destination; since a session's bytes are fixed, its marker
+    means its bytes ([`copy_is_create`, `stage_hidden`, `race_one_winner`,
+    `lost_reply_settles`, `marker_settles_bytes`](proofs/storage/CovenStorage/CopyPublication.lean)). Atomicity is
+    the provider property certification's races test: a completion that checks
+    a free name and then writes it lets two racers both succeed
+    ([`check_then_write_two_winners`](proofs/storage/CovenStorage/CopyPublication.lean)).
+  - One S3 `CopyObject` copies at most 5 GiB. A profile publishing by S3
+    copy (AWS, SeaweedFS) refuses a larger upload before any request with
+    `StorageFailure::CopyTooLarge`; such an object cannot be published
+    atomically there. Writes stay below it (§6's 1 GB record limit);
+    a larger snapshot or file waits with that failure.
   - Aborting a copy-publication session aborts its native multipart upload
     and deletes its temporary, including when the native upload has already completed.
     A crashed device's recorded session therefore remains usable by the same
@@ -985,7 +1002,8 @@ the file's ranges under `F`.
     multipart `Last-Modified` fell between the completion markers, so they use
     conditional completion without a copy. That sequential refusal does not
     hold under concurrency on SeaweedFS 4.48: two racing conditional
-    completions of one name both succeed. None returned a checksum, even
+    completions of one name both succeed. The SeaweedFS profile therefore
+    publishes multipart uploads by copy with `If-None-Match: *`. None returned a checksum, even
     with checksum mode; their profiles do not request one and rely on the
     complete-byte comparison required for a missing checksum (below).
   - `RequestTimeTooSkewed` means the device clock is off, not that access

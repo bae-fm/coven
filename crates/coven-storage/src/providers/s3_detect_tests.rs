@@ -69,6 +69,13 @@ const RUSTFS: Service = Service {
     checksum: Checksum::None,
     ..AWS
 };
+/// Enforces conditional completion one request at a time, and the copy
+/// condition. Its racing completions both succeeding is invisible to these
+/// sequential probes.
+const SEAWEEDFS: Service = Service {
+    copy: Some(S3CopyCondition::IfNoneMatch),
+    ..RUSTFS
+};
 /// Accepts writes to an occupied name whatever condition is sent, and dates
 /// multipart objects by initiation.
 const OVERWRITES: Service = Service {
@@ -513,7 +520,7 @@ async fn detection_reproduces_each_catalogued_entry() {
         (GCS, S3ProfileName::Gcs),
         (R2, S3ProfileName::R2),
         (RUSTFS, S3ProfileName::RustFs),
-        (RUSTFS, S3ProfileName::SeaweedFs),
+        (SEAWEEDFS, S3ProfileName::SeaweedFs),
         (RUSTFS, S3ProfileName::CephRgw),
     ] {
         let fixture = Fixture::new(service).await;
@@ -522,10 +529,20 @@ async fn detection_reproduces_each_catalogued_entry() {
             .await
             .unwrap_or_else(|error| panic!("{name:?}: {error:?}"));
         let entry = profile::CataloguedProfile::named(name).settings;
-        assert_eq!(detection.settings, entry, "{name:?}");
+        // Detection prefers enforced conditional completion; only the
+        // certification races showed SeaweedFS's racing completions both
+        // succeed, so its entry publishes by copy instead (§4).
+        let detected = match name {
+            S3ProfileName::SeaweedFs => S3Settings {
+                multipart: S3Multipart::ConditionalCompletion,
+                ..entry
+            },
+            _ => entry,
+        };
+        assert_eq!(detection.settings, detected, "{name:?}");
         assert_eq!(
             detection.resolve(fixture.location(None)).unwrap(),
-            fixture.location(Some(S3Profile::Custom(entry)))
+            fixture.location(Some(S3Profile::Custom(detected)))
         );
         // The named profile passes the same safety check at its own server.
         let named = fixture.location(Some(S3Profile::Named(name)));

@@ -481,6 +481,12 @@ impl ProviderOps for S3Storage {
         path: &ObjectPath,
         total: u64,
     ) -> Result<UploadSession, StorageError> {
+        // A copy above the single-copy limit cannot publish atomically (§4).
+        if let S3Multipart::Copy(condition) = self.settings.multipart {
+            if let Some(limit) = condition.single_copy_limit().filter(|limit| total > *limit) {
+                return Err(StorageFailure::CopyTooLarge { size: total, limit }.into());
+            }
+        }
         let part_size = crate::session::s3_part_size(total)?;
         let token = SecretText::new(self.ids.new_id().to_string());
         let key = self.upload_key(path, &token)?;

@@ -34,7 +34,18 @@ impl S3SinglePut {
         }
     }
 }
+/// S3's `CopyObject` copies at most 5 GiB in one atomic request.
+const SINGLE_COPY_LIMIT: u64 = 5 * 1024 * 1024 * 1024;
 impl S3CopyCondition {
+    /// The largest object one conditional copy publishes. S3's `CopyObject`
+    /// (AWS, SeaweedFS, R2's extension) is limited; GCS's XML copy is a
+    /// different operation with no such limit here.
+    pub(super) fn single_copy_limit(self) -> Option<u64> {
+        match self {
+            Self::IfNoneMatch | Self::CloudflareIfNoneMatch => Some(SINGLE_COPY_LIMIT),
+            Self::GenerationMatch => None,
+        }
+    }
     pub(super) fn header(self) -> (&'static str, &'static str) {
         match self {
             Self::IfNoneMatch => ("if-none-match", "*"),
@@ -200,10 +211,13 @@ const RUSTFS: CataloguedProfile = CataloguedProfile {
 // SeaweedFS 4.48 failed suite 4 with versioning disabled and enabled:
 // concurrent conditional multipart completions both succeeded, so its suite 2
 // certificate, which predates the races, is withdrawn and setup refuses it.
+// Multipart uploads therefore assemble a temporary and publish it with one
+// `CopyObject` conditioned on `If-None-Match: *`, as AWS does.
 const SEAWEEDFS: CataloguedProfile = CataloguedProfile {
     name: S3ProfileName::SeaweedFs,
     endpoint: None,
     settings: S3Settings {
+        multipart: S3Multipart::Copy(S3CopyCondition::IfNoneMatch),
         checksums: S3Checksums::Absent,
         request_checksums: false,
         ..PLAIN

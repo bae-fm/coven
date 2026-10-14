@@ -199,3 +199,16 @@ import CovenStorage
 #print axioms CovenStorage.KeyDelivery.Examples.bound_sealing_continues
 #print axioms CovenStorage.KeyDelivery.Examples.restored_after_seal_continues
 #print axioms CovenStorage.KeyDelivery.Examples.restored_before_mint_orphans_key
+
+#print axioms CovenStorage.CopyPublication.copy_is_create
+#print axioms CovenStorage.CopyPublication.copy_outcome
+#print axioms CovenStorage.CopyPublication.stage_hidden
+#print axioms CovenStorage.CopyPublication.discard_hidden
+#print axioms CovenStorage.CopyPublication.publish_preserves
+#print axioms CovenStorage.CopyPublication.run_preserves
+#print axioms CovenStorage.CopyPublication.race_occupied
+#print axioms CovenStorage.CopyPublication.race_one_winner
+#print axioms CovenStorage.CopyPublication.lost_reply_settles
+#print axioms CovenStorage.CopyPublication.other_marker_refuses
+#print axioms CovenStorage.CopyPublication.marker_settles_bytes
+#print axioms CovenStorage.CopyPublication.check_then_write_two_winners

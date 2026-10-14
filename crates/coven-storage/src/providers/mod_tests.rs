@@ -768,14 +768,11 @@ pub(crate) mod listing_lag {
 }
 
 /// Compare an adapter's occupied-path decisions and complete bytes with Lean.
-pub(crate) async fn compare_create_model(storage: &dyn crate::Storage) {
-    use crate::{ObjectPath, StorageFailure};
+/// Run the Lean `createRunner` on one JSON input.
+pub(crate) fn create_runner(input: &serde_json::Value) -> serde_json::Value {
     use std::io::Write;
     use std::process::{Command, Stdio};
     let runner = std::env::var("COVEN_CREATE_LEAN").expect("COVEN_CREATE_LEAN names createRunner");
-    let attempts: Vec<_> = (0..32u8).map(|i| {
-        serde_json::json!({"path": u64::from(i % 4) + 1, "bytes": vec![i; usize::from((i * 3) % 7)]})
-    }).collect();
     let mut process = Command::new(runner)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -785,11 +782,23 @@ pub(crate) async fn compare_create_model(storage: &dyn crate::Storage) {
         .stdin
         .take()
         .unwrap()
-        .write_all(&serde_json::to_vec(&attempts).unwrap())
+        .write_all(&serde_json::to_vec(input).unwrap())
         .unwrap();
     let output = process.wait_with_output().unwrap();
     assert!(output.status.success());
-    let expected: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout).unwrap();
+    serde_json::from_slice(&output.stdout).unwrap()
+}
+
+/// Compare creates with the Lean model. A copy-publication adapter
+/// (`copy`) is compared with `CopyPublication.publish`: each create stages
+/// its own temporary and publishes it with one conditional copy.
+pub(crate) async fn compare_create_model(storage: &dyn crate::Storage, copy: bool) {
+    use crate::{ObjectPath, StorageFailure};
+    let attempts: Vec<_> = (0..32u8).map(|i| {
+        serde_json::json!({"path": u64::from(i % 4) + 1, "bytes": vec![i; usize::from((i * 3) % 7)], "copy": copy})
+    }).collect();
+    let expected: Vec<serde_json::Value> =
+        serde_json::from_value(create_runner(&serde_json::Value::from(attempts.clone()))).unwrap();
     assert_eq!(expected.len(), attempts.len());
     for (attempt, expected) in attempts.iter().zip(&expected) {
         let path = ObjectPath::device_log(
