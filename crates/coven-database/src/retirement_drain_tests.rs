@@ -14,6 +14,16 @@ fn at(seconds: u64) -> SystemTime {
     UNIX_EPOCH + Duration::from_secs(seconds)
 }
 
+/// The earliest time `SystemTime` can represent after `time`. Its unit is the
+/// platform's: one nanosecond on Unix, 100 ns on Windows, where adding one
+/// nanosecond leaves the time unchanged.
+fn next_instant(time: SystemTime) -> SystemTime {
+    (1..=100)
+        .map(|nanos| time + Duration::from_nanos(nanos))
+        .find(|later| *later > time)
+        .expect("SystemTime resolves 100 ns on every supported platform")
+}
+
 async fn advance(db: &crate::Database, horizon: u64, sample: SystemTime) {
     db.advance_store_log_horizon(
         db.store_log().await.unwrap(),
@@ -106,7 +116,7 @@ async fn a_drain_needs_a_sample_strictly_past_the_wait() {
     assert_eq!(finality.drain_due(), at(41 * DAY + 300));
     let deadline = finality.final_at + DRAIN_WAIT;
     assert!(!finality.drain_permitted(deadline));
-    assert!(finality.drain_permitted(deadline + Duration::from_nanos(1)));
+    assert!(finality.drain_permitted(next_instant(deadline)));
     assert!(!db.mark_drained(finality, deadline).await.unwrap());
     assert!(db.drained_devices().await.unwrap().is_empty());
     let stale = RetirementFinality {

@@ -42,8 +42,9 @@ impl RetirementFinality {
         sample > self.final_at + DRAIN_WAIT
     }
 
-    /// The first storage time strictly past the wait, for scheduling a time
-    /// probe; a device clock reaching it only schedules that check.
+    /// `F + one day + five minutes`: the last storage time that does not yet
+    /// permit the drain, for scheduling a time probe once a device clock
+    /// passes it; a device clock passing it only schedules that check.
     pub fn drain_due(&self) -> SystemTime {
         self.final_at + DRAIN_WAIT
     }
