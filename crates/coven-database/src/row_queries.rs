@@ -17,18 +17,44 @@ pub(crate) fn children(
     Ok(database.query("SELECT DISTINCT r.table_name,r.key,r.audience FROM _coven_references v JOIN _coven_rows r ON r.id=v.row_id WHERE v.parent_table=?1 AND v.parent_key=?2 AND v.parent_audience=?3 AND v.foreign_key_id=(SELECT id FROM _coven_foreign_keys WHERE table_name=?4 AND identity=?5)", params![parent.table,parent.key,audience_text(&parent.audience),table.name,encoded(merge_fields::encode_foreign_key(key))?], read_identity)?.into_iter().collect())
 }
 
+/// The registered row of a synced table's foreign key. Preparing the schema
+/// registers every one, so a reference can only name a registered key (§8).
 pub(crate) fn foreign_key(
     database: &DatabaseConnection,
     table: &str,
     key: &ForeignKey,
 ) -> Result<i64, DbError> {
-    definition_id(
-        database,
-        "_coven_foreign_keys",
-        "identity",
-        table,
-        &encoded(merge_fields::encode_foreign_key(key))?,
-    )
+    let id: Option<i64> = database.query_row(
+        "SELECT (SELECT id FROM _coven_foreign_keys WHERE table_name=?1 AND identity=?2)",
+        params![table, encoded(merge_fields::encode_foreign_key(key))?],
+        |r| r.get(0),
+    )?;
+    Ok(id.unwrap_or_else(|| panic!("foreign key {key:?} of {table} was never registered")))
+}
+
+/// Register one `_coven_foreign_keys` row per foreign key of each synced
+/// table (§8). Runs after a migration has carried renamed keys over and
+/// removed vanished ones, and on every writable open.
+pub(crate) fn register_foreign_keys(
+    database: &DatabaseConnection,
+    schema: &crate::schema::Schema,
+    tables: &[crate::SyncedTable],
+) -> Result<(), DbError> {
+    for declaration in tables {
+        let table = &schema.tables[&declaration.name.to_ascii_lowercase()];
+        for key in &table.foreign_keys {
+            definition_id(
+                database,
+                "_coven_foreign_keys",
+                "identity",
+                &table.name,
+                &encoded(merge_fields::encode_foreign_key(
+                    &schema.foreign_key(table, key),
+                ))?,
+            )?;
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn constraint(

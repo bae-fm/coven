@@ -223,7 +223,13 @@ impl DatabaseConnection {
             return Err(MigrationError::SchemaTooNew { current, supported }.into());
         }
         if read_only || current == supported {
-            Schema::read(self)?.validate(tables)?;
+            let schema = Schema::read(self)?;
+            schema.validate(tables)?;
+            if !read_only {
+                self.transaction(|db| {
+                    crate::row_queries::register_foreign_keys(db, &schema, tables)
+                })?;
+            }
             if self.authorization.tables_changed() {
                 self.refresh_hidden_rowids()?;
             }
@@ -270,6 +276,7 @@ impl DatabaseConnection {
                     )?;
                 }
             }
+            crate::row_queries::register_foreign_keys(db, &Schema::read(db)?, tables)?;
             db.refresh_hidden_rowids()?;
             Ok(outcomes)
         });

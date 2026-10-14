@@ -285,7 +285,6 @@ const STEPS: &[(&str, &str)] = &[
     ("_coven_columns", "INSERT"),
     ("_coven_cells", "INSERT"),
     ("_coven_lost", "DELETE"),
-    ("_coven_foreign_keys", "INSERT"),
     ("_coven_references", "INSERT"),
 ];
 const WRITE: &str = "UPDATE notes SET title='Weekly groceries'; INSERT INTO tags VALUES('errands','42'); INSERT INTO local_rows VALUES('committed')";
