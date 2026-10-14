@@ -2,15 +2,6 @@
 
 use crate::*;
 
-/// Native revocation responses before the connection interprets remaining access.
-pub enum ProviderRevocation {
-    /// Account providers return the grants still reaching the account.
-    /// An empty list means all access was removed.
-    Remaining(Vec<RetainedAccess>),
-    /// S3 supplies console instructions.
-    Reported(MemberRemoval),
-}
-
 /// Native calls used by [`StorageConnection`]. Consumers use [`Storage`];
 /// implementations handle provider protocols after the connection checks paths,
 /// request sizes and recorded sessions. Construction receives validated settings.
@@ -98,10 +89,7 @@ pub trait ProviderOps: Send + Sync {
         Ok(())
     }
     /// Remove exclusive grants and return grants that still reach the account.
-    async fn revoke_access(
-        &self,
-        member: &MemberAccess,
-    ) -> Result<ProviderRevocation, StorageError>;
+    async fn revoke_access(&self, account: &str) -> Result<Vec<RetainedAccess>, StorageError>;
     /// Begin a nonempty upload to a checked immutable destination.
     async fn begin_upload(
         &self,

@@ -5,7 +5,7 @@ use crate::{DbError, NewOperation, OperationId, OperationRecord, OperationUpdate
 
 impl Database {
     /// Install a ready batch and its replay, data effects, drop reports, operation
-    /// progress and S3 deletion obligations together. Reject a result prepared against
+    /// progress and provider access intentions together. Reject a result prepared against
     /// another committed log, and a kept creation that disagrees with the directory
     /// settings (§9).
     /// The retained decoded value changes on the database thread after commit,
@@ -18,6 +18,7 @@ impl Database {
         operations: Vec<crate::NewOperation>,
         updates: Vec<crate::OperationUpdate>,
         access_keys: Vec<crate::AccessKeyDeletion>,
+        provider_access: Vec<crate::ProviderAccessChange>,
     ) -> Result<(), DbError> {
         self.call(move |inner| {
             inner.with_store_log(|current| {
@@ -91,6 +92,7 @@ impl Database {
                             &operations,
                             &updates,
                             &access_keys,
+                            &provider_access,
                         )
                     };
                     if let Some(reader) = reader {
@@ -254,42 +256,6 @@ impl Database {
             inner
                 .access
                 .with_writer(|writer| writer.transaction(|db| finish(db, id).map(drop)))
-        })
-        .await
-    }
-
-    /// Retire an operation together with the work its last step leaves: one
-    /// new journal row per follow-up, each committed with the pending condition
-    /// built from its new id. Nothing commits unless all of it does.
-    pub async fn finish_operation_with_work<P, F>(
-        &self,
-        id: OperationId,
-        follow_ups: Vec<(NewOperation, F)>,
-    ) -> Result<(), DbError>
-    where
-        P: crate::PendingValue,
-        F: FnOnce(OperationId) -> P + Send + 'static,
-    {
-        self.call(move |inner| {
-            inner.access.with_writer(|writer| {
-                writer.transaction(|db| {
-                    for (operation, pending) in follow_ups {
-                        let started = crate::operation::insert(db, &operation)?;
-                        let pending = pending(started);
-                        if pending.operation() != Some(started)
-                            || pending.reported_by() != inner.access.device
-                        {
-                            return Err(DbError::DamagedDatabase);
-                        }
-                        crate::pending::save(db, &pending)?;
-                    }
-                    // Follow-ups belong to this step; they never outlive a lost row.
-                    if finish(db, id)? != 1 {
-                        return Err(DbError::OperationChanged(id));
-                    }
-                    Ok(())
-                })
-            })
         })
         .await
     }

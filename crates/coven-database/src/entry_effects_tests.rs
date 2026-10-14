@@ -33,7 +33,15 @@ pub(crate) async fn fate(
         boundary.apply(&mut next.replay.state);
     }
     target
-        .apply_store_log_batch::<Record>(log, vec![], next.replay, vec![], vec![], Vec::new())
+        .apply_store_log_batch::<Record>(
+            log,
+            vec![],
+            next.replay,
+            vec![],
+            vec![],
+            Vec::new(),
+            Vec::new(),
+        )
         .await
 }
 

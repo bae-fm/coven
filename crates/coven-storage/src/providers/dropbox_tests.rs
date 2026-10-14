@@ -487,14 +487,8 @@ async fn conformance_ranges_pagination_and_account_sharing() {
         AccessGrant::Granted { .. }
     ));
     storage.grant_access("member@example.com").await.unwrap();
-    storage
-        .revoke_access(&MemberAccess::ProviderAccount("member@example.com".into()))
-        .await
-        .unwrap();
-    storage
-        .revoke_access(&MemberAccess::ProviderAccount("member@example.com".into()))
-        .await
-        .unwrap();
+    storage.revoke_access("member@example.com").await.unwrap();
+    storage.revoke_access("member@example.com").await.unwrap();
     assert!(state.lock().unwrap().members.is_empty());
 }
 #[tokio::test]
@@ -679,11 +673,7 @@ async fn asynchronous_removal_keeps_the_native_failure_and_previous_access() {
             member: "member".into(),
             statuses: [body.clone()].into(),
         });
-        let error = storage
-            .revoke_access(&MemberAccess::ProviderAccount("member".into()))
-            .await
-            .err()
-            .unwrap();
+        let error = storage.revoke_access("member").await.err().unwrap();
         assert_eq!(error.failure(), expected);
         let StorageError::Provider { source, .. } = error else {
             panic!("native removal failure discarded")
@@ -730,14 +720,8 @@ async fn asynchronous_removal_waits_for_publication_and_retries_after_completion
         member: "member".into(),
         statuses: [json!({".tag":"in_progress"}), json!({".tag":"complete"})].into(),
     });
-    storage
-        .revoke_access(&MemberAccess::ProviderAccount("member".into()))
-        .await
-        .unwrap();
-    storage
-        .revoke_access(&MemberAccess::ProviderAccount("member".into()))
-        .await
-        .unwrap();
+    storage.revoke_access("member").await.unwrap();
+    storage.revoke_access("member").await.unwrap();
     assert!(!state.lock().unwrap().members.contains_key("member"));
     assert_eq!(state.lock().unwrap().sharing_mutations, ["add", "remove"]);
     assert_eq!(
@@ -759,11 +743,7 @@ async fn asynchronous_removal_times_out_without_hiding_remaining_access() {
         member: "member".into(),
         statuses: [json!({".tag":"in_progress"})].into(),
     });
-    let error = storage
-        .revoke_access(&MemberAccess::ProviderAccount("member".into()))
-        .await
-        .err()
-        .unwrap();
+    let error = storage.revoke_access("member").await.err().unwrap();
     assert_eq!(error.failure(), StorageFailure::Network);
     let StorageError::Provider { source, .. } = error else {
         panic!("timeout cause discarded")
@@ -779,10 +759,7 @@ async fn asynchronous_removal_times_out_without_hiding_remaining_access() {
     );
     state.lock().unwrap().removal_job.as_mut().unwrap().statuses =
         [json!({".tag":"complete"})].into();
-    storage
-        .revoke_access(&MemberAccess::ProviderAccount("member".into()))
-        .await
-        .unwrap();
+    storage.revoke_access("member").await.unwrap();
     assert!(!state.lock().unwrap().members.contains_key("member"));
 }
 
@@ -842,10 +819,7 @@ async fn recipient_join_mounts_the_invited_namespace_and_retries_a_lost_reply() 
     recipient.join(STORE_ID, &invitation).await.unwrap();
     assert_eq!(recipient.read(&path).await.unwrap(), b"first");
     assert_eq!(state.lock().unwrap().mount_requests, 2);
-    owner
-        .revoke_access(&MemberAccess::ProviderAccount("member".into()))
-        .await
-        .unwrap();
+    owner.revoke_access("member").await.unwrap();
     for error in [
         recipient.read(&path).await.unwrap_err(),
         recipient.join(STORE_ID, &invitation).await.unwrap_err(),

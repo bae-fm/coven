@@ -179,6 +179,7 @@ async fn a_ready_batch_rolls_back_entries_cached_state_and_operation_progress_to
                 replay.clone(),
                 vec![],
                 vec![update()],
+                Vec::new(),
                 Vec::new()
             )
             .await
@@ -196,6 +197,7 @@ async fn a_ready_batch_rolls_back_entries_cached_state_and_operation_progress_to
         vec![],
         vec![update()],
         Vec::new(),
+        Vec::new(),
     )
     .await
     .unwrap();
@@ -205,8 +207,16 @@ async fn a_ready_batch_rolls_back_entries_cached_state_and_operation_progress_to
     assert_eq!(db.local_store_log().await.unwrap().log, after);
     assert_eq!(db.operation(operation).await.unwrap().unwrap().last_step, 4);
     assert!(matches!(
-        db.apply_store_log_batch::<Record>(before, incoming, replay, vec![], vec![], Vec::new())
-            .await,
+        db.apply_store_log_batch::<Record>(
+            before,
+            incoming,
+            replay,
+            vec![],
+            vec![],
+            Vec::new(),
+            Vec::new()
+        )
+        .await,
         Err(DbError::StoreLogEntriesChanged)
     ));
     db.close().await.unwrap();
@@ -249,7 +259,15 @@ async fn cancelled_batch_caller_cannot_leave_the_decoded_log_behind_its_commit()
     let expected = replay.clone();
     let task = tokio::spawn(async move {
         writer
-            .apply_store_log_batch::<Record>(before, entries, replay, vec![], vec![], Vec::new())
+            .apply_store_log_batch::<Record>(
+                before,
+                entries,
+                replay,
+                vec![],
+                vec![],
+                Vec::new(),
+                Vec::new(),
+            )
             .await
     });
     wait_committed.await.unwrap();
@@ -404,82 +422,5 @@ mod conformance {
         assert_eq!(pending(&db).await, ["made"]);
         assert!(db.operation(id).await.unwrap().is_none());
         assert_eq!(db.operations().await.unwrap().len(), 1);
-    }
-
-    #[tokio::test]
-    async fn finishing_with_work_commits_each_follow_up_with_its_condition() {
-        use crate::pending::tests::{reported_operation, Record};
-        let store = TestStore::new();
-        let db = store.builder(vec![], vec![]).open().await.unwrap();
-        let device = db.sync_state(Vec::new()).await.unwrap().device;
-        let new = |n: u8| NewOperation {
-            kind: "follow-up".into(),
-            data: vec![n],
-            started_by: "coven".into(),
-        };
-        let id = db.start_operation(new(0)).await.unwrap();
-        // A condition naming another row fails the whole commit.
-        let error = db
-            .finish_operation_with_work(
-                id,
-                vec![
-                    (
-                        new(1),
-                        Box::new(move |started| reported_operation(device, started))
-                            as Box<dyn FnOnce(crate::OperationId) -> Record + Send>,
-                    ),
-                    (new(2), Box::new(move |_| reported_operation(device, id))),
-                ],
-            )
-            .await
-            .unwrap_err();
-        assert!(matches!(error, DbError::DamagedDatabase));
-        assert_eq!(
-            db.operations()
-                .await
-                .unwrap()
-                .into_iter()
-                .map(|record| record.id)
-                .collect::<Vec<_>>(),
-            [id]
-        );
-        db.finish_operation_with_work(
-            id,
-            [new(1), new(2)]
-                .into_iter()
-                .map(|operation| {
-                    (operation, move |started| {
-                        reported_operation(device, started)
-                    })
-                })
-                .collect(),
-        )
-        .await
-        .unwrap();
-        let started = db.operations().await.unwrap();
-        assert_eq!(
-            started
-                .iter()
-                .map(|record| record.data.clone())
-                .collect::<Vec<_>>(),
-            [vec![1], vec![2]]
-        );
-        for record in &started {
-            assert_eq!(
-                db.operation_pending::<Record>(record.id).await.unwrap(),
-                Some(reported_operation(device, record.id))
-            );
-        }
-        // A row that already finished cannot leave follow-ups behind.
-        let error = db
-            .finish_operation_with_work(
-                id,
-                vec![(new(3), move |started| reported_operation(device, started))],
-            )
-            .await
-            .unwrap_err();
-        assert!(matches!(error, DbError::OperationChanged(changed) if changed == id));
-        assert_eq!(db.operations().await.unwrap().len(), 2);
-        db.close().await.unwrap();
     }
 }

@@ -85,35 +85,6 @@ pub enum AccessGrant {
     CreateAccessKey,
 }
 
-/// Revocation includes S3's manual instruction; it is not an error (E9).
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum MemberRemoval {
-    /// The removal is kept; an owner's device must apply it to revoke sharing.
-    /// Other admins never attempt provider sharing calls.
-    PendingOwner,
-    /// Sharing must remain because an active member or another open invite uses
-    /// the same account. No provider grant is revoked in this case.
-    AccountInUse {
-        /// The shared account whose grant remains necessary.
-        account: String,
-    },
-
-    /// The provider no longer shares with the account.
-    Revoked,
-    /// Exclusive grants were removed; these grants remain for owner action.
-    /// They cannot safely be removed for this account alone.
-    AccessRemains {
-        /// Native grants the owner can inspect in the provider's console.
-        shares: Vec<RetainedAccess>,
-    },
-    /// The member's current S3 key, pending deletion until coven deletes it
-    /// with admin access or the admin confirms deleting it (§13).
-    DeleteAccessKey {
-        /// Public identifier of the key to delete.
-        access_key_id: String,
-    },
-}
-
 /// A grant that revocation left for the owner to inspect.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RetainedAccess {
@@ -265,17 +236,17 @@ pub trait Storage: Send + Sync {
         self.list_writers(store).await?;
         Ok(())
     }
-    /// Unshare through the owner's account, or tell an S3 admin which key to delete.
+    /// Unshare through the owner's account. S3 key deletion uses AccessKeyAdmin.
     /// Ownership is checked as for [`Self::grant_access`]. Only grants exclusive to
     /// this account are removed; owner, inherited, shared or unidentified grants
-    /// remain in [`MemberRemoval::AccessRemains`] for owner action.
+    /// are returned for owner action. An empty list confirms revocation.
     ///
     /// OneDrive resolves native identities across all permission pages and keeps
     /// email-bearing grants until dependent ID-only removals succeed. Drive removes
     /// direct access without changing parent permissions. Dropbox pages direct and
     /// inherited memberships separately and waits for the native removal job,
     /// preserving its failure cause; group and parent access remain reported.
-    async fn revoke_access(&self, member: &MemberAccess) -> Result<MemberRemoval, StorageError>;
+    async fn revoke_access(&self, account: &str) -> Result<Vec<RetainedAccess>, StorageError>;
     /// Begin a create-once upload, returning the value to record before parts are sent.
     /// Store-log entries, positions and clocks are refused: all require one request.
     async fn begin_upload(

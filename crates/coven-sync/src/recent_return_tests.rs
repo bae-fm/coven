@@ -5,8 +5,8 @@ use coven_foundation::{
     id_source::DeviceId,
 };
 use coven_storage::{
-    test_utils::MemoryStorage, AccessGrant, ByteRange, MemberAccess, MemberRemoval, ObjectPath,
-    ObjectPrefix, Storage, StorageConfig, StorageError, StoredObject, UploadSession,
+    test_utils::MemoryStorage, AccessGrant, ByteRange, ObjectPath, ObjectPrefix, RetainedAccess,
+    Storage, StorageConfig, StorageError, StoredObject, UploadSession,
 };
 use serde_json::json;
 use std::sync::Arc;
@@ -156,8 +156,8 @@ impl Storage for SlowWrites {
     async fn grant_access(&self, account: &str) -> Result<AccessGrant, StorageError> {
         self.storage.grant_access(account).await
     }
-    async fn revoke_access(&self, member: &MemberAccess) -> Result<MemberRemoval, StorageError> {
-        self.storage.revoke_access(member).await
+    async fn revoke_access(&self, account: &str) -> Result<Vec<RetainedAccess>, StorageError> {
+        self.storage.revoke_access(account).await
     }
     async fn begin_upload(
         &self,

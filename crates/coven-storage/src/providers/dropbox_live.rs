@@ -52,7 +52,7 @@ struct Live {
     account: OAuthSession,
     folders: Vec<String>,
     uploads: Vec<(Arc<StorageConnection<DropboxStorage>>, UploadSession)>,
-    members: Vec<(Arc<StorageConnection<DropboxStorage>>, MemberAccess)>,
+    members: Vec<(Arc<StorageConnection<DropboxStorage>>, String)>,
 }
 
 async fn tokens(variable: &str, clock: ClockRef) -> OAuthTokens {
@@ -208,7 +208,7 @@ impl Live {
         }
         for (storage, member) in &self.members {
             match storage.revoke_access(member).await {
-                Ok(MemberRemoval::Revoked) => {}
+                Ok(shares) if shares.is_empty() => {}
                 Ok(_) => failures.push("recipient access remains".into()),
                 Err(error) => failures.push(format!("revoke: {:?}", error.failure())),
             }

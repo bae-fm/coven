@@ -37,6 +37,15 @@ impl Record {
     }
 }
 impl PendingValue for Record {
+    fn provider_access(
+        id: OperationId,
+        reported_by: DeviceId,
+        _account: String,
+        _grant: bool,
+        _owner: bool,
+    ) -> Self {
+        reported_operation(reported_by, id)
+    }
     fn reload(audience: coven_merge::Audience, reported_by: DeviceId) -> Self {
         Self {
             subject: Subject::Audience(crate::write_encoding::audience_text(&audience)),

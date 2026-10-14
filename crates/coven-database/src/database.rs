@@ -19,6 +19,8 @@ pub(crate) mod input_database;
 
 #[path = "database_operations.rs"]
 mod operations;
+#[path = "database_provider_access.rs"]
+mod provider_access;
 
 #[path = "database_file_retention.rs"]
 pub(crate) mod file_retention;

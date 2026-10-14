@@ -13,6 +13,18 @@ impl StoreLogSync {
         &self,
         record: &OperationRecord,
     ) -> Result<bool, SyncError> {
+        if let Data::Invite(crate::operation_data::InviteWork {
+            access: crate::operation_data::InviteGrant::Account { email },
+            state: crate::operation_data::InviteState::Grant,
+            ..
+        }) = Data::read(record)?
+        {
+            if let Some(access) = self.database.provider_access(email).await? {
+                if access.request.is_none() && access.invitation.is_some() {
+                    return Ok(true);
+                }
+            }
+        }
         if self.storage.is_some()
             && self
                 .database
@@ -156,6 +168,16 @@ impl StoreLogSync {
             }
             error => PendingReason::Failed(error.local_failure()),
         };
+        let data = Data::read(record)?;
+        if let Data::ProviderAccess { account } = &data {
+            if record.last_step == 1 {
+                let pending = self.operation_condition(record, reason).await?;
+                self.database
+                    .fail_provider_request(account.clone(), data.update(record, 2)?, pending)
+                    .await?;
+                return Ok(());
+            }
+        }
         self.record_operation_condition(record, reason).await?;
         Ok(())
     }

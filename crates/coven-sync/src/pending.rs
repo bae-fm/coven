@@ -267,6 +267,33 @@ impl PendingReason {
 }
 
 impl PendingValue for PendingRecord {
+    fn provider_access(
+        id: OperationId,
+        reported_by: DeviceId,
+        account: String,
+        grant: bool,
+        owner: bool,
+    ) -> Self {
+        Self {
+            subject: PendingSubject::Operation {
+                id,
+                kind: OperationKind::RevokeAccess,
+            },
+            reason: if owner {
+                PendingReason::ProviderPending {
+                    action: if grant {
+                        ProviderAccessAction::Grant
+                    } else {
+                        ProviderAccessAction::Revoke
+                    },
+                    account,
+                }
+            } else {
+                PendingReason::PendingOwner { account }
+            },
+            reported_by,
+        }
+    }
     fn reload(audience: Audience, reported_by: DeviceId) -> Self {
         Self {
             subject: PendingSubject::Audience(audience.clone()),

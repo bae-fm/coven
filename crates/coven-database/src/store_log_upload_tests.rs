@@ -102,6 +102,7 @@ async fn batch_clock_uses_saved_and_queued_timestamps_without_decoding_entries()
         vec![],
         vec![],
         Vec::new(),
+        Vec::new(),
     )
     .await
     .unwrap();

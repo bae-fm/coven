@@ -261,11 +261,8 @@ impl ProviderOps for CloudKitStorage {
     async fn grant_access(&self, account: &str) -> Result<AccessGrant, StorageError> {
         self.grant(account).await
     }
-    async fn revoke_access(
-        &self,
-        member: &MemberAccess,
-    ) -> Result<ProviderRevocation, StorageError> {
-        self.revoke(member).await.map(ProviderRevocation::Remaining)
+    async fn revoke_access(&self, account: &str) -> Result<Vec<RetainedAccess>, StorageError> {
+        self.revoke(account).await
     }
     async fn join(&self, invitation: &StorageInvitation) -> Result<(), StorageError> {
         self.accept(invitation).await

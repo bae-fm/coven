@@ -22,18 +22,11 @@ pub(crate) enum Intent {
         #[serde(with = "crate::snapshot_data::snapshot_id")]
         snapshot: coven_format::store_log::SnapshotId,
     },
-    RemoveMember {
-        member: String,
-    },
     CreateCircle {
         circle: CircleId,
         name: String,
     },
     AddCircleMember {
-        circle: CircleId,
-        member: String,
-    },
-    RemoveCircleMember {
         circle: CircleId,
         member: String,
     },
@@ -47,10 +40,8 @@ impl Intent {
         match self {
             Self::Reset { .. } => OperationKind::Reset,
             Self::RotateKey { .. } => OperationKind::RotateKey,
-            Self::RemoveMember { .. } => OperationKind::RemoveMember,
             Self::CreateCircle { .. } => OperationKind::CreateCircle,
             Self::AddCircleMember { .. } => OperationKind::AddCircleMember,
-            Self::RemoveCircleMember { .. } => OperationKind::RemoveCircleMember,
             Self::DeleteCircle { .. } => OperationKind::DeleteCircle,
         }
     }
@@ -158,13 +149,8 @@ pub(crate) enum Data {
     Snapshots(crate::snapshot_data::SnapshotTask),
     Entry(EntryWork),
     Invite(InviteWork),
-    /// Revoke every access recorded for a removed member.
-    Revoke {
-        member: String,
-    },
-    /// One account whose grants revocation retained, until a retry finds
-    /// them removed. Each account is its own pending subject.
-    RetainedAccess {
+    /// One account's intended provider access; the database owns its request state.
+    ProviderAccess {
         account: String,
     },
     /// One S3 key's deletion obligation; its pending notice lives on this row.
@@ -202,7 +188,7 @@ impl Data {
                 SnapshotJob::Retain => OperationKind::Retention,
             },
             Self::Invite(_) => OperationKind::Invite,
-            Self::Revoke { .. } | Self::RetainedAccess { .. } => OperationKind::RevokeAccess,
+            Self::ProviderAccess { .. } => OperationKind::RevokeAccess,
             Self::DeleteAccessKey(_) => OperationKind::DeleteAccessKey,
             Self::ReplaceAccessKey(_) => OperationKind::ReplaceAccessKey,
         }
@@ -215,10 +201,8 @@ impl Data {
             Self::Entry(work) => match work.intent {
                 Intent::Reset { .. } => "reset",
                 Intent::RotateKey { .. } => "rotate-key",
-                Intent::RemoveMember { .. } => "remove-member",
                 Intent::CreateCircle { .. } => "create-circle",
                 Intent::AddCircleMember { .. } => "add-circle-member",
-                Intent::RemoveCircleMember { .. } => "remove-circle-member",
                 Intent::DeleteCircle { .. } => "delete-circle",
             },
             Self::Snapshots(task) => match task.job {
@@ -235,8 +219,7 @@ impl Data {
                 SnapshotJob::Retain => "retention",
             },
             Self::Invite(_) => "invite",
-            Self::Revoke { .. } => "revoke-access",
-            Self::RetainedAccess { .. } => "retained-access",
+            Self::ProviderAccess { .. } => "provider-access",
             Self::DeleteAccessKey(_) => "delete-access-key",
             Self::ReplaceAccessKey(_) => "replace-access-key",
         }

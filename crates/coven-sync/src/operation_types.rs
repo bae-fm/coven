@@ -26,19 +26,15 @@ pub enum OperationKind {
     ReloadFromSnapshot,
     /// Publish a fresh audience key and its sealed copies.
     RotateKey,
-    /// Remove a member.
-    RemoveMember,
     /// Create a circle and its first key.
     CreateCircle,
     /// Seal a circle's history to a member.
     AddCircleMember,
-    /// Remove a circle member.
-    RemoveCircleMember,
     /// Delete a circle's rows and publish its deletion.
     DeleteCircle,
     /// Share storage and settle an invitation.
     Invite,
-    /// The owner's device revokes recorded access after removal or a later access entry.
+    /// Align one provider account's grants with members and open invitations.
     RevokeAccess,
     /// An S3 key awaiting deletion with admin access or explicit confirmation (§13).
     DeleteAccessKey,

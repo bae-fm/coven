@@ -10,13 +10,7 @@ async fn revocation_preserves_permissions_that_also_reach_other_accounts() {
     }
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     let storage = provider(&server.url);
-    let MemberRemoval::AccessRemains { shares } = storage
-        .revoke_access(&MemberAccess::ProviderAccount("target@example.test".into()))
-        .await
-        .unwrap()
-    else {
-        panic!("shared permission was not reported")
-    };
+    let shares = storage.revoke_access("target@example.test").await.unwrap();
     assert_eq!(
         shares,
         [RetainedAccess {
@@ -41,10 +35,7 @@ async fn revocation_resolves_native_account_ids_before_deleting_the_email() {
     }
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     let storage = provider(&server.url);
-    storage
-        .revoke_access(&MemberAccess::ProviderAccount("target@example.test".into()))
-        .await
-        .unwrap();
+    storage.revoke_access("target@example.test").await.unwrap();
     let remote = state.lock().unwrap();
     assert_eq!(
         remote.permissions.keys().cloned().collect::<Vec<_>>(),
@@ -59,13 +50,7 @@ async fn revocation_never_removes_the_store_owners_permission() {
     state.lock().unwrap().permissions.insert("owner".into(), json!({"id":"owner", "roles":["owner"], "grantedToV2":{"user":{"email":"owner@example.test"}}}));
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     let storage = provider(&server.url);
-    let MemberRemoval::AccessRemains { shares } = storage
-        .revoke_access(&MemberAccess::ProviderAccount("owner@example.test".into()))
-        .await
-        .unwrap()
-    else {
-        panic!("owner permission was not reported")
-    };
+    let shares = storage.revoke_access("owner@example.test").await.unwrap();
     assert_eq!(
         shares,
         [RetainedAccess {
@@ -91,26 +76,15 @@ async fn revocation_keeps_account_identity_available_after_a_lost_delete_reply()
     }
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     let storage = provider(&server.url);
-    let member = MemberAccess::ProviderAccount("target@example.test".into());
+    let member = "target@example.test";
     assert_eq!(
-        storage
-            .revoke_access(&member)
-            .await
-            .err()
-            .unwrap()
-            .failure(),
+        storage.revoke_access(member).await.err().unwrap().failure(),
         StorageFailure::Network
     );
     assert!(state.lock().unwrap().permissions.contains_key("a-invited"));
     assert!(!state.lock().unwrap().permissions.contains_key("z-native"));
-    assert!(matches!(
-        storage.revoke_access(&member).await.unwrap(),
-        MemberRemoval::Revoked
-    ));
-    assert!(matches!(
-        storage.revoke_access(&member).await.unwrap(),
-        MemberRemoval::Revoked
-    ));
+    assert!(storage.revoke_access(member).await.unwrap().is_empty());
+    assert!(storage.revoke_access(member).await.unwrap().is_empty());
     assert_eq!(
         state.lock().unwrap().deleted_permissions,
         ["z-native", "a-invited"]
@@ -136,13 +110,7 @@ async fn revocation_reports_broad_inherited_and_unidentified_access() {
     }
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     let storage = provider(&server.url);
-    let MemberRemoval::AccessRemains { shares } = storage
-        .revoke_access(&MemberAccess::ProviderAccount("target@example.test".into()))
-        .await
-        .unwrap()
-    else {
-        panic!("remaining access was hidden")
-    };
+    let shares = storage.revoke_access("target@example.test").await.unwrap();
     assert_eq!(
         shares,
         [
@@ -194,7 +162,7 @@ async fn revocation_validates_every_page_before_mutating_permissions() {
             .insert("bad".into(), invalid);
         assert_eq!(
             storage
-                .revoke_access(&MemberAccess::ProviderAccount("target@example.test".into()))
+                .revoke_access("target@example.test")
                 .await
                 .err()
                 .unwrap()
@@ -249,12 +217,10 @@ async fn native_identity_fields_identify_the_account_without_an_invitation() {
     }
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     let storage = provider(&server.url);
-    assert!(matches!(
-        storage
-            .revoke_access(&MemberAccess::ProviderAccount("target@example.test".into()))
-            .await
-            .unwrap(),
-        MemberRemoval::Revoked
-    ));
+    assert!(storage
+        .revoke_access("target@example.test")
+        .await
+        .unwrap()
+        .is_empty());
     assert!(state.lock().unwrap().permissions.is_empty());
 }

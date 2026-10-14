@@ -18,12 +18,9 @@ async fn revocation_removes_direct_access_and_reports_inherited_and_broad_grants
     }
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     let storage = provider(&server.url);
-    let member = MemberAccess::ProviderAccount("target@example.test".into());
+    let member = "target@example.test";
     for _ in 0..2 {
-        let MemberRemoval::AccessRemains { shares } = storage.revoke_access(&member).await.unwrap()
-        else {
-            panic!("remaining access was hidden")
-        };
+        let shares = storage.revoke_access(member).await.unwrap();
         assert_eq!(
             shares,
             [
@@ -78,13 +75,7 @@ async fn revocation_reports_owner_and_unknown_permissions_without_deleting_them(
             .unwrap()
             .extra_permissions
             .insert("permission".into(), permission.clone());
-        let MemberRemoval::AccessRemains { shares } = storage
-            .revoke_access(&MemberAccess::ProviderAccount("target@example.test".into()))
-            .await
-            .unwrap()
-        else {
-            panic!("remaining access was hidden")
-        };
+        let shares = storage.revoke_access("target@example.test").await.unwrap();
         assert_eq!(
             shares,
             [RetainedAccess {
@@ -182,10 +173,7 @@ async fn conformance_and_account_sharing() {
         ))
         .await;
     storage.grant_access("member").await.unwrap();
-    storage
-        .revoke_access(&MemberAccess::ProviderAccount("member".into()))
-        .await
-        .unwrap();
+    storage.revoke_access("member").await.unwrap();
     assert!(state.lock().unwrap().permissions.is_empty());
 }
 #[tokio::test]

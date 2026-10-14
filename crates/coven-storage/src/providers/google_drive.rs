@@ -615,16 +615,8 @@ impl ProviderOps for GoogleDriveStorage {
             invitation: StorageInvitation::for_account(self.config())?,
         })
     }
-    async fn revoke_access(
-        &self,
-        member: &MemberAccess,
-    ) -> Result<ProviderRevocation, StorageError> {
+    async fn revoke_access(&self, email: &str) -> Result<Vec<RetainedAccess>, StorageError> {
         self.require_full_access().await?;
-        let MemberAccess::ProviderAccount(email) = member else {
-            return Err(
-                StorageFailure::InvalidConfiguration.with_source("Drive requires an account")
-            );
-        };
         self.require_owner().await?;
         let permissions = self.permissions().await?;
         let mut direct = Vec::new();
@@ -662,7 +654,7 @@ impl ProviderOps for GoogleDriveStorage {
                 }),
             }
         }
-        Ok(ProviderRevocation::Remaining(shares))
+        Ok(shares)
     }
     async fn begin_upload(
         &self,

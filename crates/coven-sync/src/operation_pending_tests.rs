@@ -534,27 +534,17 @@ async fn lean_differential_access_pending() {
                 storage.set_retained_access(account, shares.clone()).await;
             }
             if remote {
-                let id = begin(&mut b, Command::RemoveMember(c.member.member_id())).await;
-                finish(&mut b, id).await;
+                publish(&mut b, Command::RemoveMember(c.member.member_id())).await;
+                drive_access(&mut b).await;
                 a.sync().await;
             }
             let files = file_owner(&a);
             let operations = operation_owner(a.sync, files);
             if !remote {
-                let result = operations
+                operations
                     .remove_member(&c.member.member_id())
                     .await
                     .unwrap();
-                assert_eq!(
-                    result,
-                    if failures > 0 {
-                        MemberRemoval::AccessRemains {
-                            shares: shares.clone(),
-                        }
-                    } else {
-                        MemberRemoval::Revoked
-                    }
-                );
             }
             let conditions = pending(&operations, &a.db).await;
             assert_eq!(conditions.len(), usize::from(failures > 0));

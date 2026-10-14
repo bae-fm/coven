@@ -457,15 +457,7 @@ impl ProviderOps for DropboxStorage {
         }
         Ok(())
     }
-    async fn revoke_access(
-        &self,
-        member: &MemberAccess,
-    ) -> Result<ProviderRevocation, StorageError> {
-        let MemberAccess::ProviderAccount(email) = member else {
-            return Err(
-                StorageFailure::InvalidConfiguration.with_source("Dropbox requires an account")
-            );
-        };
+    async fn revoke_access(&self, email: &str) -> Result<Vec<RetainedAccess>, StorageError> {
         self.require_owner().await?;
         let members = self.members(email, false).await?;
         let mut completed = Vec::new();
@@ -486,7 +478,7 @@ impl ProviderOps for DropboxStorage {
                 shares.push(share);
             }
         }
-        Ok(ProviderRevocation::Remaining(shares))
+        Ok(shares)
     }
     async fn begin_upload(
         &self,

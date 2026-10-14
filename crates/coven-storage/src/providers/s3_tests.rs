@@ -472,17 +472,10 @@ async fn errors_and_manual_key_instructions() {
         storage.grant_access("member").await.unwrap(),
         AccessGrant::CreateAccessKey
     ));
-    let MemberRemoval::DeleteAccessKey { access_key_id } = storage
-        .revoke_access(&MemberAccess::S3AccessKey {
-            access_key_id: "member-key".into(),
-            principal: coven_format::S3Principal::Console,
-        })
-        .await
-        .unwrap()
-    else {
-        panic!()
-    };
-    assert_eq!(access_key_id, "member-key");
+    assert_eq!(
+        storage.revoke_access("member").await.unwrap_err().failure(),
+        StorageFailure::InvalidConfiguration
+    );
 }
 
 #[tokio::test]

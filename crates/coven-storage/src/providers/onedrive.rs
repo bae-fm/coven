@@ -373,15 +373,7 @@ impl ProviderOps for OneDriveStorage {
         }
         Ok(())
     }
-    async fn revoke_access(
-        &self,
-        member: &MemberAccess,
-    ) -> Result<ProviderRevocation, StorageError> {
-        let MemberAccess::ProviderAccount(email) = member else {
-            return Err(
-                StorageFailure::InvalidConfiguration.with_source("OneDrive requires an account")
-            );
-        };
+    async fn revoke_access(&self, email: &str) -> Result<Vec<RetainedAccess>, StorageError> {
         self.require_owner().await?;
         let permissions = self.permissions().await?;
         let account = AccountPermissions::new(email, &permissions)?;
@@ -423,7 +415,7 @@ impl ProviderOps for OneDriveStorage {
                 }),
             }
         }
-        Ok(ProviderRevocation::Remaining(shares))
+        Ok(shares)
     }
 
     async fn begin_upload(

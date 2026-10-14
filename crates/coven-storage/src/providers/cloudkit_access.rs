@@ -248,15 +248,9 @@ impl CloudKitStorage {
             )?,
         })
     }
-    pub(super) async fn revoke(
-        &self,
-        member: &MemberAccess,
-    ) -> Result<Vec<RetainedAccess>, StorageError> {
-        let MemberAccess::ProviderAccount(account) = member else {
-            return Err(StorageFailure::InvalidConfiguration.into());
-        };
+    pub(super) async fn revoke(&self, account: &str) -> Result<Vec<RetainedAccess>, StorageError> {
         self.require_owner().await?;
-        if account == &self.owner {
+        if account == self.owner {
             return Ok(vec![RetainedAccess {
                 provider_id: self.owner.clone(),
                 reason: RetainedAccessReason::StoreOwner,

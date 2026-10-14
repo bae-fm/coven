@@ -50,6 +50,7 @@ pub(crate) fn salvage(
         destination.stream_transaction(|db| {
             for table in [
                 "_coven_operations",
+                "_coven_provider_access",
                 "_coven_store_log_uploads",
                 "_coven_key_publications",
                 "_coven_key_uploads",

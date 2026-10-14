@@ -226,18 +226,8 @@ impl<P: ProviderOps + ?Sized> Storage for StorageConnection<P> {
             self.observed(result)
         }
     }
-    async fn revoke_access(&self, member: &MemberAccess) -> Result<MemberRemoval, StorageError> {
-        let result = self
-            .provider
-            .revoke_access(member)
-            .await
-            .map(|response| match response {
-                ProviderRevocation::Remaining(shares) if shares.is_empty() => {
-                    MemberRemoval::Revoked
-                }
-                ProviderRevocation::Remaining(shares) => MemberRemoval::AccessRemains { shares },
-                ProviderRevocation::Reported(result) => result,
-            });
+    async fn revoke_access(&self, account: &str) -> Result<Vec<RetainedAccess>, StorageError> {
+        let result = self.provider.revoke_access(account).await;
         if self.config().provider() == CloudProvider::S3 {
             result
         } else {

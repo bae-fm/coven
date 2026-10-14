@@ -25,7 +25,7 @@ mod provider_check;
 mod provider_ops;
 mod publication;
 pub use provider_check::check_provider;
-pub use provider_ops::{ProviderOps, ProviderRevocation};
+pub use provider_ops::ProviderOps;
 pub use publication::{PublicationGate, PublicationRequest};
 pub mod providers;
 mod restore_storage;

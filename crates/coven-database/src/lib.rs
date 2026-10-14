@@ -50,6 +50,8 @@ mod migration_state;
 mod migration_writes;
 mod observation;
 mod pending;
+mod provider_access;
+pub use provider_access::{ProviderAccess, ProviderAccessChange, ProviderAccessRequest};
 mod read;
 mod reference_values;
 mod removal;

@@ -86,7 +86,7 @@ pub use test_utils::TestCoven;
 mod circles;
 pub use circles::Circles;
 pub use coven_format::store_log::{MemberRole, SnapshotId};
-pub use coven_storage::{MemberRemoval, ProviderSignOut, RetainedAccess, RetainedAccessReason};
+pub use coven_storage::{ProviderSignOut, RetainedAccess, RetainedAccessReason};
 pub use coven_sync::{
     AccessKeyReplacement, AccessKeyToDelete, Circle, CircleMemberInfo, DamagedObject,
     FileMissingReason, FileSourceFailure, Invite, InviteAccess, JoinRequest, LocalFailure,

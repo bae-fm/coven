@@ -1,7 +1,7 @@
 use super::*;
 use crate::test_utils::STORE_ID;
 
-async fn removal_result(status: Value) -> Result<MemberRemoval, StorageError> {
+async fn removal_result(status: Value) -> Result<Vec<RetainedAccess>, StorageError> {
     let mut remote = Remote::default();
     remote.members.insert("member".into(), "editor".into());
     remote.removal_job = Some(RemovalJob {
@@ -10,9 +10,7 @@ async fn removal_result(status: Value) -> Result<MemberRemoval, StorageError> {
     });
     let state = Arc::new(Mutex::new(remote));
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
-    let result = provider(&server.url)
-        .revoke_access(&MemberAccess::ProviderAccount("member".into()))
-        .await;
+    let result = provider(&server.url).revoke_access("member").await;
     assert_eq!(state.lock().unwrap().sharing_mutations, ["remove"]);
     result
 }
@@ -28,7 +26,7 @@ async fn removal_completion_without_parent_access_is_revoked() {
     ] {
         assert_eq!(
             removal_result(status).await.unwrap(),
-            MemberRemoval::Revoked
+            Vec::<RetainedAccess>::new()
         );
     }
 }
@@ -50,12 +48,10 @@ async fn removal_completion_reports_each_documented_parent_access_level() {
             }
             assert_eq!(
                 removal_result(status).await.unwrap(),
-                MemberRemoval::AccessRemains {
-                    shares: vec![RetainedAccess {
-                        provider_id: "dbid:member".into(),
-                        reason: RetainedAccessReason::Inherited,
-                    }],
-                }
+                vec![RetainedAccess {
+                    provider_id: "dbid:member".into(),
+                    reason: RetainedAccessReason::Inherited,
+                }]
             );
         }
     }
@@ -75,18 +71,16 @@ async fn removal_completion_reports_parent_folders_from_access_details() {
         }
         assert_eq!(
             removal_result(status).await.unwrap(),
-            MemberRemoval::AccessRemains {
-                shares: vec![
-                    RetainedAccess {
-                        provider_id: "84528192421".into(),
-                        reason: RetainedAccessReason::Inherited
-                    },
-                    RetainedAccess {
-                        provider_id: "84528192422".into(),
-                        reason: RetainedAccessReason::Inherited
-                    },
-                ],
-            }
+            vec![
+                RetainedAccess {
+                    provider_id: "84528192421".into(),
+                    reason: RetainedAccessReason::Inherited
+                },
+                RetainedAccess {
+                    provider_id: "84528192422".into(),
+                    reason: RetainedAccessReason::Inherited
+                },
+            ]
         );
     }
 }
@@ -149,7 +143,7 @@ async fn removal_launch_requires_the_documented_async_job_id() {
         .await;
         assert_eq!(
             provider(&server.url)
-                .revoke_access(&MemberAccess::ProviderAccount("member".into()))
+                .revoke_access("member")
                 .await
                 .unwrap_err()
                 .failure(),
@@ -175,25 +169,13 @@ async fn account_removal_preserves_parent_and_group_access() {
     }
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     let storage = provider(&server.url);
-    let MemberRemoval::AccessRemains { shares } = storage
-        .revoke_access(&MemberAccess::ProviderAccount("member".into()))
-        .await
-        .unwrap()
-    else {
-        panic!("parent and group access hidden")
-    };
+    let shares = storage.revoke_access("member").await.unwrap();
     assert!(shares.iter().any(|share| share.provider_id == "group-1"
         && share.reason == RetainedAccessReason::OtherAccounts));
     assert!(shares
         .iter()
         .any(|share| share.reason == RetainedAccessReason::Inherited));
-    let MemberRemoval::AccessRemains { .. } = storage
-        .revoke_access(&MemberAccess::ProviderAccount("member".into()))
-        .await
-        .unwrap()
-    else {
-        panic!("retry hid remaining access")
-    };
+    assert!(!storage.revoke_access("member").await.unwrap().is_empty());
     let remote = state.lock().unwrap();
     assert!(!remote.members.contains_key("member"));
     assert!(remote.members.contains_key("other"));
@@ -212,13 +194,7 @@ async fn account_removal_leaves_the_store_owner() {
         .insert("owner".into(), "owner".into());
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     let storage = provider(&server.url);
-    let MemberRemoval::AccessRemains { shares } = storage
-        .revoke_access(&MemberAccess::ProviderAccount("owner".into()))
-        .await
-        .unwrap()
-    else {
-        panic!("owner must be retained")
-    };
+    let shares = storage.revoke_access("owner").await.unwrap();
     assert_eq!(
         shares,
         [RetainedAccess {
@@ -235,13 +211,7 @@ async fn pending_invite_matches_the_invited_alias_and_removes_only_that_account(
     state.lock().unwrap().invitees.push(json!({"invitee":{".tag":"email","email":"alias"},"user":{"account_id":"dbid:canonical","email":"canonical"},"access_type":{".tag":"editor"}}));
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     let storage = provider(&server.url);
-    assert!(matches!(
-        storage
-            .revoke_access(&MemberAccess::ProviderAccount("canonical".into()))
-            .await
-            .unwrap(),
-        MemberRemoval::Revoked
-    ));
+    assert!(storage.revoke_access("canonical").await.unwrap().is_empty());
     assert!(state.lock().unwrap().invitees.is_empty());
     assert_eq!(state.lock().unwrap().sharing_mutations, ["remove"]);
 }
@@ -259,20 +229,14 @@ async fn lost_removal_reply_can_be_retried_without_changing_other_accounts() {
     let storage = provider(&server.url);
     assert_eq!(
         storage
-            .revoke_access(&MemberAccess::ProviderAccount("member".into()))
+            .revoke_access("member")
             .await
             .err()
             .unwrap()
             .failure(),
         StorageFailure::Network
     );
-    assert!(matches!(
-        storage
-            .revoke_access(&MemberAccess::ProviderAccount("member".into()))
-            .await
-            .unwrap(),
-        MemberRemoval::Revoked
-    ));
+    assert!(storage.revoke_access("member").await.unwrap().is_empty());
     assert_eq!(state.lock().unwrap().sharing_mutations, ["remove"]);
 }
 
@@ -288,13 +252,7 @@ async fn a_pending_viewer_without_an_account_id_keeps_their_invitation() {
     assert_eq!(error.failure(), StorageFailure::AccountIdUnavailable);
     assert_eq!(state.lock().unwrap().invitees, [invite]);
     assert!(state.lock().unwrap().sharing_mutations.is_empty());
-    assert!(matches!(
-        storage
-            .revoke_access(&MemberAccess::ProviderAccount("member".into()))
-            .await
-            .unwrap(),
-        MemberRemoval::Revoked
-    ));
+    assert!(storage.revoke_access("member").await.unwrap().is_empty());
     assert!(state.lock().unwrap().invitees.is_empty());
 }
 
@@ -473,7 +431,7 @@ mod app_folder_tests {
             matches!(storage.grant_access("member@example.test").await, Err(error) if error.failure() == StorageFailure::DropboxAppFolderNotShareable)
         );
         assert!(
-            matches!(storage.revoke_access(&MemberAccess::ProviderAccount("member@example.test".into())).await, Err(error) if error.failure() == StorageFailure::DropboxAppFolderNotShareable)
+            matches!(storage.revoke_access("member@example.test").await, Err(error) if error.failure() == StorageFailure::DropboxAppFolderNotShareable)
         );
         assert!(
             matches!(StorageInvitation::for_account(storage.config()), Err(error) if error.failure() == StorageFailure::DropboxAppFolderNotShareable)

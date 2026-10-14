@@ -1,8 +1,8 @@
 use super::*;
 use async_trait::async_trait;
 use coven_storage::{
-    AccessGrant, ByteRange, MemberAccess, MemberRemoval, StorageConfig, StorageError,
-    StorageFailure, StoredObject, UploadSession,
+    AccessGrant, ByteRange, RetainedAccess, StorageConfig, StorageError, StorageFailure,
+    StoredObject, UploadSession,
 };
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -99,8 +99,8 @@ impl Storage for BudgetStorage {
     async fn grant_access(&self, account: &str) -> Result<AccessGrant, StorageError> {
         self.provider.grant_access(account).await
     }
-    async fn revoke_access(&self, member: &MemberAccess) -> Result<MemberRemoval, StorageError> {
-        self.provider.revoke_access(member).await
+    async fn revoke_access(&self, account: &str) -> Result<Vec<RetainedAccess>, StorageError> {
+        self.provider.revoke_access(account).await
     }
     async fn begin_upload(
         &self,

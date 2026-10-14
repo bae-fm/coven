@@ -41,13 +41,7 @@ async fn cloudkit_live_sharing() {
             let mut lines = std::io::stdin().lock().lines();
             assert_eq!(lines.next().unwrap().unwrap(), "accepted");
             assert_eq!(storage.read(&object).await.unwrap(), b"recipient");
-            assert!(matches!(
-                storage
-                    .revoke_access(&MemberAccess::ProviderAccount(email))
-                    .await
-                    .unwrap(),
-                MemberRemoval::Revoked
-            ));
+            assert!(storage.revoke_access(&email).await.unwrap().is_empty());
             assert_eq!(storage.read(&object).await.unwrap(), b"recipient");
             eprintln!("Tell the recipient to enter revoked. Enter verified after that host verifies access refusal.");
             assert_eq!(lines.next().unwrap().unwrap(), "verified");

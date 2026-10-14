@@ -496,10 +496,7 @@ async fn conformance_hierarchy_pagination_and_sharing() {
         .await
         .unwrap();
     storage.grant_access("member").await.unwrap();
-    storage
-        .revoke_access(&MemberAccess::ProviderAccount("member".into()))
-        .await
-        .unwrap();
+    storage.revoke_access("member").await.unwrap();
     assert!(state.lock().unwrap().members.is_empty());
 }
 #[tokio::test]
@@ -740,10 +737,7 @@ async fn recipient_join_redeems_only_the_invited_destination_and_keeps_native_re
             "redeemSharingLink"
         ]
     );
-    owner
-        .revoke_access(&MemberAccess::ProviderAccount("member".into()))
-        .await
-        .unwrap();
+    owner.revoke_access("member").await.unwrap();
     assert_eq!(
         recipient.read(&path).await.unwrap_err().failure(),
         StorageFailure::PermissionDenied

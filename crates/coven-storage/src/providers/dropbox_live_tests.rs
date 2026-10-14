@@ -27,7 +27,7 @@ fn dropbox_live_account_sharing() {
             account != storage.account().await.unwrap(),
             "sharing requires distinct accounts"
         );
-        let member = MemberAccess::ProviderAccount(account.clone());
+        let member = account.clone();
         live.members.push((storage.clone(), member.clone()));
         let path = live.path(1);
         storage.create(&path, b"owner").await.unwrap();
@@ -46,10 +46,7 @@ fn dropbox_live_account_sharing() {
             .owner_only_sharing()
             .await;
         for _ in 0..2 {
-            assert!(matches!(
-                storage.revoke_access(&member).await.unwrap(),
-                MemberRemoval::Revoked
-            ));
+            assert!(storage.revoke_access(&member).await.unwrap().is_empty());
         }
         let read = recipient.read(&path).await.unwrap_err();
         println!(

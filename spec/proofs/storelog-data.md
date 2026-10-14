@@ -753,28 +753,35 @@ the audit permits only Lean's own `propext`, `Classical.choice`, and
 [`AccessRunner.lean`](storelog-data/AccessRunner.lean) calls `Access.adopt`,
 `retryFailed`, `start`, `complete`, `work` and `Pending.records`. The Rust
 [`lean_differential_access_pending`](../../crates/coven-sync/src/operation_pending_tests.rs)
-test runs the actual removal operations, provider adapter and database pending
+test publishes plain removals and runs the account journal, provider adapter and database pending
 query against controlled provider replies. It compares pending operation and
 reporter identities, account, retained-access reason and actual provider access
 after each completed attempt: immediate success, one to three retained-grant
 failures, repeated explicit retries, and eventual success. Both locally requested
-and remotely received removals run. Fresh Rust operation UUIDs map to the case's
+and remotely received removals run. Fresh Rust operation ids map to the case's
 Lean natural identity; Rust assertions check that the real identity stays fixed.
 Provider-specific retained-share payloads remain Rust assertions.
 
 `scripts/check.sh` builds `accessRunner` and supplies `COVEN_ACCESS_LEAN` when
 the package or `coven-sync` changes. It also runs rejection cases for malformed
-replies and retries after successful completion, and checks that both tests exist
+replies and retries after successful completion, and checks that the selected tests exist
 before selecting them.
 
-This comparison does not cover ready/in-flight visibility, owner waits, grants
-or replay intention changes. Rust still uses removal-driven
-`Data::Revoke`/`MemberRemoval` for shared accounts; it lacks the model's
-serialized account journal. S3 deletion notices are compared by
+[`lean_differential_access_phases`](../../crates/coven-sync/src/operation_access_tests.rs)
+compares ready, in-flight and failed requests, their fixed target, intended and
+actual access, and pending reasons after every event. Its histories cover grants,
+revokes, cancellation before sending, intention reversals while sending, retained
+grants and explicit retries. Rust reopens its database after every event and uses
+the production entry replay and provider request steps. Owner waits, shared
+accounts, open invites, atomic rollback and held provider replies have Rust tests.
+Lost replies, incomplete revocations and invalidated invitation tokens also have
+Rust regression coverage. Re-grant after inconclusive failure is outside this
+comparison: the model's Boolean actual grant does not represent unknown confirmation.
+
+S3 deletion notices are compared by
 [`lean_differential_access_keys`](../../crates/coven-sync/src/access_keys_tests.rs),
 which `scripts/check.sh` runs with `COVEN_ACCESS_KEY_LEAN` naming
-`accessKeyRunner`. Implementation task T33 introduces that
-counterpart and the full `Access` comparison.
+`accessKeyRunner`.
 
 ## Member-key replacement
 

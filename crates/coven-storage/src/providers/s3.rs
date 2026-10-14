@@ -472,19 +472,8 @@ impl ProviderOps for S3Storage {
     async fn grant_access(&self, _account: &str) -> Result<AccessGrant, StorageError> {
         Ok(AccessGrant::CreateAccessKey)
     }
-    async fn revoke_access(
-        &self,
-        member: &MemberAccess,
-    ) -> Result<ProviderRevocation, StorageError> {
-        match member {
-            MemberAccess::S3AccessKey { access_key_id, .. } => Ok(ProviderRevocation::Reported(
-                MemberRemoval::DeleteAccessKey {
-                    access_key_id: access_key_id.clone(),
-                },
-            )),
-            _ => Err(StorageFailure::InvalidConfiguration
-                .with_source("S3 revocation requires the member's access key")),
-        }
+    async fn revoke_access(&self, _account: &str) -> Result<Vec<RetainedAccess>, StorageError> {
+        Err(StorageFailure::InvalidConfiguration.with_source("S3 has no account sharing"))
     }
     async fn begin_upload(
         &self,

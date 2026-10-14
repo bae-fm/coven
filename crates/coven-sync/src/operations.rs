@@ -6,7 +6,7 @@ use coven_database::OperationId;
 use coven_format::store_log::MemberRole;
 use coven_foundation::clock::ClockRef;
 use coven_foundation::id_source::{CircleId, DeviceId, InviteId};
-use coven_storage::{MemberRemoval, ProviderSignOut, Storage};
+use coven_storage::{ProviderSignOut, Storage};
 use std::{
     collections::BTreeMap,
     sync::{Arc, Mutex},
@@ -78,7 +78,6 @@ pub(crate) enum Command {
 
 pub(crate) enum Output {
     Unit,
-    Removal(MemberRemoval),
     SignOut(ProviderSignOut),
     Members(Vec<MemberInfo>),
     CircleId(CircleId),
@@ -237,15 +236,9 @@ impl Operations {
     ) -> Result<(), SyncError> {
         self.unit(Command::SetAccess(access)).await
     }
-    /// Remove the member and revoke every recorded access.
-    /// Returns current access's result, or every account's retained grants;
-    /// pending() lists each such account as its own RevokeAccess record, and
-    /// every recorded S3 key until its deletion is cleared.
-    pub async fn remove_member(&self, member: &MemberId) -> Result<MemberRemoval, SyncError> {
-        match self.call(Command::RemoveMember(member.clone())).await? {
-            Output::Removal(value) => Ok(value),
-            _ => unreachable!("removal result"),
-        }
+    /// Publish removal; provider access work is reported through pending().
+    pub async fn remove_member(&self, member: &MemberId) -> Result<(), SyncError> {
+        self.unit(Command::RemoveMember(member.clone())).await
     }
     /// Remove a device with the provider's instructions for signing it out.
     pub async fn remove_device(&self, device: DeviceId) -> Result<ProviderSignOut, SyncError> {
@@ -482,7 +475,9 @@ impl OperationRun {
                     } else if matches!(command, Command::SyncAll) {
                         response = Some((reply, self.sync_pass().await.map(|()| Output::Unit)));
                     } else {
+                        let removal = matches!(command, Command::RemoveMember(_) | Command::RemoveCircleMember(..));
                         match self.sync.begin_operation_call(command).await {
+                            Ok(Begun::Value(value)) if removal => { let _ = reply.send(Ok(value)); }
                             Ok(Begun::Value(value)) => response = Some((reply, Ok(value))),
                             Ok(Begun::Operation(id)) => {
                                 if let Some(previous) = self.waiters.insert(id, reply) {
@@ -611,7 +606,21 @@ impl OperationRun {
             let raising_first = records
                 .iter()
                 .any(|(data, record)| Some(record.id) == writer && data.raises_version());
-            for (data, record) in records {
+            for (snapshot_data, snapshot) in records {
+                // Replay and invite settlement can retire another account's queued work.
+                let Some(record) = self.sync.operation_record(snapshot.id).await? else {
+                    if !matches!(
+                        snapshot_data,
+                        crate::operation_data::Data::ProviderAccess { .. }
+                    ) {
+                        return Err(coven_database::DbError::OperationChanged(snapshot.id).into());
+                    }
+                    if let Some(reply) = self.waiters.remove(&snapshot.id) {
+                        let _ = reply.send(Ok(Output::Unit));
+                    }
+                    continue;
+                };
+                let data = crate::operation_data::Data::read(&record)?;
                 if !self.sync.operation_can_retry(&record).await?
                     && !self.sync.invite_expired(&data)
                 {
@@ -626,7 +635,8 @@ impl OperationRun {
                 {
                     continue;
                 }
-                let maintenance = record.started_by == "coven";
+                let maintenance = record.started_by == "coven"
+                    && !matches!(data, crate::operation_data::Data::ProviderAccess { .. });
                 let step = self.sync.operation_step(&record, data).await;
                 match step {
                     Ok(Progress::Waiting(reason)) => {

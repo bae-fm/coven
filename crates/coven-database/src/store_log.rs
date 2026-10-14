@@ -303,6 +303,7 @@ pub(crate) fn apply<P: crate::PendingValue>(
     operations: &[crate::NewOperation],
     updates: &[crate::OperationUpdate],
     access_keys: &[crate::AccessKeyDeletion],
+    provider_access: &[crate::ProviderAccessChange],
 ) -> Result<(), DbError> {
     let encoded = incoming
         .iter()
@@ -407,6 +408,7 @@ pub(crate) fn apply<P: crate::PendingValue>(
         }
         let own = database.pending_device().ok_or(DbError::DamagedDatabase)?;
         crate::operation::record_access_keys::<P>(database, own, access_keys)?;
+        crate::provider_access::adopt::<P>(database, own, provider_access)?;
         for (id, outcome) in &replay.entries {
             // A reset can clear a report without changing the entry's fate.
             // Only a changed replay outcome creates or removes that report.

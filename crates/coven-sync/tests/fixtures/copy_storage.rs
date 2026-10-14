@@ -3,7 +3,7 @@
 
 use super::*;
 use coven_storage::{
-    AccessGrant, ByteRange, MemberAccess, MemberRemoval, StorageError, StoredObject, UploadSession,
+    AccessGrant, ByteRange, RetainedAccess, StorageError, StoredObject, UploadSession,
 };
 use std::sync::Mutex;
 use tokio::sync::Barrier;
@@ -125,8 +125,8 @@ impl Storage for CopyStorage {
     async fn grant_access(&self, account: &str) -> Result<AccessGrant, StorageError> {
         self.storage.grant_access(account).await
     }
-    async fn revoke_access(&self, member: &MemberAccess) -> Result<MemberRemoval, StorageError> {
-        self.storage.revoke_access(member).await
+    async fn revoke_access(&self, account: &str) -> Result<Vec<RetainedAccess>, StorageError> {
+        self.storage.revoke_access(account).await
     }
     async fn begin_upload(
         &self,

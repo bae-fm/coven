@@ -7,21 +7,10 @@ use crate::{
     operations::{Output, Progress},
     *,
 };
-use coven_crypto::{MemberId, MemberKeys};
-use coven_database::{
-    EntryOutcome, LocalStoreLog, NewOperation, OperationRecord, ReplayEntry, StoreLog,
-    StoreLogReplay,
-};
-use coven_format::{store_log::StoreChange, MemberAccess};
+use coven_crypto::MemberId;
+use coven_database::{EntryOutcome, LocalStoreLog, OperationRecord};
+use coven_format::store_log::StoreChange;
 use coven_foundation::id_source::KeyId;
-use coven_storage::{MemberRemoval, RetainedAccess};
-
-/// Every recorded access of one member, revoked: the call's summary and each
-/// account whose grants remain, with those grants.
-struct AccessResult {
-    result: MemberRemoval,
-    retained: Vec<(String, Vec<RetainedAccess>)>,
-}
 
 impl StoreLogSync {
     pub(crate) async fn operation_step(
@@ -53,25 +42,8 @@ impl StoreLogSync {
                 return self.replace_key_finish(record, data).await;
             }
         }
-        if let Data::Revoke { member } = &data {
-            return self.finish_revocation(record, member).await;
-        }
-        if let Data::RetainedAccess { account } = &data {
-            let access = MemberAccess::ProviderAccount(account.clone());
-            return Ok(match self.revoke_access(record.id, &access).await? {
-                MemberRemoval::AccessRemains { shares } => {
-                    Progress::Waiting(PendingReason::AccessRemains {
-                        account: account.clone(),
-                        shares,
-                    })
-                }
-                // Removed by the owner, needed again by another member or
-                // invite, or no longer this device's to revoke.
-                _ => {
-                    self.database.finish_operation(record.id).await?;
-                    Progress::Finished(Output::Unit)
-                }
-            });
+        if let Data::ProviderAccess { account } = data {
+            return self.provider_access_step(record, account).await;
         }
         if record.last_step < data.entry_step_number(5) {
             return self.entry_step(record, data).await;
@@ -94,9 +66,6 @@ impl StoreLogSync {
                 Output::Unit
             }
             Intent::CreateCircle { circle, .. } => Output::CircleId(*circle),
-            Intent::RemoveMember { member } => {
-                return self.finish_revocation(record, member).await;
-            }
             _ => Output::Unit,
         };
         self.database.finish_operation(record.id).await?;
@@ -302,8 +271,7 @@ impl StoreLogSync {
                 self.validate_administration(local, me, &change)?;
                 return Ok(Some(change));
             }
-            Data::Revoke { .. }
-            | Data::RetainedAccess { .. }
+            Data::ProviderAccess { .. }
             | Data::DeleteAccessKey(_)
             | Data::Snapshots(_)
             | Data::PublishSchema { .. } => unreachable!(),
@@ -315,9 +283,6 @@ impl StoreLogSync {
             }
             Intent::Reset { snapshot } => StoreChange::Reset {
                 snapshot: snapshot.clone(),
-            },
-            Intent::RemoveMember { member } => StoreChange::RemoveMember {
-                member: member.parse()?,
             },
             Intent::CreateCircle { circle, name } => {
                 effects::Authority::Member.check(state, me)?;
@@ -341,10 +306,6 @@ impl StoreLogSync {
                 circle: *circle,
                 member: member.parse()?,
             },
-            Intent::RemoveCircleMember { circle, member } => StoreChange::RemoveCircleMember {
-                circle: *circle,
-                member: member.parse()?,
-            },
             Intent::DeleteCircle { circle } => StoreChange::DeleteCircle { circle: *circle },
         };
         // A started operation finishes without another entry if its effect has
@@ -356,231 +317,5 @@ impl StoreLogSync {
             self.validate_administration(local, me, &change)?;
             Ok(Some(change))
         }
-    }
-
-    /// Revoke a removed member's access and finish the operation in one commit
-    /// with one retained-access row per account whose grants remain, so
-    /// pending() names each such account (E9).
-    async fn finish_revocation(
-        &self,
-        record: &OperationRecord,
-        member: &str,
-    ) -> Result<Progress, SyncError> {
-        let access = self.revoke_member_access(record.id, member).await?;
-        let reported_by = self.database.sync_state(Vec::new()).await?.device;
-        let follow_ups = access
-            .retained
-            .into_iter()
-            .map(|(account, shares)| {
-                let data = Data::RetainedAccess {
-                    account: account.clone(),
-                };
-                let kind = data.kind();
-                Ok((data.new_operation("coven")?, move |id| PendingRecord {
-                    subject: PendingSubject::Operation { id, kind },
-                    reason: PendingReason::AccessRemains { account, shares },
-                    reported_by,
-                }))
-            })
-            .collect::<Result<Vec<_>, SyncError>>()?;
-        self.database
-            .finish_operation_with_work(record.id, follow_ups)
-            .await?;
-        Ok(Progress::Finished(Output::Removal(access.result)))
-    }
-
-    async fn revoke_member_access(
-        &self,
-        operation: OperationId,
-        member: &str,
-    ) -> Result<AccessResult, SyncError> {
-        // Replay decides membership, but dropping an access entry cannot undo
-        // its provider grant. Revoke every recorded access, including late entries.
-        let local = self.database.local_store_log().await?;
-        let member: MemberId = member.parse()?;
-        let current = &local
-            .log
-            .replay
-            .state
-            .members
-            .get(&member)
-            .ok_or(coven_database::DbError::DamagedDatabase)?
-            .access;
-        let mut accesses = Vec::new();
-        for entry in &local.log.entries {
-            if let Some((target, access)) = crate::access_keys::recorded(&entry.entry) {
-                if *target == member && !accesses.iter().any(|a| access.same_credential(a)) {
-                    accesses.push(access.clone());
-                }
-            }
-        }
-        let mut retained = Vec::new();
-        let mut current_result = None;
-        for access in accesses {
-            let result = self.revoke_access(operation, &access).await?;
-            if let MemberRemoval::AccessRemains { shares } = &result {
-                let MemberAccess::ProviderAccount(account) = &access else {
-                    return Err(coven_database::DbError::DamagedDatabase.into());
-                };
-                retained.push((account.clone(), shares.clone()));
-            }
-            if current.same_credential(&access) {
-                current_result = Some(result);
-            }
-        }
-        // The app call describes the replay's current access, or every
-        // account's retained grants. S3 deletion work was recorded when each
-        // entry applied.
-        let result = if retained.is_empty() {
-            current_result.ok_or(coven_database::DbError::DamagedDatabase)?
-        } else {
-            let mut shares = Vec::new();
-            for share in retained.iter().flat_map(|(_, shares)| shares) {
-                if !shares.contains(share) {
-                    shares.push(share.clone());
-                }
-            }
-            MemberRemoval::AccessRemains { shares }
-        };
-        Ok(AccessResult { result, retained })
-    }
-
-    pub(super) async fn revoke_access(
-        &self,
-        operation: OperationId,
-        access: &MemberAccess,
-    ) -> Result<MemberRemoval, SyncError> {
-        let local = self.database.local_store_log().await?;
-        let me = self.operation_member()?.member_id();
-        if let MemberAccess::S3AccessKey { access_key_id, .. } = access {
-            return Ok(MemberRemoval::DeleteAccessKey {
-                access_key_id: access_key_id.clone(),
-            });
-        }
-        if !self.owns_storage(&local.log, &me) {
-            return Ok(MemberRemoval::PendingOwner);
-        }
-        let mut in_use = local
-            .log
-            .replay
-            .state
-            .members
-            .values()
-            .any(|m| !m.removed && m.access.same_credential(access));
-        for record in self.database.operations().await? {
-            if record.id == operation {
-                continue;
-            }
-            if let Data::Invite(work) = Data::read(&record)? {
-                if !matches!(work.state, InviteState::Revoking | InviteState::Settled)
-                    && work
-                        .access
-                        .member_access()
-                        .is_ok_and(|recorded| recorded.same_credential(access))
-                {
-                    in_use = true;
-                }
-            }
-        }
-        if in_use {
-            let MemberAccess::ProviderAccount(account) = access else {
-                unreachable!()
-            };
-            return Ok(MemberRemoval::AccountInUse {
-                account: account.clone(),
-            });
-        }
-        Ok(self
-            .storage
-            .as_deref()
-            .ok_or(SyncError::NoStorage)?
-            .revoke_access(access)
-            .await?)
-    }
-
-    /// Record access work atomically with a kept removal or a later access entry
-    /// for a removed member. Dropping either entry cannot undo provider access.
-    pub(super) async fn removal_work(
-        &self,
-        previous: &StoreLog,
-        incoming: &[ReplayEntry],
-        replay: &StoreLogReplay,
-        member: &MemberKeys,
-    ) -> Result<Vec<NewOperation>, SyncError> {
-        let log = StoreLog {
-            entries: previous
-                .entries
-                .iter()
-                .cloned()
-                .chain(incoming.iter().cloned())
-                .collect(),
-            replay: replay.clone(),
-            horizon: previous.horizon,
-        };
-        if !self.owns_storage(&log, &member.member_id()) {
-            return Ok(Vec::new());
-        }
-        let records = self.database.operations().await?;
-        let data = records
-            .iter()
-            .map(Data::read)
-            .collect::<Result<Vec<_>, _>>()?;
-        let reserved: Vec<_> = data
-            .iter()
-            .map(Data::entry)
-            .collect::<Result<Vec<_>, _>>()?
-            .into_iter()
-            .flatten()
-            .map(|e| e.position)
-            .collect();
-        let mut targets = std::collections::BTreeSet::new();
-        for (id, outcome) in &replay.entries {
-            if *outcome != EntryOutcome::Kept
-                || previous.replay.entries.get(id) == Some(outcome)
-                || reserved.contains(id)
-            {
-                continue;
-            }
-            let entry = log
-                .entries
-                .iter()
-                .find(|e| e.entry.position == *id)
-                .expect("replayed entry");
-            if let StoreChange::RemoveMember { member, .. } = &entry.entry.change {
-                targets.insert(member.clone());
-            }
-        }
-        for incoming in incoming {
-            if let Some((target, _)) = crate::access_keys::recorded(&incoming.entry) {
-                if replay.state.members.get(target).is_some_and(|m| m.removed) {
-                    targets.insert(target.clone());
-                }
-            }
-        }
-        // S3 keys are deletion obligations recorded with each application;
-        // only shared provider accounts need a revoking operation.
-        targets.retain(|target| {
-            !matches!(
-                replay.state.members.get(target).map(|m| &m.access),
-                Some(MemberAccess::S3AccessKey { .. })
-            )
-        });
-        let mut operations = Vec::new();
-        for target in targets {
-            let target = target.to_string();
-            // An unfinished revocation reads the full committed log when it
-            // runs and finishes in the commit that records its result.
-            let pending = data.iter().any(|data| match data {
-                Data::Revoke { member } => *member == target,
-                Data::Entry(work) => {
-                    matches!(&work.intent, Intent::RemoveMember { member } if *member == target)
-                }
-                _ => false,
-            });
-            if !pending {
-                operations.push(Data::Revoke { member: target }.new_operation("coven")?);
-            }
-        }
-        Ok(operations)
     }
 }

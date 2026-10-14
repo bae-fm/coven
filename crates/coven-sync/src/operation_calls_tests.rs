@@ -198,7 +198,7 @@ async fn dropped_attempt_revalidates_before_reserving_a_retry() {
 }
 
 #[tokio::test]
-async fn retry_downloads_authority_changes() {
+async fn removal_downloads_authority_changes() {
     let storage = storage();
     let mut a = device(storage.clone(), 1, member(1), store(1)).await;
     let mut b = device(storage, 2, member(2), store(1)).await;
@@ -207,7 +207,6 @@ async fn retry_downloads_authority_changes() {
     a.add(&member(3), MemberRole::Member).await;
     b.sync().await;
     b.sync.load_new_device("Ben").await.unwrap();
-    let id = begin(&mut a, Command::RemoveMember(member(3).member_id())).await;
     b.sync
         .make_and_upload_entry(StoreChange::ChangeRole {
             member: a.member.member_id(),
@@ -217,9 +216,8 @@ async fn retry_downloads_authority_changes() {
         .unwrap();
     let files = file_owner(&a);
     let operations = operation_owner(a.sync, files);
-    assert_eq!(pending_id(&pending(&operations, &a.db).await[0]), id);
     assert!(matches!(
-        operations.retry_pending_operation(id).await,
+        operations.remove_member(&member(3).member_id()).await,
         Err(SyncError::Rejected(DropReason::NotAllowed))
     ));
     assert!(a.db.local_store_log().await.unwrap().upload.is_none());
@@ -230,7 +228,10 @@ async fn retry_downloads_authority_changes() {
         })
         .await
         .unwrap();
-    operations.retry_pending_operation(id).await.unwrap();
+    operations
+        .remove_member(&member(3).member_id())
+        .await
+        .unwrap();
     assert!(a.db.store_log().await.unwrap().replay.state.members[&member(3).member_id()].removed);
     // Only the removed member's key remains, awaiting deletion (§13).
     assert_eq!(

@@ -56,8 +56,8 @@ async fn request(storage: &dyn Storage, invite: &Invite, keys: &MemberKeys, name
 async fn approve_seals_store_history_and_removes_the_request() {
     let storage = google();
     let [mut a, b, _c] = accounts(storage.clone()).await;
-    let id = begin(&mut a, Command::RemoveMember(b.member.member_id())).await;
-    finish(&mut a, id).await;
+    publish(&mut a, Command::RemoveMember(b.member.member_id())).await;
+    drive_access(&mut a).await;
     a.sync.test_rotate(Audience::Store, key(2)).await;
     let expected: Vec<_> = a.custody.read().unwrap().unwrap().store_key_ids().collect();
     assert_eq!(expected.len(), 2);
@@ -424,16 +424,11 @@ async fn cancelling_keeps_retained_provider_grants_visible_until_acknowledged() 
             }],
         )
         .await;
-    // The waiting call receives the same record pending() keeps.
-    let Err(SyncError::Pending(returned)) = operations.cancel_invite(&invite.id).await else {
-        panic!("retained grants answer the call as pending")
-    };
-    assert!(matches!(
-        &returned.reason,
-        PendingReason::AccessRemains { account, .. } if account == "join@example.com"
-    ));
+    operations.cancel_invite(&invite.id).await.unwrap();
     let conditions = pending(&operations, &a.db).await;
-    assert_eq!(conditions, vec![*returned]);
+    assert_eq!(conditions.len(), 1);
+    assert!(matches!(&conditions[0].reason,
+        PendingReason::AccessRemains { account, .. } if account == "join@example.com"));
     storage
         .set_retained_access("join@example.com", Vec::new())
         .await;
@@ -485,7 +480,7 @@ async fn a_failed_invite_is_retained_and_expiry_finishes_on_reconnect() {
             break;
         }
     }
-    assert_eq!(a.db.operations().await.unwrap().len(), 1);
+    assert_eq!(a.db.operations().await.unwrap().len(), 2);
     storage.set_online(false);
     resume.send(()).unwrap();
     operations.get_members().await.unwrap();

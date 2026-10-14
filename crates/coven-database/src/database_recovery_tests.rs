@@ -285,3 +285,94 @@ async fn recovery_preserves_original_queue_and_its_local_interpretation_separate
     source.close().await.unwrap();
     target.close().await.unwrap();
 }
+
+#[tokio::test]
+async fn recovery_preserves_an_unconfirmed_provider_request_with_its_journal() {
+    use crate::{pending::tests::Record, tests::TestStore, NewOperation, ProviderAccessChange};
+    let source_store = TestStore::new();
+    let target_store = TestStore::new();
+    let source = source_store.builder(vec![], vec![]).open().await.unwrap();
+    let target = target_store.builder(vec![], vec![]).open().await.unwrap();
+    source
+        .start_operation_with_access::<Record>(
+            NewOperation {
+                kind: "invite".into(),
+                data: vec![1],
+                started_by: "test".into(),
+            },
+            vec![ProviderAccessChange {
+                account: "account@example.com".into(),
+                intended: false,
+                initially_granted: true,
+                needs_invitation: false,
+                owner: true,
+                operation: NewOperation {
+                    kind: "provider-access".into(),
+                    data: vec![2],
+                    started_by: "coven".into(),
+                },
+            }],
+        )
+        .await
+        .unwrap();
+    let id = source
+        .provider_access("account@example.com".into())
+        .await
+        .unwrap()
+        .unwrap()
+        .request
+        .unwrap()
+        .operation;
+    source
+        .start_provider_request::<Record>("account@example.com".into(), id)
+        .await
+        .unwrap();
+    let before = source
+        .provider_access("account@example.com".into())
+        .await
+        .unwrap()
+        .unwrap();
+    source.inspect_writer(|source| {
+        target.inspect_writer(|target| super::salvage(source, target).unwrap())
+    });
+    let after = target
+        .provider_access("account@example.com".into())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(after.intended, before.intended);
+    assert_eq!(after.granted, before.granted);
+    assert_eq!(after.request, before.request);
+    assert!(
+        after
+            .invitation
+            .as_ref()
+            .map(coven_crypto::SecretBytes::as_bytes)
+            == before
+                .invitation
+                .as_ref()
+                .map(coven_crypto::SecretBytes::as_bytes)
+    );
+    let recovered = target.operation(id).await.unwrap().unwrap();
+    let original = source.operation(id).await.unwrap().unwrap();
+    assert_eq!(
+        (
+            recovered.id,
+            recovered.kind,
+            recovered.last_step,
+            recovered.data,
+            recovered.started_by
+        ),
+        (
+            original.id,
+            original.kind,
+            original.last_step,
+            original.data,
+            original.started_by
+        )
+    );
+    assert!(target
+        .complete_provider_request::<Record>("account@example.com".into(), id, false, None)
+        .await
+        .unwrap());
+}

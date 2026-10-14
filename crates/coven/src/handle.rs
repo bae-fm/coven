@@ -169,11 +169,9 @@ impl CovenHandle {
     ) -> Result<(), SyncError> {
         self.operations.set_member_role(member, role).await
     }
-    /// Remove a member, rotate keys and revoke every recorded access (§13).
-    /// The result describes current access, or every account's retained
-    /// grants; `pending` lists each such account as its own record, and each
-    /// recorded S3 key until its deletion clears.
-    pub async fn remove_member(&self, member: &MemberId) -> Result<MemberRemoval, SyncError> {
+    /// Publish removal and return once replay keeps it. Provider work is
+    /// reported through pending(), independently of the removal call (§13).
+    pub async fn remove_member(&self, member: &MemberId) -> Result<(), SyncError> {
         self.operations.remove_member(member).await
     }
     /// Remove a device and return instructions for its provider sign-out.

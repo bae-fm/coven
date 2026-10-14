@@ -5,7 +5,6 @@ use crate::{
     operations::{Begun, Command, Output, Progress},
     *,
 };
-use coven_storage::MemberRemoval;
 
 async fn pending(operations: &Operations, db: &coven_database::Database) -> Vec<PendingRecord> {
     operations.get_members().await.unwrap();
@@ -128,11 +127,62 @@ async fn step(d: &mut Device, id: OperationId) -> Result<Progress, SyncError> {
 }
 async fn finish(d: &mut Device, id: OperationId) -> Output {
     loop {
+        let record = d.db.operation(id).await.unwrap().unwrap();
+        if matches!(Data::read(&record).unwrap(), Data::Invite(_)) {
+            drive_access(d).await;
+        }
         match step(d, id).await.unwrap() {
             Progress::Finished(value) | Progress::Reply(Ok(value)) => return value,
             Progress::Reply(Err(error)) => panic!("operation call failed: {error}"),
             Progress::Advanced => (),
             Progress::Waiting(_) => panic!("unexpected wait"),
+        }
+    }
+}
+
+async fn publish(d: &mut Device, command: Command) {
+    assert!(matches!(
+        d.sync.begin_operation_call(command).await.unwrap(),
+        Begun::Value(Output::Unit)
+    ));
+}
+async fn queue_removal(d: &mut Device, command: Command) -> coven_database::StoreLogUpload {
+    let local = d.db.local_store_log().await.unwrap();
+    let number = local
+        .log
+        .entries
+        .iter()
+        .filter(|e| e.entry.position.device == local.device)
+        .map(|e| e.entry.position.number)
+        .max()
+        .unwrap()
+        + 1;
+    let previous = d.sync.storage.clone();
+    d.interrupt_entry(number).await;
+    let result = d.sync.begin_operation_call(command).await;
+    d.sync.storage = previous;
+    assert!(
+        matches!(result,Err(SyncError::Storage(ref error)) if error.failure() == StorageFailure::Network)
+    );
+    d.db.local_store_log().await.unwrap().upload.unwrap()
+}
+async fn drive_access(d: &mut Device) {
+    for record in d.db.operations().await.unwrap() {
+        if matches!(Data::read(&record).unwrap(), Data::ProviderAccess { .. }) {
+            loop {
+                match step(d, record.id).await.unwrap() {
+                    Progress::Advanced => (),
+                    Progress::Finished(Output::Unit) => break,
+                    Progress::Waiting(reason) => {
+                        d.sync
+                            .record_operation_condition(&record, reason)
+                            .await
+                            .unwrap();
+                        break;
+                    }
+                    _ => panic!("unexpected provider progress"),
+                }
+            }
         }
     }
 }
@@ -153,11 +203,8 @@ async fn owner_removal_preserves_keys_and_revokes_the_account() {
     c.sync().await;
     let old_store = a.newest(Audience::Store).await;
     let old_circle = a.newest(Audience::Circle(circle)).await;
-    let id = begin(&mut a, Command::RemoveMember(b.member.member_id())).await;
-    assert!(matches!(
-        finish(&mut a, id).await,
-        Output::Removal(MemberRemoval::Revoked)
-    ));
+    publish(&mut a, Command::RemoveMember(b.member.member_id())).await;
+    drive_access(&mut a).await;
     c.sync().await;
     let state = a.log().await.replay.state;
     // A removal introduces no key; rotation is the only replacement (§11).
@@ -193,8 +240,7 @@ async fn outside_admin_removes_a_member_without_learning_the_circle_key() {
     finish(&mut b, id).await;
     a.sync().await;
     c.sync().await;
-    let id = begin(&mut a, Command::RemoveMember(b.member.member_id())).await;
-    finish(&mut a, id).await;
+    publish(&mut a, Command::RemoveMember(b.member.member_id())).await;
     c.sync().await;
     let key = a.newest(Audience::Circle(gifts)).await;
     assert!(matches!(
@@ -226,11 +272,15 @@ async fn another_admin_cannot_share_and_owner_applies_their_revocation() {
         Err(SyncError::Storage(error)) if error.failure() == StorageFailure::NotStoreOwner
     ));
     assert!(b.db.operations().await.unwrap().is_empty());
-    let id = begin(&mut b, Command::RemoveMember(c.member.member_id())).await;
-    assert!(matches!(
-        finish(&mut b, id).await,
-        Output::Removal(MemberRemoval::PendingOwner)
-    ));
+    publish(&mut b, Command::RemoveMember(c.member.member_id())).await;
+    drive_access(&mut b).await;
+    assert!(b
+        .db
+        .pending::<PendingRecord>()
+        .await
+        .unwrap()
+        .iter()
+        .any(|p| matches!(p.reason, PendingReason::PendingOwner { .. })));
     let recipient = MemoryStorage::for_recipient(&storage, "cat@example.com").unwrap();
     assert!(recipient
         .list(&ObjectPrefix::store_logs(store(1)))
@@ -239,86 +289,65 @@ async fn another_admin_cannot_share_and_owner_applies_their_revocation() {
     a.sync().await;
     let records = a.db.operations().await.unwrap();
     assert_eq!(records.len(), 1);
-    assert!(matches!(
-        finish(&mut a, records[0].id).await,
-        Output::Removal(MemberRemoval::Revoked)
-    ));
+    assert!(matches!(finish(&mut a, records[0].id).await, Output::Unit));
     assert!(
         matches!(recipient.list(&ObjectPrefix::store_logs(store(1))).await, Err(error) if error.failure() == StorageFailure::PermissionDenied)
     );
 }
 
 #[tokio::test]
-async fn restart_after_each_step_uses_the_committed_entry_and_keys() {
-    'crashes: for crash_step in 0.. {
-        let storage = storage();
-        let mut a = device(storage.clone(), 1, member(1), store(1)).await;
-        a.create(key(1)).await;
-        a.add(&member(2), MemberRole::Member).await;
-        let id = begin(&mut a, Command::RemoveMember(member(2).member_id())).await;
-        for _ in 0..crash_step {
-            match step(&mut a, id).await.unwrap() {
-                Progress::Finished(Output::Removal(MemberRemoval::DeleteAccessKey { .. })) => {
-                    break 'crashes
-                }
-                Progress::Advanced => (),
-                _ => panic!("unexpected removal progress"),
-            }
-        }
-        let before = a.db.local_store_log().await.unwrap().upload;
-        let expected = before.as_ref().map(|upload| a.reseal(upload));
-        let record = a.db.operations().await.unwrap().remove(0);
-        if let Some(upload) = &before {
-            for key in &upload.sealing.keys {
-                let stored = storage.read(&key.path(store(1))).await;
-                if record.last_step >= 2 {
-                    assert_eq!(stored.unwrap(), key.bytes);
-                } else {
-                    assert!(
-                        matches!(stored, Err(error) if error.failure() == StorageFailure::NotFound)
-                    );
-                }
-            }
-            let stored = storage
-                .read(&object::path(store(1), upload.entry.position))
-                .await;
-            if record.last_step >= 3 {
-                assert_eq!(stored.unwrap(), *expected.as_ref().unwrap());
-            } else {
-                assert!(
-                    matches!(stored, Err(error) if error.failure() == StorageFailure::NotFound)
-                );
-            }
-        }
-        a.restart(storage.clone()).await;
-        let resumed = a.db.operations().await.unwrap().remove(0);
-        assert_eq!(record.last_step, resumed.last_step);
-        assert_eq!(record.data, resumed.data);
-        assert!(matches!(
-            finish(&mut a, id).await,
-            Output::Removal(MemberRemoval::DeleteAccessKey { .. })
+async fn interrupted_plain_removal_keeps_its_entry_and_schedules_access_on_replay() {
+    for lost_reply in [false, true] {
+        let storage = google();
+        let [mut a, b, _] = accounts(storage.clone()).await;
+        let local = a.db.local_store_log().await.unwrap();
+        let number = local
+            .log
+            .entries
+            .iter()
+            .filter(|e| e.entry.position.device == local.device)
+            .map(|e| e.entry.position.number)
+            .max()
+            .unwrap()
+            + 1;
+        a.sync.storage = Some(key_distribution::failing_creation(
+            storage.clone(),
+            ObjectPath::store_log(store(1), local.device, number.try_into().unwrap()),
+            lost_reply,
         ));
-        if let Some(before) = before {
-            assert_eq!(
-                storage
-                    .read(&object::path(store(1), before.entry.position))
-                    .await
-                    .unwrap(),
-                expected.unwrap()
-            );
-            for key in before.sealing.keys {
-                assert_eq!(storage.read(&key.path(store(1))).await.unwrap(), key.bytes);
-            }
-        }
-        assert_eq!(a.log().await.entries.len(), 3);
+        assert!(matches!(
+            a.sync
+                .begin_operation_call(Command::RemoveMember(b.member.member_id()))
+                .await,
+            Err(SyncError::Storage(_))
+        ));
+        let fixed = a.db.local_store_log().await.unwrap().upload.unwrap();
+        let bytes = a.reseal(&fixed);
+        assert!(a.db.operations().await.unwrap().is_empty());
+        a.restart(storage.clone()).await;
+        a.sync().await;
         assert_eq!(
-            access_keys(&a.db).await,
-            [console_key("fixture-access-key", Some(&member(2)))]
+            a.log().await.replay.entries[&fixed.entry.position],
+            coven_database::EntryOutcome::Kept
         );
-        a.db.clear_access_key("fixture-access-key".into())
-            .await
-            .unwrap();
-        assert!(access_keys(&a.db).await.is_empty());
+        assert_eq!(
+            storage
+                .read(&object::path(store(1), fixed.entry.position))
+                .await
+                .unwrap(),
+            bytes
+        );
+        assert!(a.db.local_store_log().await.unwrap().upload.is_none());
+        drive_access(&mut a).await;
+        assert_eq!(
+            MemoryStorage::for_recipient(&storage, "ben@example.com")
+                .unwrap()
+                .list(&ObjectPrefix::all(store(1)))
+                .await
+                .unwrap_err()
+                .failure(),
+            StorageFailure::PermissionDenied
+        );
     }
 }
 
@@ -330,19 +359,11 @@ async fn independent_removals_keep_their_original_attempts() {
     let storage = google();
     let [mut a, mut b, c] = accounts(storage.clone()).await;
     a.clock.set(UNIX_EPOCH + Duration::from_secs(2));
-    let a_op = begin(&mut a, Command::RemoveMember(b.member.member_id())).await;
-    assert!(matches!(
-        step(&mut a, a_op).await.unwrap(),
-        Progress::Advanced
-    ));
-    let attempted = a.db.local_store_log().await.unwrap().upload.unwrap();
-    let b_op = begin(&mut b, Command::RemoveMember(c.member.member_id())).await;
-    finish(&mut b, b_op).await;
+    let attempted = queue_removal(&mut a, Command::RemoveMember(b.member.member_id())).await;
+    publish(&mut b, Command::RemoveMember(c.member.member_id())).await;
     let concurrent = b.log().await.entries.last().unwrap().entry.position;
-    assert!(matches!(
-        finish(&mut a, a_op).await,
-        Output::Removal(MemberRemoval::Revoked)
-    ));
+    a.sync().await;
+    drive_access(&mut a).await;
     let log = a.log().await;
     for position in [attempted.entry.position, concurrent] {
         assert_eq!(
@@ -379,12 +400,11 @@ async fn circle_membership_rotates_and_shares_history() {
     finish(&mut a, add).await;
     b.sync().await;
     let old_key = a.newest(Audience::Circle(circle)).await;
-    let remove = begin(
+    publish(
         &mut a,
         Command::RemoveCircleMember(circle, b.member.member_id()),
     )
     .await;
-    finish(&mut a, remove).await;
     assert_eq!(a.newest(Audience::Circle(circle)).await, old_key);
     a.sync.test_rotate(Audience::Circle(circle), key(20)).await;
     b.sync().await;
@@ -511,22 +531,16 @@ async fn retained_provider_grants_block_both_requested_and_remote_revocations() 
             .set_retained_access("cat@example.com", shares.clone())
             .await;
         if remote {
-            let id = begin(&mut b, Command::RemoveMember(c.member.member_id())).await;
-            finish(&mut b, id).await;
+            publish(&mut b, Command::RemoveMember(c.member.member_id())).await;
             a.sync().await;
         }
         let files = file_owner(&a);
         let operations = { operation_owner(a.sync, files) };
         if !remote {
-            assert_eq!(
-                operations
-                    .remove_member(&c.member.member_id())
-                    .await
-                    .unwrap(),
-                MemberRemoval::AccessRemains {
-                    shares: shares.clone()
-                }
-            );
+            operations
+                .remove_member(&c.member.member_id())
+                .await
+                .unwrap();
         }
         let conditions = pending(&operations, &a.db).await;
         assert_eq!(conditions.len(), 1);
@@ -576,8 +590,8 @@ async fn removing_a_member_cuts_off_every_device_of_their_account() {
         .await
         .unwrap();
     a.sync().await;
-    let operation = begin(&mut a, Command::RemoveMember(b.member.member_id())).await;
-    finish(&mut a, operation).await;
+    publish(&mut a, Command::RemoveMember(b.member.member_id())).await;
+    drive_access(&mut a).await;
     let state = a.log().await.replay.state;
     let store_key = a.newest(Audience::Store).await;
     assert!(state.devices[&phone_id].removed);
@@ -703,13 +717,12 @@ async fn resumed_removal_uses_the_targets_current_storage_account() {
         .await
         .unwrap();
     a.sync().await;
-    let waiting = begin(&mut a, Command::RemoveMember(b.member.member_id())).await;
-    let remove = begin(
+    queue_removal(&mut a, Command::RemoveMember(b.member.member_id())).await;
+    publish(
         &mut owner_phone,
         Command::RemoveMember(b.member.member_id()),
     )
     .await;
-    finish(&mut owner_phone, remove).await;
     storage.grant_access("ben-new@example.com").await.unwrap();
     owner_phone
         .sync
@@ -720,7 +733,8 @@ async fn resumed_removal_uses_the_targets_current_storage_account() {
         })
         .await
         .unwrap();
-    finish(&mut a, waiting).await;
+    publish(&mut a, Command::RemoveMember(b.member.member_id())).await;
+    drive_access(&mut a).await;
     assert!(
         matches!(MemoryStorage::for_recipient(&storage, "ben-new@example.com")
             .unwrap()
@@ -763,3 +777,33 @@ mod pending_records;
 
 #[path = "operation_minting_tests.rs"]
 mod minting;
+
+#[tokio::test]
+async fn removal_returns_unit_before_provider_work_and_has_no_operation_row() {
+    let storage = google();
+    let [mut ana, ben, _] = accounts(storage.clone()).await;
+    let result = ana
+        .sync
+        .begin_operation_call(Command::RemoveMember(ben.member.member_id()))
+        .await
+        .unwrap();
+    assert!(matches!(result, Begun::Value(Output::Unit)));
+    assert!(ana.log().await.replay.state.members[&ben.member.member_id()].removed);
+    assert!(ana
+        .db
+        .operations()
+        .await
+        .unwrap()
+        .iter()
+        .all(|r| r.kind != "remove-member"));
+    assert!(MemoryStorage::for_recipient(&storage, "ben@example.com")
+        .unwrap()
+        .list(&ObjectPrefix::all(store(1)))
+        .await
+        .is_ok());
+    assert!(ana.db.pending::<PendingRecord>().await.unwrap().iter().any(|p|
+        matches!(&p.reason, PendingReason::ProviderPending { action: ProviderAccessAction::Revoke, account } if account == "ben@example.com")));
+}
+
+#[path = "operation_access_tests.rs"]
+mod access;

@@ -264,10 +264,7 @@ async fn sharing_authority_belongs_to_the_adapters_account() {
                 .collect::<Vec<_>>(),
             ["kept@example.test"]
         );
-        owner
-            .revoke_access(&MemberAccess::ProviderAccount("kept@example.test".into()))
-            .await
-            .unwrap();
+        owner.revoke_access("kept@example.test").await.unwrap();
         assert!(owner.provider.state.lock().await.accounts.is_empty());
     }
     let s3 = MemoryStorage::builder().location(config()).build().unwrap();
@@ -275,15 +272,10 @@ async fn sharing_authority_belongs_to_the_adapters_account() {
         s3.grant_access("member").await.unwrap(),
         AccessGrant::CreateAccessKey
     ));
-    assert!(matches!(
-        s3.revoke_access(&MemberAccess::S3AccessKey {
-            access_key_id: "key".into(),
-            principal: coven_format::S3Principal::Console,
-        })
-        .await
-        .unwrap(),
-        MemberRemoval::DeleteAccessKey { .. }
-    ));
+    assert_eq!(
+        s3.revoke_access("member").await.unwrap_err().failure(),
+        StorageFailure::InvalidConfiguration
+    );
 }
 
 #[tokio::test]
@@ -435,11 +427,11 @@ async fn publication_removes_pending_parts_and_verifies_the_exact_session() {
 }
 
 #[tokio::test]
-async fn s3_fake_requires_the_members_console_key_for_revocation() {
+async fn s3_fake_refuses_account_revocation() {
     let storage = MemoryStorage::builder().location(config()).build().unwrap();
     assert!(matches!(
         storage
-            .revoke_access(&MemberAccess::ProviderAccount("member".into()))
+            .revoke_access("member")
             .await,
         Err(error) if error.failure() == StorageFailure::InvalidConfiguration
     ));
@@ -607,10 +599,7 @@ async fn recipient_access_follows_account_grants_and_acceptance() {
             std::num::NonZeroU64::MIN,
         );
         let mut upload = member.begin_upload(&upload_path, 4).await.unwrap();
-        owner
-            .revoke_access(&MemberAccess::ProviderAccount("member".into()))
-            .await
-            .unwrap();
+        owner.revoke_access("member").await.unwrap();
         for error in [
             member.read(&path).await.unwrap_err(),
             member.list(&ObjectPrefix::all(STORE_ID)).await.unwrap_err(),

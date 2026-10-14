@@ -136,6 +136,7 @@ async fn only_the_spec_tables_are_created() {
                 "_coven_pending_resets",
                 "_coven_positions",
                 "_coven_positions_post",
+                "_coven_provider_access",
                 "_coven_queued_file_refs",
                 "_coven_reference_values",
                 "_coven_references",
@@ -222,6 +223,7 @@ mod fixture {
             CAST(printf('%032d',i) AS BLOB) AS key FROM numbers;
      INSERT INTO _coven_operations(id,kind,last_step,data,started_by)
        SELECT i,'kind_' || (i%32),1,x'00','app' FROM fixture;
+     INSERT INTO _coven_provider_access SELECT 'account_' || i,i%2,NULL,NULL,i,i%2 FROM fixture;
      INSERT INTO _coven_pending(subject,reporter,value,operation,object,coven_version)
        SELECT key,device,x'00',CASE WHEN i%2=0 THEN i END,
               CAST(x'00' || device || n AS BLOB),'1' FROM fixture;
@@ -375,8 +377,8 @@ mod scans {
         Some("publication stops at the first unfinished audience reload"),
     ("database_file_retention.rs", "SELECT device,file FROM _coven_row_file_refs UNION SELECT device,file FROM _coven_input_file_refs UNION SELECT device,file FROM _coven_queued_file_refs", "_coven_row_file_refs" | "_coven_input_file_refs" | "_coven_queued_file_refs") =>
         Some("file retention returns every protected fixed path from the sparse indexes"),
-    ("pending.rs", "INSERT INTO _coven_pending_resets(subject,reporter,entry_device,entry_number) SELECT p.subject,p.reporter,?1,?2 FROM _coven_pending AS p WHERE NOT EXISTS(SELECT 1 FROM _coven_access_keys AS k WHERE k.operation=p.operation) ON CONFLICT DO NOTHING", "p") =>
-        Some("a newly applied reset suppresses every earlier observation but S3 key deletions"),
+    ("pending.rs", "INSERT INTO _coven_pending_resets(subject,reporter,entry_device,entry_number) SELECT p.subject,p.reporter,?1,?2 FROM _coven_pending AS p WHERE NOT EXISTS(SELECT 1 FROM _coven_access_keys AS k WHERE k.operation=p.operation) AND NOT EXISTS(SELECT 1 FROM _coven_provider_access AS a WHERE a.operation=p.operation) ON CONFLICT DO NOTHING", "p") =>
+        Some("a newly applied reset suppresses earlier observations except unresolved provider access"),
     ("pending.rs", sql, "p") if sql.starts_with("UPDATE _coven_pending AS p SET suppressed=EXISTS(") =>
         Some("replay rejudges each observation against its indexed reset causes"),
     ("entry_inputs.rs", "INSERT INTO temp._coven_snapshot_writes SELECT substr(timestamp,9,8),number,timestamp,had_read FROM _coven_writes", "_coven_writes") =>

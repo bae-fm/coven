@@ -93,6 +93,7 @@ impl MemoryStorageBuilder {
                 held_listing: None,
                 held_read: None,
                 held_creation: None,
+                held_access: None,
             })),
         })))
     }

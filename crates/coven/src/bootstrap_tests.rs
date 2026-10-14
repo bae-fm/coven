@@ -1,7 +1,6 @@
 use super::*;
 use coven_crypto::custody::KeyringCustody;
 use coven_database::DatabaseBuilder;
-use coven_format::MemberAccess;
 use coven_storage::{
     test_utils::{Faults, MemoryStorage},
     ObjectPath, ObjectPrefix, S3Credentials, Storage, StorageFailure,
@@ -343,8 +342,12 @@ async fn permission_revocation_while_joining_keeps_the_provider_failure() {
         |_| {},
     );
     let revoke = async {
-        let request = next_join_request(&owner.handle).await;
-        owner.handle.decline_join_request(&request).await.unwrap();
+        next_join_request(&owner.handle).await;
+        owner
+            .storage
+            .revoke_access("join@example.com")
+            .await
+            .unwrap();
     };
     let (result, ()) = join_with_response(joining, revoke).await;
     assert!(
@@ -616,7 +619,7 @@ async fn a_device_removed_during_loading_receives_the_provider_refusal() {
         // Cut off this account in the fake to model provider refusal on the removed device.
         owner
             .storage
-            .revoke_access(&MemberAccess::ProviderAccount("join@example.com".into()))
+            .revoke_access("join@example.com")
             .await
             .unwrap();
         resume.send(()).unwrap();
@@ -722,12 +725,7 @@ async fn removal_lists_every_recorded_key_including_a_dropped_replacement() {
             })
             .await
             .unwrap();
-            assert_eq!(
-                removal.unwrap(),
-                MemberRemoval::DeleteAccessKey {
-                    access_key_id: "invited-key".into()
-                }
-            );
+            removal.unwrap();
         } else {
             replace().await.unwrap();
             let code = handle.restore_code().await.unwrap();
@@ -739,12 +737,7 @@ async fn removal_lists_every_recorded_key_including_a_dropped_replacement() {
                 member
             );
             owner.sync().await;
-            assert_eq!(
-                owner.handle.remove_member(&member).await.unwrap(),
-                MemberRemoval::DeleteAccessKey {
-                    access_key_id: "new-member-key".into()
-                }
-            );
+            owner.handle.remove_member(&member).await.unwrap();
         };
         assert_eq!(
             crate::tests::access_keys(&owner.handle).await,

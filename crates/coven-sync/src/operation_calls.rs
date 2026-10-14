@@ -14,6 +14,12 @@ use coven_format::store_log::{MemberRole, StoreChange};
 use coven_foundation::id_source::CircleId;
 
 impl StoreLogSync {
+    pub(crate) async fn operation_record(
+        &self,
+        id: OperationId,
+    ) -> Result<Option<OperationRecord>, SyncError> {
+        Ok(self.database.operation(id).await?)
+    }
     pub(crate) async fn operation_records(&self) -> Result<Vec<OperationRecord>, SyncError> {
         Ok(self.database.operations().await?)
     }
@@ -110,7 +116,7 @@ impl StoreLogSync {
                             || (record.started_by == "coven"
                                 && matches!(pending.reason, PendingReason::Storage { .. }))
                         {
-                            self.database.retry_operation(id).await?;
+                            self.retry_operation(&record).await?;
                         }
                     }
                 }
@@ -135,9 +141,9 @@ impl StoreLogSync {
                 return Ok(Begun::Value(Output::Unit));
             }
             Command::RetryWithAdmin(id, admin) => {
-                self.pending_operation(id, false).await?;
+                let record = self.pending_operation(id, false).await?;
                 self.hold_admin_access(id, admin);
-                self.database.retry_operation(id).await?;
+                self.retry_operation(&record).await?;
                 return Ok(Begun::Operation(id));
             }
             Command::Retry(id) => {
@@ -148,7 +154,7 @@ impl StoreLogSync {
                         self.database.retry_operation(reload).await?;
                     }
                 }
-                self.database.retry_operation(id).await?;
+                self.retry_operation(&record).await?;
                 return Ok(Begun::Operation(id));
             }
             Command::Discard(id) => {
@@ -174,7 +180,12 @@ impl StoreLogSync {
                     let mut ring = self.store_keys.read()?;
                     self.publish_queued(&mut local, &member, &mut ring).await?;
                 }
-                self.database.finish_operation(id).await?;
+                if matches!(data, Data::Invite(_)) {
+                    self.catch_up().await?;
+                    self.finish_invite(&record).await?;
+                } else {
+                    self.database.finish_operation(id).await?;
+                }
                 return Ok(Begun::Value(Output::Unit));
             }
             _ => (),
@@ -332,21 +343,9 @@ impl StoreLogSync {
                 return Ok(Begun::Value(Output::SignOut(signout)));
             }
             Command::RemoveMember(target) => {
-                self.validate_administration(
-                    &local,
-                    &me,
-                    &StoreChange::RemoveMember {
-                        member: target.clone(),
-                    },
-                )?;
-                if !state.members.contains_key(&target) {
-                    return Ok(Begun::Value(Output::Removal(
-                        coven_storage::MemberRemoval::Revoked,
-                    )));
-                }
-                Intent::RemoveMember {
-                    member: target.to_string(),
-                }
+                self.publish_removal(StoreChange::RemoveMember { member: target })
+                    .await?;
+                return Ok(Begun::Value(Output::Unit));
             }
             Command::CreateCircle(name) => {
                 Authority::Member.check(state, &me)?;
@@ -379,18 +378,12 @@ impl StoreLogSync {
                 }
             }
             Command::RemoveCircleMember(circle, target) => {
-                self.validate_administration(
-                    &local,
-                    &me,
-                    &StoreChange::RemoveCircleMember {
-                        circle,
-                        member: target.clone(),
-                    },
-                )?;
-                Intent::RemoveCircleMember {
+                self.publish_removal(StoreChange::RemoveCircleMember {
                     circle,
-                    member: target.to_string(),
-                }
+                    member: target,
+                })
+                .await?;
+                return Ok(Begun::Value(Output::Unit));
             }
             Command::Invite(role, access) => {
                 return self.begin_invite(&local, &me, role, access).await
@@ -416,10 +409,8 @@ impl StoreLogSync {
             _ => unreachable!("handled command"),
         };
         let method = match &intent {
-            Intent::RemoveMember { .. } => "remove_member",
             Intent::CreateCircle { .. } => "circles.create",
             Intent::AddCircleMember { .. } => "circles.add_member",
-            Intent::RemoveCircleMember { .. } => "circles.remove_member",
             Intent::DeleteCircle { .. } => "circles.delete",
             Intent::Reset { .. } | Intent::RotateKey { .. } => unreachable!(),
         };
@@ -432,6 +423,19 @@ impl StoreLogSync {
                 .start_operation(data.new_operation(method)?)
                 .await?,
         ))
+    }
+
+    async fn retry_operation(&self, record: &OperationRecord) -> Result<(), SyncError> {
+        if let Data::ProviderAccess { account } = Data::read(record)? {
+            let log = self.database.local_store_log().await?.log;
+            let owner = self.owns_storage(&log, &self.operation_member()?.member_id());
+            self.database
+                .retry_provider_request::<PendingRecord>(account, record.id, owner)
+                .await?;
+        } else {
+            self.database.retry_operation(record.id).await?;
+        }
+        Ok(())
     }
 
     pub(super) fn operation_member(&self) -> Result<MemberKeys, SyncError> {
@@ -510,9 +514,7 @@ impl StoreLogSync {
             .ok_or(SyncError::NotPending(id))?;
         let app_owned = record.started_by != "coven" || data.kind() == OperationKind::SchemaChange;
         // Provider access work can be retried, never discarded (§18).
-        if !app_owned
-            && (discard || !matches!(data, Data::Revoke { .. } | Data::RetainedAccess { .. }))
-        {
+        if !app_owned && (discard || !matches!(data, Data::ProviderAccess { .. })) {
             return Err(SyncError::NotPending(id));
         }
         if !discard

@@ -692,16 +692,11 @@ async fn reconnecting_with_a_replacement_key_records_the_access_that_removal_rev
         .await
         .unwrap();
     network.quiet().await;
-    assert_eq!(
-        network.devices[0]
-            .handle
-            .remove_member(&member)
-            .await
-            .unwrap(),
-        MemberRemoval::DeleteAccessKey {
-            access_key_id: "replacement-key".into()
-        }
-    );
+    network.devices[0]
+        .handle
+        .remove_member(&member)
+        .await
+        .unwrap();
     let owner = &network.devices[0].handle;
     owner.stop_sync();
     owner

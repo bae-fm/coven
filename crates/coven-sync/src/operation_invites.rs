@@ -17,8 +17,8 @@ use coven_format::{
 };
 use coven_foundation::id_source::InviteId;
 use coven_storage::{
-    AccessGrant, CloudProvider, InviteStorage, MemberRemoval, MintScope, ObjectPath, S3Credentials,
-    S3MemberKey, StorageFailure, StorageInvitation,
+    CloudProvider, InviteStorage, MintScope, ObjectPath, S3Credentials, S3MemberKey,
+    StorageFailure, StorageInvitation,
 };
 use std::time::Duration;
 
@@ -96,10 +96,7 @@ impl StoreLogSync {
                 )?,
             state: InviteState::Grant,
         });
-        let operation = self
-            .database
-            .start_operation(data.new_operation("create_invite")?)
-            .await?;
+        let operation = self.save_invite(None, &data, 0).await?;
         if let Some(admin) = admin {
             self.hold_admin_access(operation, admin);
         }
@@ -161,9 +158,7 @@ impl StoreLogSync {
             } else {
                 InviteState::Revoking
             };
-            self.database
-                .advance_operation(data.update(&record, 0)?)
-                .await?;
+            self.save_invite(Some(&record), &data, 0).await?;
             return Ok(Begun::Operation(record.id));
         }
         Err(SyncError::InvitationChanged)
@@ -188,9 +183,7 @@ impl StoreLogSync {
             InviteState::Revoking => (),
             InviteState::Grant | InviteState::Waiting { .. } | InviteState::Approving { .. } => {
                 work.state = InviteState::Revoking;
-                self.database
-                    .advance_operation(data.update(record, 0)?)
-                    .await?;
+                self.save_invite(Some(record), &data, 0).await?;
             }
         }
         Ok(Some(Begun::Operation(record.id)))
@@ -208,9 +201,7 @@ impl StoreLogSync {
         // A fixed entry must be published even after the invitation's expiry.
         if expired {
             work.state = InviteState::Revoking;
-            self.database
-                .advance_operation(data.update(record, 0)?)
-                .await?;
+            self.save_invite(Some(record), &data, 0).await?;
             return Ok(Progress::Reply(Err(SyncError::InvitationChanged)));
         }
         match &mut work.state {
@@ -237,9 +228,7 @@ impl StoreLogSync {
                         return Err(error);
                     }
                 }
-                self.database
-                    .advance_operation(data.update(record, 0)?)
-                    .await?;
+                self.save_invite(Some(record), &data, 0).await?;
                 Ok(Progress::Advanced)
             }
             InviteState::Grant => {
@@ -258,14 +247,32 @@ impl StoreLogSync {
                                 .with_source("S3 invitation needs its own access key")
                                 .into());
                         }
-                        match storage.grant_access(email).await? {
-                            AccessGrant::Granted { invitation } => invitation,
-                            AccessGrant::CreateAccessKey => {
-                                return Err(StorageFailure::InvalidConfiguration
-                                    .with_source("provider requires an access key")
-                                    .into())
+                        let access = self
+                            .database
+                            .provider_access(email.clone())
+                            .await?
+                            .ok_or(coven_database::DbError::DamagedDatabase)?;
+                        if let Some(request) = access.request {
+                            let pending = self
+                                .database
+                                .operation_pending::<PendingRecord>(request.operation)
+                                .await?
+                                .ok_or(coven_database::DbError::DamagedDatabase)?;
+                            if pending.retry() != Retry::Automatic {
+                                return Err(SyncError::Pending(Box::new(pending)));
                             }
+                            return Ok(Progress::Waiting(PendingReason::ProviderPending {
+                                action: ProviderAccessAction::Grant,
+                                account: email.clone(),
+                            }));
                         }
+                        coven_storage::StorageInvitation::decode(
+                            access
+                                .invitation
+                                .as_ref()
+                                .map(coven_crypto::SecretBytes::as_bytes)
+                                .ok_or(coven_database::DbError::DamagedDatabase)?,
+                        )?
                     }
                     InviteGrant::Minting(_) => unreachable!("minted before granting"),
                     InviteGrant::S3Key(_) => {
@@ -351,20 +358,6 @@ impl StoreLogSync {
                 Ok(Progress::Advanced)
             }
             InviteState::Revoking => {
-                let result = self
-                    .revoke_access(record.id, &work.access.member_access()?)
-                    .await?;
-                if let MemberRemoval::AccessRemains { shares } = result {
-                    let coven_format::MemberAccess::ProviderAccount(account) =
-                        work.access.member_access()?
-                    else {
-                        return Err(coven_database::DbError::DamagedDatabase.into());
-                    };
-                    return Ok(Progress::Waiting(PendingReason::AccessRemains {
-                        account,
-                        shares,
-                    }));
-                }
                 let access = work.access.member_access()?;
                 work.state = InviteState::Settled;
                 // The invite's S3 key stays pending until its deletion clears (§12.2).
@@ -392,7 +385,7 @@ impl StoreLogSync {
                     Err(error) if error.failure() == coven_storage::StorageFailure::NotFound => (),
                     Err(error) => return Err(error.into()),
                 }
-                self.database.finish_operation(record.id).await?;
+                self.finish_invite(record).await?;
                 Ok(Progress::Finished(Output::Unit))
             }
         }

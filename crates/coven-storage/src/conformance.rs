@@ -310,7 +310,7 @@ impl Conformance {
                 .err()
                 .unwrap(),
             self.storage
-                .revoke_access(&MemberAccess::ProviderAccount("kept@example.test".into()))
+                .revoke_access("kept@example.test")
                 .await
                 .err()
                 .unwrap(),
@@ -406,13 +406,7 @@ impl Conformance {
         ];
         if storage.config().provider() != CloudProvider::S3 {
             errors.push(storage.grant_access("member").await.err().unwrap());
-            errors.push(
-                storage
-                    .revoke_access(&MemberAccess::ProviderAccount("member".into()))
-                    .await
-                    .err()
-                    .unwrap(),
-            );
+            errors.push(storage.revoke_access("member").await.err().unwrap());
         }
         for error in &errors {
             assert_eq!(

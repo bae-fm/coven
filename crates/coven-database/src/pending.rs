@@ -17,6 +17,14 @@ pub trait PendingValue: Serialize + DeserializeOwned + Send + 'static {
         reporter: DeviceId,
         key: crate::AccessKeyToDelete,
     ) -> Self;
+    /// Report one account's unresolved intended sharing change.
+    fn provider_access(
+        operation: OperationId,
+        reporter: DeviceId,
+        account: String,
+        grant: bool,
+        owner: bool,
+    ) -> Self;
     /// Stable identity, ordered as the app presents it.
     type Subject: Serialize + Ord;
     /// The work that cannot advance.
@@ -193,10 +201,11 @@ pub(crate) fn suppress(db: &DatabaseConnection, resets: &[crate::EntryId]) -> Re
     db.pending_change(|| {
         for entry in resets {
             db.internal_execute(
-                // A reset never hides an S3 key awaiting deletion (§13).
+                // A data reset never hides unresolved provider access (§13).
                 "INSERT INTO _coven_pending_resets(subject,reporter,entry_device,entry_number)
                  SELECT p.subject,p.reporter,?1,?2 FROM _coven_pending AS p
                  WHERE NOT EXISTS(SELECT 1 FROM _coven_access_keys AS k WHERE k.operation=p.operation)
+                   AND NOT EXISTS(SELECT 1 FROM _coven_provider_access AS a WHERE a.operation=p.operation)
                  ON CONFLICT DO NOTHING",
                 (entry.device.0.to_be_bytes().as_slice(), entry.number.to_be_bytes().as_slice()),
             )?;

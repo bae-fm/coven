@@ -571,8 +571,8 @@ async fn setup_consumes_a_late_access_entry_before_committing_credentials() {
 }
 
 #[tokio::test]
-async fn a_late_operation_revalidates_changed_authority_before_a_new_number() {
-    use crate::operations::{Begun, Command};
+async fn a_late_removal_revalidates_changed_authority_before_a_new_number() {
+    use crate::operations::Command;
     let clock = Arc::new(FixedClock::new(UNIX_EPOCH));
     let storage = Arc::new(
         MemoryStorage::builder()
@@ -600,17 +600,13 @@ async fn a_late_operation_revalidates_changed_authority_before_a_new_number() {
     }
     b.sync().await;
     b.sync.load_new_device("delayed admin").await.unwrap();
-    let Begun::Operation(id) = b
+    b.interrupt_entry(2).await;
+    assert!(matches!(b
         .sync
         .begin_operation_call(Command::RemoveMember(member(3).member_id()))
-        .await
-        .unwrap()
-    else {
-        panic!("operation")
-    };
-    b.step(id).await.unwrap(); // reserve
+        .await, Err(SyncError::Storage(error)) if error.failure() == coven_storage::StorageFailure::Network));
     let fixed = b.db.local_store_log().await.unwrap().upload.unwrap();
-    b.step(id).await.unwrap(); // copies
+    assert!(b.db.operations().await.unwrap().is_empty());
     clock.set(UNIX_EPOCH + Duration::from_secs(86400));
     a.sync
         .make_and_upload_entry(StoreChange::ChangeRole {
@@ -620,8 +616,8 @@ async fn a_late_operation_revalidates_changed_authority_before_a_new_number() {
         .await
         .unwrap();
     clock.set(UNIX_EPOCH + Duration::from_secs(32 * 86400));
-    b.step(id).await.unwrap(); // publish
-    b.step(id).await.unwrap(); // consume and restart
+    b.restore_storage();
+    b.sync().await;
     assert_eq!(
         b.log().await.replay.entries[&fixed.entry.position],
         EntryOutcome::Dropped(coven_database::DropReason::LandedTooLate)
@@ -631,7 +627,9 @@ async fn a_late_operation_revalidates_changed_authority_before_a_new_number() {
     assert!(before.upload.is_none());
     for _ in 0..2 {
         assert!(matches!(
-            b.step(id).await,
+            b.sync
+                .begin_operation_call(Command::RemoveMember(member(3).member_id()))
+                .await,
             Err(SyncError::Rejected(coven_database::DropReason::NotAllowed))
         ));
         let after = b.db.local_store_log().await.unwrap();

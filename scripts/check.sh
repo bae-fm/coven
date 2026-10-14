@@ -307,10 +307,11 @@ proofs() {
 
     if proof_selected storelog-data || crate_selected coven-sync; then
         runner=$(runner storelog-data accessRunner)
-        step "Rust / Lean retained access pending visibility"
+        step "Rust / Lean serialized provider access and pending visibility"
         local access_tests test
         access_tests=$(cargo test -p coven-sync --all-features lean_differential_access -- --list)
         for test in \
+            store_log_sync::tests::operations::access::lean_differential_access_phases \
             store_log_sync::tests::operations::pending_records::lean_differential_access_pending \
             store_log_sync::tests::operations::pending_records::lean_differential_access_rejects_invalid_inputs; do
             if ! printf '%s\n' "$access_tests" | grep -qxF "$test: test"; then

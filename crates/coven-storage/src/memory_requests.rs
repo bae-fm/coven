@@ -64,3 +64,57 @@ impl MemoryStorage {
         });
     }
 }
+
+/// A provider permission request held before changing its durable grant.
+pub(super) struct HeldAccess {
+    account: String,
+    grant: bool,
+    started: tokio::sync::oneshot::Sender<()>,
+    resume: tokio::sync::oneshot::Receiver<()>,
+}
+
+impl MemoryStorage {
+    /// Hold one account request before it reaches the provider's grant state.
+    pub async fn hold_next_access(
+        &self,
+        account: &str,
+        grant: bool,
+        started: tokio::sync::oneshot::Sender<()>,
+        resume: tokio::sync::oneshot::Receiver<()>,
+    ) {
+        let mut state = self.provider.state.lock().await;
+        assert!(
+            state.held_access.is_none(),
+            "an access request is already held"
+        );
+        state.held_access = Some(HeldAccess {
+            account: account.into(),
+            grant,
+            started,
+            resume,
+        });
+    }
+}
+
+impl MemoryProvider {
+    pub(super) async fn hold_access(&self, account: &str, grant: bool) {
+        let held = {
+            let mut state = self.state.lock().await;
+            if state
+                .held_access
+                .as_ref()
+                .is_some_and(|h| h.account == account && h.grant == grant)
+            {
+                state.held_access.take()
+            } else {
+                None
+            }
+        };
+        if let Some(held) = held {
+            let _ = held.started.send(());
+            held.resume
+                .await
+                .expect("held access request was not released");
+        }
+    }
+}

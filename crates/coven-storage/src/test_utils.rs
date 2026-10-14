@@ -160,6 +160,7 @@ struct State {
     held_listing: Option<HeldRequest>,
     held_read: Option<memory_reads::HeldRead>,
     held_creation: Option<HeldRequest>,
+    held_access: Option<memory_requests::HeldAccess>,
 }
 
 impl State {
@@ -656,6 +657,7 @@ impl ProviderOps for MemoryProvider {
         Ok(())
     }
     async fn grant_access(&self, account: &str) -> Result<AccessGrant, StorageError> {
+        self.hold_access(account, true).await;
         self.before_request(MemoryRequest::Other("grant_access"))
             .await?;
         if self.config.provider() == CloudProvider::S3 {
@@ -717,38 +719,25 @@ impl ProviderOps for MemoryProvider {
         }
         Ok(())
     }
-    async fn revoke_access(
-        &self,
-        member: &MemberAccess,
-    ) -> Result<ProviderRevocation, StorageError> {
+    async fn revoke_access(&self, account: &str) -> Result<Vec<RetainedAccess>, StorageError> {
+        self.hold_access(account, false).await;
         self.before_request(MemoryRequest::Other("revoke_access"))
             .await?;
-        match (self.config.provider(), member) {
-            (CloudProvider::S3, MemberAccess::S3AccessKey { access_key_id, .. }) => Ok(
-                ProviderRevocation::Reported(MemberRemoval::DeleteAccessKey {
-                    access_key_id: access_key_id.clone(),
-                }),
-            ),
-            (
-                CloudProvider::GoogleDrive
-                | CloudProvider::Dropbox
-                | CloudProvider::OneDrive
-                | CloudProvider::CloudKit,
-                MemberAccess::ProviderAccount(account),
-            ) => {
-                if !matches!(self.account, Account::Owner) {
-                    return Err(StorageFailure::NotStoreOwner.into());
-                }
-                let mut state = self.state.lock().await;
-                let account = account.to_ascii_lowercase();
-                if let Some(shares) = state.retained_access.get(&account) {
-                    return Ok(ProviderRevocation::Remaining(shares.clone()));
-                }
-                state.accounts.remove(&account);
-                Ok(ProviderRevocation::Remaining(Vec::new()))
-            }
-            _ => Err(StorageFailure::InvalidConfiguration.with_source("wrong member access kind")),
+        if self.config.provider() == CloudProvider::S3 {
+            return Err(
+                StorageFailure::InvalidConfiguration.with_source("S3 has no account sharing")
+            );
         }
+        if !matches!(self.account, Account::Owner) {
+            return Err(StorageFailure::NotStoreOwner.into());
+        }
+        let mut state = self.state.lock().await;
+        let account = account.to_ascii_lowercase();
+        if let Some(shares) = state.retained_access.get(&account) {
+            return Ok(shares.clone());
+        }
+        state.accounts.remove(&account);
+        Ok(Vec::new())
     }
     async fn begin_upload(
         &self,

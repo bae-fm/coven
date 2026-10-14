@@ -459,9 +459,18 @@ impl StoreLogSync {
         replay: coven_database::StoreLogReplay,
         member: &MemberKeys,
     ) -> Result<(), SyncError> {
-        let mut operations = self
-            .removal_work(&local.log, &entries, &replay, member)
-            .await?;
+        let mut operations = Vec::new();
+        let records = self.database.operations().await?;
+        let data = records
+            .iter()
+            .map(crate::operation_data::Data::read)
+            .collect::<Result<Vec<_>, _>>()?;
+        let next = StoreLog {
+            entries: local.log.entries.iter().chain(&entries).cloned().collect(),
+            replay: replay.clone(),
+            horizon: local.log.horizon,
+        };
+        let provider_access = self.access_changes(&next, &data)?;
         let deletions = crate::access_keys::deletions(&local.log.entries, &entries, &replay)?;
         let before = &local.log.replay.state;
         let after = &replay.state;
@@ -502,7 +511,7 @@ impl StoreLogSync {
             );
         }
         let mut updates = Vec::new();
-        for record in self.database.operations().await? {
+        for record in records {
             let data = crate::operation_data::Data::read(&record)?;
             if self.operation_can_retry(&record).await?
                 && record.last_step < data.entry_step_number(4)
@@ -523,6 +532,7 @@ impl StoreLogSync {
                 operations,
                 updates,
                 deletions,
+                provider_access,
             )
             .await?;
         *local = self.database.local_store_log().await?;
@@ -636,6 +646,8 @@ impl StoreLogSync {
 #[path = "store_log_sync_tests.rs"]
 pub(crate) mod tests;
 
+#[path = "operation_access.rs"]
+mod operation_access;
 #[path = "operation_access_keys.rs"]
 mod operation_access_keys;
 #[path = "operation_calls.rs"]
