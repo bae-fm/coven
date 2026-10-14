@@ -185,6 +185,9 @@ const RUSTFS: CataloguedProfile = CataloguedProfile {
         suite: 4,
     },
 };
+// SeaweedFS 4.48 failed suite 4 with versioning disabled and enabled:
+// concurrent conditional multipart completions both succeeded, so its suite 2
+// certificate, which predates the races, is withdrawn.
 const SEAWEEDFS: CataloguedProfile = CataloguedProfile {
     name: S3ProfileName::SeaweedFs,
     endpoint: None,
@@ -198,10 +201,7 @@ const SEAWEEDFS: CataloguedProfile = CataloguedProfile {
     key_scope: S3KeyScope::Prefix,
     versioned_buckets: Certification::Uncertified,
     minter: Some(&super::iam::SEAWEEDFS_IAM),
-    certification: Certification::Passed {
-        date: "2026-10-13",
-        suite: 2,
-    },
+    certification: Certification::Uncertified,
 };
 
 // Ceph RGW 20.2.4 has the same detected settings as RustFS. Versioned

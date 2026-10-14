@@ -361,7 +361,6 @@ fn self_hosted_profiles_are_selected_only_by_name_at_their_own_endpoint() {
     ] {
         let profile = CataloguedProfile::named(name);
         assert_eq!(profile.endpoint, None);
-        assert_ne!(profile.certification, Certification::Uncertified);
         let named = S3Profile::Named(name);
         assert_eq!(
             settings(None, Some(&named)).unwrap_err().failure(),

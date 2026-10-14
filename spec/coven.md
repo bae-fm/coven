@@ -830,8 +830,11 @@ the file's ranges under `F`.
     detects with the production probes; the same day it reproduced each of
     those four entries and passed their setup safety check. Suite version 4
     passed Ceph RGW 20.2.4 with versioning disabled on **2026-10-14**, and
-    RustFS 1.0.1 the same day with versioning both disabled and enabled. AWS
-    is **uncertified**: there is no live account. The table's selected
+    RustFS 1.0.1 the same day with versioning both disabled and enabled. It
+    failed SeaweedFS 4.48 in both states: concurrent conditional multipart
+    completions both succeeded, so SeaweedFS's suite 2 certificate is
+    withdrawn and it is **uncertified**. AWS is **uncertified**: there is no
+    live account. The table's selected
     behaviors are:
 
     | Profile | Signing | Single PUT | Multipart publication | Native multipart time | Checksums | Listing | Revision |
@@ -840,13 +843,14 @@ the file's ranges under `F`.
     | GCS (certified) | Google HMAC | `x-goog-if-generation-match: 0` | Copy with the same generation condition | Completion | Scope stated | V2 | Generation |
     | R2 (certified) | AWS SigV4 | `If-None-Match: *` | Conditional completion | Completion | Unstated scope ignored | V2 | ETag |
     | RustFS (certified, versioned too) | AWS SigV4 | `If-None-Match: *` | Conditional completion | Completion | None returned | V2 | ETag |
-    | SeaweedFS (certified) | AWS SigV4 | `If-None-Match: *` | Conditional completion | Completion | None returned | V2 | ETag |
+    | SeaweedFS (uncertified) | AWS SigV4 | `If-None-Match: *` | Conditional completion | Completion | None returned | V2 | ETag |
     | Ceph RGW (certified, unversioned) | AWS SigV4 | `If-None-Match: *` | Conditional completion | Completion | None returned | V2 | ETag |
 
     RustFS alone supports versioned buckets: RustFS 1.0.1 passed every suite 4
     race with versioning enabled. GCS's supplied live key could neither read
     bucket versioning nor create a second bucket for certification.
-    SeaweedFS has no versioned certification. AWS remains uncertified. R2 has no versioning feature. Ceph
+    SeaweedFS 4.48 fails the multipart races with versioning enabled or not.
+    AWS remains uncertified. R2 has no versioning feature. Ceph
     RGW 20.2.4 fails the versioned races. See
     [suite 4 evidence](s3-certification.md#concurrent-certification-suite-4)
     for the live runs and their bucket states.
@@ -976,7 +980,9 @@ the file's ranges under `F`.
   - RustFS, SeaweedFS and unversioned Ceph RGW refused occupied names with HTTP 412 on
     PUT and multipart completion, preserving bytes and times, and their
     multipart `Last-Modified` fell between the completion markers, so they use
-    conditional completion without a copy. None returned a checksum, even
+    conditional completion without a copy. That sequential refusal does not
+    hold under concurrency on SeaweedFS 4.48: two racing conditional
+    completions of one name both succeed. None returned a checksum, even
     with checksum mode; their profiles do not request one and rely on the
     complete-byte comparison required for a missing checksum (below).
   - `RequestTimeTooSkewed` means the device clock is off, not that access
