@@ -261,8 +261,12 @@ mod identity {
                 identity.name = "Conflicting name".into();
             }
             assert!(matches!(
-                db.apply_store_log::<Record>(log_tests::checked(creation.clone()), changed)
-                    .await,
+                db.apply_store_log::<Record>(
+                    log_tests::checked(creation.clone()),
+                    changed,
+                    Vec::new()
+                )
+                .await,
                 Err(DbError::StoreLogEntriesChanged)
             ));
             assert!(db.local_store_log().await.unwrap().log.entries.is_empty());
@@ -278,9 +282,13 @@ mod identity {
         let (creation, mut replay) =
             log_tests::circle_history(CircleId(uuid::Uuid::from_u128(2)))[0].clone();
         let identity = replay.state.store.clone().unwrap();
-        db.apply_store_log::<Record>(log_tests::checked(creation.clone()), replay.clone())
-            .await
-            .unwrap();
+        db.apply_store_log::<Record>(
+            log_tests::checked(creation.clone()),
+            replay.clone(),
+            Vec::new(),
+        )
+        .await
+        .unwrap();
         let mut rotation = creation;
         rotation.position.number = 2;
         rotation.timestamp = coven_merge::Timestamp::new(2, 0, rotation.position.device).unwrap();
@@ -291,7 +299,7 @@ mod identity {
             key_hash: [99; 32],
         };
         replay.entries.insert(rotation.position, EntryOutcome::Kept);
-        db.apply_store_log::<Record>(log_tests::checked(rotation), replay.clone())
+        db.apply_store_log::<Record>(log_tests::checked(rotation), replay.clone(), Vec::new())
             .await
             .unwrap();
         db.close().await.unwrap();
@@ -316,7 +324,9 @@ mod identity {
         );
         let mut checked = log_tests::checked(creation);
         checked.check = StoreLogCheck::NotAllowed;
-        db.apply_store_log::<Record>(checked, replay).await.unwrap();
+        db.apply_store_log::<Record>(checked, replay, Vec::new())
+            .await
+            .unwrap();
         db.close().await.unwrap();
         let db = directory.builder(vec![], vec![]).open().await.unwrap();
         assert!(db.store_log().await.unwrap().replay.state.store.is_none());
@@ -350,7 +360,7 @@ mod identity {
         ));
         assert!(db.local_store_log().await.unwrap().upload.is_none());
         assert!(mismatch(
-            db.apply_store_log::<Record>(log_tests::checked(creation), replay)
+            db.apply_store_log::<Record>(log_tests::checked(creation), replay, Vec::new())
                 .await
         ));
         let log = db.local_store_log().await.unwrap().log;

@@ -18,6 +18,7 @@ async fn conflicting_creation_identity_reserves_and_publishes_nothing() {
             key_hash: founder.sync.test_key(coven_merge::Audience::Store, key(1)),
             access: coven_format::MemberAccess::S3AccessKey {
                 access_key_id: "owner".into(),
+                principal: coven_format::S3Principal::Console,
             },
             device_name: "Phone".into(),
         };
