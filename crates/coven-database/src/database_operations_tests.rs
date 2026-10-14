@@ -151,6 +151,7 @@ async fn a_ready_batch_rolls_back_entries_cached_state_and_operation_progress_to
             kind: "entry".into(),
             data: b"reserved".to_vec(),
             started_by: "test".into(),
+            reserves_snapshot: false,
         })
         .await
         .unwrap();
@@ -305,6 +306,7 @@ mod conformance {
                 kind: "delete-access-key".into(),
                 data: key.as_bytes().to_vec(),
                 started_by: "coven".into(),
+                reserves_snapshot: false,
             },
         }
     }
@@ -334,6 +336,7 @@ mod conformance {
                     kind: "provider-access".into(),
                     data: vec![1],
                     started_by: "cancel_invite".into(),
+                    reserves_snapshot: false,
                 })
                 .await
                 .unwrap();
@@ -398,6 +401,7 @@ mod conformance {
                 kind: "replace-access-key".into(),
                 data: vec![1],
                 started_by: "replace_member_access_key".into(),
+                reserves_snapshot: false,
             })
         };
         let id = start().await.unwrap();

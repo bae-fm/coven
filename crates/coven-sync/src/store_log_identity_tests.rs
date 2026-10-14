@@ -246,9 +246,9 @@ async fn session_evidence_is_read_once_until_reconnecting() {
 
 /// Lean `IdentityCounters.Sequence` against the snapshot reservation the
 /// check reads. Every operation, a snapshot write or another, takes the next
-/// id, and finishing one never lowers it (`sqlite_sequence`), so the
-/// reservation is the sequence, beyond the greatest snapshot number whenever
-/// a later operation is not a snapshot (`operation_ids_hide_newer_snapshot`).
+/// id, and finishing one never lowers it, but only a snapshot operation's id
+/// reserves a snapshot number: the reservation is the greatest of those, not
+/// the sequence (`operation_ids_hide_newer_snapshot`).
 #[tokio::test]
 #[ignore = "requires COVEN_IDENTITY_LEAN"]
 async fn st_differential_snapshot_sequence() {
@@ -262,9 +262,13 @@ async fn st_differential_snapshot_sequence() {
         let devices = group(storage.clone(), 1).await;
         let device = &devices[0];
         let own = device.db.local_store_log().await.unwrap().device;
-        let start = device.db.identity_reservations().await.unwrap().snapshots;
+        // Joining the group started no snapshot operation.
+        assert_eq!(
+            device.db.identity_reservations().await.unwrap().snapshots,
+            0
+        );
         let mut steps = Vec::new();
-        let mut greatest = 0;
+        let mut ids = Vec::new();
         for bit in 0..5 {
             let snapshot = pattern & (1 << bit) != 0;
             let job = if snapshot {
@@ -286,21 +290,70 @@ async fn st_differential_snapshot_sequence() {
                 .start_operation(data.new_operation("coven").unwrap())
                 .await
                 .unwrap();
-            if snapshot {
-                greatest = id.0 as u64;
-            }
             // A finished operation keeps its id reserved.
             if bit % 2 == 0 {
                 device.db.finish_operation(id).await.unwrap();
             }
             steps.push(snapshot);
+            ids.push(id.0 as u64);
         }
         let reserved = device.db.identity_reservations().await.unwrap().snapshots;
-        cases.push(json!({"check": "sequence", "last": start, "snapshots": steps}));
-        actual.push(json!({"last": reserved, "snapshot": greatest}));
+        cases.push(json!({"check": "sequence", "last": ids[0] - 1, "snapshots": steps}));
+        actual.push(json!({"last": ids[4], "snapshot": reserved}));
     }
     assert_eq!(actual, crate::identity::tests::identity_runner(&cases));
     assert!(actual
         .iter()
         .any(|a| a["snapshot"].as_u64() < a["last"].as_u64()));
+}
+
+/// T157's `operation_ids_hide_newer_snapshot` in Rust: operations a restored
+/// backup finishes before its first check advance the operation sequence
+/// past its newer self's snapshot, but reserve no snapshot number, so the
+/// check still finds storage ahead (§10).
+#[tokio::test]
+async fn other_operations_never_hide_a_newer_own_snapshot() {
+    for extra in [0u64, 10] {
+        let storage = storage();
+        let mut devices = group(storage.clone(), 1).await;
+        let original = &mut devices[0];
+        sql(&original.db, "INSERT INTO notes VALUES('first','t','b')").await;
+        original.writes.upload_writes().await.unwrap();
+        let copy = backup(original, &storage).await;
+        original.catch_up().await;
+        let snapshot = original
+            .sync
+            .write_snapshot(coven_merge::Audience::Store)
+            .await
+            .unwrap();
+        let mut restored = restored(original, copy, &storage).await;
+        let mut last = 0;
+        for _ in 0..extra {
+            let data = crate::operation_data::Data::Snapshots(crate::snapshot_data::SnapshotTask {
+                job: crate::snapshot_data::SnapshotJob::Retain,
+                temporary: Vec::new(),
+            });
+            let id = restored
+                .db
+                .start_operation(data.new_operation("coven").unwrap())
+                .await
+                .unwrap();
+            restored.db.finish_operation(id).await.unwrap();
+            last = id.0 as u64;
+        }
+        // The operation sequence now passes the newer snapshot's number.
+        assert_eq!(extra == 0, last < snapshot.number);
+        let reserved = restored.db.identity_reservations().await.unwrap();
+        assert!(
+            reserved.snapshots < snapshot.number,
+            "{extra}: {reserved:?}"
+        );
+        let before = storage.request_trace().len();
+        assert_eq!(
+            reset_reason(restored.sync.sync_store_log().await.unwrap_err()),
+            DeviceResetReason::StorageAhead,
+            "{extra} other operations"
+        );
+        assert_eq!(sends(&storage.request_trace()[before..]), 0);
+    }
 }

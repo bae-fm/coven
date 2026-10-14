@@ -13,9 +13,8 @@ unsent edits. Also, §10's detection checks do not establish that every restored
 database gets a new device id. A backup can erase the record of an encryption
 attempt without leaving any evidence in storage. Content-bound nonces separate
 the resulting plaintexts without relying on that detection. Comparing own
-snapshot numbers with the operation sequence, as the implementation does, is
-weaker still than §10's per-kind comparison
-(`operation_ids_hide_newer_snapshot`, below).
+snapshot numbers with the whole operation sequence would be weaker still
+than §10's per-kind comparison (`operation_ids_hide_newer_snapshot`, below).
 
 A third result is a checked counterexample to a proposed rule: resetting on
 a mismatched S3 key delivery path can leave a made key live and unrecorded
@@ -189,8 +188,8 @@ runs `beginReset`, `retryReset`, `finishReset` and the first `commitWrite`
 against coven's recorded reset, failed `reset_device` retries and the
 published replacement, and `resetUnconnected` against the reset of a store
 that never set up storage. Its `sequence` check runs `IdentityCounters.Sequence`
-against the snapshot reservation coven-database reads after starting and
-finishing snapshot and other operations.
+against the operation ids and the snapshot reservation coven-database records
+after starting and finishing snapshot and other operations.
 It executes `ReplacementRead.accepts` and `load` against coven-sync's write
 authority and entry replay for old-id objects whose recorded pasts read any
 subset of kept, concurrent and unauthorized replacements. Rust judges each object in its own
@@ -213,20 +212,24 @@ everything listed then. `send_of_within` is the converse of
   proves that a live copy's own stored copies and snapshots never reset it,
   whatever it deleted, and `key_copy_ahead_resets` that a stored copy beyond
   the reservation does.
-- Snapshot numbers compared with the operation sequence (fails, checked).
-  Rust's snapshot reservation is `sqlite_sequence` of `_coven_operations`:
-  one sequence numbers every operation, and a snapshot takes its operation's
-  id. A live copy is never reset by it (`live_copy_sends`), but it is weaker
-  than §10's comparison with the last reserved snapshot number:
-  `operation_ids_hide_newer_snapshot`. Ana's backup holds operations 1 to 5.
-  Her live copy then writes store snapshots 6 and 7 and deletes 6, which 7
-  covers. Restored with custody intact, the backup starts a snapshot
+- Snapshot numbers (proved, with a checked counterexample for the earlier
+  rule). One sequence numbers every operation, and a snapshot takes its
+  operation's id. The reservation is the greatest id a snapshot operation
+  took, finished or not (Rust `_coven_snapshot_reservation`, recorded with
+  the operation's insert). `live_copy_sends` proves a live copy is never
+  reset by it and `snapshot_ahead_resets` that a listing beyond it resets.
+  Comparing with the whole operation sequence, as Rust did before T162, is
+  weaker: `operation_ids_hide_newer_snapshot`. Ana's backup holds operations
+  1 to 5. Her live copy then writes store snapshots 6 and 7 and deletes 6,
+  which 7 covers. Restored with custody intact, the backup starts a snapshot
   operation (6) and another operation (7) before its first check. Storage
   lists snapshot 7, which the restored copy never made, yet 7 does not pass
-  the sequence, so it sends; compared with its last snapshot number, 6, it
-  would reset. Its snapshot operation 6 then finds that path empty and
-  creates it: two different snapshots have had one path, and no byte
-  comparison sees it. §10 is unchanged; the rule is not stated there.
+  the sequence, so it would send; compared with its last snapshot number, 6,
+  it resets. Had it sent, its snapshot operation 6 would find that path
+  empty and create it: two different snapshots would have had one path, and
+  no byte comparison sees it. A restored copy that starts as many snapshot
+  operations before its check as its newer self wrote still passes, the
+  limit §10 already names ("the checks cannot detect every restore").
 - A store that never set up storage (proved). It published nothing and has
   no stored history, so its reset is the new-device path with nothing to
   load and no registration (`unconnected_reset_is_new_device`, Rust

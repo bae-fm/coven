@@ -74,7 +74,9 @@ pub struct IdentityReservations {
     pub entries: u64,
     /// Reserved sealed key copies, confirmed or not.
     pub key_copies: u64,
-    /// Snapshot numbers, which are operation ids, never reused.
+    /// The greatest snapshot number reserved: the id of the last snapshot
+    /// operation started, finished or not. Ids of other operations reserve
+    /// no snapshot number (§10).
     pub snapshots: u64,
 }
 
@@ -96,15 +98,11 @@ pub(crate) fn reservations(
     let entries = greatest("SELECT max(number) FROM _coven_store_log WHERE device=?1")?.max(
         greatest("SELECT max(number) FROM _coven_store_log_uploads WHERE device=?1")?,
     );
-    let snapshots = database
-        .query(
-            "SELECT seq FROM sqlite_sequence WHERE name='_coven_operations'",
-            [],
-            |row| row.get::<_, i64>(0),
-        )?
-        .into_iter()
-        .next()
-        .map_or(0, |seq| seq.max(0) as u64);
+    let snapshots = database.query_row(
+        "SELECT number FROM _coven_snapshot_reservation WHERE singleton=1",
+        [],
+        |row| row.get::<_, i64>(0),
+    )? as u64;
     Ok(IdentityReservations {
         writes,
         entries,

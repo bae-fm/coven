@@ -60,10 +60,13 @@ import CovenStorage
 #print axioms CovenStorage.IdentityCounters.reserve_valid
 #print axioms CovenStorage.IdentityCounters.run_valid
 #print axioms CovenStorage.IdentityCounters.greatest_le
+#print axioms CovenStorage.IdentityCounters.le_greatest
+#print axioms CovenStorage.IdentityCounters.listed_within_kind
 #print axioms CovenStorage.IdentityCounters.listed_within
 #print axioms CovenStorage.IdentityCounters.later_numbers_fresh
 #print axioms CovenStorage.IdentityCounters.live_copy_sends
 #print axioms CovenStorage.IdentityCounters.key_copy_ahead_resets
+#print axioms CovenStorage.IdentityCounters.snapshot_ahead_resets
 #print axioms CovenStorage.IdentityCounters.key_copies_counted
 #print axioms CovenStorage.IdentityCounters.operation_ids_hide_newer_snapshot
 #print axioms CovenStorage.IdentityCounters.unconnected_reset_is_new_device

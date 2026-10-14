@@ -86,8 +86,8 @@ private def reset (j : Json) : Except String Json := do
     ("first", toJson (commitWrite finished []).reserved.logs.writes)]
 
 /-- From a sequence at `last`, reserve operation ids in order, each a
-snapshot operation or another: the reservation the check compares (the
-sequence) and the greatest snapshot number among them. -/
+snapshot operation or another: the last id, and the greatest snapshot
+number among them, which is the reservation the check compares. -/
 private def sequence (j : Json) : Except String Json := do
   let steps ← j.getObjValAs? (Array Bool) "snapshots"
   let start : IdentityCounters.Sequence := ⟨← j.getObjValAs? Nat "last", []⟩

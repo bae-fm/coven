@@ -7,14 +7,16 @@ import CovenStorage.Identity
   stored copies never pass its reservation, and one beyond it resets:
   `live_copy_sends`, `key_copy_ahead_resets`.
 - Own snapshot numbers are operation ids: one local sequence numbers every
-  operation, and a snapshot takes its operation's id. Comparing stored
-  snapshot numbers against that sequence never resets a live copy
-  (`live_copy_sends`), and every snapshot reserved after a passing check gets
-  a number beyond every listed one (`later_numbers_fresh`). It is weaker than
-  §10's comparison with the last reserved snapshot number: a restored copy's
-  other operations advance the sequence past a newer own snapshot, so the
-  restored copy sends, and its own earlier snapshot operation publishes at a
-  path its newer self used and deleted (`operation_ids_hide_newer_snapshot`).
+  operation, and a snapshot takes its operation's id. The check compares
+  stored snapshot numbers with the greatest number a snapshot operation
+  reserved, which never resets a live copy (`live_copy_sends`) and resets a
+  copy whose listing passes it (`snapshot_ahead_resets`); every snapshot
+  reserved after a passing check gets a number beyond every listed one
+  (`later_numbers_fresh`). Comparing with the whole operation sequence
+  instead is weaker: a restored copy's other operations advance the sequence
+  past a newer own snapshot, so the restored copy sends, and its own earlier
+  snapshot operation publishes at a path its newer self used and deleted
+  (`operation_ids_hide_newer_snapshot`).
 - A store that never set up storage has no stored history and published
   nothing. Its reset is the new-device path with nothing to load and no
   registration: an empty database under the fresh id, whose first write is
@@ -81,8 +83,22 @@ theorem greatest_le {l : List Nat} {m : Nat} (h : ∀ n ∈ l, n ≤ m) : greate
       have rest := ih fun n hn => h n (List.mem_cons_of_mem _ hn)
       omega
 
+theorem le_greatest {l : List Nat} {n : Nat} (h : n ∈ l) : n ≤ greatest l := by
+  induction l with
+  | nil => simp at h
+  | cons x xs ih =>
+      simp only [greatest, List.foldr_cons, List.mem_cons] at *
+      rcases h with rfl | h
+      · omega
+      · have := ih h; omega
+
 /-- Storage lists only own objects this copy published, from numbers it
-reserved; deletion only removes. So the listing never passes the sequence. -/
+reserved; deletion only removes. So the listing never passes the greatest
+number reserved for that kind, nor the sequence. -/
+theorem listed_within_kind {s : Sequence} (listed : List Nat)
+    (published : ∀ n ∈ listed, n ∈ s.kind) : greatest listed ≤ greatest s.kind :=
+  greatest_le fun n hn => le_greatest (published n hn)
+
 theorem listed_within {s : Sequence} (valid : s.Valid) (listed : List Nat)
     (published : ∀ n ∈ listed, n ∈ s.kind) : greatest listed ≤ s.last :=
   greatest_le fun n hn => (valid n (published n hn)).2
@@ -109,12 +125,13 @@ theorem later_numbers_fresh {s : Sequence} (steps : List Bool) {m : Nat} (h : m 
 /-! ## A live copy is never reset by its own key copies or snapshots -/
 
 /-- One live copy's own counters: write and entry ends, its key-copy sequence
-(every reservation a copy, Rust `key_upload::last_reserved`) and its
-operation sequence (Rust `sqlite_sequence`). Stored copies and snapshots are
-ones it published. With custody and no removal or replacement, the check
-sends, whatever it deleted (§10: an outstanding reservation is not stale). -/
+(every reservation a copy, Rust `key_upload::last_reserved`) and the
+greatest id its operation sequence gave a snapshot operation (Rust
+`_coven_snapshot_reservation`). Stored copies and snapshots are ones it
+published. With custody and no removal or replacement, the check sends,
+whatever it deleted (§10: an outstanding reservation is not stale). -/
 theorem live_copy_sends (d : Nat) (logs : Ends) (keys ops : Sequence)
-    (keysValid : keys.Valid) (opsValid : ops.Valid) (copies snapshots : List Nat)
+    (keysValid : keys.Valid) (copies snapshots : List Nat)
     (copiesPublished : ∀ n ∈ copies, n ∈ keys.kind)
     (snapshotsPublished : ∀ n ∈ snapshots, n ∈ ops.kind) (e : Evidence)
     (removed : e.removed = false) (replaced : e.replaced = false)
@@ -122,15 +139,25 @@ theorem live_copy_sends (d : Nat) (logs : Ends) (keys ops : Sequence)
     (listedSnapshots : e.listed.snapshot = greatest snapshots)
     (logsWithin : ∀ evidence ∈ [e.listed.logs, e.covered, e.posted],
       evidence.writes ≤ logs.writes ∧ evidence.entries ≤ logs.entries) :
-    checkIdentity d ⟨logs, keys.last, ops.last⟩ (some d) (.ok e) = .send :=
+    checkIdentity d ⟨logs, keys.last, greatest ops.kind⟩ (some d) (.ok e) = .send :=
   send_of_within d _ e removed replaced
     (listedCopies ▸ listed_within keysValid copies copiesPublished)
-    (listedSnapshots ▸ listed_within opsValid snapshots snapshotsPublished) logsWithin
+    (listedSnapshots ▸ listed_within_kind snapshots snapshotsPublished) logsWithin
 
 /-- A stored own key copy beyond the reservation resets the copy. -/
 theorem key_copy_ahead_resets (d : Nat) (r : Counters) (e : Evidence)
     (removed : e.removed = false) (replaced : e.replaced = false)
     (ahead : r.keyCopies < e.listed.keyCopies) :
+    checkIdentity d r (some d) (.ok e) = .reset .storageAhead := by
+  have : e.observed.ahead r = true := by
+    simp [Counters.ahead, Evidence.observed, ahead]
+  simp [checkIdentity, removed, replaced, this]
+
+/-- A stored own snapshot beyond the greatest reserved snapshot number
+resets the copy, whatever else its operation sequence numbered. -/
+theorem snapshot_ahead_resets (d : Nat) (r : Counters) (e : Evidence)
+    (removed : e.removed = false) (replaced : e.replaced = false)
+    (ahead : r.snapshot < e.listed.snapshot) :
     checkIdentity d r (some d) (.ok e) = .reset .storageAhead := by
   have : e.observed.ahead r = true := by
     simp [Counters.ahead, Evidence.observed, ahead]
@@ -178,9 +205,9 @@ def liveStorage : Storage :=
     (.snapshot 0 7 6)
 
 /-- Snapshot 7 is the live copy's, made after the backup, and the restored
-copy reserved no snapshot beyond 6. Rust compares it with the operation
-sequence (7) and sends; §10's comparison with the last reserved snapshot
-number (6) resets it. The restored snapshot operation 6 then finds its path
+copy reserved no snapshot beyond 6. Compared with the operation sequence (7)
+it sends, as Rust did before T162; §10's comparison with the last reserved
+snapshot number (6) resets it. The restored snapshot operation 6 then finds its path
 empty and creates it: the live copy's deleted snapshot 6 and the restored
 one share a path with different bytes, and no comparison sees it. -/
 theorem operation_ids_hide_newer_snapshot :

@@ -760,6 +760,7 @@ async fn publication_intent_commits_with_the_schema_queue_and_migration_write() 
                 kind: "test-publication".into(),
                 data: version.to_be_bytes().to_vec(),
                 started_by: "coven".into(),
+                reserves_snapshot: false,
             })
         })
         .open()

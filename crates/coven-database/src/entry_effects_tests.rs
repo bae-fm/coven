@@ -316,6 +316,7 @@ async fn a_kept_reset_never_hides_an_s3_key_awaiting_deletion() {
                 kind: "delete-access-key".into(),
                 data: vec![],
                 started_by: "coven".into(),
+                reserves_snapshot: false,
             },
         }],
     )

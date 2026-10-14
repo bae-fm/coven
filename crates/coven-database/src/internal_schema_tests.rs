@@ -142,6 +142,7 @@ async fn only_the_spec_tables_are_created() {
                 "_coven_references",
                 "_coven_row_file_refs",
                 "_coven_rows",
+                "_coven_snapshot_reservation",
                 "_coven_snapshot_schema",
                 "_coven_store_log",
                 "_coven_store_log_uploads",
@@ -331,6 +332,7 @@ mod fixture {
                 .unwrap();
             match table.as_str() {
                 "_coven_store_log_uploads"
+                | "_coven_snapshot_reservation"
                 | "_coven_snapshot_schema"
                 | "_coven_positions_post"
                 | "_coven_device_reset"
@@ -424,8 +426,6 @@ mod scans {
         Some("file removal visits every queued filesystem deletion"),
     ("key_upload.rs", "SELECT writer,number,bytes,before_device,before_number FROM _coven_key_uploads ORDER BY writer,number", "_coven_key_uploads") =>
         Some("the key-copy queue reader returns every reserved copy"),
-    ("device_reset.rs", "SELECT seq FROM sqlite_sequence WHERE name='_coven_operations'", "sqlite_sequence") =>
-        Some("SQLite keeps one sequence row per AUTOINCREMENT table; snapshot numbers are operation ids"),
     ("operation.rs", "SELECT id,kind,last_step,data,started_by FROM _coven_operations ORDER BY id", "_coven_operations") =>
         Some("operations() returns every unfinished journal entry"),
     ("pending.rs", "SELECT subject,reporter,value,operation,object,coven_version FROM _coven_pending" | "{SELECT} WHERE suppressed=0", "_coven_pending") =>

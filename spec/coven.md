@@ -1964,6 +1964,9 @@ Two mechanisms order writes:
 - `_coven_key_publications` retains each writer's last confirmed copy number.
   Confirmation advances it atomically with removing that copy's queue row,
   so an empty queue cannot restart the writer's numbering.
+- `_coven_snapshot_reservation` retains the id of the last snapshot
+  operation this device started, recorded with that operation's insert, so
+  finishing operations cannot lower the snapshot number §10 compares.
 - Received store-log entries and key copies are retained apart from what
   replay applied (§6). `_coven_log_inputs` keeps each complete object read by
   its exact number, with its provider observation, including objects waiting
@@ -3131,6 +3134,14 @@ Carol's tablet:
       reserved, confirmed or not. A live copy's stored copies never pass
       that number, and a stored copy beyond it resets the copy
       ([`live_copy_sends`, `key_copy_ahead_resets`](proofs/storage/CovenStorage/IdentityCounters.lean)).
+    - A snapshot's number is its operation's id. Snapshots compare with the
+      id of the last snapshot operation started, finished or not; ids other
+      operations took reserve no snapshot number. A live copy's stored
+      snapshots never pass it, and a stored snapshot beyond it resets the
+      copy. Comparing with every operation id instead would let a restored
+      copy's other operations hide its newer self's snapshot, whose deleted
+      path the restored copy could then reuse
+      ([`live_copy_sends`, `snapshot_ahead_resets`, `operation_ids_hide_newer_snapshot`](proofs/storage/CovenStorage/IdentityCounters.lean)).
   - The device id also lives in custody that backups do not copy. A missing
     or different custody id requires the same device reset.
   - Finish this check before sending writes, entries, snapshots, files,

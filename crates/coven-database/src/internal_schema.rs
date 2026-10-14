@@ -255,6 +255,13 @@ macro_rules! coven_tables {
                 reason TEXT NOT NULL CHECK(reason IN ('identity-mismatch','storage-ahead','slot-mismatch','replaced','database-damage'))
             ) STRICT;
         ");
+        $visit!(_coven_snapshot_reservation, "
+            CREATE TABLE _coven_snapshot_reservation (
+                singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+                number INTEGER NOT NULL CHECK(number>=0)
+            ) STRICT;
+            INSERT INTO _coven_snapshot_reservation VALUES(1,0);
+        ");
         $visit!(_coven_catch_up, "
             CREATE TABLE _coven_catch_up (
                 singleton INTEGER PRIMARY KEY CHECK(singleton=1),

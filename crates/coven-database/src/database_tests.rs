@@ -661,6 +661,7 @@ async fn journal_lookups_read_current_steps_and_keep_failed_rows_in_order() {
                 kind: kind.into(),
                 data: vec![1],
                 started_by: "coven".into(),
+                reserves_snapshot: false,
             })
             .await
             .unwrap(),
@@ -724,6 +725,7 @@ async fn finished_operation_ids_cannot_address_a_new_operation_after_reopening()
             kind: "reload-snapshots".into(),
             data: vec![1],
             started_by: "coven".into(),
+            reserves_snapshot: false,
         }
     }
     let store = TestStore::new();
