@@ -89,7 +89,7 @@ pub(crate) fn members(
             ))
         },
     )?;
-    members.sort_by(|a, b| a.0.cmp(&b.0));
+    members.sort_by_key(|a| a.0);
     members
         .into_iter()
         .map(|(id, role, keys)| {

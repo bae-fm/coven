@@ -130,7 +130,7 @@ async fn members_list_every_device_with_its_state_and_the_local_member() {
             is_self: false,
         },
     ];
-    expected.sort_by(|a, b| a.id.cmp(&b.id));
+    expected.sort_by_key(|a| a.id);
     assert_eq!(members, expected);
     assert_eq!(
         db.circles().await.unwrap(),
@@ -143,7 +143,7 @@ async fn members_list_every_device_with_its_state_and_the_local_member() {
         .circle_members(CircleId(uuid::Uuid::from_u128(7)))
         .await
         .unwrap();
-    circle.sort_by(|a, b| a.member.cmp(&b.member));
+    circle.sort_by_key(|a| a.member);
     let mut wanted = vec![
         CircleMemberInfo {
             member: member(1),
@@ -154,7 +154,7 @@ async fn members_list_every_device_with_its_state_and_the_local_member() {
             is_self: false,
         },
     ];
-    wanted.sort_by(|a, b| a.member.cmp(&b.member));
+    wanted.sort_by_key(|a| a.member);
     assert_eq!(circle, wanted);
     for absent in [8, 9] {
         assert!(db

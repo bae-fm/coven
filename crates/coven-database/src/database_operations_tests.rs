@@ -69,11 +69,20 @@ impl Database {
         self.call(move |inner| {
             inner.access.with_writer(|writer| {
                 writer.transaction(|db| {
-                    let member = [7u8; 32];
+                    let member = [7u8; 16];
+                    let keys = coven_crypto::MemberKeys::from_secret_bytes(
+                        &[b"CVMK\x01".as_slice(), &[7; 64]].concat(),
+                    )
+                    .expect("fixed placeholder pair")
+                    .public_keys();
                     db.internal_execute(
-                        "INSERT INTO _coven_members(member,sealing,access,role,removed)
-                         VALUES(?1,?1,x'00','member',0) ON CONFLICT DO NOTHING",
-                        [member.as_slice()],
+                        "INSERT INTO _coven_members(member,signing,sealing,access,role,removed)
+                         VALUES(?1,?2,?3,x'00','member',0) ON CONFLICT DO NOTHING",
+                        (
+                            member.as_slice(),
+                            keys.signing.as_bytes().as_slice(),
+                            keys.sealing.as_bytes().as_slice(),
+                        ),
                     )?;
                     db.internal_execute(
                         "INSERT INTO _coven_devices(device,member,name,state) VALUES(?1,?2,'test',?3)
