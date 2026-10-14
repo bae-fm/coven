@@ -61,6 +61,13 @@ pub(super) enum Certification<'date> {
     Uncertified,
     Passed { date: &'date str, suite: u32 },
 }
+/// Whether setup admits a catalogued profile. A profile that failed a
+/// certification race is refused before any request, whatever its bucket.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Setup {
+    Admitted,
+    Refused,
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct CataloguedProfile {
     pub(super) name: S3ProfileName,
@@ -75,6 +82,7 @@ pub(super) struct CataloguedProfile {
     /// the console makes them (§4).
     pub(super) minter: Option<&'static super::minting::KeyMinter>,
     pub(super) certification: Certification<'static>,
+    pub(super) setup: Setup,
 }
 
 /// Every catalogued service; hosted ones match hostnames in this order.
@@ -110,6 +118,7 @@ const AWS: CataloguedProfile = CataloguedProfile {
     versioned_buckets: Certification::Uncertified,
     minter: Some(&super::iam::AWS_IAM),
     certification: Certification::Uncertified,
+    setup: Setup::Admitted,
 };
 const GCS: CataloguedProfile = CataloguedProfile {
     name: S3ProfileName::Gcs,
@@ -134,6 +143,7 @@ const GCS: CataloguedProfile = CataloguedProfile {
         date: "2026-10-13",
         suite: 1,
     },
+    setup: Setup::Admitted,
 };
 // Detected by certification suite 1; the raw observations are in spec/s3-certification.md.
 // Cloudflare documents the API differences at https://developers.cloudflare.com/r2/api/s3/api/.
@@ -155,6 +165,7 @@ const R2: CataloguedProfile = CataloguedProfile {
         date: "2026-10-13",
         suite: 1,
     },
+    setup: Setup::Admitted,
 };
 // Self-hosted services are reached at arbitrary endpoints and selected only by
 // name. The raw observations are in spec/s3-certification.md.
@@ -184,10 +195,11 @@ const RUSTFS: CataloguedProfile = CataloguedProfile {
         date: "2026-10-14",
         suite: 4,
     },
+    setup: Setup::Admitted,
 };
 // SeaweedFS 4.48 failed suite 4 with versioning disabled and enabled:
 // concurrent conditional multipart completions both succeeded, so its suite 2
-// certificate, which predates the races, is withdrawn.
+// certificate, which predates the races, is withdrawn and setup refuses it.
 const SEAWEEDFS: CataloguedProfile = CataloguedProfile {
     name: S3ProfileName::SeaweedFs,
     endpoint: None,
@@ -202,6 +214,7 @@ const SEAWEEDFS: CataloguedProfile = CataloguedProfile {
     versioned_buckets: Certification::Uncertified,
     minter: Some(&super::iam::SEAWEEDFS_IAM),
     certification: Certification::Uncertified,
+    setup: Setup::Refused,
 };
 
 // Ceph RGW 20.2.4 has the same detected settings as RustFS. Versioned
@@ -219,6 +232,7 @@ const CEPH_RGW: CataloguedProfile = CataloguedProfile {
         date: "2026-10-14",
         suite: 4,
     },
+    setup: Setup::Admitted,
 };
 
 impl CataloguedProfile {
@@ -301,6 +315,22 @@ pub(super) fn select(
         }
         (None, Some(S3Profile::Custom(settings))) => Ok(Selected::Custom(*settings)),
         (None, None) => Ok(Selected::Undetected),
+    }
+}
+
+/// Refuse a location whose catalogued profile setup does not admit, before
+/// any request (§4).
+pub(crate) fn admit_setup(
+    endpoint: Option<&Url>,
+    profile: Option<&S3Profile>,
+) -> Result<(), crate::StorageSetupError> {
+    match select(endpoint, profile)? {
+        Selected::Catalogued(CataloguedProfile {
+            name,
+            setup: Setup::Refused,
+            ..
+        }) => Err(crate::StorageSetupError::S3ProfileRefused { profile: name }),
+        _ => Ok(()),
     }
 }
 

@@ -109,6 +109,38 @@ impl StorageConnector for BucketState {
     }
 }
 
+/// SeaweedFS failed certification's concurrent races, so setup names it and
+/// refuses before any request, committing nothing (§4).
+#[tokio::test]
+async fn a_refused_profile_fails_setup_before_any_request() {
+    let location = uncatalogued(Some(S3Profile::Named(S3ProfileName::SeaweedFs)));
+    let storage = Arc::new(
+        MemoryStorage::builder()
+            .location(location.clone())
+            .build()
+            .unwrap(),
+    );
+    let connector = Arc::new(BucketState {
+        storage: storage.clone(),
+        versioning: std::sync::Mutex::new(Ok(S3BucketVersioning::Disabled)),
+    });
+    let opened = open(connector).await;
+    assert!(matches!(
+        setup(&opened.handle, location).await.unwrap_err(),
+        StorageSetupError::S3ProfileRefused {
+            profile: S3ProfileName::SeaweedFs
+        }
+    ));
+    assert_eq!(storage.request_count(), 0);
+    assert_eq!(
+        StorageSettings::new(opened.directory.clone())
+            .read()
+            .unwrap(),
+        None
+    );
+    opened.handle.close().await.unwrap();
+}
+
 #[tokio::test]
 async fn versioning_refusal_commits_nothing_and_preserves_an_existing_connection() {
     let location = uncatalogued(Some(S3Profile::Named(S3ProfileName::CephRgw)));

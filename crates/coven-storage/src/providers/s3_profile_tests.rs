@@ -22,6 +22,23 @@ fn profile_table_records_certification_and_publication_requirements() {
             );
         }
     }
+    // Only SeaweedFS failed a certification race; setup refuses only it.
+    for profile in PROFILES {
+        let refused = admit_setup(
+            Some(&"http://localhost:8333".parse().unwrap()),
+            Some(&S3Profile::Named(profile.name)),
+        );
+        if profile.name == S3ProfileName::SeaweedFs {
+            assert_eq!(profile.setup, Setup::Refused);
+            assert!(matches!(
+                refused,
+                Err(crate::StorageSetupError::S3ProfileRefused { profile }) if profile == S3ProfileName::SeaweedFs
+            ));
+        } else {
+            assert_eq!(profile.setup, Setup::Admitted);
+            assert!(profile.endpoint.is_some() || refused.is_ok());
+        }
+    }
     assert_eq!(PROFILES[0].name, S3ProfileName::Aws);
     assert_eq!(PROFILES[0].certification, Certification::Uncertified);
     assert_eq!(

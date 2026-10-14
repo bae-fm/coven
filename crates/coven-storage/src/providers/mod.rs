@@ -28,8 +28,8 @@ pub fn s3_member_policy(
     s3::member_policy(config, store)
 }
 pub(crate) use s3::{
-    check_new_store as check_new_s3_store, check_s3_versioning, detect as detect_s3, s3_key_scope,
-    s3_settings, S3KeyScope, S3Storage,
+    admit_s3_setup, check_new_store as check_new_s3_store, check_s3_versioning,
+    detect as detect_s3, s3_key_scope, s3_settings, S3KeyScope, S3Storage,
 };
 mod google_drive;
 mod google_drive_access;

@@ -1529,7 +1529,9 @@ while let Ok(values) = lost.next().await {
   multipart uploads. Hosts ending in `.r2.cloudflarestorage.com` select R2,
   using conditional PUT and multipart completion and ignoring checksums
   without stated scope. The self-hosted RustFS, SeaweedFS and Ceph RGW profiles
-  are selected only by name. A name or custom profile contradicting a
+  are selected only by name. Setup refuses SeaweedFS before any request with
+  `StorageSetupError::S3ProfileRefused { profile: SeaweedFs }`: its concurrent
+  conditional multipart completions failed certification (§4). A name or custom profile contradicting a
   catalogued host, a name other than AWS or any custom profile without an
   endpoint, or plain `http` to a catalogued host is `InvalidConfiguration`;
   other endpoints may use `http`.
@@ -2035,6 +2037,9 @@ impl ProviderResponse {
 
 /// Storage setup failed before committing credentials and keys (E5).
 pub enum StorageSetupError {
+    /// The named catalogued S3 profile failed certification's concurrent
+    /// create-once races; setup refuses it before any request (§4).
+    S3ProfileRefused { profile: S3ProfileName },
     /// The profile has no certification with bucket versioning enabled.
     S3VersioningUnsupported { state: S3BucketVersioning },
     /// The bucket state is unknown and the profile has no versioning certification.

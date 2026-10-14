@@ -833,7 +833,10 @@ the file's ranges under `F`.
     RustFS 1.0.1 the same day with versioning both disabled and enabled. It
     failed SeaweedFS 4.48 in both states: concurrent conditional multipart
     completions both succeeded, so SeaweedFS's suite 2 certificate is
-    withdrawn and it is **uncertified**. AWS is **uncertified**: there is no
+    withdrawn and it is **uncertified**. Setup refuses the SeaweedFS profile
+    before any request with `StorageSetupError::S3ProfileRefused` naming it;
+    detection does not identify a service, so this refusal covers only the
+    named profile. AWS is **uncertified**: there is no
     live account. The table's selected
     behaviors are:
 
@@ -843,7 +846,7 @@ the file's ranges under `F`.
     | GCS (certified) | Google HMAC | `x-goog-if-generation-match: 0` | Copy with the same generation condition | Completion | Scope stated | V2 | Generation |
     | R2 (certified) | AWS SigV4 | `If-None-Match: *` | Conditional completion | Completion | Unstated scope ignored | V2 | ETag |
     | RustFS (certified, versioned too) | AWS SigV4 | `If-None-Match: *` | Conditional completion | Completion | None returned | V2 | ETag |
-    | SeaweedFS (uncertified) | AWS SigV4 | `If-None-Match: *` | Conditional completion | Completion | None returned | V2 | ETag |
+    | SeaweedFS (uncertified, refused) | AWS SigV4 | `If-None-Match: *` | Conditional completion | Completion | None returned | V2 | ETag |
     | Ceph RGW (certified, unversioned) | AWS SigV4 | `If-None-Match: *` | Conditional completion | Completion | None returned | V2 | ETag |
 
     RustFS alone supports versioned buckets: RustFS 1.0.1 passed every suite 4
