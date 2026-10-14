@@ -2,7 +2,7 @@ use super::*;
 use coven_crypto::ObjectHasher;
 use coven_format::sealed_snapshot::{SnapshotObjectLayout, SnapshotObjectPrefix};
 
-fn signed_snapshot(
+pub(super) fn signed_snapshot(
     unsigned: &[u8],
     path: &ObjectPath,
     prefix_author: &MemberKeys,

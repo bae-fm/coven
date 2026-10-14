@@ -20,9 +20,23 @@ pub(super) struct Candidate {
     signature: Signature,
 }
 
+/// A listed snapshot whose signed prefix verified, names this audience and
+/// counts. Its positions establish coverage whatever this device found in its
+/// body and whether it accepts its key: readers choose by the authenticated
+/// prefix (§15, §19.1).
+pub(super) struct Verified {
+    pub(super) object: StoredObject,
+    pub(super) prefix: SnapshotObjectPrefix,
+}
+
 pub(super) struct Catalog {
     pub(super) listed: usize,
+    /// The verified snapshots this device may load: no body refusal it may
+    /// not check again, and a key it accepts. Newest first.
     pub(super) candidates: Vec<Candidate>,
+    /// Every verified snapshot, newest first. The newest that follows the
+    /// replay's reset/version boundary is the audience's current newest.
+    pub(super) verified: Vec<Verified>,
     /// Verified prefixes that follow the replay's reset/version boundary require
     /// history, even when their keys cannot authorize loading their rows.
     pub(super) required_positions: coven_format::value::WritePositions,
@@ -34,6 +48,22 @@ pub(super) struct Catalog {
     /// A listed snapshot in a newer format: work that selects among this
     /// audience's snapshots waits for that update (§15, §17.2).
     pub(super) update: Option<crate::RequiredUpdate>,
+}
+
+impl Verified {
+    /// Whether the replay's newest reset/version boundary of this audience
+    /// admits this snapshot.
+    pub(super) fn follows_boundary(&self, log: &StoreLog) -> bool {
+        super::boundaries::allows(
+            log,
+            &self
+                .object
+                .path
+                .snapshot_id()
+                .expect("checked snapshot path"),
+            &self.prefix,
+        )
+    }
 }
 
 impl StoreLogSync {
@@ -62,7 +92,7 @@ impl StoreLogSync {
         };
         let listed = objects.len();
         let mut candidates = Vec::new();
-        let mut positions = BTreeMap::new();
+        let mut verified = Vec::new();
         let mut unreadable_prefix = false;
         let mut newest_unknown = false;
         let refused = self.refused_snapshots(audience).await?;
@@ -113,16 +143,10 @@ impl StoreLogSync {
                 tracing::debug!(path = object.path.as_str(), "late snapshot does not count");
                 continue;
             }
-            // A snapshot prepared for a concurrent raise can include its
-            // author's unpublished migration write. A boundary that excludes
-            // that snapshot also excludes its demand for that write's history.
-            if super::boundaries::allows(
-                log,
-                &object.path.snapshot_id().expect("checked path"),
-                prefix,
-            ) {
-                super::include_positions(&mut positions, &prefix.writes.0);
-            }
+            verified.push(Verified {
+                object: object.clone(),
+                prefix: prefix.clone(),
+            });
             // A refused body never authorizes loading its rows (§19.1).
             if refusal.is_none() && keys.contains_key(&(audience.clone(), prefix.key)) {
                 candidates.push(candidate);
@@ -135,9 +159,21 @@ impl StoreLogSync {
         self.replace_snapshot_conditions(audience, conditions)
             .await?;
         candidates.sort_by(|a, b| newest_first((&a.object, &a.prefix), (&b.object, &b.prefix)));
+        verified.sort_by(|a, b| newest_first((&a.object, &a.prefix), (&b.object, &b.prefix)));
+        // A snapshot prepared for a concurrent raise can include its author's
+        // unpublished migration write. A boundary that excludes that snapshot
+        // also excludes its demand for that write's history.
+        let mut positions = BTreeMap::new();
+        for snapshot in verified
+            .iter()
+            .filter(|snapshot| snapshot.follows_boundary(log))
+        {
+            super::include_positions(&mut positions, &snapshot.prefix.writes.0);
+        }
         Ok(Catalog {
             listed,
             candidates,
+            verified,
             required_positions: coven_format::value::WritePositions(
                 positions
                     .into_iter()

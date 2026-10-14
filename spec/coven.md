@@ -4524,6 +4524,12 @@ Carol's tablet:
     nothing and does not hold deletion
     ([`waiting_retention_safe`](proofs/storelog-data/CovenStorelogData/PendingScans.lean);
     the registration wait is not modeled).
+  - That current newest is chosen by verified prefix, whatever this device
+    found in a snapshot's body and whether it accepts its key: a version
+    that loads the body selects that snapshot (§19.1). E.g. Ana's version
+    refuses the body of Ben's newest snapshot, which covers her writes 1 to
+    3, so she keeps her write 4
+    ([`refused_body_retention_counterexample`, `retention_ignores_bodies`](proofs/storelog-data/CovenStorelogData/RefusedRetention.lean)).
   - E.g. Ana's snapshot covers her writes 1 to 4. Ben, on a newer version,
     snapshots her writes 1 to 3 and more of his own, so his is the newest.
     Ana cannot read its prefix, so she keeps all four: after her update the

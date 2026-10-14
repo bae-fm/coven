@@ -60,12 +60,30 @@ impl StoreLogSync {
         }
         for audience in &readable {
             let catalog = self.snapshot_candidates(audience, &local.log).await?;
-            let candidates = catalog.candidates;
-            let older: Vec<_> = candidates
+            // Log deletion judges by the current newest counting snapshot:
+            // the newest verified prefix, whatever this device found in its
+            // body or whether it accepts its key. A version that loads that
+            // body selects it and needs every write it leaves out (§15,
+            // §19.1; storelog-data `retention_ignores_bodies`).
+            if let Some(newest) = catalog
+                .verified
                 .iter()
-                .map(|c| (c.object.path.clone(), c.prefix.writes.clone()))
-                .collect();
-            let chosen = candidates.into_iter().find(|c| {
+                .find(|snapshot| snapshot.follows_boundary(&local.log))
+            {
+                // A prefix this device cannot read yet may be the newest, and
+                // need writes the chosen snapshot covers: deleting this
+                // audience's parts waits, as the reload waits (§15,
+                // `waiting_retention_safe`). That prefix's record says why.
+                if catalog.newest_unknown {
+                    tracing::debug!(?audience, "unread snapshot prefix holds back log retention");
+                } else {
+                    coverage.insert(audience.clone(), newest.prefix.writes.clone());
+                }
+            }
+            // An own snapshot goes once a newer one this device can load
+            // covers everything it covers.
+            let candidates = catalog.candidates;
+            let chosen = candidates.iter().find(|c| {
                 super::boundaries::allows(
                     &local.log,
                     &c.object
@@ -76,24 +94,19 @@ impl StoreLogSync {
                 )
             });
             if let Some(chosen) = chosen {
-                let prefix = chosen.prefix;
-                for (path, positions) in older {
-                    if path != chosen.object.path
-                        && path.device() == Some(local.device)
-                        && !pinned.contains(&path)
-                        && positions.0.iter().all(|id| prefix.writes.covers(*id))
+                for older in &candidates {
+                    if older.object.path != chosen.object.path
+                        && older.object.path.device() == Some(local.device)
+                        && !pinned.contains(&older.object.path)
+                        && older
+                            .prefix
+                            .writes
+                            .0
+                            .iter()
+                            .all(|id| chosen.prefix.writes.covers(*id))
                     {
-                        superseded.push(path);
+                        superseded.push(older.object.path.clone());
                     }
-                }
-                // A prefix this device cannot read yet may be the newest, and
-                // need writes the chosen snapshot covers: deleting this
-                // audience's parts waits, as the reload waits (§15,
-                // `waiting_retention_safe`). That prefix's record says why.
-                if catalog.newest_unknown {
-                    tracing::debug!(?audience, "unread snapshot prefix holds back log retention");
-                } else {
-                    coverage.insert(audience.clone(), prefix.writes);
                 }
             }
         }

@@ -491,13 +491,22 @@ version whose checks pass selects Ben's snapshot and needs write 4, and
 §15's missing-write rule skips it as having no part, so its changes are lost.
 
 - `refused_body_retention_counterexample`: Ana's version refuses Ben's body.
-  Rust's log retention judges by its loading candidates, which leave refused
-  bodies out, so it judges by Ana's snapshot. §15 as written does not fail
+  Rust's log retention judged by its loading candidates, which leave refused
+  bodies out, so it judged by Ana's snapshot. §15 as written does not fail
   here: a refused body's verified prefix still establishes history, and the
   current newest is chosen by prefix.
 - `missing_key_retention_counterexample`: the same through a snapshot whose
   key introduction Ana's device does not accept, which Rust's candidates
   also leave out.
+
+Rust's log retention now judges by the newest verified prefix that follows
+the audience's boundary, whatever this device found in its body or key
+(`snapshot_retention.rs`). `a_refused_body_still_decides_log_retention_by_its_prefix`
+and `a_snapshot_whose_key_is_not_accepted_still_decides_log_retention` run
+both counterexamples on this store: Ana keeps her writes 4 to 10, deletes 1
+to 3, and a device whose checks pass selects Ben's snapshot and reads write
+4 from her log. Deleting a device's own superseded snapshot still compares
+against the newest snapshot it can load.
 - `refused_prefix_retention_counterexample`: Ana's version refuses Ben's
   prefix signature. §15 says a refused prefix "establishes nothing and does
   not hold deletion", so retention judges by Ana's snapshot. This is the

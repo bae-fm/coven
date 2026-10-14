@@ -1,4 +1,5 @@
 use super::*;
+use coven_format::sealed_snapshot::SnapshotObjectPrefix;
 
 pub(super) async fn post(device: &Device, storage: &Arc<MemoryStorage>) {
     assert!(crate::DeviceLogSync::new(
@@ -485,4 +486,120 @@ async fn a_snapshot_waiting_for_its_authors_registration_holds_log_retention() {
         [false, false, false, true]
     );
     assert_eq!(snapshot_record(&a, &ben).await, None);
+}
+
+/// The store of storelog-data `RefusedRetention`: Ana's snapshot covers her
+/// writes 1 to 10 and Ben's 1 and 2; Ben's covers Ana 1 to 3 and his own 1 to
+/// 20, more writes, so his is the store's newest (§15). Ana has applied Ben's
+/// registration and her clock is past 30 storage days, so coverage alone
+/// decides deletion. Returns Ana, the path of Ben's snapshot and the paths of
+/// Ana's writes.
+async fn ana_ten_ben_twenty() -> (Arc<MemoryStorage>, Device, ObjectPath, Vec<ObjectPath>) {
+    let storage = snapshot_storage();
+    let mut a = notes_device(storage.clone(), 1).await;
+    a.create(key(1)).await;
+    let mut b = notes_device(storage.clone(), 2).await;
+    add_device(&mut b).await;
+    a.sync().await;
+    for n in 0..3 {
+        write_rows(&a, n, 1, 17, Audience::Store).await;
+    }
+    for write in a.db.test_queued_writes().await.unwrap() {
+        b.db.apply_downloaded(write.into()).await.unwrap();
+    }
+    for n in 100..120 {
+        write_rows(&b, n, 1, 17, Audience::Store).await;
+    }
+    for write in b.db.test_queued_writes().await.unwrap().into_iter().take(2) {
+        a.db.apply_downloaded(write.into()).await.unwrap();
+    }
+    upload(&b, &storage).await;
+    for n in 3..10 {
+        write_rows(&a, n, 1, 17, Audience::Store).await;
+    }
+    let writes = a.db.test_queued_writes().await.unwrap();
+    assert_eq!(writes.len(), 10);
+    upload(&a, &storage).await;
+    a.sync.write_snapshot(Audience::Store).await.unwrap();
+    let id = b.sync.write_snapshot(Audience::Store).await.unwrap();
+    a.clock.set(UNIX_EPOCH + Duration::from_secs(31 * 86400));
+    let ben = ObjectPath::snapshot(
+        store(1),
+        id.audience,
+        id.device,
+        NonZeroU64::new(id.number).unwrap(),
+    );
+    let writes = writes
+        .iter()
+        .map(|write| crate::write_seal::path(store(1), write.header.position))
+        .collect();
+    (storage, a, ben, writes)
+}
+
+/// Ana's writes 1 to 3 go and 4 to 10 stay: Ben's snapshot, the newest,
+/// covers her only through 3.
+const JUDGED_BY_BENS: [bool; 10] = [
+    false, false, false, true, true, true, true, true, true, true,
+];
+
+/// A version that loads Ben's snapshot selects it as the newest and reads
+/// Ana's write 4, which it does not cover, from her log.
+async fn a_passing_version_needs_write_4(storage: &Arc<MemoryStorage>, ben: &ObjectPath) {
+    let mut c = notes_device(storage.clone(), 3).await;
+    add_device(&mut c).await;
+    c.sync.reload_from_snapshots().await.unwrap();
+    assert_eq!(selected_snapshot(&mut c).await, *ben);
+    assert!(tables(&c).await.iter().any(|(id, _, _)| id == "3"));
+}
+
+/// `refused_body_retention_counterexample` (storelog-data
+/// `RefusedRetention`): Ana's version refuses Ben's body. His verified prefix
+/// still makes his snapshot the newest, so retention keeps her write 4,
+/// which it leaves out (`retention_ignores_bodies`).
+#[tokio::test]
+async fn a_refused_body_still_decides_log_retention_by_its_prefix() {
+    let (storage, mut a, ben, writes) = ana_ten_ben_twenty().await;
+    let readable = storage.read(&ben).await.unwrap();
+    storage
+        .corrupt_byte(&ben, readable.len() - 1)
+        .await
+        .unwrap();
+    // Ana's reload refuses Ben's body and loads her own snapshot.
+    a.sync.reload_from_snapshots().await.unwrap();
+    assert!(matches!(
+        snapshot_record(&a, &ben).await,
+        Some(crate::PendingReason::Refused(_))
+    ));
+    a.sync.run_retention().await.unwrap();
+    assert_eq!(retained(&storage, &writes).await, JUDGED_BY_BENS);
+    storage.delete(&ben).await.unwrap();
+    storage.create(&ben, &readable).await.unwrap();
+    a_passing_version_needs_write_4(&storage, &ben).await;
+}
+
+/// `missing_key_retention_counterexample` (storelog-data `RefusedRetention`):
+/// Ben's verified prefix names a key no entry Ana has applied introduces, so
+/// she cannot load it, and it still decides her log retention.
+#[tokio::test]
+async fn a_snapshot_whose_key_is_not_accepted_still_decides_log_retention() {
+    let (storage, mut a, ben, writes) = ana_ten_ben_twenty().await;
+    let readable = storage.read(&ben).await.unwrap();
+    let length = SnapshotObjectPrefix::length(&readable).unwrap();
+    let (mut prefix, _) = SnapshotObjectPrefix::decode_signed(&readable[..length + 64]).unwrap();
+    prefix.key = key(2);
+    let mut unsigned = prefix.encode().unwrap();
+    unsigned.extend_from_slice(&readable[length + 64..readable.len() - 64]);
+    // Every notes device belongs to member 1, Ben's member.
+    let unaccepted = super::signatures::signed_snapshot(&unsigned, &ben, &a.member, &a.member);
+    storage.delete(&ben).await.unwrap();
+    storage.create(&ben, &unaccepted).await.unwrap();
+    assert!(
+        !crate::key_introductions::needed(&a.log().await).contains_key(&(Audience::Store, key(2)))
+    );
+    a.sync.run_retention().await.unwrap();
+    assert_eq!(retained(&storage, &writes).await, JUDGED_BY_BENS);
+    assert_eq!(snapshot_record(&a, &ben).await, None);
+    storage.delete(&ben).await.unwrap();
+    storage.create(&ben, &readable).await.unwrap();
+    a_passing_version_needs_write_4(&storage, &ben).await;
 }
