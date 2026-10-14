@@ -872,7 +872,12 @@ the file's ranges under `F`.
     The ignored test runs production detection from the location's settings,
     or the plain S3 settings where detection must supply them, and prints
     every observation. A detected entry that fails the setup safety
-    check above prints as uncertified with each failed check. The candidate
+    check above prints as uncertified with each failed check. From suite
+    version 5 a named profile's own entry is the candidate, checked against
+    those observations; otherwise the detected settings are. Sequential probes
+    cannot show that a race needs copy publication, so detection alone would
+    race SeaweedFS's conditional completion instead of its copy. A profile
+    setup refuses prints that verdict separately. The candidate
     then runs the adapter's full live contracts, including setup, reads,
     ranges, resumption, replacement revisions and listing lag. Suite 4 records
     the bucket's versioning state and adds six concurrent checks: 2 and 8

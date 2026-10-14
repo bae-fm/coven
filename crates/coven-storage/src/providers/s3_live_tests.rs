@@ -10,8 +10,10 @@ use std::{
 };
 use tokio::{sync::Barrier, task::JoinSet};
 
-/// Version 4 records bucket versioning and requires overlapping conditional races.
-pub(super) const SUITE_VERSION: u32 = 4;
+/// Version 4 records bucket versioning and requires overlapping conditional
+/// races. Version 5 races a named profile's own publication, rather than the
+/// detected settings, which cannot see that a race needs copy publication.
+pub(super) const SUITE_VERSION: u32 = 5;
 
 #[path = "s3_race.rs"]
 mod races;
@@ -413,7 +415,26 @@ async fn s3_certification() {
         }
     };
     report(&detection, &settings.config);
-    let profile = detection.settings;
+    // A named profile is certified with its own settings, which the safety
+    // check below compares with the observations; otherwise the detected ones.
+    let StorageConfig::S3 {
+        endpoint,
+        profile: named,
+        ..
+    } = &settings.config
+    else {
+        unreachable!()
+    };
+    let profile = match named {
+        Some(S3Profile::Named(name)) => CataloguedProfile::named(*name).settings,
+        _ => detection.settings,
+    };
+    println!("candidate {profile:?}");
+    // Setup's verdict on a refused profile stays separate from certification.
+    match admit_setup(endpoint.as_ref(), named.as_ref()) {
+        Ok(()) => println!("setup_profile_check PASS"),
+        Err(error) => println!("setup_profile_check refused: {error}"),
+    }
     let mut passed = detection.check(&profile).is_ok();
     println!(
         "§4 native_behavior_detection {}",
