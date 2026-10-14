@@ -1019,8 +1019,8 @@ the file's ranges under `F`.
     with checksum mode; their profiles do not request one and rely on the
     complete-byte comparison required for a missing checksum (below).
   - `RequestTimeTooSkewed` means the device clock is off, not that access
-    was denied. Retry the request once with the server offset the SDK
-    learned from the response.
+    was denied. Retry the request once, signed with the server offset its
+    response's `Date` states.
   - If that retry still fails for clock skew, report `ClockSkew` with the
     provider's cause ([E5](api.md#e5-storage-and-sync)).
   - E.g. Ben's laptop signs with yesterday's date. The first reply supplies

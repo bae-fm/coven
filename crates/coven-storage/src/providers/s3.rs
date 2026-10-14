@@ -13,6 +13,8 @@ use coven_crypto::SecretText;
 use coven_foundation::{clock::ClockRef, id_source::IdSourceRef};
 use std::fmt;
 
+#[path = "s3_clock.rs"]
+mod clock;
 #[path = "s3_error.rs"]
 mod error;
 #[path = "s3_publication.rs"]
@@ -79,7 +81,6 @@ pub(crate) struct S3Storage {
     #[cfg(test)]
     single_request_limit: u64,
 }
-struct SigningClock(ClockRef);
 #[derive(Clone)]
 struct SigningCredentials(std::sync::Arc<std::sync::RwLock<aws_credential_types::Credentials>>);
 impl fmt::Debug for SigningCredentials {
@@ -101,25 +102,17 @@ impl aws_credential_types::provider::ProvideCredentials for SigningCredentials {
             .clone()))
     }
 }
-impl fmt::Debug for SigningClock {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("SigningClock")
-    }
-}
-impl aws_smithy_async::time::TimeSource for SigningClock {
-    fn now(&self) -> std::time::SystemTime {
-        self.0.now()
-    }
-}
 
 impl S3Storage {
     /// Construct at a composition root. No credential discovery, IAM calls, key
     /// creation or revocation occurs. The SDK computes protocol checksums itself.
+    /// Every request, a clock retry included, waits for `cooldown` (§4).
     pub(crate) fn new(
         config: StorageConfig,
         credentials: S3Credentials,
         clock: ClockRef,
         ids: IdSourceRef,
+        cooldown: std::sync::Arc<dyn Cooldown>,
     ) -> Result<Self, StorageError> {
         let StorageConfig::S3 {
             endpoint, profile, ..
@@ -133,7 +126,7 @@ impl S3Storage {
             StorageFailure::InvalidConfiguration
                 .with_source("an uncatalogued S3 endpoint needs settings detected at setup"),
         )?;
-        Self::with_settings(config, credentials, clock, ids, settings)
+        Self::with_settings(config, credentials, clock, ids, cooldown, settings)
     }
     /// Connect with explicit settings; detection probes candidates this way.
     fn with_settings(
@@ -141,6 +134,7 @@ impl S3Storage {
         credentials: S3Credentials,
         clock: ClockRef,
         ids: IdSourceRef,
+        cooldown: std::sync::Arc<dyn Cooldown>,
         settings: S3Settings,
     ) -> Result<Self, StorageError> {
         let StorageConfig::S3 {
@@ -162,14 +156,19 @@ impl S3Storage {
         let credentials = SigningCredentials(std::sync::Arc::new(std::sync::RwLock::new(
             aws_credentials(credentials),
         )));
+        let signing = clock::SigningClock::new(clock);
         let mut builder = aws_sdk_s3::config::Builder::new()
             .behavior_version_latest()
             .region(Region::new(region.clone()))
             .credentials_provider(credentials.clone())
             .identity_cache(aws_sdk_s3::config::IdentityCache::no_cache())
-            .time_source(SigningClock(clock))
+            .time_source(signing.clone())
+            // Coven corrects the signing clock itself, for both signers (§4).
+            .disable_clock_skew_correction(true)
+            .interceptor(clock::ClockSkew::new(signing, cooldown))
+            .retry_classifier(clock::ClockRetry)
+            .retry_config(clock::retry_config())
             .force_path_style(true)
-            .retry_config(aws_sdk_s3::config::retry::RetryConfig::disabled())
             .request_checksum_calculation(RequestChecksumCalculation::WhenRequired)
             .response_checksum_validation(ResponseChecksumValidation::WhenRequired);
         if settings.signing == S3Signing::GoogleHmac {

@@ -33,6 +33,7 @@ pub(super) fn profile_provider(url: &str, settings: S3Settings) -> StorageConnec
             },
             Arc::new(FixedClock::new(SystemTime::UNIX_EPOCH)),
             Arc::new(SequentialIds::new()),
+            std::sync::Arc::new(crate::NoCooldown),
             settings,
         )
         .unwrap(),
@@ -419,6 +420,7 @@ fn provider(url: &str) -> StorageConnection<S3Storage> {
         },
         Arc::new(FixedClock::new(SystemTime::UNIX_EPOCH)),
         Arc::new(SequentialIds::new()),
+        std::sync::Arc::new(crate::NoCooldown),
     )
     .unwrap();
     StorageConnection::from_provider(Arc::new(storage))

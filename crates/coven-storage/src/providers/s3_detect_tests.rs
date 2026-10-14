@@ -716,6 +716,7 @@ async fn listings_exclude_detection_probes_but_refuse_malformed_ones() {
             credentials(),
             Arc::new(SystemClock),
             Arc::new(UuidIds),
+            std::sync::Arc::new(crate::NoCooldown),
         )
         .unwrap(),
     ));

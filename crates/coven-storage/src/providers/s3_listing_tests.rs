@@ -39,6 +39,7 @@ async fn writer_discovery_uses_delimiters_and_each_native_page() {
             },
             Arc::new(FixedClock::new(std::time::UNIX_EPOCH)),
             Arc::new(SequentialIds::new()),
+            std::sync::Arc::new(crate::NoCooldown),
         )
         .unwrap();
         assert_eq!(

@@ -212,6 +212,17 @@ pub(crate) const POLICY: Policy = Policy {
             "S3Storage",
             "with_settings",
         ),
+        // The S3 client's signing clock and its refusal handling (§4).
+        (
+            "crates/coven-storage/src/providers/s3_clock.rs",
+            "SigningClock",
+            "new",
+        ),
+        (
+            "crates/coven-storage/src/providers/s3_clock.rs",
+            "ClockSkew",
+            "new",
+        ),
         // Detection connects one candidate per signer, then its probe runner.
         (
             "crates/coven-storage/src/providers/s3_detect.rs",

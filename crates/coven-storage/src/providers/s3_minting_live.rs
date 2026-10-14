@@ -136,6 +136,7 @@ async fn lifecycle(
         key.credentials.clone(),
         Arc::new(SystemClock),
         Arc::new(UuidIds),
+        std::sync::Arc::new(crate::NoCooldown),
     )?;
     let elsewhere = ObjectPath::device_log(other, DeviceId(93), NonZeroU64::MIN);
     refused(

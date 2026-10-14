@@ -695,6 +695,7 @@ async fn minted_iam_keys_can_read_bucket_versioning_without_listing_other_stores
             minted.credentials,
             fake.clock.clone(),
             Arc::new(UuidIds),
+            std::sync::Arc::new(crate::NoCooldown),
         )
         .unwrap();
         assert_eq!(

@@ -46,6 +46,7 @@ pub(crate) async fn detect(
             credentials.clone(),
             clock.clone(),
             ids.clone(),
+            std::sync::Arc::new(crate::NoCooldown),
             S3Settings { signing, ..base },
         )?;
         let namespace = namespace(&candidate, store, run);

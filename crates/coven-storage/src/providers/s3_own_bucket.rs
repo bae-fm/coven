@@ -48,6 +48,7 @@ pub(crate) async fn check_new_store(
             credentials.clone(),
             clock.clone(),
             ids.clone(),
+            std::sync::Arc::new(crate::NoCooldown),
             settings,
         )?;
         match storage.holds_only(store).await {

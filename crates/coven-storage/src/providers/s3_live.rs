@@ -119,6 +119,7 @@ impl LiveS3 {
                 credentials,
                 Arc::new(SystemClock),
                 Arc::new(UuidIds),
+                std::sync::Arc::new(crate::NoCooldown),
                 settings,
             ),
             None => S3Storage::new(
@@ -126,6 +127,7 @@ impl LiveS3 {
                 credentials,
                 Arc::new(SystemClock),
                 Arc::new(UuidIds),
+                std::sync::Arc::new(crate::NoCooldown),
             ),
         }
         .expect("live S3 connection");

@@ -229,6 +229,7 @@ async fn r2_endpoint_ignores_unscoped_checksums_on_status_and_reads() {
         },
         Arc::new(FixedClock::new(SystemTime::UNIX_EPOCH)),
         Arc::new(SequentialIds::new()),
+        std::sync::Arc::new(crate::NoCooldown),
     )
     .unwrap();
     storage.client = Client::from_conf(
@@ -317,6 +318,7 @@ fn an_uncatalogued_endpoint_without_settings_connects_only_after_detection() {
         },
         Arc::new(FixedClock::new(SystemTime::UNIX_EPOCH)),
         Arc::new(SequentialIds::new()),
+        std::sync::Arc::new(crate::NoCooldown),
     )
     .err()
     .unwrap();
@@ -345,6 +347,7 @@ async fn explicit_gcs_name_drives_the_adapter_at_an_uncatalogued_endpoint() {
             },
             Arc::new(FixedClock::new(SystemTime::UNIX_EPOCH)),
             Arc::new(SequentialIds::new()),
+            std::sync::Arc::new(crate::NoCooldown),
         )
         .unwrap(),
     ));

@@ -47,6 +47,9 @@ pub enum StorageFailure {
     /// store-log entry in its folder: another installation of the store
     /// already created it at this location (§10). Restore or join it instead.
     StoreExists,
+    /// S3 rejected the device clock after one retry with the offset its
+    /// response stated (§4).
+    ClockSkew,
     /// The S3 service's member keys reach a whole bucket, so a store there
     /// needs a bucket of its own (§4).
     OwnBucketRequired {

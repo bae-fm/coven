@@ -142,6 +142,7 @@ impl AccessKeyAdmin for ProfileKeyAdmin {
             key.clone(),
             self.clock.clone(),
             self.ids.clone(),
+            std::sync::Arc::new(crate::NoCooldown),
         )?;
         let run = self.ids.new_id();
         let pause = Duration::from_secs(1);
