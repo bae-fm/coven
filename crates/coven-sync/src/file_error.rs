@@ -1,6 +1,6 @@
 //! Typed file read and upload failures shared with the application facade.
 
-use coven_database::{DbError, FileLocation, LocalFileError};
+use coven_database::{DbError, LocalFileError};
 use coven_foundation::{
     files::{FileError as DiskError, StoreLockError},
     id_source::DeviceId,
@@ -17,18 +17,18 @@ pub enum FileReadError {
     /// No storage capability is connected.
     #[error("no storage connected")]
     NoStorage,
-    /// Only the named device holds the file.
-    #[error("file {id} is on device {device:?}")]
-    OnOtherDevice {
-        /// The row's file id.
+    /// Storage confirms the object is absent; its uploader still holds it.
+    #[error("file {id} is still uploading on device {device:?}")]
+    Uploading {
+        /// The file's fixed object id.
         id: String,
-        /// The device holding the bytes.
+        /// The device responsible for uploading it.
         device: DeviceId,
     },
     /// A recorded original is absent.
     #[error("file {id} is missing at {}", path.display())]
     UserFileMissing {
-        /// The row's file id.
+        /// The file's fixed object id.
         id: String,
         /// Recorded original path.
         path: PathBuf,
@@ -36,7 +36,7 @@ pub enum FileReadError {
     /// An original changed after attachment.
     #[error("file {id} changed at {}", path.display())]
     UserFileChanged {
-        /// The row's file id.
+        /// The file's fixed object id.
         id: String,
         /// Recorded original path.
         path: PathBuf,
@@ -44,13 +44,13 @@ pub enum FileReadError {
     /// Authentication, a chunk hash or the whole-file hash failed.
     #[error("file {id} failed its content check")]
     Integrity {
-        /// The row's file id.
+        /// The file's fixed object id.
         id: String,
     },
     /// The requested range is outside the file.
     #[error("file {id} range {offset}..{end} exceeds {size}")]
     RangeOutOfBounds {
-        /// The row's file id.
+        /// The file's fixed object id.
         id: String,
         /// Requested start.
         offset: u64,
@@ -75,14 +75,6 @@ pub enum FileReadError {
 impl From<LocalFileError> for FileReadError {
     fn from(error: LocalFileError) -> Self {
         match error {
-            LocalFileError::Unavailable {
-                location: FileLocation::Uploaded,
-                ..
-            } => Self::NoStorage,
-            LocalFileError::Unavailable {
-                id,
-                location: FileLocation::OnDevice(device),
-            } => Self::OnOtherDevice { id, device },
             LocalFileError::UserFileMissing { id, path } => Self::UserFileMissing { id, path },
             LocalFileError::UserFileChanged { id, path } => Self::UserFileChanged { id, path },
             LocalFileError::Integrity { id } => Self::Integrity { id },
@@ -114,8 +106,6 @@ pub enum RecordedUploadFailure {
     File,
     /// Local database or filesystem failed.
     Local,
-    /// File-key creation failed.
-    Crypto,
     /// The provider's classified failure.
     Storage(StorageFailure),
 }
@@ -130,9 +120,6 @@ pub enum UploadFailure {
     /// The provider failed.
     #[error(transparent)]
     Storage(#[from] StorageError),
-    /// Creating a file key failed.
-    #[error(transparent)]
-    Crypto(#[from] coven_crypto::CryptoError),
     /// A previous process recorded this failure category.
     #[error("recorded upload failure: {0:?}")]
     Recorded(RecordedUploadFailure),
@@ -148,7 +135,6 @@ impl UploadFailure {
                 RecordedUploadFailure::Storage(error.failure())
             }
             Self::File(_) => RecordedUploadFailure::File,
-            Self::Crypto(_) => RecordedUploadFailure::Crypto,
             Self::Recorded(recorded) => recorded.clone(),
         }
     }

@@ -50,7 +50,10 @@ pub struct Files {
     inner: Arc<FilesInner>,
     worker: Arc<FileWorker>,
 }
-type FileReadLocks = BTreeMap<(String, String), std::sync::Weak<tokio::sync::Mutex<()>>>;
+type FileReadLocks = BTreeMap<
+    (String, coven_foundation::id_source::FileId),
+    std::sync::Weak<tokio::sync::Mutex<()>>,
+>;
 struct FilesInner {
     database: FileDatabase,
     directory: StoreDir,

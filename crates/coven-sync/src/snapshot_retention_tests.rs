@@ -241,14 +241,8 @@ async fn a_file_named_only_by_a_retained_log_write_stays_until_that_log_goes() {
     .await
     .unwrap();
     files.retry_uploads_now().await.unwrap();
-    let uploaded =
-        a.db.file_ref("files", "one")
-            .await
-            .unwrap()
-            .uploaded()
-            .unwrap()
-            .unwrap();
-    let path = ObjectPath::file(store(1), uploaded.device, uploaded.id);
+    let uploaded = a.db.file_ref("files", "one").await.unwrap();
+    let path = ObjectPath::file(store(1), uploaded.uploader(), uploaded.id());
     a.db.write(|sql| {
         sql.execute("DELETE FROM files", [])?;
         Ok(())

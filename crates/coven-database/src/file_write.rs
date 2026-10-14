@@ -12,7 +12,7 @@ use coven_crypto::ContentHash;
 use coven_format::value::Value;
 use coven_foundation::{
     files::{FileName, StoreDir},
-    id_source::DeviceId,
+    id_source::{DeviceId, IdSource},
 };
 use std::{
     cell::RefCell,
@@ -42,6 +42,7 @@ pub(crate) struct FileWrite<'a> {
     directory: &'a StoreDir,
     schema: &'a WriteSchema,
     device: DeviceId,
+    ids: &'a dyn IdSource,
     staging: &'a std::sync::Mutex<BTreeSet<FileName>>,
     staged: Vec<StagedFile>,
     originals: RefCell<Vec<PreparedUserFile>>,
@@ -56,6 +57,7 @@ impl<'a> FileWrite<'a> {
         directory: &'a StoreDir,
         schema: &'a WriteSchema,
         device: DeviceId,
+        ids: &'a dyn IdSource,
         staging: &'a std::sync::Mutex<BTreeSet<FileName>>,
         staged: Vec<StagedFile>,
     ) -> Self {
@@ -64,6 +66,7 @@ impl<'a> FileWrite<'a> {
             directory,
             schema,
             device,
+            ids,
             staging,
             staged,
             originals: RefCell::new(Vec::new()),
@@ -137,6 +140,7 @@ impl<'a> FileWrite<'a> {
                         &key,
                         Some((staged.hashes.content, staged.size)),
                         self.device,
+                        self.ids,
                     )?;
                     let Some(attached_values) = crate::write_rows::read_values(db, table, &key.1)?
                     else {
@@ -208,12 +212,16 @@ impl<'a> FileWrite<'a> {
             &key,
             Some((prepared.hashes.content, prepared.observed.size())),
             self.device,
+            self.ids,
         )?;
-        let mut attached_values = values.clone();
-        attached_values.insert(
-            file.hash.clone(),
-            Value::Blob(prepared.hashes.content.as_bytes().to_vec()),
-        );
+        let Some(attached_values) =
+            crate::write_rows::read_values(db, self.schema.table(&key.0), &key.1)?
+        else {
+            return Err(DbError::FileRowRemoved {
+                table: key.0.clone(),
+                key: file_row::key(&key)?,
+            });
+        };
         db.internal_execute(
             "INSERT INTO _coven_user_files
                  (table_name,key,column_name,identity,path,size,modified_at)
@@ -259,7 +267,7 @@ impl<'a> FileWrite<'a> {
             });
         }
         let (key, _) = file_row::lookup(db, self.schema, table, &key)?;
-        file_row::set(db, self.schema, &key, None, self.device)?;
+        file_row::set(db, self.schema, &key, None, self.device, self.ids)?;
         self.forget_original(&key, &file.id)?;
         Ok(())
     }
@@ -277,7 +285,7 @@ impl<'a> FileWrite<'a> {
                 crate::write_rows::read_values(db, self.schema.table(&key.0), &key.1)?
             {
                 if values[&file.id] == Value::Null && values[&file.hash] != Value::Null {
-                    file_row::set(db, self.schema, key, None, self.device)?;
+                    file_row::set(db, self.schema, key, None, self.device, self.ids)?;
                 }
             }
         }
@@ -417,13 +425,6 @@ impl<'a> FileWrite<'a> {
                     .map(|(column, cell)| (column.clone(), cell.value.value.clone()))
                     .collect();
                 if let Some(identity) = file_row::identity(file, &values)? {
-                    if file.provenance == Provenance::AppProvided
-                        && crate::file_location::StoredLocation::decode(&values[&file.location])?
-                            .public()
-                            != crate::FileLocation::OnDevice(self.device)
-                    {
-                        continue;
-                    }
                     retained.insert(identity);
                 }
             }
@@ -458,60 +459,6 @@ impl<'a> FileWrite<'a> {
             self.device,
             now,
         )
-    }
-
-    pub(crate) fn mark_uploaded(
-        &self,
-        reference: &crate::FileRef,
-        location: &coven_crypto::SecretText,
-    ) -> Result<(), DbError> {
-        let location = location.as_str();
-        crate::file_ref::validate(self.database, self.schema, reference)?;
-        let (table, file) = file_row::declaration(self.schema, reference.table())?;
-        let (key, mut expected) = file_row::lookup(
-            self.database,
-            self.schema,
-            reference.table(),
-            reference.key(),
-        )?;
-        expected.insert(file.location.clone(), Value::Text(location.to_owned()));
-        let mut parameters = vec![rusqlite::types::Value::Text(location.to_owned())];
-        parameters.extend(reference.key().0.clone());
-        self.database.file_execute(
-            &format!(
-                "UPDATE main.{} SET {}=? WHERE {}",
-                crate::sql::identifier(&table.name),
-                crate::sql::identifier(&file.location),
-                crate::write_rows::key_columns(table)
-                    .iter()
-                    .map(|c| format!("{}=?", crate::sql::identifier(&c.name)))
-                    .collect::<Vec<_>>()
-                    .join(" AND ")
-            ),
-            rusqlite::params_from_iter(parameters),
-        )?;
-        let actual =
-            crate::write_rows::read_values(self.database, table, &key.1)?.ok_or_else(|| {
-                DbError::FileRowRemoved {
-                    table: reference.table().into(),
-                    key: reference.key().clone(),
-                }
-            })?;
-        if file
-            .columns()
-            .iter()
-            .any(|column| actual[*column] != expected[*column])
-        {
-            return Err(DbError::FileAttachmentChanged {
-                table: reference.table().into(),
-                key: reference.key().clone(),
-            });
-        }
-        self.database.internal_execute(
-            "DELETE FROM _coven_file_chunks WHERE table_name=?1 AND key=?2 AND column_name=?3",
-            (&key.0, &key.1, reference.column()),
-        )?;
-        Ok(())
     }
 
     pub(crate) fn before_commit(&self) -> Result<(), DbError> {

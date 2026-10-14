@@ -437,6 +437,8 @@ pub enum DbError {
     FileAbsent { table: String, key: RowKey },
     /// Reading or keeping file bytes failed (E3).
     Disk(DiskError),
+    /// The attaching write could not create its file's random key (§16.1).
+    FileKey(CryptoError),
     /// Retaining the store while staging file bytes failed.
     Lock(StoreLockError),
     /// Removing owned bytes or their pending records failed. A committed write

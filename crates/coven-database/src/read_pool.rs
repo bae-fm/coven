@@ -79,7 +79,7 @@ impl ReaderLease<'_> {
         directory: &coven_foundation::files::StoreDir,
         device: coven_foundation::id_source::DeviceId,
         reference: &crate::FileRef,
-    ) -> Result<crate::LocalFileStream, crate::LocalFileError> {
+    ) -> Result<Option<crate::LocalFileStream>, crate::LocalFileError> {
         self.read_snapshot(|sql| sql.open_local_file(schema, directory, device, reference))
             .0
     }

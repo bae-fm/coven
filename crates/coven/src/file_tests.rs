@@ -375,7 +375,7 @@ async fn a_restored_install_resets_as_a_new_device_before_its_first_write() {
         .file_ref("thumbnails", thumbnail.as_str())
         .await
         .unwrap();
-    assert_ne!(old.location(), new.location());
+    assert_ne!((old.uploader(), old.id()), (new.uploader(), new.id()));
     assert_eq!(handle.read_file(&new).await.unwrap(), b"new");
     handle.close().await.unwrap();
     let handle = builder(&restored, layout.clone(), ids)
@@ -387,9 +387,8 @@ async fn a_restored_install_resets_as_a_new_device_before_its_first_write() {
         handle
             .file_ref("thumbnails", thumbnail.as_str())
             .await
-            .unwrap()
-            .location(),
-        new.location()
+            .unwrap(),
+        new
     );
     handle.close().await.unwrap();
 }
@@ -492,7 +491,13 @@ async fn uploaded_files_pins_and_read_only_ranges_use_the_composed_owner() {
         .file_ref("thumbnails", thumbnail.as_str())
         .await
         .unwrap();
-    assert_eq!(file.location(), FileLocation::Uploaded);
+    assert!(handle
+        .subscribe_uploads()
+        .next()
+        .await
+        .unwrap()
+        .files
+        .is_empty());
     let mut pins = handle.subscribe_rows_pinned(
         "thumbnails",
         vec![thumbnail.as_str().into(), "absent".into()],

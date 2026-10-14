@@ -463,7 +463,11 @@ async fn identical_app_files_have_distinct_stored_ciphertext() {
     }
     for id in ["first", "second"] {
         let file = handle.file_ref("files", id).await.unwrap();
-        assert_eq!(file.location(), FileLocation::Uploaded);
+        // Each file is stored at the path its attaching write fixed.
+        assert!(objects
+            .iter()
+            .any(|object| object.path
+                == ObjectPath::file(f.directory.id(), file.uploader(), file.id())));
         handle.evict_file(&file).await.unwrap();
         assert_eq!(handle.read_file(&file).await.unwrap(), content);
     }

@@ -1,17 +1,19 @@
 //! An immutable reference to the file observed in one committed row version.
 
 use crate::{
-    file_location::StoredLocation,
-    file_row,
+    file_row::{self, FixedReference},
     merge_store::MergeStore,
     sqlite::DatabaseConnection,
     write_rows::{row_id, AppView},
     write_schema::WriteSchema,
-    DbError, FileLocation, RowKey,
+    DbError, RowKey,
 };
 use coven_crypto::{ContentHash, ContentHasher};
 use coven_format::value::Value;
-use coven_foundation::files::{FileReader, ObservationError};
+use coven_foundation::{
+    files::{FileReader, ObservationError},
+    id_source::{DeviceId, FileId},
+};
 use coven_merge::{Audience, RowId, WriteId};
 
 #[path = "local_file.rs"]
@@ -26,7 +28,7 @@ struct FileVersion {
     id: Value,
     size: u64,
     hash: ContentHash,
-    location: StoredLocation,
+    location: FixedReference,
 }
 
 /// A row's file at the time it was read. Facts and version remain private (§16.3).
@@ -57,22 +59,29 @@ impl FileRef {
         reader.scan(|bytes| hash.update(bytes))?;
         Ok(hash.finish() == self.content_hash())
     }
-    /// The row's file id, for diagnostics.
-    pub fn id(&self) -> String {
-        match &self.version.id {
-            Value::Text(id) => id.clone(),
-            value => format!("{:?}", crate::write_encoding::sql_value(value)),
-        }
+    /// The random object id fixed by the attaching write (§16.1).
+    pub fn id(&self) -> FileId {
+        self.version.location.id
     }
-    /// The uploaded object's identity and key carried inside the row.
-    /// Returns None for a device-local file; this never consults key custody.
-    pub fn uploaded(&self) -> Result<Option<coven_format::file_reference::FileReference>, DbError> {
-        let StoredLocation::Uploaded(text) = &self.version.location else {
-            return Ok(None);
-        };
-        Ok(Some(coven_format::file_reference::FileReference::decode(
-            text.as_str(),
-        )?))
+    /// The device that attached the file and is responsible for uploading it.
+    pub fn uploader(&self) -> DeviceId {
+        self.version.location.uploader
+    }
+    /// The fixed uploader, object id and key carried inside the row, the same
+    /// before and after upload. This never consults key custody.
+    pub fn reference(&self) -> Result<coven_format::file_reference::FileReference, DbError> {
+        self.version.location.reference()
+    }
+    /// The local byte identity, encoded as `file_row::identity` encodes a row's.
+    pub(crate) fn identity(&self) -> Result<Vec<u8>, DbError> {
+        Ok(file_row::identity_values(
+            &self.version.id,
+            &Value::Integer(
+                i64::try_from(self.version.size).map_err(|_| DbError::DamagedDatabase)?,
+            ),
+            &Value::Blob(self.version.hash.as_bytes().to_vec()),
+            &self.version.location,
+        )?)
     }
     /// Encode captured facts for a device-local journal. Contains the uploaded
     /// file key; callers must keep these bytes private, like the database itself.
@@ -139,9 +148,13 @@ impl FileRef {
                         .try_into()
                         .map_err(|_| DbError::DamagedDatabase)?,
                 ),
-                location: StoredLocation::decode(location)?,
+                location: FixedReference::decode(location)?,
             },
         })
+    }
+    /// The row's table and encoded key, as local file tables record them.
+    pub(crate) fn app_key(&self) -> crate::write_rows::AppKey {
+        (self.row.table.clone(), self.row.key.clone())
     }
     /// The declared table.
     pub fn table(&self) -> &str {
@@ -162,10 +175,6 @@ impl FileRef {
     /// The row's audience, whose encrypted writes carry the file's key.
     pub fn audience(&self) -> Audience {
         self.row.audience.clone()
-    }
-    /// Where the file was when this reference was read.
-    pub fn location(&self) -> FileLocation {
-        self.version.location.public()
     }
 }
 
@@ -217,7 +226,7 @@ fn current(
         ),
         _ => return Err(DbError::DamagedDatabase),
     };
-    let location = StoredLocation::decode(&values[&file.location])?;
+    let location = FixedReference::decode(&values[&file.location])?;
     if values[&file.id] == Value::Null {
         return Err(DbError::DamagedDatabase);
     }

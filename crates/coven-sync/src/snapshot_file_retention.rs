@@ -3,54 +3,31 @@
 use super::{catalog::failure, StoreLogSync};
 use crate::{replay_cache::ReplayCache, SyncError};
 use coven_storage::{ObjectPath, ObjectPrefix};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 impl StoreLogSync {
     pub(super) async fn retain_uploaded_files(&self) -> Result<(), SyncError> {
         let storage = self.storage.as_deref().ok_or(SyncError::NoStorage)?;
-        // List first: publication fixes an identity in the local queue before
-        // storage can list it, and atomically replaces that queue protection
-        // with a waiting write. A later upload is outside this deletion set.
+        // List first: the attaching write fixes a file's path in its row and
+        // this device's queue in one transaction, before storage can list it.
+        // A later upload is outside this deletion set.
         let objects = storage
             .list(&ObjectPrefix::files(self.directory.id()))
             .await?;
-        let local = self.database.local_store_log().await?;
-        let readable = self.snapshot_audiences(&local.log)?;
-        let protected = self.database.retained_files().await?;
-        if objects.is_empty() && !protected.uploads.iter().any(|upload| upload.unused) {
+        if objects.is_empty() {
             return Ok(());
         }
-        let mut references: BTreeSet<_> = protected
+        let local = self.database.local_store_log().await?;
+        let readable = self.snapshot_audiences(&local.log)?;
+        let mut references: BTreeSet<_> = self
+            .database
+            .retained_files()
+            .await?
             .references
             .into_iter()
             .map(|(device, id)| ObjectPath::file(self.directory.id(), device, id))
             .collect();
-        for upload in &protected.uploads {
-            if upload.unused {
-                continue;
-            }
-            if let Some(identity) = &upload.identity {
-                let (id, _) = crate::files::file_upload::decode_identity(identity.as_bytes())?;
-                let coven_database::FileLocation::OnDevice(device) = upload.file.location() else {
-                    return Err(coven_database::DbError::DamagedDatabase.into());
-                };
-                references.insert(ObjectPath::file(self.directory.id(), device, id));
-            }
-        }
-        let mut paths: BTreeSet<_> = objects.into_iter().map(|object| object.path).collect();
-        let mut unused = BTreeMap::new();
-        for upload in protected.uploads.into_iter().filter(|upload| upload.unused) {
-            let identity = upload
-                .identity
-                .ok_or(coven_database::DbError::DamagedDatabase)?;
-            let (id, _) = crate::files::file_upload::decode_identity(identity.as_bytes())?;
-            let coven_database::FileLocation::OnDevice(device) = upload.file.location() else {
-                return Err(coven_database::DbError::DamagedDatabase.into());
-            };
-            let path = ObjectPath::file(self.directory.id(), device, id);
-            paths.insert(path.clone());
-            unused.insert(path, upload.id);
-        }
+        let paths: BTreeSet<_> = objects.into_iter().map(|object| object.path).collect();
         let mut eligible = BTreeSet::new();
         for path in paths {
             let device = path
@@ -180,9 +157,6 @@ impl StoreLogSync {
             if !references.contains(&path) {
                 // Idempotent deletion also confirms absence after a lost reply.
                 storage.delete(&path).await?;
-                if let Some(id) = unused.get(&path) {
-                    self.database.retire_unused_file(*id).await?;
-                }
             }
         }
         Ok(())

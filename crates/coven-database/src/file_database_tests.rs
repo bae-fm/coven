@@ -95,31 +95,119 @@ fn cancelled_cache_reservations_drop_outside_a_runtime_and_record_cleanup_failur
 }
 
 #[tokio::test]
-async fn an_uploading_write_refuses_a_trigger_that_removes_its_file() {
+async fn a_where_column_trigger_cannot_remove_the_row_that_attaches_its_file() {
     let store = TestStore::new();
     let mut declarations = tables(Provenance::AppProvided);
-    declarations[0] = declarations[0].clone().shared_trigger("remove_uploaded");
-    let database=store.schema(declarations,"CREATE TABLE files(id TEXT NOT NULL PRIMARY KEY,size INTEGER,hash BLOB,location TEXT,title TEXT); CREATE TRIGGER remove_uploaded AFTER UPDATE OF location ON files WHEN NOT coven_applying() AND NEW.location LIKE 'file %' BEGIN DELETE FROM files WHERE id=NEW.id; END;").await.unwrap();
-    attach(&database, b"source".to_vec(), true).await.unwrap();
-    let owner = FileDatabase::new(database.clone());
-    let file = database.file_ref("files", "7").await.unwrap();
-    let id = owner.uploads().await.unwrap()[0].id;
-    owner
-        .record_upload_identity(id, SecretBytes::new(b"opaque identity".to_vec()))
-        .await
-        .unwrap();
-    owner.record_stored(id).await.unwrap();
-    let location = SecretText::new(format!(
-        "file 1 00000000-0000-4000-8000-000000000123 {}",
-        "11".repeat(32)
-    ));
+    declarations[0] = declarations[0].clone().shared_trigger("remove_attached");
+    let database=store.schema(declarations,"CREATE TABLE files(id TEXT NOT NULL PRIMARY KEY,size INTEGER,hash BLOB,location TEXT,title TEXT); CREATE TRIGGER remove_attached AFTER UPDATE OF location ON files WHEN NOT coven_applying() AND NEW.location LIKE 'file %' BEGIN DELETE FROM files WHERE id=NEW.id; END;").await.unwrap();
+    // The attaching write fixes the reference, so it is the only write that
+    // sets the where-column; a trigger removing the row refuses that write.
     assert!(matches!(
-        owner.finish_upload(id, &file, location).await,
+        attach(&database, b"source".to_vec(), true).await,
         Err(DbError::FileRowRemoved { .. })
     ));
-    assert_eq!(database.file_ref("files", "7").await.unwrap(), file);
-    assert!(owner.uploads().await.unwrap()[0].stored);
+    assert!(matches!(
+        database.file_ref("files", "7").await,
+        Err(DbError::FileAbsent { .. })
+    ));
+    assert!(FileDatabase::new(database.clone())
+        .uploads()
+        .await
+        .unwrap()
+        .is_empty());
     database.close().await.unwrap();
+}
+
+/// The fixed reference before and after: the where-column names the path and
+/// key the attaching write chose, and completion leaves every row alone.
+fn fixed(
+    file: &FileRef,
+) -> (
+    coven_foundation::id_source::DeviceId,
+    coven_foundation::id_source::FileId,
+) {
+    (file.uploader(), file.id())
+}
+
+#[tokio::test]
+async fn completion_retires_the_queue_without_writing_whatever_the_row_became() {
+    use crate::file_write::tests::{local_count, owned_paths, SCHEMA};
+    // Each case changes the row after attaching A, then storage confirms A.
+    for change in ["none", "retarget", "delete", "edit"] {
+        let store = TestStore::new();
+        let db = store
+            .schema(tables(Provenance::AppProvided), SCHEMA)
+            .await
+            .unwrap();
+        let owner = FileDatabase::new(db.clone());
+        attach(&db, b"first".to_vec(), true).await.unwrap();
+        let first = db.file_ref("files", "7").await.unwrap();
+        let first_id = owner.uploads().await.unwrap()[0].id;
+        assert_eq!(
+            first.reference().unwrap().device,
+            first.uploader(),
+            "the where-column carries the fixed reference from the start"
+        );
+        assert!(owner.open_local(&first).await.unwrap().is_some());
+        match change {
+            "retarget" => attach(&db, b"second".to_vec(), false).await.unwrap(),
+            "delete" => db
+                .write(|sql| {
+                    sql.execute("DELETE FROM files", [])?;
+                    Ok(())
+                })
+                .await
+                .unwrap(),
+            "edit" => db
+                .write(|sql| {
+                    sql.execute("UPDATE files SET title='renamed'", [])?;
+                    Ok(())
+                })
+                .await
+                .unwrap(),
+            _ => {}
+        }
+        let current = db.file_ref("files", "7").await.ok();
+        let writes = db.test_queued_writes().await.unwrap().len();
+        owner.complete_upload(first_id).await.unwrap();
+        assert_eq!(db.file_ref("files", "7").await.ok(), current);
+        assert_eq!(db.test_queued_writes().await.unwrap().len(), writes);
+        let queue = owner.uploads().await.unwrap();
+        match change {
+            "retarget" => {
+                let second = current.clone().unwrap();
+                assert_ne!(fixed(&second), fixed(&first));
+                assert_eq!(queue.len(), 1);
+                assert_eq!(queue[0].file, second);
+                // The newer attachment keeps its own copy and hashes.
+                assert!(owner.open_local(&second).await.unwrap().is_some());
+                assert_eq!(local_count(&db, "_coven_device_files"), 1);
+                assert_eq!(owned_paths(&store).len(), 1);
+            }
+            _ => {
+                assert!(queue.is_empty());
+                assert_eq!(local_count(&db, "_coven_device_files"), 0);
+                assert_eq!(local_count(&db, "_coven_file_chunks"), 0);
+                assert_eq!(local_count(&db, "_coven_file_upload_chunks"), 0);
+                assert!(owned_paths(&store).is_empty());
+            }
+        }
+        if change == "none" || change == "edit" {
+            // Uploaded: the same FileRef stays valid and now reads remotely.
+            let after = current.unwrap();
+            assert_eq!(fixed(&after), fixed(&first));
+            if change == "none" {
+                assert_eq!(after, first);
+            }
+            owner.validate(&after).await.unwrap();
+            assert!(owner.open_local(&after).await.unwrap().is_none());
+        }
+        assert!(matches!(
+            owner.complete_upload(first_id).await,
+            Err(DbError::DamagedDatabase)
+        ));
+        db.close().await.unwrap();
+    }
 }
 
 #[tokio::test]
@@ -153,26 +241,9 @@ async fn chunk_hashes_belong_to_the_queued_version_and_retire_with_it() {
                 }
             }
             assert_eq!(local_count(&db, "_coven_file_chunks"), 2);
-            let file = db.file_ref("files", "7").await.unwrap();
             let owner = FileDatabase::new(db.clone());
             let id = owner.uploads().await.unwrap()[0].id;
             assert_eq!(local_count(&db, "_coven_file_upload_chunks"), 2);
-            owner
-                .record_upload_identity(id, SecretBytes::new(b"identity".to_vec()))
-                .await
-                .unwrap();
-            assert!(owner
-                .record_upload_identity(id, SecretBytes::new(b"different".to_vec()))
-                .await
-                .is_err());
-            assert_eq!(
-                owner.uploads().await.unwrap()[0]
-                    .identity
-                    .as_ref()
-                    .unwrap()
-                    .as_bytes(),
-                b"identity"
-            );
             if remove {
                 db.write(|sql| {
                     sql.execute("DELETE FROM files", [])?;
@@ -190,19 +261,7 @@ async fn chunk_hashes_belong_to_the_queued_version_and_retire_with_it() {
                     expected.finish()
                 );
             }
-            owner.record_stored(id).await.unwrap();
-            let location = SecretText::new(format!(
-                "file 1 00000000-0000-4000-8000-000000000123 {}",
-                "11".repeat(32)
-            ));
-            assert_eq!(
-                owner.finish_upload(id, &file, location).await.unwrap(),
-                !remove
-            );
-            if remove {
-                assert_eq!(local_count(&db, "_coven_file_upload_chunks"), 2);
-                db.retire_unused_file(id).await.unwrap();
-            }
+            owner.complete_upload(id).await.unwrap();
             assert_eq!(local_count(&db, "_coven_file_chunks"), 0);
             assert_eq!(local_count(&db, "_coven_file_upload_chunks"), 0);
             assert!(owner.uploads().await.unwrap().is_empty());
@@ -265,10 +324,7 @@ async fn attachment_and_upload_queue_commit_or_roll_back_together() {
             assert_eq!(std::fs::read(original.path()).unwrap(), b"source");
         }
         let reference = database.file_ref("files", "7").await.unwrap();
-        assert!(matches!(
-            reference.location(),
-            crate::FileLocation::OnDevice(_)
-        ));
+        assert!(owner.open_local(&reference).await.unwrap().is_some());
         let queued = owner.uploads().await.unwrap();
         assert_eq!(queued.len(), 1);
         assert_eq!(queued[0].file, reference);

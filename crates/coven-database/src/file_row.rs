@@ -8,9 +8,48 @@ use crate::{
     write_schema::WriteSchema,
     DbError, FileDecl, RowKey,
 };
-use coven_crypto::ContentHash;
-use coven_format::value::Value;
-use coven_foundation::id_source::DeviceId;
+use coven_crypto::{ContentHash, FileKey, SecretText};
+use coven_format::{file_reference::FileReference, value::Value};
+use coven_foundation::id_source::{DeviceId, FileId, IdSource};
+
+/// The where-column's fixed uploader, object id and key (D12). Equality compares
+/// the whole text, so a changed id or key invalidates an earlier reference.
+/// Diagnostics never expose the key.
+#[derive(Clone, Debug)]
+pub(crate) struct FixedReference {
+    pub(crate) uploader: DeviceId,
+    pub(crate) id: FileId,
+    text: SecretText,
+}
+
+impl FixedReference {
+    pub(crate) fn decode(value: &Value) -> Result<Self, DbError> {
+        let Value::Text(text) = value else {
+            return Err(DbError::DamagedDatabase);
+        };
+        let reference = FileReference::decode(text).map_err(|_| DbError::DamagedDatabase)?;
+        Ok(Self {
+            uploader: reference.device,
+            id: reference.id,
+            text: SecretText::new(text.clone()),
+        })
+    }
+
+    pub(crate) fn value(&self) -> Value {
+        Value::Text(self.text.as_str().to_owned())
+    }
+
+    /// The uploader, object id and key, including the key sync encrypts with.
+    pub(crate) fn reference(&self) -> Result<FileReference, DbError> {
+        Ok(FileReference::decode(self.text.as_str())?)
+    }
+}
+
+impl PartialEq for FixedReference {
+    fn eq(&self, other: &Self) -> bool {
+        self.text.as_str() == other.text.as_str()
+    }
+}
 
 pub(crate) fn declaration<'a>(
     schema: &'a WriteSchema,
@@ -69,13 +108,24 @@ pub(crate) fn set(
     key: &AppKey,
     contents: Option<(ContentHash, u64)>,
     device: DeviceId,
+    ids: &dyn IdSource,
 ) -> Result<(), DbError> {
     let (table, file) = declaration(schema, &key.0)?;
     let mut columns = vec![&file.hash, &file.location];
+    // Each attachment fixes a new uploader, random object id and key (§16.1);
+    // no later write changes them, including upload completion.
     let mut parameters = match contents {
         Some((hash, _)) => vec![
             rusqlite::types::Value::Blob(hash.as_bytes().to_vec()),
-            device.0.to_string().into(),
+            FileReference {
+                device,
+                id: FileId(ids.new_id()),
+                key: FileKey::generate().map_err(DbError::FileKey)?,
+            }
+            .encode()
+            .as_str()
+            .to_owned()
+            .into(),
         ],
         None => vec![rusqlite::types::Value::Null; 2],
     };
@@ -148,7 +198,8 @@ pub(crate) fn key(key: &AppKey) -> Result<RowKey, DbError> {
     ))
 }
 
-/// The facts binding local bytes to a file, independent of its audience/location.
+/// The facts binding local bytes to one attachment, independent of its audience.
+/// The fixed uploader and object id distinguish identical bytes attached twice.
 pub(crate) fn identity(file: &FileDecl, values: &AppValues) -> Result<Option<Vec<u8>>, DbError> {
     if values[&file.hash] == Value::Null {
         return Ok(None);
@@ -168,6 +219,7 @@ pub(crate) fn identity(file: &FileDecl, values: &AppValues) -> Result<Option<Vec
         &values[&file.id],
         &values[&file.size],
         &values[&file.hash],
+        &FixedReference::decode(&values[&file.location])?,
     ))
     .map(Some)
 }
@@ -177,8 +229,15 @@ pub(crate) fn identity_values(
     id: &Value,
     size: &Value,
     hash: &Value,
+    fixed: &FixedReference,
 ) -> Result<Vec<u8>, coven_format::Error> {
-    coven_format::key::encode_key(&[id.clone(), size.clone(), hash.clone()])
+    coven_format::key::encode_key(&[
+        id.clone(),
+        size.clone(),
+        hash.clone(),
+        Value::Blob(fixed.uploader.0.to_be_bytes().to_vec()),
+        Value::Blob(fixed.id.0.as_bytes().to_vec()),
+    ])
 }
 
 #[cfg(test)]

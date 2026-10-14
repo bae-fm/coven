@@ -21,7 +21,6 @@ mod entry_inputs;
 mod error;
 mod file_authorization;
 mod file_hashes;
-mod file_location;
 mod file_queue;
 mod file_ref;
 mod file_removals;
@@ -110,7 +109,6 @@ pub use download_stream::{DownloadedPartStream, DownloadedWriteStream};
 pub use error::{
     CovenError, CovenMigrationError, CovenResult, DbError, MigrationError, SchemaError,
 };
-pub use file_location::FileLocation;
 pub use file_queue::FileUpload;
 pub use file_ref::{FileRef, LocalFileError, LocalFileStream};
 pub use live_query::{

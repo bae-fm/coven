@@ -26,12 +26,8 @@ pub(crate) fn value(
     if *value == Value::Null {
         return Ok(());
     }
-    if let crate::file_location::StoredLocation::Uploaded(text) =
-        crate::file_location::StoredLocation::decode(value)?
-    {
-        let reference = FileReference::decode(text.as_str())?;
-        references.insert((reference.device, reference.id));
-    }
+    let reference = crate::file_row::FixedReference::decode(value)?;
+    references.insert((reference.uploader, reference.id));
     Ok(())
 }
 

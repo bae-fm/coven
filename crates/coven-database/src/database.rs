@@ -113,7 +113,7 @@ impl<L> DatabaseAccess<L> {
     fn open_local_file(
         &self,
         reference: &crate::FileRef,
-    ) -> Result<crate::LocalFileStream, crate::LocalFileError> {
+    ) -> Result<Option<crate::LocalFileStream>, crate::LocalFileError> {
         self.readers.acquire_reader().local_file(
             &self.write_schema,
             &self.directory,
@@ -223,6 +223,7 @@ impl DatabaseInner {
                 &self.access.directory,
                 &self.access.write_schema,
                 self.access.device,
+                self.ids.as_ref(),
                 &self.staging,
                 staged,
             );
@@ -289,12 +290,13 @@ impl Database {
         }
     }
 
-    /// Open the source selected by a file reference, after checking its row.
-    /// No storage operation occurs; nonlocal sources return their location.
+    /// Open the local source of a file this device still has queued for upload,
+    /// after checking its row. No storage operation occurs; `None` means the
+    /// bytes come from the cache or storage.
     pub async fn open_local_file(
         &self,
         reference: &crate::FileRef,
-    ) -> Result<crate::LocalFileStream, crate::LocalFileError> {
+    ) -> Result<Option<crate::LocalFileStream>, crate::LocalFileError> {
         let reference = reference.clone();
         self.call(move |inner| inner.access.open_local_file(&reference))
             .await
@@ -560,11 +562,12 @@ impl DatabaseReadHandle {
             .await,
         )
     }
-    /// Open local bytes selected by the reference while checking its current row.
+    /// Open a queued file's local bytes while checking its current row; `None`
+    /// means the bytes come from the cache or storage.
     pub async fn open_local_file(
         &self,
         reference: &crate::FileRef,
-    ) -> Result<crate::LocalFileStream, crate::LocalFileError> {
+    ) -> Result<Option<crate::LocalFileStream>, crate::LocalFileError> {
         let reference = reference.clone();
         self.call(move |inner| inner.open_local_file(&reference))
             .await

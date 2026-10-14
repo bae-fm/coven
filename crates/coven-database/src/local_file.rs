@@ -1,10 +1,7 @@
 //! Resolve a checked row reference to its one declared local byte source.
 
 use super::FileRef;
-use crate::{
-    file_row, sqlite::DatabaseConnection, write_schema::WriteSchema, DbError, FileLocation,
-    Provenance,
-};
+use crate::{file_row, sqlite::DatabaseConnection, write_schema::WriteSchema, DbError, Provenance};
 use coven_foundation::{
     files::{
         FileArea, FileError, FileName, FileReader, ObservationError, StoreDir, StoreLockError,
@@ -14,22 +11,13 @@ use coven_foundation::{
 };
 use std::{path::PathBuf, sync::Arc};
 
-/// A local file operation's typed failure. The facade maps unavailable locations
-/// to the app's no-storage or other-device error without probing byte sources.
+/// A local file operation's typed failure.
 #[derive(Debug, thiserror::Error)]
 pub enum LocalFileError {
-    /// The current row names a nonlocal source.
-    #[error("file {id} is at {location:?}")]
-    Unavailable {
-        /// The row's file id.
-        id: String,
-        /// The authoritative where-column.
-        location: FileLocation,
-    },
     /// The recorded original is absent.
     #[error("original {id} is missing at {}", path.display())]
     UserFileMissing {
-        /// The row's file id.
+        /// The file's fixed object id.
         id: String,
         /// Its recorded original path.
         path: PathBuf,
@@ -37,7 +25,7 @@ pub enum LocalFileError {
     /// The recorded original's facts changed.
     #[error("original {id} changed at {}", path.display())]
     UserFileChanged {
-        /// The row's file id.
+        /// The file's fixed object id.
         id: String,
         /// Its recorded original path.
         path: PathBuf,
@@ -45,13 +33,13 @@ pub enum LocalFileError {
     /// Bytes did not match the row's content or an owned copy disappeared.
     #[error("file {id} failed its content check")]
     Integrity {
-        /// The row's file id.
+        /// The file's fixed object id.
         id: String,
     },
     /// The requested range exceeds the file's size.
     #[error("file {id} range {offset}..{end} exceeds {size}")]
     RangeOutOfBounds {
-        /// The row's file id.
+        /// The file's fixed object id.
         id: String,
         /// The requested first byte.
         offset: u64,
@@ -145,21 +133,21 @@ impl LocalFileReader {
     }
 }
 
+/// Open the checked local source of a file this device still has queued for
+/// upload. Any other file, including one this device has finished uploading,
+/// returns `None`: its bytes are read from the cache or storage (§16.1).
 pub(crate) fn open(
     db: &DatabaseConnection,
     schema: &WriteSchema,
     directory: &StoreDir,
     device: DeviceId,
     reference: &FileRef,
-) -> Result<LocalFileStream, LocalFileError> {
+) -> Result<Option<LocalFileStream>, LocalFileError> {
     super::validate(db, schema, reference)?;
-    let id = reference.id();
-    if reference.location() != FileLocation::OnDevice(device) {
-        return Err(LocalFileError::Unavailable {
-            id,
-            location: reference.location(),
-        });
+    if reference.uploader() != device || !crate::file_queue::queued(db, reference)? {
+        return Ok(None);
     }
+    let id = reference.id().to_string();
     let (_, file) = file_row::declaration(schema, reference.table())?;
     let lock = directory.lock_read_only()?;
     let (reader, original) = match file.provenance {
@@ -172,14 +160,7 @@ pub(crate) fn open(
             )
         }
         Provenance::AppProvided => {
-            let identity = file_row::identity_values(
-                &reference.version.id,
-                &coven_format::value::Value::Integer(
-                    i64::try_from(reference.version.size).map_err(|_| DbError::DamagedDatabase)?,
-                ),
-                &coven_format::value::Value::Blob(reference.version.hash.as_bytes().to_vec()),
-            )
-            .map_err(DbError::from)?;
+            let identity = reference.identity()?;
             let names = db.query("SELECT path FROM _coven_device_files WHERE table_name=?1 AND key=?2 AND column_name=?3 AND identity=?4", (&reference.row.table, &reference.row.key, &reference.column, identity), |row| row.get::<_, String>(0))?;
             let name = names.into_iter().next().ok_or(DbError::DamagedDatabase)?;
             let name = FileName::new(name).map_err(|_| DbError::DamagedDatabase)?;
@@ -196,14 +177,14 @@ pub(crate) fn open(
     {
         return Err(changed(&id, original.as_ref()));
     }
-    Ok(LocalFileStream {
+    Ok(Some(LocalFileStream {
         file: Arc::new(LocalFileReader {
             reader,
             _lock: lock,
             id,
             original,
         }),
-    })
+    }))
 }
 
 fn observation(error: ObservationError, id: &str, original: bool) -> LocalFileError {

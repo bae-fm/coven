@@ -416,7 +416,11 @@ proofs() {
     if proof_selected storage || crate_selected coven-sync; then
         runner=$(runner storage identityRunner)
         step "Rust / Lean identity check and replacement read"
-        COVEN_IDENTITY_LEAN="$runner" cargo test -p coven-sync --all-features st_differential_ -- --ignored
+        COVEN_IDENTITY_LEAN="$runner" cargo test -p coven-sync --all-features st_differential_identity -- --ignored
+        COVEN_IDENTITY_LEAN="$runner" cargo test -p coven-sync --all-features st_differential_replacement_read -- --ignored
+        runner=$(runner storage filesRunner)
+        step "Rust / Lean file attachment and upload completion"
+        COVEN_FILES_LEAN="$runner" cargo test -p coven-sync --all-features st_differential_files -- --ignored
     fi
 
     if proof_selected storage || crate_selected coven; then

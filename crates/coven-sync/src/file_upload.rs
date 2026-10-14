@@ -11,7 +11,6 @@ use coven_format::{
     chunks::CHUNK_SIZE,
     file::{FileHeader, FILE_HEADER_LEN},
 };
-use coven_foundation::id_source::FileId;
 use coven_storage::{ObjectPath, UploadSession};
 use futures_util::StreamExt;
 use std::{
@@ -60,14 +59,12 @@ pub enum UploadPhase {
         /// Whole ciphertext size.
         bytes_total: u64,
     },
-    /// Provider publication is confirmed.
-    Stored,
 }
 /// Result of one explicit upload drain.
 pub enum DrainOutcome {
     /// Every eligible item was attempted.
     Drained {
-        /// Rows marked uploaded.
+        /// Files storage confirmed, each retired from the queue.
         uploaded: usize,
         /// Failed attempts and their causes.
         failures: UploadFailures,
@@ -106,7 +103,7 @@ impl UploadsLiveQuery {
             .lock()
             .expect("upload state poisoned");
         let mut files = Vec::new();
-        for upload in uploads.into_iter().filter(|u| !u.unused) {
+        for upload in uploads {
             let last_failure = match state.failures.get(&upload.id) {
                 Some(error) => Some(error.clone()),
                 None => upload
@@ -121,7 +118,6 @@ impl UploadsLiveQuery {
             };
             let phase = match state.active.get(&upload.id) {
                 Some(phase) => phase.clone(),
-                None if upload.stored => UploadPhase::Stored,
                 None => UploadPhase::Waiting,
             };
             files.push(QueuedUpload {
@@ -167,11 +163,7 @@ impl FilesInner {
         if self.paused() {
             return Ok(DrainOutcome::Paused);
         }
-        let uploads = self.database.uploads().await?;
-        let waiting = uploads
-            .into_iter()
-            .filter(|u| !u.unused)
-            .collect::<Vec<_>>();
+        let waiting = self.database.uploads().await?;
         if waiting.is_empty() {
             return Ok(DrainOutcome::QueueEmpty);
         }
@@ -208,7 +200,7 @@ impl FilesInner {
         Ok(DrainOutcome::Drained { uploaded, failures })
     }
 
-    async fn attempt_upload(&self, mut item: FileUpload) -> Result<AttemptOutcome, DbError> {
+    async fn attempt_upload(&self, item: FileUpload) -> Result<AttemptOutcome, DbError> {
         if self.paused() {
             return Ok(AttemptOutcome::Unchanged);
         }
@@ -219,7 +211,7 @@ impl FilesInner {
         self.database
             .begin_attempt(item.id, self.clock.now())
             .await?;
-        match self.upload(&mut item).await {
+        match self.upload(&item).await {
             Ok(true) => Ok(AttemptOutcome::Stored),
             Ok(false) => Ok(AttemptOutcome::Unchanged),
             Err(UploadFailure::File(FileReadError::Database(
@@ -241,105 +233,99 @@ impl FilesInner {
             }
         }
     }
-    pub(super) async fn upload(&self, item: &mut FileUpload) -> Result<bool, UploadFailure> {
-        if item.identity.is_none() {
-            self.fix_identity(item).await?;
-        }
-        let identity = item.identity.as_ref().expect("recorded identity");
-        let (id, key) = decode_identity(identity.as_bytes()).map_err(FileReadError::from)?;
-        let device = upload_device(item)?;
+    /// Send the file to the path and key its attaching write fixed. Confirmed
+    /// storage retires the queue row and changes no app row (§16.5). Returns
+    /// false when paused between parts.
+    pub(super) async fn upload(&self, item: &FileUpload) -> Result<bool, UploadFailure> {
+        let coven_format::file_reference::FileReference { device, id, key } =
+            item.file.reference().map_err(FileReadError::from)?;
         let path = ObjectPath::file(self.directory.id(), device, id);
-        if !item.stored {
-            let storage = self
-                .storage
-                .read()
-                .expect("storage lock poisoned")
-                .clone()
-                .ok_or(FileReadError::NoStorage)?;
+        let storage = self
+            .storage
+            .read()
+            .expect("storage lock poisoned")
+            .clone()
+            .ok_or(FileReadError::NoStorage)?;
+        self.phase(
+            item.id,
+            UploadPhase::Preparing {
+                bytes_read: 0,
+                bytes_total: item.file.plaintext_size(),
+            },
+        );
+        // Only this device's queued files have a local source; the queue row
+        // being read here means this one does.
+        let source = self
+            .database
+            .open_local(&item.file)
+            .await?
+            .ok_or(FileReadError::Database(DbError::DamagedDatabase))?;
+        let total = FileHeader::new(item.file.plaintext_size())
+            .encrypted_size()
+            .map_err(|_| FileReadError::Integrity {
+                id: item.file.id().to_string(),
+            })?;
+        self.phase(
+            item.id,
+            UploadPhase::Preparing {
+                bytes_read: item.file.plaintext_size(),
+                bytes_total: item.file.plaintext_size(),
+            },
+        );
+        let mut transfer = FileTransfer {
+            owner: self,
+            item,
+            source,
+            key: &key,
+            path: &path,
+            total,
+        };
+        // A single request is bounded even for providers accepting GiB bodies.
+        if item.session.is_none() && total <= storage.single_request_limit().min(1024 * 1024) {
+            let bytes = transfer.read_encrypted(0, total as usize).await?;
             self.phase(
                 item.id,
-                UploadPhase::Preparing {
-                    bytes_read: 0,
-                    bytes_total: item.file.plaintext_size(),
+                UploadPhase::Uploading {
+                    bytes_sent: 0,
+                    bytes_total: total,
                 },
             );
-            let source = self.database.open_local(&item.file).await?;
-            let total = FileHeader::new(item.file.plaintext_size())
-                .encrypted_size()
-                .map_err(|_| FileReadError::Integrity { id: item.file.id() })?;
-            self.phase(
-                item.id,
-                UploadPhase::Preparing {
-                    bytes_read: item.file.plaintext_size(),
-                    bytes_total: item.file.plaintext_size(),
-                },
-            );
-            let mut transfer = FileTransfer {
-                owner: self,
-                item,
-                source,
-                key: &key,
-                path: &path,
-                total,
-            };
-            // A single request is bounded even for providers accepting GiB bodies.
-            if item.session.is_none() && total <= storage.single_request_limit().min(1024 * 1024) {
-                let bytes = transfer.read_encrypted(0, total as usize).await?;
-                self.phase(
-                    item.id,
-                    UploadPhase::Uploading {
-                        bytes_sent: 0,
-                        bytes_total: total,
-                    },
-                );
-                match storage.create(&path, &bytes).await {
-                    Ok(()) => {}
-                    Err(error)
-                        if error.failure() == coven_storage::StorageFailure::AlreadyExists
-                            && !matches!(error, coven_storage::StorageError::Cleanup { .. }) =>
-                    {
-                        self.settle_occupied(
-                            storage.as_ref(),
-                            &path,
-                            crate::identity::digest(&bytes),
-                        )
-                        .await?;
-                    }
-                    Err(error) => return Err(error.into()),
-                }
-            } else {
-                let session = item
-                    .session
-                    .as_ref()
-                    .map(|bytes| UploadSession::decode(bytes.as_bytes()))
-                    .transpose()?;
-                match crate::recorded_upload::upload(
-                    storage.as_ref(),
-                    &path,
-                    total,
-                    session,
-                    &mut transfer,
-                )
-                .await?
+            match storage.create(&path, &bytes).await {
+                Ok(()) => {}
+                Err(error)
+                    if error.failure() == coven_storage::StorageFailure::AlreadyExists
+                        && !matches!(error, coven_storage::StorageError::Cleanup { .. }) =>
                 {
-                    crate::recorded_upload::Uploaded::Stored => {}
-                    crate::recorded_upload::Uploaded::Paused => return Ok(false),
-                    crate::recorded_upload::Uploaded::Occupied(expected) => {
-                        self.settle_occupied(storage.as_ref(), &path, expected)
-                            .await?;
-                    }
+                    self.settle_occupied(storage.as_ref(), &path, crate::identity::digest(&bytes))
+                        .await?;
+                }
+                Err(error) => return Err(error.into()),
+            }
+        } else {
+            let session = item
+                .session
+                .as_ref()
+                .map(|bytes| UploadSession::decode(bytes.as_bytes()))
+                .transpose()?;
+            match crate::recorded_upload::upload(
+                storage.as_ref(),
+                &path,
+                total,
+                session,
+                &mut transfer,
+            )
+            .await?
+            {
+                crate::recorded_upload::Uploaded::Stored => {}
+                crate::recorded_upload::Uploaded::Paused => return Ok(false),
+                crate::recorded_upload::Uploaded::Occupied(expected) => {
+                    self.settle_occupied(storage.as_ref(), &path, expected)
+                        .await?;
                 }
             }
-            self.database
-                .record_stored(item.id)
-                .await
-                .map_err(FileReadError::from)?;
         }
-        self.phase(item.id, UploadPhase::Stored);
-        let location = coven_format::file_reference::FileReference { device, id, key }.encode();
-        let changed = self
-            .database
-            .finish_upload(item.id, &item.file, location)
+        self.database
+            .complete_upload(item.id)
             .await
             .map_err(FileReadError::from)?;
         self.state
@@ -347,7 +333,7 @@ impl FilesInner {
             .expect("upload state poisoned")
             .failures
             .remove(&item.id);
-        Ok(changed)
+        Ok(true)
     }
     /// A file path is this device's own: different occupant bytes mean another
     /// copy holds its id, which stops every send until the store resets (§10).
@@ -367,17 +353,6 @@ impl FilesInner {
                 .with_source(error)
                 .into()),
         }
-    }
-    pub(super) async fn fix_identity(&self, item: &mut FileUpload) -> Result<(), UploadFailure> {
-        let id = FileId(self.ids.new_id());
-        let key = FileKey::generate()?;
-        let mut identity = id.to_string().into_bytes();
-        identity.extend_from_slice(key.to_secret_bytes().as_bytes());
-        self.database
-            .record_upload_identity(item.id, SecretBytes::new(identity.clone()))
-            .await?;
-        item.identity = Some(SecretBytes::new(identity));
-        Ok(())
     }
 }
 
@@ -400,25 +375,6 @@ impl Drop for UploadActivity<'_> {
             .remove(&self.id);
         self.owner.notify();
     }
-}
-pub(crate) fn decode_identity(bytes: &[u8]) -> Result<(FileId, FileKey), DbError> {
-    if bytes.len() != 68 {
-        return Err(DbError::DamagedDatabase);
-    }
-    let id = FileId(
-        std::str::from_utf8(&bytes[..36])
-            .map_err(|_| DbError::DamagedDatabase)?
-            .parse()
-            .map_err(|_| DbError::DamagedDatabase)?,
-    );
-    Ok((
-        id,
-        FileKey::from_bytes(
-            bytes[36..]
-                .try_into()
-                .map_err(|_| DbError::DamagedDatabase)?,
-        ),
-    ))
 }
 fn in_backoff(item: &FileUpload, now: SystemTime) -> Result<bool, DbError> {
     let Some(failure) = &item.failure else {
@@ -486,7 +442,7 @@ impl FileTransfer<'_> {
             let sealed = header
                 .seal_chunk(self.key, self.path.as_str(), index, &plain)
                 .map_err(|_| FileReadError::Integrity {
-                    id: self.item.file.id(),
+                    id: self.item.file.id().to_string(),
                 })?;
             let start = (position - chunk.offset) as usize;
             let count = (end - position).min((sealed.len() - start) as u64) as usize;
@@ -517,16 +473,5 @@ impl crate::recorded_upload::UploadSource for FileTransfer<'_> {
     }
     fn keep_going(&self) -> bool {
         !self.owner.paused()
-    }
-}
-
-pub(super) fn upload_device(
-    item: &FileUpload,
-) -> Result<coven_foundation::id_source::DeviceId, UploadFailure> {
-    match item.file.location() {
-        coven_database::FileLocation::OnDevice(device) => Ok(device),
-        coven_database::FileLocation::Uploaded => {
-            Err(FileReadError::Database(DbError::DamagedDatabase).into())
-        }
     }
 }

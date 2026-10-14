@@ -242,7 +242,7 @@ impl tokio::io::AsyncRead for CrashingReader {
 }
 
 #[tokio::test]
-async fn a_downloaded_upload_releases_this_devices_owned_copy() {
+async fn a_downloaded_reference_change_releases_this_devices_owned_copy() {
     use coven_format::value::{Value, WritePositions};
     use coven_merge::{Operation, Timestamp, WriteId};
     let store = TestStore::new();
@@ -303,8 +303,8 @@ async fn a_downloaded_upload_releases_this_devices_owned_copy() {
         Err(DbError::FileRefChanged { .. })
     ));
     assert_eq!(
-        db.file_ref("files", "7").await.unwrap().location(),
-        FileLocation::Uploaded
+        db.file_ref("files", "7").await.unwrap().id(),
+        coven_foundation::id_source::FileId(uuid::Uuid::from_u128(7))
     );
     db.close().await.unwrap();
 }

@@ -46,7 +46,7 @@ impl<'connection> SqlReadContext<'connection> {
         directory: &coven_foundation::files::StoreDir,
         device: coven_foundation::id_source::DeviceId,
         reference: &crate::FileRef,
-    ) -> Result<crate::LocalFileStream, crate::LocalFileError> {
+    ) -> Result<Option<crate::LocalFileStream>, crate::LocalFileError> {
         crate::file_ref::open_local(self.database, schema, directory, device, reference)
     }
 

@@ -56,8 +56,7 @@ async fn sync(f: &Fixture) -> (StoreLogSync, MemberKeys, crate::DeviceLogSync) {
 }
 
 fn path(f: &Fixture, file: &FileRef) -> ObjectPath {
-    let uploaded = file.uploaded().unwrap().unwrap();
-    ObjectPath::file(f.directory.id(), uploaded.device, uploaded.id)
+    f.path(file)
 }
 
 #[tokio::test]
@@ -130,11 +129,18 @@ async fn file_references_survive_in_waiting_writes_and_kept_snapshots() {
 }
 
 #[tokio::test]
-async fn deleting_an_unused_publication_retires_its_queue() {
+async fn a_replaced_files_upload_stays_while_its_attaching_write_names_it() {
     let f = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
-    let (mut sync, _, _) = sync(&f).await;
-    super::uploads::unused_upload(&f).await;
+    let (mut sync, _, mut writes) = sync(&f).await;
+    let (old, new) = super::uploads::retargeted_upload(&f).await;
+    // The waiting attaching write names A's fixed path.
     sync.run_retention().await.unwrap();
+    assert!(f.storage.read(&path(&f, &old)).await.is_ok());
+    writes.upload_writes().await.unwrap();
+    assert!(writes.post_positions().await.unwrap());
+    sync.write_snapshot(Audience::Store).await.unwrap();
+    sync.run_retention().await.unwrap();
+    // Nothing retained names A any more; B still waits in the queue.
     assert!(f
         .storage
         .list(&ObjectPrefix::files(f.directory.id()))
@@ -143,11 +149,7 @@ async fn deleting_an_unused_publication_retires_its_queue() {
         .is_empty());
     let queue = f.files.inner.database.uploads().await.unwrap();
     assert_eq!(queue.len(), 1);
-    assert_eq!(
-        queue[0].file,
-        f.database.file_ref("files", "old").await.unwrap()
-    );
-    assert!(!queue[0].stored && !queue[0].unused);
+    assert_eq!(queue[0].file, new);
     f.close().await;
 }
 
@@ -185,7 +187,7 @@ async fn a_damaged_snapshot_cannot_prove_file_absence() {
     sync.write_snapshot(Audience::Store).await.unwrap();
     let orphan = ObjectPath::file(
         f.directory.id(),
-        kept.uploaded().unwrap().unwrap().device,
+        kept.uploader(),
         coven_foundation::id_source::FileId(uuid::Uuid::from_u128(999)),
     );
     f.storage.create(&orphan, b"orphan").await.unwrap();

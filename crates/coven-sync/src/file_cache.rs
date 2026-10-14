@@ -5,7 +5,7 @@ use crate::{
     files::{Files, FilesInner},
     FileReadError,
 };
-use coven_database::{DbError, FileLocation, FileRef, LiveQueryClosed, RowKey};
+use coven_database::{DbError, FileRef, LiveQueryClosed, RowKey};
 use futures_util::{StreamExt, TryStreamExt};
 use std::sync::{Arc, Mutex};
 use tokio::sync::watch;
@@ -94,12 +94,10 @@ impl Files {
             .map(|file| {
                 let progress = &progress;
                 async move {
-                    self.inner.database.validate(&file).await?;
-                    match file.location() {
-                        FileLocation::OnDevice(_) => {
-                            self.inner.database.open_local(&file).await?;
-                        }
-                        FileLocation::Uploaded => {
+                    // A file still queued here is already whole on this device.
+                    match self.inner.database.open_local(&file).await? {
+                        Some(_) => {}
+                        None => {
                             if !self.inner.database.pin_complete(&file).await? {
                                 let uploaded =
                                     UploadedFile::open(self.inner.clone(), file.clone()).await?;

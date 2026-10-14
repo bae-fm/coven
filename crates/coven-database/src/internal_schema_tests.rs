@@ -296,7 +296,8 @@ mod fixture {
      INSERT INTO _coven_device_files SELECT tab,key,'file',key,'path_' || i FROM fixture;
      INSERT INTO _coven_file_removals SELECT 'removed_' || i,'files' FROM fixture;
      INSERT INTO _coven_access_keys SELECT 'access_' || i,CASE WHEN i%2=0 THEN i END FROM fixture;
-     INSERT INTO _coven_file_uploads(id,reference,queued_at) SELECT i,key,zeroblob(13) FROM fixture;
+     INSERT INTO _coven_file_uploads(id,reference,device,file,queued_at)
+       SELECT i,key,device,substr(key,17,16),zeroblob(13) FROM fixture;
      INSERT INTO _coven_file_chunks SELECT tab,key,'file',key,0,key FROM fixture;
      INSERT INTO _coven_file_upload_chunks SELECT i,0,key FROM fixture;
      INSERT INTO _coven_cache(namespace,file_id,chunk,path,size,last_read,pinned,checked_hash)
@@ -378,7 +379,7 @@ mod scans {
         Some("one completed positions scan compares every retained peer identity"),
     ("database_sync.rs", "SELECT EXISTS(SELECT 1 FROM _coven_data_reloads)", "_coven_data_reloads") =>
         Some("publication stops at the first unfinished audience reload"),
-    ("database_file_retention.rs", "SELECT device,file FROM _coven_row_file_refs UNION SELECT device,file FROM _coven_input_file_refs UNION SELECT device,file FROM _coven_queued_file_refs", "_coven_row_file_refs" | "_coven_input_file_refs" | "_coven_queued_file_refs") =>
+    ("database_file_retention.rs", "SELECT device,file FROM _coven_row_file_refs UNION SELECT device,file FROM _coven_input_file_refs UNION SELECT device,file FROM _coven_queued_file_refs UNION SELECT device,file FROM _coven_file_uploads", "_coven_row_file_refs" | "_coven_input_file_refs" | "_coven_queued_file_refs" | "_coven_file_uploads") =>
         Some("file retention returns every protected fixed path from the sparse indexes"),
     ("pending.rs", "INSERT INTO _coven_pending_resets(subject,reporter,entry_device,entry_number) SELECT p.subject,p.reporter,?1,?2 FROM _coven_pending AS p WHERE NOT EXISTS(SELECT 1 FROM _coven_access_keys AS k WHERE k.operation=p.operation) AND NOT EXISTS(SELECT 1 FROM _coven_provider_access AS a WHERE a.operation=p.operation) ON CONFLICT DO NOTHING", "p") =>
         Some("a newly applied reset suppresses earlier observations except unresolved provider access"),
@@ -408,7 +409,7 @@ mod scans {
         Some("unfiltered EXISTS stops after the first queue row"),
     ("download.rs", "SELECT (SELECT publication FROM _coven_snapshot_schema WHERE EXISTS(SELECT 1 FROM _coven_members))", "_coven_snapshot_schema" | "_coven_members") =>
         Some("the schema row is singular; unfiltered membership EXISTS stops after its first row"),
-    ("file_queue.rs", "SELECT id,reference,queued_at,attempts,last_attempt_at,failure,identity,session,stored,unused FROM _coven_file_uploads ORDER BY id", "_coven_file_uploads") =>
+    ("file_queue.rs", "SELECT id,reference,queued_at,attempts,last_attempt_at,failure,session FROM _coven_file_uploads ORDER BY id", "_coven_file_uploads") =>
         Some("the file queue reader returns every queued attachment"),
     ("file_removals.rs", "SELECT path,area FROM _coven_file_removals ORDER BY area,path", "_coven_file_removals") =>
         Some("file removal visits every queued filesystem deletion"),

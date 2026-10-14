@@ -5,7 +5,7 @@ use crate::{
     FileReadError,
 };
 use coven_crypto::{ContentHasher, FileKey};
-use coven_database::{DbError, FileLocation, FileRef, LocalFileStream};
+use coven_database::{DbError, FileRef, LocalFileStream};
 use coven_format::{
     chunks::CHUNK_SIZE,
     file::{FileHeader, FILE_HEADER_LEN},
@@ -53,20 +53,19 @@ enum ChunkDestination {
     WholeFile,
 }
 impl Files {
-    /// Validate against the current row, then open its authoritative location.
+    /// Validate against the current row, then open its local source while
+    /// this device still has it queued for upload, or else its cached or
+    /// stored bytes (§16.1).
     pub async fn open_file_stream(&self, file: &FileRef) -> Result<FileStream, FileReadError> {
         self.inner.check_open()?;
-        self.inner.database.validate(file).await?;
-        let source = match file.location() {
-            FileLocation::OnDevice(_) => {
-                OpenFile::Local(self.inner.database.open_local(file).await?)
-            }
-            FileLocation::Uploaded => OpenFile::Uploaded(Arc::new(
+        let source = match self.inner.database.open_local(file).await? {
+            Some(local) => OpenFile::Local(local),
+            None => OpenFile::Uploaded(Arc::new(
                 UploadedFile::open(self.inner.clone(), file.clone()).await?,
             )),
         };
         Ok(FileStream {
-            id: file.id(),
+            id: file.id().to_string(),
             source,
             state: tokio::sync::Mutex::new(ReadState {
                 end: Some(0),
@@ -196,8 +195,7 @@ impl UploadedFile {
             directory.lock_read_only()
         }))
         .await?;
-        let coven_format::file_reference::FileReference { device, id, key } =
-            file.uploaded()?.ok_or(DbError::DamagedDatabase)?;
+        let coven_format::file_reference::FileReference { device, id, key } = file.reference()?;
         let path = ObjectPath::file(owner.directory.id(), device, id);
         let _file = owner.lock_file(&file).await;
         let _guard = owner.cache.read().await;
@@ -212,10 +210,14 @@ impl UploadedFile {
             {
                 FileReadError::UpdateRequired
             }
-            _ => FileReadError::Integrity { id: file.id() },
+            _ => FileReadError::Integrity {
+                id: file.id().to_string(),
+            },
         })?;
         if header.size() != file.plaintext_size() {
-            return Err(FileReadError::Integrity { id: file.id() });
+            return Err(FileReadError::Integrity {
+                id: file.id().to_string(),
+            });
         }
         if cached.is_none() {
             cache(&owner, &file, -1, bytes).await?;
@@ -297,7 +299,9 @@ impl UploadedFile {
         Ok(())
     }
     fn integrity(&self) -> FileReadError {
-        FileReadError::Integrity { id: self.file.id() }
+        FileReadError::Integrity {
+            id: self.file.id().to_string(),
+        }
     }
     fn check_range(&self, offset: u64, len: u64) -> Result<(), FileReadError> {
         if offset
@@ -305,7 +309,7 @@ impl UploadedFile {
             .is_none_or(|end| end > self.header.size())
         {
             Err(FileReadError::RangeOutOfBounds {
-                id: self.file.id(),
+                id: self.file.id().to_string(),
                 offset,
                 end: offset.saturating_add(len),
                 size: self.header.size(),
@@ -472,11 +476,22 @@ async fn fetch(
         .expect("storage lock poisoned")
         .clone()
         .ok_or(FileReadError::NoStorage)?;
-    let bytes = storage
-        .read_range(path, ByteRange::new(start, end)?)
-        .await?;
+    // Rows may arrive before their files (§16.5): confirmed absence names the
+    // uploader, never a provider failure.
+    let bytes = match storage.read_range(path, ByteRange::new(start, end)?).await {
+        Ok(bytes) => bytes,
+        Err(error) if error.failure() == coven_storage::StorageFailure::NotFound => {
+            return Err(FileReadError::Uploading {
+                id: file.id().to_string(),
+                device: file.uploader(),
+            })
+        }
+        Err(error) => return Err(error.into()),
+    };
     if bytes.len() as u64 != end - start {
-        return Err(FileReadError::Integrity { id: file.id() });
+        return Err(FileReadError::Integrity {
+            id: file.id().to_string(),
+        });
     }
     Ok(bytes)
 }

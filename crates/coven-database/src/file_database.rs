@@ -6,7 +6,7 @@ use crate::{
     file_queue, file_ref, sqlite::DatabaseConnection, write_schema::WriteSchema, DbError, FileRef,
     FileUpload, RowKey,
 };
-use coven_crypto::{SecretBytes, SecretText};
+use coven_crypto::SecretBytes;
 use coven_foundation::{
     files::{FileName, StoreDir},
     id_source::DeviceId,
@@ -92,19 +92,21 @@ impl FileDatabase {
             FileDatabaseAccess::Reader(db) => db.file_ref(table, key).await,
         }
     }
-    /// Open the declared local source and check it before returning.
+    /// Open and check the local source of a file this device has queued for
+    /// upload. `None` means its bytes come from the cache or storage.
     pub async fn open_local(
         &self,
         file: &FileRef,
-    ) -> Result<crate::LocalFileStream, crate::LocalFileError> {
+    ) -> Result<Option<crate::LocalFileStream>, crate::LocalFileError> {
         match &self.access {
             FileDatabaseAccess::Writer(db) => db.open_local_file(file).await,
             FileDatabaseAccess::Reader(db) => db.open_local_file(file).await,
         }
     }
-    /// All visible uploaded files whose declaration requests eager downloads.
+    /// All visible files whose declaration requests eager downloads, except
+    /// those this device still has queued: their bytes are already local.
     pub async fn eager_files(&self) -> Result<Vec<FileRef>, DbError> {
-        self.run(|db, schema, _, _| {
+        self.run(|db, schema, _, device| {
             db.transaction(|db| {
                 let mut files = Vec::new();
                 for declaration in &schema.declarations {
@@ -117,7 +119,7 @@ impl FileDatabase {
                     let table = schema.table(&declaration.name);
                     let keys = db.query(
                         &format!(
-                            "SELECT {} FROM main.{} WHERE {} LIKE 'file %'",
+                            "SELECT {} FROM main.{} WHERE {} IS NOT NULL",
                             crate::write_rows::key_columns(table)
                                 .iter()
                                 .map(|c| crate::sql::identifier(&c.name))
@@ -136,7 +138,10 @@ impl FileDatabase {
                         },
                     )?;
                     for key in keys {
-                        files.push(file_ref::read(db, schema, &table.name, &key)?)
+                        let file = file_ref::read(db, schema, &table.name, &key)?;
+                        if file.uploader() != device || !file_queue::queued(db, &file)? {
+                            files.push(file);
+                        }
                     }
                 }
                 Ok(files)
@@ -144,7 +149,7 @@ impl FileDatabase {
         })
         .await
     }
-    /// Durable queue, including stored copies whose row changed meanwhile.
+    /// Durable queue, including files whose row changed after attachment.
     pub async fn uploads(&self) -> Result<Vec<FileUpload>, DbError> {
         self.run(|db, _, _, _| file_queue::read(db)).await
     }
@@ -174,25 +179,6 @@ impl FileDatabase {
         })
         .await
     }
-    /// Persist the independent identity before the first provider attempt.
-    /// Identity replacement is refused so retries cannot change a published path or key.
-    pub async fn record_upload_identity(
-        &self,
-        id: i64,
-        identity: SecretBytes,
-    ) -> Result<(), DbError> {
-        self.require_writer()?;
-        self.run(move |db, _, _, _| {
-            db.transaction(|db| {
-                changed(db.internal_execute(
-                    "UPDATE _coven_file_uploads SET identity=?2 WHERE id=?1 AND identity IS NULL",
-                    (id, identity.as_bytes()),
-                )?)
-            })
-        })
-        .await
-    }
-
     /// Read the first-read plaintext hash of one queued chunk. The queue owns
     /// these records independently of later changes to the source row.
     pub async fn upload_chunk_hash(
@@ -227,75 +213,33 @@ impl FileDatabase {
         self.run(move |db, _, _, _| {
             db.transaction(|db| {
                 changed(db.internal_execute(
-                    "UPDATE _coven_file_uploads SET session=?2 WHERE id=?1 AND identity IS NOT NULL",
+                    "UPDATE _coven_file_uploads SET session=?2 WHERE id=?1",
                     (id, session.as_bytes()),
                 )?)
             })
         })
         .await
     }
-    /// Record publication before the conditional application write.
-    pub async fn record_stored(&self, id: i64) -> Result<(), DbError> {
-        self.require_writer()?;
-        self.run(move |db, _, _, _| {
-            db.transaction(|db| {
-                changed(db.internal_execute(
-                    "UPDATE _coven_file_uploads SET stored=1,session=NULL WHERE id=?1 AND identity IS NOT NULL",
-                    [id],
-                )?)
-            })
-        })
-        .await
-    }
-    /// Mark all four row columns through an ordinary recorded write, only if the
-    /// captured reference still matches. A mismatch records the copy as unused.
-    pub async fn finish_upload(
-        &self,
-        id: i64,
-        file: &FileRef,
-        location: SecretText,
-    ) -> Result<bool, DbError> {
+    /// Retire an upload once storage confirms its complete bytes (§16.5): one
+    /// transaction removes the queue row, its chunk hashes and the copy kept
+    /// for it. No app row, file reference or write changes, so a row retargeted,
+    /// moved or deleted meanwhile keeps its newer state. Afterwards this device
+    /// reads the file from the cache or storage.
+    pub async fn complete_upload(&self, id: i64) -> Result<(), DbError> {
         let FileDatabaseAccess::Writer(database) = &self.access else {
             return Err(read_only());
         };
-        let database = database.clone();
-        let file = file.clone();
         database
             .call(move |inner| {
-                inner.with_files(Vec::new(), |writer, files| {
-                    writer.local_write(
-                        &inner.access.write_schema,
-                        inner.access.device,
-                        inner.clock.now(),
-                        files,
-                        |sql| {
-                            if !writer.query_row(
-                                "SELECT stored FROM _coven_file_uploads WHERE id=?1",
-                                [id],
-                                |r| r.get::<_, bool>(0),
-                            )? {
-                                return Err(DbError::DamagedDatabase);
-                            }
-                            match file_ref::validate(writer, &inner.access.write_schema, &file) {
-                                Err(DbError::FileRefChanged { .. }) => {
-                                    writer.internal_execute(
-                                        "UPDATE _coven_file_uploads SET unused=1 WHERE id=?1",
-                                        [id],
-                                    )?;
-                                    Ok(false)
-                                }
-                                Err(error) => Err(error),
-                                Ok(()) => {
-                                    sql.mark_uploaded(&file, &location)?;
-                                    writer.internal_execute(
-                                        "DELETE FROM _coven_file_uploads WHERE id=?1",
-                                        [id],
-                                    )?;
-                                    Ok(true)
-                                }
-                            }
-                        },
+                inner.access.with_writer(|writer| {
+                    let result = writer.transaction(|db| file_queue::complete(db, id));
+                    let active = inner.staging.lock().expect("staging lock poisoned");
+                    crate::file_removals::FileRemovals::new(
+                        writer,
+                        &inner.access.directory,
+                        &active,
                     )
+                    .finish(result)
                 })
             })
             .await
@@ -484,11 +428,12 @@ impl FileDatabase {
         .await
     }
     /// Plaintext bytes absent from this namespace's cache; headers and tags
-    /// are excluded from application download progress.
+    /// are excluded from application download progress. A file this device
+    /// still has queued is wholly local.
     pub async fn missing_bytes(&self, file: &FileRef) -> Result<u64, DbError> {
         let file = file.clone();
-        self.run(move |db, _, _, _| {
-            if file.uploaded()?.is_none() {
+        self.run(move |db, _, _, device| {
+            if file.uploader() == device && file_queue::queued(db, &file)? {
                 return Ok(0);
             }
             let id = cache::id(&file)?;

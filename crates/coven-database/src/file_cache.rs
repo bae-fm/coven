@@ -9,12 +9,7 @@ pub(super) use crate::internal_schema::{
 use coven_foundation::files::{FileArea, FileName, StoreDir};
 
 pub(super) fn id(file: &FileRef) -> Result<String, DbError> {
-    file.uploaded()?
-        .map(|reference| format!("{}/{}", reference.device.0, reference.id))
-        .ok_or(DbError::FileBytesRequired {
-            table: file.table().into(),
-            key: file.key().clone(),
-        })
+    Ok(format!("{}/{}", file.uploader().0, file.id()))
 }
 fn tick(db: &DatabaseConnection) -> Result<i64, DbError> {
     db.query_row(
@@ -164,9 +159,6 @@ pub(super) fn evict(
     directory: &StoreDir,
     file: &FileRef,
 ) -> Result<(), DbError> {
-    if file.uploaded()?.is_none() {
-        return Ok(());
-    }
     let id = id(file)?;
     let paths = db.transaction(|db| {
         let paths = db.query(
@@ -217,9 +209,6 @@ pub(super) fn pin_complete(db: &DatabaseConnection, file: &FileRef) -> Result<bo
     Ok(db.internal_execute("UPDATE _coven_cache SET pinned=1 WHERE namespace=?1 AND file_id=?2 AND chunk=?4 AND checked_hash=?3",(file.namespace(),id,file.content_hash().as_bytes().as_slice(),COMPLETE_FILE))?==1)
 }
 pub(super) fn unpin(db: &DatabaseConnection, file: &FileRef) -> Result<(), DbError> {
-    if file.uploaded()?.is_none() {
-        return Ok(());
-    }
     db.internal_execute(
         "UPDATE _coven_cache SET pinned=0 WHERE namespace=?1 AND file_id=?2",
         (file.namespace(), id(file)?),
@@ -227,9 +216,6 @@ pub(super) fn unpin(db: &DatabaseConnection, file: &FileRef) -> Result<(), DbErr
     Ok(())
 }
 pub(super) fn pinned(db: &DatabaseConnection, file: &FileRef) -> Result<bool, DbError> {
-    if file.uploaded()?.is_none() {
-        return Ok(false);
-    }
     let id = id(file)?;
     db.query_row("SELECT EXISTS(SELECT 1 FROM _coven_cache WHERE namespace=?1 AND file_id=?2 AND chunk=?4 AND pinned=1 AND checked_hash=?3)",(file.namespace(),id,file.content_hash().as_bytes().as_slice(),COMPLETE_FILE),|r|r.get(0))
 }

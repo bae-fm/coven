@@ -809,18 +809,19 @@ async fn io_counts_warm_download_reuse() {
 async fn io_counts_file_fetch_baseline() {
     let counts = scenario(Scenario::FileFetch).await;
     // No fixed whole-pass count is stated for an arrival carrying a file.
-    // This fixture publishes a row write and the upload's location write,
-    // and checks the three writers' terminal store-log slots for finality.
+    // This fixture publishes only the attaching write, which already names
+    // the file's fixed path (upload completion writes nothing), and checks
+    // the writers' terminal store-log slots for finality.
     assert_eq!(
         (counts.requests, counts.requests_by_kind()),
         (
-            23,
+            21,
             RequestCounts {
                 lists: 6,
-                gets: 8,
+                gets: 7,
                 ranges: 2,
                 replaces: 1,
-                statuses: 5,
+                statuses: 4,
                 other: 1,
                 ..Default::default()
             }
@@ -828,7 +829,7 @@ async fn io_counts_file_fetch_baseline() {
         "{counts:#?}"
     );
     // No fixed non-idle writer/commit total is stated; observed counts.
-    assert_eq!((counts.work.writer_holds, counts.work.commits), (93, 37));
+    assert_eq!((counts.work.writer_holds, counts.work.commits), (87, 30));
 }
 
 #[tokio::test]

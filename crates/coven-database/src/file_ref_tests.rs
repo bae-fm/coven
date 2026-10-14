@@ -48,7 +48,8 @@ async fn changed_file_references_refuse_a_write_even_if_the_app_ignores_the_erro
     assert_eq!(reference.plaintext_size(), 3);
     assert_eq!(reference.audience(), coven_merge::Audience::Store);
     let device = crate::write::tests::records(&db)[0].header.position.device;
-    assert_eq!(reference.location(), FileLocation::OnDevice(device));
+    assert_eq!(reference.uploader(), device);
+    assert_eq!(reference.reference().unwrap().id, reference.id());
     let current = reference.clone();
     db.write(move |sql| {
         sql.validate_file_ref(&current)?;
@@ -88,7 +89,7 @@ async fn changed_file_references_refuse_a_write_even_if_the_app_ignores_the_erro
 }
 
 #[tokio::test]
-async fn file_locations_retain_the_key_identity_and_refuse_malformed_encodings() {
+async fn fixed_references_retain_the_key_identity_and_refuse_malformed_encodings() {
     let store = TestStore::new();
     let db = store
         .schema(tables(Provenance::AppProvided), SCHEMA)
@@ -98,20 +99,19 @@ async fn file_locations_retain_the_key_identity_and_refuse_malformed_encodings()
     let device_ref = db.file_ref("files", "7").await.unwrap();
     let id = uuid::Uuid::from_u128(7);
     let location = format!("file 1 {id} {}", "ab".repeat(32));
-    // A committed uploaded-row fixture; transfer completion is exercised by sync.
+    // A committed fixture naming another uploader's object.
     db.commit_writer(|sql| {
         sql.internal_execute("UPDATE files SET location=?1", [location])
             .unwrap()
     });
     let uploaded = db.file_ref("files", "7").await.unwrap();
-    assert_eq!(uploaded.location(), FileLocation::Uploaded);
-    assert!(matches!(
-        db.open_local_file(&uploaded).await,
-        Err(LocalFileError::Unavailable {
-            location: FileLocation::Uploaded,
-            ..
-        })
-    ));
+    assert_eq!(
+        uploaded.uploader(),
+        coven_foundation::id_source::DeviceId(1)
+    );
+    assert_eq!(uploaded.id(), coven_foundation::id_source::FileId(id));
+    // Only a file this device still has queued has a local source.
+    assert!(db.open_local_file(&uploaded).await.unwrap().is_none());
 
     assert!(!format!("{uploaded:?}").contains(&"ab".repeat(32)));
     let error = db
@@ -147,16 +147,6 @@ async fn file_locations_retain_the_key_identity_and_refuse_malformed_encodings()
         db.write(move |sql| sql.validate_file_ref(&uploaded)).await,
         Err(DbError::FileRefChanged { .. })
     ));
-    for device in [0, u64::MAX] {
-        db.commit_writer(|sql| {
-            sql.internal_execute("UPDATE files SET location=?1", [device.to_string()])
-                .unwrap()
-        });
-        assert_eq!(
-            db.file_ref("files", "7").await.unwrap().location(),
-            FileLocation::OnDevice(coven_foundation::id_source::DeviceId(device))
-        );
-    }
     let valid = format!("file 1 {id} {}", "ab".repeat(32));
     let mut malformed: Vec<_> = (0..valid.len())
         .map(|end| valid[..end].to_owned())
@@ -173,6 +163,9 @@ async fn file_locations_retain_the_key_identity_and_refuse_malformed_encodings()
         "1 ".into(),
         "18446744073709551616".into(),
         "device:7".into(),
+        // A bare uploader is not a fixed reference.
+        "0".into(),
+        u64::MAX.to_string(),
         format!("{valid} "),
         format!("{valid}00"),
         format!("file 1 {id} {}", "AB".repeat(32)),
@@ -222,6 +215,7 @@ async fn fixed_file_references_are_found_by_eager_reads_and_retention() {
     ];
     let db = store.schema(declarations, SCHEMA).await.unwrap();
     attach(&db, b"original".to_vec(), true).await;
+    let queued = db.file_ref("files", "7").await.unwrap();
     let text = include_str!("../../coven-format/fixtures/file-reference.txt")
         .lines()
         .nth(1)
@@ -242,12 +236,16 @@ async fn fixed_file_references_are_found_by_eager_reads_and_retention() {
     });
     let files = FileDatabase::new(db.clone()).eager_files().await.unwrap();
     assert_eq!(files, vec![db.file_ref("files", "7").await.unwrap()]);
+    // The row's current reference, and the queued attachment it replaced.
     assert_eq!(
         db.retained_files().await.unwrap().references,
-        [(
-            coven_foundation::id_source::DeviceId(1),
-            coven_foundation::id_source::FileId(uuid::Uuid::from_bytes([0x11; 16]))
-        )]
+        [
+            (
+                coven_foundation::id_source::DeviceId(1),
+                coven_foundation::id_source::FileId(uuid::Uuid::from_bytes([0x11; 16]))
+            ),
+            (queued.uploader(), queued.id())
+        ]
         .into()
     );
     db.close().await.unwrap();

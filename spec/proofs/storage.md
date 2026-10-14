@@ -17,8 +17,8 @@ the resulting plaintexts without relying on that detection.
 All named results are audited by `CovenStorage/Axioms.lean`. The package uses
 Lean 4.34.1 and its standard library, without additional axioms or unfinished
 proofs. `scripts/check.sh` builds it and runs the audit alongside the other
-proofs. `clockRunner` and `createRunner` expose the model to the Rust
-differential tests run by that script. The create-once comparison drives
+proofs. `clockRunner`, `createRunner`, `identityRunner` and `filesRunner`
+expose the model to the Rust differential tests run by that script. The create-once comparison drives
 the S3 adapter against the test server through every profile (AWS, GCS and R2),
 and the OneDrive adapter through Graph. It checks occupied-path refusals and
 stored bytes for single-request and multipart uploads.
@@ -274,6 +274,10 @@ proves that finishing any attempt changes neither rows nor the app-write count.
 then A finishes uploading, leaving B in the row. `unequal_bytes_keep_queue`
 prevents a collision from retiring that upload.
 `finish_reports_result` preserves the typed error or reset request for the caller.
+`FilesRunner` executes `attach` and `finish` for coven-sync's differential test,
+which attaches app-provided files, retargets or deletes their rows while an
+upload is in flight, and compares the settlements, the write count, each row's
+fixed reference and the queue. Row deletion is an environment step in the runner.
 
 **Retried file chunks are fixed.** `encrypted_chunk_is_captured` proves that a
 successfully checked chunk has the captured plaintext, key, path, size and index.

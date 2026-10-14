@@ -2,52 +2,29 @@
 
 use super::Database;
 use crate::file_protection::value as retain_value;
-use crate::{DbError, DownloadedPartStream, DownloadedWriteStream, FileUpload};
+use crate::{DbError, DownloadedPartStream, DownloadedWriteStream};
 use coven_format::{value::Value, write::RowChange};
 use coven_foundation::id_source::{DeviceId, FileId};
 use coven_merge::{ColumnValue, Operation};
 use std::collections::{BTreeMap, BTreeSet};
 
-/// Local references and publication attempts read in one database transaction.
+/// Local references read in one database transaction.
 pub struct FileRetention {
-    /// Uploaded paths named by rows, losses, reversible inputs or waiting writes.
+    /// Fixed paths named by rows, losses, reversible inputs, waiting writes or
+    /// this device's upload queue.
     pub references: BTreeSet<(DeviceId, FileId)>,
-    /// Includes unfinished publication, whose opaque fixed identity sync owns.
-    pub uploads: Vec<FileUpload>,
 }
 
 impl Database {
-    /// Retire an unused publication and its chunk hashes after storage confirms
-    /// deletion. Repeating deletion after a lost reply is safe.
-    pub async fn retire_unused_file(&self, id: i64) -> Result<(), DbError> {
-        self.call(move |inner| {
-            inner.access.with_writer(|writer| {
-                writer.transaction(|db| {
-                    let invalid: bool = db.query_row(
-                        "SELECT EXISTS(SELECT 1 FROM _coven_file_uploads WHERE id=?1 AND (unused=0 OR stored=0))",
-                        [id], |r| r.get(0),
-                    )?;
-                    if invalid { return Err(DbError::DamagedDatabase); }
-                    db.internal_execute("DELETE FROM _coven_file_uploads WHERE id=?1", [id])?;
-                    Ok::<_, DbError>(())
-                })
-            })
-        })
-        .await
-    }
-
     /// Read local protection after listing storage files. A file already listed
-    /// must either remain in this queue or have a committed row/write reference.
+    /// remains in this device's queue or has a committed row/write reference.
     pub async fn retained_files(&self) -> Result<FileRetention, DbError> {
         self.call(move |inner| {
             let reader = inner.access.readers.acquire_reader();
             reader.with_reader(|db| {
                 db.read_transaction(|| {
-                    let references = db.query("SELECT device,file FROM _coven_row_file_refs UNION SELECT device,file FROM _coven_input_file_refs UNION SELECT device,file FROM _coven_queued_file_refs", [], |r| Ok((DeviceId(u64::from_be_bytes(r.get(0)?)),FileId(uuid::Uuid::from_bytes(r.get(1)?)))))?.into_iter().collect();
-                    Ok(FileRetention {
-                        references,
-                        uploads: crate::file_queue::read(db)?,
-                    })
+                    let references = db.query("SELECT device,file FROM _coven_row_file_refs UNION SELECT device,file FROM _coven_input_file_refs UNION SELECT device,file FROM _coven_queued_file_refs UNION SELECT device,file FROM _coven_file_uploads", [], |r| Ok((DeviceId(u64::from_be_bytes(r.get(0)?)),FileId(uuid::Uuid::from_bytes(r.get(1)?)))))?.into_iter().collect();
+                    Ok(FileRetention { references })
                 })
             })
         })

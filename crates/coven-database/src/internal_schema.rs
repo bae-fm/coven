@@ -623,17 +623,14 @@ macro_rules! coven_tables {
             CREATE TABLE _coven_file_uploads (
                 id INTEGER PRIMARY KEY,
                 reference BLOB NOT NULL UNIQUE,
+                device BLOB NOT NULL CHECK(length(device)=8),
+                file BLOB NOT NULL CHECK(length(file)=16),
                 queued_at BLOB NOT NULL,
                 attempts INTEGER NOT NULL DEFAULT 0 CHECK(attempts>=0),
                 last_attempt_at BLOB,
                 failure BLOB,
-                identity BLOB,
                 session BLOB,
-                stored INTEGER NOT NULL DEFAULT 0 CHECK(stored IN (0,1)),
-                unused INTEGER NOT NULL DEFAULT 0 CHECK(unused IN (0,1)),
-                CHECK(session IS NULL OR identity IS NOT NULL),
-                CHECK(stored=0 OR identity IS NOT NULL),
-                CHECK(unused=0 OR stored=1)
+                UNIQUE(device,file)
             ) STRICT;
         ");
         $visit!(_coven_file_chunks, "

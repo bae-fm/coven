@@ -154,11 +154,26 @@ impl Fixture {
         }
     }
     async fn uploaded(&self, id: &str, bytes: Vec<u8>) -> FileRef {
-        self.attach("files", id, bytes).await;
+        let attached = self.attach("files", id, bytes).await;
         self.drain().await;
+        // Upload completion changes no row: the attaching write's reference stays.
         let file = self.database.file_ref("files", id).await.unwrap();
-        assert_eq!(file.location(), coven_database::FileLocation::Uploaded);
+        assert_eq!(file, attached);
+        assert!(!self.queued(&file).await);
         file
+    }
+    async fn queued(&self, file: &FileRef) -> bool {
+        self.files
+            .inner
+            .database
+            .uploads()
+            .await
+            .unwrap()
+            .iter()
+            .any(|upload| upload.file == *file)
+    }
+    fn path(&self, file: &FileRef) -> coven_storage::ObjectPath {
+        coven_storage::ObjectPath::file(self.directory.id(), file.uploader(), file.id())
     }
     async fn close(&self) {
         self.files.close().await;
@@ -219,8 +234,7 @@ async fn ranges_authenticate_cache_batch_and_fail_offline() {
         bytes[CHUNK * 4..CHUNK * 4 + 1]
     );
     f.storage.set_online(true);
-    let uploaded = file.uploaded().unwrap().unwrap();
-    let path = coven_storage::ObjectPath::file(f.directory.id(), uploaded.device, uploaded.id);
+    let path = f.path(&file);
     f.storage
         .corrupt_byte(&path, 11 + CHUNK + 16 + 1)
         .await
@@ -503,7 +517,8 @@ async fn whole_reads_and_pins_check_the_row_hash_after_authenticating_chunks() {
     for mut write in a.database.test_queued_writes().await.unwrap() {
         for part in &mut write.parts {
             for row in &mut part.rows {
-                if let coven_merge::Operation::Update(columns) = &mut row.change.operation {
+                // The attaching write is the only write carrying the file.
+                if let coven_merge::Operation::Insert(columns) = &mut row.change.operation {
                     columns.get_mut("hash").unwrap().value =
                         coven_format::value::Value::Blob(vec![0; 32]);
                 }
@@ -617,8 +632,7 @@ async fn unused_headers_do_not_displace_recently_read_chunks() {
 async fn a_file_from_a_newer_format_requests_an_update() {
     let f = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
     let file = f.uploaded("future", vec![91; CHUNK]).await;
-    let uploaded = file.uploaded().unwrap().unwrap();
-    let path = coven_storage::ObjectPath::file(f.directory.id(), uploaded.device, uploaded.id);
+    let path = f.path(&file);
     let mut bytes = f.storage.read(&path).await.unwrap();
     bytes[1..3].copy_from_slice(&(coven_format::FORMAT_VERSION + 1).to_be_bytes());
     f.storage.delete(&path).await.unwrap();
@@ -696,9 +710,7 @@ async fn waiting_files_name_the_attaching_device_until_its_automatic_upload() {
             Provenance::AppProvided => a.attach("files", "waiting", b"content".to_vec()).await,
             Provenance::UserProvided => a.original("waiting", b"content").await,
         };
-        let coven_database::FileLocation::OnDevice(device) = local.location() else {
-            panic!("attachment must wait on its device")
-        };
+        let device = local.uploader();
         a.files.sync_files().await.unwrap();
         let queued = a.files.inner.database.uploads().await.unwrap();
         assert_eq!(queued.len(), 1);
@@ -706,14 +718,15 @@ async fn waiting_files_name_the_attaching_device_until_its_automatic_upload() {
         assert_eq!(queued[0].attempts, 0);
         assert!(queued[0].last_attempt_at.is_none());
         assert!(queued[0].failure.is_none());
-        assert!(queued[0].identity.is_none());
-        for write in a.database.test_queued_writes().await.unwrap() {
+        let attaching = a.database.test_queued_writes().await.unwrap();
+        for write in attaching.clone() {
             b.database.apply_downloaded(write.into()).await.unwrap();
         }
         let remote = b.database.file_ref("files", "waiting").await.unwrap();
-        assert_eq!(remote.location(), local.location());
+        assert_eq!((remote.uploader(), remote.id()), (device, local.id()));
+        // B's storage confirms absence: the file is still uploading on A.
         assert!(matches!(b.files.read_file(&remote).await,
-            Err(FileReadError::OnOtherDevice { device: owner, .. }) if owner == device));
+            Err(FileReadError::Uploading { device: owner, .. }) if owner == device));
         assert!(b.files.inner.database.uploads().await.unwrap().is_empty());
         let mut uploads = a.files.subscribe_uploads();
         a.files
@@ -725,15 +738,21 @@ async fn waiting_files_name_the_attaching_device_until_its_automatic_upload() {
         })
         .await
         .unwrap();
-        for write in a.database.test_queued_writes().await.unwrap() {
-            b.database.apply_downloaded(write.into()).await.unwrap();
-        }
+        // Completion queued no write: B's row and reference stay as they were.
+        assert_eq!(
+            a.database.test_queued_writes().await.unwrap().len(),
+            attaching.len()
+        );
+        assert_eq!(
+            a.database.file_ref("files", "waiting").await.unwrap(),
+            local
+        );
         b.files
             .set_storage(Some(a.storage.clone()), std::future::ready(Ok(())))
             .await
             .unwrap();
         let uploaded = b.database.file_ref("files", "waiting").await.unwrap();
-        assert_eq!(uploaded.location(), coven_database::FileLocation::Uploaded);
+        assert_eq!(uploaded, remote);
         assert_eq!(b.files.read_file(&uploaded).await.unwrap(), b"content");
         assert!(b.files.inner.database.uploads().await.unwrap().is_empty());
         b.files
@@ -801,22 +820,10 @@ async fn completed_catch_up_wakes_a_worker_blocked_between_file_sends() {
             }
         }
     }).await.unwrap();
-    assert_eq!(
-        f.database
-            .file_ref("files", "first")
-            .await
-            .unwrap()
-            .location(),
-        coven_database::FileLocation::Uploaded
-    );
-    assert!(matches!(
-        f.database
-            .file_ref("files", "second")
-            .await
-            .unwrap()
-            .location(),
-        coven_database::FileLocation::OnDevice(_)
-    ));
+    let first = f.database.file_ref("files", "first").await.unwrap();
+    let second = f.database.file_ref("files", "second").await.unwrap();
+    assert!(!f.queued(&first).await);
+    assert!(f.queued(&second).await);
     f.send.begin();
     f.send
         .complete(crate::send_gate::Binding::Device, Vec::new())
@@ -824,13 +831,7 @@ async fn completed_catch_up_wakes_a_worker_blocked_between_file_sends() {
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             uploads.next().await.unwrap();
-            if f.database
-                .file_ref("files", "second")
-                .await
-                .unwrap()
-                .location()
-                == coven_database::FileLocation::Uploaded
-            {
+            if !f.queued(&second).await {
                 break;
             }
         }

@@ -456,6 +456,9 @@ pub enum DbError {
     /// Reading or keeping file bytes failed.
     #[error(transparent)]
     Disk(#[from] coven_foundation::files::FileError),
+    /// The attaching write could not create its file's random key (§16.1).
+    #[error("creating a file key failed: {0}")]
+    FileKey(#[source] coven_crypto::CryptoError),
     /// Retaining the store while staging file bytes failed.
     #[error(transparent)]
     Lock(#[from] StoreLockError),

@@ -129,21 +129,18 @@ async fn app_reopening_resumes_operations_and_files_using_one_storage_capability
     })
     .await
     .unwrap();
+    // Upload completion changes no row, so the reference taken before upload
+    // still names the file and now reads it from the cache or storage.
     let file = handle.file_ref("attachments", "shared").await.unwrap();
-    assert_eq!(file.location(), FileLocation::Uploaded);
+    assert_eq!(file, local);
     assert_eq!(handle.read_file(&file).await.unwrap(), vec![42; 200_000]);
-    let uploaded = file.uploaded().unwrap().unwrap();
-    let path = ObjectPath::file(directory.id(), uploaded.device, uploaded.id);
+    let path = ObjectPath::file(directory.id(), file.uploader(), file.id());
     let reads = storage.reads().await.len();
     let stream = handle.open_file_stream(&file).await.unwrap();
     assert_eq!(stream.read_at(70_000, 37).await.unwrap(), vec![42; 37]);
     assert!(storage.reads().await[reads..]
         .iter()
         .all(|(read, _, _)| read != &path));
-    assert!(matches!(
-        handle.read_file(&local).await,
-        Err(FileReadError::Database(DbError::FileRefChanged { .. }))
-    ));
     assert!(matches!(
         handle.retry_pending_operation(OperationId(-1)).await,
         Err(OperationError::NotPending(OperationId(-1)))

@@ -6,11 +6,13 @@ use coven_format::file::FileHeader;
 use std::time::SystemTime;
 
 /// One durable upload; its plaintext chunk hashes are owned child rows.
+/// The captured reference carries the path and key fixed by the attaching write.
 #[derive(Debug)]
 pub struct FileUpload {
     /// Local queue identity, stable across retries.
     pub id: i64,
-    /// The exact row version queued by its attaching write.
+    /// The exact row version queued by its attaching write, with its fixed
+    /// uploader, object id and key.
     pub file: FileRef,
     /// When this device queued the file.
     pub queued_at: SystemTime,
@@ -20,14 +22,8 @@ pub struct FileUpload {
     pub last_attempt_at: Option<SystemTime>,
     /// Sync's typed failure recording, interpreted only by sync.
     pub failure: Option<SecretBytes>,
-    /// Sync's encoded independent file id and key, fixed before contacting storage.
-    pub identity: Option<SecretBytes>,
     /// Opaque provider session, interpreted only by storage.
     pub session: Option<SecretBytes>,
-    /// The provider has confirmed complete publication.
-    pub stored: bool,
-    /// The row changed; this stored object is retained for later deletion.
-    pub unused: bool,
 }
 
 fn enqueue(
@@ -40,7 +36,16 @@ fn enqueue(
     let (key, values) = crate::file_row::lookup(db, schema, file.table(), file.key())?;
     let identity =
         crate::file_row::identity(declaration, &values)?.ok_or(DbError::DamagedDatabase)?;
-    let inserted = db.internal_execute("INSERT INTO _coven_file_uploads(reference,queued_at) VALUES(?1,?2) ON CONFLICT(reference) DO NOTHING", (file.encode()?, crate::user_file::encode_time(now)))?;
+    let inserted = db.internal_execute(
+        "INSERT INTO _coven_file_uploads(reference,device,file,queued_at) VALUES(?1,?2,?3,?4)
+         ON CONFLICT(reference) DO NOTHING",
+        (
+            file.encode()?,
+            file.uploader().0.to_be_bytes(),
+            file.id().0.as_bytes(),
+            crate::user_file::encode_time(now),
+        ),
+    )?;
     if inserted == 1 {
         let id: i64 = db.query_row("SELECT last_insert_rowid()", [], |r| r.get(0))?;
         let count = db.internal_execute(
@@ -90,23 +95,12 @@ pub(crate) fn attached(
 }
 
 pub(crate) fn read(db: &DatabaseConnection) -> Result<Vec<FileUpload>, DbError> {
-    let rows = db.query("SELECT id,reference,queued_at,attempts,last_attempt_at,failure,identity,session,stored,unused FROM _coven_file_uploads ORDER BY id", [], |r| {
-        Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?, r.get::<_, Vec<u8>>(2)?, r.get::<_, i64>(3)?, r.get::<_, Option<Vec<u8>>>(4)?, r.get::<_, Option<Vec<u8>>>(5)?, r.get::<_, Option<Vec<u8>>>(6)?, r.get::<_, Option<Vec<u8>>>(7)?, r.get::<_, bool>(8)?, r.get::<_, bool>(9)?))
+    let rows = db.query("SELECT id,reference,queued_at,attempts,last_attempt_at,failure,session FROM _coven_file_uploads ORDER BY id", [], |r| {
+        Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?, r.get::<_, Vec<u8>>(2)?, r.get::<_, i64>(3)?, r.get::<_, Option<Vec<u8>>>(4)?, r.get::<_, Option<Vec<u8>>>(5)?, r.get::<_, Option<Vec<u8>>>(6)?))
     })?;
     rows.into_iter()
         .map(
-            |(
-                id,
-                reference,
-                queued,
-                attempts,
-                last,
-                failure,
-                identity,
-                session,
-                stored,
-                unused,
-            )| {
+            |(id, reference, queued, attempts, last, failure, session)| {
                 let file = FileRef::decode(&reference)?;
                 Ok(FileUpload {
                     id,
@@ -118,12 +112,59 @@ pub(crate) fn read(db: &DatabaseConnection) -> Result<Vec<FileUpload>, DbError> 
                         .map(crate::user_file::decode_time)
                         .transpose()?,
                     failure: failure.map(SecretBytes::new),
-                    identity: identity.map(SecretBytes::new),
                     session: session.map(SecretBytes::new),
-                    stored,
-                    unused,
                 })
             },
         )
         .collect()
+}
+
+/// Whether this device's queue still holds the file, so its local source
+/// remains the authoritative copy (§16.1).
+pub(crate) fn queued(db: &DatabaseConnection, file: &FileRef) -> Result<bool, DbError> {
+    db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM _coven_file_uploads WHERE device=?1 AND file=?2)",
+        (file.uploader().0.to_be_bytes(), file.id().0.as_bytes()),
+        |r| r.get(0),
+    )
+}
+
+/// Retire a confirmed upload in one transaction (§16.5): the queue row, its
+/// chunk hashes, and the owned copy kept only until upload. The app row and
+/// every `FileRef` stay unchanged, whatever happened to the row meanwhile.
+/// The released copy is recorded for removal after the caller commits.
+pub(crate) fn complete(db: &DatabaseConnection, id: i64) -> Result<(), DbError> {
+    let reference = db
+        .query_row(
+            "SELECT reference FROM _coven_file_uploads WHERE id=?1",
+            [id],
+            |r| r.get::<_, Vec<u8>>(0),
+        )
+        .map_err(|error| match error {
+            DbError::Sqlite(rusqlite::Error::QueryReturnedNoRows) => DbError::DamagedDatabase,
+            error => error,
+        })?;
+    let file = FileRef::decode(&reference)?;
+    let identity = file.identity()?;
+    let (table, key) = file.app_key();
+    for path in db.query(
+        "DELETE FROM _coven_device_files
+         WHERE table_name=?1 AND key=?2 AND column_name=?3 AND identity=?4 RETURNING path",
+        (&table, &key, file.column(), &identity),
+        |r| r.get::<_, String>(0),
+    )? {
+        db.internal_execute(
+            "INSERT INTO _coven_file_removals(path) VALUES(?1) ON CONFLICT DO NOTHING",
+            [path],
+        )?;
+    }
+    db.internal_execute(
+        "DELETE FROM _coven_file_chunks
+         WHERE table_name=?1 AND key=?2 AND column_name=?3 AND identity=?4",
+        (&table, &key, file.column(), &identity),
+    )?;
+    if db.internal_execute("DELETE FROM _coven_file_uploads WHERE id=?1", [id])? != 1 {
+        return Err(DbError::DamagedDatabase);
+    }
+    Ok(())
 }
