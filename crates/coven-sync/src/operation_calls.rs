@@ -482,7 +482,7 @@ impl StoreLogSync {
                     ..
                 } = &work.state
                 {
-                    requests.push(self.present_request(&work, request)?);
+                    requests.push(self.present_request(&work, &request.bytes)?);
                 }
             }
         }

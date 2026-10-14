@@ -337,6 +337,8 @@ impl Device {
         if !self.send.can_send() {
             self.sync.scan_store_log_once(true).await?;
         }
+        // Each step is its own drive: request checks list afresh.
+        self.sync.forget_join_requests();
         let row = self.operation(id).await;
         let data = crate::operation_data::Data::read(&row)?;
         self.sync.operation_step(&row, data).await

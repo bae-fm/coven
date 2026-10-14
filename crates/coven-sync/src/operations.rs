@@ -535,6 +535,7 @@ impl OperationRun {
     async fn drive(&mut self) -> Result<Option<SyncError>, SyncError> {
         self.sync
             .set_discovery_download_limit(self.files.transfer_limits().downloads);
+        self.sync.forget_join_requests();
         // Maintenance that failed and has not recovered within this drive.
         let mut maintenance_failures: Vec<(OperationId, SyncError)> = Vec::new();
         loop {

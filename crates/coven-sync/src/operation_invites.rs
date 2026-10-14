@@ -22,6 +22,10 @@ use coven_storage::{
 };
 use std::time::Duration;
 
+/// Stored join requests by path, from one listing.
+pub(crate) type RequestListing =
+    std::collections::BTreeMap<ObjectPath, coven_storage::StoredObject>;
+
 impl StoreLogSync {
     pub(crate) fn invite_expired(&self, data: &Data) -> bool {
         matches!(data, Data::Invite(work) if self.clock.now() >= work.expires_at && matches!(work.state, InviteState::Grant | InviteState::Waiting { .. } | InviteState::Approving { entry: None, .. }))
@@ -129,7 +133,7 @@ impl StoreLogSync {
                 return Err(SyncError::InvitationChanged);
             }
             let stored = match &work.state {
-                InviteState::Waiting { request, .. } => request.as_ref(),
+                InviteState::Waiting { request, .. } => request.as_ref().map(|r| &r.bytes),
                 InviteState::Grant if !approve && request.is_none() => None,
                 _ => return Err(SyncError::InvitationChanged),
             };
@@ -305,22 +309,34 @@ impl StoreLogSync {
                     .await?;
                 Ok(Progress::Reply(Ok(Output::Invite(value))))
             }
-            InviteState::Waiting { .. } => {
+            InviteState::Waiting { request, .. } => {
                 let path = ObjectPath::join_request(self.directory.id(), work.id);
+                let Some(object) = self.listed_request(&path).await? else {
+                    // A request already checked stays with its invite: a recent
+                    // one can be absent from a listing (§4's margin).
+                    return Ok(Progress::Waiting(match request {
+                        Some(_) => PendingReason::Paused,
+                        None => PendingReason::Missing { path },
+                    }));
+                };
+                if request.as_ref().is_some_and(|request| request.is(&object)) {
+                    return Ok(Progress::Waiting(PendingReason::Paused));
+                }
                 let Some(bytes) = self.read(&path).await? else {
                     return Ok(Progress::Waiting(PendingReason::Missing { path }));
                 };
-                let request = self.open_request(work, &bytes)?;
+                let bytes = self.open_request(work, &bytes)?;
                 let InviteState::Waiting {
                     request: current, ..
                 } = &mut work.state
                 else {
                     unreachable!()
                 };
-                if *current == Some(request.clone()) {
-                    return Ok(Progress::Waiting(PendingReason::Paused));
-                }
-                *current = Some(request);
+                *current = Some(crate::operation_data::ReceivedRequest {
+                    bytes,
+                    object_id: object.object_id,
+                    revision: object.revision,
+                });
                 let pending = self
                     .operation_condition(record, PendingReason::Paused)
                     .await?;
@@ -391,6 +407,47 @@ impl StoreLogSync {
                 self.finish_invite(record).await?;
                 Ok(Progress::Finished(Output::Unit))
             }
+        }
+    }
+
+    /// Start a new drive's request checks: the next due one lists afresh.
+    pub(crate) fn forget_join_requests(&mut self) {
+        self.join_requests = None;
+    }
+
+    /// The stored request at `path` in this drive's one `join-requests/`
+    /// listing, which serves every open invite (SP step 5).
+    async fn listed_request(
+        &mut self,
+        path: &ObjectPath,
+    ) -> Result<Option<coven_storage::StoredObject>, SyncError> {
+        if self.join_requests.is_none() {
+            let listed = self
+                .storage
+                .as_deref()
+                .ok_or(SyncError::NoStorage)?
+                .list(&coven_storage::ObjectPrefix::join_requests(
+                    self.directory.id(),
+                ))
+                .await;
+            match listed {
+                Ok(objects) => {
+                    self.join_requests = Some(Ok(objects
+                        .into_iter()
+                        .map(|object| (object.path.clone(), object))
+                        .collect()));
+                }
+                Err(error) => {
+                    self.join_requests = Some(Err(error.failure()));
+                    return Err(error.into());
+                }
+            }
+        }
+        match self.join_requests.as_ref().expect("listed above") {
+            Ok(objects) => Ok(objects.get(path).cloned()),
+            Err(failure) => Err(failure
+                .with_source("this drive's join-request listing failed")
+                .into()),
         }
     }
 

@@ -46,6 +46,9 @@ pub struct StoreLogSync {
     waits: Arc<crate::RetryWaits>,
     /// Commits that can satisfy waiting operations' prerequisites.
     prerequisites: std::sync::Mutex<coven_database::DatabaseChanges>,
+    /// This drive's one `join-requests/` listing, serving every open
+    /// invite's due check, or the failure it met (SP step 5).
+    join_requests: Option<Result<operation_invites::RequestListing, StorageFailure>>,
 }
 
 impl StoreLogSync {
@@ -78,6 +81,7 @@ impl StoreLogSync {
             ids,
             directory,
             admin_access: Default::default(),
+            join_requests: None,
         }
     }
 
@@ -109,6 +113,7 @@ impl StoreLogSync {
             ids,
             directory,
             admin_access: Default::default(),
+            join_requests: None,
         }
     }
 

@@ -116,6 +116,21 @@ impl InviteGrant {
     }
 }
 
+/// A checked join request and the stored object it came from. While the
+/// listing shows that same object, the request needs no further read (SP step 5).
+#[derive(Clone, Serialize, Deserialize)]
+pub(crate) struct ReceivedRequest {
+    pub(crate) bytes: Vec<u8>,
+    pub(crate) object_id: String,
+    pub(crate) revision: String,
+}
+
+impl ReceivedRequest {
+    pub(crate) fn is(&self, object: &coven_storage::StoredObject) -> bool {
+        self.object_id == object.object_id && self.revision == object.revision
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 pub(crate) struct InviteWork {
     pub(crate) id: InviteId,
@@ -133,7 +148,7 @@ pub(crate) enum InviteState {
     Grant,
     Waiting {
         invitation: StorageInvitation,
-        request: Option<Vec<u8>>,
+        request: Option<ReceivedRequest>,
     },
     Approving {
         request: Vec<u8>,

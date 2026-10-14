@@ -523,3 +523,69 @@ async fn discarding_a_waiting_invite_takes_its_access_back() {
     assert!(a.db.operation(id).await.unwrap().is_none());
     assert_eq!(access_keys(&a.db).await, [console_key("new-key", None)]);
 }
+
+/// The calls an owner's connection made since `from`, restricted to join requests.
+fn request_calls(d: &Device, from: usize) -> Vec<coven_storage::test_utils::MemoryRequest> {
+    use coven_storage::test_utils::MemoryRequest;
+    d.storage.request_trace()[from..]
+        .iter()
+        .filter(|call| match call {
+            MemoryRequest::List(prefix) => *prefix == ObjectPrefix::join_requests(store(1)),
+            MemoryRequest::Read(path, _) | MemoryRequest::Status(path) => {
+                path.as_str().contains("/join-requests/")
+            }
+            _ => false,
+        })
+        .cloned()
+        .collect()
+}
+
+#[tokio::test]
+async fn open_invites_share_one_request_listing_and_read_only_new_requests() {
+    use coven_storage::test_utils::MemoryRequest;
+    let storage = google();
+    let [mut a, _b, _c] = accounts(storage.clone()).await;
+    let (first, _) = invite(&mut a, "one@example.com").await;
+    let (second, invite_two) = invite(&mut a, "two@example.com").await;
+    // One drive checks both invites: one listing, and no request is read.
+    let from = a.storage.request_trace().len();
+    a.sync.forget_join_requests();
+    for id in [first, second] {
+        let row = a.operation(id).await;
+        let data = Data::read(&row).unwrap();
+        assert!(matches!(
+            a.sync.operation_step(&row, data).await.unwrap(),
+            Progress::Waiting(PendingReason::Missing { .. })
+        ));
+    }
+    assert_eq!(
+        request_calls(&a, from),
+        [MemoryRequest::List(ObjectPrefix::join_requests(store(1)))]
+    );
+    // A newly present request is read once; the next drive's check finds
+    // the same object listed and reads nothing.
+    let joining = MemoryStorage::for_recipient(&storage, "two@example.com").unwrap();
+    request(&joining, &invite_two, &joiner(&invite_two, 9), "Phone").await;
+    let from = a.storage.request_trace().len();
+    assert!(matches!(
+        step(&mut a, second).await.unwrap(),
+        Progress::Advanced
+    ));
+    let path = ObjectPath::join_request(store(1), invite_two.id);
+    assert_eq!(
+        request_calls(&a, from),
+        [
+            MemoryRequest::List(ObjectPrefix::join_requests(store(1))),
+            MemoryRequest::Read(path, None),
+        ]
+    );
+    let from = a.storage.request_trace().len();
+    assert!(matches!(
+        step(&mut a, second).await.unwrap(),
+        Progress::Waiting(PendingReason::Paused)
+    ));
+    assert_eq!(
+        request_calls(&a, from),
+        [MemoryRequest::List(ObjectPrefix::join_requests(store(1)))]
+    );
+}
