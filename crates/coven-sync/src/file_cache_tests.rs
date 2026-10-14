@@ -391,7 +391,7 @@ async fn a_provider_cooldown_holds_eager_downloads_and_uploads_alike() {
         .unwrap();
     assert_eq!(cooldown.wait, Duration::from_secs(600));
     let photo = b.attach("other", "photo", b"photo".to_vec()).await;
-    b.files.inner.state.lock().unwrap().paused = false;
+    b.files.set_uploads_paused(false).await.unwrap();
     // The download's own one-second wait ends; the cooldown still holds it
     // and the upload queue.
     advance(&b, &clock, 1);
@@ -400,10 +400,10 @@ async fn a_provider_cooldown_holds_eager_downloads_and_uploads_alike() {
     b.files.sync_files().await.unwrap();
     // Not attempted at all: the fill never started.
     assert!(!status.has_changed().unwrap());
-    assert!(matches!(
+    assert_eq!(
         b.files.inner.drain_uploads(false).await.unwrap(),
-        DrainOutcome::AllInBackoff
-    ));
+        DrainOutcome::Drained { uploaded: 0 }
+    );
     assert_eq!(a.storage.request_trace().len(), requests);
     advance(&b, &clock, 599);
     b.files.sync_files().await.unwrap();
