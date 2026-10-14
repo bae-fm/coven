@@ -2924,7 +2924,9 @@ match stream.read_at(resume_at, 256 * 1024).await {
 - Removing an account can leave access through a parent, a grant reaching other
   accounts, an unidentified recipient, or the owner. `PendingReason::AccessRemains`
   retains these grants and their reasons for the app to present to the owner;
-  a waiting call receives that record as `SyncError::Pending`.
+  a waiting call receives that record as `SyncError::Pending`. Each account
+  whose grants remain is its own `RevokeAccess` record, so a member whose
+  recorded accounts kept grants lists every such account.
   The revocation remains in `pending()` until a retry confirms the owner
   removed those grants, or replay no longer requires that revocation.
   This also preserves the result when no app call is waiting, including a

@@ -240,10 +240,42 @@ impl Database {
     /// before discarding; removing this row cannot retire the publication queue.
     pub async fn finish_operation(&self, id: OperationId) -> Result<(), DbError> {
         self.call(move |inner| {
+            inner
+                .access
+                .with_writer(|writer| writer.transaction(|db| finish(db, id).map(drop)))
+        })
+        .await
+    }
+
+    /// Retire an operation together with the work its last step leaves: one
+    /// new journal row per follow-up, each committed with the pending condition
+    /// built from its new id. Nothing commits unless all of it does.
+    pub async fn finish_operation_with_work<P, F>(
+        &self,
+        id: OperationId,
+        follow_ups: Vec<(NewOperation, F)>,
+    ) -> Result<(), DbError>
+    where
+        P: crate::PendingValue,
+        F: FnOnce(OperationId) -> P + Send + 'static,
+    {
+        self.call(move |inner| {
             inner.access.with_writer(|writer| {
                 writer.transaction(|db| {
-                    crate::pending::clear_operation(db, id)?;
-                    db.internal_execute("DELETE FROM _coven_operations WHERE id=?1", [id.0])?;
+                    for (operation, pending) in follow_ups {
+                        let started = crate::operation::insert(db, &operation)?;
+                        let pending = pending(started);
+                        if pending.operation() != Some(started)
+                            || pending.reported_by() != inner.access.device
+                        {
+                            return Err(DbError::DamagedDatabase);
+                        }
+                        crate::pending::save(db, &pending)?;
+                    }
+                    // Follow-ups belong to this step; they never outlive a lost row.
+                    if finish(db, id)? != 1 {
+                        return Err(DbError::OperationChanged(id));
+                    }
                     Ok(())
                 })
             })
@@ -283,4 +315,10 @@ impl Database {
         })
         .await
     }
+}
+
+/// Delete the row and its condition, returning how many rows were deleted.
+fn finish(db: &crate::sqlite::DatabaseConnection, id: OperationId) -> Result<usize, DbError> {
+    crate::pending::clear_operation(db, id)?;
+    db.internal_execute("DELETE FROM _coven_operations WHERE id=?1", [id.0])
 }

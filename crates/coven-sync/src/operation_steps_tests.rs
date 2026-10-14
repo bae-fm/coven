@@ -456,6 +456,94 @@ async fn a_retained_grant_on_old_access_blocks_removal_until_explicit_retry() {
 }
 
 #[tokio::test]
+async fn grants_retained_on_two_accounts_are_each_reported_and_retried_alone() {
+    let storage = google();
+    let [mut a, mut b, _c] = accounts(storage.clone()).await;
+    storage
+        .grant_access("replacement@example.com")
+        .await
+        .unwrap();
+    b.sync
+        .make_and_upload_entry(StoreChange::SetAccess {
+            member: b.member.member_id(),
+            access: coven_format::MemberAccess::ProviderAccount("replacement@example.com".into()),
+        })
+        .await
+        .unwrap();
+    a.sync().await;
+    let retained = |account: &str| {
+        vec![coven_storage::RetainedAccess {
+            provider_id: format!("parent-of-{account}"),
+            reason: coven_storage::RetainedAccessReason::Inherited,
+        }]
+    };
+    let accounts = ["ben@example.com", "replacement@example.com"];
+    for account in accounts {
+        storage
+            .set_retained_access(account, retained(account))
+            .await;
+    }
+    let files = file_owner(&a);
+    let operations = operation_owner(a.sync, files);
+    assert_eq!(
+        operations
+            .remove_member(&b.member.member_id())
+            .await
+            .unwrap(),
+        MemberRemoval::AccessRemains {
+            shares: accounts.into_iter().flat_map(retained).collect()
+        }
+    );
+    // Each account is its own provider access record; the removal is done.
+    let conditions = pending(&operations, &a.db).await;
+    assert_eq!(
+        conditions
+            .iter()
+            .map(|record| (pending_kind(record), record.reason.clone()))
+            .collect::<Vec<_>>(),
+        accounts.map(|account| (
+            OperationKind::RevokeAccess,
+            PendingReason::AccessRemains {
+                account: account.into(),
+                shares: retained(account),
+            }
+        ))
+    );
+    let ids = conditions.iter().map(pending_id).collect::<Vec<_>>();
+    assert_eq!(
+        a.db.operations()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|record| record.id)
+            .collect::<Vec<_>>(),
+        ids
+    );
+    assert!(matches!(
+        operations.discard_pending_operation(ids[0]).await,
+        Err(SyncError::NotPending(id)) if id == ids[0]
+    ));
+    for (index, account) in accounts.into_iter().enumerate() {
+        assert!(matches!(
+            operations.retry_pending_operation(ids[index]).await,
+            Err(SyncError::Pending(found)) if *found == conditions[index]
+        ));
+        storage.set_retained_access(account, Vec::new()).await;
+        operations
+            .retry_pending_operation(ids[index])
+            .await
+            .unwrap();
+        assert_eq!(pending(&operations, &a.db).await, conditions[index + 1..]);
+        assert!(matches!(MemoryStorage::for_recipient(&storage, account)
+            .unwrap()
+            .list(&ObjectPrefix::all(store(1)))
+            .await, Err(error) if error.failure() == StorageFailure::PermissionDenied));
+    }
+    assert!(a.db.operations().await.unwrap().is_empty());
+    operations.close().await.unwrap();
+}
+
+#[tokio::test]
 async fn another_invites_revocation_cannot_revive_a_confirmed_key() {
     let storage = storage();
     let mut a = device(storage.clone(), 1, member(1), store(1)).await;

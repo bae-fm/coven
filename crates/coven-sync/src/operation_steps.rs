@@ -14,18 +14,20 @@ use coven_database::{
 };
 use coven_format::{store_log::StoreChange, MemberAccess};
 use coven_foundation::id_source::KeyId;
-use coven_storage::MemberRemoval;
+use coven_storage::{MemberRemoval, RetainedAccess};
 
+/// Every recorded access of one member, revoked: the call's summary and each
+/// account whose grants remain, with those grants.
 struct AccessResult {
     result: MemberRemoval,
-    pending: Option<PendingReason>,
+    retained: Vec<(String, Vec<RetainedAccess>)>,
 }
 
 impl StoreLogSync {
     pub(crate) async fn operation_step(
         &mut self,
         record: &OperationRecord,
-        mut data: Data,
+        data: Data,
     ) -> Result<Progress, SyncError> {
         if let Data::PublishSchema { version } = data {
             return self.schema_publication_step(record, version).await;
@@ -40,28 +42,30 @@ impl StoreLogSync {
             // Only explicit confirmation or a verified admin deletion clears it.
             return Ok(Progress::Waiting(PendingReason::DeleteAccessKey(key)));
         }
-        if let Data::Revoke { member, result } = &data {
-            if let Some(result) = result
-                .as_ref()
-                .filter(|result| !matches!(result, MemberRemoval::AccessRemains { .. }))
-            {
-                let result = result.clone();
-                self.database.finish_operation(record.id).await?;
-                return Ok(Progress::Finished(Output::Removal(result)));
-            }
-            let access = self.revoke_member_access(record.id, member).await?;
-            data = Data::Revoke {
-                member: member.clone(),
-                result: Some(access.result),
-            };
-            return self
-                .save_access_result(record, &data, 1, access.pending)
-                .await;
+        if let Data::Revoke { member } = &data {
+            return self.finish_revocation(record, member).await;
+        }
+        if let Data::RetainedAccess { account } = &data {
+            let access = MemberAccess::ProviderAccount(account.clone());
+            return Ok(match self.revoke_access(record.id, &access).await? {
+                MemberRemoval::AccessRemains { shares } => {
+                    Progress::Waiting(PendingReason::AccessRemains {
+                        account: account.clone(),
+                        shares,
+                    })
+                }
+                // Removed by the owner, needed again by another member or
+                // invite, or no longer this device's to revoke.
+                _ => {
+                    self.database.finish_operation(record.id).await?;
+                    Progress::Finished(Output::Unit)
+                }
+            });
         }
         if record.last_step < data.entry_step_number(5) {
             return self.entry_step(record, data).await;
         }
-        let Data::Entry(work) = &mut data else {
+        let Data::Entry(work) = &data else {
             unreachable!()
         };
         let output = match &work.intent {
@@ -80,19 +84,7 @@ impl StoreLogSync {
             }
             Intent::CreateCircle { circle, .. } => Output::CircleId(*circle),
             Intent::RemoveMember { member } => {
-                if let Some(result) = work
-                    .removal
-                    .as_ref()
-                    .filter(|result| !matches!(result, MemberRemoval::AccessRemains { .. }))
-                {
-                    Output::Removal(result.clone())
-                } else {
-                    let access = self.revoke_member_access(record.id, member).await?;
-                    work.removal = Some(access.result);
-                    return self
-                        .save_access_result(record, &data, 6, access.pending)
-                        .await;
-                }
+                return self.finish_revocation(record, member).await;
             }
             _ => Output::Unit,
         };
@@ -301,6 +293,7 @@ impl StoreLogSync {
                 return Ok(Some(change));
             }
             Data::Revoke { .. }
+            | Data::RetainedAccess { .. }
             | Data::DeleteAccessKey(_)
             | Data::Snapshots(_)
             | Data::PublishSchema { .. } => unreachable!(),
@@ -351,35 +344,35 @@ impl StoreLogSync {
         }
     }
 
-    pub(super) async fn save_access_result(
+    /// Revoke a removed member's access and finish the operation in one commit
+    /// with one retained-access row per account whose grants remain, so
+    /// pending() names each such account (E9).
+    async fn finish_revocation(
         &self,
         record: &OperationRecord,
-        data: &Data,
-        step: u32,
-        reason: Option<PendingReason>,
+        member: &str,
     ) -> Result<Progress, SyncError> {
-        let update = data.update(record, step)?;
-        let pending = match reason {
-            Some(reason) => Some(self.operation_condition(record, reason).await?),
-            None => None,
-        };
-        // A condition needing app action, such as retained grants, answers the
-        // waiting call as the same record pending() shows.
-        let reply = pending
-            .clone()
-            .filter(|pending| pending.retry() != Retry::Automatic);
-        match pending {
-            Some(pending) => {
-                self.database
-                    .advance_operation_pending(update, pending)
-                    .await?
-            }
-            None => self.database.advance_operation(update).await?,
-        }
-        Ok(match reply {
-            Some(pending) => Progress::Reply(Err(SyncError::Pending(Box::new(pending)))),
-            None => Progress::Advanced,
-        })
+        let access = self.revoke_member_access(record.id, member).await?;
+        let reported_by = self.database.sync_state(Vec::new()).await?.device;
+        let follow_ups = access
+            .retained
+            .into_iter()
+            .map(|(account, shares)| {
+                let data = Data::RetainedAccess {
+                    account: account.clone(),
+                };
+                let kind = data.kind();
+                Ok((data.new_operation("coven")?, move |id| PendingRecord {
+                    subject: PendingSubject::Operation { id, kind },
+                    reason: PendingReason::AccessRemains { account, shares },
+                    reported_by,
+                }))
+            })
+            .collect::<Result<Vec<_>, SyncError>>()?;
+        self.database
+            .finish_operation_with_work(record.id, follow_ups)
+            .await?;
+        Ok(Progress::Finished(Output::Removal(access.result)))
     }
 
     async fn revoke_member_access(
@@ -408,7 +401,6 @@ impl StoreLogSync {
             }
         }
         let mut retained = Vec::new();
-        let mut pending = None;
         let mut current_result = None;
         for access in accesses {
             let result = self.revoke_access(operation, &access).await?;
@@ -416,30 +408,27 @@ impl StoreLogSync {
                 let MemberAccess::ProviderAccount(account) = &access else {
                     return Err(coven_database::DbError::DamagedDatabase.into());
                 };
-                if pending.is_none() {
-                    pending = Some(PendingReason::AccessRemains {
-                        account: account.clone(),
-                        shares: shares.clone(),
-                    });
-                }
-                for share in shares {
-                    if !retained.contains(share) {
-                        retained.push(share.clone());
-                    }
-                }
+                retained.push((account.clone(), shares.clone()));
             }
             if current.same_credential(&access) {
                 current_result = Some(result);
             }
         }
-        // The app call describes the replay's current access. S3 deletion work was
-        // recorded when each entry applied. Retained grants from any account block it.
+        // The app call describes the replay's current access, or every
+        // account's retained grants. S3 deletion work was recorded when each
+        // entry applied.
         let result = if retained.is_empty() {
             current_result.ok_or(coven_database::DbError::DamagedDatabase)?
         } else {
-            MemberRemoval::AccessRemains { shares: retained }
+            let mut shares = Vec::new();
+            for share in retained.iter().flat_map(|(_, shares)| shares) {
+                if !shares.contains(share) {
+                    shares.push(share.clone());
+                }
+            }
+            MemberRemoval::AccessRemains { shares }
         };
-        Ok(AccessResult { result, pending })
+        Ok(AccessResult { result, retained })
     }
 
     pub(super) async fn revoke_access(
@@ -565,26 +554,17 @@ impl StoreLogSync {
         let mut operations = Vec::new();
         for target in targets {
             let target = target.to_string();
-            // Unfinished revocations read the full committed log when they run.
-            // A step whose result is already fixed cannot absorb a later access.
+            // An unfinished revocation reads the full committed log when it
+            // runs and finishes in the commit that records its result.
             let pending = data.iter().any(|data| match data {
-                Data::Revoke {
-                    member,
-                    result: None,
-                } => *member == target,
-                Data::Entry(work) if work.removal.is_none() => {
+                Data::Revoke { member } => *member == target,
+                Data::Entry(work) => {
                     matches!(&work.intent, Intent::RemoveMember { member } if *member == target)
                 }
                 _ => false,
             });
             if !pending {
-                operations.push(
-                    Data::Revoke {
-                        member: target,
-                        result: None,
-                    }
-                    .new_operation("coven")?,
-                );
+                operations.push(Data::Revoke { member: target }.new_operation("coven")?);
             }
         }
         Ok(operations)

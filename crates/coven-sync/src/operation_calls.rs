@@ -160,41 +160,13 @@ impl StoreLogSync {
             }
             Command::Retry(id) => {
                 let record = self.pending_operation(id, false).await?;
-                let mut data = Data::read(&record)?;
+                let data = Data::read(&record)?;
                 if data.completing_reset(&record) {
                     if let Some(reload) = self.pending_reload().await? {
                         self.database.retry_operation(reload).await?;
                     }
                 }
-                let restart = match &mut data {
-                    Data::Revoke { result, .. }
-                        if matches!(
-                            result,
-                            Some(coven_storage::MemberRemoval::AccessRemains { .. })
-                        ) =>
-                    {
-                        *result = None;
-                        Some(0)
-                    }
-                    Data::Entry(work)
-                        if matches!(
-                            work.removal,
-                            Some(coven_storage::MemberRemoval::AccessRemains { .. })
-                        ) =>
-                    {
-                        work.removal = None;
-                        Some(5)
-                    }
-                    _ => None,
-                };
-                match restart {
-                    Some(step) => {
-                        self.database
-                            .advance_operation(data.update(&record, step)?)
-                            .await?
-                    }
-                    None => self.database.retry_operation(id).await?,
-                }
+                self.database.retry_operation(id).await?;
                 return Ok(Begun::Operation(id));
             }
             Command::Discard(id) => {
@@ -462,7 +434,6 @@ impl StoreLogSync {
         let data = Data::Entry(EntryWork {
             intent,
             entry: None,
-            removal: None,
         });
         Ok(Begun::Operation(
             self.database
@@ -546,7 +517,10 @@ impl StoreLogSync {
             .await?
             .ok_or(SyncError::NotPending(id))?;
         let app_owned = record.started_by != "coven" || data.kind() == OperationKind::SchemaChange;
-        if !app_owned && (discard || !matches!(data, Data::Revoke { .. })) {
+        // Provider access work can be retried, never discarded (§18).
+        if !app_owned
+            && (discard || !matches!(data, Data::Revoke { .. } | Data::RetainedAccess { .. }))
+        {
             return Err(SyncError::NotPending(id));
         }
         if !discard

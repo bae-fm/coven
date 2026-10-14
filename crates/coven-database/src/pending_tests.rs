@@ -90,9 +90,12 @@ impl PendingValue for Record {
     }
 }
 pub(crate) async fn operation_record(db: &Database, id: OperationId) -> Record {
+    reported_operation(own(db).await, id)
+}
+pub(crate) fn reported_operation(reported_by: DeviceId, id: OperationId) -> Record {
     Record {
         subject: Subject::Number(id.0.try_into().unwrap()),
-        reported_by: own(db).await,
+        reported_by,
         reason: Reason::Missing,
         operation: Some(id),
     }

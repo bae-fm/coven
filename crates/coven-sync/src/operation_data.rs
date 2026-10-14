@@ -8,7 +8,7 @@ use coven_format::{
     MemberAccess, Object,
 };
 use coven_foundation::id_source::{CircleId, InviteId};
-use coven_storage::{MemberRemoval, StorageInvitation};
+use coven_storage::StorageInvitation;
 use serde::{Deserialize, Serialize};
 use std::time::SystemTime;
 
@@ -56,7 +56,6 @@ pub(crate) struct EntryWork {
     pub(crate) intent: Intent,
     // Present once preparation fixes the author view and entry bytes.
     pub(crate) entry: Option<Vec<u8>>,
-    pub(crate) removal: Option<MemberRemoval>,
 }
 
 /// A key coven makes with admin access (§4, §18). The scope, and with it the
@@ -138,9 +137,14 @@ pub(crate) enum Data {
     Snapshots(crate::snapshot_data::SnapshotTask),
     Entry(EntryWork),
     Invite(InviteWork),
+    /// Revoke every access recorded for a removed member.
     Revoke {
         member: String,
-        result: Option<MemberRemoval>,
+    },
+    /// One account whose grants revocation retained, until a retry finds
+    /// them removed. Each account is its own pending subject.
+    RetainedAccess {
+        account: String,
     },
     /// One S3 key's deletion obligation; its pending notice lives on this row.
     DeleteAccessKey(#[serde(with = "crate::pending_encoding::AccessKey")] crate::AccessKeyToDelete),
@@ -176,7 +180,7 @@ impl Data {
                 SnapshotJob::Retain => OperationKind::Retention,
             },
             Self::Invite(_) => OperationKind::Invite,
-            Self::Revoke { .. } => OperationKind::RevokeAccess,
+            Self::Revoke { .. } | Self::RetainedAccess { .. } => OperationKind::RevokeAccess,
             Self::DeleteAccessKey(_) => OperationKind::DeleteAccessKey,
         }
     }
@@ -208,6 +212,7 @@ impl Data {
             },
             Self::Invite(_) => "invite",
             Self::Revoke { .. } => "revoke-access",
+            Self::RetainedAccess { .. } => "retained-access",
             Self::DeleteAccessKey(_) => "delete-access-key",
         }
     }

@@ -568,7 +568,6 @@ impl StoreLogSync {
             let data = Data::Entry(crate::operation_data::EntryWork {
                 intent: crate::operation_data::Intent::Reset { snapshot: id },
                 entry: None,
-                removal: None,
             });
             self.database
                 .advance_operation(data.update(record, 3)?)

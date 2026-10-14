@@ -482,65 +482,6 @@ async fn pending_queries_round_trip_every_subject_and_reason() {
     }
 }
 
-#[tokio::test]
-async fn retained_access_commits_its_condition_with_the_provider_result() {
-    {
-        let storage = google();
-        let [a, _, c] = accounts(storage).await;
-        let mut data = Data::Revoke {
-            member: c.member.member_id().to_string(),
-            result: None,
-        };
-        let id =
-            a.db.start_operation(data.new_operation("coven").unwrap())
-                .await
-                .unwrap();
-        let record = a.db.operation(id).await.unwrap().unwrap();
-        let shares = vec![coven_storage::RetainedAccess {
-            provider_id: "parent-grant".into(),
-            reason: coven_storage::RetainedAccessReason::Inherited,
-        }];
-        let Data::Revoke { result, .. } = &mut data else {
-            unreachable!()
-        };
-        *result = Some(MemberRemoval::AccessRemains {
-            shares: shares.clone(),
-        });
-        let progress = a
-            .sync
-            .save_access_result(
-                &record,
-                &data,
-                1,
-                Some(PendingReason::AccessRemains {
-                    account: "cat@example.com".into(),
-                    shares: shares.clone(),
-                }),
-            )
-            .await
-            .unwrap();
-        assert!(
-            matches!(&progress, Progress::Reply(Err(SyncError::Pending(found))) if found.reason == PendingReason::AccessRemains { account: "cat@example.com".into(), shares: shares.clone() })
-        );
-        let saved = a.db.operation(id).await.unwrap().unwrap();
-        assert_eq!(saved.last_step, 1);
-        assert!(matches!(
-            Data::read(&saved).unwrap(),
-            Data::Revoke {
-                result: Some(MemberRemoval::AccessRemains { .. }),
-                ..
-            }
-        ));
-        assert_eq!(
-            a.db.pending::<PendingRecord>().await.unwrap()[0].reason,
-            PendingReason::AccessRemains {
-                account: "cat@example.com".into(),
-                shares
-            }
-        );
-    }
-}
-
 // Operation ids are fresh UUIDs in Rust and naturals in Lean. Each history
 // maps its one real operation to its case index; reporter ids remain exact.
 async fn observed(

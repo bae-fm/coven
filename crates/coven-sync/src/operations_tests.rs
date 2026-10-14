@@ -525,14 +525,8 @@ async fn retained_provider_grants_block_both_requested_and_remote_revocations() 
         }
         let conditions = pending(&operations, &a.db).await;
         assert_eq!(conditions.len(), 1);
-        assert_eq!(
-            pending_kind(&conditions[0]),
-            if remote {
-                OperationKind::RevokeAccess
-            } else {
-                OperationKind::RemoveMember
-            }
-        );
+        // Retained grants are provider access work, whichever device removed.
+        assert_eq!(pending_kind(&conditions[0]), OperationKind::RevokeAccess);
         let id = pending_id(&conditions[0]);
         assert!(
             matches!(operations.retry_pending_operation(id).await, Err(SyncError::Pending(found)) if matches!(&found.reason, PendingReason::AccessRemains { shares: found, .. } if *found == shares))

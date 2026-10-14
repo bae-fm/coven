@@ -234,21 +234,12 @@ impl Operations {
         self.unit(Command::SetAccess(access)).await
     }
     /// Remove the member, rotate audience keys and revoke every recorded access.
-    /// Returns current access's result, or retained grants from any account.
-    /// Pending records list every recorded S3 key until its deletion is cleared.
+    /// Returns current access's result, or every account's retained grants;
+    /// pending() lists each such account as its own RevokeAccess record, and
+    /// every recorded S3 key until its deletion is cleared.
     pub async fn remove_member(&self, member: &MemberId) -> Result<MemberRemoval, SyncError> {
-        match self.call(Command::RemoveMember(member.clone())).await {
-            Ok(Output::Removal(value)) => Ok(value),
-            Err(SyncError::Pending(pending)) => match pending.reason {
-                PendingReason::AccessRemains { shares, .. } => {
-                    Ok(MemberRemoval::AccessRemains { shares })
-                }
-                reason => Err(SyncError::Pending(Box::new(PendingRecord {
-                    reason,
-                    ..*pending
-                }))),
-            },
-            Err(error) => Err(error),
+        match self.call(Command::RemoveMember(member.clone())).await? {
+            Output::Removal(value) => Ok(value),
             _ => unreachable!("removal result"),
         }
     }
