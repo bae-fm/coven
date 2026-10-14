@@ -1,7 +1,7 @@
 //! The database-to-envelope stream; no write body is collected here.
 
 use crate::key_introductions::{newest, CopyObservation, Wait};
-use crate::SyncError;
+use crate::{PendingReason, PendingRecord, PendingSubject, SyncError};
 use coven_crypto::{DerivedKeys, MemberId, MemberKeys, ObjectHasher, StoreKeyring};
 use coven_database::{DbError, StoreLog, WaitingUpload};
 use coven_format::sealed_write::{WriteObjectLayout, WriteObjectPrefix};
@@ -141,6 +141,8 @@ pub(crate) fn check_upload_version(log: &StoreLog, schema: u32) -> Result<(), Sy
     Ok(())
 }
 
+/// Fix a write's first-attempt keys. An audience without a usable key makes
+/// the write wait: the error is a pending `KeyUnavailable` for that write.
 pub(crate) fn select(
     log: &StoreLog,
     schema: u32,
@@ -149,19 +151,46 @@ pub(crate) fn select(
     member: &MemberKeys,
     observation: &CopyObservation,
 ) -> Result<WriteObjectPrefix, SyncError> {
-    check_member(log, member, header.header.position.device)?;
+    let write = header.header.position;
+    check_member(log, member, write.device)?;
     check_upload_version(log, schema)?;
     let me = member.member_id();
-    let store_key = first_attempt(log, observation, ring, &me, &Audience::Store)?;
+    let first = |audience: &Audience| {
+        first_attempt(log, observation, ring, &me, audience).map_err(|error| match error {
+            SyncError::KeyUnavailable(key) => SyncError::Pending(Box::new(PendingRecord {
+                subject: PendingSubject::Write(write),
+                reason: PendingReason::KeyUnavailable {
+                    audience: audience.clone(),
+                    key,
+                },
+                reported_by: write.device,
+            })),
+            error => error,
+        })
+    };
     Ok(WriteObjectPrefix {
         format: coven_format::FormatVersion::CURRENT,
-        store_key,
+        store_key: first(&Audience::Store)?,
         part_keys: header
             .parts
             .iter()
-            .map(|part| first_attempt(log, observation, ring, &me, &part.audience))
+            .map(|part| first(&part.audience))
             .collect::<Result<_, _>>()?,
     })
+}
+
+/// The write a first attempt left waiting for a usable key in one of its
+/// audiences (§11), from the error `select` returned.
+pub(crate) fn key_wait(error: &SyncError) -> Option<&PendingRecord> {
+    match error {
+        SyncError::Pending(record)
+            if matches!(record.subject, PendingSubject::Write(_))
+                && matches!(record.reason, PendingReason::KeyUnavailable { .. }) =>
+        {
+            Some(record)
+        }
+        _ => None,
+    }
 }
 
 pub(crate) fn seal(

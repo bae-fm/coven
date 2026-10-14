@@ -399,16 +399,53 @@ async fn new_uploads_wait_for_a_current_members_replacement_circle_key() {
         .circle_deletions
         .contains_key(&CircleId(Uuid::from_u128(10))));
     sql(&devices[1].db,"INSERT INTO pins VALUES('00000000-0000-4000-8000-000000000001','00000000-0000-0000-0000-00000000000a','new')").await;
-    assert!(
-        matches!(devices[1].writes.upload_writes().await, Err(SyncError::KeyUnavailable(key)) if key == KeyId(Uuid::from_u128(11)))
-    );
+    sql(
+        &devices[1].db,
+        "INSERT INTO notes VALUES('one','public','body')",
+    )
+    .await;
+    // The circle write waits with its key and holds back the store write
+    // behind it, without failing the call (§11).
+    let wait = PendingRecord {
+        subject: PendingSubject::Write(WriteId {
+            device: DeviceId(2),
+            number: 1,
+        }),
+        reason: PendingReason::KeyUnavailable {
+            audience: Audience::Circle(CircleId(Uuid::from_u128(10))),
+            key: KeyId(Uuid::from_u128(11)),
+        },
+        reported_by: DeviceId(2),
+    };
+    for _ in 0..2 {
+        assert!(devices[1].writes.upload_writes().await.unwrap().is_empty());
+        assert_eq!(
+            devices[1].db.pending::<PendingRecord>().await.unwrap(),
+            std::slice::from_ref(&wait)
+        );
+    }
     assert!(storage
         .list(&ObjectPrefix::device_logs(STORE_ID))
         .await
         .unwrap()
         .is_empty());
+    // Downloads go on meanwhile.
+    sql(
+        &devices[0].db,
+        "INSERT INTO notes VALUES('two','public','body')",
+    )
+    .await;
+    devices[0].writes.upload_writes().await.unwrap();
+    devices[1].writes.download_writes().await.unwrap();
+    assert!(rows(&devices[1].db).await.iter().any(|row| row.0 == "two"));
     devices[1].sync.sync_store_log().await.unwrap();
-    devices[1].writes.upload_writes().await.unwrap();
+    assert_eq!(devices[1].writes.upload_writes().await.unwrap().len(), 2);
+    assert!(devices[1]
+        .db
+        .pending::<PendingRecord>()
+        .await
+        .unwrap()
+        .is_empty());
     let path = ObjectPath::device_log(STORE_ID, DeviceId(2), 1.try_into().unwrap());
     let bytes = storage.read(&path).await.unwrap();
     let length = coven_format::sealed_write::WriteObjectPrefix::length(&bytes).unwrap();
@@ -418,6 +455,69 @@ async fn new_uploads_wait_for_a_current_members_replacement_circle_key() {
             .part_keys,
         [KeyId(Uuid::from_u128(11))]
     );
+}
+
+#[tokio::test]
+async fn a_snapshot_waiting_for_its_audience_key_leaves_the_pass_going() {
+    let storage = storage();
+    let mut devices = household(storage.clone()).await;
+    let circle = Audience::Circle(CircleId(Uuid::from_u128(10)));
+    let ring = devices[1].custody.read().unwrap().unwrap();
+    devices[0]
+        .sync
+        .make_and_upload_entry(StoreChange::RemoveCircleMember {
+            circle: CircleId(Uuid::from_u128(10)),
+            member: identity(3).member_id(),
+        })
+        .await
+        .unwrap();
+    devices[1].sync.sync_store_log().await.unwrap();
+    devices[1]
+        .sync
+        .test_rotate(circle.clone(), KeyId(Uuid::from_u128(11)))
+        .await;
+    devices[1].custody.persist(&ring).unwrap();
+    // The circle has grown past the first snapshot's threshold. Its snapshot
+    // waits for the replacement key without failing the pass's snapshots (§11).
+    sql(&devices[1].db, "INSERT INTO pins VALUES('00000000-0000-4000-8000-000000000001','00000000-0000-0000-0000-00000000000a',hex(zeroblob(600000)))").await;
+    devices[1].sync.write_snapshots().await.unwrap();
+    let wait = PendingReason::KeyUnavailable {
+        audience: circle.clone(),
+        key: KeyId(Uuid::from_u128(11)),
+    };
+    assert!(devices[1]
+        .db
+        .pending::<PendingRecord>()
+        .await
+        .unwrap()
+        .iter()
+        .any(
+            |record| matches!(record.subject, PendingSubject::Operation { .. })
+                && record.reason == wait
+        ));
+    let listed = |audience: Audience| {
+        let storage = storage.clone();
+        async move {
+            storage
+                .list(&ObjectPrefix::audience_snapshots(STORE_ID, &audience))
+                .await
+                .unwrap()
+                .len()
+        }
+    };
+    assert_eq!(listed(circle.clone()).await, 0);
+    // Once the key arrives the waiting snapshot goes out.
+    devices[1].sync.sync_store_log().await.unwrap();
+    devices[1].writes.upload_writes().await.unwrap();
+    devices[1].sync.write_snapshots().await.unwrap();
+    assert_eq!(listed(circle).await, 1);
+    assert!(!devices[1]
+        .db
+        .pending::<PendingRecord>()
+        .await
+        .unwrap()
+        .iter()
+        .any(|record| record.reason == wait));
 }
 
 #[tokio::test]

@@ -101,7 +101,8 @@ impl StoreLogSync {
 
     /// Write and publish a requested audience snapshot regardless of growth.
     /// Reset and schema-change operations record the returned identity only
-    /// after this durable publication has completed.
+    /// after this durable publication has completed. A snapshot waiting for
+    /// its audience's key stays journaled and returns that pending condition.
     pub async fn write_snapshot(&mut self, audience: Audience) -> Result<SnapshotId, SyncError> {
         let _reads = self.reads.enter();
         self.resume_snapshots().await?;
@@ -125,7 +126,14 @@ impl StoreLogSync {
                 session: None,
             })
             .await?;
-        self.drive_snapshot(record.id, &mut Vec::new()).await?;
+        if !self.drive_snapshot(record.id, &mut Vec::new()).await? {
+            let pending = self
+                .database
+                .operation_pending::<crate::PendingRecord>(record.id)
+                .await?
+                .ok_or(coven_database::DbError::DamagedDatabase)?;
+            return Err(SyncError::Pending(Box::new(pending)));
+        }
         Ok(SnapshotId {
             audience,
             device: local.device,
@@ -396,14 +404,24 @@ impl StoreLogSync {
             )
         })?;
         // A snapshot's first upload is a first attempt in its audience (§11).
+        // Without a usable key it waits; other audiences' sends go on.
         let observation = self.copy_observation().await?;
-        let key_id = crate::write_seal::first_attempt(
+        let key_id = match crate::write_seal::first_attempt(
             log,
             &observation,
             &ring,
             &member.member_id(),
             &id.audience,
-        )?;
+        ) {
+            Ok(key) => key,
+            Err(SyncError::KeyUnavailable(key)) => {
+                return Ok(Progress::Waiting(crate::PendingReason::KeyUnavailable {
+                    audience: id.audience.clone(),
+                    key,
+                }))
+            }
+            Err(error) => return Err(error),
+        };
         let key = io::key(&ring, &id.audience, key_id)?;
         let caught_at = self.catch_up_time().await?;
         let name = self

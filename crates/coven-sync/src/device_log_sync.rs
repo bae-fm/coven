@@ -1,6 +1,6 @@
 //! One upload, download or position-posting step; scheduling belongs to the caller.
 
-use crate::SyncError;
+use crate::{PendingReason, PendingRecord, PendingSubject, SyncError};
 use coven_crypto::{custody::KeySession, MemberKeys, StoreKeyring};
 use coven_database::{ApplyOutcome, Database, DbError, LogObject, LogRefusal};
 use coven_format::{
@@ -213,8 +213,20 @@ impl DeviceLogSync {
     /// request and retaining provider sessions across interruptions. Returns the
     /// positions confirmed stored. A newer store schema stops this step; a local
     /// breaking migration waits for its store-log raise without recording an attempt.
+    /// A write with an audience lacking a usable key records that wait and stops
+    /// this log's sends, later numbers included; the pass goes on (§11).
     pub async fn upload_writes(&mut self) -> Result<Vec<WriteId>, SyncError> {
         let mut uploaded = Vec::new();
+        let mut waits: Vec<_> = self
+            .database
+            .pending::<PendingRecord>()
+            .await?
+            .into_iter()
+            .filter(|record| {
+                matches!(record.subject, PendingSubject::Write(write) if write.device == record.reported_by)
+                    && matches!(record.reason, PendingReason::KeyUnavailable { .. })
+            })
+            .collect();
         loop {
             let local = self.database.local_store_log().await?;
             let state = self.database.sync_state(Vec::new()).await?;
@@ -244,7 +256,7 @@ impl DeviceLogSync {
             let selected_ring = ring.clone();
             let signer = member.clone();
             let observation = self.copy_observation(local.store).await?;
-            let next = self
+            let prepared = self
                 .database
                 .prepare_write_upload(move |log, schema, header| {
                     crate::write_seal::select(
@@ -264,10 +276,32 @@ impl DeviceLogSync {
                         Err(source) => DbError::SyncStream(source).into(),
                     },
                     error => error.into(),
-                })?;
+                });
+            let next = match prepared {
+                Ok(next) => next,
+                Err(error) => {
+                    let Some(wait) = crate::write_seal::key_wait(&error) else {
+                        return Err(error);
+                    };
+                    tracing::debug!(subject = ?wait.subject, reason = ?wait.reason, "write waits for a key");
+                    if !waits.contains(wait) {
+                        self.database.record_pending(wait.clone()).await?;
+                    }
+                    break;
+                }
+            };
             let Some(write) = next else {
                 break;
             };
+            // Its keys are now fixed and held: any recorded key wait is over.
+            if let Some(index) = waits
+                .iter()
+                .position(|wait| wait.subject == PendingSubject::Write(write))
+            {
+                self.database
+                    .clear_pending(waits.remove(index).subject)
+                    .await?;
+            }
             self.send_write(local.store, write, ring, member).await?;
             self.database.upload_succeeded(write).await?;
             uploaded.push(write);
