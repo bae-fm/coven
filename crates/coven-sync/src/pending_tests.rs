@@ -49,11 +49,15 @@ fn a_dropped_operation_waits_for_the_app_but_a_dropped_entry_or_write_is_final()
 /// snapshot load installs end this device's waits for the writes they cover
 /// and keep verdicts on their bytes (`Pending.cover`). A completed positions
 /// pass replaces every peer's positions record, and an audience snapshot
-/// listing that audience's snapshot records (`Pending.replace`); neither
-/// touches this device's own positions record. The Rust side persists through
-/// the store's real pending table, its covered-write clearing and the
-/// replacement calls the positions scan and snapshot catalog make, and reads
-/// `pending()`.
+/// listing that audience's snapshot records (`Pending.replace`), keeping a
+/// refusal this version may not retry for each snapshot it still lists
+/// (`Listing.keepingRefusals`); neither touches this device's own positions
+/// record. A completed store-log scan replaces this device's entry waits and
+/// keeps its refusals and drops (`Pending.scanEntries`). The Rust side
+/// persists through the store's real pending table, its covered-write
+/// clearing and the replacement calls the positions scan, snapshot catalog and
+/// store-log scan make, reads refusals and their retry policy back as the
+/// catalog does, and reads `pending()`.
 #[tokio::test]
 #[ignore = "requires COVEN_STORELOG_DATA_LEAN, supplied by scripts/check.sh"]
 async fn data_differential_pending_records() {
@@ -161,10 +165,9 @@ async fn data_differential_pending_records() {
         (write(1, 1), json!(["write", 1, 1])),
         (write(1, 2), json!(["write", 1, 2])),
         (write(8, 1), json!(["write", 8, 1])),
-        // The model names an entry by one number; these distinct Rust
-        // identities map to distinct model numbers.
-        (entry(1, 4), json!(["entry", 1004])),
-        (entry(3, 1), json!(["entry", 3001])),
+        (entry(1, 4), json!(["entry", 1, 4])),
+        (entry(3, 1), json!(["entry", 3, 1])),
+        (entry(3, 2), json!(["entry", 3, 2])),
         (
             PendingSubject::KeyCopy {
                 audience: Audience::Store,
@@ -209,6 +212,30 @@ async fn data_differential_pending_records() {
             _ => false,
         }
     }
+    /// The records one store-log scan decides: this device's entry waits
+    /// (`Pending.decidedByScan`, Rust `replace_entry_waits`).
+    fn scan_decides(record: &PendingRecord) -> bool {
+        matches!(record.subject, PendingSubject::Entry(_))
+            && matches!(
+                record.reason,
+                PendingReason::Waits(_)
+                    | PendingReason::KeyUnavailable { .. }
+                    | PendingReason::UpdateRequired(_)
+            )
+    }
+    let entry_waits: Vec<usize> = (0..reasons.len())
+        .filter(|i| {
+            scan_decides(&PendingRecord {
+                subject: entry(1, 1),
+                reason: reasons[*i].0.clone(),
+                reported_by: DeviceId(2),
+            })
+        })
+        .collect();
+    let refused = reasons
+        .iter()
+        .position(|(reason, _)| matches!(reason, PendingReason::Refused(_)))
+        .expect("an encoded refusal");
     let classes = [
         (None, json!(["positions"])),
         (Some(Audience::Store), json!(["snapshots", 0])),
@@ -249,7 +276,7 @@ async fn data_differential_pending_records() {
         // The positions table holds one row per device, so each is covered once.
         let mut uncovered = vec![7_u64, 8];
         for _ in 0..16 {
-            let kind = next(7);
+            let kind = next(8);
             if kind == 0 && !uncovered.is_empty() {
                 let device = uncovered.remove(next(uncovered.len()));
                 let number = 1 + next(3) as u64;
@@ -274,7 +301,35 @@ async fn data_differential_pending_records() {
                         "conditions": encode(&conditions),
                     }));
                     listed_subjects.push(subject.clone());
-                    if let Some((_, reason)) = conditions.iter().find(|(met, _)| !met) {
+                    // As `snapshot_candidates`: a listed snapshot this device
+                    // refused, and may not check again, keeps that refusal.
+                    let refusal = match class {
+                        Some(_) => db
+                            .pending::<PendingRecord>()
+                            .await
+                            .unwrap()
+                            .into_iter()
+                            .find(|r| {
+                                r.reported_by == own
+                                    && r.subject == *subject
+                                    && matches!(r.reason, PendingReason::Refused(_))
+                            }),
+                        None => None,
+                    };
+                    let refusal = match refusal {
+                        Some(record)
+                            if !db
+                                .pending_can_retry::<PendingRecord>(subject.clone())
+                                .await
+                                .unwrap() =>
+                        {
+                            Some(record)
+                        }
+                        _ => None,
+                    };
+                    if let Some(record) = refusal {
+                        records.push(record);
+                    } else if let Some((_, reason)) = conditions.iter().find(|(met, _)| !met) {
                         records.push(PendingRecord {
                             subject: subject.clone(),
                             reason: reasons[*reason].0.clone(),
@@ -305,11 +360,45 @@ async fn data_differential_pending_records() {
                     .unwrap();
                 }
                 steps.push(json!({ "listing": class_json, "observed": listed }));
+            } else if kind == 3 {
+                // As `replace_entry_waits`: one completed scan's waits replace
+                // every entry wait this device recorded.
+                let mut waits = Vec::new();
+                let mut records = Vec::new();
+                for (subject, _) in subjects
+                    .iter()
+                    .filter(|(s, _)| matches!(s, PendingSubject::Entry(_)))
+                {
+                    if next(2) == 0 {
+                        continue;
+                    }
+                    let reason = entry_waits[next(entry_waits.len())];
+                    let PendingSubject::Entry(id) = subject else {
+                        unreachable!("filtered to entries")
+                    };
+                    waits.push(json!([[id.device.0, id.number], reasons[reason].1]));
+                    records.push(PendingRecord {
+                        subject: subject.clone(),
+                        reason: reasons[reason].0.clone(),
+                        reported_by: own,
+                    });
+                }
+                db.replace_local_pending(scan_decides, records)
+                    .await
+                    .unwrap();
+                steps.push(json!({ "entries": waits }));
             } else {
                 let (subject, subject_json) = subjects[next(subjects.len())].clone();
-                let conditions: Vec<(bool, usize)> = (0..next(4))
-                    .map(|_| (next(3) == 0, next(reasons.len())))
-                    .collect();
+                // As `refuse_snapshot`: loading records a body that failed its
+                // check, which later listings must keep.
+                let conditions: Vec<(bool, usize)> =
+                    if matches!(subject, PendingSubject::Snapshot(_)) && next(2) == 0 {
+                        vec![(false, refused)]
+                    } else {
+                        (0..next(4))
+                            .map(|_| (next(3) == 0, next(reasons.len())))
+                            .collect()
+                    };
                 steps.push(json!({
                     "subject": subject_json,
                     "reporter": own.0,

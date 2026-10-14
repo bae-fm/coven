@@ -3,10 +3,11 @@ import Lean
 
 /-! §19.1 / E5: Rust records each observed subject's first unmet condition
 through its pending store, ends covered write waits when a snapshot load
-installs positions, and replaces a class of records with each completed
-listing. This adapter runs the same steps through `Pending.Local.step` and
-reports `Pending.pending` with each record's `retry`. Arrays encode subjects,
-reasons and conditions positionally. -/
+installs positions, replaces a class of records with each completed listing
+(a snapshot listing keeping this device's refusals), and replaces its entry
+waits with each completed store-log scan. This adapter runs the same steps
+through `Pending.Local.step` and reports `Pending.pending` with each record's
+`retry`. Arrays encode subjects, reasons and conditions positionally. -/
 namespace PendingJson
 open Lean CovenStorelog CovenStorelogData.Pending
 
@@ -19,7 +20,7 @@ private def audienceNumber : Audience → Nat | .store => 0 | .circle c => c + 1
 def subject (j : Json) : Except String Subject := do
   match ← str j 0 with
   | "write" => pure (.write (← nat j 1) (← nat j 2))
-  | "entry" => pure (.entry (← nat j 1))
+  | "entry" => pure (.entry (← nat j 1) (← nat j 2))
   | "keyCopy" => pure (.keyCopy (audience (← nat j 1)) (← nat j 2) (← nat j 3))
   | "positions" => pure (.positions (← nat j 1))
   | "agreement" => pure (.agreement (audience (← nat j 1)) (← nat j 2))
@@ -28,7 +29,7 @@ def subject (j : Json) : Except String Subject := do
 
 def subjectJson : Subject → Json
   | .write device number => Json.arr #["write", toJson device, toJson number]
-  | .entry id => Json.arr #["entry", toJson id]
+  | .entry device number => Json.arr #["entry", toJson device, toJson number]
   | .keyCopy a key member =>
       Json.arr #["keyCopy", toJson (audienceNumber a), toJson key, toJson member]
   | .positions device => Json.arr #["positions", toJson device]
@@ -123,15 +124,20 @@ private def scan (j : Json) : Except String Scan := do
   | other => throw s!"unknown listing class {other}"
 
 /-- A step is one subject's observation (`subject`, `reporter`, `conditions`),
-a snapshot load's installed positions (`cover`: `[device, number]` pairs), or
-a completed listing (`listing` class and its `observed` subjects with their
-conditions). A case names the local `device` and its `steps`; the output lists
-the visible records after each committed step. -/
+a snapshot load's installed positions (`cover`: `[device, number]` pairs), a
+completed store-log scan's waits (`entries`: `[[device, number], reason]`
+pairs), or a completed listing (`listing` class and its `observed` subjects
+with their conditions). A case names the local `device` and its `steps`; the
+output lists the visible records after each committed step. -/
 def step (j : Json) : Except String Step := do
   if let .ok s := j.getObjVal? "subject" then
     return .observe ⟨← subject s, ← j.getObjValAs? Nat "reporter", ← conditions j⟩
   if let .ok jump := j.getObjValAs? (Array Json) "cover" then
     return .cover (← jump.toList.mapM fun p => do pure (← nat p 0, ← nat p 1))
+  if let .ok waits := j.getObjValAs? (Array Json) "entries" then
+    return .entries ⟨← waits.toList.mapM fun w => do
+      let e ← w.getArrVal? 0
+      pure ((← nat e 0, ← nat e 1), ← reason (← w.getArrVal? 1))⟩
   let observed ← (← j.getObjValAs? (Array Json) "observed").toList.mapM fun o => do
     pure (← subject (← o.getObjVal? "subject"), ← conditions o)
   pure (.listing ⟨← scan (← j.getObjVal? "listing"), observed⟩)

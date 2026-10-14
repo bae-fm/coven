@@ -6,7 +6,7 @@ namespace CovenStorelogData.Pending
 open CovenStorelog
 
 inductive Subject where
-  | write (device number : Nat) | entry (id : Nat)
+  | write (device number : Nat) | entry (device number : Nat)
   | keyCopy (audience : Audience) (key member : Nat)
   | snapshot (id : SnapshotId) | positions (device : Nat)
   | file (device id : Nat) | operation (id : Nat)
@@ -541,6 +541,13 @@ theorem own_positions_kept (device : Nat) (l : Listing) (work : List Work) (r : 
   rintro ⟨-, hd⟩
   cases hs : l.scan <;> simp [Scan.decides, hs, own] at hd
 
+/-- A record whose subject a listing names comes from that listing. -/
+theorem listed_record (device : Nat) (l : Listing) (work : List Work) (s : Subject)
+    (cs : List Condition) (listed : (s, cs) ∈ l.observed) (reason : Reason)
+    (waiting : first cs = some reason) : ⟨s, device, reason⟩ ∈ records (replace device l work) :=
+  every_pending_subject _ ⟨s, device, cs⟩ reason
+    (List.mem_append_left _ (List.mem_map.mpr ⟨(s, cs), listed, rfl⟩)) waiting
+
 theorem replace_unique (device : Nat) (l : Listing) (work : List Work)
     (valid : l.valid device = true) (u : Unique work) : Unique (replace device l work) := by
   simp only [Listing.valid, Bool.and_eq_true, List.all_eq_true, decide_eq_true_eq] at valid
@@ -560,6 +567,268 @@ theorem replace_unique (device : Nat) (l : Listing) (work : List Work)
     simp only [Function.comp_apply, Prod.mk.injEq] at e
     simp [← e.1, ← e.2, inClass o ho] at hk
 
+/-! ## A snapshot listing keeps this device's refusals (§19.1)
+
+A refusal of a snapshot's bytes cannot be retried by the version that made
+it. Each audience listing therefore keeps it as that listed snapshot's
+condition instead of checking the snapshot again; the snapshot is never
+offered for loading (`never_loads_refused`, in PendingScans). A snapshot no longer
+listed loses its record like any other. -/
+
+/-- This device holds a refusal of `s`. Rust `refused_snapshots`: every
+refusal recorded by this installed version is one it cannot retry. -/
+def refusedHere (device : Nat) (work : List Work) (s : Subject) : Bool :=
+  (records work).any fun r => r.subject == s && r.reporter == device && r.reason == .refused
+
+/-- The listing Rust's snapshot catalog commits: a listed snapshot this device
+refused keeps that refusal as its condition. A positions pass is unchanged. -/
+def Listing.keepingRefusals (device : Nat) (work : List Work) (l : Listing) : Listing :=
+  match l.scan with
+  | .snapshots _ => ⟨l.scan, l.observed.map fun o =>
+      if refusedHere device work o.1 then (o.1, [⟨false, .refused⟩]) else o⟩
+  | .positions => l
+
+theorem keepingRefusals_scan (device : Nat) (work : List Work) (l : Listing) :
+    (l.keepingRefusals device work).scan = l.scan := by
+  unfold Listing.keepingRefusals; split <;> rfl
+
+theorem keepingRefusals_subjects (device : Nat) (work : List Work) (l : Listing) :
+    (l.keepingRefusals device work).observed.map (·.1) = l.observed.map (·.1) := by
+  unfold Listing.keepingRefusals
+  split
+  · simp only [List.map_map]
+    congr 1
+    funext o
+    simp only [Function.comp_apply]
+    split <;> rfl
+  · rfl
+
+theorem keepingRefusals_valid (device : Nat) (work : List Work) (l : Listing) :
+    (l.keepingRefusals device work).valid device = l.valid device := by
+  have hs := keepingRefusals_subjects device work l
+  have hc := keepingRefusals_scan device work l
+  unfold Listing.valid
+  rw [hs, hc]
+  congr 1
+  have h₁ : (l.keepingRefusals device work).observed.all (fun o => l.scan.decides device o.1) =
+      ((l.keepingRefusals device work).observed.map (·.1)).all (l.scan.decides device) := by
+    simp [List.all_map, Function.comp_def]
+  have h₂ : l.observed.all (fun o => l.scan.decides device o.1) =
+      (l.observed.map (·.1)).all (l.scan.decides device) := by
+    simp [List.all_map, Function.comp_def]
+  rw [h₁, h₂, hs]
+
+/-- A refusal of a snapshot the listing still names survives it. -/
+theorem listing_keeps_refusal (device : Nat) (l : Listing) (work : List Work) (r : Record)
+    (a : Audience) (snapshots : l.scan = .snapshots a) (before : r ∈ records work)
+    (own : r.reporter = device) (refused : r.reason = .refused)
+    (listed : ∃ cs, (r.subject, cs) ∈ l.observed) :
+    r ∈ records (replace device (l.keepingRefusals device work) work) := by
+  obtain ⟨cs, hcs⟩ := listed
+  have here : refusedHere device work r.subject = true :=
+    List.any_eq_true.mpr ⟨r, before, by simp [own, refused]⟩
+  have kept : (r.subject, [⟨false, .refused⟩]) ∈ (l.keepingRefusals device work).observed := by
+    unfold Listing.keepingRefusals
+    rw [snapshots]
+    exact List.mem_map.mpr ⟨(r.subject, cs), hcs, by simp [here]⟩
+  have h := listed_record device _ work r.subject _ kept .refused (by simp [first])
+  cases r
+  simp only at own refused
+  subst own refused
+  exact h
+
+/-! ## A completed store-log scan decides this device's entry waits (§19.1)
+
+Each scan reads the received store log and this device's queued entry. The
+waits it finds (an entry's missing key, its newer format, or the first entry
+of its recorded past that has not applied) replace every entry wait this
+device recorded before. A refusal or a drop of an entry is a verdict on its
+bytes, not a wait: the scan's replacement never selects it. A named entry's
+new wait replaces whatever record that entry had, as Rust saves it.
+`PendingScans` computes the waits from what the scan read. -/
+
+/-- The reasons a store-log scan decides for an entry: Rust `replace_entry_waits`. -/
+def entryWait : Reason → Bool
+  | .waits _ | .keyUnavailable _ _ | .updateRequired _ => true
+  | _ => false
+
+/-- A record one scan decides: this device's wait on an entry. -/
+def decidedByScan (device : Nat) (r : Record) : Bool :=
+  r.reporter == device && entryWait r.reason &&
+    match r.subject with
+    | .entry _ _ => true
+    | _ => false
+
+/-- The waits one completed scan found, keyed by entry `(device, number)`. -/
+structure EntryScan where
+  waits : List ((Nat × Nat) × Reason)
+  deriving DecidableEq, Repr
+
+/-- Rust refuses a replacement naming an entry twice or with another reason. -/
+def EntryScan.valid (scan : EntryScan) : Bool :=
+  scan.waits.all (fun w => entryWait w.2) && decide (scan.waits.map (·.1)).Nodup
+
+def EntryScan.names (scan : EntryScan) (s : Subject) : Bool :=
+  scan.waits.any fun w => s == .entry w.1.1 w.1.2
+
+def scanRecord (device : Nat) (w : (Nat × Nat) × Reason) : Record :=
+  ⟨.entry w.1.1 w.1.2, device, w.2⟩
+
+/-- The work whose record the scan decides. -/
+def scannedWork (device : Nat) (w : Work) : Bool :=
+  match first w.conditions with
+  | some reason => decidedByScan device ⟨w.subject, w.reporter, reason⟩
+  | none => false
+
+/-- Rust `replace_local_pending`: decided records the scan does not name are
+cleared, and each named entry's record is saved over its previous one. -/
+def scanEntries (device : Nat) (scan : EntryScan) (work : List Work) : List Work :=
+  scan.waits.map (fun w => ⟨.entry w.1.1 w.1.2, device, [⟨false, w.2⟩]⟩) ++
+    work.filter fun w => !(scannedWork device w || (w.reporter == device && scan.names w.subject))
+
+/-- Filtering work filters its records by the same test on each record. -/
+theorem records_filter (work : List Work) (p : Work → Bool) (q : Record → Bool)
+    (agree : ∀ w reason, first w.conditions = some reason → p w = q ⟨w.subject, w.reporter, reason⟩) :
+    records (work.filter p) = (records work).filter q := by
+  induction work with
+  | nil => rfl
+  | cons w ws ih =>
+      cases hf : first w.conditions with
+      | none =>
+          have step : records (w :: ws) = records ws := by simp [records, hf]
+          cases hp : p w
+          · simpa [hp, step] using ih
+          · have h : records (w :: ws.filter p) = records (ws.filter p) := by simp [records, hf]
+            simpa [List.filter_cons, hp, h, step] using ih
+      | some reason =>
+          have hq := agree w reason hf
+          have step : records (w :: ws) = ⟨w.subject, w.reporter, reason⟩ :: records ws := by
+            simp [records, hf]
+          cases hp : p w
+          · simpa [hp, step, ← hq] using ih
+          · have h : records (w :: ws.filter p) =
+                ⟨w.subject, w.reporter, reason⟩ :: records (ws.filter p) := by simp [records, hf]
+            simpa [List.filter_cons, hp, h, step, ← hq] using ih
+
+theorem records_scanEntries (device : Nat) (scan : EntryScan) (work : List Work) :
+    records (scanEntries device scan work) = scan.waits.map (scanRecord device) ++
+      (records work).filter fun r =>
+        !(decidedByScan device r || (r.reporter == device && scan.names r.subject)) := by
+  unfold scanEntries
+  rw [records, List.filterMap_append]
+  congr 1
+  · simp [List.filterMap_map, Function.comp_def, first, scanRecord]
+  · exact records_filter work _ _ fun w reason hf => by simp [scannedWork, hf]
+
+theorem names_entry (scan : EntryScan) (s : Subject) (named : scan.names s = true) :
+    ∃ e, s = .entry e.1 e.2 ∧ ∃ r, (e, r) ∈ scan.waits := by
+  obtain ⟨w, hw, he⟩ := List.any_eq_true.mp named
+  exact ⟨w.1, beq_iff_eq.mp he, w.2, hw⟩
+
+/-- After a scan this device's wait on an entry is exactly the wait the scan
+found: none is kept after the scan stops finding it, and each one found is
+visible. -/
+theorem entry_scan_decides (device : Nat) (scan : EntryScan) (work : List Work)
+    (e : Nat × Nat) (reason : Reason) (wait : entryWait reason = true) :
+    ⟨.entry e.1 e.2, device, reason⟩ ∈ records (scanEntries device scan work) ↔
+      (e, reason) ∈ scan.waits := by
+  rw [records_scanEntries]
+  constructor
+  · intro h
+    rcases List.mem_append.mp h with h | h
+    · obtain ⟨w, hw, he⟩ := List.mem_map.mp h
+      simp only [scanRecord, Record.mk.injEq, Subject.entry.injEq] at he
+      obtain ⟨⟨h₁, h₂⟩, -, h₃⟩ := he
+      have : w = (e, reason) := by
+        obtain ⟨⟨a, b⟩, c⟩ := w
+        simp only at h₁ h₂ h₃
+        rw [h₁, h₂, h₃]
+      exact this ▸ hw
+    · have := (List.mem_filter.mp h).2
+      simp [decidedByScan, wait] at this
+  · intro h
+    exact List.mem_append_left _ (List.mem_map.mpr ⟨(e, reason), h, rfl⟩)
+
+/-- A record the scan does not decide or name stays: peers' reports, other
+subjects, and this device's refusals and drops of entries it does not name. -/
+theorem entry_scan_keeps_others (device : Nat) (scan : EntryScan) (work : List Work)
+    (r : Record) (before : r ∈ records work) (undecided : decidedByScan device r = false)
+    (unnamed : ¬(r.reporter = device ∧ scan.names r.subject = true)) :
+    r ∈ records (scanEntries device scan work) := by
+  rw [records_scanEntries]
+  refine List.mem_append_right _ (List.mem_filter.mpr ⟨before, ?_⟩)
+  cases hn : scan.names r.subject
+  · simp [undecided]
+  · have : (r.reporter == device) = false := by
+      cases hr : r.reporter == device
+      · rfl
+      · exact absurd ⟨beq_iff_eq.mp hr, hn⟩ unnamed
+    simp [undecided, this]
+
+/-- A verdict on an entry's bytes survives every scan that does not observe
+that entry anew. -/
+theorem entry_scan_keeps_verdicts (device : Nat) (scan : EntryScan) (work : List Work)
+    (r : Record) (before : r ∈ records work) (verdict : entryWait r.reason = false)
+    (unnamed : scan.names r.subject = false) : r ∈ records (scanEntries device scan work) :=
+  entry_scan_keeps_others device scan work r before (by simp [decidedByScan, verdict])
+    (by simp [unnamed])
+
+/-- No record is removed while its condition holds: this device's wait that
+the scan still finds survives it. -/
+theorem entry_scan_safe (device : Nat) (scan : EntryScan) (work : List Work) (r : Record)
+    (e : Nat × Nat) (subject : r.subject = .entry e.1 e.2) (own : r.reporter = device)
+    (holds : (e, r.reason) ∈ scan.waits) : r ∈ records (scanEntries device scan work) := by
+  rw [records_scanEntries]
+  refine List.mem_append_left _ (List.mem_map.mpr ⟨(e, r.reason), holds, ?_⟩)
+  cases r
+  simp only at subject own
+  simp [scanRecord, subject, own]
+
+/-- A record a scan removes was this device's record of an entry whose wait
+the scan no longer finds: either a wait that ended, or an older record of an
+entry the scan now finds waiting. -/
+theorem entry_scan_removes_only_ended (device : Nat) (scan : EntryScan) (work : List Work)
+    (r : Record) (before : r ∈ records work) (gone : r ∉ records (scanEntries device scan work)) :
+    r.reporter = device ∧ ∃ e, r.subject = .entry e.1 e.2 ∧ (e, r.reason) ∉ scan.waits ∧
+      (entryWait r.reason = true ∨ scan.names r.subject = true) := by
+  by_cases hd : decidedByScan device r = true
+  · have hd' := hd
+    simp only [decidedByScan, Bool.and_eq_true, beq_iff_eq] at hd'
+    obtain ⟨⟨own, wait⟩, hs⟩ := hd'
+    refine ⟨own, ?_⟩
+    match h : r.subject, hs with
+    | .entry d n, _ =>
+        exact ⟨(d, n), rfl, fun holds => gone (entry_scan_safe device scan work r (d, n) h own holds),
+          .inl wait⟩
+  · by_cases named : r.reporter = device ∧ scan.names r.subject = true
+    · obtain ⟨own, hn⟩ := named
+      obtain ⟨e, hs, -⟩ := names_entry scan r.subject hn
+      exact ⟨own, e, hs, fun holds => gone (entry_scan_safe device scan work r e hs own holds), .inr hn⟩
+    · exact absurd (entry_scan_keeps_others device scan work r before (by simpa using hd) named) gone
+
+theorem scanEntries_unique (device : Nat) (scan : EntryScan) (work : List Work)
+    (valid : scan.valid = true) (u : Unique work) : Unique (scanEntries device scan work) := by
+  simp only [EntryScan.valid, Bool.and_eq_true, decide_eq_true_eq] at valid
+  obtain ⟨-, distinct⟩ := valid
+  simp only [Unique, keys, scanEntries, List.map_append, List.map_map, List.nodup_append]
+  refine ⟨?_, filter_unique work _ u, ?_⟩
+  · have : (scan.waits.map ((fun w : Work => (w.subject, w.reporter)) ∘
+        fun w => (⟨.entry w.1.1 w.1.2, device, [⟨false, w.2⟩]⟩ : Work))) =
+        (scan.waits.map (·.1)).map (fun e => ((Subject.entry e.1 e.2), device)) := by
+      simp [List.map_map, Function.comp_def]
+    rw [this]
+    refine List.Pairwise.map _ (fun a b h e => h ?_) distinct
+    simp only [Prod.mk.injEq, Subject.entry.injEq] at e
+    exact Prod.ext e.1.1 e.1.2
+  · intro a ha b hb e
+    obtain ⟨w, hw, rfl⟩ := List.mem_map.mp ha
+    obtain ⟨v, hv, rfl⟩ := List.mem_map.mp hb
+    have hk := (List.mem_filter.mp hv).2
+    simp only [Function.comp_apply, Prod.mk.injEq] at e
+    have named : scan.names v.subject = true :=
+      List.any_eq_true.mpr ⟨w, hw, by rw [← e.1]; exact beq_self_eq_true _⟩
+    simp [← e.2, named] at hk
+
 /-! ## One device's pending registry across its steps -/
 
 /-- This installation's registry: its own device, its write positions and the
@@ -574,16 +843,24 @@ inductive Step where
   | observe (next : Work)
   /-- A snapshot load installing positions, which ends covered waits. -/
   | cover (jump : List (Nat × Nat))
-  /-- A completed listing replacing its class. -/
+  /-- A completed listing replacing its class; a snapshot listing keeps this
+  device's refusals of the snapshots it names. -/
   | listing (l : Listing)
+  /-- A completed store-log scan replacing this device's entry waits. -/
+  | entries (scan : EntryScan)
 
-/-- An invalid listing is refused and changes nothing. -/
+/-- An invalid listing or scan is refused and changes nothing. -/
 def Local.step (s : Local) : Step → Local
   | .observe next => { s with work := observe s.work next }
   | .cover jump =>
       { s with positions := raise s.positions jump,
                work := cover s.device (raise s.positions jump) s.work }
-  | .listing l => if l.valid s.device then { s with work := replace s.device l s.work } else s
+  | .listing l =>
+      if l.valid s.device then
+        { s with work := replace s.device (l.keepingRefusals s.device s.work) s.work }
+      else s
+  | .entries scan =>
+      if scan.valid then { s with work := scanEntries s.device scan s.work } else s
 
 def Local.run (s : Local) (steps : List Step) : Local := steps.foldl Local.step s
 
@@ -594,7 +871,13 @@ theorem step_unique (s : Local) (step : Step) (u : Unique s.work) : Unique (s.st
   | listing l =>
       cases hv : l.valid s.device
       · simpa [Local.step, hv] using u
-      · simpa [Local.step, hv] using replace_unique _ _ _ hv u
+      · have hk : (l.keepingRefusals s.device s.work).valid s.device = true := by
+          rw [keepingRefusals_valid, hv]
+        simpa [Local.step, hv] using replace_unique _ _ _ hk u
+  | entries scan =>
+      cases hv : scan.valid
+      · simpa [Local.step, hv] using u
+      · simpa [Local.step, hv] using scanEntries_unique _ _ _ hv u
 
 /-- Every reachable registry has at most one work item per subject and
 reporting device. -/
@@ -624,6 +907,7 @@ theorem history_positions_monotone (steps : List Step) (s : Local) (d : Nat) :
       | observe => exact Nat.le_refl _
       | cover jump => exact raise_monotone _ _ _
       | listing l => cases hv : l.valid s.device <;> simp [Local.step, hv]
+      | entries scan => cases hv : scan.valid <;> simp [Local.step, hv]
 
 
 /-! ### Checked histories
@@ -665,6 +949,42 @@ example : (Local.run ⟨2, fun _ => 0, []⟩
 /-- A listing naming one subject twice is refused and changes nothing. -/
 example : (Local.run ⟨2, fun _ => 0, []⟩
     [.listing ⟨.positions, [(.positions 3, []), (.positions 3, [⟨false, .refused⟩])]⟩]).work = [] := by
+  decide
+
+/-- Ana's tablet (device 2) refused Ben's entry (7, 2), and peer 4 reports
+entry (5, 3) waiting. Ana's first scan finds (7, 1) waiting for its key and
+(5, 3) for entry (5, 2). Her second finds only (5, 3) still waiting: (7, 1)'s
+wait ends, while her refusal and the peer's report stay. -/
+private def entryHistory : List Step :=
+  [.observe ⟨.entry 7 2, 2, [⟨false, .refused⟩]⟩,
+    .observe ⟨.entry 5 3, 4, [⟨false, .waits (.object "e5/2")⟩]⟩,
+    .entries ⟨[((7, 1), .keyUnavailable .store 5), ((5, 3), .waits (.object "e5/2"))]⟩,
+    .entries ⟨[((5, 3), .waits (.object "e5/2"))]⟩]
+
+example : records (Local.run ⟨2, fun _ => 0, []⟩ entryHistory).work =
+    [⟨.entry 5 3, 2, .waits (.object "e5/2")⟩, ⟨.entry 5 3, 4, .waits (.object "e5/2")⟩,
+      ⟨.entry 7 2, 2, .refused⟩] := by decide
+
+/-- A scan naming an entry twice is refused and changes nothing. -/
+example : (Local.run ⟨2, fun _ => 0, []⟩
+    [.entries ⟨[((7, 1), .keyUnavailable .store 5), ((7, 1), .updateRequired 3)]⟩]).work = [] := by
+  decide
+
+/-- Loading refused the body of Ben's store snapshot 1. The next listing finds
+its prefix verified and snapshot 2 in a newer format: the refusal stays and
+snapshot 2 waits for the update. Once snapshot 1 is deleted and snapshot 2
+reads, the listing clears both. -/
+private def refusalHistory : List Step :=
+  [.observe ⟨.snapshot ⟨.store, 1⟩, 2, [⟨false, .refused⟩]⟩,
+    .listing ⟨.snapshots .store, [(.snapshot ⟨.store, 1⟩, []),
+      (.snapshot ⟨.store, 2⟩, [⟨false, .updateRequired 3⟩])]⟩]
+
+example : records (Local.run ⟨2, fun _ => 0, []⟩ refusalHistory).work =
+    [⟨.snapshot ⟨.store, 1⟩, 2, .refused⟩, ⟨.snapshot ⟨.store, 2⟩, 2, .updateRequired 3⟩] := by
+  decide
+
+example : records (Local.run ⟨2, fun _ => 0, []⟩
+    (refusalHistory ++ [.listing ⟨.snapshots .store, [(.snapshot ⟨.store, 2⟩, [])]⟩])).work = [] := by
   decide
 
 end CovenStorelogData.Pending

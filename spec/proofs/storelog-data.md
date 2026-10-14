@@ -369,29 +369,118 @@ check of its own listed object is an ordinary observation of that subject.
 A failed listing replaces nothing, as in Rust; that a scan really listed
 everything is an input.
 
-`Local.step` runs observations, covers and listings. As in Rust, a listing
-naming a subject twice or outside its class is refused and changes nothing.
+`Local.step` runs observations, covers, listings and store-log scans. As in
+Rust, a listing naming a subject twice or outside its class, or a scan naming
+an entry twice or with a reason it does not decide, is refused and changes
+nothing.
 `history_unique` and `history_one_record` prove every reachable registry holds
 one record per subject and reporting device. `every_pending_subject` and
 `only_first_reason` quantify over any work list, so they apply unchanged to
 every state these steps reach. Checked examples run a cover over a wait, a
 refusal and an uncovered wait; a pass that drops two positions records while
-another listing's snapshot wait stays; and a refused duplicate listing.
-Positions moving back on a reset or in-place reload are outside this model;
-a reset clears the list atomically with its reload (§19.1).
+another listing's snapshot wait stays; a refused duplicate listing; two
+store-log scans; and a snapshot refusal surviving a listing, then clearing
+once the snapshot is deleted. Positions moving back on a reset or in-place
+reload are outside this model; a reset clears the list atomically with its
+reload (§19.1).
+
+**Entry waits are proved to end exactly when the scan stops finding them.**
+Each store-log scan decides every entry wait this device recorded.
+`Pending.scanEntries` replaces this device's entry records whose reason is a
+wait (`Waits`, `KeyUnavailable` or `UpdateRequired`) with the waits the scan
+found. A named entry's new wait replaces whatever record it had, as Rust
+saves it. `entry_scan_decides` proves that afterwards this device's wait on
+an entry is exactly the one the scan found. `entry_scan_safe` proves that no
+wait is removed while the scan still finds it; `entry_scan_removes_only_ended`
+proves that a removed record was this device's record of an entry whose wait
+the scan no longer finds. `entry_scan_keeps_others` and
+`entry_scan_keeps_verdicts` keep peers' reports, other subjects, and refusals
+and drops of entries the scan does not name.
+
+[PendingScans](storelog-data/CovenStorelogData/PendingScans.lean) computes
+those waits from what the scan read (`scanWaits`): a missing key, a newer
+format, or, for an opened entry and for this device's own queued entry, the
+first entry of its recorded past that has not applied. Rust looks for it in
+readiness order: the entry's own previous entry, then each entry it read.
+`first_missing_first_unmet` proves that search returns the first unmet
+readiness condition, so the record is §19.1's first unmet condition.
+`own_entry_waits` and `read_entry_waits` prove each such entry gets its wait,
+and `scan_names_only` that no other entry does. `applied_entry_never_waits`
+proves an applied entry keeps no wait; `refused_entry_never_named` proves a
+refused entry is never named, so its refusal stays. `scanWaits_valid` proves
+Rust's commit never refuses the replacement.
+
+Two readings. Rust does not read an entry behind a stopped entry of its own
+log (a refusal or a newer format), nor one whose previous entry neither
+applied nor opened in this scan. We read §19.1 as giving such an entry no
+record of its own: its log's first unread entry carries the record
+(`behind_stop_never_named`). An opened entry whose whole recorded past
+applied while the store's creation has not waits for that creation with no
+record; Rust only logs it, and so does the model. Which entries a scan reads
+is an input.
+
+**A refused snapshot is proved never to load.** Every snapshot listing keeps
+this device's refusal of each snapshot it still lists
+(`Listing.keepingRefusals`, applied by `Local.step`; `listing_keeps_refusal`).
+A snapshot no longer listed loses its record (`absent_subject_cleared`).
+`PendingScans.catalog` follows Rust's catalog. A refused snapshot whose prefix
+verified and counts still adds its positions to the required history
+(`refused_prefix_requires_history`), but is never offered for loading
+(`refused_never_offered`). `never_loads_refused` proves loading applies only
+a snapshot whose complete body checked and which this device had not
+refused; `load_refuses_failed` proves each snapshot passed over failed its
+check. `refused_stays_unoffered` follows a history: the refusal a failed load
+records keeps that snapshot out of every later catalog while listings still
+name it. A newer installed version may retry a refusal (§19.1); the model
+runs one version, so that retry is outside it.
+
+**Passing over a newer-format snapshot in retention fails (checked
+counterexample).** `select` makes the reload and the return check wait with
+`UpdateRequired` while any listed prefix is newer than this version reads
+(`reload_waits_for_newer`). Rust's retention instead treats such a snapshot
+as unreadable and judges deletion against the newest snapshot it can read.
+`newer_snapshot_retention_counterexample` checks the failure.
+
+Ana (device 1) and Ben (device 2) snapshot the store concurrently. Ana's
+snapshot covers her writes through 10 and Ben's through 2. Ben runs a newer
+version; his snapshot, in format 2, covers Ana through 3 and himself through
+20. It covers more writes, so it is the store's newest (§15). On Ana's
+version the reload waits for the update. Retention judges by Ana's own
+snapshot, which covers her write 4, and deletes it; the other gates (a
+covering snapshot a day old, posted positions or 30 storage days, finality)
+can all pass. After the update the reload selects Ben's snapshot, which does
+not cover write 4, while Ana's uploaded writes through 10 are in its fixed
+target. §15 forbids this deletion, since the current newest counting
+snapshot must cover the write; Ana cannot tell which snapshot is newest
+without reading Ben's prefix.
+
+`waiting_retention_safe` proves the safe rule: retention that waits like the
+reload while any listed prefix is unreadable judges against the snapshot the
+reload selects once it proceeds, at this version or any later one, so it
+never deletes a write that reload needs. Rust's file retention already waits
+this way; growth only decides whether to write another snapshot. A prefix
+that waits for its author's registration reaches log retention through the
+same catalog; this model does not cover that case.
 
 The Rust comparison `data_differential_pending_records`
 ([`pending_tests.rs`](../../crates/coven-sync/src/pending_tests.rs)) mixes
-the three steps in random histories against the real pending table. A cover
+the four steps in random histories against the real pending table. A cover
 calls the database's covered-write clearing after installing positions. A
 positions listing calls `replace_pending_subjects`, the replacement the
 positions scan commits, with the subjects that scan decides: every peer
 positions record held plus every listed peer. A snapshot listing calls
-`replace_local_pending` with the snapshot catalog's audience test. The
-device's own positions record is in the histories and must survive passes. After each step, Rust's `pending()` must equal
-`Local.step` followed by `Pending.pending`, retry class included. The code
-that builds listings from storage (the positions pass and snapshot catalog)
-is not driven by this comparison.
+`replace_local_pending` with the snapshot catalog's audience test; as the
+catalog does, it first reads this device's refusals back from `pending()`
+and keeps each one `pending_can_retry` refuses for a listed snapshot. A
+store-log scan calls `replace_local_pending` with `replace_entry_waits`'s
+entry-wait test. The two class tests are restated in the test, not called
+from the production code. The device's own positions record is in the
+histories and must survive passes. After each step, Rust's `pending()` must
+equal `Local.step` followed by `Pending.pending`, retry class included. The
+code that builds listings and scans from storage (the positions pass,
+snapshot catalog and store-log scan) is not driven by this comparison, and
+`PendingScans`' catalog, loading and retention models have no Rust
+comparison.
 
 **Loss metadata is proved.** `LostValues.pending_exact` contains exactly the
 non-final entries in a loss's dependency expression, without duplicates.
