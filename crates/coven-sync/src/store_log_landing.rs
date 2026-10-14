@@ -1,7 +1,7 @@
 //! First publication times observed before consuming store-log entries.
 
 use crate::SyncError;
-use coven_database::{DbError, StoreLog};
+use coven_database::StoreLog;
 use coven_format::value::EntryId;
 use coven_storage::Storage;
 use std::{collections::BTreeMap, time::SystemTime};
@@ -58,15 +58,7 @@ pub(crate) fn add_observation(
             || listed.stored_at != observed.stored_at
             || listed.size != observed.size
         {
-            let (device, number) = observed
-                .path
-                .store_log_position()
-                .ok_or(coven_storage::StorageFailure::InvalidPath)?;
-            return Err(DbError::StoreLogEntryChanged(EntryId {
-                device,
-                number: number.get(),
-            })
-            .into());
+            return Err(changed_publication(&observed.path));
         }
     } else {
         objects.push(observed);
@@ -74,32 +66,47 @@ pub(crate) fn add_observation(
     Ok(())
 }
 
+/// Storage reported other metadata for one immutable publication: a provider
+/// protocol failure, never a local database one (§3.1, §4).
+fn changed_publication(path: &coven_storage::ObjectPath) -> SyncError {
+    coven_storage::StorageFailure::Protocol
+        .with_source(format!(
+            "store-log entry {} changed its immutable publication metadata",
+            path.as_str()
+        ))
+        .into()
+}
+
 /// Landing witnesses come from received input, not kept replay or decoded arrival order. Retained publications keep their original times.
 pub(crate) fn publication_times(
     log: &StoreLog,
     objects: &[coven_storage::StoredObject],
 ) -> Result<BTreeMap<EntryId, SystemTime>, SyncError> {
-    let mut times = BTreeMap::new();
+    let mut listed = BTreeMap::new();
     for stored in objects {
         let (device, number) = stored.path.store_log_position().ok_or(
             coven_storage::StorageFailure::Protocol
                 .with_source("store-log observation returned another layout"),
         )?;
-        times.insert(
+        listed.insert(
             EntryId {
                 device,
                 number: number.get(),
             },
-            stored.stored_at,
+            stored,
         );
     }
+    let mut times: BTreeMap<_, _> = listed
+        .iter()
+        .map(|(id, stored)| (*id, stored.stored_at))
+        .collect();
     for applied in &log.entries {
-        if times
-            .insert(applied.entry.position, applied.stored_at)
-            .is_some_and(|time| time != applied.stored_at)
-        {
-            return Err(DbError::StoreLogEntryChanged(applied.entry.position).into());
+        if let Some(stored) = listed.get(&applied.entry.position) {
+            if stored.stored_at != applied.stored_at {
+                return Err(changed_publication(&stored.path));
+            }
         }
+        times.insert(applied.entry.position, applied.stored_at);
     }
     Ok(times)
 }

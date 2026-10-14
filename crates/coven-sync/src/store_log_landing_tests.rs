@@ -656,17 +656,48 @@ async fn retained_publication_time_survives_absence_and_refuses_a_changed_listin
         .await
         .unwrap();
     assert_eq!(super::publication_times(&log, &listed).unwrap(), retained);
+    // Entry d/1 observed at t is later listed at t+1: storage contradicted an
+    // immutable publication, which is a protocol failure, not database damage.
     listed[0].stored_at += Duration::from_millis(1);
-    let error = super::publication_times(&log, &listed).unwrap_err();
-    let SyncError::Failed {
-        failure: crate::LocalFailure::Database,
-        source,
-    } = &error
-    else {
-        panic!("unexpected metadata failure: {error:?}")
-    };
-    assert!(matches!(source.downcast_ref::<coven_database::DbError>(),
-        Some(coven_database::DbError::StoreLogEntryChanged(id)) if *id == created));
+    assert!(matches!(
+        super::publication_times(&log, &listed).unwrap_err(),
+        SyncError::Storage(error) if error.failure() == coven_storage::StorageFailure::Protocol
+            && error.to_string().contains(object::path(store(1), created).as_str())
+    ));
+}
+
+#[tokio::test]
+async fn a_republished_entry_observation_is_a_provider_protocol_failure() {
+    let clock = Arc::new(FixedClock::new(UNIX_EPOCH + Duration::from_secs(10)));
+    let storage = Arc::new(
+        MemoryStorage::builder()
+            .clock(clock.clone())
+            .build()
+            .unwrap(),
+    );
+    let mut a = device(storage.clone(), 1, member(1), store(1)).await;
+    let created = a.create(key(1)).await;
+    let path = object::path(store(1), created);
+    let bytes = storage.read(&path).await.unwrap();
+    // The provider now reports the same immutable entry as published later.
+    clock.set(UNIX_EPOCH + Duration::from_secs(11));
+    storage.delete(&path).await.unwrap();
+    storage.create(&path, &bytes).await.unwrap();
+    // Re-observing the publication compares exact status with the entry
+    // retained from its first read.
+    assert!(matches!(
+        super::observe_publication(
+            &a.db,
+            &crate::pass_reads::PassReads::default(),
+            std::num::NonZeroUsize::MIN,
+            store(1),
+            Some(storage.as_ref()),
+            &a.log().await,
+            created,
+        )
+        .await,
+        Err(SyncError::Storage(error)) if error.failure() == coven_storage::StorageFailure::Protocol
+    ));
 }
 
 #[tokio::test]
@@ -691,7 +722,10 @@ async fn exact_observation_cannot_replace_conflicting_listing_evidence() {
             3 => changed.size += 1,
             _ => unreachable!(),
         }
-        assert!(super::add_observation(&mut objects, changed).is_err());
+        assert!(matches!(
+            super::add_observation(&mut objects, changed),
+            Err(SyncError::Storage(error)) if error.failure() == coven_storage::StorageFailure::Protocol
+        ));
         assert_eq!(objects, std::slice::from_ref(&observed));
     }
 }
