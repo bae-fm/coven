@@ -416,8 +416,8 @@ mod query_plans {
             Some("release checks every audience that still retains replay inputs"),
         ("entry_inputs.rs", "SELECT DISTINCT entry_device,entry_number FROM _coven_pending_resets", "_coven_pending_resets") =>
             Some("release checks every reset that still conditionally suppresses observations"),
-        ("database_sync.rs", "SELECT audience FROM _coven_data_reloads", "_coven_data_reloads") =>
-            Some("sync reads every audience awaiting replacement data"),
+        ("entry_effects.rs", "SELECT audience FROM _coven_data_reloads", "_coven_data_reloads") =>
+            Some("sync and replay read every audience awaiting replacement data"),
         ("sqlite.rs", "PRAGMA integrity_check", "database") =>
             Some("corruption detection checks every stored row and index"),
         ("database_recovery.rs", "PRAGMA table_info({table})", "database") =>

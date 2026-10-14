@@ -3,9 +3,33 @@ use crate::{
     sqlite::DatabaseConnection, write_encoding::audience_text, write_schema::WriteSchema, Boundary,
     DbError, EntryId, PendingValue,
 };
+use coven_foundation::id_source::CircleId;
 use coven_merge::Audience;
 use rusqlite::params;
 use std::collections::{BTreeMap, BTreeSet};
+
+/// The circles this device reads after a replay (§14.4), from its member's
+/// view of the replayed store log.
+#[derive(Debug, Default)]
+pub(crate) struct CircleReads {
+    /// Circles the replay makes readable again
+    /// ([`crate::StoreLog::returning_circles`]).
+    pub(crate) returning: BTreeSet<CircleId>,
+    /// Every circle readable after the replay
+    /// ([`crate::StoreLogState::readable_circles`]).
+    pub(crate) readable: BTreeSet<CircleId>,
+}
+
+impl CircleReads {
+    /// Only a readable audience can be reloaded; the store always is while
+    /// this device syncs (§10).
+    fn reloadable(&self, audience: &Audience) -> bool {
+        match audience {
+            Audience::Store => true,
+            Audience::Circle(circle) => self.readable.contains(circle),
+        }
+    }
+}
 
 fn groups(boundaries: &[Boundary]) -> BTreeMap<Audience, Vec<Boundary>> {
     let mut result = BTreeMap::<_, Vec<_>>::new();
@@ -33,20 +57,21 @@ fn set_applied(db: &DatabaseConnection, entry: EntryId, applied: bool) -> Result
 /// Rebuild every audience whose selected boundaries changed from its retained
 /// inputs, in the replay's transaction. An audience without a complete retained
 /// input keeps its committed rows, refuses writes and waits for a reload, as
-/// does every circle in `returning` ([`crate::StoreLog::returning_circles`]).
+/// does every returning circle. A circle this device no longer reads waits for
+/// no reload: it has nothing to reload from, and its return requires one again.
 pub(crate) fn replay<P: PendingValue>(
     db: &DatabaseConnection,
     before: &DatabaseConnection,
     schema: &WriteSchema,
     previous: &[Boundary],
-    deleted: &BTreeMap<coven_foundation::id_source::CircleId, EntryId>,
-    returning: &BTreeSet<coven_foundation::id_source::CircleId>,
+    deleted: &BTreeMap<CircleId, EntryId>,
+    circles: &CircleReads,
 ) -> Result<BTreeSet<crate::write_rows::AppKey>, DbError> {
     // Positions this device passed while it could not read a returning circle
     // never show that it opened the circle's parts, and the inputs retained
     // before the absence cannot reproduce it: it reloads from storage (§14.4).
     let mut returned = BTreeSet::new();
-    for circle in returning {
+    for circle in &circles.returning {
         let audience = Audience::Circle(*circle);
         crate::entry_inputs::forget(db, &audience, None)?;
         require_reload::<P>(db, &audience, false)?;
@@ -105,7 +130,15 @@ pub(crate) fn replay<P: PendingValue>(
                 }
                 inputs.insert(audience.clone(), input);
             }
-            _ => require_reload::<P>(db, audience, update)?,
+            _ if circles.reloadable(audience) => require_reload::<P>(db, audience, update)?,
+            _ => (),
+        }
+    }
+    // Replay removes the need for a reload that the device can no longer
+    // perform, and its pending record with it (§19.1).
+    for audience in reloading_audiences(db)? {
+        if !circles.reloadable(&audience) {
+            clear_reload(db, &audience)?;
         }
     }
     // The entries selecting either the previous or the new data of a rebuilt
@@ -124,7 +157,7 @@ pub(crate) fn replay<P: PendingValue>(
     let affected = crate::entry_inputs::restore(db, before, schema, &inputs, deleted, causes)?;
     crate::pending::suppress(db, &resets)?;
     for audience in inputs.keys() {
-        ready(db, audience)?;
+        clear_reload(db, audience)?;
     }
     if !changed.is_empty() {
         crate::pending::refresh(db)?;
@@ -150,8 +183,10 @@ fn require_reload<P: PendingValue>(
     crate::pending::save(db, &record)
 }
 
-/// The audience's selected data has committed: writes into it may proceed.
-pub(crate) fn ready(db: &DatabaseConnection, audience: &Audience) -> Result<(), DbError> {
+/// The audience no longer waits for a reload, with its pending record: its
+/// selected data has committed, so writes into it may proceed, or this device
+/// no longer reads it.
+pub(crate) fn clear_reload(db: &DatabaseConnection, audience: &Audience) -> Result<(), DbError> {
     let own = db.pending_device().ok_or(DbError::DamagedDatabase)?;
     db.pending_change(|| {
         db.internal_execute("DELETE FROM _coven_pending WHERE reporter=?1 AND subject IN (SELECT subject FROM _coven_data_reloads WHERE audience=?2)", params![own.0.to_be_bytes().as_slice(), audience_text(audience)])?;
@@ -161,6 +196,16 @@ pub(crate) fn ready(db: &DatabaseConnection, audience: &Audience) -> Result<(), 
         )?;
         Ok(())
     })
+}
+
+/// Every audience waiting for a reload.
+pub(crate) fn reloading_audiences(db: &DatabaseConnection) -> Result<BTreeSet<Audience>, DbError> {
+    Ok(db
+        .query("SELECT audience FROM _coven_data_reloads", [], |r| {
+            crate::write_encoding::audience(&r.get::<_, String>(0)?)
+        })?
+        .into_iter()
+        .collect())
 }
 
 pub(crate) fn reloading(db: &DatabaseConnection, audience: &Audience) -> Result<bool, DbError> {

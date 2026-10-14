@@ -163,6 +163,16 @@ impl StoreLogState {
                 .get(&circle)
                 .is_some_and(|c| c.members.contains(member))
     }
+
+    /// Every circle `member` reads under [`Self::reads_circle`]: the circles
+    /// whose parts its devices open, snapshot and reload (§14.4, §15).
+    pub fn readable_circles(&self, member: &MemberId) -> BTreeSet<CircleId> {
+        self.circles
+            .keys()
+            .copied()
+            .filter(|circle| self.reads_circle(*circle, member))
+            .collect()
+    }
 }
 
 /// The created store, as its kept creation entry names it (§9).
@@ -288,7 +298,7 @@ pub(crate) fn apply<P: crate::PendingValue>(
     schema: &WriteSchema,
     incoming: &[ReplayEntry],
     replay: &StoreLogReplay,
-    returning: &BTreeSet<CircleId>,
+    circles: &crate::entry_effects::CircleReads,
     files: &crate::file_write::FileWrite<'_>,
     operations: &[crate::NewOperation],
     updates: &[crate::OperationUpdate],
@@ -369,7 +379,7 @@ pub(crate) fn apply<P: crate::PendingValue>(
             schema,
             &previous_boundaries,
             &deleted,
-            returning,
+            circles,
         )?;
         let mut touched = BTreeSet::new();
         let changed: BTreeSet<_> = previous.keys().chain(deleted.keys()).copied()

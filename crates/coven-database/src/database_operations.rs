@@ -64,12 +64,15 @@ impl Database {
                         &inner.name,
                     )?;
                 }
-                let returning = next
+                let circles = next
                     .replay
                     .state
                     .devices
                     .get(&inner.access.device)
-                    .map(|device| current.returning_circles(&next.replay.state, &device.member))
+                    .map(|device| crate::entry_effects::CircleReads {
+                        returning: current.returning_circles(&next.replay.state, &device.member),
+                        readable: next.replay.state.readable_circles(&device.member),
+                    })
                     .unwrap_or_default();
                 let changes_projection = next.boundaries().ne(current.boundaries())
                     || next.replay.state.circles != current.replay.state.circles
@@ -83,7 +86,7 @@ impl Database {
                             &inner.access.write_schema,
                             &entries,
                             &next.replay,
-                            &returning,
+                            &circles,
                             files,
                             &operations,
                             &updates,

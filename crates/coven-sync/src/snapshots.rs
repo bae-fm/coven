@@ -671,11 +671,12 @@ pub(super) fn audiences_for_member(
     if state.store.is_some() {
         audiences.insert(Audience::Store);
     }
-    for (id, circle) in &state.circles {
-        if !state.circle_deletions.contains_key(id) && circle.members.contains(member) {
-            audiences.insert(Audience::Circle(*id));
-        }
-    }
+    audiences.extend(
+        state
+            .readable_circles(member)
+            .into_iter()
+            .map(Audience::Circle),
+    );
     Ok(audiences)
 }
 

@@ -155,7 +155,7 @@ pub(crate) fn load<R: Read, W: Read>(
         files.retain_rows(affected, &deleted)?;
         files.before_commit()?;
         for audience in &selected {
-            crate::entry_effects::ready(database, audience)?;
+            crate::entry_effects::clear_reload(database, audience)?;
         }
         crate::entry_inputs::release(database)?;
         if let Some(operation) = operation {

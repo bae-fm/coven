@@ -27,14 +27,11 @@ impl Database {
         &self,
     ) -> Result<std::collections::BTreeSet<coven_merge::Audience>, DbError> {
         self.call(move |inner| {
-            inner.access.readers.acquire_reader().with_reader(|db| {
-                Ok(db
-                    .query("SELECT audience FROM _coven_data_reloads", [], |r| {
-                        crate::write_encoding::audience(&r.get::<_, String>(0)?)
-                    })?
-                    .into_iter()
-                    .collect())
-            })
+            inner
+                .access
+                .readers
+                .acquire_reader()
+                .with_reader(crate::entry_effects::reloading_audiences)
         })
         .await
     }

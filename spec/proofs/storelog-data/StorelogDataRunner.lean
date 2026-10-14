@@ -37,7 +37,12 @@ private def run (j : Json) : Except String Json := do
 
 /-- §14.4: after each received batch, exactly the members and circles for
 which `CurrentData.needsReload` holds. The compared histories make no raise
-or reset, so only returning circle readability decides. -/
+or reset, so only returning circle readability decides.
+
+Each batch also folds `CurrentData.circleReplay` over every member and circle
+seen so far, with no reload ever committing, and reports the pairs still
+reloading. A circle left unreadable is `outside`, so its reload no longer
+waits (§19.1). -/
 private def reloads (j : Json) : Except String Json := do
   let input ← StorelogJson.read j
   let H := input.history
@@ -46,8 +51,11 @@ private def reloads (j : Json) : Except String Json := do
   let state (subset : List Nat) : State :=
     (CurrentReplay.finish (ReplayPolicy.replay H.membership input.window input.bound
       input.bound (entrySet subset) views)).state
+  let initial : CurrentData.CircleReader Nat Nat :=
+    ⟨⟨CovenMerge.St.init, [], []⟩, [], .available⟩
   let mut before := State.empty
   let mut previous : List Nat := []
+  let mut readers : List ((Nat × Nat) × CurrentData.CircleReader Nat Nat) := []
   let mut results := #[]
   for subset in received do
     let after := state subset
@@ -55,7 +63,19 @@ private def reloads (j : Json) : Except String Json := do
       (circle.members.eraseDups.filter fun m =>
         CurrentData.needsReload H input.window input.bound previous before after m c).map
         fun m => Json.arr #[toJson m, toJson c]
-    results := results.push (Json.arr pairs.toArray)
+    let seen := (readers.map (·.1) ++ after.circles.flatMap fun (c, circle) =>
+      circle.members.eraseDups.map fun m => (m, c)).eraseDups
+    let prior := readers
+    readers := seen.map fun (m, c) =>
+      let reader := ((prior.find? (·.1 == (m, c))).map (·.2)).getD initial
+      ((m, c), CurrentData.circleReplay H input.window input.bound previous before after m c
+        reader)
+    let waiting := readers.filterMap fun ((m, c), reader) =>
+      match reader.status with
+      | .reloading _ => some (Json.arr #[toJson m, toJson c])
+      | _ => none
+    results := results.push (Json.mkObj [
+      ("returns", Json.arr pairs.toArray), ("waiting", Json.arr waiting.toArray)])
     before := after
     previous := subset
   pure (toJson results)

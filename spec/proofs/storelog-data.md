@@ -585,16 +585,24 @@ counterexamples remain in the package.
 The circle-return differential (Rust
 [`data_differential_circle_returns`](../../crates/coven-sync/src/snapshot_reload_tests.rs))
 replays checked histories in which a member leaves and rejoins, a deletion
-drops, a creation drops and returns, and a creation lands at or after its
-deadline, in two arrival orders and three batch widths. After each batch
-`StorelogDataRunner` reports exactly the member/circle pairs for which
+drops, a creation drops and returns, a creation lands at or after its
+deadline, and a rejoined member leaves again or the circle is deleted before
+any reload commits, in two arrival orders and three batch widths. After each
+batch `StorelogDataRunner` reports exactly the member/circle pairs for which
 `CurrentData.needsReload` holds. Rust's `StoreLog::returning_circles` must name
 the same pairs, with no extra flag or filtering. The histories contain no
 raise or reset: `needsReload` also
 holds for every circle member whenever any audience's version or reset
 changes, while Rust rebuilds a changed audience from its retained inputs and
-reloads it only when they are incomplete. `scripts/check.sh` runs all
-three differentials, rebuilds every selected module and checks `Axioms.lean`;
+reloads it only when they are incomplete. With no reload committing, the
+runner also folds `CurrentData.circleReplay` over the batches and reports the
+pairs still reloading. Rust must name exactly those: the database records each
+returning circle and, in the same replay transaction, removes the requirement
+and its pending record for every circle `StoreLogState::readable_circles` no
+longer names, which the model marks `outside`. The fold restates that database
+rule over the pure replay states; the SQL path is a Rust test
+(`a_rejoined_member_reloads_the_part_its_passed_position_skipped`).
+`scripts/check.sh` runs all three differentials, rebuilds every selected module and checks `Axioms.lean`;
 the audit permits only Lean's own `propext`, `Classical.choice`, and
 `Quot.sound`.
 

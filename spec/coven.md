@@ -4041,6 +4041,9 @@ Carol's tablet:
     `DbError::AudienceReloading`. Other audiences remain usable.
   - Missing keys, snapshots or history appear in the pending list. The
     circle remains unavailable until the reload can commit.
+  - A circle that replay leaves unreadable before its reload commits has
+    nothing to reload: that replay removes the requirement and its pending
+    record (§19.1), and the circle's next return requires the reload again.
   - E.g. Ben's laptop skips Ana's Gifts writes 9 and 10 after his removal.
     When Ben rejoins, it loads both even though its log position is 10.
     The same happens if Gifts was deleted and that deletion later drops.

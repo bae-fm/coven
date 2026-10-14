@@ -105,7 +105,7 @@ impl crate::Database {
         self.inspect_writer(|sql| {
             sql.transaction(|sql| {
                 let changed = crate::BoundaryCoverage { entry, included }.record_inside(sql)?;
-                crate::entry_effects::ready(sql, &audience)?;
+                crate::entry_effects::clear_reload(sql, &audience)?;
                 Ok(changed)
             })
         })
@@ -128,7 +128,7 @@ impl crate::Database {
         self.inspect_writer(|sql| {
             sql.transaction(|sql| {
                 let changed = crate::BoundaryCoverage { entry, included }.record_inside(sql)?;
-                crate::entry_effects::ready(sql, &audience)?;
+                crate::entry_effects::clear_reload(sql, &audience)?;
                 Ok(changed)
             })
         })

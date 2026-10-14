@@ -29,6 +29,14 @@ async fn pins(db: &Database) -> Vec<String> {
         .unwrap()
 }
 
+async fn reports_gifts(db: &Database) -> bool {
+    db.pending::<crate::PendingRecord>()
+        .await
+        .unwrap()
+        .iter()
+        .any(|record| record.subject == crate::PendingSubject::Audience(Audience::Circle(GIFTS)))
+}
+
 async fn passed(device: &Device, write: WriteId) -> bool {
     device
         .db
@@ -42,7 +50,8 @@ async fn passed(device: &Device, write: WriteId) -> bool {
 /// Ben leaves Gifts, and Ana's write 2 adds a note and a Gifts pin. Ben applies
 /// the note, so his position passes write 2. When Ana readmits him, that
 /// position is no proof he read the pin: he reloads Gifts from storage, and
-/// while write 2 is missing the reload fails as a whole.
+/// while write 2 is missing the reload fails as a whole. Removed again before
+/// it commits, he waits for no reload; readmitted, he waits again.
 #[tokio::test]
 async fn a_rejoined_member_reloads_the_part_its_passed_position_skipped() {
     let storage = storage();
@@ -50,15 +59,20 @@ async fn a_rejoined_member_reloads_the_part_its_passed_position_skipped() {
     let [ana, ben, _] = devices.as_mut_slice() else {
         panic!("three members")
     };
+    let membership = |add| {
+        let (circle, member) = (GIFTS, identity(4).member_id());
+        if add {
+            StoreChange::AddCircleMember { circle, member }
+        } else {
+            StoreChange::RemoveCircleMember { circle, member }
+        }
+    };
     sql(&ana.db, "INSERT INTO notes VALUES('first','public','one'); INSERT INTO pins VALUES('00000000-0000-4000-8000-000000000001','00000000-0000-0000-0000-00000000000a','before leaving')").await;
     ana.writes.upload_writes().await.unwrap();
     ben.writes.download_writes().await.unwrap();
     assert_eq!(pins(&ben.db).await, ["before leaving"]);
     ana.sync
-        .make_and_upload_entry(StoreChange::RemoveCircleMember {
-            circle: GIFTS,
-            member: identity(4).member_id(),
-        })
+        .make_and_upload_entry(membership(false))
         .await
         .unwrap();
     ana.sync
@@ -78,10 +92,7 @@ async fn a_rejoined_member_reloads_the_part_its_passed_position_skipped() {
     let bytes = storage.read(&path).await.unwrap();
     storage.delete(&path).await.unwrap();
     ana.sync
-        .make_and_upload_entry(StoreChange::AddCircleMember {
-            circle: GIFTS,
-            member: identity(4).member_id(),
-        })
+        .make_and_upload_entry(membership(true))
         .await
         .unwrap();
     let failed = ben.sync.sync_store_log().await;
@@ -93,13 +104,7 @@ async fn a_rejoined_member_reloads_the_part_its_passed_position_skipped() {
         ben.db.reloading_audiences().await.unwrap(),
         BTreeSet::from([Audience::Circle(GIFTS)])
     );
-    assert!(ben
-        .db
-        .pending::<crate::PendingRecord>()
-        .await
-        .unwrap()
-        .iter()
-        .any(|record| record.subject == crate::PendingSubject::Audience(Audience::Circle(GIFTS))));
+    assert!(reports_gifts(&ben.db).await);
     // The failed reload left the old rows and positions; Gifts refuses writes
     // while the store stays writable.
     assert_eq!(pins(&ben.db).await, ["before leaving"]);
@@ -111,6 +116,35 @@ async fn a_rejoined_member_reloads_the_part_its_passed_position_skipped() {
     try_sql(&ben.db, "INSERT INTO notes VALUES('third','local','three')")
         .await
         .unwrap();
+
+    // Replay that leaves Gifts unreadable withdraws the requirement and its
+    // pending record; Gifts refuses Ben's writes as a circle he is not in.
+    ana.sync
+        .make_and_upload_entry(membership(false))
+        .await
+        .unwrap();
+    ben.sync.sync_store_log().await.unwrap();
+    assert!(ben.db.reloading_audiences().await.unwrap().is_empty());
+    assert!(!reports_gifts(&ben.db).await);
+    assert!(matches!(
+        try_sql(&ben.db, "INSERT INTO pins VALUES('00000000-0000-4000-8000-000000000003','00000000-0000-0000-0000-00000000000a','refused')").await,
+        Err(DbError::NotInCircle(GIFTS))
+    ));
+    ana.sync
+        .make_and_upload_entry(membership(true))
+        .await
+        .unwrap();
+    assert!(matches!(
+        ben.sync.sync_store_log().await,
+        Err(SyncError::Database(DbError::Snapshot(
+            SnapshotError::MissingWrites { .. }
+        )))
+    ));
+    assert_eq!(
+        ben.db.reloading_audiences().await.unwrap(),
+        BTreeSet::from([Audience::Circle(GIFTS)])
+    );
+    assert!(reports_gifts(&ben.db).await);
 
     storage.create(&path, &bytes).await.unwrap();
     ben.sync.sync_store_log().await.unwrap();
@@ -248,6 +282,20 @@ mod histories {
         (h, vec![0, 1, 2, landing, landing + 1])
     }
 
+    /// Ben rejoins Gifts and leaves it again; no reload commits in between.
+    pub(super) fn leave_again() -> History {
+        let mut h = rejoin();
+        h.all(0, 0, leave(0, 1));
+        h
+    }
+
+    /// Ben rejoins Gifts and Ana deletes it; no reload commits in between.
+    pub(super) fn delete_after_return() -> History {
+        let mut h = rejoin();
+        h.all(0, 0, delete(0));
+        h
+    }
+
     /// Each batch's prior log and resulting replay state.
     pub(super) fn transitions(
         h: &History,
@@ -344,18 +392,26 @@ fn a_late_creation_cannot_make_another_creation_reload() {
 
 /// Compare each batch's returning circles with `CurrentData.needsReload`
 /// (§14.4) over the same checked histories, including creations first received
-/// in the batch, which have no skipped part and need no reload.
+/// in the batch, which have no skipped part and need no reload. With no reload
+/// committing, the circles still waiting after each batch must match those
+/// `CurrentData.circleReplay` leaves reloading: the database records a
+/// returning circle and drops it once the circle is unreadable
+/// (`entry_effects::replay`).
 #[test]
 #[ignore = "requires COVEN_STORELOG_DATA_LEAN, supplied by scripts/check.sh"]
 fn data_differential_circle_returns() {
     use crate::tests::{input, orders, run_lean};
     use serde_json::{json, Value};
+    let number = |circle: &CircleId| u64::try_from(circle.0.as_u128()).unwrap();
     let mut inputs = Vec::new();
     let mut expected = Vec::new();
+    let mut withdrawn = 0;
     let histories = [
         histories::rejoin(),
         histories::deletion(),
         histories::creation(),
+        histories::leave_again(),
+        histories::delete_after_return(),
     ]
     .into_iter()
     .map(|h| {
@@ -374,16 +430,25 @@ fn data_differential_circle_returns() {
                     received.push(all.clone());
                 }
                 let mut results = Vec::new();
+                let mut required = vec![BTreeSet::new(); 5];
                 for (before, after) in histories::transitions(&h, &stored, &batches) {
-                    let mut pairs = Vec::new();
-                    for m in 0..5 {
-                        for circle in
-                            before.returning_circles(&after, &crate::replay::tests::member(m))
-                        {
-                            pairs.push(json!([m, u64::try_from(circle.0.as_u128()).unwrap()]));
+                    let (mut pairs, mut waiting) = (Vec::new(), Vec::new());
+                    for (m, required) in (0..5).zip(&mut required) {
+                        let member = crate::replay::tests::member(m);
+                        let returning = before.returning_circles(&after, &member);
+                        for circle in &returning {
+                            pairs.push(json!([m, number(circle)]));
+                        }
+                        required.extend(returning);
+                        let readable = after.readable_circles(&member);
+                        let waited = required.len();
+                        required.retain(|circle| readable.contains(circle));
+                        withdrawn += waited - required.len();
+                        for circle in required.iter() {
+                            waiting.push(json!([m, number(circle)]));
                         }
                     }
-                    results.push(pairs);
+                    results.push((pairs, waiting));
                 }
                 inputs.push(input(&h, &stored, &received));
                 expected.push(results);
@@ -396,21 +461,36 @@ fn data_differential_circle_returns() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let actual: Vec<Vec<Vec<Value>>> = serde_json::from_slice(&output.stdout).unwrap();
+    #[derive(serde::Deserialize)]
+    struct Batch {
+        returns: Vec<Value>,
+        waiting: Vec<Value>,
+    }
+    let actual: Vec<Vec<Batch>> = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(actual.len(), expected.len());
+    let sorted = |pairs: &[Value]| {
+        let mut pairs = pairs.to_vec();
+        pairs.sort_by_key(Value::to_string);
+        pairs
+    };
     let mut reloads = 0;
     for ((actual, expected), input) in actual.iter().zip(&expected).zip(&inputs) {
         assert_eq!(actual.len(), expected.len(), "circle returns: {input}");
-        for (lean, rust) in actual.iter().zip(expected) {
-            let mut lean = lean.clone();
-            reloads += lean.len();
-            let mut rust = rust.clone();
-            lean.sort_by_key(Value::to_string);
-            rust.sort_by_key(Value::to_string);
-            assert_eq!(lean, rust, "circle returns: {input}");
+        for (lean, (returns, waiting)) in actual.iter().zip(expected) {
+            reloads += lean.returns.len();
+            assert_eq!(
+                sorted(&lean.returns),
+                sorted(returns),
+                "circle returns: {input}"
+            );
+            assert_eq!(
+                sorted(&lean.waiting),
+                sorted(waiting),
+                "waiting reloads: {input}"
+            );
         }
     }
-    assert!(reloads > 0);
+    assert!(reloads > 0 && withdrawn > 0);
 }
 
 #[test]
