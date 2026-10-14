@@ -236,8 +236,32 @@ everything listed then. `send_of_within` is the converse of
   `reset_unconnected`): an empty database under the fresh id
   (`unconnected_reset_empty`) whose first write is number 1 at a path no old
   write used (`unconnected_first_write_new_path`). Setting up storage
-  afterwards, including by another installation of the same store, is
-  outside the model.
+  afterwards is `StoreCreation`, below.
+
+**Two installations of a never-connected store.**
+[StoreCreation](storage/CovenStorage/StoreCreation.lean) models setting up
+storage for a store that has never had it. Its creation entry is entry 1 of
+the creating device. After the storage-less reset the original installation
+and the reset copy hold the store under different device ids, so the two
+creation entries have different paths and create-once never compares them.
+
+- Setup that writes its creation without reading the store folder, as Rust
+  did before T163, leaves two creation entries when both set up one
+  location (`blind_setup_two_creations`, checked).
+- Setup that first lists the store's entries and refuses one by another
+  device creates the store once when the listing includes the first
+  creation (`listed_setup_one_creation`, proved). This device's own retried
+  creation still passes and keeps its first bytes (`retry_passes`).
+- The listing is not a lock. Two setups whose listings both come before the
+  other's creation both pass (`concurrent_setups_two_creations`, checked),
+  as §4 accepts for two stores created in one bucket within the listing
+  margin. Preventing it would need one create-once object every creation
+  must claim, which D10 does not have.
+
+Listing completeness (§4's margin), the replay of two creation entries and
+the provider calls are outside the model. Rust's test
+`a_second_installation_never_creates_a_store_already_created_here`
+(`storage_setup_tests.rs`) runs the sequential history.
 
 `Identity` also contains a separate model with recorded replacement ends.
 Its `ends_*`, `combined_end_keeps_completed` and `beyond_end_waits` results

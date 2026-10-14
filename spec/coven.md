@@ -3197,6 +3197,17 @@ Carol's tablet:
     stored history. Its replacement is an empty database under the fresh
     id, with the notice, and its first write takes a path no old write used
     ([`unconnected_reset_is_new_device`, `unconnected_reset_empty`, `unconnected_first_write_new_path`](proofs/storage/CovenStorage/IdentityCounters.lean)).
+    - The original installation and the reset copy then hold the store under
+      different device ids, so their creation entries (entry 1 of each
+      device) have different paths and create-once never compares them.
+      Setting up storage for a store that has never had it therefore first
+      lists the store's `store-log/` folder. An entry by another device
+      means the store was already created there: setup refuses with
+      `StorageFailure::StoreExists` and creates nothing. This device's own
+      retried creation passes. The listing is not a lock: two setups that
+      both list before either creates can both pass, within §4's listing
+      margin
+      ([`blind_setup_two_creations`, `listed_setup_one_creation`, `retry_passes`, `concurrent_setups_two_creations`](proofs/storage/CovenStorage/StoreCreation.lean)).
   - Tell the app which old id was replaced and why, and that unsent edits
     were discarded. Store the `DeviceReset` record in `_coven_device_reset`
     in the replacement database before publishing its usable handle (E5).

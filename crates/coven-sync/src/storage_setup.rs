@@ -117,6 +117,25 @@ impl StoreLogSync {
             )
             .await?
         } else {
+            // Another installation of this never-connected store may already
+            // have created it here. After §10's storage-less reset the two
+            // hold different device ids, so their creation entries have
+            // different paths and create-once never compares them. Only this
+            // device's own retried creation may already be in the folder.
+            let own = local.device;
+            if storage
+                .list(&coven_storage::ObjectPrefix::store_logs(store_id))
+                .await?
+                .iter()
+                .any(|object| {
+                    object
+                        .path
+                        .store_log_position()
+                        .is_none_or(|(device, _)| device != own)
+                })
+            {
+                return Err(coven_storage::StorageFailure::StoreExists.into());
+            }
             if local.upload.is_none() {
                 let settings = self.directory.settings().map_err(SyncError::disk)?;
                 let key = coven_crypto::StoreKey::generate(coven_foundation::id_source::KeyId(
@@ -432,3 +451,7 @@ fn compensate(operation: SyncError, rollback: Result<(), SyncError>) -> SyncErro
         },
     }
 }
+
+#[cfg(test)]
+#[path = "storage_setup_tests.rs"]
+mod tests;

@@ -43,6 +43,10 @@ pub enum StorageFailure {
     RegionMismatch,
     /// A member key coven made could list beyond its store's prefix (§4).
     KeyBeyondStore,
+    /// Setting up a store that never had storage found another device's
+    /// store-log entry in its folder: another installation of the store
+    /// already created it at this location (§10). Restore or join it instead.
+    StoreExists,
     /// The S3 service's member keys reach a whole bucket, so a store there
     /// needs a bucket of its own (§4).
     OwnBucketRequired {

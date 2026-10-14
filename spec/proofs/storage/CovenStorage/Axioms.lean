@@ -72,6 +72,10 @@ import CovenStorage
 #print axioms CovenStorage.IdentityCounters.unconnected_reset_is_new_device
 #print axioms CovenStorage.IdentityCounters.unconnected_reset_empty
 #print axioms CovenStorage.IdentityCounters.unconnected_first_write_new_path
+#print axioms CovenStorage.StoreCreation.blind_setup_two_creations
+#print axioms CovenStorage.StoreCreation.listed_setup_one_creation
+#print axioms CovenStorage.StoreCreation.retry_passes
+#print axioms CovenStorage.StoreCreation.concurrent_setups_two_creations
 #print axioms CovenStorage.replacement_has_owner
 #print axioms CovenStorage.applyOnce_nodup
 #print axioms CovenStorage.applyOnce_members
