@@ -16,6 +16,10 @@ fn log(number: u64) -> ObjectPath {
     ObjectPath::store_log(STORE_ID, DeviceId(31), NonZeroU64::new(number).unwrap())
 }
 
+fn device_log(number: u64) -> ObjectPath {
+    ObjectPath::device_log(STORE_ID, DeviceId(31), NonZeroU64::new(number).unwrap())
+}
+
 fn take_requests(state: &Arc<Mutex<Remote>>) -> Vec<(Method, String)> {
     std::mem::take(&mut state.lock().unwrap().requests)
 }
@@ -405,9 +409,9 @@ async fn warm_upload_begin_reuses_the_reserved_folder() {
     let state = remote();
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     let storage = provider(&server.url);
-    let first = storage.begin_upload(&log(1), 4).await.unwrap();
+    let first = storage.begin_upload(&device_log(1), 4).await.unwrap();
     take_requests(&state);
-    let second = storage.begin_upload(&log(2), 4).await.unwrap();
+    let second = storage.begin_upload(&device_log(2), 4).await.unwrap();
     let requests = take_requests(&state);
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0].0, Method::POST);
@@ -467,22 +471,25 @@ async fn disappeared_upload_folders_are_invalidated_before_retry() {
     let state = remote();
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     let storage = provider(&server.url);
-    let first = storage.begin_upload(&log(1), 4).await.unwrap();
+    let first = storage.begin_upload(&device_log(1), 4).await.unwrap();
     storage.abort_upload(&first).await.unwrap();
     remove_folder(&state, &format!("{STORE_ID}/.coven-uploads"));
     assert_eq!(
         storage
-            .begin_upload(&log(1), 4)
+            .begin_upload(&device_log(1), 4)
             .await
             .err()
             .unwrap()
             .failure(),
         StorageFailure::NotFound
     );
-    let mut upload = storage.begin_upload(&log(1), 4).await.unwrap();
+    let mut upload = storage.begin_upload(&device_log(1), 4).await.unwrap();
     storage.upload_part(&mut upload, b"data").await.unwrap();
-    storage.create(&log(2), b"seed parent").await.unwrap();
-    remove_folder(&state, &format!("{STORE_ID}/store-log"));
+    storage
+        .create(&device_log(2), b"seed parent")
+        .await
+        .unwrap();
+    remove_folder(&state, &format!("{STORE_ID}/devices"));
     assert_eq!(
         storage
             .finish_upload(&mut upload)
@@ -492,8 +499,8 @@ async fn disappeared_upload_folders_are_invalidated_before_retry() {
         StorageFailure::NotFound
     );
     storage.abort_upload(&upload).await.unwrap();
-    let mut upload = storage.begin_upload(&log(1), 4).await.unwrap();
+    let mut upload = storage.begin_upload(&device_log(1), 4).await.unwrap();
     storage.upload_part(&mut upload, b"data").await.unwrap();
     storage.finish_upload(&mut upload).await.unwrap();
-    assert_eq!(storage.read(&log(1)).await.unwrap(), b"data");
+    assert_eq!(storage.read(&device_log(1)).await.unwrap(), b"data");
 }
