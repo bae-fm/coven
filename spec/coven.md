@@ -5159,8 +5159,9 @@ Carol's tablet:
     with the queue by `uploads()`;
   - `_coven_cache`: each cached file or chunk, its namespace, verified range,
     size, when it was last read, and whether it is pinned. Cache reservations
-    retain the fixed references requested for eager fill and cancellation,
-    including requests that have not received any bytes;
+    (`_coven_eager_requests`, with `_coven_eager_cancel` while the app has
+    cancelled them) retain the fixed references requested for eager fill and
+    cancellation, including requests that have not received any bytes;
   - `_coven_cache_budgets`: each namespace's budget and cached byte total,
     updated with its cache records so a budget check needs no full sum;
   - `_coven_file_removals`: unused local copies waiting to be deleted;

@@ -8,7 +8,7 @@ pub(super) use crate::internal_schema::{
 };
 use coven_foundation::files::{FileArea, FileName, StoreDir};
 
-pub(super) fn id(file: &FileRef) -> Result<String, DbError> {
+pub(crate) fn id(file: &FileRef) -> Result<String, DbError> {
     Ok(format!("{}/{}", file.uploader().0, file.id()))
 }
 fn tick(db: &DatabaseConnection) -> Result<i64, DbError> {
@@ -215,7 +215,7 @@ pub(super) fn unpin(db: &DatabaseConnection, file: &FileRef) -> Result<(), DbErr
     )?;
     Ok(())
 }
-pub(super) fn pinned(db: &DatabaseConnection, file: &FileRef) -> Result<bool, DbError> {
+pub(crate) fn pinned(db: &DatabaseConnection, file: &FileRef) -> Result<bool, DbError> {
     let id = id(file)?;
     db.query_row("SELECT EXISTS(SELECT 1 FROM _coven_cache WHERE namespace=?1 AND file_id=?2 AND chunk=?4 AND pinned=1 AND checked_hash=?3)",(file.namespace(),id,file.content_hash().as_bytes().as_slice(),COMPLETE_FILE),|r|r.get(0))
 }

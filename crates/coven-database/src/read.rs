@@ -76,6 +76,39 @@ impl<'connection> SqlReadContext<'connection> {
         Ok(crate::pending::read(self.database)?)
     }
 
+    pub(crate) fn pin_progress(
+        &self,
+        files: &[crate::FileRef],
+        device: coven_foundation::id_source::DeviceId,
+    ) -> CovenResult<crate::PinProgress> {
+        Ok(crate::cache_progress::pin_progress(
+            self.database,
+            files,
+            device,
+        )?)
+    }
+
+    pub(crate) fn eager_status(
+        &self,
+        device: coven_foundation::id_source::DeviceId,
+    ) -> CovenResult<crate::EagerCacheFillStatus> {
+        Ok(crate::cache_progress::eager_status(self.database, device)?)
+    }
+
+    pub(crate) fn rows_pinned(
+        &self,
+        schema: &crate::write_schema::WriteSchema,
+        table: &str,
+        keys: &[crate::RowKey],
+    ) -> CovenResult<Vec<Option<bool>>> {
+        Ok(crate::cache_progress::rows_pinned(
+            self.database,
+            schema,
+            table,
+            keys,
+        )?)
+    }
+
     pub(crate) fn upload_queue(&self) -> CovenResult<crate::UploadQueueState> {
         Ok(crate::file_queue::state(self.database)?)
     }

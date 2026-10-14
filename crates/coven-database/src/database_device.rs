@@ -31,7 +31,7 @@ impl Database {
     }
 
     /// This installation's device id, or `StoreClosed` once closed.
-    fn local_device(&self) -> Result<coven_foundation::id_source::DeviceId, DbError> {
+    pub(crate) fn local_device(&self) -> Result<coven_foundation::id_source::DeviceId, DbError> {
         let guard = self.inner.read().expect("database lock poisoned");
         Ok(guard.as_ref().ok_or(DbError::StoreClosed)?.access.device)
     }

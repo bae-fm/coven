@@ -114,6 +114,8 @@ async fn only_the_spec_tables_are_created() {
                 "_coven_device_reset",
                 "_coven_devices",
                 "_coven_drained_devices",
+                "_coven_eager_cancel",
+                "_coven_eager_requests",
                 "_coven_file_chunks",
                 "_coven_file_removals",
                 "_coven_file_uploads",
@@ -321,6 +323,8 @@ mod fixture {
        VALUES('join',1,zeroblob(13),1000),('provider',0,zeroblob(13),600000);
      INSERT INTO _coven_device_files SELECT device,substr(key,17,16),'path_' || i FROM fixture;
      INSERT INTO _coven_upload_pause VALUES(1);
+     INSERT INTO _coven_eager_cancel VALUES(1);
+     INSERT INTO _coven_eager_requests SELECT audience,'file_' || i,key FROM fixture;
      INSERT INTO _coven_file_chunks SELECT device,substr(key,17,16),0,key FROM fixture;
      INSERT INTO _coven_cache(namespace,file_id,chunk,path,size,last_read,pinned,checked_hash)
        SELECT audience,'file_' || i,CASE WHEN (i/64)%4=0 THEN -2 ELSE 0 END,'cache_' || i,
@@ -356,6 +360,7 @@ mod fixture {
                 | "_coven_device_reset"
                 | "_coven_catch_up"
                 | "_coven_upload_pause"
+                | "_coven_eager_cancel"
                 | "_coven_finality" => {
                     assert_eq!(count, 1)
                 }
@@ -449,6 +454,12 @@ mod scans {
         Some("the schema row is singular; unfiltered membership EXISTS stops after its first row"),
     ("file_queue.rs", "SELECT u.id,u.reference,u.queued_at,u.session,r.failures,r.not_before,r.wait FROM _coven_file_uploads AS u LEFT JOIN _coven_retries AS r ON r.upload=u.id ORDER BY u.id", "u") =>
         Some("the file queue reader returns every queued attachment"),
+    ("cache_progress.rs", "INSERT INTO _coven_eager_cancel(cancelled) SELECT 1 WHERE EXISTS(SELECT 1 FROM _coven_eager_requests) ON CONFLICT DO NOTHING", "_coven_eager_requests") =>
+        Some("unfiltered EXISTS stops after the first requested file"),
+    ("cache_progress.rs", "SELECT EXISTS(SELECT 1 FROM _coven_eager_cancel)", "_coven_eager_cancel") =>
+        Some("the cancellation table holds at most one row"),
+    ("cache_progress.rs", "SELECT reference FROM _coven_eager_requests ORDER BY namespace,file_id", "_coven_eager_requests") =>
+        Some("eager progress covers the whole requested set"),
     ("file_queue.rs", "SELECT EXISTS(SELECT 1 FROM _coven_upload_pause)", "_coven_upload_pause") =>
         Some("the pause table holds at most one row"),
     ("retry.rs", "SELECT scope,operation,upload,download,failures,not_before,wait FROM _coven_retries", "_coven_retries") =>

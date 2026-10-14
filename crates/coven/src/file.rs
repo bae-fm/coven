@@ -30,29 +30,42 @@ impl CovenHandle {
     pub async fn set_uploads_paused(&self, paused: bool) -> CovenResult<()> {
         Ok(self.files.set_uploads_paused(paused).await?)
     }
-    /// Retain uploaded files regardless of the namespace's cache budget.
-    pub async fn pin(
-        &self,
-        files: &[FileRef],
-        on_progress: &(dyn Fn(PinProgress) + Send + Sync),
-    ) -> Result<(), FileReadError> {
-        self.files.pin(files, on_progress).await
+    /// Keeps uploaded files whole on this device regardless of the cache
+    /// budget, downloading what is missing before the call returns. Progress
+    /// is read from `pin_progress()`.
+    pub async fn pin(&self, files: &[FileRef]) -> Result<(), FileReadError> {
+        self.files.pin(files).await
+    }
+    /// Verified cache coverage for these fixed references, in one snapshot.
+    pub async fn pin_progress(&self, files: Vec<FileRef>) -> CovenResult<PinProgress> {
+        self.database.pin_progress(files).await
+    }
+    /// The same pre-built cache query with the same fixed references.
+    pub fn subscribe_pin_progress(&self, files: Vec<FileRef>) -> LiveQuery<PinProgress> {
+        self.database.subscribe_pin_progress(files)
     }
     /// Release pins and apply cache budgets.
     pub async fn unpin(&self, files: &[FileRef]) -> Result<(), FileReadError> {
         self.files.unpin(files).await
     }
-    /// Pin state in key order; absent files produce `None`.
+    /// Whether each row's file is pinned, one answer per key in order, or
+    /// `None` for a key with no row carrying a file. A file not yet uploaded
+    /// reads as not pinned.
     pub async fn rows_pinned(
         &self,
         table: &str,
         keys: Vec<RowKey>,
-    ) -> Result<Vec<Option<bool>>, FileReadError> {
-        self.files.rows_pinned(table, keys).await
+    ) -> CovenResult<Vec<Option<bool>>> {
+        self.database.rows_pinned(table, keys).await
     }
-    /// Observe row and pin changes, with a replaceable row request.
-    pub fn subscribe_rows_pinned(&self, table: &str, keys: Vec<RowKey>) -> RowsPinnedLiveQuery {
-        self.files.subscribe_rows_pinned(table, keys)
+    /// The same internal query, live. To watch different keys, drop this
+    /// query and subscribe with the new keys.
+    pub fn subscribe_rows_pinned(
+        &self,
+        table: &str,
+        keys: Vec<RowKey>,
+    ) -> LiveQuery<Vec<Option<bool>>> {
+        self.database.subscribe_rows_pinned(table, keys)
     }
     /// Remove cache copies only, without changing storage or local originals.
     pub async fn evict_file(&self, file: &FileRef) -> Result<(), FileReadError> {
@@ -66,15 +79,18 @@ impl CovenHandle {
     pub async fn get_cache_budget(&self, namespace: &str) -> Result<Option<u64>, DbError> {
         self.files.get_cache_budget(namespace).await
     }
-    /// Observe eager downloads triggered by committed file rows.
-    pub fn subscribe_eager_cache_fill_status(
-        &self,
-    ) -> tokio::sync::watch::Receiver<EagerCacheFillStatus> {
-        self.files.subscribe_eager_cache_fill_status()
+    /// Progress of downloading every file declared to download as soon as
+    /// its row arrives, over the requested set's verified coverage.
+    pub async fn eager_cache_fill_status(&self) -> CovenResult<EagerCacheFillStatus> {
+        self.database.eager_cache_fill_status().await
     }
-    /// Stop current eager downloads without affecting uploads.
-    pub fn cancel_eager_cache_fill(&self) {
-        self.files.cancel_eager_cache_fill()
+    /// The same query over cache reservations, cancellation and verified ranges.
+    pub fn subscribe_eager_cache_fill_status(&self) -> LiveQuery<EagerCacheFillStatus> {
+        self.database.subscribe_eager_cache_fill_status()
+    }
+    /// Records cancellation of the current eager requests without stopping sync.
+    pub async fn cancel_eager_cache_fill(&self) -> CovenResult<()> {
+        Ok(self.files.cancel_eager_cache_fill().await?)
     }
 }
 #[cfg(test)]

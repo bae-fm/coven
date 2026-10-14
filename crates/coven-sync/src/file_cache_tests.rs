@@ -82,7 +82,7 @@ async fn eager_commit_observation_handles_download_apply() {
         b.ids.clone(),
         crate::TransferLimits::default(),
     );
-    let mut status = files.subscribe_eager_cache_fill_status();
+    let mut status = b.database.subscribe_eager_cache_fill_status();
     for write in a.database.test_queued_writes().await.unwrap() {
         b.database
             .apply_downloaded::<crate::PendingRecord>(
@@ -97,7 +97,7 @@ async fn eager_commit_observation_handles_download_apply() {
             if files.inner.database.missing_bytes(&file).await.unwrap() == 0 {
                 break;
             }
-            status.changed().await.unwrap();
+            status.next().await.unwrap();
         }
     })
     .await
@@ -206,15 +206,21 @@ async fn one_files_failure_leaves_its_record_while_the_fill_continues() {
         records[&format!("{:?}", subject(&other))],
         PendingReason::Refused(Refusal::ContentHash)
     ));
-    assert!(matches!(
-        b.files.inner.eager.borrow().clone(),
-        EagerCacheFillStatus::Idle
-    ));
+    // The requested set stays until it finishes; its progress counts only
+    // the verified file, and failures stay in pending().
+    let status = b.database.eager_cache_fill_status().await.unwrap();
+    assert!(
+        matches!(&status, EagerCacheFillStatus::Downloading(progress)
+            if progress.files_total == 4 && progress.files_completed == 1
+                && progress.bytes_cached == good.plaintext_size()),
+        "{status:?}"
+    );
     // A wake before the waiting file's retry is due neither requests it
-    // nor touches the status the pass left.
-    let status = b.files.subscribe_eager_cache_fill_status();
+    // nor changes the status the pass left.
+    let requests = a.storage.request_count();
     b.files.inner.fill_eager().await;
-    assert!(!status.has_changed().unwrap());
+    assert_eq!(a.storage.request_count(), requests);
+    assert_eq!(b.database.eager_cache_fill_status().await.unwrap(), status);
     // Retry once due: the waiting file arrives and completes; refused bytes
     // are not fetched again automatically.
     a.drain().await;
@@ -258,7 +264,7 @@ async fn a_sync_preserves_eager_cancellation_and_retries_network_failures() {
         .await
         .unwrap();
     a.storage.set_online(false);
-    let mut status = b.files.subscribe_eager_cache_fill_status();
+    let mut status = b.database.subscribe_eager_cache_fill_status();
     for write in a.database.test_queued_writes().await.unwrap() {
         b.database
             .apply_downloaded::<crate::PendingRecord>(
@@ -303,15 +309,20 @@ async fn a_sync_preserves_eager_cancellation_and_retries_network_failures() {
             .await
             .unwrap();
     }
-    status
-        .wait_for(|s| matches!(s, EagerCacheFillStatus::Downloading(_)))
-        .await
-        .unwrap();
-    b.files.cancel_eager_cache_fill();
-    status
-        .wait_for(|s| matches!(s, EagerCacheFillStatus::Cancelled(_)))
-        .await
-        .unwrap();
+    while !matches!(
+        status.next().await.unwrap(),
+        EagerCacheFillStatus::Downloading(_)
+    ) {}
+    // Cancellation commits before it is reported, with the set's coverage.
+    b.files.cancel_eager_cache_fill().await.unwrap();
+    assert!(matches!(
+        b.database.eager_cache_fill_status().await.unwrap(),
+        EagerCacheFillStatus::Cancelled(progress) if progress.files_total == 1
+    ));
+    while !matches!(
+        status.next().await.unwrap(),
+        EagerCacheFillStatus::Cancelled(_)
+    ) {}
     b.files.sync_files().await.unwrap();
     assert!(b.files.inner.database.missing_bytes(&second).await.unwrap() > 0);
     b.close().await;
@@ -399,10 +410,10 @@ async fn a_provider_cooldown_holds_eager_downloads_and_uploads_alike() {
     // and the upload queue.
     advance(&b, &clock, 1);
     let requests = a.storage.request_trace().len();
-    let status = b.files.subscribe_eager_cache_fill_status();
+    let status = b.database.eager_cache_fill_status().await.unwrap();
     b.files.sync_files().await.unwrap();
     // Not attempted at all: the fill never started.
-    assert!(!status.has_changed().unwrap());
+    assert_eq!(b.database.eager_cache_fill_status().await.unwrap(), status);
     assert_eq!(
         b.files.inner.drain_uploads(false).await.unwrap(),
         DrainOutcome::Drained { uploaded: 0 }
@@ -443,7 +454,9 @@ async fn the_worker_retries_a_download_when_its_wait_ends() {
         .await
         .unwrap();
     a.storage.set_online(false);
-    let mut status = b.files.subscribe_eager_cache_fill_status();
+    // The failure's record commits with its wait.
+    let mut pending = b.database.subscribe_pending::<crate::PendingRecord>();
+    let mut status = b.database.subscribe_eager_cache_fill_status();
     apply_all(&a, &b).await;
     tokio::time::timeout(Duration::from_secs(5), async {
         while b
@@ -455,7 +468,7 @@ async fn the_worker_retries_a_download_when_its_wait_ends() {
             .unwrap()
             .is_empty()
         {
-            status.changed().await.unwrap();
+            pending.next().await.unwrap();
         }
     })
     .await
@@ -464,11 +477,58 @@ async fn the_worker_retries_a_download_when_its_wait_ends() {
     clock.set(clock.now() + Duration::from_secs(1));
     tokio::time::timeout(Duration::from_secs(5), async {
         while b.files.inner.database.missing_bytes(&file).await.unwrap() > 0 {
-            status.changed().await.unwrap();
+            status.next().await.unwrap();
         }
     })
     .await
     .unwrap();
     b.close().await;
     a.close().await;
+}
+
+/// Pin progress is a query over committed, verified cache coverage: bytes a
+/// concurrent reader caches count, a failed read adds none, eviction removes
+/// them, and reopening reads the same answer (§16.4, E8).
+#[tokio::test]
+async fn pin_progress_reads_committed_coverage() {
+    let mut f = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
+    let file = f.uploaded("progress", vec![77; CHUNK * 3]).await;
+    let total = 3 * CHUNK as u64;
+    let progress = |cached| crate::PinProgress {
+        files_completed: 0,
+        files_total: 1,
+        bytes_cached: cached,
+        bytes_total: total,
+    };
+    let mut live = f.database.subscribe_pin_progress(vec![file.clone()]);
+    assert_eq!(live.next().await.unwrap(), progress(0));
+    // Another reader's verified chunk is coverage the moment it commits.
+    let stream = f.files.open_file_stream(&file).await.unwrap();
+    stream.read_at(CHUNK as u64, 1).await.unwrap();
+    assert_eq!(live.next().await.unwrap(), progress(CHUNK as u64));
+    // A read that fails authentication commits nothing.
+    f.storage
+        .corrupt_byte(&f.path(&file), 11 + 2 * (CHUNK + 16) + 3)
+        .await
+        .unwrap();
+    assert!(matches!(
+        stream.read_at(2 * CHUNK as u64, 1).await,
+        Err(FileReadError::Integrity { .. })
+    ));
+    assert_eq!(
+        f.database.pin_progress(vec![file.clone()]).await.unwrap(),
+        progress(CHUNK as u64)
+    );
+    drop(stream);
+    f.reopen().await;
+    assert_eq!(
+        f.database.pin_progress(vec![file.clone()]).await.unwrap(),
+        progress(CHUNK as u64)
+    );
+    f.files.evict_file(&file).await.unwrap();
+    assert_eq!(
+        f.database.pin_progress(vec![file]).await.unwrap(),
+        progress(0)
+    );
+    f.close().await;
 }

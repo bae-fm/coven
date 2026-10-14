@@ -337,28 +337,24 @@ async fn budgets_pins_eviction_and_second_device_reads() {
     );
     let ref2 = second.database.file_ref("files", "first").await.unwrap();
     assert_eq!(files.read_file(&ref2).await.unwrap(), bytes);
-    let progress = Mutex::new(Vec::new());
     f.files.set_cache_budget("files", 1).await.unwrap();
-    f.files
-        .pin(std::slice::from_ref(&file), &|p| {
-            progress.lock().unwrap().push(p)
-        })
-        .await
-        .unwrap();
+    f.files.pin(std::slice::from_ref(&file)).await.unwrap();
     assert_eq!(
-        f.files
+        f.database
             .rows_pinned("files", vec!["first".into()])
             .await
             .unwrap(),
         vec![Some(true)]
     );
-    assert_eq!(progress.lock().unwrap().last().unwrap().files_completed, 1);
+    let progress = f.database.pin_progress(vec![file.clone()]).await.unwrap();
+    assert_eq!(progress.files_completed, 1);
+    assert_eq!(progress.bytes_cached, file.plaintext_size());
     let requests = f.storage.request_count();
     assert_eq!(f.files.read_file(&file).await.unwrap(), bytes);
     assert_eq!(f.storage.request_count(), requests);
     f.files.unpin(std::slice::from_ref(&file)).await.unwrap();
     assert_eq!(
-        f.files
+        f.database
             .rows_pinned("files", vec!["first".into()])
             .await
             .unwrap(),
@@ -473,22 +469,19 @@ async fn cancelling_a_pin_releases_partial_budget_exemptions() {
             ..coven_storage::test_utils::Faults::none()
         })
         .await;
-    let downloaded = Arc::new(tokio::sync::Notify::new());
-    let signal = downloaded.clone();
+    let mut requests = f.storage.subscribe_requests();
+    let before = *requests.borrow_and_update();
     let files = f.files.clone();
     let reference = file.clone();
-    let task = tokio::spawn(async move {
-        files
-            .pin(&[reference], &move |progress| {
-                if progress.bytes_downloaded > 0 {
-                    signal.notify_one();
-                }
-            })
-            .await
-    });
-    tokio::time::timeout(Duration::from_secs(20), downloaded.notified())
-        .await
-        .unwrap();
+    let task = tokio::spawn(async move { files.pin(&[reference]).await });
+    // A range download has started for the whole-file pin.
+    tokio::time::timeout(
+        Duration::from_secs(20),
+        requests.wait_for(|count| *count > before + 1),
+    )
+    .await
+    .unwrap()
+    .unwrap();
     task.abort();
     assert!(task.await.unwrap_err().is_cancelled());
     f.reopen().await;
@@ -578,11 +571,11 @@ async fn whole_reads_and_pins_check_the_row_hash_after_authenticating_chunks() {
         Err(FileReadError::Integrity { .. })
     ));
     assert!(matches!(
-        files.pin(std::slice::from_ref(&file), &|_| {}).await,
+        files.pin(std::slice::from_ref(&file)).await,
         Err(FileReadError::Integrity { .. })
     ));
     assert_eq!(
-        files
+        b.database
             .rows_pinned("files", vec!["hash".into()])
             .await
             .unwrap(),
@@ -606,16 +599,16 @@ async fn pinning_preserves_cached_tail_chunks_while_assembling_the_whole_file() 
         .read_at(3 * CHUNK as u64, CHUNK as u64)
         .await
         .unwrap();
-    let progress = Mutex::new(Vec::new());
-    f.files
-        .pin(&[file], &|value| progress.lock().unwrap().push(value))
-        .await
-        .unwrap();
-    {
-        let values = progress.lock().unwrap();
-        assert_eq!(values[0].bytes_total, 3 * CHUNK as u64);
-        assert_eq!(values.last().unwrap().bytes_downloaded, 3 * CHUNK as u64);
-    }
+    // Only the cached tail is verified before pinning; the pin publishes the
+    // rest with it as one checked file.
+    let before = f.database.pin_progress(vec![file.clone()]).await.unwrap();
+    assert_eq!(before.bytes_total, 4 * CHUNK as u64);
+    assert_eq!(before.bytes_cached, CHUNK as u64);
+    assert_eq!(before.files_completed, 0);
+    f.files.pin(std::slice::from_ref(&file)).await.unwrap();
+    let after = f.database.pin_progress(vec![file]).await.unwrap();
+    assert_eq!(after.bytes_cached, 4 * CHUNK as u64);
+    assert_eq!(after.files_completed, 1);
     f.close().await;
 }
 
@@ -744,10 +737,7 @@ async fn waiting_files_name_the_attaching_device_until_its_automatic_upload() {
         assert_eq!(uploaded, remote);
         assert_eq!(b.files.read_file(&uploaded).await.unwrap(), b"content");
         assert!(b.files.inner.database.uploads().await.unwrap().is_empty());
-        b.files
-            .pin(std::slice::from_ref(&uploaded), &|_| {})
-            .await
-            .unwrap();
+        b.files.pin(std::slice::from_ref(&uploaded)).await.unwrap();
         b.files
             .unpin(std::slice::from_ref(&uploaded))
             .await

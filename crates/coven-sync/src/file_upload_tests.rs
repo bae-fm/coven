@@ -590,10 +590,10 @@ async fn attaching_starts_upload_after_commit_and_checks_changed_originals() {
     .await
     .unwrap();
     let file = f.database.file_ref("files", "one").await.unwrap();
-    let mut eager = f.files.subscribe_eager_cache_fill_status();
+    let mut eager = f.database.subscribe_eager_cache_fill_status();
     tokio::time::timeout(Duration::from_secs(20), async {
         while f.files.inner.database.missing_bytes(&file).await.unwrap() != 0 {
-            eager.changed().await.unwrap();
+            eager.next().await.unwrap();
         }
     })
     .await

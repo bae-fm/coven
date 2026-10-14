@@ -397,6 +397,42 @@ impl Database {
         F: Fn(&Q, SqlReadContext<'_>) -> CovenResult<R> + Send + Sync + 'static,
         R: Send + 'static,
     {
+        self.subscribe_schema(initial_request, move |request, _, sql| query(request, sql))
+    }
+
+    /// One consistent snapshot with the declared file schema.
+    pub(crate) async fn read_schema<R: Send + 'static>(
+        &self,
+        read: impl FnOnce(&crate::write_schema::WriteSchema, SqlReadContext<'_>) -> CovenResult<R>
+            + Send
+            + 'static,
+    ) -> CovenResult<R> {
+        self.call(move |inner| {
+            let schema = &inner.access.write_schema;
+            inner
+                .access
+                .readers
+                .acquire_reader()
+                .read_snapshot(move |sql| read(schema, sql))
+                .0
+        })
+        .await
+    }
+
+    /// Observe a query that reads with the declared file schema.
+    pub(crate) fn subscribe_schema<Q, F, R>(
+        &self,
+        initial_request: Q,
+        query: F,
+    ) -> ReconfigurableLiveQuery<Q, R>
+    where
+        Q: Clone + PartialEq + Send + Sync + 'static,
+        F: Fn(&Q, &crate::write_schema::WriteSchema, SqlReadContext<'_>) -> CovenResult<R>
+            + Send
+            + Sync
+            + 'static,
+        R: Send + 'static,
+    {
         let inner = self.inner.read().expect("database lock poisoned");
         let commits = match inner.as_ref() {
             Some(inner) => inner.access.observer.subscribe(),
@@ -418,11 +454,12 @@ impl Database {
                     finish_blocking(
                         start_call(database, move |inner| {
                             inner.call(|inner| {
+                                let schema = &inner.access.write_schema;
                                 let (result, reads) = inner
                                     .access
                                     .readers
                                     .acquire_reader()
-                                    .read_snapshot(move |sql| query(&request, sql));
+                                    .read_snapshot(move |sql| query(&request, schema, sql));
                                 completion.finish(reads);
                                 result
                             })

@@ -15,6 +15,7 @@ use std::sync::{Arc, RwLock};
 
 #[path = "file_cache.rs"]
 mod cache;
+pub(crate) use cache::{id as cache_id, pinned as cache_pinned};
 
 #[derive(Clone)]
 enum FileDatabaseAccess {
@@ -387,18 +388,11 @@ impl FileDatabase {
             .await
     }
 
-    /// Open a database commit observation for application file rows and upload
-    /// metadata. Subscribing before reading the work list prevents missed commits.
-    pub fn changes(&self) -> DatabaseChanges {
-        self.file_changes(false)
-    }
     /// Observe the file worker's work: changed application file rows and newly
     /// queued uploads. A confirmed upload retiring its own queue row wakes
-    /// nothing (§16.5).
+    /// nothing (§16.5). Subscribing before reading the work list prevents
+    /// missed commits.
     pub fn queued_work_changes(&self) -> DatabaseChanges {
-        self.file_changes(true)
-    }
-    fn file_changes(&self, queued_only: bool) -> DatabaseChanges {
         match &self.access {
             FileDatabaseAccess::Reader(_) => DatabaseChanges {
                 commits: crate::observation::CommitSubscription::closed(),
@@ -435,7 +429,7 @@ impl FileDatabase {
                         table: "_coven_file_uploads".into(),
                         columns: ["reference".into()].into(),
                         keys: crate::key_scope::KeyScope::All,
-                        inserted_only: queued_only,
+                        inserted_only: true,
                     }))
                     .collect::<Vec<_>>();
                 let commits = inner.access.observer.subscribe();
@@ -512,17 +506,6 @@ impl FileDatabase {
         })
         .await
     }
-    /// Whether the uploaded file has a retained whole-file pin.
-    pub async fn is_pinned(&self, file: &FileRef) -> Result<bool, DbError> {
-        let file = file.clone();
-        self.run(move |db, schema, _, _| {
-            db.transaction(|db| {
-                file_ref::validate(db, schema, &file)?;
-                cache::pinned(db, &file)
-            })
-        })
-        .await
-    }
     /// Store a namespace's byte budget. Eviction is requested separately by sync.
     pub async fn set_budget(&self, namespace: &str, bytes: u64) -> Result<(), DbError> {
         let namespace = namespace.to_owned();
@@ -544,31 +527,30 @@ impl FileDatabase {
     pub async fn missing_bytes(&self, file: &FileRef) -> Result<u64, DbError> {
         let file = file.clone();
         self.run(move |db, _, _, device| {
-            if file.uploader() == device && file_queue::queued(db, &file)? {
-                return Ok(0);
-            }
-            let id = cache::id(&file)?;
-            if db.query_row(
-                "SELECT EXISTS(SELECT 1 FROM _coven_cache
-                 WHERE namespace=?1 AND file_id=?2 AND chunk=?3)",
-                (file.namespace(), &id, cache::COMPLETE_FILE),
-                |r| r.get::<_, bool>(0),
-            )? {
-                return Ok(0);
-            }
-            let cached = db.query_row(
-                "SELECT coalesce(sum(size-?3),0) FROM _coven_cache
-                 WHERE namespace=?1 AND file_id=?2 AND chunk>=0",
-                (
-                    file.namespace(),
-                    &id,
-                    coven_crypto::FILE_CHUNK_TAG_LEN as i64,
-                ),
-                |r| r.get::<_, i64>(0),
-            )?;
-            file.plaintext_size()
-                .checked_sub(u64::try_from(cached).map_err(|_| DbError::DamagedDatabase)?)
-                .ok_or(DbError::DamagedDatabase)
+            Ok(file.plaintext_size() - crate::cache_progress::covered(db, &file, device)?)
+        })
+        .await
+    }
+    /// Reserve eager downloads of these references; a cancelled set gives
+    /// way to them (§16.4).
+    pub async fn request_eager(&self, files: Vec<FileRef>) -> Result<(), DbError> {
+        self.require_writer()?;
+        self.run(move |db, _, _, _| {
+            db.transaction(|db| crate::cache_progress::request_eager(db, &files))
+        })
+        .await
+    }
+    /// Commit cancellation of the requested eager set before reporting it.
+    pub async fn cancel_eager(&self) -> Result<(), DbError> {
+        self.require_writer()?;
+        self.run(|db, _, _, _| db.transaction(crate::cache_progress::cancel_eager))
+            .await
+    }
+    /// Retire the requested eager set together once all of it is cached.
+    pub async fn retire_eager(&self) -> Result<bool, DbError> {
+        self.require_writer()?;
+        self.run(|db, _, _, device| {
+            db.transaction(|db| crate::cache_progress::retire_eager(db, device))
         })
         .await
     }

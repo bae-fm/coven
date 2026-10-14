@@ -734,7 +734,6 @@ pub(crate) const POLICY: Policy = Policy {
         "SnapshotTransfer",
         "FileTransfer",
         "FileRangeStream",
-        "RowsPinnedLiveQuery",
         "FileWorker",
         "LocalFileStream",
         "FileStream",

@@ -19,7 +19,7 @@ pub use coven::Coven;
 pub use coven_sync::{decode_code_info, CodeError, CodeInfo, CodeKind};
 pub use coven_sync::{
     DrainOutcome, EagerCacheFillStatus, FileRangeStream, FileReadError, FileStatus, FileStream,
-    PinProgress, QueuedUpload, RowsPinnedLiveQuery, TransferLimits, UploadPhase, UploadQueue,
+    PinProgress, QueuedUpload, TransferLimits, UploadPhase, UploadQueue,
 };
 pub use error::{ReadOnlyOpenError, StoreCreationError, StoreDeletionError, StoreKeyUnlockError};
 pub use handle::CovenHandle;

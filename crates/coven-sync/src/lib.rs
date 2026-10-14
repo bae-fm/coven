@@ -57,8 +57,7 @@ pub use operations::Operations;
 mod files;
 pub use files::{
     DrainOutcome, EagerCacheFillStatus, FileRangeStream, FileReadError, FileStatus, FileStream,
-    Files, PinProgress, QueuedUpload, RowsPinnedLiveQuery, TransferLimits, UploadPhase,
-    UploadQueue,
+    Files, PinProgress, QueuedUpload, TransferLimits, UploadPhase, UploadQueue,
 };
 
 mod joining_identity;

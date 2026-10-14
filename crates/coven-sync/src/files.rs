@@ -14,10 +14,10 @@ pub(crate) mod file_upload;
 mod file_upload_retry;
 use crate::SyncError;
 use coven_database::{DbError, FileDatabase};
+pub use coven_database::{EagerCacheFillStatus, PinProgress};
 use coven_foundation::{files::StoreDir, id_source::IdSourceRef};
 use coven_storage::Storage;
 use file_cache::EagerAttempts;
-pub use file_cache::{EagerCacheFillStatus, PinProgress, RowsPinnedLiveQuery};
 pub use file_error::FileReadError;
 pub use file_read::{FileRangeStream, FileStream};
 pub use file_status::FileStatus;
@@ -70,7 +70,6 @@ struct FilesInner {
     /// The persisted pause setting as of the last drain or app change; parts
     /// check it between sends.
     paused: AtomicBool,
-    changed: watch::Sender<u64>,
     wake: Arc<Notify>,
     drain: tokio::sync::Mutex<()>,
     cache: tokio::sync::RwLock<()>,
@@ -78,7 +77,6 @@ struct FilesInner {
     limits: std::sync::RwLock<TransferLimits>,
     pins: tokio::sync::Mutex<()>,
     closed: AtomicBool,
-    eager: watch::Sender<crate::EagerCacheFillStatus>,
     eager_attempts: tokio::sync::Mutex<EagerAttempts>,
     cancel_eager: watch::Sender<u64>,
 }
@@ -104,8 +102,6 @@ impl Files {
     ) -> Self {
         let mut changes = database.queued_work_changes();
         let mut sending = send.changes();
-        let (changed, _) = watch::channel(0);
-        let (eager, _) = watch::channel(crate::EagerCacheFillStatus::Idle);
         let (cancel_eager, _) = watch::channel(0);
         let (stop, mut stopping) = watch::channel(false);
         let inner = Arc::new(FilesInner {
@@ -116,7 +112,6 @@ impl Files {
             waits,
             ids,
             paused: AtomicBool::new(false),
-            changed,
             wake: Arc::new(Notify::new()),
             drain: tokio::sync::Mutex::new(()),
             cache: tokio::sync::RwLock::new(()),
@@ -124,7 +119,6 @@ impl Files {
             limits: std::sync::RwLock::new(limits),
             pins: tokio::sync::Mutex::new(()),
             closed: AtomicBool::new(false),
-            eager,
             eager_attempts: tokio::sync::Mutex::new(EagerAttempts::default()),
             cancel_eager,
         });
@@ -165,7 +159,6 @@ impl Files {
                     owner.fill_eager().await;
                 };
                 tokio::select! { biased; _=stopping.changed()=>break, _=work=>{} }
-                owner.notify();
                 retry = owner
                     .next_retry()
                     .unwrap_or_else(|| Box::pin(std::future::pending()));
@@ -205,7 +198,6 @@ impl Files {
         let _drain = self.inner.drain.lock().await;
         let _pins = self.inner.pins.lock().await;
         let _cache = self.inner.cache.write().await;
-        self.inner.notify();
     }
     /// Retry all waiting files now, overriding their ordinary backoff and
     /// app-action waits. A live provider cooldown still holds (§16.5).
@@ -271,10 +263,6 @@ impl FilesInner {
         lock.lock_owned().await
     }
 
-    pub(crate) fn notify(&self) {
-        self.changed
-            .send_modify(|version| *version = version.wrapping_add(1));
-    }
     pub(crate) fn check_open(&self) -> Result<(), DbError> {
         if self.closed.load(Ordering::Acquire) {
             Err(DbError::StoreClosed)

@@ -56,9 +56,7 @@ async fn transfer_limits_bound_requests_and_an_active_batch_keeps_its_limit() {
         let mut uploaded = Vec::new();
         for id in 0..4 { uploaded.push(handle.file_ref("files", id.to_string().as_str()).await.unwrap()); }
         memory.reset_request_peak();
-        let progress = std::sync::Mutex::new(Vec::new());
-        let on_progress = |p| progress.lock().unwrap().push(p);
-        let pin = handle.pin(&uploaded, &on_progress);
+        let pin = handle.pin(&uploaded);
         tokio::pin!(pin);
         tokio::select! {
             result = &mut pin => panic!("pin ended before two downloads overlapped: {result:?}"),
@@ -67,10 +65,10 @@ async fn transfer_limits_bound_requests_and_an_active_batch_keeps_its_limit() {
         handle.set_transfer_limits(TransferLimits::default());
         pin.await.unwrap();
         assert_eq!(memory.peak_requests(), 2);
-        assert_eq!(progress.lock().unwrap().last().unwrap().files_completed, 4);
+        assert_eq!(handle.pin_progress(uploaded.clone()).await.unwrap().files_completed, 4);
         for file in &uploaded { handle.evict_file(file).await.unwrap(); }
         memory.reset_request_peak();
-        handle.pin(&uploaded, &|_| {}).await.unwrap();
+        handle.pin(&uploaded).await.unwrap();
         assert_eq!(memory.peak_requests(), 1, "the subsequent pin captures the changed limit");
         handle.stop_sync();
         status.wait_for(|s| matches!(s, SyncStatus::Stopped)).await.unwrap();
@@ -507,20 +505,18 @@ async fn uploaded_files_pins_and_read_only_ranges_use_the_composed_owner() {
         vec![thumbnail.as_str().into(), "absent".into()],
     );
     assert_eq!(pins.next().await.unwrap(), vec![Some(false), None]);
-    handle
-        .pin(std::slice::from_ref(&file), &|_| {})
-        .await
-        .unwrap();
+    handle.pin(std::slice::from_ref(&file)).await.unwrap();
     assert_eq!(pins.next().await.unwrap(), vec![Some(true), None]);
     assert_eq!(
         handle.rows_pinned("thumbnails", keys).await.unwrap(),
         vec![None, None, Some(true), Some(true)]
     );
-    pins.set_rows(
+    // Watching different keys is a new subscription with those keys.
+    drop(pins);
+    let mut pins = handle.subscribe_rows_pinned(
         "thumbnails",
         vec!["absent".into(), thumbnail.as_str().into()],
-    )
-    .unwrap();
+    );
     assert_eq!(pins.next().await.unwrap(), vec![None, Some(true)]);
     assert_eq!(
         handle

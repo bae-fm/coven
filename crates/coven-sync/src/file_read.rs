@@ -45,7 +45,6 @@ pub(crate) struct UploadedFile {
     header: FileHeader,
     key: FileKey,
     path: ObjectPath,
-    downloaded: std::sync::atomic::AtomicU64,
     _lock: StoreReadLock,
 }
 enum ChunkDestination {
@@ -232,17 +231,13 @@ impl UploadedFile {
             header,
             key,
             path,
-            downloaded: std::sync::atomic::AtomicU64::new(0),
             _lock: lock,
         })
     }
     /// Fetch every chunk into the cache, authenticating each, then compare the
     /// whole plaintext with the row's content hash. A mismatch is the inner
     /// error: complete authenticated bytes that are not this file (§16.3).
-    pub(crate) async fn download(
-        &self,
-        progress: impl Fn(u64),
-    ) -> Result<Result<(), crate::Refusal>, FileReadError> {
+    pub(crate) async fn download(&self) -> Result<Result<(), crate::Refusal>, FileReadError> {
         let mut index = 0;
         let mut hash = ContentHasher::new();
         while index < self.header.chunk_count() {
@@ -256,7 +251,6 @@ impl UploadedFile {
             for chunk in chunks {
                 hash.update(&chunk.plaintext);
             }
-            progress(self.downloaded.load(std::sync::atomic::Ordering::Relaxed));
             index = last + 1;
         }
         if hash.finish() != self.file.content_hash() {
@@ -264,7 +258,7 @@ impl UploadedFile {
         }
         Ok(Ok(()))
     }
-    pub(crate) async fn keep_whole(&self, progress: impl Fn(u64)) -> Result<(), FileReadError> {
+    pub(crate) async fn keep_whole(&self) -> Result<(), FileReadError> {
         let name = FileName::new(self.owner.ids.new_id().to_string()).expect("UUID cache name");
         let reservation = self.owner.database.reserve_cache_file(name.clone()).await?;
         let target = self.owner.directory.file(FileArea::Cache, &name);
@@ -295,7 +289,6 @@ impl UploadedFile {
                 hash.update(&chunk.plaintext);
                 writer.append(&chunk.ciphertext).await?;
             }
-            progress(self.downloaded.load(std::sync::atomic::Ordering::Relaxed));
             index = last + 1;
         }
         if hash.finish() != self.file.content_hash() {
@@ -439,8 +432,6 @@ impl UploadedFile {
             if matches!(destination, ChunkDestination::Cache) {
                 cache(&self.owner, &self.file, index as i64, sealed.to_vec()).await?;
             }
-            self.downloaded
-                .fetch_add(opened.len() as u64, std::sync::atomic::Ordering::Relaxed);
             plain.push(OpenedChunk {
                 plaintext: opened,
                 ciphertext: sealed.to_vec(),
@@ -449,7 +440,7 @@ impl UploadedFile {
         }
         // A pin writes these bytes directly to its reserved whole file. Adding
         // them to the chunk cache too could evict a cached tail before pinning
-        // reaches it, causing unnecessary downloads and incorrect progress.
+        // reaches it, causing unnecessary downloads.
         if matches!(destination, ChunkDestination::Cache) {
             self.owner.trim(self.file.namespace()).await;
         }

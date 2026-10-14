@@ -749,6 +749,21 @@ macro_rules! coven_tables {
             CREATE INDEX _coven_cache_lru ON _coven_cache(namespace,pinned,last_read);
             CREATE INDEX _coven_cache_recency ON _coven_cache(last_read);
         ");
+        // Eager-fill reservations: the requested fixed references, kept
+        // until the whole set is cached, and the set's cancellation (§16.4).
+        $visit!(_coven_eager_requests, "
+            CREATE TABLE _coven_eager_requests (
+                namespace TEXT NOT NULL,
+                file_id TEXT NOT NULL,
+                reference BLOB NOT NULL,
+                PRIMARY KEY(namespace,file_id)
+            ) STRICT, WITHOUT ROWID;
+        ");
+        $visit!(_coven_eager_cancel, "
+            CREATE TABLE _coven_eager_cancel (
+                cancelled INTEGER PRIMARY KEY CHECK(cancelled=1)
+            ) STRICT;
+        ");
         $visit!(_coven_cache_budgets, "
             CREATE TABLE _coven_cache_budgets (
                 namespace TEXT PRIMARY KEY NOT NULL,
