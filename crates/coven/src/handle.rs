@@ -168,9 +168,20 @@ impl CovenHandle {
         self.database.subscribe_pending()
     }
 
-    /// Active members and their active devices from the local store log.
-    pub async fn get_members(&self) -> Result<Vec<MemberInfo>, SyncError> {
-        self.operations.get_members().await
+    /// The members and their devices, as this device's store log has them (E9).
+    pub async fn members(&self) -> CovenResult<Vec<MemberInfo>> {
+        self.database.members().await
+    }
+
+    /// The same internal query, live (E4).
+    pub fn subscribe_members(&self) -> LiveQuery<Vec<MemberInfo>> {
+        self.database.subscribe_members()
+    }
+
+    /// Wait for the operation worker to finish every earlier call.
+    #[cfg(test)]
+    pub(crate) async fn barrier(&self) -> Result<(), SyncError> {
+        self.operations.barrier().await
     }
     /// Set a member's role as an admin.
     pub async fn set_member_role(
@@ -297,7 +308,7 @@ impl CovenHandle {
     }
     /// Circle calls borrowing this store's operation owner.
     pub fn circles(&self) -> Circles<'_> {
-        Circles::new(&self.operations)
+        Circles::new(&self.operations, &self.database)
     }
 
     /// Runs one write.

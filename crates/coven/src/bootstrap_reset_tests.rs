@@ -168,7 +168,7 @@ async fn missing_custody_resets_as_a_new_device_and_keeps_the_notice() {
     // Stored history loads; the unsent edit is discarded, not renumbered.
     assert_eq!(notes(&handle).await, ["kept"]);
     let devices: Vec<_> = handle
-        .get_members()
+        .members()
         .await
         .unwrap()
         .into_iter()

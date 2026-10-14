@@ -400,6 +400,8 @@ mod scans {
         Some("release checks every audience that still retains replay inputs"),
     ("entry_inputs.rs", "SELECT DISTINCT entry_device,entry_number FROM _coven_pending_resets", "_coven_pending_resets") =>
         Some("release checks every reset that still conditionally suppresses observations"),
+    ("members.rs", "SELECT member,role,sealing FROM _coven_members WHERE removed=0", "_coven_members") =>
+        Some("the member list returns every current member"),
     ("write_landing.rs", "SELECT device,number,stored_at,header,late FROM _coven_write_landings", "_coven_write_landings") =>
         Some("replay rejudges every verdict a retirement can still change; final ones are released"),
     ("write_landing.rs", "SELECT device,number,stored_at,header FROM _coven_write_landings", "_coven_write_landings") =>

@@ -38,6 +38,7 @@ mod log_refusal;
 pub use log_input::{LogInput, LogKind};
 mod loss_record;
 mod lost;
+mod members;
 mod merge_store;
 mod migration;
 mod migration_change;
@@ -118,6 +119,7 @@ pub use live_query::{
 };
 pub use log_refusal::{LogObject, LogRefusal};
 pub use lost::{Lost, LostCell, LostValue, RemovalRule, Replacement};
+pub use members::{Circle, CircleMemberInfo, DeviceInfo, MemberInfo};
 pub use migration::{Migration, MigrationChange, MigrationContext, MigrationOutcome};
 pub use migration_change::{ChangeOp, ColumnChange, RowChange};
 pub use read::{Read, SqlReadContext};

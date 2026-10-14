@@ -890,7 +890,7 @@ async fn setup_rejects_overwriting_providers_before_committing() {
         .await
         .unwrap()
         .is_empty());
-    assert!(f.handle.get_members().await.unwrap().is_empty());
+    assert!(f.handle.members().await.unwrap().is_empty());
     assert_eq!(
         StorageSettings::new(f.directory.clone()).read().unwrap(),
         None

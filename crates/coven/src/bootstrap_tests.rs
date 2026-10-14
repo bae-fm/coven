@@ -180,7 +180,7 @@ async fn join_accepts_provider_access_and_approval_then_loads_the_store() {
         );
         assert_eq!(
             handle
-                .get_members()
+                .members()
                 .await
                 .unwrap()
                 .iter()
@@ -310,7 +310,7 @@ async fn declined_and_expired_requests_finish_without_committing_custody() {
             let request = next_join_request(&owner.handle).await;
             if expiry {
                 owner.clock.set(invite.expires_at);
-                owner.handle.get_members().await.unwrap();
+                owner.handle.barrier().await.unwrap();
             } else {
                 owner.handle.decline_join_request(&request).await.unwrap();
             }
@@ -603,7 +603,7 @@ async fn a_device_removed_during_loading_receives_the_provider_refusal() {
         owner.handle.approve_join_request(&request).await.unwrap();
         listing.await.unwrap();
         owner.sync().await;
-        let members = owner.handle.get_members().await.unwrap();
+        let members = owner.handle.members().await.unwrap();
         let devices = &members
             .iter()
             .find(|m| m.id == request.member)

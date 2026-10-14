@@ -40,9 +40,6 @@ pub(crate) enum Command {
     SetRole(MemberId, MemberRole),
     SetAccess(coven_format::MemberAccess),
     RemoveDevice(DeviceId),
-    Members,
-    Circles,
-    CircleMembers(CircleId),
     Invite(MemberRole, InviteAccess),
     Approve(JoinRequest),
     Decline(JoinRequest),
@@ -64,6 +61,9 @@ pub(crate) enum Command {
     ForgetKeys,
     #[cfg(any(test, feature = "test-utils"))]
     Sync,
+    /// Returns once every earlier command has run.
+    #[cfg(any(test, feature = "test-utils"))]
+    Barrier,
     SyncAll,
     Unlock(Arc<dyn Storage>),
     Setup(
@@ -79,10 +79,7 @@ pub(crate) enum Command {
 pub(crate) enum Output {
     Unit,
     SignOut(ProviderSignOut),
-    Members(Vec<MemberInfo>),
     CircleId(CircleId),
-    Circles(Vec<Circle>),
-    CircleMembers(Vec<CircleMemberInfo>),
     Invite(Invite),
     AccessKeyReplaced(AccessKeyReplacement),
     DeliveredKey(Option<coven_format::access_key_delivery::DeliveredKey>),
@@ -208,17 +205,15 @@ impl Operations {
     pub async fn sync_store_log(&self) -> Result<(), SyncError> {
         self.unit(Command::Sync).await
     }
+    /// Wait for the worker to finish every earlier command.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub async fn barrier(&self) -> Result<(), SyncError> {
+        self.unit(Command::Barrier).await
+    }
     /// Run one entire pass under the operation worker's serialization. Replay,
     /// reloads, writes and snapshots cannot interleave with another operation.
     pub async fn sync(&self) -> Result<(), SyncError> {
         self.unit(Command::SyncAll).await
-    }
-    /// Active members and devices from the local store log.
-    pub async fn get_members(&self) -> Result<Vec<MemberInfo>, SyncError> {
-        match self.call(Command::Members).await? {
-            Output::Members(value) => Ok(value),
-            _ => unreachable!("member result"),
-        }
     }
     /// Change a member's role as a plain store-log entry.
     pub async fn set_member_role(
@@ -389,23 +384,6 @@ impl Operations {
     ) -> Result<(), SyncError> {
         self.unit(Command::RemoveCircleMember(circle, member.clone()))
             .await
-    }
-    /// List circles this member currently belongs to.
-    pub async fn circles(&self) -> Result<Vec<Circle>, SyncError> {
-        match self.call(Command::Circles).await? {
-            Output::Circles(value) => Ok(value),
-            _ => unreachable!("circle list"),
-        }
-    }
-    /// List active store members belonging to a circle.
-    pub async fn circle_members(
-        &self,
-        circle: CircleId,
-    ) -> Result<Vec<CircleMemberInfo>, SyncError> {
-        match self.call(Command::CircleMembers(circle)).await? {
-            Output::CircleMembers(value) => Ok(value),
-            _ => unreachable!("circle members"),
-        }
     }
     /// Stop the task before closing its database; journal rows remain for reopening.
     pub async fn close(&self) -> Result<(), SyncError> {

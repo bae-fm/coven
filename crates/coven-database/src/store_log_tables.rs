@@ -22,12 +22,22 @@ pub(crate) fn entry_id(row: &Row<'_>, start: usize) -> rusqlite::Result<EntryId>
     })
 }
 
-fn member(row: &Row<'_>, column: usize) -> rusqlite::Result<MemberId> {
+pub(crate) fn member(row: &Row<'_>, column: usize) -> rusqlite::Result<MemberId> {
     MemberId::from_bytes(row.get(column)?)
         .map_err(|error| decode_failure(column, Type::Blob, error))
 }
 
-fn circle(text: String) -> rusqlite::Result<CircleId> {
+/// A `_coven_devices.state` value.
+pub(crate) fn device_state(text: String) -> rusqlite::Result<DeviceState> {
+    match text.as_str() {
+        "active" => Ok(DeviceState::Active),
+        "removed" => Ok(DeviceState::Removed),
+        "replaced" => Ok(DeviceState::Replaced),
+        _ => Err(rusqlite::Error::InvalidQuery),
+    }
+}
+
+pub(crate) fn circle(text: String) -> rusqlite::Result<CircleId> {
     match audience(&text)? {
         Audience::Circle(circle) => Ok(circle),
         Audience::Store => Err(rusqlite::Error::InvalidQuery),
@@ -170,12 +180,7 @@ pub(crate) fn read(database: &DatabaseConnection) -> Result<StoreLog, DbError> {
                     StoreDevice {
                         member: member(row, 1)?,
                         name: row.get(2)?,
-                        state: match row.get::<_, String>(3)?.as_str() {
-                            "active" => DeviceState::Active,
-                            "removed" => DeviceState::Removed,
-                            "replaced" => DeviceState::Replaced,
-                            _ => return Err(rusqlite::Error::InvalidQuery),
-                        },
+                        state: device_state(row.get(3)?)?,
                     },
                 ))
             },

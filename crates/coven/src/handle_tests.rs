@@ -371,6 +371,39 @@ async fn closed_storage_calls_keep_their_public_errors_on_every_clone() {
     ));
 }
 
+/// Members and circles come from the committed replay: a handle with no
+/// storage, connection or unlocked key reads them without the operation
+/// worker, and each subscription starts with the value its call returns. A
+/// store not yet created in storage has no members (E4, E9, E12).
+#[tokio::test]
+async fn disconnected_member_and_circle_reads_match_their_subscriptions() {
+    let root = tempfile::tempdir().unwrap();
+    let layout = StoreLayout::new(root.path().to_owned());
+    let app = TestCoven::new();
+    let directory = app
+        .create_store(&layout, "members", Arc::new(UuidIds))
+        .await
+        .unwrap();
+    let handle = builder(&app, layout).open(directory.id()).await.unwrap();
+    assert_eq!(handle.store_key_state().unwrap(), StoreKeyState::Locked);
+    let members = handle.members().await.unwrap();
+    assert!(members.is_empty());
+    assert_eq!(handle.subscribe_members().next().await.unwrap(), members);
+    assert!(handle.circles().list().await.unwrap().is_empty());
+    assert!(handle
+        .circles()
+        .subscribe_list()
+        .next()
+        .await
+        .unwrap()
+        .is_empty());
+    handle.close().await.unwrap();
+    assert!(matches!(
+        handle.members().await,
+        Err(CovenError::Database(DbError::StoreClosed))
+    ));
+}
+
 #[tokio::test]
 async fn closing_waits_for_setup_after_its_caller_is_cancelled() {
     tokio::time::timeout(std::time::Duration::from_secs(10), async {

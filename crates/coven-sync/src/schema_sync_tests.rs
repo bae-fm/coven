@@ -725,7 +725,7 @@ async fn a_migration_waits_for_an_operation_that_already_reserved_the_entry_numb
             device.writes,
             device.clock.clone(),
         );
-        operations.get_members().await.unwrap();
+        operations.barrier().await.unwrap();
         operations.sync().await.unwrap();
         assert!(device
             .db
@@ -733,7 +733,7 @@ async fn a_migration_waits_for_an_operation_that_already_reserved_the_entry_numb
             .await
             .unwrap()
             .is_empty());
-        assert_eq!(operations.circles().await.unwrap()[0].name, "waiting");
+        assert_eq!(device.db.circles().await.unwrap()[0].name, "waiting");
         assert_eq!(
             device.db.store_log().await.unwrap().replay.state.schema[&Audience::Store].number,
             2

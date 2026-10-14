@@ -136,6 +136,8 @@ impl StoreLogSync {
                 )));
             }
             #[cfg(any(test, feature = "test-utils"))]
+            Command::Barrier => return Ok(Begun::Value(Output::Unit)),
+            #[cfg(any(test, feature = "test-utils"))]
             Command::Sync => {
                 self.sync_store_log().await?;
                 return Ok(Begun::Value(Output::Unit));
@@ -191,10 +193,7 @@ impl StoreLogSync {
             _ => (),
         }
         // Local reads and recovery do not start an administrative change.
-        if !matches!(
-            command,
-            Command::Members | Command::Circles | Command::CircleMembers(_) | Command::Reload
-        ) {
+        if !matches!(command, Command::Reload) {
             self.catch_up().await?;
         }
         let local = self.database.local_store_log().await?;
@@ -239,64 +238,6 @@ impl StoreLogSync {
                         .start_operation(data.new_operation(method)?)
                         .await?,
                 ));
-            }
-            Command::Members => {
-                return Ok(Begun::Value(Output::Members(
-                    state
-                        .members
-                        .iter()
-                        .filter(|(_, m)| !m.removed)
-                        .map(|(id, m)| MemberInfo {
-                            id: id.clone(),
-                            role: m.role,
-                            is_self: *id == me,
-                            devices: state
-                                .devices
-                                .iter()
-                                .filter(|(_, d)| d.member == *id)
-                                .map(|(id, d)| crate::DeviceInfo {
-                                    id: *id,
-                                    name: d.name.clone(),
-                                    state: d.state,
-                                })
-                                .collect(),
-                        })
-                        .collect(),
-                )))
-            }
-            Command::Circles => {
-                return Ok(Begun::Value(Output::Circles(
-                    state
-                        .circles
-                        .iter()
-                        .filter(|(id, c)| {
-                            !state.circle_deletions.contains_key(id) && c.members.contains(&me)
-                        })
-                        .map(|(id, c)| Circle {
-                            id: *id,
-                            name: c.name.clone(),
-                        })
-                        .collect(),
-                )))
-            }
-            Command::CircleMembers(circle) => {
-                let current = effects::circle(state, circle).ok_or(
-                    coven_database::DropReason::TargetGone(coven_database::EntryTarget::Circle(
-                        circle,
-                    )),
-                )?;
-                Authority::Circle(circle).check(state, &me)?;
-                return Ok(Begun::Value(Output::CircleMembers(
-                    current
-                        .members
-                        .iter()
-                        .filter(|id| effects::member(state, id).is_some())
-                        .map(|id| CircleMemberInfo {
-                            member: id.clone(),
-                            is_self: *id == me,
-                        })
-                        .collect(),
-                )));
             }
             Command::SetAccess(access) => {
                 let change = StoreChange::SetAccess {

@@ -92,7 +92,7 @@ async fn an_admin_replaces_a_members_key_and_their_device_adopts_it() {
     let owner = &network.devices[0];
     let member = owner
         .handle
-        .get_members()
+        .members()
         .await
         .unwrap()
         .into_iter()

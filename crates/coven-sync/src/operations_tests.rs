@@ -7,7 +7,7 @@ use crate::{
 };
 
 async fn pending(operations: &Operations, db: &coven_database::Database) -> Vec<PendingRecord> {
-    operations.get_members().await.unwrap();
+    operations.barrier().await.unwrap();
     db.pending().await.unwrap()
 }
 fn pending_id(record: &PendingRecord) -> OperationId {
@@ -660,6 +660,7 @@ async fn role_changes_preserve_an_admin_and_owner_accounts_cannot_be_removed() {
     let [a, b, c] = accounts(google()).await;
     let owner = a.member.member_id();
     let admin = b.member.member_id();
+    let a_db = a.db.clone();
     let files = file_owner(&a);
     let a = { operation_owner(a.sync, files) };
     let files = file_owner(&b);
@@ -680,8 +681,8 @@ async fn role_changes_preserve_an_admin_and_owner_accounts_cannot_be_removed() {
         Err(SyncError::Rejected(coven_database::DropReason::NoAdminLeft))
     ));
     a.sync_store_log().await.unwrap();
-    assert!(a
-        .get_members()
+    assert!(a_db
+        .members()
         .await
         .unwrap()
         .iter()
@@ -691,10 +692,12 @@ async fn role_changes_preserve_an_admin_and_owner_accounts_cannot_be_removed() {
         a.add_circle_member(circle, &member(99).member_id()).await,
         Err(SyncError::Rejected(coven_database::DropReason::TargetGone(coven_database::EntryTarget::Member(id)))) if id == member(99).member_id()
     ));
-    assert!(matches!(
-        a.circle_members(super::circle(99)).await,
-        Err(SyncError::Rejected(coven_database::DropReason::TargetGone(coven_database::EntryTarget::Circle(id)))) if id == super::circle(99)
-    ));
+    // An absent circle has no members; listing it is not a change to reject.
+    assert!(a_db
+        .circle_members(super::circle(99))
+        .await
+        .unwrap()
+        .is_empty());
     a.close().await.unwrap();
     b.close().await.unwrap();
     c.close().await.unwrap();

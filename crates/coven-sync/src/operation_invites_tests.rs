@@ -366,7 +366,7 @@ async fn failed_join_request_still_expires_and_live_requests_are_delivered() {
         .unwrap();
     let joining = MemoryStorage::for_recipient(&storage, "join@example.com").unwrap();
     a.clock.set(UNIX_EPOCH + Duration::from_millis(1500));
-    operations.get_members().await.unwrap();
+    operations.barrier().await.unwrap();
     assert_eq!(
         *sleeping.borrow(),
         2,
@@ -483,7 +483,7 @@ async fn a_failed_invite_is_retained_and_expiry_finishes_on_reconnect() {
     assert_eq!(a.db.operations().await.unwrap().len(), 2);
     storage.set_online(false);
     resume.send(()).unwrap();
-    operations.get_members().await.unwrap();
+    operations.barrier().await.unwrap();
     assert!(matches!(
         pending.await,
         Err(SyncError::Storage(error)) if error.failure() == StorageFailure::Network

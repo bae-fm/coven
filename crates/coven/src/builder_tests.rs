@@ -88,7 +88,7 @@ async fn app_reopening_resumes_operations_and_files_using_one_storage_capability
     let queued = handle.subscribe_uploads().next().await.unwrap();
     assert_eq!(queued.files.len(), 1);
     assert_eq!(queued.files[0].file, local);
-    let members = handle.get_members().await.unwrap();
+    let members = handle.members().await.unwrap();
     assert_eq!(members.len(), 1);
     assert!(members[0].is_self);
     assert!(matches!(
@@ -111,7 +111,7 @@ async fn app_reopening_resumes_operations_and_files_using_one_storage_capability
     observed.await.unwrap();
     storage.set_online(false);
     resume.send(()).unwrap();
-    handle.get_members().await.unwrap();
+    handle.barrier().await.unwrap();
     drop(waiting);
     handle.close().await.unwrap();
     storage.set_online(true);
@@ -145,7 +145,7 @@ async fn app_reopening_resumes_operations_and_files_using_one_storage_capability
         handle.retry_pending_operation(OperationId(-1)).await,
         Err(OperationError::NotPending(OperationId(-1)))
     ));
-    handle.get_members().await.unwrap();
+    handle.barrier().await.unwrap();
     let circle = handle.circles().list().await.unwrap().remove(0);
     assert_eq!(circle.name, "Interrupted");
     handle.circles().rename(circle.id, "Family").await.unwrap();
@@ -187,14 +187,17 @@ async fn app_reopening_resumes_operations_and_files_using_one_storage_capability
         .is_some());
     handle.circles().delete(circle.id).await.unwrap();
     assert!(handle.circles().list().await.unwrap().is_empty());
-    assert!(matches!(
-        handle.circles().members(circle.id).await,
-        Err(SyncError::Rejected(coven_database::DropReason::TargetGone(coven_database::EntryTarget::Circle(id)))) if id == circle.id
-    ));
+    // A deleted circle has no members left to list.
+    assert!(handle
+        .circles()
+        .members(circle.id)
+        .await
+        .unwrap()
+        .is_empty());
     handle.close().await.unwrap();
     assert!(matches!(
         handle.circles().list().await,
-        Err(SyncError::Database(DbError::StoreClosed))
+        Err(CovenError::Database(DbError::StoreClosed))
     ));
 
     let updated = || {
@@ -216,7 +219,7 @@ async fn app_reopening_resumes_operations_and_files_using_one_storage_capability
         .open(directory.id())
         .await
         .unwrap();
-    handle.get_members().await.unwrap();
+    handle.members().await.unwrap();
     handle.close().await.unwrap();
     let database = || {
         DatabaseBuilder::new(directory.clone())
@@ -241,7 +244,7 @@ async fn app_reopening_resumes_operations_and_files_using_one_storage_capability
         .await
         .unwrap();
     handle.unlock_store_key().await.unwrap();
-    tokio::time::timeout(std::time::Duration::from_secs(20), handle.get_members())
+    tokio::time::timeout(std::time::Duration::from_secs(20), handle.barrier())
         .await
         .unwrap()
         .unwrap();

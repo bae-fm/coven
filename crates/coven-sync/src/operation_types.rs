@@ -2,10 +2,12 @@
 
 use coven_crypto::{MemberId, SecretText};
 use coven_format::store_log::MemberRole;
-use coven_foundation::id_source::{CircleId, DeviceId, InviteId};
+use coven_foundation::id_source::InviteId;
 use std::time::SystemTime;
 
-pub use coven_database::{AccessKeyToDelete, DeviceState, OperationId};
+pub use coven_database::{
+    AccessKeyToDelete, Circle, CircleMemberInfo, DeviceInfo, DeviceState, MemberInfo, OperationId,
+};
 /// An operation failure retains the same typed causes as an ordinary sync call.
 pub type OperationError = crate::SyncError;
 
@@ -70,48 +72,6 @@ pub enum OldKeyDeletion {
         /// Why.
         error: crate::SyncError,
     },
-}
-
-/// A live member and every device they registered (E9).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct MemberInfo {
-    /// Signing identity.
-    pub id: MemberId,
-    /// Current store role.
-    pub role: MemberRole,
-    /// Every registered device, including removed and replaced ids.
-    pub devices: Vec<DeviceInfo>,
-    /// Whether this is the local member.
-    pub is_self: bool,
-}
-
-/// One of a member's device ids as replay has it (E9).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct DeviceInfo {
-    /// The device id.
-    pub id: DeviceId,
-    /// Its name from its registration.
-    pub name: String,
-    /// Active, removed, or replaced by a kept registration (§10).
-    pub state: DeviceState,
-}
-
-/// A circle the local member belongs to.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Circle {
-    /// Circle identity.
-    pub id: CircleId,
-    /// Current name.
-    pub name: String,
-}
-
-/// An active store member in a circle.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CircleMemberInfo {
-    /// Signing identity.
-    pub member: MemberId,
-    /// Whether this is the local member.
-    pub is_self: bool,
 }
 
 /// How the invited person reaches the store's provider.

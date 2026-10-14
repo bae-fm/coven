@@ -277,8 +277,8 @@ async fn cancelled_app_future_keeps_running_and_permanent_failure_retries_or_dis
     assert_eq!(d.db.operations().await.unwrap().len(), 1);
     drop(waiting);
     resume.send(()).unwrap();
-    operations.get_members().await.unwrap();
-    assert_eq!(operations.circles().await.unwrap()[0].name, "Retained");
+    operations.barrier().await.unwrap();
+    assert_eq!(d.db.circles().await.unwrap()[0].name, "Retained");
     // Invalid names fail during format validation, after their intent is durable.
     assert!(matches!(
         operations.create_circle("").await,

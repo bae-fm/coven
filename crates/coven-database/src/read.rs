@@ -80,6 +80,32 @@ impl<'connection> SqlReadContext<'connection> {
         Ok(crate::device_reset::read(self.database)?)
     }
 
+    pub(crate) fn members(
+        &self,
+        device: coven_foundation::id_source::DeviceId,
+    ) -> CovenResult<Vec<crate::MemberInfo>> {
+        Ok(crate::members::members(self.database, device)?)
+    }
+
+    pub(crate) fn circles(
+        &self,
+        device: coven_foundation::id_source::DeviceId,
+    ) -> CovenResult<Vec<crate::Circle>> {
+        Ok(crate::members::circles(self.database, device)?)
+    }
+
+    pub(crate) fn circle_members(
+        &self,
+        device: coven_foundation::id_source::DeviceId,
+        circle: coven_foundation::id_source::CircleId,
+    ) -> CovenResult<Vec<crate::CircleMemberInfo>> {
+        Ok(crate::members::circle_members(
+            self.database,
+            device,
+            circle,
+        )?)
+    }
+
     pub(crate) fn store_log(&self) -> CovenResult<crate::StoreLog> {
         Ok(crate::store_log_tables::read(self.database)?)
     }

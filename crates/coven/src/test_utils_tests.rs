@@ -597,7 +597,7 @@ async fn admit_member(f: &Fixture, handle: &CovenHandle, keys: &MemberKeys) {
         .clone();
     handle.approve_join_request(&request).await.unwrap();
     assert!(handle
-        .get_members()
+        .members()
         .await
         .unwrap()
         .iter()
@@ -618,7 +618,7 @@ async fn removal_preserves_key_material_and_publishes_only_the_member_target() {
     let before = f.keys.unlock().unwrap().unwrap().to_secret_bytes();
     handle.remove_member(&removed.member_id()).await.unwrap();
     assert!(!handle
-        .get_members()
+        .members()
         .await
         .unwrap()
         .iter()

@@ -438,7 +438,7 @@ pub(crate) async fn posted(device: &Device) -> coven_format::objects::PostedPosi
     let code = RestoreCode::from_text(&device.handle.restore_code().await.unwrap()).unwrap();
     let member = device
         .handle
-        .get_members()
+        .members()
         .await
         .unwrap()
         .into_iter()
@@ -559,7 +559,7 @@ async fn seeded_whole_system_convergence() {
             for device in &network.devices[1..] {
                 let member = device
                     .handle
-                    .get_members()
+                    .members()
                     .await
                     .unwrap()
                     .into_iter()
@@ -601,7 +601,7 @@ async fn seeded_whole_system_convergence() {
                         19 => {
                             let member = network.devices[1]
                                 .handle
-                                .get_members()
+                                .members()
                                 .await
                                 .unwrap()
                                 .into_iter()
@@ -644,7 +644,7 @@ async fn seeded_whole_system_convergence() {
                 let retired = network.devices.pop().unwrap();
                 let member = retired
                     .handle
-                    .get_members()
+                    .members()
                     .await
                     .unwrap()
                     .into_iter()
@@ -674,7 +674,7 @@ async fn reconnecting_with_a_replacement_key_records_the_access_that_removal_rev
     let network = Network::new(2).await;
     let member = network.devices[1]
         .handle
-        .get_members()
+        .members()
         .await
         .unwrap()
         .into_iter()
@@ -789,7 +789,7 @@ async fn an_internal_reload_failure_reports_sync_status_and_retries_without_app_
     let bytes = storage.read(path).await.unwrap();
     storage.delete(path).await.unwrap();
     let device = reader
-        .get_members()
+        .members()
         .await
         .unwrap()
         .into_iter()

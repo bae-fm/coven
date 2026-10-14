@@ -210,7 +210,7 @@ async fn a_reload_call_receives_its_native_failure_and_automatic_retry_replaces_
         std::task::Poll::Ready(())
     })
     .await;
-    operations.get_members().await.unwrap();
+    operations.barrier().await.unwrap();
     let retained = a.db.operations().await.unwrap();
     assert_eq!(retained.len(), 1);
     assert!(matches!(
