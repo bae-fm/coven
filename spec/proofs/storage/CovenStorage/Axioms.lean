@@ -134,3 +134,15 @@ import CovenStorage
 #print axioms CovenStorage.RowAuthorship.Examples.overwritten_value_needs_no_opening
 #print axioms CovenStorage.RowAuthorship.Examples.creation_without_initial_values
 #print axioms CovenStorage.RowAuthorship.Examples.kind_bound
+
+#print axioms CovenStorage.KeyDelivery.run_inv
+#print axioms CovenStorage.KeyDelivery.start_inv
+#print axioms CovenStorage.KeyDelivery.occupant_is_own_copy
+#print axioms CovenStorage.KeyDelivery.reset_is_own_copy
+#print axioms CovenStorage.KeyDelivery.settled_step
+#print axioms CovenStorage.KeyDelivery.uncopied_never_resets
+#print axioms CovenStorage.KeyDelivery.start_settled
+#print axioms CovenStorage.KeyDelivery.Examples.restored_before_seal_orphans_key
+#print axioms CovenStorage.KeyDelivery.Examples.bound_sealing_continues
+#print axioms CovenStorage.KeyDelivery.Examples.restored_after_seal_continues
+#print axioms CovenStorage.KeyDelivery.Examples.restored_before_mint_orphans_key

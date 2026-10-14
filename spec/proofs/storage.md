@@ -14,6 +14,10 @@ database gets a new device id. A backup can erase the record of an encryption
 attempt without leaving any evidence in storage. Content-bound nonces separate
 the resulting plaintexts without relying on that detection.
 
+A third result is a checked counterexample to a proposed rule: resetting on
+a mismatched S3 key delivery path can leave a made key live and unrecorded
+([S3 key deliveries](#s3-key-deliveries)).
+
 All named results are audited by `CovenStorage/Axioms.lean`. The package uses
 Lean 4.34.1 and its standard library, without additional axioms or unfinished
 proofs. `scripts/check.sh` builds it and runs the audit alongside the other
@@ -204,6 +208,60 @@ store-log replay. These reset results do not establish eventual successful
 registration. `ReplacementRead.reset_uses_new_path` and
 `receipt_after_restore` establish the fresh path and duplicate-free receipt
 for the replacement rule without recorded ends.
+
+## S3 key deliveries
+
+`KeyDelivery` models §13's S3 key replacement from the admin desktop's side:
+journal a fresh attempt id, make a key under that attempt's name (§4), seal
+it to the member, publish it at `<store>/access-keys/<member>/<attempt>` (D10),
+then record it in a set-access entry. On an occupied delivery path it follows
+§10: equal bytes count as delivered, different bytes reset this copy as a new
+device with an empty database. A database copy is a backup, the database a
+restore overwrites, or a second live clone. One counter supplies fresh
+attempt ids, key ids, sealing randomness and new device ids.
+
+**A delivery path is this device's own path.** `occupant_is_own_copy`
+proves, for every history of every device's copies, that whatever occupies
+a delivery path was sent by the device whose database journals that attempt.
+The attempt id is fresh, only copies of that database journal it, and a copy
+publishes only at its own attempt. `reset_is_own_copy` applies this to the
+reset: different bytes there come from another copy of the same device,
+which is §10's stale-copy condition. `uncopied_never_resets` proves that a
+database that is never backed up, restored or cloned never takes this reset,
+and that every key it makes stays recorded or journaled.
+
+**Resetting on a delivery path loses a made key.** In
+`restored_before_seal_orphans_key`, Ana's desktop makes key 101 for Ben and
+is backed up before sealing it. The live database seals and delivers; the
+backup is then restored. Nothing was written to a numbered log since the
+backup, so §10's counted evidence passes. The restored copy re-seals with
+fresh randomness, finds different bytes and resets. §10's reset reads
+nothing from the discarded database, so key 101 is now live at the provider,
+in no kept entry and in no surviving journal: nothing records it or will
+delete it. §13 says discarding a replacement leaves no key unrecorded; this
+reset discards one that does.
+
+Sealing bound to its inputs would not remove the loss. With it the same
+restore resends the stored bytes and records the key
+(`bound_sealing_continues`), as does a backup taken after sealing with today's
+sealing (`restored_after_seal_continues`). But in
+`restored_before_mint_orphans_key` the backup predates the key: the restored
+copy's mint deletes key 101 under the attempt's name and makes 103. The
+stored delivery holds the deleted key, so counting it would leave Ben unable
+to install the recorded one; the comparison is right to refuse it. The reset
+then orphans 103 under either sealer. The loss comes from the reset
+discarding a made key, not from the comparison.
+
+So §10's own-path list does not yet include deliveries. Adding them needs
+§10's reset to keep a journaled, unrecorded key recorded, for example as
+pending `DeleteAccessKey` in the replacement database, or rolled back.
+
+The model leaves out the store log, entry admission, the old key's deletion,
+the member's side, failed comparison reads, the discard call, invites (whose
+made keys sit in the journal the same way) and other members writing the
+path. The reading chosen for §10's "nothing newer in storage" is that a
+delivery stored after the backup counts as newer, so the reset itself is
+permitted; the loss is what it discards.
 
 ## Nonces
 
