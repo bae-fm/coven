@@ -916,3 +916,69 @@ async fn local_restrict_children_are_refused_before_circle_removal() {
         matches!(error, DbError::Schema(crate::SchemaError::LocalChildAction { table, column }) if table == "pins" && column == "note")
     );
 }
+
+#[tokio::test]
+async fn a_failed_rollback_fails_every_later_call_until_reopen() {
+    for internal in [false, true] {
+        let store = TestStore::new();
+        let open = || store.builder(notes_tables(), notes_migrations()).open();
+        let db = open().await.unwrap();
+        let mut notes = db.subscribe(|sql| {
+            Ok(sql.query("SELECT title FROM notes", [], |r| r.get::<_, String>(0))?)
+        });
+        assert!(next(&mut notes).await.is_empty());
+        db.inspect_writer(|writer| writer.refuse_transaction_end(true));
+        // Neither transaction changes pending state; each fails after a change
+        // that its refused ROLLBACK leaves on the writer.
+        let error = if internal {
+            db.inspect_writer(|writer| {
+                writer.transaction(|writer| {
+                    writer.internal_execute("INSERT INTO notes VALUES('n','held','')", [])?;
+                    Err::<(), _>(DbError::StoreClosed)
+                })
+            })
+        } else {
+            db.write(|sql| {
+                sql.execute("INSERT INTO notes VALUES('n','held','')", [])?;
+                Err::<(), _>(DbError::StoreClosed)
+            })
+            .await
+        }
+        .unwrap_err();
+        // An app write's file cleanup then fails too, inside the open transaction.
+        let write = match &error {
+            DbError::FileCleanup {
+                write: Err(write), ..
+            } if !internal => write.as_ref(),
+            error => error,
+        };
+        assert!(
+            matches!(write, DbError::Rollback { operation, .. } if matches!(**operation, DbError::StoreClosed)),
+            "{error:?}"
+        );
+        let held = |db: &crate::Database| {
+            db.inspect_writer(|writer| {
+                writer.query_row("SELECT count(*) FROM notes", [], |r| r.get::<_, i64>(0))
+            })
+            .unwrap()
+        };
+        assert_eq!(held(&db), 1, "the writer still holds the uncommitted row");
+        let rollback_failed = |error: DbError| matches!(error, DbError::RollbackFailed);
+        assert!(rollback_failed(db.key_uploads().await.unwrap_err()));
+        assert!(rollback_failed(db.write(|_| Ok(())).await.unwrap_err()));
+        assert!(rollback_failed(db.schema_version().await.unwrap_err()));
+        assert!(matches!(
+            db.read(|_| Ok(())).await.unwrap_err(),
+            crate::CovenError::Database(DbError::RollbackFailed)
+        ));
+        assert!(matches!(
+            notes.next().await.unwrap_err(),
+            crate::CovenError::Database(DbError::RollbackFailed)
+        ));
+        db.close().await.unwrap();
+        let db = open().await.unwrap();
+        assert_eq!(held(&db), 0);
+        assert!(db.key_uploads().await.unwrap().is_empty());
+        db.close().await.unwrap();
+    }
+}

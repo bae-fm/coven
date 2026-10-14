@@ -291,7 +291,8 @@ pub type CovenResult<T> = Result<T, CovenError>;
 pub enum CovenError {
     /// Reading device identity or an app callback's custody operation failed.
     Key(KeyError),
-    /// An app callback failed and SQLite also failed to roll it back.
+    /// An app callback failed and SQLite also failed to roll it back. Later
+    /// calls fail with `DbError::RollbackFailed` until the store is reopened (§5).
     Rollback { operation: Box<CovenError>, rollback: rusqlite::Error },
     /// Cleanup also failed after an app callback failed.
     FileCleanup { write: Result<(), Box<CovenError>>, failures: Vec<DbError> },
@@ -427,8 +428,12 @@ pub enum DbError {
     /// Removing owned bytes or their pending records failed. A committed write
     /// stays committed; an unsuccessful write retains its original error (§16.6).
     FileCleanup { write: Result<(), Box<DbError>>, failures: Vec<DbError> },
-    /// A transaction failed and rolling it back failed too.
+    /// A transaction failed and rolling it back failed too. Later calls fail
+    /// with `RollbackFailed` until the store is reopened (§5).
     Rollback { operation: Box<DbError>, rollback: rusqlite::Error },
+    /// An earlier call's rollback failed, so the writer may still hold its
+    /// uncommitted changes; this handle refuses calls until reopened (§5).
+    RollbackFailed,
     /// Closing failed for these connections, after every one was tried (E1).
     Closing { failures: Vec<DbError> },
 }

@@ -1207,6 +1207,10 @@ the file's ranges under `F`.
 - Database callbacks release their connections before propagating a panic.
   An uncommitted transaction rolls back, and later calls can reuse the writer
   and readers.
+- If rolling back a failed transaction fails too, the writer may still hold
+  its uncommitted changes, which its own later reads and writes would treat as
+  committed. The failing call reports both failures, and every later call and
+  live query fails with `RollbackFailed` until the store is reopened.
 - Reads run on several read-only connections at once.
 - Another process, such as a widget, can open the store for reading only
   while the app has it open.

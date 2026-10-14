@@ -384,13 +384,16 @@ async fn a_failed_rollback_cannot_release_bytes_using_uncommitted_records() {
         matches!(error, DbError::FileCleanup {write: Err(error), ..} if matches!(*error, DbError::Rollback { .. }))
     );
     // Another attempted write must not delete from the same uncommitted state.
-    assert!(db.write(|_| Ok(())).await.is_err());
+    assert!(matches!(
+        db.write(|_| Ok(())).await,
+        Err(DbError::RollbackFailed)
+    ));
     assert_eq!(std::fs::read(&original).unwrap(), b"original");
-    db.inspect_writer(|sql| {
-        sql.refuse_transaction_end(false);
-        sql.batch("ROLLBACK").unwrap();
-    });
-    db.write(|_| Ok(())).await.unwrap();
+    db.close().await.unwrap();
+    let db = store
+        .schema(tables(Provenance::AppProvided), SCHEMA)
+        .await
+        .unwrap();
     assert_eq!(db.file_ref("files", "7").await.unwrap().plaintext_size(), 8);
     assert_eq!(local_count(&db, "_coven_file_removals"), 0);
     db.close().await.unwrap();

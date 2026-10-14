@@ -11,7 +11,8 @@ pub enum CovenError {
     /// Reading device identity or an app callback's custody operation failed.
     #[error(transparent)]
     Key(#[from] coven_crypto::custody::KeyError),
-    /// An app callback failed and SQLite also failed to roll it back.
+    /// An app callback failed and SQLite also failed to roll it back. Later
+    /// calls fail with `DbError::RollbackFailed` until the store is reopened (§5).
     #[error("{operation}; rollback failed: {rollback}")]
     Rollback {
         /// The callback or database failure.
@@ -66,6 +67,10 @@ pub enum DbError {
     /// Saving pending state failed; this handle refuses calls until reopened.
     #[error("pending persistence failed: {0}")]
     PendingPersistence(#[source] std::sync::Arc<DbError>),
+    /// An earlier call's rollback failed, so the writer may still hold its
+    /// uncommitted changes; this handle refuses calls until reopened (§5).
+    #[error("an earlier rollback failed; reopen the store")]
+    RollbackFailed,
     /// A streaming producer or its final authentication check failed.
     #[error("sync stream failed: {0}")]
     SyncStream(#[source] Box<dyn std::error::Error + Send + Sync>),
@@ -487,7 +492,8 @@ pub enum DbError {
         /// Failures in connection-close order.
         failures: Vec<DbError>,
     },
-    /// A transaction failed and rolling it back failed too.
+    /// A transaction failed and rolling it back failed too. Later calls fail
+    /// with `RollbackFailed` until the store is reopened (§5).
     #[error("{operation}; rollback failed: {rollback}")]
     Rollback {
         /// The operation that required rollback.

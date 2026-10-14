@@ -38,7 +38,6 @@ pub(crate) struct DatabaseConnection {
     authorization: SqlAuthorization,
     observation: Option<WriterObservation>,
     streaming: std::cell::Cell<bool>,
-    pending_changed: std::cell::Cell<bool>,
     #[cfg(any(test, feature = "test-utils"))]
     write_checkpoint: std::cell::RefCell<Option<crate::test_utils::WriteCheckpointObserver>>,
     #[cfg(test)]
@@ -140,7 +139,6 @@ impl DatabaseConnection {
             authorization,
             observation: None,
             streaming: std::cell::Cell::new(false),
-            pending_changed: std::cell::Cell::new(false),
             #[cfg(any(test, feature = "test-utils"))]
             write_checkpoint: std::cell::RefCell::new(None),
             #[cfg(test)]
@@ -424,7 +422,6 @@ impl DatabaseConnection {
         &self,
         run: impl FnOnce() -> Result<T, DbError>,
     ) -> Result<T, DbError> {
-        self.pending_changed.set(true);
         run().map_err(|error| self.pending_failure(error))
     }
 
@@ -434,7 +431,9 @@ impl DatabaseConnection {
         }
         let error = Arc::new(error);
         if let Some(observation) = &self.observation {
-            observation.observer.fail(error.clone());
+            observation
+                .observer
+                .fail(crate::observation::HandleFailure::Pending(error.clone()));
         }
         DbError::PendingPersistence(error)
     }
@@ -763,7 +762,6 @@ impl DatabaseConnection {
         run: impl FnOnce(&Self) -> Result<T, DbError>,
     ) -> Result<T, DbError> {
         self.transaction_captured(false, run)
-            .map_err(|error| self.unresolved_pending(error))
     }
 
     /// Streaming transfers publish table invalidations without a session's
@@ -773,28 +771,6 @@ impl DatabaseConnection {
         run: impl FnOnce(&Self) -> Result<T, DbError>,
     ) -> Result<T, DbError> {
         self.transaction_captured(true, run)
-            .map_err(|error| self.unresolved_pending(error))
-    }
-
-    /// A failure that rolled back cleanly left pending state as it was, so the
-    /// caller receives it unchanged. When rolling back also failed, this
-    /// connection may still hold the uncommitted pending change, so the handle
-    /// refuses calls until reopened.
-    fn unresolved_pending(&self, error: DbError) -> DbError {
-        match error {
-            DbError::Rollback {
-                operation,
-                rollback,
-            } if self.pending_changed.get()
-                && !matches!(*operation, DbError::PendingPersistence(_)) =>
-            {
-                self.pending_failure(DbError::Rollback {
-                    operation,
-                    rollback,
-                })
-            }
-            error => error,
-        }
     }
 
     fn transaction_captured<T, E: crate::WriteFailure>(
@@ -802,7 +778,6 @@ impl DatabaseConnection {
         streaming: bool,
         run: impl FnOnce(&Self) -> Result<T, E>,
     ) -> Result<T, E> {
-        self.pending_changed.set(false);
         self.batch("BEGIN IMMEDIATE")?;
         self.streaming.set(streaming);
         let mut guard = SqlTransaction {
@@ -849,7 +824,16 @@ impl DatabaseConnection {
             Err(operation) if self.connection.is_autocommit() => Err(operation),
             Err(operation) => match self.batch("ROLLBACK") {
                 Ok(()) => Err(operation),
-                Err(DbError::Sqlite(rollback)) => Err(operation.with_rollback(rollback)),
+                // This connection may still hold the uncommitted changes, which
+                // its own later reads and writes would see as committed.
+                Err(DbError::Sqlite(rollback)) => {
+                    if let Some(observation) = &self.observation {
+                        observation
+                            .observer
+                            .fail(crate::observation::HandleFailure::Rollback);
+                    }
+                    Err(operation.with_rollback(rollback))
+                }
                 Err(error) => panic!("internal rollback returned a non-SQLite error: {error}"),
             },
         }

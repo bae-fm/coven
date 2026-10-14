@@ -37,18 +37,37 @@ impl TableRead {
     }
 }
 
+/// Why this handle refuses every call until the store is reopened.
+#[derive(Clone)]
+pub(crate) enum HandleFailure {
+    /// Saving pending state failed, with this cause.
+    Pending(Arc<DbError>),
+    /// Rolling back a failed transaction failed, so the writer may still hold
+    /// its uncommitted changes.
+    Rollback,
+}
+
+impl HandleFailure {
+    fn error(&self) -> DbError {
+        match self {
+            Self::Pending(cause) => DbError::PendingPersistence(cause.clone()),
+            Self::Rollback => DbError::RollbackFailed,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct CommitState {
     pub(crate) changed: bool,
     closed: bool,
-    failure: Option<Arc<DbError>>,
+    failure: Option<HandleFailure>,
 }
 
 impl CommitState {
     pub(crate) fn error(&self) -> Option<DbError> {
         self.failure
             .as_ref()
-            .map(|e| DbError::PendingPersistence(e.clone()))
+            .map(HandleFailure::error)
             .or_else(|| self.closed.then_some(DbError::StoreClosed))
     }
 }
@@ -70,7 +89,7 @@ pub(crate) struct CommitSubscription {
 }
 
 impl CommitSubscription {
-    fn new(closed: bool, failure: Option<Arc<DbError>>) -> Self {
+    fn new(closed: bool, failure: Option<HandleFailure>) -> Self {
         let (state, receiver) = watch::channel(CommitState {
             changed: false,
             closed,
@@ -136,7 +155,7 @@ fn affected(reads: &ReadSet, changes: &[RowChange]) -> bool {
 struct ObserverState {
     subscriptions: Vec<Weak<SubscriptionState>>,
     closed: bool,
-    failure: Option<Arc<DbError>>,
+    failure: Option<HandleFailure>,
 }
 
 impl ObserverState {
@@ -218,12 +237,13 @@ impl CommitObserver {
             .expect("observer lock poisoned")
             .failure
             .as_ref()
-            .map(|error| DbError::PendingPersistence(error.clone()))
+            .map(HandleFailure::error)
     }
 
-    pub(crate) fn fail(&self, error: Arc<DbError>) {
+    /// Fail every later call and subscription; the first failure is kept.
+    pub(crate) fn fail(&self, failure: HandleFailure) {
         let mut state = self.state.lock().expect("observer lock poisoned");
-        let error = state.failure.get_or_insert(error).clone();
+        let error = state.failure.get_or_insert(failure).clone();
         state.subscriptions.retain(|subscription| {
             let Some(subscription) = subscription.upgrade() else {
                 return false;
