@@ -46,9 +46,10 @@ def policy : Policy Write Bool Bool Nat where
   creator _ := .create
   author | .create | .dependent => 0 | .intrude | .concurrent => 1
 
-def unguarded (_w : Write) (_r : Bool) : Option (Cause Write Nat Bool) := none
+def permission (w : Write) (r : Bool) : Option (Cause Write Nat Bool) :=
+  if allowed policy w r then none else some (.notOwner (owner policy r))
 
-abbrev evidence := DataDependency.authoredState history valid provenance (base policy unguarded)
+abbrev evidence := DataDependency.authoredState history valid provenance (base permission)
 
 theorem retained (w : Write) (r : Bool) :
     DataDependency.retained evidence w r = (r || decide (w = .create)) := by
@@ -107,33 +108,38 @@ theorem second_causal : CausalOrder history second := by
   · intro a h; cases a <;> simp_all [history]
 
 theorem orders_agree :
-    merged history valid provenance policy unguarded first =
-      merged history valid provenance policy unguarded second :=
-  converges history valid provenance policy unguarded first_causal second_causal
+    merged history valid provenance permission first =
+      merged history valid provenance permission second :=
+  converges history valid provenance permission first_causal second_causal
     (by intro w; cases w <;> decide)
 
 theorem per_change_keeps_unrelated :
-    (merged history valid provenance policy unguarded first).cell false () = some .create ∧
-    (merged history valid provenance policy unguarded first).cell true () = some .concurrent := by
+    (merged history valid provenance permission first).cell false () = some .create ∧
+    (merged history valid provenance permission first).cell true () = some .concurrent := by
   simp only [merged, Data.merged, DataDependency.effective, retained]
   decide
 
 theorem non_owner_loss :
-    (loss history valid provenance policy unguarded values first .intrude false).map (fun l => l.cause) =
+    (loss history valid provenance permission values first .intrude false).map (fun l => l.cause) =
       some (.notOwner 0) := by
-  simp [loss, first, history, allowed, policy, owner, changeLoss]
+  simp [loss, permission, first, history, allowed, policy, owner, changeLoss]
 
 theorem dependent_loss :
-    (loss history valid provenance policy unguarded values first .dependent false).map (fun l => l.cause) =
-      some (.dependency [.intrude]) := by
+    (loss history valid provenance permission values first .dependent false).map (fun l => l.cause) =
+      some (.dependency [(.intrude, false)]) := by
   have dep : DataDependency.dependsOnDropped evidence .dependent false = true := by
     change [Write.create, .intrude].any (fun a => !DataDependency.retained evidence a false) = true
     simp [retained]
   have sources : DataDependency.droppedSources evidence .dependent false = [.intrude] := by
     change [Write.create, .intrude].filter (fun a => !DataDependency.retained evidence a false) = [.intrude]
     simp [retained]
-  rw [Ownership.dependent_recorded history valid provenance policy unguarded values first .dependent false _
-    (by decide) rfl (by decide) rfl dep]
-  simp [sources, changeLoss]
+  simp only [loss, first, List.mem_cons, reduceCtorEq, or_true,
+    true_or, ↓reduceIte, history, Option.bind_some, permission, allowed, policy, owner]
+  change (if DataDependency.dependsOnDropped evidence .dependent false then
+    some (changeLoss .dependent false 1 (values .dependent false)
+      (.dependency ((DataDependency.droppedSources evidence .dependent false).map (·, false))))
+    else none).map (fun l => l.cause) = some (.dependency [(.intrude, false)])
+  rw [dep, sources]
+  rfl
 
 end CovenMerge.Ownership.FilterExamples

@@ -81,173 +81,157 @@ theorem accepted_owner_matches_filter {Key Payload Digest Signature : Type}
   exact (CovenStorage.RowAuthorship.owned_row_true_author h s (key r) claimed (P.creator r)
     signature proof accepted).1
 
-/-- These losses share the ordinary row/change/value identity. Their cause
-keeps the actual owner; no member is inferred from the current cell setter. -/
+/-- Ownership refusals use the same row-change identity as other losses. -/
 inductive Cause (W Member Row : Type) where
   | notOwner (owner : Member)
+  | foreignKey
   | move (protectedRow : Row) (owner : Member)
-  | delete (protectedRow : Row) (owner : Member)
-  | dependency (sources : List W)
+  | dependency (sources : List (W × Row))
   deriving DecidableEq, Repr
 
 structure Loss (W Row Col Member : Type) extends LossRecord W Row Col (Cause W Member Row) where
   write : W
 
-/-- Owner exclusions use the same whole-row envelope as other recorded losses. -/
 def changeLoss (w : W) (r : Row) (generation : Nat) (values : Col → Option W)
     (cause : Cause W Member Row) : Loss W Row Col Member :=
   ⟨⟨r, generation, none, values, cause⟩, w⟩
 
-/-- A direct guard verdict is per change. Cascading move/delete effects can
-share a verdict, without discarding unrelated changes in that write. -/
-def base (P : Policy W Row Table Member)
-    (guard : W → Row → Option (Cause W Member Row)) (w : W) (r : Row) : Bool :=
-  allowed P w r && (guard w r).isNone
+/-- Admission is a per-change verdict. The FK verifier supplies it after
+checking direct permissions and recomputing every derived payload. -/
+def base (guard : W → Row → Option (Cause W Member Row)) (w : W) (r : Row) : Bool :=
+  (guard w r).isNone
 
 def loss (M : Writes W Row Col) (valid : Valid M) (p : DataDependency.Authored M)
-    (P : Policy W Row Table Member) (guard : W → Row → Option (Cause W Member Row))
+    (guard : W → Row → Option (Cause W Member Row))
     (values : W → Row → Col → Option W) (received : List W) (w : W) (r : Row) :
     Option (Loss W Row Col Member) :=
   if w ∈ received then
     (M.chg w r).bind fun ch =>
       let record := fun cause => some (changeLoss w r ch.gen (values w r) cause)
-      if !allowed P w r then record (.notOwner (owner P r))
-      else match guard w r with
-        | some cause => record cause
-        | none =>
-          let s := DataDependency.authoredState M valid p (base P guard)
-          if DataDependency.dependsOnDropped s w r then record (.dependency (DataDependency.droppedSources s w r))
-          else none
+      match guard w r with
+      | some cause => record cause
+      | none =>
+        let s := DataDependency.authoredState M valid p (base guard)
+        if DataDependency.dependsOnDropped s w r then
+          record (.dependency ((DataDependency.droppedSources s w r).map (·, r)))
+        else none
   else none
 
 def merged (M : Writes W Row Col) (valid : Valid M) (p : DataDependency.Authored M)
-    (P : Policy W Row Table Member) (guard : W → Row → Option (Cause W Member Row))
+    (guard : W → Row → Option (Cause W Member Row))
     (received : List W) : St W Row Col :=
-  Data.merged M valid p (base P guard) St.init received
-
-theorem non_owner_no_effect (M : Writes W Row Col) (valid : Valid M)
-    (p : DataDependency.Authored M) (P : Policy W Row Table Member)
-    (guard : W → Row → Option (Cause W Member Row)) (w : W) (r : Row)
-    (denied : allowed P w r = false) :
-    (DataDependency.effective M valid p (base P guard)).chg w r = none := by
-  have dropped := DataDependency.dropped_stays_dropped
-    (DataDependency.authoredState M valid p (base P guard)) w r (by simp [DataDependency.authoredState, base, denied])
-  simp [DataDependency.effective, dropped]
-
-theorem non_owner_recorded (M : Writes W Row Col) (valid : Valid M)
-    (p : DataDependency.Authored M) (P : Policy W Row Table Member)
-    (guard : W → Row → Option (Cause W Member Row)) (values : W → Row → Col → Option W)
-    (received : List W) (w : W) (r : Row) (ch : Change Col)
-    (mem : w ∈ received) (change : M.chg w r = some ch) (denied : allowed P w r = false) :
-    loss M valid p P guard values received w r =
-      some (changeLoss w r ch.gen (values w r) (.notOwner (owner P r))) := by
-  simp [loss, mem, change, denied]
+  Data.merged M valid p (base guard) St.init received
 
 theorem guard_recorded (M : Writes W Row Col) (valid : Valid M)
-    (p : DataDependency.Authored M) (P : Policy W Row Table Member)
+    (p : DataDependency.Authored M)
     (guard : W → Row → Option (Cause W Member Row)) (values : W → Row → Col → Option W)
     (received : List W) (w : W) (r : Row) (ch : Change Col) (cause : Cause W Member Row)
-    (mem : w ∈ received) (change : M.chg w r = some ch)
-    (author : allowed P w r = true) (denied : guard w r = some cause) :
-    loss M valid p P guard values received w r = some (changeLoss w r ch.gen (values w r) cause) := by
-  simp [loss, mem, change, author, denied]
+    (mem : w ∈ received) (change : M.chg w r = some ch) (denied : guard w r = some cause) :
+    loss M valid p guard values received w r = some (changeLoss w r ch.gen (values w r) cause) := by
+  simp [loss, mem, change, denied]
 
-/-- Even an empty-valued deletion gets a dependency record. -/
-theorem dependent_recorded (M : Writes W Row Col) (valid : Valid M)
-    (p : DataDependency.Authored M) (P : Policy W Row Table Member)
+/-- Empty-valued deletions are recorded too. -/
+theorem excluded_recorded (M : Writes W Row Col) (valid : Valid M)
+    (p : DataDependency.Authored M)
     (guard : W → Row → Option (Cause W Member Row)) (values : W → Row → Col → Option W)
     (received : List W) (w : W) (r : Row) (ch : Change Col)
     (mem : w ∈ received) (change : M.chg w r = some ch)
-    (author : allowed P w r = true) (unguarded : guard w r = none)
-    (depends : DataDependency.dependsOnDropped (DataDependency.authoredState M valid p (base P guard)) w r = true) :
-    loss M valid p P guard values received w r =
-      some (changeLoss w r ch.gen (values w r)
-        (.dependency (DataDependency.droppedSources (DataDependency.authoredState M valid p (base P guard)) w r))) := by
-  simp [loss, mem, change, author, unguarded, depends]
+    (excluded : DataDependency.retained (DataDependency.authoredState M valid p (base guard)) w r = false) :
+    ∃ record, loss M valid p guard values received w r = some record ∧
+      record.write = w ∧ record.row = r ∧ record.generation = ch.gen ∧ record.values = values w r := by
+  cases hg : guard w r with
+  | some cause => exact ⟨_, guard_recorded M valid p guard values received w r ch cause mem change hg,
+      rfl, rfl, rfl, rfl⟩
+  | none =>
+    have dep : DataDependency.dependsOnDropped (DataDependency.authoredState M valid p (base guard)) w r = true := by
+      cases hd : DataDependency.dependsOnDropped (DataDependency.authoredState M valid p (base guard)) w r
+      · have kept := DataDependency.independent_retained
+          (DataDependency.authoredState M valid p (base guard)) w r
+          (by simp [DataDependency.authoredState, base, hg])
+          (by simp [DataDependency.authoredState, change]) hd
+        simp [excluded] at kept
+      · rfl
+    exact ⟨changeLoss w r ch.gen (values w r) (.dependency
+      ((DataDependency.droppedSources (DataDependency.authoredState M valid p (base guard)) w r).map (·, r))),
+      by simp [loss, mem, change, hg, dep], rfl, rfl, rfl, rfl⟩
 
 theorem converges (M : Writes W Row Col) (valid : Valid M)
-    (p : DataDependency.Authored M) (P : Policy W Row Table Member)
+    (p : DataDependency.Authored M)
     (guard : W → Row → Option (Cause W Member Row)) {a b : List W}
     (ca : CausalOrder M a) (cb : CausalOrder M b) (same : ∀ w, w ∈ a ↔ w ∈ b) :
-    merged M valid p P guard a = merged M valid p P guard b :=
-  Data.converges M valid p (base P guard) _ closed_empty St.init isSpec_init
+    merged M valid p guard a = merged M valid p guard b :=
+  Data.converges M valid p (base guard) _ closed_empty St.init isSpec_init
     (causalFrom_of_causalOrder ca) (causalFrom_of_causalOrder cb) same
 
 theorem loss_converges (M : Writes W Row Col) (valid : Valid M)
-    (p : DataDependency.Authored M) (P : Policy W Row Table Member)
+    (p : DataDependency.Authored M)
     (guard : W → Row → Option (Cause W Member Row)) (values : W → Row → Col → Option W)
     {a b : List W} (same : ∀ w, w ∈ a ↔ w ∈ b) :
-    loss M valid p P guard values a = loss M valid p P guard values b := by
+    loss M valid p guard values a = loss M valid p guard values b := by
   funext w r
   simp only [loss, same w]
-
-theorem excluded_recorded (M : Writes W Row Col) (valid : Valid M)
-    (p : DataDependency.Authored M) (P : Policy W Row Table Member)
-    (guard : W → Row → Option (Cause W Member Row)) (values : W → Row → Col → Option W)
-    (received : List W) (w : W) (r : Row) (ch : Change Col)
-    (mem : w ∈ received) (change : M.chg w r = some ch)
-    (excluded : DataDependency.retained (DataDependency.authoredState M valid p (base P guard)) w r = false) :
-    ∃ record, loss M valid p P guard values received w r = some record ∧
-      record.write = w ∧ record.row = r ∧ record.generation = ch.gen ∧ record.values = values w r := by
-  cases author : allowed P w r
-  · exact ⟨_, non_owner_recorded M valid p P guard values received w r ch mem change author, rfl, rfl, rfl, rfl⟩
-  · cases hg : guard w r with
-    | some cause => exact ⟨_, guard_recorded M valid p P guard values received w r ch cause mem change author hg,
-        rfl, rfl, rfl, rfl⟩
-    | none =>
-      have dep : DataDependency.dependsOnDropped (DataDependency.authoredState M valid p (base P guard)) w r = true := by
-        cases hd : DataDependency.dependsOnDropped (DataDependency.authoredState M valid p (base P guard)) w r
-        · have kept := DataDependency.independent_retained
-            (DataDependency.authoredState M valid p (base P guard)) w r
-            (by simp [DataDependency.authoredState, base, author, hg])
-            (by simp [DataDependency.authoredState, change]) hd
-          simp [excluded] at kept
-        · rfl
-      exact ⟨_, dependent_recorded M valid p P guard values received w r ch mem change author hg dep,
-        rfl, rfl, rfl, rfl⟩
 
 variable [DecidableEq Row] [DecidableEq Col] [DecidableEq K]
 
 theorem value_accounted (M : Writes W Row Col) (valid : Valid M)
-    (p : DataDependency.Authored M) (P : Policy W Row Table Member)
+    (p : DataDependency.Authored M)
     (guard : W → Row → Option (Cause W Member Row)) (values : W → Row → Col → Option W)
     (received : List W) (causal : CausalOrder M received) (I : EntryInputs Row K)
-    (present : ∀ r, I.present r = decide ((merged M valid p P guard received).gen r % 2 = 1))
+    (present : ∀ r, I.present r = decide ((merged M valid p guard received).gen r % 2 = 1))
     (w : W) (r : Row) (c : Col) (k : Nat)
     (setter : Setter M (fun a => a ∈ received) r c w k) (written : values w r c = some w) :
-    CovenMerge.ValueAccounted (DataDependency.effective M valid p (base P guard)) (fun a => a ∈ received)
-      (merged M valid p P guard received) I r c w k ∨
-    ∃ record, loss M valid p P guard values received w r = some record ∧ record.values c = some w := by
+    CovenMerge.ValueAccounted (DataDependency.effective M valid p (base guard)) (fun a => a ∈ received)
+      (merged M valid p guard received) I r c w k ∨
+    ∃ record, loss M valid p guard values received w r = some record ∧ record.values c = some w := by
   obtain ⟨mem, ch, change, kind, sets, inc⟩ := setter
-  cases kept : DataDependency.retained (DataDependency.authoredState M valid p (base P guard)) w r
-  · obtain ⟨record, hl, _, _, _, hv⟩ := excluded_recorded M valid p P guard values received w r ch mem change kept
+  cases kept : DataDependency.retained (DataDependency.authoredState M valid p (base guard)) w r
+  · obtain ⟨record, hl, _, _, _, hv⟩ := excluded_recorded M valid p guard values received w r ch mem change kept
     exact Or.inr ⟨record, hl, by rw [hv]; exact written⟩
-  · have result := Data.isSpec M valid p (base P guard) _ closed_empty St.init isSpec_init received
+  · have result := Data.isSpec M valid p (base guard) _ closed_empty St.init isSpec_init received
       (causalFrom_of_causalOrder causal)
-    have correct : IsSpec (DataDependency.effective M valid p (base P guard))
-        (fun a => a ∈ received) (merged M valid p P guard received) :=
+    have correct : IsSpec (DataDependency.effective M valid p (base guard))
+        (fun a => a ∈ received) (merged M valid p guard received) :=
       isSpec_congr (fun a => by simp) result.1
-    have closed : Closed (DataDependency.effective M valid p (base P guard)) (fun a => a ∈ received) :=
+    have closed : Closed (DataDependency.effective M valid p (base guard)) (fun a => a ∈ received) :=
       closed_congr (fun a => by simp) result.2
-    exact Or.inl (CovenMerge.value_accounted (DataDependency.effective_valid M valid p (base P guard)) closed correct
+    exact Or.inl (CovenMerge.value_accounted (DataDependency.effective_valid M valid p (base guard)) closed correct
       I present ⟨mem, ch, by simp [DataDependency.effective, kept, change], kind, sets, inc⟩)
 
-/-- Equality includes ordinary row/cell losses, owner/dependency losses and
-all three removal passes. Transport arrival order may differ; application
-still obeys the existing receive/causality contract. -/
 def result (M : Writes W Row Col) (valid : Valid M) (p : DataDependency.Authored M)
-    (P : Policy W Row Table Member) (guard : W → Row → Option (Cause W Member Row))
+    (guard : W → Row → Option (Cause W Member Row))
     (values : W → Row → Col → Option W) (inputs : St W Row Col → EntryInputs Row K)
     (received : List W) : Device W Row Col × (W → Row → Option (Loss W Row Col Member)) :=
-  let st := merged M valid p P guard received
+  let st := merged M valid p guard received
   let v := entryView (inputs st)
-  (⟨st, v, lossRecord st v⟩, loss M valid p P guard values received)
+  (⟨st, v, lossRecord st v⟩, loss M valid p guard values received)
 
 theorem result_converges (M : Writes W Row Col) (valid : Valid M) (p : DataDependency.Authored M)
-    (P : Policy W Row Table Member) (guard : W → Row → Option (Cause W Member Row))
+    (guard : W → Row → Option (Cause W Member Row))
     (values : W → Row → Col → Option W) (inputs : St W Row Col → EntryInputs Row K)
     {a b : List W} (ca : CausalOrder M a) (cb : CausalOrder M b) (same : ∀ w, w ∈ a ↔ w ∈ b) :
-    result M valid p P guard values inputs a = result M valid p P guard values inputs b := by
-  simp only [result, converges M valid p P guard ca cb same, loss_converges M valid p P guard values same]
+    result M valid p guard values inputs a = result M valid p guard values inputs b := by
+  simp only [result, converges M valid p guard ca cb same, loss_converges M valid p guard values same]
+
+/-- Owned rows use the ordinary removal recorder: every hidden row retains
+its values and every applicable cause. No delete permission trial is involved. -/
+theorem constraint_effect_recorded (st : St W Row Col) (I : EntryInputs Row K) (r : Row)
+    (hidden : (entryView I).removed r = true) :
+    (entryView I).rules r ≠ [] ∧
+    lossRecord st (entryView I) r none =
+      some ⟨r, st.gen r, none, st.cell r, .rules ((entryView I).rules r)⟩ :=
+  ⟨named_rules_nonempty I hidden, by simp [lossRecord, hidden]⟩
+
+/-- Recompute after a cause drops. An independent remaining cause can still
+hide the row; when none remains its original merged values are displayed. -/
+theorem constraint_effect_reversed (st : St W Row Col) (I : EntryInputs Row K) (r : Row)
+    (present : I.present r = true) (cleared : (entryView I).rules r = []) :
+    (entryView I).shown r = true ∧ lossRecord st (entryView I) r none = none := by
+  have shown := row_returns I present cleared
+  refine ⟨shown, ?_⟩
+  have absent : (entryView I).removed r = false := by
+    change (I.present r && removal I.erase r) = false
+    change (I.present r && !removal I.erase r) = true at shown
+    simp_all
+  simp [lossRecord, absent]
 
 end CovenMerge.Ownership
