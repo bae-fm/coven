@@ -358,7 +358,7 @@
 
 - A snapshot's plaintext is a header frame, its record frames in order,
   then an end frame (kind 7).
-- The header (kind 5): `id:SnapshotId | schema_version:u32 | counts:5×u64`,
+- The header (kind 5): `id:SnapshotId | schema_version:u32 | counts:6×u64`,
   one count per section below. Its positions are in its sealed prefix (D9).
 - Records (kind 6) are `section:u8 | record`, sections in order, each
   ordered as shown:
@@ -370,6 +370,7 @@
   | 2 | Synced column: `table:name \| column:name` | table, column |
   | 3 | Merge row: `row:RowId \| generations:map<u64, WriteId> \| cells:map<name, Cell>` | `RowId` |
   | 4 | Loss: `row:RowId \| generation:u64 \| frozen:bool \| values \| cause` | identity below |
+  | 5 | Authored change: `header:WriteHeader \| complete:bool \| change:RowChange \| verdict` | `ChangeId` |
 
   Empty sections emit nothing. `Cell` is `write:WriteId | value:ColumnValue`.
   Synced-row columns are nonempty. Applied-write timestamps name their
@@ -453,6 +454,18 @@
   Retained inputs for undoing a non-final entry's effects are local state;
   they are not lost merely because a snapshot replaces the visible state.
   `LostValue.pending_entries` is computed from replay and finality, not encoded.
+- Section 5 holds every original row change of the audience whose write
+  the snapshot's positions cover and which this device holds: the D5 header
+  of its part, whether that part's every change is known (so a named row's
+  absence is proof), the original D5 row change with its generation source
+  and replaced setters, and the author's verdict. `verdict` is
+  `0` unjudged (its effects arrived in an earlier snapshot), `1` applied,
+  `2 | cause:LostWriteCause` excluded, `3` dropped by its own retirement
+  window, or `4 | sources:[ChangeId]` dependent. Only unjudged and applied
+  changes survive as sources. Its write and every source it names must be
+  covered by the positions; dismissing a loss never changes a verdict.
+  A loader keeps the same original bytes for one identity and adopts the
+  snapshot's verdicts with its data.
 - Snapshot evidence must preserve original change identities, actual
   generation/setter sources and their own admission facts independently of
   dismissible losses and consumed positions. Old-key window exclusions feed
@@ -463,8 +476,7 @@
   A later reader, conversion, loss dismissal or snapshot reload cannot turn
   that excluded source into retained data. Preserve originals until deciding
   replacement prefixes are final and the other retention checks pass.
-  The compact five-section layout above does not itself supply the shared
-  data evidence or dependency-loss encoding required by
+  Section 5 and loss cause 3 supply that evidence for
   [B17](proofs/merge.md#b17-receive-order-progress-and-dropping-by-data).
 
 ### D8 Small frames

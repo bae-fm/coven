@@ -288,7 +288,7 @@ pub fn snapshot_header() -> SnapshotHeader {
             },
         ]),
         store_log: EntryPositions(vec![loss_entry()]),
-        counts: [1, 4, 1, 1, 4],
+        counts: [1, 4, 1, 1, 4, 1],
     }
 }
 /// The fixture's catch-up storage time, with a subsecond fraction.
@@ -333,7 +333,18 @@ pub fn snapshot_records() -> Vec<SnapshotRecord> {
             .chain([concurrent_loss(), excluded_loss()])
             .map(SnapshotRecord::Loss),
     );
+    records.push(SnapshotRecord::Authored(authored_change()));
     records
+}
+/// The fixture write's row change as source evidence, applied by its author.
+pub fn authored_change() -> crate::snapshot_rows::AuthoredChange {
+    let write = write();
+    crate::snapshot_rows::AuthoredChange {
+        header: write.header,
+        complete: true,
+        change: write.parts[0].rows[0].clone(),
+        verdict: crate::snapshot_rows::ChangeVerdict::Applied,
+    }
 }
 /// A concurrent cell loss of the fixture row.
 pub fn concurrent_loss() -> crate::loss::Loss {

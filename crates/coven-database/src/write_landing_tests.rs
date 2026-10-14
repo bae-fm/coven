@@ -491,3 +491,124 @@ async fn changes_built_on_a_late_write_are_frozen_and_unrelated_ones_apply() {
     }
     assert_eq!(results[0], results[1]);
 }
+
+/// A device that has a row only through a snapshot holds its original
+/// changes as source evidence: it authors its own edit of that row, applies a
+/// peer's later edit naming those sources, and keeps a dropped source dropped
+/// after its loss was dismissed (§8, §15, D7).
+#[tokio::test]
+async fn snapshot_evidence_keeps_sources_and_verdicts_for_later_changes() {
+    use crate::snapshot_write::tests::{frames, id, load_one};
+    use crate::Replacement;
+    let ids = SequentialIds::new();
+    let stores: Vec<_> = (0..4).map(|_| TestStore::with_ids(&ids)).collect();
+    let mut dbs = Vec::new();
+    for store in &stores {
+        dbs.push(store.schema(notes(), NOTES).await.unwrap());
+    }
+    let [ana, ben, source, fresh] = &dbs[..] else {
+        unreachable!()
+    };
+    sql(
+        ana,
+        "INSERT INTO notes VALUES('kept','one',''),('late','two','')",
+    )
+    .await
+    .unwrap();
+    let ana_write = records(ana).remove(0);
+    // Ana's write lands late at the source; Ben, who read it, edits both rows.
+    ben.receive(ana_write.clone().into()).await.unwrap();
+    sql(ben, "UPDATE notes SET title='edited'").await.unwrap();
+    let ben_write = records(ben).remove(0);
+    retire(source, ana_write.header.position.device, 1, "device", 0).await;
+    source
+        .apply_downloaded::<Record>(ana_write.clone().into(), at(30 * DAY + 1))
+        .await
+        .unwrap();
+    source.receive(ben_write.clone().into()).await.unwrap();
+    let losses = source.lost_values().await.unwrap();
+    assert_eq!(losses.len(), 2);
+    assert!(losses
+        .iter()
+        .all(|loss| matches!(loss.replaced_by, Replacement::DataDependency { .. })));
+    // Dismissing the displayed losses changes no verdict.
+    source.dismiss_lost_values(&losses).await.unwrap();
+    assert!(source.lost_values().await.unwrap().is_empty());
+    let snapshot = frames(source, coven_merge::Audience::Store).await;
+    // The fresh device has none of these writes, only the snapshot.
+    retire(fresh, ana_write.header.position.device, 1, "device", 0).await;
+    load_one(
+        fresh,
+        id(coven_merge::Audience::Store),
+        snapshot.prefix.clone(),
+        std::io::Cursor::new(snapshot.concat()),
+    )
+    .await
+    .unwrap();
+    // Ben edits again, naming his own frozen change and Ana's dropped one.
+    sql(ben, "UPDATE notes SET body='again'").await.unwrap();
+    let again = records(ben).remove(1);
+    assert_eq!(
+        fresh.receive(again.clone().into()).await.unwrap(),
+        crate::ApplyOutcome::Applied
+    );
+    let frozen = fresh.lost_values().await.unwrap();
+    assert_eq!(frozen.len(), 2);
+    assert!(frozen.iter().all(|loss| matches!(
+        &loss.replaced_by,
+        Replacement::DataDependency { write, .. } if *write == again.header.position
+    )));
+    // An identical snapshot's evidence loads again; a different original
+    // under the same identity is refused and nothing commits.
+    load_one(
+        fresh,
+        id(coven_merge::Audience::Store),
+        snapshot.prefix.clone(),
+        std::io::Cursor::new(snapshot.concat()),
+    )
+    .await
+    .unwrap();
+}
+
+/// A device that loaded a row from a snapshot authors its own change to it,
+/// naming the snapshot's original changes as its sources.
+#[tokio::test]
+async fn a_row_known_only_from_a_snapshot_can_be_edited_locally() {
+    use crate::snapshot_write::tests::{frames, id, load_one};
+    let ids = SequentialIds::new();
+    let stores: Vec<_> = (0..3).map(|_| TestStore::with_ids(&ids)).collect();
+    let mut dbs = Vec::new();
+    for store in &stores {
+        dbs.push(store.schema(notes(), NOTES).await.unwrap());
+    }
+    let [author, source, fresh] = &dbs[..] else {
+        unreachable!()
+    };
+    sql(author, "INSERT INTO notes VALUES('n','one','')")
+        .await
+        .unwrap();
+    source
+        .receive(records(author).remove(0).into())
+        .await
+        .unwrap();
+    let snapshot = frames(source, coven_merge::Audience::Store).await;
+    load_one(
+        fresh,
+        id(coven_merge::Audience::Store),
+        snapshot.prefix.clone(),
+        std::io::Cursor::new(snapshot.concat()),
+    )
+    .await
+    .unwrap();
+    sql(fresh, "UPDATE notes SET title='two'").await.unwrap();
+    let edit = records(fresh).remove(0);
+    let sources: Vec<_> = edit.parts[0].rows[0].sources.changes().cloned().collect();
+    assert_eq!(sources.len(), 2);
+    assert!(sources
+        .iter()
+        .all(|source| source.write == records(author)[0].header.position));
+    assert_eq!(
+        source.receive(edit.into()).await.unwrap(),
+        crate::ApplyOutcome::Applied
+    );
+}

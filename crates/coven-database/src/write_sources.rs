@@ -5,7 +5,7 @@ use crate::{
 };
 use coven_format::{
     merge_fields,
-    snapshot_rows::LostWriteCause,
+    snapshot_rows::{AuthoredChange, ChangeVerdict},
     value::Value,
     write::{RowChange, WriteHeader},
     write_sources::{CellSource, ChangeId, WriteSources},
@@ -292,39 +292,6 @@ pub(crate) fn complete(
     Ok(())
 }
 
-/// How this device interpreted one original row change (§8, §10, §17.1).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum Interpretation {
-    /// It entered the merge.
-    Applied,
-    /// A schema change or reset excluded its part.
-    Excluded(LostWriteCause),
-    /// Its write landed outside a retirement window; it has no effects.
-    Dropped,
-    /// It used data that does not survive: these sources, in role order.
-    Dependent(Vec<ChangeId>),
-}
-
-impl Interpretation {
-    /// `write` is the change's own write, kept with its failed sources.
-    fn encode(&self, write: WriteId) -> Result<Vec<u8>, DbError> {
-        Ok(match self {
-            Self::Applied => Vec::new(),
-            Self::Excluded(cause) => {
-                let mut bytes = vec![1];
-                bytes.extend(merge_fields::encode_lost_write_cause(cause)?);
-                bytes
-            }
-            Self::Dropped => vec![2],
-            Self::Dependent(sources) => {
-                let mut bytes = vec![3];
-                bytes.extend(merge_fields::encode_dependency(write, sources)?);
-                bytes
-            }
-        })
-    }
-}
-
 /// Record this device's current interpretation under the original identity,
 /// replacing an earlier one: replay rebuilds interpret retained inputs again.
 /// NULL means unjudged; receiving covered bytes alone never judges them.
@@ -332,7 +299,7 @@ pub(crate) fn admit(
     db: &DatabaseConnection,
     header: &WriteHeader,
     row: &RowId,
-    admission: &Interpretation,
+    verdict: &ChangeVerdict,
 ) -> Result<(), DbError> {
     let write = merge_fields::encode_write_id(&header.position)?;
     let audience = audience_text(&row.audience);
@@ -351,7 +318,7 @@ pub(crate) fn admit(
     .ok_or(DbError::DamagedDatabase)?;
     db.internal_execute(
         "UPDATE _coven_authored_changes SET admission=?5 WHERE write_id=?1 AND audience=?2 AND table_name=?3 AND key=?4",
-        params![write, audience, table, row.key, admission.encode(header.position)?],
+        params![write, audience, table, row.key, stored_verdict(verdict)?],
     )?;
     Ok(())
 }
@@ -373,8 +340,78 @@ pub(crate) fn retained(db: &DatabaseConnection, source: &ChangeId) -> Result<boo
         .pop();
     match admission {
         None => Err(DbError::MissingWriteSources(vec![source.clone()])),
-        Some(admission) => Ok(admission.is_none_or(|bytes| bytes.is_empty())),
+        Some(admission) => Ok(read_verdict(admission)?.retained()),
     }
+}
+
+/// NULL stands for a change never judged here.
+fn stored_verdict(verdict: &ChangeVerdict) -> Result<Option<Vec<u8>>, DbError> {
+    Ok(match verdict {
+        ChangeVerdict::Unjudged => None,
+        verdict => Some(merge_fields::encode_change_verdict(verdict)?),
+    })
+}
+
+fn read_verdict(stored: Option<Vec<u8>>) -> Result<ChangeVerdict, DbError> {
+    stored.map_or(Ok(ChangeVerdict::Unjudged), |bytes| {
+        merge_fields::decode_change_verdict(&bytes).map_err(|_| DbError::DamagedDatabase)
+    })
+}
+
+/// Every original change of an audience whose write these positions cover,
+/// with its part header and this device's verdict, in D7 section 5 order.
+pub(crate) fn visit_evidence<E: From<DbError>>(
+    db: &DatabaseConnection,
+    audience: &coven_merge::Audience,
+    covered: &coven_format::value::WritePositions,
+    mut visit: impl FnMut(AuthoredChange) -> Result<(), E>,
+) -> Result<(), E> {
+    db.for_each(
+        "SELECT p.header,p.complete,c.record,c.admission FROM _coven_authored_changes c
+         JOIN _coven_authored_parts p ON p.write_id=c.write_id AND p.audience=c.audience
+         WHERE c.audience=?1 ORDER BY c.write_id,c.table_name,c.key",
+        [audience_text(audience)],
+        |r| {
+            let header =
+                merge_fields::decode_write_header(&r.get::<_, Vec<u8>>(0).map_err(DbError::from)?)
+                    .map_err(DbError::from)?;
+            if !covered.covers(header.position) {
+                return Ok(());
+            }
+            let change = RowChange::decode(&r.get::<_, Vec<u8>>(2).map_err(DbError::from)?)
+                .map_err(DbError::from)?;
+            visit(AuthoredChange {
+                header,
+                complete: r.get(1).map_err(DbError::from)?,
+                change,
+                verdict: read_verdict(r.get(3).map_err(DbError::from)?)?,
+            })
+        },
+    )
+}
+
+/// Install a loaded snapshot's source evidence (D7). An original already held
+/// must have the same bytes; the snapshot's verdict replaces this device's,
+/// since the loaded data is what that verdict produced. The caller marks
+/// complete parts once all their changes are installed.
+pub(crate) fn load_evidence(
+    db: &DatabaseConnection,
+    authored: &AuthoredChange,
+) -> Result<(), DbError> {
+    let header = &authored.header;
+    part(db, header, &authored.change.row.audience)?;
+    retain(db, header, &authored.change)?;
+    db.internal_execute(
+        "UPDATE _coven_authored_changes SET admission=?5 WHERE write_id=?1 AND audience=?2 AND table_name=?3 AND key=?4",
+        params![
+            merge_fields::encode_write_id(&header.position)?,
+            audience_text(&authored.change.row.audience),
+            authored.change.row.table,
+            authored.change.row.key,
+            stored_verdict(&authored.verdict)?
+        ],
+    )?;
+    Ok(())
 }
 
 #[cfg(test)]

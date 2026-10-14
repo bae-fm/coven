@@ -213,6 +213,18 @@ pub fn decode_dependency(
     Ok((write, sources))
 }
 
+/// Encode a change's verdict with the bytes its snapshot evidence uses.
+pub fn encode_change_verdict(
+    value: &crate::snapshot_rows::ChangeVerdict,
+) -> Result<Vec<u8>, Error> {
+    encode(value)
+}
+
+/// Decode a change's verdict stored with its original change.
+pub fn decode_change_verdict(bytes: &[u8]) -> Result<crate::snapshot_rows::ChangeVerdict, Error> {
+    decode(bytes)
+}
+
 /// Encode one loss using the same bytes as the snapshot loss section.
 pub fn encode_loss(value: &crate::loss::Loss) -> Result<Vec<u8>, Error> {
     value.validate()?;

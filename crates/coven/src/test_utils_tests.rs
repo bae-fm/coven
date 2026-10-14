@@ -526,7 +526,9 @@ async fn newer_snapshots_delete_covered_logs_and_older_own_snapshots() {
         .await
         .unwrap();
     f.sync(&handle).await;
-    grow_and_retain(&f, &handle, "y".repeat(2 * 1024 * 1024 + 1)).await;
+    // The first snapshot holds the note three times: its synced row, merge
+    // row and original change kept as source evidence (D7 section 5).
+    grow_and_retain(&f, &handle, "y".repeat(4 * 1024 * 1024 + 1)).await;
     let new = f
         .storage
         .list(&ObjectPrefix::snapshots(f.directory.id()))
@@ -542,7 +544,7 @@ async fn newer_snapshots_delete_covered_logs_and_older_own_snapshots() {
         f.storage.read(&old[0].path).await.unwrap_err().failure(),
         StorageFailure::NotFound
     );
-    assert_eq!(read_note(&handle).await, "y".repeat(2 * 1024 * 1024 + 1));
+    assert_eq!(read_note(&handle).await, "y".repeat(4 * 1024 * 1024 + 1));
     handle.close().await.unwrap();
 }
 

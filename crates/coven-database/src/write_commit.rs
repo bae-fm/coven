@@ -173,7 +173,7 @@ pub(crate) fn queue(database: &DatabaseConnection, record: &WriteRecord) -> Resu
                 database,
                 &record.header,
                 &row.row,
-                &crate::write_sources::Interpretation::Applied,
+                &coven_format::snapshot_rows::ChangeVerdict::Applied,
             )?;
         }
     }

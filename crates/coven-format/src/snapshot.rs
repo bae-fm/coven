@@ -21,10 +21,13 @@ pub struct SnapshotHeader {
     pub writes: WritePositions,
     /// Consumed store-log positions from the sealed prefix.
     pub store_log: EntryPositions,
-    /// Counts: synced rows, applied writes, columns, merged rows and losses.
-    pub counts: [u64; 5],
+    /// Counts: synced rows, applied writes, columns, merged rows, losses and
+    /// authored changes.
+    pub counts: [u64; SECTIONS],
 }
-impl Wire for [u64; 5] {
+/// The number of record sections (D7).
+pub const SECTIONS: usize = 6;
+impl Wire for [u64; SECTIONS] {
     fn put(&self, out: &mut Encoder) -> Result<(), Error> {
         for n in self {
             n.put(out)?;
@@ -32,13 +35,11 @@ impl Wire for [u64; 5] {
         Ok(())
     }
     fn get(input: &mut Decoder<'_>) -> Result<Self, Error> {
-        Ok([
-            Wire::get(input)?,
-            Wire::get(input)?,
-            Wire::get(input)?,
-            Wire::get(input)?,
-            Wire::get(input)?,
-        ])
+        let mut counts = [0; SECTIONS];
+        for count in &mut counts {
+            *count = Wire::get(input)?;
+        }
+        Ok(counts)
     }
 }
 impl SnapshotHeader {
@@ -62,6 +63,8 @@ pub enum SnapshotRecord {
     Merge(MergeRow),
     /// A displaced cell, removed row or excluded write's row.
     Loss(Loss),
+    /// An original row change and its verdict, kept as source evidence.
+    Authored(AuthoredChange),
 }
 impl SnapshotRecord {
     pub(crate) fn put(&self, out: &mut Encoder) -> Result<(), Error> {
@@ -72,6 +75,7 @@ impl SnapshotRecord {
             Self::Column(v) => v.put(out),
             Self::Merge(v) => v.put(out),
             Self::Loss(v) => v.put(out),
+            Self::Authored(v) => v.put(out),
         }
     }
     pub(crate) fn get(input: &mut Decoder<'_>, oracle: &impl WriteOracle) -> Result<Self, Error> {
@@ -81,6 +85,7 @@ impl SnapshotRecord {
             2 => Ok(Self::Column(Wire::get(input)?)),
             3 => Ok(Self::Merge(MergeRow::get(input, oracle)?)),
             4 => Ok(Self::Loss(Wire::get(input)?)),
+            5 => Ok(Self::Authored(Wire::get(input)?)),
             tag => Err(Error::UnknownTag {
                 field: "snapshot section",
                 tag,
@@ -97,6 +102,7 @@ impl SnapshotRecord {
             }
             Self::Merge(v) => v.validate(),
             Self::Loss(v) => v.validate(),
+            Self::Authored(v) => v.validate(),
         }
     }
     fn section(&self) -> u8 {
@@ -106,6 +112,7 @@ impl SnapshotRecord {
             Self::Column(_) => 2,
             Self::Merge(_) => 3,
             Self::Loss(_) => 4,
+            Self::Authored(_) => 5,
         }
     }
     fn key(&self) -> RecordKey {
@@ -115,6 +122,7 @@ impl SnapshotRecord {
             Self::Column(v) => RecordKey::Column(v.clone()),
             Self::Merge(v) => RecordKey::Row(v.state.row().clone()),
             Self::Loss(v) => RecordKey::Loss(v.key()),
+            Self::Authored(v) => RecordKey::Change(v.id()),
         }
     }
     fn check_header(&self, h: &SnapshotHeader) -> Result<(), Error> {
@@ -168,6 +176,30 @@ impl SnapshotRecord {
                 }
                 Ok(())
             }
+            Self::Authored(v) => {
+                audience(&v.change.row)?;
+                covered(v.header.position)?;
+                for source in v.change.sources.changes() {
+                    covered(source.write)?;
+                }
+                match &v.verdict {
+                    ChangeVerdict::Excluded(LostWriteCause::SchemaChange(version)) => require(
+                        *version <= h.schema_version,
+                        "change verdict",
+                        Rule::Coverage,
+                    ),
+                    ChangeVerdict::Excluded(LostWriteCause::Reset(entry)) => {
+                        require(h.store_log.covers(*entry), "change verdict", Rule::Coverage)
+                    }
+                    ChangeVerdict::Dependent(sources) => {
+                        for source in sources {
+                            covered(source.write)?;
+                        }
+                        Ok(())
+                    }
+                    _ => Ok(()),
+                }
+            }
         }
     }
 }
@@ -178,10 +210,11 @@ enum RecordKey {
     Write(WriteId),
     Column(SyncedColumn),
     Loss((RowId, u64, LossIdentity, bool, u8, Option<WriteId>)),
+    Change(crate::write_sources::ChangeId),
 }
 struct StreamState {
     header: SnapshotHeader,
-    remaining: [u64; 5],
+    remaining: [u64; SECTIONS],
     previous: Option<(u8, RecordKey)>,
     ended: bool,
 }
@@ -216,7 +249,7 @@ impl StreamState {
     }
     fn end(&mut self) -> Result<(), Error> {
         require(
-            !self.ended && self.remaining == [0; 5],
+            !self.ended && self.remaining == [0; SECTIONS],
             "snapshot end",
             Rule::SnapshotSequence,
         )?;

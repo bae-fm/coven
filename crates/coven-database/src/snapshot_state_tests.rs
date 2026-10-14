@@ -118,7 +118,11 @@ async fn active_loss_records_require_their_merge_history_and_removed_rows_can_re
         if damage == 1 {
             let index = records.iter().position(|r| matches!(r, SnapshotRecord::Loss(loss) if matches!(loss.values, LossValues::Cell { .. }))).unwrap();
             let cell = records.remove(index);
-            records.push(cell);
+            let end = records
+                .iter()
+                .rposition(|r| matches!(r, SnapshotRecord::Loss(_)))
+                .map_or(records.len(), |last| last + 1);
+            records.insert(end, cell);
         }
         let (mut encoder, mut plaintext) = SnapshotEncoder::start(header).unwrap();
         for record in records {

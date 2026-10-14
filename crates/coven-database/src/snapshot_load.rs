@@ -180,6 +180,7 @@ pub(crate) fn read(
     let mut decoder = SnapshotChunkDecoder::new(prefix);
     let mut checked_header = false;
     let mut loss_state = None;
+    let mut complete = BTreeSet::new();
     let mut chunk = [0; coven_format::chunks::CHUNK_SIZE];
     loop {
         let length = match input.read(&mut chunk) {
@@ -227,10 +228,24 @@ pub(crate) fn read(
                 SnapshotRecord::Loss(loss) => {
                     crate::snapshot_state::loss(database, schema, loss, &metadata, &mut loss_state)?
                 }
+                SnapshotRecord::Authored(authored) => {
+                    crate::write_sources::load_evidence(database, &authored)?;
+                    if authored.complete {
+                        complete.insert((
+                            coven_format::merge_fields::encode_write_header(&authored.header)
+                                .map_err(DbError::from)?,
+                            authored.change.row.audience.clone(),
+                        ));
+                    }
+                }
             }
         }
     }
     decoder.finish().map_err(SnapshotError::Format)?;
+    for (header, audience) in complete {
+        let header = coven_format::merge_fields::decode_write_header(&header)?;
+        crate::write_sources::complete(database, &header, &audience)?;
+    }
     let header = decoder
         .header()
         .ok_or_else(|| invalid("snapshot has no header"))?;

@@ -140,7 +140,7 @@ impl<R: Read> DownloadedWriteStream<R> {
                                 database,
                                 &self.header.header,
                                 &row.row,
-                                &crate::write_sources::Interpretation::Dropped,
+                                &coven_format::snapshot_rows::ChangeVerdict::Dropped,
                             )?;
                         }
                         return Ok(());

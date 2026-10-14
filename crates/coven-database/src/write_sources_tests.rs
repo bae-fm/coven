@@ -29,7 +29,11 @@ async fn captures_each_actual_setter_and_keeps_empty_delete_sources() {
                 r.get::<_, Option<Vec<u8>>>(0)
             })
             .unwrap();
-        assert!(judgments.iter().all(|a| a.as_deref() == Some(&[][..])));
+        let applied = merge_fields::encode_change_verdict(
+            &coven_format::snapshot_rows::ChangeVerdict::Applied,
+        )
+        .unwrap();
+        assert!(judgments.iter().all(|a| a.as_deref() == Some(&applied[..])));
     });
     assert!(first.parts[0].rows[0].sources.changes().next().is_none());
     let third = &records[2].parts[0].rows[0];
@@ -461,10 +465,11 @@ async fn frozen_display_and_dismissal_preserve_original_parents_sources_and_admi
         );
         // Each original keeps its schema exclusion as this device's interpretation.
         for (_, admission) in before {
-            assert_eq!(admission[0], 1);
             assert_eq!(
-                merge_fields::decode_lost_write_cause(&admission[1..]).unwrap(),
-                LostWriteCause::SchemaChange(2)
+                merge_fields::decode_change_verdict(&admission).unwrap(),
+                coven_format::snapshot_rows::ChangeVerdict::Excluded(
+                    coven_format::snapshot_rows::LostWriteCause::SchemaChange(2)
+                )
             );
         }
     });

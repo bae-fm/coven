@@ -191,7 +191,26 @@ async fn a_snapshot_round_trips_rows_history_and_excluded_changes() {
     let (header, snapshot) = decode(&frames(&receiver, Audience::Store).await);
     assert_eq!(header.schema_version, 1);
     assert_eq!(header.writes.0, [excluded.header.position]);
-    assert_eq!(header.counts, [1, 5, 3, 1, 1]);
+    // Five original changes travel as source evidence with their verdicts.
+    assert_eq!(header.counts, [1, 5, 3, 1, 1, 5]);
+    let verdicts: Vec<_> = snapshot
+        .iter()
+        .filter_map(|record| match record {
+            SnapshotRecord::Authored(authored) => Some(authored.verdict.clone()),
+            _ => None,
+        })
+        .collect();
+    use coven_format::snapshot_rows::{ChangeVerdict, LostWriteCause};
+    assert_eq!(
+        verdicts,
+        [
+            ChangeVerdict::Applied,
+            ChangeVerdict::Applied,
+            ChangeVerdict::Applied,
+            ChangeVerdict::Applied,
+            ChangeVerdict::Excluded(LostWriteCause::SchemaChange(1)),
+        ]
+    );
     let synced = snapshot
         .iter()
         .find_map(|record| match record {
@@ -228,7 +247,12 @@ async fn a_snapshot_round_trips_rows_history_and_excluded_changes() {
     assert_eq!(cells["title"].value.value, Value::Text("excluded".into()));
     assert_eq!(count(&source, "_coven_uploads"), 5);
     assert_eq!(count(&receiver, "_coven_uploads"), 0);
-    assert_loaded_losses(&receiver, &source).await;
+    // The source holds the excluded write's original header, which this test
+    // altered for the receiver; a loader of the receiver's evidence must not.
+    let target_store = TestStore::with_ids(&ids);
+    let target = target_store.schema(notes(), NOTES).await.unwrap();
+    assert_loaded_losses(&receiver, &target).await;
+    target.close().await.unwrap();
     source.close().await.unwrap();
     receiver.close().await.unwrap();
 }
@@ -332,6 +356,9 @@ async fn circle_snapshot_has_only_its_rows_and_reference_metadata() {
             SnapshotRecord::Merge(row) => assert_eq!(row.state.row().audience, circle),
             SnapshotRecord::Column(column) => assert_eq!(column.table, "notes"),
             SnapshotRecord::Write(_) => {}
+            SnapshotRecord::Authored(authored) => {
+                assert_eq!(authored.change.row.audience, circle)
+            }
             other => panic!("unexpected record {other:?}"),
         }
     }

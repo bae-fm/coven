@@ -44,7 +44,7 @@ pub(crate) fn write<E>(
 ) -> Result<(), SnapshotWriteError<E>> {
     let audience = audience_text(&id.audience);
     let selected = id.audience.clone();
-    let mut counts = [0; 5];
+    let mut counts = [0; coven_format::snapshot::SECTIONS];
     visit_rows(database, schema, &id.audience, |row| {
         counts[3] += 1;
         if row.state.present() && row.loss.is_none() {
@@ -77,6 +77,10 @@ pub(crate) fn write<E>(
         [&audience],
         |r| r.get::<_, i64>(0).map(|n| n as u64),
     )?;
+    crate::write_sources::visit_evidence(database, &id.audience, &writes, |_| {
+        counts[5] += 1;
+        Ok::<_, SnapshotWriteError<E>>(())
+    })?;
     let header = SnapshotHeader {
         id,
         schema_version: database.schema_version()?,
@@ -93,6 +97,7 @@ pub(crate) fn write<E>(
         )?),
         counts,
     };
+    let covered = header.writes.clone();
     let (mut encoder, header_frame) = SnapshotEncoder::start(header)?;
     begin(encoder.header()).map_err(SnapshotWriteError::Output)?;
     emit(header_frame).map_err(SnapshotWriteError::Output)?;
@@ -157,6 +162,10 @@ pub(crate) fn write<E>(
     })?;
     crate::loss_record::visit(database, &selected, |loss| {
         record(SnapshotRecord::Loss(loss))
+    })?;
+    // Original changes and verdicts later changes may name as sources (§8, D7).
+    crate::write_sources::visit_evidence(database, &selected, &covered, |authored| {
+        record(SnapshotRecord::Authored(authored))
     })?;
     emit(encoder.finish()?).map_err(SnapshotWriteError::Output)
 }

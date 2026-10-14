@@ -14,9 +14,8 @@
 //! entry keeps its format in `record`'s frame prefix. No ciphertext is kept for either.
 //! `_coven_uploads` retains its rowid for queue order and incremental BLOB reads.
 //! Cell keys start with the row; column-wide cell edits occur only in migrations.
-//! Original-change admission is NULL until judged, then the receiving device's
-//! interpretation (`write_sources::Interpretation`). Consumed positions do not
-//! establish admission.
+//! Original-change admission is NULL until judged here, then this device's
+//! `ChangeVerdict`. Consumed positions do not establish admission.
 //! Write-id indexes serve SQLite's incoming foreign-key checks on INSERT with
 //! RETURNING, which EXPLAIN QUERY PLAN includes alongside explicit lookups.
 
@@ -451,6 +450,7 @@ macro_rules! coven_tables {
                 PRIMARY KEY(write_id,audience,table_name,key),
                 FOREIGN KEY(write_id,audience) REFERENCES _coven_authored_parts(write_id,audience)
             ) STRICT, WITHOUT ROWID;
+            CREATE INDEX _coven_authored_changes_audience ON _coven_authored_changes(audience,write_id,table_name,key);
         ");
         $visit!(_coven_conversion_schemas, "
             CREATE TABLE _coven_conversion_schemas (

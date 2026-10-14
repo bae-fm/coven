@@ -302,7 +302,7 @@ pub(crate) fn interpret(
     schema: &WriteSchema,
     download: DownloadedWrite,
 ) -> Result<WriteRecord, DbError> {
-    use crate::write_sources::Interpretation;
+    use coven_format::snapshot_rows::ChangeVerdict;
     let mut record = WriteRecord {
         header: download.header,
         parts: download
@@ -323,7 +323,7 @@ pub(crate) fn interpret(
                     database,
                     &record.header,
                     &row.row,
-                    &Interpretation::Dropped,
+                    &ChangeVerdict::Dropped,
                 )?;
             }
         }
@@ -376,7 +376,7 @@ pub(crate) fn interpret(
                     database,
                     &record.header,
                     row,
-                    &Interpretation::Excluded(cause),
+                    &ChangeVerdict::Excluded(cause),
                 )?;
             }
             // A reset ignores the part without a loss (§19.3); a schema
@@ -409,7 +409,7 @@ pub(crate) fn interpret(
                     database,
                     &record.header,
                     row,
-                    &Interpretation::Applied,
+                    &ChangeVerdict::Applied,
                 )?;
             }
         } else {
@@ -431,7 +431,7 @@ fn classify(
     header: &WriteHeader,
     rows: Vec<RowChange>,
 ) -> Result<Vec<RowChange>, DbError> {
-    use crate::write_sources::Interpretation;
+    use coven_format::snapshot_rows::ChangeVerdict;
     let mut applied = Vec::new();
     for row in rows {
         let provenance = coven_merge::Provenance {
@@ -451,7 +451,7 @@ fn classify(
                     database,
                     header,
                     &row.row,
-                    &Interpretation::Dependent(sources.clone()),
+                    &ChangeVerdict::Dependent(sources.clone()),
                 )?;
                 freeze(
                     database,
@@ -465,7 +465,7 @@ fn classify(
                 )?;
             }
             _ => {
-                crate::write_sources::admit(database, header, &row.row, &Interpretation::Applied)?;
+                crate::write_sources::admit(database, header, &row.row, &ChangeVerdict::Applied)?;
                 applied.push(row);
             }
         }

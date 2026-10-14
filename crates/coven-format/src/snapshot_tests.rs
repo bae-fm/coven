@@ -11,7 +11,7 @@ fn raw(record: &SnapshotRecord) -> Vec<u8> {
 }
 fn single_header(section: usize, audience: Audience, count: u64) -> SnapshotHeader {
     let mut header = test_utils::snapshot_header();
-    header.counts = [0; 5];
+    header.counts = [0; 6];
     header.counts[section] = count;
     header.id.audience = audience;
     header
@@ -153,7 +153,7 @@ fn a_snapshot_larger_than_the_frame_bound_is_streamed_in_key_order() {
 #[test]
 fn empty_snapshot_requires_an_exact_end_frame() {
     let mut header = test_utils::snapshot_header();
-    header.counts = [0; 5];
+    header.counts = [0; 6];
     let (mut writer, first) = SnapshotEncoder::start(header).unwrap();
     let mut reader =
         SnapshotDecoder::start(&first, &test_utils::snapshot_prefix(writer.header())).unwrap();
@@ -188,7 +188,7 @@ fn eof_before_the_end_marker_is_truncation_at_every_record_boundary() {
     assert_eq!(reader.finish(), Ok(()));
 
     let mut empty = header;
-    empty.counts = [0; 5];
+    empty.counts = [0; 6];
     let (mut writer, first) = SnapshotEncoder::start(empty).unwrap();
     let mut reader =
         SnapshotDecoder::start(&first, &test_utils::snapshot_prefix(writer.header())).unwrap();
@@ -378,7 +378,7 @@ fn snapshot_fixture_classifies_every_consumed_write_once() {
 fn snapshot_positions_are_bounded_in_the_prefix_independently_of_the_frame() {
     use coven_foundation::id_source::DeviceId;
     let mut header = test_utils::snapshot_header();
-    header.counts = [0; 5];
+    header.counts = [0; 6];
     header.writes.0 = (0..crate::wire::MAX_ITEMS)
         .map(|device| coven_merge::WriteId {
             device: DeviceId(device as u64),
@@ -396,7 +396,7 @@ fn snapshot_positions_are_bounded_in_the_prefix_independently_of_the_frame() {
         .collect();
     let prefix = test_utils::snapshot_prefix(&header);
     let (_, frame) = SnapshotEncoder::start(header.clone()).unwrap();
-    assert_eq!(frame.len(), 68);
+    assert_eq!(frame.len(), 76);
     let prefix =
         crate::sealed_snapshot::SnapshotObjectPrefix::decode(&prefix.encode().unwrap()).unwrap();
     assert_eq!(

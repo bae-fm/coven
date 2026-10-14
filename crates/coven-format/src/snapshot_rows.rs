@@ -142,3 +142,134 @@ impl Wire for LostWriteCause {
         }
     }
 }
+
+/// How a device interpreted one original row change (§8, §10, §17.1, §19.3).
+/// It decides whether the change survives as a source for later changes,
+/// independently of dismissible losses and consumed positions.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ChangeVerdict {
+    /// Never interpreted here: a loaded snapshot already carries its effects.
+    Unjudged,
+    /// It entered the merge.
+    Applied,
+    /// A schema change or reset excluded its part.
+    Excluded(LostWriteCause),
+    /// Its write landed outside a retirement window and has no effects.
+    Dropped,
+    /// It used data that does not survive: these sources, in role order.
+    Dependent(Vec<crate::write_sources::ChangeId>),
+}
+impl ChangeVerdict {
+    /// Whether the change survives as data for later changes.
+    pub fn retained(&self) -> bool {
+        matches!(self, Self::Unjudged | Self::Applied)
+    }
+}
+impl Wire for ChangeVerdict {
+    fn put(&self, out: &mut Encoder) -> Result<(), Error> {
+        match self {
+            Self::Unjudged => 0u8.put(out),
+            Self::Applied => 1u8.put(out),
+            Self::Excluded(cause) => {
+                2u8.put(out)?;
+                cause.put(out)
+            }
+            Self::Dropped => 3u8.put(out),
+            Self::Dependent(sources) => {
+                4u8.put(out)?;
+                sources.put(out)
+            }
+        }
+    }
+    fn get(input: &mut Decoder<'_>) -> Result<Self, Error> {
+        match u8::get(input)? {
+            0 => Ok(Self::Unjudged),
+            1 => Ok(Self::Applied),
+            2 => Ok(Self::Excluded(Wire::get(input)?)),
+            3 => Ok(Self::Dropped),
+            4 => Ok(Self::Dependent(Wire::get(input)?)),
+            tag => Err(Error::UnknownTag {
+                field: "change verdict",
+                tag,
+            }),
+        }
+    }
+}
+
+/// One original row change kept as source evidence (D7 section 5): the
+/// authored header of its part, whether that part arrived whole, the original
+/// change with its sources, and its author's verdict.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AuthoredChange {
+    /// The original write header, before any conversion.
+    pub header: crate::write::WriteHeader,
+    /// Whether every original change of this part is known, so absence of a
+    /// named row is proof rather than a wait.
+    pub complete: bool,
+    /// The original change, with its generation source and replaced setters.
+    pub change: crate::write::RowChange,
+    /// Its interpretation by the snapshot's author.
+    pub verdict: ChangeVerdict,
+}
+impl Wire for AuthoredChange {
+    fn put(&self, out: &mut Encoder) -> Result<(), Error> {
+        self.header.put(out)?;
+        u8::from(self.complete).put(out)?;
+        self.change.put(out)?;
+        self.verdict.put(out)
+    }
+    fn get(input: &mut Decoder<'_>) -> Result<Self, Error> {
+        let header = Wire::get(input)?;
+        let complete = match u8::get(input)? {
+            0 => false,
+            1 => true,
+            tag => {
+                return Err(Error::UnknownTag {
+                    field: "authored part completeness",
+                    tag,
+                })
+            }
+        };
+        Ok(Self {
+            header,
+            complete,
+            change: Wire::get(input)?,
+            verdict: Wire::get(input)?,
+        })
+    }
+}
+impl AuthoredChange {
+    /// The original change's identity.
+    pub fn id(&self) -> crate::write_sources::ChangeId {
+        crate::write_sources::ChangeId {
+            write: self.header.position,
+            row: self.change.row.clone(),
+        }
+    }
+
+    pub(crate) fn validate(&self) -> Result<(), Error> {
+        self.header.validate()?;
+        self.change.validate()?;
+        match &self.verdict {
+            ChangeVerdict::Excluded(cause) => cause.validate(),
+            ChangeVerdict::Dependent(sources) => {
+                require(
+                    !sources.is_empty(),
+                    "dependency sources",
+                    FormatRule::Required,
+                )?;
+                for source in sources {
+                    positive(source.write.number)?;
+                    require(
+                        source.row.key == self.change.row.key
+                            && source.row.audience == self.change.row.audience,
+                        "dependency source row",
+                        FormatRule::Required,
+                    )?;
+                }
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
+}
