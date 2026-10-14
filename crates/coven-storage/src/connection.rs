@@ -218,7 +218,7 @@ impl<P: ProviderOps + ?Sized> Storage for StorageConnection<P> {
         let result = async {
             invitation.check(&self.config())?;
             self.provider.join(invitation).await?;
-            self.list_checked(&ObjectPrefix::all(store)).await?;
+            self.list_writers(store).await?;
             Ok(())
         }
         .await;

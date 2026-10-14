@@ -7,6 +7,43 @@ pub(super) struct Page {
     pub(super) next: Option<String>,
 }
 impl S3Storage {
+    pub(super) async fn writer_folders(
+        &self,
+        store: coven_foundation::id_source::StoreId,
+    ) -> Result<Vec<coven_foundation::id_source::DeviceId>, StorageError> {
+        let prefix = ObjectPrefix::store_logs(store).under(&self.prefix);
+        let mut writers = std::collections::BTreeSet::new();
+        let mut marker = None;
+        let mut pages = Pagination::new();
+        loop {
+            let page = self
+                .list_page(self.settings.listing, &prefix, Some("/"), marker, None)
+                .await?;
+            for folder in page.folders {
+                let name = folder
+                    .prefix()
+                    .and_then(|path| path.strip_prefix(&prefix))
+                    .and_then(|name| name.strip_suffix('/'))
+                    .ok_or_else(|| {
+                        StorageFailure::Protocol.with_source("S3 returned another writer folder")
+                    })?;
+                let path = ObjectPath::parse(&format!("{store}/store-log/{name}/1"))?;
+                writers.insert(path.device().expect("store-log writer"));
+            }
+            for object in page.contents {
+                let name = object.key().ok_or(StorageFailure::Protocol)?;
+                if name != prefix {
+                    return Err(StorageFailure::Protocol
+                        .with_source("S3 writer listing returned a non-folder"));
+                }
+            }
+            let Some(next) = page.next else { break };
+            pages.check(&next)?;
+            marker = Some(next);
+        }
+        Ok(writers.into_iter().collect())
+    }
+
     pub(super) async fn list_page(
         &self,
         protocol: S3Listing,
@@ -74,3 +111,7 @@ impl S3Storage {
         })
     }
 }
+
+#[cfg(test)]
+#[path = "s3_listing_tests.rs"]
+mod tests;

@@ -450,6 +450,7 @@ impl OperationRun {
                 command = self.commands.recv() => {
                     let Some(Request { command, reply }) = command else { break; };
                     if matches!(command, Command::Close) { let _ = reply.send(Ok(Output::Unit)); break; }
+                    self.sync.set_discovery_download_limit(self.files.transfer_limits().downloads);
                     if let Command::Storage(storage) = &command {
                         if let Err(error) = self.files.set_storage(storage.clone(), std::future::ready(Ok(()))).await {
                             let _ = reply.send(Err(error));
@@ -549,6 +550,8 @@ impl OperationRun {
 
     // Journal failures stop the worker; maintenance failures stop only the pass.
     async fn drive(&mut self) -> Result<Option<SyncError>, SyncError> {
+        self.sync
+            .set_discovery_download_limit(self.files.transfer_limits().downloads);
         let mut maintenance_failure = None;
         loop {
             match self.sync.schedule_version_changes().await {

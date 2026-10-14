@@ -288,6 +288,12 @@ impl ProviderOps for OneDriveStorage {
     async fn list(&self, listing: &mut ObjectListing) -> Result<(), StorageError> {
         self.list_folders(listing).await
     }
+    async fn list_writers(
+        &self,
+        store: coven_foundation::id_source::StoreId,
+    ) -> Result<Vec<coven_foundation::id_source::DeviceId>, StorageError> {
+        self.writer_folders(store).await
+    }
     async fn delete(&self, path: &ObjectPath) -> Result<(), StorageError> {
         let response = self
             .send(Method::DELETE, &self.by_path(path, "")?, Body::Empty)

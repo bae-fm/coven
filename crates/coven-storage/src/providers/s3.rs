@@ -486,6 +486,12 @@ impl ProviderOps for S3Storage {
         }
         Ok(())
     }
+    async fn list_writers(
+        &self,
+        store: coven_foundation::id_source::StoreId,
+    ) -> Result<Vec<coven_foundation::id_source::DeviceId>, StorageError> {
+        self.writer_folders(store).await
+    }
     async fn delete(&self, path: &ObjectPath) -> Result<(), StorageError> {
         self.delete_key(&path.under(&self.prefix)).await
     }

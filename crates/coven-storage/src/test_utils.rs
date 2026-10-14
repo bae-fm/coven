@@ -12,8 +12,12 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
 
+#[path = "memory_reads.rs"]
+mod memory_reads;
 #[path = "memory_requests.rs"]
 mod memory_requests;
+#[path = "memory_writers.rs"]
+mod memory_writers;
 pub use memory_requests::MemoryRequest;
 #[path = "memory_key_admin.rs"]
 mod memory_key_admin;
@@ -24,6 +28,8 @@ pub use memory_key_admin::MemoryKeyAdmin;
 pub struct Faults {
     /// Fail this many calls before doing their work.
     pub fail_next: usize,
+    /// Fail exact reads at these paths, retaining other in-flight responses.
+    pub read_failures: BTreeMap<ObjectPath, StorageFailure>,
     /// The classification of injected failures.
     pub failure: StorageFailure,
     /// Delay each call without blocking its executor.
@@ -50,6 +56,7 @@ impl Faults {
     pub fn none() -> Self {
         Self {
             fail_next: 0,
+            read_failures: BTreeMap::new(),
             failure: StorageFailure::Network,
             delay: Duration::ZERO,
             drop_part: false,
@@ -143,6 +150,7 @@ struct State {
     sent_bytes: u64,
     largest_part: usize,
     held_listing: Option<HeldRequest>,
+    held_read: Option<memory_reads::HeldRead>,
     held_creation: Option<HeldRequest>,
 }
 
@@ -351,37 +359,6 @@ impl MemoryStorage {
     pub async fn set_faults(&self, faults: Faults) {
         self.provider.state.lock().await.faults = faults;
     }
-    /// Hold one listing's reply after taking its snapshot. The test is notified
-    /// when the result is fixed, and can mutate remote state before releasing it.
-    pub async fn hold_next_listing(
-        &self,
-        prefix: ObjectPrefix,
-        listed: tokio::sync::oneshot::Sender<()>,
-        resume: tokio::sync::oneshot::Receiver<()>,
-    ) {
-        let mut state = self.provider.state.lock().await;
-        assert!(state.held_listing.is_none(), "a listing is already held");
-        state.held_listing = Some(HeldRequest {
-            prefix,
-            listed,
-            resume,
-        });
-    }
-    /// Hold a single-request creation before publication, notifying its observer.
-    pub async fn hold_next_creation(
-        &self,
-        prefix: ObjectPrefix,
-        started: tokio::sync::oneshot::Sender<()>,
-        resume: tokio::sync::oneshot::Receiver<()>,
-    ) {
-        let mut state = self.provider.state.lock().await;
-        assert!(state.held_creation.is_none(), "a creation is already held");
-        state.held_creation = Some(HeldRequest {
-            prefix,
-            listed: started,
-            resume,
-        });
-    }
     /// Model native grants that remain until the owner changes them in the provider.
     pub async fn set_retained_access(&self, account: &str, shares: Vec<RetainedAccess>) {
         let mut state = self.provider.state.lock().await;
@@ -588,24 +565,14 @@ impl ProviderOps for MemoryProvider {
         path: &ObjectPath,
         range: Option<ByteRange>,
     ) -> Result<ObjectRead, StorageError> {
-        self.before(MemoryRequest::Read(path.clone(), range))
-            .await?;
-        let mut state = self.state.lock().await;
-        let object = state.objects.get(path).ok_or(StorageFailure::NotFound)?;
-        let metadata = object.metadata(path, self.time_resolution);
-        let bytes = match range {
-            Some(range) => range.select(&object.bytes)?,
-            None => object.bytes.clone(),
-        };
-        if let Some(range) = range {
-            state.ranges.push(range);
-        }
-        state.reads.push((
-            path.clone(),
-            range.map_or(0, ByteRange::start),
-            bytes.len() as u64,
-        ));
-        Ok(ObjectRead { metadata, bytes })
+        self.read_recorded(path, range).await
+    }
+
+    async fn list_writers(
+        &self,
+        store: coven_foundation::id_source::StoreId,
+    ) -> Result<Vec<coven_foundation::id_source::DeviceId>, StorageError> {
+        self.writer_folders(store).await
     }
     async fn list(&self, listing: &mut ObjectListing) -> Result<(), StorageError> {
         let prefix = listing.prefix();

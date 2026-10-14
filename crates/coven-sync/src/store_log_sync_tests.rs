@@ -10,7 +10,7 @@ use coven_foundation::{
 };
 use coven_storage::ObjectPrefix;
 use coven_storage::{
-    test_utils::{Faults, MemoryStorage},
+    test_utils::{Faults, MemoryRequest, MemoryStorage},
     StorageConfig,
 };
 use std::time::{Duration, UNIX_EPOCH};
@@ -83,15 +83,24 @@ pub(crate) async fn find_copy(
     key: KeyId,
     member: &coven_crypto::MemberId,
 ) -> Option<keys::ObservedCopy> {
-    keys::read_copies(storage, store(1), &mut Vec::new())
-        .await
-        .unwrap()
-        .into_iter()
-        .find(|copy| {
-            copy.prefix.audience == audience
-                && copy.prefix.key == key
-                && &copy.prefix.member == member
-        })
+    for object in storage.list(&ObjectPrefix::keys(store(1))).await.unwrap() {
+        let bytes = storage.read(&object.path).await.unwrap();
+        // Tests also plant malformed copies; inspection skips them.
+        let Ok(sealed) = SealedKey::decode(&bytes) else {
+            continue;
+        };
+        if sealed.prefix().audience == audience
+            && sealed.prefix().key == key
+            && &sealed.prefix().member == member
+        {
+            return Some(keys::ObservedCopy {
+                path: object.path,
+                prefix: sealed.prefix().clone(),
+                bytes,
+            });
+        }
+    }
+    None
 }
 
 async fn copy_path(
@@ -593,87 +602,6 @@ async fn own_device_removal_stops_sync() {
 }
 
 #[tokio::test]
-async fn far_future_entry_waits_for_missing_or_damaged_sealed_keys() {
-    let storage = storage();
-    let mut a = device(storage.clone(), 1, member(1), store(1)).await;
-    a.clock.set(UNIX_EPOCH + Duration::from_secs(365 * 86400));
-    a.create(key(1)).await;
-    let path = copy_path(
-        storage.as_ref(),
-        Audience::Store,
-        key(1),
-        &a.member.member_id(),
-    )
-    .await;
-    let original = storage.read(&path).await.unwrap();
-    storage.delete(&path).await.unwrap();
-    let mut b = device(storage.clone(), 2, member(1), store(1)).await;
-    b.sync().await;
-    assert!(b.log().await.entries.is_empty());
-    let mut damaged = original.clone();
-    let last = damaged.len() - 1;
-    damaged[last] ^= 1;
-    storage.create(&path, &damaged).await.unwrap();
-    // A refused copy is the key copy's own pending record, not a pass failure.
-    let store_copy = crate::PendingSubject::KeyCopy {
-        audience: Audience::Store,
-        key: key(1),
-        member: b.member.member_id(),
-    };
-    let copy_reason = |records: Vec<crate::PendingRecord>| {
-        records
-            .into_iter()
-            .find(|record| record.subject == store_copy)
-            .map(|record| record.reason)
-    };
-    assert!(b.sync.step().await.unwrap().is_empty());
-    assert!(matches!(
-        copy_reason(b.db.pending().await.unwrap()),
-        Some(crate::PendingReason::Refused(Refusal::Decryption { .. }))
-    ));
-    assert!(b.log().await.entries.is_empty());
-    storage.delete(&path).await.unwrap();
-    for claimed_key in [key(1), key(2)] {
-        let prefix = coven_format::sealed_key::KeyCopyPrefix {
-            audience: Audience::Store,
-            key: claimed_key,
-            member: a.member.member_id(),
-        };
-        let wrong = coven_crypto::seal_store_key(
-            &StoreKey::generate(key(2)).unwrap(),
-            &a.member.sealing_public_key(),
-            path.as_str(),
-            &prefix.encode().unwrap(),
-        )
-        .unwrap();
-        let wrong = prefix.encode_box(&wrong).unwrap();
-        storage.create(&path, &wrong).await.unwrap();
-        assert!(b.sync.step().await.unwrap().is_empty());
-        let reason = copy_reason(b.db.pending().await.unwrap());
-        if claimed_key == key(1) {
-            assert!(matches!(
-                reason,
-                Some(crate::PendingReason::Refused(Refusal::WrongIdentity { .. }))
-            ));
-        } else {
-            assert_eq!(
-                reason,
-                Some(crate::PendingReason::KeyUnavailable {
-                    audience: Audience::Store,
-                    key: key(1),
-                })
-            );
-        }
-        assert!(b.custody.read().unwrap().is_none());
-        storage.delete(&path).await.unwrap();
-    }
-    storage.create(&path, &original).await.unwrap();
-    b.sync().await;
-    assert_eq!(a.log().await, b.log().await);
-    assert_eq!(copy_reason(b.db.pending().await.unwrap()), None);
-}
-
-#[tokio::test]
 async fn far_future_entry_applies_and_a_restored_device_stamps_after_it() {
     let storage = storage();
     let mut a = device(storage.clone(), 1, member(1), store(1)).await;
@@ -915,14 +843,20 @@ async fn only_newer_envelopes_require_an_update() {
                 .unwrap()
                 .is_empty());
             assert_eq!(storage.read(&path).await.unwrap(), bytes);
-            storage.delete(&path).await.unwrap();
-            storage.create(&path, &original).await.unwrap();
-            b.sync().await;
-            if !sealed_key && version == 0 {
-                assert!(b.log().await.entries.is_empty());
+            assert_ne!(original, bytes);
+            // The retained immutable bytes decide the next attempt as well;
+            // the object is not downloaded again to look for another version.
+            let before = storage.request_trace().len();
+            let again = b.sync.sync_store_log().await;
+            if version == 2 {
+                assert!(matches!(again, Err(SyncError::UpdateRequired(_))));
             } else {
-                assert_eq!(b.log().await, a.log().await);
+                again.unwrap();
             }
+            assert!(!storage.request_trace()[before..]
+                .iter()
+                .any(|request| matches!(request, MemoryRequest::Read(read, _) if read == &path)));
+            assert!(b.log().await.entries.is_empty());
             assert!(b.db.operations().await.unwrap().is_empty());
         }
     }

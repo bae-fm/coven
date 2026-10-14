@@ -249,21 +249,28 @@ pub(crate) struct ObservedCopy {
 }
 
 pub(crate) async fn read_copies(
+    database: &coven_database::Database,
+    reads: &crate::pass_reads::PassReads,
+    limit: std::num::NonZeroUsize,
     storage: &dyn coven_storage::Storage,
     store: coven_foundation::id_source::StoreId,
     damages: &mut Vec<crate::DamagedObject>,
 ) -> Result<Vec<ObservedCopy>, SyncError> {
     let mut copies = Vec::new();
-    for object in storage
-        .list(&coven_storage::ObjectPrefix::keys(store))
-        .await?
+    let writers = crate::discovery::writers(database, reads, storage, store).await?;
+    for read in crate::discovery::scan(
+        database,
+        reads,
+        storage,
+        store,
+        coven_database::LogKind::KeyCopy,
+        &writers,
+        limit,
+    )
+    .await?
     {
-        if object.path.store() != store || object.path.key_copy_position().is_none() {
-            return Err(coven_storage::StorageFailure::Protocol
-                .with_source("key listing returned another layout")
-                .into());
-        }
-        let bytes = storage.read(&object.path).await?;
+        let object = read.metadata;
+        let bytes = read.bytes;
         match coven_format::sealed_key::SealedKey::decode(&bytes) {
             Ok(sealed) => copies.push(ObservedCopy {
                 path: object.path,
@@ -278,11 +285,14 @@ pub(crate) async fn read_copies(
     Ok(copies)
 }
 
-/// Open this member's copy of a store key, trying each copy in listing order.
+/// Open this member's copy of a store key, trying each retained copy in writer/number order.
 /// A copy that fails to open, names another key or misses `expected` is refused
 /// by itself and a later copy can still supply the key (§11). Without a
 /// commitment the key is tentative and its introducing entry must check it.
 pub(crate) async fn read_store_key(
+    database: &coven_database::Database,
+    reads: &crate::pass_reads::PassReads,
+    limit: std::num::NonZeroUsize,
     storage: &dyn coven_storage::Storage,
     store: coven_foundation::id_source::StoreId,
     key: KeyId,
@@ -291,7 +301,7 @@ pub(crate) async fn read_store_key(
 ) -> Result<StoreKey, SyncError> {
     let mut damages = Vec::new();
     let mut refused = None;
-    for copy in read_copies(storage, store, &mut damages).await? {
+    for copy in read_copies(database, reads, limit, storage, store, &mut damages).await? {
         if copy.prefix.audience != Audience::Store
             || copy.prefix.key != key
             || copy.prefix.member != member.member_id()

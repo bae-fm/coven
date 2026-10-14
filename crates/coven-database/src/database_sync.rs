@@ -23,6 +23,96 @@ impl Database {
         .await
     }
 
+    /// Complete retained entry or key-copy input, including input not yet applied.
+    pub async fn log_inputs(&self, kind: crate::LogKind) -> Result<Vec<crate::LogInput>, DbError> {
+        self.call(move |inner| {
+            inner
+                .access
+                .readers
+                .acquire_reader()
+                .with_reader(|reader| crate::log_input::inputs(reader, kind))
+        })
+        .await
+    }
+
+    /// Contiguous received positions; these never substitute for applied positions.
+    pub async fn log_downloads(
+        &self,
+        kind: crate::LogKind,
+    ) -> Result<Vec<(coven_foundation::id_source::DeviceId, u64)>, DbError> {
+        self.call(move |inner| {
+            inner
+                .access
+                .readers
+                .acquire_reader()
+                .with_reader(|reader| crate::log_input::positions(reader, kind))
+        })
+        .await
+    }
+
+    /// Writers known without listing storage: this device, every device a
+    /// received entry wrote from or registered (including removed and replaced
+    /// ones), and every writer folder remembered from an earlier listing.
+    pub async fn known_log_writers(
+        &self,
+    ) -> Result<std::collections::BTreeSet<coven_foundation::id_source::DeviceId>, DbError> {
+        self.call(move |inner| {
+            let mut writers = inner.with_store_log(|log| {
+                Ok::<_, DbError>(
+                    log.replay
+                        .state
+                        .devices
+                        .keys()
+                        .copied()
+                        .chain(log.entries.iter().map(|entry| entry.entry.position.device))
+                        .collect::<std::collections::BTreeSet<_>>(),
+                )
+            })?;
+            writers.insert(inner.access.device);
+            inner.access.readers.acquire_reader().with_reader(|reader| {
+                for kind in [crate::LogKind::Entry, crate::LogKind::KeyCopy] {
+                    writers.extend(
+                        crate::log_input::positions(reader, kind)?
+                            .into_iter()
+                            .map(|(writer, _)| writer),
+                    );
+                }
+                Ok(writers)
+            })
+        })
+        .await
+    }
+
+    /// Retain discovered writers even when their first exact read is still absent.
+    pub async fn remember_log_writers(
+        &self,
+        writers: Vec<coven_foundation::id_source::DeviceId>,
+    ) -> Result<(), DbError> {
+        self.call(move |inner| {
+            inner
+                .access
+                .with_writer(|writer| crate::log_input::remember_writers(writer, &writers))
+        })
+        .await
+    }
+
+    /// Retain complete inputs and advance each writer's contiguous received
+    /// position in one transaction. Out-of-order completions remain reusable
+    /// after a crash; a failure retains none of them.
+    pub async fn keep_log_inputs(
+        &self,
+        kind: crate::LogKind,
+        inputs: Vec<crate::LogInput>,
+    ) -> Result<std::collections::BTreeMap<coven_foundation::id_source::DeviceId, u64>, DbError>
+    {
+        self.call(move |inner| {
+            inner
+                .access
+                .with_writer(|writer| crate::log_input::keep(writer, kind, &inputs))
+        })
+        .await
+    }
+
     /// Current pending records, decoded as the sync owner's typed values.
     pub async fn pending<P: crate::PendingValue>(&self) -> CovenResult<Vec<P>> {
         self.read(|sql| sql.pending()).await

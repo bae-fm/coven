@@ -187,6 +187,24 @@ macro_rules! coven_tables {
             ) STRICT;
             INSERT INTO _coven_finality VALUES(1,NULL);
         ");
+        $visit!(_coven_log_inputs, "
+            CREATE TABLE _coven_log_inputs (
+                kind TEXT NOT NULL CHECK(kind IN ('entry','key')),
+                writer BLOB NOT NULL CHECK(length(writer)=8),
+                number BLOB NOT NULL CHECK(length(number)=8 AND number>x'0000000000000000'),
+                observation BLOB NOT NULL,
+                bytes BLOB NOT NULL,
+                PRIMARY KEY(kind,writer,number)
+            ) STRICT, WITHOUT ROWID;
+        ");
+        $visit!(_coven_log_downloads, "
+            CREATE TABLE _coven_log_downloads (
+                kind TEXT NOT NULL CHECK(kind IN ('entry','key')),
+                writer BLOB NOT NULL CHECK(length(writer)=8),
+                number BLOB NOT NULL CHECK(length(number)=8),
+                PRIMARY KEY(kind,writer)
+            ) STRICT, WITHOUT ROWID;
+        ");
         $visit!(_coven_store_log_uploads, "
             CREATE TABLE _coven_store_log_uploads (
                 device BLOB NOT NULL CHECK(length(device)=8),

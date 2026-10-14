@@ -101,10 +101,14 @@ async fn incomplete_or_damaged_catch_up_reserves_nothing() {
                 .await
                 .unwrap();
         } else {
+            // Entries are never deleted; an incomplete catch-up is a failed read.
             storage
-                .delete(&object::path(store(1), missing))
-                .await
-                .unwrap();
+                .set_faults(coven_storage::test_utils::Faults {
+                    read_failures: [(object::path(store(1), missing), StorageFailure::Network)]
+                        .into(),
+                    ..coven_storage::test_utils::Faults::none()
+                })
+                .await;
         }
         let error = b
             .sync
@@ -114,7 +118,7 @@ async fn incomplete_or_damaged_catch_up_reserves_nothing() {
             assert!(matches!(error, Err(SyncError::Pending(_))));
         } else {
             assert!(
-                matches!(error, Err(SyncError::Storage(error)) if error.failure() == StorageFailure::NotFound)
+                matches!(error, Err(SyncError::Storage(error)) if error.failure() == StorageFailure::Network)
             );
         }
         let local = b.db.local_store_log().await.unwrap();
@@ -122,39 +126,6 @@ async fn incomplete_or_damaged_catch_up_reserves_nothing() {
         assert!(local.upload.is_none());
         assert!(b.db.operations().await.unwrap().is_empty());
     }
-}
-
-#[tokio::test]
-async fn a_listed_entry_disappearing_during_catch_up_starts_no_operation() {
-    let storage = storage();
-    let mut a = device(storage.clone(), 1, member(1), store(1)).await;
-    let mut b = device(storage.clone(), 2, member(1), store(1)).await;
-    a.create(key(1)).await;
-    b.sync().await;
-    let added = a.add(&member(2), MemberRole::Member).await;
-    let (started, observed) = tokio::sync::oneshot::channel();
-    let (resume, held) = tokio::sync::oneshot::channel();
-    storage
-        .hold_next_listing(ObjectPrefix::store_logs(store(1)), started, held)
-        .await;
-    let remove = async {
-        observed.await.unwrap();
-        storage
-            .delete(&object::path(store(1), added))
-            .await
-            .unwrap();
-        resume.send(()).unwrap();
-    };
-    let (result, ()) = tokio::join!(
-        b.sync
-            .begin_operation_call(Command::CreateCircle("Waiting".into())),
-        remove
-    );
-    assert!(
-        matches!(result, Err(SyncError::Storage(error)) if error.failure() == StorageFailure::NotFound)
-    );
-    assert!(b.db.local_store_log().await.unwrap().upload.is_none());
-    assert!(b.db.operations().await.unwrap().is_empty());
 }
 
 #[tokio::test]

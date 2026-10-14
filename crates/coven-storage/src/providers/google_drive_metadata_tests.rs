@@ -913,3 +913,31 @@ async fn duplicate_folders_union_children_and_choose_the_oldest_creation_target(
         assert!(remote.files.contains_key(id));
     }
 }
+
+#[tokio::test]
+async fn writer_discovery_queries_folder_children_without_entering_history() {
+    let server = TestServer::new(Router::new().fallback(|uri: Uri| async move {
+        if uri.path().ends_with("/folder") {
+            return reply(json!({"id":"folder","mimeType":"application/vnd.google-apps.folder","trashed":false}));
+        }
+        let q = crate::providers::tests::query(&uri);
+        let (id, name, parent, next) = if q["q"].contains(&format!("name = '{STORE_ID}'")) {
+            ("store", STORE_ID.to_string(), "folder", false)
+        } else if q["q"].contains("name = 'store-log'") {
+            ("log", "store-log".into(), "store", false)
+        } else {
+            assert_eq!(q["q"], "'log' in parents and trashed = false and mimeType = 'application/vnd.google-apps.folder'");
+            if q.contains_key("pageToken") {
+                assert_eq!(q["pageToken"], "next");
+                ("second", "32".into(), "log", false)
+            } else { ("first", "31".into(), "log", true) }
+        };
+        let mut value = json!({"files":[{"id":id,"name":name,"parents":[parent],"mimeType":"application/vnd.google-apps.folder","createdTime":"2026-10-06T00:00:00Z","trashed":false}]});
+        if next { value["nextPageToken"] = json!("next"); }
+        reply(value)
+    })).await;
+    assert_eq!(
+        provider(&server.url).list_writers(STORE_ID).await.unwrap(),
+        [DeviceId(31), DeviceId(32)]
+    );
+}

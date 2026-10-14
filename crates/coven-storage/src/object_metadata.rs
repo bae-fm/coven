@@ -4,7 +4,7 @@ use crate::{ByteRange, ObjectPath, StorageError, StorageFailure};
 use std::time::{Duration, SystemTime};
 
 /// Metadata of an object returned by a provider read, exact status or listing.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct StoredObject {
     /// Validated path relative to the store's location.
     pub path: ObjectPath,
@@ -75,7 +75,7 @@ impl ObjectRead {
 }
 
 /// The algorithm and native encoding of a provider checksum.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ChecksumValue {
     /// Hexadecimal MD5 of the complete content (Drive).
     Md5Hex(String),
@@ -98,7 +98,7 @@ pub enum ChecksumValue {
 }
 
 /// Full-content checksums and multipart composites have different comparison rules.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ObjectChecksum {
     /// Comparable with the named algorithm run over the complete encrypted object.
     FullObject(ChecksumValue),

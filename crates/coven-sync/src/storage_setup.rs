@@ -104,7 +104,15 @@ impl StoreLogSync {
                 .find(|entry| matches!(entry.entry.change, StoreChange::CreateStore { .. }))
                 .ok_or(coven_database::DbError::DamagedDatabase)?;
             let path = object::path(store_id, recorded.entry.position);
-            read_setup_entry(storage.as_ref(), &path, &member).await?
+            read_setup_entry(
+                &self.database,
+                &self.reads,
+                self.download_limit,
+                storage.as_ref(),
+                &path,
+                &member,
+            )
+            .await?
         } else {
             if local.upload.is_none() {
                 let settings = self.directory.settings().map_err(SyncError::disk)?;
@@ -155,6 +163,9 @@ impl StoreLogSync {
                 };
                 recovered = StoreKeyring::new(
                     keys::read_store_key(
+                        &self.database,
+                        &self.reads,
+                        self.download_limit,
                         storage.as_ref(),
                         store_id,
                         upload.sealing.key,
@@ -178,7 +189,15 @@ impl StoreLogSync {
             .await?;
             // Read what storage actually retained, including a lost-reply retry.
             let path = object::path(store_id, upload.entry.position);
-            read_setup_entry(storage.as_ref(), &path, &member).await?
+            read_setup_entry(
+                &self.database,
+                &self.reads,
+                self.download_limit,
+                storage.as_ref(),
+                &path,
+                &member,
+            )
+            .await?
         };
         if !matches!(entry.change, StoreChange::CreateStore { store, .. } if store == local.store) {
             return Err(crate::write_object::damaged(
@@ -213,6 +232,9 @@ impl StoreLogSync {
             let key = crate::key_introductions::newest(&local.log, &Audience::Store)
                 .ok_or(coven_database::DbError::DamagedDatabase)?;
             let opened = keys::read_store_key(
+                &self.database,
+                &self.reads,
+                self.download_limit,
                 storage.as_ref(),
                 store_id,
                 key,
@@ -275,6 +297,9 @@ impl StoreLogSync {
         }
         let applied = if let Some(entry) = creation {
             let publications = crate::store_log_landing::observe_publication(
+                &self.database,
+                &self.reads,
+                self.download_limit,
                 store_id,
                 Some(storage.as_ref()),
                 &local.log,
@@ -332,7 +357,7 @@ impl StoreLogSync {
         ring: StoreKeyring,
     ) -> Result<StoreKeyring, SyncError> {
         let staged_keys = Arc::new(KeySession::store(Arc::new(InMemoryCustody::new(ring)))?);
-        let candidate = Self::new(
+        let mut candidate = Self::new(
             storage,
             self.database.clone(),
             staged_keys.clone(),
@@ -341,6 +366,7 @@ impl StoreLogSync {
             self.ids.clone(),
             self.directory.clone(),
         );
+        candidate.set_discovery_download_limit(self.download_limit);
         candidate.catch_up().await?;
         Ok(staged_keys
             .read()?
@@ -349,6 +375,9 @@ impl StoreLogSync {
 }
 
 async fn read_setup_entry(
+    database: &coven_database::Database,
+    reads: &crate::pass_reads::PassReads,
+    limit: std::num::NonZeroUsize,
     storage: &dyn Storage,
     path: &ObjectPath,
     member: &MemberKeys,
@@ -362,7 +391,17 @@ async fn read_setup_entry(
         ));
     };
     // Tentative until the creation it opens commits to its hash (§11).
-    let key = keys::read_store_key(storage, path.store(), *key, None, member).await?;
+    let key = keys::read_store_key(
+        database,
+        reads,
+        limit,
+        storage,
+        path.store(),
+        *key,
+        None,
+        member,
+    )
+    .await?;
     let entry = object::open(&envelope, path, &key).map_err(|failure| crate::DamagedObject {
         path: path.as_str().into(),
         failure,

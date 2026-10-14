@@ -284,6 +284,12 @@ pub(super) async fn endpoint(
                 return response(404, json!({"error":{"code":"itemNotFound"}}).to_string());
             }
         }
+        if suffix == "/children" && method == Method::GET {
+            let Some(base) = state.dirs.values().find(|p| *p == &path).cloned() else {
+                return response(404, json!({"error":{"code":"itemNotFound"}}).to_string());
+            };
+            return children(&state, &base, host, &q, uri.path());
+        }
         if suffix == "/createUploadSession" {
             state.session_starts += 1;
             assert_eq!(value["item"]["@microsoft.graph.conflictBehavior"], "fail");
@@ -366,36 +372,7 @@ pub(super) async fn endpoint(
             state.dirs.insert(id.clone(), path);
             return reply(json!({"id":id,"name":name,"folder":{}}));
         }
-        let prefix = if base.is_empty() {
-            String::new()
-        } else {
-            format!("{base}/")
-        };
-        let mut entries = Vec::new();
-        for (id, path) in &state.dirs {
-            if let Some(name) = path.strip_prefix(&prefix) {
-                if !name.is_empty() && !name.contains('/') {
-                    entries.push(json!({"id":id,"name":name,"folder":{}}));
-                }
-            }
-        }
-        for (path, bytes) in &state.files {
-            if let Some(name) = path.strip_prefix(&prefix) {
-                if !name.contains('/') {
-                    entries.push(file(path, bytes, host, &state));
-                }
-            }
-        }
-        let start = q
-            .get("page")
-            .map(|n| n.parse::<usize>().unwrap())
-            .unwrap_or(0);
-        let mut result = json!({"value":entries.iter().skip(start).take(1).collect::<Vec<_>>()});
-        if entries.len() > start + 1 {
-            result["@odata.nextLink"] =
-                json!(format!("http://{host}{}?page={}", uri.path(), start + 1));
-        }
-        return reply(result);
+        return children(&state, &base, host, &q, uri.path());
     }
     match suffix {
         "permissions" => {
@@ -949,3 +926,43 @@ async fn replacement_during_download_does_not_return_mismatched_metadata() {
 
 #[path = "onedrive_upload_tests.rs"]
 mod upload_tests;
+
+/// One page of a folder's immediate children, addressed by id or by path.
+fn children(
+    state: &Remote,
+    base: &str,
+    host: &str,
+    q: &std::collections::BTreeMap<String, String>,
+    request_path: &str,
+) -> Response<Body> {
+    let prefix = if base.is_empty() {
+        String::new()
+    } else {
+        format!("{base}/")
+    };
+    let mut entries = Vec::new();
+    for (id, path) in &state.dirs {
+        if let Some(name) = path.strip_prefix(&prefix) {
+            if !name.is_empty() && !name.contains('/') {
+                entries.push(json!({"id":id,"name":name,"folder":{}}));
+            }
+        }
+    }
+    for (path, bytes) in &state.files {
+        if let Some(name) = path.strip_prefix(&prefix) {
+            if !name.contains('/') {
+                entries.push(file(path, bytes, host, state));
+            }
+        }
+    }
+    let start = q
+        .get("page")
+        .map(|n| n.parse::<usize>().unwrap())
+        .unwrap_or(0);
+    let mut result = json!({"value":entries.iter().skip(start).take(1).collect::<Vec<_>>()});
+    if entries.len() > start + 1 {
+        result["@odata.nextLink"] =
+            json!(format!("http://{host}{request_path}?page={}", start + 1));
+    }
+    reply(result)
+}

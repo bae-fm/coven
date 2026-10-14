@@ -21,6 +21,9 @@ pub struct JoiningIdentity {
     request: Vec<u8>,
     path: ObjectPath,
     attempted: bool,
+    initial_key: coven_foundation::id_source::KeyId,
+    inviting_writer: coven_foundation::id_source::DeviceId,
+    key_copy_number: u64,
 }
 
 impl JoiningIdentity {
@@ -102,6 +105,9 @@ impl JoiningIdentity {
                 request,
                 path,
                 attempted,
+                initial_key: code.initial_key,
+                inviting_writer: code.inviting_writer,
+                key_copy_number: code.key_copy_number,
             });
         }
         let keys = MemberKeys::generate()?;
@@ -133,6 +139,9 @@ impl JoiningIdentity {
             request,
             path,
             attempted: false,
+            initial_key: code.initial_key,
+            inviting_writer: code.inviting_writer,
+            key_copy_number: code.key_copy_number,
         };
         identity.save(&file, code)?;
         Ok(identity)
@@ -194,12 +203,58 @@ impl JoiningIdentity {
     }
 
     pub(crate) async fn pending(&self, storage: &dyn Storage) -> Result<bool, SyncError> {
-        match storage.read(&self.path).await {
-            Ok(bytes) if bytes == self.request => Ok(true),
-            Ok(_) => Err(SyncError::InvitationChanged),
-            Err(error) if error.failure() == StorageFailure::NotFound => Ok(false),
-            Err(error) => Err(error.into()),
+        Ok(storage.status(&self.path).await?.is_some())
+    }
+
+    pub(crate) async fn initial_key(
+        &self,
+        database: &coven_database::Database,
+        limit: std::num::NonZeroUsize,
+        storage: &dyn Storage,
+    ) -> Result<Option<coven_crypto::StoreKey>, SyncError> {
+        let store = self.path.store();
+        let kind = coven_database::LogKind::KeyCopy;
+        let mut input = crate::discovery::retained(database, store, kind).await?;
+        crate::discovery::scan_tail(
+            database,
+            &crate::pass_reads::PassReads::default(),
+            storage,
+            store,
+            kind,
+            self.inviting_writer,
+            self.key_copy_number,
+            limit,
+            &mut input,
+        )
+        .await?;
+        for ((writer, number), read) in input {
+            if writer != self.inviting_writer || number.get() <= self.key_copy_number {
+                continue;
+            }
+            let sealed = match coven_format::sealed_key::SealedKey::decode(&read.bytes) {
+                Ok(sealed) => sealed,
+                Err(error) => {
+                    if let Some(update) = crate::error::required_format(&error) {
+                        return Err(SyncError::UpdateRequired(update));
+                    }
+                    tracing::warn!(path = read.metadata.path.as_str(), %error, "invalid invitation key copy");
+                    continue;
+                }
+            };
+            let prefix = sealed.prefix();
+            if prefix.audience == coven_merge::Audience::Store
+                && prefix.key == self.initial_key
+                && prefix.member == self.keys.member_id()
+            {
+                match sealed.open_store_key(&self.keys, read.metadata.path.as_str()) {
+                    Ok(key) => return Ok(Some(key)),
+                    Err(error) => {
+                        tracing::warn!(path = read.metadata.path.as_str(), %error, "unusable invitation key copy")
+                    }
+                }
+            }
         }
+        Ok(None)
     }
 }
 

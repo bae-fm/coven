@@ -336,6 +336,12 @@ impl ProviderOps for DropboxStorage {
     async fn list(&self, listing: &mut ObjectListing) -> Result<(), StorageError> {
         self.list_objects(listing).await
     }
+    async fn list_writers(
+        &self,
+        store: coven_foundation::id_source::StoreId,
+    ) -> Result<Vec<coven_foundation::id_source::DeviceId>, StorageError> {
+        self.writer_folders(store).await
+    }
     async fn delete(&self, path: &ObjectPath) -> Result<(), StorageError> {
         match self
             .rpc("files/delete_v2", json!({"path":path.absolute()}))

@@ -3,6 +3,64 @@ use super::*;
 use std::collections::BTreeSet;
 
 impl OneDriveStorage {
+    pub(super) async fn writer_folders(
+        &self,
+        store: coven_foundation::id_source::StoreId,
+    ) -> Result<Vec<coven_foundation::id_source::DeviceId>, StorageError> {
+        let directory = format!("{store}/store-log");
+        let known_id = self.folder_ids.lock().await.get(&directory).cloned();
+        let mut url = match &known_id {
+            Some(id) => self.item(id, &["children"])?,
+            None => format!("{}:/{directory}:/children", self.item(&self.folder, &[])?),
+        };
+        let mut pages = Pagination::new();
+        let mut writers = BTreeSet::new();
+        let mut folders = BTreeMap::new();
+        let mut first = true;
+        loop {
+            pages.check(&url)?;
+            http::same_origin(&self.api, &url)?;
+            let value = match http::json(PROVIDER, self.send(Method::GET, &url, Body::Empty).await?)
+                .await
+            {
+                Ok(value) => value,
+                Err(error) if first && error.failure() == StorageFailure::NotFound => {
+                    self.check_folder().await?;
+                    self.folder_ids.lock().await.clear();
+                    if known_id.is_some() {
+                        return Err(error);
+                    }
+                    return Ok(Vec::new());
+                }
+                Err(error) => return Err(error),
+            };
+            for item in http::array(&value, "value")? {
+                if !item["folder"].is_object() || item["file"].is_object() {
+                    return Err(StorageFailure::Protocol
+                        .with_source("OneDrive writer listing returned a file"));
+                }
+                let name = http::string(item, "name")?;
+                let path = ObjectPath::parse(&format!("{directory}/{name}/1"))?;
+                writers.insert(path.device().expect("store-log writer"));
+                folders.insert(
+                    format!("{directory}/{name}"),
+                    http::string(item, "id")?.to_owned(),
+                );
+            }
+            let Some(next) = value.get("@odata.nextLink") else {
+                break;
+            };
+            url = next
+                .as_str()
+                .filter(|value| !value.is_empty())
+                .ok_or(StorageFailure::Protocol)?
+                .to_owned();
+            first = false;
+        }
+        self.folder_ids.lock().await.extend(folders);
+        Ok(writers.into_iter().collect())
+    }
+
     pub(super) async fn checked_folder_operation<T>(
         &self,
         result: Result<T, StorageError>,

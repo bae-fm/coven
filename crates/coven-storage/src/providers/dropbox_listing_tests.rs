@@ -385,3 +385,22 @@ async fn failed_continuation_is_not_an_empty_folder_or_partial_success() {
         );
     }
 }
+
+#[tokio::test]
+async fn writer_discovery_reads_only_immediate_folders_and_all_pages() {
+    let server = TestServer::new(Router::new().fallback(|uri: Uri, body: Bytes| async move {
+        let request: Value = serde_json::from_slice(&body).unwrap();
+        if uri.path().ends_with("/continue") {
+            assert_eq!(request, json!({"cursor":"next"}));
+            reply(json!({"entries":[{".tag":"folder","path_lower":format!("/{STORE_ID}/store-log/32")}],"has_more":false}))
+        } else {
+            assert_eq!(request["path"], format!("/{STORE_ID}/store-log"));
+            assert_eq!(request["recursive"], false);
+            reply(json!({"entries":[{".tag":"folder","path_lower":format!("/{STORE_ID}/store-log/31")}],"has_more":true,"cursor":"next"}))
+        }
+    })).await;
+    assert_eq!(
+        provider(&server.url).list_writers(STORE_ID).await.unwrap(),
+        [DeviceId(31), DeviceId(32)]
+    );
+}

@@ -25,6 +25,7 @@ use std::sync::Arc;
 pub struct StoreLogSync {
     #[cfg(test)]
     received_entry_decodes: Option<Arc<std::sync::atomic::AtomicUsize>>,
+    download_limit: std::num::NonZeroUsize,
     finality: std::sync::Mutex<crate::finality::Observation>,
     reads: crate::pass_reads::PassReads,
     storage: Option<Arc<dyn Storage>>,
@@ -54,6 +55,7 @@ impl StoreLogSync {
         Self {
             #[cfg(test)]
             received_entry_decodes: None,
+            download_limit: std::num::NonZeroUsize::MIN,
             finality: std::sync::Mutex::default(),
             reads: crate::pass_reads::PassReads::default(),
             storage: Some(storage),
@@ -79,6 +81,7 @@ impl StoreLogSync {
         Self {
             #[cfg(test)]
             received_entry_decodes: None,
+            download_limit: std::num::NonZeroUsize::MIN,
             finality: std::sync::Mutex::default(),
             reads: crate::pass_reads::PassReads::default(),
             storage: None,
@@ -90,6 +93,11 @@ impl StoreLogSync {
             directory,
             admin_access: Default::default(),
         }
+    }
+
+    /// Bound simultaneous membership and key-copy requests in subsequent scans.
+    pub fn set_discovery_download_limit(&mut self, limit: std::num::NonZeroUsize) {
+        self.download_limit = limit;
     }
 
     /// Share metadata and checked references with device-log downloads until
@@ -122,6 +130,8 @@ impl StoreLogSync {
         &mut self,
         change: StoreChange,
     ) -> Result<EntryId, SyncError> {
+        let _scope = self.reads.enter();
+        self.reads.reset_discovery();
         if let Some(id) = self.pending_reload().await? {
             return Err(SyncError::ReloadPending(id));
         }
@@ -154,6 +164,9 @@ impl StoreLogSync {
         keys::check_shared_keys(&local.log, &change, &ring)?;
         let mut damages = Vec::new();
         let observed = keys::read_copies(
+            &self.database,
+            &self.reads,
+            self.download_limit,
             self.storage.as_deref().ok_or(SyncError::NoStorage)?,
             local.store,
             &mut damages,
@@ -197,31 +210,6 @@ impl StoreLogSync {
 
     async fn step(&self) -> Result<Vec<DamagedObject>, SyncError> {
         self.scan_store_log(false).await
-    }
-
-    async fn read_entry(
-        &self,
-        object: &coven_storage::StoredObject,
-        require_present: bool,
-    ) -> Result<Option<Vec<u8>>, SyncError> {
-        let bytes = self.read(&object.path).await?;
-        if require_present && bytes.is_none() {
-            return Err(StorageFailure::NotFound
-                .with_source(format!(
-                    "store-log catch-up could not read {}",
-                    object.path.as_str()
-                ))
-                .into());
-        }
-        if bytes
-            .as_ref()
-            .is_some_and(|bytes| bytes.len() as u64 != object.size)
-        {
-            return Err(StorageFailure::Protocol
-                .with_source("store-log read length differs from listing")
-                .into());
-        }
-        Ok(bytes)
     }
 
     async fn stuck_entry(
@@ -316,6 +304,9 @@ impl StoreLogSync {
             // Observe all landing witnesses after publication, before retaining
             // this entry's author-view checks.
             let publications = crate::store_log_landing::observe_publication(
+                &self.database,
+                &self.reads,
+                self.download_limit,
                 self.directory.id(),
                 self.storage.as_deref(),
                 &local.log,
@@ -340,6 +331,9 @@ impl StoreLogSync {
                     && !keys::holds(ring.as_ref(), &Audience::Store, upload.sealing.key)
                 {
                     let key = keys::read_store_key(
+                        &self.database,
+                        &self.reads,
+                        self.download_limit,
                         self.storage.as_deref().ok_or(SyncError::NoStorage)?,
                         self.directory.id(),
                         upload.sealing.key,
@@ -483,13 +477,27 @@ impl StoreLogSync {
     ) -> Result<(), SyncError> {
         // Reserved copies precede all new sharing decisions. An observed duplicate
         // or removed recipient must never erase a writer's already reserved number.
-        object::upload_keys(self.directory.id(), self.storage.as_deref(), &self.database).await?;
+        if let Some(writer) =
+            object::upload_keys(self.directory.id(), self.storage.as_deref(), &self.database)
+                .await?
+        {
+            self.reads
+                .forget_misses(coven_database::LogKind::KeyCopy, writer);
+        }
         let needs = crate::key_introductions::needed(log);
         if needs.is_empty() {
             return Ok(());
         }
         let storage = self.storage.as_deref().ok_or(SyncError::NoStorage)?;
-        let copies = keys::read_copies(storage, self.directory.id(), damages).await?;
+        let copies = keys::read_copies(
+            &self.database,
+            &self.reads,
+            self.download_limit,
+            storage,
+            self.directory.id(),
+            damages,
+        )
+        .await?;
         for (audience, key) in needs.keys().cloned() {
             if !crate::key_introductions::accepted(ring.as_ref(), &needs, &audience, key) {
                 tracing::debug!(?audience, ?key, "historical key has not arrived");
@@ -560,7 +568,7 @@ impl StoreLogSync {
                 ));
             }
         }
-        tracing::warn!(path = path.as_str(), error = %failure, "damaged object; will reread on sync");
+        tracing::warn!(path = path.as_str(), error = %failure, "retained object failed validation");
         if !damages.iter().any(|object| object.path == path.as_str()) {
             damages.push(DamagedObject {
                 path: path.as_str().to_owned(),

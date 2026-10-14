@@ -46,16 +46,17 @@ async fn replacement_tokens_cannot_change_dropbox_access_or_provider() {
 }
 
 #[tokio::test]
-async fn unavailable_writer_discovery_never_falls_back_to_history_listing() {
+async fn writer_discovery_never_reads_history() {
     let storage = MemoryStorage::builder().build().unwrap();
     let path = ObjectPath::store_log(STORE_ID, DeviceId(7), std::num::NonZeroU64::MIN);
     storage.create(&path, b"entry").await.unwrap();
     let before = storage.request_count();
-    assert_eq!(
-        storage.list_writers(STORE_ID).await.unwrap_err().failure(),
-        StorageFailure::Refused
-    );
-    assert_eq!(storage.request_count(), before);
+    assert_eq!(storage.list_writers(STORE_ID).await.unwrap(), [DeviceId(7)]);
+    assert_eq!(storage.request_count(), before + 1);
+    assert!(matches!(
+        storage.request_trace().last(),
+        Some(crate::test_utils::MemoryRequest::Other("list_writers"))
+    ));
 }
 
 #[tokio::test]

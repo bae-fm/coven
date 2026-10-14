@@ -2,14 +2,14 @@
 
 use super::*;
 use coven_format::sealed_single::SingleChunkObject;
-use coven_foundation::id_source::DeviceId;
-use coven_storage::ObjectPrefix;
 
 impl StoreLogSync {
     pub(super) async fn scan_store_log_once(
         &self,
         require_complete: bool,
     ) -> Result<(Vec<DamagedObject>, bool), SyncError> {
+        let _scope = self.reads.enter();
+        self.reads.reset_discovery();
         let through = self
             .finality
             .lock()
@@ -31,20 +31,9 @@ impl StoreLogSync {
             None
         };
         let storage = self.storage.as_deref().ok_or(SyncError::NoStorage)?;
-        let mut paths = storage.list(&ObjectPrefix::store_logs(local.store)).await?;
-        let mut writers: BTreeSet<_> = local
-            .log
-            .entries
-            .iter()
-            .map(|entry| entry.entry.position.device)
-            .chain(local.log.replay.state.devices.keys().copied())
-            .chain(published.as_ref().map(|entry| entry.position.device))
-            .chain(
-                paths
-                    .iter()
-                    .filter_map(|object| object.path.store_log_position().map(|p| p.0)),
-            )
-            .collect();
+        let mut paths = Vec::new();
+        let mut writers =
+            crate::discovery::writers(&self.database, &self.reads, storage, local.store).await?;
         let stuck = crate::pending_logs::local_refusals(&self.database).await?;
         if require_complete {
             if let Some(refusal) = stuck
@@ -64,14 +53,47 @@ impl StoreLogSync {
         let mut missing_keys = BTreeMap::new();
         let mut entries = BTreeMap::new();
         loop {
-            for device in writers.difference(&probed).copied().collect::<Vec<_>>() {
-                self.discover_writer(&local, device, &mut paths).await?;
-                probed.insert(device);
+            let unseen = writers.difference(&probed).copied().collect();
+            for received in crate::discovery::scan(
+                &self.database,
+                &self.reads,
+                storage,
+                local.store,
+                coven_database::LogKind::Entry,
+                &unseen,
+                self.download_limit,
+            )
+            .await?
+            {
+                let (device, number) = received
+                    .metadata
+                    .path
+                    .store_log_position()
+                    .ok_or(StorageFailure::InvalidPath)?;
+                bytes.insert(
+                    EntryId {
+                        device,
+                        number: number.get(),
+                    },
+                    received.bytes,
+                );
+                crate::store_log_landing::add_observation(&mut paths, received.metadata)?;
             }
+            crate::discovery::scan(
+                &self.database,
+                &self.reads,
+                storage,
+                local.store,
+                coven_database::LogKind::KeyCopy,
+                &unseen,
+                self.download_limit,
+            )
+            .await?;
+            probed.extend(&writers);
             for stored in &paths {
                 let (device, number) = stored.path.store_log_position().ok_or(
                     StorageFailure::Protocol
-                        .with_source("store-log listing returned another layout"),
+                        .with_source("store-log observation returned another layout"),
                 )?;
                 entries.insert(
                     EntryId {
@@ -105,13 +127,6 @@ impl StoreLogSync {
                     {
                         continue;
                     }
-                }
-                if !bytes.contains_key(id) {
-                    let Some(received) = self.read_entry(stored, require_complete).await? else {
-                        pending_entries.insert(*id);
-                        continue;
-                    };
-                    bytes.insert(*id, received);
                 }
                 let envelope = match SingleChunkObject::decode(&bytes[id]) {
                     Ok(envelope) => envelope,
@@ -276,38 +291,6 @@ impl StoreLogSync {
             }
         }
         Ok((damages, complete))
-    }
-
-    async fn discover_writer(
-        &self,
-        local: &LocalStoreLog,
-        device: DeviceId,
-        paths: &mut Vec<coven_storage::StoredObject>,
-    ) -> Result<(), SyncError> {
-        let mut number = local
-            .log
-            .entries
-            .iter()
-            .filter(|entry| entry.entry.position.device == device)
-            .map(|entry| entry.entry.position.number)
-            .max()
-            .unwrap_or(0);
-        loop {
-            number = number.checked_add(1).ok_or_else(|| {
-                StorageFailure::Protocol.with_source("store-log sequence exhausted")
-            })?;
-            let path = object::path(local.store, EntryId { device, number });
-            let Some(stored) = self
-                .storage
-                .as_deref()
-                .ok_or(SyncError::NoStorage)?
-                .status(&path)
-                .await?
-            else {
-                return Ok(());
-            };
-            crate::store_log_landing::add_observation(paths, stored)?;
-        }
     }
 }
 

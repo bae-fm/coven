@@ -364,7 +364,10 @@ async fn finality_cannot_advance_across_an_interrupted_or_failed_listing() {
 
 #[tokio::test]
 async fn finality_waits_for_every_entry_in_the_certified_prefix_and_its_prerequisites() {
-    for number in [1, 2] {
+    // An unreadable entry and a failed read of an old entry both leave the
+    // certified prefix incomplete. Logs are gap-free, so a writer's later
+    // entries are only reachable through its entry 1.
+    for failed_read in [false, true] {
         let clock = Arc::new(FixedClock::new(day(0)));
         let storage = Arc::new(
             MemoryStorage::builder()
@@ -378,20 +381,25 @@ async fn finality_waits_for_every_entry_in_the_certified_prefix_and_its_prerequi
         let truncated = coven_format::sealed_single::SingleChunkPrefix::StoreLog { key: key(1) }
             .encode()
             .unwrap();
-        storage
-            .create(
-                &ObjectPath::store_log(store(1), DeviceId(2), number.try_into().unwrap()),
-                &truncated,
-            )
-            .await
-            .unwrap();
+        let path = ObjectPath::store_log(store(1), DeviceId(2), std::num::NonZeroU64::MIN);
+        storage.create(&path, &truncated).await.unwrap();
         clock.set(day(40));
         a.sync
             .observe_clock(&a.db.local_store_log().await.unwrap())
             .await
             .unwrap();
-        a.sync.step().await.unwrap();
-        assert_eq!(a.log().await.horizon, None, "entry {number}");
+        if failed_read {
+            storage
+                .set_faults(Faults {
+                    read_failures: [(path, coven_storage::StorageFailure::Network)].into(),
+                    ..Faults::none()
+                })
+                .await;
+            assert!(a.sync.step().await.is_err());
+        } else {
+            a.sync.step().await.unwrap();
+        }
+        assert_eq!(a.log().await.horizon, None, "failed read {failed_read}");
     }
 }
 

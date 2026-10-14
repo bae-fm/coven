@@ -467,6 +467,12 @@ impl ProviderOps for GoogleDriveStorage {
     async fn list(&self, listing: &mut ObjectListing) -> Result<(), StorageError> {
         self.list_folder(listing).await
     }
+    async fn list_writers(
+        &self,
+        store: coven_foundation::id_source::StoreId,
+    ) -> Result<Vec<DeviceId>, StorageError> {
+        self.writer_folders(store).await
+    }
     async fn delete(&self, path: &ObjectPath) -> Result<(), StorageError> {
         for item in self.copies(path, None).await? {
             let id = http::string(&item, "id")?;

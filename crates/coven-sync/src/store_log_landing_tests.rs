@@ -54,9 +54,17 @@ async fn own_publication_is_observed_even_when_the_listing_lags() {
         .await
         .unwrap();
     assert!(
-        super::observe_publication(store(1), Some(storage.as_ref()), &log, created)
-            .await
-            .is_err(),
+        super::observe_publication(
+            &a.db,
+            &crate::pass_reads::PassReads::default(),
+            std::num::NonZeroUsize::MIN,
+            store(1),
+            Some(storage.as_ref()),
+            &log,
+            created
+        )
+        .await
+        .is_err(),
         "retained history cannot substitute for exact status"
     );
 }

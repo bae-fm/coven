@@ -30,3 +30,37 @@ impl MemoryStorage {
             .clone()
     }
 }
+
+impl MemoryStorage {
+    /// Hold one listing's reply after taking its snapshot. The test is notified
+    /// when the result is fixed, and can mutate remote state before releasing it.
+    pub async fn hold_next_listing(
+        &self,
+        prefix: ObjectPrefix,
+        listed: tokio::sync::oneshot::Sender<()>,
+        resume: tokio::sync::oneshot::Receiver<()>,
+    ) {
+        let mut state = self.provider.state.lock().await;
+        assert!(state.held_listing.is_none(), "a listing is already held");
+        state.held_listing = Some(HeldRequest {
+            prefix,
+            listed,
+            resume,
+        });
+    }
+    /// Hold a single-request creation before publication, notifying its observer.
+    pub async fn hold_next_creation(
+        &self,
+        prefix: ObjectPrefix,
+        started: tokio::sync::oneshot::Sender<()>,
+        resume: tokio::sync::oneshot::Receiver<()>,
+    ) {
+        let mut state = self.provider.state.lock().await;
+        assert!(state.held_creation.is_none(), "a creation is already held");
+        state.held_creation = Some(HeldRequest {
+            prefix,
+            listed: started,
+            resume,
+        });
+    }
+}

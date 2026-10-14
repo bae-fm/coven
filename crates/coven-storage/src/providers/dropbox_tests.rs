@@ -52,6 +52,7 @@ pub(super) struct Remote {
     range_reads: usize,
     pub(super) folders: BTreeSet<String>,
     list_prefix: String,
+    list_recursive: bool,
 }
 pub(super) fn file_metadata(path: &str, bytes: &[u8], state: &Remote) -> Value {
     json!({".tag":"file", "path_lower":path, "size":bytes.len(), "id":format!("id:{path}"),
@@ -165,12 +166,13 @@ pub(super) async fn endpoint(
             if uri.path() == "/2/files/list_folder" {
                 assert!(!path.is_empty());
                 state.list_prefix = format!("{path}/");
+                state.list_recursive = arg["recursive"].as_bool().unwrap();
             }
             let start = arg["cursor"]
                 .as_str()
                 .map(|s| s.parse::<usize>().unwrap())
                 .unwrap_or(0);
-            let all: Vec<_> = state
+            let mut all: Vec<_> = state
                 .objects
                 .iter()
                 .map(|(path, bytes)| file_metadata(path, bytes, &state))
@@ -187,6 +189,27 @@ pub(super) async fn endpoint(
                         .starts_with(&state.list_prefix)
                 })
                 .collect();
+            if !state.list_recursive {
+                // A non-recursive listing returns each immediate child once.
+                let prefix = state.list_prefix.clone();
+                let mut children = std::collections::BTreeMap::new();
+                for entry in all {
+                    let path = entry["path_lower"].as_str().unwrap();
+                    match path[prefix.len()..].split_once('/') {
+                        Some((folder, _)) => {
+                            let folder = format!("{prefix}{folder}");
+                            children.insert(
+                                folder.clone(),
+                                json!({".tag":"folder","path_lower":folder}),
+                            );
+                        }
+                        None => {
+                            children.entry(path.to_owned()).or_insert(entry);
+                        }
+                    }
+                }
+                all = children.into_values().collect();
+            }
             if uri.path() == "/2/files/list_folder" && all.is_empty() {
                 return error("path/not_found/...");
             }

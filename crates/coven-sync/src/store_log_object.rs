@@ -70,11 +70,14 @@ pub(crate) async fn upload(
 
 /// Settle every reserved copy in writer/number order, regardless of its current
 /// recipient or initiating operation. Each confirmation commits before the next send.
+/// Publish reserved copies in number order. Returns the writer whose copy log
+/// grew, so discovery can probe only that log again.
 pub(crate) async fn upload_keys(
     store: StoreId,
     storage: Option<&dyn Storage>,
     database: &Database,
-) -> Result<(), SyncError> {
+) -> Result<Option<coven_foundation::id_source::DeviceId>, SyncError> {
+    let mut published = None;
     for copy in database.key_uploads().await? {
         let storage = storage.ok_or(SyncError::NoStorage)?;
         let path = copy.path(store);
@@ -91,9 +94,10 @@ pub(crate) async fn upload_keys(
             }
             Err(error) => return Err(error.into()),
         }
+        published = Some(copy.writer);
         database.complete_key_upload(copy).await?;
     }
-    Ok(())
+    Ok(published)
 }
 
 pub(crate) fn seal(

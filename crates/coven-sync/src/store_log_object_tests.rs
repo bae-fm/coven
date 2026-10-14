@@ -683,20 +683,19 @@ async fn damaged_entries_block_only_their_device_and_retain_each_cause() {
         assert!(c.log().await.replay.entries.contains_key(&independent));
         assert!(!c.log().await.replay.entries.contains_key(&broken));
         assert!(!c.log().await.replay.entries.contains_key(&later));
-        storage.delete(&path).await.unwrap();
-        storage.create(&path, &original).await.unwrap();
-        c.sync().await;
-        assert!(!c.log().await.replay.entries.contains_key(&later));
+        // A different installed version permits one new attempt, which checks
+        // the retained immutable bytes rather than downloading them again.
         c.db.test_pending_version("previous-version").await.unwrap();
         c.restart(storage.clone()).await;
+        let before = storage.reads().await;
         c.sync().await;
-        assert!(c.log().await.replay.entries.contains_key(&later));
-        assert!(c
-            .db
-            .pending::<crate::PendingRecord>()
-            .await
-            .unwrap()
-            .is_empty());
+        assert_eq!(entry_reads(storage.reads().await), entry_reads(before));
+        assert!(!c.log().await.replay.entries.contains_key(&broken));
+        assert!(!c.log().await.replay.entries.contains_key(&later));
+        assert_eq!(
+            c.db.pending::<crate::PendingRecord>().await.unwrap(),
+            vec![crate::PendingRecord::log_refusal(record, DeviceId(3))]
+        );
     }
 }
 

@@ -135,6 +135,9 @@ impl StoreLogSync {
             crate::store_log_keys::check_shared_keys(&local.log, &change, &ring)?;
             let mut damages = Vec::new();
             let observed = crate::store_log_keys::read_copies(
+                &self.database,
+                &self.reads,
+                self.download_limit,
                 self.storage.as_deref().ok_or(SyncError::NoStorage)?,
                 local.store,
                 &mut damages,
@@ -206,6 +209,9 @@ impl StoreLogSync {
                 n if n == data.entry_step_number(3) => {
                     let mut ring = self.store_keys.read()?;
                     let publications = crate::store_log_landing::observe_publication(
+                        &self.database,
+                        &self.reads,
+                        self.download_limit,
                         self.directory.id(),
                         self.storage.as_deref(),
                         &local.log,

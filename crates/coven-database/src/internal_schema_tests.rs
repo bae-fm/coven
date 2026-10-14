@@ -127,6 +127,8 @@ async fn only_the_spec_tables_are_created() {
                 "_coven_local_effect_causes",
                 "_coven_local_effect_rows",
                 "_coven_local_effects",
+                "_coven_log_downloads",
+                "_coven_log_inputs",
                 "_coven_lost",
                 "_coven_members",
                 "_coven_operations",
@@ -263,6 +265,10 @@ mod query_plans {
            SELECT device,n,zeroblob(128),CAST(n || device AS BLOB),x'00',zeroblob(13),'kept' FROM fixture;
          INSERT INTO _coven_store_log_uploads VALUES(counter(1),counter(1),zeroblob(128),CAST(counter(1) || counter(1) AS BLOB),zeroblob(16));
          INSERT INTO _coven_key_publications SELECT n,n FROM fixture;
+         INSERT INTO _coven_log_inputs
+           SELECT CASE WHEN i%2=0 THEN 'entry' ELSE 'key' END,device,n,x'00',zeroblob(64) FROM fixture;
+         INSERT INTO _coven_log_downloads
+           SELECT CASE WHEN i%2=0 THEN 'entry' ELSE 'key' END,n,n FROM fixture;
          INSERT INTO _coven_key_uploads
            SELECT device,n,zeroblob(128),CASE WHEN i%4=0 THEN counter(1) END,
                   CASE WHEN i%4=0 THEN counter(1) END FROM fixture;

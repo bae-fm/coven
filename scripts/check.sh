@@ -341,6 +341,14 @@ proofs() {
         runner=$(runner io finalityRunner)
         step "Rust / Lean finality observation endpoint"
         COVEN_IO_LEAN="$runner" cargo test -p coven-sync --all-features io_differential_finality -- --ignored
+        runner=$(runner io ioRunner)
+        step "Rust / Lean numbered publication and discovery"
+        if ! cargo test -p coven-sync --all-features io_differential_discovery -- --list |
+            grep '::io_differential_discovery: test$' > /dev/null; then
+            echo "the Rust test binary is missing the discovery differential" >&2
+            exit 1
+        fi
+        COVEN_IO_RUNNER="$runner" cargo test -p coven-sync --all-features io_differential_discovery -- --ignored
     fi
 
     if proof_selected storage || crate_selected coven-database; then

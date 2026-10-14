@@ -9,25 +9,45 @@ use std::{collections::BTreeMap, time::SystemTime};
 /// Observe every landing witness after publishing a local entry, including on
 /// a retry whose first publication preceded this call.
 pub(crate) async fn observe_publication(
+    database: &coven_database::Database,
+    reads: &crate::pass_reads::PassReads,
+    limit: std::num::NonZeroUsize,
     store: coven_foundation::id_source::StoreId,
     storage: Option<&dyn Storage>,
     log: &StoreLog,
     entry: EntryId,
 ) -> Result<BTreeMap<EntryId, SystemTime>, SyncError> {
+    // Entries landing before this publication decide its lateness. Other
+    // writers' key-copy observations from this catch-up still stand; this
+    // device's own log gained the entry's prerequisite copies.
+    reads.reset_discovery_of(coven_database::LogKind::Entry);
+    reads.forget_misses(coven_database::LogKind::KeyCopy, entry.device);
     let storage = storage.ok_or(SyncError::NoStorage)?;
     let path = crate::store_log_object::path(store, entry);
     let published = storage.status(&path).await?.ok_or_else(|| {
         coven_storage::StorageFailure::NotFound
             .with_source("published store-log entry is absent from exact status")
     })?;
-    let mut objects = storage
-        .list(&coven_storage::ObjectPrefix::store_logs(store))
-        .await?;
+    let mut writers = crate::discovery::writers(database, reads, storage, store).await?;
+    writers.insert(entry.device);
+    let mut objects = crate::discovery::scan(
+        database,
+        reads,
+        storage,
+        store,
+        coven_database::LogKind::Entry,
+        &writers,
+        limit,
+    )
+    .await?
+    .into_iter()
+    .map(|read| read.metadata)
+    .collect();
     add_observation(&mut objects, published)?;
     publication_times(log, &objects)
 }
 
-/// Exact status and a listing must identify the same immutable publication.
+/// Exact status and a retained read must identify the same immutable publication.
 pub(crate) fn add_observation(
     objects: &mut Vec<coven_storage::StoredObject>,
     observed: coven_storage::StoredObject,
@@ -54,8 +74,7 @@ pub(crate) fn add_observation(
     Ok(())
 }
 
-/// Landing witnesses come from the complete listing, not the kept replay or
-/// decoded arrival order. Retained publications keep their original times.
+/// Landing witnesses come from received input, not kept replay or decoded arrival order. Retained publications keep their original times.
 pub(crate) fn publication_times(
     log: &StoreLog,
     objects: &[coven_storage::StoredObject],
@@ -64,7 +83,7 @@ pub(crate) fn publication_times(
     for stored in objects {
         let (device, number) = stored.path.store_log_position().ok_or(
             coven_storage::StorageFailure::Protocol
-                .with_source("store-log listing returned another layout"),
+                .with_source("store-log observation returned another layout"),
         )?;
         times.insert(
             EntryId {

@@ -91,7 +91,7 @@ impl StoreLogSync {
             let PendingSubject::KeyCopy { audience, key, .. } = &record.subject else {
                 unreachable!("filtered key copy subjects")
             };
-            // A key not introduced yet keeps its tentative wait (see `acquire_tentative`).
+            // A key not introduced yet keeps its tentative wait (see `confirm_tentative`).
             let introduced = introductions
                 .iter()
                 .any(|i| &i.audience == audience && i.key == *key);
@@ -188,7 +188,16 @@ impl StoreLogSync {
     ) -> Result<Tentative, SyncError> {
         let storage = self.storage.as_deref().ok_or(SyncError::NoStorage)?;
         let mut refusal = None;
-        for copy in keys::read_copies(storage, self.directory.id(), damages).await? {
+        for copy in keys::read_copies(
+            &self.database,
+            &self.reads,
+            self.download_limit,
+            storage,
+            self.directory.id(),
+            damages,
+        )
+        .await?
+        {
             if copy.prefix.audience != Audience::Store
                 || copy.prefix.key != key
                 || copy.prefix.member != member.member_id()
@@ -295,7 +304,7 @@ impl StoreLogSync {
         Ok(())
     }
 
-    /// Open this member's copies of one key in listing order. A copy that fails
+    /// Open this member's retained copies of one key in writer/number order. A copy that fails
     /// to open, names another key or misses the agreed commitment is refused by
     /// itself; a later valid copy still supplies the key (§11). Returns the
     /// key's first unmet condition, or `None` once it is held.
@@ -321,7 +330,16 @@ impl StoreLogSync {
         }
         let storage = self.storage.as_deref().ok_or(SyncError::NoStorage)?;
         let mut refusal = None;
-        for copy in keys::read_copies(storage, self.directory.id(), damages).await? {
+        for copy in keys::read_copies(
+            &self.database,
+            &self.reads,
+            self.download_limit,
+            storage,
+            self.directory.id(),
+            damages,
+        )
+        .await?
+        {
             if copy.prefix.audience != *audience
                 || copy.prefix.key != key
                 || copy.prefix.member != member.member_id()

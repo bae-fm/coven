@@ -132,7 +132,7 @@ async fn a_later_valid_copy_supplies_the_key_and_clears_the_refusal() {
 async fn an_absent_usable_store_key_stays_pending() {
     for forged in [false, true] {
         let storage = storage();
-        let (ana, mut ben) = household(&storage).await;
+        let (_ana, mut ben) = household(&storage).await;
         let genuine = find_copy(
             storage.as_ref(),
             Audience::Store,
@@ -143,7 +143,16 @@ async fn an_absent_usable_store_key_stays_pending() {
         .unwrap();
         storage.delete(&genuine.path).await.unwrap();
         if forged {
-            forge_copy(&ana, &ben, Audience::Store, key(1)).await;
+            // The first arriving copy is forged; no missing earlier number
+            // hides it from next-number discovery.
+            let bytes = keys::store_copy(
+                &genuine.path,
+                &coven_crypto::StoreKey::generate(key(1)).unwrap(),
+                &ben.member.member_id(),
+                &ben.member.sealing_public_key(),
+            )
+            .unwrap();
+            storage.create(&genuine.path, &bytes).await.unwrap();
         }
         let error = ben.sync.unlock_storage(storage.clone()).await.unwrap_err();
         let SyncError::Pending(record) = error else {

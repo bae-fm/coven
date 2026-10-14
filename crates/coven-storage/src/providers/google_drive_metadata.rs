@@ -8,6 +8,46 @@ const FOLDER: &str = "application/vnd.google-apps.folder";
 pub(super) type FolderIds = BTreeSet<(SystemTime, String)>;
 
 impl GoogleDriveStorage {
+    pub(super) async fn writer_folders(
+        &self,
+        store: coven_foundation::id_source::StoreId,
+    ) -> Result<Vec<DeviceId>, StorageError> {
+        let directory = format!("{store}/store-log");
+        let parents = self.directory(&directory, false).await?;
+        if parents.is_empty() {
+            return Ok(Vec::new());
+        }
+        let query = format!(
+            "{} and trashed = false and mimeType = '{FOLDER}'",
+            parent_query(&parents)
+        );
+        let mut writers = BTreeSet::new();
+        let mut folders = BTreeMap::<String, FolderIds>::new();
+        for item in self.pages(&query).await? {
+            let name = http::string(&item, "name")?;
+            check_child(&item, &parents, name)?;
+            if item["mimeType"] != FOLDER {
+                return Err(
+                    StorageFailure::Protocol.with_source("Drive writer query returned a file")
+                );
+            }
+            let path = ObjectPath::parse(&format!("{directory}/{name}/1"))?;
+            writers.insert(path.device().expect("store-log writer"));
+            folders
+                .entry(format!("{directory}/{name}"))
+                .or_default()
+                .insert((
+                    http::timestamp(&item, "createdTime")?,
+                    http::string(&item, "id")?.into(),
+                ));
+        }
+        let mut known = self.folder_ids.lock().await;
+        for (path, ids) in folders {
+            known.entry(path).or_default().extend(ids);
+        }
+        Ok(writers.into_iter().collect())
+    }
+
     async fn directory(&self, path: &str, create: bool) -> Result<Vec<String>, StorageError> {
         coven_format::path::validate_directory(path)?;
         if self.session.access().await == OAuthAccess::GoogleDrive(GoogleDriveAccess::File) {

@@ -557,9 +557,16 @@ async fn reversed_removal_parts(
         })
     };
     assert!(!has_copy(
-        crate::store_log_keys::read_copies(storage.as_ref(), STORE_ID, &mut Vec::new())
-            .await
-            .unwrap()
+        crate::store_log_keys::read_copies(
+            &ana.db,
+            &crate::pass_reads::PassReads::default(),
+            std::num::NonZeroUsize::MIN,
+            storage.as_ref(),
+            STORE_ID,
+            &mut Vec::new()
+        )
+        .await
+        .unwrap()
     ));
     if ben_reads_before_copy {
         ben.sync.sync_store_log().await.unwrap();
@@ -612,9 +619,16 @@ async fn reversed_removal_parts(
     // Carol owns K2 and shares it through StoreLogSync when she learns the drop.
     carol.sync.sync_store_log().await.unwrap();
     assert!(has_copy(
-        crate::store_log_keys::read_copies(storage.as_ref(), STORE_ID, &mut Vec::new())
-            .await
-            .unwrap()
+        crate::store_log_keys::read_copies(
+            &ana.db,
+            &crate::pass_reads::PassReads::default(),
+            std::num::NonZeroUsize::MIN,
+            storage.as_ref(),
+            STORE_ID,
+            &mut Vec::new()
+        )
+        .await
+        .unwrap()
     ));
     assert!(matches!(
         carol.db.store_log().await.unwrap().replay.entries[&dropped],

@@ -64,29 +64,37 @@ impl StoreLogSync {
         Ok(false)
     }
 
-    /// Check membership before and after observing a deleted request: approval
-    /// can publish between the first listing and that deletion. Sealed keys
-    /// without a membership entry keep waiting; permission failures reach callers.
+    /// Poll the invitation's key-copy tail before reading membership history.
+    /// A deleted request triggers a final tail read, since admission may race status.
     pub async fn join_outcome(
         &mut self,
         request: &crate::JoiningIdentity,
     ) -> Result<JoinOutcome, SyncError> {
-        if self.bootstrap_member().await? {
-            return Ok(JoinOutcome::Admitted);
+        let storage = self.storage.as_deref().ok_or(SyncError::NoStorage)?;
+        if self.store_keys.read()?.is_none() {
+            let key = match request
+                .initial_key(&self.database, self.download_limit, storage)
+                .await?
+            {
+                Some(key) => Some(key),
+                None if request.pending(storage).await? => return Ok(JoinOutcome::Waiting),
+                // Deletion may follow admission between our key scan and status.
+                None => {
+                    request
+                        .initial_key(&self.database, self.download_limit, storage)
+                        .await?
+                }
+            };
+            let Some(key) = key else {
+                return Ok(JoinOutcome::Declined);
+            };
+            self.store_keys
+                .persist(&coven_crypto::StoreKeyring::new(key))?;
         }
-        if request
-            .pending(self.storage.as_deref().ok_or(SyncError::NoStorage)?)
-            .await?
-        {
-            return Ok(JoinOutcome::Waiting);
-        }
-        if self.bootstrap_member().await? {
-            return Ok(JoinOutcome::Admitted);
-        }
-        Ok(if self.store_keys.read()?.is_some() {
-            JoinOutcome::Waiting
+        Ok(if self.bootstrap_member().await? {
+            JoinOutcome::Admitted
         } else {
-            JoinOutcome::Declined
+            JoinOutcome::Waiting
         })
     }
 

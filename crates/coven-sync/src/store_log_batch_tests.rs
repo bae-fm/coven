@@ -30,9 +30,13 @@ async fn ready_entries_commit_one_replay_and_retain_decoded_state() {
         counts.store_log_commits, 1,
         "one replay commit for the whole ready batch"
     );
+    // The replay and its file cleanup each commit once. Received input is
+    // retained before application: each log with new input retains its reads
+    // together, and a listed writer folder unknown locally is remembered.
     assert_eq!(
-        counts.commits, 2,
-        "the replay and its file cleanup each commit once"
+        counts.commits,
+        2 + 2 + 1,
+        "replay, cleanup, entries, key copies and the listed writer folder"
     );
     assert_eq!(counts.full_log_decodes, 1, "decode the saved log once");
     assert_eq!(receiver.log().await, author.log().await);

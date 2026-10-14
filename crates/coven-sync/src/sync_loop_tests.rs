@@ -712,7 +712,7 @@ async fn io_counts_one_write_local_baseline() {
     assert_eq!(repeated_reads(&counts.reads, &[], false), 0);
     // No fixed total is stated for non-idle writer holds or commits. These
     // are observed baselines; the saved-log decode bound is tested separately.
-    assert_eq!((counts.work.writer_holds, counts.work.commits), (55, 11));
+    assert_eq!((counts.work.writer_holds, counts.work.commits), (56, 11));
 }
 
 #[tokio::test]
@@ -726,18 +726,19 @@ async fn io_counts_first_catchup_baseline() {
         (
             69,
             RequestCounts {
-                lists: 19,
-                gets: 22,
+                lists: 10,
+                gets: 38,
                 ranges: 14,
                 creates: 1,
                 replaces: 1,
-                statuses: 12,
+                statuses: 1,
+                other: 4,
                 ..Default::default()
             }
         ),
         "{counts:#?}"
     );
-    assert_eq!((counts.work.writer_holds, counts.work.commits), (70, 18));
+    assert_eq!((counts.work.writer_holds, counts.work.commits), (78, 22));
     assert_eq!(
         counts.work.store_log_commits, 2,
         "catch-up batch and own registration"
@@ -758,7 +759,7 @@ async fn io_counts_first_catchup_saved_log() {
 }
 
 #[tokio::test]
-#[ignore = "observed 10 repeated key-copy downloads and 3 repeated position-version downloads; stated 0 duplicate downloads"]
+#[ignore = "observed 3 repeated position-version downloads; stated 0 duplicate downloads"]
 async fn io_counts_first_catchup_download_reuse() {
     let counts = scenario(Scenario::FirstCatchup).await;
     assert_eq!(
@@ -771,7 +772,7 @@ async fn io_counts_first_catchup_download_reuse() {
 }
 
 #[tokio::test]
-#[ignore = "observed 1 retained key-copy download and 2 repeated position-version downloads per idle/write/file pass; stated 0 duplicates"]
+#[ignore = "observed 2 repeated position-version downloads per idle/write/file pass; stated 0 duplicates"]
 async fn io_counts_warm_download_reuse() {
     // CovenIO.Trace.no_duplicate_download: another consumer or pass cannot
     // refetch retained bytes. All providers are quiescent during measurement.
@@ -795,20 +796,20 @@ async fn io_counts_file_fetch_baseline() {
     assert_eq!(
         (counts.requests, counts.requests_by_kind()),
         (
-            38,
+            39,
             RequestCounts {
-                lists: 12,
-                gets: 6,
+                lists: 10,
+                gets: 11,
                 ranges: 16,
                 replaces: 1,
-                statuses: 3,
+                other: 1,
                 ..Default::default()
             }
         ),
         "{counts:#?}"
     );
     // No fixed non-idle writer/commit total is stated; observed counts.
-    assert_eq!((counts.work.writer_holds, counts.work.commits), (66, 25));
+    assert_eq!((counts.work.writer_holds, counts.work.commits), (67, 25));
 }
 
 #[tokio::test]
@@ -862,19 +863,19 @@ async fn io_counts_reopen_baseline() {
     assert_eq!(
         (counts.requests, counts.requests_by_kind()),
         (
-            26,
+            27,
             RequestCounts {
-                lists: 12,
-                gets: 6,
+                lists: 10,
+                gets: 11,
                 ranges: 4,
                 replaces: 1,
-                statuses: 3,
+                other: 1,
                 ..Default::default()
             }
         ),
         "{counts:#?}"
     );
-    assert_eq!((counts.work.writer_holds, counts.work.commits), (54, 9));
+    assert_eq!((counts.work.writer_holds, counts.work.commits), (55, 9));
 }
 
 #[tokio::test]
@@ -888,7 +889,7 @@ async fn io_counts_reopen_saved_log() {
 }
 
 #[tokio::test]
-#[ignore = "observed 5 retained immutable range/body reads (4 write-header ranges, 1 key copy) and 2 repeated position-version reads; stated 0 duplicates after reopen"]
+#[ignore = "observed 4 retained write-header range reads and 2 repeated position-version reads; stated 0 duplicates after reopen"]
 async fn io_counts_reopen_download_reuse() {
     let counts = scenario(Scenario::Reopen).await;
     assert_eq!(

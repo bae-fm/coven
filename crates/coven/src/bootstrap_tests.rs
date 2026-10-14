@@ -626,17 +626,22 @@ async fn a_device_removed_during_loading_receives_the_provider_refusal() {
 }
 
 #[tokio::test]
-async fn approval_during_a_log_listing_is_not_mistaken_for_decline() {
+async fn approval_after_a_copy_miss_is_not_mistaken_for_decline() {
     let owner = Owner::new(CloudProvider::S3, false).await;
     let invite = owner.invite().await;
     let install = Installation::new();
     let (_, cancel) = watch::channel(false);
     let (listed, listing) = tokio::sync::oneshot::channel();
     let (resume, resumed) = tokio::sync::oneshot::channel();
+    let code = coven_sync::read_invite_code(&invite.code).unwrap();
     owner
         .storage
-        .hold_next_listing(
-            ObjectPrefix::store_logs(owner.directory.id()),
+        .hold_next_read(
+            ObjectPath::key_copy(
+                owner.directory.id(),
+                code.inviting_writer,
+                (code.key_copy_number + 1).try_into().unwrap(),
+            ),
             listed,
             resumed,
         )
@@ -657,7 +662,7 @@ async fn approval_during_a_log_listing_is_not_mistaken_for_decline() {
     let (result, ()) = join_with_response(joining, approve).await;
     assert!(
         result.unwrap().is_some(),
-        "approval deleted the request after this device took its log listing"
+        "approval deleted the request after this device observed a key-copy miss"
     );
     owner.close().await;
 }

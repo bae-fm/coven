@@ -1,9 +1,97 @@
 use super::*;
-use coven_storage::{
-    AccessGrant, ByteRange, MemberAccess, MemberRemoval, StorageError, StoredObject, UploadSession,
-};
-use std::sync::Mutex;
+use coven_storage::StorageError;
 use tokio::sync::Barrier;
+
+#[tokio::test]
+async fn far_future_entry_waits_for_missing_or_damaged_sealed_keys() {
+    let storage = storage();
+    let mut a = device(storage.clone(), 1, member(1), store(1)).await;
+    a.clock.set(UNIX_EPOCH + Duration::from_secs(365 * 86400));
+    a.create(key(1)).await;
+    let path = copy_path(
+        storage.as_ref(),
+        Audience::Store,
+        key(1),
+        &a.member.member_id(),
+    )
+    .await;
+    let original = storage.read(&path).await.unwrap();
+    storage.delete(&path).await.unwrap();
+    let mut b = device(storage.clone(), 2, member(1), store(1)).await;
+    b.sync().await;
+    assert!(b.log().await.entries.is_empty());
+    // Copies are immutable; each variant arrives at the writer's next number.
+    let (writer, first) = path.key_copy_position().unwrap();
+    let next =
+        |offset: u64| ObjectPath::key_copy(store(1), writer, first.checked_add(offset).unwrap());
+    let mut damaged = original.clone();
+    let last = damaged.len() - 1;
+    damaged[last] ^= 1;
+    storage.create(&path, &damaged).await.unwrap();
+    // A refused copy is the key copy's own pending record, not a pass failure.
+    let store_copy = crate::PendingSubject::KeyCopy {
+        audience: Audience::Store,
+        key: key(1),
+        member: b.member.member_id(),
+    };
+    let copy_reason = |records: Vec<crate::PendingRecord>| {
+        records
+            .into_iter()
+            .find(|record| record.subject == store_copy)
+            .map(|record| record.reason)
+    };
+    assert!(b.sync.step().await.unwrap().is_empty());
+    assert!(matches!(
+        copy_reason(b.db.pending().await.unwrap()),
+        Some(crate::PendingReason::Refused(Refusal::Decryption { .. }))
+    ));
+    assert!(b.log().await.entries.is_empty());
+    for (offset, claimed_key) in [(1, key(1)), (2, key(2))] {
+        let path = next(offset);
+        let prefix = coven_format::sealed_key::KeyCopyPrefix {
+            audience: Audience::Store,
+            key: claimed_key,
+            member: a.member.member_id(),
+        };
+        let wrong = coven_crypto::seal_store_key(
+            &StoreKey::generate(key(2)).unwrap(),
+            &a.member.sealing_public_key(),
+            path.as_str(),
+            &prefix.encode().unwrap(),
+        )
+        .unwrap();
+        let wrong = prefix.encode_box(&wrong).unwrap();
+        storage.create(&path, &wrong).await.unwrap();
+        assert!(b.sync.step().await.unwrap().is_empty());
+        let reason = copy_reason(b.db.pending().await.unwrap());
+        // The first copy remains refused; later failures do not hide it.
+        assert!(matches!(
+            reason,
+            Some(crate::PendingReason::Refused(Refusal::Decryption { .. }))
+        ));
+        assert!(b.custody.read().unwrap().is_none());
+    }
+    // A later valid copy supplies the key without rereading the refused ones.
+    let ring = a.custody.read().unwrap().unwrap();
+    let valid = crate::store_log_keys::store_copy(
+        &next(3),
+        ring.store_key(key(1)).unwrap(),
+        &a.member.member_id(),
+        &a.member.sealing_public_key(),
+    )
+    .unwrap();
+    storage.create(&next(3), &valid).await.unwrap();
+    let before = storage.request_trace().len();
+    b.sync().await;
+    assert_eq!(a.log().await, b.log().await);
+    assert_eq!(copy_reason(b.db.pending().await.unwrap()), None);
+    assert!(!storage.request_trace()[before..]
+        .iter()
+        .any(|request| matches!(
+            request,
+            MemoryRequest::Read(read, _) if read == &path || read == &next(1) || read == &next(2)
+        )));
+}
 
 #[tokio::test]
 async fn copies_use_one_contiguous_writer_sequence_across_audiences() {
@@ -110,120 +198,10 @@ async fn introductions_refuse_material_that_does_not_match_the_committed_hash() 
     }
 }
 
-enum CopyAttempt {
-    InterruptOnce,
-    LoseReplyOnce,
-    FailComparison,
-    Race(Barrier),
-}
-
-struct CopyStorage {
-    storage: Arc<MemoryStorage>,
-    paths: Vec<ObjectPath>,
-    action: CopyAttempt,
-    attempts: Mutex<Vec<(ObjectPath, Vec<u8>)>>,
-}
-
-#[async_trait::async_trait]
-impl Storage for CopyStorage {
-    fn config(&self) -> StorageConfig {
-        self.storage.config()
-    }
-    fn single_request_limit(&self) -> u64 {
-        self.storage.single_request_limit()
-    }
-    async fn create(&self, path: &ObjectPath, bytes: &[u8]) -> Result<(), StorageError> {
-        if self.paths.contains(path) {
-            let first = {
-                let mut attempts = self.attempts.lock().unwrap();
-                attempts.push((path.clone(), bytes.to_vec()));
-                attempts.len() == 1
-            };
-            match &self.action {
-                CopyAttempt::InterruptOnce if first => {
-                    return Err(StorageError::Failure(StorageFailure::Network))
-                }
-                CopyAttempt::LoseReplyOnce if first => {
-                    self.storage.create(path, bytes).await?;
-                    return Err(StorageError::Failure(StorageFailure::Network));
-                }
-                CopyAttempt::Race(barrier) => {
-                    barrier.wait().await;
-                }
-                _ => (),
-            }
-        }
-        self.storage.create(path, bytes).await
-    }
-    async fn replace(&self, path: &ObjectPath, bytes: &[u8]) -> Result<(), StorageError> {
-        self.storage.replace(path, bytes).await
-    }
-    async fn status(&self, path: &ObjectPath) -> Result<Option<StoredObject>, StorageError> {
-        self.storage.status(path).await
-    }
-    async fn read_object(
-        &self,
-        path: &ObjectPath,
-        range: Option<ByteRange>,
-    ) -> Result<coven_storage::ObjectRead, StorageError> {
-        if self.paths.contains(path) && matches!(self.action, CopyAttempt::FailComparison) {
-            return Err(StorageFailure::Network.into());
-        }
-        self.storage.read_object(path, range).await
-    }
-    async fn list(&self, prefix: &ObjectPrefix) -> Result<Vec<StoredObject>, StorageError> {
-        self.storage.list(prefix).await
-    }
-    async fn delete(&self, path: &ObjectPath) -> Result<(), StorageError> {
-        self.storage.delete(path).await
-    }
-    async fn grant_access(&self, account: &str) -> Result<AccessGrant, StorageError> {
-        self.storage.grant_access(account).await
-    }
-    async fn revoke_access(&self, member: &MemberAccess) -> Result<MemberRemoval, StorageError> {
-        self.storage.revoke_access(member).await
-    }
-    async fn begin_upload(
-        &self,
-        path: &ObjectPath,
-        total: u64,
-    ) -> Result<UploadSession, StorageError> {
-        self.storage.begin_upload(path, total).await
-    }
-    async fn resume_upload(&self, session: &mut UploadSession) -> Result<(), StorageError> {
-        self.storage.resume_upload(session).await
-    }
-    async fn upload_part(
-        &self,
-        session: &mut UploadSession,
-        bytes: &[u8],
-    ) -> Result<(), StorageError> {
-        self.storage.upload_part(session, bytes).await
-    }
-    async fn finish_upload(&self, session: &mut UploadSession) -> Result<(), StorageError> {
-        self.storage.finish_upload(session).await
-    }
-    async fn abort_upload(&self, session: &UploadSession) -> Result<(), StorageError> {
-        self.storage.abort_upload(session).await
-    }
-}
-
-pub(super) fn failing_creation(
-    storage: Arc<MemoryStorage>,
-    path: ObjectPath,
-    lost_reply: bool,
-) -> Arc<dyn Storage> {
-    Arc::new(CopyStorage {
-        storage,
-        paths: vec![path],
-        action: if lost_reply {
-            CopyAttempt::LoseReplyOnce
-        } else {
-            CopyAttempt::InterruptOnce
-        },
-        attempts: Mutex::new(Vec::new()),
-    })
-}
+#[path = "../tests/fixtures/copy_storage.rs"]
+mod copy_storage;
+pub(super) use copy_storage::failing_creation;
+use copy_storage::{CopyAttempt, CopyStorage};
 
 async fn household(storage: &Arc<MemoryStorage>) -> [Device; 4] {
     let mut ana = device(storage.clone(), 1, member(1), store(1)).await;
@@ -241,6 +219,88 @@ async fn household(storage: &Arc<MemoryStorage>) -> [Device; 4] {
     ana.clock.set(UNIX_EPOCH + Duration::from_secs(2));
     ben.clock.set(UNIX_EPOCH + Duration::from_secs(3));
     [ana, ben, dan, erin]
+}
+
+/// Ben rotates to K3 while Ana concurrently adds Erin, so Ben's rotation
+/// copies omit Erin and Ana's addition carries only K1. Both admins then
+/// need to share K3 with Erin. Copies are never deleted to create a need.
+/// `holder` treats Ben's K3 copy for Ana as still in flight, or as damaged
+/// by the provider. Returns that copy's path.
+async fn concurrent_addition(
+    storage: &Arc<MemoryStorage>,
+    holder: Option<bool>,
+) -> ([Device; 4], ObjectPath) {
+    let mut ana = device(storage.clone(), 1, member(1), store(1)).await;
+    let mut ben = device(storage.clone(), 2, member(2), store(1)).await;
+    let dan = device(storage.clone(), 3, member(3), store(1)).await;
+    let mut erin = device(storage.clone(), 4, member(4), store(1)).await;
+    ana.create(key(1)).await;
+    ana.add(&ben.member, MemberRole::Admin).await;
+    ana.add(&dan.member, MemberRole::Member).await;
+    ben.sync().await;
+    ben.sync.load_new_device("Ben").await.unwrap();
+    ana.sync().await;
+    ana.clock.set(UNIX_EPOCH + Duration::from_secs(2));
+    ben.clock.set(UNIX_EPOCH + Duration::from_secs(3));
+    let ben_device = ben.device().await;
+    let first = next_copy(storage.as_ref(), ben_device)
+        .await
+        .key_copy_position()
+        .unwrap()
+        .1;
+    if holder == Some(true) {
+        ben.sync.storage = Some(Arc::new(CopyStorage::new(
+            storage.clone(),
+            Vec::new(),
+            CopyAttempt::CorruptFor(ana.member.member_id()),
+        )));
+    }
+    let rotation = ben.sync.test_rotate(Audience::Store, key(3)).await;
+    ben.sync.storage = Some(storage.clone());
+    let holder_path = copy_path(
+        storage.as_ref(),
+        Audience::Store,
+        key(3),
+        &ana.member.member_id(),
+    )
+    .await;
+    // Ana's addition is concurrent: Ben's rotation and its copies have not
+    // landed for her yet.
+    let mut unseen = vec![crate::store_log_object::path(store(1), rotation)];
+    let mut number = first;
+    loop {
+        let path = ObjectPath::key_copy(store(1), ben_device, number);
+        if storage.status(&path).await.unwrap().is_none() {
+            break;
+        }
+        unseen.push(path);
+        number = number.checked_add(1).unwrap();
+    }
+    ana.sync.storage = Some(Arc::new(CopyStorage::new(
+        storage.clone(),
+        unseen,
+        CopyAttempt::Hidden,
+    )));
+    ana.add(&erin.member, MemberRole::Member).await;
+    ana.sync.storage = Some(if holder == Some(false) {
+        Arc::new(CopyStorage::new(
+            storage.clone(),
+            vec![holder_path.clone()],
+            CopyAttempt::Hidden,
+        ))
+    } else {
+        storage.clone()
+    });
+    erin.sync().await;
+    assert!(find_copy(
+        storage.as_ref(),
+        Audience::Store,
+        key(3),
+        &erin.member.member_id()
+    )
+    .await
+    .is_none());
+    ([ana, ben, dan, erin], holder_path)
 }
 
 async fn next_copy(storage: &dyn Storage, writer: DeviceId) -> ObjectPath {
@@ -261,34 +321,43 @@ async fn next_copy(storage: &dyn Storage, writer: DeviceId) -> ObjectPath {
 async fn a_missing_or_damaged_holder_copy_waits_and_a_later_copy_enables_sharing() {
     for damaged in [false, true] {
         let storage = storage();
-        let [mut ana, mut ben, _dan, erin] = household(&storage).await;
-        let rotation = ben.sync.test_rotate(Audience::Store, key(3)).await;
-        let holder = copy_path(
-            storage.as_ref(),
-            Audience::Store,
-            key(3),
-            &ana.member.member_id(),
-        )
-        .await;
-        let recipient = copy_path(
-            storage.as_ref(),
-            Audience::Store,
-            key(3),
-            &erin.member.member_id(),
-        )
-        .await;
-        storage.delete(&recipient).await.unwrap();
-        let original = storage.read(&holder).await.unwrap();
-        storage.delete(&holder).await.unwrap();
+        let ([mut ana, ben, _dan, erin], _) = concurrent_addition(&storage, Some(damaged)).await;
+        assert!(ana.sync.step().await.unwrap().is_empty());
+        let subject = crate::PendingSubject::KeyCopy {
+            audience: Audience::Store,
+            key: key(3),
+            member: ana.member.member_id(),
+        };
+        let reason = ana
+            .db
+            .pending::<crate::PendingRecord>()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|record| record.subject == subject)
+            .unwrap()
+            .reason;
         if damaged {
-            storage.create(&holder, b"damaged").await.unwrap();
+            assert!(matches!(
+                reason,
+                crate::PendingReason::Refused(Refusal::Decryption { .. })
+            ));
+        } else {
+            assert_eq!(
+                reason,
+                crate::PendingReason::KeyUnavailable {
+                    audience: Audience::Store,
+                    key: key(3),
+                }
+            );
         }
-        let damages = ana.sync.step().await.unwrap();
-        assert_eq!(damages.len(), usize::from(damaged));
-        assert_eq!(
-            ana.log().await.replay.entries[&rotation],
-            EntryOutcome::Kept
-        );
+        assert!(ana
+            .custody
+            .read()
+            .unwrap()
+            .unwrap()
+            .store_key(key(3))
+            .is_err());
         assert!(find_copy(
             storage.as_ref(),
             Audience::Store,
@@ -297,8 +366,20 @@ async fn a_missing_or_damaged_holder_copy_waits_and_a_later_copy_enables_sharing
         )
         .await
         .is_none());
-        storage.delete(&holder).await.unwrap();
-        storage.create(&holder, &original).await.unwrap();
+        // The in-flight copy lands, or Ben's next copy supplies a valid one.
+        ana.sync.storage = Some(storage.clone());
+        if damaged {
+            let ring = ben.custody.read().unwrap().unwrap();
+            let later = next_copy(storage.as_ref(), ben.device().await).await;
+            let valid = crate::store_log_keys::store_copy(
+                &later,
+                ring.store_key(key(3)).unwrap(),
+                &ana.member.member_id(),
+                &ana.member.sealing_public_key(),
+            )
+            .unwrap();
+            storage.create(&later, &valid).await.unwrap();
+        }
         ana.sync().await;
         let copy = find_copy(
             storage.as_ref(),
@@ -323,27 +404,16 @@ async fn a_missing_or_damaged_holder_copy_waits_and_a_later_copy_enables_sharing
 #[tokio::test]
 async fn two_suppliers_publish_distinct_copies_for_the_same_member() {
     let storage = storage();
-    let [mut ana, mut ben, _dan, mut erin] = household(&storage).await;
-    ben.sync.test_rotate(Audience::Store, key(3)).await;
-    ana.sync().await;
-    let original = copy_path(
-        storage.as_ref(),
-        Audience::Store,
-        key(3),
-        &erin.member.member_id(),
-    )
-    .await;
-    storage.delete(&original).await.unwrap();
+    let ([mut ana, mut ben, _dan, mut erin], _) = concurrent_addition(&storage, None).await;
     let paths = vec![
         next_copy(storage.as_ref(), ana.device().await).await,
         next_copy(storage.as_ref(), ben.device().await).await,
     ];
-    let racing = Arc::new(CopyStorage {
-        storage: storage.clone(),
-        paths: paths.clone(),
-        action: CopyAttempt::Race(Barrier::new(2)),
-        attempts: Mutex::new(Vec::new()),
-    });
+    let racing = Arc::new(CopyStorage::new(
+        storage.clone(),
+        paths.clone(),
+        CopyAttempt::Race(Barrier::new(2)),
+    ));
     ana.sync.storage = Some(racing.clone());
     ben.sync.storage = Some(racing.clone());
     let (a, b) = tokio::time::timeout(Duration::from_secs(10), async {
@@ -353,7 +423,7 @@ async fn two_suppliers_publish_distinct_copies_for_the_same_member() {
     .unwrap();
     assert!(a.unwrap().is_empty());
     assert!(b.unwrap().is_empty());
-    let attempts = racing.attempts.lock().unwrap().clone();
+    let attempts = racing.attempts();
     assert_eq!(attempts.len(), 2);
     assert_ne!(attempts[0].0, attempts[1].0);
     assert_ne!(attempts[0].1, attempts[1].1);
@@ -387,35 +457,24 @@ async fn two_suppliers_publish_distinct_copies_for_the_same_member() {
 async fn interrupted_and_lost_reply_copies_retry_identical_bytes_after_restart() {
     for lost_reply in [false, true] {
         let storage = storage();
-        let [mut ana, mut ben, _dan, mut erin] = household(&storage).await;
-        ben.sync.test_rotate(Audience::Store, key(3)).await;
-        ana.sync().await;
-        let original = copy_path(
-            storage.as_ref(),
-            Audience::Store,
-            key(3),
-            &erin.member.member_id(),
-        )
-        .await;
-        storage.delete(&original).await.unwrap();
+        let ([mut ana, _ben, _dan, mut erin], _) = concurrent_addition(&storage, None).await;
         let path = next_copy(storage.as_ref(), ana.device().await).await;
-        let fault = Arc::new(CopyStorage {
-            storage: storage.clone(),
-            paths: vec![path.clone()],
-            action: if lost_reply {
+        let fault = Arc::new(CopyStorage::new(
+            storage.clone(),
+            vec![path.clone()],
+            if lost_reply {
                 CopyAttempt::LoseReplyOnce
             } else {
                 CopyAttempt::InterruptOnce
             },
-            attempts: Mutex::new(Vec::new()),
-        });
+        ));
         ana.sync.storage = Some(fault.clone());
         assert!(
             matches!(ana.sync.sync_store_log().await.unwrap_err(), SyncError::Storage(error) if error.failure() == StorageFailure::Network)
         );
         let fixed = ana.db.key_uploads().await.unwrap().remove(0);
         assert_eq!(fixed.path(store(1)), path);
-        assert_eq!(fault.attempts.lock().unwrap()[0].1, fixed.bytes);
+        assert_eq!(fault.attempts()[0].1, fixed.bytes);
         ana.restart(storage.clone()).await;
         assert_eq!(
             ana.db.key_uploads().await.unwrap(),
@@ -431,10 +490,7 @@ async fn interrupted_and_lost_reply_copies_retry_identical_bytes_after_restart()
             .await
             .unwrap();
         assert_eq!(storage.read(&path).await.unwrap(), fixed.bytes);
-        assert_eq!(
-            *fault.attempts.lock().unwrap(),
-            vec![(path, fixed.bytes); 2]
-        );
+        assert_eq!(fault.attempts(), vec![(path, fixed.bytes); 2]);
         assert!(ana.db.key_uploads().await.unwrap().is_empty());
         erin.sync().await;
         assert!(erin
@@ -451,24 +507,13 @@ async fn interrupted_and_lost_reply_copies_retry_identical_bytes_after_restart()
 async fn reserved_copy_settles_even_after_another_supplier_or_recipient_removal() {
     for removed in [false, true] {
         let storage = storage();
-        let [mut ana, mut ben, _dan, erin] = household(&storage).await;
-        ben.sync.test_rotate(Audience::Store, key(3)).await;
-        ana.sync().await;
-        let original = copy_path(
-            storage.as_ref(),
-            Audience::Store,
-            key(3),
-            &erin.member.member_id(),
-        )
-        .await;
-        storage.delete(&original).await.unwrap();
+        let ([mut ana, mut ben, _dan, erin], _) = concurrent_addition(&storage, None).await;
         let path = next_copy(storage.as_ref(), ana.device().await).await;
-        let fault = Arc::new(CopyStorage {
-            storage: storage.clone(),
-            paths: vec![path.clone()],
-            action: CopyAttempt::InterruptOnce,
-            attempts: Mutex::new(Vec::new()),
-        });
+        let fault = Arc::new(CopyStorage::new(
+            storage.clone(),
+            vec![path.clone()],
+            CopyAttempt::InterruptOnce,
+        ));
         ana.sync.storage = Some(fault);
         assert!(ana.sync.sync_store_log().await.is_err());
         let fixed = ana.db.key_uploads().await.unwrap().remove(0);
@@ -617,12 +662,11 @@ async fn failed_occupied_comparison_keeps_the_copy_pending() {
         .create(&copy.path(store(1)), &copy.bytes)
         .await
         .unwrap();
-    let fault = CopyStorage {
-        storage: storage.clone(),
-        paths: vec![copy.path(store(1))],
-        action: CopyAttempt::FailComparison,
-        attempts: Mutex::new(Vec::new()),
-    };
+    let fault = CopyStorage::new(
+        storage.clone(),
+        vec![copy.path(store(1))],
+        CopyAttempt::FailComparison,
+    );
     assert!(
         matches!(object::upload_keys(store(1), Some(&fault), &ana.db).await,
         Err(SyncError::Storage(error)) if error.failure() == StorageFailure::Network)

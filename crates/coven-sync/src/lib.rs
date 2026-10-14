@@ -74,3 +74,5 @@ mod credential_custody;
 pub use credential_custody::{commit_credentials, CredentialRollback};
 mod restore_codes;
 pub use restore_codes::{read_connection, refreshed_credentials, RestoreCodes};
+
+mod discovery;

@@ -90,6 +90,7 @@ impl MemoryStorageBuilder {
                 sent_bytes: 0,
                 largest_part: 0,
                 held_listing: None,
+                held_read: None,
                 held_creation: None,
             })),
         })))

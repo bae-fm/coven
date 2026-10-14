@@ -444,7 +444,7 @@ impl OpeningStore {
             .await
             .map_err(SyncError::from)?;
         storage
-            .list(&ObjectPrefix::all(owners.directory.id()))
+            .list_writers(owners.directory.id())
             .await
             .map_err(SyncError::from)?;
         owners.storage = Some(storage);

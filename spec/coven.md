@@ -1964,6 +1964,14 @@ Two mechanisms order writes:
 - `_coven_key_publications` retains each writer's last confirmed copy number.
   Confirmation advances it atomically with removing that copy's queue row,
   so an empty queue cannot restart the writer's numbering.
+- Received store-log entries and key copies are retained apart from what
+  replay applied (§6). `_coven_log_inputs` keeps each complete object read by
+  its exact number, with its provider observation, including objects waiting
+  for keys or causes and fetch-ahead reads past a gap.
+  `_coven_log_downloads` holds one contiguous received number per writer and
+  log, advanced in the transaction that retains the input reaching it, and
+  zero for a discovered writer with nothing received yet. A miss or failed
+  read never advances it, and it never substitutes for applied positions.
 - The store log's effects that the database applies are kept with it:
   - `_coven_circle_deletions` records each deleted circle's responsible kept
     entry; local writes, downloaded writes and row recomputation all read
