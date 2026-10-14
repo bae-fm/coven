@@ -87,6 +87,7 @@ pub(crate) enum Drop {
     BeatenBy(#[serde(with = "entry")] coven_format::value::EntryId),
     TargetGone(#[serde(with = "Target")] coven_database::EntryTarget),
     NoAdminLeft,
+    KeysAlreadyUsed,
     NotAllowed,
 }
 #[derive(Serialize, Deserialize)]

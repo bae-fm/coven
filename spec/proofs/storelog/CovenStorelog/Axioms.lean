@@ -424,6 +424,11 @@ import CovenStorelog
 #print axioms CovenStorelog.CurrentReplay.Keyed.Additions.overwrite_keeps_unapplied_addition
 #print axioms CovenStorelog.CurrentReplay.Keyed.Additions.keyed_drops_concurrent_access
 #print axioms CovenStorelog.CurrentReplay.Keyed.Additions.checked_metadata
+#print axioms CovenStorelog.CurrentReplay.Keyed.Additions.authorized_addition_fresh
+#print axioms CovenStorelog.CurrentReplay.Keyed.Additions.effect_keeps_used
+#print axioms CovenStorelog.CurrentReplay.Keyed.Additions.return_needs_fresh_keys
+#print axioms CovenStorelog.CurrentReplay.Keyed.Additions.new_id_needs_fresh_keys
+#print axioms CovenStorelog.CurrentReplay.Keyed.Additions.fresh_metadata
 
 #print axioms CovenStorelog.CurrentReplay.Keyed.OldKeyObjects.timely_iff
 #print axioms CovenStorelog.CurrentReplay.Keyed.OldKeyObjects.counts_iff

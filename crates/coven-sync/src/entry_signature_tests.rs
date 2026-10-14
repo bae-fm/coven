@@ -7,7 +7,9 @@
 //! two concurrent additions of one new id, entries signed with a key their
 //! author's recorded view never bound, and a self-registration by an id no
 //! entry added. The prefix re-adds active members, repeating or changing
-//! their keys, role or access (`Keyed.Additions`). Rust refuses a bad
+//! their keys, role or access (`Keyed.Additions`), returns removed members
+//! with their old pair or a fresh one, and adds new ids borrowing another
+//! member's key (`Keyed.freshKeys`). Rust refuses a bad
 //! signature as damaged bytes and never applies it; the model drops it.
 //! Because no entry reads a leaf, both replays keep the same prefix.
 
@@ -39,6 +41,16 @@ const CONCURRENT: u8 = MEMBERS + 1;
 /// Member `n`'s identity: `history::member(n)` with `history::keys(n)`.
 fn identity(n: u8) -> MemberIdentity {
     crate::store_log_sync::tests::member(n + 1)
+}
+
+/// Member `n`'s id with a third private pair, bound only by a return.
+fn returning(n: u8) -> MemberIdentity {
+    let mut bytes = b"CVMK\x01".to_vec();
+    bytes.extend([n + 151; 64]);
+    MemberIdentity::new(
+        history::member(n),
+        MemberKeys::from_secret_bytes(&bytes).unwrap(),
+    )
 }
 
 /// Member `n`'s id with a private pair no entry ever binds to it.
@@ -114,6 +126,8 @@ struct Case {
     /// Entries signed with their author's current key: the prefix and the
     /// concurrent additions.
     signed: usize,
+    /// Additions of an id absent from their view: returns and borrowed keys.
+    fresh: Vec<usize>,
     /// Introductions held in custody, by entry index.
     held: Vec<usize>,
     /// Copies of held keys: introduction index, recipient id and sealing key.
@@ -131,6 +145,7 @@ fn generate(seed: u64) -> Case {
     let mut roles = BTreeMap::new();
     let mut circles = 0u64;
     let mut rotations = 0u64;
+    let mut fresh = Vec::new();
     let push = |h: &mut History, signers: &mut Vec<MemberIdentity>, author: u8, change| {
         h.all(author, device_of(author), change);
         signers.push(identity(author));
@@ -139,7 +154,7 @@ fn generate(seed: u64) -> Case {
         let candidate = 1 + g.pick(usize::from(MEMBERS - 1)) as u8;
         let actors: Vec<u8> = registered.difference(&removed).copied().collect();
         let actor = actors[g.pick(actors.len())];
-        match g.pick(8) {
+        match g.pick(9) {
             // Each id is added once, with its own fresh pair.
             0 if !added.contains(&candidate) => {
                 let role = if g.pick(2) == 0 {
@@ -201,6 +216,25 @@ fn generate(seed: u64) -> Case {
                 let change = readd(candidate, role, g.pick(4));
                 push(&mut h, &mut signers, 0, change);
             }
+            // A new id borrows an added member's pair or one of its keys.
+            8 if !added.contains(&candidate) => {
+                let others: Vec<u8> = added.iter().copied().collect();
+                let other = history::keys(others[g.pick(others.len())]);
+                let own = history::keys(candidate);
+                let keys = match g.pick(3) {
+                    0 => other,
+                    1 => coven_crypto::MemberPublicKeys {
+                        signing: other.signing,
+                        sealing: own.sealing,
+                    },
+                    _ => coven_crypto::MemberPublicKeys {
+                        signing: own.signing,
+                        sealing: other.sealing,
+                    },
+                };
+                fresh.push(h.entries.len());
+                push(&mut h, &mut signers, 0, with_keys(candidate, keys));
+            }
             6 => {
                 rotations += 1;
                 push(
@@ -212,6 +246,23 @@ fn generate(seed: u64) -> Case {
             }
             _ => {}
         }
+    }
+    // Removed members return, with their old pair or a fresh one. A history
+    // without a removal first removes an added member.
+    if removed.is_empty() {
+        if let Some(n) = added.iter().copied().find(|&n| n != 0) {
+            push(&mut h, &mut signers, 0, history::remove(n));
+            removed.insert(n);
+        }
+    }
+    for &n in &removed {
+        let keys = if g.pick(2) == 0 {
+            history::keys(n)
+        } else {
+            returning(n).keys().public_keys()
+        };
+        fresh.push(h.entries.len());
+        push(&mut h, &mut signers, 0, with_keys(n, keys));
     }
     // Member 0's two other devices, which add the same new id below.
     for other in [30, 31] {
@@ -284,9 +335,29 @@ fn generate(seed: u64) -> Case {
         signers,
         honest,
         signed,
+        fresh,
         held,
         copies,
         me,
+    }
+}
+
+/// `history::add(n, Member)` with another public pair.
+fn with_keys(n: u8, keys: coven_crypto::MemberPublicKeys) -> StoreChange {
+    let StoreChange::AddMember {
+        member,
+        role,
+        access,
+        ..
+    } = history::add(n, MemberRole::Member)
+    else {
+        unreachable!("history::add makes an addition")
+    };
+    StoreChange::AddMember {
+        member,
+        keys,
+        role,
+        access,
     }
 }
 
@@ -564,6 +635,8 @@ fn lean_differential_member_keys() {
     let mut selections = [0; 2];
     // Re-additions kept and dropped, and concurrent additions combined and not.
     let mut additions = [0; 4];
+    // Absent-id additions refused for a used key, and kept with a fresh pair.
+    let mut fresh = [0; 2];
     for (((case, input), result), numbers) in
         cases.iter().zip(&inputs).zip(&results).zip(&mut numbers)
     {
@@ -600,6 +673,15 @@ fn lean_differential_member_keys() {
             }
         }
         additions[2 + usize::from(rust.contains(&(case.honest + 1)))] += 1;
+        for &i in &case.fresh {
+            match replay.entries.get(&position(i)) {
+                Some(EntryOutcome::Kept) => fresh[1] += 1,
+                Some(EntryOutcome::Dropped(coven_database::DropReason::KeysAlreadyUsed)) => {
+                    fresh[0] += 1
+                }
+                _ => {}
+            }
+        }
         let rust: BTreeSet<usize> = (0..case.history.entries.len())
             .filter(|&i| {
                 received.refused.contains(&i)
@@ -626,6 +708,15 @@ fn lean_differential_member_keys() {
             .collect();
         let lean: BTreeSet<[usize; 3]> = serde_json::from_value(result["keys"].clone()).unwrap();
         assert_eq!(keys, lean, "member keys of {input}");
+        // Every pair kept entries bound, including replaced and removed ones.
+        let used: BTreeSet<[usize; 2]> = replay
+            .state
+            .bound_keys
+            .iter()
+            .map(|keys| [numbers.signing(keys.signing), numbers.sealing(keys.sealing)])
+            .collect();
+        let lean: BTreeSet<[usize; 2]> = serde_json::from_value(result["used"].clone()).unwrap();
+        assert_eq!(used, lean, "bound pairs of {input}");
         let members: BTreeSet<[u64; 2]> = replay
             .state
             .members
@@ -668,6 +759,7 @@ fn lean_differential_member_keys() {
     );
     assert!(selections.iter().all(|&n| n > 0), "{selections:?}");
     assert!(additions.iter().all(|&n| n > 0), "{additions:?}");
+    assert!(fresh.iter().all(|&n| n > 0), "{fresh:?}");
 }
 
 #[tokio::test]

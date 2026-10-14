@@ -243,7 +243,7 @@ async fn adopt_account(a: &mut Device, target: &MemberIdentity, intended: bool) 
     let change = if intended {
         StoreChange::AddMember {
             member: target.member(),
-            keys: public(target),
+            keys: crate::effects::tests::addition_keys(&a.log().await, target),
             role: MemberRole::Member,
             access: coven_format::MemberAccess::ProviderAccount(ACCOUNT.into()),
         }

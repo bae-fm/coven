@@ -62,6 +62,7 @@ pub(crate) fn outcome(row: &Row<'_>, start: usize) -> rusqlite::Result<EntryOutc
         ))),
         "admin" => Ok(EntryOutcome::Dropped(DropReason::NoAdminLeft)),
         "authority" => Ok(EntryOutcome::Dropped(DropReason::NotAllowed)),
+        "keys" => Ok(EntryOutcome::Dropped(DropReason::KeysAlreadyUsed)),
         _ => Err(rusqlite::Error::InvalidQuery),
     }
 }
@@ -156,6 +157,16 @@ pub(crate) fn read(database: &DatabaseConnection) -> Result<StoreLog, DbError> {
         )?
         .into_iter()
         .collect();
+    state.bound_keys = database
+        .query("SELECT signing,sealing FROM _coven_bound_keys", [], |row| {
+            Ok(MemberPublicKeys {
+                signing: SigningKey::from_bytes(row.get(0)?)
+                    .map_err(|error| decode_failure(0, Type::Blob, error))?,
+                sealing: SealingKey::from_bytes(row.get(1)?),
+            })
+        })?
+        .into_iter()
+        .collect();
     state.devices = database
         .query(
             "SELECT device,member,name,state FROM _coven_devices",
@@ -232,6 +243,7 @@ pub(crate) fn replace(
                 },
                 DropReason::NoAdminLeft => ("admin", None, None),
                 DropReason::NotAllowed => ("authority", None, None),
+                DropReason::KeysAlreadyUsed => ("keys", None, None),
             },
         };
         database.internal_execute(
@@ -251,6 +263,7 @@ pub(crate) fn replace(
         "_coven_circle_deletions",
         "_coven_circle_members",
         "_coven_devices",
+        "_coven_bound_keys",
         "_coven_circles",
         "_coven_members",
     ] {
@@ -272,6 +285,15 @@ pub(crate) fn replace(
                 role,
                 member.removed,
                 serde_json::to_vec(&member.access).expect("member access encoding")
+            ],
+        )?;
+    }
+    for keys in &state.bound_keys {
+        database.internal_execute(
+            "INSERT INTO _coven_bound_keys(signing,sealing) VALUES(?1,?2)",
+            params![
+                keys.signing.as_bytes().as_slice(),
+                keys.sealing.as_bytes().as_slice()
             ],
         )?;
     }

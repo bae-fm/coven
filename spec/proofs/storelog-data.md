@@ -1002,8 +1002,11 @@ member and sealing key, and `MemberKeys.selectInReplay` with Rust's first-attemp
 selection. Leaves signed with a key their author's view never bound are Rust
 signature refusals and model drops; a self-registration by an id no entry
 added is dropped by both. Its honest prefix also re-adds active members,
-repeating them or changing their keys, role or access, and two concurrent
-leaves add one new id with equal or differing payloads
+repeating them or changing their keys, role or access, returns removed
+members with their old pair or a fresh one, and adds new ids borrowing an
+added member's pair or one of its keys. Every bound pair is compared with
+`Keyed`'s history. Two concurrent leaves add one new id with equal or
+differing payloads
 ([`Keyed.Additions`](storelog.md#member-additions)). The histories contain no
 replacement, so member-key replacement itself still has no Rust differential.
 

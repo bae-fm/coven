@@ -985,9 +985,16 @@ holds nowhere and its author is never told. The keyed rule refuses the first
 Convergence and the admin invariant for the keyed rule are `equal_received`
 and `admin_remains` above.
 
-The keyed rule also requires fresh keys for an addition of an id not in the
-view, including a removed member's return. Rust does not check that yet: it
-keeps no history of installed keys outside the current member list.
+The keyed rule also requires fresh keys for an addition of an id not active
+in the view, including a removed member's return. `authorized_addition_fresh`
+states it: such an addition is authorized only when neither of its keys
+appears in a pair that view's replay bound. `effect_keeps_used` shows replay
+never forgets a bound pair. `return_needs_fresh_keys` drops Ben's return with
+his old pair and keeps it with a new one; `new_id_needs_fresh_keys` drops a
+new id borrowing Ben's whole pair, his signing key or his sealing key. Rust
+keeps the same history (`_coven_bound_keys`), drops such an addition as
+`KeysAlreadyUsed`, and `lean_differential_member_keys` compares the bound
+pairs with the model's.
 
 Concurrent replacements of the same member conflict even with equal payloads.
 `replacements_conflict`, `admin_preferred` and `same_kind_timestamp` prove the

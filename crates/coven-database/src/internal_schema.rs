@@ -198,7 +198,7 @@ macro_rules! coven_tables {
                 timestamp BLOB NOT NULL CHECK(length(timestamp)=16),
                 author_view BLOB NOT NULL,
                 stored_at BLOB NOT NULL CHECK(length(stored_at)=12),
-                outcome TEXT NOT NULL CHECK(outcome IN ('kept','late','beaten','target-member','target-device','target-circle','admin','authority')),
+                outcome TEXT NOT NULL CHECK(outcome IN ('kept','late','beaten','target-member','target-device','target-circle','admin','authority','keys')),
                 beaten_device BLOB CHECK(length(beaten_device)=8),
                 beaten_number BLOB CHECK(length(beaten_number)=8),
                 target BLOB,
@@ -348,6 +348,14 @@ macro_rules! coven_tables {
                 access BLOB NOT NULL,
                 role TEXT NOT NULL CHECK(role IN ('admin','member')),
                 removed INTEGER NOT NULL CHECK(removed IN (0,1))
+            ) STRICT, WITHOUT ROWID;
+        ");
+        // Every pair replay's kept creation and additions bound (§9). Replay
+        // rewrites it with the member tables; fresh additions keep both keys unique.
+        $visit!(_coven_bound_keys, "
+            CREATE TABLE _coven_bound_keys (
+                signing BLOB PRIMARY KEY NOT NULL CHECK(length(signing)=32),
+                sealing BLOB NOT NULL UNIQUE CHECK(length(sealing)=32)
             ) STRICT, WITHOUT ROWID;
         ");
         $visit!(_coven_devices, "

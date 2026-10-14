@@ -899,6 +899,7 @@ fn replay_drops_are_final_for_logs_and_app_retriable_for_operations() {
             DropReason::TargetGone(EntryTarget::Member(MemberId(uuid::Uuid::from_u128(5)))),
             DropReason::NotAllowed,
             DropReason::NoAdminLeft,
+            DropReason::KeysAlreadyUsed,
         ] {
             let record = PendingRecord {
                 subject: subject.clone(),

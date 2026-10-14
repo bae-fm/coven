@@ -2875,6 +2875,8 @@ Carol's tablet:
   - the replay's result: `_coven_members` (every member a kept entry
     added, their stable ids, current public key pairs and role, and whether
     they were removed),
+    `_coven_bound_keys` (every public pair a kept creation or addition
+    bound, including removed members' pairs),
     `_coven_devices` (every device a kept entry added, its member and name,
     and whether it is active, removed or replaced),
     `_coven_circles` (every circle a kept entry made and its name),
@@ -3086,6 +3088,14 @@ Carol's tablet:
     `NotAllowed`. Roles and access change only by their own entries, so an
     admin cannot record another member's access by re-adding them
     ([`authorized_readd_identical`, `overwrite_sets_anothers_access`](proofs/storelog/CovenStorelog/MemberAdditions.lean)).
+  - Any other addition, a removed member's return included, needs a pair
+    sharing neither its signing nor its sealing key with a pair a kept
+    creation or addition bound in its author's view; otherwise it drops as
+    `KeysAlreadyUsed`. Replay never forgets a bound pair. E.g. Ana removes
+    Ben and adds his id again: with his old pair the addition drops, with a
+    new pair it applies. Dan's new id cannot borrow Ben's signing or
+    sealing key
+    ([`authorized_addition_fresh`, `effect_keeps_used`, `return_needs_fresh_keys`, `new_id_needs_fresh_keys`](proofs/storelog/CovenStorelog/MemberAdditions.lean)).
   - Replace member keys never takes this shortcut. Concurrent replacements
     of the same id conflict even when their key pairs are identical.
 - Otherwise it applies only if:

@@ -10,7 +10,7 @@ use zeroize::Zeroizing;
 
 /// A member's validated Ed25519 public signing key (§11.1). It is bound to a
 /// stable [`MemberId`] by the store log and is never that identity.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct SigningKey([u8; 32]);
 
 impl SigningKey {
@@ -79,7 +79,7 @@ impl SealingKey {
 
 /// A member's public signing and sealing keys, independent of their stable
 /// [`MemberId`] (§9, D2). Creation, addition and replacement bind a pair to an id.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Ord, PartialOrd)]
 pub struct MemberPublicKeys {
     /// The Ed25519 key that verifies the member's signatures.
     pub signing: SigningKey,

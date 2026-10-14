@@ -871,33 +871,35 @@ async fn creation_recovers_after_copy_confirmation_without_resealing_the_copy() 
     }
 }
 
+/// A removed member returns only with a fresh pair (§9). The refused return
+/// with the old pair seals nothing, so its historical copy reserves no number:
+/// the fresh pair's copy takes the next number, 3.
 #[tokio::test]
-async fn observed_historical_copies_do_not_reserve_numbers_when_a_member_returns() {
+async fn a_member_returns_with_a_fresh_pair_and_historical_copies_reserve_no_numbers() {
     let storage = storage();
     let mut ana = device(storage.clone(), 1, member(1), store(1)).await;
     ana.create(key(1)).await;
     ana.add(&member(2), MemberRole::Member).await;
     let before = storage.list(&ObjectPrefix::keys(store(1))).await.unwrap();
+    // `replay::tests` numbers member(2)'s id 1.
+    use crate::{effects::tests::add_with, replay::tests::remove};
+    use coven_database::DropReason;
+    ana.sync.make_and_upload_entry(remove(1)).await.unwrap();
+    let old = add_with(1, public(&member(2)));
+    assert!(matches!(
+        ana.sync.make_and_upload_entry(old).await,
+        Err(SyncError::Rejected(DropReason::KeysAlreadyUsed))
+    ));
+    let keys = storage.list(&ObjectPrefix::keys(store(1))).await.unwrap();
+    assert_eq!(keys, before);
+    let fresh = crate::effects::tests::addition_keys(&ana.log().await, &member(2));
+    assert_ne!(fresh, public(&member(2)));
     ana.sync
-        .make_and_upload_entry(StoreChange::RemoveMember {
-            member: member(2).member(),
-        })
+        .make_and_upload_entry(add_with(1, fresh))
         .await
         .unwrap();
-    ana.add(&member(2), MemberRole::Member).await;
-    assert_eq!(
-        storage.list(&ObjectPrefix::keys(store(1))).await.unwrap(),
-        before
-    );
-    ana.add(&member(3), MemberRole::Member).await;
-    assert!(storage
-        .read(&ObjectPath::key_copy(
-            store(1),
-            DeviceId(1),
-            3.try_into().unwrap()
-        ))
-        .await
-        .is_ok());
+    let copy = ObjectPath::key_copy(store(1), DeviceId(1), 3.try_into().unwrap());
+    assert!(storage.read(&copy).await.is_ok());
 }
 
 #[tokio::test]

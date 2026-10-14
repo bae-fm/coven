@@ -498,3 +498,134 @@ fn a_member_key_replacement_is_not_yet_authorized_by_any_view() {
         assert_eq!(r.state.members[&member(1)].keys, keys(1));
     });
 }
+
+/// The pair an addition of `member` uses in `log`'s view: an active member's
+/// own, or else the first pair sharing no key with one that view bound, as a
+/// removed member's return needs (§9).
+pub(crate) fn addition_keys(
+    log: &coven_database::StoreLog,
+    member: &coven_crypto::MemberIdentity,
+) -> coven_format::store_log::MemberPublicKeys {
+    let state = &log.replay.state;
+    if let Some(active) = crate::effects::member(state, &member.member()) {
+        return active.keys;
+    }
+    let unbound = |keys: &coven_format::store_log::MemberPublicKeys| {
+        !state
+            .bound_keys
+            .iter()
+            .any(|bound| bound.signing == keys.signing || bound.sealing == keys.sealing)
+    };
+    std::iter::once(member.keys().public_keys())
+        .chain((200..=u8::MAX).map(|seed| {
+            let mut bytes = b"CVMK\x01".to_vec();
+            bytes.extend([seed; 64]);
+            coven_crypto::MemberKeys::from_secret_bytes(&bytes)
+                .unwrap()
+                .public_keys()
+        }))
+        .find(unbound)
+        .expect("an unbound fixture pair")
+}
+
+/// `add(n, Member)` with another public pair.
+pub(crate) fn add_with(n: u8, keys: coven_format::store_log::MemberPublicKeys) -> StoreChange {
+    let StoreChange::AddMember {
+        member,
+        role,
+        access,
+        ..
+    } = add(n, Member)
+    else {
+        unreachable!("add makes an addition")
+    };
+    StoreChange::AddMember {
+        member,
+        keys,
+        role,
+        access,
+    }
+}
+
+/// An addition of an id not active in its author's view needs a pair sharing
+/// no key with any pair that view bound (§9,
+/// `Keyed.Additions.return_needs_fresh_keys`, `new_id_needs_fresh_keys`).
+#[test]
+fn an_addition_of_an_absent_id_needs_keys_no_pair_has_bound() {
+    use crate::effects::validate_change;
+    use coven_database::{DropReason, EntryOutcome};
+    use coven_format::store_log::MemberPublicKeys;
+    let refused = Err(DropReason::KeysAlreadyUsed);
+    // Ben (1) is removed, then returns with his old pair or a fresh one.
+    for (pair, fresh) in [(keys(1), false), (keys(9), true)] {
+        let mut h = household(Member, Member);
+        h.all(0, 0, remove(1));
+        let current = replay(&h.entries);
+        assert!(current.state.bound_keys.contains(&keys(1)));
+        let change = add_with(1, pair);
+        let expected = if fresh { Ok(false) } else { refused.clone() };
+        assert_eq!(
+            validate_change(&current.state, &member(0), &change),
+            expected
+        );
+        h.all(0, 0, change);
+        let last = h.entries.last().unwrap().position;
+        h.every_order(|r| {
+            if fresh {
+                assert_eq!(r.entries[&last], EntryOutcome::Kept);
+                let ben = &r.state.members[&member(1)];
+                assert_eq!((ben.keys, ben.removed), (pair, false));
+                assert!(
+                    r.state.bound_keys.contains(&keys(1)) && r.state.bound_keys.contains(&pair)
+                );
+            } else {
+                assert_eq!(
+                    r.entries[&last],
+                    EntryOutcome::Dropped(DropReason::KeysAlreadyUsed)
+                );
+                assert!(r.state.members[&member(1)].removed);
+            }
+        });
+    }
+    // A new id, Dan (3), borrows Ben's whole pair, his signing key or his
+    // sealing key; with his own pair he is added.
+    let (ben, dan) = (keys(1), keys(3));
+    for (pair, fresh) in [
+        (ben, false),
+        (
+            MemberPublicKeys {
+                signing: ben.signing,
+                sealing: dan.sealing,
+            },
+            false,
+        ),
+        (
+            MemberPublicKeys {
+                signing: dan.signing,
+                sealing: ben.sealing,
+            },
+            false,
+        ),
+        (dan, true),
+    ] {
+        let mut h = household(Member, Member);
+        let change = add_with(3, pair);
+        let current = replay(&h.entries);
+        let expected = if fresh { Ok(false) } else { refused.clone() };
+        assert_eq!(
+            validate_change(&current.state, &member(0), &change),
+            expected
+        );
+        h.all(0, 0, change);
+        let last = h.entries.last().unwrap().position;
+        h.every_order(|r| {
+            assert_eq!(r.state.members.contains_key(&member(3)), fresh);
+            if !fresh {
+                assert_eq!(
+                    r.entries[&last],
+                    EntryOutcome::Dropped(DropReason::KeysAlreadyUsed)
+                );
+            }
+        });
+    }
+}

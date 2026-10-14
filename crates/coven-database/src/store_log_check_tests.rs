@@ -9,6 +9,7 @@ fn author_view_checks_retain_all_facts_and_reject_damaged_encodings() {
         StoreLogCheck::LandedTooLate { authorized: false },
         StoreLogCheck::LandedTooLate { authorized: true },
         StoreLogCheck::NotAllowed,
+        StoreLogCheck::KeysAlreadyUsed,
         StoreLogCheck::DeviceOwner(member(1)),
         StoreLogCheck::MemberRemoval(BTreeMap::new()),
         StoreLogCheck::MemberRemoval([(circle, CircleRemoval::Member)].into()),
@@ -21,7 +22,8 @@ fn author_view_checks_retain_all_facts_and_reject_damaged_encodings() {
     for bytes in [
         vec![],
         vec![2],
-        vec![5],
+        vec![5, 0],
+        vec![6],
         vec![4],
         vec![4, 2],
         vec![0, 0],

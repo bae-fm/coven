@@ -253,6 +253,11 @@ mod identity {
         let (creation, mut replay) =
             log_tests::circle_history(CircleId(uuid::Uuid::from_u128(2)))[0].clone();
         let identity = replay.state.store.clone().unwrap();
+        // The bound key history is saved and read back with the member tables.
+        let StoreChange::CreateStore { admin, .. } = creation.change else {
+            unreachable!("the history starts with creation")
+        };
+        replay.state.bound_keys.insert(admin);
         db.apply_store_log::<Record>(
             log_tests::checked(creation.clone()),
             replay.clone(),

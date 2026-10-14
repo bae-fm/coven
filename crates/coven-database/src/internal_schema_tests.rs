@@ -91,6 +91,7 @@ async fn only_the_spec_tables_are_created() {
                 "_coven_access_keys",
                 "_coven_authored_changes",
                 "_coven_authored_parts",
+                "_coven_bound_keys",
                 "_coven_boundaries",
                 "_coven_cache",
                 "_coven_cache_budgets",
@@ -254,6 +255,7 @@ mod fixture {
        SELECT device,n,zeroblob(128),CASE WHEN i%4=0 THEN counter(1) END,
               CASE WHEN i%4=0 THEN counter(1) END FROM fixture;
      INSERT INTO _coven_members SELECT member,key,key,x'00','member',i%2 FROM fixture;
+     INSERT INTO _coven_bound_keys SELECT key,key FROM fixture;
      INSERT INTO _coven_devices SELECT n,member,'device ' || i,CASE i%3 WHEN 0 THEN 'active' WHEN 1 THEN 'removed' ELSE 'replaced' END FROM fixture;
      INSERT INTO _coven_circles SELECT 'circle_' || i,'circle ' || i FROM fixture;
      INSERT INTO _coven_circle_members SELECT 'circle_' || i,member FROM fixture;
@@ -479,6 +481,8 @@ mod scans {
         Some("store_log() returns every replay entry"),
     ("store_log_tables.rs", "SELECT member,signing,sealing,role,removed,access FROM _coven_members", "_coven_members") =>
         Some("store_log() returns the complete member map"),
+    ("store_log_tables.rs", "SELECT signing,sealing FROM _coven_bound_keys", "_coven_bound_keys") =>
+        Some("store_log() returns every pair replay bound"),
     ("store_log_tables.rs", "SELECT device,member,name,state FROM _coven_devices", "_coven_devices") =>
         Some("store_log() returns the complete device map"),
     ("store_log_tables.rs", "SELECT circle,name FROM _coven_circles", "_coven_circles") =>

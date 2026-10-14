@@ -133,6 +133,11 @@ pub struct StoreLogState {
     pub store: Option<StoreIdentity>,
     /// Every member added by a kept entry, including removed members.
     pub members: BTreeMap<MemberId, StoreMember>,
+    /// Every public pair a kept creation or addition bound, including pairs
+    /// of removed members and pairs a later binding replaced. An addition of
+    /// an id not active in its view must share no key with these (§9,
+    /// `Keyed.Additions.authorized_addition_fresh`).
+    pub bound_keys: BTreeSet<MemberPublicKeys>,
     /// Every device added by a kept entry, including removed devices.
     pub devices: BTreeMap<DeviceId, StoreDevice>,
     /// Every circle made by a kept entry, including deleted circles.
@@ -308,6 +313,9 @@ pub enum DropReason {
     TargetGone(EntryTarget),
     /// Its effect would leave no admin.
     NoAdminLeft,
+    /// The proposed member pair reuses a signing or sealing key already bound
+    /// in its author's view (§9).
+    KeysAlreadyUsed,
     /// Its author's view did not authorize the change, including an unseen device.
     NotAllowed,
 }

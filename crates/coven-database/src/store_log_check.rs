@@ -43,6 +43,9 @@ pub enum StoreLogCheck {
     Allowed,
     /// The author's view did not allow the change.
     NotAllowed,
+    /// An addition of an id not active in the author's view whose pair shares
+    /// a signing or sealing key with a pair already bound in that view (§9).
+    KeysAlreadyUsed,
     /// An authorized device removal, with the owner its author observed.
     DeviceOwner(MemberId),
     /// An authorized store or circle member removal. Each circle contained the
@@ -56,7 +59,7 @@ impl StoreLogCheck {
     pub fn authorized(&self) -> bool {
         match self {
             Self::LandedTooLate { authorized } => *authorized,
-            Self::NotAllowed => false,
+            Self::NotAllowed | Self::KeysAlreadyUsed => false,
             Self::Allowed | Self::DeviceOwner(_) | Self::MemberRemoval(_) => true,
         }
     }
@@ -81,6 +84,7 @@ impl StoreLogCheck {
             Self::LandedTooLate { authorized } => vec![4, u8::from(*authorized)],
             Self::Allowed => vec![0],
             Self::NotAllowed => vec![1],
+            Self::KeysAlreadyUsed => vec![5],
             Self::DeviceOwner(owner) => {
                 let mut bytes = vec![2];
                 bytes.extend(owner.0.as_bytes());
@@ -107,6 +111,7 @@ impl StoreLogCheck {
             }),
             [0] => Ok(Self::Allowed),
             [1] => Ok(Self::NotAllowed),
+            [5] => Ok(Self::KeysAlreadyUsed),
             [2, owner @ ..] if owner.len() == 16 => Ok(Self::DeviceOwner(MemberId(
                 uuid::Uuid::from_bytes(owner.try_into().expect("checked owner length")),
             ))),

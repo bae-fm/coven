@@ -60,6 +60,9 @@ private def run (j : Json) : Except String Json := do
     Json.mkObj [("current", toJson (CurrentReplay.Keyed.signatureCurrent (views e) (H.log e))),
       ("known", toJson (lookup (views e).keys (H.log e).author).isSome)]
   let keys := sortedPairs (r.state.keys.map fun (m, k) => [m, k.signing, k.sealing])
+  -- Every pair kept entries bound in this replay, retained after removal.
+  let used := (r.state.usedKeys.map fun k => [k.signing, k.sealing]).eraseDups.mergeSort
+    fun a b => decide (a.headD 0 ≤ b.headD 0)
   let members := sortedPairs (r.state.membership.members.map fun (m, role) =>
     [m, StorelogJson.roleNumber role])
   let introduction (e : Nat) : Except String KeySelection.Key := do
@@ -81,7 +84,8 @@ private def run (j : Json) : Except String Json := do
     toJson ((KeySelection.MemberKeys.selectInReplay H W n received pass who audience).map
       (·.entry))
   pure (Json.mkObj [
-    ("signatures", toJson signatures), ("keys", toJson keys), ("members", toJson members),
+    ("signatures", toJson signatures), ("keys", toJson keys), ("used", toJson used),
+    ("members", toJson members),
     ("kept", toJson (StorelogJson.sorted r.kept)),
     ("dropped", toJson (StorelogJson.sorted r.dropped)),
     ("current", toJson (copies.map fun (_, recipient) =>

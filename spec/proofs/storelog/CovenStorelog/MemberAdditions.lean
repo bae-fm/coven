@@ -23,6 +23,12 @@ it breaks:
 (`keyed_refuses_readd`, `keyed_drops_concurrent_access`).
 `authorized_readd_identical`, `addition_in_place` and
 `additions_conflict_iff_different` state the keyed rule for every view.
+An addition of an id not active in its author's view needs a pair sharing
+no key with any pair that view's replay has bound
+(`authorized_addition_fresh`), and replay never forgets a bound pair
+(`effect_keeps_used`). `return_needs_fresh_keys` and
+`new_id_needs_fresh_keys` check a removed member's return and a new id
+borrowing another member's key.
 Convergence and the admin invariant are `Keyed.equal_received` and
 `Keyed.admin_remains`.
 -/
@@ -79,6 +85,31 @@ theorem additions_conflict_iff_different (va vb : State) (a b : Entry) (m k : Na
   rw [show contradiction va vb a b = (m == k && a.action != b.action) by
     simp only [contradiction, ha, hb]]
   simp
+
+/-- An addition of an id not active in its author's view is authorized only
+with a pair sharing neither key with any pair bound earlier in that view. -/
+theorem authorized_addition_fresh (view : State) (e : Entry) (m : Nat) (r : Role)
+    (access : String) (keys : MemberKeys)
+    (action : e.action = .entry (.addMember m r access) keys)
+    (absent : member view.membership m = false) (ok : authorized view e = true) :
+    freshKeys view keys = true := by
+  simp only [authorized, action, absent, Bool.false_eq_true, ite_false, Bool.and_eq_true] at ok
+  exact ok.2.2
+
+/-- Replay never forgets a bound pair: every effect keeps the history. -/
+theorem effect_keeps_used (view s t : State) (id : Nat) (e : Entry)
+    (h : effect view s id e = some t) : ∀ k ∈ s.usedKeys, k ∈ t.usedKeys := by
+  intro k hk
+  unfold effect at h
+  split at h
+  · split at h
+    · cases h; exact List.mem_cons_of_mem _ hk
+    · cases h
+  · obtain ⟨membership, _, rfl⟩ := Option.map_eq_some_iff.mp h
+    split
+    · exact List.mem_cons_of_mem _ hk
+    · exact List.mem_cons_of_mem _ hk
+    · exact hk
 
 /-! ## T104's first Rust rule -/
 
@@ -194,6 +225,41 @@ theorem keyed_drops_concurrent_access :
       some "x" := by decide
 
 theorem checked_metadata : metadataValid readd 3 = true ∧ metadataValid concurrent 3 = true := by
+  decide
+
+def fresh : MemberKeys := ⟨104, 204⟩
+
+/-- Ana adds Ben, removes him, then adds his id again with `keys`. -/
+def returning (keys : MemberKeys) : History := ⟨fun
+  | 0 => ⟨0, 100, 0, [], .entry (.create "ana" storeKey) ana⟩
+  | 1 => ⟨0, 100, 0, [0], .entry (.addMember 1 .member "ben") ben⟩
+  | 2 => ⟨0, 100, 0, [0, 1], .entry (.removeMember 1) ()⟩
+  | _ => ⟨0, 100, 0, [0, 1, 2], .entry (.addMember 1 .member "ben") keys⟩, id, id⟩
+
+/-- **A removed member returns only with a fresh pair.** Re-adding Ben with
+his old pair drops; a pair new to the store is kept and bound to his id. -/
+theorem return_needs_fresh_keys :
+    3 ∈ (resolve (returning ben) 30 4 (entrySet [0, 1, 2, 3])).dropped ∧
+    member (resolve (returning ben) 30 4 (entrySet [0, 1, 2, 3])).state.membership 1 = false ∧
+    3 ∈ (resolve (returning fresh) 30 4 (entrySet [0, 1, 2, 3])).kept ∧
+    lookup (resolve (returning fresh) 30 4 (entrySet [0, 1, 2, 3])).state.keys 1 = some fresh := by
+  decide
+
+/-- Ana adds Ben, then adds a new id, Dan, with `keys`. -/
+def borrowing (keys : MemberKeys) : History := ⟨fun
+  | 0 => ⟨0, 100, 0, [], .entry (.create "ana" storeKey) ana⟩
+  | 1 => ⟨0, 100, 0, [0], .entry (.addMember 1 .member "ben") ben⟩
+  | _ => ⟨0, 100, 0, [0, 1], .entry (.addMember 3 .member "dan") keys⟩, id, id⟩
+
+/-- **A new id cannot reuse another member's key,** signing or sealing alone. -/
+theorem new_id_needs_fresh_keys :
+    2 ∈ (resolve (borrowing ben) 30 3 (entrySet [0, 1, 2])).dropped ∧
+    2 ∈ (resolve (borrowing ⟨103, 201⟩) 30 3 (entrySet [0, 1, 2])).dropped ∧
+    2 ∈ (resolve (borrowing ⟨101, 203⟩) 30 3 (entrySet [0, 1, 2])).dropped ∧
+    2 ∈ (resolve (borrowing dan) 30 3 (entrySet [0, 1, 2])).kept := by decide
+
+theorem fresh_metadata : metadataValid (returning ben) 4 = true ∧
+    metadataValid (returning fresh) 4 = true ∧ metadataValid (borrowing ben) 3 = true := by
   decide
 
 end CovenStorelog.CurrentReplay.Keyed.Additions

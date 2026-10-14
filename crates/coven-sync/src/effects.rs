@@ -139,7 +139,9 @@ fn check_change(view: &StoreLogState, author: &MemberId, change: &StoreChange) -
     }
     // An addition of an active id only repeats it: keys change by replacement
     // (§9, D6), and role and access by their own entries
-    // (`Keyed.Additions.overwrite_sets_anothers_access`).
+    // (`Keyed.Additions.overwrite_sets_anothers_access`). Any other addition,
+    // a removed member's return included, binds a pair sharing no key with a
+    // pair this view already bound (`Keyed.Additions.authorized_addition_fresh`).
     if let AddMember {
         member: id,
         keys,
@@ -147,8 +149,13 @@ fn check_change(view: &StoreLogState, author: &MemberId, change: &StoreChange) -
         access,
     } = change
     {
-        if member(view, id).is_some_and(|added| !repeats(added, keys, *role, access)) {
-            return StoreLogCheck::NotAllowed;
+        match member(view, id) {
+            Some(added) if !repeats(added, keys, *role, access) => {
+                return StoreLogCheck::NotAllowed;
+            }
+            Some(_) => {}
+            None if !fresh(view, keys) => return StoreLogCheck::KeysAlreadyUsed,
+            None => {}
         }
     }
     // Only the old id's own member replaces it, with a distinct new id (D6).
@@ -195,6 +202,14 @@ fn check_change(view: &StoreLogState, author: &MemberId, change: &StoreChange) -
         }
         _ => StoreLogCheck::Allowed,
     }
+}
+
+/// Neither key of `keys` is already bound in `view` (`Keyed.freshKeys`).
+fn fresh(view: &StoreLogState, keys: &coven_format::store_log::MemberPublicKeys) -> bool {
+    !view
+        .bound_keys
+        .iter()
+        .any(|bound| bound.signing == keys.signing || bound.sealing == keys.sealing)
 }
 
 /// An addition's whole payload is its meaning: keys, role and storage access
@@ -271,8 +286,10 @@ pub(crate) fn validate_effect(
     change: &StoreChange,
 ) -> Result<bool, DropReason> {
     use StoreChange::*;
-    if *view == StoreLogCheck::NotAllowed {
-        return Err(DropReason::NotAllowed);
+    match view {
+        StoreLogCheck::NotAllowed => return Err(DropReason::NotAllowed),
+        StoreLogCheck::KeysAlreadyUsed => return Err(DropReason::KeysAlreadyUsed),
+        _ => {}
     }
     if change_in_place(state, author, change) {
         return Ok(true);
@@ -403,6 +420,7 @@ pub(crate) fn apply_effect(next: &mut StoreLogState, view: &StoreLogCheck, entry
                     removed: false,
                 },
             );
+            next.bound_keys.insert(*admin);
             next.devices.insert(
                 entry.position.device,
                 StoreDevice {
@@ -427,6 +445,7 @@ pub(crate) fn apply_effect(next: &mut StoreLogState, view: &StoreLogCheck, entry
                     removed: false,
                 },
             );
+            next.bound_keys.insert(*keys);
         }
         RemoveMember { member: id } => {
             next.members.get_mut(id).expect("checked member").removed = true;

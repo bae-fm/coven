@@ -713,7 +713,7 @@ async fn resumed_removal_uses_the_targets_current_storage_account() {
         .sync
         .make_and_upload_entry(StoreChange::AddMember {
             member: b.member.member(),
-            keys: public(&b.member),
+            keys: crate::effects::tests::addition_keys(&owner_phone.log().await, &b.member),
             role: MemberRole::Member,
             access: coven_format::MemberAccess::ProviderAccount("ben-new@example.com".into()),
         })

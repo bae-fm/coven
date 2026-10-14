@@ -117,9 +117,11 @@ impl Generator {
             MemberRole::Member
         };
         match self.pick(14) {
-            // An active member's re-addition repeats it. Changed payloads are
-            // refused by the keyed rule, which `lean_differential_member_keys`
-            // compares; this unkeyed model predates stable ids.
+            // An active member's re-addition repeats it, and a removed member
+            // returns with a pair this view never bound. Changed payloads and
+            // reused keys are refused by the keyed rule, which
+            // `lean_differential_member_keys` compares; this unkeyed model
+            // predates stable ids.
             0 => match crate::effects::member(view, &member(m)) {
                 Some(added) => StoreChange::AddMember {
                     member: member(m),
@@ -127,6 +129,20 @@ impl Generator {
                     role: added.role,
                     access: added.access.clone(),
                 },
+                None if view.members.contains_key(&member(m)) => {
+                    let StoreChange::AddMember { access, .. } = add(m, role) else {
+                        unreachable!("add makes an addition")
+                    };
+                    let seed = 100 + view.bound_keys.len() as u8;
+                    StoreChange::AddMember {
+                        member: member(m),
+                        keys: crate::store_log_sync::tests::member(seed)
+                            .keys()
+                            .public_keys(),
+                        role,
+                        access,
+                    }
+                }
                 None => add(m, role),
             },
             1 => remove(m),
