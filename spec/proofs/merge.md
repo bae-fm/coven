@@ -474,8 +474,11 @@ It has no live parent links in loss records; clearing serialized parent maps
 is outside it. Frozen records are held separately from the merge state and
 are never supplied to current removal rules.
 
-The rules take references, CHECK results and claims as inputs. A multi-column
-reference is one input: capture sets all its components together, so the
+The rules take references, CHECK results and claims as inputs. CHECK expression
+normalization and rule names are outside Lean's Boolean CHECK result; the
+`unnamed_check_sqlite_differential` compares the database evaluator with SQLite
+constraint enforcement, including failures that SQLite abbreviates to one token.
+A multi-column reference is one input: capture sets all its components together, so the
 ordinary cell rule selects the same setter for each. The database differential
 `composite_reference_differential` compares captured whole-tuple setters and
 losses with `MergeRunner` in both arrival and timestamp orders, including NULL

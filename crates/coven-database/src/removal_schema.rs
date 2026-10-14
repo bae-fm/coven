@@ -333,16 +333,7 @@ fn automatic_column(table: &TableSchema, mut expr: &Expr<'_>) -> (String, Option
 fn check_name(named: &Option<Name<'_>>, expression: &SchemaSource<'_>) -> String {
     match named {
         Some(named) => name(named.0),
-        None => {
-            let text = expression.text().trim_ascii();
-            // SQLite trims the span, then dequotes its first token if quoted,
-            // even when the expression continues after that token.
-            if matches!(text.as_bytes()[0], b'[' | b'\'' | b'"' | b'`') {
-                name(expression.first_token())
-            } else {
-                text.to_owned()
-            }
-        }
+        None => expression.text().trim_ascii().to_owned(),
     }
 }
 

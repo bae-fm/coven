@@ -188,6 +188,8 @@ fn checks(
     table: &TableSchema,
     rules: &TableRules,
 ) -> Result<BTreeSet<String>, DbError> {
+    // SQLite may report only an unnamed CHECK's dequoted first token. Evaluate
+    // every expression to keep each failed constraint's full schema identity.
     let mut failed = BTreeSet::new();
     for (name, expression) in &rules.checks {
         if db.query_row(&format!("SELECT COALESCE(CAST(({expression}) AS NUMERIC)=0,0) FROM temp.{} AS {} WHERE {}=1",identifier(&evaluation_name(table)),identifier(&table.name),identifier(&ordinal(table))),[],|r| r.get::<_,bool>(0))? { failed.insert(name.clone()); }

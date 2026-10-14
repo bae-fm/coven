@@ -528,3 +528,38 @@ fn deleted_circle_rules_keep_canonical_entry_identities_and_refuse_zero() {
         );
     }
 }
+
+#[test]
+fn unnamed_check_rules_retain_full_expressions_in_loss_fields() {
+    let rules: BTreeSet<_> = [
+        "\"n\">0",
+        "\"n\"<10",
+        "\"n\">1",
+        "[n] /* expression */ > 0",
+        "named check",
+    ]
+    .into_iter()
+    .map(|expression| Rule::Check(expression.into()))
+    .collect();
+    let encoded = encode_rules(&rules).unwrap();
+    assert_eq!(decode_rules(&encoded).unwrap(), rules);
+    let loss = crate::loss::Loss::removed(&fixture::merge_row().state, rules);
+    let bytes = encode_loss(&loss).unwrap();
+    assert_eq!(decode_loss(&bytes).unwrap(), loss);
+    let mut header = fixture::snapshot_header();
+    header.counts = [0, 0, 0, 0, 1];
+    let (mut encoder, start) = SnapshotEncoder::start(header.clone()).unwrap();
+    let mut decoder =
+        crate::snapshot::SnapshotDecoder::start(&start, &fixture::snapshot_prefix(&header))
+            .unwrap();
+    let record = SnapshotRecord::Loss(loss);
+    let frame = encoder.record(record.clone()).unwrap();
+    assert_eq!(
+        decoder.frame(&frame, &fixture::oracle()).unwrap(),
+        Some(record)
+    );
+    decoder
+        .frame(&encoder.finish().unwrap(), &fixture::oracle())
+        .unwrap();
+    decoder.finish().unwrap();
+}

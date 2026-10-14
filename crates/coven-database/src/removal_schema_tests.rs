@@ -3,7 +3,7 @@ use crate::{tests::TestStore, RowIdentity, SyncedTable};
 use coven_merge::UniqueConstraint;
 
 #[tokio::test]
-async fn unnamed_check_identity_matches_sqlites_failure_name() {
+async fn unnamed_check_identity_keeps_the_full_expression() {
     for table_constraint in [false, true] {
         for expression in [
             " n > 0 ",
@@ -40,7 +40,8 @@ async fn unnamed_check_identity_matches_sqlites_failure_name() {
             let reported = message.strip_prefix("CHECK constraint failed: ").unwrap();
             db.inspect_writer_schema(|_, schema| {
                 let (identity, evaluation) = &schema.rules["notes"].checks[0];
-                assert_eq!(identity, reported);
+                assert_eq!(identity, expression.trim_ascii());
+                assert!(!reported.is_empty());
                 assert_eq!(evaluation, expression);
             });
             db.close().await.unwrap();
@@ -222,6 +223,222 @@ async fn parenthesized_unique_columns_keep_their_expression_text() {
             schema.rules["notes"].unique[0].identity,
             UniqueConstraint::from(["(title) COLLATE BINARY"])
         );
+    });
+    db.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn unnamed_checks_on_one_generated_column_keep_each_loss_identity() {
+    use crate::write::tests::{count, records};
+    use crate::{RemovalRule, Replacement};
+    for (second, changed, expected) in [
+        ("\"n\"<10", 0, vec!["\"n\">0"]),
+        ("\"n\"<10", 6, vec!["\"n\"<10"]),
+        ("\"n\">1", 0, vec!["\"n\">0", "\"n\">1"]),
+    ] {
+        let ids = coven_foundation::id_source::SequentialIds::new();
+        let sa = TestStore::with_ids(&ids);
+        let sb = TestStore::with_ids(&ids);
+        let tables = || vec![SyncedTable::new("notes", RowIdentity::SharedKey)];
+        let schema = format!("CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,x INT,y INT,n INT AS(x+y),CHECK( \"n\">0 ),CHECK({second}))");
+        let migrations = || {
+            let schema = schema.clone();
+            vec![crate::Migration::run(1, "checks", move |sql| {
+                sql.execute_batch(&schema)?;
+                Ok(())
+            })]
+        };
+        let a = sa.builder(tables(), migrations()).open().await.unwrap();
+        let b = sb.builder(tables(), migrations()).open().await.unwrap();
+        sql(&a, "INSERT INTO notes(id,x,y) VALUES('row',3,3)")
+            .await
+            .unwrap();
+        let initial = records(&a).remove(0);
+        b.apply_downloaded(initial.clone().into()).await.unwrap();
+        for (db, statement) in [(&a, "UPDATE notes SET x=?1"), (&b, "UPDATE notes SET y=?1")] {
+            db.write(move |sql| {
+                sql.execute(statement, [changed])?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        }
+        let writes = [
+            initial,
+            records(&a).pop().unwrap(),
+            records(&b).pop().unwrap(),
+        ];
+        // SQLite's message cannot distinguish these constraints, including two
+        // checks that fail together. Local writes retain SQLite's own error.
+        let error = a
+            .write(move |sql| {
+                sql.execute(
+                    "INSERT INTO notes(id,x,y) VALUES('invalid',?1,?1)",
+                    [changed],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, crate::DbError::Sqlite(rusqlite::Error::SqliteFailure(_, Some(message))) if message == "CHECK constraint failed: n")
+        );
+        sql(&b, "UPDATE notes SET y=3").await.unwrap();
+        let repaired = records(&b).pop().unwrap();
+        let expected = Replacement::Rules(
+            expected
+                .into_iter()
+                .map(|constraint| RemovalRule::Check {
+                    constraint: constraint.into(),
+                })
+                .collect(),
+        );
+        let mut snapshots = Vec::new();
+        for order in [[0, 1, 2], [0, 2, 1]] {
+            let fixture = TestStore::new();
+            let db = fixture
+                .builder(tables(), migrations())
+                .open()
+                .await
+                .unwrap();
+            for i in order {
+                db.apply_downloaded(writes[i].clone().into()).await.unwrap();
+            }
+            assert_eq!(count(&db, "notes"), 0);
+            let losses = db.lost_values().await.unwrap();
+            assert_eq!(
+                losses
+                    .iter()
+                    .filter(|l| matches!(l.replaced_by, Replacement::Rules(_)))
+                    .map(|l| &l.replaced_by)
+                    .collect::<Vec<_>>(),
+                [&expected]
+            );
+            snapshots.push(
+                crate::snapshot_write::tests::frames(&db, coven_merge::Audience::Store).await,
+            );
+            let target_store = TestStore::new();
+            let target = target_store
+                .builder(tables(), migrations())
+                .open()
+                .await
+                .unwrap();
+            crate::snapshot_write::tests::assert_loaded_losses(&db, &target).await;
+            target.close().await.unwrap();
+            db.close().await.unwrap();
+            let db = fixture
+                .builder(tables(), migrations())
+                .open()
+                .await
+                .unwrap();
+            assert_eq!(db.lost_values().await.unwrap(), losses);
+            db.apply_downloaded(repaired.clone().into()).await.unwrap();
+            assert_eq!(count(&db, "notes"), 1);
+            assert!(!db
+                .lost_values()
+                .await
+                .unwrap()
+                .iter()
+                .any(|l| matches!(l.replaced_by, Replacement::Rules(_))));
+            db.close().await.unwrap();
+        }
+        assert_eq!(snapshots[0], snapshots[1]);
+        a.close().await.unwrap();
+        b.close().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn unnamed_check_sqlite_differential() {
+    use coven_format::value::Value;
+    use std::collections::BTreeSet;
+    let expressions = [
+        "\"n\">0",
+        "\"n\"<10",
+        "\"n\">1",
+        "[n] IS NOT NULL",
+        "`n` <> 'literal  with  spaces'",
+    ];
+    let checks = expressions
+        .iter()
+        .map(|e| format!("CHECK({e})"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let mut schema =
+        format!("CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,n NUMERIC,{checks});");
+    for (i, expression) in expressions.iter().enumerate() {
+        schema.push_str(&format!(
+            "CREATE TABLE oracle{i}(n NUMERIC CHECK({expression}));"
+        ));
+    }
+    let fixture = TestStore::new();
+    let db = fixture
+        .builder(
+            vec![SyncedTable::new("notes", RowIdentity::SharedKey)],
+            vec![crate::Migration::run(1, "checks", move |sql| {
+                sql.execute_batch(&schema)?;
+                Ok(())
+            })],
+        )
+        .open()
+        .await
+        .unwrap();
+    sql(&db, "INSERT INTO notes VALUES('row',5)").await.unwrap();
+    let record = crate::write::tests::records(&db).remove(0);
+    db.inspect_writer_schema(|writer, schema| {
+        let app = crate::write_rows::AppView::after(writer, schema);
+        let store = crate::merge_store::MergeStore::new(writer, &app);
+        let state = store.row(&record.parts[0].rows[0].row).unwrap().state;
+        let mut values: crate::write_rows::AppValues = state
+            .cells()
+            .iter()
+            .map(|(c, v)| (c.clone(), v.value.value.clone()))
+            .collect();
+        for value in [
+            Value::Null,
+            Value::Integer(-1),
+            Value::Integer(0),
+            Value::Integer(1),
+            Value::Integer(5),
+            Value::Integer(10),
+            Value::Real(0.5_f64.to_bits()),
+            Value::Text("0".into()),
+            Value::Text("11".into()),
+            Value::Text("literal  with  spaces".into()),
+            Value::Blob(vec![0]),
+        ] {
+            values.insert("n".into(), value.clone());
+            let actual = crate::removal_sql::constraints(
+                writer,
+                schema.table("notes"),
+                &schema.rules["notes"],
+                &state,
+                &values,
+                |_| record.header.timestamp,
+            )
+            .unwrap()
+            .failed_checks;
+            let mut expected = BTreeSet::new();
+            for (i, expression) in expressions.iter().enumerate() {
+                match writer.internal_execute(
+                    &format!("INSERT INTO oracle{i} VALUES(?1)"),
+                    [crate::write_encoding::sql_value(&value)],
+                ) {
+                    Ok(_) => {
+                        writer
+                            .internal_execute(&format!("DELETE FROM oracle{i}"), [])
+                            .unwrap();
+                    }
+                    Err(crate::DbError::Sqlite(rusqlite::Error::SqliteFailure(e, _)))
+                        if e.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_CHECK =>
+                    {
+                        expected.insert((*expression).to_owned());
+                    }
+                    result => panic!("unexpected SQLite enforcement result: {result:?}"),
+                }
+            }
+            assert_eq!(actual, expected, "{value:?}");
+        }
     });
     db.close().await.unwrap();
 }

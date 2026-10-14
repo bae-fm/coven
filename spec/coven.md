@@ -1793,8 +1793,13 @@ Two mechanisms order writes:
   - a unique constraint by its terms, in order, each a column's name or an
     expression's text as written, and by its WHERE clause when it is
     partial, so `UNIQUE(title)` and `UNIQUE(lower(title))` stay two;
-  - a CHECK by its name, or by its expression when it has none, as SQLite
-    reports a failed one.
+  - a CHECK by its name, or by its full expression text from the schema when
+    unnamed. Normalize by removing outer ASCII whitespace only; preserve
+    quoting, comments and internal spacing. Thus `CHECK("n">0)` and
+    `CHECK("n"<10)` have distinct identities, `"n">0` and `"n"<10`.
+    SQLite may report only the dequoted first token (`n`) for either failure;
+    coven evaluates every CHECK on the merged row and records the full
+    identities of all failing constraints.
 - The app can't see a removed row, so it can insert the same shared key
   again.
   - The write records that insert as an update of the removed row, setting

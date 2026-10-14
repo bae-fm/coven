@@ -89,10 +89,6 @@ impl<'a> SchemaSource<'a> {
         self.sql
     }
 
-    pub(crate) fn first_token(&self) -> &'a str {
-        &self.sql[self.tokens.first().expect("AST expression").1.clone()]
-    }
-
     pub(crate) fn without_suffix(&self, tokens: usize) -> &'a str {
         let first = self.tokens.first().expect("AST expression").1.start;
         let last = self.tokens[self.tokens.len() - tokens - 1].1.end;
