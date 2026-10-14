@@ -4,6 +4,9 @@ defaultTargets = ["CovenStorelog", "storelogRunner"]
 [[lean_lib]]
 name = "CovenStorelog"
 
+[[lean_lib]]
+name = "StorelogJson"
+
 [[lean_exe]]
 name = "storelogRunner"
 root = "StorelogRunner"

@@ -121,7 +121,7 @@ pub use upload::{UploadBytes, UploadParts, UploadReadError, WaitingUpload};
 pub use user_file::{prepare_user_file, PreparedUserFile, UserFile};
 pub use write::SqlContext;
 pub use write_batch::{FileSource, WriteBatch};
-pub use write_boundary::WriteBoundary;
+pub use write_boundary::{Boundary, BoundaryCoverage};
 pub use write_failure::WriteFailure;
 
 // SQL values and parameters are part of the API. Connections remain private.

@@ -471,7 +471,7 @@ mod differential {
     use crate::snapshot_write::tests::{frames, stream};
     use crate::test_utils::tests::*;
     use crate::tests::TestStore;
-    use crate::{Database, SnapshotReload, WriteBoundary};
+    use crate::{BoundaryCoverage, Database, SnapshotReload};
     use coven_format::value::{Value as Scalar, WritePositions};
     use coven_format::write::{WriteDisposition, WriteRecord};
     use coven_foundation::id_source::{DeviceId, SequentialIds};
@@ -663,20 +663,21 @@ mod differential {
             );
         }
         let snapshot = frames(&source, Audience::Store).await;
-        let boundary = WriteBoundary::SchemaChange {
-            version: 2,
-            audience: Audience::Store,
-            included: snapshot.prefix.writes.clone(),
+        let boundary = if history.raised {
+            let boundary = target.schema_fixture(Audience::Store, 2).await.unwrap();
+            let entry = target.check_boundary_fixture(boundary).await.unwrap();
+            vec![BoundaryCoverage {
+                entry,
+                included: snapshot.prefix.writes.clone(),
+            }]
+        } else {
+            Vec::new()
         };
         let mut reload = SnapshotReload::new(
             vec![snapshot.input()],
             history.reload.writes.iter().map(stream).collect(),
         );
-        reload.boundaries = Some(if history.raised {
-            vec![boundary]
-        } else {
-            Vec::new()
-        });
+        reload.boundaries = Some(boundary);
         target.load_snapshots(reload).await.unwrap();
         let result = result_json(&target, &history.reload.rows());
         let positions = target.sync_state(Vec::new()).await.unwrap().positions;

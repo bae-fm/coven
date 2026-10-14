@@ -3,7 +3,7 @@
 use coven_crypto::MemberId;
 use coven_database::{
     CircleRemoval, DropReason, EntryTarget, StoreCircle, StoreDevice, StoreIdentity, StoreLogCheck,
-    StoreLogState, StoreMember, StoreVersion,
+    StoreLogState, StoreMember,
 };
 use coven_format::store_log::{MemberRole, StoreChange, StoreLogEntry};
 use coven_foundation::id_source::{CircleId, DeviceId};
@@ -140,10 +140,6 @@ fn check_change(view: &StoreLogState, author: &MemberId, change: &StoreChange) -
     }
 }
 
-pub(crate) fn already_in_place(state: &StoreLogState, entry: &StoreLogEntry) -> bool {
-    change_in_place(state, &entry.author, &entry.change)
-}
-
 pub(crate) fn change_in_place(
     state: &StoreLogState,
     author: &MemberId,
@@ -170,11 +166,9 @@ pub(crate) fn change_in_place(
         AddCircleMember { circle, member } => in_circle(state, *circle, member),
         RemoveCircleMember { circle, member, .. } => !in_circle(state, *circle, member),
         RaiseSchema { version, snapshot } => {
-            state.schema.get(&snapshot.audience).is_some_and(|v| {
-                *version < v.number || (*version == v.number && *snapshot == v.snapshot)
-            })
+            coven_database::Boundary::schema_in_place(state, *version, snapshot)
         }
-        Reset { snapshot } => state.resets.get(&snapshot.audience) == Some(snapshot),
+        Reset { snapshot } => coven_database::Boundary::reset_in_place(state, snapshot),
     }
 }
 
@@ -435,19 +429,10 @@ pub(crate) fn apply_effect(next: &mut StoreLogState, view: &StoreLogCheck, entry
                 next.circle_deletions.insert(*id, entry.position);
             }
         }
-        RaiseSchema { version, snapshot } => {
-            next.schema.insert(
-                snapshot.audience.clone(),
-                StoreVersion {
-                    number: *version,
-                    snapshot: snapshot.clone(),
-                    entry: entry.position,
-                },
-            );
-        }
-        Reset { snapshot } => {
-            next.resets
-                .insert(snapshot.audience.clone(), snapshot.clone());
+        RaiseSchema { .. } | Reset { .. } => {
+            coven_database::Boundary::from_entry(entry)
+                .expect("matched boundary entry")
+                .apply(next);
         }
     }
 }

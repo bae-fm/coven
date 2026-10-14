@@ -110,7 +110,7 @@ mod audiences {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct SavedBoundary {
-    pub(crate) entry: Vec<u8>,
+    pub(crate) entry: (DeviceId, u64),
     pub(crate) prefix: Vec<u8>,
 }
 

@@ -491,10 +491,16 @@ are outside this pass model. Other first-send gates, complete write causality
 and whole-object signature validation are inputs to the modeled key/data boundary.
 
 Encryption, signatures, real provider behavior, SQL execution, crashes, and
-Rust/Lean equivalence remain outside the model. No Rust code or differential
-test changes are part of this package. `scripts/check.sh` rebuilds every module
-and checks `Axioms.lean`; the audit permits only Lean's own `propext`,
-`Classical.choice`, and `Quot.sound`.
+general Rust/Lean equivalence remain outside the model. `StorelogDataRunner`
+uses the shared checked JSON histories, `ReplayEffects.applyKept`, and
+`Snapshots.boundaryEntries`/`selectedSnapshot`. The Rust boundary differential
+compares repeated no-ops, concurrent raises and resets, arrival orders and batch
+partitions with those functions. SQL tests separately cover retained coverage,
+selection reversal, restart, and failed replacement rollback. Checked entries
+own one `_coven_boundaries` row each; kept entries determine selection, while
+coverage survives a dropped verdict. `scripts/check.sh` runs the differential,
+rebuilds every selected module and checks `Axioms.lean`; the audit permits only
+Lean's own `propext`, `Classical.choice`, and `Quot.sound`.
 
 ## Member-key replacement
 

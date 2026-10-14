@@ -315,12 +315,25 @@ async fn losing_a_pending_update_fails_an_already_running_subscription() {
 async fn judgments_clear_only_with_a_committed_changed_reset() {
     let store = TestStore::new();
     let db = store.builder(vec![], vec![]).open().await.unwrap();
-    let boundary = || crate::WriteBoundary::Reset {
+    let entry = crate::EntryId {
+        device: DeviceId(1),
+        number: 1,
+    };
+    db.check_boundary_fixture(crate::Boundary::Reset {
+        entry,
+        snapshot: coven_format::store_log::SnapshotId {
+            audience: coven_merge::Audience::Store,
+            device: entry.device,
+            number: entry.number,
+        },
+    })
+    .await
+    .unwrap();
+    let boundary = || crate::BoundaryCoverage {
         entry: crate::EntryId {
             device: DeviceId(1),
             number: 1,
         },
-        audience: coven_merge::Audience::Store,
         included: coven_format::value::WritePositions(Vec::new()),
     };
     let reload = |snapshots| crate::SnapshotReload::<std::io::Empty, std::io::Empty> {

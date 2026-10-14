@@ -3,11 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use coven_crypto::{MemberId, SealingPublicKey};
-use coven_format::{
-    store_log::{MemberRole, SnapshotId},
-    value::EntryId,
-    Object,
-};
+use coven_format::{store_log::MemberRole, value::EntryId, Object};
 use coven_foundation::id_source::{CircleId, DeviceId, KeyId, StoreId};
 use coven_merge::Audience;
 use rusqlite::{params, types::Type, Row};
@@ -15,7 +11,7 @@ use rusqlite::{params, types::Type, Row};
 use crate::{
     sqlite::DatabaseConnection,
     store_log::*,
-    write_encoding::{audience, audience_text, counter, decode_failure, decoded},
+    write_encoding::{audience, counter, decode_failure, decoded},
     DbError, ReplayEntry, StoreLogCheck,
 };
 
@@ -212,55 +208,10 @@ pub(crate) fn read(database: &DatabaseConnection) -> Result<StoreLog, DbError> {
         })?
         .into_iter()
         .next();
-    state.schema = read_versions(database)?;
-    state.resets = database
-        .query(
-            "SELECT audience,snapshot_device,snapshot_number
-             FROM _coven_resets",
-            [],
-            |row| {
-                let audience = audience(&row.get::<_, String>(0)?)?;
-                Ok((
-                    audience.clone(),
-                    SnapshotId {
-                        audience,
-                        device: DeviceId(counter(row.get(1)?)),
-                        number: counter(row.get(2)?),
-                    },
-                ))
-            },
-        )?
-        .into_iter()
-        .collect();
+    for boundary in crate::Boundary::load_selected(database)? {
+        boundary.apply(state);
+    }
     Ok(log)
-}
-
-fn read_versions(
-    database: &DatabaseConnection,
-) -> Result<BTreeMap<Audience, StoreVersion>, DbError> {
-    Ok(database
-        .query(
-            "SELECT version,snapshot_device,snapshot_number,entry_device,entry_number,audience
-             FROM _coven_versions",
-            [],
-            |row| {
-                let audience = audience(&row.get::<_, String>(5)?)?;
-                Ok((
-                    audience.clone(),
-                    StoreVersion {
-                        number: row.get(0)?,
-                        snapshot: SnapshotId {
-                            audience,
-                            device: DeviceId(counter(row.get(1)?)),
-                            number: counter(row.get(2)?),
-                        },
-                        entry: entry_id(row, 3)?,
-                    },
-                ))
-            },
-        )?
-        .into_iter()
-        .collect())
 }
 
 pub(crate) fn replace(
@@ -313,8 +264,6 @@ pub(crate) fn replace(
         "_coven_circles",
         "_coven_members",
         "_coven_store",
-        "_coven_versions",
-        "_coven_resets",
     ] {
         database.internal_execute(&format!("DELETE FROM {table}"), [])?;
     }
@@ -378,41 +327,6 @@ pub(crate) fn replace(
             ),
         )?;
     }
-    for (audience, version) in &state.schema {
-        put_version(database, audience, version)?;
-    }
-    for (audience, snapshot) in &state.resets {
-        database.internal_execute(
-            "INSERT INTO _coven_resets(audience,snapshot_device,snapshot_number)
-             VALUES(?1,?2,?3)",
-            (
-                audience_text(audience),
-                snapshot.device.0.to_be_bytes().as_slice(),
-                snapshot.number.to_be_bytes().as_slice(),
-            ),
-        )?;
-    }
-    Ok(())
-}
-
-fn put_version(
-    database: &DatabaseConnection,
-    audience: &Audience,
-    version: &StoreVersion,
-) -> Result<(), DbError> {
-    database.internal_execute(
-        "INSERT INTO _coven_versions(audience,version,snapshot_device,snapshot_number,
-                                    entry_device,entry_number)
-         VALUES(?1,?2,?3,?4,?5,?6)",
-        params![
-            audience_text(audience),
-            version.number,
-            version.snapshot.device.0.to_be_bytes().as_slice(),
-            version.snapshot.number.to_be_bytes().as_slice(),
-            version.entry.device.0.to_be_bytes().as_slice(),
-            version.entry.number.to_be_bytes().as_slice()
-        ],
-    )?;
     Ok(())
 }
 

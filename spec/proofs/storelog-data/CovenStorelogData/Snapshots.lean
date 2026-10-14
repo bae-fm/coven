@@ -13,7 +13,7 @@ def effectiveEntries (log : Log) (bound : Nat) (result : Result) : List Nat :=
     | none => acc
     | some next => (next, acc.2 ++ [e])) (CovenStorelog.State.empty, [])).2
 
-/-- snapshot_boundaries.rs::entries skips kept no-ops. Remembering every
+/-- StoreLog::boundaries skips kept no-ops. Remembering every
 once-kept boundary would be a different model. -/
 def boundaryEntries (log : Log) (bound : Nat) (result : Result) : List (Nat × SnapshotId) :=
   (effectiveEntries log bound result).filterMap fun e => match (log e).action with

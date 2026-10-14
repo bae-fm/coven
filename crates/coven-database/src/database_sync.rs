@@ -230,46 +230,6 @@ impl Database {
             .await
     }
 
-    /// Record an applied breaking change's snapshot coverage. Returns false on repetition.
-    /// Loading the snapshot's rows is a separate operation.
-    pub async fn apply_breaking_change(
-        &self,
-        audience: coven_merge::Audience,
-        version: u32,
-        included: coven_format::value::WritePositions,
-    ) -> Result<bool, DbError> {
-        self.apply_boundary(crate::write_boundary::WriteBoundary::SchemaChange {
-            audience,
-            version,
-            included,
-        })
-        .await
-    }
-
-    /// Record an applied reset's snapshot coverage. Returns false on repetition.
-    /// Loading the snapshot's rows is a separate operation.
-    pub async fn apply_reset(
-        &self,
-        entry: crate::EntryId,
-        audience: coven_merge::Audience,
-        included: coven_format::value::WritePositions,
-    ) -> Result<bool, DbError> {
-        self.apply_boundary(crate::write_boundary::WriteBoundary::Reset {
-            entry,
-            audience,
-            included,
-        })
-        .await
-    }
-
-    async fn apply_boundary(
-        &self,
-        boundary: crate::write_boundary::WriteBoundary,
-    ) -> Result<bool, DbError> {
-        self.call(move |inner| inner.with_writer(|writer| boundary.record(writer)))
-            .await
-    }
-
     /// Read the retained decoded log and its queue from a committed reader snapshot.
     /// All clones share the value installed by the replay transaction.
     pub async fn local_store_log(&self) -> Result<crate::LocalStoreLog, DbError> {

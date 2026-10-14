@@ -1,6 +1,6 @@
 //! Inputs and journal progress committed by one snapshot reload.
 
-use crate::{DownloadedWriteStream, OperationUpdate, WriteBoundary};
+use crate::{BoundaryCoverage, DownloadedWriteStream, OperationUpdate};
 use coven_format::{sealed_snapshot::SnapshotObjectPrefix, store_log::SnapshotId};
 use coven_merge::Audience;
 
@@ -29,9 +29,10 @@ pub struct SnapshotReload<R, W> {
     /// Absent storage writes covered by at least one selected snapshot. Their
     /// authenticated snapshot metadata advances the common log position.
     pub absent: Vec<coven_merge::WriteId>,
-    /// Replace the reset/schema boundaries when store-log replay has changed.
-    /// Ordinary recovery retains the existing boundary facts.
-    pub boundaries: Option<Vec<WriteBoundary>>,
+    /// Authenticated coverage for the effective readable boundary entries.
+    /// A reload changes their application receipts without deleting retained facts.
+    /// Ordinary recovery retains the preceding application receipts.
+    pub boundaries: Option<Vec<BoundaryCoverage>>,
     /// Exact applied entries used to choose the inputs, sorted by identity.
     /// A changed store log rejects the transaction before any row is replaced.
     pub expected_entries: Option<Vec<coven_format::value::EntryId>>,

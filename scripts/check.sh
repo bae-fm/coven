@@ -287,6 +287,17 @@ proofs() {
         COVEN_STORELOG_LEAN="$runner" cargo test -p coven-sync --all-features lean_differential -- --ignored
     fi
 
+    if proof_selected storelog-data || crate_selected coven-sync; then
+        runner=$(runner storelog-data storelogDataRunner)
+        step "Rust / Lean replay-selected boundaries"
+        if ! cargo test -p coven-sync --all-features data_differential_boundaries -- --list |
+            grep '::data_differential_boundaries: test$' > /dev/null; then
+            echo "the Rust test binary is missing the boundary differential" >&2
+            exit 1
+        fi
+        COVEN_STORELOG_DATA_LEAN="$runner" cargo test -p coven-sync --all-features data_differential_boundaries -- --ignored
+    fi
+
     if proof_selected io || crate_selected coven-sync; then
         runner=$(runner io finalityRunner)
         step "Rust / Lean finality observation endpoint"

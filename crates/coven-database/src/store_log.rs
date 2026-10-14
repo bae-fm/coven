@@ -49,6 +49,15 @@ impl StoreLog {
         })
     }
 
+    /// Effective raise/reset entries in replay order, excluding kept no-ops.
+    pub fn boundaries(&self) -> impl Iterator<Item = crate::Boundary> + '_ {
+        crate::Boundary::select(self.entries.iter().filter_map(|entry| {
+            (self.replay.entries[&entry.entry.position] == EntryOutcome::Kept)
+                .then(|| crate::Boundary::from_entry(&entry.entry))
+                .flatten()
+        }))
+    }
+
     /// Applied positions represented by these entries, including dropped entries.
     pub fn positions(&self) -> coven_format::value::EntryPositions {
         let mut positions = BTreeMap::new();
@@ -265,6 +274,9 @@ pub(crate) fn apply<P: crate::PendingValue>(
                  bytes, author_view, stored_at,
                  if incoming.check == crate::StoreLogCheck::LandedTooLate { "late" } else { "kept" }, timestamp),
             )?;
+            if let Some(boundary) = crate::Boundary::from_entry(&incoming.entry) {
+                boundary.record(database)?;
+            }
             crate::store_log_upload::retire(database, id, bytes)?;
         }
         let previous = crate::store_log_tables::deleted_circles(database)?;

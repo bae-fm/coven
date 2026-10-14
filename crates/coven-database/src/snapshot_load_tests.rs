@@ -343,7 +343,7 @@ async fn loading_a_parent_snapshot_recomputes_other_audiences_without_rewriting_
                 vec![None]
             }
         );
-        b.apply_reset(
+        b.install_reset_fixture(
             crate::EntryId {
                 device: coven_foundation::id_source::DeviceId(99),
                 number: 1,

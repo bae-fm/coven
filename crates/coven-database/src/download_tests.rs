@@ -629,13 +629,13 @@ async fn applied_schema_boundaries_exclude_only_uncovered_older_writes() {
         let db = open(&store).await;
         let included = WritePositions(included);
         assert!(db
-            .apply_breaking_change(coven_merge::Audience::Store, version, included.clone())
+            .install_schema_fixture(coven_merge::Audience::Store, version, included.clone())
             .await
             .unwrap());
         db.close().await.unwrap();
         let db = open(&store).await;
         assert!(!db
-            .apply_breaking_change(coven_merge::Audience::Store, version, included)
+            .install_schema_fixture(coven_merge::Audience::Store, version, included)
             .await
             .unwrap());
         assert_eq!(
@@ -703,12 +703,15 @@ async fn reset_exclusion_is_audience_scoped_and_counts_implicit_own_reads() {
         db.apply_downloaded(first).await.unwrap();
         let included = WritePositions(included);
         assert!(db
-            .apply_reset(entry, audience.clone(), included.clone())
+            .install_reset_fixture(entry, audience.clone(), included.clone())
             .await
             .unwrap());
         db.close().await.unwrap();
         let db = circle_db(&store).await;
-        assert!(!db.apply_reset(entry, audience, included).await.unwrap());
+        assert!(!db
+            .install_reset_fixture(entry, audience, included)
+            .await
+            .unwrap());
         assert_eq!(
             db.apply_downloaded(writes[1].clone().into()).await.unwrap(),
             ApplyOutcome::Applied
@@ -838,7 +841,7 @@ async fn a_reset_successor_can_read_another_post_reset_write() {
         .await
         .unwrap();
     receiver
-        .apply_reset(
+        .install_reset_fixture(
             coven_format::value::EntryId {
                 device: DeviceId(99),
                 number: 1,

@@ -515,3 +515,148 @@ mod reset {
         }
     }
 }
+
+#[test]
+#[ignore = "requires COVEN_STORELOG_DATA_LEAN, supplied by scripts/check.sh"]
+fn data_differential_boundaries() {
+    use crate::effects::tests::{raise, snapshot};
+    use crate::replay::tests::{circle, delete, device, gifts, household, remove};
+    use crate::tests::{input, orders, publication_times, run_lean};
+    use coven_database::{StoreLog, StoreLogState};
+    use coven_format::store_log::MemberRole::Admin;
+    use serde_json::json;
+    use std::collections::BTreeMap;
+    let reset = |number, audience| StoreChange::Reset {
+        snapshot: snapshot(number, audience),
+    };
+    let mut histories = Vec::new();
+    for audience in [Audience::Store, Audience::Circle(circle(0))] {
+        let mut h = if audience == Audience::Store {
+            household(Admin, Admin)
+        } else {
+            gifts()
+        };
+        for change in [
+            raise(2, 30, audience.clone()),
+            raise(2, 30, audience.clone()),
+            raise(1, 31, audience.clone()),
+            reset(40, audience.clone()),
+            reset(40, audience.clone()),
+            reset(41, audience.clone()),
+        ] {
+            h.all(0, 0, change);
+        }
+        histories.push(h);
+        for changes in [
+            [
+                raise(2, 30, audience.clone()),
+                raise(2, 31, audience.clone()),
+            ],
+            [
+                raise(2, 30, audience.clone()),
+                raise(3, 31, audience.clone()),
+            ],
+            [reset(40, audience.clone()), reset(41, audience.clone())],
+            [reset(40, audience.clone()), raise(2, 30, audience.clone())],
+        ] {
+            let mut h = if audience == Audience::Store {
+                household(Admin, Admin)
+            } else {
+                gifts()
+            };
+            for (author, change) in [0, 1].into_iter().zip(changes) {
+                h.push(author, u64::from(author), &[0, 1, 2, 3, 4], change);
+            }
+            histories.push(h);
+        }
+    }
+    // Ben's deletion defeats the reset until Ana's concurrent removal of Ben
+    // arrives. The deletion then drops, so the same reset entry returns.
+    let mut h = gifts();
+    h.all(0, 0, device(3));
+    let past: Vec<_> = (0..h.entries.len()).collect();
+    let removal = h.entries.len();
+    h.push(0, 0, &past, remove(1));
+    h.push(1, 1, &past, delete(0));
+    h.push(0, 3, &past, reset(50, Audience::Circle(circle(0))));
+    let without_removal: Vec<_> = h
+        .entries
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| *i != removal)
+        .map(|(_, e)| e.clone())
+        .collect();
+    assert!(crate::replay::tests::replay(&without_removal)
+        .state
+        .resets
+        .is_empty());
+    assert_eq!(
+        crate::replay::tests::replay(&h.entries).state.resets[&Audience::Circle(circle(0))].number,
+        50
+    );
+    histories.push(h);
+    let mut inputs = Vec::new();
+    let mut expected = Vec::new();
+    for h in histories {
+        let stored: Vec<_> = (0..h.entries.len() as u64).collect();
+        let publications = publication_times(&h, &stored);
+        for order in orders(&h) {
+            for width in [1, 2, h.entries.len()] {
+                let mut received = Vec::new();
+                let mut all = Vec::new();
+                let mut results = Vec::new();
+                let mut log = StoreLog::default();
+                for chunk in order.chunks(width) {
+                    let mut batch = crate::replay::ReplayBatch::new(&log);
+                    for &index in chunk {
+                        batch.push_checked(h.entries[index].clone(), &publications);
+                        all.push(index);
+                    }
+                    let (entries, replay) = batch.finish().unwrap();
+                    log.entries.extend(entries);
+                    log.entries.sort_by_key(|e| e.entry.timestamp);
+                    log.replay = replay;
+                    let mut state = StoreLogState::default();
+                    let mut selected = BTreeMap::new();
+                    let boundaries: Vec<_> = log
+                        .boundaries()
+                        .map(|boundary| {
+                            boundary.apply(&mut state);
+                            let id = boundary.snapshot();
+                            let audience = match id.audience {
+                                Audience::Store => 0,
+                                Audience::Circle(id) => u64::try_from(id.0.as_u128()).unwrap() + 1,
+                            };
+                            selected.insert(audience, id.number);
+                            let index = h
+                                .entries
+                                .iter()
+                                .position(|e| e.position == boundary.entry())
+                                .unwrap();
+                            json!([index, audience, id.number])
+                        })
+                        .collect();
+                    results.push(json!({
+                        "realized": state.schema == log.replay.state.schema && state.resets == log.replay.state.resets,
+                        "boundaries": boundaries,
+                        "selected": selected.into_iter().map(|(a,n)| [a,n]).collect::<Vec<_>>()
+                    }));
+                    received.push(all.clone());
+                }
+                inputs.push(input(&h, &stored, &received));
+                expected.push(results);
+            }
+        }
+    }
+    let output = run_lean("COVEN_STORELOG_DATA_LEAN", &json!({"histories": inputs}));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let actual: Vec<Vec<serde_json::Value>> = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(actual.len(), expected.len());
+    for ((actual, expected), input) in actual.iter().zip(&expected).zip(&inputs) {
+        assert_eq!(actual, expected, "boundary history: {input}");
+    }
+}

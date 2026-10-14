@@ -44,19 +44,7 @@ pub(crate) fn load<R: Read, W: Read>(
             }
         }
         if let Some(boundaries) = boundaries {
-            let previous = crate::WriteBoundary::load(database)?;
-            let resets = |boundaries: &[crate::WriteBoundary]| {
-                boundaries
-                    .iter()
-                    .filter_map(|boundary| match boundary {
-                        crate::WriteBoundary::Reset {
-                            entry, audience, ..
-                        } => Some((entry.to_owned(), audience.clone())),
-                        _ => None,
-                    })
-                    .collect::<BTreeSet<_>>()
-            };
-            if !resets(&boundaries).is_subset(&resets(&previous)) {
+            if crate::BoundaryCoverage::replace(database, boundaries)? {
                 // Failed ciphertext can conceal every audience. A committed reset
                 // clears all pending observations with the replacement.
                 database.pending_change(|| {
@@ -64,14 +52,14 @@ pub(crate) fn load<R: Read, W: Read>(
                     Ok(())
                 })?;
             }
-            if let Some(version) = boundaries
-                .iter()
-                .filter_map(|boundary| match boundary {
-                    crate::WriteBoundary::SchemaChange {
-                        version,
-                        audience: coven_merge::Audience::Store,
-                        ..
-                    } => Some(*version),
+            if let Some(version) = crate::write_boundary::WriteBoundary::load(database)?
+                .into_iter()
+                .filter_map(|boundary| match boundary.boundary {
+                    crate::Boundary::SchemaChange(version)
+                        if version.snapshot.audience == coven_merge::Audience::Store =>
+                    {
+                        Some(version.number)
+                    }
                     _ => None,
                 })
                 .max()
@@ -81,10 +69,6 @@ pub(crate) fn load<R: Read, W: Read>(
                     *schema.versions.start(),
                     version,
                 )?;
-            }
-            database.internal_execute("DELETE FROM _coven_applied_boundaries", [])?;
-            for boundary in boundaries {
-                boundary.record_inside(database)?;
             }
         }
         if snapshots.is_empty() {

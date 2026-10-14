@@ -5,6 +5,311 @@ use coven_format::value::WritePositions;
 use coven_foundation::id_source::{DeviceId, SequentialIds};
 use coven_merge::{Audience, WriteId};
 
+// These fixtures supply checked replay input; coverage still passes through the
+// production entry-keyed persistence and transaction functions.
+impl crate::Database {
+    pub(crate) async fn check_boundary_fixture(
+        &self,
+        boundary: crate::Boundary,
+    ) -> Result<EntryId, crate::DbError> {
+        use coven_format::{
+            store_log::{StoreChange, StoreLogEntry},
+            value::EntryPositions,
+        };
+        let log = self.store_log().await.unwrap();
+        let id = boundary.entry();
+        let entry = if let Some(existing) = log.entries.iter().find(|e| e.entry.position == id) {
+            existing.entry.clone()
+        } else {
+            let time = log.entries.iter().map(|e| e.entry.timestamp).max();
+            let timestamp = match time {
+                Some(time) => {
+                    coven_merge::Timestamp::new(time.milliseconds() + 1, 0, id.device).unwrap()
+                }
+                None => coven_merge::Timestamp::new(1, 0, id.device).unwrap(),
+            };
+            StoreLogEntry {
+                position: id,
+                timestamp,
+                author: crate::store_log::tests::keys(1).signing,
+                had_read: EntryPositions(Vec::new()),
+                change: match &boundary {
+                    crate::Boundary::SchemaChange(v) => StoreChange::RaiseSchema {
+                        version: v.number,
+                        snapshot: v.snapshot.clone(),
+                    },
+                    crate::Boundary::Reset { snapshot, .. } => StoreChange::Reset {
+                        snapshot: snapshot.clone(),
+                    },
+                },
+            }
+        };
+        let mut replay = log.replay;
+        replay.entries.insert(id, crate::EntryOutcome::Kept);
+        if !boundary.already_in_place(&replay.state) {
+            boundary.apply(&mut replay.state);
+        }
+        self.apply_store_log::<crate::pending::tests::Record>(
+            crate::store_log::tests::checked(entry),
+            replay,
+        )
+        .await?;
+        Ok(id)
+    }
+    pub(crate) async fn schema_fixture(
+        &self,
+        audience: Audience,
+        version: u32,
+    ) -> Result<crate::Boundary, crate::DbError> {
+        let log = self.store_log().await.unwrap();
+        if let Some(boundary) = log.boundaries().find(|b| matches!(b, crate::Boundary::SchemaChange(v) if v.number == version && v.snapshot.audience == audience)) { return Ok(boundary); }
+        let device = DeviceId(98);
+        let number = log
+            .entries
+            .iter()
+            .filter(|e| e.entry.position.device == device)
+            .map(|e| e.entry.position.number)
+            .max()
+            .unwrap_or(0)
+            + 1;
+        Ok(crate::Boundary::SchemaChange(crate::StoreVersion {
+            number: version,
+            snapshot: coven_format::store_log::SnapshotId {
+                audience,
+                device,
+                number,
+            },
+            entry: EntryId { device, number },
+        }))
+    }
+    pub(crate) async fn install_schema_fixture(
+        &self,
+        audience: Audience,
+        version: u32,
+        included: WritePositions,
+    ) -> Result<bool, crate::DbError> {
+        let boundary = self.schema_fixture(audience, version).await?;
+        let entry = self.check_boundary_fixture(boundary).await?;
+        self.inspect_writer(|sql| {
+            sql.transaction(|sql| crate::BoundaryCoverage { entry, included }.record_inside(sql))
+        })
+    }
+    pub(crate) async fn install_reset_fixture(
+        &self,
+        entry: EntryId,
+        audience: Audience,
+        included: WritePositions,
+    ) -> Result<bool, crate::DbError> {
+        let boundary = crate::Boundary::Reset {
+            entry,
+            snapshot: coven_format::store_log::SnapshotId {
+                audience,
+                device: entry.device,
+                number: entry.number,
+            },
+        };
+        self.check_boundary_fixture(boundary).await?;
+        self.inspect_writer(|sql| {
+            sql.transaction(|sql| crate::BoundaryCoverage { entry, included }.record_inside(sql))
+        })
+    }
+}
+
+#[tokio::test]
+async fn checked_boundaries_survive_selection_changes_and_restart() {
+    use crate::pending::tests::Record;
+    use crate::store_log::tests::{checked, keys};
+    use coven_format::{
+        store_log::{SnapshotId, StoreChange, StoreLogEntry},
+        value::EntryPositions,
+    };
+    use coven_merge::Timestamp;
+    let store = TestStore::new();
+    let db = store.schema(notes(), NOTES).await.unwrap();
+    let mut replay = crate::StoreLogReplay::default();
+    let mut entries = Vec::new();
+    for (number, version) in [(1, 2), (2, 3), (3, 2)] {
+        let position = EntryId {
+            device: DeviceId(99),
+            number,
+        };
+        let snapshot = SnapshotId {
+            audience: Audience::Store,
+            device: DeviceId(99),
+            number,
+        };
+        let entry = StoreLogEntry {
+            position,
+            timestamp: Timestamp::new(number, 0, position.device).unwrap(),
+            author: keys(1).signing,
+            had_read: EntryPositions(Vec::new()),
+            change: StoreChange::RaiseSchema {
+                version,
+                snapshot: snapshot.clone(),
+            },
+        };
+        replay.entries.insert(position, crate::EntryOutcome::Kept);
+        if number != 3 {
+            replay.state.schema.insert(
+                Audience::Store,
+                crate::StoreVersion {
+                    number: version,
+                    snapshot,
+                    entry: position,
+                },
+            );
+        }
+        db.apply_store_log::<Record>(checked(entry.clone()), replay.clone())
+            .await
+            .unwrap();
+        entries.push(entry);
+    }
+    assert_eq!(count(&db, "_coven_boundaries"), 3);
+    replay.entries.insert(
+        entries[1].position,
+        crate::EntryOutcome::Dropped(crate::DropReason::NotAllowed),
+    );
+    replay.state.schema.insert(
+        Audience::Store,
+        crate::StoreVersion {
+            number: 2,
+            snapshot: SnapshotId {
+                audience: Audience::Store,
+                device: DeviceId(99),
+                number: 3,
+            },
+            entry: entries[2].position,
+        },
+    );
+    db.apply_store_log::<Record>(checked(entries[2].clone()), replay.clone())
+        .await
+        .unwrap();
+    assert_eq!(count(&db, "_coven_boundaries"), 3);
+    db.close().await.unwrap();
+    let db = store.schema(notes(), NOTES).await.unwrap();
+    assert_eq!(db.store_log().await.unwrap().replay, replay);
+    assert_eq!(count(&db, "_coven_boundaries"), 3);
+    db.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn reset_coverage_survives_noops_reversal_and_failed_replacement() {
+    let store = TestStore::new();
+    let db = store.schema(notes(), NOTES).await.unwrap();
+    let id = |number| EntryId {
+        device: DeviceId(99),
+        number,
+    };
+    let snapshot = coven_format::store_log::SnapshotId {
+        audience: Audience::Store,
+        device: DeviceId(99),
+        number: 1,
+    };
+    for number in [1, 2] {
+        db.check_boundary_fixture(crate::Boundary::Reset {
+            entry: id(number),
+            snapshot: snapshot.clone(),
+        })
+        .await
+        .unwrap();
+    }
+    let coverage = |number| crate::BoundaryCoverage {
+        entry: id(number),
+        included: WritePositions(vec![]),
+    };
+    let reload = |boundaries| {
+        let mut reload =
+            crate::SnapshotReload::<std::io::Empty, std::io::Empty>::new(vec![], vec![]);
+        reload.snapshots = vec![crate::SnapshotSource::Empty(Audience::Store)];
+        reload.boundaries = Some(boundaries);
+        reload
+    };
+    assert_eq!(
+        db.store_log()
+            .await
+            .unwrap()
+            .boundaries()
+            .map(|b| b.entry())
+            .collect::<Vec<_>>(),
+        [id(1)]
+    );
+    assert!(
+        db.load_snapshots(reload(vec![coverage(2)])).await.is_err(),
+        "kept no-op has no effective boundary"
+    );
+    assert!(
+        db.load_snapshots(reload(vec![coverage(3)])).await.is_err(),
+        "coverage cannot introduce an unchecked entry"
+    );
+    db.load_snapshots(reload(vec![coverage(1)])).await.unwrap();
+    let retained = || {
+        db.inspect_writer(|sql| {
+            sql.query(
+                "SELECT entry_number,included,applied FROM _coven_boundaries ORDER BY entry_number",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, Vec<u8>>(0)?,
+                        row.get::<_, Option<Vec<u8>>>(1)?,
+                        row.get::<_, bool>(2)?,
+                    ))
+                },
+            )
+            .unwrap()
+        })
+    };
+    let before = retained();
+    let mut changed = coverage(1);
+    changed.included = WritePositions(vec![WriteId {
+        device: DeviceId(55),
+        number: 1,
+    }]);
+    assert!(db.load_snapshots(reload(vec![changed])).await.is_err());
+    assert_eq!(
+        retained(),
+        before,
+        "failed coverage must roll back application receipts"
+    );
+    let log = db.store_log().await.unwrap();
+    let mut replay = log.replay.clone();
+    replay.entries.insert(
+        id(1),
+        crate::EntryOutcome::Dropped(crate::DropReason::NotAllowed),
+    );
+    db.apply_store_log::<crate::pending::tests::Record>(log.entries[1].clone(), replay)
+        .await
+        .unwrap();
+    db.load_snapshots(reload(vec![coverage(2)])).await.unwrap();
+    let after = retained();
+    assert_eq!(
+        after[0].1, before[0].1,
+        "dropped entry keeps its checked coverage"
+    );
+    assert!(!after[0].2);
+    assert!(after[1].2);
+    db.apply_store_log::<crate::pending::tests::Record>(log.entries[1].clone(), log.replay)
+        .await
+        .unwrap();
+    db.load_snapshots(reload(vec![coverage(1)])).await.unwrap();
+    assert_eq!(retained()[0], before[0]);
+    db.close().await.unwrap();
+    let db = store.schema(notes(), NOTES).await.unwrap();
+    assert_eq!(
+        db.store_log()
+            .await
+            .unwrap()
+            .boundaries()
+            .map(|b| b.entry())
+            .collect::<Vec<_>>(),
+        [id(1)]
+    );
+    let boundaries = db.inspect_writer(super::WriteBoundary::load).unwrap();
+    assert_eq!(boundaries.len(), 1);
+    assert_eq!(boundaries[0].boundary.entry(), id(1));
+    assert_eq!(count(&db, "_coven_boundaries"), 2);
+    db.close().await.unwrap();
+}
+
 #[tokio::test]
 async fn schema_boundaries_are_independent_for_each_audience() {
     let store = TestStore::new();
@@ -16,9 +321,19 @@ async fn schema_boundaries_are_independent_for_each_audience() {
     let circle = Audience::Circle(coven_foundation::id_source::CircleId(
         uuid::Uuid::from_u128(1),
     ));
-    let boundary = crate::WriteBoundary::SchemaChange {
-        audience: circle.clone(),
-        version: 2,
+    let boundary = super::WriteBoundary {
+        boundary: crate::Boundary::SchemaChange(crate::StoreVersion {
+            number: 2,
+            snapshot: coven_format::store_log::SnapshotId {
+                audience: circle.clone(),
+                device: DeviceId(99),
+                number: 1,
+            },
+            entry: EntryId {
+                device: DeviceId(99),
+                number: 1,
+            },
+        }),
         included: WritePositions(Vec::new()),
     };
     assert!(boundary
@@ -31,14 +346,14 @@ async fn schema_boundaries_are_independent_for_each_audience() {
         Some(coven_format::snapshot_rows::LostWriteCause::SchemaChange(2))
     ));
     assert!(db
-        .apply_breaking_change(circle, 2, WritePositions(Vec::new()))
+        .install_schema_fixture(circle, 2, WritePositions(Vec::new()))
         .await
         .unwrap());
     assert!(db
-        .apply_breaking_change(Audience::Store, 2, WritePositions(Vec::new()))
+        .install_schema_fixture(Audience::Store, 2, WritePositions(Vec::new()))
         .await
         .unwrap());
-    assert_eq!(count(&db, "_coven_applied_boundaries"), 2);
+    assert_eq!(count(&db, "_coven_boundaries"), 2);
     db.close().await.unwrap();
 }
 
@@ -61,7 +376,7 @@ async fn reset_successors_can_read_post_reset_writes_from_another_device() {
         db.apply_downloaded(initial.clone().into()).await.unwrap();
     }
     receiver
-        .apply_reset(
+        .install_reset_fixture(
             EntryId {
                 device: DeviceId(99),
                 number: 1,
@@ -130,7 +445,7 @@ async fn repeated_boundaries_keep_their_original_coverage_and_application_order(
         for reset in [reset_first, !reset_first] {
             if reset {
                 assert!(db
-                    .apply_reset(
+                    .install_reset_fixture(
                         entry,
                         Audience::Store,
                         WritePositions(vec![WriteId {
@@ -142,7 +457,7 @@ async fn repeated_boundaries_keep_their_original_coverage_and_application_order(
                     .unwrap());
             } else {
                 assert!(db
-                    .apply_breaking_change(coven_merge::Audience::Store, 2, WritePositions(vec![]))
+                    .install_schema_fixture(coven_merge::Audience::Store, 2, WritePositions(vec![]))
                     .await
                     .unwrap());
             }
@@ -150,24 +465,24 @@ async fn repeated_boundaries_keep_their_original_coverage_and_application_order(
         db.close().await.unwrap();
         let db = store.schema(notes(), NOTES).await.unwrap();
         // A repeated effect cannot change its coverage or move it after another.
-        assert!(!db
-            .apply_reset(
+        assert!(db
+            .install_reset_fixture(
                 entry,
                 Audience::Store,
                 WritePositions(vec![writes[1].header.position])
             )
             .await
-            .unwrap());
-        assert!(!db
-            .apply_breaking_change(
+            .is_err());
+        assert!(db
+            .install_schema_fixture(
                 coven_merge::Audience::Store,
                 2,
                 WritePositions(vec![writes[1].header.position])
             )
             .await
-            .unwrap());
+            .is_err());
         db.apply_downloaded(writes[1].clone().into()).await.unwrap();
-        assert_eq!(count(&db, "_coven_applied_boundaries"), 2);
+        assert_eq!(count(&db, "_coven_boundaries"), 2);
         assert_eq!(count(&db, "notes"), 0);
         let losses = db.lost_values().await.unwrap();
         assert_eq!(losses.len(), 1);
@@ -189,7 +504,7 @@ mod differential {
     use crate::snapshot_write::tests::{frames, id as snapshot_id, stream};
     use crate::test_utils::tests::*;
     use crate::tests::TestStore;
-    use crate::{Database, SnapshotReload, WriteBoundary};
+    use crate::{BoundaryCoverage, Database, SnapshotReload};
     use coven_format::value::EntryPositions;
     use coven_foundation::id_source::SequentialIds;
     use coven_merge::{Audience, Operation, Timestamp};
@@ -244,10 +559,11 @@ mod differential {
             );
         }
         let snapshot = frames(&source, Audience::Store).await;
-        install_reset_entry(&target).await;
-        let boundary = WriteBoundary::Reset {
+        if history.reset {
+            install_reset_entry(&target).await;
+        }
+        let boundary = BoundaryCoverage {
             entry: RESET,
-            audience: Audience::Store,
             included: snapshot.prefix.writes.clone(),
         };
         let mut reload = SnapshotReload::new(

@@ -57,7 +57,8 @@ impl StoreLogSync {
                 )?);
             }
         }
-        for (_, snapshot) in super::boundaries::entries(&local.log) {
+        for boundary in local.log.boundaries() {
+            let snapshot = boundary.snapshot();
             pinned.insert(snapshot_path(self.directory.id(), snapshot)?);
         }
         for audience in &readable {

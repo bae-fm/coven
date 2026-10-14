@@ -147,14 +147,14 @@ pub(crate) fn prerequisite(
         [], |r| r.get(0),
     )?;
     if let Some(publication) = publication.filter(|version| *version > 0) {
-        let applied = crate::WriteBoundary::load(database)?
+        let applied = crate::write_boundary::WriteBoundary::load(database)?
             .into_iter()
-            .filter_map(|b| match b {
-                crate::WriteBoundary::SchemaChange {
-                    version,
-                    audience: Audience::Store,
-                    ..
-                } => Some(version),
+            .filter_map(|b| match b.boundary {
+                crate::Boundary::SchemaChange(version)
+                    if version.snapshot.audience == Audience::Store =>
+                {
+                    Some(version.number)
+                }
                 _ => None,
             })
             .max()

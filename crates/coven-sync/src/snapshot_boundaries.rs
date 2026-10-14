@@ -1,63 +1,29 @@
 //! Replay-selected boundaries constrain both snapshot choice and late writes.
 
-use super::{catalog::inconsistent, snapshot_path, StoreLogSync};
+use super::{snapshot_path, StoreLogSync};
 use crate::{snapshot_data::SavedBoundary, SyncError};
-use coven_database::{EntryOutcome, StoreLog, WriteBoundary};
-use coven_format::{
-    sealed_snapshot::SnapshotObjectPrefix,
-    store_log::{SnapshotId, StoreChange, StoreLogEntry},
-    Object,
-};
+use coven_database::{BoundaryCoverage, StoreLog};
+use coven_format::{sealed_snapshot::SnapshotObjectPrefix, store_log::SnapshotId, value::EntryId};
 use coven_merge::Audience;
 
-pub(super) fn entries(log: &StoreLog) -> impl Iterator<Item = (&StoreLogEntry, &SnapshotId)> {
-    let mut state = coven_database::StoreLogState::default();
-    log.entries.iter().filter_map(move |entry| {
-        if log.replay.entries[&entry.entry.position] != EntryOutcome::Kept {
-            return None;
-        }
-        // A kept entry whose effect is already in place brings no new boundary.
-        // Use the replay's effect functions so repeated resets and lower raises
-        // do not invalidate snapshots following the original boundary.
-        if crate::effects::already_in_place(&state, &entry.entry) {
-            return None;
-        }
-        crate::effects::apply_effect(&mut state, &entry.check, &entry.entry);
-        match &entry.entry.change {
-            StoreChange::RaiseSchema { snapshot, .. } | StoreChange::Reset { snapshot } => {
-                Some((&entry.entry, snapshot))
-            }
-            _ => None,
-        }
-    })
-}
-
 pub(super) fn allows(log: &StoreLog, id: &SnapshotId, prefix: &SnapshotObjectPrefix) -> bool {
-    let selected = entries(log)
-        .filter(|(_, s)| s.audience == id.audience)
-        .last();
-    selected
-        .is_none_or(|(entry, snapshot)| snapshot == id || prefix.store_log.covers(entry.position))
+    log.boundaries()
+        .filter(|boundary| boundary.snapshot().audience == id.audience)
+        .last()
+        .is_none_or(|boundary| {
+            boundary.snapshot() == id || prefix.store_log.covers(boundary.entry())
+        })
 }
 
-pub(super) fn decode(saved: &SavedBoundary) -> Result<WriteBoundary, SyncError> {
-    let Object::StoreLog(entry) = Object::decode(&saved.entry)? else {
-        return Err(inconsistent("recorded boundary is not a store-log entry"));
-    };
+pub(super) fn decode(saved: &SavedBoundary) -> Result<BoundaryCoverage, SyncError> {
     let prefix = SnapshotObjectPrefix::decode(&saved.prefix)?;
-    match entry.change {
-        StoreChange::Reset { snapshot } => Ok(WriteBoundary::Reset {
-            entry: entry.position,
-            audience: snapshot.audience,
-            included: prefix.writes,
-        }),
-        StoreChange::RaiseSchema { version, snapshot } => Ok(WriteBoundary::SchemaChange {
-            version,
-            audience: snapshot.audience,
-            included: prefix.writes,
-        }),
-        _ => Err(inconsistent("recorded boundary does not exclude writes")),
-    }
+    Ok(BoundaryCoverage {
+        entry: EntryId {
+            device: saved.entry.0,
+            number: saved.entry.1,
+        },
+        included: prefix.writes,
+    })
 }
 
 impl StoreLogSync {
@@ -67,8 +33,9 @@ impl StoreLogSync {
     ) -> Result<Vec<SavedBoundary>, SyncError> {
         let readable = self.snapshot_audiences(log)?;
         let mut saved = Vec::new();
-        let boundaries: Vec<_> = entries(log)
-            .filter(|(_, id)| readable.contains_key(&id.audience))
+        let boundaries: Vec<_> = log
+            .boundaries()
+            .filter(|boundary| readable.contains_key(&boundary.snapshot().audience))
             .collect();
         if boundaries.is_empty() {
             return Ok(saved);
@@ -77,7 +44,8 @@ impl StoreLogSync {
         let objects = storage
             .list(&coven_storage::ObjectPrefix::snapshots(self.directory.id()))
             .await?;
-        for (entry, id) in boundaries {
+        for boundary in boundaries {
+            let id = boundary.snapshot();
             let path = snapshot_path(self.directory.id(), id)?;
             let object = objects
                 .iter()
@@ -86,7 +54,7 @@ impl StoreLogSync {
             let candidate = self.snapshot_prefix(object, log).await?;
             let clear = candidate.prefix.encode()?;
             saved.push(SavedBoundary {
-                entry: Object::StoreLog(entry.clone()).encode()?,
+                entry: (boundary.entry().device, boundary.entry().number),
                 prefix: clear,
             });
         }
@@ -94,6 +62,7 @@ impl StoreLogSync {
     }
 
     pub(super) fn has_snapshot_boundary(&self, log: &StoreLog, audience: &Audience) -> bool {
-        entries(log).any(|(_, snapshot)| snapshot.audience == *audience)
+        log.boundaries()
+            .any(|boundary| boundary.snapshot().audience == *audience)
     }
 }

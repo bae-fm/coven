@@ -1,96 +1,263 @@
-//! Durable coverage facts used to judge writes after a breaking change or reset.
+//! Checked entry boundaries, their immutable coverage, and replay selection.
 use crate::sqlite::DatabaseConnection;
-use crate::write_encoding::{audience_text, decoded, encoded};
-use crate::DbError;
+use crate::write_encoding::{audience, audience_text, counter, decoded, encoded};
+use crate::{DbError, StoreLogState, StoreVersion};
 use coven_format::{
     merge_fields,
     snapshot_rows::LostWriteCause,
-    value::WritePositions,
+    store_log::{SnapshotId, StoreChange, StoreLogEntry},
+    value::{EntryId, WritePositions},
     write::{WriteHeader, WritePart},
 };
-use coven_merge::{Audience, WritePast};
+use coven_foundation::id_source::DeviceId;
+use coven_merge::WritePast;
 use rusqlite::params;
+use std::collections::BTreeSet;
 
-/// Coverage of applied store-log boundaries, in application order.
-pub enum WriteBoundary {
-    /// An applied breaking schema change excludes uncovered older-schema writes.
-    SchemaChange {
-        /// The version reached by the change.
-        version: u32,
-        /// Audience whose schema was raised.
-        audience: Audience,
-        /// Writes included in its snapshot.
-        included: WritePositions,
-    },
-    /// An applied reset excludes a write whose cause its snapshot omitted.
+/// A checked raise/reset and the snapshot named by that entry. Its selection is
+/// derived from kept entries, independently of whether coverage has been read.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Boundary {
+    /// A breaking schema raise.
+    SchemaChange(StoreVersion),
+    /// A reset of the named snapshot's audience.
     Reset {
-        /// The reset's store-log identity.
-        entry: coven_format::value::EntryId,
-        /// The audience reset by this snapshot.
-        audience: Audience,
-        /// Writes included in its snapshot.
-        included: WritePositions,
+        /// The reset's checked store-log identity.
+        entry: EntryId,
+        /// Its snapshot, including the audience.
+        snapshot: SnapshotId,
     },
 }
 
-impl WriteBoundary {
-    pub(crate) fn record(&self, database: &DatabaseConnection) -> Result<bool, DbError> {
-        database.transaction(|database| self.record_inside(database))
+impl Boundary {
+    /// Extract the boundary carried by an entry, including a currently dropped one.
+    pub fn from_entry(entry: &StoreLogEntry) -> Option<Self> {
+        match &entry.change {
+            StoreChange::RaiseSchema { version, snapshot } => {
+                Some(Self::SchemaChange(StoreVersion {
+                    number: *version,
+                    snapshot: snapshot.clone(),
+                    entry: entry.position,
+                }))
+            }
+            StoreChange::Reset { snapshot } => Some(Self::Reset {
+                entry: entry.position,
+                snapshot: snapshot.clone(),
+            }),
+            _ => None,
+        }
     }
 
-    pub(crate) fn record_inside(&self, database: &DatabaseConnection) -> Result<bool, DbError> {
-        let (cause, audience, included) = match self {
-            Self::SchemaChange {
-                version,
-                audience,
-                included,
-            } => (
-                LostWriteCause::SchemaChange(*version),
-                audience_text(audience),
-                included,
-            ),
-            Self::Reset {
-                entry,
-                audience,
-                included,
-            } => (
-                LostWriteCause::Reset(*entry),
-                audience_text(audience),
-                included,
-            ),
+    /// The checked entry that owns this boundary.
+    pub fn entry(&self) -> EntryId {
+        match self {
+            Self::SchemaChange(version) => version.entry,
+            Self::Reset { entry, .. } => *entry,
+        }
+    }
+
+    /// The immutable snapshot named by this boundary.
+    pub fn snapshot(&self) -> &SnapshotId {
+        match self {
+            Self::SchemaChange(version) => &version.snapshot,
+            Self::Reset { snapshot, .. } => snapshot,
+        }
+    }
+
+    /// Replay's no-op rule for a raise; a lower version never replaces a higher one.
+    pub fn schema_in_place(state: &StoreLogState, version: u32, snapshot: &SnapshotId) -> bool {
+        state.schema.get(&snapshot.audience).is_some_and(|current| {
+            version < current.number || (version == current.number && *snapshot == current.snapshot)
+        })
+    }
+
+    /// Repeating the current reset does not introduce a new boundary.
+    pub fn reset_in_place(state: &StoreLogState, snapshot: &SnapshotId) -> bool {
+        state.resets.get(&snapshot.audience) == Some(snapshot)
+    }
+
+    /// Whether applying this checked boundary leaves the replayed state unchanged.
+    pub fn already_in_place(&self, state: &StoreLogState) -> bool {
+        match self {
+            Self::SchemaChange(version) => {
+                Self::schema_in_place(state, version.number, &version.snapshot)
+            }
+            Self::Reset { snapshot, .. } => Self::reset_in_place(state, snapshot),
+        }
+    }
+
+    /// Realize a non-no-op boundary after replay's authority and conflict checks.
+    pub fn apply(&self, state: &mut StoreLogState) {
+        match self {
+            Self::SchemaChange(version) => {
+                state
+                    .schema
+                    .insert(version.snapshot.audience.clone(), version.clone());
+            }
+            Self::Reset { snapshot, .. } => {
+                state
+                    .resets
+                    .insert(snapshot.audience.clone(), snapshot.clone());
+            }
+        }
+    }
+
+    /// Effective boundaries in entry timestamp order. The input contains only
+    /// kept entries; the same no-op and effect functions are used during replay.
+    pub(crate) fn select(boundaries: impl IntoIterator<Item = Self>) -> impl Iterator<Item = Self> {
+        let mut state = StoreLogState::default();
+        boundaries.into_iter().filter(move |boundary| {
+            if boundary.already_in_place(&state) {
+                return false;
+            }
+            boundary.apply(&mut state);
+            true
+        })
+    }
+
+    pub(crate) fn record(&self, database: &DatabaseConnection) -> Result<(), DbError> {
+        let (kind, version) = match self {
+            Self::SchemaChange(version) => ("schema", Some(version.number)),
+            Self::Reset { .. } => ("reset", None),
         };
-        Ok(database.internal_execute(
-                "INSERT INTO _coven_applied_boundaries(cause,audience,included) VALUES(?1,?2,?3) ON CONFLICT(cause,audience) DO NOTHING",
-                params![encoded(merge_fields::encode_lost_write_cause(&cause))?, audience, encoded(merge_fields::encode_write_positions(included))?],
-            )? != 0)
+        let entry = self.entry();
+        let snapshot = self.snapshot();
+        database.internal_execute(
+            "INSERT INTO _coven_boundaries(entry_device,entry_number,kind,version,audience,snapshot_device,snapshot_number)
+             VALUES(?1,?2,?3,?4,?5,?6,?7) ON CONFLICT(entry_device,entry_number) DO NOTHING",
+            params![entry.device.0.to_be_bytes().as_slice(), entry.number.to_be_bytes().as_slice(),
+                kind, version, audience_text(&snapshot.audience),
+                snapshot.device.0.to_be_bytes().as_slice(), snapshot.number.to_be_bytes().as_slice()],
+        )?;
+        Ok(())
     }
 
+    pub(crate) fn load_selected(database: &DatabaseConnection) -> Result<Vec<Self>, DbError> {
+        Ok(Self::select(retained(database)?.into_iter().map(|row| row.boundary)).collect())
+    }
+}
+
+/// Authenticated coverage of the snapshot named by one checked entry. The entry
+/// supplies the audience and kind; callers cannot install an unrelated boundary.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BoundaryCoverage {
+    /// The already checked raise/reset entry.
+    pub entry: EntryId,
+    /// Device-write positions authenticated by its snapshot prefix.
+    pub included: WritePositions,
+}
+
+impl BoundaryCoverage {
+    pub(crate) fn record_inside(&self, database: &DatabaseConnection) -> Result<bool, DbError> {
+        let previous: (Option<Vec<u8>>, bool) = database.query_row(
+            "SELECT included,applied FROM _coven_boundaries WHERE entry_device=?1 AND entry_number=?2",
+            (self.entry.device.0.to_be_bytes().as_slice(), self.entry.number.to_be_bytes().as_slice()),
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        let included = encoded(merge_fields::encode_write_positions(&self.included))?;
+        if let Some(checked) = previous.0 {
+            if checked != included {
+                return Err(crate::snapshot_error::invalid(
+                    "checked boundary coverage changed",
+                ));
+            }
+        }
+        if previous.1 {
+            return Ok(false);
+        }
+        database.internal_execute(
+            "UPDATE _coven_boundaries SET included=?3,applied=1 WHERE entry_device=?1 AND entry_number=?2",
+            params![self.entry.device.0.to_be_bytes().as_slice(), self.entry.number.to_be_bytes().as_slice(), included],
+        )?;
+        Ok(true)
+    }
+
+    /// Install the reload's effective readable boundaries, retaining every
+    /// checked coverage fact. The applied bit records the committed data view,
+    /// not replay selection. It also distinguishes a repeated reset reload.
+    pub(crate) fn replace(
+        database: &DatabaseConnection,
+        boundaries: Vec<Self>,
+    ) -> Result<bool, DbError> {
+        let selected = Boundary::load_selected(database)?;
+        let selected_ids: BTreeSet<_> = selected.iter().map(Boundary::entry).collect();
+        let mut ids = BTreeSet::new();
+        for boundary in &boundaries {
+            if !selected_ids.contains(&boundary.entry) || !ids.insert(boundary.entry) {
+                return Err(crate::snapshot_error::invalid(
+                    "reload boundary is not a distinct effective checked entry",
+                ));
+            }
+        }
+        let previous: BTreeSet<_> = database.query(
+            "SELECT entry_device,entry_number FROM _coven_boundaries WHERE applied=1 AND kind='reset'",
+            [], |row| crate::store_log_tables::entry_id(row, 0),
+        )?.into_iter().collect();
+        let changed_reset = selected.iter().any(|boundary| {
+            matches!(boundary, Boundary::Reset { entry, .. } if ids.contains(entry) && !previous.contains(entry))
+        });
+        database.internal_execute("UPDATE _coven_boundaries SET applied=0 WHERE applied=1", [])?;
+        for boundary in boundaries {
+            boundary.record_inside(database)?;
+        }
+        Ok(changed_reset)
+    }
+}
+
+struct RetainedBoundary {
+    boundary: Boundary,
+    included: Option<WritePositions>,
+    applied: bool,
+}
+
+fn retained(database: &DatabaseConnection) -> Result<Vec<RetainedBoundary>, DbError> {
+    database.query(
+        "SELECT b.kind,b.version,b.audience,b.snapshot_device,b.snapshot_number,b.entry_device,b.entry_number,b.included,b.applied
+         FROM _coven_store_log l JOIN _coven_boundaries b ON b.entry_device=l.device AND b.entry_number=l.number
+         WHERE l.outcome='kept' ORDER BY l.timestamp",
+        [],
+        |row| {
+            let snapshot = SnapshotId {
+                audience: audience(&row.get::<_, String>(2)?)?,
+                device: DeviceId(counter(row.get(3)?)),
+                number: counter(row.get(4)?),
+            };
+            let entry = crate::store_log_tables::entry_id(row, 5)?;
+            let boundary = match (row.get::<_, String>(0)?.as_str(), row.get::<_, Option<u32>>(1)?) {
+                ("schema", Some(number)) => Boundary::SchemaChange(StoreVersion { number, snapshot, entry }),
+                ("reset", None) => Boundary::Reset { entry, snapshot },
+                _ => return Err(rusqlite::Error::InvalidQuery),
+            };
+            let included = row.get::<_, Option<Vec<u8>>>(7)?
+                .map(|bytes| decoded(merge_fields::decode_write_positions(&bytes))).transpose()?;
+            Ok(RetainedBoundary { boundary, included, applied: row.get(8)? })
+        },
+    )
+}
+
+/// The boundary facts realized by the current data projection.
+pub(crate) struct WriteBoundary {
+    pub(crate) boundary: Boundary,
+    pub(crate) included: WritePositions,
+}
+
+impl WriteBoundary {
     pub(crate) fn load(database: &DatabaseConnection) -> Result<Vec<Self>, DbError> {
-        database.query(
-            "SELECT cause,audience,included FROM _coven_applied_boundaries ORDER BY id",
-            [],
-            |row| {
-                let cause = decoded(merge_fields::decode_lost_write_cause(
-                    &row.get::<_, Vec<u8>>(0)?,
-                ))?;
-                let audience: String = row.get(1)?;
-                let included = decoded(merge_fields::decode_write_positions(
-                    &row.get::<_, Vec<u8>>(2)?,
-                ))?;
-                match (cause, audience) {
-                    (LostWriteCause::SchemaChange(version), text) => Ok(Self::SchemaChange {
-                        version,
-                        audience: crate::write_encoding::audience(&text)?,
-                        included,
-                    }),
-                    (LostWriteCause::Reset(entry), text) => Ok(Self::Reset {
-                        entry,
-                        audience: crate::write_encoding::audience(&text)?,
-                        included,
-                    }),
-                }
-            },
-        )
+        let mut state = StoreLogState::default();
+        let mut result = Vec::new();
+        for row in retained(database)? {
+            if row.boundary.already_in_place(&state) {
+                continue;
+            }
+            row.boundary.apply(&mut state);
+            if row.applied {
+                result.push(Self {
+                    boundary: row.boundary,
+                    included: row.included.ok_or(DbError::DamagedDatabase)?,
+                });
+            }
+        }
+        Ok(result)
     }
 
     pub(crate) fn excludes(
@@ -98,24 +265,17 @@ impl WriteBoundary {
         header: &WriteHeader,
         part: &WritePart,
     ) -> Option<LostWriteCause> {
-        match self {
-            Self::SchemaChange {
-                version,
-                audience,
-                included,
-            } => (part.audience == *audience
-                && header.schema_version < *version
+        let included = &self.included;
+        match &self.boundary {
+            Boundary::SchemaChange(version) => (part.audience == version.snapshot.audience
+                && header.schema_version < version.number
                 && !included.covers(header.position))
-            .then_some(LostWriteCause::SchemaChange(*version)),
-            Self::Reset {
-                entry,
-                audience,
-                included,
-            } => {
+            .then_some(LostWriteCause::SchemaChange(version.number)),
+            Boundary::Reset { entry, snapshot } => {
                 let past = header.had_read.causal_past(header.position);
                 let follows = included.0.iter().all(|id| past.contains(id));
                 let missing = past.frontier().any(|id| !included.covers(*id));
-                (part.audience == *audience
+                (part.audience == snapshot.audience
                     && !included.covers(header.position)
                     && !follows
                     && missing)
@@ -126,4 +286,4 @@ impl WriteBoundary {
 }
 #[cfg(test)]
 #[path = "write_boundary_tests.rs"]
-mod tests;
+pub(crate) mod tests;

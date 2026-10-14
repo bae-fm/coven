@@ -155,33 +155,24 @@ macro_rules! coven_tables {
             ) STRICT, WITHOUT ROWID;
             CREATE UNIQUE INDEX _coven_one_store ON _coven_store ((1));
         ");
-        $visit!(_coven_versions, "
-            CREATE TABLE _coven_versions (
+        $visit!(_coven_boundaries, "
+            CREATE TABLE _coven_boundaries (
+                entry_device BLOB NOT NULL CHECK(length(entry_device)=8),
+                entry_number BLOB NOT NULL CHECK(length(entry_number)=8 AND entry_number>x'0000000000000000'),
+                kind TEXT NOT NULL CHECK(kind IN ('schema','reset')),
+                version INTEGER,
                 audience TEXT NOT NULL,
-                version INTEGER NOT NULL CHECK(version>0),
                 snapshot_device BLOB NOT NULL CHECK(length(snapshot_device)=8),
                 snapshot_number BLOB NOT NULL CHECK(length(snapshot_number)=8 AND snapshot_number>x'0000000000000000'),
-                entry_device BLOB NOT NULL CHECK(length(entry_device)=8),
-                entry_number BLOB NOT NULL CHECK(length(entry_number)=8),
-                PRIMARY KEY(audience),
+                included BLOB,
+                applied INTEGER NOT NULL DEFAULT 0 CHECK(applied IN (0,1)),
+                CHECK((kind='schema' AND version IS NOT NULL AND version>0)
+                   OR (kind='reset' AND version IS NULL)),
+                CHECK(applied=0 OR included IS NOT NULL),
+                PRIMARY KEY(entry_device,entry_number),
                 FOREIGN KEY(entry_device,entry_number) REFERENCES _coven_store_log(device,number)
             ) STRICT, WITHOUT ROWID;
-        ");
-        $visit!(_coven_resets, "
-            CREATE TABLE _coven_resets (
-                audience TEXT PRIMARY KEY NOT NULL,
-                snapshot_device BLOB NOT NULL CHECK(length(snapshot_device)=8),
-                snapshot_number BLOB NOT NULL CHECK(length(snapshot_number)=8 AND snapshot_number>x'0000000000000000')
-            ) STRICT, WITHOUT ROWID;
-        ");
-        $visit!(_coven_applied_boundaries, "
-            CREATE TABLE _coven_applied_boundaries (
-                id INTEGER PRIMARY KEY,
-                cause BLOB NOT NULL,
-                audience TEXT NOT NULL,
-                included BLOB NOT NULL,
-                UNIQUE(cause,audience)
-            ) STRICT;
+            CREATE INDEX _coven_boundaries_applied ON _coven_boundaries(applied,kind);
         ");
         $visit!(_coven_snapshot_schema, "
             CREATE TABLE _coven_snapshot_schema (

@@ -96,7 +96,7 @@ async fn only_the_spec_tables_are_created() {
             tables,
             [
                 "_coven_access_keys_to_delete",
-                "_coven_applied_boundaries",
+                "_coven_boundaries",
                 "_coven_cache",
                 "_coven_cache_budgets",
                 "_coven_cells",
@@ -126,7 +126,6 @@ async fn only_the_spec_tables_are_created() {
                 "_coven_positions",
                 "_coven_reference_values",
                 "_coven_references",
-                "_coven_resets",
                 "_coven_rows",
                 "_coven_snapshot_schema",
                 "_coven_store",
@@ -134,7 +133,6 @@ async fn only_the_spec_tables_are_created() {
                 "_coven_store_log_uploads",
                 "_coven_uploads",
                 "_coven_user_files",
-                "_coven_versions",
                 "_coven_write_upload_sessions",
                 "_coven_writes",
                 "sqlite_sequence"
@@ -264,9 +262,7 @@ mod query_plans {
          INSERT INTO _coven_circle_members SELECT 'circle_' || i,key FROM fixture;
          INSERT INTO _coven_circle_deletions SELECT 'circle_' || i,device,n FROM fixture;
          INSERT INTO _coven_store VALUES('store','store',zeroblob(16));
-         INSERT INTO _coven_versions SELECT 'audience_' || i,1,device,n,device,n FROM fixture;
-         INSERT INTO _coven_resets SELECT 'audience_' || i,device,n FROM fixture;
-         INSERT INTO _coven_applied_boundaries SELECT i,n,audience,x'00' FROM fixture;
+         INSERT INTO _coven_boundaries SELECT device,n,'schema',1,audience,device,n,x'00',1 FROM fixture;
          INSERT INTO _coven_loaded_audiences SELECT 'audience_' || i FROM fixture;
          INSERT INTO _coven_fingerprint_sums SELECT 'audience_' || i,zeroblob(32) FROM fixture;
          INSERT INTO _coven_fingerprint_leaves SELECT audience,key,key,key FROM fixture;
@@ -434,10 +430,6 @@ mod query_plans {
             Some("store_log() returns every circle deletion and its cause"),
         ("store_log_tables.rs", "SELECT id,name,key FROM _coven_store", "_coven_store") =>
             Some("the store identity table has an enforced maximum of one row"),
-        ("store_log_tables.rs", "SELECT audience,snapshot_device,snapshot_number FROM _coven_resets", "_coven_resets") =>
-            Some("store_log() returns every audience's reset"),
-        ("store_log_tables.rs", "SELECT version,snapshot_device,snapshot_number,entry_device,entry_number,audience FROM _coven_versions", "_coven_versions") =>
-            Some("store_log() returns every audience's schema boundary"),
         ("store_log_tables.rs", "DELETE FROM {table}", table)
             if statement.sql == format!("DELETE FROM {table}") =>
             Some("replay replaces the entire derived table; foreign-key lookups must be indexed"),
@@ -447,8 +439,8 @@ mod query_plans {
             Some("rowid order with LIMIT 1 reads only the oldest queued write"),
         ("upload.rs", "SELECT rowid,device,number FROM _coven_uploads ORDER BY rowid", "_coven_uploads") =>
             Some("the queue reader lists every waiting write in insertion order"),
-        ("write_boundary.rs", "SELECT cause,audience,included FROM _coven_applied_boundaries ORDER BY id", "_coven_applied_boundaries") =>
-            Some("boundary selection reads all recorded causes and their coverage"),
+        ("write_boundary.rs", "SELECT b.kind,b.version,b.audience,b.snapshot_device,b.snapshot_number,b.entry_device,b.entry_number,b.included,b.applied FROM _coven_store_log l JOIN _coven_boundaries b ON b.entry_device=l.device AND b.entry_number=l.number WHERE l.outcome='kept' ORDER BY l.timestamp", "l") =>
+            Some("boundary selection reads every kept boundary in replay order"),
         ("write_encoding.rs", "SELECT record FROM _coven_store_log UNION ALL SELECT record FROM _coven_store_log_uploads", "_coven_store_log" | "_coven_store_log_uploads") =>
             Some("clock construction considers every applied and queued entry timestamp"),
         ("migration_snapshot.rs", "SELECT DISTINCT lower(table_name) FROM _coven_columns", "_coven_columns") =>

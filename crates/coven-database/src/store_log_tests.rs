@@ -808,7 +808,7 @@ async fn audience_versions_round_trip_and_a_failed_raise_keeps_every_audience() 
     db.inspect_writer(|sql| {
         sql.fail_at(
             "_coven_refuse",
-            "BEFORE INSERT ON _coven_versions WHEN NEW.version=13",
+            "BEFORE INSERT ON _coven_boundaries WHEN NEW.version=13",
             "refuse circle raise",
         )
     });
@@ -852,15 +852,18 @@ async fn store_facts_have_one_row_and_versions_and_resets_require_snapshots() {
         );
         assert!(
             sql.internal_execute(
-                "INSERT INTO _coven_versions(audience,version) VALUES('store',2)",
+                "INSERT INTO _coven_boundaries(kind,audience,version) VALUES('schema','store',2)",
                 [],
             )
             .is_err(),
             "a version must name its snapshot and raise entry"
         );
         assert!(
-            sql.internal_execute("INSERT INTO _coven_resets(audience) VALUES('store')", [],)
-                .is_err(),
+            sql.internal_execute(
+                "INSERT INTO _coven_boundaries(kind,audience) VALUES('reset','store')",
+                [],
+            )
+            .is_err(),
             "a reset must name its snapshot"
         );
     });
