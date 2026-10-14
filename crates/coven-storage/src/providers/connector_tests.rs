@@ -22,6 +22,7 @@ async fn cloudkit_is_typed_unavailable_without_an_apple_framework() {
             },
             StorageCredentials::CloudKit,
             DeviceId(1),
+            Arc::new(crate::test_utils::UnrestrictedPublications),
         )
         .await;
     assert_eq!(
