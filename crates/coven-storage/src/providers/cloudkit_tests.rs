@@ -227,6 +227,8 @@ fn native_failures_are_classified_without_discarding_their_cause() {
 async fn cloudkit_live() {
     let ids: IdSourceRef = Arc::new(UuidIds);
     let store = StoreId(ids.new_id());
+    // A failed run keeps its zones for inspection; name them for removal.
+    println!("cloudkit_live zone=coven-{store}");
     let config = super::zone::prepare("iCloud.fm.bae.desktop", store)
         .await
         .unwrap();
@@ -613,9 +615,11 @@ impl Discovery {
         storage.create(&join, b"join").await.unwrap();
         paths.push(join);
 
+        // Store-log entries are published in one request, so an unfinished
+        // upload by a would-be writer can only be another object family.
         let mut pending = Vec::new();
         for path in [
-            ObjectPath::store_log(store, DeviceId(71), NonZeroU64::MIN),
+            ObjectPath::device_log(store, DeviceId(71), NonZeroU64::MIN),
             ObjectPath::file(store, DeviceId(71), FileId(native.ids.new_id())),
         ] {
             let mut session = storage
@@ -640,7 +644,9 @@ impl Discovery {
             );
             storage.create(&path, b"other store history").await.unwrap();
         }
-        let config = zone::prepare(&native.container_id, StoreId(native.ids.new_id()))
+        let other_store = StoreId(native.ids.new_id());
+        println!("cloudkit_live other_zone=coven-{other_store}");
+        let config = zone::prepare(&native.container_id, other_store)
             .await
             .unwrap();
         let other_zone = CloudKitStorage::new(config, native.ids.clone())
