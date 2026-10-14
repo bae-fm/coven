@@ -3989,9 +3989,11 @@ Carol's tablet:
   earlier terminal misses
   ([`completed_catchup_covers_old`](proofs/io/CovenIO/Reload.lean)).
   - Sample storage time `T_c` before those reads, and keep that sample in
-    the signed prefix throughout preparation and upload, including retries
-    ([`completed_catchup_covers_old`](proofs/io/CovenIO/Reload.lean),
-    [`late_snapshot_ignored`](proofs/io/CovenIO/Retention.lean)).
+    the signed prefix throughout preparation and upload, including retries.
+    [`SnapshotPublication.begin_samples_time`, `read_uses_prior_sample`,
+    `prepare_preserves_sample`, `land_preserves_sample`](proofs/io/CovenIO/SnapshotTiming.lean)
+    prove sampling and preservation in the publication model. Signed-prefix
+    encoding and exact-byte retries are not proved by these theorems.
   - At preparation, the new snapshot must cover every position of that
     audience's current newest counting snapshot; this check does not lock
     the remote catalog or require covering a concurrent arrival at landing
@@ -4003,8 +4005,11 @@ Carol's tablet:
     ([`late_snapshot_ignored`](proofs/io/CovenIO/Retention.lean)).
   - Once an attempt passes that day without confirmed counting publication,
     abandon it and catch up and prepare afresh at a new snapshot path;
-    stopping locally does not prevent the old request landing remotely
-    ([`late_snapshot_ignored`, `SnapshotPublication.act`](proofs/io/CovenIO/Retention.lean)).
+    stopping locally does not prevent the old request landing remotely.
+    [`late_snapshot_ignored`](proofs/io/CovenIO/Retention.lean) proves that
+    selection ignores a late landing. `SnapshotPublication.act` permits a
+    fresh path while an old request can still land, but has no local
+    confirmation or abandonment state: the abandonment rule is not proved.
   - Exactly one day counts, but nothing here guarantees an upload duration
     or eventual successful catch-up
     ([`Snapshot.counts`](proofs/io/CovenIO/Retention.lean),

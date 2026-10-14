@@ -132,6 +132,12 @@ import CovenIO
 #print axioms CovenIO.eligible_after_day
 #print axioms CovenIO.SnapshotPublication.run_append
 #print axioms CovenIO.SnapshotPublication.tick_preserves_deleted
+#print axioms CovenIO.SnapshotPublication.begin_samples_time
+#print axioms CovenIO.SnapshotPublication.read_preserves_sample
+#print axioms CovenIO.SnapshotPublication.prepare_preserves_sample
+#print axioms CovenIO.SnapshotPublication.land_preserves_sample
+#print axioms CovenIO.SnapshotPublication.run_samples_before_time
+#print axioms CovenIO.SnapshotPublication.read_uses_prior_sample
 #print axioms CovenIO.loaded_snapshot_complete
 #print axioms CovenIO.catchup_miss_after_sample
 #print axioms CovenIO.Examples.incomparable_history

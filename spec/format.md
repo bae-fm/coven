@@ -569,8 +569,11 @@
 
   - `caught_at` is §15's `T_c`, the provider storage sample taken before
     the publication catch-up's reads; it is fixed with the captured prefix,
-    not the author's wall clock or the upload's start or completion time
-    ([`completed_catchup_covers_old`](proofs/io/CovenIO/Reload.lean)).
+    not the author's wall clock or the upload's start or completion time.
+    [`SnapshotPublication.begin_samples_time`, `read_uses_prior_sample`,
+    `prepare_preserves_sample`, `land_preserves_sample`](proofs/io/CovenIO/SnapshotTiming.lean)
+    prove the model's sampling and preservation; they do not prove the
+    signed encoding or exact-byte retries.
   - Compare the complete object's first publication time from provider
     metadata with `caught_at + 86,400 seconds`: equality counts, a later
     landing is ignored for loading, selection and coverage

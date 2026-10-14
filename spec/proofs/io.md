@@ -263,6 +263,20 @@ deletion rules remain:
 > Active devices keep the posted-position and recent-return protections;
 > this adds no snapshot listing to their ordinary sync.
 
+[`SnapshotTiming`](io/CovenIO/SnapshotTiming.lean) checks the sample in the
+existing `SnapshotPublication` actions. `begin_samples_time` takes provider
+time before any session reads. `run_samples_before_time` and
+`read_uses_prior_sample` prove that every successful read in a reachable run
+uses that preceding sample; provider ticks may be equal. `read_preserves_sample`
+covers reloads too. `prepare_preserves_sample` copies it into the remote
+request, and `land_preserves_sample` keeps it at publication.
+`completed_catchup_covers_old` separately proves position coverage, not timing.
+The model has no signed bytes, retry sends, local publication confirmation or
+abandonment state, so it does not prove signed-prefix preservation through
+retries or the required one-day abandonment and restart. `late_snapshot_ignored`
+proves only that catalog selection ignores a late landing; `act` retains
+outstanding remote requests and permits a new path while an old one can land.
+
 The required lower bound is frozen at reload start, including the remote past
 of waiting writes, already uploaded own writes and their past, and the positions
 of audiences whose existing state is retained. New app writes see the old

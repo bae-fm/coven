@@ -45,7 +45,8 @@ theorem loading_prefix_complete (world : World) (catalog : Nat → List Snapshot
     cases covered
 
 /-- Apply this to every writer's final scan after the last reload. Reload
-invalidates earlier terminal misses; the catch-up sample remains unchanged. -/
+invalidates earlier terminal misses. This proves position coverage; sample
+creation and preservation are checked separately in `SnapshotTiming`. -/
 theorem completed_catchup_covers_old (world : World) (catalog : Nat → List Snapshot)
     (failure : Nat → Option Failure) (refused : Object → Bool)
     (snap : Snapshot) (fuel start initial : Nat → Nat)

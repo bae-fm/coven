@@ -161,7 +161,8 @@ still proceed; finality and age-based deletion wait for qualifying evidence.
 From saved entry times and covered-log times, compute the next instant at
 which §9 finality or §15's age tests could change. Include snapshot upload
 expiry at `T_c + one day`
-([`late_snapshot_ignored`](proofs/io/CovenIO/Retention.lean)), and the first
+([`late_snapshot_ignored`](proofs/io/CovenIO/Retention.lean) proves late-landing
+selection, not local expiry scheduling), and the first
 storage observation strictly after each covering snapshot's landing plus
 one day ([`eligible_after_day`](proofs/io/CovenIO/Retention.lean)). Include
 the last late entry's window and the strict boundary for finality; equality at 30 days
@@ -541,6 +542,11 @@ in that catch-up, using its storage sample from before the reads as the signed
 snapshot at preparation (§15;
 [`completed_catchup_covers_old`](proofs/io/CovenIO/Reload.lean),
 [`SnapshotRefresh.refresh_outranks`](proofs/io/CovenIO/SnapshotRefresh.lean)).
+The first theorem proves position coverage. Sampling before reads and keeping
+the sample through preparation and landing are checked by
+[`SnapshotPublication.begin_samples_time`, `read_uses_prior_sample`,
+`prepare_preserves_sample`, `land_preserves_sample`](proofs/io/CovenIO/SnapshotTiming.lean);
+signed encoding and exact-byte retries are not proved by those theorems.
 If this pass cannot supply that catch-up, leave publication pending
 ([`SnapshotPublication.act`](proofs/io/CovenIO/Retention.lean)).
 Capture it and verify its sealed bytes locally as §15 requires; before
@@ -554,8 +560,9 @@ has no complete-object checksum. That confirmation is shared with any
 occupied-path comparison. No snapshot task is created and deleted merely
 to record an idle check.
 Abandon an attempt that passes `T_c + one day` without confirmed counting
-publication and prepare afresh; every reader ignores an old attempt landing
-after that deadline
+publication and prepare afresh at a new path. The model has no local
+confirmation or abandonment state, so that rule is not proved. Every reader
+ignores an old attempt landing after that deadline
 ([`late_snapshot_ignored`](proofs/io/CovenIO/Retention.lean)).
 For example, an attempt caught up at noon Monday and still unconfirmed after
 noon Tuesday cannot become usable by landing later
