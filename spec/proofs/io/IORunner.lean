@@ -182,6 +182,27 @@ private def post (j : Json) : Except String Json := do
   let current ← j.getObjValAs? (List Nat) "current"
   return toJson (changedPost confirmed present current)
 
+/-- A request named by the Rust trace: its actor (`outside` by default) and
+kind (a positions replacement by default). File kinds name writer 1's file 1;
+resuming a recorded session queries its status. -/
+private def traceRequest (action : Json) : Except String IOEvent := do
+  let time ← action.getObjValAs? Nat "time"
+  let actor ← match (action.getObjValAs? String "actor").toOption.getD "outside" with
+    | "pass" => pure Actor.pass
+    | "upload" => pure Actor.upload
+    | "outside" => pure Actor.outside
+    | other => throw s!"unknown actor {other}"
+  let request ← match (action.getObjValAs? String "kind").toOption.getD "positions" with
+    | "positions" => pure (Request.replace (.positions 1) [1])
+    | "create" => pure (Request.create (.file 1 1) [1])
+    | "begin" => pure (Request.beginUpload 1 1)
+    | "part" => pure (Request.uploadPart 1 1 [1])
+    | "finish" => pure (Request.finishUpload 1 1)
+    | "resume" | "status" => pure (Request.status (.file 1 1))
+    | "read" => pure (Request.get (.file 1 1))
+    | other => throw s!"unknown request kind {other}"
+  pure (.request actor time request)
+
 /-- Compare the shared real sender with Trace's executable transitions. Rejected
 requests preserve the prior state; an unfinished phase never renews it. -/
 private def sendGate (j : Json) : Except String Json := do
@@ -197,9 +218,7 @@ private def sendGate (j : Json) : Except String Json := do
         let retired ← action.getObjValAs? Bool "retired"
         pure (.checked time (if sending then .send else .stopped) retired)
       | "invalidate" => pure .invalidate
-      | "request" => do
-        let time ← action.getObjValAs? Nat "time"
-        pure (.request .outside time (.replace (.positions 1) [1]))
+      | "request" => traceRequest action
       | other => throw s!"unknown send action {other}"
     let next := gateStep sender event
     results := results.push next.isSome

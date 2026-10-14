@@ -105,7 +105,7 @@ impl Files {
         ids: IdSourceRef,
         limits: TransferLimits,
     ) -> Self {
-        let mut changes = database.changes();
+        let mut changes = database.queued_work_changes();
         let mut sending = send.changes();
         let (changed, _) = watch::channel(0);
         let (eager, _) = watch::channel(crate::EagerCacheFillStatus::Idle);

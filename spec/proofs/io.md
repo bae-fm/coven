@@ -740,6 +740,12 @@ is pending, using the still-fresh completed one.
 The same trace accounts for calls outside the loop and clock replacement.
 A request queued before expiry has no exception.
 
+[`io_differential_upload_worker`](../../crates/coven-sync/src/file_upload_retry_tests.rs)
+runs the IO runner's `send_gate` check over the real upload worker's requests
+with the upload actor: session begin, parts crossing the five-minute bound,
+resumption after each new catch-up, and the comparison read after a lost
+create reply. Each request's refusal by the shared gate matches `gateStep`.
+
 The literal statement “the pass contains no file transfers” is false:
 `pass_can_download_file` is a checked pass trace with an eager file-range read,
 as required by sync-pass step 7. The chosen reading of item 17 is no file

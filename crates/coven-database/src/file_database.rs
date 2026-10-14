@@ -329,6 +329,15 @@ impl FileDatabase {
     /// Open a database commit observation for application file rows and upload
     /// metadata. Subscribing before reading the work list prevents missed commits.
     pub fn changes(&self) -> DatabaseChanges {
+        self.file_changes(false)
+    }
+    /// Observe the file worker's work: changed application file rows and newly
+    /// queued uploads. A confirmed upload retiring its own queue row wakes
+    /// nothing (§16.5).
+    pub fn queued_work_changes(&self) -> DatabaseChanges {
+        self.file_changes(true)
+    }
+    fn file_changes(&self, queued_only: bool) -> DatabaseChanges {
         match &self.access {
             FileDatabaseAccess::Reader(_) => DatabaseChanges {
                 commits: crate::observation::CommitSubscription::closed(),
@@ -365,7 +374,7 @@ impl FileDatabase {
                         table: "_coven_file_uploads".into(),
                         columns: ["reference".into()].into(),
                         keys: crate::key_scope::KeyScope::All,
-                        inserted_only: false,
+                        inserted_only: queued_only,
                     }))
                     .collect::<Vec<_>>();
                 let commits = inner.access.observer.subscribe();

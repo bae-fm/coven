@@ -334,12 +334,15 @@ impl FilesInner {
     }
     /// A file path is this device's own: different occupant bytes mean another
     /// copy holds its id, which stops every send until the store resets (§10).
+    /// The comparison read is an upload-worker request, so it passes the same
+    /// fresh catch-up check as a send (SP, file uploads outside the pass).
     async fn settle_occupied(
         &self,
         storage: &dyn coven_storage::Storage,
         path: &coven_storage::ObjectPath,
         expected: (u64, coven_crypto::ObjectDigest),
     ) -> Result<(), UploadFailure> {
+        coven_storage::PublicationGate::check(self.send.as_ref(), path)?;
         match crate::identity::settle_occupied(storage, &self.send, path, expected).await {
             Ok(()) => Ok(()),
             Err(SyncError::Storage(error)) => Err(error.into()),

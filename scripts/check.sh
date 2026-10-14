@@ -404,7 +404,7 @@ proofs() {
             io_differential_positions io_differential_retained_ranges_and_refusal_eviction \
             io_differential_send_gate io_differential_retired_drain \
             io_differential_pass_phases io_differential_snapshot_writes \
-            io_differential_waiting \
+            io_differential_waiting io_differential_upload_worker \
             io_differential_dropped_registration; do
             if ! printf '%s\n' "$io_tests" | grep -q "::$test: test\$"; then
                 echo "the Rust test binary is missing $test" >&2
@@ -425,6 +425,7 @@ proofs() {
             operations::pass::tests::io_differential_pass_phases \
             device_log_sync::tests::schema::raise_publication::differential::io_differential_snapshot_writes \
             retry_waits::tests::io_differential_waiting \
+            files::tests::upload_retry::io_differential_upload_worker \
             write_object::tests::io_differential_dropped_registration
     fi
 
