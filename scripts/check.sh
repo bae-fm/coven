@@ -316,6 +316,12 @@ proofs() {
     fi
 
     if proof_selected storelog-data || crate_selected coven-sync; then
+        runner=$(runner storelog-data rotationRunner)
+        step "Rust / Lean durable rotation and first-send phases"
+        COVEN_ROTATION_LEAN="$runner" cargo test -p coven-sync --all-features lean_differential_rotation_phases -- --ignored
+    fi
+
+    if proof_selected storelog-data || crate_selected coven-sync; then
         runner=$(runner storelog-data accessKeyRunner)
         step "Rust / Lean S3 key deletion journal"
         COVEN_ACCESS_KEY_LEAN="$runner" cargo test -p coven-sync --all-features lean_differential_access_keys -- --ignored

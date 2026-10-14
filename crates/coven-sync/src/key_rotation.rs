@@ -2,17 +2,16 @@
 
 use super::*;
 use crate::key_introductions::{belongs, introductions, select, CopyObservation, Wait};
+use crate::operation_data::{Data, EntryWork, Intent};
+use crate::operations::Progress;
 
 impl StoreLogSync {
-    /// For each audience this member belongs to, use an existing usable key;
-    /// if none is held, publish a rotation to a fresh key sealed only to the
-    /// audience's current members (§11). The store goes first, since every
-    /// other rotation entry is sealed with a store key. A queued entry is
-    /// published first; its own rotation then becomes usable once applied.
-    pub(crate) async fn rotate_exposed_keys(&mut self) -> Result<(), SyncError> {
+    /// Queue durable rotations for audiences with no usable held key. Store
+    /// rotation comes first because every rotation entry needs a store key.
+    pub(crate) async fn rotate_exposed_keys(&mut self) -> Result<bool, SyncError> {
         let local = self.database.local_store_log().await?;
         if local.upload.is_some() || local.log.replay.state.store.is_none() {
-            return Ok(());
+            return Ok(false);
         }
         let member = self.operation_member()?;
         let me = member.member_id();
@@ -25,23 +24,71 @@ impl StoreLogSync {
                 .map(|circle| Audience::Circle(*circle))
                 .filter(|audience| belongs(state, audience, &me)),
         );
+        let mut scheduled = false;
         for audience in audiences {
-            self.rotate_if_exposed(audience, &me).await?;
+            scheduled |= self.schedule_rotation(audience, &me).await?;
         }
-        Ok(())
+        Ok(scheduled)
     }
 
-    /// Rotate one audience's key when no held key is usable for first attempts.
-    pub(super) async fn rotate_if_exposed(
+    /// Requested snapshots also use the durable rotation steps before sealing.
+    pub(crate) async fn rotate_if_exposed(
         &mut self,
         audience: Audience,
         me: &coven_crypto::MemberId,
     ) -> Result<(), SyncError> {
+        self.schedule_rotation(audience.clone(), me).await?;
+        for record in self.database.operations().await? {
+            if matches!(Data::read(&record)?, Data::Entry(EntryWork {
+                intent: Intent::RotateKey { audience: ref target }, ..
+            }) if *target == audience)
+            {
+                loop {
+                    let record = self
+                        .database
+                        .operation(record.id)
+                        .await?
+                        .ok_or(coven_database::DbError::OperationChanged(record.id))?;
+                    if !self.operation_can_retry(&record).await? {
+                        let pending = self
+                            .database
+                            .operation_pending::<crate::PendingRecord>(record.id)
+                            .await?
+                            .ok_or(coven_database::DbError::DamagedDatabase)?;
+                        return Err(SyncError::Pending(Box::new(pending)));
+                    }
+                    match self.operation_step(&record, Data::read(&record)?).await {
+                        Ok(Progress::Advanced) => (),
+                        Ok(Progress::Finished(_)) => break,
+                        Ok(Progress::Waiting(reason)) => {
+                            let pending = self.record_operation_condition(&record, reason).await?;
+                            return Err(SyncError::Pending(Box::new(pending)));
+                        }
+                        Ok(Progress::Reply(result)) => {
+                            result?;
+                            break;
+                        }
+                        Err(error) => {
+                            self.record_operation_error(&record, &error).await?;
+                            return Err(error);
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn schedule_rotation(
+        &self,
+        audience: Audience,
+        me: &coven_crypto::MemberId,
+    ) -> Result<bool, SyncError> {
         let local = self.database.local_store_log().await?;
         let observation = self.copy_observation().await?;
         let CopyObservation::Complete(copies) = &observation else {
             // Without this pass's complete observation, sends wait (§11).
-            return Ok(());
+            return Ok(false);
         };
         let copies: Vec<_> = copies.iter().map(|copy| copy.prefix.clone()).collect();
         let ring = self.store_keys.read()?;
@@ -53,23 +100,45 @@ impl StoreLogSync {
             crate::key_introductions::held_hash(ring.as_ref()),
             &audience,
         ) {
-            Err(Wait::Key) => self.rotate(audience).await,
-            Ok(_) | Err(Wait::Membership | Wait::Listing) => Ok(()),
+            Err(Wait::Key) => {
+                for record in self.database.operations().await? {
+                    if matches!(Data::read(&record)?, Data::Entry(EntryWork {
+                        intent: Intent::RotateKey { audience: ref target }, ..
+                    }) if *target == audience)
+                    {
+                        return Ok(false);
+                    }
+                }
+                self.database
+                    .start_operation(
+                        Data::Entry(EntryWork {
+                            intent: Intent::RotateKey { audience },
+                            entry: None,
+                        })
+                        .new_operation("coven")?,
+                    )
+                    .await?;
+                Ok(true)
+            }
+            Ok(_) | Err(Wait::Membership | Wait::Listing) => Ok(false),
         }
     }
 
-    /// Make a fresh key, keep it in custody, then publish its introduction
-    /// with copies for the audience's current members.
-    async fn rotate(&mut self, audience: Audience) -> Result<(), SyncError> {
+    /// Custody precedes the reservation naming this material. A dropped entry
+    /// restarts preparation and therefore gets a fresh id and material.
+    pub(super) fn rotation_change(
+        &self,
+        audience: Audience,
+        ring: &mut Option<StoreKeyring>,
+    ) -> Result<StoreChange, SyncError> {
         let id = KeyId(self.ids.new_id());
-        let mut ring = self.store_keys.read()?;
         let key_hash = match &audience {
             Audience::Store => {
                 let key = coven_crypto::StoreKey::generate(id)?;
                 let hash = key.hash();
-                match &mut ring {
+                match ring {
                     Some(ring) => ring.insert_store_key(key)?,
-                    None => ring = Some(StoreKeyring::new(key)),
+                    None => *ring = Some(StoreKeyring::new(key)),
                 }
                 hash
             }
@@ -85,13 +154,11 @@ impl StoreLogSync {
         // Custody holds the material before any entry names it.
         self.store_keys
             .persist(ring.as_ref().expect("fresh keyring"))?;
-        self.make_and_upload_entry(StoreChange::RotateKey {
+        Ok(StoreChange::RotateKey {
             audience,
             key: id,
             key_hash,
         })
-        .await?;
-        Ok(())
     }
 }
 

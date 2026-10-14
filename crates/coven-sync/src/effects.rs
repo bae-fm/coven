@@ -102,7 +102,7 @@ impl Authority {
         }
     }
 
-    fn audience(audience: &Audience) -> Self {
+    pub(crate) fn audience(audience: &Audience) -> Self {
         match audience {
             Audience::Store => Self::Member,
             Audience::Circle(circle) => Self::Circle(*circle),

@@ -116,4 +116,25 @@ def excludes {W : Type} [DecidableEq W] (w : W) (version : Nat)
 theorem reset_publication_order {W : Type} (s : CovenStorelog.SnapshotId) :
     publicationOrder (W := W) (.reset s) = [.uploadSnapshot s, .publish (.reset s)] := rfl
 
+/-- A rotation fixes its entry and copies together, confirms the copies, stores
+the entry, then observes replay. A dropped attempt returns to preparation;
+only a kept entry permits completion. Crashes preserve this durable phase. -/
+inductive RotationPhase where
+  | prepare | copies | entry | replay | received | finish
+  deriving DecidableEq, Repr
+
+def rotationStep (kept : Bool) : RotationPhase → Option RotationPhase
+  | .prepare => some .copies
+  | .copies => some .entry
+  | .entry => some .replay
+  | .replay => some .received
+  | .received => some (if kept then .finish else .prepare)
+  | .finish => none
+
+theorem dropped_rotation_restarts : rotationStep false .received = some .prepare := rfl
+
+theorem rotation_finish_requires_kept (kept : Bool)
+    (h : rotationStep kept .received = some .finish) : kept = true := by
+  cases kept <;> simp_all [rotationStep]
+
 end CovenStorelogData

@@ -533,7 +533,12 @@ async fn reversed_removal_parts(
         .await;
     // Ben's copies expose both audiences' keys in Ana's view, so her second
     // phase also replaces the other one before the write's first attempt.
-    ana.sync.rotate_exposed_keys().await.unwrap();
+    for target in [Audience::Store, Audience::Circle(circle)] {
+        ana.sync
+            .rotate_if_exposed(target, &identity(3).member_id())
+            .await
+            .unwrap();
+    }
     sql(&ana.db, "INSERT INTO notes VALUES('one','public','body'); INSERT INTO pins VALUES('00000000-0000-4000-8000-000000000001','00000000-0000-0000-0000-00000000000a','private')").await;
     let writes = ana.writes.upload_writes().await.unwrap();
     assert_eq!(writes.len(), 1);

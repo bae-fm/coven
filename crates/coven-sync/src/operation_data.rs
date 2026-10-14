@@ -14,6 +14,10 @@ use std::time::SystemTime;
 
 #[derive(Clone, Serialize, Deserialize)]
 pub(crate) enum Intent {
+    RotateKey {
+        #[serde(with = "crate::snapshot_data::audience")]
+        audience: coven_merge::Audience,
+    },
     Reset {
         #[serde(with = "crate::snapshot_data::snapshot_id")]
         snapshot: coven_format::store_log::SnapshotId,
@@ -42,6 +46,7 @@ impl Intent {
     pub(crate) fn kind(&self) -> OperationKind {
         match self {
             Self::Reset { .. } => OperationKind::Reset,
+            Self::RotateKey { .. } => OperationKind::RotateKey,
             Self::RemoveMember { .. } => OperationKind::RemoveMember,
             Self::CreateCircle { .. } => OperationKind::CreateCircle,
             Self::AddCircleMember { .. } => OperationKind::AddCircleMember,
@@ -209,6 +214,7 @@ impl Data {
             Self::PublishSchema { .. } => "migrate-schema",
             Self::Entry(work) => match work.intent {
                 Intent::Reset { .. } => "reset",
+                Intent::RotateKey { .. } => "rotate-key",
                 Intent::RemoveMember { .. } => "remove-member",
                 Intent::CreateCircle { .. } => "create-circle",
                 Intent::AddCircleMember { .. } => "add-circle-member",

@@ -237,7 +237,7 @@ impl Operations {
     ) -> Result<(), SyncError> {
         self.unit(Command::SetAccess(access)).await
     }
-    /// Remove the member, rotate audience keys and revoke every recorded access.
+    /// Remove the member and revoke every recorded access.
     /// Returns current access's result, or every account's retained grants;
     /// pending() lists each such account as its own RevokeAccess record, and
     /// every recorded S3 key until its deletion is cleared.
@@ -388,7 +388,7 @@ impl Operations {
         self.unit(Command::AddCircleMember(circle, member.clone()))
             .await
     }
-    /// Remove a circle member and rotate its key.
+    /// Remove a circle member.
     pub async fn remove_circle_member(
         &self,
         circle: CircleId,
@@ -523,7 +523,7 @@ impl OperationRun {
         self.sync.sync_store_log().await?;
         // Phase 2: replace exposed keys before any first attempt (§11).
         self.sync.rotate_exposed_keys().await?;
-        self.drive_pass().await?;
+        self.drive_key_phase().await?;
         // A pending reload cannot report a successful pass or advance positions.
         if let Some(id) = self.sync.pending_reload().await? {
             return Err(SyncError::ReloadPending(id));
@@ -536,7 +536,7 @@ impl OperationRun {
             self.sync.discover_snapshots().await?;
             discovery = self.writes.download_writes().await?;
         }
-        self.drive_pass().await?;
+        self.drive_key_phase().await?;
         if let Some(id) = self.sync.pending_reload().await? {
             return Err(SyncError::ReloadPending(id));
         }
@@ -551,6 +551,16 @@ impl OperationRun {
             }
         }
         Ok(())
+    }
+
+    async fn drive_key_phase(&mut self) -> Result<(), SyncError> {
+        loop {
+            self.drive_pass().await?;
+            // Local operations may have changed membership during this phase.
+            if !self.sync.rotate_exposed_keys().await? {
+                return Ok(());
+            }
+        }
     }
 
     async fn drive_pass(&mut self) -> Result<(), SyncError> {

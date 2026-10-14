@@ -24,13 +24,15 @@ pub enum OperationKind {
     Reset,
     /// Reload snapshots at the app's request, keeping waiting writes.
     ReloadFromSnapshot,
-    /// Remove a member and rotate every affected key.
+    /// Publish a fresh audience key and its sealed copies.
+    RotateKey,
+    /// Remove a member.
     RemoveMember,
     /// Create a circle and its first key.
     CreateCircle,
     /// Seal a circle's history to a member.
     AddCircleMember,
-    /// Replace a circle's key after removing a member.
+    /// Remove a circle member.
     RemoveCircleMember,
     /// Delete a circle's rows and publish its deletion.
     DeleteCircle,

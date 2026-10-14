@@ -327,6 +327,10 @@ impl StoreLogSync {
             | Data::PublishSchema { .. } => unreachable!(),
         };
         let change = match intent {
+            Intent::RotateKey { audience } => {
+                effects::Authority::audience(audience).check(state, me)?;
+                self.rotation_change(audience.clone(), ring)?
+            }
             Intent::Reset { snapshot } => StoreChange::Reset {
                 snapshot: snapshot.clone(),
             },
