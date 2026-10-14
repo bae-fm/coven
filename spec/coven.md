@@ -839,7 +839,11 @@ the file's ranges under `F`.
     withdrawn and it is **uncertified**. Setup refuses the SeaweedFS profile
     before any request with `StorageSetupError::S3ProfileRefused` naming it;
     detection does not identify a service, so this refusal covers only the
-    named profile. AWS is **uncertified**: there is no
+    named profile. Suite version 5, which races the named entry's own
+    publication, passed SeaweedFS's copy publication with versioning disabled
+    and enabled on **2026-10-14**, but with versioning disabled a conditional
+    PUT racing a conditional copy of one name both succeeded in 14 of 200
+    trials, so the refusal stands. AWS is **uncertified**: there is no
     live account. The table's selected
     behaviors are:
 

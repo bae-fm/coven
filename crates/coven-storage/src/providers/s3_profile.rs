@@ -213,6 +213,9 @@ const RUSTFS: CataloguedProfile = CataloguedProfile {
 // certificate, which predates the races, is withdrawn and setup refuses it.
 // Multipart uploads therefore assemble a temporary and publish it with one
 // `CopyObject` conditioned on `If-None-Match: *`, as AWS does.
+// Suite 5 (2026-10-14) passed that copy publication's races in both bucket
+// states, but an unversioned bucket let a conditional PUT and a conditional
+// copy of one name both succeed (14 of 200), so setup still refuses it.
 const SEAWEEDFS: CataloguedProfile = CataloguedProfile {
     name: S3ProfileName::SeaweedFs,
     endpoint: None,
