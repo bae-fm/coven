@@ -174,16 +174,32 @@ impl FileDatabase {
         .await
     }
     /// Record this device's first unmet condition for one file it reads,
-    /// replacing an earlier reason. Read-only handles keep no records.
-    pub async fn record_file_pending<P: crate::PendingValue>(
+    /// replacing an earlier reason, with its retry wait, or with none when it
+    /// waits for the app or an update (§16.3, §16.5). Read-only handles keep
+    /// no records.
+    pub async fn fail_download<P: crate::PendingValue>(
         &self,
         record: impl FnOnce(DeviceId) -> P + Send + 'static,
+        subject: crate::RetrySubject,
+        wait: Option<crate::RetryWait>,
     ) -> Result<(), DbError> {
         let FileDatabaseAccess::Writer(database) = &self.access else {
             return Err(read_only());
         };
         let device = self.run(|_, _, _, device| Ok::<_, DbError>(device)).await?;
-        database.record_pending(record(device)).await
+        database
+            .record_pending_retry(record(device), subject, wait)
+            .await
+    }
+    /// Every download's persisted retry wait (§16.5), read without the
+    /// writer. A read-only handle persists none.
+    pub async fn download_waits(
+        &self,
+    ) -> Result<Vec<(crate::RetrySubject, crate::RetryWait)>, DbError> {
+        let FileDatabaseAccess::Writer(database) = &self.access else {
+            return Ok(Vec::new());
+        };
+        database.download_retry_waits().await
     }
     /// Clear this device's record about a file once its read completes.
     pub async fn clear_file_pending<S: serde::Serialize + Send + 'static>(

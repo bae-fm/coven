@@ -764,18 +764,28 @@ macro_rules! coven_tables {
             CREATE INDEX _coven_operations_kind ON _coven_operations(kind);
         ");
         // One persisted retry wait, T and W, per waiting operation, queued
-        // upload, joiner poll or provider cooldown (§16.5). Work rows take
-        // their waits with them.
+        // upload, eager file download, joiner poll or provider cooldown
+        // (§16.5). Work rows take their waits with them; a download's work
+        // is its file's pending record.
         $visit!(_coven_retries, "
             CREATE TABLE _coven_retries (
                 id INTEGER PRIMARY KEY,
                 scope TEXT UNIQUE CHECK(scope IN ('join','provider')),
                 operation INTEGER UNIQUE REFERENCES _coven_operations(id) ON DELETE CASCADE,
                 upload INTEGER UNIQUE REFERENCES _coven_file_uploads(id) ON DELETE CASCADE,
+                download BLOB UNIQUE CHECK(download IS NULL OR length(download)=24),
+                pending_subject BLOB,
+                pending_reporter BLOB,
                 failures INTEGER NOT NULL CHECK(failures>=0),
                 not_before BLOB NOT NULL CHECK(length(not_before)=13),
                 wait INTEGER NOT NULL CHECK(wait>=0),
-                CHECK((scope IS NOT NULL)+(operation IS NOT NULL)+(upload IS NOT NULL)=1)
+                UNIQUE(pending_subject,pending_reporter),
+                FOREIGN KEY(pending_subject,pending_reporter)
+                    REFERENCES _coven_pending(subject,reporter) ON DELETE CASCADE,
+                CHECK((download IS NULL)=(pending_subject IS NULL)
+                    AND (download IS NULL)=(pending_reporter IS NULL)),
+                CHECK((scope IS NOT NULL)+(operation IS NOT NULL)+(upload IS NOT NULL)
+                    +(download IS NOT NULL)=1)
             ) STRICT;
         ");
     };

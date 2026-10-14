@@ -19,6 +19,18 @@ impl Database {
         .await
     }
 
+    /// Every eager download's persisted wait (§16.5).
+    pub async fn download_retry_waits(&self) -> Result<Vec<(RetrySubject, RetryWait)>, DbError> {
+        self.call(move |inner| {
+            inner
+                .access
+                .readers
+                .acquire_reader()
+                .with_reader(retry::read_downloads)
+        })
+        .await
+    }
+
     /// The subject's persisted wait, if one is armed.
     pub async fn retry_wait(&self, subject: RetrySubject) -> Result<Option<RetryWait>, DbError> {
         self.call(move |inner| {
@@ -42,6 +54,42 @@ impl Database {
             inner
                 .access
                 .with_writer(|writer| writer.transaction(|db| retry::save(db, subject, &wait)))
+        })
+        .await
+    }
+
+    /// Record a failed download's pending reason and, in the same
+    /// transaction, its next wait, or delete its wait when it no longer
+    /// retries automatically. The wait belongs to that record: clearing the
+    /// record, for any reason, deletes it (§16.5).
+    pub async fn record_pending_retry<P: crate::PendingValue>(
+        &self,
+        record: P,
+        subject: RetrySubject,
+        wait: Option<RetryWait>,
+    ) -> Result<(), DbError> {
+        self.call(move |inner| {
+            inner.access.with_writer(|writer| {
+                if record.reported_by() != inner.access.device || record.operation().is_some() {
+                    return Err(DbError::DamagedDatabase);
+                }
+                writer.pending_transaction(|db| {
+                    crate::pending::save(db, &record)?;
+                    match &wait {
+                        Some(wait) => {
+                            let pending = serde_json::to_vec(record.subject())
+                                .map_err(DbError::PendingEncoding)?;
+                            retry::save_download(
+                                db,
+                                subject,
+                                (&pending, record.reported_by()),
+                                wait,
+                            )
+                        }
+                        None => retry::clear(db, subject),
+                    }
+                })
+            })
         })
         .await
     }

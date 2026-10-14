@@ -6,7 +6,7 @@ use crate::{
     FileReadError,
 };
 use crate::{LocalFailure, PendingReason, PendingRecord, PendingSubject, Prerequisite};
-use coven_database::{DbError, FileRef, LiveQueryClosed, RowKey};
+use coven_database::{DbError, FileRef, LiveQueryClosed, RetrySubject, RetryWait, RowKey};
 use futures_util::{StreamExt, TryStreamExt};
 use std::sync::{Arc, Mutex};
 use tokio::sync::watch;
@@ -33,20 +33,20 @@ pub enum EagerCacheFillStatus {
     /// The application cancelled the pending downloads.
     Cancelled(PinProgress),
 }
-/// The eager references a fill has attempted, and those of them whose
-/// temporary failure a later pass retries (SP step 7).
+/// The eager references a fill has attempted this session. A failed one is
+/// attempted again only once its persisted retry wait is due and no provider
+/// cooldown holds the connection (§16.5, SP waiting); a wake never requests
+/// an unchanged wait again.
 #[derive(Default)]
 pub(crate) struct EagerAttempts {
     seen: Vec<FileRef>,
-    retry: Vec<FileRef>,
 }
-/// Which eager references one fill attempts. A commit or connection wake
-/// reevaluates only changed references; retrying a failed download is a
-/// pass's work, so an unchanged wait is not requested again on every wake.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum EagerWork {
-    NewReferences,
-    WithRetries,
+/// The persisted wait of an eager download of `file`.
+pub(crate) fn download_subject(file: &FileRef) -> RetrySubject {
+    RetrySubject::Download {
+        uploader: file.uploader(),
+        file: file.id(),
+    }
 }
 /// Pin answers with replaceable row requests.
 pub struct RowsPinnedLiveQuery {
@@ -230,7 +230,7 @@ impl FilesInner {
             bytes_total,
         })
     }
-    pub(crate) async fn fill_eager(self: &Arc<Self>, work: EagerWork) {
+    pub(crate) async fn fill_eager(self: &Arc<Self>) {
         let mut attempts = self.eager_attempts.lock().await;
         if self
             .storage
@@ -248,16 +248,32 @@ impl FilesInner {
                 return;
             }
         };
+        let waits: std::collections::BTreeMap<_, _> = match self.database.download_waits().await {
+            Ok(waits) => waits.into_iter().collect(),
+            Err(error) => {
+                // No file subject holds this failure; the next wake retries it.
+                tracing::error!(?error, "reading eager download waits failed");
+                return;
+            }
+        };
+        // A new reference, or a failed one whose wait is due; neither while
+        // a provider cooldown holds the connection.
         let pending = files
             .iter()
             .filter(|file| {
-                !attempts.seen.contains(file)
-                    || (work == EagerWork::WithRetries && attempts.retry.contains(file))
+                let subject = download_subject(file);
+                let persisted = waits.get(&subject);
+                (persisted.is_some() || !attempts.seen.contains(file))
+                    && self.waits.due(subject, persisted)
             })
             .cloned()
             .collect::<Vec<_>>();
-        attempts.retry.retain(|file| files.contains(file));
-        attempts.seen = files;
+        attempts.seen.retain(|file| files.contains(file));
+        for file in &pending {
+            if !attempts.seen.contains(file) {
+                attempts.seen.push(file.clone());
+            }
+        }
         if pending.is_empty() {
             return;
         }
@@ -289,7 +305,11 @@ impl FilesInner {
             let result = tokio::select! {
                 _ = cancel.changed() => {
                     // Cancelled downloads are not retried; new references remain eligible.
-                    attempts.retry.retain(|file| !pending.contains(file));
+                    for file in &pending {
+                        if let Err(error) = self.waits.clear(download_subject(file)).await {
+                            tracing::error!(?error, "ending a cancelled download's wait failed");
+                        }
+                    }
                     self.eager.send_replace(EagerCacheFillStatus::Cancelled(
                         current.into_inner().expect("eager progress poisoned"),
                     ));
@@ -309,30 +329,72 @@ impl FilesInner {
                 device: file.uploader(),
                 file: file.id(),
             };
-            attempts.retry.retain(|retry| retry != file);
-            let recorded = match reason {
+            let retry = download_subject(file);
+            match reason {
                 None => {
                     progress.files_completed += 1;
-                    self.database.clear_file_pending(subject).await
+                    // Its wait belongs to the record and goes with it.
+                    match self.database.clear_file_pending(subject).await {
+                        Ok(()) => self.waits.forget(retry),
+                        Err(error) => tracing::error!(
+                            ?error,
+                            "clearing a completed eager download's record failed"
+                        ),
+                    }
                 }
                 Some(reason) => {
-                    if retries(&reason) {
-                        attempts.retry.push(file.clone());
-                    }
-                    self.database
-                        .record_file_pending(move |reported_by| PendingRecord {
-                            subject,
-                            reason,
-                            reported_by,
-                        })
+                    self.record_download_failure(subject, retry, reason, waits.get(&retry))
                         .await
                 }
-            };
-            if let Err(error) = recorded {
-                tracing::error!(?error, "recording an eager download's pending state failed");
             }
         }
         self.eager.send_replace(EagerCacheFillStatus::Idle);
+    }
+
+    /// Persist the failed download's record with its next wait before it
+    /// waits (§16.5): temporary conditions retry once the wait is due,
+    /// others wait for the app or an update and keep no wait. A wait that
+    /// cannot be chosen or persisted holds the download until the app acts.
+    async fn record_download_failure(
+        &self,
+        subject: PendingSubject,
+        retry: RetrySubject,
+        reason: PendingReason,
+        previous: Option<&RetryWait>,
+    ) {
+        let timed = retries(&reason);
+        let wait = if timed {
+            match self.waits.next(previous) {
+                Ok(wait) => Some(wait),
+                Err(error) => {
+                    tracing::error!(?error, "choosing an eager download's retry wait failed");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        let recorded = self
+            .database
+            .fail_download(
+                move |reported_by| PendingRecord {
+                    subject,
+                    reason,
+                    reported_by,
+                },
+                retry,
+                wait,
+            )
+            .await;
+        match (recorded, wait) {
+            (Ok(()), Some(wait)) => self.waits.arm(retry, &wait),
+            (Ok(()), None) if !timed => self.waits.forget(retry),
+            (Ok(()), None) => self.waits.hold(retry),
+            (Err(error), _) => {
+                tracing::error!(?error, "recording an eager download's pending state failed");
+                self.waits.hold(retry);
+            }
+        }
     }
 
     /// The first unmet condition a failed read of `file` leaves (§16.3).

@@ -16,7 +16,7 @@ use crate::SyncError;
 use coven_database::{DbError, FileDatabase};
 use coven_foundation::{files::StoreDir, id_source::IdSourceRef};
 use coven_storage::Storage;
-use file_cache::{EagerAttempts, EagerWork};
+use file_cache::EagerAttempts;
 pub use file_cache::{EagerCacheFillStatus, PinProgress, RowsPinnedLiveQuery};
 pub use file_error::{FileReadError, RecordedUploadFailure, UploadFailure, UploadFailures};
 pub use file_read::{FileRangeStream, FileStream};
@@ -138,7 +138,8 @@ impl Files {
         let weak = Arc::downgrade(&inner);
         let wake = inner.wake.clone();
         let task = tokio::spawn(async move {
-            // The earliest due upload retry, armed after each drain (§16.5).
+            // The earliest due upload or eager download retry, armed after
+            // each drain and fill (§16.5).
             let mut retry: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> =
                 Box::pin(std::future::pending());
             loop {
@@ -168,7 +169,7 @@ impl Files {
                         }
                         Err(error) => tracing::error!(?error, "upload queue failed"),
                     }
-                    owner.fill_eager(EagerWork::NewReferences).await;
+                    owner.fill_eager().await;
                 };
                 tokio::select! { biased; _=stopping.changed()=>break, _=work=>{} }
                 owner.notify();
@@ -232,10 +233,10 @@ impl Files {
     }
 
     /// SP step 7: wake the upload worker, and fill the eager cache with new
-    /// references and the retries of temporary failures that only a pass makes.
+    /// references and the failed downloads whose retry waits are due.
     pub(crate) async fn sync_files(&self) -> Result<(), SyncError> {
         self.inner.wake.notify_one();
-        self.inner.fill_eager(EagerWork::WithRetries).await;
+        self.inner.fill_eager().await;
         Ok(())
     }
 

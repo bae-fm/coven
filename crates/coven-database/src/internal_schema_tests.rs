@@ -444,7 +444,7 @@ mod scans {
         Some("the schema row is singular; unfiltered membership EXISTS stops after its first row"),
     ("file_queue.rs", "SELECT u.id,u.reference,u.queued_at,u.failure,u.session,r.failures,r.not_before,r.wait FROM _coven_file_uploads AS u LEFT JOIN _coven_retries AS r ON r.upload=u.id ORDER BY u.id", "u") =>
         Some("the file queue reader returns every queued attachment"),
-    ("retry.rs", "SELECT scope,operation,upload,failures,not_before,wait FROM _coven_retries", "_coven_retries") =>
+    ("retry.rs", "SELECT scope,operation,upload,download,failures,not_before,wait FROM _coven_retries", "_coven_retries") =>
         Some("reopening arms every persisted retry wait"),
     ("file_removals.rs", "SELECT path,area FROM _coven_file_removals ORDER BY area,path", "_coven_file_removals") =>
         Some("file removal visits every queued filesystem deletion"),

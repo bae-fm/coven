@@ -37,23 +37,24 @@ impl FilesInner {
                 .due(RetrySubject::Upload(item.id), item.retry.as_ref()))
     }
 
-    /// When the worker must next drain without other wakes: the earliest
-    /// due upload retry, or the end of a provider cooldown holding the queue.
+    /// When the worker must next drain and fill without other wakes: the
+    /// earliest due upload or eager download retry, or the end of a provider
+    /// cooldown holding the upload queue.
     pub(crate) fn next_retry(&self) -> Option<crate::retry_waits::Wake> {
         // Resuming, connecting and a completed catch-up wake the worker themselves.
-        let idle = self.paused()
-            || self
-                .storage
-                .read()
-                .expect("storage lock poisoned")
-                .is_none()
-            || !self.send.can_send();
-        if idle {
-            return None;
-        }
+        let connected = self
+            .storage
+            .read()
+            .expect("storage lock poisoned")
+            .is_some();
+        let uploads = connected && !self.paused() && self.send.can_send();
         self.waits
-            .next_wake(|subject| matches!(subject, RetrySubject::Upload(_)))
-            .or_else(|| self.waits.cooldown_wake())
+            .next_wake(|subject| match subject {
+                RetrySubject::Upload(_) => uploads,
+                RetrySubject::Download { .. } => connected,
+                _ => false,
+            })
+            .or_else(|| uploads.then(|| self.waits.cooldown_wake()).flatten())
     }
 
     /// Record a failed attempt with its next wait, persisting T and W with
