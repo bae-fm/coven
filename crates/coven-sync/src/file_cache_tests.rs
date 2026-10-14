@@ -47,7 +47,10 @@ async fn connect(b: &Fixture, a: &Fixture) {
 async fn apply_all(a: &Fixture, b: &Fixture) {
     for write in a.database.test_queued_writes().await.unwrap() {
         b.database
-            .apply_downloaded::<crate::PendingRecord>(write.into(), std::time::UNIX_EPOCH)
+            .apply_downloaded::<crate::PendingRecord>(
+                write.into(),
+                coven_format::value::StorageTime::since_epoch(std::time::Duration::ZERO),
+            )
             .await
             .unwrap();
     }
