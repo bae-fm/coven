@@ -20,7 +20,7 @@ impl Database {
     /// deletion. Repeating deletion after a lost reply is safe.
     pub async fn retire_unused_file(&self, id: i64) -> Result<(), DbError> {
         self.call(move |inner| {
-            inner.with_writer(|writer| {
+            inner.access.with_writer(|writer| {
                 writer.transaction(|db| {
                     let invalid: bool = db.query_row(
                         "SELECT EXISTS(SELECT 1 FROM _coven_file_uploads WHERE id=?1 AND (unused=0 OR stored=0))",

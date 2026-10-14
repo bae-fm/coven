@@ -36,7 +36,7 @@ impl Database {
     /// Record one local first unmet condition, replacing its previous reason.
     pub async fn record_pending<P: crate::PendingValue>(&self, record: P) -> Result<(), DbError> {
         self.call(move |inner| {
-            inner.with_writer(|writer| {
+            inner.access.with_writer(|writer| {
                 if record.reported_by() != inner.access.device {
                     return Err(DbError::DamagedDatabase);
                 }
@@ -57,7 +57,7 @@ impl Database {
         subject: S,
     ) -> Result<(), DbError> {
         self.call(move |inner| {
-            inner.with_writer(|writer| {
+            inner.access.with_writer(|writer| {
                 writer.pending_transaction(|db| {
                     crate::pending::clear(db, &subject, inner.access.device)
                 })
@@ -73,7 +73,7 @@ impl Database {
         reports: Vec<P>,
     ) -> Result<(), DbError> {
         self.call(move |inner| {
-            inner.with_writer(|writer| {
+            inner.access.with_writer(|writer| {
                 let mut identities = std::collections::BTreeSet::new();
                 for report in &reports {
                     if report.reported_by() == inner.access.device
@@ -126,7 +126,7 @@ impl Database {
         P::Subject: Send + 'static,
     {
         self.call(move |inner| {
-            inner.with_writer(|writer| {
+            inner.access.with_writer(|writer| {
                 crate::pending::retry::<P>(writer, &subject, inner.access.device)
             })
         })
@@ -174,8 +174,12 @@ impl Database {
         &self,
         write: crate::WriteId,
     ) -> Result<Option<Vec<u8>>, DbError> {
-        self.call(move |inner| inner.with_writer(|writer| crate::upload::session(writer, write)))
-            .await
+        self.call(move |inner| {
+            inner
+                .access
+                .with_writer(|writer| crate::upload::session(writer, write))
+        })
+        .await
     }
 
     /// Record a session before sending and after provider-confirmed progress.
@@ -185,7 +189,9 @@ impl Database {
         bytes: Vec<u8>,
     ) -> Result<(), DbError> {
         self.call(move |inner| {
-            inner.with_writer(|writer| crate::upload::keep_session(writer, write, bytes))
+            inner
+                .access
+                .with_writer(|writer| crate::upload::keep_session(writer, write, bytes))
         })
         .await
     }
@@ -207,7 +213,9 @@ impl Database {
     {
         self.call(move |inner| {
             inner.with_store_log(|log| {
-                inner.with_writer(|writer| crate::upload::prepare(writer, log, select))
+                inner
+                    .access
+                    .with_writer(|writer| crate::upload::prepare(writer, log, select))
             })
         })
         .await
@@ -250,8 +258,12 @@ impl Database {
     /// Report a successful upload and remove its queue row and session together.
     /// A repeated report returns false; attempts must stay in order.
     pub async fn upload_succeeded(&self, write: coven_merge::WriteId) -> Result<bool, DbError> {
-        self.call(move |inner| inner.with_writer(|writer| crate::upload::succeeded(writer, write)))
-            .await
+        self.call(move |inner| {
+            inner
+                .access
+                .with_writer(|writer| crate::upload::succeeded(writer, write))
+        })
+        .await
     }
 
     /// Read the retained decoded log and its queue from a committed reader snapshot.
@@ -296,7 +308,7 @@ impl Database {
     {
         self.call(move |inner| {
             inner.with_store_log(|log| {
-                inner.with_writer(|writer| {
+                inner.access.with_writer(|writer| {
                     crate::store_log_upload::prepare(
                         writer,
                         log,
@@ -324,7 +336,7 @@ impl Database {
         E: From<DbError> + Send + 'static,
     {
         self.call(move |inner| {
-            inner.with_writer(|writer| {
+            inner.access.with_writer(|writer| {
                 crate::key_upload::prepare(
                     writer,
                     inner.access.directory.id(),
@@ -338,7 +350,7 @@ impl Database {
 
     /// Every unconfirmed fixed copy in writer/number order, including abandoned operations.
     pub async fn key_uploads(&self) -> Result<Vec<crate::KeyUpload>, DbError> {
-        self.call(move |inner| inner.with_writer(crate::key_upload::read))
+        self.call(move |inner| inner.access.with_writer(crate::key_upload::read))
             .await
     }
 
@@ -346,7 +358,9 @@ impl Database {
     /// first publication. Reserved but unconfirmed copies do not advance it.
     pub async fn published_key_copy_number(&self) -> Result<u64, DbError> {
         self.call(move |inner| {
-            inner.with_writer(|writer| crate::key_upload::published(writer, inner.access.device))
+            inner
+                .access
+                .with_writer(|writer| crate::key_upload::published(writer, inner.access.device))
         })
         .await
     }
@@ -355,7 +369,9 @@ impl Database {
     /// Confirmation and queue retirement commit together; repetitions are idempotent.
     pub async fn complete_key_upload(&self, copy: crate::KeyUpload) -> Result<(), DbError> {
         self.call(move |inner| {
-            inner.with_writer(|writer| crate::key_upload::complete(writer, &copy))
+            inner
+                .access
+                .with_writer(|writer| crate::key_upload::complete(writer, &copy))
         })
         .await
     }
@@ -393,7 +409,7 @@ impl Database {
     ) -> Result<(), DbError> {
         self.call(move |inner| {
             inner.with_store_log(|current| {
-                inner.with_writer(|writer| {
+                inner.access.with_writer(|writer| {
                     if current.entries != checked.entries || current.replay != checked.replay {
                         return Err(DbError::StoreLogEntriesChanged);
                     }
@@ -424,7 +440,7 @@ impl Database {
         keys: Vec<(coven_merge::Audience, coven_crypto::FingerprintHasher)>,
     ) -> Result<crate::SyncState, DbError> {
         self.call(move |inner| {
-            inner.with_writer(|writer| {
+            inner.access.with_writer(|writer| {
                 let schema_version = writer.schema_version()?;
                 let positions = crate::download::positions(writer)?;
                 let fingerprints = keys

@@ -11,7 +11,7 @@ impl Database {
         counter: crate::test_utils::WorkCounter,
     ) -> Result<(), DbError> {
         self.call(move |inner| {
-            inner.with_writer(|writer| {
+            inner.access.with_writer(|writer| {
                 *writer.work.borrow_mut() = Some(counter.clone());
                 Ok::<_, DbError>(())
             })?;
@@ -29,7 +29,7 @@ impl Database {
         callback: impl Fn(crate::test_utils::WriteCheckpoint) + Send + 'static,
     ) -> Result<(), DbError> {
         self.call(move |inner| {
-            inner.with_writer(|writer| {
+            inner.access.with_writer(|writer| {
                 writer.on_write_checkpoint(callback);
                 Ok(())
             })
@@ -40,7 +40,7 @@ impl Database {
     /// Model a database last judged by another library release before reopening it.
     pub async fn test_pending_version(&self, version: &'static str) -> Result<(), DbError> {
         self.call(move |inner| {
-            inner.with_writer(|writer| {
+            inner.access.with_writer(|writer| {
                 writer.transaction(|db| {
                     db.internal_execute(
                         "UPDATE _coven_pending SET coven_version=?1 WHERE reporter=?2",
@@ -60,7 +60,7 @@ impl Database {
         audience: coven_merge::Audience,
     ) -> Result<(), DbError> {
         self.call(move |inner| {
-            inner.with_writer(|writer| {
+            inner.access.with_writer(|writer| {
                 writer.transaction(|db| {
                     db.internal_execute("INSERT INTO _coven_fingerprint_sums(audience,sum) VALUES(?1,?2) ON CONFLICT(audience) DO UPDATE SET sum=excluded.sum",
                         (crate::write_encoding::audience_text(&audience), [37u8;32].as_slice()))?;
@@ -76,7 +76,7 @@ impl Database {
         &self,
     ) -> Result<Vec<coven_format::write::WriteRecord>, DbError> {
         self.call(move |inner| {
-            inner.with_writer(|writer| {
+            inner.access.with_writer(|writer| {
                 writer
                     .query(
                         "SELECT record FROM _coven_uploads ORDER BY device,number",

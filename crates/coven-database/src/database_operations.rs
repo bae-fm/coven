@@ -105,7 +105,7 @@ impl Database {
     {
         self.call(move |inner| {
             inner.with_store_log(|log| {
-                inner.with_writer(|writer| {
+                inner.access.with_writer(|writer| {
                     crate::store_log_upload::prepare(
                         writer,
                         log,
@@ -126,28 +126,36 @@ impl Database {
 
     /// Read every unfinished operation, including permanently failed ones.
     pub async fn operations(&self) -> Result<Vec<OperationRecord>, DbError> {
-        self.call(move |inner| inner.with_writer(crate::operation::read))
+        self.call(move |inner| inner.access.with_writer(crate::operation::read))
             .await
     }
 
     /// Read one committed journal row without loading unrelated operation data.
     /// Absence means the operation has finished or never existed.
     pub async fn operation(&self, id: OperationId) -> Result<Option<OperationRecord>, DbError> {
-        self.call(move |inner| inner.with_writer(|writer| crate::operation::find(writer, id)))
-            .await
+        self.call(move |inner| {
+            inner
+                .access
+                .with_writer(|writer| crate::operation::find(writer, id))
+        })
+        .await
     }
 
     /// Read the earliest unfinished row of a sync-owned kind, including failures.
     pub async fn first_operation(&self, kind: &str) -> Result<Option<OperationRecord>, DbError> {
         let kind = kind.to_owned();
-        self.call(move |inner| inner.with_writer(|writer| crate::operation::first(writer, &kind)))
-            .await
+        self.call(move |inner| {
+            inner
+                .access
+                .with_writer(|writer| crate::operation::first(writer, &kind))
+        })
+        .await
     }
 
     /// Commit the operation before its first step.
     pub async fn start_operation(&self, operation: NewOperation) -> Result<OperationId, DbError> {
         self.call(move |inner| {
-            inner.with_writer(|writer| {
+            inner.access.with_writer(|writer| {
                 writer.transaction(|db| crate::operation::insert(db, &operation))
             })
         })
@@ -157,7 +165,7 @@ impl Database {
     /// Commit a local step's state after an idempotent storage effect.
     pub async fn advance_operation(&self, update: OperationUpdate) -> Result<(), DbError> {
         self.call(move |inner| {
-            inner.with_writer(|writer| {
+            inner.access.with_writer(|writer| {
                 writer.transaction(|db| crate::operation::advance(db, &update))
             })
         })
@@ -169,14 +177,18 @@ impl Database {
         &self,
         id: OperationId,
     ) -> Result<Option<P>, DbError> {
-        self.call(move |inner| inner.with_writer(|db| crate::pending::operation(db, id)))
-            .await
+        self.call(move |inner| {
+            inner
+                .access
+                .with_writer(|db| crate::pending::operation(db, id))
+        })
+        .await
     }
 
     /// Clear a condition for an explicit retry; completed steps stay recorded.
     pub async fn retry_operation(&self, id: OperationId) -> Result<(), DbError> {
         self.call(move |inner| {
-            inner.with_writer(|writer| {
+            inner.access.with_writer(|writer| {
                 writer.transaction(|db| crate::pending::clear_operation(db, id))
             })
         })
@@ -190,7 +202,7 @@ impl Database {
         pending: P,
     ) -> Result<(), DbError> {
         self.call(move |inner| {
-            inner.with_writer(|writer| {
+            inner.access.with_writer(|writer| {
                 if pending.operation() != Some(update.id)
                     || pending.reported_by() != inner.access.device
                 {
@@ -209,7 +221,7 @@ impl Database {
     /// before discarding; removing this row cannot retire the publication queue.
     pub async fn finish_operation(&self, id: OperationId) -> Result<(), DbError> {
         self.call(move |inner| {
-            inner.with_writer(|writer| {
+            inner.access.with_writer(|writer| {
                 writer.transaction(|db| {
                     crate::pending::clear_operation(db, id)?;
                     db.internal_execute("DELETE FROM _coven_operations WHERE id=?1", [id.0])?;
@@ -230,7 +242,7 @@ impl Database {
         pending: Option<P>,
     ) -> Result<(), DbError> {
         self.call(move |inner| {
-            inner.with_writer(|writer| {
+            inner.access.with_writer(|writer| {
                 writer.transaction(|db| {
                     for key in keys {
                         db.internal_execute("INSERT INTO _coven_access_keys_to_delete(access_key_id,member) VALUES(?1,?2) ON CONFLICT(access_key_id) DO UPDATE SET member=excluded.member WHERE excluded.member IS NOT NULL", (key.access_key_id, key.member.map(|m| m.to_bytes().to_vec())))?;
@@ -253,7 +265,7 @@ impl Database {
     /// The durable provider-console actions still awaiting confirmation.
     pub async fn access_keys_to_delete(&self) -> Result<Vec<crate::AccessKeyToDelete>, DbError> {
         self.call(move |inner| {
-            inner.with_writer(|writer| {
+            inner.access.with_writer(|writer| {
                 writer.query(
                     "SELECT access_key_id,member FROM _coven_access_keys_to_delete WHERE confirmed=0 ORDER BY access_key_id",
                     [],
@@ -271,7 +283,7 @@ impl Database {
     /// Repeating confirmation or replaying an access entry cannot revive it.
     pub async fn confirm_access_key_deleted(&self, key: String) -> Result<(), DbError> {
         self.call(move |inner| {
-            inner.with_writer(|writer| {
+            inner.access.with_writer(|writer| {
                 writer.transaction(|db| {
                     db.internal_execute(
                         "INSERT INTO _coven_access_keys_to_delete(access_key_id,confirmed) VALUES(?1,1) ON CONFLICT(access_key_id) DO UPDATE SET confirmed=1",

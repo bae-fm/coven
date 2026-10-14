@@ -28,6 +28,24 @@ impl Database {
         let writer = inner.as_ref().unwrap().access.writer.lock().unwrap();
         inspect(&writer)
     }
+
+    pub(crate) fn inspect_readers(&self, inspect: impl Fn(&DatabaseConnection)) {
+        let inner = self.inner.read().unwrap();
+        inner.as_ref().unwrap().access.readers.inspect_each(inspect);
+    }
+}
+
+impl DatabaseReadHandle {
+    pub(crate) fn inspect_readers(&self, inspect: impl Fn(&DatabaseConnection)) {
+        let inner = self.inner.read().unwrap();
+        inner.as_ref().unwrap().readers.inspect_each(inspect);
+    }
+
+    pub(crate) fn inspect_writer<T>(&self, inspect: impl FnOnce(&DatabaseConnection) -> T) -> T {
+        let inner = self.inner.read().unwrap();
+        let writer = inner.as_ref().unwrap().writer.lock().unwrap();
+        inspect(&writer)
+    }
 }
 
 #[tokio::test]
@@ -731,4 +749,97 @@ async fn finished_operation_ids_cannot_address_a_new_operation_after_reopening()
     assert_eq!(current.last_step, 0);
     assert_eq!(current.data, [1]);
     db.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_panicking_write_whose_rollback_fails_still_panics_and_fails_the_handle() {
+    let store = TestStore::new();
+    let open = || store.builder(notes_tables(), notes_migrations()).open();
+    let db = open().await.unwrap();
+    db.inspect_writer(|writer| writer.refuse_transaction_end(true));
+    let clone = db.clone();
+    let panic = tokio::spawn(async move {
+        clone
+            .write(|sql| -> Result<(), DbError> {
+                sql.execute("INSERT INTO notes VALUES('n','held','')", [])?;
+                panic!("app write panic")
+            })
+            .await
+    })
+    .await
+    .unwrap_err();
+    assert_eq!(
+        *panic.into_panic().downcast::<&str>().unwrap(),
+        "app write panic"
+    );
+    let held = |db: &Database| {
+        db.inspect_writer(|writer| {
+            writer.query_row("SELECT count(*) FROM notes", [], |r| r.get::<_, i64>(0))
+        })
+        .unwrap()
+    };
+    assert_eq!(held(&db), 1, "the writer still holds the uncommitted row");
+    assert!(matches!(
+        db.write(|_| Ok(())).await,
+        Err(DbError::RollbackFailed)
+    ));
+    assert!(matches!(
+        db.read(|_| Ok(())).await,
+        Err(CovenError::Database(DbError::RollbackFailed))
+    ));
+    db.close().await.unwrap();
+    let db = open().await.unwrap();
+    assert_eq!(held(&db), 0);
+    db.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_failed_rollback_after_snapshot_checks_fails_the_handle() {
+    // Checks that pass report the failed ROLLBACK; checks that fail report both.
+    for valid in [true, false] {
+        let store = TestStore::new();
+        let open = || store.builder(notes_tables(), notes_migrations()).open();
+        let db = open().await.unwrap();
+        let snapshot =
+            crate::snapshot_write::tests::frames(&db, coven_merge::Audience::Store).await;
+        let (id, prefix, input) = snapshot.input();
+        db.validate_snapshot(id, prefix, input).await.unwrap();
+        let (id, prefix, input) = snapshot.input();
+        let input = if valid {
+            input
+        } else {
+            std::io::Cursor::new(Vec::new())
+        };
+        db.inspect_writer(|writer| writer.refuse_transaction_end(true));
+        let error = db.validate_snapshot(id, prefix, input).await.unwrap_err();
+        if valid {
+            assert!(matches!(error, DbError::Sqlite(_)), "{error:?}");
+        } else {
+            assert!(
+                matches!(&error, DbError::Rollback { operation, .. } if !matches!(**operation, DbError::Sqlite(_) | DbError::RollbackFailed)),
+                "{error:?}"
+            );
+        }
+        let scratch = db.inspect_writer(|writer| {
+            writer
+                .query_row(
+                    "SELECT count(*) FROM temp.sqlite_schema WHERE name='_coven_snapshot_values'",
+                    [],
+                    |r| r.get::<_, i64>(0),
+                )
+                .unwrap()
+        });
+        assert_eq!(
+            scratch, 1,
+            "the writer is still inside the checks' transaction"
+        );
+        assert!(matches!(
+            db.write(|_| Ok(())).await,
+            Err(DbError::RollbackFailed)
+        ));
+        db.close().await.unwrap();
+        let db = open().await.unwrap();
+        db.write(|_| Ok(())).await.unwrap();
+        db.close().await.unwrap();
+    }
 }

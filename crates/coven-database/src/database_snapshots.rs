@@ -74,8 +74,8 @@ impl Database {
         DbError,
     > {
         self.call(move |inner| {
-            inner.with_writer(|writer| {
-                writer.read_transaction(|| {
+            inner.access.with_writer(|writer| {
+                writer.discarded_transaction(|writer| {
                     crate::snapshot_state::create_tables(writer)?;
                     crate::snapshot_load::read(
                         writer,

@@ -21,6 +21,12 @@ impl ReadPool {
         }
     }
 
+    pub(crate) fn inspect_each(&self, inspect: impl Fn(&DatabaseConnection)) {
+        for reader in &self.readers {
+            inspect(&reader.lock().unwrap());
+        }
+    }
+
     pub(crate) fn integrity_checks(&self) -> usize {
         self.readers
             .iter()

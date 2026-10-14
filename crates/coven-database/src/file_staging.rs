@@ -33,7 +33,7 @@ impl FileStaging {
         let sources = {
             let slot = database.read().expect("database lock poisoned");
             let inner = slot.as_ref().ok_or(DbError::StoreClosed)?;
-            if let Some(error) = inner.observer.error() {
+            if let Some(error) = inner.access.observer.error() {
                 return Err(error.into());
             }
             let built = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -41,7 +41,7 @@ impl FileStaging {
                 build(&mut batch)?;
                 Ok::<_, E>(batch)
             }));
-            inner.with_writer(|writer| {
+            inner.access.with_writer(|writer| {
                 let built = match built {
                     Ok(built) => built,
                     Err(panic) => {

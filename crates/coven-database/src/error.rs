@@ -69,8 +69,9 @@ pub enum DbError {
     /// later call and live query fail with this same cause until reopened (E5).
     #[error("pending persistence failed: {0}")]
     PendingPersistence(#[source] std::sync::Arc<DbError>),
-    /// An earlier call's rollback failed, so the writer may still hold its
-    /// uncommitted changes; this handle refuses calls until reopened (§5).
+    /// An earlier call's rollback failed, so a connection may still be inside
+    /// that transaction, holding its uncommitted changes or its old snapshot;
+    /// this handle, read-only or not, refuses calls until reopened (§5).
     #[error("an earlier rollback failed; reopen the store")]
     RollbackFailed,
     /// Sync's part of a database transaction failed, keeping sync's own typed

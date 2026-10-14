@@ -431,8 +431,9 @@ pub enum DbError {
     /// A transaction failed and rolling it back failed too. Later calls fail
     /// with `RollbackFailed` until the store is reopened (§5).
     Rollback { operation: Box<DbError>, rollback: rusqlite::Error },
-    /// An earlier call's rollback failed, so the writer may still hold its
-    /// uncommitted changes; this handle refuses calls until reopened (§5).
+    /// An earlier call's rollback failed, so a connection may still be inside
+    /// that transaction, holding its uncommitted changes or its old snapshot;
+    /// this handle, read-only or not, refuses calls until reopened (§5).
     RollbackFailed,
     /// Saving pending state failed. The call that lost the update and every
     /// later call and live query fail with this same cause until the store is

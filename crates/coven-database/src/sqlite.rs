@@ -36,6 +36,10 @@ pub(crate) struct DatabaseConnection {
     pub(crate) work: std::cell::RefCell<Option<crate::test_utils::WorkCounter>>,
     connection: Connection,
     authorization: SqlAuthorization,
+    /// The open handle this connection serves: it receives the commits and
+    /// failures after which the handle refuses calls. None while opening, when
+    /// a failure fails the open and drops the connection instead.
+    handle: Option<CommitObserver>,
     observation: Option<WriterObservation>,
     streaming: std::cell::Cell<bool>,
     #[cfg(any(test, feature = "test-utils"))]
@@ -48,7 +52,6 @@ pub(crate) struct DatabaseConnection {
 
 struct WriterObservation {
     device: DeviceId,
-    observer: CommitObserver,
     supplemental: Arc<BTreeMap<String, Option<String>>>,
 }
 
@@ -137,6 +140,7 @@ impl DatabaseConnection {
             work: std::cell::RefCell::new(None),
             connection,
             authorization,
+            handle: None,
             observation: None,
             streaming: std::cell::Cell::new(false),
             #[cfg(any(test, feature = "test-utils"))]
@@ -430,10 +434,8 @@ impl DatabaseConnection {
             return error;
         }
         let error = Arc::new(error);
-        if let Some(observation) = &self.observation {
-            observation
-                .observer
-                .fail(crate::observation::HandleFailure::Pending(error.clone()));
+        if let Some(handle) = &self.handle {
+            handle.fail(crate::observation::HandleFailure::Pending(error.clone()));
         }
         DbError::PendingPersistence(error)
     }
@@ -670,19 +672,27 @@ impl DatabaseConnection {
         self.authorization.app_result(result)
     }
 
+    /// Serve an open handle once opening succeeds (§5).
+    pub(crate) fn serve(&mut self, handle: CommitObserver) {
+        assert!(self.handle.is_none(), "a connection serves one handle");
+        self.handle = Some(handle);
+    }
+
+    /// Serve the handle as its writer, capturing each commit's row changes.
     pub(crate) fn observe_commits(
         &mut self,
-        observer: CommitObserver,
+        handle: CommitObserver,
         device: DeviceId,
     ) -> Result<(), DbError> {
         assert!(
             self.observation.is_none(),
             "commit observation installed once"
         );
+        let supplemental = Arc::new(crate::change_capture::supplemental_tables(self)?);
+        self.serve(handle);
         self.observation = Some(WriterObservation {
             device,
-            observer,
-            supplemental: Arc::new(crate::change_capture::supplemental_tables(self)?),
+            supplemental,
         });
         Ok(())
     }
@@ -720,8 +730,61 @@ impl DatabaseConnection {
             read()
         })();
         guard.active = false;
-        self.batch("ROLLBACK")
-            .expect("ending read snapshot with ROLLBACK failed");
+        match self.roll_back() {
+            Ok(()) => result,
+            // A failed read keeps its own cause; the handle now refuses calls.
+            Err(rollback) => Err(match result {
+                Ok(_) => DbError::Sqlite(rollback).into(),
+                Err(error) => {
+                    tracing::error!(%rollback, "ending a failed read's snapshot failed");
+                    error
+                }
+            }),
+        }
+    }
+
+    /// Run checks that write scratch state, such as temporary tables, in a
+    /// transaction that always rolls back, so nothing they write is kept or
+    /// observed. It takes no write lock until something writes the main schema.
+    pub(crate) fn discarded_transaction<T>(
+        &self,
+        run: impl FnOnce(&Self) -> Result<T, DbError>,
+    ) -> Result<T, DbError> {
+        use crate::WriteFailure;
+        self.batch("BEGIN DEFERRED")?;
+        let mut guard = SqlTransaction {
+            database: self,
+            active: true,
+        };
+        let result = run(self);
+        guard.active = false;
+        match self.roll_back() {
+            Ok(()) => result,
+            Err(rollback) => Err(match result {
+                Ok(_) => DbError::Sqlite(rollback),
+                Err(error) => error.with_rollback(rollback),
+            }),
+        }
+    }
+
+    /// Roll back the open transaction unless SQLite already ended it. When
+    /// ROLLBACK fails, this connection may still be inside the transaction: a
+    /// writer would treat its uncommitted changes as committed and a reader
+    /// would keep reading its old snapshot, so the handle refuses every later
+    /// call until the store is reopened (§5).
+    fn roll_back(&self) -> rusqlite::Result<()> {
+        if self.connection.is_autocommit() {
+            return Ok(());
+        }
+        let result = {
+            let _scope = self.authorization.internal();
+            self.connection.execute_batch("ROLLBACK")
+        };
+        if result.is_err() {
+            if let Some(handle) = &self.handle {
+                handle.fail(crate::observation::HandleFailure::Rollback);
+            }
+        }
         result
     }
 
@@ -811,8 +874,8 @@ impl DatabaseConnection {
             self.record_work(|work| work.commits += 1);
             #[cfg(any(test, feature = "test-utils"))]
             self.checkpoint(crate::test_utils::WriteCheckpoint::Committed);
-            if let Some(observation) = &self.observation {
-                observation.observer.commit(changes);
+            if let Some(handle) = &self.handle {
+                handle.commit(changes);
             }
             #[cfg(any(test, feature = "test-utils"))]
             self.checkpoint(crate::test_utils::WriteCheckpoint::Observed);
@@ -821,20 +884,9 @@ impl DatabaseConnection {
         guard.active = false;
         match result {
             Ok(result) => Ok(result),
-            Err(operation) if self.connection.is_autocommit() => Err(operation),
-            Err(operation) => match self.batch("ROLLBACK") {
+            Err(operation) => match self.roll_back() {
                 Ok(()) => Err(operation),
-                // This connection may still hold the uncommitted changes, which
-                // its own later reads and writes would see as committed.
-                Err(DbError::Sqlite(rollback)) => {
-                    if let Some(observation) = &self.observation {
-                        observation
-                            .observer
-                            .fail(crate::observation::HandleFailure::Rollback);
-                    }
-                    Err(operation.with_rollback(rollback))
-                }
-                Err(error) => panic!("internal rollback returned a non-SQLite error: {error}"),
+                Err(rollback) => Err(operation.with_rollback(rollback)),
             },
         }
     }
@@ -897,13 +949,16 @@ struct SqlTransaction<'a> {
     active: bool,
 }
 
+// Still active only while a callback's panic unwinds, when a second panic
+// would abort the process. The panic propagates; a failed rollback is logged
+// and fails the handle, so every later call reports it.
 impl Drop for SqlTransaction<'_> {
     fn drop(&mut self) {
         self.database.streaming.set(false);
-        if self.active && !self.database.connection.is_autocommit() {
-            self.database
-                .batch("ROLLBACK")
-                .expect("rollback panicking database transaction");
+        if self.active {
+            if let Err(rollback) = self.database.roll_back() {
+                tracing::error!(%rollback, "rolling back a panicking transaction failed");
+            }
         }
     }
 }

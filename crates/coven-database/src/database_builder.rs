@@ -196,11 +196,9 @@ impl DatabaseBuilder {
         writer.observe_commits(observer.clone(), settings.device_id)?;
         let mut readers = Vec::new();
         for _ in 0..4 {
-            readers.push(Mutex::new(DatabaseConnection::open(
-                &path,
-                true,
-                SqlAuthorization::new(&tables),
-            )?));
+            let mut reader = DatabaseConnection::open(&path, true, SqlAuthorization::new(&tables))?;
+            reader.serve(observer.clone());
+            readers.push(Mutex::new(reader));
         }
         if let Some(recovery) = &mut recovery {
             recovery.prepared().map_err(DbError::from)?;
@@ -210,10 +208,10 @@ impl DatabaseBuilder {
             file_tasks: Arc::new(tokio::sync::RwLock::new(())),
             inner: Arc::new(RwLock::new(Some(DatabaseInner {
                 store_log: Mutex::new(None),
-                observer,
                 access: DatabaseAccess {
                     writer: Mutex::new(writer),
                     readers: ReadPool::new(readers),
+                    observer,
                     write_schema,
                     directory: self.directory,
                     device: settings.device_id,
@@ -238,26 +236,26 @@ impl DatabaseBuilder {
         self.directory.check_database_recovery()?;
         let settings = self.directory.settings()?;
         let path = self.directory.database_path();
-        let first = DatabaseConnection::open(&path, true, SqlAuthorization::new(&tables))?;
+        let mut first = DatabaseConnection::open(&path, true, SqlAuthorization::new(&tables))?;
         first.check_integrity()?;
         first.prepare_schema(&tables, &migrations, None, None)?;
         let schema = crate::write_schema::WriteSchema::read(&first, tables.clone())?;
+        // Only the cache connection commits, and nothing subscribes to it.
+        let observer = CommitObserver::new();
+        first.serve(observer.clone());
         let mut readers = vec![Mutex::new(first)];
         for _ in 1..4 {
-            readers.push(Mutex::new(DatabaseConnection::open(
-                &path,
-                true,
-                SqlAuthorization::new(&tables),
-            )?));
+            let mut reader = DatabaseConnection::open(&path, true, SqlAuthorization::new(&tables))?;
+            reader.serve(observer.clone());
+            readers.push(Mutex::new(reader));
         }
+        let mut writer = DatabaseConnection::open(&path, false, SqlAuthorization::new(&tables))?;
+        writer.serve(observer.clone());
         Ok(DatabaseReadHandle {
             inner: Arc::new(RwLock::new(Some(DatabaseAccess {
-                writer: Mutex::new(DatabaseConnection::open(
-                    &path,
-                    false,
-                    SqlAuthorization::new(&tables),
-                )?),
+                writer: Mutex::new(writer),
                 readers: ReadPool::new(readers),
+                observer,
                 lock,
                 write_schema: schema,
                 directory: self.directory,

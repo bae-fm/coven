@@ -55,7 +55,6 @@ pub struct Database {
 struct DatabaseInner {
     // Shared by the sync owner and its workers; only a committed replay replaces it.
     store_log: Mutex<Option<crate::StoreLog>>,
-    observer: CommitObserver,
     access: DatabaseAccess<StoreLock>,
     migrations: Vec<MigrationOutcome>,
     clock: ClockRef,
@@ -68,6 +67,8 @@ struct DatabaseInner {
 struct DatabaseAccess<L> {
     writer: Mutex<DatabaseConnection>,
     readers: ReadPool,
+    // Every connection reports its commits and handle failures here (§5).
+    observer: CommitObserver,
     write_schema: crate::write_schema::WriteSchema,
     directory: StoreDir,
     device: DeviceId,
@@ -75,6 +76,33 @@ struct DatabaseAccess<L> {
 }
 
 impl<L> DatabaseAccess<L> {
+    /// Refuse calls once a connection failed the handle. A failing call keeps
+    /// its own error; one that succeeds while the handle fails reports it.
+    fn call<R, E: From<DbError>>(&self, run: impl FnOnce() -> Result<R, E>) -> Result<R, E> {
+        if let Some(error) = self.observer.error() {
+            return Err(error.into());
+        }
+        let result = run()?;
+        match self.observer.error() {
+            Some(error) => Err(error.into()),
+            None => Ok(result),
+        }
+    }
+
+    fn with_writer<R, E: From<DbError>>(
+        &self,
+        run: impl FnOnce(&DatabaseConnection) -> Result<R, E>,
+    ) -> Result<R, E> {
+        with_locked(&self.writer, |writer| {
+            #[cfg(any(test, feature = "test-utils"))]
+            writer.record_work(|work| work.writer_holds += 1);
+            if let Some(error) = self.observer.error() {
+                return Err(error.into());
+            }
+            run(writer)
+        })
+    }
+
     fn open_local_file(
         &self,
         reference: &crate::FileRef,
@@ -114,6 +142,7 @@ impl<L> DatabaseAccess<L> {
     }
 
     fn close(self) -> Result<(), DbError> {
+        self.observer.close();
         let mut failures = self.readers.close();
         if let Err(error) = self
             .writer
@@ -161,14 +190,7 @@ impl DatabaseInner {
     }
 
     fn call<R, E: From<DbError>>(&self, run: impl FnOnce(&Self) -> Result<R, E>) -> Result<R, E> {
-        if let Some(error) = self.observer.error() {
-            return Err(error.into());
-        }
-        let result = run(self);
-        if let Some(error) = self.observer.error() {
-            return Err(error.into());
-        }
-        result
+        self.access.call(|| run(self))
     }
 
     // The caller retains its file-task lease until these names are released.
@@ -183,26 +205,12 @@ impl DatabaseInner {
         }
     }
 
-    fn with_writer<R, E: From<DbError>>(
-        &self,
-        run: impl FnOnce(&DatabaseConnection) -> Result<R, E>,
-    ) -> Result<R, E> {
-        with_locked(&self.access.writer, |writer| {
-            #[cfg(any(test, feature = "test-utils"))]
-            writer.record_work(|work| work.writer_holds += 1);
-            if let Some(error) = self.observer.error() {
-                return Err(error.into());
-            }
-            run(writer)
-        })
-    }
-
     fn with_files<R, E: crate::WriteFailure>(
         &self,
         staged: Vec<crate::file_write::StagedFile>,
         run: impl FnOnce(&DatabaseConnection, &crate::file_write::FileWrite<'_>) -> Result<R, E>,
     ) -> Result<R, E> {
-        self.with_writer(|writer| {
+        self.access.with_writer(|writer| {
             let files = crate::file_write::FileWrite::new(
                 writer,
                 &self.access.directory,
@@ -216,8 +224,12 @@ impl DatabaseInner {
             match result {
                 Ok(result) => files.finish(result),
                 Err(panic) => {
-                    if let Err(error) = files.rollback() {
-                        panic!("file cleanup after callback panic failed: {error:?}");
+                    // After a failed rollback the writer may still hold this
+                    // write; removal records wait for the next open (§16.6).
+                    if !matches!(self.access.observer.error(), Some(DbError::RollbackFailed)) {
+                        if let Err(error) = files.rollback() {
+                            panic!("file cleanup after callback panic failed: {error:?}");
+                        }
                     }
                     std::panic::resume_unwind(panic)
                 }
@@ -258,7 +270,7 @@ impl Database {
             keys: crate::key_scope::KeyScope::All,
         }];
         let commits = match slot.as_ref() {
-            Some(inner) => inner.observer.subscribe(),
+            Some(inner) => inner.access.observer.subscribe(),
             None => CommitSubscription::closed(),
         };
         commits.begin();
@@ -278,11 +290,11 @@ impl Database {
             tokio::task::spawn_blocking(move || {
                 let mut slot = database.write().expect("database lock poisoned");
                 let inner = slot.as_mut().ok_or(DbError::StoreClosed)?;
-                if let Some(error) = inner.observer.error() {
+                if let Some(error) = inner.access.observer.error() {
                     return Err(error);
                 }
                 if let Some(recovery) = &inner.recovery {
-                    inner.with_writer(|writer| {
+                    inner.access.with_writer(|writer| {
                         crate::file_removals::FileRemovals::new(
                             writer,
                             &inner.access.directory,
@@ -365,7 +377,7 @@ impl Database {
     {
         let inner = self.inner.read().expect("database lock poisoned");
         let commits = match inner.as_ref() {
-            Some(inner) => inner.observer.subscribe(),
+            Some(inner) => inner.access.observer.subscribe(),
             None => CommitSubscription::closed(),
         };
         // A subscription retains a database only for its active blocking read.
@@ -482,7 +494,7 @@ impl Database {
     pub fn applied_migrations(&self) -> Result<Vec<MigrationOutcome>, DbError> {
         let inner = self.inner.read().expect("database lock poisoned");
         let inner = inner.as_ref().ok_or(DbError::StoreClosed)?;
-        if let Some(error) = inner.observer.error() {
+        if let Some(error) = inner.access.observer.error() {
             return Err(error);
         }
         Ok(inner.migrations.clone())
@@ -503,7 +515,6 @@ impl Database {
                         let Some(inner) = slot.take() else {
                             return Err(DbError::StoreClosed);
                         };
-                        inner.observer.close();
                         inner.access.close()
                     })
                     .await,
@@ -552,7 +563,12 @@ impl DatabaseReadHandle {
         R: Send + 'static,
         E: From<DbError> + Send + 'static,
     {
-        finish_blocking(start_call(self.inner.clone(), run).await)
+        finish_blocking(
+            start_call(self.inner.clone(), move |access| {
+                access.call(|| run(access))
+            })
+            .await,
+        )
     }
     /// Open local bytes selected by the reference while checking its current row.
     pub async fn open_local_file(
@@ -605,7 +621,9 @@ impl DatabaseReadHandle {
         F: FnOnce(SqlReadContext<'_>) -> CovenResult<R> + Send + 'static,
         R: Send + 'static,
     {
-        start_call(self.inner.clone(), move |inner| inner.read(read))
+        start_call(self.inner.clone(), move |inner| {
+            inner.call(|| inner.read(read))
+        })
     }
 
     /// The committed app schema version.

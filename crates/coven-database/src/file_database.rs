@@ -56,7 +56,7 @@ impl FileDatabase {
             FileDatabaseAccess::Writer(database) => {
                 database
                     .call(move |inner| {
-                        inner.with_writer(|writer| {
+                        inner.access.with_writer(|writer| {
                             run(
                                 writer,
                                 &inner.access.write_schema,
@@ -70,7 +70,7 @@ impl FileDatabase {
             FileDatabaseAccess::Reader(database) => {
                 database
                     .call(move |inner| {
-                        super::with_locked(&inner.writer, |writer| {
+                        inner.with_writer(|writer| {
                             run(writer, &inner.write_schema, &inner.directory, inner.device)
                         })
                     })
@@ -310,7 +310,7 @@ impl FileDatabase {
         let resources = database.inner.clone();
         database
             .call(move |inner| {
-                inner.with_writer(|writer| {
+                inner.access.with_writer(|writer| {
                     writer.transaction(|db| {
                         if db.query_row(
                             "SELECT EXISTS(
@@ -383,7 +383,7 @@ impl FileDatabase {
                         keys: crate::key_scope::KeyScope::All,
                     }))
                     .collect::<Vec<_>>();
-                let commits = inner.observer.subscribe();
+                let commits = inner.access.observer.subscribe();
                 commits.begin();
                 commits.finish(reads.clone());
                 DatabaseChanges {
@@ -541,7 +541,7 @@ impl CacheReservation {
                 {
                     let slot = pending.database.read().expect("database lock poisoned");
                     let inner = slot.as_ref().ok_or(DbError::StoreClosed)?;
-                    inner.with_writer(|writer| {
+                    inner.access.with_writer(|writer| {
                         writer.transaction(|db| {
                             file_ref::validate(db, &inner.access.write_schema, &file)?;
                             cache::publish(db, &inner.access.directory, &file, &pending.name)

@@ -249,3 +249,114 @@ async fn a_panicking_read_releases_its_snapshot_and_keeps_the_reader_usable() {
     );
     ro.close().await.unwrap();
 }
+
+fn rollback_failed<T>(result: crate::CovenResult<T>) -> bool {
+    matches!(result, Err(CovenError::Database(DbError::RollbackFailed)))
+}
+
+#[tokio::test]
+async fn a_failed_snapshot_rollback_fails_the_handle_until_reopen() {
+    // A read that succeeds reports the failed ROLLBACK; one that fails keeps its cause.
+    for read_fails in [false, true] {
+        let store = TestStore::new();
+        let open = || store.builder(notes_tables(), notes_migrations()).open();
+        let db = open().await.unwrap();
+        let mut notes = db.subscribe(|sql| {
+            Ok(sql.query("SELECT title FROM notes", [], |r| r.get::<_, String>(0))?)
+        });
+        assert!(notes.next().await.unwrap().is_empty());
+        db.inspect_readers(|reader| reader.refuse_transaction_end(true));
+        let error = db
+            .read(move |sql| {
+                sql.query_row("SELECT 1", [], |r| r.get::<_, i64>(0))?;
+                if read_fails {
+                    Err(DbError::DamagedDatabase.into())
+                } else {
+                    Ok(())
+                }
+            })
+            .await
+            .unwrap_err();
+        if read_fails {
+            assert!(
+                matches!(error, CovenError::Database(DbError::DamagedDatabase)),
+                "{error:?}"
+            );
+        } else {
+            assert!(
+                matches!(error, CovenError::Database(DbError::Sqlite(_))),
+                "{error:?}"
+            );
+        }
+        assert!(rollback_failed(db.read(|_| Ok(())).await));
+        assert!(matches!(
+            db.schema_version().await,
+            Err(DbError::RollbackFailed)
+        ));
+        assert!(matches!(
+            db.write(|_| Ok(())).await,
+            Err(DbError::RollbackFailed)
+        ));
+        assert!(rollback_failed(notes.next().await));
+        db.close().await.unwrap();
+        let db = open().await.unwrap();
+        assert!(db.read(|_| Ok(())).await.is_ok());
+        db.close().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn a_panicking_read_whose_rollback_fails_still_panics_and_fails_the_handle() {
+    let store = TestStore::new();
+    let db = store.builder(vec![], vec![]).open().await.unwrap();
+    db.inspect_readers(|reader| reader.refuse_transaction_end(true));
+    let clone = db.clone();
+    let panic = tokio::spawn(async move {
+        clone
+            .read(|_| -> crate::CovenResult<()> { panic!("app read panic") })
+            .await
+    })
+    .await
+    .unwrap_err();
+    assert_eq!(
+        *panic.into_panic().downcast::<&str>().unwrap(),
+        "app read panic"
+    );
+    assert!(rollback_failed(db.read(|_| Ok(())).await));
+    db.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_read_only_handle_fails_after_any_of_its_connections_fails_to_roll_back() {
+    let store = TestStore::new();
+    let open = || store.builder(notes_tables(), notes_migrations());
+    open().open().await.unwrap().close().await.unwrap();
+    // A reader ending its snapshot.
+    let ro = open().open_read_only().await.unwrap();
+    ro.inspect_readers(|reader| reader.refuse_transaction_end(true));
+    assert!(matches!(
+        ro.read(|_| Ok(())).await,
+        Err(CovenError::Database(DbError::Sqlite(_)))
+    ));
+    assert!(rollback_failed(ro.read(|_| Ok(())).await));
+    assert!(matches!(
+        ro.schema_version().await,
+        Err(DbError::RollbackFailed)
+    ));
+    ro.close().await.unwrap();
+    // The cache connection rolling back a transaction whose COMMIT failed.
+    let ro = open().open_read_only().await.unwrap();
+    ro.inspect_writer(|writer| writer.refuse_transaction_end(true));
+    let files = crate::FileDatabase::read_only(ro.clone());
+    let error = files.eager_files().await.unwrap_err();
+    assert!(matches!(error, DbError::Rollback { .. }), "{error:?}");
+    assert!(matches!(
+        files.eager_files().await,
+        Err(DbError::RollbackFailed)
+    ));
+    assert!(rollback_failed(ro.read(|_| Ok(())).await));
+    ro.close().await.unwrap();
+    let ro = open().open_read_only().await.unwrap();
+    assert!(ro.read(|_| Ok(())).await.is_ok());
+    ro.close().await.unwrap();
+}
