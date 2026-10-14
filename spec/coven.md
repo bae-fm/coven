@@ -1265,6 +1265,18 @@ the file's ranges under `F`.
     other HMAC keys, removes its folder binding and deletes the service
     account. The managed folder is the store's and stays. Absence is read
     from the account's HMAC key list, which a deleted account leaves empty.
+  - On R2 each member key is a Cloudflare account API token, named after the
+    attempt and limited to the store's own bucket
+    (`com.cloudflare.edge.r2.bucket.<account>_<jurisdiction>_<bucket>`) with
+    the `Workers R2 Storage Bucket Item Write` permission group, object reads
+    and writes. The location's endpoint host names the account and its
+    jurisdiction. The token id is the S3 key id and the hex SHA-256 of the
+    token value its secret. Tokens an earlier attempt named are deleted
+    first. The admin access is an API token allowed to write account tokens,
+    which can grant anything its owner holds. Revocation deletes the token;
+    absence is read from the token itself. Because the key reaches its whole
+    bucket, its member-side check requires the account's bucket listing to be
+    refused.
   - The member policy allows `s3:GetObject`, `s3:PutObject`,
     `s3:DeleteObject`, `s3:AbortMultipartUpload` and
     `s3:ListMultipartUploadParts` on `arn:aws:s3:::<bucket>/<prefix>/<store>/*`,
@@ -1281,9 +1293,11 @@ the file's ranges under `F`.
     invite's key does.
   - Before delivery the key is checked from the member's side. Under it, an
     object in `<store>/.coven-check/<run>/` is created, refused a second time,
-    read back and deleted, and that prefix is listed; a listing of the
-    location's base prefix, outside every store, must be refused, or the
-    check fails with `StorageFailure::KeyBeyondStore`. Authentication and
+    read back and deleted, and that prefix is listed. Where keys reach a
+    prefix, a listing of the location's base prefix, outside every store,
+    must be refused; where they reach a whole bucket, the account's bucket
+    listing must be. Otherwise the check fails with
+    `StorageFailure::KeyBeyondStore`. Authentication and
     permission failures are retried each second within the service's
     propagation bound: 60 seconds for AWS IAM, which states none, and 30 for
     SeaweedFS, whose gateways read identity changes asynchronously.

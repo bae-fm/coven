@@ -47,6 +47,8 @@ mod member_probe;
 pub(crate) mod minting;
 #[path = "s3_own_bucket.rs"]
 mod own_bucket;
+#[path = "s3_r2_keys.rs"]
+mod r2_keys;
 pub(crate) use own_bucket::check_new_store;
 
 /// The finest scope a member key has at this location, after refusing a

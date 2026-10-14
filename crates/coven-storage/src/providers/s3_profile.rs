@@ -150,7 +150,7 @@ const R2: CataloguedProfile = CataloguedProfile {
     // credentials, which need a session token, take a prefix.
     key_scope: S3KeyScope::Bucket,
     versioned_buckets: Certification::Uncertified,
-    minter: None,
+    minter: Some(&super::r2_keys::R2_TOKENS),
     certification: Certification::Passed {
         date: "2026-10-13",
         suite: 1,

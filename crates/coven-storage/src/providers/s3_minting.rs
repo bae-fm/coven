@@ -44,6 +44,7 @@ pub(crate) struct AdminEndpoints {
     pub(crate) gcs_storage: Url,
     pub(crate) gcs_iam: Url,
     pub(crate) gcs_projects: Url,
+    pub(crate) cloudflare: Url,
 }
 impl AdminEndpoints {
     pub(crate) fn production() -> Self {
@@ -53,6 +54,7 @@ impl AdminEndpoints {
             gcs_storage: url("https://storage.googleapis.com/storage/v1/"),
             gcs_iam: url("https://iam.googleapis.com/v1/"),
             gcs_projects: url("https://cloudresourcemanager.googleapis.com/v3/"),
+            cloudflare: url("https://api.cloudflare.com/client/v4/"),
         }
     }
 }
@@ -76,6 +78,7 @@ pub(crate) struct ProfileKeyAdmin {
     clock: ClockRef,
     ids: IdSourceRef,
     minter: &'static KeyMinter,
+    key_scope: S3KeyScope,
 }
 
 impl ProfileKeyAdmin {
@@ -124,6 +127,7 @@ pub(crate) fn key_admin(
         clock,
         ids,
         minter,
+        key_scope: selected.key_scope,
     }))
 }
 
@@ -158,7 +162,11 @@ impl AccessKeyAdmin for ProfileKeyAdmin {
                 Err(error) => return Err(error),
             }
         }
-        storage.outside_store_refused(scope.store).await
+        match self.key_scope {
+            S3KeyScope::Prefix => storage.outside_store_refused(scope.store).await,
+            // The store has the bucket to itself; the key must reach no other.
+            S3KeyScope::Bucket => storage.other_buckets_refused().await,
+        }
     }
     async fn roll_back(&self, scope: &MintScope) -> Result<(), StorageError> {
         (self.minter.roll_back)(&self.request(), scope).await

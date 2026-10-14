@@ -104,6 +104,17 @@ impl S3Storage {
         Ok(())
     }
 
+    /// A key limited to its store's own bucket must not list the account's
+    /// buckets: that would show it reaches beyond the bucket.
+    pub(super) async fn other_buckets_refused(&self) -> Result<(), StorageError> {
+        match self.client.list_buckets().send().await.map_err(s3_error) {
+            Err(error) if error.failure() == StorageFailure::PermissionDenied => Ok(()),
+            Err(error) => Err(error),
+            Ok(_) => Err(StorageFailure::KeyBeyondStore
+                .with_source("a member key for a store's own bucket lists the account's buckets")),
+        }
+    }
+
     /// A listing of the location's base prefix, outside every store's
     /// folder, must be refused with permission denied.
     pub(super) async fn outside_store_refused(&self, store: StoreId) -> Result<(), StorageError> {
