@@ -88,13 +88,23 @@ impl StoreLogSync {
     }
 
     /// Persist `S` for the next return; an unchanged time writes nothing.
-    pub(crate) async fn save_return_checkpoint(
+    /// Step 9: post positions. Only a pass that discovered every write and
+    /// confirmed its positions moves the return checkpoint `S` to `sample` (§15).
+    pub(crate) async fn finish_pass(
         &self,
-        sample: std::time::SystemTime,
+        writes: &mut crate::DeviceLogSync,
+        complete: bool,
+        sample: Option<std::time::SystemTime>,
     ) -> Result<(), SyncError> {
-        self.database
-            .save_return_checkpoint(coven_format::value::StorageTime::from_system_time(sample)?)
-            .await?;
+        if writes.post_positions().await? && complete {
+            if let Some(sample) = sample {
+                self.database
+                    .save_return_checkpoint(coven_format::value::StorageTime::from_system_time(
+                        sample,
+                    )?)
+                    .await?;
+            }
+        }
         Ok(())
     }
 

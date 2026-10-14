@@ -924,8 +924,11 @@ unchanged post with no send at any age. A literal Lean `example` checks the
 
 The model takes the gate's copies as given and does not model bootstrap
 publication scopes, the reload's held post, failed requests or retries. It
-does not prove that passes finish within the window. No Rust comparison is
-added.
+does not prove that passes finish within the window. Rust follows the pass
+reading: `positions_for` takes keys from the send gate's last completed
+observation at any age, and a Rust test reaches step 9 after the window,
+confirms the unchanged post without a send, moves the checkpoint, and cannot
+send a changed one. No Rust comparison is added.
 
 ### C13 Stable members and replaceable keys — checked proposal
 

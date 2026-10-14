@@ -149,3 +149,46 @@ async fn a_failed_storage_time_observation_certifies_no_miss() {
         Some(StorageTime::new(START, 0).unwrap())
     );
 }
+
+/// Lean `PositionPublication.late_step_nine_unconfirmed`: a pass reaching step
+/// 9 more than five minutes after its catch-up started still confirms an
+/// unchanged post from that pass's observation, sending nothing, and moves the
+/// return checkpoint (`pass_confirms_unchanged`). A changed post still waits
+/// for a fresh gate (`readings_store_alike`).
+#[tokio::test]
+async fn a_late_step_nine_confirms_an_unchanged_post_and_moves_the_checkpoint() {
+    let (storage, _) = timed_storage();
+    let mut a = notes_device(storage.clone(), 1).await;
+    a.create(key(1)).await;
+    a.sync().await;
+    assert!(a.writes.post_positions().await.unwrap());
+    let pass = a.sync.begin_pass(&mut a.writes);
+    a.sync.sync_store_log().await.unwrap();
+    a.writes.observe_positions().await.unwrap();
+    a.sync.prepare_return().await.unwrap();
+    let sample = a.sync.return_sample().expect("storage time sampled");
+    let discovery = a.writes.download_writes().await.unwrap();
+    assert!(discovery.complete);
+    let now = coven_foundation::clock::Clock::now(a.clock.as_ref());
+    a.clock.set(now + Duration::from_secs(301));
+    assert!(!a.send.can_send());
+    let before = storage.request_trace().len();
+    a.sync
+        .finish_pass(&mut a.writes, discovery.complete, Some(sample))
+        .await
+        .unwrap();
+    assert!(!storage.request_trace()[before..]
+        .iter()
+        .any(|r| matches!(r, coven_storage::test_utils::MemoryRequest::Replace(_))));
+    assert_eq!(
+        a.db.return_checkpoint().await.unwrap(),
+        Some(StorageTime::from_system_time(sample).unwrap())
+    );
+    drop(pass);
+    // Its disappearance changes the post, which needs a send.
+    let path = ObjectPath::positions(store(1), a.db.local_store_log().await.unwrap().device);
+    storage.delete(&path).await.unwrap();
+    a.writes.observe_positions().await.unwrap();
+    assert!(a.writes.post_positions().await.is_err());
+    assert!(storage.status(&path).await.unwrap().is_none());
+}

@@ -152,12 +152,22 @@ impl SendGate {
             .is_some_and(|completed| completed.binding == Binding::Device && self.fresh(completed))
     }
     pub(crate) fn observation(&self) -> Result<Vec<ObservedCopy>, SyncError> {
+        self.completed_copies(true)
+    }
+    /// The last completed key-copy observation at any age. It chooses the keys
+    /// positions are fingerprinted with (§19.1); sending them still needs the
+    /// fresh gate, so a long pass can confirm an unchanged post.
+    pub(crate) fn completed_observation(&self) -> Result<Vec<ObservedCopy>, SyncError> {
+        self.completed_copies(false)
+    }
+    fn completed_copies(&self, fresh: bool) -> Result<Vec<ObservedCopy>, SyncError> {
         let session = self.session.lock().expect("send gate poisoned");
         let completed = session
             .completed
             .as_ref()
             .ok_or(StorageFailure::CatchUpRequired)?;
-        if !matches!(completed.binding, Binding::Device | Binding::Member) || !self.fresh(completed)
+        if !matches!(completed.binding, Binding::Device | Binding::Member)
+            || (fresh && !self.fresh(completed))
         {
             return Err(StorageFailure::CatchUpRequired.into());
         }

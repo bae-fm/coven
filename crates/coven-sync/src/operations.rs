@@ -531,13 +531,9 @@ impl OperationRun {
         self.writes.upload_writes().await?;
         self.sync.write_snapshots().await?;
         self.sync.run_retention().await?;
-        // Only a completed catch-up with confirmed positions moves `S` (§15).
-        if self.writes.post_positions().await? && discovery.complete {
-            if let Some(sample) = checkpoint {
-                self.sync.save_return_checkpoint(sample).await?;
-            }
-        }
-        Ok(())
+        self.sync
+            .finish_pass(&mut self.writes, discovery.complete, checkpoint)
+            .await
     }
 
     async fn drive_key_phase(&mut self) -> Result<(), SyncError> {

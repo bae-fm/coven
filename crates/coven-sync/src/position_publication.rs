@@ -259,9 +259,12 @@ impl DeviceLogSync {
         // newest held one: a key an excluded member holds would let them test
         // guesses of data sealed with keys they lack (Appendix C12,
         // `PositionFingerprints`). An audience without a usable key omits its
-        // fingerprint. Without this pass's complete observation no key is
-        // known usable, so the current past waits and the confirmed post stands.
-        let copies = match self.send.observation() {
+        // fingerprint. The observation counts at any age: only a send needs it
+        // fresh, so a pass reaching this step after five minutes still confirms
+        // an unchanged post (`PositionPublication.pass_confirms_unchanged`).
+        // With no completed observation no key is known usable, so the current
+        // past waits and the confirmed post stands.
+        let copies = match self.send.completed_observation() {
             Ok(copies) => copies
                 .into_iter()
                 .map(|copy| copy.prefix)

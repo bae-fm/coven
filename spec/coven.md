@@ -5756,6 +5756,14 @@ holds failures and rejected entries, without making either wait look completed.
   - it is keyed with a key derived from the store's or circle's usable key
     (§11), so neither the provider nor a member excluded from that audience
     learns anything from it;
+  - usable keys come from this pass's completed key-copy observation,
+    whatever its age; only a send needs it fresh (§10). A pass reaching its
+    post after five minutes still confirms an unchanged post without sending,
+    and so still moves the return checkpoint (§15). An audience without a
+    usable key posts no fingerprint; with no completed observation since
+    opening, current positions wait and the confirmed post stands
+    ([`PositionPublication.pass_confirms_unchanged`, `pass_reading_advances`,
+    `readings_store_alike`, `late_passes_stall`](proofs/storelog/CovenStorelog/PositionPublication.lean));
   - each device posts its fingerprints with its positions ([§6](#6-syncing-writes));
   - two devices that have applied exactly the same writes must have the
     same fingerprints;
