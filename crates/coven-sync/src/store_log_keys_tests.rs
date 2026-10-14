@@ -635,21 +635,28 @@ async fn cancelling_publication_retains_prerequisites_and_leaves_no_number_gap()
     assert_eq!(numbers, [1, 2, 3]);
 }
 
+/// Another live copy of this database sealed its own copy at the same
+/// number: both decode and the bytes differ, so §10's comparison stops this
+/// copy and keeps the copy queued. Undecodable bytes there would be damage,
+/// never another copy's (`OwnCopyDamage.unreadable_is_damage`).
 #[tokio::test]
 async fn unequal_occupant_of_an_own_copy_path_stops_the_copy_and_keeps_it_queued() {
     let storage = storage();
     let mut ana = device(storage.clone(), 1, member(1), store(1)).await;
     ana.create(key(1)).await;
+    let ring = ana.custody.read().unwrap().unwrap();
+    let material = ring.store_key(key(1)).unwrap().clone();
+    let sealed = material.clone();
+    let (id, sealing) = (ana.member.member(), ana.member.keys().public_keys().sealing);
     let copy = ana
         .db
-        .prepare_key_upload(|_| Ok::<_, coven_database::DbError>(vec![1, 2, 3]))
+        .prepare_key_upload(move |path| keys::store_copy(path, &sealed, &id, &sealing))
         .await
         .unwrap();
-    storage
-        .create(&copy.path(store(1)), b"different")
-        .await
-        .unwrap();
-    // Another live copy holds this device's key-copy number (§10).
+    // The other copy seals the same key with its own randomness.
+    let other = keys::store_copy(&copy.path(store(1)), &material, &id, &sealing).unwrap();
+    assert_ne!(other, copy.bytes);
+    storage.create(&copy.path(store(1)), &other).await.unwrap();
     assert!(matches!(
         ana.sync.step().await,
         Err(SyncError::DeviceReset(

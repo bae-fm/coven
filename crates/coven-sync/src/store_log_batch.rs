@@ -100,27 +100,13 @@ impl StoreLogSync {
             .await?
             {
                 if let Some((writer, number)) = copy.metadata.path.key_copy_position() {
+                    // A number beyond the reservations is storage ahead,
+                    // whatever its bytes. Undecodable bytes within them are
+                    // provider damage, never another copy's object: the
+                    // copy reading below reports them and the phase waits
+                    // (§11, `OwnCopyDamage.unreadable_is_damage`).
                     if writer == local.device {
                         listed_copies = listed_copies.max(number.get());
-                        // This installation seals only decodable copies, and
-                        // confirms each by its bytes: a number it reserved
-                        // whose prefix does not decode holds another live
-                        // copy's object (§10). Waiting on it as an unreadable
-                        // copy would leave every first phase incomplete. A
-                        // number beyond the reservations is storage ahead.
-                        if number.get() <= reserved.key_copies
-                            && coven_format::sealed_key::SealedKey::decode(&copy.bytes).is_err_and(
-                                |error| crate::Refusal::from(error).required_update().is_none(),
-                            )
-                        {
-                            tracing::warn!(
-                                path = copy.metadata.path.as_str(),
-                                "own key-copy number holds another copy's bytes"
-                            );
-                            return Err(self
-                                .send
-                                .stop(coven_foundation::files::DeviceResetReason::SlotMismatch));
-                        }
                     }
                 }
             }

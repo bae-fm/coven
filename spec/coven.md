@@ -3201,6 +3201,8 @@ Carol's tablet:
       reserved, confirmed or not. A live copy's stored copies never pass
       that number, and a stored copy beyond it resets the copy
       ([`live_copy_sends`, `key_copy_ahead_resets`](proofs/storage/CovenStorage/IdentityCounters.lean)).
+      A number within the reservations whose clear prefix does not decode
+      is storage damage, not a stale copy: it waits (§11).
     - A snapshot's number is its operation's id. Snapshots compare with the
       id of the last snapshot operation started, finished or not; ids other
       operations took reserve no snapshot number. A live copy's stored
@@ -3527,6 +3529,16 @@ Carol's tablet:
   and records the failure (§19.1); an older miss cannot stand in for it.
   A completed retirement drain (§6) supplies that writer's complete retained
   copy history without another probe.
+  - A copy whose clear prefix does not decode is damage, also at a number
+    this device reserved: every copy of a database seals decodable bytes, so
+    it is never another copy's object. It leaves the read incomplete like
+    any other damaged copy, and the device waits; it never resets on it.
+    A reset would discard unsent edits, and the new device would read the
+    same bytes, so its first phase would stay incomplete. An own number
+    beyond the reservations still resets as storage ahead, whatever its
+    bytes (§10;
+    [`unreadable_is_damage`, `reset_never_completes`, `uncopied_waiting_never_resets`](proofs/storage/CovenStorage/OwnCopyDamage.lean),
+    [`damage_resets_uncopied`](proofs/storage/CovenStorage/OwnCopyDamageExamples.lean)).
   - An observed copy means its recipient may hold the key, whether or not the
     recipient has downloaded it. Copies remain in storage for good.
   - A key with an exposed copy under the rule above is retired for first

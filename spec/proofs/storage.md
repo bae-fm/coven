@@ -19,9 +19,9 @@ than §10's per-kind comparison (`operation_ids_hide_newer_snapshot`, below).
 A third result is a checked counterexample to a proposed rule: resetting on
 a mismatched S3 key delivery path can leave a made key live and unrecorded
 ([S3 key deliveries](#s3-key-deliveries)). A fourth is a checked
-counterexample to a rule Rust follows: resetting when an own key-copy number
-holds undecodable bytes discards unsent edits and still leaves the first
-phase incomplete ([Undecodable own key copies](#undecodable-own-key-copies)).
+counterexample to a rule Rust followed until T188: resetting when an own
+key-copy number holds undecodable bytes discards unsent edits and still
+leaves the first phase incomplete ([Undecodable own key copies](#undecodable-own-key-copies)).
 
 All named results are audited by `CovenStorage/Axioms.lean`. The package uses
 Lean 4.34.1 and its standard library, without additional axioms or unfinished
@@ -487,14 +487,16 @@ keeps the bytes it read and is not held at all
 comparison: a clone that seals copy 1 with other randomness still finds Ana's
 copy there and resets (`live_copies_still_reset`).
 
-So damage at an own copy number should be reported as a damaged copy and
-wait, like any other writer's unreadable copy; §2 already says coven does
+So damage at an own copy number leaves the read incomplete and waits, like
+any other writer's unreadable copy; §2 already says coven does
 not recover damaged storage. A number beyond the reservations is different:
 its existence proves another copy reserved it, whatever its bytes, since a
 database that is never copied has nothing stored past its reservations (the
 invariant behind `uncopied_waiting_never_resets`). It still resets as
-storage ahead (`key_copy_ahead_resets`). §10 and §11 are
-unchanged until Rust follows the waiting rule.
+storage ahead (`key_copy_ahead_resets`). §10 and §11 state this rule, and
+Rust follows it: the scan's own-number reset is gone, and
+`an_undecodable_own_copy_waits_as_damage` (`key_rotation_tests.rs`) runs
+the corrupted history.
 
 The model leaves out the store log, key selection, sharing, positions, the
 drain of a replaced id (whose retained history keeps the damaged object, so
