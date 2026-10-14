@@ -71,10 +71,12 @@ impl StoreLogSync {
         // Retained under the object's revision, so the positions scan that
         // follows in the pass reuses these bytes instead of reading them again.
         if let Some(object) = storage.status(&path).await? {
-            let bytes = crate::object_input::ObjectInput::observe(&self.database, &object)
-                .await?
-                .whole(storage)
-                .await?;
+            let (_, bytes) = crate::object_input::ObjectInput::whole_replaceable(
+                &self.database,
+                storage,
+                &object,
+            )
+            .await?;
             {
                 let ring = self.store_keys.read()?;
                 // Damage or an unmet condition counts as no post (§19.1).
