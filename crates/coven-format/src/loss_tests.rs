@@ -130,7 +130,7 @@ fn invalid_losses_leave_order_and_counts_unchanged() {
         invalid.push(loss);
     }
     let mut active = test_utils::excluded_loss();
-    active.retired = false;
+    active.frozen = false;
     invalid.push(active);
     let (mut encoder, mut decoder) = encoder(2);
     for loss in invalid {
@@ -316,6 +316,6 @@ fn dependency_losses_round_trip_with_their_sources() {
         assert!(bad.validate().is_err());
     }
     let mut unfrozen = loss;
-    unfrozen.retired = false;
+    unfrozen.frozen = false;
     assert!(unfrozen.validate().is_err());
 }

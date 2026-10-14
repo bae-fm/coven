@@ -185,7 +185,7 @@ impl LostValue {
             },
         };
         let row = record.row;
-        let target = if matches!(replaced_by, Replacement::Rules(_)) && !record.retired {
+        let target = if matches!(replaced_by, Replacement::Rules(_)) && !record.frozen {
             LossTarget::Removed {
                 row: row.clone(),
                 generation: record.generation,

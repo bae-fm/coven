@@ -211,6 +211,7 @@ fn finish(
         // Rows removal rules hide independently become ordinary deletes at
         // their generations (§17.1).
         let selected = hidden.select(database, &schema, &visible)?;
+        hidden.freeze_dropped(database, &schema, &selected)?;
         let mut deletes = Vec::new();
         for row in &selected {
             if let Some(change) = crate::migration_hidden::Hidden::delete(database, &store, row)? {

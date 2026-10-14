@@ -530,25 +530,7 @@ async fn a_non_final_circle_deletion_leaves_its_rows_out_of_the_migration() {
         .unwrap()
         .0
         .position;
-    // Replay drops the deletion: the circle is no longer deleted.
-    let log = db.store_log().await.unwrap();
-    let mut next = log.clone();
-    next.replay.entries.insert(
-        deletion,
-        crate::EntryOutcome::Dropped(crate::DropReason::NotAllowed),
-    );
-    next.replay.state.circle_deletions.remove(&circle_id());
-    db.apply_store_log_batch::<crate::pending::tests::Record>(
-        log,
-        vec![],
-        next.replay,
-        vec![],
-        vec![],
-        Vec::new(),
-        Vec::new(),
-    )
-    .await
-    .unwrap();
+    drop_entry(&db, deletion, circle_id()).await;
     assert_eq!(count(&db, "rows"), 3, "parent and child return");
     assert_eq!(
         generations(&db, &row_of(&second)),
@@ -703,4 +685,55 @@ async fn late_edits_to_a_migration_deleted_row_lose_to_its_delete() {
     for db in dbs {
         db.close().await.ok();
     }
+}
+
+/// Replay drops a circle deletion: the circle is no longer deleted.
+pub(crate) async fn drop_entry(db: &Database, deletion: crate::EntryId, circle: CircleId) {
+    let log = db.store_log().await.unwrap();
+    let mut next = log.clone();
+    next.replay.entries.insert(
+        deletion,
+        crate::EntryOutcome::Dropped(crate::DropReason::NotAllowed),
+    );
+    next.replay.state.circle_deletions.remove(&circle);
+    db.apply_store_log_batch::<crate::pending::tests::Record>(
+        log,
+        vec![],
+        next.replay,
+        vec![],
+        vec![],
+        Vec::new(),
+        Vec::new(),
+    )
+    .await
+    .unwrap();
+}
+
+pub(crate) fn circle_tables() -> Vec<SyncedTable> {
+    migration_tables()
+}
+
+/// The circle fixture schema, optionally with a droppable column `c`.
+pub(crate) fn circle_schema(with_c: bool) -> &'static str {
+    if with_c {
+        "CREATE TABLE rows(id TEXT NOT NULL PRIMARY KEY,audience TEXT NOT NULL,a INTEGER CHECK(a>=0),b TEXT,parent TEXT REFERENCES rows(id) ON DELETE CASCADE,c TEXT,UNIQUE(audience,b)); CREATE INDEX rows_parent ON rows(parent)"
+    } else {
+        MIGRATION_SCHEMA
+    }
+}
+
+/// One circle row setting every column of `circle_schema(true)`.
+pub(crate) fn circle_row() -> WriteRecord {
+    let mut write = migration_insert(0, 0, Audience::Circle(circle_id()));
+    let Operation::Insert(columns) = &mut write.parts[0].rows[0].change.operation else {
+        unreachable!()
+    };
+    columns.insert(
+        "c".into(),
+        ColumnValue {
+            value: Scalar::Text("extra".into()),
+            parents: BTreeMap::new(),
+        },
+    );
+    write
 }

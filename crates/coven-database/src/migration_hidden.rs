@@ -22,12 +22,14 @@ use std::collections::{BTreeMap, BTreeSet};
 pub(crate) struct Hidden {
     /// Merge state under the old identity and column names, by new identity.
     rows: BTreeMap<RowId, (RowId, RowState<Value>)>,
+    /// Removed-row losses naming a column the migration drops, by new identity.
+    dropped: BTreeMap<RowId, Loss>,
 }
 
 impl Hidden {
     /// Read every hidden row before identities move. A hidden row of a dropped
-    /// table has no generation left to delete: its losses are frozen as they
-    /// are, with their causes, before the table's merge state goes.
+    /// table has no generation left to delete; its losses are frozen with the
+    /// table's (`migration_state::carry`).
     pub(crate) fn before(
         db: &DatabaseConnection,
         before: &crate::schema::Schema,
@@ -35,13 +37,22 @@ impl Hidden {
     ) -> Result<Self, DbError> {
         let store = MergeStore::from_schema(db, before);
         let mut rows = BTreeMap::new();
-        for row in db.query(
-            "SELECT DISTINCT table_name,key,audience FROM _coven_lost WHERE retired=0 AND replacement_kind='rules'",
+        let mut dropped = BTreeMap::new();
+        for (id, row) in db.query(
+            "SELECT id,table_name,key,audience FROM _coven_lost WHERE frozen=0 AND replacement_kind='rules'",
             [],
-            crate::row_queries::read_identity,
+            |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    RowId {
+                        table: r.get(1)?,
+                        key: r.get(2)?,
+                        audience: crate::write_encoding::audience(&r.get::<_, String>(3)?)?,
+                    },
+                ))
+            },
         )? {
             let Some(table) = names.tables.get(&row.table) else {
-                crate::migration_state::freeze_losses(db, &row)?;
                 continue;
             };
             let state = store.row_without_losses(&row)?.state;
@@ -49,9 +60,39 @@ impl Hidden {
                 table: table.clone(),
                 ..row.clone()
             };
+            if state
+                .cells()
+                .keys()
+                .any(|column| !names.columns.contains_key(&(row.table.clone(), column.clone())))
+            {
+                let loss = db.query_row(
+                    &format!("{} WHERE l.id=?1", crate::loss_record::SELECT),
+                    [id],
+                    crate::loss_record::read,
+                )?;
+                dropped.insert(new.clone(), crate::migration_state::frozen(loss));
+            }
             rows.insert(new, (row, state));
         }
-        Ok(Self { rows })
+        Ok(Self { rows, dropped })
+    }
+
+    /// Lean `Migration.freezeDropped` for a row the migration leaves hidden:
+    /// its removed-row loss names a dropped column, so a frozen copy keeps the
+    /// whole row and its cause while the active one follows the new schema.
+    pub(crate) fn freeze_dropped(
+        &self,
+        db: &DatabaseConnection,
+        schema: &WriteSchema,
+        selected: &BTreeSet<RowId>,
+    ) -> Result<(), DbError> {
+        for (row, loss) in &self.dropped {
+            if !selected.contains(row) {
+                crate::loss_record::put(db, loss, None)?;
+                crate::file_protection::retain_loss(db, schema, loss)?;
+            }
+        }
+        Ok(())
     }
 
     /// Lean `migrationRemoves`: rerun the three removal passes without
@@ -146,7 +187,7 @@ impl Hidden {
         let loss = Loss {
             row: original,
             generation: state.generation(),
-            retired: true,
+            frozen: true,
             values: LossValues::Row(cells),
             cause: LossCause::Excluded {
                 write: migration,

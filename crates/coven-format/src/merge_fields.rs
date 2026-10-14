@@ -312,7 +312,7 @@ pub fn encode_loss_identity(value: &crate::loss::Loss) -> Result<Vec<u8>, Error>
                 .put(&mut out)?;
         }
     }
-    u8::from(value.retired).put(&mut out)?;
+    u8::from(value.frozen).put(&mut out)?;
     match value.cause {
         LossCause::Write(_) => 0u8,
         LossCause::Rules(_) => 1,

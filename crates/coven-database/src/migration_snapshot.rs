@@ -239,7 +239,7 @@ impl MigrationSnapshot {
         let Some(values) = rows.pop() else {
             return Ok(None);
         };
-        let owners = db.query("SELECT r.audience,r.generation FROM _coven_rows r WHERE r.table_name=?1 AND r.key=?2 AND NOT EXISTS(SELECT 1 FROM _coven_rows newer WHERE newer.table_name=r.table_name AND newer.key=r.key AND newer.audience=r.audience AND newer.generation>r.generation) AND NOT EXISTS(SELECT 1 FROM _coven_lost l WHERE l.table_name=r.table_name AND l.key=r.key AND l.audience=r.audience AND l.generation=r.generation AND l.retired=0 AND l.replacement_kind='rules')",params![key.0,key.1],|r|Ok((r.get::<_,String>(0)?,crate::write_encoding::counter(r.get(1)?))))?;
+        let owners = db.query("SELECT r.audience,r.generation FROM _coven_rows r WHERE r.table_name=?1 AND r.key=?2 AND NOT EXISTS(SELECT 1 FROM _coven_rows newer WHERE newer.table_name=r.table_name AND newer.key=r.key AND newer.audience=r.audience AND newer.generation>r.generation) AND NOT EXISTS(SELECT 1 FROM _coven_lost l WHERE l.table_name=r.table_name AND l.key=r.key AND l.audience=r.audience AND l.generation=r.generation AND l.frozen=0 AND l.replacement_kind='rules')",params![key.0,key.1],|r|Ok((r.get::<_,String>(0)?,crate::write_encoding::counter(r.get(1)?))))?;
         let mut owners = owners
             .into_iter()
             .filter(|(_, generation)| generation % 2 == 1);

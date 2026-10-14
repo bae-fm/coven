@@ -99,7 +99,7 @@ pub(crate) fn loss(database: &DatabaseConnection, loss: &Loss) -> Result<(), DbE
         &loss.row.audience,
         hash(&[b"loss", &identity]),
         hash(&[&value]),
-        (!loss.retired).then(|| hash(&[b"row", loss.row.table.as_bytes(), &loss.row.key])),
+        (!loss.frozen).then(|| hash(&[b"row", loss.row.table.as_bytes(), &loss.row.key])),
     )
 }
 

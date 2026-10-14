@@ -36,7 +36,7 @@ pub(crate) fn loss(
     loss: &Loss,
     references: &mut BTreeSet<(DeviceId, FileId)>,
 ) -> Result<(), DbError> {
-    if loss.retired {
+    if loss.frozen {
         // Frozen values keep their original column names after declarations
         // disappear. Any canonical fixed file reference remains protective;
         // a non-file string coinciding with that encoding can only retain extra

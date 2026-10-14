@@ -3,7 +3,7 @@
 use crate::migration_names::MigrationMatch;
 use crate::schema::Schema;
 use crate::sqlite::DatabaseConnection;
-use crate::write_encoding::{audience_text, decoded, encoded};
+use crate::write_encoding::{decoded, encoded};
 use crate::write_schema::WriteSchema;
 use crate::DbError;
 use coven_format::merge_fields;
@@ -44,10 +44,13 @@ pub(crate) fn carry(
                 db.internal_execute(&format!("DELETE FROM {child} WHERE row_id IN (SELECT id FROM _coven_rows WHERE table_name=?1)"), [&table.name])?;
             }
             db.internal_execute("DELETE FROM _coven_rows WHERE table_name=?1", [&table.name])?;
-            db.internal_execute(
-                "DELETE FROM _coven_lost WHERE table_name=?1 AND retired=0",
+            // A dropped table's losses stay, frozen under its old names (§17.1).
+            let losses = db.query(
+                "SELECT id FROM _coven_lost WHERE table_name=?1 AND frozen=0",
                 [&table.name],
+                |r| r.get::<_, i64>(0),
             )?;
+            freeze(db, losses)?;
         }
     }
     columns(db, names)?;
@@ -65,34 +68,33 @@ pub(crate) fn carry(
     Ok(refresh)
 }
 
-/// Retired losses keep their written values without active reference metadata.
-pub(crate) fn freeze_losses(
-    db: &DatabaseConnection,
-    row: &coven_merge::RowId,
-) -> Result<(), DbError> {
-    let ids = db.query(
-        "SELECT id FROM _coven_lost WHERE table_name=?1 AND key=?2 AND audience=?3 AND retired=0",
-        params![row.table, row.key, audience_text(&row.audience)],
-        |r| r.get::<_, i64>(0),
-    )?;
+/// Lean `Migration.freezeDropped`: a loss whose table or column goes keeps its
+/// written values, setters, old names and original cause, without live
+/// parent links; it no longer follows merge or removal rules (§17.1, D7).
+pub(crate) fn freeze(db: &DatabaseConnection, ids: Vec<i64>) -> Result<(), DbError> {
     for id in ids {
-        let mut loss = db.query_row(
+        let loss = db.query_row(
             &format!("{} WHERE l.id=?1", crate::loss_record::SELECT),
             [id],
             crate::loss_record::read,
         )?;
-        loss.retired = true;
-        match &mut loss.values {
-            coven_format::loss::LossValues::Cell { cell, .. } => cell.value.parents.clear(),
-            coven_format::loss::LossValues::Row(cells) => {
-                for cell in cells.values_mut() {
-                    cell.value.parents.clear();
-                }
-            }
-        }
-        crate::loss_record::put(db, &loss, Some(id))?;
+        crate::loss_record::put(db, &frozen(loss), Some(id))?;
     }
     Ok(())
+}
+
+/// The frozen form of a loss record.
+pub(crate) fn frozen(mut loss: coven_format::loss::Loss) -> coven_format::loss::Loss {
+    loss.frozen = true;
+    match &mut loss.values {
+        coven_format::loss::LossValues::Cell { cell, .. } => cell.value.parents.clear(),
+        coven_format::loss::LossValues::Row(cells) => {
+            for cell in cells.values_mut() {
+                cell.value.parents.clear();
+            }
+        }
+    }
+    loss
 }
 
 fn rename_table(db: &DatabaseConnection, old: &str, new: &str) -> Result<(), DbError> {
@@ -103,7 +105,7 @@ fn rename_table(db: &DatabaseConnection, old: &str, new: &str) -> Result<(), DbE
     // Active losses follow their row: a hidden row keeps its values in its
     // removal record (§17.1).
     db.internal_execute(
-        "UPDATE _coven_lost SET table_name=?2 WHERE table_name=?1 AND retired=0",
+        "UPDATE _coven_lost SET table_name=?2 WHERE table_name=?1 AND frozen=0",
         params![old, new],
     )?;
     Ok(())
@@ -117,7 +119,7 @@ fn rename_removed_values(
     columns: &std::collections::BTreeMap<String, Option<String>>,
 ) -> Result<(), DbError> {
     for (id, bytes) in db.query(
-        "SELECT id,value FROM _coven_lost WHERE table_name=?1 AND retired=0 AND replacement_kind='rules' AND column_id IS NULL",
+        "SELECT id,value FROM _coven_lost WHERE table_name=?1 AND frozen=0 AND replacement_kind='rules' AND column_id IS NULL",
         [table],
         |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?)),
     )? {
@@ -170,12 +172,18 @@ fn columns(db: &DatabaseConnection, names: &MigrationMatch) -> Result<(), DbErro
         let Some((new_table, new_column)) = target else {
             db.internal_execute("DELETE FROM _coven_references WHERE column_id=?1", [id])?;
             db.internal_execute("DELETE FROM _coven_cells WHERE column_id=?1", [id])?;
-            db.internal_execute("DELETE FROM _coven_lost WHERE column_id=?1 AND retired=0 AND replacement_kind='write'",[id])?;
+            // Its cell losses stay, frozen under the old name (§17.1).
+            let losses = db.query(
+                "SELECT id FROM _coven_lost WHERE column_id=?1 AND frozen=0",
+                [id],
+                |r| r.get::<_, i64>(0),
+            )?;
+            freeze(db, losses)?;
             db.internal_execute("DELETE FROM _coven_columns WHERE id=?1 AND NOT EXISTS(SELECT 1 FROM _coven_lost WHERE column_id=?1)",[id])?;
             continue;
         };
         let retained: bool = db.query_row(
-            "SELECT EXISTS(SELECT 1 FROM _coven_lost WHERE column_id=?1 AND retired=1)",
+            "SELECT EXISTS(SELECT 1 FROM _coven_lost WHERE column_id=?1 AND frozen=1)",
             [id],
             |r| r.get(0),
         )?;
@@ -230,7 +238,7 @@ fn move_column(db: &DatabaseConnection, old: i64, new: i64) -> Result<(), DbErro
             params![old, new],
         )?;
     }
-    db.internal_execute("UPDATE _coven_lost SET column_id=?2 WHERE column_id=?1 AND retired=0 AND replacement_kind='write'",params![old,new])?;
+    db.internal_execute("UPDATE _coven_lost SET column_id=?2 WHERE column_id=?1 AND frozen=0 AND replacement_kind='write'",params![old,new])?;
     Ok(())
 }
 
@@ -294,7 +302,7 @@ fn references(
     }
     for table in losses {
         // Values of concurrent cell losses embed reference identities as well.
-        db.for_each::<_, crate::DbError>("SELECT id,value FROM _coven_lost WHERE table_name=?1 AND retired=0 AND replacement_kind='write'",[&table],|r| {
+        db.for_each::<_, crate::DbError>("SELECT id,value FROM _coven_lost WHERE table_name=?1 AND frozen=0 AND replacement_kind='write'",[&table],|r| {
             let id: i64 = r.get(0)?;
             let mut value = decoded(merge_fields::decode_column_value(&r.get::<_,Vec<u8>>(1)?))?;
             let old = value.clone();
@@ -365,8 +373,8 @@ fn constraints(
             )?;
             renamed.push((id, table, key));
         } else {
-            // Claims belong to removed rows, which were retired above. Definitions
-            // that no longer exist must not be reused by a later incarnation.
+            // A dropped constraint's claims go with it. Definitions that no
+            // longer exist must not be reused by a later incarnation.
             db.internal_execute("DELETE FROM _coven_claims WHERE constraint_id=?1", [id])?;
             db.internal_execute("DELETE FROM _coven_constraints WHERE id=?1", [id])?;
         }
@@ -413,4 +421,4 @@ pub(crate) fn refresh(
 
 #[cfg(test)]
 #[path = "migration_state_tests.rs"]
-mod tests;
+pub(crate) mod tests;

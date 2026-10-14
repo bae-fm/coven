@@ -398,13 +398,13 @@ pub fn retained_losses() -> Vec<crate::loss::Loss> {
     };
     let mut cell = concurrent_loss();
     cell.row = row.clone();
-    cell.retired = true;
+    cell.frozen = true;
     let mut removed = Loss::removed(
         &merge_row().state,
         [coven_merge::Rule::Check("valid".into())].into(),
     );
     removed.row = row;
-    removed.retired = true;
+    removed.frozen = true;
     vec![cell, removed]
 }
 /// The row values of a write excluded by a schema change.
@@ -417,7 +417,7 @@ pub fn excluded_loss() -> crate::loss::Loss {
     Loss {
         row: change.row,
         generation: change.change.generation,
-        retired: true,
+        frozen: true,
         values: LossValues::Row(
             values
                 .into_iter()

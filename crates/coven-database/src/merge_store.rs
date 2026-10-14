@@ -213,7 +213,7 @@ impl<'a> MergeStore<'a> {
         let mut cells = BTreeMap::new();
         let mut loss = None;
         if let Some((ordinal, generation)) = current.filter(|(_, g)| g % 2 == 1) {
-            let retained = self.database.query("SELECT id,value FROM _coven_lost WHERE table_name=?1 AND key=?2 AND audience=?3 AND generation=?4 AND column_id IS NULL AND replacement_kind='rules' AND retired=0", params![id.table,id.key,audience,generation.to_be_bytes().as_slice()], |r| Ok((r.get::<_,i64>(0)?, decoded(merge_fields::decode_columns(&r.get::<_,Vec<u8>>(1)?))?)))?;
+            let retained = self.database.query("SELECT id,value FROM _coven_lost WHERE table_name=?1 AND key=?2 AND audience=?3 AND generation=?4 AND column_id IS NULL AND replacement_kind='rules' AND frozen=0", params![id.table,id.key,audience,generation.to_be_bytes().as_slice()], |r| Ok((r.get::<_,i64>(0)?, decoded(merge_fields::decode_columns(&r.get::<_,Vec<u8>>(1)?))?)))?;
             assert!(
                 retained.len() <= 1,
                 "present row has more than one removal record: {id:?}"
@@ -272,7 +272,7 @@ impl<'a> MergeStore<'a> {
         let mut lost = BTreeMap::new();
         let mut lost_ids = BTreeMap::new();
         if with_losses {
-            let records = self.database.query("SELECT l.id,l.generation,c.column_name,l.value,l.set_by,l.replaced_by FROM _coven_lost l JOIN _coven_columns c ON c.id=l.column_id WHERE l.table_name=?1 AND l.key=?2 AND l.audience=?3 AND l.column_id IS NOT NULL AND l.replacement_kind='write' AND l.retired=0", params![id.table,id.key,audience], |r| Ok((r.get::<_,i64>(0)?, counter(r.get(1)?),r.get::<_,String>(2)?,decoded(merge_fields::decode_column_value(&r.get::<_,Vec<u8>>(3)?))?,decoded(merge_fields::decode_write_id(&r.get::<_,Vec<u8>>(4)?))?,decoded(merge_fields::decode_write_id(&r.get::<_,Vec<u8>>(5)?))?)))?;
+            let records = self.database.query("SELECT l.id,l.generation,c.column_name,l.value,l.set_by,l.replaced_by FROM _coven_lost l JOIN _coven_columns c ON c.id=l.column_id WHERE l.table_name=?1 AND l.key=?2 AND l.audience=?3 AND l.column_id IS NOT NULL AND l.replacement_kind='write' AND l.frozen=0", params![id.table,id.key,audience], |r| Ok((r.get::<_,i64>(0)?, counter(r.get(1)?),r.get::<_,String>(2)?,decoded(merge_fields::decode_column_value(&r.get::<_,Vec<u8>>(3)?))?,decoded(merge_fields::decode_write_id(&r.get::<_,Vec<u8>>(4)?))?,decoded(merge_fields::decode_write_id(&r.get::<_,Vec<u8>>(5)?))?)))?;
             for (ordinal, generation, column, value, set_by, replaced_by) in records {
                 self.metadata.load(set_by)?;
                 self.metadata.load(replaced_by)?;

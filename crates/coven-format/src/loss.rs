@@ -8,7 +8,7 @@ use coven_merge::{Cell, LostKey, LostValue, RowId, Rule, WriteId};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// A loss independent of local SQLite identities. Active losses follow merge;
-/// retired losses keep their values and cause after their merge history is gone.
+/// frozen losses keep their values and cause after their merge history is gone.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Loss {
     /// Original table, key and audience.
@@ -16,7 +16,7 @@ pub struct Loss {
     /// Cell incarnation, removed-row generation, or excluded change's generation.
     pub generation: u64,
     /// Whether this loss is frozen outside merge.
-    pub retired: bool,
+    pub frozen: bool,
     /// Values as written, with each value's setter.
     pub values: LossValues,
     /// What displaced these values.
@@ -26,14 +26,14 @@ impl Wire for Loss {
     fn put(&self, out: &mut Encoder) -> Result<(), Error> {
         self.row.put(out)?;
         self.generation.put(out)?;
-        u8::from(self.retired).put(out)?;
+        u8::from(self.frozen).put(out)?;
         self.values.put(out)?;
         self.cause.put(out)
     }
     fn get(input: &mut Decoder<'_>) -> Result<Self, Error> {
         let row = Wire::get(input)?;
         let generation = Wire::get(input)?;
-        let retired = match u8::get(input)? {
+        let frozen = match u8::get(input)? {
             0 => false,
             1 => true,
             tag => {
@@ -46,7 +46,7 @@ impl Wire for Loss {
         Ok(Self {
             row,
             generation,
-            retired,
+            frozen,
             values: Wire::get(input)?,
             cause: Wire::get(input)?,
         })
@@ -174,7 +174,7 @@ impl Loss {
         Self {
             row,
             generation: value.incarnation,
-            retired: false,
+            frozen: false,
             values: LossValues::Cell {
                 column: key.column,
                 cell: Cell {
@@ -191,7 +191,7 @@ impl Loss {
         Self {
             row: state.row().clone(),
             generation: state.generation(),
-            retired: false,
+            frozen: false,
             values: LossValues::Row(state.cells().clone()),
             cause: LossCause::Rules(rules),
         }
@@ -217,7 +217,7 @@ impl Loss {
             self.row.clone(),
             self.generation,
             identity,
-            self.retired,
+            self.frozen,
             cause,
             match self.cause {
                 LossCause::Excluded { write, .. } | LossCause::Dependency { write, .. } => {
@@ -257,7 +257,7 @@ impl Loss {
                 for cell in cells.values() {
                     positive(cell.write.number)?;
                 }
-                require(self.retired, "excluded loss", FormatRule::Required)?;
+                require(self.frozen, "excluded loss", FormatRule::Required)?;
                 require(
                     *version > 0,
                     "breaking schema version",
@@ -271,7 +271,7 @@ impl Loss {
                     "dependent setters",
                     FormatRule::Required,
                 )?;
-                require(self.retired, "dependent loss", FormatRule::Required)?;
+                require(self.frozen, "dependent loss", FormatRule::Required)?;
                 require(
                     !sources.is_empty(),
                     "dependency sources",
@@ -307,7 +307,7 @@ impl Loss {
             name(n)?;
             positive(cell.write.number)?;
             crate::merge_wire::column(&cell.value)?;
-            if self.retired
+            if self.frozen
                 && !matches!(
                     self.cause,
                     LossCause::Excluded { .. } | LossCause::Dependency { .. }

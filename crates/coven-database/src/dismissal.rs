@@ -143,7 +143,7 @@ pub(crate) fn apply(
                     *column == dismissal.column && cell.write == dismissal.write
                 }
                 LossValues::Row(cells) => {
-                    loss.retired
+                    loss.frozen
                         && cells
                             .get(&dismissal.column)
                             .is_some_and(|cell| cell.write == dismissal.write)
@@ -152,7 +152,7 @@ pub(crate) fn apply(
             if !matches {
                 continue;
             }
-            if loss.retired {
+            if loss.frozen {
                 crate::fingerprint::forget_loss(database, &loss)?;
             }
             let keep = if let LossValues::Row(cells) = &mut loss.values {
@@ -166,7 +166,7 @@ pub(crate) fn apply(
             } else {
                 database.internal_execute("DELETE FROM _coven_lost WHERE id=?1", [id])?;
             }
-            if !loss.retired {
+            if !loss.frozen {
                 affected.insert(row.clone());
             }
         }

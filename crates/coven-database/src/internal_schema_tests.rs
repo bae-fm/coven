@@ -304,7 +304,7 @@ mod fixture {
      INSERT INTO _coven_constraints SELECT i,tab,n FROM fixture;
      INSERT INTO _coven_claims SELECT i,i,audience,key FROM fixture;
      INSERT INTO _coven_lost
-       (table_name,key,audience,generation,column_id,value,set_by,retired,replacement_kind,replaced_by)
+       (table_name,key,audience,generation,column_id,value,set_by,frozen,replacement_kind,replaced_by)
        SELECT tab,key,audience,counter(1),CASE WHEN i%3=0 THEN i END,
               zeroblob(64),n,i%2,CASE WHEN i%3=0 THEN 'write' ELSE 'rules' END,n FROM fixture;
      INSERT INTO _coven_uploads SELECT device,n,zeroblob(256),NULL FROM fixture;
@@ -465,7 +465,7 @@ mod scans {
         Some("reload discovers the union of all locally represented audiences"),
     ("snapshot_load.rs", "SELECT device,number FROM _coven_store_log ORDER BY device,number", "_coven_store_log") =>
         Some("reload compares the entire committed entry set with its captured set"),
-    ("snapshot_state.rs", "SELECT EXISTS(SELECT 1 FROM temp._coven_snapshot_values v WHERE matched=0 OR (matched=2) != EXISTS(SELECT 1 FROM _coven_lost l WHERE l.table_name=v.table_name AND l.key=v.key AND l.audience=v.audience AND l.retired=0 AND l.replacement_kind='rules'))", "v") =>
+    ("snapshot_state.rs", "SELECT EXISTS(SELECT 1 FROM temp._coven_snapshot_values v WHERE matched=0 OR (matched=2) != EXISTS(SELECT 1 FROM _coven_lost l WHERE l.table_name=v.table_name AND l.key=v.key AND l.audience=v.audience AND l.frozen=0 AND l.replacement_kind='rules'))", "v") =>
         Some("snapshot validation checks every staged row; its loss lookup must be indexed"),
     ("snapshot_write.rs", "SELECT {WRITE_DEVICE_SQL},number FROM _coven_writes", "_coven_writes") =>
         Some("snapshot counts include all applied write metadata"),
@@ -510,7 +510,7 @@ mod scans {
         Some("once per migration: discover every table with retained column metadata"),
     ("migration_receive.rs", "SELECT version,before_schema,after_schema,tables,columns FROM _coven_conversion_schemas ORDER BY version", "_coven_conversion_schemas") =>
         Some("opening retains every breaking migration's conversion schema"),
-    ("migration_hidden.rs", "SELECT DISTINCT table_name,key,audience FROM _coven_lost WHERE retired=0 AND replacement_kind='rules'", "_coven_lost") =>
+    ("migration_hidden.rs", "SELECT id,table_name,key,audience FROM _coven_lost WHERE frozen=0 AND replacement_kind='rules'", "_coven_lost") =>
         Some("once per migration: read every hidden row before its identity moves"),
     ("migration_state.rs", "SELECT id,table_name,column_name FROM _coven_columns", "_coven_columns") =>
         Some("once per migration: carry all column definitions through renames and drops"),
@@ -523,12 +523,12 @@ mod scans {
         | "DELETE FROM _coven_columns WHERE id=?1"
         | "DELETE FROM _coven_columns WHERE id=?1 AND NOT EXISTS(SELECT 1 FROM _coven_lost WHERE column_id=?1)", "_coven_cells") =>
         Some("once per migration: move/drop a column and check its cell references"),
-    ("migration_state.rs", "DELETE FROM _coven_lost WHERE table_name=?1 AND retired=0", "_coven_lost") =>
+    ("migration_state.rs", "DELETE FROM _coven_lost WHERE table_name=?1 AND frozen=0", "_coven_lost") =>
         Some("once per migration: remove active losses of a dropped app table"),
-    ("migration_state.rs", "DELETE FROM _coven_lost WHERE column_id=?1 AND retired=0 AND replacement_kind='write'"
-        | "SELECT EXISTS(SELECT 1 FROM _coven_lost WHERE column_id=?1 AND retired=1)"
-        | "UPDATE _coven_lost SET column_id=?2 WHERE column_id=?1 AND retired=0 AND replacement_kind='write'", "_coven_lost") =>
-        Some("once per migration: separate active and retired losses when moving columns"),
+    ("migration_state.rs", "DELETE FROM _coven_lost WHERE column_id=?1 AND frozen=0 AND replacement_kind='write'"
+        | "SELECT EXISTS(SELECT 1 FROM _coven_lost WHERE column_id=?1 AND frozen=1)"
+        | "UPDATE _coven_lost SET column_id=?2 WHERE column_id=?1 AND frozen=0 AND replacement_kind='write'", "_coven_lost") =>
+        Some("once per migration: separate active and frozen losses when moving columns"),
     _ => None,
 }
     }

@@ -467,7 +467,7 @@ pub(crate) fn result_json(db: &Database, rows: &[RowId]) -> Value {
         let merged: Vec<_> = rows.iter().enumerate().map(|(i, r)| state_json(i, &store.row(r).unwrap().state)).collect();
         let losses = db.query(crate::loss_record::SELECT, [], crate::loss_record::read).unwrap();
         let mut frozen = Vec::new();
-        for loss in losses.into_iter().filter(|loss| loss.retired) {
+        for loss in losses.into_iter().filter(|loss| loss.frozen) {
             let LossValues::Row(cells) = loss.values else { panic!("boundary loss must hold a row") };
             let cause = match loss.cause {
                 LossCause::Excluded { write, version } => json!({"schema": version, "write": write_id(write)}),

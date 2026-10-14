@@ -711,7 +711,7 @@ fn observed(db: &Database, history: &QueueHistory, received: &[WriteId]) -> Valu
             .query(crate::loss_record::SELECT, [], crate::loss_record::read)
             .unwrap()
             .into_iter()
-            .filter(|loss| loss.retired)
+            .filter(|loss| loss.frozen)
         {
             let row = rows.iter().position(|r| *r == loss.row).unwrap();
             frozen.push(match loss.cause {

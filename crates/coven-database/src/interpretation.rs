@@ -218,7 +218,7 @@ fn freeze(
     let loss = coven_format::loss::Loss {
         row: change.row.clone(),
         generation: change.change.generation,
-        retired: true,
+        frozen: true,
         values: coven_format::loss::LossValues::Row(
             values
                 .into_iter()

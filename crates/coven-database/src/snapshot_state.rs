@@ -220,7 +220,7 @@ pub(crate) fn loss(
     cached: &mut Option<RowState<coven_format::value::Value>>,
 ) -> Result<(), DbError> {
     use coven_format::loss::{LossCause, LossValues};
-    if !loss.retired {
+    if !loss.frozen {
         // Loss records are ordered by row; keep only this row's immutable state.
         if cached.as_ref().is_none_or(|state| state.row() != &loss.row) {
             let audiences = BTreeSet::from([loss.row.audience.clone()]);
@@ -278,7 +278,7 @@ pub(crate) fn ordinal(database: &DatabaseConnection, id: WriteId) -> Result<i64,
 pub(crate) fn finish(database: &DatabaseConnection) -> Result<(), DbError> {
     let unmatched: bool = database.query_row(
         "SELECT EXISTS(SELECT 1 FROM temp._coven_snapshot_values v WHERE matched=0
-         OR (matched=2) != EXISTS(SELECT 1 FROM _coven_lost l WHERE l.table_name=v.table_name AND l.key=v.key AND l.audience=v.audience AND l.retired=0 AND l.replacement_kind='rules'))",
+         OR (matched=2) != EXISTS(SELECT 1 FROM _coven_lost l WHERE l.table_name=v.table_name AND l.key=v.key AND l.audience=v.audience AND l.frozen=0 AND l.replacement_kind='rules'))",
         [],
         |r| r.get(0),
     )?;

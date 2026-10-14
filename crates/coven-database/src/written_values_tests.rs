@@ -253,7 +253,7 @@ async fn migrations_freeze_deleted_rows_and_preserve_surviving_written_reference
     ));
     a.inspect_writer_schema(|db, schema| {
         db.for_each::<_, crate::DbError>(
-            "SELECT replacement_kind,value FROM _coven_lost WHERE retired=1",
+            "SELECT replacement_kind,value FROM _coven_lost WHERE frozen=1",
             [],
             |r| {
                 let bytes = r.get::<_, Vec<u8>>(1)?;
@@ -262,7 +262,7 @@ async fn migrations_freeze_deleted_rows_and_preserve_surviving_written_reference
                         .unwrap()
                         .values()
                     {
-                        assert!(value.parents.is_empty(), "retired row values are plain");
+                        assert!(value.parents.is_empty(), "frozen row values are plain");
                     }
                 } else {
                     assert!(
@@ -270,7 +270,7 @@ async fn migrations_freeze_deleted_rows_and_preserve_surviving_written_reference
                             .unwrap()
                             .parents
                             .is_empty(),
-                        "retired cell values are plain"
+                        "frozen cell values are plain"
                     );
                 }
                 Ok(())

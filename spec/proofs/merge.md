@@ -819,7 +819,10 @@ corresponding Lean results. Database tests check the migration write's
 deletes, frozen whole-row losses with original setters and old names, a
 returning parent and child after the deletion drops, and late edits losing
 to the retained delete on the migrating device and on a device that loads
-its snapshot.
+its snapshot. For `freezeDropped`, they check that dropping a table or a
+column freezes each affected pending cell or removed-row loss with its old
+names, setters and cause, through name reuse, renames, snapshot reload with
+equal fingerprints, and dismissal; there is no model comparison of it.
 
 `scripts/check.sh` runs the strict comparison and the agreement case:
 

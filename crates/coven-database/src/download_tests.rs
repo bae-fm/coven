@@ -420,7 +420,7 @@ async fn lost_references_keep_the_written_parent_in_every_arrival_order() {
             losses[0].replaced_by,
             crate::Replacement::Write(changes[2].header.position)
         );
-        let stored = db.inspect_writer(|db| db.query("SELECT table_name,key,audience,generation,value,set_by,replacement_kind,replaced_by,retired FROM _coven_lost ORDER BY id", [], |r| Ok((r.get::<_,String>(0)?,r.get::<_,Vec<u8>>(1)?,r.get::<_,String>(2)?,r.get::<_,Vec<u8>>(3)?,r.get::<_,Vec<u8>>(4)?,r.get::<_,Vec<u8>>(5)?,r.get::<_,String>(6)?,r.get::<_,Vec<u8>>(7)?,r.get::<_,bool>(8)?))).unwrap());
+        let stored = db.inspect_writer(|db| db.query("SELECT table_name,key,audience,generation,value,set_by,replacement_kind,replaced_by,frozen FROM _coven_lost ORDER BY id", [], |r| Ok((r.get::<_,String>(0)?,r.get::<_,Vec<u8>>(1)?,r.get::<_,String>(2)?,r.get::<_,Vec<u8>>(3)?,r.get::<_,Vec<u8>>(4)?,r.get::<_,Vec<u8>>(5)?,r.get::<_,String>(6)?,r.get::<_,Vec<u8>>(7)?,r.get::<_,bool>(8)?))).unwrap());
         if let Some(expected) = &expected_losses {
             assert_eq!(&stored, expected, "{order:?}");
         } else {

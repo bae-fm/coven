@@ -36,7 +36,7 @@ fn insert(
     replacement: Vec<u8>,
 ) {
     db.commit_writer(|sql| {
-        sql.internal_execute("INSERT INTO _coven_lost(table_name,key,audience,generation,column_id,value,set_by,replacement_kind,replaced_by,retired) VALUES ('notes',?1,'store',?2,?3,?4,?5,?6,?7,?8)",
+        sql.internal_execute("INSERT INTO _coven_lost(table_name,key,audience,generation,column_id,value,set_by,replacement_kind,replaced_by,frozen) VALUES ('notes',?1,'store',?2,?3,?4,?5,?6,?7,?8)",
             (key(), 0u64.to_be_bytes().to_vec(), column, value, setters, kind, replacement, matches!(kind, "excluded" | "dependency"))).unwrap();
     });
 }
@@ -344,13 +344,314 @@ async fn a_lost_row_does_not_require_an_accepted_generation() {
     let setters = BTreeMap::from([("title".into(), write)]);
     for cause in [1, u32::MAX] {
         db.inspect_writer(|sql| {
-            sql.internal_execute("INSERT INTO _coven_lost(table_name,key,audience,generation,value,set_by,replacement_kind,replaced_by,retired) VALUES (?1,?2,?3,?4,?5,?6,'excluded',?7,1)",
+            sql.internal_execute("INSERT INTO _coven_lost(table_name,key,audience,generation,value,set_by,replacement_kind,replaced_by,frozen) VALUES (?1,?2,?3,?4,?5,?6,'excluded',?7,1)",
                 ("notes", &key, "store", 0u64.to_be_bytes().to_vec(), encode_columns(&values).unwrap(), encode_setters(&setters).unwrap(), encode_exclusion(write, cause).unwrap())).unwrap();
             let stored = sql.query_row("SELECT replaced_by FROM _coven_lost WHERE id=last_insert_rowid()", [], |r| r.get::<_, Vec<u8>>(0)).unwrap();
             assert_eq!(decode_exclusion(&stored).unwrap().1, cause);
-            assert!(sql.internal_execute("UPDATE _coven_lost SET retired=0 WHERE id=last_insert_rowid()", []).is_err());
+            assert!(sql.internal_execute("UPDATE _coven_lost SET frozen=0 WHERE id=last_insert_rowid()", []).is_err());
             assert_eq!(sql.query_row("SELECT count(*) FROM _coven_rows", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
         });
     }
     db.close().await.unwrap();
+}
+
+/// Losses under schema a migration drops (§17.1, D7): Lean
+/// `Migration.freezeDropped` keeps every affected record, frozen under its
+/// old names with its original cause and setters.
+mod dropped_schema {
+    use crate::snapshot_write::tests::assert_loaded_losses;
+    use crate::write::tests::{count, records, sql};
+    use crate::{tests::TestStore, Database, Lost, Migration, Replacement, RowIdentity};
+    use crate::{LostValue, SyncedTable};
+    use coven_foundation::id_source::SequentialIds;
+
+    const TAGS: &str = "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,title TEXT NOT NULL,body TEXT NOT NULL DEFAULT ''); CREATE TABLE tags(id TEXT NOT NULL PRIMARY KEY,label TEXT NOT NULL)";
+
+    fn tables(names: &[&str]) -> Vec<SyncedTable> {
+        names
+            .iter()
+            .map(|name| SyncedTable::new(*name, RowIdentity::SharedKey))
+            .collect()
+    }
+
+    /// `b` edits `column` of `row` concurrently with `a`; `a` keeps one loss.
+    async fn concurrent_loss(
+        a: &Database,
+        b: &Database,
+        inserted: &'static str,
+        a_edit: &'static str,
+        b_edit: &'static str,
+    ) {
+        sql(a, inserted).await.unwrap();
+        b.receive(records(a).last().unwrap().clone().into())
+            .await
+            .unwrap();
+        sql(b, b_edit).await.unwrap();
+        sql(a, a_edit).await.unwrap();
+        a.receive(records(b).last().unwrap().clone().into())
+            .await
+            .unwrap();
+        assert_eq!(a.lost_values().await.unwrap().len(), 1);
+    }
+
+    async fn assert_frozen(db: &Database, before: &[LostValue]) {
+        let losses = db.lost_values().await.unwrap();
+        assert_eq!(losses.len(), 1);
+        assert_eq!(
+            (
+                &losses[0].table,
+                &losses[0].key,
+                &losses[0].lost,
+                &losses[0].replaced_by
+            ),
+            (
+                &before[0].table,
+                &before[0].key,
+                &before[0].lost,
+                &before[0].replaced_by
+            )
+        );
+        assert_eq!(cell_column(&losses[0]), "body");
+    }
+
+    fn cell_column(loss: &LostValue) -> &str {
+        match &loss.lost {
+            Lost::Cell(cell) => &cell.column,
+            Lost::Row(_) => panic!("{loss:?}"),
+        }
+    }
+
+    fn evidence(db: &Database, table: &str) -> Vec<(Vec<u8>, Option<Vec<u8>>)> {
+        db.inspect_writer(|sql| {
+            sql.query(
+                "SELECT write_id,admission FROM _coven_authored_changes WHERE table_name=?1 ORDER BY write_id,key",
+                [table],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap()
+        })
+    }
+
+    /// A dropped table's cell loss stays displayed, frozen under the table's
+    /// name; its original changes and verdicts stay as source evidence. A
+    /// snapshot carries the loss to a device that never had the table, with
+    /// equal fingerprints, and dismissal removes it on both.
+    #[tokio::test]
+    async fn a_dropped_tables_losses_stay_frozen_under_its_name() {
+        let ids = SequentialIds::new();
+        let stores: Vec<_> = (0..3).map(|_| TestStore::with_ids(&ids)).collect();
+        let a = stores[0]
+            .schema(tables(&["notes", "tags"]), TAGS)
+            .await
+            .unwrap();
+        let b = stores[1]
+            .schema(tables(&["notes", "tags"]), TAGS)
+            .await
+            .unwrap();
+        concurrent_loss(
+            &a,
+            &b,
+            "INSERT INTO tags VALUES('t','first')",
+            "UPDATE tags SET label='from a'",
+            "UPDATE tags SET label='from b'",
+        )
+        .await;
+        let before = a.lost_values().await.unwrap();
+        let sources = evidence(&a, "tags");
+        assert!(!sources.is_empty());
+        a.close().await.unwrap();
+        let migrations = || {
+            vec![
+                Migration::sql(1, "tags", TAGS),
+                Migration::sql(2, "drop tags", "DROP TABLE tags"),
+            ]
+        };
+        let a = stores[0]
+            .builder(tables(&["notes"]), migrations())
+            .open()
+            .await
+            .unwrap();
+        let after = a.lost_values().await.unwrap();
+        assert_eq!(after.len(), 1);
+        assert_eq!(
+            (
+                &after[0].table,
+                &after[0].key,
+                &after[0].lost,
+                &after[0].replaced_by
+            ),
+            (
+                &before[0].table,
+                &before[0].key,
+                &before[0].lost,
+                &before[0].replaced_by
+            )
+        );
+        assert_eq!(after[0].table, "tags");
+        assert_eq!(cell_column(&after[0]), "label");
+        assert!(matches!(after[0].target, crate::lost::LossTarget::Cells(_)));
+        assert_eq!(evidence(&a, "tags"), sources, "verdicts outlive the table");
+        let fresh = stores[2]
+            .builder(tables(&["notes"]), migrations())
+            .open()
+            .await
+            .unwrap();
+        for write in records(&fresh) {
+            a.receive(write.into()).await.unwrap();
+        }
+        assert_loaded_losses(&a, &fresh).await;
+        a.dismiss_lost_values(&after).await.unwrap();
+        assert!(a.lost_values().await.unwrap().is_empty());
+        assert_loaded_losses(&a, &fresh).await;
+        for db in [a, b, fresh] {
+            db.close().await.unwrap();
+        }
+    }
+
+    /// A dropped column's cell loss stays frozen with the old name. A later
+    /// migration adding a column of that name, then renaming it, moves only
+    /// live cells: the frozen loss still names the dropped column, also after
+    /// a snapshot reload with equal fingerprints.
+    #[tokio::test]
+    async fn a_dropped_columns_loss_keeps_its_name_through_reuse_and_rename() {
+        let ids = SequentialIds::new();
+        let stores: Vec<_> = (0..3).map(|_| TestStore::with_ids(&ids)).collect();
+        let a = stores[0].schema(tables(&["notes"]), TAGS).await.unwrap();
+        let b = stores[1].schema(tables(&["notes"]), TAGS).await.unwrap();
+        concurrent_loss(
+            &a,
+            &b,
+            "INSERT INTO notes VALUES('n','title','first')",
+            "UPDATE notes SET body='from a'",
+            "UPDATE notes SET body='from b'",
+        )
+        .await;
+        let before = a.lost_values().await.unwrap();
+        a.close().await.unwrap();
+        let migrations = |through: u32| {
+            [
+                Migration::sql(1, "tags", TAGS),
+                Migration::sql(2, "drop body", "ALTER TABLE notes DROP COLUMN body"),
+                Migration::sql(
+                    3,
+                    "body again",
+                    "ALTER TABLE notes ADD COLUMN body TEXT NOT NULL DEFAULT ''",
+                ),
+                Migration::sql(
+                    4,
+                    "rename body",
+                    "ALTER TABLE notes RENAME COLUMN body TO content",
+                ),
+            ]
+            .into_iter()
+            .take(through as usize)
+            .collect::<Vec<_>>()
+        };
+        let a = stores[0]
+            .builder(tables(&["notes"]), migrations(2))
+            .open()
+            .await
+            .unwrap();
+        assert_frozen(&a, &before).await;
+        a.close().await.unwrap();
+        let a = stores[0]
+            .builder(tables(&["notes"]), migrations(3))
+            .open()
+            .await
+            .unwrap();
+        sql(&a, "UPDATE notes SET body='new body'").await.unwrap();
+        assert_frozen(&a, &before).await;
+        a.close().await.unwrap();
+        let a = stores[0]
+            .builder(tables(&["notes"]), migrations(4))
+            .open()
+            .await
+            .unwrap();
+        assert_frozen(&a, &before).await;
+        let content: String = a
+            .read(|sql| Ok(sql.query_row("SELECT content FROM notes", [], |r| r.get(0))?))
+            .await
+            .unwrap();
+        assert_eq!(content, "new body");
+        let fresh = stores[2]
+            .builder(tables(&["notes"]), migrations(4))
+            .open()
+            .await
+            .unwrap();
+        for write in records(&fresh) {
+            a.receive(write.into()).await.unwrap();
+        }
+        assert_loaded_losses(&a, &fresh).await;
+        assert_frozen(&fresh, &before).await;
+        assert_eq!(count(&fresh, "notes"), 1);
+        for db in [a, b, fresh] {
+            db.close().await.unwrap();
+        }
+    }
+
+    /// A row left hidden by a non-final circle deletion keeps its active
+    /// removal record under the new schema; the record naming the dropped
+    /// column is kept whole as a frozen copy with its original rules. When the
+    /// deletion drops, the row returns and the frozen copy remains (§17.1).
+    #[tokio::test]
+    async fn a_hidden_rows_dropped_column_is_kept_in_a_frozen_whole_row_loss() {
+        use crate::migration_state::tests::{circle_row, circle_schema, circle_tables};
+        let store = TestStore::new();
+        let db = store
+            .schema(circle_tables(), circle_schema(true))
+            .await
+            .unwrap();
+        let row = circle_row();
+        db.receive(row.into()).await.unwrap();
+        let circle = coven_foundation::id_source::CircleId(uuid::Uuid::from_u128(1));
+        crate::store_log::tests::delete_circle(&db, circle)
+            .await
+            .unwrap();
+        let hidden = db.lost_values().await.unwrap();
+        assert_eq!(hidden.len(), 1);
+        db.close().await.unwrap();
+        let db = store
+            .builder(
+                circle_tables(),
+                vec![
+                    Migration::sql(1, "rows", circle_schema(true)),
+                    Migration::sql(2, "drop c", "ALTER TABLE rows DROP COLUMN c"),
+                ],
+            )
+            .open()
+            .await
+            .unwrap();
+        let losses = db.lost_values().await.unwrap();
+        assert_eq!(losses.len(), 2, "{losses:#?}");
+        let columns = |loss: &LostValue| match &loss.lost {
+            Lost::Row(cells) => cells.iter().map(|c| c.column.clone()).collect::<Vec<_>>(),
+            Lost::Cell(_) => panic!("{loss:?}"),
+        };
+        let frozen = losses
+            .iter()
+            .find(|l| matches!(l.target, crate::lost::LossTarget::Cells(_)))
+            .unwrap();
+        assert_eq!(
+            (&frozen.lost, &frozen.replaced_by),
+            (&hidden[0].lost, &hidden[0].replaced_by)
+        );
+        assert!(columns(frozen).contains(&"c".to_string()));
+        let active = losses
+            .iter()
+            .find(|l| matches!(l.target, crate::lost::LossTarget::Removed { .. }))
+            .unwrap();
+        assert!(!columns(active).contains(&"c".to_string()));
+        assert!(matches!(active.replaced_by, Replacement::Rules(_)));
+        let deletion = crate::store_log::tests::circle_history(circle)
+            .last()
+            .unwrap()
+            .0
+            .position;
+        crate::migration_state::tests::drop_entry(&db, deletion, circle).await;
+        assert_eq!(count(&db, "rows"), 1);
+        let losses = db.lost_values().await.unwrap();
+        assert_eq!(losses.len(), 1);
+        assert_eq!(losses[0].lost, frozen.lost);
+        db.close().await.unwrap();
+    }
 }
