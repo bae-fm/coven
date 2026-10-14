@@ -61,17 +61,22 @@ impl From<rusqlite::Error> for CovenError {
 /// A failed database call or a write the database refuses (§5, §8, §14, §16).
 #[derive(Debug, thiserror::Error)]
 pub enum DbError {
-    /// A pending value could not be encoded or decoded.
+    /// A pending record or its subject could not be encoded, or a stored one
+    /// could not be decoded as the requested record type (E5).
     #[error("invalid pending data: {0}")]
     PendingEncoding(#[source] serde_json::Error),
-    /// Saving pending state failed; this handle refuses calls until reopened.
+    /// Saving pending state failed. The call that lost the update and every
+    /// later call and live query fail with this same cause until reopened (E5).
     #[error("pending persistence failed: {0}")]
     PendingPersistence(#[source] std::sync::Arc<DbError>),
     /// An earlier call's rollback failed, so the writer may still hold its
     /// uncommitted changes; this handle refuses calls until reopened (§5).
     #[error("an earlier rollback failed; reopen the store")]
     RollbackFailed,
-    /// A streaming producer or its final authentication check failed.
+    /// Sync's part of a database transaction failed, keeping sync's own typed
+    /// cause, and the transaction did not commit: a streamed transfer's
+    /// producer or final authentication check, or the schema publication
+    /// operation a migration commits with (§17.1, E13).
     #[error("sync stream failed: {0}")]
     SyncStream(#[source] Box<dyn std::error::Error + Send + Sync>),
     /// This handle or a clone has closed the store (E1).

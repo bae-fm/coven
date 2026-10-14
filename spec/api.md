@@ -434,6 +434,18 @@ pub enum DbError {
     /// An earlier call's rollback failed, so the writer may still hold its
     /// uncommitted changes; this handle refuses calls until reopened (§5).
     RollbackFailed,
+    /// Saving pending state failed. The call that lost the update and every
+    /// later call and live query fail with this same cause until the store is
+    /// reopened (E5).
+    PendingPersistence(Arc<DbError>),
+    /// A pending record or its subject could not be encoded, or a stored one
+    /// could not be decoded as the requested record type (E5).
+    PendingEncoding(serde_json::Error),
+    /// Sync's part of a database transaction failed, keeping sync's own typed
+    /// cause, and the transaction did not commit: a streamed transfer's
+    /// producer or final authentication check, or the schema publication
+    /// operation a migration commits with (§17.1, E13).
+    SyncStream(Box<dyn std::error::Error + Send + Sync>),
     /// Closing failed for these connections, after every one was tried (E1).
     Closing { failures: Vec<DbError> },
 }
@@ -1552,7 +1564,8 @@ while let Ok(values) = lost.next().await {
     for good. Local failures also name their pending subject and preserve
     their typed cause for a waiting caller.
   - If the database cannot save a pending record, stop the loop and fail database
-    calls and live queries with that cause until the store is reopened.
+    calls and live queries with that cause, as `DbError::PendingPersistence`,
+    until the store is reopened.
     Never expose an apparently empty pending list after losing its update.
 - E.g. Ana syncs successfully, then loses Wi-Fi. The next attempt is
   `Offline`. A later provider error denying the store listing is `Failed`.
