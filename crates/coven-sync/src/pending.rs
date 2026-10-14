@@ -42,6 +42,12 @@ pub enum PendingSubject {
         #[serde(with = "encoding::sealing")]
         sealing: coven_crypto::SealingKey,
     },
+    /// A key-copy object whose clear prefix does not decode. It names no
+    /// audience, key or recipient, so its path identifies it (§19.1).
+    KeyCopyPath {
+        /// The copy's storage path.
+        path: ObjectPath,
+    },
     /// A numbered snapshot.
     Snapshot(#[serde(with = "crate::snapshot_data::snapshot_id")] SnapshotId),
     /// A device's replaceable positions.
@@ -376,15 +382,16 @@ impl PendingSubject {
             Self::Write(_) => 0,
             Self::Entry(_) => 1,
             Self::KeyCopy { .. } => 2,
-            Self::Snapshot(_) => 3,
-            Self::Positions(_) => 4,
-            Self::File { .. } => 5,
-            Self::Operation { .. } => 6,
-            Self::Retention { .. } => 7,
-            Self::Audience(_) => 8,
-            Self::Agreement { .. } => 9,
-            Self::JoinRequest(_) => 10,
-            Self::Connection => 11,
+            Self::KeyCopyPath { .. } => 3,
+            Self::Snapshot(_) => 4,
+            Self::Positions(_) => 5,
+            Self::File { .. } => 6,
+            Self::Operation { .. } => 7,
+            Self::Retention { .. } => 8,
+            Self::Audience(_) => 9,
+            Self::Agreement { .. } => 10,
+            Self::JoinRequest(_) => 11,
+            Self::Connection => 12,
         }
     }
 }
@@ -407,6 +414,7 @@ impl Ord for PendingSubject {
                     sealing: bsl,
                 },
             ) => (a, ak, am, asl).cmp(&(b, bk, bm, bsl)),
+            (Self::KeyCopyPath { path: a }, Self::KeyCopyPath { path: b }) => a.cmp(b),
             (Self::Snapshot(a), Self::Snapshot(b)) => {
                 (&a.audience, a.device, a.number).cmp(&(&b.audience, b.device, b.number))
             }

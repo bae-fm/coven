@@ -5755,7 +5755,11 @@ holds failures and rejected entries, without making either wait look completed.
 - Record every wait and failure, including:
   - a gap in either kind of log, a listed object that cannot yet be read,
     an unknown author's device registration, or missing causal history;
-  - a missing or damaged sealed key copy;
+  - a missing or damaged sealed key copy. A copy whose clear prefix does not
+    decode names no audience, key or recipient, so its record's subject is
+    its path and its reason the refusal. Each completed copy reading decides
+    these records as a whole: a copy that now reads, or that the reading no
+    longer finds, loses its record;
   - an app schema or object format that needs an update;
   - an unpublished schema raise, pending own uploads or a required reload;
   - a snapshot that cannot be used, a positions object that cannot be

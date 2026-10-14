@@ -17,7 +17,7 @@ async fn observed(device: &Device) -> Vec<keys::ObservedCopy> {
     )
     .await
     .unwrap();
-    assert!(reading.unreadable.is_none(), "{:?}", reading.unreadable);
+    assert!(reading.unreadable.is_empty(), "{:?}", reading.unreadable);
     reading.copies
 }
 
@@ -139,6 +139,7 @@ async fn an_undecodable_own_copy_waits_as_damage() {
         Err(SyncError::Damaged(damage)) if damage.path == path.as_str()
     ));
     assert!(!ana.sync.scan_store_log_once(false).await.unwrap());
+    assert_eq!(copy_damage(&ana.db).await, std::slice::from_ref(&path));
     assert_eq!(ana.send.stopped(), None);
     assert_eq!(ana.directory.device_reset().unwrap(), None);
     let attempted = ana
@@ -147,6 +148,74 @@ async fn an_undecodable_own_copy_waits_as_damage() {
         .await
         .unwrap();
     assert_eq!(attempted, Some(false));
+}
+
+/// The paths of this device's damaged-copy records, each a parse refusal.
+async fn copy_damage(db: &coven_database::Database) -> Vec<coven_storage::ObjectPath> {
+    db.pending::<crate::PendingRecord>()
+        .await
+        .unwrap()
+        .into_iter()
+        .filter_map(|record| match record.subject {
+            crate::PendingSubject::KeyCopyPath { path } => {
+                assert!(matches!(record.reason, crate::PendingReason::Refused(_)));
+                Some(path)
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// Each completed copy reading decides this device's damaged-copy records as
+/// a whole (§19.1): an undecodable copy gets one, naming its path, and a
+/// recorded path that now reads, or that the reading no longer finds, loses
+/// its record. The app sees why the first phase waits.
+#[tokio::test]
+async fn each_copy_reading_decides_the_damaged_copy_records() {
+    let storage = storage();
+    let mut ana = device(storage.clone(), 1, member(1), store(1)).await;
+    let mut ben = device(storage.clone(), 2, member(2), store(1)).await;
+    ana.create(key(1)).await;
+    ana.add(&ben.member, MemberRole::Member).await;
+    ben.sync().await;
+    ben.sync.load_new_device("Ben", None).await.unwrap();
+    let own = ana.db.local_store_log().await.unwrap().device;
+    let readable = find_copy(
+        storage.as_ref(),
+        Audience::Store,
+        key(1),
+        &ana.member.member(),
+    )
+    .await
+    .expect("stored copy")
+    .path;
+    let absent = coven_storage::ObjectPath::key_copy(
+        store(1),
+        coven_foundation::id_source::DeviceId(9),
+        1.try_into().unwrap(),
+    );
+    let stale = |path: &coven_storage::ObjectPath| crate::PendingRecord {
+        subject: crate::PendingSubject::KeyCopyPath { path: path.clone() },
+        reason: crate::PendingReason::Refused(crate::Refusal::Parse { cause: None }),
+        reported_by: own,
+    };
+    ana.db
+        .replace_local_pending(
+            |record: &crate::PendingRecord| {
+                matches!(record.subject, crate::PendingSubject::KeyCopyPath { .. })
+            },
+            vec![stale(&readable), stale(&absent)],
+        )
+        .await
+        .unwrap();
+    assert_eq!(copy_damage(&ana.db).await.len(), 2);
+    // Ben's log, not Ana's: her own number beyond the reservations would
+    // reset as storage ahead.
+    let writer = ben.db.local_store_log().await.unwrap().device;
+    let bad = coven_storage::ObjectPath::key_copy(store(1), writer, 1.try_into().unwrap());
+    storage.create(&bad, b"not a sealed key").await.unwrap();
+    assert!(!ana.sync.scan_store_log_once(false).await.unwrap());
+    assert_eq!(copy_damage(&ana.db).await, [bad]);
 }
 
 #[tokio::test]
@@ -175,6 +244,7 @@ async fn an_incomplete_copy_observation_blocks_first_attempts() {
         Err(SyncError::Damaged(damage)) if damage.path == bad.as_str()
     ));
     assert!(!ana.sync.scan_store_log_once(false).await.unwrap());
+    assert_eq!(copy_damage(&ana.db).await, std::slice::from_ref(&bad));
     assert!(matches!(
         ana.send.observation(),
         Err(SyncError::Storage(error)) if error.failure() == coven_storage::StorageFailure::CatchUpRequired

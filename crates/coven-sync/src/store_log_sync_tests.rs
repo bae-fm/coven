@@ -893,9 +893,7 @@ async fn only_newer_envelopes_require_an_update() {
                     )
                     .await
                     .unwrap();
-                    assert!(
-                        matches!(reading.unreadable, Some(damage) if damage.path == path.as_str())
-                    );
+                    assert!(matches!(&reading.unreadable[..], [(damaged, _)] if *damaged == path));
                     assert!(
                         pending.contains(&entry(&crate::PendingReason::KeyUnavailable {
                             audience: Audience::Store,

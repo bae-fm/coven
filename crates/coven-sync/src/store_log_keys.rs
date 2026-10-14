@@ -260,13 +260,42 @@ pub(crate) struct ObservedCopy {
 }
 
 /// One reading of every writer's key-copy log: the copies whose clear prefix
-/// decodes, and the first object whose prefix does not. Without a prefix that
-/// object names no audience, key or recipient, so it is no key copy subject;
-/// it leaves the reading incomplete, so the catch-up supplies no sending
-/// authority (§11), while this member's readable copies still open.
+/// decodes, and every object whose prefix does not. Without a prefix such an
+/// object names no audience, key or recipient, so its path is its pending
+/// subject; it leaves the reading incomplete, so the catch-up supplies no
+/// sending authority (§11), while this member's readable copies still open.
 pub(crate) struct CopyReading {
     pub(crate) copies: Vec<ObservedCopy>,
-    pub(crate) unreadable: Option<crate::DamagedObject>,
+    pub(crate) unreadable: Vec<(ObjectPath, crate::Refusal)>,
+}
+
+impl CopyReading {
+    /// This device's records for the reading's undecodable copies: each
+    /// completed reading replaces them as a whole (§19.1).
+    pub(crate) fn damage_records(
+        &self,
+        own: coven_foundation::id_source::DeviceId,
+    ) -> Vec<crate::PendingRecord> {
+        self.unreadable
+            .iter()
+            .map(|(path, failure)| crate::PendingRecord {
+                subject: crate::PendingSubject::KeyCopyPath { path: path.clone() },
+                reason: crate::PendingReason::Refused(failure.clone()),
+                reported_by: own,
+            })
+            .collect()
+    }
+
+    /// The first undecodable copy, which a catch-up that must be complete
+    /// reports.
+    pub(crate) fn first_damage(&self) -> Option<crate::DamagedObject> {
+        self.unreadable
+            .first()
+            .map(|(path, failure)| crate::DamagedObject {
+                path: path.as_str().to_owned(),
+                failure: failure.clone(),
+            })
+    }
 }
 
 pub(crate) async fn read_copies(
@@ -278,7 +307,7 @@ pub(crate) async fn read_copies(
 ) -> Result<CopyReading, SyncError> {
     let mut reading = CopyReading {
         copies: Vec::new(),
-        unreadable: None,
+        unreadable: Vec::new(),
     };
     let writers = crate::discovery::writers(database, reads, storage, store).await?;
     for read in crate::discovery::scan(
@@ -306,10 +335,7 @@ pub(crate) async fn read_copies(
                     return Err(SyncError::UpdateRequired(update));
                 }
                 tracing::warn!(path = object.path.as_str(), error = %failure, "key copy has no readable prefix");
-                reading.unreadable.get_or_insert(crate::DamagedObject {
-                    path: object.path.as_str().to_owned(),
-                    failure,
-                });
+                reading.unreadable.push((object.path, failure));
             }
         }
     }

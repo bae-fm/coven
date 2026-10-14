@@ -2210,6 +2210,9 @@ pub enum PendingSubject {
     Write(WriteId),
     Entry(EntryId),
     KeyCopy { audience: Audience, key: KeyId, member: MemberId, sealing: SealingKey },
+    /// A key-copy object whose clear prefix does not decode: it names no
+    /// audience, key or recipient, so its path identifies it (§19.1).
+    KeyCopyPath { path: ObjectPath },
     Snapshot(SnapshotId),
     /// Retention waits for this active reader's position, or storage age (§15).
     Positions(DeviceId),

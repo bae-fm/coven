@@ -364,6 +364,17 @@ impl StoreLogSync {
                 local.store,
             )
             .await?;
+            // Each completed reading decides this device's records of
+            // undecodable copies: a copy that now reads, or is no longer
+            // read, loses its record (§19.1).
+            self.database
+                .replace_local_pending(
+                    |record: &PendingRecord| {
+                        matches!(record.subject, PendingSubject::KeyCopyPath { .. })
+                    },
+                    reading.damage_records(local.device),
+                )
+                .await?;
             let state = &local.log.replay.state;
             let binding = match state.members.get(&member.member()) {
                 Some(held) if held.removed => crate::send_gate::Binding::Retired,
@@ -395,7 +406,7 @@ impl StoreLogSync {
             }
             // A copy without a readable prefix leaves the reading incomplete:
             // it supplies no sending authority (§11).
-            match reading.unreadable {
+            match reading.first_damage() {
                 None => {
                     self.send.complete(binding, reading.copies)?;
                     self.finality
