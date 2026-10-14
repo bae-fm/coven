@@ -8,13 +8,6 @@ use crate::{
 use coven_database::OperationRecord;
 use coven_merge::Audience;
 
-pub(crate) type EvidenceMark = (
-    Vec<(coven_foundation::id_source::DeviceId, u64)>,
-    Vec<(coven_foundation::id_source::DeviceId, u64)>,
-    usize,
-    Option<coven_format::value::EntryId>,
-);
-
 impl StoreLogSync {
     pub(crate) async fn operation_can_retry(
         &self,
@@ -80,8 +73,23 @@ impl StoreLogSync {
             self.waits.seen(subject);
             return Ok(false);
         }
+        self.observe_prerequisites()?;
         let persisted = self.database.retry_wait(subject).await?;
         Ok(self.waits.due(subject, persisted.as_ref()))
+    }
+
+    /// A commit that can satisfy a prerequisite, such as an own upload or an
+    /// applied entry, makes every operation then waiting due once.
+    fn observe_prerequisites(&self) -> Result<(), SyncError> {
+        if self
+            .prerequisites
+            .lock()
+            .expect("prerequisite observation poisoned")
+            .take_changed()?
+        {
+            self.waits.prerequisites_changed();
+        }
+        Ok(())
     }
 
     /// Committed work may satisfy waiting operations' prerequisites: each
@@ -101,23 +109,6 @@ impl StoreLogSync {
             .next_wake(|subject| matches!(subject, coven_database::RetrySubject::Operation(_)))
     }
 
-    /// What store-log scans received or applied: entry and key-copy
-    /// download positions, applied entries and the queued entry. A change
-    /// is new evidence for every waiting operation (SP waiting).
-    pub(crate) async fn evidence_mark(&self) -> Result<EvidenceMark, SyncError> {
-        let local = self.database.local_store_log().await?;
-        Ok((
-            self.database
-                .log_downloads(coven_database::LogKind::Entry)
-                .await?,
-            self.database
-                .log_downloads(coven_database::LogKind::KeyCopy)
-                .await?,
-            local.log.entries.len(),
-            local.upload.map(|upload| upload.entry.position),
-        ))
-    }
-
     /// After an unsuccessful attempt, persist the next retry wait before the
     /// operation waits; a condition that waits for anything but time keeps no
     /// wait. A completed catch-up is the next pass's, so it is no backoff.
@@ -130,6 +121,8 @@ impl StoreLogSync {
         if pending.retry() == Retry::Automatic
             && pending.reason != PendingReason::Waits(Prerequisite::CatchUp)
         {
+            // Commits before this wait began are not evidence against it.
+            self.observe_prerequisites()?;
             let previous = self.database.retry_wait(subject).await?;
             self.waits.fail(subject, previous.as_ref()).await
         } else {

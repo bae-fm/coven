@@ -273,12 +273,42 @@ impl Database {
     /// Observe committed changes to the outgoing write queue. Register before
     /// the first sync to include writes committed while a pass is running.
     pub fn sync_changes(&self) -> crate::DatabaseChanges {
+        self.table_changes(&["_coven_uploads"], true)
+    }
+
+    /// Observe commits that can satisfy a waiting operation's prerequisites:
+    /// own uploads and queued entries, received and applied store-log
+    /// entries and key copies, reloads, provider access and write positions.
+    /// Operation journal and pending rows, which every attempt rewrites, are
+    /// not among them (SP waiting). Only commits after this call count.
+    pub fn operation_prerequisite_changes(&self) -> crate::DatabaseChanges {
+        self.table_changes(
+            &[
+                "_coven_uploads",
+                "_coven_store_log",
+                "_coven_store_log_uploads",
+                "_coven_log_downloads",
+                "_coven_log_inputs",
+                "_coven_key_uploads",
+                "_coven_data_reloads",
+                "_coven_provider_access",
+                "_coven_positions",
+            ],
+            false,
+        )
+    }
+
+    /// `first` reports the initial state as a change.
+    fn table_changes(&self, tables: &[&str], first: bool) -> crate::DatabaseChanges {
         let slot = self.inner.read().expect("database lock poisoned");
-        let reads = vec![crate::observation::TableRead {
-            table: "_coven_uploads".into(),
-            columns: BTreeSet::new(),
-            keys: crate::key_scope::KeyScope::All,
-        }];
+        let reads: Vec<_> = tables
+            .iter()
+            .map(|table| crate::observation::TableRead {
+                table: (*table).into(),
+                columns: BTreeSet::new(),
+                keys: crate::key_scope::KeyScope::All,
+            })
+            .collect();
         let commits = match slot.as_ref() {
             Some(inner) => inner.access.observer.subscribe(),
             None => CommitSubscription::closed(),
@@ -288,7 +318,7 @@ impl Database {
         crate::DatabaseChanges {
             commits,
             reads,
-            first: true,
+            first,
         }
     }
 

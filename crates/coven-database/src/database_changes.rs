@@ -8,6 +8,22 @@ pub struct DatabaseChanges {
     pub(crate) first: bool,
 }
 impl DatabaseChanges {
+    /// Whether a relevant commit happened since the previous observation,
+    /// without waiting; the first call reports the initial state.
+    pub fn take_changed(&mut self) -> Result<bool, DbError> {
+        let state = self.commits.state();
+        if let Some(error) = state.error() {
+            return Err(error);
+        }
+        if self.first || state.changed {
+            self.first = false;
+            self.commits.begin();
+            self.commits.finish(self.reads.clone());
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
     /// The initial state, then each relevant commit. No timer or polling is used.
     pub async fn next(&mut self) -> Result<(), DbError> {
         loop {

@@ -226,6 +226,7 @@ async fn a_file_named_only_by_a_retained_log_write_stays_until_that_log_goes() {
         .await
         .unwrap();
     a.sync.database = a.db.clone();
+    a.sync.prerequisites = std::sync::Mutex::new(a.sync.database.operation_prerequisite_changes());
     a.create(key(1)).await;
     let files = crate::Files::new(
         FileDatabase::new(a.db.clone()),

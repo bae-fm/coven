@@ -38,7 +38,6 @@ impl OperationRun {
             self.writes.retry_attempted_writes().await?
         };
         if !uploaded.is_empty() {
-            self.sync.prerequisites_changed();
             self.drive_pass().await?;
         }
         let mut discovery = self.writes.download_writes().await?;

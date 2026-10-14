@@ -8,18 +8,7 @@ impl StoreLogSync {
     /// threshold may have passed, then discovers again from that sample.
     /// Nothing here publishes an entry or shares a key. Returns whether the
     /// observation completed.
-    /// A scan that received entries or key copies, or applied entries, is
-    /// new evidence for every waiting operation (SP waiting).
     pub(super) async fn scan_store_log(&self, require_complete: bool) -> Result<bool, SyncError> {
-        let before = self.evidence_mark().await?;
-        let result = self.scan_logs(require_complete).await;
-        if self.evidence_mark().await? != before {
-            self.waits.prerequisites_changed();
-        }
-        result
-    }
-
-    async fn scan_logs(&self, require_complete: bool) -> Result<bool, SyncError> {
         let complete = self.scan_store_log_once(require_complete).await?;
         if !complete || !self.send.can_send() {
             return Ok(complete);
