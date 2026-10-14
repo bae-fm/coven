@@ -1,7 +1,6 @@
 //! One loss record for displaced cells, removed rows and excluded writes.
 
 use crate::error::{require, Error, Rule as FormatRule};
-use crate::snapshot_rows::LostWriteCause;
 use crate::value::{name, positive, row, Value, WritePositions};
 use crate::wire::{Decoder, Encoder, Wire};
 use crate::write_sources::ChangeId;
@@ -103,12 +102,13 @@ pub enum LossCause {
     Write(WriteId),
     /// Every rule holding when the row was removed.
     Rules(BTreeSet<Rule>),
-    /// A schema change or reset that excluded the write.
+    /// A breaking schema change that excluded the write, or whose migration
+    /// write deleted a hidden row. Resets create no losses (§19.3).
     Excluded {
         /// The excluded write, including deletions with no retained cells.
         write: WriteId,
-        /// The boundary that excluded it.
-        cause: LostWriteCause,
+        /// The schema version reached by the breaking change.
+        version: u32,
     },
     /// An admitted row change that used data which does not survive (§8):
     /// its generation source or a cell setter it replaced.
@@ -130,10 +130,10 @@ impl Wire for LossCause {
                 1u8.put(out)?;
                 rules.put(out)
             }
-            Self::Excluded { write, cause } => {
+            Self::Excluded { write, version } => {
                 2u8.put(out)?;
                 write.put(out)?;
-                cause.put(out)
+                version.put(out)
             }
             Self::Dependency { write, sources } => {
                 3u8.put(out)?;
@@ -148,7 +148,7 @@ impl Wire for LossCause {
             1 => Ok(Self::Rules(Wire::get(input)?)),
             2 => Ok(Self::Excluded {
                 write: Wire::get(input)?,
-                cause: Wire::get(input)?,
+                version: Wire::get(input)?,
             }),
             3 => Ok(Self::Dependency {
                 write: Wire::get(input)?,
@@ -249,7 +249,7 @@ impl Loss {
                     }
                 }
             }
-            (LossValues::Row(cells), LossCause::Excluded { write, cause }) => {
+            (LossValues::Row(cells), LossCause::Excluded { write, version }) => {
                 positive(write.number)?;
                 require(
                     cells.values().all(|cell| cell.write == *write),
@@ -257,7 +257,11 @@ impl Loss {
                     FormatRule::Required,
                 )?;
                 require(self.retired, "excluded loss", FormatRule::Required)?;
-                cause.validate()?;
+                require(
+                    *version > 0,
+                    "breaking schema version",
+                    FormatRule::Required,
+                )?;
             }
             (LossValues::Row(cells), LossCause::Dependency { write, sources }) => {
                 positive(write.number)?;

@@ -24,7 +24,7 @@ import CovenMerge.ReceivePositions
 import CovenMerge.ReceiveMerge
 import CovenMerge.ReceiveExamples
 import CovenMerge.Retirement
-import CovenMerge.ResetCounterexample
+import CovenMerge.ResetAgreement
 import CovenMerge.MigrationCounterexample
 import CovenMerge.Ownership
 import CovenMerge.OwnerProtection

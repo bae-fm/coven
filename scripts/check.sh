@@ -264,8 +264,9 @@ proofs() {
         fi
         COVEN_MERGE_LEAN="$runner" cargo test -p coven-database --all-features composite_reference_differential -- --ignored
 
-        step "Rust / Lean reset counterexample"
-        COVEN_MERGE_LEAN="$runner" cargo test -p coven-database --all-features reset_differential_counterexample -- --ignored
+        step "Rust / Lean reset differential"
+        COVEN_MERGE_LEAN="$runner" cargo test -p coven-database --all-features reset_differential_histories -- --ignored
+        COVEN_MERGE_LEAN="$runner" cargo test -p coven-database --all-features reset_differential_agreement -- --ignored
 
         step "Rust / Lean schema-boundary differential"
         COVEN_MERGE_LEAN="$runner" cargo test -p coven-database --all-features schema_differential_histories -- --ignored
@@ -278,6 +279,10 @@ proofs() {
         runner=$(runner queue authoredRunner)
         step "Rust / Lean authored source evidence and data validity"
         COVEN_AUTHORED_LEAN="$runner" cargo test -p coven-database --all-features authored_sources_differential -- --ignored
+
+        runner=$(runner queue queueRunner)
+        step "Rust / Lean queue change verdicts and row merge"
+        COVEN_QUEUE_LEAN="$runner" cargo test -p coven-database --all-features queue_reset_differential_histories -- --ignored
     fi
 
     if proof_selected storelog || crate_selected coven-sync; then

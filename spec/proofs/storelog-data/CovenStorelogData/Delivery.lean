@@ -32,7 +32,7 @@ def receiveEntry {W Col : Type} [DecidableEq W]
 is present. The header needs its store key. Any required unreadable part holds
 the whole transaction back; otherwise opened parts merge and skipped parts
 advance the same write position. Consumed positions are never applied again.
-This models write_object.rs::parts and download.rs::apply/accepted together. -/
+This models write_object.rs::parts and download.rs::apply and interpretation.rs::accepted together. -/
 def receiveWrite {W Col : Type} [DecidableEq W]
     (writes : CovenMerge.Writes W Row Col) (log : CovenStorelog.Log)
     (member device : Nat) (copies : Copies) (headerKey : Key) (keys : List Key)

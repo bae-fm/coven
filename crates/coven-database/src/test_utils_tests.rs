@@ -470,11 +470,7 @@ pub(crate) fn result_json(db: &Database, rows: &[RowId]) -> Value {
         for loss in losses.into_iter().filter(|loss| loss.retired) {
             let LossValues::Row(cells) = loss.values else { panic!("boundary loss must hold a row") };
             let cause = match loss.cause {
-                LossCause::Excluded { write, cause: coven_format::snapshot_rows::LostWriteCause::Reset(entry) } => {
-                    assert_eq!(entry, RESET);
-                    json!({"reset": 1, "write": write_id(write)})
-                }
-                LossCause::Excluded { write, cause: coven_format::snapshot_rows::LostWriteCause::SchemaChange(version) } => json!({"schema": version, "write": write_id(write)}),
+                LossCause::Excluded { write, version } => json!({"schema": version, "write": write_id(write)}),
                 cause => panic!("unexpected boundary cause {cause:?}"),
             };
             let mut values: Vec<_> = cells.iter().map(|(c, v)| [column_id(c) as u64, write_id(v.write)]).collect();

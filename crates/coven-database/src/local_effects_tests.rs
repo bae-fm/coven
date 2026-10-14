@@ -239,10 +239,9 @@ async fn a_child_of_two_provisionally_hidden_parents_returns_when_both_do() {
             .unwrap();
     }
     let inside = circle_write(0, CIRCLE_ROW, &Audience::Circle(circle));
-    let other = circle_write(1, OTHER_ROW, &Audience::Store);
-    let mut outside = circle_write(2, STORE_ROW, &Audience::Store);
-    outside.header.had_read = WritePositions(vec![other.header.position]);
-    for write in [&inside, &other, &outside] {
+    let mut other = circle_write(1, OTHER_ROW, &Audience::Store);
+    let outside = circle_write(2, STORE_ROW, &Audience::Store);
+    for write in [&inside, &outside] {
         db.receive(write.clone().into()).await.unwrap();
     }
     sql(
@@ -268,8 +267,13 @@ async fn a_child_of_two_provisionally_hidden_parents_returns_when_both_do() {
         .await
         .unwrap();
     assert_eq!(local(&db), (0, 0));
-    // A store reset then takes out the pair's other parent too: its write
-    // read a write outside the reset's coverage and missed the one it names.
+    // A store reset then takes out the pair's other parent too: its write is
+    // outside the reset's coverage and had not read the reset entry. Another
+    // store write made after reading the entry applies.
+    other.header.store_log_read = coven_format::value::EntryPositions(vec![EntryId {
+        device: DeviceId(99),
+        number: 1,
+    }]);
     let entry = reset(
         &db,
         &[inside.clone(), other.clone(), outside.clone()],

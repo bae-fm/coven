@@ -53,6 +53,14 @@ fn writes() -> Vec<WriteRecord> {
             };
         }
     }
+    // Writes 3 and 5 were authored after reading the reset entry; the reset
+    // ignores the others outside its snapshot (§19.3).
+    for n in [3, 5] {
+        writes[n].header.store_log_read = coven_format::value::EntryPositions(vec![EntryId {
+            device: DeviceId(99),
+            number: 1,
+        }]);
+    }
     writes
 }
 
@@ -68,6 +76,7 @@ fn input_writes(writes: &[WriteRecord]) -> Vec<Value> {
         let coven_format::value::Value::Text(key) = &key[0] else { unreachable!() };
         json!({"row": key.parse::<usize>().unwrap(), "generation": r.change.generation,
             "kind": kind, "columns": columns, "version": w.header.schema_version,
+            "storeRead": w.header.store_log_read.0.iter().map(|e| e.number).collect::<Vec<_>>(),
             "past": w.header.had_read.0.iter().map(|id| writes.iter().position(|w| w.header.position == *id).unwrap()).collect::<Vec<_>>()})
     }).collect()
 }
@@ -87,12 +96,8 @@ async fn observed(db: &crate::Database, writes: &[WriteRecord], trace: &mut Vec<
         }).collect();
         let mut rejected = Vec::new();
         crate::loss_record::visit(db, &Audience::Store, |loss| {
-            if let LossCause::Excluded { write, cause } = loss.cause {
-                let cause = match cause {
-                    coven_format::snapshot_rows::LostWriteCause::Reset(id) => json!({"reset": id.number}),
-                    coven_format::snapshot_rows::LostWriteCause::SchemaChange(v) => json!({"schema": v}),
-                };
-                rejected.push((index(write), cause));
+            if let LossCause::Excluded { write, version } = loss.cause {
+                rejected.push((index(write), json!({"schema": version})));
             }
             Ok::<_, crate::DbError>(())
         }).unwrap();

@@ -1,10 +1,7 @@
 //! Decoding the durable lost-value fields into the read API.
 
 use crate::{DbError, EntryId, RowKey, WriteId};
-use coven_format::{
-    loss::{Loss, LossCause, LossValues},
-    snapshot_rows::LostWriteCause,
-};
+use coven_format::loss::{Loss, LossCause, LossValues};
 use coven_merge::Rule;
 use rusqlite::types::Value;
 
@@ -171,15 +168,7 @@ impl LostValue {
                     })
                     .collect(),
             ),
-            LossCause::Excluded {
-                cause: LostWriteCause::SchemaChange(version),
-                ..
-            } => Replacement::SchemaChange { version },
-            // Resets create no losses (§19.3).
-            LossCause::Excluded {
-                cause: LostWriteCause::Reset(_),
-                ..
-            } => return Err(DbError::DamagedDatabase),
+            LossCause::Excluded { version, .. } => Replacement::SchemaChange { version },
             LossCause::Dependency { write, sources } => Replacement::DataDependency {
                 write,
                 sources: sources

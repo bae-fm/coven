@@ -8,7 +8,6 @@
 use crate::wire::{Decoder, Encoder, Wire};
 use crate::{
     merge_wire,
-    snapshot_rows::LostWriteCause,
     value::{Value, WritePositions},
     Error,
 };
@@ -163,33 +162,31 @@ pub fn decode_rules(bytes: &[u8]) -> Result<BTreeSet<Rule>, Error> {
     Ok(value)
 }
 
-/// Encode an excluded write’s replacement cause using its snapshot field bytes.
-pub fn encode_lost_write_cause(value: &LostWriteCause) -> Result<Vec<u8>, Error> {
-    value.validate()?;
-    encode(value)
+/// Encode the excluded write and the breaking schema version that excluded it.
+pub fn encode_exclusion(write: WriteId, version: u32) -> Result<Vec<u8>, Error> {
+    crate::value::positive(write.number)?;
+    crate::error::require(
+        version > 0,
+        "breaking schema version",
+        crate::error::Rule::Required,
+    )?;
+    let mut out = Encoder::new();
+    write.put(&mut out)?;
+    version.put(&mut out)?;
+    Ok(out.bytes)
 }
 
-/// Decode exactly one snapshot field containing an excluded write’s replacement cause.
-pub fn decode_lost_write_cause(bytes: &[u8]) -> Result<LostWriteCause, Error> {
-    let value: LostWriteCause = decode(bytes)?;
-    value.validate()?;
-    Ok(value)
-}
-
-/// Encode the excluded write and the boundary that displaced it.
-pub fn encode_exclusion(write: WriteId, cause: LostWriteCause) -> Result<Vec<u8>, Error> {
-    let mut bytes = encode_write_id(&write)?;
-    bytes.extend(encode_lost_write_cause(&cause)?);
-    Ok(bytes)
-}
-
-/// Decode an excluded write's identity and boundary from its loss record.
-pub fn decode_exclusion(bytes: &[u8]) -> Result<(WriteId, LostWriteCause), Error> {
-    let (write, cause): (WriteId, LostWriteCause) =
+/// Decode an excluded write's identity and breaking version from its loss record.
+pub fn decode_exclusion(bytes: &[u8]) -> Result<(WriteId, u32), Error> {
+    let (write, version): (WriteId, u32) =
         decode_with(bytes, |input| Ok((Wire::get(input)?, Wire::get(input)?)))?;
     crate::value::positive(write.number)?;
-    cause.validate()?;
-    Ok((write, cause))
+    crate::error::require(
+        version > 0,
+        "breaking schema version",
+        crate::error::Rule::Required,
+    )?;
+    Ok((write, version))
 }
 
 /// Encode a dependent change's write and failed sources for its loss record.
@@ -217,12 +214,15 @@ pub fn decode_dependency(
 pub fn encode_change_verdict(
     value: &crate::snapshot_rows::ChangeVerdict,
 ) -> Result<Vec<u8>, Error> {
+    value.validate()?;
     encode(value)
 }
 
 /// Decode a change's verdict stored with its original change.
 pub fn decode_change_verdict(bytes: &[u8]) -> Result<crate::snapshot_rows::ChangeVerdict, Error> {
-    decode(bytes)
+    let value: crate::snapshot_rows::ChangeVerdict = decode(bytes)?;
+    value.validate()?;
+    Ok(value)
 }
 
 /// Encode one loss using the same bytes as the snapshot loss section.

@@ -467,9 +467,7 @@ async fn frozen_display_and_dismissal_preserve_original_parents_sources_and_admi
         for (_, admission) in before {
             assert_eq!(
                 merge_fields::decode_change_verdict(&admission).unwrap(),
-                coven_format::snapshot_rows::ChangeVerdict::Excluded(
-                    coven_format::snapshot_rows::LostWriteCause::SchemaChange(2)
-                )
+                coven_format::snapshot_rows::ChangeVerdict::Excluded(2)
             );
         }
     });

@@ -1,9 +1,9 @@
 import CovenMerge.Reset
 
-/-! An empty reset snapshot and one unread insert. The database differential
-checks the Rust result; these examples check the reset's specified result and
-its reductions without reproducing Rust's eligibility predicate. -/
-namespace CovenMerge.ResetCounterexample
+/-! An empty reset snapshot and one unread insert. The database's
+`reset_differential_agreement` checks that Rust produces these same results;
+these examples check the reset's specified result and its reductions. -/
+namespace CovenMerge.ResetAgreement
 
 private def writes : Writes Unit Unit Unit where
   ts _ := 1
@@ -37,4 +37,4 @@ theorem no_write_no_gap :
 theorem no_reset_applies :
     (reloadSnapshot writes boundary.toSnapshotBoundary (fun _ => true) St.init [()]).gen () = 1 := by decide
 
-end CovenMerge.ResetCounterexample
+end CovenMerge.ResetAgreement

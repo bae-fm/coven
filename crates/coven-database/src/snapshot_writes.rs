@@ -191,7 +191,7 @@ pub(crate) fn apply<P: crate::PendingValue, R: Read>(
                     database, schema, write, deleted,
                 )?);
             } else {
-                let record = crate::download::interpret(database, schema, write)?;
+                let record = crate::interpretation::interpret(database, schema, write)?;
                 affected.extend(crate::download::apply_interpreted(
                     database, schema, &record, deleted,
                 )?);

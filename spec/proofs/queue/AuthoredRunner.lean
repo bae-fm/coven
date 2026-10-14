@@ -1,4 +1,4 @@
-import CovenQueue.Verdicts
+import CovenQueue.Checked
 import Lean
 
 /-! Checked adapter for actual Rust-authored histories. The finite checks below
@@ -62,46 +62,6 @@ private def checkedAuthored {n rows cols : Nat} (M : Writes (Fin n) (Fin rows) (
     rename_i ch ca
     exact ⟨ch, ca, rfl, rfl, h⟩
 
-private def emptyRecord : CovenQueue.CheckedWrite :=
-  ⟨⟨⟨⟨0,0⟩,0,[],[]⟩,0,.ordinary,[]⟩,none⟩
-
-private def history (records : Array CovenQueue.CheckedWrite) : CovenQueue.History :=
-  fun w => records[w]?.getD emptyRecord
-
-private def dataOK (records : Array CovenQueue.CheckedWrite) : Prop :=
-  ∀ w : Fin records.size,
-    ((records[w]).record.body.map CovenQueue.RowChange.row).Nodup ∧
-    ∀ ch ∈ (records[w]).record.body, ∀ a ∈ ch.provenance.sources,
-      a < w.val ∧ (CovenQueue.rowChange (history records) a ch.row).isSome = true
-
-private theorem checkedData (records : Array CovenQueue.CheckedWrite) (good : dataOK records) :
-    CovenQueue.DataValid (history records) := by
-  have outside (w : Nat) (h : ¬w < records.size) : (history records w).record.body = [] := by
-    simp [history, Array.getElem?_eq_none (by omega : records.size ≤ w), emptyRecord]
-  have inside (w : Nat) (h : w < records.size) : history records w = records[w] := by
-    simp [history, Array.getElem?_eq_getElem h]
-  have source (w r a : Nat) (mem : a ∈ (CovenQueue.provenance (history records) w r).sources) :
-      a < w ∧ (CovenQueue.rowChange (history records) a r).isSome = true := by
-    cases found : CovenQueue.rowChange (history records) w r with
-    | none => simp [CovenQueue.provenance, found, Provenance.sources] at mem
-    | some ch =>
-      have row : ch.row = r := by simpa [CovenQueue.rowChange] using List.find?_some found
-      have member := List.mem_of_find?_eq_some found
-      change ch ∈ (history records w).record.body at member
-      by_cases bound : w < records.size
-      · rw [inside w bound] at member
-        have hs : a ∈ ch.provenance.sources := by simpa [CovenQueue.provenance, found] using mem
-        simpa [row] using (good ⟨w,bound⟩).2 ch member a hs
-      · rw [outside w bound] at member
-        contradiction
-  exact {
-    uniqueRows := fun w => by
-      by_cases bound : w < records.size
-      · rw [inside w bound]; exact (good ⟨w,bound⟩).1
-      · rw [outside w bound]; simp
-    earlier := fun w r a mem => (source w r a mem).1
-    sourcePresent := fun w r a mem => (source w r a mem).2 }
-
 private def bounded (limit value : Nat) : Except String (Fin limit) :=
   if h : value < limit then pure ⟨value,h⟩ else throw "identity outside history domain"
 
@@ -146,9 +106,9 @@ private def run (j : Json) : Except String Json := do
      ⟨⟨⟨⟨stamp,1⟩,stamp,past.toList.map (fun a => ⟨a.val,1⟩),[]⟩,0,.ordinary,
        body.toList.map fun (r,ch,p) => ⟨r.val,ch.gen,ch.kind,
          ⟨p.generation.map Fin.val,p.setters.map (fun (c,a) => (c.val,a.val))⟩,.values []⟩⟩,none⟩
-   letI : Decidable (dataOK records) := by unfold dataOK; infer_instance
-   let dataValid := if h : dataOK records then
-     let _checked : CovenQueue.DataValid (history records) := checkedData records h
+   let dataValid := if h : CovenQueue.dataOK records then
+     let _checked : CovenQueue.DataValid (CovenQueue.recordHistory records) :=
+       CovenQueue.checkedData records h
      true
      else false
    let earlier : Prop := ∀ (w a : Fin n), M.past w a = true → M.ts a < M.ts w

@@ -188,11 +188,11 @@ open CovenMerge
 #print axioms Receive.send_gate_publication_bound
 
 -- unread writes outside a reset snapshot
-#print axioms ResetCounterexample.writes_valid
-#print axioms ResetCounterexample.unread_insert_ignored
-#print axioms ResetCounterexample.read_reset_applies
-#print axioms ResetCounterexample.no_write_no_gap
-#print axioms ResetCounterexample.no_reset_applies
+#print axioms ResetAgreement.writes_valid
+#print axioms ResetAgreement.unread_insert_ignored
+#print axioms ResetAgreement.read_reset_applies
+#print axioms ResetAgreement.no_write_no_gap
+#print axioms ResetAgreement.no_reset_applies
 
 -- migration selection without non-final circle deletions
 #print axioms MigrationCounterexample.nonfinal_retained

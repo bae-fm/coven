@@ -434,7 +434,7 @@ pub fn excluded_loss() -> crate::loss::Loss {
         ),
         cause: LossCause::Excluded {
             write: write().header.position,
-            cause: LostWriteCause::SchemaChange(2),
+            version: 2,
         },
     }
 }

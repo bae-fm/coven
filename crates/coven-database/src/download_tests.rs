@@ -2,9 +2,11 @@ use super::*;
 use crate::tests::{database_error, TestStore};
 use crate::write::tests::{count, notes, records, sql, NOTES};
 use crate::{Database, Migration, RowIdentity, SyncedTable};
+use coven_format::write::WriteDisposition;
 use coven_foundation::id_source::{CircleId, KeyId};
 use coven_foundation::{clock::FixedClock, id_source::SequentialIds};
 use coven_merge::Timestamp;
+use coven_merge::{ColumnValue, Operation};
 use rusqlite::params;
 use std::sync::Arc;
 use std::time::{Duration, UNIX_EPOCH};
@@ -625,7 +627,7 @@ async fn applied_schema_boundaries_exclude_only_uncovered_older_writes() {
 }
 
 #[tokio::test]
-async fn reset_exclusion_is_audience_scoped_and_counts_implicit_own_reads() {
+async fn reset_ignores_unread_uncovered_parts_of_its_audience_only() {
     let ids = SequentialIds::new();
     let source_store = TestStore::with_ids(&ids);
     let source = circle_db(&source_store).await;
@@ -638,7 +640,9 @@ async fn reset_exclusion_is_audience_scoped_and_counts_implicit_own_reads() {
         device: DeviceId(99),
         number: 1,
     };
-    for (audience, included, lost) in [
+    // The update did not read the reset entry. It is ignored in the reset
+    // audience even when it read every write the snapshot covers (§19.3).
+    for (audience, included, skip_first, title) in [
         (
             Audience::Circle(circle),
             vec![WriteId {
@@ -646,22 +650,25 @@ async fn reset_exclusion_is_audience_scoped_and_counts_implicit_own_reads() {
                 number: 1,
             }],
             true,
+            None,
         ),
         (
             Audience::Circle(circle),
             vec![writes[0].header.position],
             false,
+            Some("title"),
         ),
         (
             Audience::Circle(circle),
             vec![writes[1].header.position],
             false,
+            Some("late"),
         ),
-        (Audience::Store, vec![], false),
+        (Audience::Store, vec![], false, Some("late")),
     ] {
         let store = TestStore::with_ids(&ids);
         let db = circle_db(&store).await;
-        let first = if lost {
+        let first = if skip_first {
             DownloadedWrite {
                 header: writes[0].header.clone(),
                 parts: vec![DownloadedPart::Skipped(Audience::Circle(circle))],
@@ -681,7 +688,7 @@ async fn reset_exclusion_is_audience_scoped_and_counts_implicit_own_reads() {
             .install_reset_fixture(entry, audience, included)
             .await
             .unwrap());
-        if lost {
+        if skip_first {
             assert_eq!(
                 db.receive(writes[0].clone().into()).await.unwrap(),
                 ApplyOutcome::AlreadyApplied
@@ -691,9 +698,20 @@ async fn reset_exclusion_is_audience_scoped_and_counts_implicit_own_reads() {
             db.receive(writes[1].clone().into()).await.unwrap(),
             ApplyOutcome::Applied
         );
-        assert_eq!(count(&db, "notes"), i64::from(!lost));
-        // A reset ignores the write's part without a loss (§19.3).
+        assert_eq!(
+            db.read(|sql| Ok(sql.query("SELECT title FROM notes", [], |r| r.get::<_, String>(0))?))
+                .await
+                .unwrap(),
+            title.into_iter().map(String::from).collect::<Vec<_>>()
+        );
+        // A reset ignores the write's part without a loss.
         assert!(db.lost_values().await.unwrap().is_empty());
+        assert!(db
+            .sync_state(Vec::new())
+            .await
+            .unwrap()
+            .positions
+            .covers(writes[1].header.position));
         db.close().await.unwrap();
     }
     source.close().await.unwrap();
@@ -807,19 +825,24 @@ async fn a_reset_successor_can_read_another_post_reset_write() {
     sql(&source, "UPDATE notes SET title='second successor'")
         .await
         .unwrap();
-    let writes = records(&source);
+    let mut writes = records(&source);
+    let entry = coven_format::value::EntryId {
+        device: DeviceId(99),
+        number: 1,
+    };
     receiver.receive(writes[0].clone().into()).await.unwrap();
     receiver
         .install_reset_fixture(
-            coven_format::value::EntryId {
-                device: DeviceId(99),
-                number: 1,
-            },
+            entry,
             Audience::Store,
             WritePositions(vec![writes[0].header.position]),
         )
         .await
         .unwrap();
+    // Both successors were authored after reading the reset entry.
+    for write in &mut writes[1..] {
+        write.header.store_log_read = coven_format::value::EntryPositions(vec![entry]);
+    }
     for write in &writes[1..] {
         assert_eq!(
             receiver.receive(write.clone().into()).await.unwrap(),

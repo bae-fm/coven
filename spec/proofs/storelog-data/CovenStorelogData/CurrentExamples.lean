@@ -37,7 +37,7 @@ theorem entry_only_deletion_restores :
   exact ⟨validCheck_sound _ _ (by decide), by decide⟩
 
 def snapshot : Snapshot (Fin 1) Unit := ⟨CovenMerge.St.init, [], [], []⟩
-def headers (_ : Fin 1) : Header (Fin 1) := ⟨0, [], .apply⟩
+def headers (_ : Fin 1) : Header (Fin 1) := ⟨0, [], .apply, []⟩
 def reloadData := CurrentData.prepareReload DeliveryExamples.writes headers
   circleHistory 30 7 (List.range 7) 0 (fun _ => snapshot) snapshot [0]
 def skipped : CurrentData.CircleReader (Fin 1) Unit :=

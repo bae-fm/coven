@@ -15,6 +15,7 @@ private structure InputWrite where
   columns : List Nat
   past : List Nat
   version : Nat
+  storeRead : List Nat
 
 private def readWrite (j : Json) : Except String InputWrite := do
   let kind ← match ← j.getObjValAs? String "kind" with
@@ -24,11 +25,10 @@ private def readWrite (j : Json) : Except String InputWrite := do
     | _ => throw "unknown row change"
   pure ⟨← StorelogJson.nat j "row", ← StorelogJson.nat j "generation", kind,
     ← j.getObjValAs? (List Nat) "columns", ← j.getObjValAs? (List Nat) "past",
-    ← StorelogJson.nat j "version"⟩
+    ← StorelogJson.nat j "version", ← j.getObjValAs? (List Nat) "storeRead"⟩
 
 private def cause : Exclusion → Json
   | .schema version => Json.mkObj [("schema", toJson version)]
-  | .reset entry => Json.mkObj [("reset", toJson entry)]
 
 /-- Finite projections inspect the model's actual generations, setters, losses,
 rejected writes and pending observations, including each committed app value. -/
@@ -43,7 +43,8 @@ def run (j : Json) : Except String Json := do
     past := fun w a => a ∈ (write w).past
     chg := fun w r => if r == row (write w).row then
       some ⟨(write w).kind, (write w).generation, fun c => c ∈ (write w).columns⟩ else none }
-  let headers (w : Nat) : Header Nat := ⟨(write w).version, (write w).past, .apply⟩
+  let headers (w : Nat) : Header Nat :=
+    ⟨(write w).version, (write w).past, .apply, (write w).storeRead⟩
   let snapshot (covered : List Nat) : Snapshot Nat Nat :=
     ⟨covered.foldl (CovenMerge.step writes) CovenMerge.St.init, covered, [], []⟩
   let originals ← j.getObjValAs? (List Nat) "original"

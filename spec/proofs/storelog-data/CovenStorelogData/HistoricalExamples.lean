@@ -94,7 +94,7 @@ theorem ben_never_stopped :
     ([8, 9, 10].foldl (CurrentData.receive history 30 11 1 1)
       ⟨List.range 8, false⟩).stopped = false := by decide
 
-def headers (_ : Fin 1) : Header (Fin 1) := ⟨0, [], .apply⟩
+def headers (_ : Fin 1) : Header (Fin 1) := ⟨0, [], .apply, []⟩
 def carol : Author := ⟨2, 2, afterRotation⟩
 def empty (received : List Nat) : HistoricalKeys.Reader (Fin 1) Unit :=
   ⟨received, ⟨CovenMerge.St.init, [], []⟩⟩

@@ -37,6 +37,8 @@ structure Header (W : Type) where
   version : Nat
   past : List W
   disposition : Disposition
+  /-- Store-log entries its author had read (D5 `store_log_read`). -/
+  storeRead : List Nat
 
 /-- A snapshot carries its audience's merge state and frozen losses. The
 included list denotes its authenticated device-write positions. -/
@@ -53,8 +55,9 @@ structure Reloaded (W Col : Type) where
   frozen : List (CovenMerge.LossRecord W Row Col)
   rejected : List (W × Exclusion)
 
-/-- download.rs::accepted: migration markers have no changes, explicit lost
-writes are recorded, and boundaries reject old-schema or reset-orphaned parts.
+/-- interpretation.rs::accepted: migration markers have no changes, a reset
+ignores unread uncovered parts without a loss, explicit lost writes are
+recorded, and raises reject old-schema parts. Reset eligibility comes first.
 The caller supplies authenticated, readable parts in causal order. -/
 def applyDownloaded {W Col : Type} [DecidableEq W]
     (writes : CovenMerge.Writes W Row Col) (headers : W → Header W)
@@ -62,13 +65,13 @@ def applyDownloaded {W Col : Type} [DecidableEq W]
     (state : Reloaded W Col) (w : W) : Reloaded W Col :=
   let header := headers w
   let rejection := match header.disposition with
-    | .migration => none
     | .lost version => some (.schema version)
-    | .apply => (boundaries.find? (excludes w header.version audience header.past)).map Boundary.cause
-  match header.disposition, rejection with
-  | .migration, _ => state
-  | _, some cause => { state with rejected := state.rejected ++ [(w, cause)] }
-  | _, none =>
+    | _ => boundaries.findSome? (exclusion w header.version audience)
+  if header.disposition = .migration || boundaries.any (ignores w audience header.storeRead) then
+    state
+  else match rejection with
+  | some cause => { state with rejected := state.rejected ++ [(w, cause)] }
+  | none =>
     let projected := CovenMerge.project writes Row.audience (· == audience)
     { state with data := CovenMerge.step projected state.data w }
 

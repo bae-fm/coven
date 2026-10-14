@@ -533,8 +533,7 @@ mod reset {
     }
 
     #[tokio::test]
-    async fn reset_reloads_author_and_peers_loses_dependent_branch_and_merges_independent_late_write(
-    ) {
+    async fn reset_reloads_author_and_peers_and_ignores_every_write_that_had_not_read_it() {
         let storage = snapshot_storage();
         let mut a = notes_device(storage.clone(), 1).await;
         a.create(key(1)).await;
@@ -554,7 +553,8 @@ mod reset {
         write_rows(&c, 3, 1, 7, Audience::Store).await;
         upload(&a, &storage).await;
         let reset = begin_reset(&mut a, Audience::Store).await;
-        // Seal the reset snapshot, then let the resetting device read the rejected branch.
+        // Seal the reset snapshot, then let the resetting device read the
+        // rejected branch and write after its own snapshot.
         reset_step(&mut a, reset).await;
         for d in [&b, &c] {
             for write in d.db.test_queued_writes().await.unwrap() {
@@ -564,21 +564,35 @@ mod reset {
             }
             upload(d, &storage).await;
         }
+        write_rows(&a, 4, 1, 7, Audience::Store).await;
         finish_reset(&mut a, reset).await;
         b.sync().await;
         c.sync().await;
         for d in [&mut a, &mut b, &mut c] {
+            upload(d, &storage).await;
             d.writes.download_writes().await.unwrap();
         }
-        // B's independent first write is late; C's write depended on B but did not
-        // read A, so it is lost. This is §7.1's causal boundary, not a time cutoff.
+        // Neither B's independent write, C's write built on it, nor A's own
+        // write after its snapshot read the reset entry: each is ignored on
+        // every device, the author's included, without a loss (§19.3).
         let ids: Vec<_> = tables(&a).await.into_iter().map(|r| r.0).collect();
-        assert_eq!(ids, ["1", "2"]);
-        assert_eq!(tables(&a).await, tables(&b).await);
-        assert_eq!(tables(&a).await, tables(&c).await);
-        assert_eq!(fingerprint(&a).await, fingerprint(&b).await);
-        assert_eq!(fingerprint(&a).await, fingerprint(&c).await);
+        assert_eq!(ids, ["1"]);
+        for d in [&a, &b, &c] {
+            assert_eq!(tables(d).await, tables(&a).await);
+            assert_eq!(fingerprint(d).await, fingerprint(&a).await);
+            assert!(d.db.lost_values().await.unwrap().is_empty());
+        }
         assert!(a.db.operations().await.unwrap().is_empty());
+        // B's next write read the reset and applies everywhere.
+        write_rows(&b, 5, 1, 7, Audience::Store).await;
+        upload(&b, &storage).await;
+        for d in [&mut a, &mut b, &mut c] {
+            d.writes.download_writes().await.unwrap();
+        }
+        for d in [&a, &b, &c] {
+            let ids: Vec<_> = tables(d).await.into_iter().map(|r| r.0).collect();
+            assert_eq!(ids, ["1", "5"]);
+        }
     }
 
     #[tokio::test]

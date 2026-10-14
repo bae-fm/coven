@@ -61,7 +61,7 @@ pub(crate) fn frame(
         parts: vec![crate::DownloadedPart::Opened(part)],
     };
     crate::download::retain_source_rows(database, &download)?;
-    let record = crate::download::interpret(database, schema, download)?;
+    let record = crate::interpretation::interpret(database, schema, download)?;
     let store = MergeStore::from_staged(database, &schema.schema);
     let updates = store.apply(&record)?;
     crate::write_commit::commit(database, &record, &store, &updates)?;

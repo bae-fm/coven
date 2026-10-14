@@ -380,7 +380,7 @@ async fn schema_boundaries_are_independent_for_each_audience() {
     part.audience = circle.clone();
     assert!(matches!(
         boundary.excludes(&record.header, &part),
-        Some(coven_format::snapshot_rows::LostWriteCause::SchemaChange(2))
+        Some(coven_format::snapshot_rows::ChangeVerdict::Excluded(2))
     ));
     assert!(db
         .install_schema_fixture(circle, 2, WritePositions(Vec::new()))
@@ -433,7 +433,12 @@ async fn reset_successors_can_read_post_reset_writes_from_another_device() {
         .unwrap();
     let second = records(&b).remove(0);
     assert!(second.header.had_read.covers(first.header.position));
-    for write in [first, second] {
+    for mut write in [first, second] {
+        // Both authors had read the reset entry (§19.3).
+        write.header.store_log_read = coven_format::value::EntryPositions(vec![EntryId {
+            device: DeviceId(99),
+            number: 1,
+        }]);
         assert_eq!(
             receiver.receive(write.into()).await.unwrap(),
             ApplyOutcome::Applied
@@ -528,22 +533,116 @@ async fn repeated_boundaries_keep_their_original_coverage_and_application_order(
         );
         assert_eq!(count(&db, "_coven_boundaries"), 2);
         assert_eq!(count(&db, "notes"), 0);
-        // A schema exclusion keeps the change as a loss; a reset leaves none.
-        let losses = db.lost_values().await.unwrap();
-        assert_eq!(
-            losses
-                .iter()
-                .map(|loss| loss.replaced_by.clone())
-                .collect::<Vec<_>>(),
-            if reset_first {
-                vec![]
-            } else {
-                vec![Replacement::SchemaChange { version: 2 }]
-            }
-        );
+        // Reset eligibility precedes schema exclusion: the unread part is
+        // ignored without a schema loss, whichever boundary came first (§19.3).
+        assert!(db.lost_values().await.unwrap().is_empty());
         db.close().await.unwrap();
     }
     source.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn unread_pre_reset_writes_are_ignored_and_changes_using_their_data_become_losses() {
+    use coven_format::value::EntryPositions;
+    let ids = SequentialIds::new();
+    let [a_store, ben_store, receiver_store] = [
+        TestStore::with_ids(&ids),
+        TestStore::with_ids(&ids),
+        TestStore::with_ids(&ids),
+    ];
+    let a = a_store.schema(notes(), NOTES).await.unwrap();
+    let ben = ben_store.schema(notes(), NOTES).await.unwrap();
+    let receiver = receiver_store.schema(notes(), NOTES).await.unwrap();
+    sql(&a, "INSERT INTO notes VALUES('n','snapshot','')")
+        .await
+        .unwrap();
+    let initial = records(&a).remove(0);
+    for db in [&ben, &receiver] {
+        db.receive(initial.clone().into()).await.unwrap();
+    }
+    let entry = EntryId {
+        device: DeviceId(99),
+        number: 1,
+    };
+    receiver
+        .install_reset_fixture(
+            entry,
+            Audience::Store,
+            WritePositions(vec![initial.header.position]),
+        )
+        .await
+        .unwrap();
+    // Ben's first and later late writes did not read the reset; the second
+    // read the first.
+    sql(&ben, "INSERT INTO notes VALUES('x','late','')")
+        .await
+        .unwrap();
+    sql(&ben, "UPDATE notes SET title='later' WHERE id='x'")
+        .await
+        .unwrap();
+    // After reading the reset, one write edits Ben's ignored row and the
+    // snapshot's row; another merely reads the ignored numbers.
+    ben.write(|sql| {
+        sql.execute("UPDATE notes SET title='uses ignored' WHERE id='x'", [])?;
+        sql.execute("UPDATE notes SET body='independent' WHERE id='n'", [])?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    sql(&ben, "UPDATE notes SET title='post reset' WHERE id='n'")
+        .await
+        .unwrap();
+    let mut writes = records(&ben);
+    for write in &mut writes[2..] {
+        write.header.store_log_read = EntryPositions(vec![entry]);
+    }
+    for write in &writes {
+        assert_eq!(
+            receiver.receive(write.clone().into()).await.unwrap(),
+            ApplyOutcome::Applied
+        );
+    }
+    assert_eq!(
+        receiver
+            .read(|sql| Ok(sql.query(
+                "SELECT id,title,body FROM notes ORDER BY id",
+                [],
+                |r| Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?
+                ))
+            )?))
+            .await
+            .unwrap(),
+        [("n".into(), "post reset".into(), "independent".into())]
+    );
+    let source = |write: &coven_format::write::WriteRecord| crate::ChangeSource {
+        write: write.header.position,
+        table: "notes".into(),
+        key: crate::RowKey(vec![rusqlite::types::Value::Text("x".into())]),
+        audience: Audience::Store,
+    };
+    // Only the change actually using ignored data is lost; the ignored
+    // writes themselves leave no loss.
+    assert_eq!(
+        receiver
+            .lost_values()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|loss| loss.replaced_by)
+            .collect::<Vec<_>>(),
+        [Replacement::DataDependency {
+            write: writes[2].header.position,
+            sources: vec![source(&writes[0]), source(&writes[1])],
+        }]
+    );
+    let positions = receiver.sync_state(Vec::new()).await.unwrap().positions;
+    assert!(writes.iter().all(|w| positions.covers(w.header.position)));
+    for db in [a, ben, receiver] {
+        db.close().await.unwrap();
+    }
 }
 
 mod differential {
@@ -688,9 +787,11 @@ mod differential {
     }
 
     #[tokio::test]
-    #[ignore = "requires COVEN_MERGE_LEAN; scripts/check.sh checks the reset discrepancy"]
-    async fn reset_differential_counterexample() {
+    #[ignore = "requires COVEN_MERGE_LEAN; scripts/check.sh supplies the merge runner"]
+    async fn reset_differential_agreement() {
         let runner = std::env::var_os("COVEN_MERGE_LEAN").expect("built mergeRunner");
+        // An empty reset snapshot and one key-only insert that did not read
+        // the reset: both sides ignore it, with no generation and no loss.
         let mut write = insert(0, 0);
         let Operation::Insert(columns) = &mut write.parts[0].rows[0].change.operation else {
             unreachable!()
@@ -701,22 +802,23 @@ mod differential {
             covered: BTreeSet::new(),
             reset: true,
         };
-        let rust = json!({"rows":[{"id":0,"gen":1,"gw":[[1,100]],"cells":[[0,100]],"lost":[]}],"frozen":[]});
-        let lean = json!({"rows":[{"id":0,"gen":0,"gw":[],"cells":[],"lost":[]}],"frozen":[]});
-        assert_eq!(reset_result(&history).await, rust);
-        assert_eq!(run_lean(&runner, &history.input()), lean);
-        assert_ne!(rust, lean);
-        // No write, no reset, reading the reset, or inclusion in the snapshot each
-        // removes this mismatch. The key is required by the real write format.
+        let ignored = json!({"rows":[{"id":0,"gen":0,"gw":[],"cells":[],"lost":[]}],"frozen":[]});
+        let applied = json!({"rows":[{"id":0,"gen":1,"gw":[[1,100]],"cells":[[0,100]],"lost":[]}],"frozen":[]});
+        assert_eq!(reset_result(&history).await, ignored);
+        assert_eq!(run_lean(&runner, &history.input()), ignored);
+        // No reset, reading the reset, or inclusion in the snapshot each apply
+        // the insert on both sides; with no write nothing changes.
         let mut empty = history.clone();
         empty.writes.clear();
         assert!(!reset_mismatch(&runner, &empty).await);
         let mut no_reset = history.clone();
         no_reset.reset = false;
-        assert!(!reset_mismatch(&runner, &no_reset).await);
         let mut read = history.clone();
         read.writes[0].header.store_log_read = EntryPositions(vec![RESET]);
-        assert!(!reset_mismatch(&runner, &read).await);
+        for case in [no_reset, read] {
+            assert_eq!(reset_result(&case).await, applied);
+            assert!(!reset_mismatch(&runner, &case).await);
+        }
         let mut covered = history;
         covered.covered.insert(covered.writes[0].header.position);
         assert!(!reset_mismatch(&runner, &covered).await);

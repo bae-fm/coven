@@ -567,12 +567,29 @@ write after a competing raise. These readings preserve the same interpretation
 on every device without converting the raising device's own upload queue.
 
 `CovenQueue/Axioms.lean` audits the main results. `scripts/check.sh` rebuilds
-the package, rejects unfinished proofs and foreign axioms, and continues to
-run the existing Rust/Lean differential tests. There is no queue differential:
-Rust's `coven-database/src/download.rs::accepted` selects whole audience parts
-using `WriteBoundary::excludes`, not `classifyChange`'s generation and replaced
-setter sources. It has no counterpart to `mergeInput`'s per-row selection in
-`RowMerge.lean`. Implementation task T100 adds that classifier and its queue
-comparison; T99 supplies authored source evidence, T101 retains source verdicts
-through snapshots, and T102 adds per-change receive conversion. Comparing the
-existing whole-part boundary filter would not test this model's rule.
+the package, rejects unfinished proofs and foreign axioms, and runs the
+Rust/Lean differential tests below.
+
+**Rust comparison.** `QueueRunner.lean` reads checked records in timestamp
+order, decides `DataValid` with `Checked.lean`'s finite check, and returns
+`classifyChange` for every received change together with `mergeRows` from the
+snapshot's covered records. Each change sets the first `values` columns, as
+`rowMetadata` states, so the Rust generator's updates set `a` or `a` and `b`.
+`queue_reset_differential_histories` in `coven-database` generates 64 causal
+histories with several writes per device, implicit own reads, a reset snapshot
+covering the first writes, and later authors who did or did not read the reset;
+some that read it have not yet reloaded and build on ignored data. Each history
+runs twice, once with the uncovered writes inside the real reset reload
+(`load_snapshots`) and once received afterwards (`receive`), in sampled causal
+orders. It compares every change's retained verdict (`_coven_authored_changes`),
+the dependency causes and sources of the frozen losses, generations, generation
+setters, cell setters and ordinary cell losses, and requires every position to
+be consumed. Snapshot evidence, conversion and replay rebuilds have their own
+families; scalar values, encryption and store-log selection are inputs.
+
+Run it with:
+
+```sh
+COVEN_QUEUE_LEAN="$PWD/spec/proofs/queue/.lake/build/bin/queueRunner" \
+  cargo test -p coven-database queue_reset_differential_histories -- --ignored --nocapture
+```

@@ -4,13 +4,12 @@ use crate::write_encoding::{audience, audience_text, counter, decoded, encoded};
 use crate::{DbError, StoreLogState, StoreVersion};
 use coven_format::{
     merge_fields,
-    snapshot_rows::LostWriteCause,
+    snapshot_rows::ChangeVerdict,
     store_log::{SnapshotId, StoreChange, StoreLogEntry},
     value::{EntryId, WritePositions},
     write::{WriteHeader, WritePart},
 };
 use coven_foundation::id_source::DeviceId;
-use coven_merge::WritePast;
 use rusqlite::params;
 use std::collections::BTreeSet;
 
@@ -268,28 +267,50 @@ impl WriteBoundary {
         Ok(result)
     }
 
-    pub(crate) fn excludes(
-        &self,
-        header: &WriteHeader,
-        part: &WritePart,
-    ) -> Option<LostWriteCause> {
-        let included = &self.included;
+    /// This boundary's verdict on an uncovered part of its audience: a kept
+    /// reset ignores a part whose write had not read the reset entry (§19.3);
+    /// a raise excludes a part authored at an older schema version (§17.1).
+    pub(crate) fn excludes(&self, header: &WriteHeader, part: &WritePart) -> Option<ChangeVerdict> {
+        if part.audience != self.boundary.snapshot().audience
+            || self.included.covers(header.position)
+        {
+            return None;
+        }
         match &self.boundary {
-            Boundary::SchemaChange(version) => (part.audience == version.snapshot.audience
-                && header.schema_version < version.number
-                && !included.covers(header.position))
-            .then_some(LostWriteCause::SchemaChange(version.number)),
-            Boundary::Reset { entry, snapshot } => {
-                let past = header.had_read.causal_past(header.position);
-                let follows = included.0.iter().all(|id| past.contains(id));
-                let missing = past.frontier().any(|id| !included.covers(*id));
-                (part.audience == snapshot.audience
-                    && !included.covers(header.position)
-                    && !follows
-                    && missing)
-                    .then_some(LostWriteCause::Reset(*entry))
+            Boundary::SchemaChange(version) => (header.schema_version < version.number)
+                .then_some(ChangeVerdict::Excluded(version.number)),
+            Boundary::Reset { entry, .. } => {
+                (!header.store_log_read.covers(*entry)).then_some(ChangeVerdict::Ignored(*entry))
             }
         }
+    }
+
+    /// The selected boundaries' combined verdict on one part. Reset
+    /// eligibility comes first, so an ignored part never gains a schema loss;
+    /// otherwise the highest excluding raise names the loss.
+    pub(crate) fn part_verdict(
+        boundaries: &[Self],
+        header: &WriteHeader,
+        part: &WritePart,
+    ) -> Option<ChangeVerdict> {
+        let verdicts: Vec<_> = boundaries
+            .iter()
+            .filter_map(|boundary| boundary.excludes(header, part))
+            .collect();
+        verdicts
+            .iter()
+            .find(|verdict| matches!(verdict, ChangeVerdict::Ignored(_)))
+            .cloned()
+            .or_else(|| {
+                verdicts
+                    .iter()
+                    .filter_map(|verdict| match verdict {
+                        ChangeVerdict::Excluded(version) => Some(*version),
+                        _ => None,
+                    })
+                    .max()
+                    .map(ChangeVerdict::Excluded)
+            })
     }
 }
 #[cfg(test)]

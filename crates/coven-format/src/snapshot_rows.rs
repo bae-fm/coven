@@ -100,49 +100,6 @@ impl MergeRow {
     }
 }
 
-/// Why an entire write was excluded from the merged state (§17.1, §19.3).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum LostWriteCause {
-    /// The schema version reached by a breaking change, including author-marked loss.
-    SchemaChange(u32),
-    /// A reset whose snapshot dropped one of the write's causes.
-    Reset(EntryId),
-}
-impl LostWriteCause {
-    pub(crate) fn validate(self) -> Result<(), Error> {
-        match self {
-            Self::SchemaChange(version) => {
-                require(version > 0, "breaking schema version", FormatRule::Required)
-            }
-            Self::Reset(entry) => positive(entry.number),
-        }
-    }
-}
-impl Wire for LostWriteCause {
-    fn put(&self, out: &mut Encoder) -> Result<(), Error> {
-        match self {
-            Self::SchemaChange(e) => {
-                0u8.put(out)?;
-                e.put(out)
-            }
-            Self::Reset(e) => {
-                1u8.put(out)?;
-                e.put(out)
-            }
-        }
-    }
-    fn get(input: &mut Decoder<'_>) -> Result<Self, Error> {
-        match u8::get(input)? {
-            0 => Ok(Self::SchemaChange(Wire::get(input)?)),
-            1 => Ok(Self::Reset(Wire::get(input)?)),
-            tag => Err(Error::UnknownTag {
-                field: "lost write cause",
-                tag,
-            }),
-        }
-    }
-}
-
 /// How a device interpreted one original row change (§8, §10, §17.1, §19.3).
 /// It decides whether the change survives as a source for later changes,
 /// independently of dismissible losses and consumed positions.
@@ -152,14 +109,36 @@ pub enum ChangeVerdict {
     Unjudged,
     /// It entered the merge.
     Applied,
-    /// A schema change or reset excluded its part.
-    Excluded(LostWriteCause),
+    /// A breaking change to this schema version excluded its part (§17.1).
+    Excluded(u32),
     /// Its write landed outside a retirement window and has no effects.
     Dropped,
     /// It used data that does not survive: these sources, in role order.
     Dependent(Vec<crate::write_sources::ChangeId>),
+    /// A kept reset ignored its part: it had not read that entry (§19.3).
+    Ignored(EntryId),
 }
 impl ChangeVerdict {
+    pub(crate) fn validate(&self) -> Result<(), Error> {
+        match self {
+            Self::Excluded(version) => require(
+                *version > 0,
+                "breaking schema version",
+                FormatRule::Required,
+            ),
+            Self::Ignored(entry) => positive(entry.number),
+            Self::Dependent(sources) => {
+                require(
+                    !sources.is_empty(),
+                    "dependency sources",
+                    FormatRule::Required,
+                )?;
+                sources.iter().try_for_each(|s| positive(s.write.number))
+            }
+            Self::Unjudged | Self::Applied | Self::Dropped => Ok(()),
+        }
+    }
+
     /// Whether the change survives as data for later changes.
     pub fn retained(&self) -> bool {
         matches!(self, Self::Unjudged | Self::Applied)
@@ -170,14 +149,18 @@ impl Wire for ChangeVerdict {
         match self {
             Self::Unjudged => 0u8.put(out),
             Self::Applied => 1u8.put(out),
-            Self::Excluded(cause) => {
+            Self::Excluded(version) => {
                 2u8.put(out)?;
-                cause.put(out)
+                version.put(out)
             }
             Self::Dropped => 3u8.put(out),
             Self::Dependent(sources) => {
                 4u8.put(out)?;
                 sources.put(out)
+            }
+            Self::Ignored(entry) => {
+                5u8.put(out)?;
+                entry.put(out)
             }
         }
     }
@@ -188,6 +171,7 @@ impl Wire for ChangeVerdict {
             2 => Ok(Self::Excluded(Wire::get(input)?)),
             3 => Ok(Self::Dropped),
             4 => Ok(Self::Dependent(Wire::get(input)?)),
+            5 => Ok(Self::Ignored(Wire::get(input)?)),
             tag => Err(Error::UnknownTag {
                 field: "change verdict",
                 tag,
@@ -250,16 +234,10 @@ impl AuthoredChange {
     pub(crate) fn validate(&self) -> Result<(), Error> {
         self.header.validate()?;
         self.change.validate()?;
+        self.verdict.validate()?;
         match &self.verdict {
-            ChangeVerdict::Excluded(cause) => cause.validate(),
             ChangeVerdict::Dependent(sources) => {
-                require(
-                    !sources.is_empty(),
-                    "dependency sources",
-                    FormatRule::Required,
-                )?;
                 for source in sources {
-                    positive(source.write.number)?;
                     require(
                         source.row.key == self.change.row.key
                             && source.row.audience == self.change.row.audience,

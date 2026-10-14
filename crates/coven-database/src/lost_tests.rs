@@ -94,7 +94,7 @@ async fn losses_preserve_storage_classes_each_setter_and_every_replacement() {
         encode_columns(&values).unwrap(),
         encode_setters(&setters).unwrap(),
         "excluded",
-        encode_exclusion(setter(1), LostWriteCause::SchemaChange(u32::MAX)).unwrap(),
+        encode_exclusion(setter(1), u32::MAX).unwrap(),
     );
     // A dependent change names its failed sources in role order, with repeats.
     let source = |write| coven_format::write_sources::ChangeId {
@@ -342,14 +342,7 @@ async fn a_lost_row_does_not_require_an_accepted_generation() {
         },
     )]);
     let setters = BTreeMap::from([("title".into(), write)]);
-    let entry = EntryId {
-        device: DeviceId(u64::MAX),
-        number: u64::MAX,
-    };
-    for cause in [
-        LostWriteCause::SchemaChange(u32::MAX),
-        LostWriteCause::Reset(entry),
-    ] {
+    for cause in [1, u32::MAX] {
         db.inspect_writer(|sql| {
             sql.internal_execute("INSERT INTO _coven_lost(table_name,key,audience,generation,value,set_by,replacement_kind,replaced_by,retired) VALUES (?1,?2,?3,?4,?5,?6,'excluded',?7,1)",
                 ("notes", &key, "store", 0u64.to_be_bytes().to_vec(), encode_columns(&values).unwrap(), encode_setters(&setters).unwrap(), encode_exclusion(write, cause).unwrap())).unwrap();

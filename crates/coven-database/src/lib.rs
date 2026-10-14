@@ -28,6 +28,7 @@ mod file_row;
 mod file_write;
 mod fingerprint;
 mod internal_schema;
+mod interpretation;
 mod key_scope;
 mod key_upload;
 pub use key_upload::{KeyUpload, KeyUploadBatch};

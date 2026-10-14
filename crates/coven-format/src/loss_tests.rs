@@ -28,14 +28,11 @@ fn every_loss_uses_one_section_without_write_headers_or_merge_metadata() {
     };
     let mut losses = test_utils::retained_losses();
     losses.extend([test_utils::concurrent_loss(), test_utils::excluded_loss()]);
-    for cause in [
-        LostWriteCause::SchemaChange(2),
-        LostWriteCause::Reset(test_utils::loss_entry()),
-    ] {
+    for version in [1, 2] {
         let mut losses = losses.clone();
         losses.last_mut().unwrap().cause = LossCause::Excluded {
             write: test_utils::write().header.position,
-            cause,
+            version,
         };
         let (mut encoder, mut decoder) = encoder(losses.len() as u64);
         for loss in losses {
@@ -123,18 +120,12 @@ fn invalid_losses_leave_order_and_counts_unchanged() {
         );
         invalid.push(loss);
     }
-    for cause in [
-        LostWriteCause::SchemaChange(0),
-        LostWriteCause::SchemaChange(3),
-        LostWriteCause::Reset(crate::value::EntryId {
-            number: 3,
-            ..test_utils::loss_entry()
-        }),
-    ] {
+    // A breaking version is positive and no later than the snapshot's.
+    for version in [0, 3] {
         let mut loss = test_utils::excluded_loss();
         loss.cause = LossCause::Excluded {
             write: test_utils::write().header.position,
-            cause,
+            version,
         };
         invalid.push(loss);
     }

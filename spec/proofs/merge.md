@@ -712,7 +712,7 @@ COVEN_MERGE_LEAN="$PWD/spec/proofs/merge/.lake/build/bin/mergeRunner" \
 The reset mode calls `reloadReset` on the selected snapshot inputs and incoming
 writes. `reset_differential_histories` calls the real database
 `load_snapshots`, which installs the snapshot and replays writes through
-`snapshot_writes::apply`, `download::accepted` and `WriteBoundary::excludes`.
+`snapshot_writes::apply`, `interpretation::accepted` and `WriteBoundary::excludes`.
 It compares generations, generation setters, cell setters, cell losses and
 frozen losses, and checks that every supplied write position is consumed.
 Store-log selection is supplied to both sides; this is not a test of replay
@@ -725,27 +725,30 @@ reset. The reducer removes writes, changes, non-key values, reset reads and
 snapshot coverage while preserving format validity, causal closure and the
 merge's generation witnesses.
 
-Seed 0 reduces to an empty reset snapshot and one key-only insert that did not
-read the reset. Rust applies it at generation 1; Lean leaves generation 0 and
-no cells. Neither produces a loss. `reset_differential_counterexample` fixes
-this history and checks that removing the write or reset, covering the write,
-or making it read the reset removes the difference. Lean's
-`ResetCounterexample` checks the specified results and write validity.
+Rust's reset predicate is §19.3's: an uncovered part of the reset audience is
+ignored when its write's `store_log_read` lacks the kept reset entry, even if
+it read every write in the snapshot. All 128 seeds pass, each in three causal
+arrival orders at both a full history and a random prefix (768 comparisons).
+`reset_differential_agreement` fixes the former seed-0 history: an empty reset
+snapshot and one key-only insert that did not read the reset. Both sides leave
+generation 0 and no cells or loss; removing the reset or making the write read
+it applies the insert on both sides, and removing the write or covering it
+also agrees. Lean's `ResetAgreement` checks the specified results and write
+validity.
 
-Lean follows [§19.3](../coven.md#193-resetting-a-store): “A write outside the
-snapshot that had not read that entry is ignored for the reset audience, even
-if it read every write in the snapshot.” Rust's reset predicate instead asks
-whether the write read the snapshot's write frontier, and whether it read a
-write outside that frontier. An empty frontier passes that test. No sentence
-in the current spec licenses that substitution for `store_log_read`.
-
-`scripts/check.sh` checks the fixed reset counterexample; the strict reset
-comparison remains ignored and outside the script. Run it explicitly with:
+`scripts/check.sh` runs the strict reset comparison and the fixed agreement
+case. Run them separately with:
 
 ```sh
 COVEN_MERGE_LEAN="$PWD/spec/proofs/merge/.lake/build/bin/mergeRunner" \
-  cargo test -p coven-database reset_differential_histories -- --ignored --nocapture
+  cargo test -p coven-database reset_differential -- --ignored --nocapture
 ```
+
+The generated authors here retain only snapshot inputs and post-reset data, so
+these histories never build on an ignored change. The queue comparison
+[`queue_reset_differential_histories`](queue.md) covers authors that read the
+reset before reloading: each change using ignored data becomes a dependency
+loss there, while its write's other changes apply.
 
 The schema mode calls `boundaryDevice`, including `receivedLoss` and the
 selected snapshot's frozen records. `schema_differential_histories` also
@@ -770,8 +773,7 @@ excluded: keep its values as frozen losses, and pass its position without
 applying its changes.” The adapter supplies the eligibility verdict from the
 write's version or explicit disposition, and tests the boundary's use of it.
 Conversion callbacks, per-change data dependencies, and competing
-store-log selection remain outside this comparison. Schema tests use no reset,
-so the known reset discrepancy cannot stop this family first.
+store-log selection remain outside this comparison. Schema tests use no reset.
 
 `scripts/check.sh` runs the strict schema comparison. Run it separately with:
 

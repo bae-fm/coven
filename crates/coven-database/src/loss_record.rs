@@ -65,8 +65,8 @@ pub(crate) fn read(r: &rusqlite::Row<'_>) -> rusqlite::Result<Loss> {
         "write" => LossCause::Write(decoded(merge_fields::decode_write_id(&replacement))?),
         "rules" => LossCause::Rules(decoded(merge_fields::decode_rules(&replacement))?),
         "excluded" => {
-            let (write, cause) = decoded(merge_fields::decode_exclusion(&replacement))?;
-            LossCause::Excluded { write, cause }
+            let (write, version) = decoded(merge_fields::decode_exclusion(&replacement))?;
+            LossCause::Excluded { write, version }
         }
         "dependency" => {
             let (write, sources) = decoded(merge_fields::decode_dependency(&replacement))?;
@@ -125,9 +125,9 @@ pub(crate) fn put(
     let (kind, cause) = match &loss.cause {
         LossCause::Write(write) => ("write", encoded(merge_fields::encode_write_id(write))?),
         LossCause::Rules(rules) => ("rules", encoded(merge_fields::encode_rules(rules))?),
-        LossCause::Excluded { write, cause } => (
+        LossCause::Excluded { write, version } => (
             "excluded",
-            encoded(merge_fields::encode_exclusion(*write, *cause))?,
+            encoded(merge_fields::encode_exclusion(*write, *version))?,
         ),
         LossCause::Dependency { write, sources } => (
             "dependency",

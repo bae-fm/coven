@@ -200,7 +200,7 @@ async fn a_snapshot_round_trips_rows_history_and_excluded_changes() {
             _ => None,
         })
         .collect();
-    use coven_format::snapshot_rows::{ChangeVerdict, LostWriteCause};
+    use coven_format::snapshot_rows::ChangeVerdict;
     assert_eq!(
         verdicts,
         [
@@ -208,7 +208,7 @@ async fn a_snapshot_round_trips_rows_history_and_excluded_changes() {
             ChangeVerdict::Applied,
             ChangeVerdict::Applied,
             ChangeVerdict::Applied,
-            ChangeVerdict::Excluded(LostWriteCause::SchemaChange(1)),
+            ChangeVerdict::Excluded(1),
         ]
     );
     let synced = snapshot

@@ -141,8 +141,11 @@ theorem boundaries_valid : Valid boundaryLog 4 ∧
   all_goals apply causalCheck_sound _ .nil; decide
 
 def emptySnapshot : Snapshot (Fin 4) (Fin 2) := ⟨CovenMerge.St.init, [], [], []⟩
+/-- The old-schema write read the reset entry, so the reset never ignores it. -/
+def readResetHeaders (w : Fin 4) : Header (Fin 4) :=
+  { MigrationExamples.headers w with storeRead := [2] }
 def boundaryData (entries : List Nat) :=
-  rebuild MigrationExamples.writes MigrationExamples.headers boundaryLog 4
+  rebuild MigrationExamples.writes readResetHeaders boundaryLog 4
     (resolve boundaryLog 4 (entrySet entries)) .store (fun _ => emptySnapshot) emptySnapshot [0]
 
 theorem schema_loss_returns :

@@ -147,15 +147,8 @@ impl SnapshotRecord {
             Self::Loss(v) => {
                 audience(&v.row)?;
                 require(v.covered(&h.writes), "loss writes", Rule::Coverage)?;
-                if let LossCause::Excluded { cause, .. } = v.cause {
-                    require(
-                        match cause {
-                            LostWriteCause::SchemaChange(version) => version <= h.schema_version,
-                            LostWriteCause::Reset(entry) => h.store_log.covers(entry),
-                        },
-                        "loss cause",
-                        Rule::Coverage,
-                    )?;
+                if let LossCause::Excluded { version, .. } = v.cause {
+                    require(version <= h.schema_version, "loss cause", Rule::Coverage)?;
                 }
                 if let LossCause::Rules(rules) = &v.cause {
                     for rule in rules {
@@ -183,12 +176,12 @@ impl SnapshotRecord {
                     covered(source.write)?;
                 }
                 match &v.verdict {
-                    ChangeVerdict::Excluded(LostWriteCause::SchemaChange(version)) => require(
+                    ChangeVerdict::Excluded(version) => require(
                         *version <= h.schema_version,
                         "change verdict",
                         Rule::Coverage,
                     ),
-                    ChangeVerdict::Excluded(LostWriteCause::Reset(entry)) => {
+                    ChangeVerdict::Ignored(entry) => {
                         require(h.store_log.covers(*entry), "change verdict", Rule::Coverage)
                     }
                     ChangeVerdict::Dependent(sources) => {

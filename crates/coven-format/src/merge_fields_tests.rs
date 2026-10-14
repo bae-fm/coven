@@ -175,16 +175,19 @@ fn removed_setters_and_rules_use_canonical_maps_and_sets() {
         encode_rules,
         decode_rules,
     );
-    let cause = LostWriteCause::Reset(EntryId {
-        device: DeviceId(u64::MAX),
-        number: u64::MAX,
-    });
-    let bytes = encode_lost_write_cause(&cause).unwrap();
+    let exclusion = (
+        WriteId {
+            device: DeviceId(u64::MAX),
+            number: u64::MAX,
+        },
+        u32::MAX,
+    );
+    let bytes = encode_exclusion(exclusion.0, exclusion.1).unwrap();
     take_field(
         &mut Decoder::new(&bytes).unwrap(),
-        &cause,
-        encode_lost_write_cause,
-        decode_lost_write_cause,
+        &exclusion,
+        |(write, version)| encode_exclusion(*write, *version),
+        decode_exclusion,
     );
 }
 
@@ -198,11 +201,7 @@ fn field_codecs_refuse_invalid_values_and_noncanonical_bytes() {
         encode_write_id(&invalid).unwrap_err(),
         decode_write_id(&[0; 16]).unwrap_err(),
         encode_setters(&BTreeMap::from([("x".into(), invalid)])).unwrap_err(),
-        encode_lost_write_cause(&LostWriteCause::Reset(EntryId {
-            device: DeviceId(1),
-            number: 0,
-        }))
-        .unwrap_err(),
+        encode_exclusion(invalid, 1).unwrap_err(),
     ] {
         assert_eq!(
             error,
@@ -276,9 +275,9 @@ fn field_codecs_refuse_invalid_values_and_noncanonical_bytes() {
         })
     );
     assert_eq!(
-        decode_lost_write_cause(&[255]),
+        decode_change_verdict(&[255]),
         Err(Error::UnknownTag {
-            field: "lost write cause",
+            field: "change verdict",
             tag: 255
         })
     );
@@ -391,17 +390,37 @@ fn unique_identity_retains_terms_order_and_partial_predicate() {
     }
 }
 #[test]
-fn schema_loss_uses_a_positive_u32_while_reset_retains_its_entry() {
-    use crate::snapshot_rows::LostWriteCause;
+fn schema_loss_uses_a_positive_u32_while_reset_ignores_retain_their_entry() {
+    use crate::snapshot_rows::ChangeVerdict;
+    let write = WriteId {
+        device: DeviceId(1),
+        number: 1,
+    };
     for version in [1, u32::MAX] {
-        let cause = LostWriteCause::SchemaChange(version);
-        let bytes = encode_lost_write_cause(&cause).unwrap();
-        assert_eq!(bytes, [vec![0], version.to_be_bytes().to_vec()].concat());
-        assert_eq!(decode_lost_write_cause(&bytes).unwrap(), cause);
+        let bytes = encode_exclusion(write, version).unwrap();
+        assert_eq!(&bytes[16..], version.to_be_bytes());
+        assert_eq!(decode_exclusion(&bytes).unwrap(), (write, version));
+        let verdict = ChangeVerdict::Excluded(version);
+        let bytes = encode_change_verdict(&verdict).unwrap();
+        assert_eq!(bytes, [vec![2], version.to_be_bytes().to_vec()].concat());
+        assert_eq!(decode_change_verdict(&bytes).unwrap(), verdict);
     }
+    // Resets create no losses; an ignored change keeps the reset's entry.
+    let entry = EntryId {
+        device: DeviceId(u64::MAX),
+        number: u64::MAX,
+    };
+    let bytes = encode_change_verdict(&ChangeVerdict::Ignored(entry)).unwrap();
+    assert_eq!(bytes[0], 5);
+    assert_eq!(
+        decode_change_verdict(&bytes).unwrap(),
+        ChangeVerdict::Ignored(entry)
+    );
     for error in [
-        encode_lost_write_cause(&LostWriteCause::SchemaChange(0)).unwrap_err(),
-        decode_lost_write_cause(&[0, 0, 0, 0, 0]).unwrap_err(),
+        encode_exclusion(write, 0).unwrap_err(),
+        decode_exclusion(&[[0; 7].as_slice(), &[1], &[0; 7], &[1], &[0; 4]].concat()).unwrap_err(),
+        encode_change_verdict(&ChangeVerdict::Excluded(0)).unwrap_err(),
+        decode_change_verdict(&[2, 0, 0, 0, 0]).unwrap_err(),
     ] {
         assert_eq!(
             error,

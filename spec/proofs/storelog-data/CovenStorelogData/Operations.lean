@@ -97,21 +97,25 @@ inductive Boundary (W : Type) where
   | schema (version : Nat) (audience : Audience) (included : List W)
   | reset (entry : Nat) (audience : Audience) (included : List W)
 
-/-- The recorded cause does not contain a boundary's coverage positions. -/
+/-- The recorded cause does not contain a boundary's coverage positions.
+Resets record none: they ignore parts without a loss (§19.3). -/
 inductive Exclusion where
   | schema (version : Nat)
-  | reset (entry : Nat)
   deriving DecidableEq, Repr
 
-def Boundary.cause {W : Type} : Boundary W → Exclusion
-  | .schema v _ _ => .schema v
-  | .reset e _ _ => .reset e
+/-- A raise excludes an uncovered part authored at an older version. -/
+def exclusion {W : Type} [DecidableEq W] (w : W) (version : Nat)
+    (audience : Audience) : Boundary W → Option Exclusion
+  | .schema v a included =>
+    if a == audience && version < v && w ∉ included then some (.schema v) else none
+  | .reset .. => none
 
-def excludes {W : Type} [DecidableEq W] (w : W) (version : Nat)
-    (audience : Audience) (past : List W) : Boundary W → Bool
-  | .schema v a included => a == audience && version < v && w ∉ included
-  | .reset _ a included => a == audience && w ∉ included &&
-      !included.all (· ∈ past) && past.any (· ∉ included)
+/-- A reset ignores an uncovered part whose author had not read its entry,
+even if it read every write the snapshot covers. -/
+def ignores {W : Type} [DecidableEq W] (w : W) (audience : Audience)
+    (storeRead : List Nat) : Boundary W → Bool
+  | .reset e a included => a == audience && w ∉ included && e ∉ storeRead
+  | .schema .. => false
 
 theorem reset_publication_order {W : Type} (s : CovenStorelog.SnapshotId) :
     publicationOrder (W := W) (.reset s) = [.uploadSnapshot s, .publish (.reset s)] := rfl

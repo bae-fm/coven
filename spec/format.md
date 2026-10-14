@@ -460,9 +460,10 @@
   absence is proof), the original D5 row change with its generation source
   and replaced setters, and the author's verdict. `verdict` is
   `0` unjudged (its effects arrived in an earlier snapshot), `1` applied,
-  `2 | cause:LostWriteCause` excluded, `3` dropped by its own retirement
-  window, or `4 | sources:[ChangeId]` dependent. Only unjudged and applied
-  changes survive as sources. Its write and every source it names must be
+  `2 | version:u32` excluded by the breaking change to that version, `3`
+  dropped by its own retirement window, `4 | sources:[ChangeId]` dependent,
+  or `5 | entry:EntryId` ignored by that kept reset (§19.3), which it had not
+  read. Only unjudged and applied changes survive as sources. Its write and every source it names must be
   covered by the positions; dismissing a loss never changes a verdict.
   A loader keeps the same original bytes for one identity and adopts the
   snapshot's verdicts with its data.

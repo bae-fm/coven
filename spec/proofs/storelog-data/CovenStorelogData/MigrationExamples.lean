@@ -60,7 +60,7 @@ def ben : Snapshot (Fin 4) (Fin 2) :=
   ⟨[0, 1, 3].foldl (CovenMerge.step writes) CovenMerge.St.init, [0, 1, 3], [], []⟩
 def headers (w : Fin 4) : Header (Fin 4) :=
   ⟨if w.val = 0 then 1 else 2, (List.finRange 4).filter (writes.past w),
-   if w.val < 2 then .apply else .migration⟩
+   if w.val < 2 then .apply else .migration, []⟩
 def result := resolve log 5 (entrySet (List.range 5))
 def snapshots (id : SnapshotId) : Snapshot (Fin 4) (Fin 2) :=
   if id.number = 0 then ana else ben
@@ -97,10 +97,12 @@ example : ¬ Accounted writes (fun _ => True) afterReload.data
   · have : afterReload.data.cell note 1 ≠ some 3 := by decide
     exact this h.1
 
-/-- Reset losses have an explicit cause, unlike the migration marker above. -/
-example : excludes (2 : Nat) 1 .store [1] (.reset 5 .store [0]) = true ∧
-    excludes (2 : Nat) 1 .store [] (.reset 5 .store [0]) = false ∧
-    excludes (2 : Nat) 1 .store [0, 1] (.reset 5 .store [0]) = false := by decide
+/-- A reset ignores a part whose author had not read its entry, whatever
+writes it read, and records no loss for it. -/
+example : ignores (2 : Nat) .store [] (.reset 5 .store [0]) = true ∧
+    ignores (2 : Nat) .store [5] (.reset 5 .store [0]) = false ∧
+    ignores (2 : Nat) .store [] (.reset 5 .store [0, 2]) = false ∧
+    exclusion (2 : Nat) 1 .store (.reset 5 .store [0]) = none := by decide
 
 def resets : Log
   | 1 => entry 0 0 [0] (.addMember 1 .admin "S3")
