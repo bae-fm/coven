@@ -92,9 +92,11 @@ fn edit_waiting(
             "UPDATE _coven_uploads SET record=?1 WHERE device=?2 AND number=?3 AND sealing_keys IS NULL",
             params![bytes,id.device.0.to_be_bytes().as_slice(),id.number.to_be_bytes().as_slice()],
         )?;
-        if updated != 1 {
-            return Err(DbError::MigrationUploadMissing { write: id });
-        }
+        // This connection selected the row above and is the queue's only writer.
+        assert_eq!(
+            updated, 1,
+            "waiting upload {id:?} selected above is unchanged"
+        );
     }
     Ok(())
 }

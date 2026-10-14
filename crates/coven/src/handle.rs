@@ -402,8 +402,9 @@ impl CovenHandle {
     /// Stops operation and file work, closes connections and releases the writer
     /// lock. Open file streams retain their shared deletion guards. Later
     /// database calls on any clone fail with `DbError::StoreClosed`; custody
-    /// calls fail with `KeyError::StoreClosed`. Closing reports every failure.
-    pub async fn close(&self) -> Result<(), DbError> {
+    /// calls fail with `KeyError::StoreClosed`. Closing reports every failure:
+    /// one alone as itself, several chained as `SyncError::Cleanup`.
+    pub async fn close(&self) -> Result<(), SyncError> {
         self.closing.begin_close();
         let handle = self.clone();
         crate::coven::completion(tokio::spawn(async move {
@@ -426,18 +427,14 @@ impl CovenHandle {
                 Err(SyncError::Database(DbError::StoreClosed)) => Ok(()),
                 result => result,
             });
-            let failure = workers
+            workers
                 .chain([database.map_err(SyncError::from)])
                 .filter_map(Result::err)
                 .reduce(|operation, cleanup| SyncError::Cleanup {
                     operation: Box::new(operation),
                     cleanup: Box::new(cleanup),
-                });
-            match failure {
-                None => Ok(()),
-                Some(SyncError::Database(error)) => Err(error),
-                Some(error) => Err(DbError::OperationWorker(Box::new(error))),
-            }
+                })
+                .map_or(Ok(()), Err)
         }))
         .await
     }

@@ -266,12 +266,6 @@ pub enum DbError {
         /// The migration being applied.
         migration_version: u32,
     },
-    /// A waiting upload disappeared while its conversion was being recorded.
-    #[error("waiting upload {write:?} disappeared during migration")]
-    MigrationUploadMissing {
-        /// The missing waiting write.
-        write: coven_merge::WriteId,
-    },
     /// A write tried to replace a file declared write-once (§16).
     #[error("file on {table} at {key:?} cannot be replaced")]
     FileWriteOnce {
@@ -466,12 +460,6 @@ pub enum DbError {
     /// A fixed entry must be published before another is made.
     #[error("store-log entry {0:?} is waiting for publication")]
     StoreLogUploadPending(crate::EntryId),
-    /// Stopping the store’s operation worker failed.
-    #[error("operation worker failed: {0}")]
-    OperationWorker(#[source] Box<dyn std::error::Error + Send + Sync>),
-    /// A journal value could not be encoded or decoded.
-    #[error(transparent)]
-    OperationData(#[from] serde_json::Error),
     /// An operation no longer has the state expected by its caller.
     #[error("operation {0:?} changed or is absent")]
     OperationChanged(crate::OperationId),

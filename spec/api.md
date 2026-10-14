@@ -349,6 +349,13 @@ pub enum DbError {
     NotInCircle(CircleId),
     /// A required reset, schema or skipped-history reload has not committed.
     AudienceReloading(Audience),
+    /// This device's last store-log entry is fixed but unpublished; it must be
+    /// published before this device makes another (§9).
+    StoreLogUploadPending(EntryId),
+    /// This device has used every store-log entry number (§9).
+    StoreLogNumberExhausted,
+    /// This device has reserved every key-copy number (§11).
+    KeyCopyNumberExhausted,
     /// Self-replacement has paused app writes while queued objects settle
     /// and the new binding and custody are installed (§10, E9).
     MemberKeysChanging,
@@ -359,6 +366,9 @@ pub enum DbError {
     InvalidWrite { write: WriteId, error: MergeError },
     /// A received record or its conversion violates the write format (E13).
     WriteFormat(coven_format::Error),
+    /// Snapshots or their gap writes could not be checked or loaded; the
+    /// database is unchanged (§15, §19.2).
+    Snapshot(SnapshotError),
     /// A conversion changed or introduced a reference whose generation it cannot know (E13).
     MigrationReference { table: String, column: String },
     /// A converted row names the same column twice.
@@ -449,6 +459,40 @@ pub enum DbError {
     SyncStream(Box<dyn std::error::Error + Send + Sync>),
     /// Closing failed for these connections, after every one was tried (E1).
     Closing { failures: Vec<DbError> },
+}
+
+/// Why snapshots or their gap writes could not be checked or loaded (§15, §19.2).
+pub enum SnapshotError {
+    /// A downloaded gap write failed while the reload was applying it.
+    Write { write: WriteId, error: Box<DbError> },
+    /// Reading the plaintext supplied by sync failed.
+    Read(std::io::Error),
+    /// A frame or its merge state failed the format's checks.
+    Format(coven_format::Error),
+    /// The snapshot needs a different app schema (§17).
+    Schema { snapshot: u32, database: u32 },
+    /// These store-log entries must apply first; snapshots don't carry them.
+    StoreLog { missing: Vec<EntryId> },
+    /// These gap writes or causal predecessors were not supplied.
+    MissingWrites { missing: Vec<WriteId> },
+    /// A supplied write cannot apply yet.
+    WriteWaiting(WriteWait),
+    /// Individually valid records disagree with one another or the schema.
+    Inconsistent(&'static str),
+}
+
+/// What a downloaded write waits for before it can apply (§6, §19.1).
+pub enum WriteWait {
+    /// Store-log entries the write's author had applied.
+    StoreLog(Vec<EntryId>),
+    /// Writes that must apply first, including the author's preceding write.
+    Writes(Vec<WriteId>),
+    /// The app must support this schema version.
+    SchemaVersion(u32),
+    /// This device's breaking migration awaits publication and reload.
+    SchemaPublication(u32),
+    /// The audience's reload has not committed its replacement data.
+    Reload(Audience),
 }
 
 /// A schema rule checked on open and after migrating (§8, §14.1).
@@ -832,8 +876,10 @@ impl CovenHandle {
     /// lock. Open file streams and outstanding file I/O
     /// retain their shared deletion guards. Later database calls on any clone
     /// fail with `DbError::StoreClosed`; custody calls fail with `KeyError::StoreClosed`.
-    /// Reports connection-close failures; cancellation does not stop closing.
-    pub async fn close(&self) -> Result<(), DbError>;
+    /// Reports every failure of closing workers and connections, one alone as
+    /// itself and several chained as `SyncError::Cleanup`; cancellation does
+    /// not stop closing.
+    pub async fn close(&self) -> Result<(), SyncError>;
 }
 ```
 
@@ -2014,6 +2060,9 @@ pub enum SyncError {
     /// An internal invariant failed. The public category is also recorded
     /// as PendingReason::Failed; the initiating call retains the native cause.
     Failed { failure: LocalFailure, source: Arc<dyn std::error::Error + Send + Sync> },
+    /// A later step, such as a rollback or closing another owner, failed
+    /// too; neither failure is hidden.
+    Cleanup { operation: Box<SyncError>, cleanup: Box<SyncError> },
     /// Reading or removing credentials or keys failed.
     SecureStorage(KeyError),
     /// Opening the store key failed.

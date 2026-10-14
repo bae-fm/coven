@@ -24,12 +24,13 @@ pub enum SyncError {
     /// Provider setup failed before replacing the active connection.
     #[error(transparent)]
     Setup(#[from] Box<coven_storage::StorageSetupError>),
-    /// Rollback failed too; neither failure is hidden.
-    #[error("{operation}; rollback failed: {cleanup}")]
+    /// A later step, such as a rollback or closing another owner, failed
+    /// too; neither failure is hidden.
+    #[error("{operation}; then: {cleanup}")]
     Cleanup {
         /// The original failure.
         operation: Box<SyncError>,
-        /// Failure restoring the original state.
+        /// The later failure, such as restoring the original state.
         #[source]
         cleanup: Box<SyncError>,
     },
@@ -126,9 +127,16 @@ impl From<coven_database::CovenError> for SyncError {
 impl From<DbError> for SyncError {
     fn from(error: DbError) -> Self {
         match error {
+            // The database refusing sync's own requests out of order or
+            // against changed state is an internal invariant, not a database
+            // failure an app can act on.
             error @ (DbError::InvalidStoreLogEntry { .. }
             | DbError::StoreLogEntriesChanged
-            | DbError::StoreLogEntryChanged(_)) => Self::Failed {
+            | DbError::StoreLogEntryChanged(_)
+            | DbError::UploadNotOldest { .. }
+            | DbError::UploadNotAttempted { .. }
+            | DbError::KeyUploadChanged { .. }
+            | DbError::OperationChanged(_)) => Self::Failed {
                 failure: crate::LocalFailure::Database,
                 source: Arc::new(error),
             },

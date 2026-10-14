@@ -107,3 +107,49 @@ fn object_validation_keeps_causes_and_local_failures_stay_local() {
         SyncError::Database(DbError::DamagedDatabase)
     ));
 }
+
+#[test]
+fn refusals_of_syncs_own_requests_fail_internally_and_keep_their_native_cause() {
+    let write = WriteId {
+        device: DeviceId(1),
+        number: 2,
+    };
+    let entry = coven_database::EntryId {
+        device: DeviceId(1),
+        number: 3,
+    };
+    let internal = [
+        DbError::StoreLogEntriesChanged,
+        DbError::StoreLogEntryChanged(entry),
+        DbError::UploadNotOldest { write },
+        DbError::UploadNotAttempted { write },
+        DbError::KeyUploadChanged {
+            writer: DeviceId(1),
+            number: std::num::NonZeroU64::MIN,
+        },
+        DbError::OperationChanged(coven_database::OperationId(4)),
+    ];
+    for refusal in internal {
+        let expected = refusal.to_string();
+        let error = SyncError::from(refusal);
+        let SyncError::Failed {
+            failure: crate::LocalFailure::Database,
+            source,
+        } = &error
+        else {
+            panic!("{error:?}")
+        };
+        assert_eq!(
+            source.downcast_ref::<DbError>().unwrap().to_string(),
+            expected
+        );
+    }
+    // Conditions an app can see stay database failures.
+    for condition in [
+        DbError::StoreLogUploadPending(entry),
+        DbError::StoreLogNumberExhausted,
+        DbError::KeyCopyNumberExhausted,
+    ] {
+        assert!(matches!(SyncError::from(condition), SyncError::Database(_)));
+    }
+}

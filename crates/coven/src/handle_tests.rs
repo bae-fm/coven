@@ -497,7 +497,10 @@ async fn workers_share_keys_across_stop_forget_and_reacquisition_until_close() {
         clone.store_key_state(),
         Err(KeyError::StoreClosed)
     ));
-    assert!(matches!(clone.close().await, Err(DbError::StoreClosed)));
+    assert!(matches!(
+        clone.close().await,
+        Err(SyncError::Database(DbError::StoreClosed))
+    ));
     assert_eq!(keys.closes.load(Ordering::SeqCst), 1);
     assert_eq!(identity.closes.load(Ordering::SeqCst), 1);
 }
@@ -605,10 +608,9 @@ async fn closing_erases_custody_even_when_releasing_a_worker_fails() {
         .await
         .unwrap();
     let clone = handle.clone();
-    assert!(matches!(
-        handle.close().await,
-        Err(DbError::OperationWorker(_))
-    ));
+    // The operation worker's own failure, not a database error.
+    let error = handle.close().await.unwrap_err();
+    assert!(!matches!(error, SyncError::Database(_)), "{error:?}");
     assert_eq!(keys.closes.load(Ordering::SeqCst), 1);
     assert_eq!(identity.closes.load(Ordering::SeqCst), 1);
     assert!(keys.keys.lock().unwrap().is_none());
