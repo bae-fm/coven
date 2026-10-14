@@ -136,7 +136,7 @@ pub(crate) fn load<P: crate::PendingValue, R: Read, W: Read>(
         // Waits for writes these positions now cover end with this commit.
         crate::pending::clear_covered_writes(database)?;
         // Retention sees the final state, including every replayed waiting write.
-        files.retain_rows(affected, &deleted)?;
+        files.retain_rows(affected)?;
         files.before_commit()?;
         for audience in &selected {
             crate::entry_effects::clear_reload(database, audience)?;

@@ -92,7 +92,7 @@ pub(crate) fn dismiss(
             database, schema, &store, &visible, &visible, &deleted,
         )
         .apply(Some(&record), BTreeSet::new())?;
-        files.retain_rows(affected, &deleted)?;
+        files.retain_rows(affected)?;
         files.before_commit()?;
         crate::write_commit::queue(database, &record)
     })

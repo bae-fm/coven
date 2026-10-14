@@ -114,7 +114,7 @@ pub(crate) fn finish(
             database, schema, &current, &prior, &prior, deleted,
         )
         .replace(&old, touched)?;
-        files.retain_rows(affected, deleted)?;
+        files.retain_rows(affected)?;
     }
     database.for_each::<_, crate::DbError>(
         "SELECT record FROM temp._coven_download_dismissals ORDER BY id",

@@ -138,7 +138,7 @@ pub(crate) fn apply<P: crate::PendingValue>(
         )?;
         crate::retained_writes::download(database, &download)?;
         let affected = apply_opened(database, schema, download, &deleted)?;
-        files.retain_rows(affected, &deleted)?;
+        files.retain_rows(affected)?;
         files.before_commit()?;
         Ok(ApplyOutcome::Applied)
     }))

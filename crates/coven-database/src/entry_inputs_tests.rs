@@ -254,8 +254,7 @@ async fn data_differential_entry_effects() {
 #[tokio::test]
 #[ignore = "requires COVEN_STORELOG_DATA_LEAN, supplied by scripts/check.sh"]
 async fn data_differential_entry_effects_circles() {
-    use crate::store_log::tests::{checked, circle_history, member};
-    use coven_format::store_log::StoreChange;
+    use crate::store_log::tests::{checked, circle_history};
     let runner = std::env::var_os("COVEN_STORELOG_DATA_LEAN").expect("built storelogDataRunner");
     let circle = coven_foundation::id_source::CircleId(uuid::Uuid::from_u128(2));
     let history = circle_history(circle);
@@ -301,28 +300,7 @@ async fn data_differential_entry_effects_circles() {
                     .await
                     .unwrap();
             } else if stage == 2 {
-                let mut removal = history[0].0.clone();
-                removal.position.number = 5;
-                removal.timestamp =
-                    coven_merge::Timestamp::new(5, 0, removal.position.device).unwrap();
-                removal.change = StoreChange::RemoveMember { member: member(2) };
-                let mut replay = history[3].1.clone();
-                replay.state.members.get_mut(&member(2)).unwrap().removed = true;
-                replay
-                    .state
-                    .circles
-                    .get_mut(&circle)
-                    .unwrap()
-                    .members
-                    .remove(&member(2));
-                replay
-                    .entries
-                    .insert(removal.position, crate::EntryOutcome::Kept);
-                replay.entries.insert(
-                    history[4].0.position,
-                    crate::EntryOutcome::Dropped(crate::DropReason::BeatenBy(removal.position)),
-                );
-                db.apply_store_log::<Record>(checked(removal), replay, Vec::new())
+                crate::store_log::tests::drop_circle_deletion(&db, circle)
                     .await
                     .unwrap();
             }

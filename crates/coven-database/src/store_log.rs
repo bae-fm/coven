@@ -430,7 +430,7 @@ pub(crate) fn apply<P: crate::PendingValue>(
             database, schema, &store, &visible, &visible, &deleted,
         )
         .apply(None, touched)?);
-        files.retain_rows(affected, &deleted)?;
+        files.retain_rows(affected)?;
         files.before_commit()?;
         for update in updates {
             crate::operation::advance(database, update)?;

@@ -347,15 +347,12 @@ impl<'a> FileWrite<'a> {
     }
 
     /// Retain an original's recorded facts while a current row still names it,
-    /// including rows temporarily removed by constraints. Historical generations
-    /// and deleted circles cannot keep them. Audience moves keep a file's
-    /// identity. The upload queue keeps its own source facts and owned copies
-    /// independently of rows (§16.5).
-    pub(crate) fn retain_rows(
-        &self,
-        keys: BTreeSet<AppKey>,
-        deleted: &BTreeMap<coven_foundation::id_source::CircleId, crate::EntryId>,
-    ) -> Result<(), DbError> {
+    /// including rows temporarily removed by constraints and rows a circle
+    /// deletion hides: that deletion is not a row delete and can still drop
+    /// (§14.7). Historical generations cannot keep them. Audience moves keep a
+    /// file's identity. The upload queue keeps its own source facts and owned
+    /// copies independently of rows (§16.5).
+    pub(crate) fn retain_rows(&self, keys: BTreeSet<AppKey>) -> Result<(), DbError> {
         let db = self.database;
         // Each file identity is checked once; retaining its app row would keep
         // every downloaded payload alive until this whole write finishes.
@@ -390,9 +387,7 @@ impl<'a> FileWrite<'a> {
                     ))
                 },
             )? {
-                if generation % 2 == 0
-                    || matches!(&audience, coven_merge::Audience::Circle(id) if deleted.contains_key(id))
-                {
+                if generation % 2 == 0 {
                     continue;
                 }
                 let row = store.row(&coven_merge::RowId {

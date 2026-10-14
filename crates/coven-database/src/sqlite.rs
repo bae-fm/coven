@@ -414,7 +414,7 @@ impl DatabaseConnection {
                 }
                 error => error,
             })?;
-            files.retain_rows(affected, &deleted_circles)?;
+            files.retain_rows(affected)?;
             if let Some(record) = &record {
                 crate::write_commit::queue(database, record)?;
             }

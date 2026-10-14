@@ -192,6 +192,32 @@ pub(crate) async fn delete_circle(db: &Database, circle: CircleId) -> Result<(),
         .await
 }
 
+/// Drop `delete_circle`'s deletion: Ana's higher-tier removal of Ben, its
+/// author, beats it and the circle's rows return (§14.7).
+pub(crate) async fn drop_circle_deletion(db: &Database, circle: CircleId) -> Result<(), DbError> {
+    let history = circle_history(circle);
+    let mut removal = history[0].0.clone();
+    removal.position.number = 5;
+    removal.timestamp = Timestamp::new(5, 0, removal.position.device).unwrap();
+    removal.change = StoreChange::RemoveMember { member: member(2) };
+    let mut replay = history[3].1.clone();
+    replay.state.members.get_mut(&member(2)).unwrap().removed = true;
+    replay
+        .state
+        .circles
+        .get_mut(&circle)
+        .unwrap()
+        .members
+        .remove(&member(2));
+    replay.entries.insert(removal.position, EntryOutcome::Kept);
+    replay.entries.insert(
+        history[4].0.position,
+        EntryOutcome::Dropped(crate::DropReason::BeatenBy(removal.position)),
+    );
+    db.apply_store_log::<PendingRecord>(checked(removal), replay, Vec::new())
+        .await
+}
+
 const NOTE: &str = "00000000-0000-4000-8000-000000000001";
 const SCHEMA: &str = "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,audience TEXT NOT NULL,title TEXT); CREATE TABLE children(id TEXT NOT NULL PRIMARY KEY,note TEXT NOT NULL REFERENCES notes(id) ON DELETE CASCADE); CREATE INDEX children_note ON children(note)";
 
