@@ -218,11 +218,16 @@ several devices at once, so they're modelled differently.
   from trying to write the proof: a step that won't keep the property is exactly
   the sequence of events that breaks it. Once the proof is finished, the property
   holds for every order of events, not only the ones anyone thought of.
-- **Model versus code.** The proof is about the model, not the Rust. The
-  differential test connects them: it generates random histories, runs each
-  through the Rust implementation and through the Lean model's executable step
-  function, and compares the results. The merge and the store log already have
-  one; each new model gets one too.
+- **Model versus code.** The proof is about the model, not the Rust.
+  Differential tests run the same inputs through the Rust implementation and
+  the Lean model's executable functions, then compare the results. Coverage
+  follows implemented counterparts:
+  merge, store-log replay, storage clocks/create-once, IO finality and store-log
+  data's retained-access pending visibility have runners. The
+  [queue row classifier](queue.md#spec-edit-checklist-and-rust-obligations) has no
+  Rust counterpart until implementation task T100. The
+  [access comparison](storelog-data.md#rust-differential-coverage) checks completed
+  revocation attempts, not the full serialized access lifecycle assigned to T33.
 
 ### What the queue and schema-change model found before any code changed
 

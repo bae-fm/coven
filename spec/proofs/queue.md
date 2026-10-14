@@ -568,5 +568,11 @@ on every device without converting the raising device's own upload queue.
 
 `CovenQueue/Axioms.lean` audits the main results. `scripts/check.sh` rebuilds
 the package, rejects unfinished proofs and foreign axioms, and continues to
-run the existing Rust/Lean differential tests. This package adds no Rust
-changes and no new differential test.
+run the existing Rust/Lean differential tests. There is no queue differential:
+Rust's `coven-database/src/download.rs::accepted` selects whole audience parts
+using `WriteBoundary::excludes`, not `classifyChange`'s generation and replaced
+setter sources. It has no counterpart to `mergeInput`'s per-row selection in
+`RowMerge.lean`. Implementation task T100 adds that classifier and its queue
+comparison; T99 supplies authored source evidence, T101 retains source verdicts
+through snapshots, and T102 adds per-change receive conversion. Comparing the
+existing whole-part boundary filter would not test this model's rule.

@@ -1,5 +1,5 @@
 name = "covenStorelogData"
-defaultTargets = ["CovenStorelogData", "storelogDataRunner"]
+defaultTargets = ["CovenStorelogData", "storelogDataRunner", "accessRunner"]
 
 [[require]]
 name = "covenMerge"
@@ -15,3 +15,7 @@ name = "CovenStorelogData"
 [[lean_exe]]
 name = "storelogDataRunner"
 root = "StorelogDataRunner"
+
+[[lean_exe]]
+name = "accessRunner"
+root = "AccessRunner"

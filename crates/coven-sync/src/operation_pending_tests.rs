@@ -1,4 +1,5 @@
 use super::*;
+use serde_json::{json, Value};
 
 #[tokio::test]
 async fn maintenance_failures_are_visible_and_wait_for_a_changed_connection() {
@@ -542,5 +543,136 @@ async fn retained_access_commits_its_condition_with_the_provider_result() {
                 .collect::<Vec<_>>(),
             keys
         );
+    }
+}
+
+// Operation ids are fresh UUIDs in Rust and naturals in Lean. Each history
+// maps its one real operation to its case index; reporter ids remain exact.
+async fn observed(
+    operations: &Operations,
+    db: &coven_database::Database,
+    storage: &MemoryStorage,
+    account: &str,
+    operation: Option<OperationId>,
+    index: usize,
+) -> Value {
+    let mut records = Vec::new();
+    for record in pending(operations, db).await {
+        assert_eq!(Some(pending_id(&record)), operation);
+        let PendingReason::AccessRemains { account, .. } = record.reason else {
+            panic!("unexpected pending record: {record:?}");
+        };
+        records.push(json!({
+            "operation": index,
+            "reporter": record.reported_by.0,
+            "account": account,
+            "reason": "accessRemains",
+        }));
+    }
+    let recipient = MemoryStorage::for_recipient(storage, account).unwrap();
+    let actual = match recipient.list(&ObjectPrefix::all(store(1))).await {
+        Ok(_) => true,
+        Err(error) if error.failure() == StorageFailure::PermissionDenied => false,
+        Err(error) => panic!("unexpected provider result: {error}"),
+    };
+    json!({"actual": actual, "pending": records})
+}
+
+#[tokio::test]
+#[ignore = "requires COVEN_ACCESS_LEAN; scripts/check.sh supplies it"]
+async fn lean_differential_access_pending() {
+    let mut inputs = Vec::new();
+    let mut rust = Vec::new();
+    for remote in [false, true] {
+        for failures in 0..=3 {
+            let storage = google();
+            let [mut a, mut b, c] = accounts(storage.clone()).await;
+            let account = "cat@example.com";
+            let reporter = a.device().await;
+            let shares = vec![coven_storage::RetainedAccess {
+                provider_id: "parent-permission".into(),
+                reason: coven_storage::RetainedAccessReason::Inherited,
+            }];
+            if failures > 0 {
+                storage.set_retained_access(account, shares.clone()).await;
+            }
+            if remote {
+                let id = begin(&mut b, Command::RemoveMember(c.member.member_id())).await;
+                finish(&mut b, id).await;
+                a.sync().await;
+            }
+            let files = file_owner(&a);
+            let operations = operation_owner(a.sync, files);
+            if !remote {
+                let result = operations
+                    .remove_member(&c.member.member_id())
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    result,
+                    if failures > 0 {
+                        MemberRemoval::AccessRemains {
+                            shares: shares.clone(),
+                        }
+                    } else {
+                        MemberRemoval::Revoked
+                    }
+                );
+            }
+            let conditions = pending(&operations, &a.db).await;
+            assert_eq!(conditions.len(), usize::from(failures > 0));
+            let operation = conditions.first().map(pending_id);
+            let index = inputs.len();
+            let mut results =
+                vec![observed(&operations, &a.db, &storage, account, operation, index).await];
+            for _ in 1..failures {
+                assert!(matches!(
+                    operations.retry_pending_operation(operation.unwrap()).await,
+                    Err(SyncError::AccessRemains(found)) if found == shares
+                ));
+                results
+                    .push(observed(&operations, &a.db, &storage, account, operation, index).await);
+            }
+            if let Some(id) = operation {
+                storage.set_retained_access(account, Vec::new()).await;
+                operations.retry_pending_operation(id).await.unwrap();
+                results
+                    .push(observed(&operations, &a.db, &storage, account, operation, index).await);
+            }
+            assert!(a.db.operations().await.unwrap().is_empty());
+            let retained: Vec<_> = std::iter::repeat_n(true, failures)
+                .chain(std::iter::once(false))
+                .collect();
+            inputs.push(json!({
+                "account": account, "reporter": reporter.0,
+                "operation": index, "retained": retained,
+            }));
+            rust.push(results);
+            operations.close().await.unwrap();
+        }
+    }
+    let output = crate::tests::run_lean("COVEN_ACCESS_LEAN", &json!(inputs));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let lean: Vec<Vec<Value>> = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(lean, rust);
+}
+
+#[test]
+#[ignore = "requires COVEN_ACCESS_LEAN; scripts/check.sh supplies it"]
+fn lean_differential_access_rejects_invalid_inputs() {
+    for retained in [json!([]), json!([false, true]), json!(["retained"])] {
+        let output = crate::tests::run_lean(
+            "COVEN_ACCESS_LEAN",
+            &json!([{
+                "account": "cat@example.com", "reporter": 1,
+                "operation": 0, "retained": retained,
+            }]),
+        );
+        assert!(!output.status.success());
+        assert!(!output.stderr.is_empty());
     }
 }

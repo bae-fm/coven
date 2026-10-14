@@ -502,6 +502,31 @@ coverage survives a dropped verdict. `scripts/check.sh` runs the differential,
 rebuilds every selected module and checks `Axioms.lean`; the audit permits only
 Lean's own `propext`, `Classical.choice`, and `Quot.sound`.
 
+## Rust differential coverage
+
+[`AccessRunner.lean`](storelog-data/AccessRunner.lean) calls `Access.adopt`,
+`retryFailed`, `start`, `complete`, `work` and `Pending.records`. The Rust
+[`lean_differential_access_pending`](../../crates/coven-sync/src/operation_pending_tests.rs)
+test runs the actual removal operations, provider adapter and database pending
+query against controlled provider replies. It compares pending operation and
+reporter identities, account, retained-access reason and actual provider access
+after each completed attempt: immediate success, one to three retained-grant
+failures, repeated explicit retries, and eventual success. Both locally requested
+and remotely received removals run. Fresh Rust operation UUIDs map to the case's
+Lean natural identity; Rust assertions check that the real identity stays fixed.
+Provider-specific retained-share payloads remain Rust assertions.
+
+`scripts/check.sh` builds `accessRunner` and supplies `COVEN_ACCESS_LEAN` when
+the package or `coven-sync` changes. It also runs rejection cases for malformed
+replies and retries after successful completion, and checks that both tests exist
+before selecting them.
+
+This comparison does not cover ready/in-flight visibility, owner waits, grants,
+replay intention changes or S3 deletion notices. Rust still uses removal-driven
+`Data::Revoke`/`MemberRemoval` and a separate access-key deletion list; it lacks
+the model's serialized account journal. Implementation task T33 introduces that
+counterpart and the full `Access` comparison.
+
 ## Member-key replacement
 
 `MemberKeySelection`, `MemberKeyPhases` and `MemberKeyExamples` extend the

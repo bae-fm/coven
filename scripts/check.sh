@@ -232,7 +232,7 @@ runner() {
     echo "$path"
 }
 
-# Merge, replay, clocks and create-once uploads have Rust differential tests.
+# Merge, replay, access visibility, clocks and create-once uploads have Rust differential tests.
 # Data coupling also has checked counterexamples (spec/proofs/storelog-data.md).
 # Each runs when its Lean package or the Rust crate it compares is selected.
 proofs() {
@@ -275,6 +275,7 @@ proofs() {
             tests::lean_differential_generated \
             tests::lean_differential_checked_examples \
             tests::lean_differential_circle_replay \
+            tests::lean_differential_online_administration \
             replay::landing::tests::lean_differential_storage_admission \
             tests::lean_differential_rejects_invalid_inputs \
             store_log_sync::store_log_batch::tests::lean_differential_batch_partitions \
@@ -283,8 +284,24 @@ proofs() {
                 echo "the Rust test binary is missing $test" >&2
                 exit 1
             fi
+            COVEN_STORELOG_LEAN="$runner" cargo test -p coven-sync --all-features "$test" -- --ignored --exact
         done
-        COVEN_STORELOG_LEAN="$runner" cargo test -p coven-sync --all-features lean_differential -- --ignored
+    fi
+
+    if proof_selected storelog-data || crate_selected coven-sync; then
+        runner=$(runner storelog-data accessRunner)
+        step "Rust / Lean retained access pending visibility"
+        local access_tests test
+        access_tests=$(cargo test -p coven-sync --all-features lean_differential_access -- --list)
+        for test in \
+            store_log_sync::tests::operations::pending_records::lean_differential_access_pending \
+            store_log_sync::tests::operations::pending_records::lean_differential_access_rejects_invalid_inputs; do
+            if ! printf '%s\n' "$access_tests" | grep -qxF "$test: test"; then
+                echo "the Rust test binary is missing $test" >&2
+                exit 1
+            fi
+            COVEN_ACCESS_LEAN="$runner" cargo test -p coven-sync --all-features "$test" -- --ignored --exact
+        done
     fi
 
     if proof_selected storelog-data || crate_selected coven-sync; then
