@@ -64,6 +64,41 @@ async fn plant_refused_entry(storage: &MemoryStorage) {
         .unwrap();
 }
 
+/// Device 2's next key copy has no readable clear prefix: the copy
+/// observation is incomplete (§11). Device 2 must be in the group.
+async fn plant_unreadable_copy(storage: &MemoryStorage) {
+    storage
+        .create(
+            &ObjectPath::key_copy(STORE_ID, DeviceId(2), NonZeroU64::MIN),
+            b"not a sealed key",
+        )
+        .await
+        .unwrap();
+}
+
+/// A first phase whose entries complete but whose copy observation meets an
+/// unreadable prefix is incomplete, even while the previous pass's catch-up
+/// is still fresh: no first attempt uses that earlier pass's copies
+/// (`PassPhases.entries_only_reuses_previous`).
+#[tokio::test]
+async fn an_unreadable_copy_prefix_holds_first_attempts_after_a_fresh_pass() {
+    let storage = storage();
+    let ana = group(storage.clone(), 2).await.remove(0);
+    let (operations, ana) = start(ana);
+    operations.sync().await.unwrap();
+    plant_unreadable_copy(&storage).await;
+    sql(&ana.db, "INSERT INTO notes VALUES('one','title','body')").await;
+    operations.sync().await.unwrap();
+    assert!(storage.status(&write_path(1)).await.unwrap().is_none());
+    let attempted = ana
+        .db
+        .read_oldest_upload(|upload| Ok::<_, coven_database::DbError>(upload.keys.is_some()))
+        .await
+        .unwrap();
+    assert_eq!(attempted, Some(false));
+    operations.close().await.unwrap();
+}
+
 /// An incomplete first phase sends no first attempt and permits no
 /// administrative entry; a complete one permits both.
 #[tokio::test]
@@ -167,7 +202,8 @@ async fn a_provider_access_wait_does_not_hold_unrelated_data() {
 }
 
 /// IO `PassPhases.run` over `readLog`: a first phase whose entry log reaches
-/// a refused entry is incomplete, so the pass makes no first attempt and only
+/// a refused entry, or whose copies include an unreadable prefix, is
+/// incomplete, so the pass makes no first attempt and only
 /// resends an attempted write, under the previous pass's catch-up while it is
 /// fresh. A failed entry or copy read ends the pass. The real pass agrees.
 #[test]
@@ -180,21 +216,25 @@ fn io_differential_pass_phases() {
     let runtime = tokio::runtime::Runtime::new().unwrap();
     let mut cases = Vec::new();
     let mut results = Vec::new();
-    for (entry_failed, entry_refused, copy_failed, attempted, expired) in [
-        (false, false, false, false, false),
-        (true, false, false, false, false),
-        (false, true, false, false, false),
-        (false, false, true, false, false),
-        (false, false, false, true, false),
-        (false, true, false, true, false),
-        (false, true, false, true, true),
-        (false, false, false, true, true),
-        (true, false, false, true, false),
-        (false, false, true, true, false),
+    for (entry_failed, entry_refused, copy_failed, unreadable, attempted, expired) in [
+        (false, false, false, false, false, false),
+        (true, false, false, false, false, false),
+        (false, true, false, false, false, false),
+        (false, false, true, false, false, false),
+        (false, false, false, false, true, false),
+        (false, true, false, false, true, false),
+        (false, true, false, false, true, true),
+        (false, false, false, false, true, true),
+        (true, false, false, false, true, false),
+        (false, false, true, false, true, false),
+        (false, false, false, true, false, false),
+        (false, false, false, true, true, false),
+        (false, false, false, true, true, true),
     ] {
         let (first_attempt, retried) = runtime.block_on(async {
             let storage = storage();
-            let mut ana = group(storage.clone(), 1).await.remove(0);
+            let devices = if unreadable { 2 } else { 1 };
+            let mut ana = group(storage.clone(), devices).await.remove(0);
             sql(&ana.db, "INSERT INTO notes VALUES('one','title','body')").await;
             if attempted {
                 // Write 1's first attempt fixes its keys, then fails.
@@ -219,6 +259,9 @@ fn io_differential_pass_phases() {
             }
             if entry_refused {
                 plant_refused_entry(&storage).await;
+            }
+            if unreadable {
+                plant_unreadable_copy(&storage).await;
             }
             let mut faults = Faults::none();
             if entry_failed {
@@ -247,7 +290,7 @@ fn io_differential_pass_phases() {
         });
         cases.push(json!({"check":"phases",
             "entry":{"count":usize::from(entry_refused),"failed":entry_failed,"refused":entry_refused},
-            "copy":{"count":0,"failed":copy_failed,"refused":false},
+            "copy":{"count":0,"failed":copy_failed,"refused":false,"unreadable":unreadable},
             "attempted":attempted,"elapsed":if expired { 300 } else { 0 }}));
         results.push(json!({"first_attempt":first_attempt,"retried":retried}));
     }

@@ -759,9 +759,10 @@ in phase 1 ends the pass with nothing sent.
 [`IORunner.lean`](io/IORunner.lean)'s `phases` case runs `PassPhases.run`
 for the Rust test `io_differential_pass_phases`
 ([`operation_pass_tests.rs`](../../crates/coven-sync/src/operation_pass_tests.rs)).
-It covers a failed entry or copy read, a refused entry, an attempted write
-from an earlier pass, and that pass's catch-up being fresh or five minutes
-old. It compares whether an untried write got its first attempt and whether
+It covers a failed entry or copy read, a refused entry, an unreadable copy
+prefix, an attempted write from an earlier pass, and that pass's catch-up
+being fresh or five minutes old. The unreadable prefix with a fresh earlier
+catch-up is `entries_only_reuses_previous`: the pass makes no first attempt. It compares whether an untried write got its first attempt and whether
 the attempted write was resent.
 
 ### Joined revocation
@@ -1015,12 +1016,6 @@ The model does not establish them.
 - Confirm cutoff includes in-flight sessions, orphan scans survive reopen, a new
   access epoch requires a new scan, and rows, losses, history and non-final effects
   continue protecting file deletion.
-- A pass whose copy observation meets an unreadable clear prefix must not
-  count phase 1 as complete (`entries_only_reuses_previous`). The current
-  `catch_up_membership` decides from entry completeness and `can_send()`, which
-  can still see the previous pass's catch-up: such a pass shares keys and makes
-  first attempts with that earlier pass's copies. Test a phase 1 that ends in
-  an unreadable copy while the previous catch-up is fresh.
 - The reserved store-log entry is held after an incomplete phase 1 by the
   pass's own settling step, while an operation already publishing its reserved
   entry and copies resends them. Both send only fixed attempts, as

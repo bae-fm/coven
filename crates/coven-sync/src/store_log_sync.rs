@@ -156,6 +156,8 @@ impl StoreLogSync {
     /// operation of this pass in place of their own catch-up (SP step 5).
     pub(crate) async fn catch_up_membership(&self) -> Result<bool, SyncError> {
         let complete = self.scan_store_log(false).await?;
+        // A complete phase installed its own catch-up, so `can_send` judges
+        // this phase, never an earlier one that is still fresh.
         self.reads.keep_membership(complete && self.send.can_send());
         Ok(complete)
     }

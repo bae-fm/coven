@@ -232,7 +232,8 @@ private def drain (j : Json) : Except String Json := do
 
 /-- `PassPhases.run` over IO `readLog`. Phase 1 reads the entry log, then
 the copy log once the entries reach their miss: a failed read ends the pass,
-a refused entry leaves phase 1 incomplete. The previous pass's catch-up
+a refused entry or an unreadable copy prefix leaves phase 1 incomplete
+(`entries_only_reuses_previous`). The previous pass's catch-up
 started at second 0; this pass starts `elapsed` seconds later. Write 1 is
 attempted or untried; with an attempted write 1, write 2 is untried.
 Reports whether an untried write had its first attempt and whether an
@@ -251,8 +252,9 @@ private def phases (j : Json) : Except String Json := do
   let elapsed ← j.getObjValAs? Nat "elapsed"
   let entries ← observe .entry "entry"
   let copies ← observe .copy "copy"
+  let unreadable ← (← j.getObjVal? "copy").getObjValAs? Bool "unreadable"
   let plan : PassPhases.Plan := {
-    writer := 1, start := elapsed, phase := ⟨entries, copies, true, .send, false, elapsed⟩,
+    writer := 1, start := elapsed, phase := ⟨entries, copies, !unreadable, .send, false, elapsed⟩,
     copies := [], shares := [], entry := none, admission := none, operations := [],
     attempted := if attempted then [1] else [], untried := if attempted then [2] else [1],
     resumed := [], clock := fun _ => elapsed }

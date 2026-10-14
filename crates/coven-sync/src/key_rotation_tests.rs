@@ -123,13 +123,13 @@ async fn an_incomplete_copy_observation_blocks_first_attempts() {
     storage.create(&bad, b"not a sealed key").await.unwrap();
     let now = coven_foundation::clock::Clock::now(ana.clock.as_ref());
     ana.clock.set(now + std::time::Duration::from_secs(300));
-    // A catch-up that must be complete fails on that copy; a pass's scan
-    // completes but supplies no sending authority.
+    // A catch-up that must be complete fails on that copy; a pass's scan is
+    // incomplete and supplies no sending authority.
     assert!(matches!(
         ana.sync.scan_store_log_once(true).await,
         Err(SyncError::Damaged(damage)) if damage.path == bad.as_str()
     ));
-    assert!(ana.sync.scan_store_log_once(false).await.unwrap());
+    assert!(!ana.sync.scan_store_log_once(false).await.unwrap());
     assert!(matches!(
         ana.send.observation(),
         Err(SyncError::Storage(error)) if error.failure() == coven_storage::StorageFailure::CatchUpRequired

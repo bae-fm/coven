@@ -8,7 +8,9 @@ impl StoreLogSync {
     /// One complete scan of the received store log. Each received entry that
     /// cannot apply yet is its own subject's record, replaced by this scan: its
     /// missing key, its newer format, or the first entry of its recorded past
-    /// that has not applied (§19.1). Returns whether every observed entry applied.
+    /// that has not applied (§19.1). Returns whether the observation completed:
+    /// every observed entry applied and every key copy's clear prefix decoded.
+    /// Only then does it supply sending authority and the catch-up time (§11).
     pub(super) async fn scan_store_log_once(
         &self,
         require_complete: bool,
@@ -100,6 +102,25 @@ impl StoreLogSync {
                 if let Some((writer, number)) = copy.metadata.path.key_copy_position() {
                     if writer == local.device {
                         listed_copies = listed_copies.max(number.get());
+                        // This installation seals only decodable copies, and
+                        // confirms each by its bytes: a number it reserved
+                        // whose prefix does not decode holds another live
+                        // copy's object (§10). Waiting on it as an unreadable
+                        // copy would leave every first phase incomplete. A
+                        // number beyond the reservations is storage ahead.
+                        if number.get() <= reserved.key_copies
+                            && coven_format::sealed_key::SealedKey::decode(&copy.bytes).is_err_and(
+                                |error| crate::Refusal::from(error).required_update().is_none(),
+                            )
+                        {
+                            tracing::warn!(
+                                path = copy.metadata.path.as_str(),
+                                "own key-copy number holds another copy's bytes"
+                            );
+                            return Err(self
+                                .send
+                                .stop(coven_foundation::files::DeviceResetReason::SlotMismatch));
+                        }
                     }
                 }
             }
@@ -389,13 +410,15 @@ impl StoreLogSync {
             // A copy without a readable prefix leaves the reading incomplete:
             // it supplies no sending authority (§11).
             match reading.unreadable {
-                None => self.send.complete(binding, reading.copies)?,
+                None => {
+                    self.send.complete(binding, reading.copies)?;
+                    self.finality
+                        .lock()
+                        .expect("finality lock poisoned")
+                        .complete_catch_up(sample);
+                }
                 Some(damage) => unreadable = Some(damage),
             }
-            self.finality
-                .lock()
-                .expect("finality lock poisoned")
-                .complete_catch_up(sample);
         } else {
             self.acquire_keys(&local.log, &member, &mut ring).await?;
         }
@@ -410,10 +433,13 @@ impl StoreLogSync {
                 }
             }
         }
-        // A catch-up that must be complete fails loudly on that copy.
+        // A catch-up that must be complete fails loudly on that copy; the
+        // pass's first phase is incomplete, so an earlier catch-up that is
+        // still fresh cannot stand in for it (SP step 2).
         match unreadable {
             Some(damage) if require_complete => Err(damage.into()),
-            _ => Ok(complete),
+            Some(_) => Ok(false),
+            None => Ok(complete),
         }
     }
 
