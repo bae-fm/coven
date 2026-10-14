@@ -136,10 +136,8 @@ mod tests;
 
 mod operation;
 pub use operation::{
-    AccessKeyToDelete, NewOperation, OperationCommit, OperationId, OperationRecord, OperationUpdate,
+    AccessKeyToDelete, NewOperation, OperationId, OperationRecord, OperationUpdate,
 };
-
-mod circle_deletion;
 
 mod database_changes;
 pub use database_changes::DatabaseChanges;

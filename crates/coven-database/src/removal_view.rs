@@ -55,7 +55,7 @@ pub(crate) struct DatabaseRemovalView<'a> {
     schema: &'a WriteSchema,
     app: &'a AppView<'a>,
     updates: &'a BTreeMap<RowId, RowUpdate<Value>>,
-    deleted: &'a BTreeSet<CircleId>,
+    deleted: &'a BTreeMap<CircleId, crate::EntryId>,
     arriving: Option<(WriteId, Timestamp)>,
     rows: Option<RefCell<BTreeMap<RowId, EvaluatedRow>>>,
     edges: BTreeMap<RowId, BTreeSet<RowId>>,
@@ -69,7 +69,7 @@ impl<'a> DatabaseRemovalView<'a> {
         schema: &'a WriteSchema,
         app: &'a AppView<'a>,
         updates: &'a BTreeMap<RowId, RowUpdate<Value>>,
-        deleted: &'a BTreeSet<CircleId>,
+        deleted: &'a BTreeMap<CircleId, crate::EntryId>,
         arriving: Option<(WriteId, Timestamp)>,
     ) -> Result<Self, DbError> {
         let mut edges = BTreeMap::<RowId, BTreeSet<RowId>>::new();
@@ -233,7 +233,10 @@ impl<'a> DatabaseRemovalView<'a> {
             generation,
             started: self.stamp(state.generations()[&generation]),
             references,
-            deleted_circle: matches!(id.audience,Audience::Circle(circle) if self.deleted.contains(&circle)),
+            deleted_circle: match id.audience {
+                Audience::Store => None,
+                Audience::Circle(circle) => self.deleted.get(&circle).copied(),
+            },
         };
         let row = EvaluatedRow {
             facts,

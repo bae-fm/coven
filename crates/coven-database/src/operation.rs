@@ -44,14 +44,6 @@ impl std::fmt::Debug for OperationRecord {
     }
 }
 
-/// The journal change committed together with a circle row-deletion write.
-pub enum OperationCommit {
-    /// Begin a circle deletion with its first row write.
-    Start(NewOperation),
-    /// Repeat row deletion after replay dropped the preceding attempt.
-    Advance(OperationUpdate),
-}
-
 /// The initial state committed before any external effect.
 pub struct NewOperation {
     /// Stable kind name.

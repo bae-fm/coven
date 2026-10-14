@@ -114,7 +114,7 @@ impl LostWriteCause {
             Self::SchemaChange(version) => {
                 require(version > 0, "breaking schema version", FormatRule::Required)
             }
-            Self::Reset(entry) => entry.validate(),
+            Self::Reset(entry) => positive(entry.number),
         }
     }
 }

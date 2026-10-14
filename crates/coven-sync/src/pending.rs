@@ -97,8 +97,6 @@ pub enum Prerequisite {
     },
     /// This audience must reload.
     Reload(#[serde(with = "crate::snapshot_data::audience")] Audience),
-    /// This device must publish its waiting writes.
-    OwnUploads,
     /// A reader must post positions.
     Positions(DeviceId),
     /// Physical cleanup must retain an entry's reversal inputs.

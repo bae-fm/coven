@@ -225,7 +225,10 @@ async fn queued_entries_wait_for_reload_and_finishing_a_queued_reset_blocks_new_
     a.sync
         .record_operation_condition(
             &record,
-            crate::PendingReason::Waits(crate::Prerequisite::OwnUploads),
+            crate::PendingReason::Waits(crate::Prerequisite::Object(object::path(
+                store(1),
+                queued.entry.position,
+            ))),
         )
         .await
         .unwrap();

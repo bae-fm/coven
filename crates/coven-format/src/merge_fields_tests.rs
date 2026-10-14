@@ -158,7 +158,10 @@ fn removed_setters_and_rules_use_canonical_maps_and_sets() {
         encode_setters,
         decode_setters,
     );
-    let rules = BTreeSet::from([Rule::DeletedCircle, Rule::OtherAudience]);
+    let rules = BTreeSet::from([
+        Rule::DeletedCircle(fixture::loss_entry()),
+        Rule::OtherAudience,
+    ]);
     let bytes = encode_rules(&rules).unwrap();
     take_field(
         &mut Decoder::new(&bytes).unwrap(),
@@ -242,7 +245,14 @@ fn field_codecs_refuse_invalid_values_and_noncanonical_bytes() {
             })
         );
     }
-    for bytes in [[0, 0, 0, 2, 3, 2], [0, 0, 0, 2, 2, 2]] {
+    for bytes in [
+        vec![0, 0, 0, 2, 3, 3],
+        [
+            vec![0, 0, 0, 2, 3],
+            encode(&Rule::DeletedCircle(fixture::loss_entry())).unwrap(),
+        ]
+        .concat(),
+    ] {
         assert_eq!(
             decode_rules(&bytes),
             Err(Error::Invalid {
@@ -465,4 +475,56 @@ fn constraint_order_is_logical_with_absent_predicates_first() {
         .collect();
     let bytes = encode_rules(&rules).unwrap();
     assert_eq!(decode_rules(&bytes).unwrap(), rules);
+}
+
+#[test]
+fn deleted_circle_rules_keep_canonical_entry_identities_and_refuse_zero() {
+    let entries = [
+        EntryId {
+            device: DeviceId(1),
+            number: 1,
+        },
+        EntryId {
+            device: DeviceId(1),
+            number: u64::MAX,
+        },
+        EntryId {
+            device: DeviceId(u64::MAX),
+            number: 1,
+        },
+    ];
+    let rules = entries.map(Rule::DeletedCircle);
+    let expected = BTreeSet::from(rules.clone());
+    assert_eq!(
+        decode_rules(&encode_rules(&expected).unwrap()).unwrap(),
+        expected
+    );
+    for noncanonical in [
+        vec![rules[1].clone(), rules[0].clone()],
+        vec![rules[0].clone(), rules[0].clone()],
+    ] {
+        assert_eq!(
+            decode_rules(&encode(&noncanonical).unwrap()),
+            Err(Error::Invalid {
+                field: "set",
+                rule: FormatRule::Order,
+            })
+        );
+    }
+    let invalid = BTreeSet::from([Rule::DeletedCircle(EntryId {
+        device: DeviceId(1),
+        number: 0,
+    })]);
+    for error in [
+        encode_rules(&invalid).unwrap_err(),
+        decode_rules(&encode(&invalid).unwrap()).unwrap_err(),
+    ] {
+        assert_eq!(
+            error,
+            Error::Invalid {
+                field: "log number",
+                rule: FormatRule::Required
+            }
+        );
+    }
 }

@@ -37,7 +37,7 @@ async fn transfer(a: &Device, b: &Device) {
 }
 
 #[tokio::test]
-async fn deletion_write_and_operation_commit_together_and_wait_for_upload() {
+async fn circle_deletion_publishes_only_an_entry_and_does_not_wait_for_a_row_upload() {
     let storage = google();
     let [mut a, mut b, _c] = accounts(storage).await;
     rows(&mut a).await;
@@ -57,7 +57,7 @@ async fn deletion_write_and_operation_commit_together_and_wait_for_upload() {
     transfer(&a, &b).await;
     assert_eq!(count(&b).await, 1);
     let deletion = begin(&mut a, Command::DeleteCircle(circle)).await;
-    assert_eq!(count(&a).await, 0);
+    assert_eq!(count(&a).await, 1);
     assert!(!a
         .log()
         .await
@@ -66,15 +66,16 @@ async fn deletion_write_and_operation_commit_together_and_wait_for_upload() {
         .circle_deletions
         .contains_key(&circle));
     assert_eq!(a.db.operations().await.unwrap().len(), 1);
-    assert_eq!(a.db.operations().await.unwrap()[0].last_step, 1);
-    assert_eq!(a.db.test_queued_writes().await.unwrap().len(), 1);
+    assert_eq!(a.db.operations().await.unwrap()[0].last_step, 0);
+    assert!(a.db.test_queued_writes().await.unwrap().is_empty());
     assert!(matches!(
         step(&mut a, deletion).await.unwrap(),
-        Progress::Waiting(_)
+        Progress::Advanced
     ));
-    transfer(&a, &b).await;
-    assert_eq!(count(&b).await, 0);
     finish(&mut a, deletion).await;
+    assert_eq!(count(&a).await, 0);
+    assert_eq!(count(&b).await, 1);
+    assert!(a.db.test_queued_writes().await.unwrap().is_empty());
     b.sync().await;
     assert!(b
         .log()
@@ -83,6 +84,63 @@ async fn deletion_write_and_operation_commit_together_and_wait_for_upload() {
         .state
         .circle_deletions
         .contains_key(&circle));
+}
+
+#[tokio::test]
+async fn dropping_circle_deletion_restores_existing_and_arriving_rows() {
+    let [mut a, mut b, _c] = accounts(google()).await;
+    rows(&mut a).await;
+    rows(&mut b).await;
+    let create = begin(&mut a, Command::CreateCircle("Gifts".into())).await;
+    let Output::CircleId(circle) = finish(&mut a, create).await else {
+        panic!("created circle")
+    };
+    let add = begin(
+        &mut a,
+        Command::AddCircleMember(circle, b.member.member_id()),
+    )
+    .await;
+    finish(&mut a, add).await;
+    b.sync().await;
+    write(&a, circle, 1).await;
+    let first = a.db.test_queued_writes().await.unwrap()[0].header.position;
+    transfer(&a, &b).await;
+
+    // Ana fixes a concurrent store removal before Ben publishes his deletion.
+    let removal = begin(&mut a, Command::RemoveMember(b.member.member_id())).await;
+    step(&mut a, removal).await.unwrap();
+    let deletion = begin(&mut b, Command::DeleteCircle(circle)).await;
+    finish(&mut b, deletion).await;
+    assert_eq!(count(&b).await, 0);
+    assert!(b.db.test_queued_writes().await.unwrap().is_empty());
+
+    // Ana has not read the deletion; Ben receives her second row while hidden.
+    write(&a, circle, 2).await;
+    let second = a.db.test_queued_writes().await.unwrap()[0].header.position;
+    transfer(&a, &b).await;
+    assert_eq!(count(&b).await, 0);
+    let entry = b.log().await.replay.state.circle_deletions[&circle];
+    let losses = b.db.lost_values().await.unwrap();
+    assert_eq!(losses.len(), 2);
+    for (loss, setter) in losses.iter().zip([first, second]) {
+        assert_eq!(
+            loss.replaced_by,
+            coven_database::Replacement::Rules(vec![coven_database::RemovalRule::DeletedCircle {
+                entry
+            }])
+        );
+        let coven_database::Lost::Row(cells) = &loss.lost else {
+            panic!("circle deletion retains each row")
+        };
+        assert!(cells.iter().all(|cell| cell.set_by == setter));
+    }
+
+    finish(&mut a, removal).await;
+    assert_eq!(count(&a).await, 2);
+    assert!(a.db.lost_values().await.unwrap().is_empty());
+    assert!(a.db.test_queued_writes().await.unwrap().is_empty());
+    rows(&mut a).await;
+    assert_eq!(count(&a).await, 2);
 }
 
 #[tokio::test]
@@ -104,9 +162,9 @@ async fn circle_deletion_survives_an_earlier_concurrent_circle_removal() {
     b.sync().await;
     write(&a, circle, 1).await;
     transfer(&a, &b).await;
-    // Ben knows another row that Ana's explicit deletion cannot name.
+    // Ben knows another row that Ana has not read.
     write(&b, circle, 2).await;
-    // Ben's earlier removal is fixed before Ana's deletion write arrives.
+    // Ben fixes his earlier removal before Ana publishes her deletion.
     let removal = begin(
         &mut b,
         Command::RemoveCircleMember(circle, a.member.member_id()),
@@ -135,7 +193,7 @@ async fn circle_deletion_survives_an_earlier_concurrent_circle_removal() {
 }
 
 #[tokio::test]
-async fn concurrent_circle_removal_does_not_restart_a_deletions_row_write() {
+async fn concurrent_circle_removal_keeps_deletion_entry_only() {
     let storage = google();
     let [mut a, mut b, c] = accounts(storage).await;
     rows(&mut a).await;
@@ -164,7 +222,7 @@ async fn concurrent_circle_removal_does_not_restart_a_deletions_row_write() {
     step(&mut a, deletion).await.unwrap(); // fix deletion against the original members
     finish(&mut b, removal).await;
     transfer(&b, &a).await;
-    assert_eq!(count(&a).await, 1);
+    assert_eq!(count(&a).await, 2);
     finish(&mut a, deletion).await;
     assert_eq!(count(&a).await, 0);
     assert!(a.db.test_queued_writes().await.unwrap().is_empty());

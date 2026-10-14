@@ -249,8 +249,9 @@ proofs() {
         step "Rust / Lean Boolean merge differential"
         COVEN_MERGE_LEAN="$runner" cargo test -p coven-merge --all-features lean_differential -- --ignored
 
-        step "Rust / Lean circle-entry counterexample"
-        COVEN_MERGE_LEAN="$runner" cargo test -p coven-merge --all-features entry_differential_counterexample -- --ignored
+        step "Rust / Lean circle-entry differential"
+        COVEN_MERGE_LEAN="$runner" cargo test -p coven-merge --all-features entry_differential_histories -- --ignored
+        COVEN_MERGE_LEAN="$runner" cargo test -p coven-merge --all-features entry_differential_agreement -- --ignored
     fi
 
     if proof_selected merge || crate_selected coven-database; then

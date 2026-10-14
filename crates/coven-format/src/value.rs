@@ -4,6 +4,7 @@ use crate::error::{bound, require, Error, Rule};
 use crate::wire::{get_blob, put_blob, wire_struct, Decoder, Encoder, Wire};
 use coven_crypto::{Fingerprint, MemberId, SealingPublicKey};
 use coven_foundation::id_source::{CircleId, DeviceId, FileId, InviteId, KeyId, StoreId};
+pub use coven_merge::EntryId;
 use coven_merge::{Audience, RowId, Timestamp, WriteId};
 use uuid::Uuid;
 
@@ -87,28 +88,7 @@ impl Wire for Audience {
     }
 }
 wire_struct!(WriteId, device, number);
-
-/// One device's numbered store-log entry (§9), distinct from a merge write.
-///
-/// ```compile_fail
-/// use coven_format::value::EntryPositions;
-/// use coven_foundation::id_source::DeviceId;
-/// use coven_merge::WriteId;
-/// let entries = EntryPositions(vec![WriteId { device: DeviceId(1), number: 1 }]);
-/// ```
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct EntryId {
-    /// The device whose store log contains the entry.
-    pub device: DeviceId,
-    /// The entry's number, starting at one.
-    pub number: u64,
-}
 wire_struct!(EntryId, device, number);
-impl EntryId {
-    pub(crate) fn validate(&self) -> Result<(), Error> {
-        positive(self.number)
-    }
-}
 
 macro_rules! positions {
     ($ty:ident, $id:ty, $doc:literal) => {

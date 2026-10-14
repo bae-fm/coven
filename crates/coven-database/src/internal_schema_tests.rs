@@ -251,9 +251,9 @@ mod query_plans {
          INSERT INTO _coven_pending(subject,reporter,value,operation,object,coven_version)
            SELECT key,device,x'00',CASE WHEN i%2=0 THEN i END,
                   CAST(x'00' || device || n AS BLOB),'1' FROM fixture;
-         INSERT INTO _coven_store_log(device,number,record,author_view,stored_at,outcome)
-           SELECT device,n,zeroblob(128),x'00',zeroblob(13),'kept' FROM fixture;
-         INSERT INTO _coven_store_log_uploads VALUES(counter(1),counter(1),zeroblob(128),zeroblob(16));
+         INSERT INTO _coven_store_log(device,number,record,timestamp,author_view,stored_at,outcome)
+           SELECT device,n,zeroblob(128),CAST(n || device AS BLOB),x'00',zeroblob(13),'kept' FROM fixture;
+         INSERT INTO _coven_store_log_uploads VALUES(counter(1),counter(1),zeroblob(128),zeroblob(16),zeroblob(16));
          INSERT INTO _coven_key_publications SELECT n,n FROM fixture;
          INSERT INTO _coven_key_uploads
            SELECT device,n,zeroblob(128),CASE WHEN i%4=0 THEN counter(1) END,
@@ -326,7 +326,10 @@ mod query_plans {
                     .query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))
                     .unwrap();
                 match table.as_str() {
-                    "_coven_store" | "_coven_store_log_uploads" | "_coven_snapshot_schema" => {
+                    "_coven_store"
+                    | "_coven_store_log_uploads"
+                    | "_coven_snapshot_schema"
+                    | "_coven_finality" => {
                         assert_eq!(count, 1)
                     }
                     _ => assert!(
@@ -417,8 +420,6 @@ mod query_plans {
             Some("the public losses reader returns all losses"),
         ("store_log.rs", "SELECT device,number,outcome,beaten_device,beaten_number,target FROM _coven_store_log", "_coven_store_log") =>
             Some("replay verifies the complete previously committed entry set"),
-        ("store_log_tables.rs", "SELECT circle FROM _coven_circle_deletions", "_coven_circle_deletions") =>
-            Some("row recomputation needs the set of all deleted circles"),
         ("store_log_tables.rs", "SELECT record,outcome,beaten_device,beaten_number,target,author_view,stored_at FROM _coven_store_log", "_coven_store_log") =>
             Some("store_log() returns every replay entry"),
         ("store_log_tables.rs", "SELECT member,sealing,role,removed,access FROM _coven_members", "_coven_members") =>

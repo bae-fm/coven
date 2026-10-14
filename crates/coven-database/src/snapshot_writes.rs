@@ -26,7 +26,7 @@ pub(crate) fn apply<R: Read>(
     downloads: Vec<DownloadedWriteStream<R>>,
     absent: Vec<WriteId>,
     mut coverage: SnapshotCoverage,
-    deleted: &BTreeSet<CircleId>,
+    deleted: &BTreeMap<CircleId, crate::EntryId>,
 ) -> Result<BTreeSet<AppKey>, DbError> {
     let mut sources = BTreeMap::new();
     let mut supplied = BTreeSet::new();

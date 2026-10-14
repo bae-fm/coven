@@ -24,7 +24,7 @@ pub(crate) fn changes(
     after: &AppView<'_>,
     stored: &MergeStore<'_>,
     changed: &BTreeMap<AppKey, BTreeSet<String>>,
-    deleted: &BTreeSet<CircleId>,
+    deleted: &BTreeMap<CircleId, crate::EntryId>,
 ) -> Result<BTreeMap<RowId, RowChange>, DbError> {
     let mut moved = BTreeMap::new();
     let mut keys: BTreeSet<_> = changed.keys().cloned().collect();
@@ -271,7 +271,7 @@ pub(crate) fn changes(
         .collect();
     for (row, change) in &mut changes {
         if let Audience::Circle(circle) = row.audience {
-            if deleted.contains(&circle) {
+            if deleted.contains_key(&circle) {
                 return Err(DbError::DeletedCircle(circle));
             }
         }

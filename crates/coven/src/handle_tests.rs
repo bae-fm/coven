@@ -662,7 +662,6 @@ fn missing_prerequisites_and_replaceable_positions_retry_automatically() {
             version: 2,
         },
         Prerequisite::Reload(Audience::Store),
-        Prerequisite::OwnUploads,
         Prerequisite::Positions(device),
         Prerequisite::EntryFinality(EntryId { device, number: 1 }),
     ] {

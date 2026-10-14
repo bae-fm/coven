@@ -63,11 +63,13 @@ pub(crate) fn outcome(row: &Row<'_>, start: usize) -> rusqlite::Result<EntryOutc
 
 pub(crate) fn deleted_circles(
     database: &DatabaseConnection,
-) -> Result<BTreeSet<CircleId>, DbError> {
+) -> Result<BTreeMap<CircleId, EntryId>, DbError> {
     Ok(database
-        .query("SELECT circle FROM _coven_circle_deletions", [], |row| {
-            circle(row.get(0)?)
-        })?
+        .query(
+            "SELECT circle,entry_device,entry_number FROM _coven_circle_deletions",
+            [],
+            |row| Ok((circle(row.get(0)?)?, entry_id(row, 1)?)),
+        )?
         .into_iter()
         .collect())
 }
@@ -196,14 +198,7 @@ pub(crate) fn read(database: &DatabaseConnection) -> Result<StoreLog, DbError> {
             .members
             .insert(member);
     }
-    state.circle_deletions = database
-        .query(
-            "SELECT circle,entry_device,entry_number FROM _coven_circle_deletions",
-            [],
-            |row| Ok((circle(row.get(0)?)?, entry_id(row, 1)?)),
-        )?
-        .into_iter()
-        .collect();
+    state.circle_deletions = deleted_circles(database)?;
     state.store = database
         .query("SELECT id,name,key FROM _coven_store", [], |row| {
             let text: String = row.get(0)?;
@@ -420,3 +415,7 @@ fn put_version(
     )?;
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "store_log_tables_tests.rs"]
+mod tests;

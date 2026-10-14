@@ -454,9 +454,9 @@ limits](../coven.md#3-guarantees), not this convergence theorem.
 Lean checks the theorems named in this appendix. `CovenMerge/Axioms.lean`
 prints their axioms; only Lean's `propext`, `Classical.choice` and
 `Quot.sound` are allowed. `scripts/check.sh` rebuilds the package, audits
-these axioms, and runs the Boolean and schema differentials and the fixed
-Rust/Lean counterexamples in B16. Strict comparisons that find a discrepancy stay
-out of the check script.
+these axioms, and runs the Boolean, entry-aware and schema differentials and the
+fixed reset and migration counterexamples in B16. Strict comparisons that find
+those remaining discrepancies stay out of the check script.
 
 Values are identified by their setters and cells. A column can be its old
 name, so a frozen record does not require that column in the new schema.
@@ -492,9 +492,9 @@ write validity, retained generation witnesses and snapshot correctness.
 Files, encryption, network transfer, atomic SQLite installation, retention
 until finality, loss dismissal, fingerprint hashing and trigger execution are outside
 this model. The functions describe a completed atomic reload; they do not
-model a partially installed database. Rust's merge functions use Boolean
-circle causes. The Boolean differential passes; the entry-aware differential
-exposes the missing deletion-entry identity in B16. The reset differential
+model a partially installed database. Rust's merge functions retain the kept
+circle-deletion entry in each cause. The Boolean and entry-aware differentials
+pass, including replacement and removal of those causes (B16). The reset differential
 calls the database snapshot reload and exposes a separate eligibility
 discrepancy there. The schema-boundary differential passes on its generated
 histories; version/conversion verdicts are supplied as described below.
@@ -670,26 +670,22 @@ orders and prefixes, and changes to kept circle-deletion entries. A mismatch
 stops the comparison. The reducer removes writes, changes, values and entries
 while retaining a history accepted by Rust's `History::new`.
 
-Seed 0 fails. Its history reduces to one insert of a key-only row in a
-circle, followed by one kept entry deleting that circle. The row stays at
-generation 1, its insertion record remains, and both implementations hide it.
-Rust returns `Rule::DeletedCircle`, with no entry. Lean returns
-`Rule.deletedCircleEntry 2`. There are no foreign keys, CHECK failures,
-competing rows or non-key values in the reduced history.
+The entry-aware comparison runs 128 generated histories, eight changes to
+the selected deletion entries per history, and three causal application orders
+at each sampled prefix (3,072 comparisons). Entry identities vary in both
+device and log number. The adapter translates the identity returned by Rust's
+`Rule::DeletedCircle(entry)`; it does not reconstruct a cause from the row's
+audience.
 
-`entry_differential_counterexample` checks the same discrepancy with entry 1
-and verifies that removing either the insert or the deletion removes the
-difference. Lean's `EntryCounterexample.entry_identity_gap` checks both model
-outputs; `writes_valid`, `no_row_no_gap` and `no_entry_no_gap` check the
-history's assumptions and those two reductions. This is a discrepancy with
-Rust's result type, not a counterexample to the current spec or the convergence
-proof. [§14.7](../coven.md#147-deleting-a-circle) requires the loss record to
-name the responsible entry; its identity is part of the cause.
+`entry_differential_agreement` also checks one key-only circle row and one
+kept deletion. Both implementations retain generation 1 and its insertion
+identity, hide the row, and name the deleting entry. Removing either the insert
+or the deletion also agrees. This exercises the entry identity required by
+[§14.7](../coven.md#147-deleting-a-circle), not merely Boolean visibility.
 
-The Boolean differential passes. `scripts/check.sh` runs it and checks the
-fixed counterexample. The strict entry-aware comparison fails on this history
-and is not in `scripts/check.sh`; it joins the check when Rust names the
-deleting entry in its loss rule, and the fixed counterexample then fails.
+`scripts/check.sh` runs the Boolean differential, the strict entry histories,
+and the fixed agreement case. SQLite persistence, atomic rollback and
+restoration after reopening are checked separately by Rust database tests.
 
 From the repository root, after building `mergeRunner`:
 

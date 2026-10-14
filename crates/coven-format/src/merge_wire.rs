@@ -23,7 +23,10 @@ impl Wire for Rule {
                 1u8.put(out)?;
                 n.put(out)
             }
-            Self::DeletedCircle => 2u8.put(out),
+            Self::DeletedCircle(entry) => {
+                2u8.put(out)?;
+                entry.put(out)
+            }
             Self::OtherAudience => 3u8.put(out),
             Self::Unique(n) => {
                 4u8.put(out)?;
@@ -35,7 +38,7 @@ impl Wire for Rule {
         match u8::get(input)? {
             0 => Ok(Self::ForeignKey(Wire::get(input)?)),
             1 => Ok(Self::Check(Wire::get(input)?)),
-            2 => Ok(Self::DeletedCircle),
+            2 => Ok(Self::DeletedCircle(Wire::get(input)?)),
             3 => Ok(Self::OtherAudience),
             4 => Ok(Self::Unique(Wire::get(input)?)),
             tag => Err(Error::UnknownTag {
@@ -100,7 +103,8 @@ pub(crate) fn rules(values: &BTreeSet<Rule>) -> Result<(), Error> {
             Rule::ForeignKey(n) => foreign_key(n)?,
             Rule::Unique(n) => unique_constraint(n)?,
             Rule::Check(n) => crate::error::bound(n.len(), crate::wire::MAX_BYTES, "text")?,
-            Rule::DeletedCircle | Rule::OtherAudience => {}
+            Rule::DeletedCircle(entry) => positive(entry.number)?,
+            Rule::OtherAudience => {}
         }
     }
     Ok(())

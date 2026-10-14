@@ -361,7 +361,7 @@ impl<'a> FileWrite<'a> {
     pub(crate) fn retain_rows(
         &self,
         keys: BTreeSet<AppKey>,
-        deleted: &BTreeSet<coven_foundation::id_source::CircleId>,
+        deleted: &BTreeMap<coven_foundation::id_source::CircleId, crate::EntryId>,
     ) -> Result<(), DbError> {
         let db = self.database;
         // Each file identity is checked once; retaining its app row would keep
@@ -400,7 +400,7 @@ impl<'a> FileWrite<'a> {
                 },
             )? {
                 if generation % 2 == 0
-                    || matches!(&audience, coven_merge::Audience::Circle(id) if deleted.contains(id))
+                    || matches!(&audience, coven_merge::Audience::Circle(id) if deleted.contains_key(id))
                 {
                     continue;
                 }

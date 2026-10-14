@@ -545,7 +545,7 @@ async fn audience_validation_looks_up_children_only_when_the_parent_moves() {
             let after=crate::write_rows::AppView::after(writer,schema);
             let stored=crate::merge_store::MergeStore::new(writer,&before);
             let profile=writer.profile_statements();
-            let changes=crate::write_record::changes(writer,schema,&before,&after,&stored,&before.changes(&after, captured.keys().cloned()).unwrap(),&BTreeSet::new());
+            let changes=crate::write_record::changes(writer,schema,&before,&after,&stored,&before.changes(&after, captured.keys().cloned()).unwrap(),&BTreeMap::new());
             drop(profile);
             let lookups=writer.fullscan_statements().into_iter().filter(|(sql,_)| sql.starts_with("SELECT DISTINCT r.table_name,r.key,r.audience FROM _coven_references v")).count();
             if moving {
@@ -692,7 +692,9 @@ async fn observation_and_local_write_sessions_cover_app_and_materialized_changes
     assert_eq!(losses.len(), 1);
     assert_eq!(
         losses[0].replaced_by,
-        crate::Replacement::Rules(vec![crate::RemovalRule::DeletedCircle])
+        crate::Replacement::Rules(vec![crate::RemovalRule::DeletedCircle {
+            entry: db.store_log().await.unwrap().replay.state.circle_deletions[&circle]
+        }])
     );
     db.close().await.unwrap();
 }

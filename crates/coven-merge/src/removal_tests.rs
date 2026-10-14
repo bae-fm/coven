@@ -1,5 +1,6 @@
 use crate::ForeignKey;
 use crate::{tests::*, *};
+use coven_foundation::id_source::DeviceId;
 use std::collections::{BTreeMap, BTreeSet};
 
 fn rules(result: &RemovalResult, r: &RowId) -> BTreeSet<Rule> {
@@ -563,7 +564,7 @@ fn two_circles_choose_the_earlier_generation_and_unique_is_audience_scoped() {
 }
 
 #[test]
-fn deleted_circle_removes_concurrent_rows_without_deleting_them() {
+fn deleted_circle_entries_hide_existing_and_arriving_rows_without_deleting_them() {
     let writes = vec![
         write(
             1,
@@ -575,34 +576,52 @@ fn deleted_circle_removes_concurrent_rows_without_deleting_them() {
             ],
         ),
         write(
-            31,
-            1600,
-            &[1],
-            vec![
-                (circle(7, 1), change(1, 2, &[])),
-                (circle(8, 1), change(1, 2, &[])),
-            ],
-        ),
-        write(
             5,
             1601,
             &[1],
             vec![(circle(9, 1), change(0, 0, &[("0", "Ana's gift")]))],
         ),
     ];
-    let states = agree(&writes, &[&[0, 1, 2], &[0, 2, 1]]);
-    let mut view = MemoryView::from_states(&states, &History::new(writes).unwrap());
-    for r in view.data.values_mut() {
-        if let RemovalRow::Present { deleted_circle, .. } = r {
-            *deleted_circle = true;
+    let states = agree(&writes, &[&[0, 1]]);
+    let original = MemoryView::from_states(&states, &History::new(writes).unwrap());
+    let mut before = original.clone();
+    for entry in [
+        EntryId {
+            device: DeviceId(2),
+            number: 1,
+        },
+        EntryId {
+            device: DeviceId(2),
+            number: 2,
+        },
+        EntryId {
+            device: DeviceId(3),
+            number: 1,
+        },
+    ] {
+        let mut view = original.clone();
+        for facts in view.data.values_mut() {
+            if let RemovalRow::Present { deleted_circle, .. } = facts {
+                *deleted_circle = Some(entry);
+            }
         }
+        let result = removal_orders(&view);
+        assert_eq!(
+            recompute(&before, &view, states.keys().cloned()).unwrap(),
+            result
+        );
+        for row in states.keys() {
+            assert_eq!(states[row].generation(), 1);
+            assert_eq!(rules(&result, row), [Rule::DeletedCircle(entry)].into());
+        }
+        before = view;
     }
-    let result = removal_orders(&view);
-    assert_eq!(states[&circle(7, 1)].generation(), 2);
-    assert_eq!(states[&circle(8, 1)].generation(), 2);
-    assert_eq!(states[&circle(9, 1)].generation(), 1);
+    assert_eq!(value(&states, &circle(7, 1), "0"), "Gift seven");
+    assert_eq!(value(&states, &circle(8, 1), "0"), "Gift eight");
     assert_eq!(value(&states, &circle(9, 1), "0"), "Ana's gift");
-    assert_eq!(rules(&result, &circle(9, 1)), [Rule::DeletedCircle].into());
+    let restored = recompute(&before, &original, states.keys().cloned()).unwrap();
+    assert_eq!(restored, removals(&original).unwrap());
+    assert!(restored.removed.is_empty());
 }
 
 #[test]

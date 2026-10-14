@@ -20,8 +20,8 @@ use history::from_writes;
 #[cfg(any(test, feature = "test-utils"))]
 pub use history::History;
 pub use input::{
-    Audience, Change, ColumnValue, ConstraintColumns, ForeignKey, Operation, Parent, RowId,
-    UniqueConstraint, Write, WriteId, WriteOracle, WritePast,
+    Audience, Change, ColumnValue, ConstraintColumns, EntryId, ForeignKey, Operation, Parent,
+    RowId, UniqueConstraint, Write, WriteId, WriteOracle, WritePast,
 };
 pub use removal::{
     recompute, recompute_fingerprint, removals, resolve_reference, Constraints, Group, OnDelete,

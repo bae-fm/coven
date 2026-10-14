@@ -44,7 +44,7 @@ fn present(ms: u64, parent: Option<RowId>) -> RemovalRow {
                 )
             })
             .collect(),
-        deleted_circle: false,
+        deleted_circle: None,
     }
 }
 

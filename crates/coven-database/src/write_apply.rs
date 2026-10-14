@@ -16,7 +16,7 @@ pub(crate) struct WriteApply<'a> {
     store: &'a MergeStore<'a>,
     before: &'a AppView<'a>,
     visible: &'a AppView<'a>,
-    deleted: &'a BTreeSet<CircleId>,
+    deleted: &'a BTreeMap<CircleId, crate::EntryId>,
 }
 
 impl<'a> WriteApply<'a> {
@@ -26,7 +26,7 @@ impl<'a> WriteApply<'a> {
         store: &'a MergeStore<'a>,
         before: &'a AppView<'a>,
         visible: &'a AppView<'a>,
-        deleted: &'a BTreeSet<CircleId>,
+        deleted: &'a BTreeMap<CircleId, crate::EntryId>,
     ) -> Self {
         Self {
             database,

@@ -2004,7 +2004,6 @@ pub enum Prerequisite {
     DeviceRegistration(DeviceId),
     SchemaPublication { audience: Audience, version: u32 },
     Reload(Audience),
-    OwnUploads,
     Positions(DeviceId),
     /// Physical cleanup cannot release this entry's retained inputs (§9).
     EntryFinality(EntryId),

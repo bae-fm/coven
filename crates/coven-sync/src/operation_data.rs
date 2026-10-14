@@ -7,7 +7,7 @@ use coven_format::{
     store_log::{MemberRole, StoreLogEntry},
     MemberAccess, Object,
 };
-use coven_foundation::id_source::{CircleId, DeviceId, InviteId};
+use coven_foundation::id_source::{CircleId, InviteId};
 use coven_storage::{MemberRemoval, StorageInvitation};
 use serde::{Deserialize, Serialize};
 use std::time::SystemTime;
@@ -35,14 +35,7 @@ pub(crate) enum Intent {
     },
     DeleteCircle {
         circle: CircleId,
-        rows: CircleRows,
     },
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-pub(crate) enum CircleRows {
-    Delete,
-    Deleted { write: Option<(DeviceId, u64)> },
 }
 
 impl Intent {
@@ -187,17 +180,12 @@ impl Data {
             data: serde_json::to_vec(self)?,
         })
     }
-    /// Circle deletion commits its row write and reset publishes its snapshot
-    /// before the shared entry steps.
+    /// Reset and schema publication prepare snapshots before the shared entry steps.
     pub(crate) fn entry_step_number(&self, step: u32) -> u32 {
         if self.raises_version() {
             return step + 2;
         }
         step + match self {
-            Self::Entry(EntryWork {
-                intent: Intent::DeleteCircle { .. },
-                ..
-            }) => 1,
             Self::Entry(EntryWork {
                 intent: Intent::Reset { .. },
                 ..

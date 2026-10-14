@@ -570,12 +570,7 @@ async fn opening_checks_integrity_once_for_all_its_connections() {
 #[tokio::test]
 async fn callback_panics_release_the_writer_and_reserve_nothing() {
     let mut poisoned = Vec::new();
-    for callback in [
-        "store log",
-        "key upload",
-        "operation entry",
-        "circle deletion",
-    ] {
+    for callback in ["store log", "key upload", "operation entry"] {
         let store = TestStore::new();
         let db = store.builder(vec![], vec![]).open().await.unwrap();
         let call = db.clone();
@@ -603,14 +598,6 @@ async fn callback_panics_release_the_writer_and_reserve_nothing() {
                         entry.author,
                         entry.change,
                         |_, _, _| -> Result<_, DbError> { std::panic::panic_any(123_u64) },
-                    )
-                    .await
-                    .unwrap();
-                }
-                "circle deletion" => {
-                    call.delete_circle_rows(
-                        coven_foundation::id_source::CircleId(uuid::Uuid::from_u128(1)),
-                        |_| std::panic::panic_any(123_u64),
                     )
                     .await
                     .unwrap();

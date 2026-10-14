@@ -708,7 +708,10 @@ async fn store_wins_one_key_and_circles_use_their_generation_start() {
             )
             .unwrap();
             assert_eq!(records(&db).len(), 1);
-            assert_eq!(losses(&db)[0].2, BTreeSet::from([Rule::DeletedCircle]));
+            assert_eq!(
+                losses(&db)[0].2,
+                BTreeSet::from([Rule::DeletedCircle(deleting_entry())])
+            );
             let audience: String = db.inspect_writer(|db| {
                 db.query_row("SELECT audience FROM notes", [], |r| r.get(0))
                     .unwrap()
@@ -834,7 +837,7 @@ async fn generated_unique_claim_uses_the_write_that_set_its_generated_value() {
         let app = crate::write_rows::AppView::after(db, schema);
         let store = crate::merge_store::MergeStore::new(db, &app);
         let updates = BTreeMap::new();
-        let deleted = BTreeSet::new();
+        let deleted = BTreeMap::new();
         let view = crate::removal_view::DatabaseRemovalView::new(
             db, &store, schema, &app, &updates, &deleted, None,
         )
@@ -945,7 +948,7 @@ pub(crate) fn materialize_deleted(
             let app = crate::write_rows::AppView::after(db, schema);
             let store = crate::merge_store::MergeStore::new(db, &app);
             let updates = std::collections::BTreeMap::new();
-            let deleted = [circle].into();
+            let deleted = [(circle, deleting_entry())].into();
             let view = crate::removal_view::DatabaseRemovalView::new(
                 db, &store, schema, &app, &updates, &deleted, None,
             )?;
@@ -980,4 +983,11 @@ pub(crate) async fn hidden_plan_note(db: &Database) {
     crate::tests::remote_update(db, "notes", "2", &[("title", Value::Text("Plan".into()))]).await;
     assert_eq!(count(db, "notes"), 2);
     assert_eq!(losses(db)[0].2, [Rule::Unique(["title"].into())].into());
+}
+
+fn deleting_entry() -> crate::EntryId {
+    crate::EntryId {
+        device: coven_foundation::id_source::DeviceId(2),
+        number: 1,
+    }
 }

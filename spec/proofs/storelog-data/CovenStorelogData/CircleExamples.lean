@@ -77,7 +77,7 @@ def state (received : List Nat) (order : List (Fin 3)) : CovenStorelogData.State
 def beforeDrop := state [0, 1, 2, 3, 4, 6] [0, 2, 1]
 def afterDrop := CovenStorelogData.step writes log 7 beforeDrop (.entry 5)
 
-/-- §14.7: ordinary deletes remove the known notes; the concurrent note
+/-- Ordinary deletes remove the known notes in the counterexample; the concurrent note
 retains its value in a whole-row loss naming the deleted circle. -/
 theorem deletion_example :
     (observe schema writes log beforeDrop).view.shown (note 7) = false ∧
@@ -87,8 +87,8 @@ theorem deletion_example :
     (observe schema writes log beforeDrop).view.rules (note 9) = [.deletedCircle] ∧
     ((observe schema writes log beforeDrop).losses (note 9) none).isSome = true := by decide
 
-/-- Counterexample to §9's unqualified claim that the circle's rows return:
-the rule reverses; the causal row delete does not. One known note suffices. -/
+/-- Authoring row deletes would violate §9's requirement that the circle's rows
+return: the rule reverses; the causal row delete does not. One note suffices. -/
 theorem gifts_counterexample :
     deletedCircle log afterDrop.log.result 0 = false ∧
     afterDrop.log.result.dropped = [6] ∧

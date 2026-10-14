@@ -170,7 +170,7 @@ pub(crate) fn apply_opened(
     database: &DatabaseConnection,
     schema: &WriteSchema,
     download: DownloadedWrite,
-    deleted: &BTreeSet<CircleId>,
+    deleted: &BTreeMap<CircleId, crate::EntryId>,
 ) -> Result<BTreeSet<crate::write_rows::AppKey>, DbError> {
     let record = accepted(database, schema, download)?;
     let visible = AppView::after(database, schema);

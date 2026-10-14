@@ -286,7 +286,7 @@ pub struct StoreLogEntry {
 wire_struct!(StoreLogEntry, position, timestamp, author, had_read, change);
 impl StoreLogEntry {
     pub(crate) fn validate(&self) -> Result<(), Error> {
-        self.position.validate()?;
+        positive(self.position.number)?;
         require(
             self.timestamp.device() == self.position.device,
             "store-log timestamp",

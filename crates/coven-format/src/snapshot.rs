@@ -149,6 +149,13 @@ impl SnapshotRecord {
                         Rule::Coverage,
                     )?;
                 }
+                if let LossCause::Rules(rules) = &v.cause {
+                    for rule in rules {
+                        if let coven_merge::Rule::DeletedCircle(entry) = rule {
+                            require(h.store_log.covers(*entry), "loss cause", Rule::Coverage)?;
+                        }
+                    }
+                }
                 Ok(())
             }
             Self::Merge(v) => {

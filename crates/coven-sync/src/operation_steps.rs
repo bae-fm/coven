@@ -3,7 +3,7 @@
 use super::{operation_calls::same_access, StoreLogSync};
 use crate::{
     effects,
-    operation_data::{CircleRows, Data, Intent, InviteState},
+    operation_data::{Data, Intent, InviteState},
     operations::{Output, Progress},
     *,
 };
@@ -126,55 +126,6 @@ impl StoreLogSync {
                     .await?;
                 return Ok(Progress::Advanced);
             };
-            if let Data::Entry(work) = &data {
-                if let Intent::DeleteCircle {
-                    circle,
-                    rows: CircleRows::Delete,
-                } = work.intent
-                {
-                    let record = record.clone();
-                    self.database
-                        .delete_circle_rows(circle, move |write| {
-                            let Data::Entry(work) = &mut data else {
-                                unreachable!()
-                            };
-                            work.intent = Intent::DeleteCircle {
-                                circle,
-                                rows: CircleRows::Deleted {
-                                    write: write.map(|w| (w.device, w.number)),
-                                },
-                            };
-                            Ok(coven_database::OperationCommit::Advance(
-                                coven_database::OperationUpdate {
-                                    id: record.id,
-                                    previous: record.last_step,
-                                    last_step: 1,
-                                    data: serde_json::to_vec(&data)?,
-                                },
-                            ))
-                        })
-                        .await?;
-                    return Ok(Progress::Advanced);
-                }
-                if let Intent::DeleteCircle {
-                    rows:
-                        CircleRows::Deleted {
-                            write: Some((device, number)),
-                        },
-                    ..
-                } = work.intent
-                {
-                    if !self
-                        .database
-                        .write_is_uploaded(coven_merge::WriteId { device, number })
-                        .await?
-                    {
-                        return Ok(Progress::Waiting(PendingReason::Waits(
-                            Prerequisite::OwnUploads,
-                        )));
-                    }
-                }
-            }
             crate::store_log_keys::check_shared_keys(&local.log, &change, &ring)?;
             let mut damages = Vec::new();
             let observed = crate::store_log_keys::read_copies(
@@ -303,11 +254,6 @@ impl StoreLogSync {
             }
             Some(EntryOutcome::Dropped(_)) => {
                 data.set_entry(None)?;
-                if let Data::Entry(work) = &mut data {
-                    if let Intent::DeleteCircle { rows, .. } = &mut work.intent {
-                        *rows = CircleRows::Delete;
-                    }
-                }
                 self.database
                     .advance_operation(data.update(&current, 0)?)
                     .await?;
@@ -383,7 +329,7 @@ impl StoreLogSync {
                 circle: *circle,
                 member: member.parse()?,
             },
-            Intent::DeleteCircle { circle, .. } => StoreChange::DeleteCircle { circle: *circle },
+            Intent::DeleteCircle { circle } => StoreChange::DeleteCircle { circle: *circle },
         };
         // A started operation finishes without another entry if its effect has
         // already happened (§18), even if that effect removed its authority.

@@ -99,7 +99,7 @@ pub(crate) fn finish(
     before: &DatabaseConnection,
     schema: &WriteSchema,
     header: &WriteHeader,
-    deleted: &BTreeSet<coven_foundation::id_source::CircleId>,
+    deleted: &BTreeMap<coven_foundation::id_source::CircleId, crate::EntryId>,
     files: &crate::file_write::FileWrite<'_>,
 ) -> Result<(), DbError> {
     let touched = database.query("SELECT table_name,key,audience FROM temp._coven_download_rows ORDER BY table_name,key,audience",[],crate::row_queries::read_identity)?.into_iter().collect::<BTreeSet<_>>();

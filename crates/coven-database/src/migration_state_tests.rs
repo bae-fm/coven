@@ -227,7 +227,7 @@ fn migration_input(db: &Database, history: &MigrationHistory) -> (Value, Vec<(Ro
                 deleted_circle,
                 ..
             } = evaluated.facts {
-                deleted = deleted_circle;
+                deleted = deleted_circle.is_some();
                 if deleted {
                     entries.push(json!([i, 1]));
                 }

@@ -328,7 +328,7 @@ impl Operations {
     pub async fn rename_circle(&self, circle: CircleId, name: &str) -> Result<(), SyncError> {
         self.unit(Command::RenameCircle(circle, name.into())).await
     }
-    /// Delete the circle's local rows and then its store-log membership.
+    /// Publish one entry whose deletion rule hides the circle's rows while kept.
     pub async fn delete_circle(&self, circle: CircleId) -> Result<(), SyncError> {
         self.unit(Command::DeleteCircle(circle)).await
     }
@@ -491,8 +491,6 @@ impl OperationRun {
         }
         self.sync.reload_deleted_history().await?;
         self.writes.upload_writes().await?;
-        // Deleting a circle waits for its row deletion's write to be uploaded.
-        self.drive_pass().await?;
         self.writes.download_writes().await?;
         self.drive_pass().await?;
         if let Some(id) = self.sync.pending_reload().await? {

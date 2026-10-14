@@ -271,7 +271,9 @@ pub(crate) fn apply<P: crate::PendingValue>(
         crate::store_log_tables::replace(database, replay, &outcomes)?;
         let deleted = crate::store_log_tables::deleted_circles(database)?;
         let mut touched = BTreeSet::new();
-        for circle in previous.symmetric_difference(&deleted) {
+        let changed: BTreeSet<_> = previous.keys().chain(deleted.keys()).copied()
+            .filter(|circle| previous.get(circle) != deleted.get(circle)).collect();
+        for circle in changed {
             touched.extend(database.query(
                 "SELECT DISTINCT table_name,key,audience FROM _coven_rows WHERE audience=?1",
                 [circle.to_string()],

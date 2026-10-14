@@ -4,7 +4,7 @@ use super::StoreLogSync;
 use crate::effects::Authority;
 use crate::{
     effects,
-    operation_data::{CircleRows, Data, EntryWork, Intent, InviteState},
+    operation_data::{Data, EntryWork, Intent, InviteState},
     operations::{Begun, Command, Output},
     *,
 };
@@ -374,29 +374,7 @@ impl StoreLogSync {
             }
             Command::DeleteCircle(circle) => {
                 self.validate_administration(&local, &me, &StoreChange::DeleteCircle { circle })?;
-                let id = self
-                    .database
-                    .delete_circle_rows(circle, move |write| {
-                        let data = Data::Entry(EntryWork {
-                            intent: Intent::DeleteCircle {
-                                circle,
-                                rows: CircleRows::Deleted {
-                                    write: write.map(|w| (w.device, w.number)),
-                                },
-                            },
-                            entry: None,
-                            removal: None,
-                        });
-                        Ok(coven_database::OperationCommit::Start(
-                            coven_database::NewOperation {
-                                kind: data.journal_kind().into(),
-                                data: serde_json::to_vec(&data)?,
-                                started_by: "circles.delete".into(),
-                            },
-                        ))
-                    })
-                    .await?;
-                return Ok(Begun::Operation(id));
+                Intent::DeleteCircle { circle }
             }
             Command::AddCircleMember(circle, target) => {
                 self.validate_administration(
@@ -449,7 +427,8 @@ impl StoreLogSync {
             Intent::CreateCircle { .. } => "circles.create",
             Intent::AddCircleMember { .. } => "circles.add_member",
             Intent::RemoveCircleMember { .. } => "circles.remove_member",
-            Intent::DeleteCircle { .. } | Intent::Reset { .. } => unreachable!(),
+            Intent::DeleteCircle { .. } => "circles.delete",
+            Intent::Reset { .. } => unreachable!(),
         };
         let data = Data::Entry(EntryWork {
             intent,

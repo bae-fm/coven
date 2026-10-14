@@ -59,6 +59,10 @@ async fn losses_preserve_storage_classes_each_setter_and_every_replacement() {
         "write",
         encode_write_id(&setter(2)).unwrap(),
     );
+    let entry = EntryId {
+        device: DeviceId(u64::MAX),
+        number: u64::MAX,
+    };
     let values: BTreeMap<String, ColumnValue<WireValue>> = BTreeMap::from([
         ("a".into(), cell(WireValue::Null)),
         ("b".into(), cell(WireValue::Integer(i64::MIN))),
@@ -79,15 +83,11 @@ async fn losses_preserve_storage_classes_each_setter_and_every_replacement() {
         "rules",
         encode_rules(&BTreeSet::from([
             Rule::Check("positive".into()),
-            Rule::DeletedCircle,
+            Rule::DeletedCircle(entry),
             Rule::OtherAudience,
         ]))
         .unwrap(),
     );
-    let entry = EntryId {
-        device: DeviceId(u64::MAX),
-        number: u64::MAX,
-    };
     for cause in [
         LostWriteCause::SchemaChange(u32::MAX),
         LostWriteCause::Reset(entry),
@@ -144,7 +144,7 @@ async fn losses_preserve_storage_classes_each_setter_and_every_replacement() {
             RemovalRule::Check {
                 constraint: "positive".into()
             },
-            RemovalRule::DeletedCircle,
+            RemovalRule::DeletedCircle { entry },
             RemovalRule::OtherAudience
         ])
     );
@@ -224,7 +224,11 @@ async fn corrupt_values_fail_typed_and_live_losses_recover_after_repair() {
     let values: BTreeMap<String, ColumnValue<WireValue>> =
         BTreeMap::from([("title".into(), cell(WireValue::Text("lost".into())))]);
     let setters = BTreeMap::from([("title".into(), setter(1))]);
-    let rules = encode_rules(&BTreeSet::from([Rule::DeletedCircle])).unwrap();
+    let rules = encode_rules(&BTreeSet::from([Rule::DeletedCircle(EntryId {
+        device: DeviceId(1),
+        number: 1,
+    })]))
+    .unwrap();
     insert(
         &db,
         None,

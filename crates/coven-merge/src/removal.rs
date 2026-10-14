@@ -1,4 +1,4 @@
-use crate::{Audience, MergeError, Parent, RowId, Timestamp};
+use crate::{Audience, EntryId, MergeError, Parent, RowId, Timestamp};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 /// The foreign key's ON DELETE action (§8.4).
@@ -85,8 +85,8 @@ pub enum RemovalRow {
         started: Timestamp,
         /// Foreign-key names and their merged references.
         references: BTreeMap<crate::ForeignKey, Reference>,
-        /// Whether the store log has deleted this row's circle.
-        deleted_circle: bool,
+        /// The kept store-log entry deleting this row's circle, if any.
+        deleted_circle: Option<EntryId>,
     },
 }
 
@@ -184,8 +184,8 @@ pub enum Rule {
     ForeignKey(crate::ForeignKey),
     /// The named CHECK fails on merged values.
     Check(String),
-    /// The store log has deleted the row's circle.
-    DeletedCircle,
+    /// The kept entry deleting the row's circle.
+    DeletedCircle(EntryId),
     /// The same key won in another audience.
     OtherAudience,
     /// The named unique constraint lost its value to an earlier claim.
@@ -406,14 +406,12 @@ fn monotone_rules(fact: &Facts, out: &BTreeSet<RowId>) -> BTreeSet<Rule> {
             .cloned()
             .map(Rule::Check),
     );
-    if matches!(
-        fact.row,
-        RemovalRow::Present {
-            deleted_circle: true,
-            ..
-        }
-    ) {
-        rules.insert(Rule::DeletedCircle);
+    if let RemovalRow::Present {
+        deleted_circle: Some(entry),
+        ..
+    } = fact.row
+    {
+        rules.insert(Rule::DeletedCircle(entry));
     }
     rules
 }

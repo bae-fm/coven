@@ -95,7 +95,10 @@ fn invalid_losses_leave_order_and_counts_unchanged() {
             invalid.push(loss);
         }
     }
-    for rule in [Rule::DeletedCircle, Rule::OtherAudience] {
+    for rule in [
+        Rule::DeletedCircle(test_utils::loss_entry()),
+        Rule::OtherAudience,
+    ] {
         let mut loss = original[1].clone();
         loss.cause = LossCause::Rules([rule].into());
         invalid.push(loss);
@@ -197,7 +200,7 @@ fn circle_losses_keep_every_original_removal_reason() {
         unreachable!()
     };
     rules.extend([
-        Rule::DeletedCircle,
+        Rule::DeletedCircle(test_utils::loss_entry()),
         Rule::OtherAudience,
         Rule::Unique(["old_name"].into()),
         Rule::ForeignKey(coven_merge::ForeignKey::new(["p"], "t", ["id"])),
@@ -208,6 +211,54 @@ fn circle_losses_keep_every_original_removal_reason() {
     let (mut encoder, first) = SnapshotEncoder::start(header).unwrap();
     let mut decoder =
         SnapshotDecoder::start(&first, &test_utils::snapshot_prefix(encoder.header())).unwrap();
+    let expected = SnapshotRecord::Loss(loss);
+    assert_eq!(
+        decoder
+            .frame(
+                &encoder.record(expected.clone()).unwrap(),
+                &test_utils::oracle()
+            )
+            .unwrap(),
+        Some(expected)
+    );
+    decoder
+        .frame(&encoder.finish().unwrap(), &test_utils::oracle())
+        .unwrap();
+    decoder.finish().unwrap();
+}
+
+#[test]
+fn circle_loss_requires_its_entry_in_snapshot_coverage() {
+    let mut loss = test_utils::retained_losses().remove(1);
+    loss.row.audience = Audience::Circle(CircleId(uuid::Uuid::from_u128(1)));
+    let entry = test_utils::loss_entry();
+    loss.cause = LossCause::Rules([Rule::DeletedCircle(entry)].into());
+    let mut header = test_utils::snapshot_header();
+    header.id.audience = loss.row.audience.clone();
+    header.counts = [0, 0, 0, 0, 1];
+    let (mut encoder, first) = SnapshotEncoder::start(header.clone()).unwrap();
+    let mut decoder =
+        SnapshotDecoder::start(&first, &test_utils::snapshot_prefix(&header)).unwrap();
+    for invalid in [
+        crate::value::EntryId { number: 0, ..entry },
+        crate::value::EntryId {
+            number: entry.number + 1,
+            ..entry
+        },
+        crate::value::EntryId {
+            device: DeviceId(2),
+            ..entry
+        },
+    ] {
+        let mut refused = loss.clone();
+        refused.cause = LossCause::Rules([Rule::DeletedCircle(invalid)].into());
+        assert!(encoder
+            .record(SnapshotRecord::Loss(refused.clone()))
+            .is_err());
+        assert!(decoder
+            .frame(&raw(&refused), &test_utils::oracle())
+            .is_err());
+    }
     let expected = SnapshotRecord::Loss(loss);
     assert_eq!(
         decoder

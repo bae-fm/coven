@@ -4,8 +4,8 @@ namespace CovenStorelogData
 
 open CovenStorelog (Audience)
 
-/-- circle_deletion.rs selects every odd generation in the circle, including
-rows hidden by a removal rule. The deletion uses that generation. -/
+/-- The row-deletion counterexample selects every odd generation in the circle,
+including hidden rows. Entry-only deletion does not author these changes. -/
 def deleteChanges {W Col : Type} (st : CovenMerge.St W Row Col) (circle : Nat)
     (row : Row) : Option (CovenMerge.Change Col) :=
   if row.audience = .circle circle ∧ st.gen row % 2 = 1 then
@@ -28,7 +28,7 @@ def IsDeletion {W Col : Type} (writes : CovenMerge.Writes W Row Col)
   | none => ∀ r, deleteChanges st circle r = none
   | some w => ∀ r, writes.chg w r = deleteChanges st circle r
 
-/-- The app call commits the ordinary row write and the journal together.
+/-- The counterexample commits the ordinary row write and the journal together.
 The write still exists if publication fails, the operation is abandoned, or
 the entry is dropped later. -/
 def commitDeletion {W Col : Type} [DecidableEq W]

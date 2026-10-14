@@ -33,7 +33,7 @@ theorem writes_valid : Valid writes where
     decide
 
 /-- Both hide the row and retain generation 1, but only `entryView` names the
-responsible entry. This is the missing information in Rust's `DeletedCircle`. -/
+responsible entry. Rust's `DeletedCircle` preserves this entry identity. -/
 theorem entry_identity_gap :
     state.gen () = 1 ∧ state.cell () () = none ∧
     (view inputs.erase).removed () = true ∧ (entryView inputs).removed () = true ∧

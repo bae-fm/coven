@@ -1,9 +1,7 @@
 //! Operation transactions, borrowing the database owner's connections.
 
 use super::Database;
-use crate::{
-    DbError, NewOperation, OperationCommit, OperationId, OperationRecord, OperationUpdate,
-};
+use crate::{DbError, NewOperation, OperationId, OperationRecord, OperationUpdate};
 
 impl Database {
     /// Install a ready batch and its replay, data effects, drop reports and operation
@@ -94,72 +92,6 @@ impl Database {
                         },
                     )
                 })
-            })
-        })
-        .await
-    }
-
-    /// Commit circle row deletions, their queued write and their operation together.
-    /// The callback records the write dependency when starting or restarting the operation.
-    pub async fn delete_circle_rows<F>(
-        &self,
-        circle: coven_foundation::id_source::CircleId,
-        build: F,
-    ) -> Result<OperationId, DbError>
-    where
-        F: FnOnce(Option<coven_merge::WriteId>) -> Result<OperationCommit, DbError>
-            + Send
-            + 'static,
-    {
-        self.call(move |inner| {
-            inner.with_files(Vec::new(), |writer, files| {
-                writer.transaction(|db| {
-                    let write = crate::circle_deletion::write(
-                        db,
-                        &inner.access.write_schema,
-                        inner.access.device,
-                        inner.clock.now(),
-                        circle,
-                        files,
-                    )?;
-                    match build(write)? {
-                        OperationCommit::Start(new) => {
-                            let id = crate::operation::insert(db, &new)?;
-                            crate::operation::advance(
-                                db,
-                                &OperationUpdate {
-                                    id,
-                                    previous: 0,
-                                    last_step: 1,
-                                    data: new.data,
-                                },
-                            )?;
-                            Ok(id)
-                        }
-                        OperationCommit::Advance(update) => {
-                            crate::operation::advance(db, &update)?;
-                            Ok(update.id)
-                        }
-                    }
-                })
-            })
-        })
-        .await
-    }
-
-    /// Whether a circle deletion’s write has left the device-log upload queue.
-    /// Device-log transport retires that row only after publishing its fixed bytes.
-    pub async fn write_is_uploaded(&self, write: coven_merge::WriteId) -> Result<bool, DbError> {
-        self.call(move |inner| {
-            inner.with_writer(|writer| {
-                writer.query_row(
-                    "SELECT NOT EXISTS(SELECT 1 FROM _coven_uploads WHERE device=?1 AND number=?2)",
-                    (
-                        write.device.0.to_be_bytes().as_slice(),
-                        write.number.to_be_bytes().as_slice(),
-                    ),
-                    |r| r.get(0),
-                )
             })
         })
         .await

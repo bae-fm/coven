@@ -219,7 +219,7 @@ impl Loss {
                 )?;
                 crate::merge_wire::rules(rules)?;
                 for rule in rules {
-                    if matches!(rule, Rule::DeletedCircle | Rule::OtherAudience) {
+                    if matches!(rule, Rule::DeletedCircle(_) | Rule::OtherAudience) {
                         require(
                             matches!(self.row.audience, coven_merge::Audience::Circle(_)),
                             "loss audience",

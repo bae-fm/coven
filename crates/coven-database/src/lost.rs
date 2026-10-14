@@ -85,7 +85,10 @@ pub enum RemovalRule {
         constraint: String,
     },
     /// The row belongs to a deleted circle.
-    DeletedCircle,
+    DeletedCircle {
+        /// The kept entry responsible for the deletion.
+        entry: EntryId,
+    },
     /// The same key is shown from another audience.
     OtherAudience,
     /// A competing row won the unique values.
@@ -139,7 +142,7 @@ impl LostValue {
                             partial: constraint.partial,
                         },
                         Rule::Check(constraint) => RemovalRule::Check { constraint },
-                        Rule::DeletedCircle => RemovalRule::DeletedCircle,
+                        Rule::DeletedCircle(entry) => RemovalRule::DeletedCircle { entry },
                         Rule::OtherAudience => RemovalRule::OtherAudience,
                     })
                     .collect(),

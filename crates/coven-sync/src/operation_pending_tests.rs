@@ -456,7 +456,6 @@ async fn pending_queries_round_trip_every_subject_and_reason() {
                 version: 2,
             },
             Prerequisite::Reload(coven_merge::Audience::Store),
-            Prerequisite::OwnUploads,
             Prerequisite::Positions(own),
             Prerequisite::EntryFinality(entry),
         ]

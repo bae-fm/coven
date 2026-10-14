@@ -155,7 +155,7 @@ impl MemoryView {
                 generation,
                 started,
                 references: BTreeMap::new(),
-                deleted_circle: false,
+                deleted_circle: None,
             },
         );
     }
@@ -513,7 +513,11 @@ pub(crate) fn generated_view(
                 }
             }
             if let RemovalRow::Present { deleted_circle, .. } = view.data.get_mut(r).unwrap() {
-                *deleted_circle = r.audience == circle(0, 2).audience && seed.is_multiple_of(7);
+                *deleted_circle = (r.audience == circle(0, 2).audience && seed.is_multiple_of(7))
+                    .then_some(EntryId {
+                        device: DeviceId(2),
+                        number: 1,
+                    });
             }
         }
     }
@@ -572,11 +576,18 @@ mod differential {
         match rule {
             Rule::ForeignKey(_) => 0,
             Rule::Check(_) => 1,
-            Rule::DeletedCircle => 2,
+            Rule::DeletedCircle(_) => 2,
             Rule::OtherAudience => 3,
             Rule::Unique(_) => 4,
         }
     }
+    fn entry_id(number: u64) -> EntryId {
+        EntryId {
+            device: DeviceId(number % 2 + 1),
+            number: number / 2 + 1,
+        }
+    }
+
     struct Comparison {
         input: Value,
         rust: Value,
@@ -594,7 +605,7 @@ mod differential {
         if let Some(entries) = entries {
             for (r, data) in &mut view.data {
                 if let RemovalRow::Present { deleted_circle, .. } = data {
-                    *deleted_circle = entries.contains_key(&r.audience);
+                    *deleted_circle = entries.get(&r.audience).copied().map(entry_id);
                 }
             }
             // Keep absent reference targets, but omit unrelated, never-written rows.
@@ -616,6 +627,11 @@ mod differential {
         view.order = view.data.keys().cloned().collect();
         rng.shuffle(&mut view.order);
         let removed = removals(&view).unwrap();
+        let entry_ids: BTreeMap<_, _> = entries
+            .into_iter()
+            .flat_map(|entries| entries.values())
+            .map(|number| (entry_id(*number), *number))
+            .collect();
         let rows: Vec<_> = view.data.keys().cloned().collect();
         let row_ids: BTreeMap<_, _> = rows
             .iter()
@@ -656,7 +672,7 @@ mod differential {
                     deleted_circle,
                     started,
                     ..
-                } => (deleted_circle, Some(started)),
+                } => (deleted_circle.is_some(), Some(started)),
                 RemovalRow::Absent { .. } => (false, None),
             };
             if let Some(started) = started {
@@ -671,9 +687,11 @@ mod differential {
                 row_claims
                     .push(json!({"con": {"terms":[],"partial":null}, "value": key, "ts": ts.to_string(), "other": true}));
             }
-            input_rows.push(json!({"id": row_ids[r], "present": data.present(), "refs": refs,
+            input_rows.push(
+                json!({"id": row_ids[r], "present": data.present(), "refs": refs,
                 "check": !constraints.failed_checks.is_empty(), "deleted": deleted,
-                "claims": row_claims, "rank": u64::from_be_bytes(r.key.clone().try_into().unwrap())}));
+                "claims": row_claims, "rank": u64::from_be_bytes(r.key.clone().try_into().unwrap())}),
+            );
         }
         let input_writes: Vec<_> = writes.iter().map(|w| {
             let changes: Vec<_> = w.changes.iter().map(|(r, ch)| {
@@ -727,22 +745,28 @@ mod differential {
                     })
                     .collect();
                 lost.sort();
-                let rules: BTreeSet<_> = removed
-                    .removed
-                    .get(r)
-                    .into_iter()
-                    .flatten()
-                    .map(rule_number)
-                    .collect();
-                // Rust's rule carries no entry identity. Do not fill one in from
-                // the test input: doing so would hide the difference from Lean.
+                let actual = removed.removed.get(r).into_iter().flatten();
                 let rules = if entries.is_some() {
-                    json!(rules
+                    let named: BTreeSet<_> = actual
+                        .map(|rule| {
+                            (
+                                rule_number(rule),
+                                match rule {
+                                    Rule::DeletedCircle(entry) => Some(entry_ids[entry]),
+                                    _ => None,
+                                },
+                            )
+                        })
+                        .collect();
+                    json!(named
                         .into_iter()
-                        .map(|kind| json!({"kind": kind}))
+                        .map(|(kind, entry)| match entry {
+                            Some(entry) => json!({"kind": kind, "entry": entry}),
+                            None => json!({"kind": kind}),
+                        })
                         .collect::<Vec<_>>())
                 } else {
-                    json!(rules)
+                    json!(actual.map(rule_number).collect::<BTreeSet<_>>())
                 };
                 json!({"id": row_ids[r], "gen": state.generation(), "gw": gw, "cells": cells,
                 "lost": lost, "removed": removed.removed.contains_key(r), "rules": rules})
@@ -869,23 +893,20 @@ mod differential {
 
     #[test]
     #[ignore = "requires the Lean executable; scripts/check.sh supplies COVEN_MERGE_LEAN"]
-    fn entry_differential_counterexample() {
+    fn entry_differential_agreement() {
         let runner = std::env::var_os("COVEN_MERGE_LEAN")
             .expect("COVEN_MERGE_LEAN must name the built Lean runner");
-        // One key-only circle row, then one kept circle deletion. Rust and
-        // Lean hide the same row, but only Lean names the responsible entry.
+        // One key-only circle row and one kept deletion preserve the generation
+        // and insertion identity, with the responsible entry in both results.
         let row = circle(0, 1);
         let writes = [write(1, 0, &[], vec![(row.clone(), change(0, 0, &[]))])];
         let entries = BTreeMap::from([(row.audience, 1)]);
         let case = comparison(&writes, &[0], 0, Some(&entries));
-        let rust = json!([{"id": 0, "gen": 1, "gw": [[1, 0]], "cells": [], "lost": [],
-            "removed": true, "rules": [{"kind": 2}]}]);
-        let lean = json!([{"id": 0, "gen": 1, "gw": [[1, 0]], "cells": [], "lost": [],
+        let expected = json!([{"id": 0, "gen": 1, "gw": [[1, 0]], "cells": [], "lost": [],
             "removed": true, "rules": [{"kind": 2, "entry": 1}]}]);
-        assert_eq!(case.rust, rust);
-        assert_eq!(run_lean(&runner, &case.input), lean);
-        assert_ne!(rust, lean);
-        // Removing either event removes the discrepancy.
+        assert_eq!(case.rust, expected);
+        assert_eq!(run_lean(&runner, &case.input), expected);
+        // Removing either event also agrees.
         let no_write = comparison(&[], &[], 0, Some(&entries));
         assert_eq!(no_write.rust, run_lean(&runner, &no_write.input));
         let no_entry = comparison(&writes, &[0], 0, Some(&BTreeMap::new()));

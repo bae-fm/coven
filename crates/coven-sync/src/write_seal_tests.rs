@@ -277,8 +277,8 @@ async fn a_circle_restored_and_rejoined_after_deletion_reloads_previously_skippe
         .positions
         .covers(writes[0]));
 
-    // Ben has not downloaded Carol's row. Deleting the empty local circle
-    // therefore publishes an entry without an ordinary row-delete write.
+    // Ben has not downloaded Carol's row. His deletion hides it on other
+    // devices without authoring any row changes.
     ben.clock.set(UNIX_EPOCH + Duration::from_secs(5));
     let crate::operations::Begun::Operation(id) = ben
         .sync
