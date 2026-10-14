@@ -293,3 +293,43 @@ async fn wrong_column_table_is_a_damaged_database() {
     ));
     db.close().await.unwrap();
 }
+
+#[tokio::test]
+async fn a_lost_row_does_not_require_an_accepted_generation() {
+    let store = TestStore::new();
+    let db = store.builder(vec![], vec![]).open().await.unwrap();
+    let key = coven_format::key::encode_key(&[WireValue::Text(
+        "f47ac10b-58cc-4372-a567-0e02b2c3d479".into(),
+    )])
+    .unwrap();
+    let write = WriteId {
+        device: DeviceId(u64::MAX),
+        number: u64::MAX,
+    };
+    let values = BTreeMap::from([(
+        "title".into(),
+        ColumnValue {
+            value: WireValue::Text("lost".into()),
+            parents: BTreeMap::new(),
+        },
+    )]);
+    let setters = BTreeMap::from([("title".into(), write)]);
+    let entry = EntryId {
+        device: DeviceId(u64::MAX),
+        number: u64::MAX,
+    };
+    for cause in [
+        LostWriteCause::SchemaChange(u32::MAX),
+        LostWriteCause::Reset(entry),
+    ] {
+        db.inspect_writer(|sql| {
+            sql.internal_execute("INSERT INTO _coven_lost(table_name,key,audience,generation,value,set_by,replacement_kind,replaced_by,retired) VALUES (?1,?2,?3,?4,?5,?6,'excluded',?7,1)",
+                ("notes", &key, "store", 0u64.to_be_bytes().to_vec(), encode_columns(&values).unwrap(), encode_setters(&setters).unwrap(), encode_exclusion(write, cause).unwrap())).unwrap();
+            let stored = sql.query_row("SELECT replaced_by FROM _coven_lost WHERE id=last_insert_rowid()", [], |r| r.get::<_, Vec<u8>>(0)).unwrap();
+            assert_eq!(decode_exclusion(&stored).unwrap().1, cause);
+            assert!(sql.internal_execute("UPDATE _coven_lost SET retired=0 WHERE id=last_insert_rowid()", []).is_err());
+            assert_eq!(sql.query_row("SELECT count(*) FROM _coven_rows", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+        });
+    }
+    db.close().await.unwrap();
+}

@@ -546,3 +546,83 @@ async fn a_completed_scan_replaces_exactly_its_own_class_of_records() {
     db.replace_local_pending(scanned, Vec::new()).await.unwrap();
     assert_eq!(live.next().await.unwrap(), std::slice::from_ref(&other));
 }
+
+#[tokio::test]
+async fn positions_observation_and_reports_commit_together_or_neither_does() {
+    use std::collections::BTreeMap;
+    let store = TestStore::new();
+    let db = store.builder(vec![], vec![]).open().await.unwrap();
+    let local = record(&db, 1).await;
+    let peer = Record {
+        reported_by: DeviceId(local.reported_by.0.wrapping_add(1)),
+        ..local.clone()
+    };
+    let before = BTreeMap::from([(peer.reported_by, vec![1u8])]);
+    db.complete_positions_observation(
+        before.clone(),
+        vec![peer.clone()],
+        vec![local.subject.clone()],
+        vec![local.clone()],
+    )
+    .await
+    .unwrap();
+    let work = crate::test_utils::WorkCounter::default();
+    db.test_track_work(work.clone()).await.unwrap();
+    db.complete_positions_observation(
+        before.clone(),
+        vec![peer.clone()],
+        vec![local.subject.clone()],
+        vec![local.clone()],
+    )
+    .await
+    .unwrap();
+    db.replace_pending_reports(vec![peer.clone()])
+        .await
+        .unwrap();
+    assert_eq!(work.take().commits, 0);
+    db.inspect_writer(|sql| sql.batch("CREATE TEMP TRIGGER fail_pending BEFORE INSERT ON _coven_pending BEGIN SELECT RAISE(ABORT,'injected pending failure'); END;").unwrap());
+    let changed = Record {
+        reason: Reason::Missing,
+        ..peer.clone()
+    };
+    assert!(db
+        .complete_positions_observation(
+            BTreeMap::from([(peer.reported_by, vec![2u8])]),
+            vec![changed],
+            vec![],
+            Vec::<Record>::new()
+        )
+        .await
+        .is_err());
+    db.close().await.unwrap();
+    let db = store.builder(vec![], vec![]).open().await.unwrap();
+    assert_eq!(db.positions_observation::<Vec<u8>>().await.unwrap(), before);
+    let records = db.pending::<Record>().await.unwrap();
+    assert!(records.contains(&local));
+    assert!(records.contains(&peer));
+}
+
+#[tokio::test]
+async fn post_confirmation_and_failure_removal_are_atomic() {
+    let store = TestStore::new();
+    let db = store.builder(vec![], vec![]).open().await.unwrap();
+    let failure = record(&db, 1).await;
+    db.record_pending(failure.clone()).await.unwrap();
+    db.save_positions_post::<_, Record>(vec![1u8], None)
+        .await
+        .unwrap();
+    db.inspect_writer(|sql| sql.batch("CREATE TEMP TRIGGER fail_pending BEFORE DELETE ON _coven_pending BEGIN SELECT RAISE(ABORT,'injected pending failure'); END;").unwrap());
+    assert!(db
+        .save_positions_post::<_, Record>(vec![2u8], Some(failure.subject.clone()))
+        .await
+        .is_err());
+    db.close().await.unwrap();
+    let db = store.builder(vec![], vec![]).open().await.unwrap();
+    assert_eq!(db.positions_post::<Vec<u8>>().await.unwrap(), Some(vec![1]));
+    assert_eq!(db.pending::<Record>().await.unwrap(), vec![failure.clone()]);
+    db.save_positions_post::<_, Record>(vec![2u8], Some(failure.subject))
+        .await
+        .unwrap();
+    assert_eq!(db.positions_post::<Vec<u8>>().await.unwrap(), Some(vec![2]));
+    assert!(db.pending::<Record>().await.unwrap().is_empty());
+}

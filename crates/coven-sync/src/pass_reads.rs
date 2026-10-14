@@ -13,6 +13,7 @@ pub(crate) struct PassReads(Arc<Mutex<Reads>>);
 #[derive(Default)]
 struct Reads {
     scopes: usize,
+    positions: Option<crate::posted_positions::Observation>,
     writers: Option<BTreeSet<DeviceId>>,
     misses: BTreeSet<(coven_database::LogKind, DeviceId, u64)>,
     /// Audience snapshot listings shared while one return observation lasts.
@@ -26,6 +27,21 @@ impl PassReads {
     pub(crate) fn enter(&self) -> ReadScope {
         self.0.lock().expect("pass reads lock poisoned").scopes += 1;
         ReadScope(self.clone())
+    }
+
+    pub(crate) fn positions(&self) -> Option<crate::posted_positions::Observation> {
+        self.0
+            .lock()
+            .expect("pass reads lock poisoned")
+            .positions
+            .clone()
+    }
+
+    pub(crate) fn keep_positions(&self, positions: crate::posted_positions::Observation) {
+        let mut reads = self.0.lock().expect("pass reads lock poisoned");
+        if reads.scopes > 0 {
+            reads.positions = Some(positions);
+        }
     }
 
     /// Start a new discovery observation: list writers and probe every log again.
@@ -125,6 +141,7 @@ impl Drop for ReadScope {
         let mut reads = self.0 .0.lock().expect("pass reads lock poisoned");
         reads.scopes -= 1;
         if reads.scopes == 0 {
+            reads.positions = None;
             reads.writers = None;
             reads.misses.clear();
         }

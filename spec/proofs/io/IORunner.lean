@@ -153,6 +153,30 @@ private def download (j : Json) : Except String Json := do
   return Json.mkObj [("complete", toJson (Downloads.completed result)),
     ("refused", toJson refused), ("automatic", toJson automatic)]
 
+private def positions (j : Json) : Except String Json := do
+  let actions ← j.getObjValAs? (Array Json) "actions"
+  let mut cache : Cache := ⟨[], []⟩
+  let mut output := #[]
+  for action in actions do
+    cache ← cacheTransition cache .reopen
+    let size ← action.getObjValAs? Nat "size"
+    let revision ← action.getObjValAs? Nat "revision"
+    let mut fetched := 0
+    for offset in List.range size do
+      let address : ByteAddress := ⟨.positions 1, ⟨size, 0, revision⟩, offset⟩
+      if address ∉ cache.retained then
+        cache ← cacheTransition cache (.fetch address)
+        cache ← cacheTransition cache (.commit address)
+        fetched := fetched + 1
+    output := output.push (toJson fetched)
+  return toJson output
+
+private def post (j : Json) : Except String Json := do
+  let confirmed ← j.getObjValAs? (Option (List Nat)) "confirmed"
+  let present ← j.getObjValAs? Bool "present"
+  let current ← j.getObjValAs? (List Nat) "current"
+  return toJson (changedPost confirmed present current)
+
 private def run (j : Json) : Except String Json := do
   match ← j.getObjValAs? String "check" with
   | "discovery" => discovery j
@@ -162,6 +186,8 @@ private def run (j : Json) : Except String Json := do
   | "recent" => recent j
   | "retained" => retained j
   | "download" => download j
+  | "positions" => positions j
+  | "post" => post j
   | check => throw s!"unknown IO check {check}"
 
 def main : IO UInt32 := do

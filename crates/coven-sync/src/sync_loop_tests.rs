@@ -614,7 +614,7 @@ async fn scenario(scenario: Scenario) -> Counts {
 // listings return revisions directly, so M=0: 2 + 3*3 = 11. S3's 14-request
 // example adds three native HEADs that this provider does not perform.
 #[tokio::test]
-#[ignore = "observed 22 requests (12 LIST, 6 GET, 3 status, 1 PUT); stated 11 (2 LIST, 9 next-number misses, 0 PUT)"]
+#[ignore = "requires bounded discovery and retention: 2 listings, 9 next-number misses, 0 replacements"]
 async fn io_counts_idle_requests() {
     let counts = scenario(Scenario::Idle).await;
     assert_eq!(
@@ -636,13 +636,13 @@ async fn io_counts_idle_requests() {
 }
 
 #[tokio::test]
-#[ignore = "observed 54 writer holds and 9 commits; stated 0 of each on warm idle passes (saved-log decodes are already 0)"]
+#[ignore = "pass maintenance opens writer transactions; warm idle passes require zero writer holds and commits"]
 async fn io_counts_idle_local_work() {
     assert_eq!(scenario(Scenario::Idle).await.work, WorkCounts::default());
 }
 
 #[tokio::test]
-#[ignore = "observed 29 requests; stated 13 with one transfer at a time: idle 11 + one write GET + one positions PUT"]
+#[ignore = "requires bounded discovery and retention: idle 11 + one write GET + one positions PUT"]
 async fn io_counts_one_write_requests() {
     let counts = scenario(Scenario::OneWrite).await;
     assert_eq!(
@@ -721,7 +721,7 @@ async fn io_counts_one_write_local_baseline() {
     assert_eq!(repeated_reads(&counts.reads, &[], false), 0);
     // No fixed total is stated for non-idle writer holds or commits. These
     // are observed baselines; the saved-log decode bound is tested separately.
-    assert_eq!((counts.work.writer_holds, counts.work.commits), (63, 18));
+    assert_eq!((counts.work.writer_holds, counts.work.commits), (78, 18));
 }
 
 #[tokio::test]
@@ -733,9 +733,9 @@ async fn io_counts_first_catchup_baseline() {
     assert_eq!(
         (counts.requests, counts.requests_by_kind()),
         (
-            60,
+            59,
             RequestCounts {
-                lists: 8,
+                lists: 7,
                 gets: 37,
                 creates: 1,
                 replaces: 2,
@@ -746,7 +746,7 @@ async fn io_counts_first_catchup_baseline() {
         ),
         "{counts:#?}"
     );
-    assert_eq!((counts.work.writer_holds, counts.work.commits), (95, 39));
+    assert_eq!((counts.work.writer_holds, counts.work.commits), (112, 42));
     assert_eq!(
         counts.work.store_log_commits, 2,
         "catch-up batch and own registration"
@@ -802,10 +802,10 @@ async fn io_counts_file_fetch_baseline() {
     assert_eq!(
         (counts.requests, counts.requests_by_kind()),
         (
-            25,
+            23,
             RequestCounts {
-                lists: 7,
-                gets: 9,
+                lists: 6,
+                gets: 8,
                 ranges: 2,
                 replaces: 1,
                 statuses: 5,
@@ -816,7 +816,7 @@ async fn io_counts_file_fetch_baseline() {
         "{counts:#?}"
     );
     // No fixed non-idle writer/commit total is stated; observed counts.
-    assert_eq!((counts.work.writer_holds, counts.work.commits), (79, 37));
+    assert_eq!((counts.work.writer_holds, counts.work.commits), (94, 37));
 }
 
 #[tokio::test]
@@ -870,11 +870,11 @@ async fn io_counts_reopen_baseline() {
     assert_eq!(
         (counts.requests, counts.requests_by_kind()),
         (
-            21,
+            19,
             RequestCounts {
-                lists: 7,
+                lists: 6,
                 gets: 7,
-                replaces: 2,
+                replaces: 1,
                 statuses: 4,
                 other: 1,
                 ..Default::default()
@@ -882,7 +882,7 @@ async fn io_counts_reopen_baseline() {
         ),
         "{counts:#?}"
     );
-    assert_eq!((counts.work.writer_holds, counts.work.commits), (57, 11));
+    assert_eq!((counts.work.writer_holds, counts.work.commits), (73, 12));
 }
 
 #[tokio::test]

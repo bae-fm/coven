@@ -276,44 +276,12 @@ impl Database {
     ) -> Result<(), DbError> {
         self.call(move |inner| {
             inner.access.with_writer(|writer| {
-                let mut identities = std::collections::BTreeSet::new();
-                for report in &reports {
-                    if report.reported_by() == inner.access.device
-                        || report.operation().is_some()
-                        || !identities.insert((report.subject(), report.reported_by()))
-                    {
-                        return Err(DbError::DamagedDatabase);
-                    }
-                }
-                let previous: Vec<_> = crate::pending::retained::<P>(writer)?
-                    .into_iter()
-                    .filter(|r| r.reported_by() != inner.access.device)
-                    .collect();
-                let previous_values = previous
-                    .iter()
-                    .map(|r| serde_json::to_vec(r).map_err(DbError::PendingEncoding))
-                    .collect::<Result<std::collections::BTreeSet<_>, _>>()?;
-                let next = reports
-                    .iter()
-                    .map(|r| serde_json::to_vec(r).map_err(DbError::PendingEncoding))
-                    .collect::<Result<std::collections::BTreeSet<_>, _>>()?;
-                if previous_values == next {
+                let changes =
+                    crate::pending::Replacement::reports(writer, inner.access.device, reports)?;
+                if changes.is_empty() {
                     return Ok(());
                 }
-                writer.pending_transaction(|db| {
-                    for report in previous {
-                        if !identities.contains(&(report.subject(), report.reported_by())) {
-                            crate::pending::clear(db, report.subject(), report.reported_by())?;
-                        }
-                    }
-                    for report in &reports {
-                        let bytes = serde_json::to_vec(report).map_err(DbError::PendingEncoding)?;
-                        if !previous_values.contains(&bytes) {
-                            crate::pending::save(db, report)?;
-                        }
-                    }
-                    Ok(())
-                })
+                writer.pending_transaction(|db| changes.apply(db))
             })
         })
         .await
@@ -666,6 +634,11 @@ impl Database {
                 Ok(crate::SyncState {
                     device: inner.access.device,
                     store_log: crate::store_log::positions(writer)?,
+                    reloading: writer.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM _coven_data_reloads)",
+                        [],
+                        |r| r.get(0),
+                    )?,
                     uploads_pending: writer.query_row(
                         "SELECT EXISTS(SELECT 1 FROM _coven_uploads)",
                         [],
@@ -685,3 +658,6 @@ impl Database {
         .await
     }
 }
+
+#[path = "database_positions.rs"]
+mod positions;

@@ -633,7 +633,14 @@ async fn authorization_causality_and_identity_refusals_keep_their_report_tags() 
         );
         devices[1].writes.post_positions().await.unwrap();
         let post = posted(&storage, &devices[1], 2).await;
-        assert_eq!(post.pending[0], saved[0].as_log_refusal().unwrap().into());
+        assert_eq!(
+            post.pending[0].subject,
+            coven_format::pending::PendingSubject::Write(path.write_id().unwrap())
+        );
+        assert_eq!(
+            post.pending[0].reason,
+            coven_format::pending::PendingReason::Refused(RefusalCode::try_from(tag).unwrap())
+        );
     }
 }
 

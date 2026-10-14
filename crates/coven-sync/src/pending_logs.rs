@@ -79,8 +79,7 @@ pub(crate) async fn reports(
         .pending::<PendingRecord>()
         .await?
         .into_iter()
-        .filter(|r| r.reported_by == own)
-        .filter_map(|r| r.as_log_refusal().map(Into::into))
+        .filter_map(|r| reports::publish(r, own))
         .collect();
     reports.sort_by(|a: &coven_format::pending::PendingReport, b| a.subject.cmp(&b.subject));
     Ok(reports)
@@ -132,3 +131,6 @@ pub(crate) fn write_wait(
         }
     })
 }
+
+#[path = "pending_reports.rs"]
+pub(crate) mod reports;

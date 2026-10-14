@@ -3,8 +3,10 @@ use coven_crypto::{MemberKeys, StoreKey, StoreKeyring};
 use coven_database::{LogRefusal, Migration, RowIdentity, SyncedTable};
 use coven_format::pending::RefusalCode;
 use coven_format::store_log::{MemberPublicKeys, StoreChange};
+use coven_format::{objects::PostedPositions, sealed_single::SingleChunkPrefix, Object};
 use coven_foundation::id_source::{DeviceId, IdSource, KeyId, SequentialIds, StoreId};
 use coven_storage::test_utils::{Faults, MemoryStorage};
+use coven_storage::{ObjectPath, ObjectPrefix};
 use std::time::{Duration, UNIX_EPOCH};
 use uuid::Uuid;
 
@@ -649,21 +651,14 @@ mod stuck {
             .await
             .unwrap();
         devices[0].writes.download_writes().await.unwrap();
-        // The damaged positions are this device's own observation instead.
-        let pending = devices[0]
-            .db
-            .pending::<crate::PendingRecord>()
-            .await
-            .unwrap();
-        assert_eq!(pending.len(), 1);
         assert_eq!(
-            pending[0].subject,
-            crate::PendingSubject::Positions(DeviceId(2))
+            author.next().await.unwrap(),
+            vec![crate::PendingRecord {
+                subject: crate::PendingSubject::Positions(DeviceId(2)),
+                reason: crate::PendingReason::InvalidPositions(RefusalCode::Signature.into()),
+                reported_by: DeviceId(1),
+            }]
         );
-        assert!(matches!(
-            pending[0].reason,
-            crate::PendingReason::InvalidPositions(_)
-        ));
     }
 
     async fn reopen(storage: Arc<MemoryStorage>, device: &mut Device) {
@@ -889,50 +884,4 @@ mod stuck {
             assert_eq!(super::writes::queued(&devices[1].db).await, queued);
         }
     }
-}
-
-#[tokio::test]
-async fn oversized_reports_fail_publication_without_replacing_or_truncating_the_post() {
-    let storage = Arc::new(
-        MemoryStorage::builder()
-            .transfer_limits(1024, 256)
-            .build()
-            .unwrap(),
-    );
-    let mut devices = group(storage.clone(), 1).await;
-    let device = &mut devices[0];
-    device.writes.post_positions().await.unwrap();
-    let path = ObjectPath::positions(STORE_ID, DeviceId(1));
-    let previous = storage.read(&path).await.unwrap();
-    for writer in 2..66 {
-        device
-            .db
-            .record_pending(crate::PendingRecord::log_refusal(
-                coven_database::LogRefusal {
-                    object: LogObject::Write(WriteId {
-                        device: DeviceId(writer),
-                        number: 1,
-                    }),
-                    failure: RefusalCode::Parse,
-                },
-                DeviceId(1),
-            ))
-            .await
-            .unwrap();
-    }
-    assert!(matches!(device.writes.post_positions().await,
-        Err(SyncError::Storage(error)) if matches!(error.failure(),
-            coven_storage::StorageFailure::SingleRequestTooLarge { limit: 1024, .. })));
-    assert_eq!(storage.read(&path).await.unwrap(), previous);
-    assert_eq!(
-        device
-            .writes
-            .current_positions()
-            .await
-            .unwrap()
-            .unwrap()
-            .pending
-            .len(),
-        64
-    );
 }

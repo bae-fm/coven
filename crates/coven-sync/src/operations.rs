@@ -521,11 +521,13 @@ impl OperationRun {
     async fn sync_pass(&mut self) -> Result<(), SyncError> {
         let _pass = self.sync.begin_pass(&mut self.writes);
         self.sync.sync_store_log().await?;
+        self.writes.observe_positions().await?;
         // Phase 2: replace exposed keys before any first attempt (§11).
         self.sync.rotate_exposed_keys().await?;
         self.drive_key_phase().await?;
-        // A pending reload cannot report a successful pass or advance positions.
+        // Pending reports still travel while a reload holds the confirmed past.
         if let Some(id) = self.sync.pending_reload().await? {
+            self.writes.post_positions().await?;
             return Err(SyncError::ReloadPending(id));
         }
         self.sync.prepare_return().await?;
@@ -538,6 +540,7 @@ impl OperationRun {
         }
         self.drive_key_phase().await?;
         if let Some(id) = self.sync.pending_reload().await? {
+            self.writes.post_positions().await?;
             return Err(SyncError::ReloadPending(id));
         }
         self.files.sync_files().await?;

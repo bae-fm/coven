@@ -94,7 +94,7 @@ impl StoreLogSync {
                 coverage.insert(audience.clone(), prefix.writes);
             }
         }
-        let positions = self.retention_positions(&local.log, damages).await?;
+        let positions = self.retention_positions().await?;
         let mut stuck = crate::pending_logs::local_refusals(&self.database).await?;
         for object in storage
             .list(&ObjectPrefix::device_logs(self.directory.id()))
@@ -199,45 +199,22 @@ impl StoreLogSync {
         Ok(removed && owner)
     }
 
-    async fn retention_positions(
-        &self,
-        log: &StoreLog,
-        damages: &mut Vec<DamagedObject>,
-    ) -> Result<BTreeMap<DeviceId, WritePositions>, SyncError> {
-        let storage = self.storage.as_deref().ok_or(SyncError::NoStorage)?;
-        let mut positions = BTreeMap::new();
-        for object in storage
-            .list(&ObjectPrefix::positions(self.directory.id()))
-            .await?
-        {
-            match self.open_retention_positions(&object, log).await {
-                Ok(Ok((device, writes))) => {
-                    positions.insert(device, writes);
-                }
-                // Positions that wait or fail a check count as not posted;
-                // the agreement scan keeps their pending record (§19.1).
-                Ok(Err(reason)) => {
-                    tracing::debug!(path = object.path.as_str(), ?reason, "positions not posted");
-                }
-                Err(error) => snapshot_damage(damages, &object.path, error)?,
-            }
-        }
-        Ok(positions)
-    }
-
-    async fn open_retention_positions(
-        &self,
-        object: &coven_storage::StoredObject,
-        log: &StoreLog,
-    ) -> Result<Result<(DeviceId, WritePositions), crate::PendingReason>, SyncError> {
-        let storage = self.storage.as_deref().ok_or(SyncError::NoStorage)?;
-        let input = crate::object_input::ObjectInput::observe(&self.database, object).await?;
-        let bytes = input.whole(storage).await?;
+    async fn retention_positions(&self) -> Result<BTreeMap<DeviceId, WritePositions>, SyncError> {
+        let local = self.database.local_store_log().await?;
         let ring = self.store_keys.read()?;
-        Ok(
-            crate::posted_positions::open(&bytes, &object.path, ring.as_ref(), log)?
-                .map(|positions| (positions.device, positions.writes)),
+        let observation = crate::posted_positions::observe(
+            &self.database,
+            &self.reads,
+            self.storage.as_deref().ok_or(SyncError::NoStorage)?,
+            &local,
+            ring.as_ref(),
         )
+        .await?;
+        Ok(observation
+            .positions
+            .into_iter()
+            .map(|(device, positions)| (device, positions.writes))
+            .collect())
     }
 }
 

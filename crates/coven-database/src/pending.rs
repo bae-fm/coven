@@ -284,3 +284,66 @@ pub(crate) fn clear_covered_writes(db: &DatabaseConnection) -> Result<(), DbErro
 #[cfg(test)]
 #[path = "pending_tests.rs"]
 pub(crate) mod tests;
+
+/// Prepare a set replacement before opening a durable transaction. Equal sets
+/// have no writes; unchanged records keep their suppression and retry evidence.
+pub(crate) struct Replacement<P: PendingValue> {
+    removed: Vec<P>,
+    changed: Vec<P>,
+}
+impl<P: PendingValue> Replacement<P> {
+    pub(crate) fn new(previous: Vec<P>, next: Vec<P>) -> Result<Self, DbError> {
+        let mut identities = std::collections::BTreeSet::new();
+        for record in &next {
+            if !identities.insert((record.subject(), record.reported_by())) {
+                return Err(DbError::DamagedDatabase);
+            }
+        }
+        let values = previous
+            .iter()
+            .map(|r| serde_json::to_vec(r).map_err(DbError::PendingEncoding))
+            .collect::<Result<std::collections::BTreeSet<_>, _>>()?;
+        let removed = previous
+            .into_iter()
+            .filter(|r| !identities.contains(&(r.subject(), r.reported_by())))
+            .collect();
+        let mut changed = Vec::new();
+        for record in next {
+            if !values.contains(&serde_json::to_vec(&record).map_err(DbError::PendingEncoding)?) {
+                changed.push(record);
+            }
+        }
+        Ok(Self { removed, changed })
+    }
+    pub(crate) fn reports(
+        db: &DatabaseConnection,
+        own: DeviceId,
+        next: Vec<P>,
+    ) -> Result<Self, DbError> {
+        if next
+            .iter()
+            .any(|r| r.reported_by() == own || r.operation().is_some())
+        {
+            return Err(DbError::DamagedDatabase);
+        }
+        Self::new(
+            retained::<P>(db)?
+                .into_iter()
+                .filter(|r| r.reported_by() != own)
+                .collect(),
+            next,
+        )
+    }
+    pub(crate) fn is_empty(&self) -> bool {
+        self.removed.is_empty() && self.changed.is_empty()
+    }
+    pub(crate) fn apply(self, db: &DatabaseConnection) -> Result<(), DbError> {
+        for record in self.removed {
+            clear(db, record.subject(), record.reported_by())?;
+        }
+        for record in self.changed {
+            save(db, &record)?;
+        }
+        Ok(())
+    }
+}

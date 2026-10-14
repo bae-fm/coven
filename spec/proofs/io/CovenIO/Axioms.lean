@@ -99,6 +99,8 @@ import CovenIO
 #print axioms CovenIO.provider_time_grows
 #print axioms CovenIO.old_immutable_present
 #print axioms CovenIO.exposure_survives
+#print axioms CovenIO.unchanged_post_sends_nothing
+#print axioms CovenIO.disappeared_post_republishes
 #print axioms CovenIO.idle_requests
 #print axioms CovenIO.idle_two_listings
 #print axioms CovenIO.idle_gets

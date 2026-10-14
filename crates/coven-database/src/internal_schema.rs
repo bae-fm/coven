@@ -48,6 +48,18 @@ macro_rules! coven_tables {
             CREATE INDEX _coven_pending_object ON _coven_pending(object,reporter);
             CREATE UNIQUE INDEX _coven_pending_operation ON _coven_pending(operation) WHERE operation IS NOT NULL;
         ");
+        $visit!(_coven_peer_positions, "
+            CREATE TABLE _coven_peer_positions (
+                device BLOB PRIMARY KEY NOT NULL CHECK(length(device)=8),
+                observation BLOB NOT NULL
+            ) STRICT, WITHOUT ROWID;
+        ");
+        $visit!(_coven_positions_post, "
+            CREATE TABLE _coven_positions_post (
+                singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+                state BLOB NOT NULL
+            ) STRICT;
+        ");
         $visit!(_coven_pending_resets, "
             CREATE TABLE _coven_pending_resets (
                 subject BLOB NOT NULL,

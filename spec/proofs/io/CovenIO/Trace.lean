@@ -3,6 +3,17 @@ import CovenStorage.Identity
 
 namespace CovenIO
 
+/-- Canonical D8 plaintext, not sealing randomness, determines publication.
+An observed disappearance requires republication even with confirmation. -/
+def changedPost (confirmed : Option Bytes) (present : Bool) (current : Bytes) : Bool :=
+  !present || confirmed != some current
+
+theorem unchanged_post_sends_nothing (bytes : Bytes) :
+    changedPost (some bytes) true bytes = false := by simp [changedPost]
+
+theorem disappeared_post_republishes (confirmed : Option Bytes) (current : Bytes) :
+    changedPost confirmed false current = true := by simp [changedPost]
+
 def probes (next : Kind → Nat → Nat) (writer : Nat) : List Request :=
   [.get (.log .entry writer (next .entry writer)),
    .get (.log .copy writer (next .copy writer)),

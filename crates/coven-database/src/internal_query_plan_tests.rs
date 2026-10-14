@@ -82,6 +82,8 @@ mod fixture {
      INSERT INTO _coven_fingerprint_leaves SELECT audience,key,key,key FROM fixture;
      INSERT INTO _coven_writes
        SELECT i,CAST(n || device AS BLOB),n,x'00' FROM fixture;
+     INSERT INTO _coven_peer_positions SELECT n,x'00' FROM fixture;
+     INSERT INTO _coven_positions_post VALUES(1,x'00');
      INSERT INTO _coven_positions SELECT n,n FROM fixture;
      INSERT INTO _coven_write_headers SELECT device,n,x'00' FROM fixture;
      INSERT INTO _coven_authored_parts SELECT CAST(device || n AS BLOB),audience,x'00',1 FROM fixture;
@@ -143,6 +145,7 @@ mod fixture {
             match table.as_str() {
                 "_coven_store_log_uploads"
                 | "_coven_snapshot_schema"
+                | "_coven_positions_post"
                 | "_coven_catch_up"
                 | "_coven_finality" => {
                     assert_eq!(count, 1)
@@ -187,6 +190,10 @@ mod scans {
         let file = statement.file.as_str();
         let sql = statement.template.as_str();
         match (file, sql, relation) {
+    ("database_positions.rs", "SELECT device,observation FROM _coven_peer_positions", "_coven_peer_positions") =>
+        Some("one completed positions scan compares every retained peer identity"),
+    ("database_sync.rs", "SELECT EXISTS(SELECT 1 FROM _coven_data_reloads)", "_coven_data_reloads") =>
+        Some("publication stops at the first unfinished audience reload"),
     ("database_file_retention.rs", "SELECT device,file FROM _coven_row_file_refs UNION SELECT device,file FROM _coven_input_file_refs UNION SELECT device,file FROM _coven_queued_file_refs", "_coven_row_file_refs" | "_coven_input_file_refs" | "_coven_queued_file_refs") =>
         Some("file retention returns every protected fixed path from the sparse indexes"),
     ("pending.rs", "INSERT INTO _coven_pending_resets(subject,reporter,entry_device,entry_number) SELECT p.subject,p.reporter,?1,?2 FROM _coven_pending AS p WHERE NOT EXISTS(SELECT 1 FROM _coven_access_keys AS k WHERE k.operation=p.operation) ON CONFLICT DO NOTHING", "p") =>

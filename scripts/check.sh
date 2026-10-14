@@ -373,7 +373,8 @@ proofs() {
         io_tests=$(cargo test -p coven-sync --all-features -- --list --ignored)
         for test in io_differential_discovery io_differential_snapshot_counts \
             io_differential_catalog_current io_differential_needs_snapshots \
-            io_differential_recent_return io_differential_streaming_download_dispositions; do
+            io_differential_recent_return io_differential_streaming_download_dispositions \
+            io_differential_positions; do
             if ! printf '%s\n' "$io_tests" | grep -q "::$test: test\$"; then
                 echo "the Rust test binary is missing $test" >&2
                 exit 1
@@ -385,7 +386,8 @@ proofs() {
             store_log_sync::tests::snapshots::signatures::io_differential_catalog_current \
             recent_return::tests::io_differential_needs_snapshots \
             recent_return::tests::io_differential_recent_return \
-            device_log_sync::tests::validation::io_differential_streaming_download_dispositions
+            device_log_sync::tests::validation::io_differential_streaming_download_dispositions \
+            device_log_sync::positions::tests::io_differential_positions
     fi
 
     if proof_selected storage || crate_selected coven-database; then

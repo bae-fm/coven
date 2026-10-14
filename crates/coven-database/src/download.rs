@@ -423,6 +423,8 @@ pub struct SyncState {
     pub store_log: coven_format::value::EntryPositions,
     /// A queued local write prevents publishing the current fingerprints.
     pub uploads_pending: bool,
+    /// Selected audience data has not yet been realized by a reload.
+    pub reloading: bool,
     /// The final version of the last breaking migration batch; uploads await its raise.
     pub breaking_version: u32,
     /// Fingerprints may be compared only at the same app schema version.

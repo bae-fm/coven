@@ -1,6 +1,6 @@
 //! Permanent log stops used by local download scheduling and persistence.
 
-use coven_format::pending::{PendingReason, PendingReport, PendingSubject, RefusalCode};
+use coven_format::pending::RefusalCode;
 use coven_format::value::EntryId;
 use coven_foundation::id_source::DeviceId;
 use coven_merge::WriteId;
@@ -48,31 +48,5 @@ impl LogRefusal {
             (LogObject::Write(_), LogObject::Write(_)) | (LogObject::Entry(_), LogObject::Entry(_))
         ) && self.object.device() == object.device()
             && self.object.number() <= object.number()
-    }
-
-    /// Select a permanent log refusal from a peer's broader pending report.
-    /// Other pending conditions never become permanent local log stops.
-    pub fn from_report(report: &PendingReport) -> Option<Self> {
-        let PendingReason::Refused(failure) = report.reason else {
-            return None;
-        };
-        let object = match report.subject {
-            PendingSubject::Write(id) => LogObject::Write(id),
-            PendingSubject::Entry(id) => LogObject::Entry(id),
-            _ => return None,
-        };
-        Some(Self { object, failure })
-    }
-}
-
-impl From<LogRefusal> for PendingReport {
-    fn from(record: LogRefusal) -> Self {
-        Self {
-            subject: match record.object {
-                LogObject::Write(id) => PendingSubject::Write(id),
-                LogObject::Entry(id) => PendingSubject::Entry(id),
-            },
-            reason: PendingReason::Refused(record.failure),
-        }
     }
 }

@@ -305,7 +305,16 @@ async fn multiple_reported_subjects_in_one_log_retain_each_condition() {
         .await
         .unwrap()
         .unwrap();
-    positions.pending = vec![first.into(), second.into()];
+    positions.pending = [first, second]
+        .into_iter()
+        .map(|refusal| {
+            crate::pending_logs::reports::publish(
+                crate::PendingRecord::log_refusal(refusal, DeviceId(2)),
+                DeviceId(2),
+            )
+            .unwrap()
+        })
+        .collect();
     let path = ObjectPath::positions(STORE_ID, positions.device);
     storage
         .replace(&path, &signed_positions(&devices[1], positions))
