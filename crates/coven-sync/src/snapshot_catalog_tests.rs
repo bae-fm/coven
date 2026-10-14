@@ -889,7 +889,7 @@ async fn selection_orders_coverage_then_path_and_waits_on_a_damaged_newest() {
         a.device().await,
         NonZeroU64::new(999).unwrap(),
     );
-    storage.create_once(&malformed, b"x").await.unwrap();
+    storage.create(&malformed, b"x").await.unwrap();
     waits_on_newer(c.sync.reload_from_snapshots().await);
     assert!(matches!(
         snapshot_record(&c, &malformed).await,

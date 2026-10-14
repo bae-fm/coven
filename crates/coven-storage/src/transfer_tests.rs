@@ -33,6 +33,9 @@ async fn create_routes_the_boundary_without_starting_the_unused_request() {
     .unwrap();
     assert_eq!(storage.read(&path).await.unwrap(), [7; 17]);
     assert!(storage.create(&path, &[8; 17]).await.is_err());
-    storage.create_once(&path, &[7; 17]).await.unwrap();
+    assert_eq!(
+        storage.create(&path, &[7; 17]).await.unwrap_err().failure(),
+        StorageFailure::AlreadyExists
+    );
     assert_eq!(storage.read(&path).await.unwrap(), [7; 17]);
 }

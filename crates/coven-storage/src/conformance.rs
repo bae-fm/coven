@@ -8,6 +8,14 @@ pub struct Conformance {
     storage: Arc<dyn Storage>,
     store: StoreId,
 }
+/// The provider refused an occupied immutable path and left it unchanged.
+fn occupied(result: Result<(), StorageError>) -> bool {
+    result.is_err_and(|error| {
+        error.failure() == StorageFailure::AlreadyExists
+            && !matches!(error, StorageError::Cleanup { .. })
+    })
+}
+
 impl Conformance {
     /// The provider under test, with an unused store ID.
     pub fn new(storage: Arc<dyn Storage>, store: StoreId) -> Self {
@@ -80,17 +88,12 @@ impl Conformance {
         ) {
             return Err(StorageFailure::Protocol.with_source("past-end range misclassified"));
         }
-        if self
-            .storage
-            .create(&path, b"replacement")
-            .await
-            .err()
-            .map(|e| e.failure())
-            != Some(StorageFailure::AlreadyExists)
-        {
+        if !occupied(self.storage.create(&path, b"replacement").await) {
             return Err(StorageFailure::Protocol.with_source("create-once refusal"));
         }
-        self.storage.create_once(&path, data).await?;
+        if !occupied(self.storage.create(&path, data).await) {
+            return Err(StorageFailure::Protocol.with_source("create-once retry refusal"));
+        }
         if self.storage.status(&path).await?.as_ref() != Some(&first) {
             return Err(StorageFailure::Protocol
                 .with_source("immutable retry changed publication metadata"));
@@ -193,11 +196,15 @@ impl Conformance {
             self.storage.delete(&path).await?;
         }
         self.storage.create(&path, &[]).await?;
-        self.storage.create_once(&path, &[]).await?;
+        if !occupied(self.storage.create(&path, &[]).await) {
+            return Err(StorageFailure::Protocol.with_source("empty create-once refusal"));
+        }
         if !self.storage.read(&path).await?.is_empty() {
             return Err(StorageFailure::Protocol.with_source("empty object changed"));
         }
-        self.storage.create_once(&path, b"different").await?;
+        if !occupied(self.storage.create(&path, b"different").await) {
+            return Err(StorageFailure::Protocol.with_source("empty create-once refusal"));
+        }
         if !self.storage.read(&path).await?.is_empty() {
             return Err(StorageFailure::Protocol.with_source("empty immutable object replaced"));
         }
@@ -243,8 +250,8 @@ impl Conformance {
         let storage = &self.storage;
         let first = ObjectPath::device_log(self.store, DeviceId(31), std::num::NonZeroU64::MIN);
         let second = ObjectPath::device_log(self.store, DeviceId(32), std::num::NonZeroU64::MIN);
-        storage.create_once(&first, b"first").await.unwrap();
-        storage.create_once(&second, b"second").await.unwrap();
+        storage.create(&first, b"first").await.unwrap();
+        storage.create(&second, b"second").await.unwrap();
         let expected = storage
             .list(&ObjectPrefix::device_logs(self.store))
             .await
@@ -257,7 +264,7 @@ impl Conformance {
             [(&first, 5, stored_at), (&second, 6, stored_at)]
         );
         advance.await;
-        storage.create_once(&first, b"first").await.unwrap();
+        assert!(occupied(storage.create(&first, b"first").await));
         assert_eq!(
             storage.list(&ObjectPrefix::all(self.store)).await.unwrap(),
             expected

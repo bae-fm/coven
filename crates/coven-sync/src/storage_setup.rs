@@ -293,13 +293,7 @@ impl StoreLogSync {
                 let upload = local.upload.as_ref().expect("reserved access entry");
                 let path = object::path(store_id, upload.entry.position);
                 let bytes = object::seal_upload(store_id, upload, Some(&ring), &member)?;
-                storage.create_once(&path, &bytes).await?;
-                if storage.read(&path).await? != bytes {
-                    return Err(crate::write_object::damaged(
-                        &path,
-                        crate::Refusal::WrongIdentity { cause: None },
-                    ));
-                }
+                object::create_own(storage.as_ref(), &self.send, &path, &bytes).await?;
                 creation = Some(upload.entry.clone());
             }
         }

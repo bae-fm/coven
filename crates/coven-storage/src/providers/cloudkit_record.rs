@@ -337,7 +337,7 @@ pub(super) fn native_error(error: &NSError) -> StorageError {
 }
 
 // Only an occupied destination is AlreadyExists. A changed upload/session/share
-// must reach its initiator as a refusal; create_once must never suppress it.
+// must reach its initiator as a refusal, never as an occupied path to compare.
 pub(super) fn save_error(error: &NSError, created: Option<&str>) -> StorageError {
     let mut result = native_error(error);
     if let StorageError::Provider { failure, .. } = &mut result {

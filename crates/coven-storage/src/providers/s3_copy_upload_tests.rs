@@ -313,7 +313,7 @@ async fn gcs_refused_copy_retains_both_failures_and_retry_cleans_the_temporary()
 }
 
 #[tokio::test]
-async fn create_once_does_not_hide_failed_temporary_cleanup() {
+async fn an_occupied_create_does_not_hide_failed_temporary_cleanup() {
     let state = Arc::new(Mutex::new(Remote {
         gcs: true,
         ..Remote::default()
@@ -330,5 +330,9 @@ async fn create_once_does_not_hide_failed_temporary_cleanup() {
     );
     storage.create(&path, b"original").await.unwrap();
     state.lock().unwrap().refuse_temporary_delete = true;
-    assert!(storage.create_once(&path, b"replacement").await.is_err());
+    // A failed cleanup is never a plain occupied path a caller may compare.
+    assert!(matches!(
+        storage.create(&path, b"replacement").await,
+        Err(StorageError::Cleanup { .. })
+    ));
 }

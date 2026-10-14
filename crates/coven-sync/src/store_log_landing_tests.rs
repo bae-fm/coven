@@ -573,6 +573,90 @@ async fn setup_consumes_a_late_access_entry_before_committing_credentials() {
     );
 }
 
+/// Setup's retry of its reserved access entry counts an occupied path only
+/// with equal complete bytes (§10). A failed comparison read stays pending.
+#[tokio::test]
+async fn setup_compares_an_occupied_access_entry_before_committing() {
+    for lost_reply in [true, false] {
+        let storage = Arc::new(MemoryStorage::builder().build().unwrap());
+        let mut a = device(storage.clone(), 1, member(1), store(1)).await;
+        let mut b = device(storage.clone(), 2, member(1), store(1)).await;
+        a.create(key(1)).await;
+        b.sync().await;
+        b.sync.load_new_device("access writer", None).await.unwrap();
+        let access = coven_format::MemberAccess::S3AccessKey {
+            access_key_id: "replacement".into(),
+            principal: coven_format::S3Principal::Console,
+        };
+        let device = b.db.local_store_log().await.unwrap().device;
+        let path = object::path(store(1), EntryId { device, number: 2 });
+        if lost_reply {
+            b.lose_entry_reply(2).await;
+        } else {
+            b.interrupt_entry(2).await;
+        }
+        assert!(b
+            .sync
+            .make_and_upload_entry(StoreChange::SetAccess {
+                member: b.member.member_id(),
+                access: access.clone()
+            })
+            .await
+            .is_err());
+        b.restore_storage();
+        if lost_reply {
+            b.sync
+                .setup_storage(
+                    storage.clone(),
+                    access.clone(),
+                    "device".into(),
+                    Box::new(|| Ok(Box::new(|| Ok(())))),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                b.log().await.replay.entries[&EntryId { device, number: 2 }],
+                EntryOutcome::Kept
+            );
+            continue;
+        }
+        storage.create(&path, b"another copy").await.unwrap();
+        let mut faults = Faults::none();
+        faults
+            .read_failures
+            .insert(path.clone(), coven_storage::StorageFailure::Network);
+        storage.set_faults(faults).await;
+        assert!(matches!(
+            b.sync
+                .setup_storage(
+                    storage.clone(),
+                    access.clone(),
+                    "device".into(),
+                    Box::new(|| panic!("an unread occupant must not commit")),
+                )
+                .await,
+            Err(SyncError::Storage(error)) if error.failure() == coven_storage::StorageFailure::Network
+        ));
+        assert_eq!(b.send.stopped(), None);
+        storage.set_faults(Faults::none()).await;
+        assert!(matches!(
+            b.sync
+                .setup_storage(
+                    storage.clone(),
+                    access.clone(),
+                    "device".into(),
+                    Box::new(|| panic!("another copy's entry must not commit")),
+                )
+                .await,
+            Err(SyncError::DeviceReset(
+                coven_foundation::files::DeviceResetReason::SlotMismatch
+            ))
+        ));
+        assert!(b.db.local_store_log().await.unwrap().upload.is_some());
+        assert_eq!(storage.read(&path).await.unwrap(), b"another copy");
+    }
+}
+
 #[tokio::test]
 async fn a_late_removal_revalidates_changed_authority_before_a_new_number() {
     use crate::operations::Command;

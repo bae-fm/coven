@@ -141,7 +141,11 @@ pub trait Storage: Send + Sync {
     async fn set_oauth_tokens(&self, _tokens: crate::OAuthTokens) -> Result<(), StorageError> {
         Err(StorageFailure::InvalidConfiguration.with_source("provider does not use OAuth"))
     }
-    /// Create a complete encrypted object, refusing an occupied path.
+    /// Create a complete encrypted object, refusing an occupied path with
+    /// [`StorageFailure::AlreadyExists`]. Occupation alone proves nothing: a
+    /// retry compares the occupant's complete bytes itself (§10). On Drive a
+    /// retry keeps the earliest copy (createdTime, then id) and deletes later
+    /// copies from this writer.
     /// Bodies above [`Self::single_request_limit`] use a session for immutable
     /// paths other than store-log entries, whose bodies must fit one request.
     /// A failed transfer aborts the session;
@@ -291,21 +295,4 @@ pub trait Storage: Send + Sync {
     /// Explicitly abandon an upload. Dropping a recorded value does not abort it.
     /// Already closed or absent sessions succeed; published objects are preserved.
     async fn abort_upload(&self, session: &UploadSession) -> Result<(), StorageError>;
-
-    /// Retry an operation's create with its fixed encrypted bytes (§18).
-    /// An occupied path counts as stored, without a second read. Callers that
-    /// must confirm identical bytes perform that comparison themselves.
-    /// On Drive a retry keeps the earliest copy (createdTime, then id) and
-    /// deletes later copies from this writer.
-    async fn create_once(&self, path: &ObjectPath, bytes: &[u8]) -> Result<(), StorageError> {
-        match self.create(path, bytes).await {
-            Err(error)
-                if error.failure() == crate::StorageFailure::AlreadyExists
-                    && !matches!(error, StorageError::Cleanup { .. }) =>
-            {
-                Ok(())
-            }
-            result => result,
-        }
-    }
 }

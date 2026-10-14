@@ -183,7 +183,14 @@ fn dropbox_live_immutable_time_is_stable() {
         let native_before = metadata(&storage, &path).await;
         live.clock.sleep(Duration::from_secs(3)).await;
         marker(&storage, &live.path(2)).await;
-        storage.create_once(&path, b"immutable").await.unwrap();
+        assert_eq!(
+            storage
+                .create(&path, b"immutable")
+                .await
+                .unwrap_err()
+                .failure(),
+            StorageFailure::AlreadyExists
+        );
         let read = storage.read_object(&path, None).await.unwrap();
         assert_eq!(read.bytes, b"immutable");
         assert_eq!(read.metadata, before);

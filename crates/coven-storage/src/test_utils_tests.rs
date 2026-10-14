@@ -312,7 +312,10 @@ async fn listing_records_publication_time_and_keeps_it_on_retry() {
     let initial = storage.status(&path).await.unwrap().unwrap();
     assert_eq!(initial.stored_at, published);
     clock.set(published + Duration::from_secs(30));
-    storage.create_once(&path, b"data").await.unwrap();
+    assert_eq!(
+        storage.create(&path, b"data").await.unwrap_err().failure(),
+        StorageFailure::AlreadyExists
+    );
     assert_eq!(storage.status(&path).await.unwrap(), Some(initial));
     let listed = storage.list(&ObjectPrefix::all(STORE_ID)).await.unwrap();
     assert_eq!(listed.len(), 1);

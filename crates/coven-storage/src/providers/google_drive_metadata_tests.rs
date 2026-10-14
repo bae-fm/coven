@@ -330,7 +330,10 @@ async fn repeated_search_entries_do_not_delete_the_copy_being_kept() {
     ))
     .await;
     let storage = provider(&server.url);
-    storage.create_once(&path, b"data").await.unwrap();
+    assert_eq!(
+        storage.create(&path, b"data").await.unwrap_err().failure(),
+        StorageFailure::AlreadyExists
+    );
     assert_eq!(state.lock().unwrap().object_ids(), ["first"]);
 }
 
@@ -894,7 +897,10 @@ async fn duplicate_folders_union_children_and_choose_the_oldest_creation_target(
             ["first", "second"]
         );
     }
-    storage.create_once(&first, b"data").await.unwrap();
+    assert_eq!(
+        storage.create(&first, b"data").await.unwrap_err().failure(),
+        StorageFailure::AlreadyExists
+    );
     assert!(!state.lock().unwrap().files.contains_key("retry"));
     let next = ObjectPath::store_log(STORE_ID, DeviceId(31), 3.try_into().unwrap());
     storage.create(&next, b"next").await.unwrap();

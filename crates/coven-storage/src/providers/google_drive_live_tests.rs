@@ -327,7 +327,10 @@ async fn drive_live_immutable_time_is_stable() {
         assert_eq!(drive.storage.read(&path).await.unwrap(), b"immutable");
         drive.clock.sleep(Duration::from_secs(5)).await;
         let later = drive.marker(2).await;
-        drive.storage.create_once(&path, b"immutable").await.unwrap();
+        assert_eq!(
+        drive.storage.create(&path, b"immutable").await.unwrap_err().failure(),
+        StorageFailure::AlreadyExists
+    );
         assert_eq!(drive.storage.read(&path).await.unwrap(), b"immutable");
         let last = drive.observed(&path).await;
         let native_last = drive.metadata(&path).await;

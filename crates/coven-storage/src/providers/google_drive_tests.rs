@@ -213,7 +213,10 @@ async fn retry_keeps_earliest_own_copy_and_leaves_other_devices_copies() {
     }
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     let storage = provider(&server.url);
-    storage.create_once(&path, b"data").await.unwrap();
+    assert_eq!(
+        storage.create(&path, b"data").await.unwrap_err().failure(),
+        StorageFailure::AlreadyExists
+    );
     assert_eq!(
         state.lock().unwrap().object_ids(),
         ["other-device", "z-first"]
@@ -240,7 +243,10 @@ async fn duplicate_time_ties_use_ids_after_normalizing_timezones() {
     }
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     let storage = provider(&server.url);
-    storage.create_once(&path, b"data").await.unwrap();
+    assert_eq!(
+        storage.create(&path, b"data").await.unwrap_err().failure(),
+        StorageFailure::AlreadyExists
+    );
     assert_eq!(state.lock().unwrap().object_ids(), ["a-first"]);
 }
 
@@ -258,15 +264,14 @@ async fn duplicate_cleanup_failure_is_reported_and_the_retry_finishes() {
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     let storage = provider(&server.url);
     assert_eq!(
-        storage
-            .create_once(&path, b"data")
-            .await
-            .unwrap_err()
-            .failure(),
+        storage.create(&path, b"data").await.unwrap_err().failure(),
         StorageFailure::Network
     );
     assert!(state.lock().unwrap().files.contains_key("z-first"));
-    storage.create_once(&path, b"data").await.unwrap();
+    assert_eq!(
+        storage.create(&path, b"data").await.unwrap_err().failure(),
+        StorageFailure::AlreadyExists
+    );
     assert_eq!(state.lock().unwrap().object_ids(), ["z-first"]);
 }
 
@@ -738,7 +743,10 @@ async fn upload_confirmation_uses_its_returned_id_when_search_omits_the_publicat
     let storage = provider(&server.url);
     let path = ObjectPath::store_log(STORE_ID, DeviceId(31), std::num::NonZeroU64::MIN);
     storage.create(&path, b"data").await.unwrap();
-    storage.create_once(&path, b"data").await.unwrap();
+    assert_eq!(
+        storage.create(&path, b"data").await.unwrap_err().failure(),
+        StorageFailure::AlreadyExists
+    );
     assert_eq!(storage.read(&path).await.unwrap(), b"data");
     assert_eq!(state.lock().unwrap().object_ids().len(), 1);
     storage.delete(&path).await.unwrap();

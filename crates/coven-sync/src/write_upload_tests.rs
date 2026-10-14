@@ -484,6 +484,74 @@ async fn classified_occupied_paths_count_as_stored_with_and_without_a_session() 
     }
 }
 
+/// Each send arm compares a different occupant before counting it (§6, §10):
+/// a failed comparison read keeps the write queued without resetting, and the
+/// completed comparison stops this copy without settling the write.
+#[tokio::test]
+async fn a_different_occupant_resets_on_every_arm_and_a_failed_read_stays_pending() {
+    for arm in ["single", "begin", "resume", "restart"] {
+        let storage = storage();
+        let mut devices = group(storage.clone(), 2).await;
+        let body = if arm == "single" { 1 } else { 100_000 };
+        devices[0]
+            .db
+            .write(move |sql| {
+                sql.execute(
+                    "INSERT INTO notes VALUES('one','title',?1)",
+                    ["x".repeat(body)],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let write = WriteId {
+            device: DeviceId(1),
+            number: 1,
+        };
+        if matches!(arm, "resume" | "restart") {
+            let mut faults = Faults::none();
+            faults.lose_part_reply = true;
+            storage.set_faults(faults).await;
+            assert!(devices[0].writes.upload_writes().await.is_err());
+            assert!(devices[0]
+                .db
+                .write_upload_session(write)
+                .await
+                .unwrap()
+                .is_some());
+        }
+        let path = crate::write_seal::path(STORE_ID, write);
+        storage.set_faults(Faults::none()).await;
+        storage.create(&path, b"another copy").await.unwrap();
+        let mut faults = Faults::none();
+        faults.expire_uploads = arm == "restart";
+        faults
+            .read_failures
+            .insert(path.clone(), coven_storage::StorageFailure::Network);
+        storage.set_faults(faults).await;
+        assert!(
+            matches!(devices[0].writes.upload_writes().await, Err(SyncError::Storage(error)) if error.failure() == coven_storage::StorageFailure::Network),
+            "{arm}"
+        );
+        assert_eq!(devices[0].send.stopped(), None, "{arm}");
+        assert_eq!(devices[0].db.test_queued_writes().await.unwrap().len(), 1);
+        let mut faults = Faults::none();
+        faults.expire_uploads = arm == "restart";
+        storage.set_faults(faults).await;
+        assert!(
+            matches!(
+                devices[0].writes.upload_writes().await,
+                Err(SyncError::DeviceReset(
+                    coven_foundation::files::DeviceResetReason::SlotMismatch
+                ))
+            ),
+            "{arm}"
+        );
+        assert_eq!(devices[0].db.test_queued_writes().await.unwrap().len(), 1);
+        assert_eq!(storage.read(&path).await.unwrap(), b"another copy");
+    }
+}
+
 #[tokio::test]
 async fn a_completed_catch_up_expires_at_five_minutes_before_an_outside_write_send() {
     for (age, allowed) in [

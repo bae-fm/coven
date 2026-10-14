@@ -310,3 +310,70 @@ async fn discarding_a_replacement_leaves_no_key_unrecorded() {
     assert_eq!(admin.calls(), ["mint", "roll_back"]);
     assert!(a.db.operation(id).await.unwrap().is_none());
 }
+
+/// The replacement's delivery path once its fixed bytes are sealed.
+async fn sealed_delivery(
+    d: &mut Device,
+    id: OperationId,
+    member: &MemberId,
+) -> (ObjectPath, Vec<u8>) {
+    while d.operation(id).await.last_step < 1 {
+        assert!(matches!(d.step(id).await.unwrap(), Progress::Advanced));
+    }
+    assert!(matches!(d.step(id).await.unwrap(), Progress::Advanced));
+    match crate::operation_data::Data::read(&d.operation(id).await).unwrap() {
+        crate::operation_data::Data::ReplaceAccessKey(work) => (
+            ObjectPath::access_key(store(1), member, work.attempt),
+            work.delivery.expect("sealed delivery"),
+        ),
+        _ => panic!("replacement"),
+    }
+}
+
+#[tokio::test]
+async fn an_occupied_delivery_counts_only_with_its_own_complete_bytes() {
+    // A lost reply stored the fixed bytes: the retry counts them.
+    let (storage, mut a, b) = household().await;
+    let admin = MemoryKeyAdmin::default();
+    let ben = b.member.member_id();
+    let id = begin(
+        &mut a,
+        crate::operations::Command::ReplaceAccessKey(ben.clone(), Arc::new(admin.clone())),
+    )
+    .await;
+    let (path, bytes) = sealed_delivery(&mut a, id, &ben).await;
+    storage.create(&path, &bytes).await.unwrap();
+    assert!(matches!(a.step(id).await.unwrap(), Progress::Advanced));
+    assert_eq!(a.operation(id).await.last_step, 2);
+    assert!(finish(&mut a, id).await.is_ok());
+    // Different bytes at this device's attempt path: a failed comparison read
+    // stays pending; a completed one stops this copy before the entry.
+    let id = begin(
+        &mut a,
+        crate::operations::Command::ReplaceAccessKey(ben.clone(), Arc::new(admin.clone())),
+    )
+    .await;
+    let (path, _) = sealed_delivery(&mut a, id, &ben).await;
+    storage.create(&path, b"another copy").await.unwrap();
+    let mut faults = coven_storage::test_utils::Faults::none();
+    faults
+        .read_failures
+        .insert(path.clone(), coven_storage::StorageFailure::Network);
+    storage.set_faults(faults).await;
+    assert!(
+        matches!(a.step(id).await, Err(SyncError::Storage(error)) if error.failure() == coven_storage::StorageFailure::Network)
+    );
+    assert_eq!(a.send.stopped(), None);
+    assert_eq!(a.operation(id).await.last_step, 1);
+    storage
+        .set_faults(coven_storage::test_utils::Faults::none())
+        .await;
+    assert!(matches!(
+        a.step(id).await,
+        Err(SyncError::DeviceReset(
+            coven_foundation::files::DeviceResetReason::SlotMismatch
+        ))
+    ));
+    assert_eq!(a.operation(id).await.last_step, 1);
+    assert_eq!(storage.read(&path).await.unwrap(), b"another copy");
+}

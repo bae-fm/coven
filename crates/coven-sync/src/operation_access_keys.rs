@@ -140,11 +140,15 @@ impl StoreLogSync {
                 .await?;
             return Ok(Progress::Advanced);
         };
-        self.storage
-            .as_deref()
-            .ok_or(SyncError::NoStorage)?
-            .create_once(&path, bytes)
-            .await?;
+        // A lost reply may have stored these bytes. The attempt id is this
+        // device's own, so different bytes mean another copy of it (§10).
+        crate::store_log_object::create_own(
+            self.storage.as_deref().ok_or(SyncError::NoStorage)?,
+            &self.send,
+            &path,
+            bytes,
+        )
+        .await?;
         self.database
             .advance_operation(data.update(record, 2)?)
             .await?;

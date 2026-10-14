@@ -182,11 +182,20 @@ impl StoreLogSync {
 
 impl Device {
     pub(crate) async fn interrupt_entry(&mut self, number: u64) {
+        self.fail_entry(number, false).await;
+    }
+
+    /// Store this device's next attempt at entry `number` but lose its reply.
+    pub(crate) async fn lose_entry_reply(&mut self, number: u64) {
+        self.fail_entry(number, true).await;
+    }
+
+    async fn fail_entry(&mut self, number: u64, lost_reply: bool) {
         let device = self.db.local_store_log().await.unwrap().device;
         self.sync.storage = Some(key_distribution::failing_creation(
             self.storage.clone(),
             object::path(self.directory.id(), EntryId { device, number }),
-            false,
+            lost_reply,
         ));
     }
 
