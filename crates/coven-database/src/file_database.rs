@@ -176,6 +176,28 @@ impl FileDatabase {
         })
         .await
     }
+    /// Record this device's first unmet condition for one file it reads,
+    /// replacing an earlier reason. Read-only handles keep no records.
+    pub async fn record_file_pending<P: crate::PendingValue>(
+        &self,
+        record: impl FnOnce(DeviceId) -> P + Send + 'static,
+    ) -> Result<(), DbError> {
+        let FileDatabaseAccess::Writer(database) = &self.access else {
+            return Err(read_only());
+        };
+        let device = self.run(|_, _, _, device| Ok::<_, DbError>(device)).await?;
+        database.record_pending(record(device)).await
+    }
+    /// Clear this device's record about a file once its read completes.
+    pub async fn clear_file_pending<S: serde::Serialize + Send + 'static>(
+        &self,
+        subject: S,
+    ) -> Result<(), DbError> {
+        let FileDatabaseAccess::Writer(database) = &self.access else {
+            return Err(read_only());
+        };
+        database.clear_pending(subject).await
+    }
     /// Durable queue, including files whose row changed after attachment.
     pub async fn uploads(&self) -> Result<Vec<FileUpload>, DbError> {
         self.run(|db, _, _, _| file_queue::read(db)).await

@@ -208,7 +208,9 @@ impl UploadedFile {
             coven_format::Error::UnsupportedVersion(version)
                 if version > coven_format::FORMAT_VERSION =>
             {
-                FileReadError::UpdateRequired
+                FileReadError::UpdateRequired(coven_format::pending::RequiredUpdate::CovenFormat {
+                    version,
+                })
             }
             _ => FileReadError::Integrity {
                 id: file.id().to_string(),
@@ -234,7 +236,13 @@ impl UploadedFile {
             _lock: lock,
         })
     }
-    pub(crate) async fn download(&self, progress: impl Fn(u64)) -> Result<(), FileReadError> {
+    /// Fetch every chunk into the cache, authenticating each, then compare the
+    /// whole plaintext with the row's content hash. A mismatch is the inner
+    /// error: complete authenticated bytes that are not this file (§16.3).
+    pub(crate) async fn download(
+        &self,
+        progress: impl Fn(u64),
+    ) -> Result<Result<(), crate::Refusal>, FileReadError> {
         let mut index = 0;
         let mut hash = ContentHasher::new();
         while index < self.header.chunk_count() {
@@ -252,9 +260,9 @@ impl UploadedFile {
             index = last + 1;
         }
         if hash.finish() != self.file.content_hash() {
-            return Err(self.integrity());
+            return Ok(Err(crate::Refusal::ContentHash));
         }
-        Ok(())
+        Ok(Ok(()))
     }
     pub(crate) async fn keep_whole(&self, progress: impl Fn(u64)) -> Result<(), FileReadError> {
         let name = FileName::new(self.owner.ids.new_id().to_string()).expect("UUID cache name");

@@ -13,7 +13,7 @@ use std::{path::PathBuf, sync::Arc};
 pub enum FileReadError {
     /// This file uses a newer coven format (§17.2).
     #[error("an update is required to read this file")]
-    UpdateRequired,
+    UpdateRequired(coven_format::pending::RequiredUpdate),
     /// No storage capability is connected.
     #[error("no storage connected")]
     NoStorage,

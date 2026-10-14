@@ -155,6 +155,22 @@ pub(crate) fn operation<P: PendingValue>(
     .transpose()
 }
 
+/// Whether one reporter keeps any record, current or suppressed, for a subject.
+pub(crate) fn recorded<S: Serialize>(
+    db: &DatabaseConnection,
+    subject: &S,
+    reporter: DeviceId,
+) -> Result<bool, DbError> {
+    db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM _coven_pending WHERE subject=?1 AND reporter=?2)",
+        (
+            serde_json::to_vec(subject).map_err(DbError::PendingEncoding)?,
+            reporter.0.to_be_bytes().as_slice(),
+        ),
+        |r| r.get(0),
+    )
+}
+
 /// The current record one reporter keeps for one subject, if any.
 pub(crate) fn find<P: PendingValue>(
     db: &DatabaseConnection,

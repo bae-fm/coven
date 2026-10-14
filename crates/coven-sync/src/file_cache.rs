@@ -5,6 +5,7 @@ use crate::{
     files::{Files, FilesInner},
     FileReadError,
 };
+use crate::{LocalFailure, PendingReason, PendingRecord, PendingSubject, Prerequisite};
 use coven_database::{DbError, FileRef, LiveQueryClosed, RowKey};
 use futures_util::{StreamExt, TryStreamExt};
 use std::sync::{Arc, Mutex};
@@ -31,13 +32,6 @@ pub enum EagerCacheFillStatus {
     Downloading(PinProgress),
     /// The application cancelled the pending downloads.
     Cancelled(PinProgress),
-    /// The current download failed, retaining its typed cause.
-    Failed {
-        /// Progress before failure.
-        progress: PinProgress,
-        /// Original error.
-        error: Arc<FileReadError>,
-    },
 }
 /// Pin answers with replaceable row requests.
 pub struct RowsPinnedLiveQuery {
@@ -234,15 +228,8 @@ impl FilesInner {
         let files = match self.database.eager_files().await {
             Ok(files) => files,
             Err(error) => {
-                self.eager.send_replace(EagerCacheFillStatus::Failed {
-                    progress: PinProgress {
-                        files_completed: 0,
-                        files_total: 0,
-                        bytes_downloaded: 0,
-                        bytes_total: 0,
-                    },
-                    error: Arc::new(error.into()),
-                });
+                // No file subject holds this failure; the next wake retries it.
+                tracing::error!(?error, "listing eager files failed");
                 return;
             }
         };
@@ -258,22 +245,15 @@ impl FilesInner {
         let mut progress = match self.progress(&pending).await {
             Ok(p) => p,
             Err(error) => {
-                self.eager.send_replace(EagerCacheFillStatus::Failed {
-                    progress: PinProgress {
-                        files_completed: 0,
-                        files_total: pending.len() as u64,
-                        bytes_downloaded: 0,
-                        bytes_total: 0,
-                    },
-                    error: Arc::new(error.into()),
-                });
+                tracing::error!(?error, "measuring eager downloads failed");
+                seen.retain(|file| !pending.contains(file));
                 return;
             }
         };
         let mut cancel = self.cancel_eager.subscribe();
         self.eager
             .send_replace(EagerCacheFillStatus::Downloading(progress.clone()));
-        for (index, file) in pending.iter().enumerate() {
+        for file in &pending {
             let current = Mutex::new(progress.clone());
             let work = async {
                 self.database.validate(file).await?;
@@ -287,13 +267,93 @@ impl FilesInner {
                     })
                     .await
             };
-            tokio::select! {
-                _=cancel.changed()=>{self.eager.send_replace(EagerCacheFillStatus::Cancelled(current.into_inner().expect("eager progress poisoned")));return},
-                result=work=>if let Err(error)=result {seen.retain(|file| !pending[index..].contains(file));self.eager.send_replace(EagerCacheFillStatus::Failed{progress:current.into_inner().expect("eager progress poisoned"),error:Arc::new(error)});return},
-            }
+            let result = tokio::select! {
+                _ = cancel.changed() => {
+                    self.eager.send_replace(EagerCacheFillStatus::Cancelled(
+                        current.into_inner().expect("eager progress poisoned"),
+                    ));
+                    return;
+                }
+                result = work => result,
+            };
             progress = current.into_inner().expect("eager progress poisoned");
-            progress.files_completed += 1;
+            // One file's failure is that file's pending record; the rest of
+            // the fill continues (§16.4, E8).
+            let reason = match result {
+                Ok(Ok(())) => None,
+                Ok(Err(refusal)) => Some(PendingReason::Refused(refusal)),
+                Err(error) => Some(self.read_pending(file, &error)),
+            };
+            let subject = PendingSubject::File {
+                device: file.uploader(),
+                file: file.id(),
+            };
+            let recorded = match reason {
+                None => {
+                    progress.files_completed += 1;
+                    self.database.clear_file_pending(subject).await
+                }
+                Some(reason) => {
+                    if retries(&reason) {
+                        seen.retain(|seen| seen != file);
+                    }
+                    self.database
+                        .record_file_pending(move |reported_by| PendingRecord {
+                            subject,
+                            reason,
+                            reported_by,
+                        })
+                        .await
+                }
+            };
+            if let Err(error) = recorded {
+                tracing::error!(?error, "recording an eager download's pending state failed");
+            }
         }
         self.eager.send_replace(EagerCacheFillStatus::Idle);
     }
+
+    /// The first unmet condition a failed read of `file` leaves (§16.3).
+    fn read_pending(&self, file: &FileRef, error: &FileReadError) -> PendingReason {
+        match error {
+            FileReadError::NoStorage => PendingReason::NoStorage,
+            FileReadError::Storage(error) => {
+                match self.storage.read().expect("storage lock poisoned").as_ref() {
+                    Some(storage) => PendingReason::Storage {
+                        provider: storage.config().provider(),
+                        failure: error.failure(),
+                    },
+                    None => PendingReason::NoStorage,
+                }
+            }
+            FileReadError::Uploading { .. } => PendingReason::Waits(Prerequisite::Object(
+                coven_storage::ObjectPath::file(self.directory.id(), file.uploader(), file.id()),
+            )),
+            FileReadError::Missing { reason, .. } => PendingReason::FileUnavailable(reason.clone()),
+            FileReadError::Integrity { .. } => {
+                PendingReason::Refused(crate::Refusal::Decryption { cause: None })
+            }
+            FileReadError::UpdateRequired(update) => PendingReason::UpdateRequired(*update),
+            FileReadError::Disk(_) | FileReadError::Lock(_) => {
+                PendingReason::Failed(LocalFailure::Disk)
+            }
+            FileReadError::Database(_)
+            | FileReadError::UserFileMissing { .. }
+            | FileReadError::UserFileChanged { .. }
+            | FileReadError::RangeOutOfBounds { .. } => {
+                PendingReason::Failed(LocalFailure::Database)
+            }
+        }
+    }
+}
+
+/// Temporary conditions retry on a later wake; refusals of immutable bytes,
+/// a missing file and a required update wait for app action or an update.
+fn retries(reason: &PendingReason) -> bool {
+    !matches!(
+        reason,
+        PendingReason::Refused(_)
+            | PendingReason::FileUnavailable(_)
+            | PendingReason::UpdateRequired(_)
+    )
 }

@@ -182,12 +182,23 @@ impl Database {
         .await
     }
 
-    /// Clear this device's observation when its subject advances.
+    /// Clear this device's observation when its subject advances. The usual
+    /// case, with nothing recorded, reads without taking the writer.
     pub async fn clear_pending<S: serde::Serialize + Send + 'static>(
         &self,
         subject: S,
     ) -> Result<(), DbError> {
         self.call(move |inner| {
+            let recorded = inner
+                .access
+                .readers
+                .acquire_reader()
+                .with_reader(|reader| {
+                    crate::pending::recorded(reader, &subject, inner.access.device)
+                })?;
+            if !recorded {
+                return Ok(());
+            }
             inner.access.with_writer(|writer| {
                 writer.pending_transaction(|db| {
                     crate::pending::clear(db, &subject, inner.access.device)
