@@ -23,7 +23,7 @@ impl StoreLogSync {
         member: &MemberIdentity,
         path: &ObjectPath,
         name: &str,
-    ) -> Result<(), SyncError> {
+    ) -> Result<(super::verify::Sealed, Option<coven_database::CapturedState>), SyncError> {
         let writer = self
             .directory
             .file(
@@ -49,14 +49,15 @@ impl StoreLogSync {
             send.blocking_send(frame)
                 .map_err(|_| std::io::Error::from(std::io::ErrorKind::BrokenPipe))
         };
+        // A raise snapshot replays frames captured at migration; its sealed
+        // plaintext must equal them, and no live state is captured now.
         let produce = async move {
             match raise {
-                Some(version) => {
-                    database
-                        .write_raise_snapshot(id, version, begin, emit)
-                        .await
-                }
-                None => database.write_snapshot(id, begin, emit).await,
+                Some(version) => database
+                    .write_raise_snapshot(id, version, begin, emit)
+                    .await
+                    .map(|()| None),
+                None => database.write_snapshot(id, begin, emit).await.map(Some),
             }
         };
         let consume = seal_frames(writer, receive_prefix, receive, path, key, member);
@@ -70,7 +71,7 @@ impl StoreLogSync {
                 consumed?;
                 Err(SyncError::disk(error))
             }
-            Ok(()) => consumed,
+            Ok(captured) => Ok((consumed?, captured)),
         }
     }
 }
@@ -82,11 +83,10 @@ async fn seal_frames(
     path: &ObjectPath,
     key: DerivedKeys,
     member: &MemberIdentity,
-) -> Result<(), SyncError> {
-    let prefix = prefix
-        .await
-        .map_err(|_| coven_format::Error::Truncated)?
-        .encode()?;
+) -> Result<super::verify::Sealed, SyncError> {
+    let signed = prefix.await.map_err(|_| coven_format::Error::Truncated)?;
+    let prefix = signed.encode()?;
+    let mut plaintext = coven_crypto::ContentHasher::new();
     let first = receive.recv().await.ok_or(coven_format::Error::Truncated)?;
     writer.append(&prefix).await?;
     let signature = member.keys().sign_prefix(path.as_str(), &prefix);
@@ -98,6 +98,7 @@ async fn seal_frames(
     let mut chunk = Vec::with_capacity(io::BUFFER);
     let mut frame = Some(first);
     while let Some(bytes) = frame {
+        plaintext.update(&bytes);
         let mut remaining = bytes.as_slice();
         while !remaining.is_empty() {
             let length = remaining.len().min(io::BUFFER - chunk.len());
@@ -129,5 +130,8 @@ async fn seal_frames(
         )
         .await?;
     writer.finish().await?;
-    Ok(())
+    Ok(super::verify::Sealed {
+        prefix: signed,
+        plaintext: plaintext.finish(),
+    })
 }

@@ -451,3 +451,140 @@ async fn row_fingerprint_pins_generations_setters_written_parents_and_visible_va
     }
     db.close().await.unwrap();
 }
+
+/// A snapshot's frames with the agreement state they were written from.
+async fn captured(
+    database: &crate::Database,
+) -> (
+    crate::snapshot_write::tests::SnapshotFrames,
+    crate::CapturedState,
+) {
+    use std::sync::{Arc, Mutex};
+    let frames = Arc::new(Mutex::new(Vec::new()));
+    let metadata = Arc::new(Mutex::new(None));
+    let (output, start) = (frames.clone(), metadata.clone());
+    let state = database
+        .write_snapshot(
+            crate::snapshot_write::tests::id(coven_merge::Audience::Store),
+            move |header| {
+                *start.lock().unwrap() = Some(crate::snapshot_write::tests::prefix(header));
+                Ok(())
+            },
+            move |frame| {
+                output.lock().unwrap().push(frame);
+                Ok::<_, std::convert::Infallible>(())
+            },
+        )
+        .await
+        .unwrap();
+    let frames = crate::snapshot_write::tests::SnapshotFrames {
+        prefix: metadata.lock().unwrap().clone().unwrap(),
+        frames: frames.lock().unwrap().clone(),
+    };
+    (frames, state)
+}
+
+/// Before publication the writer loads its sealed plaintext in a discarded
+/// transaction (§15): the snapshot it wrote reproduces the captured state,
+/// also after later writes; damaged plaintext or another state's capture is
+/// refused and nothing changes.
+#[tokio::test]
+async fn a_written_snapshot_reproduces_its_captured_state_before_publication() {
+    use crate::write::tests::{count, notes, sql, NOTES};
+    let store = crate::tests::TestStore::new();
+    let db = store.schema(notes(), NOTES).await.unwrap();
+    sql(&db, "INSERT INTO notes VALUES('a','one',''),('b','two','')")
+        .await
+        .unwrap();
+    let (snapshot, state) = captured(&db).await;
+    let id = crate::snapshot_write::tests::id(coven_merge::Audience::Store);
+    let verify = |bytes: Vec<u8>, state| {
+        let db = db.clone();
+        let (id, prefix) = (id.clone(), snapshot.prefix.clone());
+        async move {
+            db.verify_snapshot(id, prefix, std::io::Cursor::new(bytes), Some(state))
+                .await
+        }
+    };
+    verify(snapshot.concat(), state).await.unwrap();
+    // Later writes do not take part in the comparison.
+    sql(&db, "UPDATE notes SET title='later' WHERE id='a'")
+        .await
+        .unwrap();
+    let (later, later_state) = captured(&db).await;
+    verify(snapshot.concat(), state).await.unwrap();
+    assert!(matches!(
+        verify(snapshot.concat(), later_state).await,
+        Err(crate::DbError::Snapshot(
+            crate::SnapshotError::CapturedState
+        ))
+    ));
+    let mut damaged = later.concat();
+    let middle = damaged.len() / 2;
+    damaged[middle] ^= 0x40;
+    assert!(verify(damaged, later_state).await.is_err());
+    assert_eq!(count(&db, "notes"), 2);
+    let title: String = db
+        .read(|sql| Ok(sql.query_row("SELECT title FROM notes WHERE id='a'", [], |r| r.get(0))?))
+        .await
+        .unwrap();
+    assert_eq!(title, "later");
+}
+
+/// The agreement state is a function of the rows, not of when a column was
+/// added: a device that received rows before an addition and one that
+/// received them after agree (§19.1).
+#[tokio::test]
+async fn an_addition_leaves_fingerprints_independent_of_arrival() {
+    use crate::write::tests::{notes, records, sql, NOTES};
+    let migrations = || {
+        vec![
+            crate::Migration::sql(1, "notes", NOTES),
+            crate::Migration::sql(2, "color", "ALTER TABLE notes ADD COLUMN color TEXT"),
+        ]
+    };
+    let ids = coven_foundation::id_source::SequentialIds::new();
+    let stores: Vec<_> = (0..3)
+        .map(|_| crate::tests::TestStore::with_ids(&ids))
+        .collect();
+    let author = stores[0].schema(notes(), NOTES).await.unwrap();
+    sql(&author, "INSERT INTO notes VALUES('a','one','')")
+        .await
+        .unwrap();
+    let write = records(&author).remove(0);
+    let early = stores[1].schema(notes(), NOTES).await.unwrap();
+    early.receive(write.clone().into()).await.unwrap();
+    early.close().await.unwrap();
+    let early = stores[1]
+        .builder(notes(), migrations())
+        .open()
+        .await
+        .unwrap();
+    let late = stores[2]
+        .builder(notes(), migrations())
+        .open()
+        .await
+        .unwrap();
+    late.receive(write.into()).await.unwrap();
+    let key = coven_crypto::StoreKey::from_bytes(
+        coven_foundation::id_source::KeyId(uuid::Uuid::from_bytes([1; 16])),
+        [7; 32],
+    )
+    .derive();
+    let fingerprint = |db: crate::Database| {
+        let hasher = key.fingerprint_hasher();
+        async move {
+            db.sync_state(vec![(coven_merge::Audience::Store, hasher)])
+                .await
+                .unwrap()
+                .fingerprints
+        }
+    };
+    assert_eq!(
+        fingerprint(early.clone()).await,
+        fingerprint(late.clone()).await
+    );
+    for db in [author, early, late] {
+        db.close().await.unwrap();
+    }
+}

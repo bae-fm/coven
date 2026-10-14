@@ -118,7 +118,7 @@ pub(crate) fn digest(bytes: &[u8]) -> (u64, ObjectDigest) {
 
 /// Read the complete occupant of an immutable path. A failed read keeps the
 /// attempt pending; occupation alone proves nothing (§10).
-async fn stored_digest(
+pub(crate) async fn stored_digest(
     storage: &dyn Storage,
     path: &ObjectPath,
 ) -> Result<(u64, ObjectDigest), SyncError> {

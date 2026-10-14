@@ -111,6 +111,61 @@ pub enum ObjectChecksum {
     Composite(ChecksumValue),
 }
 
+impl ObjectChecksum {
+    /// Whether this checksum confirms that the complete stored object equals
+    /// the `size` bytes `read` supplies, computed with the provider's own
+    /// algorithm. `None` when it cannot: a multipart composite covers parts,
+    /// not content, and coven does not compute every provider algorithm.
+    /// Then the caller reads the stored bytes back instead (§15).
+    pub fn confirms<E>(
+        &self,
+        size: u64,
+        mut read: impl FnMut(u64, usize) -> Result<Vec<u8>, E>,
+    ) -> Result<Option<bool>, E> {
+        const BLOCK: u64 = 4 * 1024 * 1024;
+        let ObjectChecksum::FullObject(value) = self else {
+            return Ok(None);
+        };
+        match value {
+            ChecksumValue::Sha256Base64(expected) => {
+                let mut hasher = coven_crypto::ContentHasher::new();
+                let mut offset = 0;
+                while offset < size {
+                    let length = (size - offset).min(BLOCK) as usize;
+                    hasher.update(&read(offset, length)?);
+                    offset += length as u64;
+                }
+                use base64::Engine;
+                let local =
+                    base64::engine::general_purpose::STANDARD.encode(hasher.finish().as_bytes());
+                Ok(Some(local == *expected))
+            }
+            // SHA-256 of the concatenated SHA-256 of each 4 MiB block.
+            ChecksumValue::DropboxContentHash(expected) => {
+                let mut blocks = coven_crypto::ContentHasher::new();
+                let mut offset = 0;
+                while offset < size {
+                    let length = (size - offset).min(BLOCK) as usize;
+                    let mut block = coven_crypto::ContentHasher::new();
+                    block.update(&read(offset, length)?);
+                    blocks.update(block.finish().as_bytes());
+                    offset += length as u64;
+                }
+                Ok(Some(
+                    hex::encode(blocks.finish().as_bytes()) == expected.to_ascii_lowercase(),
+                ))
+            }
+            ChecksumValue::Md5Hex(_)
+            | ChecksumValue::Sha1Hex(_)
+            | ChecksumValue::QuickXorBase64(_)
+            | ChecksumValue::Crc64NvmeBase64(_)
+            | ChecksumValue::Crc32cBase64(_)
+            | ChecksumValue::Crc32Base64(_)
+            | ChecksumValue::Sha1Base64(_) => Ok(None),
+        }
+    }
+}
+
 #[cfg(test)]
 #[path = "object_metadata_tests.rs"]
 mod tests;

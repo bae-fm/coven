@@ -727,6 +727,7 @@ pub(crate) const POLICY: Policy = Policy {
         "CacheReservation",
         "UploadedFile",
         "SnapshotInput",
+        "SealedPlaintext",
         "RetainedInput",
         "ObjectInput",
         "InputStream",

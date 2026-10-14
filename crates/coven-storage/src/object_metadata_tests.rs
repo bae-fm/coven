@@ -35,3 +35,35 @@ async fn observations_reject_wrong_identity_and_inconsistent_body_lengths() {
         StorageFailure::Protocol
     );
 }
+
+/// A full-object SHA-256 or Dropbox content hash confirms exactly the local
+/// bytes; a composite never does, and other algorithms defer to a readback.
+#[test]
+fn checksums_confirm_only_complete_objects_in_known_algorithms() {
+    use base64::Engine;
+    let bytes: Vec<u8> = (0..5 * 1024 * 1024).map(|i| (i % 251) as u8).collect();
+    let read = |offset: u64, length: usize| {
+        Ok::<_, ()>(bytes[offset as usize..offset as usize + length].to_vec())
+    };
+    let mut whole = coven_crypto::ContentHasher::new();
+    whole.update(&bytes);
+    let sha = base64::engine::general_purpose::STANDARD.encode(whole.finish().as_bytes());
+    let full = ObjectChecksum::FullObject(ChecksumValue::Sha256Base64(sha.clone()));
+    assert_eq!(full.confirms(bytes.len() as u64, read), Ok(Some(true)));
+    let other = ObjectChecksum::FullObject(ChecksumValue::Sha256Base64("AAAA".into()));
+    assert_eq!(other.confirms(bytes.len() as u64, read), Ok(Some(false)));
+    let composite = ObjectChecksum::Composite(ChecksumValue::Sha256Base64(sha));
+    assert_eq!(composite.confirms(bytes.len() as u64, read), Ok(None));
+    let mut blocks = coven_crypto::ContentHasher::new();
+    for block in bytes.chunks(4 * 1024 * 1024) {
+        let mut hasher = coven_crypto::ContentHasher::new();
+        hasher.update(block);
+        blocks.update(hasher.finish().as_bytes());
+    }
+    let dropbox = ObjectChecksum::FullObject(ChecksumValue::DropboxContentHash(hex::encode(
+        blocks.finish().as_bytes(),
+    )));
+    assert_eq!(dropbox.confirms(bytes.len() as u64, read), Ok(Some(true)));
+    let md5 = ObjectChecksum::FullObject(ChecksumValue::Md5Hex("00".into()));
+    assert_eq!(md5.confirms(bytes.len() as u64, read), Ok(None));
+}

@@ -1061,6 +1061,7 @@ dependencies = [
  "aws-smithy-async",
  "aws-smithy-runtime-api",
  "axum",
+ "base64 0.22.1",
  "block2",
  "coven-crypto",
  "coven-format",

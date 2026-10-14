@@ -57,6 +57,41 @@ impl Database {
         }).await
     }
 
+    /// Check a sealed snapshot's plaintext before publication (§15): every
+    /// record passes the loader's checks and, with `captured`, loading it
+    /// reproduces the agreement state the snapshot was written from. Writes
+    /// committed since that capture do not take part. Nothing commits.
+    pub async fn verify_snapshot<R: std::io::Read + Send + 'static>(
+        &self,
+        id: coven_format::store_log::SnapshotId,
+        prefix: coven_format::sealed_snapshot::SnapshotObjectPrefix,
+        input: R,
+        captured: Option<crate::CapturedState>,
+    ) -> Result<(), DbError> {
+        self.call(move |inner| {
+            let reader = inner.access.readers.acquire_reader();
+            inner.access.with_writer(|writer| {
+                reader.with_reader(|reader| {
+                    reader.read_transaction(|| {
+                        inner.access.write_schema.prepare(reader)?;
+                        writer.discarded_transaction(|writer| {
+                            crate::snapshot_load::verify(
+                                writer,
+                                reader,
+                                &inner.access.write_schema,
+                                id,
+                                prefix,
+                                input,
+                                captured,
+                            )
+                        })
+                    })
+                })
+            })
+        })
+        .await
+    }
+
     /// Run the snapshot loader's format, schema and merge checks in a transaction
     /// that always rolls back. Sync uses this for loading and file-reference checks;
     /// a damaged snapshot cannot leave rows, metadata or observations behind.
@@ -111,7 +146,7 @@ impl Database {
         id: coven_format::store_log::SnapshotId,
         begin: B,
         emit: F,
-    ) -> Result<(), crate::SnapshotWriteError<E>>
+    ) -> Result<crate::CapturedState, crate::SnapshotWriteError<E>>
     where
         B: FnOnce(&coven_format::snapshot::SnapshotHeader) -> Result<(), E> + Send + 'static,
         F: FnMut(Vec<u8>) -> Result<(), E> + Send + 'static,

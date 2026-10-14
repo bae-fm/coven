@@ -35,13 +35,38 @@ pub enum SnapshotWriteError<E> {
     Output(E),
 }
 
+/// The agreement state a snapshot was written from: its audience's durable
+/// fingerprint sum in the same pinned transaction (§15, §19.1). Loading the
+/// sealed snapshot must reproduce it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CapturedState(Option<[u8; 32]>);
+
+pub(crate) fn captured(
+    database: &DatabaseConnection,
+    audience: &Audience,
+) -> Result<CapturedState, DbError> {
+    Ok(CapturedState(database.query_row(
+        "SELECT (SELECT sum FROM _coven_fingerprint_sums WHERE audience=?1)",
+        [audience_text(audience)],
+        |r| r.get(0),
+    )?))
+}
+
+impl CapturedState {
+    /// The empty set and an audience with no sum yet are the same state.
+    pub(crate) fn same(self, other: Self) -> bool {
+        self.0.unwrap_or_default() == other.0.unwrap_or_default()
+    }
+}
+
 pub(crate) fn write<E>(
     database: &DatabaseConnection,
     schema: &WriteSchema,
     id: SnapshotId,
     begin: impl FnOnce(&SnapshotHeader) -> Result<(), E>,
     mut emit: impl FnMut(Vec<u8>) -> Result<(), E>,
-) -> Result<(), SnapshotWriteError<E>> {
+) -> Result<CapturedState, SnapshotWriteError<E>> {
+    let state = captured(database, &id.audience)?;
     let audience = audience_text(&id.audience);
     let selected = id.audience.clone();
     let mut counts = [0; coven_format::snapshot::SECTIONS];
@@ -167,7 +192,8 @@ pub(crate) fn write<E>(
     crate::write_sources::visit_evidence(database, &selected, &covered, |authored| {
         record(SnapshotRecord::Authored(authored))
     })?;
-    emit(encoder.finish()?).map_err(SnapshotWriteError::Output)
+    emit(encoder.finish()?).map_err(SnapshotWriteError::Output)?;
+    Ok(state)
 }
 
 fn visit_rows<E: From<DbError>>(

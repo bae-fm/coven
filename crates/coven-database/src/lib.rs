@@ -137,7 +137,7 @@ pub use read::{Read, SqlReadContext};
 pub use row_key::RowKey;
 pub use snapshot_error::SnapshotError;
 pub use snapshot_reload::{SnapshotReload, SnapshotSource};
-pub use snapshot_write::SnapshotWriteError;
+pub use snapshot_write::{CapturedState, SnapshotWriteError};
 pub use store_log::{
     DeviceState, DropReason, EntryOutcome, EntryTarget, StoreCircle, StoreDevice, StoreIdentity,
     StoreLog, StoreLogReplay, StoreLogState, StoreMember, StoreVersion,

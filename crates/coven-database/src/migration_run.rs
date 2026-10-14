@@ -164,6 +164,25 @@ pub(crate) fn run<'a>(
             author,
         )?);
     }
+    if marker.is_none() && !steps.is_empty() {
+        // An addition changes no merge state, but each row's agreement leaf
+        // covers its table's columns: recompute the changed tables' leaves so
+        // the fingerprint is a function of the state, not of when a column
+        // arrived (§19.1).
+        let schema = crate::write_schema::WriteSchema::read(database, tables.to_vec())?;
+        let changed = steps[0].before.changed_tables(&final_schema);
+        let refresh: BTreeSet<String> = schema
+            .declarations
+            .iter()
+            .filter(|declaration| changed.contains(&declaration.name.to_ascii_lowercase()))
+            .map(|declaration| declaration.name.clone())
+            .collect();
+        if !refresh.is_empty() {
+            schema.with_evaluators(database, || {
+                crate::migration_state::refresh(database, &schema, &refresh)
+            })?;
+        }
+    }
     crate::file_protection::migrate(database, tables)?;
     Ok(MigrationRun { outcomes, marker })
 }

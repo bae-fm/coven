@@ -49,6 +49,10 @@ pub enum SnapshotError {
         /// The covered write this device judged itself.
         write: coven_merge::WriteId,
     },
+    /// A sealed snapshot does not reproduce the agreement state it was written
+    /// from (§15): publication stops and the writer reports it.
+    #[error("sealed snapshot does not reproduce its captured state")]
+    CapturedState,
     /// Individually valid records disagree with one another or the schema.
     #[error("inconsistent snapshot: {0}")]
     Inconsistent(&'static str),

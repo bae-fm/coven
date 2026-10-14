@@ -31,6 +31,8 @@ mod retention;
 mod return_check;
 #[path = "snapshot_seal.rs"]
 mod seal;
+#[path = "snapshot_verify.rs"]
+mod verify;
 #[path = "snapshot_write_input.rs"]
 mod write_input;
 
@@ -458,7 +460,28 @@ impl StoreLogSync {
             .reserve_snapshot_files(record, &mut task, 1)
             .await?
             .remove(0);
-        self.seal_snapshot(id, raise, (key_id, key), caught_at, member, path, &name)
+        let (sealed, captured) = self
+            .seal_snapshot(
+                id.clone(),
+                raise,
+                (key_id, key),
+                caught_at,
+                member,
+                path,
+                &name,
+            )
+            .await?;
+        // Open it as a reader would before anything is sent (§15). A failed
+        // check stops publication and reaches the caller.
+        let opened = verify::SealedPlaintext::open(
+            io::SnapshotInput::open(&self.directory, &name)?,
+            path,
+            &sealed,
+            io::key(&ring, &id.audience, key_id)?,
+            member.keys().public_keys().signing,
+        )?;
+        self.database
+            .verify_snapshot(id, sealed.prefix, opened, captured)
             .await?;
         self.save_snapshot_task(record, &task, 1).await?;
         Ok(Progress::Advanced)
@@ -572,15 +595,28 @@ impl StoreLogSync {
             task: &mut task,
             input: &input,
         };
-        if let crate::recorded_upload::Uploaded::Occupied(expected) =
-            crate::recorded_upload::upload(storage, path, input.size(), session, &mut transfer)
-                .await?
+        match crate::recorded_upload::upload(storage, path, input.size(), session, &mut transfer)
+            .await?
         {
-            // A lost reply may have published this snapshot; another copy of
-            // this device may also have used its number (§10).
-            crate::identity::settle_occupied(storage, &self.send, path, expected).await?;
-            if let Some(session) = &recorded {
-                storage.abort_upload(session).await?;
+            crate::recorded_upload::Uploaded::Occupied(expected) => {
+                // A lost reply may have published this snapshot; another copy
+                // of this device may also have used its number (§10). Equal
+                // complete bytes are the stored confirmation too.
+                crate::identity::settle_occupied(storage, &self.send, path, expected).await?;
+                if let Some(session) = &recorded {
+                    storage.abort_upload(session).await?;
+                }
+            }
+            // The provider's report of success is not confirmation of the
+            // stored bytes (§15).
+            crate::recorded_upload::Uploaded::Stored => {
+                verify::confirm_stored(storage, path, input.size(), |offset, length| {
+                    input.read_at(offset, length)
+                })
+                .await?;
+            }
+            crate::recorded_upload::Uploaded::Paused => {
+                unreachable!("snapshot uploads keep going")
             }
         }
         self.save_snapshot_task(record, &task, 2).await?;
