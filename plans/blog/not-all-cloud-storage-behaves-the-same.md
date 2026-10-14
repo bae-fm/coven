@@ -1,7 +1,7 @@
 # Not all cloud storage behaves the same
 
-*Draft. Numbers are from coven's certification runs on 2026-10-13 and 2026-10-14. A full re-run of every
-provider is in progress; update the tables when it lands.*
+*Draft. Numbers are from coven's certification runs on 2026-10-13 and 2026-10-14, the last a full pass of
+every reachable provider through the newest suites.*
 
 Other titles to consider: "S3-compatible isn't S3-identical", "Same API, different guarantees".
 
@@ -59,11 +59,14 @@ provider that passes every sequential check can still fail them.
 | SeaweedFS 4.48 | two conditional multipart completions | both accepted in 198 of 200 trials |
 | SeaweedFS 4.48 | eight conditional multipart completions | more than one accepted in 49 of 50 |
 | SeaweedFS 4.48 | conditional PUT vs conditional completion | both accepted in 2 of 200 |
-| SeaweedFS 4.48 | conditional PUT vs conditional copy, unversioned bucket | both accepted in 14 of 200 |
+| SeaweedFS 4.48 | conditional PUT vs conditional copy, unversioned bucket | both accepted in 14 of 200, then 17 of 200 on a rerun |
 | SeaweedFS 4.48 | conditional copy vs copy; PUT vs PUT | one winner every trial |
-| Ceph RGW, versioned bucket | two conditional writers | both accepted in 199 of 200 |
+| Ceph RGW 20.2.4, versioned bucket | two and eight conditional writers | 199 of 200 on the first run; on the full rerun every writer was accepted in every trial (2,400 acceptances where 900 were allowed) |
+| Garage 2.4.1 | conditional multipart completions | more than one accepted in 197 of 200 (two writers) and 16 of 50 (eight) |
 | Ceph RGW 20.2.0 | conditional multipart completion | overwrote a taken name (fixed in 20.2.1) |
 | RustFS 1.0.1 | every race, versioned and unversioned | one winner every trial |
+| Cloudflare R2 | every race | one winner every trial |
+| Ceph RGW 20.2.4, unversioned bucket | every race | one winner every trial |
 
 "Both accepted" means both clients were told their object was stored, and one of them was silently
 overwritten. For coven that is lost data, and it is the exact case its stale-device detection exists for.
@@ -99,10 +102,13 @@ Median time for a new object to appear in a listing:
 | Provider | Median |
 |---|---|
 | GCS (S3 interop) | 0.13 s |
-| Cloudflare R2 | 0.21 s |
-| Google Drive | 0.43 s |
-| OneDrive | 2.7 s |
-| RustFS, SeaweedFS, Ceph (local) | milliseconds |
+| Cloudflare R2 | 0.21-0.22 s |
+| Google Drive | 0.43 s one day, 0.99 s (max 5.9 s) the next |
+| OneDrive | 2.7 s one day, 0.93 s the next |
+| RustFS, SeaweedFS, Ceph, Garage (local) | 3-50 ms |
+
+Time resolution differs too: S3 services and OneDrive report whole seconds, Google Drive and iCloud
+milliseconds.
 
 ### What the docs don't say
 
@@ -124,7 +130,8 @@ answer is to run the race. They stay uncertified until we do.
 
 ## Open questions for the post
 
-- Rerun numbers from the full pass over every provider (in progress).
+- GCS hasn't run suite 5 yet (the test key lacked permission to read the bucket's versioning).
+- Versity Gateway is next to test.
 - Whether to name versions and dates for each result (they change: Ceph fixed its multipart bug in
   20.2.1).
 - Whether to report these upstream first (SeaweedFS PUT-vs-copy, Ceph versioned conditional writes)
