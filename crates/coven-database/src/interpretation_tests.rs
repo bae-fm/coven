@@ -398,7 +398,7 @@ async fn install_reset(db: &Database) {
     let entry = coven_format::store_log::StoreLogEntry {
         position: RESET,
         timestamp: Timestamp::new(1_000_000, 0, RESET.device).unwrap(),
-        author: crate::store_log::tests::keys(1).signing,
+        author: crate::store_log::tests::member(1),
         had_read: EntryPositions(Vec::new()),
         change: coven_format::store_log::StoreChange::Reset {
             snapshot: crate::snapshot_write::tests::id(Audience::Store),
