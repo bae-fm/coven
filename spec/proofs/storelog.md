@@ -687,7 +687,7 @@ received authorized introductions disagree on that hash
 avoids assuming id uniqueness or silently picking one of two commitments.
 An id in one audience is distinct from the same id in another audience.
 
-**Selection requires this pass's complete listing.** `firstAttempt` combines
+**App-data selection requires this pass's complete listing.** `firstAttempt` combines
 the current replay, received authorized introductions, custody and the pass's
 copy listing. An incomplete listing gives a listing wait; an excluded sender
 gives a membership wait. Otherwise `select` picks the newest usable held key,
@@ -749,6 +749,82 @@ selection with `select` as `firstAttempt` applies it to the received
 introductions and resolved state, for complete and incomplete listings, copies
 to members and outsiders, and committed and other held bytes. Cryptographic
 operations are not compared.
+
+#### Store-log entries, positions and clock objects
+
+[`EntryKeys`](storelog/CovenStorelog/EntryKeys.lean) models §11's separate
+metadata path. `select` chooses the newest received store-key introduction
+whose bytes the device holds and accepts. It uses C12's hash checks and
+timestamp/key-id ordering, without consulting copy exposure. `selected_accepted`
+and `selected_newest` prove those conditions; `first_attempt_authorized`
+connects the selected key to the actual replay's received authorized entries.
+The existing exposure-checked `CurrentKeys.select` still governs writes and
+snapshots, and its Rust comparison is unchanged.
+
+**Removal and rotation can be sealed with a retained accepted store key.**
+`metadata_sealing_available` proves this for every metadata object, including
+any removal or rotation entry. It requires at least one accepted store key in
+custody; membership alone does not supply missing or damaged key bytes. All
+held keys may be exposed. Entry authority, completed catch-up, send freshness
+and successful publication are separate conditions; this result does not
+promise that every attempted entry is kept or uploaded. A circle rotation's
+entry uses a store key too, irrespective of the circle key it introduces.
+
+**Removal does not make later metadata cryptographically unreadable.**
+`readable_iff` states the exact boundary for entries, positions and clocks:
+the reader must obtain the ciphertext and know its sealing key's exact bytes.
+Knowledge includes retained keys and any later disclosures, not just keys
+current replay permits the reader to use. `accepted_key_opens` connects a
+retained accepted copy to the bytes selected by the writer, under C12's
+explicit hash-injectivity hypothesis. `unknown_key_unreadable` proves the
+opposite case within this abstraction of correct encryption.
+
+[`EntryKeyExamples`](storelog/CovenStorelog/EntryKeyExamples.lean) checks the
+shortest removal prefix: Ana creates the store, adds Ben, then removes Ben.
+She remains its admin, and Ben keeps the original store key. Positions and a
+clock object sealed after that replay still use it and Ben can open them while
+provider revocation is pending (`removed_reads_positions_and_clock`). The
+fourth entry rotates the store key, reads the removal, and can itself be sealed
+with the original key (`removal_and_rotation_sealable`, `removed_reads_rotation`).
+Literal Lean `example`s check both disclosures; `history_valid` and
+`online_history` check causal and online histories. These refute immediate
+metadata secrecy after removal, not §3's app-write revocation promise.
+
+Receiving the rotation entry without its key still leaves the original key
+selected. Once the writer holds the replacement it selects that key for all
+three metadata kinds, and Ben's old bytes do not open those objects
+(`rotation_changes_only_holders`). A subsequent entry remains readable if its
+writer lacks the replacement (`later_entry_still_readable_without_replacement`).
+If Ben later obtains the selected replacement, he can open its earlier and
+later metadata; even known exposure does not stop its metadata use
+(`later_disclosure`). There is no store-wide cutoff at the first rotation.
+
+**The confidentiality sentence depends on actual storage cutoff.** §13
+explicitly lets removal return while provider revocation is pending. Read with
+that condition, §11 and §3 remain consistent: metadata has no immediate
+cryptographic revocation guarantee, while writes and snapshots use the
+exposure check. `cutoff_prevents_new_read` proves no read when the ciphertext
+is unavailable; `cutoff_does_not_erase_keys` checks that an already obtained
+object remains openable. The spec citation makes this condition explicit;
+these examples do not require changing the key-selection policy.
+
+Positions also carry content fingerprints, each naming its own audience key
+([D8](../format.md#d8-small-frames), [D11](../format.md#d11-keys-contexts-and-fingerprints)).
+The [sync pass](../sync-pass.md#4-observe-keys-and-peers) calls that key usable;
+the conservative reading is C12's exposure-checked audience key, independently
+of the positions envelope's store key. The relaxed envelope rule does not
+authorize content fingerprints under exposed keys. Fingerprint construction
+and selection are outside this sealing model.
+
+The model assumes correct encryption and supplies ciphertext availability and
+the reader's key knowledge as inputs. It does not prove provider cutoff,
+cryptographic secrecy, eventual key delivery, custody persistence, or the
+absence of app data in metadata bodies. Locally validated fresh introductions
+that seal themselves remain outside this received-key path; the availability
+proof needs only the existing accepted store key. Credential replacement,
+entry signatures and publication gates retain their separate models and
+assumptions. No Rust comparison is added for metadata sealing. All named
+results are included in the package's axiom audit.
 
 ### C13 Stable members and replaceable keys — checked proposal
 

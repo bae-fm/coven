@@ -3443,8 +3443,12 @@ Carol's tablet:
   - This selection governs app data: writes and snapshots. Store-log entries,
     positions and clock objects carry membership and sync metadata, not app
     data; they are sealed with the newest store key this device holds and
-    accepts, so removal and rotation entries can always be authored. Storage
-    revocation keeps them from removed members (§13).
+    accepts. With an accepted store key in custody, exposure cannot block
+    sealing a removal or rotation entry. Until storage revocation is confirmed
+    (§13), a removed member can still obtain and open metadata sealed with a
+    key they retain or later acquire. Cutoff prevents new downloads, not opening
+    ciphertext already obtained
+    ([sealing and read conditions](proofs/storelog.md#store-log-entries-positions-and-clock-objects)).
 - Every kept Replace member keys entry exposes the preceding sealing
   credential from its recorded view, regardless of why keys changed. Copies
   to that credential retire their audience keys even though the member stays

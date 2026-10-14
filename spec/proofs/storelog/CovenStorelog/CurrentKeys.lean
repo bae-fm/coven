@@ -204,9 +204,17 @@ def exposed (hash : KeyBytes → KeyHash) (is : List Introduction) (s : State)
 
 /-- Custody is checked against the authorized commitment even when a caller
 supplies an arbitrary local candidate. Nothing tentative is usable. -/
+def acceptedHeld (hash : KeyBytes → KeyHash) (is : List Introduction)
+    (i : Introduction) (p : Payload) : Bool :=
+  p.key == i.identity && accepts hash is p.key p.bytes
+
+def holdsAccepted (hash : KeyBytes → KeyHash) (is : List Introduction)
+    (held : List Payload) (i : Introduction) : Bool :=
+  held.any (acceptedHeld hash is i)
+
 def usable (hash : KeyBytes → KeyHash) (is : List Introduction) (s : State)
     (self : Nat) (copies : List Copy) (held : List Payload) (i : Introduction) : Bool :=
-  (held.any fun p => p.key == i.identity && accepts hash is p.key p.bytes) &&
+  holdsAccepted hash is held i &&
     !exposed hash is s self copies i.identity
 
 theorem excluded_copy_unusable (hash : KeyBytes → KeyHash) (is : List Introduction)
