@@ -30,9 +30,12 @@ async fn transfer(a: &Device, b: &Device) {
     a.writes().upload_writes().await.unwrap();
     for record in records {
         assert!(!matches!(
-            b.db.apply_downloaded::<crate::PendingRecord>(record.into(), std::time::UNIX_EPOCH)
-                .await
-                .unwrap(),
+            b.db.apply_downloaded::<crate::PendingRecord>(
+                record.into(),
+                coven_format::value::StorageTime::UNIX_EPOCH
+            )
+            .await
+            .unwrap(),
             coven_database::ApplyOutcome::Waiting(_)
         ));
     }

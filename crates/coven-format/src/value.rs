@@ -91,15 +91,39 @@ impl Wire for Audience {
 wire_struct!(WriteId, device, number);
 wire_struct!(EntryId, device, number);
 
-/// A provider storage sample: Unix seconds and a nanosecond fraction (D2).
-/// It keeps the sample's precision; ordering is time order.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+/// A provider storage time: Unix seconds and a nanosecond fraction (D2, §4).
+/// It keeps every returned digit on every platform, unlike `SystemTime`,
+/// which counts 100 ns on Windows; ordering is time order.
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
+#[serde(try_from = "StoredStorageTime")]
 pub struct StorageTime {
     seconds: u64,
     nanos: u32,
 }
 
+/// A serialized `StorageTime`, checked on the way in.
+#[derive(serde::Deserialize)]
+struct StoredStorageTime {
+    seconds: u64,
+    nanos: u32,
+}
+
+impl TryFrom<StoredStorageTime> for StorageTime {
+    type Error = Error;
+    fn try_from(stored: StoredStorageTime) -> Result<Self, Error> {
+        Self::new(stored.seconds, stored.nanos)
+    }
+}
+
 impl StorageTime {
+    /// The Unix epoch, the earliest storage time.
+    pub const UNIX_EPOCH: Self = Self {
+        seconds: 0,
+        nanos: 0,
+    };
+
     /// One storage day, the upload allowance after a snapshot's catch-up (§15).
     pub const DAY_SECONDS: u64 = 24 * 60 * 60;
 
@@ -120,6 +144,39 @@ impl StorageTime {
         Self::new(since.as_secs(), since.subsec_nanos())
     }
 
+    /// The time `since` the Unix epoch.
+    pub fn since_epoch(since: std::time::Duration) -> Self {
+        Self {
+            seconds: since.as_secs(),
+            nanos: since.subsec_nanos(),
+        }
+    }
+
+    /// The exact time elapsed since the Unix epoch.
+    pub fn elapsed_since_epoch(self) -> std::time::Duration {
+        std::time::Duration::new(self.seconds, self.nanos)
+    }
+
+    /// This time plus `duration`, or `None` past the representable range.
+    pub fn checked_add(self, duration: std::time::Duration) -> Option<Self> {
+        self.elapsed_since_epoch()
+            .checked_add(duration)
+            .map(Self::since_epoch)
+    }
+
+    /// This time minus `duration`, or `None` before the Unix epoch.
+    pub fn checked_sub(self, duration: std::time::Duration) -> Option<Self> {
+        self.elapsed_since_epoch()
+            .checked_sub(duration)
+            .map(Self::since_epoch)
+    }
+
+    /// The exact time from `earlier` to this time, or `None` if `earlier` is later.
+    pub fn duration_since(self, earlier: Self) -> Option<std::time::Duration> {
+        self.elapsed_since_epoch()
+            .checked_sub(earlier.elapsed_since_epoch())
+    }
+
     /// Whole Unix seconds.
     pub fn seconds(self) -> u64 {
         self.seconds
@@ -137,6 +194,31 @@ impl StorageTime {
             Some(seconds) => landed <= Self { seconds, ..self },
             None => true,
         }
+    }
+}
+
+/// Panics past the representable range, as `SystemTime` does; use
+/// `checked_add` where the duration is not known to fit.
+impl std::ops::Add<std::time::Duration> for StorageTime {
+    type Output = Self;
+    fn add(self, duration: std::time::Duration) -> Self {
+        self.checked_add(duration)
+            .expect("storage time past the representable range")
+    }
+}
+
+impl std::ops::AddAssign<std::time::Duration> for StorageTime {
+    fn add_assign(&mut self, duration: std::time::Duration) {
+        *self = *self + duration;
+    }
+}
+
+/// Panics before the Unix epoch; use `checked_sub` where that can happen.
+impl std::ops::Sub<std::time::Duration> for StorageTime {
+    type Output = Self;
+    fn sub(self, duration: std::time::Duration) -> Self {
+        self.checked_sub(duration)
+            .expect("storage time before the Unix epoch")
     }
 }
 

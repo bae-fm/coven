@@ -180,3 +180,33 @@ fn lean_differential_storage_admission() {
     ));
     assert_eq!(result.entries[&own.entries[2].position], EntryOutcome::Kept);
 }
+
+/// Lateness compares provider times at their full precision on every
+/// platform: one nanosecond past thirty days is late, exactly thirty days is
+/// not. A 100 ns Windows `SystemTime` could not tell these apart (§4, §9).
+#[test]
+fn one_nanosecond_past_thirty_days_lands_too_late() {
+    use coven_format::value::StorageTime;
+    use std::time::Duration;
+    let mut h = History::new();
+    h.push(0, 1, &[0], device(1));
+    h.push(0, 2, &[0], device(2));
+    let unread = StorageTime::new(1_760_400_000, 123_456_789).unwrap();
+    let thirty_days = Duration::from_secs(30 * 86_400);
+    for (after, late) in [
+        (thirty_days, false),
+        (thirty_days + Duration::from_nanos(1), true),
+    ] {
+        let publications = [
+            (h.entries[0].position, StorageTime::UNIX_EPOCH),
+            (h.entries[1].position, unread),
+            (h.entries[2].position, unread + after),
+        ]
+        .into();
+        assert_eq!(
+            super::landed_too_late(&h.entries[2], &publications),
+            late,
+            "{after:?}"
+        );
+    }
+}

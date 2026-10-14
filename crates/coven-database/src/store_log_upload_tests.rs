@@ -211,7 +211,7 @@ async fn applying_entry_and_retiring_the_queue_roll_back_together() {
     let pending = db.local_store_log().await.unwrap().upload.unwrap();
     let checked = crate::ReplayEntry {
         entry: pending.entry.clone(),
-        stored_at: UNIX_EPOCH,
+        stored_at: coven_format::value::StorageTime::UNIX_EPOCH,
         check: crate::StoreLogCheck::Allowed,
     };
     // The supplied creation replay names the writer that reserved the entry.
@@ -329,7 +329,7 @@ async fn entry_copies_and_operation_commit_or_roll_back_as_one_reservation() {
     let upload = db.local_store_log().await.unwrap().upload.unwrap();
     let checked = crate::ReplayEntry {
         entry: upload.entry,
-        stored_at: UNIX_EPOCH,
+        stored_at: coven_format::value::StorageTime::UNIX_EPOCH,
         check: crate::StoreLogCheck::Allowed,
     };
     replay.entries = [(id, crate::EntryOutcome::Kept)].into();

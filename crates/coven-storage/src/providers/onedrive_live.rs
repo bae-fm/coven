@@ -3,11 +3,12 @@
 
 use super::*;
 use crate::providers::http::Body;
+use coven_format::value::StorageTime;
 use coven_foundation::{
     clock::ClockRef,
     id_source::{DeviceId, StoreId},
 };
-use std::{sync::Arc, time::SystemTime};
+use std::sync::Arc;
 
 const GRAPH: &str = "https://graph.microsoft.com/v1.0";
 type Connection = Arc<StorageConnection<OneDriveStorage>>;
@@ -124,7 +125,7 @@ impl Live<'_> {
             .unwrap()
             .expect("published object status")
     }
-    async fn marker(&self, number: u64) -> (String, SystemTime) {
+    async fn marker(&self, number: u64) -> (String, StorageTime) {
         let path = self.path(number);
         self.storage
             .create(&path, b"publication marker")

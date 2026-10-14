@@ -736,7 +736,8 @@ pub(super) async fn multipart(connected: Arc<StorageConnection<S3Storage>>, stor
             .await
             .map_err(s3_error)
             .unwrap();
-        let assembled_at: SystemTime = (*before.last_modified().unwrap()).try_into().unwrap();
+        let assembled_at =
+            crate::providers::http::storage_time(*before.last_modified().unwrap()).unwrap();
         assert!(
             connected
                 .list(&ObjectPrefix::all(store))

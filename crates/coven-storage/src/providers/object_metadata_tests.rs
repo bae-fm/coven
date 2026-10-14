@@ -117,10 +117,11 @@ fn account_timestamps_preserve_each_returned_fractional_digit() {
         let item = json!({"id":"native", "name":path.file_name(), "size":"4",
             "modifiedTime":timestamp, "headRevisionId":"revision"});
         let google = drive(&path, &item).unwrap();
+        // StorageTime keeps the digits a 100 ns Windows SystemTime would drop.
         for observed in [one, google] {
             assert_eq!(
                 observed.stored_at,
-                std::time::UNIX_EPOCH + Duration::new(1, nanos)
+                coven_format::value::StorageTime::new(1, nanos).unwrap()
             );
             assert_eq!(
                 observed.time_resolution,

@@ -47,7 +47,7 @@ impl DeviceLogSync {
     pub(super) async fn finish_drain(
         &self,
         drain: coven_database::RetirementFinality,
-        sample: std::time::SystemTime,
+        sample: coven_format::value::StorageTime,
         miss: u64,
         objects: &BTreeMap<WriteId, coven_storage::StoredObject>,
         positions: &coven_format::value::WritePositions,

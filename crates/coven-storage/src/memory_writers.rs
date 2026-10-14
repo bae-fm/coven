@@ -2,13 +2,19 @@ use super::*;
 use coven_foundation::id_source::{DeviceId, StoreId};
 
 impl MemoryProvider {
+    /// The provider's time for a publication or listing: its clock's reading.
+    pub(super) fn storage_time(&self) -> Result<coven_format::value::StorageTime, StorageError> {
+        coven_format::value::StorageTime::from_system_time(self.clock.now())
+            .map_err(|error| StorageFailure::Protocol.with_source(error))
+    }
+
     pub(super) async fn writer_folders(
         &self,
         store: StoreId,
     ) -> Result<Vec<DeviceId>, StorageError> {
         self.before(MemoryRequest::Other("list_writers")).await?;
         let prefix = ObjectPrefix::store_logs(store);
-        let now = self.clock.now();
+        let now = self.storage_time()?;
         let mut state = self.state.lock().await;
         let writers: std::collections::BTreeSet<_> = state
             .objects
@@ -18,7 +24,7 @@ impl MemoryProvider {
                     && prefix.contains(path)
                     && state.faults.listing_lag.is_none_or(|lag| {
                         now.duration_since(object.stored_at)
-                            .is_ok_and(|age| age > lag)
+                            .is_some_and(|age| age > lag)
                     })
             })
             .filter_map(|(path, _)| path.store_log_position().map(|(writer, _)| writer))

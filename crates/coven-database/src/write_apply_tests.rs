@@ -170,7 +170,7 @@ async fn failure_after_every_remote_mutation_rolls_back_rows_metadata_and_notifi
             let result = if streamed {
                 let encoder = coven_format::write_stream::WriteEncoder::new(&incoming).unwrap();
                 let input = crate::DownloadedWriteStream {
-                    stored_at: std::time::UNIX_EPOCH,
+                    stored_at: coven_format::value::StorageTime::UNIX_EPOCH,
                     header: encoder.header().clone(),
                     parts: (0..incoming.parts.len())
                         .map(|i| {

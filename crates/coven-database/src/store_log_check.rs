@@ -14,7 +14,7 @@ pub struct ReplayEntry {
     /// The checked entry, stored using format's encoding.
     pub entry: StoreLogEntry,
     /// Provider time of the first complete publication; retries cannot replace it.
-    pub stored_at: std::time::SystemTime,
+    pub stored_at: coven_format::value::StorageTime,
     /// Permanent landing exclusion, or the authority and author-view facts used by replay.
     pub check: StoreLogCheck,
 }

@@ -402,7 +402,7 @@ pub(crate) fn received_prefixes(orders: &[Vec<usize>]) -> Vec<Vec<usize>> {
 pub(crate) fn publication_times(
     h: &History,
     stored: &[u64],
-) -> std::collections::BTreeMap<coven_format::value::EntryId, std::time::SystemTime> {
+) -> std::collections::BTreeMap<coven_format::value::EntryId, coven_format::value::StorageTime> {
     assert_eq!(h.entries.len(), stored.len());
     h.entries
         .iter()
@@ -410,7 +410,9 @@ pub(crate) fn publication_times(
         .map(|(e, day)| {
             (
                 e.position,
-                std::time::UNIX_EPOCH + std::time::Duration::from_secs(day * 86400),
+                coven_format::value::StorageTime::since_epoch(std::time::Duration::from_secs(
+                    day * 86400,
+                )),
             )
         })
         .collect()

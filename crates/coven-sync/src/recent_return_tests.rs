@@ -48,7 +48,7 @@ fn only_a_clock_sample_with_its_monotonic_start_certifies_a_miss() {
     observation.lock().unwrap().observe(&StoredObject {
         path: ObjectPath::clock(store(1), DeviceId(1)),
         size: 1,
-        stored_at: UNIX_EPOCH + Duration::from_secs(DAY),
+        stored_at: time(DAY),
         time_resolution: Duration::from_secs(1),
         object_id: "id".into(),
         revision: "1".into(),
@@ -58,7 +58,7 @@ fn only_a_clock_sample_with_its_monotonic_start_certifies_a_miss() {
     observation
         .lock()
         .unwrap()
-        .clock_observed(UNIX_EPOCH + Duration::from_secs(DAY), clock.elapsed());
+        .clock_observed(time(DAY), clock.elapsed());
     assert!(miss_is_recent(&observation, clock.as_ref(), Some(time(0))));
     // Suspension counts: 28 days asleep reach the deadline at the next use.
     clock.set(UNIX_EPOCH + Duration::from_secs(28 * DAY));
@@ -72,7 +72,7 @@ fn only_a_clock_sample_with_its_monotonic_start_certifies_a_miss() {
     observation
         .lock()
         .unwrap()
-        .snapshots_discovered(UNIX_EPOCH + Duration::from_secs(2 * DAY));
+        .snapshots_discovered(time(2 * DAY));
     assert!(miss_is_recent(&observation, clock.as_ref(), Some(time(0))));
     assert!(miss_is_recent(&observation, clock.as_ref(), None));
 }
@@ -297,7 +297,10 @@ async fn a_cause_past_its_writers_miss_requires_snapshot_discovery() {
     let cause = devices[1].db.test_queued_writes().await.unwrap().remove(0);
     devices[2]
         .db
-        .apply_downloaded::<crate::PendingRecord>(cause.into(), std::time::UNIX_EPOCH)
+        .apply_downloaded::<crate::PendingRecord>(
+            cause.into(),
+            coven_format::value::StorageTime::UNIX_EPOCH,
+        )
         .await
         .unwrap();
     note(&devices[2], 2).await;

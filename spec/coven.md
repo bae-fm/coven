@@ -1134,6 +1134,8 @@ the file's ranges under `F`.
   `δ = 10^(-p) seconds`: no fraction means one second, three digits one
   millisecond. Preserve the returned precision in comparisons; do not round
   a fractional timestamp to seconds or invent an order within an equal time.
+  Keep provider times as integer seconds and nanoseconds: a platform clock
+  type such as Windows's 100 ns `SystemTime` would drop returned digits.
   The listing margin M is independent of that precision and is at least δ.
 
   Exact status and reads carry the complete encrypted size, native object id,

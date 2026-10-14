@@ -374,7 +374,6 @@ mod retirement_replay {
     use coven_foundation::id_source::{DeviceId, SequentialIds};
     use coven_merge::{Audience, WriteId};
     use std::collections::BTreeMap;
-    use std::time::{Duration, UNIX_EPOCH};
 
     fn rows(db: &crate::Database) -> Vec<(String, String)> {
         db.inspect_writer(|sql| {
@@ -747,11 +746,7 @@ mod retirement_replay {
             .await
             .unwrap();
         target
-            .advance_store_log_horizon(
-                target.store_log().await.unwrap(),
-                Duration::from_secs(1),
-                UNIX_EPOCH + Duration::from_secs(1),
-            )
+            .advance_store_log_horizon(target.store_log().await.unwrap(), at(1), at(1))
             .await
             .unwrap();
         let retained = target.inspect_writer(|sql| {

@@ -1,7 +1,8 @@
 //! Provider observations identify replacements independently of timestamps and checksums.
 
 use crate::{ByteRange, ObjectPath, StorageError, StorageFailure};
-use std::time::{Duration, SystemTime};
+use coven_format::value::StorageTime;
+use std::time::Duration;
 
 /// Metadata of an object returned by a provider read, exact status or listing.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -13,7 +14,7 @@ pub struct StoredObject {
     /// Provider publication time for immutable objects, replacement time otherwise.
     /// OneDrive uses the copy's lastModifiedDateTime. AWS multipart Last-Modified
     /// still reports initiation; its live check exposes that unmet guarantee.
-    pub stored_at: SystemTime,
+    pub stored_at: StorageTime,
     /// Timestamp resolution. S3 uses its whole-second HEAD/GET representation
     /// for listings too; other providers retain their returned fractional digits.
     pub time_resolution: Duration,

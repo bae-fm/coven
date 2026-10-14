@@ -230,6 +230,16 @@ impl ByteRange {
     pub fn is_empty(self) -> bool;
 }
 
+/// A provider time: Unix seconds and a nanosecond fraction (D2). It keeps
+/// every digit the provider returned on every platform, which `SystemTime`
+/// cannot: Windows counts it in 100 ns intervals (§4). Ordered by time.
+pub struct StorageTime(/* seconds: u64, nanos: u32 */);
+
+impl StorageTime {
+    pub fn seconds(self) -> u64;
+    pub fn nanos(self) -> u32;
+}
+
 /// Metadata of a complete object returned by a provider read, listing or status (§4).
 pub struct StoredObject {
     /// Validated path relative to the store's location.
@@ -239,7 +249,7 @@ pub struct StoredObject {
     /// Server publication time of the complete object, not the uploading device's clock.
     /// Immutable objects retain their first stored time across retries. Replaced
     /// positions and clock objects carry their replacement time (§9).
-    pub stored_at: SystemTime,
+    pub stored_at: StorageTime,
     /// Timestamp resolution; S3 uses its whole-second HEAD/GET representation (§4).
     pub time_resolution: Duration,
     /// Native object id, or the complete S3 key.

@@ -180,10 +180,7 @@ async fn a_late_step_nine_confirms_an_unchanged_post_and_moves_the_checkpoint() 
     assert!(!storage.request_trace()[before..]
         .iter()
         .any(|r| matches!(r, coven_storage::test_utils::MemoryRequest::Replace(_))));
-    assert_eq!(
-        a.db.return_checkpoint().await.unwrap(),
-        Some(StorageTime::from_system_time(sample).unwrap())
-    );
+    assert_eq!(a.db.return_checkpoint().await.unwrap(), Some(sample));
     drop(pass);
     // Its disappearance changes the post, which needs a send.
     let path = ObjectPath::positions(store(1), a.db.local_store_log().await.unwrap().device);

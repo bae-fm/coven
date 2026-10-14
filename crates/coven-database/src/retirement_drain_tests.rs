@@ -6,32 +6,17 @@ use crate::write_landing::tests::retire;
 use crate::{DeviceState, DropReason, EntryOutcome};
 use coven_format::store_log::{StoreChange, StoreLogEntry};
 use coven_format::value::EntryPositions;
-use std::time::UNIX_EPOCH;
 
 const DAY: u64 = 24 * 60 * 60;
 
-fn at(seconds: u64) -> SystemTime {
-    UNIX_EPOCH + Duration::from_secs(seconds)
+fn at(seconds: u64) -> StorageTime {
+    StorageTime::since_epoch(Duration::from_secs(seconds))
 }
 
-/// The earliest time `SystemTime` can represent after `time`. Its unit is the
-/// platform's: one nanosecond on Unix, 100 ns on Windows, where adding one
-/// nanosecond leaves the time unchanged.
-fn next_instant(time: SystemTime) -> SystemTime {
-    (1..=100)
-        .map(|nanos| time + Duration::from_nanos(nanos))
-        .find(|later| *later > time)
-        .expect("SystemTime resolves 100 ns on every supported platform")
-}
-
-async fn advance(db: &crate::Database, horizon: u64, sample: SystemTime) {
-    db.advance_store_log_horizon(
-        db.store_log().await.unwrap(),
-        Duration::from_secs(horizon),
-        sample,
-    )
-    .await
-    .unwrap();
+async fn advance(db: &crate::Database, horizon: u64, sample: StorageTime) {
+    db.advance_store_log_horizon(db.store_log().await.unwrap(), at(horizon), sample)
+        .await
+        .unwrap();
 }
 
 /// Drop `entry` in a replay that also applies an unrelated entry, as a replay
@@ -113,10 +98,11 @@ async fn a_drain_needs_a_sample_strictly_past_the_wait() {
     retire(&db, writer, 1, "device", 100).await;
     advance(&db, 101, at(40 * DAY)).await;
     let finality = db.retirement_finalities().await.unwrap()[0];
-    assert_eq!(finality.drain_due(), at(41 * DAY + 300));
+    assert_eq!(finality.drain_due(), Some(at(41 * DAY + 300)));
     let deadline = finality.final_at + DRAIN_WAIT;
     assert!(!finality.drain_permitted(deadline));
-    assert!(finality.drain_permitted(next_instant(deadline)));
+    // One nanosecond is a distinct storage time on every platform.
+    assert!(finality.drain_permitted(deadline + Duration::from_nanos(1)));
     assert!(!db.mark_drained(finality, deadline).await.unwrap());
     assert!(db.drained_devices().await.unwrap().is_empty());
     let stale = RetirementFinality {

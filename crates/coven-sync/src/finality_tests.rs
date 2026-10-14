@@ -6,6 +6,11 @@ fn day(n: u64) -> Duration {
     Duration::from_secs(n * 86400)
 }
 
+/// A provider time `since` the epoch.
+fn at(since: Duration) -> StorageTime {
+    StorageTime::since_epoch(since)
+}
+
 fn history(late: bool) -> StoreLog {
     let mut history = History::new();
     history.push(0, 1, &[0], device(1));
@@ -17,7 +22,7 @@ fn history(late: bool) -> StoreLog {
         .entries
         .iter()
         .zip([0, 1, 1, 40])
-        .map(|(entry, time)| (entry.position, UNIX_EPOCH + day(time)))
+        .map(|(entry, time)| (entry.position, at(day(time))))
         .collect();
     let mut log = StoreLog::default();
     for entry in history.entries {
@@ -32,14 +37,14 @@ fn history(late: bool) -> StoreLog {
 fn observations_wait_out_the_listing_margin_before_the_provider_tick() {
     let hour = Duration::from_secs(3600);
     for unit in [Duration::from_secs(1), Duration::from_millis(1)] {
-        assert_eq!(observation_time(UNIX_EPOCH + hour, unit), None);
+        assert_eq!(observation_time(at(hour), unit), None);
         assert_eq!(
-            observation_time(UNIX_EPOCH + hour + unit, unit),
-            Some(Duration::ZERO)
+            observation_time(at(hour + unit), unit),
+            Some(StorageTime::UNIX_EPOCH)
         );
         assert_eq!(
-            observation_time(UNIX_EPOCH + day(40), unit),
-            Some(day(40) - hour - unit)
+            observation_time(at(day(40)), unit),
+            Some(at(day(40) - hour - unit))
         );
     }
 }
@@ -48,14 +53,14 @@ fn observations_wait_out_the_listing_margin_before_the_provider_tick() {
 fn recovered_endpoint_is_the_last_provider_tick_before_the_late_entry() {
     let mut log = history(true);
     for (entry, time) in log.entries.iter_mut().zip([0, 1, 1, 30 * 86400 + 2]) {
-        entry.stored_at = UNIX_EPOCH + Duration::from_secs(time);
+        entry.stored_at = at(Duration::from_secs(time));
     }
     log.horizon = horizon(
         &log,
-        day(30) + Duration::from_secs(2),
+        at(day(30) + Duration::from_secs(2)),
         Duration::from_secs(1),
     );
-    assert_eq!(log.horizon, Some(Duration::from_secs(1)));
+    assert_eq!(log.horizon, Some(at(Duration::from_secs(1))));
     assert!(!log.is_final(log.entries[1].entry.position));
 }
 
@@ -66,17 +71,14 @@ fn observations_exclude_the_entire_clock_tick_and_reject_underflow() {
         Duration::from_millis(1),
         Duration::from_nanos(1),
     ] {
-        assert_eq!(observation_time(UNIX_EPOCH, resolution), None);
+        assert_eq!(observation_time(StorageTime::UNIX_EPOCH, resolution), None);
         assert_eq!(
-            observation_time(
-                UNIX_EPOCH + LISTING_MARGIN + Duration::from_secs(1),
-                resolution
-            ),
-            Some(Duration::from_secs(1) - resolution)
+            observation_time(at(LISTING_MARGIN + Duration::from_secs(1)), resolution),
+            Some(at(Duration::from_secs(1) - resolution))
         );
         assert_eq!(
-            observation_time(UNIX_EPOCH + day(40), resolution),
-            Some(day(40) - LISTING_MARGIN - resolution)
+            observation_time(at(day(40)), resolution),
+            Some(at(day(40) - LISTING_MARGIN - resolution))
         );
     }
 }
@@ -85,46 +87,46 @@ fn observations_exclude_the_entire_clock_tick_and_reject_underflow() {
 fn an_absent_horizon_differs_from_zero_and_tied_entries_share_the_strict_boundary() {
     let mut log = history(false);
     assert_eq!(log.horizon, None);
-    log.horizon = horizon(&log, day(30), Duration::from_secs(1));
-    assert_eq!(log.horizon, Some(day(0)));
+    log.horizon = horizon(&log, at(day(30)), Duration::from_secs(1));
+    assert_eq!(log.horizon, Some(at(day(0))));
     assert!(!log.is_final(log.entries[0].entry.position));
-    log.horizon = horizon(&log, day(31), Duration::from_secs(1));
-    assert_eq!(log.horizon, Some(day(1)));
+    log.horizon = horizon(&log, at(day(31)), Duration::from_secs(1));
+    assert_eq!(log.horizon, Some(at(day(1))));
     assert!(log.is_final(log.entries[0].entry.position));
     assert!(!log.is_final(log.entries[1].entry.position));
     assert!(!log.is_final(log.entries[2].entry.position));
-    log.horizon = horizon(&log, day(32), Duration::from_secs(1));
+    log.horizon = horizon(&log, at(day(32)), Duration::from_secs(1));
     assert!(log.entries.iter().all(|e| log.is_final(e.entry.position)));
 }
 
 #[test]
 fn inclusive_late_window_recovers_earlier_checks_without_lowering_saved_finality() {
     let mut log = history(true);
-    let recovered = day(10) - Duration::from_secs(1);
+    let recovered = at(day(10) - Duration::from_secs(1));
     assert_eq!(
-        horizon(&log, day(40), Duration::from_secs(1)),
+        horizon(&log, at(day(40)), Duration::from_secs(1)),
         Some(recovered)
     );
     assert_eq!(
-        horizon(&log, day(70), Duration::from_secs(1)),
+        horizon(&log, at(day(70)), Duration::from_secs(1)),
         Some(recovered)
     );
     assert_eq!(
         horizon(
             &log,
-            day(70) + Duration::from_secs(1),
+            at(day(70) + Duration::from_secs(1)),
             Duration::from_secs(1)
         ),
-        Some(day(40) + Duration::from_secs(1))
+        Some(at(day(40) + Duration::from_secs(1)))
     );
-    log.horizon = Some(day(20));
+    log.horizon = Some(at(day(20)));
     assert_eq!(
-        horizon(&log, day(40), Duration::from_secs(1)),
-        Some(day(20))
+        horizon(&log, at(day(40)), Duration::from_secs(1)),
+        Some(at(day(20)))
     );
     assert_eq!(
-        horizon(&log, day(10), Duration::from_secs(1)),
-        Some(day(20))
+        horizon(&log, at(day(10)), Duration::from_secs(1)),
+        Some(at(day(20)))
     );
 }
 
@@ -154,7 +156,7 @@ async fn probes_require_the_margin_and_the_observed_provider_tick() {
     use coven_foundation::clock::FixedClock;
     let unit = Duration::from_secs(1);
     let mut observation = Observation {
-        sample: Some((UNIX_EPOCH, unit)),
+        sample: Some((StorageTime::UNIX_EPOCH, unit)),
         ..Default::default()
     };
     let log = history(true);
@@ -204,12 +206,7 @@ fn lean_differential_finality_horizon() {
                 .entries
                 .iter()
                 .zip(times)
-                .map(|(entry, time)| {
-                    (
-                        entry.position,
-                        UNIX_EPOCH + Duration::from_secs(time * 86400),
-                    )
-                })
+                .map(|(entry, time)| (entry.position, at(Duration::from_secs(time * 86400))))
                 .collect();
             let mut log = StoreLog::default();
             for entry in history.entries {
@@ -224,8 +221,9 @@ fn lean_differential_finality_horizon() {
                 checks
                     .into_iter()
                     .map(|time| {
-                        let cutoff =
-                            horizon(&log, Duration::from_secs(time * 86400), day(1)).unwrap();
+                        let cutoff = horizon(&log, at(Duration::from_secs(time * 86400)), day(1))
+                            .unwrap()
+                            .elapsed_since_epoch();
                         assert_eq!(cutoff.as_nanos() % day(1).as_nanos(), 0);
                         cutoff.as_secs() / 86400
                     })
@@ -247,11 +245,9 @@ fn io_differential_finality_observation() {
     for unit in [1u64, 2] {
         for time in [0, 3599, 3600, 3600 + unit, 3601 + unit, 40 * 86400] {
             let stored = [0, time.saturating_sub(unit), time, time + unit];
-            let through = observation_time(
-                UNIX_EPOCH + Duration::from_secs(time),
-                Duration::from_secs(unit),
-            )
-            .map(|time| time.as_secs());
+            let through =
+                observation_time(at(Duration::from_secs(time)), Duration::from_secs(unit))
+                    .map(|time| time.seconds());
             inputs.push(json!({"clock":time,"unit":unit,"stored":stored}));
             expected.push(json!({
                 "horizon_input": through,
@@ -286,7 +282,7 @@ fn io_differential_finality_requires_the_old_prefix_even_when_the_window_is_quie
         .entries
         .iter()
         .zip(stored)
-        .map(|(entry, time)| (entry.position, UNIX_EPOCH + Duration::from_secs(time)))
+        .map(|(entry, time)| (entry.position, at(Duration::from_secs(time))))
         .collect();
     let mut log = StoreLog::default();
     for i in [0, 2] {
@@ -295,11 +291,8 @@ fn io_differential_finality_requires_the_old_prefix_even_when_the_window_is_quie
         log.replay = replay;
     }
     let sample = 32 * 86400 + 3602;
-    let through = observation_time(
-        UNIX_EPOCH + Duration::from_secs(sample),
-        Duration::from_secs(1),
-    )
-    .unwrap();
+    let through =
+        observation_time(at(Duration::from_secs(sample)), Duration::from_secs(1)).unwrap();
     log.horizon = horizon(&log, through, Duration::from_secs(1));
     assert!(log.is_final(h.entries[2].position));
     assert_eq!(
@@ -322,7 +315,7 @@ fn io_differential_finality_requires_the_old_prefix_even_when_the_window_is_quie
             }])
         ),
         json!([{
-            "horizon_input":through.as_secs(),"certified":[true,true,true],"through_time":true,
+            "horizon_input":through.seconds(),"certified":[true,true,true],"through_time":true,
             "completed_prefix":false,"observed_quiet":true,"whole_quiet":true,
             "horizon":null,
         }])

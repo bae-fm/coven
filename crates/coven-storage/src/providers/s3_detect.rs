@@ -5,11 +5,9 @@ use super::*;
 use crate::s3_detection::{COPY_CONDITIONS, SIGNERS, SINGLE_PUTS};
 use crate::{S3Detection, S3Observation, S3Probe};
 use aws_sdk_s3::operation::head_object::HeadObjectOutput;
+use coven_format::value::StorageTime;
 use coven_foundation::id_source::StoreId;
-use std::{
-    collections::BTreeSet,
-    time::{Duration, SystemTime},
-};
+use std::{collections::BTreeSet, time::Duration};
 
 const PROBES: &str = ".coven-check";
 /// `Last-Modified` has whole seconds: the earliest a later marker can differ.
@@ -157,12 +155,6 @@ fn absent<T>(result: Result<T, StorageError>) -> Result<bool, StorageError> {
     }
 }
 
-fn seconds(time: SystemTime) -> u64 {
-    time.duration_since(SystemTime::UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_secs())
-        .unwrap_or_default()
-}
-
 struct Probes<'a> {
     s: &'a S3Storage,
     prefix: String,
@@ -299,11 +291,11 @@ impl Probes<'_> {
         };
         let detail = format!(
             "start={}..{} completion={}..{} published={}",
-            seconds(start_before),
-            seconds(start_after),
-            seconds(completion_before),
-            seconds(completion_after),
-            seconds(published_at)
+            start_before.seconds(),
+            start_after.seconds(),
+            completion_before.seconds(),
+            completion_after.seconds(),
+            published_at.seconds()
         );
         self.observe(S3Probe::CompletionTimestamp, completion, detail);
         let mut taken = self.start(&key).await?;
@@ -326,8 +318,8 @@ impl Probes<'_> {
     async fn marker_after(
         &mut self,
         key: &str,
-        after: SystemTime,
-    ) -> Result<SystemTime, StorageError> {
+        after: StorageTime,
+    ) -> Result<StorageTime, StorageError> {
         self.clock.sleep(FIRST_PAUSE).await;
         for _ in 0..=RETRIES {
             self.put(key, b"later marker", None).await?;
@@ -340,7 +332,7 @@ impl Probes<'_> {
         Err(StorageFailure::Protocol.with_source("server time did not advance"))
     }
 
-    async fn copies(&mut self, source: &str, source_time: SystemTime) -> Result<(), StorageError> {
+    async fn copies(&mut self, source: &str, source_time: StorageTime) -> Result<(), StorageError> {
         let mut dated = None;
         for (index, condition) in COPY_CONDITIONS.into_iter().enumerate() {
             let key = self.key(&format!("copy-{index}"));
@@ -372,8 +364,8 @@ impl Probes<'_> {
                 copied > source_time,
                 format!(
                     "condition={condition:?} source={} copy={}",
-                    seconds(source_time),
-                    seconds(copied)
+                    source_time.seconds(),
+                    copied.seconds()
                 ),
             ),
             None => (false, "no copy accepted".into()),
@@ -637,12 +629,12 @@ struct NativeUpload {
     parts: Vec<CompletedPart>,
 }
 
-pub(super) fn time(head: &HeadObjectOutput) -> Result<SystemTime, StorageError> {
-    (*head
-        .last_modified()
-        .ok_or(StorageFailure::Protocol.with_source("S3 omitted storage time"))?)
-    .try_into()
-    .map_err(|error| StorageFailure::Protocol.with_source(error))
+pub(super) fn time(head: &HeadObjectOutput) -> Result<StorageTime, StorageError> {
+    crate::providers::http::storage_time(
+        *head
+            .last_modified()
+            .ok_or(StorageFailure::Protocol.with_source("S3 omitted storage time"))?,
+    )
 }
 
 #[cfg(test)]

@@ -11,8 +11,8 @@ use coven_foundation::id_source::SequentialIds;
 
 pub(crate) const DAY: u64 = 24 * 60 * 60;
 
-pub(crate) fn at(seconds: u64) -> SystemTime {
-    UNIX_EPOCH + Duration::from_secs(seconds)
+pub(crate) fn at(seconds: u64) -> StorageTime {
+    StorageTime::since_epoch(Duration::from_secs(seconds))
 }
 
 /// A kept retiring entry about `writer`, a device of member 2, as replay
@@ -273,11 +273,7 @@ async fn a_settled_verdict_releases_its_retained_inputs() {
     // The deciding kept retirement is final: the late verdict cannot change
     // (`retirement_verdict_final`), so its inputs and verdict go.
     p.target
-        .advance_store_log_horizon(
-            p.target.store_log().await.unwrap(),
-            Duration::from_secs(1),
-            std::time::UNIX_EPOCH + Duration::from_secs(1),
-        )
+        .advance_store_log_horizon(p.target.store_log().await.unwrap(), at(1), at(1))
         .await
         .unwrap();
     assert_eq!(retained(&p.target), (0, 0));
@@ -311,13 +307,9 @@ async fn an_admitted_verdict_settles_when_the_horizon_passes_its_window() {
     let horizon = |seconds| {
         let db = &p.target;
         async move {
-            db.advance_store_log_horizon(
-                db.store_log().await.unwrap(),
-                Duration::from_secs(seconds),
-                std::time::UNIX_EPOCH + Duration::from_secs(seconds),
-            )
-            .await
-            .unwrap()
+            db.advance_store_log_horizon(db.store_log().await.unwrap(), at(seconds), at(seconds))
+                .await
+                .unwrap()
         }
     };
     horizon(DAY - 1).await;
@@ -370,7 +362,7 @@ fn mg_differential_retirement_window() {
                     set.iter()
                         .map(|r| {
                             json!({"device": 7, "entry": r.entry.number,
-                                   "stored": r.stored_at.duration_since(UNIX_EPOCH).unwrap().as_secs()})
+                                   "stored": r.stored_at.seconds()})
                         })
                         .collect::<Vec<_>>()
                 };
@@ -637,4 +629,25 @@ async fn a_row_known_only_from_a_snapshot_can_be_edited_locally() {
         source.receive(edit.into()).await.unwrap(),
         crate::ApplyOutcome::Applied
     );
+}
+
+/// The window compares provider times at their full precision on every
+/// platform: one nanosecond past thirty days is late, exactly thirty days is
+/// admitted. A 100 ns Windows `SystemTime` could not tell these apart (§10).
+#[test]
+fn one_nanosecond_past_the_window_is_late() {
+    let retired = StorageTime::new(1_760_400_000, 123_456_789).unwrap();
+    let kept = [Retirement {
+        entry: EntryId {
+            device: DeviceId(97),
+            number: 1,
+        },
+        stored_at: retired,
+    }];
+    assert!(within_window(retired + WRITE_WINDOW, &kept));
+    assert!(!within_window(
+        retired + WRITE_WINDOW + Duration::from_nanos(1),
+        &kept
+    ));
+    assert!(within_window(retired, &kept));
 }

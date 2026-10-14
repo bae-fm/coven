@@ -28,10 +28,9 @@ pub struct StoreLog {
     pub entries: Vec<ReplayEntry>,
     /// The result computed by sync for exactly these entries.
     pub replay: StoreLogReplay,
-    /// Greatest certified cutoff since the Unix epoch. Absence differs from a
-    /// certified empty prefix. Duration preserves the provider tick's precision
-    /// even on platforms whose SystemTime has coarser precision.
-    pub horizon: Option<std::time::Duration>,
+    /// Greatest certified cutoff, on provider ticks. Absence differs from a
+    /// certified empty prefix.
+    pub horizon: Option<coven_format::value::StorageTime>,
 }
 
 impl StoreLog {
@@ -55,14 +54,9 @@ impl StoreLog {
     /// Finality is a strict comparison with the one persisted horizon (§9).
     pub fn is_final(&self, entry: EntryId) -> bool {
         self.horizon.is_some_and(|horizon| {
-            self.entries.iter().any(|applied| {
-                applied.entry.position == entry
-                    && applied
-                        .stored_at
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .expect("nonnegative provider time")
-                        < horizon
-            })
+            self.entries
+                .iter()
+                .any(|applied| applied.entry.position == entry && applied.stored_at < horizon)
         })
     }
 
@@ -344,7 +338,7 @@ pub(crate) fn apply<P: crate::PendingValue>(
                 incoming,
                 bytes,
                 incoming.check.encode(),
-                crate::user_file::encode_time(incoming.stored_at),
+                crate::storage_time::encode(incoming.stored_at),
                 crate::write_encoding::encoded(coven_format::merge_fields::encode_timestamp(
                     &incoming.entry.timestamp,
                 ))?,

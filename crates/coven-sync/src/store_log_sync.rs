@@ -521,7 +521,7 @@ impl StoreLogSync {
         &self,
         local: &mut LocalStoreLog,
         entry: StoreLogEntry,
-        publications: &BTreeMap<EntryId, std::time::SystemTime>,
+        publications: &BTreeMap<EntryId, coven_format::value::StorageTime>,
         member: &MemberIdentity,
         ring: &mut Option<StoreKeyring>,
     ) -> Result<(), SyncError> {

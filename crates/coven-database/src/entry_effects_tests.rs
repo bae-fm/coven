@@ -418,7 +418,7 @@ async fn reset_at(target: &crate::Database, number: u64, seconds: u64) -> EntryI
                     number,
                 },
             },
-            std::time::UNIX_EPOCH + std::time::Duration::from_secs(seconds),
+            coven_format::value::StorageTime::since_epoch(std::time::Duration::from_secs(seconds)),
         )
         .await
         .unwrap();
@@ -451,8 +451,8 @@ fn notes_rows(db: &crate::Database) -> Vec<(String, String)> {
 async fn horizon(db: &crate::Database, seconds: u64) {
     db.advance_store_log_horizon(
         db.store_log().await.unwrap(),
-        std::time::Duration::from_secs(seconds),
-        std::time::UNIX_EPOCH + std::time::Duration::from_secs(seconds),
+        coven_format::value::StorageTime::since_epoch(std::time::Duration::from_secs(seconds)),
+        coven_format::value::StorageTime::since_epoch(std::time::Duration::from_secs(seconds)),
     )
     .await
     .unwrap();

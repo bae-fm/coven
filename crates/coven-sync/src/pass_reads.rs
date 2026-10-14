@@ -18,7 +18,7 @@ struct Reads {
     misses: BTreeSet<(coven_database::LogKind, DeviceId, u64)>,
     /// Retired devices whose entry and key-copy logs reached terminal misses in
     /// a completed discovery, by the storage sample taken before it (§6).
-    drains: BTreeMap<DeviceId, std::time::SystemTime>,
+    drains: BTreeMap<DeviceId, coven_format::value::StorageTime>,
     /// This pass's first phase: whether it completed with sending authority.
     membership: Option<bool>,
     /// Audience snapshot listings shared while one return observation lasts.
@@ -112,14 +112,14 @@ impl PassReads {
 
     /// Replace the drain halves of the latest completed membership discovery:
     /// each device's entry and key-copy misses followed this storage sample.
-    pub(crate) fn keep_drains(&self, drains: BTreeMap<DeviceId, std::time::SystemTime>) {
+    pub(crate) fn keep_drains(&self, drains: BTreeMap<DeviceId, coven_format::value::StorageTime>) {
         let mut reads = self.0.lock().expect("pass reads lock poisoned");
         if reads.scopes > 0 {
             reads.drains = drains;
         }
     }
 
-    pub(crate) fn drains(&self) -> BTreeMap<DeviceId, std::time::SystemTime> {
+    pub(crate) fn drains(&self) -> BTreeMap<DeviceId, coven_format::value::StorageTime> {
         self.0
             .lock()
             .expect("pass reads lock poisoned")

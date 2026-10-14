@@ -286,12 +286,7 @@ async fn the_signed_catch_up_time_is_a_provider_sample_never_device_time() {
             "reopened {reopen}, {later}s later"
         );
         assert_eq!(prefix.caught_at.nanos(), 250_000_000);
-        assert!(prefix.counts(
-            coven_format::value::StorageTime::from_system_time(
-                storage.status(&path).await.unwrap().unwrap().stored_at
-            )
-            .unwrap()
-        ));
+        assert!(prefix.counts(storage.status(&path).await.unwrap().unwrap().stored_at));
     }
 }
 
@@ -415,9 +410,12 @@ async fn concurrent_snapshots_covering_different_pasts_converge_from_either_one(
     a.sync().await;
     write_rows(&a, 0, 1, 17, Audience::Store).await;
     let first = a.db.test_queued_writes().await.unwrap().remove(0);
-    b.db.apply_downloaded::<crate::PendingRecord>(first.into(), std::time::UNIX_EPOCH)
-        .await
-        .unwrap();
+    b.db.apply_downloaded::<crate::PendingRecord>(
+        first.into(),
+        coven_format::value::StorageTime::UNIX_EPOCH,
+    )
+    .await
+    .unwrap();
     upload(&a, &storage).await;
     write_rows(&a, 1, 1, 17, Audience::Store).await;
     write_rows(&b, 2, 1, 17, Audience::Store).await;
@@ -427,12 +425,18 @@ async fn concurrent_snapshots_covering_different_pasts_converge_from_either_one(
     let b_snapshot = b.sync.write_snapshot(Audience::Store).await.unwrap();
     upload(&a, &storage).await;
     upload(&b, &storage).await;
-    a.db.apply_downloaded::<crate::PendingRecord>(b_write.into(), std::time::UNIX_EPOCH)
-        .await
-        .unwrap();
-    b.db.apply_downloaded::<crate::PendingRecord>(a_write.into(), std::time::UNIX_EPOCH)
-        .await
-        .unwrap();
+    a.db.apply_downloaded::<crate::PendingRecord>(
+        b_write.into(),
+        coven_format::value::StorageTime::UNIX_EPOCH,
+    )
+    .await
+    .unwrap();
+    b.db.apply_downloaded::<crate::PendingRecord>(
+        a_write.into(),
+        coven_format::value::StorageTime::UNIX_EPOCH,
+    )
+    .await
+    .unwrap();
     let mut c = notes_device(storage.clone(), 3).await;
     add_device(&mut c).await;
     c.sync.reload_from_snapshots().await.unwrap();
@@ -522,7 +526,7 @@ async fn deleted_history_reload_preserves_waiting_numbers_and_late_writes_conver
     write_rows(&a, 0, 1, 17, Audience::Store).await;
     b.db.apply_downloaded::<crate::PendingRecord>(
         a.db.test_queued_writes().await.unwrap().remove(0).into(),
-        std::time::UNIX_EPOCH,
+        coven_format::value::StorageTime::UNIX_EPOCH,
     )
     .await
     .unwrap();

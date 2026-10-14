@@ -603,7 +603,7 @@ fn io_differential_catalog_current() {
                         (*number).try_into().unwrap(),
                     ),
                     size: 0,
-                    stored_at: UNIX_EPOCH + Duration::from_secs(*stored),
+                    stored_at: coven_format::value::StorageTime::new(*stored, 0).unwrap(),
                     time_resolution: Duration::from_secs(1),
                     object_id: "id".into(),
                     revision: "1".into(),
@@ -624,9 +624,7 @@ fn io_differential_catalog_current() {
                     ),
                     store_log: coven_format::value::EntryPositions(Vec::new()),
                 };
-                if prefix
-                    .counts(crate::store_log_sync::snapshots::catalog::landing(&object).unwrap())
-                {
+                if prefix.counts(object.stored_at) {
                     listed.push((object, prefix));
                 }
             }
@@ -830,7 +828,7 @@ async fn selection_orders_coverage_then_path_and_waits_on_a_damaged_newest() {
     write_rows(&a, 0, 1, 17, Audience::Store).await;
     b.db.apply_downloaded::<crate::PendingRecord>(
         a.db.test_queued_writes().await.unwrap().remove(0).into(),
-        std::time::UNIX_EPOCH,
+        coven_format::value::StorageTime::UNIX_EPOCH,
     )
     .await
     .unwrap();

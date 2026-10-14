@@ -13,10 +13,11 @@ use crate::{
     sqlite::DatabaseConnection, store_log_tables::entry_id, write_encoding::counter, DbError,
     EntryId,
 };
+use coven_format::value::StorageTime;
 use coven_foundation::id_source::DeviceId;
 use rusqlite::params;
 use std::collections::BTreeSet;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 /// One day for any request in flight to land, plus the five-minute catch-up
 /// freshness every sender requires (§6, §10).
@@ -32,21 +33,24 @@ pub struct RetirementFinality {
     pub entry: EntryId,
     /// `F`: the qualifying sample `T` of that finality observation, never the
     /// entry's own publication time.
-    pub final_at: SystemTime,
+    pub final_at: StorageTime,
 }
 
 impl RetirementFinality {
     /// Reads that follow storage time `sample` can drain this device only when
     /// `sample > F + one day + five minutes`; equality is insufficient.
-    pub fn drain_permitted(&self, sample: SystemTime) -> bool {
-        sample > self.final_at + DRAIN_WAIT
+    pub fn drain_permitted(&self, sample: StorageTime) -> bool {
+        sample
+            .duration_since(self.final_at)
+            .is_some_and(|waited| waited > DRAIN_WAIT)
     }
 
     /// `F + one day + five minutes`: the last storage time that does not yet
     /// permit the drain, for scheduling a time probe once a device clock
-    /// passes it; a device clock passing it only schedules that check.
-    pub fn drain_due(&self) -> SystemTime {
-        self.final_at + DRAIN_WAIT
+    /// passes it; a device clock passing it only schedules that check. `None`
+    /// past the representable range, where no sample can permit the drain.
+    pub fn drain_due(&self) -> Option<StorageTime> {
+        self.final_at.checked_add(DRAIN_WAIT)
     }
 }
 
@@ -61,8 +65,8 @@ fn device_bytes(device: DeviceId) -> [u8; 8] {
 /// refreshed: a later `F` would only delay the drain.
 pub(crate) fn record_finality(
     db: &DatabaseConnection,
-    horizon: Duration,
-    sample: SystemTime,
+    horizon: StorageTime,
+    sample: StorageTime,
 ) -> Result<(), DbError> {
     let retirements = db.query(
         "SELECT l.retires_device,l.device,l.number,l.stored_at FROM _coven_store_log l
@@ -86,12 +90,7 @@ pub(crate) fn record_finality(
         if recorded.contains(&device) {
             continue;
         }
-        let stored_at =
-            crate::user_file::decode_time(&stored).map_err(|_| DbError::DamagedDatabase)?;
-        if stored_at
-            .duration_since(std::time::UNIX_EPOCH)
-            .is_ok_and(|time| time >= horizon)
-        {
+        if crate::storage_time::decode(&stored)? >= horizon {
             continue;
         }
         db.internal_execute(
@@ -101,7 +100,7 @@ pub(crate) fn record_finality(
                 device_bytes(device).as_slice(),
                 device_bytes(entry.device).as_slice(),
                 entry.number.to_be_bytes().as_slice(),
-                crate::user_file::encode_time(sample),
+                crate::storage_time::encode(sample),
             ],
         )?;
         recorded.insert(device);
@@ -140,7 +139,7 @@ pub(crate) fn finalities(db: &DatabaseConnection) -> Result<Vec<RetirementFinali
         Ok(RetirementFinality {
             device,
             entry,
-            final_at: crate::user_file::decode_time(&time).map_err(|_| DbError::DamagedDatabase)?,
+            final_at: crate::storage_time::decode(&time)?,
         })
     })
     .collect()
@@ -170,7 +169,7 @@ pub(crate) fn drained(db: &DatabaseConnection) -> Result<BTreeSet<DeviceId>, DbE
 pub(crate) fn mark(
     db: &DatabaseConnection,
     drain: RetirementFinality,
-    sample: SystemTime,
+    sample: StorageTime,
 ) -> Result<bool, DbError> {
     let current = finalities(db)?
         .into_iter()

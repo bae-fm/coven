@@ -7,7 +7,7 @@ use crate::store_log_sync::tests::{circle, device, find_copy, key, member, stora
 use crate::SyncError;
 use coven_database::{DropReason, EntryOutcome, StoreLogCheck, StoreLogSealing};
 use coven_format::store_log::MemberRole;
-use std::time::{Duration, UNIX_EPOCH};
+use std::time::Duration;
 
 /// The applied log of a history whose entries landed on the given days.
 fn landed_log(h: &History, days: &[u64]) -> StoreLog {
@@ -15,7 +15,12 @@ fn landed_log(h: &History, days: &[u64]) -> StoreLog {
         .entries
         .iter()
         .zip(days)
-        .map(|(e, day)| (e.position, UNIX_EPOCH + Duration::from_secs(day * 86_400)))
+        .map(|(e, day)| {
+            (
+                e.position,
+                coven_format::value::StorageTime::since_epoch(Duration::from_secs(day * 86_400)),
+            )
+        })
         .collect();
     let mut log = StoreLog::default();
     for entry in &h.entries {

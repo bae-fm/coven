@@ -163,11 +163,10 @@ impl StoreLogSync {
                 .iter()
                 .filter(|(_, d)| d.active())
                 .all(|(device, _)| positions.get(device).is_some_and(|p| p.covers(id)));
-            let aged = self
-                .clock
-                .now()
-                .duration_since(object.stored_at)
-                .is_ok_and(|age| age >= Duration::from_secs(30 * 24 * 60 * 60));
+            let aged = coven_format::value::StorageTime::from_system_time(self.clock.now())
+                .ok()
+                .and_then(|now| now.duration_since(object.stored_at))
+                .is_some_and(|age| age >= Duration::from_secs(30 * 24 * 60 * 60));
             if covered && (posted || aged) {
                 storage.delete(&object.path).await?;
             }

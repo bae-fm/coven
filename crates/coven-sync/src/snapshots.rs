@@ -474,7 +474,7 @@ impl StoreLogSync {
         // T_c must precede this catch-up's reads, so the pass's earlier first
         // phase cannot serve here.
         self.scan_store_log(true).await?;
-        let sample = self
+        Ok(self
             .finality
             .lock()
             .expect("finality lock poisoned")
@@ -482,8 +482,7 @@ impl StoreLogSync {
             .ok_or_else(|| {
                 coven_storage::StorageFailure::Protocol
                     .with_source("a complete catch-up recorded no storage time")
-            })?;
-        Ok(coven_format::value::StorageTime::from_system_time(sample)?)
+            })?)
     }
 
     async fn snapshot_grew(&self, audience: &Audience, log: &StoreLog) -> Result<bool, SyncError> {

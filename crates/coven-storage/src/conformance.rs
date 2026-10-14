@@ -244,7 +244,7 @@ impl Conformance {
     /// Advance the fixture clock after publication to distinguish retry timestamps.
     pub async fn listing_times(
         &self,
-        stored_at: std::time::SystemTime,
+        stored_at: coven_format::value::StorageTime,
         advance: impl std::future::Future<Output = ()>,
     ) {
         let storage = &self.storage;

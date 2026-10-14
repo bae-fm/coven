@@ -48,7 +48,7 @@ impl ChannelParts {
     pub(crate) fn new(
         header: WriteHeaderFrame,
         opens: &[bool],
-        stored_at: std::time::SystemTime,
+        stored_at: coven_format::value::StorageTime,
     ) -> (Self, DownloadedWriteStream<StreamInput>) {
         let (senders, parts) = opens
             .iter()

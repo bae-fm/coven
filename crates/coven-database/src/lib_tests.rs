@@ -394,8 +394,11 @@ impl crate::Database {
         &self,
         write: crate::DownloadedWrite,
     ) -> Result<crate::ApplyOutcome, DbError> {
-        self.apply_downloaded::<crate::pending::tests::Record>(write, std::time::UNIX_EPOCH)
-            .await
+        self.apply_downloaded::<crate::pending::tests::Record>(
+            write,
+            coven_format::value::StorageTime::UNIX_EPOCH,
+        )
+        .await
     }
 
     /// Apply a streamed received write, reporting with the test record.

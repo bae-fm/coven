@@ -69,9 +69,12 @@ async fn memory_conforms() {
             ))
             .await;
         suite
-            .listing_times(std::time::UNIX_EPOCH, async {
-                clock.set(std::time::UNIX_EPOCH + Duration::from_secs(10));
-            })
+            .listing_times(
+                coven_format::value::StorageTime::new(0, 0).unwrap(),
+                async {
+                    clock.set(std::time::UNIX_EPOCH + Duration::from_secs(10));
+                },
+            )
             .await;
         suite
             .expired_session(async {
@@ -310,7 +313,8 @@ async fn listing_records_publication_time_and_keeps_it_on_retry() {
     clock.set(published);
     storage.finish_upload(&mut upload).await.unwrap();
     let initial = storage.status(&path).await.unwrap().unwrap();
-    assert_eq!(initial.stored_at, published);
+    let storage_time = |time| coven_format::value::StorageTime::from_system_time(time).unwrap();
+    assert_eq!(initial.stored_at, storage_time(published));
     clock.set(published + Duration::from_secs(30));
     assert_eq!(
         storage.create(&path, b"data").await.unwrap_err().failure(),
@@ -321,7 +325,7 @@ async fn listing_records_publication_time_and_keeps_it_on_retry() {
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0].path, path);
     assert_eq!(listed[0].size, 4);
-    assert_eq!(listed[0].stored_at, published);
+    assert_eq!(listed[0].stored_at, storage_time(published));
     let positions = ObjectPath::positions(STORE_ID, DeviceId(31));
     storage.replace(&positions, b"old").await.unwrap();
     clock.set(published + Duration::from_secs(40));
@@ -330,7 +334,10 @@ async fn listing_records_publication_time_and_keeps_it_on_retry() {
         .list(&ObjectPrefix::positions(STORE_ID))
         .await
         .unwrap();
-    assert_eq!(listed[0].stored_at, published + Duration::from_secs(40));
+    assert_eq!(
+        listed[0].stored_at,
+        storage_time(published + Duration::from_secs(40))
+    );
     assert_eq!(listed[0].size, 12);
 }
 

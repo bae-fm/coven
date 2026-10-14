@@ -9,12 +9,13 @@ use crate::{
     write_encoding::{audience_text, counter},
     DbError, EntryId, PendingValue,
 };
+use coven_format::value::StorageTime;
 use coven_format::{merge_fields, store_log::StoreChange, write::WriteHeader};
 use coven_foundation::id_source::DeviceId;
 use coven_merge::{Audience, WriteId};
 use rusqlite::params;
 use std::collections::BTreeSet;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 /// A retired write counts when published no more than thirty storage days after
 /// each kept entry retiring its device; exactly thirty days counts (§10).
@@ -26,14 +27,22 @@ pub(crate) struct Retirement {
     /// The removal of the device or its member, or the replacement of its id.
     pub(crate) entry: EntryId,
     /// The entry's first complete publication time.
-    pub(crate) stored_at: SystemTime,
+    pub(crate) stored_at: StorageTime,
 }
 
 /// Lean `Receive.withinWindow`: the write landed within the window of every
 /// kept retirement of its device, read or not. A write whose own recorded view
 /// retires its device was already refused by its authority check (§7.1, §10).
-pub(crate) fn within_window(stored_at: SystemTime, kept: &[Retirement]) -> bool {
-    kept.iter().all(|r| stored_at <= r.stored_at + WRITE_WINDOW)
+pub(crate) fn within_window(stored_at: StorageTime, kept: &[Retirement]) -> bool {
+    kept.iter().all(|r| within(stored_at, r.stored_at))
+}
+
+/// Whether `stored_at` is no more than thirty storage days after `start`,
+/// compared exactly at the provider's precision.
+fn within(stored_at: StorageTime, start: StorageTime) -> bool {
+    stored_at
+        .duration_since(start)
+        .is_none_or(|after| after <= WRITE_WINDOW)
 }
 
 /// The device and member columns `_coven_store_log` keeps for an entry that
@@ -52,17 +61,13 @@ pub(crate) fn retires(
     }
 }
 
-fn horizon(db: &DatabaseConnection) -> Result<Option<SystemTime>, DbError> {
-    Ok(crate::store_log_tables::horizon(db)?.map(|h| UNIX_EPOCH + h))
-}
-
 /// Every entry retiring `device`, except permanently late ones, with whether replay keeps it and
 /// whether it is final (stored strictly before the horizon, §9).
 fn candidates(
     db: &DatabaseConnection,
     device: DeviceId,
 ) -> Result<Vec<(Retirement, bool, bool)>, DbError> {
-    let horizon = horizon(db)?;
+    let horizon = crate::store_log_tables::horizon(db)?;
     let rows = db.query(
         "SELECT device,number,stored_at,outcome='kept' FROM _coven_store_log
          WHERE retires_device=?1 AND outcome<>'late'
@@ -80,8 +85,7 @@ fn candidates(
     )?;
     rows.into_iter()
         .map(|(entry, stored, kept)| {
-            let stored_at =
-                crate::user_file::decode_time(&stored).map_err(|_| DbError::DamagedDatabase)?;
+            let stored_at = crate::storage_time::decode(&stored)?;
             let fixed = horizon.is_some_and(|h| stored_at < h);
             Ok((Retirement { entry, stored_at }, kept, fixed))
         })
@@ -100,7 +104,7 @@ pub(crate) struct Landing {
 pub(crate) fn judge(
     db: &DatabaseConnection,
     header: &WriteHeader,
-    stored_at: SystemTime,
+    stored_at: StorageTime,
 ) -> Result<Landing, DbError> {
     let candidates = candidates(db, header.position.device)?;
     let kept: Vec<_> = candidates
@@ -114,7 +118,7 @@ pub(crate) fn judge(
             .iter()
             .any(|(r, kept, fixed)| *kept && *fixed && !within_window(stored_at, &[*r]))
     } else {
-        settled(horizon(db)?, stored_at)
+        settled(crate::store_log_tables::horizon(db)?, stored_at)
     };
     Ok(Landing { late, fixed })
 }
@@ -131,7 +135,7 @@ pub(crate) fn land<P: PendingValue>(
     db: &DatabaseConnection,
     schema: &crate::write_schema::WriteSchema,
     header: &WriteHeader,
-    stored_at: SystemTime,
+    stored_at: StorageTime,
     audiences: &[Audience],
     retain: bool,
 ) -> Result<bool, DbError> {
@@ -161,7 +165,7 @@ pub(crate) fn land<P: PendingValue>(
 fn record(
     db: &DatabaseConnection,
     header: &WriteHeader,
-    stored_at: SystemTime,
+    stored_at: StorageTime,
     late: bool,
     audiences: impl IntoIterator<Item = Audience>,
 ) -> Result<(), DbError> {
@@ -172,7 +176,7 @@ fn record(
         params![
             device,
             number,
-            crate::user_file::encode_time(stored_at),
+            crate::storage_time::encode(stored_at),
             merge_fields::encode_write_header(header)?,
             late
         ],
@@ -235,8 +239,7 @@ pub(crate) fn rejudge<P: PendingValue>(db: &DatabaseConnection) -> Result<Rejudg
     let own = db.pending_device().ok_or(DbError::DamagedDatabase)?;
     let mut rejudged = Rejudged::default();
     for (write, stored, header, was_late) in landings {
-        let stored_at =
-            crate::user_file::decode_time(&stored).map_err(|_| DbError::DamagedDatabase)?;
+        let stored_at = crate::storage_time::decode(&stored)?;
         let header = merge_fields::decode_write_header(&header)?;
         let landing = judge(db, &header, stored_at)?;
         if landing.late == was_late {
@@ -323,8 +326,7 @@ fn recorded(db: &DatabaseConnection) -> Result<Vec<(WriteId, Landing)>, DbError>
     )?;
     rows.into_iter()
         .map(|(write, stored, header)| {
-            let stored_at =
-                crate::user_file::decode_time(&stored).map_err(|_| DbError::DamagedDatabase)?;
+            let stored_at = crate::storage_time::decode(&stored)?;
             let header = merge_fields::decode_write_header(&header)?;
             Ok((write, judge(db, &header, stored_at)?))
         })
@@ -354,8 +356,8 @@ pub(crate) fn open_audiences(db: &DatabaseConnection) -> Result<BTreeSet<Audienc
 /// Every retirement that could exclude a write published at `stored_at` was
 /// stored more than thirty days earlier; once the horizon reaches that point,
 /// all of them are final and known (§9, §10).
-fn settled(horizon: Option<SystemTime>, stored_at: SystemTime) -> bool {
-    horizon.is_some_and(|h| stored_at <= h + WRITE_WINDOW)
+fn settled(horizon: Option<StorageTime>, stored_at: StorageTime) -> bool {
+    horizon.is_some_and(|h| within(stored_at, h))
 }
 
 /// Forget final verdicts. A late one stays while an audience it opened

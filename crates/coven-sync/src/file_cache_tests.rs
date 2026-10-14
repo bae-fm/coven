@@ -82,7 +82,10 @@ async fn eager_commit_observation_handles_download_apply() {
     let mut status = files.subscribe_eager_cache_fill_status();
     for write in a.database.test_queued_writes().await.unwrap() {
         b.database
-            .apply_downloaded::<crate::PendingRecord>(write.into(), std::time::UNIX_EPOCH)
+            .apply_downloaded::<crate::PendingRecord>(
+                write.into(),
+                coven_format::value::StorageTime::UNIX_EPOCH,
+            )
             .await
             .unwrap();
     }
@@ -162,7 +165,10 @@ async fn one_files_failure_leaves_its_record_while_the_fill_continues() {
             }
         }
         b.database
-            .apply_downloaded::<crate::PendingRecord>(write.into(), std::time::UNIX_EPOCH)
+            .apply_downloaded::<crate::PendingRecord>(
+                write.into(),
+                coven_format::value::StorageTime::UNIX_EPOCH,
+            )
             .await
             .unwrap();
     }
@@ -252,7 +258,10 @@ async fn a_sync_preserves_eager_cancellation_and_retries_network_failures() {
     let mut status = b.files.subscribe_eager_cache_fill_status();
     for write in a.database.test_queued_writes().await.unwrap() {
         b.database
-            .apply_downloaded::<crate::PendingRecord>(write.into(), std::time::UNIX_EPOCH)
+            .apply_downloaded::<crate::PendingRecord>(
+                write.into(),
+                coven_format::value::StorageTime::UNIX_EPOCH,
+            )
             .await
             .unwrap();
     }
@@ -284,7 +293,10 @@ async fn a_sync_preserves_eager_cancellation_and_retries_network_failures() {
     let second = a.uploaded("another", vec![73; CHUNK * 2]).await;
     for write in a.database.test_queued_writes().await.unwrap() {
         b.database
-            .apply_downloaded::<crate::PendingRecord>(write.into(), std::time::UNIX_EPOCH)
+            .apply_downloaded::<crate::PendingRecord>(
+                write.into(),
+                coven_format::value::StorageTime::UNIX_EPOCH,
+            )
             .await
             .unwrap();
     }

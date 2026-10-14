@@ -28,7 +28,7 @@ use MemberRole::{Admin, Member};
 pub(crate) fn replay(entries: &[StoreLogEntry]) -> StoreLogReplay {
     let publications = entries
         .iter()
-        .map(|e| (e.position, std::time::UNIX_EPOCH))
+        .map(|e| (e.position, coven_format::value::StorageTime::UNIX_EPOCH))
         .collect();
     super::replay(entries, &publications)
 }
@@ -41,7 +41,7 @@ pub(crate) fn replay_entry(
         .entries
         .iter()
         .map(|e| (e.entry.position, e.stored_at))
-        .chain([(entry.position, std::time::UNIX_EPOCH)])
+        .chain([(entry.position, coven_format::value::StorageTime::UNIX_EPOCH)])
         .collect();
     super::replay_entry(log, entry, &publications)
 }

@@ -54,14 +54,8 @@ pub(crate) fn miss_is_recent(
     let Some((stored, started)) = sample else {
         return false;
     };
-    let (Ok(observed), Ok(discovered)) = (
-        StorageTime::from_system_time(stored),
-        discovered.map(StorageTime::from_system_time).transpose(),
-    ) else {
-        return false;
-    };
     let elapsed = clock.elapsed().saturating_sub(started);
-    !needs_snapshots(saved.max(discovered), observed, elapsed)
+    !needs_snapshots(saved.max(discovered), stored, elapsed)
 }
 
 #[cfg(test)]

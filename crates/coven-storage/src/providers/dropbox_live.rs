@@ -17,6 +17,7 @@ use crate::providers::{DropboxClients, OAuthClients, OAuthError, OAuthFlow, OAut
 use crate::*;
 use async_trait::async_trait;
 use coven_crypto::SecretText;
+use coven_format::value::StorageTime;
 use coven_foundation::{
     clock::{ClockRef, SystemClock},
     id_source::{DeviceId, IdSource, StoreId, UuidIds},
@@ -26,7 +27,7 @@ use serde_json::{json, Value};
 use std::{
     panic::{catch_unwind, resume_unwind, AssertUnwindSafe},
     sync::{Arc, Mutex},
-    time::{Duration, SystemTime},
+    time::Duration,
 };
 
 // Serialize ownership of the optional parent folder, including its cleanup.
@@ -287,15 +288,9 @@ async fn metadata(storage: &StorageConnection<DropboxStorage>, path: &ObjectPath
         .unwrap()
 }
 
-async fn marker(storage: &StorageConnection<DropboxStorage>, path: &ObjectPath) -> SystemTime {
+async fn marker(storage: &StorageConnection<DropboxStorage>, path: &ObjectPath) -> StorageTime {
     storage.create(path, b"publication marker").await.unwrap();
     storage.status(path).await.unwrap().unwrap().stored_at
-}
-
-fn seconds(time: SystemTime) -> u64 {
-    time.duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap()
-        .as_secs()
 }
 
 #[cfg(test)]

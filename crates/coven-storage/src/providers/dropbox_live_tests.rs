@@ -80,7 +80,7 @@ fn dropbox_live_complete_publication_time() {
             let object = listed(&storage, &path).await;
             let native = metadata(&storage, &path).await;
             println!("Dropbox publication pause={pause}s start_markers=[{},{}] finish_markers=[{},{}] listed={} server_modified={} local_start={local_start:?} local_finish={local_finish:?}",
-                seconds(start_before), seconds(start_after), seconds(finish_before), seconds(finish_after), seconds(object.stored_at), http::string(&native, "server_modified").unwrap());
+                start_before.seconds(), start_after.seconds(), finish_before.seconds(), finish_after.seconds(), object.stored_at.seconds(), http::string(&native, "server_modified").unwrap());
             assert!(
                 start_before <= start_after && start_after < finish_before,
                 "marker intervals must distinguish initiation from completion"
@@ -198,8 +198,8 @@ fn dropbox_live_immutable_time_is_stable() {
         let native_after = metadata(&storage, &path).await;
         println!(
             "Dropbox immutable time: before={} after={} native_before={} native_after={}",
-            seconds(before.stored_at),
-            seconds(after.stored_at),
+            before.stored_at.seconds(),
+            after.stored_at.seconds(),
             http::string(&native_before, "server_modified").unwrap(),
             http::string(&native_after, "server_modified").unwrap()
         );

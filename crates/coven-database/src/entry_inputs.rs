@@ -304,7 +304,8 @@ fn collect(db: &DatabaseConnection, audience: &Audience) -> Result<(), DbError> 
 }
 
 /// Entries stored strictly before the persisted horizon (§9); no horizon means none.
-pub(crate) const FINAL: &str = "(substr(l.stored_at,1,1)=x'01' OR substr(l.stored_at,2) < coalesce((SELECT horizon FROM _coven_finality WHERE singleton=1),x''))";
+pub(crate) const FINAL: &str =
+    "(l.stored_at < coalesce((SELECT horizon FROM _coven_finality WHERE singleton=1),x''))";
 
 /// Release every audience whose boundary entries are all final (§9): no later
 /// arrival can change its selection, so its current rows are its only input.

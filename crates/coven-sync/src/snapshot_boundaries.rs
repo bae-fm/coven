@@ -67,7 +67,7 @@ impl StoreLogSync {
             };
             // A named snapshot that landed late is ignored like any other:
             // the boundary waits as if it had not arrived.
-            if !candidate.prefix.counts(super::catalog::landing(object)?) {
+            if !candidate.prefix.counts(object.stored_at) {
                 return Err(coven_storage::StorageFailure::NotFound
                     .with_source("the boundary's snapshot landed after its catch-up deadline")
                     .into());

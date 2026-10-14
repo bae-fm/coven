@@ -397,7 +397,9 @@ impl QueueHistory {
 
 /// The real window under the finally kept retirements (§10).
 fn late(kept: [bool; 2], write: WriteId, stored: u64) -> bool {
-    let at = |seconds: u64| std::time::UNIX_EPOCH + std::time::Duration::from_secs(seconds);
+    let at = |seconds: u64| {
+        coven_format::value::StorageTime::since_epoch(std::time::Duration::from_secs(seconds))
+    };
     let retirements: Vec<_> = RETIRED
         .iter()
         .zip(kept)
@@ -522,7 +524,7 @@ async fn install_reset(db: &Database) {
         crate::ReplayEntry {
             entry,
             check: crate::StoreLogCheck::Allowed,
-            stored_at: std::time::UNIX_EPOCH,
+            stored_at: coven_format::value::StorageTime::UNIX_EPOCH,
         },
         replay,
         Vec::new(),
@@ -904,7 +906,9 @@ mod retire {
                 flips += 1;
             }
             let index = history.index(*id);
-            let at = std::time::UNIX_EPOCH + std::time::Duration::from_secs(history.stored[index]);
+            let at = coven_format::value::StorageTime::since_epoch(std::time::Duration::from_secs(
+                history.stored[index],
+            ));
             assert_eq!(
                 target
                     .apply_downloaded::<PendingRecord>(history.writes[index].clone().into(), at)

@@ -20,13 +20,13 @@ impl crate::Database {
         &self,
         boundary: crate::Boundary,
     ) -> Result<EntryId, crate::DbError> {
-        self.check_boundary_fixture_at(boundary, std::time::UNIX_EPOCH)
+        self.check_boundary_fixture_at(boundary, coven_format::value::StorageTime::UNIX_EPOCH)
             .await
     }
     pub(crate) async fn check_boundary_fixture_at(
         &self,
         boundary: crate::Boundary,
-        stored_at: std::time::SystemTime,
+        stored_at: coven_format::value::StorageTime,
     ) -> Result<EntryId, crate::DbError> {
         use coven_format::{
             store_log::{StoreChange, StoreLogEntry},
@@ -704,7 +704,7 @@ mod differential {
             crate::ReplayEntry {
                 entry,
                 check: crate::StoreLogCheck::Allowed,
-                stored_at: std::time::UNIX_EPOCH,
+                stored_at: coven_format::value::StorageTime::UNIX_EPOCH,
             },
             replay,
             Vec::new(),

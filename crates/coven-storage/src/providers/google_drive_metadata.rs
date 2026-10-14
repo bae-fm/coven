@@ -1,11 +1,12 @@
 //! Exact Drive object lookup and paginated name discovery.
 use super::*;
-use std::{collections::BTreeSet, time::SystemTime};
+use coven_format::value::StorageTime;
+use std::collections::BTreeSet;
 const FOLDER: &str = "application/vnd.google-apps.folder";
 
 // A directory can have several native folders after concurrent creation.
 // Ordering is also the deterministic destination for new children.
-pub(super) type FolderIds = BTreeSet<(SystemTime, String)>;
+pub(super) type FolderIds = BTreeSet<(StorageTime, String)>;
 
 impl GoogleDriveStorage {
     pub(super) async fn writer_folders(

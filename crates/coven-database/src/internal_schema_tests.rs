@@ -238,11 +238,11 @@ mod fixture {
        SELECT key,device,x'00',CASE WHEN i%2=0 THEN i END,
               CAST(x'00' || device || n AS BLOB),'1' FROM fixture;
      INSERT INTO _coven_store_log(device,number,record,timestamp,author_view,stored_at,outcome,retires_device,retires_member)
-       SELECT device,n,zeroblob(128),CAST(n || device AS BLOB),x'00',zeroblob(13),'kept',
+       SELECT device,n,zeroblob(128),CAST(n || device AS BLOB),x'00',zeroblob(12),'kept',
               CASE WHEN i%3=0 THEN device END,CASE WHEN i%3=1 THEN member END FROM fixture;
-     INSERT INTO _coven_retirement_finality SELECT n,device,n,zeroblob(13) FROM fixture;
+     INSERT INTO _coven_retirement_finality SELECT n,device,n,zeroblob(12) FROM fixture;
      INSERT INTO _coven_drained_devices SELECT n,device,n FROM fixture;
-     INSERT INTO _coven_write_landings SELECT device,n,zeroblob(13),x'00',i%2 FROM fixture;
+     INSERT INTO _coven_write_landings SELECT device,n,zeroblob(12),x'00',i%2 FROM fixture;
      INSERT INTO _coven_write_landing_parts SELECT device,n,audience FROM fixture;
      INSERT INTO _coven_store_log_uploads VALUES(counter(1),counter(1),zeroblob(128),CAST(counter(1) || counter(1) AS BLOB),zeroblob(16));
      INSERT INTO _coven_key_publications SELECT n,n FROM fixture;
@@ -788,7 +788,7 @@ mod source {
         if sql.contains("{FINAL}") {
             assert!(matches!(file, "entry_inputs.rs" | "local_effects.rs"));
             let condition =
-                select_constant(&sources()["entry_inputs.rs"].strings, "(substr(l.stored_at");
+                select_constant(&sources()["entry_inputs.rs"].strings, "(l.stored_at <");
             return vec![sql.replace("{FINAL}", &condition)];
         }
         if sql.contains("{table}") || sql.contains("{child}") {

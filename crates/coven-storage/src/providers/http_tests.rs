@@ -623,7 +623,7 @@ async fn read_response(
             coven_foundation::id_source::DeviceId(1),
         ),
         size: 8,
-        stored_at: std::time::UNIX_EPOCH,
+        stored_at: coven_format::value::StorageTime::new(0, 0).unwrap(),
         time_resolution: std::time::Duration::from_secs(1),
         object_id: "object".into(),
         revision: "1".into(),

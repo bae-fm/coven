@@ -625,21 +625,21 @@ async fn upload_start_refuses_empty_ids_and_cross_origin_session_urls() {
             (
                 STORE_ID.to_string(),
                 std::collections::BTreeSet::from([(
-                    std::time::SystemTime::UNIX_EPOCH,
+                    coven_format::value::StorageTime::new(0, 0).unwrap(),
                     "store".into(),
                 )]),
             ),
             (
                 format!("{STORE_ID}/devices"),
                 std::collections::BTreeSet::from([(
-                    std::time::SystemTime::UNIX_EPOCH,
+                    coven_format::value::StorageTime::new(0, 0).unwrap(),
                     "devices".into(),
                 )]),
             ),
             (
                 format!("{STORE_ID}/devices/31"),
                 std::collections::BTreeSet::from([(
-                    std::time::SystemTime::UNIX_EPOCH,
+                    coven_format::value::StorageTime::new(0, 0).unwrap(),
                     "writer".into(),
                 )]),
             ),

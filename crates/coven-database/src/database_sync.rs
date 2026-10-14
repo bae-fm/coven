@@ -425,7 +425,7 @@ impl Database {
     pub async fn apply_downloaded<P: crate::PendingValue>(
         &self,
         write: crate::DownloadedWrite,
-        stored_at: std::time::SystemTime,
+        stored_at: coven_format::value::StorageTime,
     ) -> Result<crate::ApplyOutcome, DbError> {
         self.call(move |inner| {
             inner.with_files(Vec::new(), |writer, files| {
@@ -626,8 +626,8 @@ impl Database {
     pub async fn advance_store_log_horizon(
         &self,
         checked: crate::StoreLog,
-        horizon: std::time::Duration,
-        sample: std::time::SystemTime,
+        horizon: coven_format::value::StorageTime,
+        sample: coven_format::value::StorageTime,
     ) -> Result<(), DbError> {
         self.call(move |inner| {
             inner.with_store_log(|current| {
@@ -641,7 +641,7 @@ impl Database {
                     writer.transaction(|database| {
                         database.internal_execute(
                             "UPDATE _coven_finality SET horizon=?1 WHERE singleton=1",
-                            [crate::store_log_tables::encode_horizon(horizon)],
+                            [crate::storage_time::encode(horizon)],
                         )?;
                         crate::retirement_drain::record_finality(database, horizon, sample)?;
                         // Inputs whose boundary entries all became final are released.
@@ -689,7 +689,7 @@ impl Database {
     pub async fn mark_drained(
         &self,
         drain: crate::RetirementFinality,
-        sample: std::time::SystemTime,
+        sample: coven_format::value::StorageTime,
     ) -> Result<bool, DbError> {
         self.call(move |inner| {
             inner.access.with_writer(|writer| {

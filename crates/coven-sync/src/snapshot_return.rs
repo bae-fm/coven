@@ -17,15 +17,11 @@ impl StoreLogSync {
         let refresh = match sample {
             None => true,
             Some((stored, started)) => {
-                let checkpoint = saved.max(
-                    discovered
-                        .map(coven_format::value::StorageTime::from_system_time)
-                        .transpose()?,
-                );
+                let checkpoint = saved.max(discovered);
                 checkpoint.is_some()
                     && crate::recent_return::refresh_due(
                         checkpoint,
-                        coven_format::value::StorageTime::from_system_time(stored)?,
+                        stored,
                         self.clock.elapsed().saturating_sub(started),
                     )
             }
@@ -94,15 +90,11 @@ impl StoreLogSync {
         &self,
         writes: &mut crate::DeviceLogSync,
         complete: bool,
-        sample: Option<std::time::SystemTime>,
+        sample: Option<coven_format::value::StorageTime>,
     ) -> Result<(), SyncError> {
         if writes.post_positions().await? && complete {
             if let Some(sample) = sample {
-                self.database
-                    .save_return_checkpoint(coven_format::value::StorageTime::from_system_time(
-                        sample,
-                    )?)
-                    .await?;
+                self.database.save_return_checkpoint(sample).await?;
             }
         }
         Ok(())
@@ -110,7 +102,7 @@ impl StoreLogSync {
 
     /// The storage time known before this pass's write discovery; it becomes
     /// the return checkpoint if the pass completes (SP step 9).
-    pub(crate) fn return_sample(&self) -> Option<std::time::SystemTime> {
+    pub(crate) fn return_sample(&self) -> Option<coven_format::value::StorageTime> {
         self.finality
             .lock()
             .expect("finality lock poisoned")

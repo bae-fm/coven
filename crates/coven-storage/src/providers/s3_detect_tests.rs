@@ -112,7 +112,10 @@ struct Remote {
 }
 
 fn now() -> u64 {
-    seconds(SystemTime::now())
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
 }
 fn date(secs: u64, format: aws_sdk_s3::primitives::DateTimeFormat) -> String {
     aws_sdk_s3::primitives::DateTime::from_secs(secs as i64)

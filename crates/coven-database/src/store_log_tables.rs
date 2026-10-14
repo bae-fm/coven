@@ -79,35 +79,18 @@ pub(crate) fn deleted_circles(
         .collect())
 }
 
-pub(crate) fn encode_horizon(horizon: std::time::Duration) -> Vec<u8> {
-    let mut bytes = horizon.as_secs().to_be_bytes().to_vec();
-    bytes.extend(horizon.subsec_nanos().to_be_bytes());
-    bytes
-}
-
-fn decode_horizon(bytes: &[u8]) -> Result<std::time::Duration, DbError> {
-    if bytes.len() != 12 {
-        return Err(DbError::DamagedDatabase);
-    }
-    let seconds = u64::from_be_bytes(bytes[..8].try_into().expect("checked horizon width"));
-    let nanos = u32::from_be_bytes(bytes[8..].try_into().expect("checked horizon width"));
-    if nanos >= 1_000_000_000 {
-        return Err(DbError::DamagedDatabase);
-    }
-    Ok(std::time::Duration::new(seconds, nanos))
-}
-
 /// The persisted finality horizon; absence differs from an empty final prefix (§9).
 pub(crate) fn horizon(
     database: &DatabaseConnection,
-) -> Result<Option<std::time::Duration>, DbError> {
+) -> Result<Option<coven_format::value::StorageTime>, DbError> {
     database.query_row(
         "SELECT horizon FROM _coven_finality WHERE singleton=1",
         [],
         |row| {
             row.get::<_, Option<Vec<u8>>>(0)?
                 .map(|bytes| {
-                    decode_horizon(&bytes).map_err(|error| decode_failure(0, Type::Blob, error))
+                    crate::storage_time::decode(&bytes)
+                        .map_err(|error| decode_failure(0, Type::Blob, error))
                 })
                 .transpose()
         },
@@ -134,7 +117,7 @@ pub(crate) fn read(database: &DatabaseConnection) -> Result<StoreLog, DbError> {
             let outcome = outcome(row, 1)?;
             let check = StoreLogCheck::decode(&row.get::<_, Vec<u8>>(5)?)
                 .map_err(|error| decode_failure(5, Type::Blob, error))?;
-            let stored_at = crate::user_file::decode_time(&row.get::<_, Vec<u8>>(6)?)
+            let stored_at = crate::storage_time::decode(&row.get::<_, Vec<u8>>(6)?)
                 .map_err(|error| decode_failure(6, Type::Blob, error))?;
             Ok((ReplayEntry { entry, stored_at, check }, outcome))
         },

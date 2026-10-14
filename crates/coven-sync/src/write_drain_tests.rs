@@ -92,9 +92,7 @@ impl Removed {
         self.ana.sync.sync_store_log().await?;
         self.ana
             .db
-            .save_return_checkpoint(
-                coven_format::value::StorageTime::from_system_time(second(time)).unwrap(),
-            )
+            .save_return_checkpoint(coven_format::value::StorageTime::new(time, 0).unwrap())
             .await?;
         self.ana.writes.download_writes().await?;
         Ok(self.storage.request_trace()[before..].to_vec())
@@ -138,7 +136,10 @@ async fn a_removed_device_is_drained_once_after_its_finality_wait() {
     removed.pass(FINAL).await.unwrap();
     let finality = removed.ana.db.retirement_finalities().await.unwrap();
     assert_eq!(finality.len(), 1);
-    assert_eq!(finality[0].final_at, second(FINAL));
+    assert_eq!(
+        finality[0].final_at,
+        coven_format::value::StorageTime::new(FINAL, 0).unwrap()
+    );
     // Restart before the wait keeps F; a sample at exactly F + wait is a miss
     // before the qualifying T.
     removed.reopen().await;
@@ -222,7 +223,10 @@ async fn a_drained_writers_retained_write_still_applies() {
     assert!(removed
         .ana
         .db
-        .mark_drained(finality, second(FINAL + WAIT + 1))
+        .mark_drained(
+            finality,
+            coven_format::value::StorageTime::new(FINAL + WAIT + 1, 0).unwrap()
+        )
         .await
         .unwrap());
     let before = removed.storage.request_trace().len();

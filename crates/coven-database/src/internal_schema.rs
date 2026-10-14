@@ -197,7 +197,7 @@ macro_rules! coven_tables {
                 record BLOB NOT NULL,
                 timestamp BLOB NOT NULL CHECK(length(timestamp)=16),
                 author_view BLOB NOT NULL,
-                stored_at BLOB NOT NULL CHECK(length(stored_at)=13),
+                stored_at BLOB NOT NULL CHECK(length(stored_at)=12),
                 outcome TEXT NOT NULL CHECK(outcome IN ('kept','late','beaten','target-member','target-device','target-circle','admin','authority')),
                 beaten_device BLOB CHECK(length(beaten_device)=8),
                 beaten_number BLOB CHECK(length(beaten_number)=8),
@@ -225,7 +225,7 @@ macro_rules! coven_tables {
             CREATE TABLE _coven_write_landings (
                 device BLOB NOT NULL CHECK(length(device)=8),
                 number BLOB NOT NULL CHECK(length(number)=8 AND number>x'0000000000000000'),
-                stored_at BLOB NOT NULL CHECK(length(stored_at)=13),
+                stored_at BLOB NOT NULL CHECK(length(stored_at)=12),
                 header BLOB NOT NULL,
                 late INTEGER NOT NULL CHECK(late IN (0,1)),
                 PRIMARY KEY(device,number)
@@ -255,7 +255,7 @@ macro_rules! coven_tables {
                 device BLOB PRIMARY KEY NOT NULL CHECK(length(device)=8),
                 entry_device BLOB NOT NULL CHECK(length(entry_device)=8),
                 entry_number BLOB NOT NULL CHECK(length(entry_number)=8),
-                final_at BLOB NOT NULL CHECK(length(final_at)=13),
+                final_at BLOB NOT NULL CHECK(length(final_at)=12),
                 UNIQUE(device,entry_device,entry_number),
                 FOREIGN KEY(entry_device,entry_number) REFERENCES _coven_store_log(device,number)
             ) STRICT, WITHOUT ROWID;

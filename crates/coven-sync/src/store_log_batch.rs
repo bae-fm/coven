@@ -333,14 +333,9 @@ impl StoreLogSync {
                     .into());
             }
         }
-        let complete_through = |through: Option<std::time::Duration>| {
-            let includes = |time: &std::time::SystemTime| {
-                through.is_none_or(|end| {
-                    time.duration_since(std::time::UNIX_EPOCH)
-                        .expect("nonnegative provider time")
-                        <= end
-                })
-            };
+        let complete_through = |through: Option<coven_format::value::StorageTime>| {
+            let includes =
+                |time: &coven_format::value::StorageTime| through.is_none_or(|end| *time <= end);
             publications
                 .iter()
                 .filter(|(_, time)| includes(time))

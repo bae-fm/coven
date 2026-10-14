@@ -1,7 +1,8 @@
 //! Appendix C: `authorViews`, `scan`, and `settle`.
 
+use coven_format::value::StorageTime;
 use std::collections::BTreeMap;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 use coven_database::{
     DropReason, EntryOutcome, ReplayEntry, StoreLog, StoreLogCheck, StoreLogReplay, StoreLogState,
@@ -37,7 +38,7 @@ pub(crate) mod circles;
 /// set and entries whose replay drops. Complete the storage scan before calling.
 pub fn replay(
     entries: &[StoreLogEntry],
-    publications: &BTreeMap<EntryId, SystemTime>,
+    publications: &BTreeMap<EntryId, StorageTime>,
 ) -> StoreLogReplay {
     let mut entries: Vec<_> = entries.iter().collect();
     entries.sort_by_key(|entry| entry.timestamp);
@@ -64,7 +65,7 @@ pub fn replay(
 pub fn replay_entry(
     log: &StoreLog,
     entry: StoreLogEntry,
-    publications: &BTreeMap<EntryId, SystemTime>,
+    publications: &BTreeMap<EntryId, StorageTime>,
 ) -> (ReplayEntry, StoreLogReplay) {
     let mut batch = ReplayBatch::new(log);
     batch.push_checked(entry, publications);
@@ -101,7 +102,7 @@ impl ReplayBatch {
     pub(crate) fn push(
         &mut self,
         opened: &crate::store_log_object::OpenedEntry,
-        publications: &BTreeMap<EntryId, SystemTime>,
+        publications: &BTreeMap<EntryId, StorageTime>,
         store: coven_foundation::id_source::StoreId,
     ) -> Result<bool, crate::Refusal> {
         let entry = &opened.entry;
@@ -125,7 +126,7 @@ impl ReplayBatch {
     pub(crate) fn push_checked(
         &mut self,
         entry: StoreLogEntry,
-        publications: &BTreeMap<EntryId, SystemTime>,
+        publications: &BTreeMap<EntryId, StorageTime>,
     ) {
         let late = landed_too_late(&entry, publications);
         let check = check(&self.author_view(&entry).state, &entry, late);

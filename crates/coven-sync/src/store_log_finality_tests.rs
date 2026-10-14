@@ -94,7 +94,10 @@ mod listing {
         assert_eq!(owner.log().await.entries.len(), 1);
         assert_eq!(
             owner.sync.finality.lock().unwrap().through(),
-            Some((Duration::from_secs(2), Duration::from_secs(1)))
+            Some((
+                coven_format::value::StorageTime::new(2, 0).unwrap(),
+                Duration::from_secs(1)
+            ))
         );
         assert!(storage
             .status(&crate::store_log_object::path(store(1), second))
@@ -112,7 +115,10 @@ mod listing {
             log.replay.entries[&second],
             coven_database::EntryOutcome::Kept
         );
-        assert_eq!(log.horizon, Some(Duration::ZERO));
+        assert_eq!(
+            log.horizon,
+            Some(coven_format::value::StorageTime::UNIX_EPOCH)
+        );
     }
 
     #[tokio::test]
@@ -139,7 +145,12 @@ mod listing {
         observe(&owner, &clock, cutoff + 3600).await;
         let log = owner.log().await;
         assert_eq!(log.entries.len(), 2);
-        assert_eq!(log.horizon, Some(Duration::from_secs(1)));
+        assert_eq!(
+            log.horizon,
+            Some(coven_format::value::StorageTime::since_epoch(
+                Duration::from_secs(1)
+            ))
+        );
         assert!(!log.is_final(first));
         assert!(!log.replay.entries.contains_key(&late));
         observe(&owner, &clock, cutoff + 3601).await;
@@ -149,7 +160,12 @@ mod listing {
             log.replay.entries[&late],
             coven_database::EntryOutcome::Dropped(coven_database::DropReason::LandedTooLate)
         );
-        assert_eq!(log.horizon, Some(Duration::from_secs(1)));
+        assert_eq!(
+            log.horizon,
+            Some(coven_format::value::StorageTime::since_epoch(
+                Duration::from_secs(1)
+            ))
+        );
         assert!(!log.is_final(first));
         owner.restart(storage.clone()).await;
         assert_eq!(owner.log().await, log);
@@ -194,7 +210,12 @@ mod listing {
                 .unwrap();
             assert!(!owner.sync.scan_store_log_once(false).await.unwrap());
             let log = owner.log().await;
-            assert_eq!(log.horizon, Some(Duration::from_secs(10 * 86400)));
+            assert_eq!(
+                log.horizon,
+                Some(coven_format::value::StorageTime::since_epoch(
+                    Duration::from_secs(10 * 86400)
+                ))
+            );
             assert!(log.is_final(creation));
         }
     }
@@ -236,17 +257,19 @@ mod listing {
                     .enumerate()
                     .filter_map(|(i, id)| log.replay.entries.contains_key(id).then_some(i))
                     .collect();
-                let through =
-                    crate::finality::observation_time(second(time), Duration::from_secs(1))
-                        .unwrap();
+                let through = crate::finality::observation_time(
+                    coven_format::value::StorageTime::new(time, 0).unwrap(),
+                    Duration::from_secs(1),
+                )
+                .unwrap();
                 let quiet = crate::finality::quiet_endpoint(&log, through, Duration::from_secs(1))
                     == Some(through);
                 inputs.push(json!({"clock":time,"unit":1,"stored":times,
                     "past":[[],[0],[0]],"received":received,"window":month}));
-                expected.push(json!({"horizon_input":through.as_secs(),
-                    "certified":times.map(|t| Duration::from_secs(t) <= through),"through_time":true,
+                expected.push(json!({"horizon_input":through.seconds(),
+                    "certified":times.map(|t| coven_format::value::StorageTime::since_epoch(Duration::from_secs(t)) <= through),"through_time":true,
                     "completed_prefix":true,"observed_quiet":quiet,"whole_quiet":quiet,
-                    "horizon":log.horizon.map(|h| h.as_secs())}));
+                    "horizon":log.horizon.map(|h| h.seconds())}));
             }
         }
         let output = crate::tests::run_lean("COVEN_IO_LEAN", &json!(inputs));
@@ -284,9 +307,9 @@ async fn finality_clock_precedes_its_scan_and_survives_reopening() {
     let saved = a.log().await;
     assert_eq!(
         saved.horizon,
-        Some(
+        Some(coven_format::value::StorageTime::since_epoch(
             Duration::from_secs(86400) - crate::finality::LISTING_MARGIN - Duration::from_nanos(1)
-        )
+        ))
     );
     assert!(saved.is_final(entry));
     let path = ObjectPath::clock(store(1), entry.device);
@@ -355,11 +378,11 @@ async fn finality_cannot_advance_across_an_interrupted_or_failed_listing() {
     a.sync.step().await.unwrap();
     assert_eq!(
         a.log().await.horizon,
-        Some(
+        Some(coven_format::value::StorageTime::since_epoch(
             Duration::from_secs(10 * 86400)
                 - crate::finality::LISTING_MARGIN
                 - Duration::from_nanos(1)
-        )
+        ))
     );
 }
 

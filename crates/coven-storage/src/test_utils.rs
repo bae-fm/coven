@@ -88,7 +88,7 @@ impl Faults {
 struct Object {
     upload_id: Option<u64>,
     bytes: Arc<[u8]>,
-    stored_at: std::time::SystemTime,
+    stored_at: coven_format::value::StorageTime,
     revision: u64,
 }
 impl Object {
@@ -579,7 +579,7 @@ impl ProviderOps for MemoryProvider {
                 revision,
                 upload_id: None,
                 bytes: bytes.into(),
-                stored_at: self.clock.now(),
+                stored_at: self.storage_time()?,
             },
         );
         if std::mem::replace(&mut state.faults.lose_completion_reply, false) {
@@ -604,7 +604,7 @@ impl ProviderOps for MemoryProvider {
                 revision,
                 upload_id: None,
                 bytes: bytes.into(),
-                stored_at: self.clock.now(),
+                stored_at: self.storage_time()?,
             },
         );
         Ok(())
@@ -637,7 +637,7 @@ impl ProviderOps for MemoryProvider {
     async fn list(&self, listing: &mut ObjectListing) -> Result<(), StorageError> {
         let prefix = listing.prefix();
         self.before(MemoryRequest::List(prefix.clone())).await?;
-        let now = self.clock.now();
+        let now = self.storage_time()?;
         let mut state = self.state.lock().await;
         let objects: Vec<_> = state
             .objects
@@ -647,7 +647,7 @@ impl ProviderOps for MemoryProvider {
                     && prefix.contains(path)
                     && state.faults.listing_lag.is_none_or(|lag| {
                         now.duration_since(object.stored_at)
-                            .is_ok_and(|age| age > lag)
+                            .is_some_and(|age| age > lag)
                     })
             })
             .map(|(path, object)| object.metadata(path, self.time_resolution))
@@ -880,7 +880,7 @@ impl ProviderOps for MemoryProvider {
             Object {
                 revision,
                 bytes: pending.bytes.into(),
-                stored_at: self.clock.now(),
+                stored_at: self.storage_time()?,
                 upload_id: Some(id),
             },
         );

@@ -49,7 +49,7 @@ pub(crate) fn checked(entry: StoreLogEntry) -> ReplayEntry {
     };
     ReplayEntry {
         entry,
-        stored_at: std::time::UNIX_EPOCH,
+        stored_at: coven_format::value::StorageTime::UNIX_EPOCH,
         check,
     }
 }
@@ -533,7 +533,7 @@ async fn late_verdict_and_first_publication_commit_together_and_cannot_be_revers
                 },
             },
         ),
-        stored_at: std::time::UNIX_EPOCH + Duration::new(32 * 86400, 987_654_321),
+        stored_at: coven_format::value::StorageTime::new(32 * 86400, 987_654_321).unwrap(),
         check: StoreLogCheck::LandedTooLate { authorized: true },
     };
     result.entries.insert(
@@ -904,7 +904,7 @@ async fn a_failed_drop_report_rolls_back_consumption_and_replay() {
     change.had_read = db.store_log().await.unwrap().positions();
     let late = ReplayEntry {
         entry: change,
-        stored_at: std::time::UNIX_EPOCH + Duration::from_secs(32 * 86400),
+        stored_at: coven_format::value::StorageTime::since_epoch(Duration::from_secs(32 * 86400)),
         check: StoreLogCheck::LandedTooLate { authorized: true },
     };
     result.entries.insert(
@@ -961,7 +961,7 @@ fn finality_requires_a_known_entry_strictly_before_the_certified_horizon() {
         let mut log = StoreLog {
             entries: vec![crate::ReplayEntry {
                 entry: entry.clone(),
-                stored_at: std::time::UNIX_EPOCH + Duration::from_secs(1),
+                stored_at: coven_format::value::StorageTime::since_epoch(Duration::from_secs(1)),
                 check: crate::StoreLogCheck::Allowed,
             }],
             replay: StoreLogReplay {
@@ -978,16 +978,14 @@ fn finality_requires_a_known_entry_strictly_before_the_certified_horizon() {
             },
             horizon: None,
         };
+        let at = |since| Some(coven_format::value::StorageTime::since_epoch(since));
         for (horizon, expected) in [
             (None, false),
-            (Some(Duration::ZERO), false),
-            (
-                Some(Duration::from_secs(1) - Duration::from_nanos(1)),
-                false,
-            ),
-            (Some(Duration::from_secs(1)), false),
-            (Some(Duration::from_secs(1) + Duration::from_nanos(1)), true),
-            (Some(Duration::MAX), true),
+            (at(Duration::ZERO), false),
+            (at(Duration::from_secs(1) - Duration::from_nanos(1)), false),
+            (at(Duration::from_secs(1)), false),
+            (at(Duration::from_secs(1) + Duration::from_nanos(1)), true),
+            (at(Duration::MAX), true),
         ] {
             log.horizon = horizon;
             assert_eq!(log.is_final(id), expected, "{horizon:?}, dropped={dropped}");

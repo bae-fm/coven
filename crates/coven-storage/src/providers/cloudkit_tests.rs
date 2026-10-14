@@ -13,7 +13,7 @@ use std::{
     collections::BTreeSet,
     num::NonZeroU64,
     sync::{Arc, Mutex},
-    time::{Duration, SystemTime},
+    time::Duration,
 };
 
 fn path() -> ObjectPath {
@@ -97,7 +97,7 @@ fn metadata_uses_publication_and_replacement_dates() {
         assert_eq!(object.checksum, None);
         assert_eq!(
             object.stored_at,
-            SystemTime::UNIX_EPOCH + Duration::from_secs(expected)
+            coven_format::value::StorageTime::since_epoch(Duration::from_secs(expected))
         );
     }
 }
@@ -124,7 +124,7 @@ fn replacements_retain_change_tags_even_with_equal_sizes_and_dates() {
         assert_eq!(observed[0].stored_at, observed[1].stored_at);
         assert_eq!(
             observed[0].stored_at,
-            SystemTime::UNIX_EPOCH + Duration::from_millis(30_125)
+            coven_format::value::StorageTime::since_epoch(Duration::from_millis(30_125))
         );
         assert_eq!(observed[0].revision, "first-change-tag");
         assert_eq!(observed[1].revision, "second-change-tag");

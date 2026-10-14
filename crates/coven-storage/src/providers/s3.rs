@@ -425,9 +425,9 @@ impl ProviderOps for S3Storage {
                 // HEAD and GET use whole-second HTTP dates. GCS's XML listings
                 // include fractions; use the same precision for every observation
                 // so listing an immutable object cannot change its publication time.
-                let stored_at = aws_sdk_s3::primitives::DateTime::from_secs(stored_at.secs())
-                    .try_into()
-                    .map_err(|error| StorageFailure::Encoding.with_source(error))?;
+                let stored_at = crate::providers::http::storage_time(
+                    aws_sdk_s3::primitives::DateTime::from_secs(stored_at.secs()),
+                )?;
                 if path.is_replaceable() {
                     // ListObjectsV2 has neither native versions nor user metadata.
                     // Exact status supplies the replacement revision; an intervening

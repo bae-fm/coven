@@ -97,11 +97,11 @@ macro_rules! observation {
         Ok(StoredObject {
             path: $path.clone(),
             size: $size,
-            stored_at: (*response
-                .last_modified()
-                .ok_or(StorageFailure::Protocol.with_source("S3 omitted storage time"))?)
-            .try_into()
-            .map_err(|e| StorageFailure::Encoding.with_source(e))?,
+            stored_at: crate::providers::http::storage_time(
+                *response
+                    .last_modified()
+                    .ok_or(StorageFailure::Protocol.with_source("S3 omitted storage time"))?,
+            )?,
             time_resolution: std::time::Duration::from_secs(1),
             object_id: $path.under(&$storage.prefix),
             revision: revision(

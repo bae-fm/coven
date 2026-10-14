@@ -7,7 +7,6 @@ use crate::{PendingReason, PendingRecord, PendingSubject};
 use coven_crypto::{ObjectHasher, Signature, SigningKey};
 use coven_database::StoreLog;
 use coven_format::sealed_snapshot::{SnapshotObjectLayout, SnapshotObjectPrefix};
-use coven_format::value::StorageTime;
 use coven_merge::Audience;
 use coven_storage::{ObjectPath, ObjectPrefix, StoredObject};
 use std::collections::BTreeMap;
@@ -169,7 +168,7 @@ impl StoreLogSync {
             }
             // A landing more than a day after its signed catch-up time is
             // ignored for loading, selection and coverage (§15).
-            if !prefix.counts(landing(&object)?) {
+            if !prefix.counts(object.stored_at) {
                 tracing::debug!(path = object.path.as_str(), "late snapshot does not count");
                 continue;
             }
@@ -667,15 +666,6 @@ pub(crate) fn newest_first(
     score(b_prefix)
         .cmp(&score(a_prefix))
         .then_with(|| path(a).cmp(&path(b)))
-}
-
-/// The first complete publication time of a listed snapshot.
-pub(crate) fn landing(object: &StoredObject) -> Result<StorageTime, SyncError> {
-    StorageTime::from_system_time(object.stored_at).map_err(|_| {
-        coven_storage::StorageFailure::Protocol
-            .with_source("snapshot publication precedes the Unix epoch")
-            .into()
-    })
 }
 
 pub(super) fn inconsistent(reason: &'static str) -> SyncError {

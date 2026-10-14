@@ -641,10 +641,8 @@ pub(crate) fn live_settings(variable: &str) -> std::collections::BTreeMap<String
 pub(crate) mod listing_lag {
     //! Live measurements, with monotonic request bounds and no provider response dumps.
     use crate::StorageError;
-    use std::{
-        future::Future,
-        time::{Duration, SystemTime},
-    };
+    use coven_format::value::StorageTime;
+    use std::{future::Future, time::Duration};
     use tokio::time::{Instant, MissedTickBehavior};
 
     pub(crate) const TRIALS: u64 = 20;
@@ -662,7 +660,7 @@ pub(crate) mod listing_lag {
         label: &str,
         trial: u64,
         replied: Instant,
-        stored_at: SystemTime,
+        stored_at: StorageTime,
         mut listed: impl FnMut() -> Fut,
     ) -> Sample {
         let mut omissions = 0;
@@ -741,12 +739,18 @@ pub(crate) mod listing_lag {
     async fn poll_records_omissions_without_delaying_the_first_request() {
         let attempts = std::cell::Cell::new(0);
         let replied = Instant::now();
-        let sample = observe("fixture", 1, replied, SystemTime::UNIX_EPOCH, || {
-            let attempt = attempts.get();
-            assert_eq!(replied.elapsed(), POLL * attempt);
-            attempts.set(attempt + 1);
-            std::future::ready(Ok(attempt == 2))
-        })
+        let sample = observe(
+            "fixture",
+            1,
+            replied,
+            StorageTime::new(0, 0).unwrap(),
+            || {
+                let attempt = attempts.get();
+                assert_eq!(replied.elapsed(), POLL * attempt);
+                attempts.set(attempt + 1);
+                std::future::ready(Ok(attempt == 2))
+            },
+        )
         .await;
         assert_eq!(attempts.get(), 3);
         assert_eq!(sample.omissions, 2);
@@ -756,10 +760,16 @@ pub(crate) mod listing_lag {
     #[tokio::test(start_paused = true)]
     async fn poll_deadline_cancels_an_unfinished_listing() {
         let replied = Instant::now();
-        let sample = observe("fixture", 1, replied, SystemTime::UNIX_EPOCH, || async {
-            tokio::time::sleep(LIMIT + POLL).await;
-            Ok(true)
-        })
+        let sample = observe(
+            "fixture",
+            1,
+            replied,
+            StorageTime::new(0, 0).unwrap(),
+            || async {
+                tokio::time::sleep(LIMIT + POLL).await;
+                Ok(true)
+            },
+        )
         .await;
         assert!(sample.appeared.is_none());
         assert_eq!(sample.omissions, 0);

@@ -3,8 +3,9 @@
 use crate::SyncError;
 use coven_database::StoreLog;
 use coven_format::value::EntryId;
+use coven_format::value::StorageTime;
 use coven_storage::Storage;
-use std::{collections::BTreeMap, time::SystemTime};
+use std::collections::BTreeMap;
 
 /// Observe every landing witness after publishing a local entry, including on
 /// a retry whose first publication preceded this call.
@@ -16,7 +17,7 @@ pub(crate) async fn observe_publication(
     storage: Option<&dyn Storage>,
     log: &StoreLog,
     entry: EntryId,
-) -> Result<BTreeMap<EntryId, SystemTime>, SyncError> {
+) -> Result<BTreeMap<EntryId, StorageTime>, SyncError> {
     // Entries landing before this publication decide its lateness. Other
     // writers' key-copy observations from this catch-up still stand; this
     // device's own log gained the entry's prerequisite copies.
@@ -81,7 +82,7 @@ fn changed_publication(path: &coven_storage::ObjectPath) -> SyncError {
 pub(crate) fn publication_times(
     log: &StoreLog,
     objects: &[coven_storage::StoredObject],
-) -> Result<BTreeMap<EntryId, SystemTime>, SyncError> {
+) -> Result<BTreeMap<EntryId, StorageTime>, SyncError> {
     let mut listed = BTreeMap::new();
     for stored in objects {
         let (device, number) = stored.path.store_log_position().ok_or(

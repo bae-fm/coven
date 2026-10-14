@@ -30,7 +30,7 @@ async fn http_delivers_the_first_body_bytes_before_the_response_finishes() {
             coven_foundation::id_source::DeviceId(1),
         ),
         size: 6,
-        stored_at: std::time::UNIX_EPOCH,
+        stored_at: coven_format::value::StorageTime::new(0, 0).unwrap(),
         time_resolution: std::time::Duration::from_secs(1),
         object_id: "object".into(),
         revision: "1".into(),

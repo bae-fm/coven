@@ -150,72 +150,31 @@ async fn replacing_and_dropping_circle_causes_preserves_generations_and_setters(
     db.close().await.unwrap();
 }
 
-#[test]
-fn horizon_encoding_preserves_provider_ticks_and_rejects_noncanonical_fractions() {
-    for (duration, expected) in [
-        (Duration::ZERO, vec![0; 12]),
-        (
-            Duration::new(0x0102_0304_0506_0708, 0x0506_0708),
-            vec![1, 2, 3, 4, 5, 6, 7, 8, 5, 6, 7, 8],
-        ),
-        (
-            Duration::MAX,
-            vec![255, 255, 255, 255, 255, 255, 255, 255, 59, 154, 201, 255],
-        ),
-    ] {
-        assert_eq!(super::encode_horizon(duration), expected);
-        assert_eq!(super::decode_horizon(&expected).unwrap(), duration);
-    }
-    for bytes in [
-        vec![],
-        vec![0; 11],
-        vec![0; 13],
-        [vec![0; 8], 1_000_000_000u32.to_be_bytes().to_vec()].concat(),
-        [vec![0; 8], u32::MAX.to_be_bytes().to_vec()].concat(),
-    ] {
-        assert!(matches!(
-            super::decode_horizon(&bytes),
-            Err(DbError::DamagedDatabase)
-        ));
-    }
-}
-
 #[tokio::test]
 async fn horizon_persists_and_failed_or_stale_transactions_preserve_it() {
-    use std::time::UNIX_EPOCH;
+    use coven_format::value::StorageTime;
+    let at = |since| StorageTime::since_epoch(since);
     let store = TestStore::new();
     let db = store.builder(vec![], vec![]).open().await.unwrap();
     let absent = db.local_store_log().await.unwrap().log;
     assert_eq!(absent.horizon, None);
-    db.advance_store_log_horizon(
-        absent.clone(),
-        Duration::ZERO,
-        std::time::UNIX_EPOCH + Duration::ZERO,
-    )
-    .await
-    .unwrap();
-    db.advance_store_log_horizon(
-        absent,
-        Duration::ZERO,
-        std::time::UNIX_EPOCH + Duration::ZERO,
-    )
-    .await
-    .unwrap();
+    db.advance_store_log_horizon(absent.clone(), at(Duration::ZERO), at(Duration::ZERO))
+        .await
+        .unwrap();
+    db.advance_store_log_horizon(absent, at(Duration::ZERO), at(Duration::ZERO))
+        .await
+        .unwrap();
     let zero = db.local_store_log().await.unwrap().log;
-    assert_eq!(zero.horizon, Some(Duration::ZERO));
+    assert_eq!(zero.horizon, Some(at(Duration::ZERO)));
     let mut different = zero.clone();
     different.entries.push(crate::ReplayEntry {
         entry: coven_format::test_utils::store_log(),
-        stored_at: UNIX_EPOCH,
+        stored_at: StorageTime::UNIX_EPOCH,
         check: crate::StoreLogCheck::Allowed,
     });
     assert!(matches!(
-        db.advance_store_log_horizon(
-            different,
-            Duration::ZERO,
-            std::time::UNIX_EPOCH + Duration::ZERO
-        )
-        .await,
+        db.advance_store_log_horizon(different, at(Duration::ZERO), at(Duration::ZERO))
+            .await,
         Err(DbError::StoreLogEntriesChanged)
     ));
     db.inspect_writer(|sql| {
@@ -225,26 +184,22 @@ async fn horizon_persists_and_failed_or_stale_transactions_preserve_it() {
             "horizon failed",
         )
     });
-    db.advance_store_log_horizon(
-        zero.clone(),
-        Duration::ZERO,
-        std::time::UNIX_EPOCH + Duration::ZERO,
-    )
-    .await
-    .unwrap();
-    let later = Duration::from_secs(1) - Duration::from_nanos(1);
+    db.advance_store_log_horizon(zero.clone(), at(Duration::ZERO), at(Duration::ZERO))
+        .await
+        .unwrap();
+    let later = at(Duration::from_secs(1) - Duration::from_nanos(1));
     assert!(db
-        .advance_store_log_horizon(zero.clone(), later, std::time::UNIX_EPOCH + later)
+        .advance_store_log_horizon(zero.clone(), later, later)
         .await
         .is_err());
     assert_eq!(db.local_store_log().await.unwrap().log, zero);
     db.inspect_writer(|sql| sql.batch("DROP TRIGGER reject_horizon").unwrap());
-    db.advance_store_log_horizon(zero.clone(), later, std::time::UNIX_EPOCH + later)
+    db.advance_store_log_horizon(zero.clone(), later, later)
         .await
         .unwrap();
     let saved = db.local_store_log().await.unwrap().log;
     assert_eq!(saved.horizon, Some(later));
-    db.advance_store_log_horizon(zero, Duration::ZERO, std::time::UNIX_EPOCH + Duration::ZERO)
+    db.advance_store_log_horizon(zero, at(Duration::ZERO), at(Duration::ZERO))
         .await
         .unwrap();
     db.close().await.unwrap();

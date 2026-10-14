@@ -177,14 +177,7 @@ pub(crate) fn checkpoint(
         |row| row.get(0),
     )?;
     saved
-        .map(|bytes| {
-            let bytes: [u8; 12] = bytes.try_into().map_err(|_| DbError::DamagedDatabase)?;
-            coven_format::value::StorageTime::new(
-                u64::from_be_bytes(bytes[..8].try_into().expect("eight bytes")),
-                u32::from_be_bytes(bytes[8..].try_into().expect("four bytes")),
-            )
-            .map_err(|_| DbError::DamagedDatabase)
-        })
+        .map(|bytes| crate::storage_time::decode(&bytes))
         .transpose()
 }
 
@@ -196,12 +189,10 @@ pub(crate) fn save_checkpoint(
     if checkpoint(db)?.is_some_and(|saved| saved >= time) {
         return Ok(false);
     }
-    let mut bytes = time.seconds().to_be_bytes().to_vec();
-    bytes.extend_from_slice(&time.nanos().to_be_bytes());
     db.transaction(|db| {
         db.internal_execute(
             "UPDATE _coven_catch_up SET storage_time=?1 WHERE singleton=1",
-            [bytes],
+            [crate::storage_time::encode(time)],
         )
     })?;
     Ok(true)

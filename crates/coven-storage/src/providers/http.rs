@@ -490,12 +490,23 @@ pub(crate) fn string<'a>(value: &'a Value, field: &str) -> Result<&'a str, Stora
         .filter(|s| !s.is_empty())
         .ok_or(StorageFailure::Protocol.with_source("missing string field"))
 }
-pub(crate) fn timestamp(value: &Value, field: &str) -> Result<std::time::SystemTime, StorageError> {
+pub(crate) fn timestamp(
+    value: &Value,
+    field: &str,
+) -> Result<coven_format::value::StorageTime, StorageError> {
     use aws_sdk_s3::primitives::{DateTime, DateTimeFormat};
     let timestamp = DateTime::from_str(string(value, field)?, DateTimeFormat::DateTimeWithOffset)
         .map_err(|error| StorageFailure::Protocol.with_source(error))?;
-    timestamp
-        .try_into()
+    storage_time(timestamp)
+}
+/// A provider's date with every returned digit; a time before the Unix epoch
+/// is a protocol error.
+pub(crate) fn storage_time(
+    time: aws_sdk_s3::primitives::DateTime,
+) -> Result<coven_format::value::StorageTime, StorageError> {
+    let seconds = u64::try_from(time.secs())
+        .map_err(|_| StorageFailure::Protocol.with_source("provider time precedes the epoch"))?;
+    coven_format::value::StorageTime::new(seconds, time.subsec_nanos())
         .map_err(|error| StorageFailure::Protocol.with_source(error))
 }
 pub(crate) fn array<'a>(value: &'a Value, field: &str) -> Result<&'a Vec<Value>, StorageError> {

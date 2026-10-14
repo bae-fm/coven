@@ -15,7 +15,7 @@ pub struct DownloadedWriteStream<R> {
     /// Opened plaintext or an explicit unreadable audience, in header order.
     pub parts: Vec<DownloadedPartStream<R>>,
     /// The object's first complete publication time, from provider metadata (§10).
-    pub stored_at: std::time::SystemTime,
+    pub stored_at: coven_format::value::StorageTime,
 }
 
 /// Whether sync could decrypt the corresponding part in the header.

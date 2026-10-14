@@ -213,7 +213,10 @@ async fn equality_at_thirty_days_is_kept_and_lost_reply_preserves_publication_ti
         .iter()
         .find(|e| e.entry.position == fixed.entry.position)
         .unwrap();
-    assert_eq!(applied.stored_at, landed);
+    assert_eq!(
+        applied.stored_at,
+        coven_format::value::StorageTime::from_system_time(landed).unwrap()
+    );
     assert_eq!(
         log.replay.entries[&fixed.entry.position],
         EntryOutcome::Kept

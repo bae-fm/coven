@@ -39,7 +39,7 @@ async fn overwritten_and_deleted_old_values_protect_their_uploaded_files() {
             .collect();
         let references = db
             .write_file_references(DownloadedWriteStream {
-                stored_at: std::time::UNIX_EPOCH,
+                stored_at: coven_format::value::StorageTime::UNIX_EPOCH,
                 header,
                 parts: vec![DownloadedPartStream::Opened(std::io::Cursor::new(bytes))],
             })
@@ -253,8 +253,8 @@ async fn a_dismissed_file_loss_releases_its_local_protection() {
     // Settle the received write's landing, which retains its input until then.
     db.advance_store_log_horizon(
         db.store_log().await.unwrap(),
-        std::time::Duration::ZERO,
-        std::time::UNIX_EPOCH,
+        coven_format::value::StorageTime::UNIX_EPOCH,
+        coven_format::value::StorageTime::UNIX_EPOCH,
     )
     .await
     .unwrap();

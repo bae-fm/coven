@@ -1,6 +1,7 @@
 //! Native record conversion, identity and failure classification.
 
 use crate::{CloudProvider, ObjectPath, ObjectPrefix, StorageError, StorageFailure, StoredObject};
+use coven_format::value::StorageTime;
 use coven_foundation::files::{AssetFile, AssetFiles};
 use objc2::{rc::Retained, runtime::ProtocolObject, AnyThread, Message};
 use objc2_cloud_kit::{
@@ -8,7 +9,7 @@ use objc2_cloud_kit::{
     CKRecordChangedErrorClientRecordKey, CKRecordID, CKReference, CKReferenceAction, CKShare,
 };
 use objc2_foundation::{NSCopying, NSDictionary, NSError, NSString, NSURL};
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 pub(super) use crate::session::CLOUDKIT_PART_SIZE as PART_SIZE;
 pub(super) const OBJECT_KEYS: &[&str] = &["path", "size", "upload"];
@@ -222,14 +223,11 @@ pub(super) fn publication_metadata(
         created
     }
     .ok_or(StorageFailure::Protocol)?;
-    let duration = Duration::try_from_secs_f64(seconds.abs())
-        .map_err(|error| StorageFailure::Protocol.with_source(error))?;
-    let stored_at = if seconds.is_sign_negative() {
-        SystemTime::UNIX_EPOCH.checked_sub(duration)
-    } else {
-        SystemTime::UNIX_EPOCH.checked_add(duration)
-    }
-    .ok_or(StorageFailure::Protocol)?;
+    // A negative interval precedes the epoch and fails the conversion.
+    let stored_at = StorageTime::since_epoch(
+        Duration::try_from_secs_f64(seconds)
+            .map_err(|error| StorageFailure::Protocol.with_source(error))?,
+    );
     Ok(StoredObject {
         path,
         size,
