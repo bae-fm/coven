@@ -339,13 +339,14 @@ async fn late_access_survives_restart_and_cannot_revive_confirmed_keys() {
 }
 
 #[tokio::test]
-async fn removal_revokes_accounts_in_dropped_additions_and_access_updates() {
+async fn removal_revokes_accounts_in_dropped_access_updates() {
     let storage = google();
     let [mut a, mut b, _c] = accounts(storage.clone()).await;
     queue_removal(&mut a, Command::RemoveMember(b.member.member())).await;
-    for account in ["replacement@example.com", "addition@example.com"] {
-        storage.grant_access(account).await.unwrap();
-    }
+    storage
+        .grant_access("replacement@example.com")
+        .await
+        .unwrap();
     let replacement = b
         .sync
         .make_and_upload_entry(StoreChange::SetAccess {
@@ -354,29 +355,13 @@ async fn removal_revokes_accounts_in_dropped_additions_and_access_updates() {
         })
         .await
         .unwrap();
-    let addition = b
-        .sync
-        .make_and_upload_entry(StoreChange::AddMember {
-            member: b.member.member(),
-            keys: public(&b.member),
-            role: MemberRole::Member,
-            access: coven_format::MemberAccess::ProviderAccount("addition@example.com".into()),
-        })
-        .await
-        .unwrap();
     a.sync().await;
     drive_access(&mut a).await;
-    for entry in [replacement, addition] {
-        assert!(matches!(
-            a.log().await.replay.entries[&entry],
-            coven_database::EntryOutcome::Dropped(_)
-        ));
-    }
-    for account in [
-        "ben@example.com",
-        "replacement@example.com",
-        "addition@example.com",
-    ] {
+    assert!(matches!(
+        a.log().await.replay.entries[&replacement],
+        coven_database::EntryOutcome::Dropped(_)
+    ));
+    for account in ["ben@example.com", "replacement@example.com"] {
         let recipient = MemoryStorage::for_recipient(&storage, account).unwrap();
         assert!(matches!(recipient.list(&ObjectPrefix::all(store(1))).await,
             Err(error) if error.failure() == StorageFailure::PermissionDenied));
@@ -386,6 +371,64 @@ async fn removal_revokes_accounts_in_dropped_additions_and_access_updates() {
         .list(&ObjectPrefix::all(store(1)))
         .await
         .is_ok());
+}
+
+/// An addition never changes an existing member's access, so the account in a
+/// dropped addition comes from a concurrent addition of the same new id
+/// (`Keyed.Additions.additions_conflict_iff_different`). Removing that member
+/// still takes it back (§13).
+#[tokio::test]
+async fn removal_revokes_the_account_in_a_dropped_concurrent_addition() {
+    let storage = google();
+    let [mut a, mut b, _c] = accounts(storage.clone()).await;
+    let dan = member(4);
+    let add = |email: &str| StoreChange::AddMember {
+        member: dan.member(),
+        keys: public(&dan),
+        role: MemberRole::Member,
+        access: coven_format::MemberAccess::ProviderAccount(email.into()),
+    };
+    for account in ["dan@example.com", "addition@example.com"] {
+        storage.grant_access(account).await.unwrap();
+    }
+    // Neither admin has read the other's addition.
+    let first = a
+        .sync
+        .make_and_upload_entry(add("dan@example.com"))
+        .await
+        .unwrap();
+    let second = b
+        .sync
+        .make_and_upload_entry(add("addition@example.com"))
+        .await
+        .unwrap();
+    a.sync().await;
+    let replay = a.log().await.replay;
+    let dropped = [first, second]
+        .iter()
+        .filter(|entry| {
+            matches!(
+                replay.entries[entry],
+                coven_database::EntryOutcome::Dropped(_)
+            )
+        })
+        .count();
+    assert_eq!(dropped, 1);
+    queue_removal(&mut a, Command::RemoveMember(dan.member())).await;
+    a.sync().await;
+    drive_access(&mut a).await;
+    for account in ["dan@example.com", "addition@example.com"] {
+        let recipient = MemoryStorage::for_recipient(&storage, account).unwrap();
+        assert!(matches!(recipient.list(&ObjectPrefix::all(store(1))).await,
+            Err(error) if error.failure() == StorageFailure::PermissionDenied));
+    }
+    for account in ["ben@example.com", "cat@example.com"] {
+        assert!(MemoryStorage::for_recipient(&storage, account)
+            .unwrap()
+            .list(&ObjectPrefix::all(store(1)))
+            .await
+            .is_ok());
+    }
 }
 
 #[tokio::test]

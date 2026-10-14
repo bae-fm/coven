@@ -117,7 +117,18 @@ impl Generator {
             MemberRole::Member
         };
         match self.pick(14) {
-            0 => add(m, role),
+            // An active member's re-addition repeats it. Changed payloads are
+            // refused by the keyed rule, which `lean_differential_member_keys`
+            // compares; this unkeyed model predates stable ids.
+            0 => match crate::effects::member(view, &member(m)) {
+                Some(added) => StoreChange::AddMember {
+                    member: member(m),
+                    keys: added.keys,
+                    role: added.role,
+                    access: added.access.clone(),
+                },
+                None => add(m, role),
+            },
             1 => remove(m),
             2 => crate::replay::tests::role(m, role),
             3 => device(self.pick(9) as u64),

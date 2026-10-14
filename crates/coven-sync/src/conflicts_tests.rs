@@ -386,7 +386,11 @@ fn same_members_concurrent_device_additions_both_survive() {
 pub(crate) fn contradictory_histories() -> Vec<(History, usize)> {
     let mut histories = Vec::new();
     for (addition, removal) in [
-        ((0, add(1, Admin)), (2, remove(1))),
+        // A re-addition repeats Ben's payload, his role now member (§9).
+        (
+            (0, add(1, coven_format::store_log::MemberRole::Member)),
+            (2, remove(1)),
+        ),
         (
             (1, device(1)),
             (
@@ -518,6 +522,63 @@ fn every_priority_boundary_uses_the_author_view_before_the_timestamp() {
                 ta <= tb
             );
             assert_eq!(super::before(&h.entries[6], vb, &h.entries[5], va), tb < ta);
+        }
+    }
+}
+
+/// An addition's meaning is its whole payload (`Keyed.Additions`). Re-adding
+/// an active member must repeat its keys, role and access, so an admin cannot
+/// set another member's access through it (`overwrite_sets_anothers_access`).
+/// Two concurrent additions of one id combine only when all three are equal,
+/// so no addition stays kept with an access that never applied
+/// (`overwrite_keeps_unapplied_addition`).
+#[test]
+fn additions_of_one_id_combine_only_with_the_same_keys_role_and_access() {
+    use coven_format::store_log::MemberRole::Member;
+    let access = |id: &str| coven_format::MemberAccess::S3AccessKey {
+        access_key_id: id.into(),
+        principal: coven_format::S3Principal::Console,
+    };
+    let dan = |role, access_key: &str, keys| StoreChange::AddMember {
+        member: member(3),
+        keys,
+        role,
+        access: access(access_key),
+    };
+    for concurrent in [false, true] {
+        for (role, access_key, pair, same) in [
+            (Member, "dan", keys(3), true),
+            (Admin, "dan", keys(3), false),
+            (Member, "ana", keys(3), false),
+            (Member, "dan", keys(4), false),
+        ] {
+            let mut h = household(Admin, Member);
+            let past = [0, 1, 2, 3, 4];
+            h.push(0, 0, &past, dan(Member, "dan", keys(3)));
+            if concurrent {
+                h.push(0, 5, &past, dan(role, access_key, pair));
+            } else {
+                h.all(0, 0, dan(role, access_key, pair));
+            }
+            h.every_order(|r| {
+                assert_eq!(h.drops(r), if same { vec![] } else { vec![6] });
+                if !same {
+                    let reason = match r.entries[&h.entries[6].position] {
+                        EntryOutcome::Dropped(ref reason) => reason.clone(),
+                        EntryOutcome::Kept => unreachable!(),
+                    };
+                    if concurrent {
+                        assert_eq!(reason, DropReason::BeatenBy(h.entries[5].position));
+                    } else {
+                        assert_eq!(reason, DropReason::NotAllowed);
+                    }
+                }
+                let added = &r.state.members[&member(3)];
+                assert_eq!(
+                    (added.role, added.keys, &added.access),
+                    (Member, keys(3), &access("dan"))
+                );
+            });
         }
     }
 }

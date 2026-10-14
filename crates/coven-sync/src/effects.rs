@@ -137,13 +137,17 @@ fn check_change(view: &StoreLogState, author: &MemberId, change: &StoreChange) -
     {
         return StoreLogCheck::NotAllowed;
     }
-    // An addition cannot change an active member's keys; only a replacement
-    // does (§9, D6).
+    // An addition of an active id only repeats it: keys change by replacement
+    // (§9, D6), and role and access by their own entries
+    // (`Keyed.Additions.overwrite_sets_anothers_access`).
     if let AddMember {
-        member: id, keys, ..
+        member: id,
+        keys,
+        role,
+        access,
     } = change
     {
-        if member(view, id).is_some_and(|added| added.keys != *keys) {
+        if member(view, id).is_some_and(|added| !repeats(added, keys, *role, access)) {
             return StoreLogCheck::NotAllowed;
         }
     }
@@ -193,6 +197,17 @@ fn check_change(view: &StoreLogState, author: &MemberId, change: &StoreChange) -
     }
 }
 
+/// An addition's whole payload is its meaning: keys, role and storage access
+/// (`Keyed.Additions.addition_in_place`).
+fn repeats(
+    added: &StoreMember,
+    keys: &coven_format::store_log::MemberPublicKeys,
+    role: MemberRole,
+    access: &coven_format::MemberAccess,
+) -> bool {
+    added.keys == *keys && added.role == role && added.access.same_credential(access)
+}
+
 pub(crate) fn change_in_place(
     state: &StoreLogState,
     author: &MemberId,
@@ -207,8 +222,8 @@ pub(crate) fn change_in_place(
             member: id,
             keys,
             role,
-            ..
-        } => member(state, id).is_some_and(|m| m.role == *role && m.keys == *keys),
+            access,
+        } => member(state, id).is_some_and(|m| repeats(m, keys, *role, access)),
         SetAccess { member: id, access } => {
             member(state, id).is_some_and(|m| m.access.same_credential(access))
         }

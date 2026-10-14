@@ -958,6 +958,37 @@ Adding an already-present id with different keys is refused; it cannot bypass
 replacement. `signer_uses_recorded_view`, `old_unread_entry_counts` and
 `addition_cannot_replace` check these distinctions through actual replay.
 
+#### Member additions
+
+An addition's meaning is its whole payload: keys, role and storage access.
+`MemberAdditions.lean` states the keyed rule and checks what the first Rust
+rule under stable ids broke.
+
+- `authorized_readd_identical`: an addition its author's view authorizes for
+  an id already there repeats that member's keys, role and access exactly.
+- `addition_in_place`: a kept addition is in place where it applies. Unchanged
+  means the id already has its payload; applied, it sets exactly that payload.
+- `additions_conflict_iff_different`: two concurrent additions of one id
+  conflict exactly when their payloads differ.
+
+T104 first let a re-addition with the same keys overwrite role and access, and
+let concurrent additions conflict only on keys or role. `Overwrite` states that
+rule over the same replay machine. `overwrite_sets_anothers_access` re-adds Ben
+as an admin with Ana's chosen access: the entry stays kept and sets Ben's
+access, which a set-access entry by Ana could not do in that view.
+`overwrite_keeps_unapplied_addition` adds Dan twice concurrently, differing
+only in access: both stay kept in every arrival order, but the later access
+holds nowhere and its author is never told. The keyed rule refuses the first
+(`keyed_refuses_readd`) and drops the later addition of the second
+(`keyed_drops_concurrent_access`). Rust now follows the keyed rule, and
+`lean_differential_member_keys` compares both cases (storelog-data.md).
+Convergence and the admin invariant for the keyed rule are `equal_received`
+and `admin_remains` above.
+
+The keyed rule also requires fresh keys for an addition of an id not in the
+view, including a removed member's return. Rust does not check that yet: it
+keeps no history of installed keys outside the current member list.
+
 Concurrent replacements of the same member conflict even with equal payloads.
 `replacements_conflict`, `admin_preferred` and `same_kind_timestamp` prove the
 comparison rules. A replacement whose author equals its target is self-replacement,

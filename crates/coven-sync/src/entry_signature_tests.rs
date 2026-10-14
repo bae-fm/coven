@@ -4,10 +4,12 @@
 //! (`spec/proofs/storelog-data/MemberKeyRunner.lean`).
 //!
 //! Each history is a linear honest prefix followed by leaves nothing reads:
-//! entries signed with a key their author's recorded view never bound, and a
-//! self-registration by an id no entry added. Rust refuses a bad signature as
-//! damaged bytes and never applies it; the model drops it. Because no entry
-//! reads a leaf, both replays keep the same prefix.
+//! two concurrent additions of one new id, entries signed with a key their
+//! author's recorded view never bound, and a self-registration by an id no
+//! entry added. The prefix re-adds active members, repeating or changing
+//! their keys, role or access (`Keyed.Additions`). Rust refuses a bad
+//! signature as damaged bytes and never applies it; the model drops it.
+//! Because no entry reads a leaf, both replays keep the same prefix.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -31,6 +33,8 @@ use crate::Refusal;
 const STORE: StoreId = StoreId(uuid::Uuid::from_u128(1));
 /// Members the generator may add; member 5 is never added.
 const MEMBERS: u8 = 5;
+/// The id the two concurrent addition leaves add.
+const CONCURRENT: u8 = MEMBERS + 1;
 
 /// Member `n`'s identity: `history::member(n)` with `history::keys(n)`.
 fn identity(n: u8) -> MemberIdentity {
@@ -73,7 +77,7 @@ struct Numbers {
 
 impl Numbers {
     fn member(id: &MemberId) -> u64 {
-        (0..=MEMBERS)
+        (0..=CONCURRENT)
             .find(|&n| history::member(n) == *id)
             .map(u64::from)
             .expect("generated member")
@@ -107,6 +111,9 @@ struct Case {
     signers: Vec<MemberIdentity>,
     /// The honest, linear prefix's length; the rest are leaves.
     honest: usize,
+    /// Entries signed with their author's current key: the prefix and the
+    /// concurrent additions.
+    signed: usize,
     /// Introductions held in custody, by entry index.
     held: Vec<usize>,
     /// Copies of held keys: introduction index, recipient id and sealing key.
@@ -121,6 +128,7 @@ fn generate(seed: u64) -> Case {
     let mut added = BTreeSet::from([0u8]);
     let mut registered = BTreeSet::from([0u8]);
     let mut removed = BTreeSet::new();
+    let mut roles = BTreeMap::new();
     let mut circles = 0u64;
     let mut rotations = 0u64;
     let push = |h: &mut History, signers: &mut Vec<MemberIdentity>, author: u8, change| {
@@ -131,7 +139,7 @@ fn generate(seed: u64) -> Case {
         let candidate = 1 + g.pick(usize::from(MEMBERS - 1)) as u8;
         let actors: Vec<u8> = registered.difference(&removed).copied().collect();
         let actor = actors[g.pick(actors.len())];
-        match g.pick(7) {
+        match g.pick(8) {
             // Each id is added once, with its own fresh pair.
             0 if !added.contains(&candidate) => {
                 let role = if g.pick(2) == 0 {
@@ -141,6 +149,7 @@ fn generate(seed: u64) -> Case {
                 };
                 push(&mut h, &mut signers, 0, history::add(candidate, role));
                 added.insert(candidate);
+                roles.insert(candidate, role);
             }
             1 if added.contains(&candidate)
                 && !registered.contains(&candidate)
@@ -161,6 +170,7 @@ fn generate(seed: u64) -> Case {
                     MemberRole::Member
                 };
                 push(&mut h, &mut signers, 0, history::role(candidate, role));
+                roles.insert(candidate, role);
             }
             3 if added.contains(&candidate) && !removed.contains(&candidate) && g.pick(3) == 0 => {
                 push(&mut h, &mut signers, 0, history::remove(candidate));
@@ -184,6 +194,13 @@ fn generate(seed: u64) -> Case {
                     history::join(circle, candidate),
                 );
             }
+            // A re-addition of an active member: repeated, or with another
+            // role, access or pair, which only replacement may change.
+            7 if added.contains(&candidate) && !removed.contains(&candidate) => {
+                let role = roles[&candidate];
+                let change = readd(candidate, role, g.pick(4));
+                push(&mut h, &mut signers, 0, change);
+            }
             6 => {
                 rotations += 1;
                 push(
@@ -196,8 +213,25 @@ fn generate(seed: u64) -> Case {
             _ => {}
         }
     }
+    // Member 0's two other devices, which add the same new id below.
+    for other in [30, 31] {
+        h.all(0, other, history::device(other));
+        signers.push(identity(0));
+    }
     let honest = h.entries.len();
     let all: Vec<usize> = (0..honest).collect();
+    // Those devices each add the same new id without reading the other:
+    // equal payloads combine, any difference conflicts.
+    h.push(0, 30, &all, history::add(CONCURRENT, MemberRole::Member));
+    signers.push(identity(0));
+    h.push(
+        0,
+        31,
+        &all,
+        readd(CONCURRENT, MemberRole::Member, g.pick(4)),
+    );
+    signers.push(identity(0));
+    let signed = h.entries.len();
     // A registered member's own id and device, signed with a key its view
     // never bound to that id; at most one leaf per device.
     for author in registered.iter().copied().filter(|a| !removed.contains(a)) {
@@ -249,9 +283,41 @@ fn generate(seed: u64) -> Case {
         history: h,
         signers,
         honest,
+        signed,
         held,
         copies,
         me,
+    }
+}
+
+/// An addition of `n`: 0 repeats `history::add`, 1 changes the role, 2 the
+/// access and 3 the pair.
+fn readd(n: u8, role: MemberRole, variant: usize) -> StoreChange {
+    let StoreChange::AddMember {
+        member,
+        keys,
+        role,
+        access,
+    } = history::add(n, role)
+    else {
+        unreachable!("history::add makes an addition")
+    };
+    let other = coven_format::MemberAccess::S3AccessKey {
+        access_key_id: "other-access-key".into(),
+        principal: coven_format::S3Principal::Console,
+    };
+    let (role, access, keys) = match variant {
+        0 => (role, access, keys),
+        1 if role == MemberRole::Admin => (MemberRole::Member, access, keys),
+        1 => (MemberRole::Admin, access, keys),
+        2 => (role, other, keys),
+        _ => (role, access, unbound(n).keys().public_keys()),
+    };
+    StoreChange::AddMember {
+        member,
+        keys,
+        role,
+        access,
     }
 }
 
@@ -496,6 +562,8 @@ fn lean_differential_member_keys() {
     let mut unknown = 0;
     let mut exposed = 0;
     let mut selections = [0; 2];
+    // Re-additions kept and dropped, and concurrent additions combined and not.
+    let mut additions = [0; 4];
     for (((case, input), result), numbers) in
         cases.iter().zip(&inputs).zip(&results).zip(&mut numbers)
     {
@@ -512,7 +580,7 @@ fn lean_differential_member_keys() {
                 known && !current,
                 "entry {i} of {input}"
             );
-            assert_eq!(i < case.honest, current, "entry {i} of {input}");
+            assert_eq!(i < case.signed, current, "entry {i} of {input}");
             refusals += usize::from(known && !current);
             unknown += usize::from(!known);
         }
@@ -522,6 +590,16 @@ fn lean_differential_member_keys() {
             .collect();
         let lean: BTreeSet<usize> = serde_json::from_value(result["kept"].clone()).unwrap();
         assert_eq!(rust, lean, "kept entries of {input}");
+        for (i, entry) in case.history.entries[..case.honest].iter().enumerate() {
+            if let StoreChange::AddMember { member, .. } = &entry.change {
+                if case.history.entries[..i].iter().any(|e| {
+                    matches!(&e.change, StoreChange::AddMember { member: m, .. } if m == member)
+                }) {
+                    additions[usize::from(rust.contains(&i))] += 1;
+                }
+            }
+        }
+        additions[2 + usize::from(rust.contains(&(case.honest + 1)))] += 1;
         let rust: BTreeSet<usize> = (0..case.history.entries.len())
             .filter(|&i| {
                 received.refused.contains(&i)
@@ -589,6 +667,7 @@ fn lean_differential_member_keys() {
         "{refusals} {unknown} {exposed}"
     );
     assert!(selections.iter().all(|&n| n > 0), "{selections:?}");
+    assert!(additions.iter().all(|&n| n > 0), "{additions:?}");
 }
 
 #[tokio::test]

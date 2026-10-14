@@ -39,4 +39,5 @@ import CovenStorelog.ReplayMachine
 import CovenStorelog.ReplayMachineTermination
 import CovenStorelog.MemberKeys
 import CovenStorelog.MemberKeyExamples
+import CovenStorelog.MemberAdditions
 import CovenStorelog.OldKeyObjects

@@ -416,6 +416,14 @@ import CovenStorelog
 #print axioms CovenStorelog.CurrentReplay.Keyed.Examples.checked_metadata
 #print axioms CovenStorelog.CurrentReplay.Keyed.Examples.equal_payload_admin_wins
 #print axioms CovenStorelog.CurrentReplay.Keyed.Examples.other_admin_beats_admin_self
+#print axioms CovenStorelog.CurrentReplay.Keyed.Additions.authorized_readd_identical
+#print axioms CovenStorelog.CurrentReplay.Keyed.Additions.addition_in_place
+#print axioms CovenStorelog.CurrentReplay.Keyed.Additions.additions_conflict_iff_different
+#print axioms CovenStorelog.CurrentReplay.Keyed.Additions.overwrite_sets_anothers_access
+#print axioms CovenStorelog.CurrentReplay.Keyed.Additions.keyed_refuses_readd
+#print axioms CovenStorelog.CurrentReplay.Keyed.Additions.overwrite_keeps_unapplied_addition
+#print axioms CovenStorelog.CurrentReplay.Keyed.Additions.keyed_drops_concurrent_access
+#print axioms CovenStorelog.CurrentReplay.Keyed.Additions.checked_metadata
 
 #print axioms CovenStorelog.CurrentReplay.Keyed.OldKeyObjects.timely_iff
 #print axioms CovenStorelog.CurrentReplay.Keyed.OldKeyObjects.counts_iff

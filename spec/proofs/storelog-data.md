@@ -1001,7 +1001,10 @@ and active role from `Keyed.resolve`, `currentCredential` for each copy's
 member and sealing key, and `MemberKeys.selectInReplay` with Rust's first-attempt
 selection. Leaves signed with a key their author's view never bound are Rust
 signature refusals and model drops; a self-registration by an id no entry
-added is dropped by both. Its histories add each id once and contain no
+added is dropped by both. Its honest prefix also re-adds active members,
+repeating them or changing their keys, role or access, and two concurrent
+leaves add one new id with equal or differing payloads
+([`Keyed.Additions`](storelog.md#member-additions)). The histories contain no
 replacement, so member-key replacement itself still has no Rust differential.
 
 A recipient contains a stable member id and the exact sealing public key.

@@ -3065,6 +3065,11 @@ Carol's tablet:
   - E.g. Ana and Ben both add the same Dan id, keys, role and access: both
     apply, Dan is added once, and neither is dropped. An addition cannot
     change an active member's keys; use Replace member keys instead.
+  - An addition naming an id active in its author's view must repeat that
+    member's keys, role and access exactly; otherwise it drops as
+    `NotAllowed`. Roles and access change only by their own entries, so an
+    admin cannot record another member's access by re-adding them
+    ([`authorized_readd_identical`, `overwrite_sets_anothers_access`](proofs/storelog/CovenStorelog/MemberAdditions.lean)).
   - Replace member keys never takes this shortcut. Concurrent replacements
     of the same id conflict even when their key pairs are identical.
 - Otherwise it applies only if:
@@ -3086,7 +3091,10 @@ Carol's tablet:
   ([§12.1](#121-a-persons-new-device)).
 - Concurrent entries conflict only when they contradict:
   - different states for the same member or device, such as granting and
-    removing the same membership, or assigning different roles;
+    removing the same membership, or assigning different roles. Two
+    additions of one id conflict unless their keys, role and access are all
+    equal, so no kept addition leaves an access that never applied
+    ([`additions_conflict_iff_different`, `overwrite_keeps_unapplied_addition`](proofs/storelog/CovenStorelog/MemberAdditions.lean));
   - one removes a member or device the other's change requires to exist;
   - one deletes a circle the other changes, adds to, removes from, resets
     or raises. A rotation changes no membership and conflicts with nothing;

@@ -126,22 +126,22 @@ fn same_meaning(
                 access: y,
             },
         ) => m == n && x.same_credential(y),
-        // Two additions of one id with different keys contradict: an addition
-        // never changes an active member's keys (§9).
+        // Two additions of one id are the same result only with the same keys,
+        // role and access (`Keyed.Additions.additions_conflict_iff_different`).
         (
             AddMember {
                 member: m,
                 keys: x,
                 role: r,
-                ..
+                access: p,
             },
             AddMember {
                 member: n,
                 keys: y,
                 role: s,
-                ..
+                access: q,
             },
-        ) => m == n && x == y && r == s,
+        ) => m == n && x == y && r == s && p.same_credential(q),
         (
             AddMember {
                 member: m, role: r, ..
