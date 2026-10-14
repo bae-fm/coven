@@ -261,7 +261,18 @@ async fn retry_downloads_authority_changes() {
         .unwrap();
     operations.retry_pending_operation(id).await.unwrap();
     assert!(a.db.store_log().await.unwrap().replay.state.members[&member(3).member_id()].removed);
-    assert!(pending(&operations, &a.db).await.is_empty());
+    // Only the removed member's key remains, awaiting deletion (§13).
+    assert_eq!(
+        pending(&operations, &a.db)
+            .await
+            .into_iter()
+            .map(|record| record.reason)
+            .collect::<Vec<_>>(),
+        [PendingReason::DeleteAccessKey(console_key(
+            "fixture-access-key",
+            Some(&member(3))
+        ))]
+    );
     operations.close().await.unwrap();
 }
 

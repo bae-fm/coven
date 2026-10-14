@@ -90,7 +90,10 @@ impl RestoreCodes {
                 .await?;
             owner
                 .operations
-                .set_access(coven_format::MemberAccess::S3AccessKey { access_key_id })
+                .set_access(coven_format::MemberAccess::S3AccessKey {
+                    access_key_id,
+                    principal: coven_format::S3Principal::Console,
+                })
                 .await?;
             Ok(())
         }))

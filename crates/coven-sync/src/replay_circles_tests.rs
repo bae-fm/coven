@@ -231,7 +231,11 @@ async fn circle_causes_and_author_view_classifications_survive_reopening() {
             assert_eq!(database.store_log().await.unwrap(), log);
             let (checked, result) = crate::replay::tests::replay_entry(&log, entry.clone());
             database
-                .apply_store_log::<crate::PendingRecord>(checked.clone(), result.clone())
+                .apply_store_log::<crate::PendingRecord>(
+                    checked.clone(),
+                    result.clone(),
+                    Vec::new(),
+                )
                 .await
                 .unwrap();
             log.entries.push(checked);

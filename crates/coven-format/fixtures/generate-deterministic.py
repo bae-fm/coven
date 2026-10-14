@@ -73,15 +73,17 @@ def main():
     frames = [bytes.fromhex(line) for line in (directory / "v1.hex").read_text().splitlines()]
     store = b"10101010-1010-1010-1010-101010101010/"
     path = store + b"devices/1/3"
-    prefix = frames[36]
-    assert prefix[0] == 32 and frames[37][0] == 1
+    # The write prefix follows the frame examples; its header and part chunks follow it.
+    first = next(i for i, frame in enumerate(frames) if frame[0] == 32)
+    prefix = frames[first]
+    assert frames[first + 1][0] == 1
     body = prefix
     for frame, section, index, key in [
-        (frames[37], 0, 0, encryption_key(17)),
-        (frames[38], 1, 0, encryption_key(17)),
-        (frames[39], 1, 1, encryption_key(17)),
-        (frames[40], 1, 2, encryption_key(17)),
-        (frames[41], 2, 0, encryption_key(18)),
+        (frames[first + 1], 0, 0, encryption_key(17)),
+        (frames[first + 2], 1, 0, encryption_key(17)),
+        (frames[first + 3], 1, 1, encryption_key(17)),
+        (frames[first + 4], 1, 2, encryption_key(17)),
+        (frames[first + 5], 2, 0, encryption_key(18)),
     ]:
         body += chunk(sodium, key, path, prefix, section, index, frame)
     write = signed(sodium, path, body)

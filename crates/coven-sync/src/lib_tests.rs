@@ -50,7 +50,12 @@ impl Generator {
         // publication boundaries are compared separately.
         for _ in 0..3 {
             let author = self.pick(5) as u8;
-            let change = self.action(&replay(&h.entries).state);
+            let mut change = self.action(&replay(&h.entries).state);
+            // CurrentReplay records only a member's own access; an admin's
+            // replacement for another member is compared by the S3 key runner.
+            if let StoreChange::SetAccess { member: target, .. } = &mut change {
+                *target = member(author);
+            }
             h.all(author, u64::from(author), change);
             let past: Vec<_> = (0..h.entries.len()).collect();
             let mut changes = self.concurrent_changes();
@@ -150,12 +155,14 @@ impl Generator {
                 ),
             },
             12 => StoreChange::SetAccess {
+                member: member(0),
                 access: coven_format::MemberAccess::S3AccessKey {
                     access_key_id: if self.pick(3) == 0 {
                         "fixture-access-key".into()
                     } else {
                         format!("key-{}", self.pick(3))
                     },
+                    principal: coven_format::S3Principal::Console,
                 },
             },
             13 => StoreChange::RotateKey {
@@ -220,7 +227,7 @@ pub(crate) fn input(h: &History, stored: &[u64], received: &[Vec<usize>]) -> Val
             StoreChange::RaiseSchema { version, snapshot } => json!({"kind":11,"version":version,"snapshot":{"audience":audience_number(&snapshot.audience),"number":snapshot.number}}),
             StoreChange::Reset { snapshot } => json!({"kind":13,"snapshot":{"audience":audience_number(&snapshot.audience),"number":snapshot.number}}),
             StoreChange::RotateKey { audience, key, key_hash } => json!({"kind":15,"audience":audience_number(audience),"key":key_number(*key),"key_hash":key_hash}),
-            StoreChange::SetAccess { access } => json!({"kind":14,"member":member_number(&entry.author),"access":serde_json::to_string(access).unwrap()}),
+            StoreChange::SetAccess { member, access } => json!({"kind":14,"member":member_number(member),"access":serde_json::to_string(access).unwrap()}),
         };
         // Attempt at the latest observed landing; a later stored time is a retry.
         let attempted = past.iter().map(|&p| stored[p]).max().unwrap_or(stored[0]);
@@ -617,6 +624,7 @@ fn expected(
 ) -> Value {
     let access = serde_json::to_string(&coven_format::MemberAccess::S3AccessKey {
         access_key_id: "fixture-access-key".into(),
+        principal: coven_format::S3Principal::Console,
     })
     .unwrap();
     let access: Vec<_> = access_members.iter().map(|m| json!([m, access])).collect();
@@ -784,7 +792,7 @@ async fn cached_author_views_survive_reopening_and_a_deletions_reversal() {
         let previous = log.entries.clone();
         let (entry, result) = replay_entry(&log, h.entries[i].clone());
         database
-            .apply_store_log::<crate::PendingRecord>(entry, result.clone())
+            .apply_store_log::<crate::PendingRecord>(entry, result.clone(), Vec::new())
             .await
             .unwrap();
         log = database.store_log().await.unwrap();
@@ -835,7 +843,7 @@ async fn every_author_view_check_is_durable_and_reused_after_reopening() {
         let (checked, result) = replay_entry(&log, entry.clone());
         assert_eq!(result, replay(&h.entries[..=index]));
         database
-            .apply_store_log::<crate::PendingRecord>(checked.clone(), result.clone())
+            .apply_store_log::<crate::PendingRecord>(checked.clone(), result.clone(), Vec::new())
             .await
             .unwrap();
         log.entries.push(checked);

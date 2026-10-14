@@ -382,9 +382,14 @@ fn every_change_fits_one_request_at_its_field_bounds() {
                 *device_name = "d".repeat(1024);
                 *access = crate::MemberAccess::ProviderAccount("a".repeat(1024));
             }
-            StoreChange::AddMember { access, .. } | StoreChange::SetAccess { access } => {
+            StoreChange::AddMember { access, .. } | StoreChange::SetAccess { access, .. } => {
                 *access = crate::MemberAccess::S3AccessKey {
                     access_key_id: "a".repeat(1024),
+                    principal: crate::S3Principal::GcsServiceAccount {
+                        project: "p".repeat(1024),
+                        email: "e".repeat(1024),
+                        managed_folder: "f".repeat(1024),
+                    },
                 };
             }
             StoreChange::AddDevice { name, .. }
@@ -420,10 +425,15 @@ fn member_access_bound_applies_before_decoding_its_declared_bytes() {
         } else {
             crate::MemberAccess::S3AccessKey {
                 access_key_id: "a".repeat(1025),
+                principal: crate::S3Principal::Console,
             }
         };
         assert!(matches!(
-            frame(StoreChange::SetAccess { access }).encode(),
+            frame(StoreChange::SetAccess {
+                member: test_utils::member().signing,
+                access
+            })
+            .encode(),
             Err(Error::Limit {
                 field: "member access",
                 actual: 1025,
@@ -431,12 +441,15 @@ fn member_access_bound_applies_before_decoding_its_declared_bytes() {
             })
         ));
         let mut bytes = frame(StoreChange::SetAccess {
+            member: test_utils::member().signing,
             access: crate::MemberAccess::ProviderAccount(String::new()),
         })
         .encode()
         .unwrap();
-        bytes[76] = tag;
-        bytes[77..81].copy_from_slice(&1025u32.to_be_bytes());
+        // The empty account is the frame's last field: its tag and zero length.
+        let at = bytes.len() - 5;
+        bytes[at] = tag;
+        bytes[at + 1..].copy_from_slice(&1025u32.to_be_bytes());
         assert!(matches!(
             Object::decode(&bytes),
             Err(Error::Limit {

@@ -475,6 +475,7 @@ async fn errors_and_manual_key_instructions() {
     let MemberRemoval::DeleteAccessKey { access_key_id } = storage
         .revoke_access(&MemberAccess::S3AccessKey {
             access_key_id: "member-key".into(),
+            principal: coven_format::S3Principal::Console,
         })
         .await
         .unwrap()

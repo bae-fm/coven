@@ -95,7 +95,7 @@ async fn only_the_spec_tables_are_created() {
         assert_eq!(
             tables,
             [
-                "_coven_access_keys_to_delete",
+                "_coven_access_keys",
                 "_coven_boundaries",
                 "_coven_cache",
                 "_coven_cache_budgets",
@@ -310,7 +310,7 @@ mod query_plans {
          INSERT INTO _coven_user_files SELECT tab,key,'file',key,key,n,zeroblob(13) FROM fixture;
          INSERT INTO _coven_device_files SELECT tab,key,'file',key,'path_' || i FROM fixture;
          INSERT INTO _coven_file_removals SELECT 'removed_' || i,'files' FROM fixture;
-         INSERT INTO _coven_access_keys_to_delete SELECT 'access_' || i,key,i%2 FROM fixture;
+         INSERT INTO _coven_access_keys SELECT 'access_' || i,CASE WHEN i%2=0 THEN i END FROM fixture;
          INSERT INTO _coven_file_uploads(id,reference,queued_at) SELECT i,key,zeroblob(13) FROM fixture;
          INSERT INTO _coven_file_chunks SELECT tab,key,'file',key,0,key FROM fixture;
          INSERT INTO _coven_file_upload_chunks SELECT i,0,key FROM fixture;
@@ -387,8 +387,8 @@ mod query_plans {
             let file = statement.file.as_str();
             let sql = statement.template.as_str();
             match (file, sql, relation) {
-        ("pending.rs", "INSERT INTO _coven_pending_resets(subject,reporter,entry_device,entry_number) SELECT subject,reporter,?1,?2 FROM _coven_pending WHERE true ON CONFLICT DO NOTHING", "_coven_pending") =>
-            Some("a newly applied reset suppresses every earlier observation"),
+        ("pending.rs", "INSERT INTO _coven_pending_resets(subject,reporter,entry_device,entry_number) SELECT p.subject,p.reporter,?1,?2 FROM _coven_pending AS p WHERE NOT EXISTS(SELECT 1 FROM _coven_access_keys AS k WHERE k.operation=p.operation) ON CONFLICT DO NOTHING", "p") =>
+            Some("a newly applied reset suppresses every earlier observation but S3 key deletions"),
         ("pending.rs", sql, "p") if sql.starts_with("UPDATE _coven_pending AS p SET suppressed=EXISTS(") =>
             Some("replay rejudges each observation against its indexed reset causes"),
         ("entry_inputs.rs", "INSERT INTO temp._coven_snapshot_writes SELECT substr(timestamp,9,8),number,timestamp,had_read FROM _coven_writes", "_coven_writes") =>

@@ -253,24 +253,30 @@ impl StoreLogSync {
                 let result = self
                     .revoke_access(record.id, &work.access.member_access())
                     .await?;
-                let key = match result {
-                    MemberRemoval::AccessRemains { shares } => {
-                        let coven_format::MemberAccess::ProviderAccount(account) =
-                            work.access.member_access()
-                        else {
-                            return Err(coven_database::DbError::DamagedDatabase.into());
-                        };
-                        return Ok(Progress::Waiting(PendingReason::AccessRemains {
-                            account,
-                            shares,
-                        }));
-                    }
-                    MemberRemoval::DeleteAccessKey { access_key_id } => Some(access_key_id),
-                    _ => None,
-                };
+                if let MemberRemoval::AccessRemains { shares } = result {
+                    let coven_format::MemberAccess::ProviderAccount(account) =
+                        work.access.member_access()
+                    else {
+                        return Err(coven_database::DbError::DamagedDatabase.into());
+                    };
+                    return Ok(Progress::Waiting(PendingReason::AccessRemains {
+                        account,
+                        shares,
+                    }));
+                }
+                let access = work.access.member_access();
                 work.state = InviteState::Settled;
-                self.save_access_result(record, &data, 5, key.into_iter().collect(), None)
-                    .await
+                // The invite's S3 key stays pending until its deletion clears (§12.2).
+                let deletions = crate::access_keys::deletion(&access, None)
+                    .into_iter()
+                    .collect::<Result<Vec<_>, _>>()?;
+                self.database
+                    .record_access_key_deletions::<PendingRecord>(
+                        Some(data.update(record, 5)?),
+                        deletions,
+                    )
+                    .await?;
+                Ok(Progress::Advanced)
             }
             InviteState::Settled => {
                 // Provider deletes are idempotent, including an already absent request.

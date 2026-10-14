@@ -4,6 +4,8 @@
 //! cryptography. Provider adapters authenticate their native requests. The
 //! caller records upload sessions and commits credentials to key custody only
 //! after setup succeeds. Providers never read the database.
+mod access_admin;
+pub use access_admin::AccessKeyAdmin;
 mod config;
 mod provider_access;
 pub use provider_access::*;

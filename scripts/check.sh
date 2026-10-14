@@ -313,6 +313,12 @@ proofs() {
         done
     fi
 
+    if proof_selected storelog-data || crate_selected coven-sync; then
+        runner=$(runner storelog-data accessKeyRunner)
+        step "Rust / Lean S3 key deletion journal"
+        COVEN_ACCESS_KEY_LEAN="$runner" cargo test -p coven-sync --all-features lean_differential_access_keys -- --ignored
+    fi
+
     if proof_selected storelog-data || crate_selected coven-sync || crate_selected coven-database; then
         runner=$(runner storelog-data storelogDataRunner)
         step "Rust / Lean replay-selected boundaries"

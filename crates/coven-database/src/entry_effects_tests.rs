@@ -33,7 +33,7 @@ pub(crate) async fn fate(
         boundary.apply(&mut next.replay.state);
     }
     target
-        .apply_store_log_batch::<Record>(log, vec![], next.replay, vec![], vec![])
+        .apply_store_log_batch::<Record>(log, vec![], next.replay, vec![], vec![], Vec::new())
         .await
 }
 
@@ -280,6 +280,35 @@ async fn every_kept_reset_suppresses_earlier_observations_across_restart() {
     assert!(db.pending::<Record>().await.unwrap().is_empty());
     drop_boundary(&db, second).await;
     assert_eq!(db.pending::<Record>().await.unwrap(), [old]);
+    db.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_kept_reset_never_hides_an_s3_key_awaiting_deletion() {
+    let store = TestStore::new();
+    let db = store.schema(notes(), NOTES).await.unwrap();
+    db.record_access_key_deletions::<Record>(
+        None,
+        vec![crate::AccessKeyDeletion {
+            key: crate::AccessKeyToDelete {
+                access_key_id: "old-key".into(),
+                principal: coven_format::S3Principal::Console,
+                member: None,
+            },
+            operation: crate::NewOperation {
+                kind: "delete-access-key".into(),
+                data: vec![],
+                started_by: "coven".into(),
+            },
+        }],
+    )
+    .await
+    .unwrap();
+    let before = db.pending::<Record>().await.unwrap();
+    assert_eq!(before.len(), 1);
+    reset(&db, 1).await;
+    empty(&db).await;
+    assert_eq!(db.pending::<Record>().await.unwrap(), before);
     db.close().await.unwrap();
 }
 

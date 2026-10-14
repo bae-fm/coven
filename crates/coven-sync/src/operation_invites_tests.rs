@@ -282,13 +282,7 @@ async fn s3_invitation_carries_its_key_and_retains_the_manual_deletion_notice() 
     begin(&mut a, Command::Cancel(invite.id)).await;
     finish(&mut a, id).await;
     a.restart(storage).await;
-    assert_eq!(
-        a.db.access_keys_to_delete().await.unwrap(),
-        [AccessKeyToDelete {
-            access_key_id: "new-key".into(),
-            member: None
-        }]
-    );
+    assert_eq!(access_keys(&a.db).await, [console_key("new-key", None)]);
 }
 
 #[tokio::test]

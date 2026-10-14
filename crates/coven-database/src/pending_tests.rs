@@ -21,10 +21,19 @@ impl From<u64> for Subject {
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 enum Reason {
+    AccessKey(String),
     Missing,
     Refused,
     Update(u32),
     Dropped,
+}
+impl Record {
+    pub(crate) fn access_key(&self) -> Option<&str> {
+        match &self.reason {
+            Reason::AccessKey(key) => Some(key),
+            _ => None,
+        }
+    }
 }
 impl PendingValue for Record {
     fn reload(audience: coven_merge::Audience, reported_by: DeviceId) -> Self {
@@ -33,6 +42,14 @@ impl PendingValue for Record {
             reported_by,
             reason: Reason::Missing,
             operation: None,
+        }
+    }
+    fn access_key(id: OperationId, reported_by: DeviceId, key: crate::AccessKeyToDelete) -> Self {
+        Self {
+            subject: Subject::Number(id.0 as u64),
+            reported_by,
+            reason: Reason::AccessKey(key.access_key_id),
+            operation: Some(id),
         }
     }
     fn dropped_entry(entry: crate::EntryId, _reason: crate::DropReason) -> Self {
@@ -65,6 +82,7 @@ impl PendingValue for Record {
     fn can_retry(&self, version: &str, schema: u32) -> bool {
         match self.reason {
             Reason::Missing => true,
+            Reason::AccessKey(_) => false,
             Reason::Dropped => false,
             Reason::Refused => version != env!("CARGO_PKG_VERSION"),
             Reason::Update(required) => schema >= required,

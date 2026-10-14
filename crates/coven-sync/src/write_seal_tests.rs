@@ -37,6 +37,7 @@ pub(super) async fn household(storage: Arc<MemoryStorage>) -> Vec<Device> {
             device_name: "one".into(),
             access: coven_format::MemberAccess::S3AccessKey {
                 access_key_id: "owner-key".into(),
+                principal: coven_format::S3Principal::Console,
             },
         })
         .await
@@ -53,6 +54,7 @@ pub(super) async fn household(storage: Arc<MemoryStorage>) -> Vec<Device> {
                 role: MemberRole::Admin,
                 access: coven_format::MemberAccess::S3AccessKey {
                     access_key_id: format!("member-{seed}"),
+                    principal: coven_format::S3Principal::Console,
                 },
             })
             .await

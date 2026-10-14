@@ -216,7 +216,6 @@ async fn opening_unlocks_once_and_sql_callback_failures_roll_back() {
             .unwrap(),
         0
     );
-    assert!(handle.access_keys_to_delete().await.unwrap().is_empty());
     assert!(handle.pending().await.unwrap().is_empty());
     let reader = builder(&app, layout)
         .key_custody(KeyCustody::Custom(keys.clone()))
@@ -596,7 +595,7 @@ async fn closing_erases_custody_even_when_releasing_a_worker_fails() {
         .await
         .unwrap();
     handle.initialize_identity().unwrap();
-    handle.access_keys_to_delete().await.unwrap();
+    handle.pending().await.unwrap();
     // Hold timer-driven work so closing encounters the damaged journal row.
     handle
         .database
@@ -806,6 +805,7 @@ fn local_and_access_failures_require_app_action() {
         },
         PendingReason::DeleteAccessKey(AccessKeyToDelete {
             access_key_id: "expired-invite-key".into(),
+            principal: coven_format::S3Principal::Console,
             member: None,
         }),
         PendingReason::FileUnavailable(FileMissingReason::DeviceRemoved),

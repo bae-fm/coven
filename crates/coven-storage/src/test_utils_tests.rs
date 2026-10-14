@@ -277,7 +277,8 @@ async fn sharing_authority_belongs_to_the_adapters_account() {
     ));
     assert!(matches!(
         s3.revoke_access(&MemberAccess::S3AccessKey {
-            access_key_id: "key".into()
+            access_key_id: "key".into(),
+            principal: coven_format::S3Principal::Console,
         })
         .await
         .unwrap(),

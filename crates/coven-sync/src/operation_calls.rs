@@ -116,13 +116,36 @@ impl StoreLogSync {
                 return Ok(Begun::Value(Output::Unit));
             }
             Command::ConfirmKey(key) => {
-                self.database.confirm_access_key_deleted(key).await?;
+                self.database.clear_access_key(key).await?;
                 return Ok(Begun::Value(Output::Unit));
             }
-            Command::AccessKeysToDelete => {
-                return Ok(Begun::Value(Output::AccessKeysToDelete(
-                    self.database.access_keys_to_delete().await?,
-                )))
+            Command::DeleteKey(id, admin) => {
+                let record = self
+                    .database
+                    .operation(id)
+                    .await?
+                    .ok_or(SyncError::NotPending(id))?;
+                let Data::DeleteAccessKey(key) = Data::read(&record)? else {
+                    return Err(SyncError::NotPending(id));
+                };
+                let deleted = admin.revoke(&key.access_key_id, &key.principal).await;
+                // A read follows only an accepted deletion.
+                let observation = match &deleted {
+                    Ok(()) => Some(crate::access_keys::KeyObservation {
+                        access_key_id: key.access_key_id.clone(),
+                        reply: admin
+                            .key_exists(&key.access_key_id, &key.principal)
+                            .await
+                            .map(|present| match present {
+                                true => crate::access_keys::KeyPresence::Present,
+                                false => crate::access_keys::KeyPresence::Absent,
+                            }),
+                    }),
+                    Err(_) => None,
+                };
+                crate::access_keys::verify_deletion(&key.access_key_id, deleted, observation)?;
+                self.database.clear_access_key(key.access_key_id).await?;
+                return Ok(Begun::Value(Output::Unit));
             }
             #[cfg(any(test, feature = "test-utils"))]
             Command::Sync => {
@@ -295,7 +318,10 @@ impl StoreLogSync {
                 )));
             }
             Command::SetAccess(access) => {
-                let change = StoreChange::SetAccess { access };
+                let change = StoreChange::SetAccess {
+                    member: me.clone(),
+                    access,
+                };
                 if !effects::validate_change(state, &me, &change)? {
                     self.make_and_upload_entry(change).await?;
                 }
@@ -459,7 +485,7 @@ impl StoreLogSync {
                     coven_format::MemberAccess::ProviderAccount(_)
                 ) && self
                     .owner_access(&local.log)
-                    .is_some_and(|owner| same_access(owner, &target.access))
+                    .is_some_and(|owner| owner.same_credential(&target.access))
                 {
                     return Err(SyncError::StoreOwner);
                 }
@@ -492,7 +518,7 @@ impl StoreLogSync {
             coven_format::MemberAccess::S3AccessKey { .. } => m.role == MemberRole::Admin,
             access => self
                 .owner_access(log)
-                .is_some_and(|owner| same_access(owner, access)),
+                .is_some_and(|owner| owner.same_credential(access)),
         }
     }
 
@@ -540,15 +566,5 @@ impl StoreLogSync {
             }
         }
         Ok(requests)
-    }
-}
-
-pub(super) fn same_access(a: &coven_format::MemberAccess, b: &coven_format::MemberAccess) -> bool {
-    match (a, b) {
-        (
-            coven_format::MemberAccess::ProviderAccount(a),
-            coven_format::MemberAccess::ProviderAccount(b),
-        ) => a.trim().eq_ignore_ascii_case(b.trim()),
-        _ => a == b,
     }
 }

@@ -313,6 +313,20 @@ consistency are inputs. The journal holds key ids and never admin credentials.
 The unchanged account and historical theorems remain in the axiom audit;
 Rust/Lean comparisons keep their original replay interface.
 
+`accessKeyRunner` compares this journal with Rust. Each history is checked by
+the shared JSON reader; S3 accesses are compared by key id. After each event,
+Lean's `keys` of `applyEvent` must equal the key ids Rust's pending list
+names, and the event's reply must match. Rust computes obligations with its
+production function over the received entries and their replay, records them
+in its database journal, and checks provider deletions with its production
+`verify_deletion`. The histories cover two admins' and an admin's and the
+member's concurrent replacements in both receipt orders followed by removal,
+an unauthorized replacement by a member, a replacement landing after its
+thirty days, concurrent removals whose replay returns a member, and recording
+the same key again. Every deletion failure and both clearing events are
+exercised. Rust's deleting call requires admin access by its type, so the
+runner supplies it; `adminRequired` has no Rust counterpart.
+
 **Every modeled pending subject is visible with its first reason.**
 `Pending.every_pending_subject`, `only_first_reason`, and `first_unmet` connect
 the processing conditions to the list required by
@@ -543,10 +557,13 @@ the package or `coven-sync` changes. It also runs rejection cases for malformed
 replies and retries after successful completion, and checks that both tests exist
 before selecting them.
 
-This comparison does not cover ready/in-flight visibility, owner waits, grants,
-replay intention changes or S3 deletion notices. Rust still uses removal-driven
-`Data::Revoke`/`MemberRemoval` and a separate access-key deletion list; it lacks
-the model's serialized account journal. Implementation task T33 introduces that
+This comparison does not cover ready/in-flight visibility, owner waits, grants
+or replay intention changes. Rust still uses removal-driven
+`Data::Revoke`/`MemberRemoval` for shared accounts; it lacks the model's
+serialized account journal. S3 deletion notices are compared by
+[`lean_differential_access_keys`](../../crates/coven-sync/src/access_keys_tests.rs),
+which `scripts/check.sh` runs with `COVEN_ACCESS_KEY_LEAN` naming
+`accessKeyRunner`. Implementation task T33 introduces that
 counterpart and the full `Access` comparison.
 
 ## Member-key replacement

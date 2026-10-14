@@ -38,6 +38,8 @@ pub enum OperationKind {
     Invite,
     /// The owner's device revokes recorded access after removal or a later access entry.
     RevokeAccess,
+    /// An S3 key awaiting deletion with admin access or explicit confirmation (§13).
+    DeleteAccessKey,
 }
 
 /// A live member and the devices still belonging to them.

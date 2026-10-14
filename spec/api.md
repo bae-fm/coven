@@ -2126,6 +2126,23 @@ pub enum SyncError {
     ReloadPending(OperationId),
     /// Decoding persisted operation data failed, retaining its cause.
     OperationData(serde_json::Error),
+    /// Deleting an S3 key with admin access did not establish its absence;
+    /// the key stays pending (§13).
+    AccessKeyNotDeleted(DeleteAccessKeyError),
+}
+
+/// Why coven's deletion of an S3 key did not clear its record (§13).
+pub enum DeleteAccessKeyError {
+    /// The provider refused or failed the deletion.
+    DeleteFailed(StorageError),
+    /// No provider read followed the deletion.
+    ObservationMissing,
+    /// The read concerned another key.
+    WrongKey,
+    /// The read still found the key.
+    StillPresent,
+    /// The read failed; a failed read is never absence.
+    ObservationFailed(StorageError),
 }
 
 /// An object that failed a check when read (§19.1).
@@ -2542,6 +2559,9 @@ pub enum OperationKind {
     WriteSnapshot,
     /// Grant access, approve or decline a join, and settle the invite.
     Invite,
+    /// An S3 key awaiting deletion with admin access or explicit
+    /// confirmation (§13). Its record names the key.
+    DeleteAccessKey,
     /// Snapshot and reset an audience (§19.3).
     Reset,
 }
@@ -2990,8 +3010,34 @@ impl CovenHandle {
 /// An S3 key superseded, recorded for a removed member, or from an ended invite (§13).
 pub struct AccessKeyToDelete {
     pub access_key_id: String,
+    /// Who holds the key; deleting it with admin access uses these handles.
+    pub principal: S3Principal,
+    /// The member it was recorded for; none for an invite that ended unanswered.
     pub member: Option<MemberId>,
 }
+
+/// The non-secret handles deleting an S3 key needs (D6).
+pub enum S3Principal {
+    /// Made by hand in the provider's console; only the console deletes it.
+    Console,
+    /// AWS IAM, Ceph RGW accounts and SeaweedFS's embedded IAM.
+    IamUser { user: String, policy: IamPolicy },
+    /// GCS: the HMAC key's service account and its managed folder.
+    GcsServiceAccount { project: String, email: String, managed_folder: String },
+    /// Cloudflare: the account holding the API token whose id is the key id.
+    R2Token { account: String },
+    /// RustFS: the parent user of the service account whose access key is the key id.
+    RustFsServiceAccount { parent: String },
+}
+
+pub enum IamPolicy {
+    Inline { name: String },
+    Managed { arn: String },
+}
+
+// Each DeleteAccessKey record belongs to its own DeleteAccessKey operation,
+// whose id the app passes to confirm or delete with admin access. Retry and
+// discard refuse it: only the two clearing events end it.
 
 // Pending notices are DeleteAccessKey records in _coven_pending. Only verified
 // admin deletion or explicit confirm_access_key_deleted clears one. Confirmation

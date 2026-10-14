@@ -45,6 +45,29 @@ pub(crate) fn member(n: u8) -> MemberKeys {
     bytes.extend([n; 64]);
     MemberKeys::from_secret_bytes(&bytes).unwrap()
 }
+/// S3 keys this device lists as pending deletion, by key id (§13).
+pub(crate) async fn access_keys(db: &coven_database::Database) -> Vec<crate::AccessKeyToDelete> {
+    let mut keys: Vec<_> = db
+        .pending::<crate::PendingRecord>()
+        .await
+        .unwrap()
+        .into_iter()
+        .filter_map(|record| match record.reason {
+            crate::PendingReason::DeleteAccessKey(key) => Some(key),
+            _ => None,
+        })
+        .collect();
+    keys.sort_by(|a, b| a.access_key_id.cmp(&b.access_key_id));
+    keys
+}
+/// The pending deletion of a console-made key recorded for a member.
+pub(crate) fn console_key(id: &str, member: Option<&MemberKeys>) -> crate::AccessKeyToDelete {
+    crate::AccessKeyToDelete {
+        access_key_id: id.into(),
+        principal: coven_format::S3Principal::Console,
+        member: member.map(MemberKeys::member_id),
+    }
+}
 pub(crate) fn public(member: &MemberKeys) -> MemberPublicKeys {
     MemberPublicKeys {
         signing: member.member_id(),
@@ -293,6 +316,7 @@ impl Device {
             .make_and_upload_entry(StoreChange::CreateStore {
                 access: coven_format::MemberAccess::S3AccessKey {
                     access_key_id: "fixture-access-key".into(),
+                    principal: coven_format::S3Principal::Console,
                 },
                 store: self.directory.id(),
                 name: "Store".into(),
@@ -309,6 +333,7 @@ impl Device {
             .make_and_upload_entry(StoreChange::AddMember {
                 access: coven_format::MemberAccess::S3AccessKey {
                     access_key_id: "fixture-access-key".into(),
+                    principal: coven_format::S3Principal::Console,
                 },
                 keys: public(other),
                 role,
@@ -692,6 +717,7 @@ async fn key_objects_are_fixed_and_published_before_the_entry() {
     let change = StoreChange::CreateStore {
         access: coven_format::MemberAccess::S3AccessKey {
             access_key_id: "fixture-access-key".into(),
+            principal: coven_format::S3Principal::Console,
         },
         store: store(1),
         name: "Store".into(),
@@ -955,7 +981,7 @@ async fn a_waiting_entry_reseals_with_its_recorded_key_after_rotation() {
     // Apply the downloaded rotation while the local entry is still queued.
     let rotation = b.log().await.entries.last().unwrap().entry.clone();
     let (entry, replay) = crate::replay::tests::replay_entry(&a.log().await, rotation);
-    a.db.apply_store_log::<crate::PendingRecord>(entry, replay)
+    a.db.apply_store_log::<crate::PendingRecord>(entry, replay, Vec::new())
         .await
         .unwrap();
     a.custody

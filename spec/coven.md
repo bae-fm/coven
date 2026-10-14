@@ -3560,8 +3560,8 @@ Carol's tablet:
   - Provider permission failures reach the app even when revocation followed
     decline or expiry; an unreadable request is not an absent request.
 - The entry adding a new Carol records how she reaches storage, her provider
-  account or the id of the S3 key made for her, so any admin can take it
-  back later ([§13](#13-removing-members-and-devices)).
+  account or the id of the S3 key made for her and who holds it, so any admin
+  can take it back later ([§13](#13-removing-members-and-devices)).
 - Rebinding an existing id changes no access record or device id. The new
   installation registers its own fresh device after the binding is kept.
   Any changed provider access is separate work under §13, with its own
@@ -3699,7 +3699,10 @@ Carol's tablet:
   `SyncError::StoreOwner`.
 - On S3, `pending()` retains each `DeleteAccessKey` record until one of the
   two clearing events above ([E9](api.md#e9-members-and-devices)), whether it
-  arose from replacement, removal or an invite ending. Retain both pending
+  arose from replacement, removal or an invite ending. Each record names the
+  key's principal: the non-secret handles its deletion needs, such as an IAM
+  user or a GCS service account and managed folder (D6). A key made by hand in
+  the console names none, so only the console deletes it. Retain both pending
   work and confirmed key ids through restart. Another entry, invite or retry
   cannot bring a confirmed deletion notice back. Recording entries, replay,
   pending work and confirmations uses atomic local commits; a failed commit

@@ -399,6 +399,7 @@ queries notify the app when rows change. The handle's `pending()` and
 `subscribe_pending()` expose the same persisted typed conditions, keyed by
 subject and reporting device, including while disconnected. A new reason replaces
 that reporter's previous reason; committed progress clears its condition.
-`access_keys_to_delete()` lists provider-console revocation actions. Removal, a location taken by another store,
+On S3, each key awaiting deletion is a `DeleteAccessKey` record there, cleared
+only by explicit confirmation or coven's verified deletion. Removal, a location taken by another store,
 or a required update stops further passes; other pass failures retry on the idle
 interval or an explicit request.

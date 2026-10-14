@@ -96,6 +96,8 @@ pub(crate) enum Data {
         member: String,
         result: Option<MemberRemoval>,
     },
+    /// One S3 key's deletion obligation; its pending notice lives on this row.
+    DeleteAccessKey(#[serde(with = "crate::pending_encoding::AccessKey")] crate::AccessKeyToDelete),
 }
 
 impl Data {
@@ -129,6 +131,7 @@ impl Data {
             },
             Self::Invite(_) => OperationKind::Invite,
             Self::Revoke { .. } => OperationKind::RevokeAccess,
+            Self::DeleteAccessKey(_) => OperationKind::DeleteAccessKey,
         }
     }
 
@@ -159,6 +162,7 @@ impl Data {
             },
             Self::Invite(_) => "invite",
             Self::Revoke { .. } => "revoke-access",
+            Self::DeleteAccessKey(_) => "delete-access-key",
         }
     }
     pub(crate) fn new_operation(&self, started_by: &str) -> Result<NewOperation, SyncError> {
@@ -303,6 +307,7 @@ impl InviteAccess {
             }
             Self::S3AccessKey { access_key_id, .. } => MemberAccess::S3AccessKey {
                 access_key_id: access_key_id.clone(),
+                principal: coven_format::S3Principal::Console,
             },
         }
     }

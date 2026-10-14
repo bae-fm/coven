@@ -472,13 +472,13 @@ macro_rules! coven_tables {
             ) STRICT, WITHOUT ROWID;
             CREATE INDEX _coven_device_files_path ON _coven_device_files(path);
         ");
-        $visit!(_coven_access_keys_to_delete, "
-            CREATE TABLE _coven_access_keys_to_delete (
+        // Each S3 key named for deletion: the open deletion operation, which
+        // carries its pending notice, or NULL once deletion was confirmed (§13).
+        $visit!(_coven_access_keys, "
+            CREATE TABLE _coven_access_keys (
                 access_key_id TEXT PRIMARY KEY NOT NULL,
-                member BLOB,
-                confirmed INTEGER NOT NULL DEFAULT 0 CHECK(confirmed IN (0,1))
+                operation INTEGER UNIQUE
             ) WITHOUT ROWID;
-            CREATE INDEX _coven_access_keys_unconfirmed ON _coven_access_keys_to_delete(confirmed) WHERE confirmed=0;
         ");
         $visit!(_coven_file_uploads, "
             CREATE TABLE _coven_file_uploads (

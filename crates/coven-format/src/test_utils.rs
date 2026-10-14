@@ -125,6 +125,7 @@ pub fn store_log() -> StoreLogEntry {
         change: StoreChange::CreateStore {
             access: crate::MemberAccess::S3AccessKey {
                 access_key_id: "fixture-access-key".into(),
+                principal: crate::S3Principal::Console,
             },
             store: StoreId(Uuid::from_bytes([0x10; 16])),
             name: "S".into(),
@@ -475,8 +476,15 @@ pub fn store_changes() -> Vec<StoreChange> {
             },
         },
         StoreChange::SetAccess {
+            member: m.clone(),
             access: crate::MemberAccess::S3AccessKey {
                 access_key_id: "replacement-key".into(),
+                principal: crate::S3Principal::IamUser {
+                    user: "coven-member".into(),
+                    policy: crate::IamPolicy::Inline {
+                        name: "coven-store".into(),
+                    },
+                },
             },
         },
         StoreChange::RotateKey {

@@ -169,4 +169,4 @@ fn encode_frame_in(
 mod tests;
 
 mod member_access;
-pub use member_access::MemberAccess;
+pub use member_access::{IamPolicy, MemberAccess, S3Principal};

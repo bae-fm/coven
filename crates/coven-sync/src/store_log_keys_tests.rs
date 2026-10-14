@@ -49,6 +49,7 @@ async fn introductions_refuse_material_that_does_not_match_the_committed_hash() 
             admin: public(&ana.member),
             access: coven_format::MemberAccess::S3AccessKey {
                 access_key_id: "owner".into(),
+                principal: coven_format::S3Principal::Console,
             },
             device_name: "Ana".into(),
             key: key(1),
@@ -499,7 +500,7 @@ async fn reserved_copy_settles_even_after_another_supplier_or_recipient_removal(
                 .entry;
             let (entry, replay) = crate::replay::tests::replay_entry(&ana.log().await, entry);
             ana.db
-                .apply_store_log::<crate::PendingRecord>(entry, replay)
+                .apply_store_log::<crate::PendingRecord>(entry, replay, Vec::new())
                 .await
                 .unwrap();
         }
@@ -753,7 +754,8 @@ async fn creation_recovers_after_copy_confirmation_without_resealing_the_copy() 
                     name: ana.directory.settings().unwrap().name,
                     admin: public(&ana.member),
                     access: coven_format::MemberAccess::S3AccessKey {
-                        access_key_id: "owner".into()
+                        access_key_id: "owner".into(),
+                        principal: coven_format::S3Principal::Console,
                     },
                     device_name: "Ana".into(),
                     key: key(1),

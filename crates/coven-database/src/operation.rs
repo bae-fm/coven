@@ -8,13 +8,25 @@ use crate::{sqlite::DatabaseConnection, DbError};
 )]
 pub struct OperationId(pub i64);
 
-/// An S3 key awaiting deletion in the provider console (E5).
+/// An S3 key pending deletion: superseded, recorded for a removed member, or
+/// from an ended invite (§13, E9).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AccessKeyToDelete {
     /// Public identifier; never the key's secret.
     pub access_key_id: String,
-    /// The removed member, absent when an invitation ended before approval.
+    /// The provider identity holding the key, which deleting it needs.
+    pub principal: coven_format::S3Principal,
+    /// The member it was recorded for, absent when an invitation ended before approval.
     pub member: Option<coven_crypto::MemberId>,
+}
+
+/// A deletion obligation and the operation that carries its pending notice.
+/// Recording it is a no-op when the key already has one or was confirmed deleted.
+pub struct AccessKeyDeletion {
+    /// The key to delete.
+    pub key: AccessKeyToDelete,
+    /// The operation journaling its deletion, started by `coven`.
+    pub operation: NewOperation,
 }
 
 /// A journal row read as one committed value.
@@ -111,6 +123,52 @@ fn record(row: &rusqlite::Row<'_>) -> rusqlite::Result<OperationRecord> {
         data: row.get(3)?,
         started_by: row.get(4)?,
     })
+}
+
+/// Record each new obligation with its operation and pending notice, in the
+/// caller's transaction. Open and confirmed keys keep their state (§13).
+pub(crate) fn record_access_keys<P: crate::PendingValue>(
+    db: &DatabaseConnection,
+    reporter: coven_foundation::id_source::DeviceId,
+    deletions: &[AccessKeyDeletion],
+) -> Result<(), DbError> {
+    for deletion in deletions {
+        let known = db.query(
+            "SELECT 1 FROM _coven_access_keys WHERE access_key_id=?1",
+            [&deletion.key.access_key_id],
+            |_| Ok(()),
+        )?;
+        if !known.is_empty() {
+            continue;
+        }
+        let id = insert(db, &deletion.operation)?;
+        db.internal_execute(
+            "INSERT INTO _coven_access_keys(access_key_id,operation) VALUES(?1,?2)",
+            (&deletion.key.access_key_id, id.0),
+        )?;
+        crate::pending::save(db, &P::access_key(id, reporter, deletion.key.clone()))?;
+    }
+    Ok(())
+}
+
+/// Retire a key's deletion obligation and its notice, keeping the confirmation
+/// by id so no later entry, invite or retry records it again (§13).
+pub(crate) fn clear_access_key(db: &DatabaseConnection, key: &str) -> Result<(), DbError> {
+    let open = db.query(
+        "SELECT operation FROM _coven_access_keys WHERE access_key_id=?1 AND operation IS NOT NULL",
+        [key],
+        |r| r.get::<_, i64>(0),
+    )?;
+    for id in open {
+        crate::pending::clear_operation(db, OperationId(id))?;
+        db.internal_execute("DELETE FROM _coven_operations WHERE id=?1", [id])?;
+    }
+    db.internal_execute(
+        "INSERT INTO _coven_access_keys(access_key_id,operation) VALUES(?1,NULL)
+         ON CONFLICT(access_key_id) DO UPDATE SET operation=NULL",
+        [key],
+    )?;
+    Ok(())
 }
 
 pub(crate) fn advance(db: &DatabaseConnection, update: &OperationUpdate) -> Result<(), DbError> {

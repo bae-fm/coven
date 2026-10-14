@@ -307,16 +307,13 @@ async fn restart_after_each_step_uses_the_committed_entry_and_keys() {
         }
         assert_eq!(a.log().await.entries.len(), 3);
         assert_eq!(
-            a.db.access_keys_to_delete().await.unwrap(),
-            [AccessKeyToDelete {
-                access_key_id: "fixture-access-key".into(),
-                member: Some(member(2).member_id())
-            }]
+            access_keys(&a.db).await,
+            [console_key("fixture-access-key", Some(&member(2)))]
         );
-        a.db.confirm_access_key_deleted("fixture-access-key".into())
+        a.db.clear_access_key("fixture-access-key".into())
             .await
             .unwrap();
-        assert!(a.db.access_keys_to_delete().await.unwrap().is_empty());
+        assert!(access_keys(&a.db).await.is_empty());
     }
 }
 

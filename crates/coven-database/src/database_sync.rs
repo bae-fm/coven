@@ -386,14 +386,23 @@ impl Database {
     /// a stale or different applied-entry set is refused with
     /// [`DbError::StoreLogEntriesChanged`]; changing an applied entry's bytes or
     /// publication time or check is refused with [`DbError::StoreLogEntryChanged`].
+    /// S3 deletion obligations the entry creates commit with it.
     pub async fn apply_store_log<P: crate::PendingValue>(
         &self,
         entry: crate::ReplayEntry,
         replay: crate::StoreLogReplay,
+        access_keys: Vec<crate::AccessKeyDeletion>,
     ) -> Result<(), DbError> {
         let checked = self.local_store_log().await?.log;
-        self.apply_store_log_batch::<P>(checked, vec![entry], replay, Vec::new(), Vec::new())
-            .await
+        self.apply_store_log_batch::<P>(
+            checked,
+            vec![entry],
+            replay,
+            Vec::new(),
+            Vec::new(),
+            access_keys,
+        )
+        .await
     }
 
     /// Applied entries and their complete replay result from one committed snapshot.

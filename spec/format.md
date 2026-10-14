@@ -66,7 +66,8 @@
 | `Unique` | `terms:[text] \| predicate:Option<text>` | Nonempty terms; each is a column or an expression as written. Terms and predicates use `text`, not `name`. |
 | `ColumnValue` | `value:Value \| parents:map<ForeignKey, Parent>` | |
 | `MemberKeys` | `signing:SigningKey \| sealing:SealingKey` | Public pair, independent of `MemberId`. |
-| `MemberAccess` | `0 \| account:text`, or `1 \| access_key_id:text` | A provider account, or an S3 key's public id; at most 1,024 UTF-8 bytes. |
+| `MemberAccess` | `0 \| account:text`, or `1 \| access_key_id:text \| principal:S3Principal` | A provider account, or an S3 key's public id and who holds it; each text at most 1,024 UTF-8 bytes. |
+| `S3Principal` | `0` console; `1 \| user:text \| policy`, policy `0 \| name:text` inline or `1 \| arn:text` managed; `2 \| project:text \| email:text \| managed_folder:text`; `3 \| account:text`; `4 \| parent:text` | The non-secret handles deleting the key needs (§13): none for a key made in the console; an IAM user and its prefix policy (AWS, Ceph RGW, SeaweedFS); a GCS service account and its managed folder, the HMAC access id being the key id; a Cloudflare account, the token id being the key id; RustFS's parent user, the service account's access key being the key id. Each text at most 1,024 UTF-8 bytes. |
 
 - A complete sealed store-log entry, including its cleartext prefix, chunk
   framing, nonce, authentication tag and signature, is at most 4 MiB
@@ -286,7 +287,7 @@
 | 10 | Remove circle member | `circle:uuid \| member:MemberId` |
 | 11 | Raise schema | `version:u32 \| snapshot:SnapshotId` |
 | 13 | Reset | `snapshot:SnapshotId` |
-| 14 | Set access | `access:MemberAccess` |
+| 14 | Set access | `member:MemberId \| access:MemberAccess` |
 | 15 | Rotate key | `audience:Audience \| key:uuid \| key_hash:32 bytes` |
 | 16 | Replace member keys | `member:MemberId \| keys:MemberKeys` |
 
@@ -318,7 +319,12 @@
   `store_log_read`, and within §10's write landing deadline; an entry uses
   `had_read` with implicit own entries and §9's permanent landing rule.
   Ordinary authority and admission checks still apply. Replacement introduces no key.
-- Set-access is about its author, the member whose access it records.
+- Set-access names the member whose access it records: its author, or
+  another member when an admin records a replacement S3 key (§9). Both must
+  be members in its recorded view, and the target at its replay position.
+  An admin's entry for another member must carry an S3 key. Concurrent
+  set-access entries conflict when they name the same member; equal ones
+  name the same account or key id.
 - `key` and `key_hash` occur only on creation and rotation: the id and
   SHA-256 of the exact 32 key bytes ([§11](coven.md#11-keys)). The hash is
   inside the encrypted entry, never a cleartext path component. Key ids

@@ -140,7 +140,8 @@ mod tests;
 
 mod operation;
 pub use operation::{
-    AccessKeyToDelete, NewOperation, OperationId, OperationRecord, OperationUpdate,
+    AccessKeyDeletion, AccessKeyToDelete, NewOperation, OperationId, OperationRecord,
+    OperationUpdate,
 };
 
 mod database_changes;

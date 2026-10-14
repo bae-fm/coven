@@ -440,6 +440,11 @@ async fn pending_queries_round_trip_every_subject_and_reason() {
         },
         PendingReason::DeleteAccessKey(AccessKeyToDelete {
             access_key_id: "public-key-id".into(),
+            principal: coven_format::S3Principal::GcsServiceAccount {
+                project: "project".into(),
+                email: "member@project.iam.gserviceaccount.com".into(),
+                managed_folder: "base/store/".into(),
+            },
             member: Some(a.member.member_id()),
         }),
         PendingReason::FileUnavailable(FileMissingReason::Source(FileSourceFailure::Changed)),
@@ -479,7 +484,7 @@ async fn pending_queries_round_trip_every_subject_and_reason() {
 
 #[tokio::test]
 async fn retained_access_commits_its_condition_with_the_provider_result() {
-    for keys in [Vec::new(), vec!["retired-access-key".to_owned()]] {
+    {
         let storage = google();
         let [a, _, c] = accounts(storage).await;
         let mut data = Data::Revoke {
@@ -507,7 +512,6 @@ async fn retained_access_commits_its_condition_with_the_provider_result() {
                 &record,
                 &data,
                 1,
-                keys.clone(),
                 Some(PendingReason::AccessRemains {
                     account: "cat@example.com".into(),
                     shares: shares.clone(),
@@ -533,15 +537,6 @@ async fn retained_access_commits_its_condition_with_the_provider_result() {
                 account: "cat@example.com".into(),
                 shares
             }
-        );
-        assert_eq!(
-            a.db.access_keys_to_delete()
-                .await
-                .unwrap()
-                .into_iter()
-                .map(|k| k.access_key_id)
-                .collect::<Vec<_>>(),
-            keys
         );
     }
 }

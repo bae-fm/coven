@@ -51,6 +51,10 @@ pub enum SyncError {
     /// Decoding persisted operation data failed; its cause remains available.
     #[error("invalid operation data: {0}")]
     OperationData(#[from] serde_json::Error),
+    /// Deleting an S3 key with admin access did not establish its absence;
+    /// its pending deletion stays (§13).
+    #[error(transparent)]
+    AccessKeyNotDeleted(#[from] crate::access_keys::DeleteAccessKeyError),
     /// Storage refused or failed a request.
     #[error(transparent)]
     Storage(#[from] StorageError),

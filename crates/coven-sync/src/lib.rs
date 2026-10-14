@@ -1,5 +1,7 @@
 //! Device logs, store-log replay, keys, snapshots, files and durable operations (§§6–18).
 
+mod access_keys;
+pub use access_keys::DeleteAccessKeyError;
 mod conflicts;
 mod device_log_sync;
 mod effects;

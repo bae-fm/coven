@@ -387,6 +387,7 @@ impl StoreLogSync {
         let mut operations = self
             .removal_work(&local.log, &entries, &replay, member)
             .await?;
+        let deletions = crate::access_keys::deletions(&local.log.entries, &entries, &replay)?;
         let before = &local.log.replay.state;
         let after = &replay.state;
         let mut changed: BTreeSet<_> = before
@@ -450,6 +451,7 @@ impl StoreLogSync {
                 replay,
                 operations,
                 updates,
+                deletions,
             )
             .await?;
         *local = self.database.local_store_log().await?;

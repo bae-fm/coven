@@ -222,6 +222,7 @@ async fn intermediate_removal_cannot_stop_the_owner_before_batch_replay() {
             role: MemberRole::Admin,
             access: MemberAccess::S3AccessKey {
                 access_key_id: "ben".into(),
+                principal: coven_format::S3Principal::Console,
             },
         })
         .await

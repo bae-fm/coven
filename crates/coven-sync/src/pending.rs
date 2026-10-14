@@ -197,7 +197,7 @@ pub enum PendingReason {
         /// The retained grants.
         shares: Vec<RetainedAccess>,
     },
-    /// The administrator must delete this S3 key.
+    /// This S3 key awaits deletion with admin access or explicit confirmation (§13).
     DeleteAccessKey(#[serde(with = "encoding::AccessKey")] crate::AccessKeyToDelete),
     /// The uploading device cannot supply this file.
     FileUnavailable(FileMissingReason),
@@ -266,6 +266,16 @@ impl PendingValue for PendingRecord {
         Self {
             subject: PendingSubject::Audience(audience.clone()),
             reason: PendingReason::Waits(Prerequisite::Reload(audience)),
+            reported_by,
+        }
+    }
+    fn access_key(id: OperationId, reported_by: DeviceId, key: crate::AccessKeyToDelete) -> Self {
+        Self {
+            subject: PendingSubject::Operation {
+                id,
+                kind: crate::OperationKind::DeleteAccessKey,
+            },
+            reason: PendingReason::DeleteAccessKey(key),
             reported_by,
         }
     }

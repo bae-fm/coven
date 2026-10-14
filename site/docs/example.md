@@ -208,8 +208,8 @@ The host reads the current `SyncStatus` through
 `handle.subscribe_sync_status()`. The receiver immediately contains the current
 value and may coalesce intermediate values. A successful pass supplies its
 completion time. Use live queries to refresh views when their rows change;
-query `pending()` or observe `subscribe_pending()` for typed pending conditions.
-`access_keys_to_delete()` lists provider-console actions.
+query `pending()` or observe `subscribe_pending()` for typed pending conditions,
+including S3 keys awaiting deletion.
 
 ```rust
 let mut status = handle.subscribe_sync_status();

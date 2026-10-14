@@ -64,6 +64,7 @@ pub(crate) fn circle_history(circle: CircleId) -> Vec<(StoreLogEntry, StoreLogRe
         StoreChange::CreateStore {
             access: coven_format::MemberAccess::S3AccessKey {
                 access_key_id: "fixture-access-key".into(),
+                principal: coven_format::S3Principal::Console,
             },
             store: store.id,
             name: store.name.clone(),
@@ -80,6 +81,7 @@ pub(crate) fn circle_history(circle: CircleId) -> Vec<(StoreLogEntry, StoreLogRe
         StoreMember {
             access: coven_format::MemberAccess::S3AccessKey {
                 access_key_id: "fixture-access-key".into(),
+                principal: coven_format::S3Principal::Console,
             },
             sealing: ana.sealing,
             role: MemberRole::Admin,
@@ -101,6 +103,7 @@ pub(crate) fn circle_history(circle: CircleId) -> Vec<(StoreLogEntry, StoreLogRe
         StoreChange::AddMember {
             access: coven_format::MemberAccess::S3AccessKey {
                 access_key_id: "fixture-access-key".into(),
+                principal: coven_format::S3Principal::Console,
             },
             keys: ben.clone(),
             role: MemberRole::Member,
@@ -111,6 +114,7 @@ pub(crate) fn circle_history(circle: CircleId) -> Vec<(StoreLogEntry, StoreLogRe
         StoreMember {
             access: coven_format::MemberAccess::S3AccessKey {
                 access_key_id: "fixture-access-key".into(),
+                principal: coven_format::S3Principal::Console,
             },
             sealing: ben.sealing,
             role: MemberRole::Member,
@@ -175,12 +179,12 @@ pub(crate) async fn delete_circle(db: &Database, circle: CircleId) -> Result<(),
     let history = circle_history(circle);
     for (entry, replay) in &history[..4] {
         if !present.replay.entries.contains_key(&entry.position) {
-            db.apply_store_log::<PendingRecord>(checked(entry.clone()), replay.clone())
+            db.apply_store_log::<PendingRecord>(checked(entry.clone()), replay.clone(), Vec::new())
                 .await?;
         }
     }
     let (entry, replay) = history.last().unwrap();
-    db.apply_store_log::<PendingRecord>(checked(entry.clone()), replay.clone())
+    db.apply_store_log::<PendingRecord>(checked(entry.clone()), replay.clone(), Vec::new())
         .await
 }
 
@@ -214,7 +218,7 @@ async fn deletion_and_reversal_commit_marks_and_visible_rows_together() {
     let circle = CircleId(uuid::Uuid::from_u128(2));
     let history = circle_history(circle);
     for (entry, replay) in &history[..4] {
-        db.apply_store_log::<PendingRecord>(checked(entry.clone()), replay.clone())
+        db.apply_store_log::<PendingRecord>(checked(entry.clone()), replay.clone(), Vec::new())
             .await
             .unwrap();
     }
@@ -246,7 +250,7 @@ async fn deletion_and_reversal_commit_marks_and_visible_rows_together() {
     let before = db.store_log().await.unwrap();
     db.inspect_writer(|sql| sql.fail_at("refuse", "BEFORE DELETE ON notes", "keep circle"));
     assert!(matches!(
-        db.apply_store_log::<PendingRecord>(checked(delete.clone()), deleted.clone())
+        db.apply_store_log::<PendingRecord>(checked(delete.clone()), deleted.clone(), Vec::new())
             .await,
         Err(DbError::Sqlite(_))
     ));
@@ -264,7 +268,7 @@ async fn deletion_and_reversal_commit_marks_and_visible_rows_together() {
     assert!(!rows.is_marked_for_rerun());
     assert!(!losses.is_marked_for_rerun());
     db.inspect_writer(|sql| sql.batch("DROP TRIGGER refuse").unwrap());
-    db.apply_store_log::<PendingRecord>(checked(delete.clone()), deleted.clone())
+    db.apply_store_log::<PendingRecord>(checked(delete.clone()), deleted.clone(), Vec::new())
         .await
         .unwrap();
     assert_eq!(next(&mut rows).await, (0, 0));
@@ -303,7 +307,7 @@ async fn deletion_and_reversal_commit_marks_and_visible_rows_together() {
     let before = db.store_log().await.unwrap();
     db.inspect_writer(|sql| sql.fail_at("refuse", "BEFORE INSERT ON notes", "refuse restoration"));
     assert!(matches!(
-        db.apply_store_log::<PendingRecord>(checked(remove.clone()), restored.clone())
+        db.apply_store_log::<PendingRecord>(checked(remove.clone()), restored.clone(), Vec::new())
             .await,
         Err(DbError::Sqlite(_))
     ));
@@ -319,7 +323,7 @@ async fn deletion_and_reversal_commit_marks_and_visible_rows_together() {
     assert_eq!(count(&db, "notes"), 0);
     assert!(!rows.is_marked_for_rerun());
     db.inspect_writer(|sql| sql.batch("DROP TRIGGER refuse").unwrap());
-    db.apply_store_log::<PendingRecord>(checked(remove.clone()), restored.clone())
+    db.apply_store_log::<PendingRecord>(checked(remove.clone()), restored.clone(), Vec::new())
         .await
         .unwrap();
     assert_eq!(next(&mut rows).await, (1, 1));
@@ -369,7 +373,7 @@ async fn circle_deletion_commits_file_removal_with_the_entry_and_rolls_both_back
         .unwrap();
     let history = circle_history(circle);
     for (entry, replay) in &history[..4] {
-        db.apply_store_log::<PendingRecord>(checked(entry.clone()), replay.clone())
+        db.apply_store_log::<PendingRecord>(checked(entry.clone()), replay.clone(), Vec::new())
             .await
             .unwrap();
     }
@@ -401,7 +405,7 @@ async fn circle_deletion_commits_file_removal_with_the_entry_and_rolls_both_back
         )
     });
     assert!(matches!(
-        db.apply_store_log::<PendingRecord>(checked(entry.clone()), replay.clone())
+        db.apply_store_log::<PendingRecord>(checked(entry.clone()), replay.clone(), Vec::new())
             .await,
         Err(DbError::Sqlite(_))
     ));
@@ -411,7 +415,7 @@ async fn circle_deletion_commits_file_removal_with_the_entry_and_rolls_both_back
     assert_eq!(owned_paths(&store), paths);
     assert_eq!(std::fs::read(&paths[0]).unwrap(), b"original");
     db.inspect_writer(|sql| sql.batch("DROP TRIGGER refuse_file").unwrap());
-    db.apply_store_log::<PendingRecord>(checked(entry), replay.clone())
+    db.apply_store_log::<PendingRecord>(checked(entry), replay.clone(), Vec::new())
         .await
         .unwrap();
     assert_eq!(db.store_log().await.unwrap().replay, replay);
@@ -429,7 +433,7 @@ async fn a_failure_halfway_through_replacing_state_rolls_back_the_entry_too() {
     let circle = CircleId(uuid::Uuid::from_u128(2));
     let history = circle_history(circle);
     for (entry, replay) in &history[..2] {
-        db.apply_store_log::<PendingRecord>(checked(entry.clone()), replay.clone())
+        db.apply_store_log::<PendingRecord>(checked(entry.clone()), replay.clone(), Vec::new())
             .await
             .unwrap();
     }
@@ -443,16 +447,16 @@ async fn a_failure_halfway_through_replacing_state_rolls_back_the_entry_too() {
     });
     let (entry, replay) = history[2].clone();
     assert!(matches!(
-        db.apply_store_log::<PendingRecord>(checked(entry.clone()), replay.clone())
+        db.apply_store_log::<PendingRecord>(checked(entry.clone()), replay.clone(), Vec::new())
             .await,
         Err(DbError::Sqlite(_))
     ));
     assert_eq!(db.store_log().await.unwrap(), before);
     db.inspect_writer(|sql| sql.batch("DROP TRIGGER _coven_refuse").unwrap());
-    db.apply_store_log::<PendingRecord>(checked(entry.clone()), replay.clone())
+    db.apply_store_log::<PendingRecord>(checked(entry.clone()), replay.clone(), Vec::new())
         .await
         .unwrap();
-    db.apply_store_log::<PendingRecord>(checked(entry), replay.clone())
+    db.apply_store_log::<PendingRecord>(checked(entry), replay.clone(), Vec::new())
         .await
         .unwrap();
     assert_eq!(db.store_log().await.unwrap().replay, replay);
@@ -465,37 +469,37 @@ async fn stale_results_and_changed_entry_bytes_cannot_replace_the_applied_set() 
     let db = open(&store).await;
     let history = circle_history(CircleId(uuid::Uuid::from_u128(2)));
     let (first, initial) = &history[0];
-    db.apply_store_log::<PendingRecord>(checked(first.clone()), initial.clone())
+    db.apply_store_log::<PendingRecord>(checked(first.clone()), initial.clone(), Vec::new())
         .await
         .unwrap();
     let mut changed = first.clone();
     changed.timestamp = Timestamp::new(2, 0, changed.position.device).unwrap();
     assert!(
-        matches!(db.apply_store_log::<PendingRecord>(checked(changed), initial.clone()).await, Err(DbError::StoreLogEntryChanged(id)) if id==first.position)
+        matches!(db.apply_store_log::<PendingRecord>(checked(changed), initial.clone(), Vec::new()).await, Err(DbError::StoreLogEntryChanged(id)) if id==first.position)
     );
     let mut changed_view = checked(first.clone());
     changed_view.check = StoreLogCheck::NotAllowed;
     assert!(matches!(
-        db.apply_store_log::<PendingRecord>(changed_view, initial.clone()).await,
+        db.apply_store_log::<PendingRecord>(changed_view, initial.clone(), Vec::new()).await,
         Err(DbError::StoreLogEntryChanged(id)) if id == first.position
     ));
     let mut changed_time = checked(first.clone());
     changed_time.stored_at += Duration::from_millis(1);
     assert!(matches!(
-        db.apply_store_log::<PendingRecord>(changed_time, initial.clone()).await,
+        db.apply_store_log::<PendingRecord>(changed_time, initial.clone(), Vec::new()).await,
         Err(DbError::StoreLogEntryChanged(id)) if id == first.position
     ));
     let (second, next) = &history[1];
     assert!(matches!(
-        db.apply_store_log::<PendingRecord>(checked(second.clone()), initial.clone())
+        db.apply_store_log::<PendingRecord>(checked(second.clone()), initial.clone(), Vec::new())
             .await,
         Err(DbError::StoreLogEntriesChanged)
     ));
-    db.apply_store_log::<PendingRecord>(checked(second.clone()), next.clone())
+    db.apply_store_log::<PendingRecord>(checked(second.clone()), next.clone(), Vec::new())
         .await
         .unwrap();
     assert!(matches!(
-        db.apply_store_log::<PendingRecord>(checked(first.clone()), initial.clone())
+        db.apply_store_log::<PendingRecord>(checked(first.clone()), initial.clone(), Vec::new())
             .await,
         Err(DbError::StoreLogEntriesChanged)
     ));
@@ -508,7 +512,7 @@ async fn late_verdict_and_first_publication_commit_together_and_cannot_be_revers
     let store = TestStore::new();
     let db = open(&store).await;
     let (creation, mut result) = circle_history(CircleId(uuid::Uuid::from_u128(2)))[0].clone();
-    db.apply_store_log::<PendingRecord>(checked(creation.clone()), result.clone())
+    db.apply_store_log::<PendingRecord>(checked(creation.clone()), result.clone(), Vec::new())
         .await
         .unwrap();
     let late = ReplayEntry {
@@ -519,6 +523,7 @@ async fn late_verdict_and_first_publication_commit_together_and_cannot_be_revers
                 role: MemberRole::Member,
                 access: coven_format::MemberAccess::S3AccessKey {
                     access_key_id: "late-access".into(),
+                    principal: coven_format::S3Principal::Console,
                 },
             },
         ),
@@ -538,12 +543,12 @@ async fn late_verdict_and_first_publication_commit_together_and_cannot_be_revers
         )
     });
     assert!(db
-        .apply_store_log::<PendingRecord>(late.clone(), result.clone())
+        .apply_store_log::<PendingRecord>(late.clone(), result.clone(), Vec::new())
         .await
         .is_err());
     assert_eq!(db.store_log().await.unwrap(), before);
     db.inspect_writer(|sql| sql.batch("DROP TRIGGER _coven_fail").unwrap());
-    db.apply_store_log::<PendingRecord>(late.clone(), result.clone())
+    db.apply_store_log::<PendingRecord>(late.clone(), result.clone(), Vec::new())
         .await
         .unwrap();
     db.close().await.unwrap();
@@ -556,21 +561,22 @@ async fn late_verdict_and_first_publication_commit_together_and_cannot_be_revers
         .entries
         .insert(late.entry.position, EntryOutcome::Kept);
     assert!(db
-        .apply_store_log::<PendingRecord>(checked(creation), reversed)
+        .apply_store_log::<PendingRecord>(checked(creation), reversed, Vec::new())
         .await
         .is_err());
     assert_eq!(db.store_log().await.unwrap(), saved);
     let mut changed = late.clone();
     changed.check = StoreLogCheck::Allowed;
     assert!(matches!(
-        db.apply_store_log::<PendingRecord>(changed, result.clone())
+        db.apply_store_log::<PendingRecord>(changed, result.clone(), Vec::new())
             .await,
         Err(DbError::StoreLogEntryChanged(_))
     ));
     let mut changed = late;
     changed.stored_at += Duration::from_millis(1);
     assert!(matches!(
-        db.apply_store_log::<PendingRecord>(changed, result).await,
+        db.apply_store_log::<PendingRecord>(changed, result, Vec::new())
+            .await,
         Err(DbError::StoreLogEntryChanged(_))
     ));
     assert_eq!(db.store_log().await.unwrap(), saved);
@@ -618,7 +624,7 @@ async fn removed_identities_keys_versions_resets_and_every_drop_reason_round_tri
         replay
             .entries
             .insert(e.position, EntryOutcome::Dropped(reason));
-        db.apply_store_log::<PendingRecord>(checked(e.clone()), replay.clone())
+        db.apply_store_log::<PendingRecord>(checked(e.clone()), replay.clone(), Vec::new())
             .await
             .unwrap();
         expected.entries.push(checked(e));
@@ -644,7 +650,7 @@ async fn removed_identities_keys_versions_resets_and_every_drop_reason_round_tri
         },
     );
     replay.entries.insert(schema.position, EntryOutcome::Kept);
-    db.apply_store_log::<PendingRecord>(checked(schema.clone()), replay.clone())
+    db.apply_store_log::<PendingRecord>(checked(schema.clone()), replay.clone(), Vec::new())
         .await
         .unwrap();
     expected.entries.push(checked(schema));
@@ -665,7 +671,7 @@ async fn removed_identities_keys_versions_resets_and_every_drop_reason_round_tri
         );
         replay.state.resets.insert(audience, snapshot);
         replay.entries.insert(reset.position, EntryOutcome::Kept);
-        db.apply_store_log::<PendingRecord>(checked(reset.clone()), replay.clone())
+        db.apply_store_log::<PendingRecord>(checked(reset.clone()), replay.clone(), Vec::new())
             .await
             .unwrap();
         expected.entries.push(checked(reset));
@@ -685,7 +691,7 @@ async fn entries_and_result_are_read_from_one_snapshot_during_an_apply() {
     let db = open(&store).await;
     let history = circle_history(CircleId(uuid::Uuid::from_u128(2)));
     let (first, initial) = history[0].clone();
-    db.apply_store_log::<PendingRecord>(checked(first), initial)
+    db.apply_store_log::<PendingRecord>(checked(first), initial, Vec::new())
         .await
         .unwrap();
     let (ready, wait_ready) = std::sync::mpsc::channel();
@@ -705,7 +711,7 @@ async fn entries_and_result_are_read_from_one_snapshot_during_an_apply() {
     });
     wait_ready.recv_timeout(Duration::from_secs(5)).unwrap();
     let (second, next) = history[1].clone();
-    db.apply_store_log::<PendingRecord>(checked(second), next.clone())
+    db.apply_store_log::<PendingRecord>(checked(second), next.clone(), Vec::new())
         .await
         .unwrap();
     resume.send(()).unwrap();
@@ -721,7 +727,7 @@ async fn audience_versions_round_trip_and_a_failed_raise_keeps_every_audience() 
     let gifts = CircleId(uuid::Uuid::from_u128(2));
     let notes = CircleId(uuid::Uuid::from_u128(3));
     for (entry, replay) in &circle_history(gifts)[..4] {
-        db.apply_store_log::<PendingRecord>(checked(entry.clone()), replay.clone())
+        db.apply_store_log::<PendingRecord>(checked(entry.clone()), replay.clone(), Vec::new())
             .await
             .unwrap();
     }
@@ -743,7 +749,7 @@ async fn audience_versions_round_trip_and_a_failed_raise_keeps_every_audience() 
         },
     );
     replay.entries.insert(create.position, EntryOutcome::Kept);
-    db.apply_store_log::<PendingRecord>(checked(create), replay.clone())
+    db.apply_store_log::<PendingRecord>(checked(create), replay.clone(), Vec::new())
         .await
         .unwrap();
     let mut number = 6;
@@ -774,7 +780,7 @@ async fn audience_versions_round_trip_and_a_failed_raise_keeps_every_audience() 
             },
         );
         replay.entries.insert(schema.position, EntryOutcome::Kept);
-        db.apply_store_log::<PendingRecord>(checked(schema), replay.clone())
+        db.apply_store_log::<PendingRecord>(checked(schema), replay.clone(), Vec::new())
             .await
             .unwrap();
         assert_eq!(db.store_log().await.unwrap().replay, replay);
@@ -809,13 +815,13 @@ async fn audience_versions_round_trip_and_a_failed_raise_keeps_every_audience() 
         )
     });
     assert!(matches!(
-        db.apply_store_log::<PendingRecord>(checked(raised.clone()), replay.clone())
+        db.apply_store_log::<PendingRecord>(checked(raised.clone()), replay.clone(), Vec::new())
             .await,
         Err(DbError::Sqlite(_))
     ));
     assert_eq!(db.store_log().await.unwrap(), before);
     db.inspect_writer(|sql| sql.batch("DROP TRIGGER _coven_refuse").unwrap());
-    db.apply_store_log::<PendingRecord>(checked(raised), replay.clone())
+    db.apply_store_log::<PendingRecord>(checked(raised), replay.clone(), Vec::new())
         .await
         .unwrap();
     assert_eq!(db.store_log().await.unwrap().replay, replay);
@@ -830,7 +836,7 @@ async fn store_identity_has_no_duplicate_table_and_boundaries_require_snapshots(
     let store = TestStore::new();
     let db = open(&store).await;
     let (entry, replay) = circle_history(CircleId(uuid::Uuid::from_u128(2)))[0].clone();
-    db.apply_store_log::<PendingRecord>(checked(entry), replay)
+    db.apply_store_log::<PendingRecord>(checked(entry), replay, Vec::new())
         .await
         .unwrap();
     let before = db.store_log().await.unwrap();
@@ -871,7 +877,7 @@ async fn a_failed_drop_report_rolls_back_consumption_and_replay() {
     let store = TestStore::new();
     let db = open(&store).await;
     let (creation, mut result) = circle_history(CircleId(uuid::Uuid::from_u128(2)))[0].clone();
-    db.apply_store_log::<PendingRecord>(checked(creation), result.clone())
+    db.apply_store_log::<PendingRecord>(checked(creation), result.clone(), Vec::new())
         .await
         .unwrap();
     let own = db.local_store_log().await.unwrap().device;
@@ -904,7 +910,7 @@ async fn a_failed_drop_report_rolls_back_consumption_and_replay() {
         )
     });
     let failed = db
-        .apply_store_log::<PendingRecord>(late.clone(), result.clone())
+        .apply_store_log::<PendingRecord>(late.clone(), result.clone(), Vec::new())
         .await;
     assert!(
         matches!(failed, Err(DbError::PendingPersistence(_))),
@@ -917,7 +923,7 @@ async fn a_failed_drop_report_rolls_back_consumption_and_replay() {
     db.inspect_writer(|sql| sql.batch("DROP TRIGGER fail_report").unwrap());
     let mut live = db.subscribe_pending::<PendingRecord>();
     assert!(live.next().await.unwrap().is_empty());
-    db.apply_store_log::<PendingRecord>(late.clone(), result.clone())
+    db.apply_store_log::<PendingRecord>(late.clone(), result.clone(), Vec::new())
         .await
         .unwrap();
     let expected = [PendingRecord::dropped_entry(
@@ -925,7 +931,7 @@ async fn a_failed_drop_report_rolls_back_consumption_and_replay() {
         DropReason::LandedTooLate,
     )];
     assert_eq!(live.next().await.unwrap(), expected);
-    db.apply_store_log::<PendingRecord>(late, result.clone())
+    db.apply_store_log::<PendingRecord>(late, result.clone(), Vec::new())
         .await
         .unwrap();
     assert_eq!(db.pending::<PendingRecord>().await.unwrap(), expected);

@@ -53,7 +53,7 @@ async fn replacing_and_dropping_circle_causes_preserves_generations_and_setters(
     let history = circle_history(circle);
     for (entry, replay) in &history[..4] {
         for db in [&author, &db] {
-            db.apply_store_log::<PendingRecord>(checked(entry.clone()), replay.clone())
+            db.apply_store_log::<PendingRecord>(checked(entry.clone()), replay.clone(), Vec::new())
                 .await
                 .unwrap();
         }
@@ -79,7 +79,7 @@ async fn replacing_and_dropping_circle_causes_preserves_generations_and_setters(
     );
     let initial = states(&db);
     let (deletion, mut replay) = history[4].clone();
-    db.apply_store_log::<PendingRecord>(checked(deletion.clone()), replay.clone())
+    db.apply_store_log::<PendingRecord>(checked(deletion.clone()), replay.clone(), Vec::new())
         .await
         .unwrap();
     assert_eq!(states(&db), initial);
@@ -112,14 +112,18 @@ async fn replacing_and_dropping_circle_causes_preserves_generations_and_setters(
         sql.fail_at("refuse", "BEFORE UPDATE ON _coven_lost", "retain old cause")
     });
     assert!(matches!(
-        db.apply_store_log::<PendingRecord>(checked(replacement.clone()), replay.clone())
-            .await,
+        db.apply_store_log::<PendingRecord>(
+            checked(replacement.clone()),
+            replay.clone(),
+            Vec::new()
+        )
+        .await,
         Err(crate::DbError::Sqlite(_))
     ));
     assert_eq!(db.store_log().await.unwrap(), before);
     causes(&db, deletion.position, 2).await;
     db.inspect_writer(|sql| sql.batch("DROP TRIGGER refuse").unwrap());
-    db.apply_store_log::<PendingRecord>(checked(replacement.clone()), replay.clone())
+    db.apply_store_log::<PendingRecord>(checked(replacement.clone()), replay.clone(), Vec::new())
         .await
         .unwrap();
     assert_eq!(states(&db), expected);
@@ -135,7 +139,7 @@ async fn replacing_and_dropping_circle_causes_preserves_generations_and_setters(
     );
     replay.state.circle_deletions.clear();
     replay.state.circles = history[3].1.state.circles.clone();
-    db.apply_store_log::<PendingRecord>(checked(replacement), replay)
+    db.apply_store_log::<PendingRecord>(checked(replacement), replay, Vec::new())
         .await
         .unwrap();
     assert_eq!(states(&db), expected);

@@ -215,8 +215,10 @@ fn concurrent_member_removal_defeats_access_replacement_in_every_arrival_order()
             1,
             1,
             StoreChange::SetAccess {
+                member: member(1),
                 access: coven_format::MemberAccess::S3AccessKey {
                     access_key_id: "replacement".into(),
+                    principal: coven_format::S3Principal::Console,
                 },
             },
         );
@@ -234,6 +236,7 @@ fn concurrent_member_removal_defeats_access_replacement_in_every_arrival_order()
                 r.state.members[&member(1)].access,
                 coven_format::MemberAccess::S3AccessKey {
                     access_key_id: "fixture-access-key".into(),
+                    principal: coven_format::S3Principal::Console,
                 }
             );
             assert_eq!(h.drops(r), [if removal_first { 4 } else { 3 }]);
@@ -251,6 +254,7 @@ fn access_entries_conflict_by_member_and_combine_only_equal_access() {
                 1,
                 &[0, 1, 2, 3, 4],
                 StoreChange::SetAccess {
+                    member: member(1),
                     access: coven_format::MemberAccess::ProviderAccount("first@example.com".into()),
                 },
             );
@@ -260,6 +264,7 @@ fn access_entries_conflict_by_member_and_combine_only_equal_access() {
                 4,
                 &[0, 1, 2, 3, 4],
                 StoreChange::SetAccess {
+                    member: member(second_member),
                     access: coven_format::MemberAccess::ProviderAccount(if same_access {
                         "first@example.com".into()
                     } else {
@@ -287,6 +292,7 @@ fn access_entries_conflict_by_member_and_combine_only_equal_access() {
 
 pub(crate) fn independent_histories() -> Vec<History> {
     let access = StoreChange::SetAccess {
+        member: member(1),
         access: coven_format::MemberAccess::ProviderAccount("ben@example.com".into()),
     };
     let remove_device = |id| StoreChange::RemoveDevice {

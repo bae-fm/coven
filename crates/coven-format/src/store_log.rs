@@ -99,9 +99,12 @@ pub enum StoreChange {
         /// The initial role.
         role: MemberRole,
     },
-    /// Record the author's current storage access, used by a later removal (§9).
+    /// Record a member's current storage access, used by a later removal (§9):
+    /// the author's own, or an admin's replacement S3 key for another member.
     SetAccess {
-        /// The author's provider account or public S3 key id; no credentials.
+        /// The member whose access this records.
+        member: MemberId,
+        /// The provider account, or the S3 key id and its principal; no credentials.
         access: crate::MemberAccess,
     },
     /// Remove a member and delete circles left empty (§13).
@@ -265,7 +268,7 @@ store_changes!(
     10 => RemoveCircleMember { circle, member },
     11 => RaiseSchema { version, snapshot },
     13 => Reset { snapshot },
-    14 => SetAccess { access },
+    14 => SetAccess { member, access },
     15 => RotateKey { audience, key, key_hash },
 );
 

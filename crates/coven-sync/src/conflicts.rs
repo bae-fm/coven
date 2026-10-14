@@ -59,9 +59,8 @@ fn required_member<'a>(entry: &'a StoreLogEntry, view: &'a StoreLogCheck) -> Opt
         ChangeRole { member, .. }
         | AddCircleMember { member, .. }
         | RemoveCircleMember { member, .. } => Some(member),
-        SetAccess { .. } | AddDevice { .. } | CreateCircle { .. } | DeleteCircle { .. } => {
-            Some(&entry.author)
-        }
+        SetAccess { member, .. } => Some(member),
+        AddDevice { .. } | CreateCircle { .. } | DeleteCircle { .. } => Some(&entry.author),
         RemoveDevice { .. } => match view {
             StoreLogCheck::DeviceOwner(owner) => Some(owner),
             _ => unreachable!("authorized device removal has an observed owner"),
@@ -118,7 +117,16 @@ fn same_meaning(
     use StoreChange::*;
     match (&a.change, &b.change) {
         (CreateStore { .. }, CreateStore { .. }) => true,
-        (SetAccess { access: x }, SetAccess { access: y }) => a.author == b.author && x == y,
+        (
+            SetAccess {
+                member: m,
+                access: x,
+            },
+            SetAccess {
+                member: n,
+                access: y,
+            },
+        ) => m == n && x.same_credential(y),
         (
             AddMember {
                 keys: m, role: r, ..
@@ -205,7 +213,7 @@ fn contradiction(
 ) -> bool {
     use StoreChange::*;
     let access_membership_and_snapshots = match (&a.change, &b.change) {
-        (SetAccess { .. }, SetAccess { .. }) => a.author == b.author,
+        (SetAccess { member: m, .. }, SetAccess { member: n, .. }) => m == n,
         (
             AddCircleMember {
                 circle: c,

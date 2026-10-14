@@ -242,7 +242,7 @@ async fn data_differential_entry_effects_circles() {
             "CREATE TABLE rows(id TEXT NOT NULL PRIMARY KEY,audience TEXT NOT NULL,a TEXT,b TEXT);
              CREATE TABLE pins(row TEXT REFERENCES rows(id) ON DELETE CASCADE)").await.unwrap();
         for (entry, replay) in &history[..4] {
-            db.apply_store_log::<Record>(checked(entry.clone()), replay.clone())
+            db.apply_store_log::<Record>(checked(entry.clone()), replay.clone(), Vec::new())
                 .await
                 .unwrap();
         }
@@ -272,7 +272,7 @@ async fn data_differential_entry_effects_circles() {
         for stage in 0..3 {
             if stage == 1 {
                 let (entry, replay) = &history[4];
-                db.apply_store_log::<Record>(checked(entry.clone()), replay.clone())
+                db.apply_store_log::<Record>(checked(entry.clone()), replay.clone(), Vec::new())
                     .await
                     .unwrap();
             } else if stage == 2 {
@@ -304,7 +304,7 @@ async fn data_differential_entry_effects_circles() {
                     history[4].0.position,
                     crate::EntryOutcome::Dropped(crate::DropReason::BeatenBy(removal.position)),
                 );
-                db.apply_store_log::<Record>(checked(removal), replay)
+                db.apply_store_log::<Record>(checked(removal), replay, Vec::new())
                     .await
                     .unwrap();
             }

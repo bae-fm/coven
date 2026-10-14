@@ -105,9 +105,13 @@ async fn a_ready_batch_rolls_back_entries_cached_state_and_operation_progress_to
     let history = circle_history(coven_foundation::id_source::CircleId(
         uuid::Uuid::from_u128(2),
     ));
-    db.apply_store_log::<Record>(checked(history[0].0.clone()), history[0].1.clone())
-        .await
-        .unwrap();
+    db.apply_store_log::<Record>(
+        checked(history[0].0.clone()),
+        history[0].1.clone(),
+        Vec::new(),
+    )
+    .await
+    .unwrap();
     let before = db.local_store_log().await.unwrap().log;
     let operation = db
         .start_operation(NewOperation {
@@ -141,7 +145,8 @@ async fn a_ready_batch_rolls_back_entries_cached_state_and_operation_progress_to
                 incoming.clone(),
                 replay.clone(),
                 vec![],
-                vec![update()]
+                vec![update()],
+                Vec::new()
             )
             .await
             .is_err());
@@ -157,6 +162,7 @@ async fn a_ready_batch_rolls_back_entries_cached_state_and_operation_progress_to
         replay.clone(),
         vec![],
         vec![update()],
+        Vec::new(),
     )
     .await
     .unwrap();
@@ -166,7 +172,7 @@ async fn a_ready_batch_rolls_back_entries_cached_state_and_operation_progress_to
     assert_eq!(db.local_store_log().await.unwrap().log, after);
     assert_eq!(db.operation(operation).await.unwrap().unwrap().last_step, 4);
     assert!(matches!(
-        db.apply_store_log_batch::<Record>(before, incoming, replay, vec![], vec![])
+        db.apply_store_log_batch::<Record>(before, incoming, replay, vec![], vec![], Vec::new())
             .await,
         Err(DbError::StoreLogEntriesChanged)
     ));
@@ -210,7 +216,7 @@ async fn cancelled_batch_caller_cannot_leave_the_decoded_log_behind_its_commit()
     let expected = replay.clone();
     let task = tokio::spawn(async move {
         writer
-            .apply_store_log_batch::<Record>(before, entries, replay, vec![], vec![])
+            .apply_store_log_batch::<Record>(before, entries, replay, vec![], vec![], Vec::new())
             .await
     });
     wait_committed.await.unwrap();
@@ -232,15 +238,43 @@ async fn cancelled_batch_caller_cannot_leave_the_decoded_log_behind_its_commit()
 
 #[cfg(test)]
 mod conformance {
-    use crate::{tests::TestStore, AccessKeyToDelete, DbError, NewOperation, OperationUpdate};
+    use crate::{
+        tests::TestStore, AccessKeyDeletion, AccessKeyToDelete, DbError, NewOperation,
+        OperationUpdate,
+    };
+
+    fn deletion(key: &str) -> AccessKeyDeletion {
+        AccessKeyDeletion {
+            key: AccessKeyToDelete {
+                access_key_id: key.into(),
+                principal: coven_format::S3Principal::Console,
+                member: None,
+            },
+            operation: NewOperation {
+                kind: "delete-access-key".into(),
+                data: key.as_bytes().to_vec(),
+                started_by: "coven".into(),
+            },
+        }
+    }
+
+    async fn pending(db: &crate::Database) -> Vec<String> {
+        let mut keys: Vec<_> = db
+            .pending::<crate::pending::tests::Record>()
+            .await
+            .unwrap()
+            .into_iter()
+            .filter_map(|record| record.access_key().map(str::to_owned))
+            .collect();
+        keys.sort();
+        keys
+    }
 
     #[tokio::test]
     async fn access_key_confirmation_survives_repeated_notices_and_reopening() {
         let store = TestStore::new();
         let db = store.builder(vec![], vec![]).open().await.unwrap();
-        db.confirm_access_key_deleted("confirmed-first".into())
-            .await
-            .unwrap();
+        db.clear_access_key("confirmed-first".into()).await.unwrap();
         db.close().await.unwrap();
         for replayed in [false, true] {
             let db = store.builder(vec![], vec![]).open().await.unwrap();
@@ -252,53 +286,53 @@ mod conformance {
                 })
                 .await
                 .unwrap();
-            let keys = ["confirmed-first", "confirmed-after"]
-                .map(|key| AccessKeyToDelete {
-                    access_key_id: key.into(),
-                    member: None,
-                })
-                .to_vec();
+            let keys = ["confirmed-first", "confirmed-after"].map(deletion);
             // A failed journal update must not leave a deletion notice behind.
             let error = db
                 .record_access_key_deletions::<crate::pending::tests::Record>(
-                    OperationUpdate {
+                    Some(OperationUpdate {
                         id,
                         previous: 1,
                         last_step: 2,
                         data: vec![2],
-                    },
-                    keys.clone(),
-                    None,
+                    }),
+                    keys.into_iter().collect(),
                 )
                 .await
                 .unwrap_err();
             assert!(matches!(error, DbError::OperationChanged(changed) if changed == id));
-            assert!(db.access_keys_to_delete().await.unwrap().is_empty());
+            assert!(pending(&db).await.is_empty());
+            assert_eq!(db.operations().await.unwrap().len(), 1);
             assert_eq!(db.operation(id).await.unwrap().unwrap().last_step, 0);
             db.record_access_key_deletions::<crate::pending::tests::Record>(
-                OperationUpdate {
+                Some(OperationUpdate {
                     id,
                     previous: 0,
                     last_step: 1,
                     data: vec![2],
-                },
-                keys,
-                None,
+                }),
+                ["confirmed-first", "confirmed-after"].map(deletion).into(),
             )
             .await
             .unwrap();
-            let pending = db.access_keys_to_delete().await.unwrap();
-            assert_eq!(pending.len(), usize::from(!replayed));
-            assert!(pending
-                .iter()
-                .all(|key| key.access_key_id == "confirmed-after"));
-            db.confirm_access_key_deleted("confirmed-after".into())
-                .await
-                .unwrap();
-            db.confirm_access_key_deleted("confirmed-after".into())
-                .await
-                .unwrap();
-            assert!(db.access_keys_to_delete().await.unwrap().is_empty());
+            // Recording an open key again keeps its one operation and notice.
+            db.record_access_key_deletions::<crate::pending::tests::Record>(
+                None,
+                vec![deletion("confirmed-after")],
+            )
+            .await
+            .unwrap();
+            let expected: Vec<String> = if replayed {
+                vec![]
+            } else {
+                vec!["confirmed-after".into()]
+            };
+            assert_eq!(pending(&db).await, expected);
+            assert_eq!(db.operations().await.unwrap().len(), 1 + expected.len());
+            db.clear_access_key("confirmed-after".into()).await.unwrap();
+            db.clear_access_key("confirmed-after".into()).await.unwrap();
+            assert!(pending(&db).await.is_empty());
+            assert_eq!(db.operations().await.unwrap().len(), 1);
             db.finish_operation(id).await.unwrap();
             db.close().await.unwrap();
         }

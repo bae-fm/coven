@@ -93,6 +93,7 @@ pub(crate) enum Drop {
 #[serde(remote = "crate::AccessKeyToDelete")]
 pub(crate) struct AccessKey {
     access_key_id: String,
+    principal: coven_format::S3Principal,
     #[serde(with = "optional_member")]
     member: Option<coven_crypto::MemberId>,
 }

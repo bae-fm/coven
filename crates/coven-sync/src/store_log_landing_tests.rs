@@ -464,11 +464,13 @@ async fn setup_consumes_a_late_access_entry_before_committing_credentials() {
     b.sync.load_new_device("access writer").await.unwrap();
     let access = coven_format::MemberAccess::S3AccessKey {
         access_key_id: "replacement".into(),
+        principal: coven_format::S3Principal::Console,
     };
     b.interrupt_entry(2).await;
     assert!(b
         .sync
         .make_and_upload_entry(StoreChange::SetAccess {
+            member: b.member.member_id(),
             access: access.clone()
         })
         .await

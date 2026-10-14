@@ -713,7 +713,7 @@ impl ProviderOps for MemoryProvider {
         self.before_request(MemoryRequest::Other("revoke_access"))
             .await?;
         match (self.config.provider(), member) {
-            (CloudProvider::S3, MemberAccess::S3AccessKey { access_key_id }) => Ok(
+            (CloudProvider::S3, MemberAccess::S3AccessKey { access_key_id, .. }) => Ok(
                 ProviderRevocation::Reported(MemberRemoval::DeleteAccessKey {
                     access_key_id: access_key_id.clone(),
                 }),

@@ -49,7 +49,7 @@ pub use coven_database::{DropReason, EntryTarget};
 pub use coven_database::{LogObject, LogRefusal};
 pub use coven_format::pending::RefusalCode;
 pub use coven_format::value::EntryId;
-pub use coven_format::MemberAccess;
+pub use coven_format::{IamPolicy, MemberAccess, S3Principal};
 pub use coven_foundation::clock::{Clock, ClockRef, SystemClock};
 pub use coven_foundation::files::FileError as DiskError;
 pub use coven_foundation::files::{

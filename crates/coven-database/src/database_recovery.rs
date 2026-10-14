@@ -49,7 +49,7 @@ pub(crate) fn salvage(
                 "_coven_store_log_uploads",
                 "_coven_key_publications",
                 "_coven_key_uploads",
-                "_coven_access_keys_to_delete",
+                "_coven_access_keys",
                 "_coven_file_uploads",
                 "_coven_file_upload_chunks",
                 "_coven_file_removals",

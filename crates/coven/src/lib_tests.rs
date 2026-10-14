@@ -273,12 +273,16 @@ impl Network {
                 &*status.borrow()
             )
         });
+        // S3 keys awaiting deletion stay until confirmed or deleted (§13).
         assert!(handle
             .pending()
             .await
             .unwrap()
             .iter()
-            .all(|record| !matches!(record.subject, PendingSubject::Operation { .. })));
+            .all(|record| !matches!(
+                record.subject,
+                PendingSubject::Operation { kind, .. } if kind != OperationKind::DeleteAccessKey
+            )));
     }
 
     async fn quiet(&self) {
@@ -373,6 +377,22 @@ impl Network {
             device.handle.close().await.unwrap();
         }
     }
+}
+
+/// S3 keys a handle lists as pending deletion, by key id (§13).
+pub(crate) async fn access_keys(handle: &CovenHandle) -> Vec<AccessKeyToDelete> {
+    let mut keys: Vec<_> = handle
+        .pending()
+        .await
+        .unwrap()
+        .into_iter()
+        .filter_map(|record| match record.reason {
+            PendingReason::DeleteAccessKey(key) => Some(key),
+            _ => None,
+        })
+        .collect();
+    keys.sort_by(|a, b| a.access_key_id.cmp(&b.access_key_id));
+    keys
 }
 
 pub(crate) async fn next_join_request(owner: &CovenHandle) -> JoinRequest {
@@ -686,21 +706,21 @@ async fn reconnecting_with_a_replacement_key_records_the_access_that_removal_rev
         .wait_for(|s| matches!(s, SyncStatus::Stopped))
         .await
         .unwrap();
+    let key = |id: &str| AccessKeyToDelete {
+        access_key_id: id.into(),
+        principal: coven_format::S3Principal::Console,
+        member: Some(member.clone()),
+    };
     assert_eq!(
-        owner.access_keys_to_delete().await.unwrap(),
-        ["member-1", "replacement-key"].map(|key| AccessKeyToDelete {
-            access_key_id: key.into(),
-            member: Some(member.clone()),
-        })
+        access_keys(owner).await,
+        [key("member-1"), key("replacement-key")]
     );
     owner.confirm_access_key_deleted("member-1").await.unwrap();
-    assert_eq!(
-        owner.access_keys_to_delete().await.unwrap(),
-        vec![AccessKeyToDelete {
-            access_key_id: "replacement-key".into(),
-            member: Some(member),
-        }]
-    );
+    assert_eq!(access_keys(owner).await, [key("replacement-key")]);
+    owner
+        .confirm_access_key_deleted("replacement-key")
+        .await
+        .unwrap();
     assert!(owner.pending().await.unwrap().is_empty());
     network.close().await;
 }

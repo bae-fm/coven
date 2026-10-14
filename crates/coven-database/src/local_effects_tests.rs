@@ -231,7 +231,7 @@ async fn a_child_of_two_provisionally_hidden_parents_returns_when_both_do() {
         .await
         .unwrap();
     for (entry, replay) in &history[..4] {
-        db.apply_store_log::<Record>(checked(entry.clone()), replay.clone())
+        db.apply_store_log::<Record>(checked(entry.clone()), replay.clone(), Vec::new())
             .await
             .unwrap();
     }
@@ -261,7 +261,7 @@ async fn a_child_of_two_provisionally_hidden_parents_returns_when_both_do() {
     };
     // The circle's deletion hides its row: the pin and the pair cascade.
     let (deletion, replay) = &history[4];
-    db.apply_store_log::<Record>(checked(deletion.clone()), replay.clone())
+    db.apply_store_log::<Record>(checked(deletion.clone()), replay.clone(), Vec::new())
         .await
         .unwrap();
     assert_eq!(local(&db), (0, 0));
@@ -304,7 +304,7 @@ async fn a_child_of_two_provisionally_hidden_parents_returns_when_both_do() {
         deletion.position,
         crate::EntryOutcome::Dropped(crate::DropReason::BeatenBy(removal.position)),
     );
-    db.apply_store_log::<Record>(checked(removal), replay)
+    db.apply_store_log::<Record>(checked(removal), replay, Vec::new())
         .await
         .unwrap();
     assert_eq!(count(&db, "rows"), 2);

@@ -484,7 +484,7 @@ impl ProviderOps for S3Storage {
         member: &MemberAccess,
     ) -> Result<ProviderRevocation, StorageError> {
         match member {
-            MemberAccess::S3AccessKey { access_key_id } => Ok(ProviderRevocation::Reported(
+            MemberAccess::S3AccessKey { access_key_id, .. } => Ok(ProviderRevocation::Reported(
                 MemberRemoval::DeleteAccessKey {
                     access_key_id: access_key_id.clone(),
                 },

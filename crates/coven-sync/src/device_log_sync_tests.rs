@@ -72,6 +72,7 @@ pub(crate) async fn group(storage: Arc<MemoryStorage>, count: u64) -> Vec<Device
             device_name: "one".into(),
             access: coven_format::MemberAccess::S3AccessKey {
                 access_key_id: "owner-key".into(),
+                principal: coven_format::S3Principal::Console,
             },
         })
         .await

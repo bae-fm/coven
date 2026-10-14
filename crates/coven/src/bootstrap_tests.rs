@@ -738,9 +738,10 @@ async fn removal_lists_every_recorded_key_including_a_dropped_replacement() {
             );
         };
         assert_eq!(
-            owner.handle.access_keys_to_delete().await.unwrap(),
+            crate::tests::access_keys(&owner.handle).await,
             ["invited-key", "new-member-key"].map(|key| AccessKeyToDelete {
                 access_key_id: key.into(),
+                principal: coven_format::S3Principal::Console,
                 member: Some(member.clone())
             })
         );

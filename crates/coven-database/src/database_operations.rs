@@ -4,9 +4,10 @@ use super::Database;
 use crate::{DbError, NewOperation, OperationId, OperationRecord, OperationUpdate};
 
 impl Database {
-    /// Install a ready batch and its replay, data effects, drop reports and operation
-    /// progress together. Reject a result prepared against another committed log,
-    /// and a kept creation that disagrees with the directory settings (§9).
+    /// Install a ready batch and its replay, data effects, drop reports, operation
+    /// progress and S3 deletion obligations together. Reject a result prepared against
+    /// another committed log, and a kept creation that disagrees with the directory
+    /// settings (§9).
     /// The retained decoded value changes on the database thread after commit,
     /// including when the awaiting caller is cancelled or subsequent cleanup fails.
     pub async fn apply_store_log_batch<P: crate::PendingValue>(
@@ -16,6 +17,7 @@ impl Database {
         replay: crate::StoreLogReplay,
         operations: Vec<crate::NewOperation>,
         updates: Vec<crate::OperationUpdate>,
+        access_keys: Vec<crate::AccessKeyDeletion>,
     ) -> Result<(), DbError> {
         self.call(move |inner| {
             inner.with_store_log(|current| {
@@ -77,6 +79,7 @@ impl Database {
                             files,
                             &operations,
                             &updates,
+                            &access_keys,
                         )
                     };
                     if let Some(reader) = reader {
@@ -248,65 +251,34 @@ impl Database {
         .await
     }
 
-    /// Persist public S3 key ids with their operation step. Previously confirmed
-    /// ids remain confirmed even when another entry or invitation names them.
-    /// A retained-grant condition commits with the same completed step.
+    /// Commit an operation's step together with new S3 deletion obligations,
+    /// each with its own operation and pending notice. Keys already open or
+    /// confirmed deleted keep their state (§13).
     pub async fn record_access_key_deletions<P: crate::PendingValue>(
         &self,
-        update: OperationUpdate,
-        keys: Vec<crate::AccessKeyToDelete>,
-        pending: Option<P>,
+        update: Option<OperationUpdate>,
+        deletions: Vec<crate::AccessKeyDeletion>,
     ) -> Result<(), DbError> {
         self.call(move |inner| {
             inner.access.with_writer(|writer| {
                 writer.transaction(|db| {
-                    for key in keys {
-                        db.internal_execute("INSERT INTO _coven_access_keys_to_delete(access_key_id,member) VALUES(?1,?2) ON CONFLICT(access_key_id) DO UPDATE SET member=excluded.member WHERE excluded.member IS NOT NULL", (key.access_key_id, key.member.map(|m| m.to_bytes().to_vec())))?;
+                    if let Some(update) = &update {
+                        crate::operation::advance(db, update)?;
                     }
-                    crate::operation::advance(db, &update)?;
-                    if let Some(pending) = pending {
-                        if pending.operation() != Some(update.id)
-                            || pending.reported_by() != inner.access.device {
-                            return Err(DbError::DamagedDatabase);
-                        }
-                        crate::pending::save(db, &pending)?;
-                    }
-                    Ok(())
+                    crate::operation::record_access_keys::<P>(db, inner.access.device, &deletions)
                 })
             })
         })
         .await
     }
 
-    /// The durable provider-console actions still awaiting confirmation.
-    pub async fn access_keys_to_delete(&self) -> Result<Vec<crate::AccessKeyToDelete>, DbError> {
+    /// Clear an S3 key's deletion obligation, after an explicit confirmation or
+    /// a verified provider deletion, and retain the confirmation by key id.
+    /// Confirmation before any notice prevents that notice (§13).
+    pub async fn clear_access_key(&self, key: String) -> Result<(), DbError> {
         self.call(move |inner| {
             inner.access.with_writer(|writer| {
-                writer.query(
-                    "SELECT access_key_id,member FROM _coven_access_keys_to_delete WHERE confirmed=0 ORDER BY access_key_id",
-                    [],
-                    |r| Ok(crate::AccessKeyToDelete {
-                        access_key_id: r.get(0)?,
-                        member: r.get::<_, Option<[u8; 32]>>(1)?.map(coven_crypto::MemberId::from_bytes).transpose().map_err(|e| crate::write_encoding::decode_failure(1, rusqlite::types::Type::Blob, e))?,
-                    }),
-                )
-            })
-        })
-        .await
-    }
-
-    /// Remember an S3 key deletion, including confirmation before its notice.
-    /// Repeating confirmation or replaying an access entry cannot revive it.
-    pub async fn confirm_access_key_deleted(&self, key: String) -> Result<(), DbError> {
-        self.call(move |inner| {
-            inner.access.with_writer(|writer| {
-                writer.transaction(|db| {
-                    db.internal_execute(
-                        "INSERT INTO _coven_access_keys_to_delete(access_key_id,confirmed) VALUES(?1,1) ON CONFLICT(access_key_id) DO UPDATE SET confirmed=1",
-                        [key],
-                    )?;
-                    Ok(())
-                })
+                writer.transaction(|db| crate::operation::clear_access_key(db, &key))
             })
         })
         .await

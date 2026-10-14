@@ -20,6 +20,7 @@ async fn oversized_access_reserves_neither_an_entry_nor_key_copies() {
         .prepare_store_log(
             entry.author.clone(),
             StoreChange::SetAccess {
+                member: entry.author.clone(),
                 access: coven_format::MemberAccess::ProviderAccount("a".repeat(4 * 1024 * 1024)),
             },
             |_, _, _| -> Result<StoreLogSealing, DbError> {
@@ -100,6 +101,7 @@ async fn batch_clock_uses_saved_and_queued_timestamps_without_decoding_entries()
         history[3].1.clone(),
         vec![],
         vec![],
+        Vec::new(),
     )
     .await
     .unwrap();
@@ -107,8 +109,9 @@ async fn batch_clock_uses_saved_and_queued_timestamps_without_decoding_entries()
     db.test_track_work(work.clone()).await.unwrap();
     let entry = crate::tests::store_log();
     db.prepare_store_log(
-        entry.author,
+        entry.author.clone(),
         StoreChange::SetAccess {
+            member: entry.author,
             access: coven_format::MemberAccess::ProviderAccount("account".into()),
         },
         move |_, entry, _| {
@@ -226,7 +229,7 @@ async fn applying_entry_and_retiring_the_queue_roll_back_together() {
         )
     });
     assert!(matches!(
-        db.apply_store_log::<PendingRecord>(checked.clone(), result.clone())
+        db.apply_store_log::<PendingRecord>(checked.clone(), result.clone(), Vec::new())
             .await,
         Err(DbError::Sqlite(_))
     ));
@@ -234,7 +237,7 @@ async fn applying_entry_and_retiring_the_queue_roll_back_together() {
     assert!(state.log.entries.is_empty());
     assert_eq!(state.upload, Some(pending));
     db.inspect_writer(|sql| sql.batch("DROP TRIGGER reject_retirement").unwrap());
-    db.apply_store_log::<PendingRecord>(checked, result)
+    db.apply_store_log::<PendingRecord>(checked, result, Vec::new())
         .await
         .unwrap();
     let state = db.local_store_log().await.unwrap();
@@ -337,14 +340,14 @@ async fn entry_copies_and_operation_commit_or_roll_back_as_one_reservation() {
     let device = replay.state.devices.pop_first().unwrap().1;
     replay.state.devices.insert(id.device, device);
     assert!(db
-        .apply_store_log::<PendingRecord>(checked.clone(), replay.clone())
+        .apply_store_log::<PendingRecord>(checked.clone(), replay.clone(), Vec::new())
         .await
         .is_err());
     assert!(db.local_store_log().await.unwrap().log.entries.is_empty());
     for copy in copies {
         db.complete_key_upload(copy).await.unwrap();
     }
-    db.apply_store_log::<PendingRecord>(checked, replay)
+    db.apply_store_log::<PendingRecord>(checked, replay, Vec::new())
         .await
         .unwrap();
     assert!(db.local_store_log().await.unwrap().upload.is_none());

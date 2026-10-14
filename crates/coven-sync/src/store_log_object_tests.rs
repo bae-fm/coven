@@ -312,7 +312,8 @@ async fn queued_creation_rejects_a_copy_with_the_right_identity_and_wrong_materi
                 name: a.directory.settings().unwrap().name,
                 admin: public(&a.member),
                 access: coven_format::MemberAccess::S3AccessKey {
-                    access_key_id: "owner".into()
+                    access_key_id: "owner".into(),
+                    principal: coven_format::S3Principal::Console,
                 },
                 device_name: "Ana".into(),
                 key: key(1),
@@ -517,6 +518,7 @@ async fn setup_checks_its_known_creation_before_committing() {
     let before = a.log().await;
     let access = coven_format::MemberAccess::S3AccessKey {
         access_key_id: "fixture-access-key".into(),
+        principal: coven_format::S3Principal::Console,
     };
     a.sync
         .setup_storage(

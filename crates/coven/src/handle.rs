@@ -171,7 +171,7 @@ impl CovenHandle {
     }
     /// Remove a member, rotate keys and revoke every recorded access (§13).
     /// The result describes current access and any retained grants;
-    /// `access_keys_to_delete` lists S3 keys until each deletion is confirmed.
+    /// `pending` lists each recorded S3 key until its deletion clears.
     pub async fn remove_member(&self, member: &MemberId) -> Result<MemberRemoval, SyncError> {
         self.operations.remove_member(member).await
     }
@@ -179,11 +179,9 @@ impl CovenHandle {
     pub async fn remove_device(&self, device: DeviceId) -> Result<ProviderSignOut, SyncError> {
         self.operations.remove_device(device).await
     }
-    /// S3 keys awaiting deletion in the provider console, also available while stopped.
-    pub async fn access_keys_to_delete(&self) -> Result<Vec<AccessKeyToDelete>, SyncError> {
-        self.operations.access_keys_to_delete().await
-    }
-    /// Confirm deletion of an S3 key in the provider console.
+    /// Explicitly confirms that this S3 key was deleted, including through the
+    /// provider's console. Clears only this id's DeleteAccessKey record and
+    /// keeps the confirmation (§13).
     pub async fn confirm_access_key_deleted(&self, key: &str) -> Result<(), SyncError> {
         self.operations.confirm_access_key_deleted(key).await
     }

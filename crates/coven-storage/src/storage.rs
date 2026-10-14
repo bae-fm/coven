@@ -104,9 +104,10 @@ pub enum MemberRemoval {
         /// Native grants the owner can inspect in the provider's console.
         shares: Vec<RetainedAccess>,
     },
-    /// The admin deletes this member's key in the provider console.
+    /// The member's current S3 key, pending deletion until coven deletes it
+    /// with admin access or the admin confirms deleting it (§13).
     DeleteAccessKey {
-        /// Public identifier of the key to delete in the provider console.
+        /// Public identifier of the key to delete.
         access_key_id: String,
     },
 }

@@ -41,6 +41,11 @@ pub(crate) enum Authority {
     Member,
     Circle(CircleId),
     Device(DeviceId),
+    /// Recording a member's access: their own, or an admin's replacement S3 key.
+    Access {
+        target: MemberId,
+        s3: bool,
+    },
 }
 
 impl Authority {
@@ -61,6 +66,13 @@ impl Authority {
                 member(state, author).is_some()
                     && (device.member == *author || admin(state, author))
             }),
+            // Both must be members in the recorded view; an admin's role there,
+            // not provider-admin access, permits recording another's S3 key (§9).
+            Self::Access { target, s3 } => {
+                member(state, author).is_some()
+                    && member(state, target).is_some()
+                    && (target == author || (*s3 && admin(state, author)))
+            }
         };
         if allowed {
             Ok(())
@@ -74,7 +86,11 @@ impl Authority {
         match change {
             CreateStore { .. } => Self::Creation,
             AddMember { .. } | RemoveMember { .. } | ChangeRole { .. } => Self::Admin,
-            SetAccess { .. } | AddDevice { .. } | CreateCircle { .. } => Self::Member,
+            SetAccess { member, access } => Self::Access {
+                target: member.clone(),
+                s3: matches!(access, coven_format::MemberAccess::S3AccessKey { .. }),
+            },
+            AddDevice { .. } | CreateCircle { .. } => Self::Member,
             RotateKey { audience, .. } => Self::audience(audience),
             RaiseSchema { snapshot, .. } => Self::audience(&snapshot.audience),
             RemoveDevice { device } => Self::Device(*device),
@@ -152,7 +168,9 @@ pub(crate) fn change_in_place(
         AddMember { keys, role, .. } => {
             member(state, &keys.signing).is_some_and(|m| m.role == *role)
         }
-        SetAccess { access } => member(state, author).is_some_and(|m| m.access == *access),
+        SetAccess { member: id, access } => {
+            member(state, id).is_some_and(|m| m.access.same_credential(access))
+        }
         ChangeRole { member: id, role } => member(state, id).is_some_and(|m| m.role == *role),
         RemoveMember { member: id, .. } => member(state, id).is_none(),
         AddDevice { device: id, .. } => device(state, *id).is_some_and(|d| d.member == *author),
@@ -198,9 +216,9 @@ pub(crate) fn validate_effect(
     }
     let missing = match change {
         RotateKey { .. } | CreateStore { .. } | AddMember { .. } => None,
-        SetAccess { .. } => member(state, author)
+        SetAccess { member: id, .. } => member(state, id)
             .is_none()
-            .then(|| EntryTarget::Member(author.clone())),
+            .then(|| EntryTarget::Member(id.clone())),
         RemoveMember { member: id } | ChangeRole { member: id, .. } => member(state, id)
             .is_none()
             .then(|| EntryTarget::Member(id.clone())),
@@ -350,11 +368,8 @@ pub(crate) fn apply_effect(next: &mut StoreLogState, view: &StoreLogCheck, entry
                 }
             }
         }
-        SetAccess { access } => {
-            next.members
-                .get_mut(&entry.author)
-                .expect("checked author")
-                .access = access.clone();
+        SetAccess { member: id, access } => {
+            next.members.get_mut(id).expect("checked member").access = access.clone();
         }
         ChangeRole { member: id, role } => {
             next.members.get_mut(id).expect("checked member").role = *role;

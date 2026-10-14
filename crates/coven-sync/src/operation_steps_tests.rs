@@ -247,8 +247,10 @@ async fn resumed_removal_lists_original_and_replaced_access() {
     let waiting = begin(&mut a, Command::RemoveMember(b.member.member_id())).await;
     b.sync
         .make_and_upload_entry(StoreChange::SetAccess {
+            member: b.member.member_id(),
             access: coven_format::MemberAccess::S3AccessKey {
                 access_key_id: "replacement-key".into(),
+                principal: coven_format::S3Principal::Console,
             },
         })
         .await
@@ -258,13 +260,14 @@ async fn resumed_removal_lists_original_and_replaced_access() {
     finish(&mut c, removal).await;
     assert!(matches!(finish(&mut a, waiting).await,
         Output::Removal(MemberRemoval::DeleteAccessKey { access_key_id }) if access_key_id == "replacement-key"));
-    assert_eq!(
-        a.db.access_keys_to_delete().await.unwrap(),
-        ["fixture-access-key", "replacement-key"].map(|key| AccessKeyToDelete {
-            access_key_id: key.into(),
-            member: Some(b.member.member_id()),
-        })
-    );
+    // Both admins list both: the replaced key from its recording, the
+    // replacement since the removal (§13).
+    for device in [&a, &c] {
+        assert_eq!(
+            access_keys(&device.db).await,
+            ["fixture-access-key", "replacement-key"].map(|key| console_key(key, Some(&b.member)))
+        );
+    }
 }
 
 #[tokio::test]
@@ -286,8 +289,10 @@ async fn late_access_survives_restart_and_cannot_revive_confirmed_keys() {
         let removal = begin(observer, Command::RemoveMember(target.member.member_id())).await;
         step(observer, removal).await.unwrap();
         let replacement = StoreChange::SetAccess {
+            member: target.member.member_id(),
             access: coven_format::MemberAccess::S3AccessKey {
                 access_key_id: "late-key".into(),
+                principal: coven_format::S3Principal::Console,
             },
         };
         let entry = target
@@ -300,15 +305,12 @@ async fn late_access_survives_restart_and_cannot_revive_confirmed_keys() {
         storage.delete(&path).await.unwrap();
         finish(observer, removal).await;
         assert_eq!(
-            observer.db.access_keys_to_delete().await.unwrap(),
-            [AccessKeyToDelete {
-                access_key_id: "fixture-access-key".into(),
-                member: Some(target.member.member_id()),
-            }]
+            access_keys(&observer.db).await,
+            [console_key("fixture-access-key", Some(&target.member))]
         );
         observer
             .db
-            .confirm_access_key_deleted("fixture-access-key".into())
+            .clear_access_key("fixture-access-key".into())
             .await
             .unwrap();
         observer.restart(storage.clone()).await;
@@ -318,20 +320,16 @@ async fn late_access_survives_restart_and_cannot_revive_confirmed_keys() {
             observer.log().await.replay.entries[&entry],
             coven_database::EntryOutcome::Dropped(_)
         ));
-        let records = observer.db.operations().await.unwrap();
-        assert_eq!(records.len(), 1);
+        // Applying the late entry records its key with the replay; the removal
+        // already finished and no other operation is needed.
+        let expected = [console_key("late-key", Some(&target.member))];
+        assert_eq!(access_keys(&observer.db).await, expected);
         observer.restart(storage.clone()).await;
-        finish(observer, records[0].id).await;
-        assert_eq!(
-            observer.db.access_keys_to_delete().await.unwrap(),
-            [AccessKeyToDelete {
-                access_key_id: "late-key".into(),
-                member: Some(target.member.member_id()),
-            }]
-        );
+        observer.sync().await;
+        assert_eq!(access_keys(&observer.db).await, expected);
         observer
             .db
-            .confirm_access_key_deleted("late-key".into())
+            .clear_access_key("late-key".into())
             .await
             .unwrap();
         // This device has not read its removal and repeats its recorded key.
@@ -341,23 +339,11 @@ async fn late_access_survives_restart_and_cannot_revive_confirmed_keys() {
             .await
             .unwrap();
         observer.sync().await;
-        for record in observer.db.operations().await.unwrap() {
-            finish(observer, record.id).await;
-        }
-        assert!(observer
-            .db
-            .access_keys_to_delete()
-            .await
-            .unwrap()
-            .is_empty());
+        assert!(access_keys(&observer.db).await.is_empty());
+        assert!(observer.db.operations().await.unwrap().is_empty());
         observer.restart(storage.clone()).await;
         observer.sync().await;
-        assert!(observer
-            .db
-            .access_keys_to_delete()
-            .await
-            .unwrap()
-            .is_empty());
+        assert!(access_keys(&observer.db).await.is_empty());
     }
 }
 
@@ -373,6 +359,7 @@ async fn removal_revokes_accounts_in_dropped_additions_and_access_updates() {
     let replacement = b
         .sync
         .make_and_upload_entry(StoreChange::SetAccess {
+            member: b.member.member_id(),
             access: coven_format::MemberAccess::ProviderAccount("replacement@example.com".into()),
         })
         .await
@@ -419,6 +406,7 @@ async fn a_retained_grant_on_old_access_blocks_removal_until_explicit_retry() {
         .unwrap();
     b.sync
         .make_and_upload_entry(StoreChange::SetAccess {
+            member: b.member.member_id(),
             access: coven_format::MemberAccess::ProviderAccount("replacement@example.com".into()),
         })
         .await
@@ -492,18 +480,10 @@ async fn another_invites_revocation_cannot_revive_a_confirmed_key() {
     }
     let first = begin(&mut a, Command::Cancel(invites[0].id)).await;
     finish(&mut a, first).await;
-    assert_eq!(
-        a.db.access_keys_to_delete().await.unwrap(),
-        [AccessKeyToDelete {
-            access_key_id: "invited-key".into(),
-            member: None,
-        }]
-    );
-    a.db.confirm_access_key_deleted("invited-key".into())
-        .await
-        .unwrap();
+    assert_eq!(access_keys(&a.db).await, [console_key("invited-key", None)]);
+    a.db.clear_access_key("invited-key".into()).await.unwrap();
     a.restart(storage.clone()).await;
     let second = begin(&mut a, Command::Cancel(invites[1].id)).await;
     finish(&mut a, second).await;
-    assert!(a.db.access_keys_to_delete().await.unwrap().is_empty());
+    assert!(access_keys(&a.db).await.is_empty());
 }

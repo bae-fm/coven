@@ -11,6 +11,12 @@ pub trait PendingValue: Serialize + DeserializeOwned + Send + 'static {
     fn dropped_entry(entry: crate::EntryId, reason: crate::DropReason) -> Self;
     /// Report an audience whose selected boundary has no committed data input.
     fn reload(audience: coven_merge::Audience, reporter: DeviceId) -> Self;
+    /// Report an S3 key awaiting deletion on its journal operation (§13).
+    fn access_key(
+        operation: OperationId,
+        reporter: DeviceId,
+        key: crate::AccessKeyToDelete,
+    ) -> Self;
     /// Stable identity, ordered as the app presents it.
     type Subject: Serialize + Ord;
     /// The work that cannot advance.
@@ -171,8 +177,11 @@ pub(crate) fn suppress(db: &DatabaseConnection, resets: &[crate::EntryId]) -> Re
     db.pending_change(|| {
         for entry in resets {
             db.internal_execute(
+                // A reset never hides an S3 key awaiting deletion (§13).
                 "INSERT INTO _coven_pending_resets(subject,reporter,entry_device,entry_number)
-                 SELECT subject,reporter,?1,?2 FROM _coven_pending WHERE true ON CONFLICT DO NOTHING",
+                 SELECT p.subject,p.reporter,?1,?2 FROM _coven_pending AS p
+                 WHERE NOT EXISTS(SELECT 1 FROM _coven_access_keys AS k WHERE k.operation=p.operation)
+                 ON CONFLICT DO NOTHING",
                 (entry.device.0.to_be_bytes().as_slice(), entry.number.to_be_bytes().as_slice()),
             )?;
         }

@@ -50,6 +50,7 @@ pub(crate) enum Command {
     Retry(OperationId),
     Discard(OperationId),
     ConfirmKey(String),
+    DeleteKey(OperationId, Arc<dyn coven_storage::AccessKeyAdmin>),
     Credentials {
         previous: Option<coven_storage::ConnectionCredentials>,
         next: coven_storage::ConnectionCredentials,
@@ -68,7 +69,6 @@ pub(crate) enum Command {
         String,
         crate::StorageCommit,
     ),
-    AccessKeysToDelete,
     Storage(Option<Arc<dyn Storage>>),
     Close,
 }
@@ -82,7 +82,6 @@ pub(crate) enum Output {
     Circles(Vec<Circle>),
     CircleMembers(Vec<CircleMemberInfo>),
     Invite(Invite),
-    AccessKeysToDelete(Vec<AccessKeyToDelete>),
 }
 
 type Reply = oneshot::Sender<Result<Output, SyncError>>;
@@ -210,13 +209,6 @@ impl Operations {
     pub async fn sync(&self) -> Result<(), SyncError> {
         self.unit(Command::SyncAll).await
     }
-    /// Read S3 key deletions still awaiting confirmation, including while stopped.
-    pub async fn access_keys_to_delete(&self) -> Result<Vec<AccessKeyToDelete>, SyncError> {
-        match self.call(Command::AccessKeysToDelete).await? {
-            Output::AccessKeysToDelete(keys) => Ok(keys),
-            _ => unreachable!("access keys result"),
-        }
-    }
     /// Active members and devices from the local store log.
     pub async fn get_members(&self) -> Result<Vec<MemberInfo>, SyncError> {
         match self.call(Command::Members).await? {
@@ -242,7 +234,7 @@ impl Operations {
     }
     /// Remove the member, rotate audience keys and revoke every recorded access.
     /// Returns current access's result, or retained grants from any account.
-    /// `access_keys_to_delete` lists all recorded S3 keys until confirmed deleted.
+    /// Pending records list every recorded S3 key until its deletion is cleared.
     pub async fn remove_member(&self, member: &MemberId) -> Result<MemberRemoval, SyncError> {
         match self.call(Command::RemoveMember(member.clone())).await {
             Ok(Output::Removal(value)) => Ok(value),
@@ -294,7 +286,19 @@ impl Operations {
     ) -> Result<(), OperationError> {
         self.unit(Command::Discard(operation)).await
     }
-    /// Acknowledge a key deleted in the S3 console.
+    /// Delete the S3 key a pending deletion names using the storage account's
+    /// admin access, then read the provider for that exact key. Only its
+    /// absence clears the notice; every failure is returned and the notice
+    /// stays (§13).
+    pub async fn delete_access_key(
+        &self,
+        operation: OperationId,
+        admin: Arc<dyn coven_storage::AccessKeyAdmin>,
+    ) -> Result<(), SyncError> {
+        self.unit(Command::DeleteKey(operation, admin)).await
+    }
+    /// Confirm explicitly that this S3 key was deleted, such as in the console.
+    /// Clears only this id's notice and keeps the confirmation (§13).
     pub async fn confirm_access_key_deleted(&self, key: &str) -> Result<(), SyncError> {
         self.unit(Command::ConfirmKey(key.into())).await
     }
@@ -407,7 +411,6 @@ impl OperationRun {
         let mut retry = self.clock.sleep(Duration::ZERO);
         loop {
             let mut response = None;
-            let mut query = None;
             tokio::select! {
                 command = self.commands.recv() => {
                     let Some(Request { command, reply }) = command else { break; };
@@ -438,8 +441,6 @@ impl OperationRun {
                             self.writes.set_storage(Some(storage));
                         }
                         let _ = reply.send(result.map(|()| Output::Unit));
-                    } else if matches!(command, Command::AccessKeysToDelete) {
-                        query = Some((reply, command));
                     } else if matches!(command, Command::SyncAll) {
                         response = Some((reply, self.sync_pass().await.map(|()| Output::Unit)));
                     } else {
@@ -470,22 +471,10 @@ impl OperationRun {
                 if let Some((reply, _)) = response.take() {
                     let _ = reply.send(Err(shared()));
                 }
-                if let Some((reply, _)) = query.take() {
-                    let _ = reply.send(Err(shared()));
-                }
                 for (_, reply) in std::mem::take(&mut self.waiters) {
                     let _ = reply.send(Err(shared()));
                 }
                 break;
-            }
-            if let Some((reply, command)) = query {
-                let result = self.sync.begin_operation_call(command).await.map(|begun| {
-                    let Begun::Value(value) = begun else {
-                        unreachable!("read-only query")
-                    };
-                    value
-                });
-                let _ = reply.send(result);
             }
             if let Some((reply, result)) = response {
                 let _ = reply.send(result);

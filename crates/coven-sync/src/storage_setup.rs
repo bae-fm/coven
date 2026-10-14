@@ -183,8 +183,11 @@ impl StoreLogSync {
                 return Err(SyncError::Removed);
             }
             creation = None;
-            if current.access != access {
-                let change = StoreChange::SetAccess { access };
+            if !current.access.same_credential(&access) {
+                let change = StoreChange::SetAccess {
+                    member: member.member_id(),
+                    access,
+                };
                 match &local.upload {
                     Some(upload) if upload.entry.change != change => {
                         return Err(coven_database::DbError::StoreLogUploadPending(
@@ -230,25 +233,30 @@ impl StoreLogSync {
             )
             .await?;
             let (entry, replay) = crate::replay_entry(&local.log, entry, &publications);
+            let deletions = crate::access_keys::deletions(
+                &local.log.entries,
+                std::slice::from_ref(&entry),
+                &replay,
+            )?;
             if let coven_database::EntryOutcome::Dropped(reason) =
                 &replay.entries[&entry.entry.position]
             {
                 let reason = reason.clone();
                 self.database
-                    .apply_store_log::<crate::PendingRecord>(entry, replay)
+                    .apply_store_log::<crate::PendingRecord>(entry, replay, deletions)
                     .await?;
                 return Err(SyncError::Rejected(reason));
             }
-            Some((entry, replay))
+            Some((entry, replay, deletions))
         } else {
             None
         };
         let rollback = commit()?;
         let result = async {
             self.store_keys.persist(&ring)?;
-            if let Some((entry, replay)) = applied {
+            if let Some((entry, replay, deletions)) = applied {
                 self.database
-                    .apply_store_log::<crate::PendingRecord>(entry, replay)
+                    .apply_store_log::<crate::PendingRecord>(entry, replay, deletions)
                     .await?;
             }
             Ok::<_, SyncError>(())

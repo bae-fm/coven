@@ -202,8 +202,10 @@ fn access_updates_are_member_authored_and_causal_replacements_keep_the_latest() 
             1,
             1,
             StoreChange::SetAccess {
+                member: member(1),
                 access: coven_format::MemberAccess::S3AccessKey {
                     access_key_id: name.into(),
+                    principal: coven_format::S3Principal::Console,
                 },
             },
         );
@@ -212,6 +214,7 @@ fn access_updates_are_member_authored_and_causal_replacements_keep_the_latest() 
         3,
         3,
         StoreChange::SetAccess {
+            member: member(3),
             access: coven_format::MemberAccess::ProviderAccount("outsider@example.com".into()),
         },
     );
@@ -220,8 +223,10 @@ fn access_updates_are_member_authored_and_causal_replacements_keep_the_latest() 
         1,
         1,
         StoreChange::SetAccess {
+            member: member(1),
             access: coven_format::MemberAccess::S3AccessKey {
                 access_key_id: "after-removal".into(),
+                principal: coven_format::S3Principal::Console,
             },
         },
     );
@@ -232,6 +237,7 @@ fn access_updates_are_member_authored_and_causal_replacements_keep_the_latest() 
             target.access,
             coven_format::MemberAccess::S3AccessKey {
                 access_key_id: "second".into(),
+                principal: coven_format::S3Principal::Console,
             }
         );
         assert_eq!(h.drops(r), [6, 8]);

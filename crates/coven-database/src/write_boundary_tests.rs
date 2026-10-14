@@ -64,7 +64,7 @@ impl crate::Database {
         }
         let mut checked = crate::store_log::tests::checked(entry);
         checked.stored_at = stored_at;
-        self.apply_store_log::<crate::pending::tests::Record>(checked, replay)
+        self.apply_store_log::<crate::pending::tests::Record>(checked, replay, Vec::new())
             .await?;
         Ok(id)
     }
@@ -179,7 +179,7 @@ async fn checked_boundaries_survive_selection_changes_and_restart() {
                 },
             );
         }
-        db.apply_store_log::<Record>(checked(entry.clone()), replay.clone())
+        db.apply_store_log::<Record>(checked(entry.clone()), replay.clone(), Vec::new())
             .await
             .unwrap();
         entries.push(entry);
@@ -201,7 +201,7 @@ async fn checked_boundaries_survive_selection_changes_and_restart() {
             entry: entries[2].position,
         },
     );
-    db.apply_store_log::<Record>(checked(entries[2].clone()), replay.clone())
+    db.apply_store_log::<Record>(checked(entries[2].clone()), replay.clone(), Vec::new())
         .await
         .unwrap();
     assert_eq!(count(&db, "_coven_boundaries"), 3);
@@ -296,7 +296,7 @@ async fn reset_coverage_survives_noops_reversal_and_failed_replacement() {
         id(1),
         crate::EntryOutcome::Dropped(crate::DropReason::NotAllowed),
     );
-    db.apply_store_log::<crate::pending::tests::Record>(log.entries[1].clone(), replay)
+    db.apply_store_log::<crate::pending::tests::Record>(log.entries[1].clone(), replay, Vec::new())
         .await
         .unwrap();
     db.load_snapshots(reload(vec![coverage(2)])).await.unwrap();
@@ -307,9 +307,13 @@ async fn reset_coverage_survives_noops_reversal_and_failed_replacement() {
     );
     assert!(!after[0].2);
     assert!(after[1].2);
-    db.apply_store_log::<crate::pending::tests::Record>(log.entries[1].clone(), log.replay)
-        .await
-        .unwrap();
+    db.apply_store_log::<crate::pending::tests::Record>(
+        log.entries[1].clone(),
+        log.replay,
+        Vec::new(),
+    )
+    .await
+    .unwrap();
     db.load_snapshots(reload(vec![coverage(1)])).await.unwrap();
     assert_eq!(retained()[0], before[0]);
     db.close().await.unwrap();
@@ -557,6 +561,7 @@ mod differential {
                 stored_at: std::time::UNIX_EPOCH,
             },
             replay,
+            Vec::new(),
         )
         .await
         .unwrap();

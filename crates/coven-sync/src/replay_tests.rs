@@ -85,6 +85,7 @@ pub(crate) fn add(n: u8, role: MemberRole) -> StoreChange {
     StoreChange::AddMember {
         access: coven_format::MemberAccess::S3AccessKey {
             access_key_id: "fixture-access-key".into(),
+            principal: coven_format::S3Principal::Console,
         },
         keys: keys(n),
         role,
@@ -122,6 +123,7 @@ impl History {
             StoreChange::CreateStore {
                 access: coven_format::MemberAccess::S3AccessKey {
                     access_key_id: "fixture-access-key".into(),
+                    principal: coven_format::S3Principal::Console,
                 },
                 store: StoreId(uuid::Uuid::from_u128(1)),
                 name: "Home".into(),
@@ -949,7 +951,7 @@ async fn replay_cost() {
         // checked, with at most its past and the resulting received set replayed.
         work.assert_bounded(1, 2 * count - 1, count - 1, count, writers);
         database
-            .apply_store_log::<crate::PendingRecord>(checked.clone(), replay.clone())
+            .apply_store_log::<crate::PendingRecord>(checked.clone(), replay.clone(), Vec::new())
             .await
             .unwrap();
         applied.entries.push(checked);

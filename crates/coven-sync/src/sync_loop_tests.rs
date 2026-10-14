@@ -210,6 +210,7 @@ impl Device<StoreLogSync> {
                 device_name: "one".into(),
                 access: coven_format::MemberAccess::S3AccessKey {
                     access_key_id: "owner".into(),
+                    principal: coven_format::S3Principal::Console,
                 },
             })
             .await
@@ -223,6 +224,7 @@ impl Device<StoreLogSync> {
                 role: MemberRole::Member,
                 access: coven_format::MemberAccess::S3AccessKey {
                     access_key_id: "member".into(),
+                    principal: coven_format::S3Principal::Console,
                 },
             })
             .await
