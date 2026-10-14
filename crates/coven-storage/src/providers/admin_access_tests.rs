@@ -74,26 +74,60 @@ fn cli_output_becomes_an_in_memory_credential() {
 #[tokio::test]
 async fn a_failing_cli_reports_its_status_but_not_its_output() {
     let directory = tempfile::tempdir().unwrap();
-    let script = directory.path().join("fake-cli");
-    std::fs::write(
-        &script,
-        "#!/bin/sh\necho leaked-secret\necho leaked-error >&2\nexit 3\n",
-    )
-    .unwrap();
-    std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let script = fake_cli(
+        directory.path(),
+        "fake-cli",
+        &["leaked-secret"],
+        &["leaked-error"],
+        3,
+    );
     let error = run(tokio::process::Command::new(&script))
         .await
         .unwrap_err();
     assert_eq!(error.failure(), StorageFailure::Authentication);
     let text = format!("{error} {error:?}");
     assert!(!text.contains("leaked"));
-    let ok = directory.path().join("ok-cli");
-    std::fs::write(&ok, "#!/bin/sh\necho ya29.token\n").unwrap();
-    std::fs::set_permissions(&ok, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let ok = fake_cli(directory.path(), "ok-cli", &["ya29.token"], &[], 0);
     assert!(matches!(
         bearer(&run(tokio::process::Command::new(&ok)).await.unwrap()).unwrap(),
         AdminCredential::BearerToken(token) if token.as_str() == "ya29.token"
     ));
+}
+
+/// A stand-in for a provider CLI: prints `out` and `err` lines and exits with `status`.
+fn fake_cli(
+    directory: &std::path::Path,
+    name: &str,
+    out: &[&str],
+    err: &[&str],
+    status: u8,
+) -> std::path::PathBuf {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let path = directory.join(name);
+        let mut script = String::from("#!/bin/sh\n");
+        out.iter()
+            .for_each(|line| script += &format!("echo {line}\n"));
+        err.iter()
+            .for_each(|line| script += &format!("echo {line} >&2\n"));
+        script += &format!("exit {status}\n");
+        std::fs::write(&path, script).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+    #[cfg(windows)]
+    {
+        let path = directory.join(format!("{name}.cmd"));
+        let mut script = String::from("@echo off\r\n");
+        out.iter()
+            .for_each(|line| script += &format!("echo {line}\r\n"));
+        err.iter()
+            .for_each(|line| script += &format!("echo {line} 1>&2\r\n"));
+        script += &format!("exit /b {status}\r\n");
+        std::fs::write(&path, script).unwrap();
+        path
+    }
 }
 
 #[derive(Default)]
