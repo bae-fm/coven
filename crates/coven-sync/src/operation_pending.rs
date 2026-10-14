@@ -34,24 +34,6 @@ impl StoreLogSync {
         {
             return Ok(true);
         }
-        // Approval pauses the action, while its replaceable request is still observed.
-        if matches!(
-            Data::read(record)?,
-            Data::Invite(crate::operation_data::InviteWork {
-                state: crate::operation_data::InviteState::Waiting {
-                    request: Some(_),
-                    ..
-                },
-                ..
-            })
-        ) && self
-            .database
-            .operation_pending::<PendingRecord>(record.id)
-            .await?
-            .is_some_and(|p| p.reason == PendingReason::Paused)
-        {
-            return Ok(true);
-        }
         Ok(self
             .database
             .pending_can_retry::<PendingRecord>(PendingSubject::Operation {

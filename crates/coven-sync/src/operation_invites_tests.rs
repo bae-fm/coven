@@ -589,3 +589,46 @@ async fn open_invites_share_one_request_listing_and_read_only_new_requests() {
         [MemoryRequest::List(ObjectPrefix::join_requests(store(1)))]
     );
 }
+
+#[tokio::test]
+async fn a_request_awaiting_the_persons_decision_is_not_read_again() {
+    use coven_storage::test_utils::MemoryRequest;
+    let storage = google();
+    let [a, _b, _c] = accounts(storage.clone()).await;
+    let connection = a.storage.clone();
+    let files = file_owner(&a);
+    let waits = a.waits.clone();
+    let clock = a.clock.clone();
+    let operations = { operation_owner(a.sync, files) };
+    let mut joins = operations.subscribe_join_requests();
+    let invite = operations
+        .create_invite(
+            MemberRole::Member,
+            InviteAccess::ProviderAccount {
+                email: "join@example.com".into(),
+            },
+        )
+        .await
+        .unwrap();
+    let joining = MemoryStorage::for_recipient(&storage, "join@example.com").unwrap();
+    request(&joining, &invite, &joiner(&invite, 9), "Phone").await;
+    crate::retry_waits::tests::elapse_retry_delays(&waits, &clock);
+    tokio::time::timeout(Duration::from_secs(10), joins.changed())
+        .await
+        .unwrap()
+        .unwrap();
+    let request = joins.borrow()[0].clone();
+    // Waiting for the person: no retry falls due, and later drives read nothing.
+    let from = connection.request_trace().len();
+    for _ in 0..3 {
+        crate::retry_waits::tests::elapse_retry_delays(&waits, &clock);
+        operations.barrier().await.unwrap();
+    }
+    let path = ObjectPath::join_request(store(1), invite.id);
+    assert!(!connection.request_trace()[from..]
+        .iter()
+        .any(|call| matches!(call, MemoryRequest::Read(read, _) if *read == path)));
+    // The retained request is what the person approves.
+    operations.approve_join_request(&request).await.unwrap();
+    operations.close().await.unwrap();
+}
