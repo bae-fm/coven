@@ -7,6 +7,7 @@ import CovenStorage.Clocks
 import CovenStorage.Examples
 import CovenStorage.ReplacementRead
 import CovenStorage.ReplacementReadExamples
+import CovenStorage.ReplacementViews
 import CovenStorage.RowAuthorship
 import CovenStorage.CellProof
 import CovenStorage.KeyDelivery

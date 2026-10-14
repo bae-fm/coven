@@ -97,6 +97,60 @@ catch-up and provider assumptions explicitly. This proposal changes neither
 `ReplacementRead` nor the normative spec files; the merge write-up lists the
 required wording and Rust obligations.
 
+### Each object judged in its own view
+
+coven-sync judges an old-id write or entry by replaying its own recorded
+past: the object is excluded when that replay keeps a replacement of its
+device. `accepts` above instead uses one kept set, the full replay's, for
+every object. The two agree whenever each object's view keeps exactly the
+replacements of that set it read (`agrees_with_kept_set`), which covers every
+history where no replacement is kept in one replay and dropped in another.
+
+They can differ in both directions, and the full replay can change after an
+object is judged. `ReplacementViews` models the per-object rule,
+`acceptsView`, with replay as a parameter. Its one assumption,
+`SetDetermined`, is that replaying a set of entries gives one result whatever
+their order; the store-log model proves this as `storelog_converges`. Objects
+are judged once every entry they read has arrived (`Ready`), and a path names
+one entry (`OnePerPath`).
+
+- `view_order_irrelevant`: devices holding the same entries, in any arrival
+  order, give each object the same verdict.
+- `verdict_never_rejudged`: once an object is ready, later arrivals never
+  change its verdict, even when the full replay then keeps or drops other
+  replacements. `view_stable` is the step: later arrivals add nothing to its
+  view.
+- `views_converge`: devices with the same entries and objects apply the same
+  identities. `applied_never_retracted`: an applied identity stays applied as
+  entries and objects keep arriving.
+- `unstopped_copy_counts`: an object whose copy had not stopped, because its
+  own replay kept no replacement of its id, always counts. A copy stops
+  exactly when its replay keeps one (§10), so admission and stopping use one
+  judgement.
+
+Two checked histories show where the single kept set goes wrong.
+`dropped_replacement_keeps_verdict` is the history coven-sync pins in
+`a_dropped_replacement_restores_the_old_id_without_rejudging_recorded_pasts`:
+Ana registers device 5 while Ben's restored copy, unaware, registers 5
+replacing his phone 1. Phone 1's entry made after reading Ben's replacement is
+excluded, and stays excluded once Ana's registration arrives and the full
+replay drops the replacement; the single set would accept it then.
+`full_set_excludes_unstopped_write` is the other direction: Carol removes Ana
+concurrently with Ana registering device 5, so the full replay drops Ana's
+registration and keeps Ben's replacement. Phone 1's write read both
+registrations but not the removal; its own replay kept Ana's and dropped
+Ben's, so the phone had not stopped. The per-object rule counts the write;
+the single set would exclude a write its copy could not yet know was
+replaced. Both histories use a small replay that keeps and drops what the
+real one does on these entries. The `admission` differential runs both
+histories through Rust's real replay and checks those verdicts.
+
+The single-set reading is also the one §10's 30-day paragraph and the IO
+model's `writeAllowed` use: a write that read a kept retirement never counts.
+On the second history that excludes the write the per-object rule keeps.
+That paragraph is unchanged here; restating it per object needs the IO model
+updated first.
+
 **Stored bytes are preserved; receipt is conditional.** `stored_object_survives` combines
 create-once storage with receipt: later publications preserve the original
 bytes and time. Its receipt result assumes the other admission checks
@@ -145,7 +199,8 @@ do not depend on detecting that restore.
 
 The readings chosen are: “before it read” means the immutable recorded past
 of the copy that made the object, not whether another copy has read it;
-any kept replacement in that past excludes an old-id object; a write's
+a replacement that the replay of that past keeps excludes an old-id object
+(`acceptsView`; `accepts` is the special case above); a write's
 `store_log_read` and an entry's expanded `had_read` supply that past.
 Publication after replacement can count when creation preceded that read
 and the landing check passes. Agreement requires the same received objects,
@@ -154,8 +209,8 @@ Restore includes replacing the database from a backup while custody survives;
 it does not imply that the app's explicit reset path was invoked.
 
 Authentication, honest recording of reads, membership authority, entry landing
-rejection, the write landing deadline and which retirements replay keeps
-remain inputs. The write deadline is a required verification obligation,
+rejection, the write landing deadline and replay itself remain inputs;
+`acceptsView` assumes only that replay depends on the set of entries. The write deadline is a required verification obligation,
 not proved by `ReplacementRead`: check removal and replacement, equality
 at 30 days, a later landing, and reversal restoring only the write. Replaying a
 changed replacement set rebuilds admission from retained objects. Files and
@@ -190,11 +245,12 @@ published replacement, and `resetUnconnected` against the reset of a store
 that never set up storage. Its `sequence` check runs `IdentityCounters.Sequence`
 against the operation ids and the snapshot reservation coven-database records
 after starting and finishing snapshot and other operations.
-It executes `ReplacementRead.accepts` and `load` against coven-sync's write
-authority and entry replay for old-id objects whose recorded pasts read any
-subset of kept, concurrent and unauthorized replacements. Rust judges each object in its own
-recorded view, as §7.1 judges removal; those cases keep the same replacements
-in every view, so the model's single kept set applies to all of them.
+It executes `ReplacementRead.acceptsView` and `loadViews` against coven-sync's
+write authority and entry replay for old-id objects whose recorded pasts read
+any subset of kept, concurrent and unauthorized replacements, and for the two
+histories in [Each object judged in its own view](#each-object-judged-in-its-own-view).
+Each case hands the model every object's recorded past and the registrations
+Rust's replay of that past keeps.
 
 **Key copies, snapshot numbers and the storage-less reset.**
 [IdentityCounters](storage/CovenStorage/IdentityCounters.lean) models the

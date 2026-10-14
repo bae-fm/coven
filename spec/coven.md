@@ -3227,10 +3227,22 @@ Carol's tablet:
     the old id remains replaced, with no recorded last write or entry.
   - Judge an old-id write by its `store_log_read`, and an old-id entry by
     its `had_read` including its implicit earlier own entries. It counts
-    only if that past contains no kept replacement of the old id, just as
-    an object made before reading removal can count. A write must also land
-    within the retirement deadline below; entries keep §9's permanent
-    landing rule. Ordinary authority, causality, schema and reset rules apply.
+    only if the replay of that past itself keeps no replacement of the old
+    id, just as an object made before reading removal can count. A write must
+    also land within the retirement deadline below; entries keep §9's
+    permanent landing rule. Ordinary authority, causality, schema and reset
+    rules apply.
+  - That verdict is the object's own: every device holding the same entries
+    reaches it, in any arrival order, and later arrivals never change it,
+    even when the full replay later keeps or drops a replacement
+    ([`view_order_irrelevant`, `verdict_never_rejudged`, `views_converge`](proofs/storage/CovenStorage/ReplacementViews.lean)).
+    A copy stops when its own replay keeps a replacement of its id, so every
+    object it made before stopping counts
+    ([`unstopped_copy_counts`](proofs/storage/CovenStorage/ReplacementViews.lean)).
+    E.g. Ana registers device 5 while Ben's restored copy, unaware, registers
+    5 replacing his phone 1, and phone 1 then reads only Ben's registration.
+    Its later entries stay excluded after Ana's registration arrives and
+    the full replay drops Ben's (`dropped_replacement_keeps_verdict`).
   - Publication after replacement does not change what the object had read,
     but its storage time decides the landing check. There is no upper number
     to extend and no wait for another replacement to include it. Retain

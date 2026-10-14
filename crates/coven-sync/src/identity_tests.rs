@@ -332,19 +332,105 @@ fn past_json(entries: &[StoreLogEntry], read: impl Fn(&StoreLogEntry) -> bool) -
         .collect()
 }
 
-/// The real write authority and entry replay against `ReplacementRead`: Ben's
-/// phone 1 and Carol's tablet 2, with every subset of replacements by Ben's
-/// restored copies 5 and 6 (concurrent), Carol's copy 8 of her tablet and
-/// Carol's unauthorized claim 7 on Ben's phone, and every subset of them read.
-/// None of these replacements drops later, so each object's recorded view
-/// keeps exactly the kept registrations it read (see
-/// `a_dropped_replacement_restores_the_old_id_without_rejudging_recorded_pasts`).
+/// The registrations a replay of exactly these entries keeps.
+fn view_registrations(entries: Vec<StoreLogEntry>) -> Vec<Value> {
+    registrations(&crate::replay::tests::replay(&entries), &entries)
+}
+
+/// One old-id write and one old-id entry for each `(author, old id, past)`,
+/// judged by the real write authority and entry replay. Each object carries
+/// its recorded past and the registrations the replay of that past keeps.
+fn admission_case(base: &History, objects: &[(u8, u64, Vec<usize>)]) -> (Value, Vec<bool>) {
+    let log = checked_log(&base.entries);
+    let mut replays = crate::replay_cache::ReplayCache::new(&log);
+    let mut judged = Vec::new();
+    let mut verdicts = Vec::new();
+    for (author, old, past) in objects {
+        let (author, old) = (*author, *old);
+        // An old-id write recording exactly this past.
+        let store_log_read = coven_format::value::EntryPositions(
+            past.iter()
+                .fold(std::collections::BTreeMap::new(), |mut ends, &index| {
+                    let id = base.entries[index].position;
+                    let end = ends.entry(id.device).or_insert(id);
+                    if id.number > end.number {
+                        *end = id;
+                    }
+                    ends
+                })
+                .into_values()
+                .collect(),
+        );
+        let header = coven_format::write::WriteHeader {
+            position: coven_merge::WriteId {
+                device: DeviceId(old),
+                number: 1,
+            },
+            timestamp: coven_merge::Timestamp::new(1_000, 0, DeviceId(old)).unwrap(),
+            had_read: coven_format::value::WritePositions(Vec::new()),
+            store_log_read: store_log_read.clone(),
+            schema_version: 1,
+            disposition: coven_format::write::WriteDisposition::Apply,
+        };
+        verdicts.push(
+            match crate::write_object::authority(&log, &mut replays, &header) {
+                Ok(signer) => {
+                    assert_eq!(signer, crate::replay::tests::keys(author).signing);
+                    true
+                }
+                Err(crate::Refusal::NotAuthorized) => false,
+                Err(other) => panic!("{other:?}"),
+            },
+        );
+        let read = |e: &StoreLogEntry| store_log_read.covers(e.position);
+        judged.push(json!({
+            "device": old, "number": judged.len() + 1, "kind": "write",
+            "past": past_json(&base.entries, read),
+            "view": view_registrations(base.entries.iter().filter(|e| read(e)).cloned().collect()),
+        }));
+        // An old-id entry with the same past, replayed with the history.
+        let mut history = base.clone();
+        history.push(author, old, past, make(40, "Gifts"));
+        let entry = history.entries.last().unwrap().clone();
+        let replay = crate::replay::tests::replay(&history.entries);
+        assert_eq!(
+            registrations(&replay, &history.entries),
+            registrations(&log.replay, &base.entries)
+        );
+        verdicts.push(match &replay.entries[&entry.position] {
+            coven_database::EntryOutcome::Kept => true,
+            coven_database::EntryOutcome::Dropped(coven_database::DropReason::NotAllowed) => false,
+            other => panic!("{other:?}"),
+        });
+        let read = |e: &StoreLogEntry| crate::replay::had_read(&entry, e);
+        judged.push(json!({
+            "device": old, "number": judged.len() + 1, "kind": "entry",
+            "past": past_json(&base.entries, read),
+            "view": view_registrations(base.entries.iter().filter(|e| read(e)).cloned().collect()),
+        }));
+    }
+    (json!({"check": "admission", "objects": judged}), verdicts)
+}
+
+/// The real write authority and entry replay against `ReplacementRead.acceptsView`:
+/// Ben's phone 1 and Carol's tablet 2, with every subset of replacements by
+/// Ben's restored copies 5 and 6 (concurrent), Carol's copy 8 of her tablet
+/// and Carol's unauthorized claim 7 on Ben's phone, and every subset of them
+/// read. Then two histories where an object's own view and the full replay
+/// disagree about a replacement, in each direction.
 #[test]
 #[ignore = "requires COVEN_IDENTITY_LEAN"]
 fn st_differential_replacement_admission() {
     let candidates = [(1u8, 5u64, 1u64), (1, 6, 1), (2, 7, 1), (2, 8, 2)];
     let mut cases = Vec::new();
     let mut actual = Vec::new();
+    // Every judged object is distinct, so `loadViews` applies exactly the accepted ones.
+    let mut judge = |base: &History, objects: &[(u8, u64, Vec<usize>)]| {
+        let (case, verdicts) = admission_case(base, objects);
+        cases.push(case);
+        actual.push(json!({"accepts": verdicts, "loaded": verdicts}));
+        verdicts
+    };
     for chosen in 0..1u32 << candidates.len() {
         let mut base = household(MemberRole::Admin, MemberRole::Member);
         let registered: Vec<usize> = (0..base.entries.len()).collect();
@@ -355,10 +441,7 @@ fn st_differential_replacement_admission() {
                 replacements.push(base.entries.len() - 1);
             }
         }
-        let log = checked_log(&base.entries);
-        let mut replays = crate::replay_cache::ReplayCache::new(&log);
         let mut objects = Vec::new();
-        let mut verdicts = Vec::new();
         for read in 0..1u32 << replacements.len() {
             let mut past = registered.clone();
             past.extend(
@@ -369,75 +452,46 @@ fn st_differential_replacement_admission() {
                     .map(|(_, index)| *index),
             );
             for (author, old) in [(1u8, 1u64), (2, 2)] {
-                // An old-id write recording exactly this past.
-                let store_log_read = coven_format::value::EntryPositions(
-                    past.iter()
-                        .fold(std::collections::BTreeMap::new(), |mut ends, &index| {
-                            let id = base.entries[index].position;
-                            let end = ends.entry(id.device).or_insert(id);
-                            if id.number > end.number {
-                                *end = id;
-                            }
-                            ends
-                        })
-                        .into_values()
-                        .collect(),
-                );
-                let header = coven_format::write::WriteHeader {
-                    position: coven_merge::WriteId {
-                        device: DeviceId(old),
-                        number: 1,
-                    },
-                    timestamp: coven_merge::Timestamp::new(1_000, 0, DeviceId(old)).unwrap(),
-                    had_read: coven_format::value::WritePositions(Vec::new()),
-                    store_log_read: store_log_read.clone(),
-                    schema_version: 1,
-                    disposition: coven_format::write::WriteDisposition::Apply,
-                };
-                verdicts.push(
-                    match crate::write_object::authority(&log, &mut replays, &header) {
-                        Ok(signer) => {
-                            assert_eq!(signer, crate::replay::tests::keys(author).signing);
-                            true
-                        }
-                        Err(crate::Refusal::NotAuthorized) => false,
-                        Err(other) => panic!("{other:?}"),
-                    },
-                );
-                objects.push(json!({
-                    "device": old, "number": objects.len() + 1, "kind": "write",
-                    "past": past_json(&base.entries, |e| store_log_read.covers(e.position)),
-                }));
-                // An old-id entry with the same past, replayed with the history.
-                let mut history = base.clone();
-                history.push(author, old, &past, make(40, "Gifts"));
-                let entry = history.entries.last().unwrap().clone();
-                let replay = crate::replay::tests::replay(&history.entries);
-                assert_eq!(
-                    registrations(&replay, &history.entries),
-                    registrations(&log.replay, &base.entries)
-                );
-                verdicts.push(match &replay.entries[&entry.position] {
-                    coven_database::EntryOutcome::Kept => true,
-                    coven_database::EntryOutcome::Dropped(
-                        coven_database::DropReason::NotAllowed,
-                    ) => false,
-                    other => panic!("{other:?}"),
-                });
-                objects.push(json!({
-                    "device": old, "number": objects.len() + 1, "kind": "entry",
-                    "past": past_json(&base.entries, |e| crate::replay::had_read(&entry, e)),
-                }));
+                objects.push((author, old, past.clone()));
             }
         }
-        cases.push(json!({
-            "check": "admission",
-            "kept": registrations(&log.replay, &base.entries),
-            "objects": objects,
-        }));
-        // Every judged object is distinct, so `load` applies exactly the accepted ones.
-        actual.push(json!({"accepts": verdicts, "loaded": verdicts}));
+        judge(&base, &objects);
     }
+    let registered: Vec<usize> = (0..5).collect();
+    let with = |extra: &[usize]| [&registered[..], extra].concat();
+    // The pinned history: Ana registers device 5 while Ben's restored copy,
+    // unaware, registers 5 replacing phone 1. The full replay drops the
+    // replacement; an object whose own view kept it stays excluded.
+    let mut pinned = household(MemberRole::Admin, MemberRole::Member);
+    pinned.push(0, 0, &registered, crate::replay::tests::device(5));
+    pinned.push(1, 5, &registered, replace(5, 1));
+    assert!(registrations(&checked_log(&pinned.entries).replay, &pinned.entries).is_empty());
+    let objects: Vec<_> = [with(&[]), with(&[6]), with(&[5, 6])]
+        .into_iter()
+        .map(|past| (1, 1, past))
+        .collect();
+    assert_eq!(
+        judge(&pinned, &objects),
+        [true, true, false, false, true, true]
+    );
+    // The other direction: Carol removes Ana concurrently with Ana registering
+    // device 5, so the full replay drops Ana's registration and keeps Ben's
+    // replacement. A view without the removal drops the replacement instead,
+    // and phone 1's objects there still count.
+    let mut removal = household(MemberRole::Member, MemberRole::Admin);
+    removal.push(2, 2, &registered, crate::replay::tests::remove(0));
+    removal.push(0, 0, &registered, crate::replay::tests::device(5));
+    removal.push(1, 5, &registered, replace(5, 1));
+    let full = registrations(&checked_log(&removal.entries).replay, &removal.entries);
+    assert_eq!(full, [json!({"old": 1, "fresh": 5, "number": 1})]);
+    let objects: Vec<_> = [with(&[]), with(&[7]), with(&[6, 7]), with(&[5, 6, 7])]
+        .into_iter()
+        .map(|past| (1, 1, past))
+        .collect();
+    assert_eq!(
+        judge(&removal, &objects),
+        [true, true, false, false, true, true, false, false]
+    );
     assert_eq!(actual, identity_runner(&cases));
 }
 

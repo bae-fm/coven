@@ -1,9 +1,10 @@
-import CovenStorage.ReplacementRead
+import CovenStorage.ReplacementViews
 import CovenStorage.IdentityCounters
 import Lean
 
 /-! JSON adapter comparing the Rust pre-send identity check, replacement
-observation and replacement admission with `checkIdentity` and `ReplacementRead`,
+observation and per-object replacement admission with `checkIdentity` and
+`ReplacementRead`,
 and the reservation sequences and storage-less reset with `IdentityCounters`. -/
 
 open Lean CovenStorage
@@ -109,15 +110,26 @@ private def logObject (j : Json) : Except String ReplacementRead.LogObject := do
   pure ⟨← j.getObjValAs? Nat "device", ← j.getObjValAs? Nat "number", kind,
     ← (← j.getObjValAs? (Array Json) "past").toList.mapM entryPath⟩
 
-/-- Judge old-id objects by their recorded pasts against the kept registrations,
-then rebuild the applied set from all of them with `load`. -/
+/-- Judge old-id objects each in its own view with `acceptsView`, then rebuild
+the applied set from all of them with `loadViews`. Each object carries the
+registrations Rust's replay of its recorded past keeps. Replay here is the
+function those cases define: a set of entries gives the kept registrations of
+the object whose past is that set. The received entries are every recorded
+past together, so each object is ready. -/
 private def admission (j : Json) : Except String Json := do
-  let kept ← (← j.getObjValAs? (Array Json) "kept").toList.mapM registration
-  let objects ← (← j.getObjValAs? (Array Json) "objects").toList.mapM logObject
-  let loaded := ReplacementRead.load kept objects
+  let objects ← (← j.getObjValAs? (Array Json) "objects").toList.mapM fun o => do
+    pure (← logObject o, ← (← o.getObjValAs? (Array Json) "view").toList.mapM registration)
+  let sameSet (a b : List Path) := a.all (· ∈ b) && b.all (· ∈ a)
+  let replay (entries : List Path) : List ReplacementRead.Registration :=
+    match objects.find? (fun (o, _) => sameSet o.past entries) with
+    | some (_, kept) => kept
+    | none => []
+  let received := (objects.flatMap (·.1.past)).eraseDups
+  let logObjects := objects.map (·.1)
+  let loaded := ReplacementRead.loadViews id replay received logObjects
   return Json.mkObj [
-    ("accepts", toJson (objects.map (ReplacementRead.accepts kept))),
-    ("loaded", toJson (objects.map fun o => decide (o.path ∈ loaded)))]
+    ("accepts", toJson (logObjects.map (ReplacementRead.acceptsView id replay received))),
+    ("loaded", toJson (logObjects.map fun o => decide (o.path ∈ loaded)))]
 
 private def run (j : Json) : Except String Json := do
   let cases ← fromJson? j (α := Array Json)

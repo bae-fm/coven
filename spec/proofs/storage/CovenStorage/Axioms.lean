@@ -138,6 +138,16 @@ import CovenStorage
 #print axioms CovenStorage.ReplacementRead.observed_replacement_blocks_send
 #print axioms CovenStorage.ReplacementRead.missing_custody_blocks_restore
 #print axioms CovenStorage.ReplacementRead.reset_uses_new_path
+#print axioms CovenStorage.ReplacementRead.acceptsView_iff
+#print axioms CovenStorage.ReplacementRead.loadViews_iff
+#print axioms CovenStorage.ReplacementRead.loadViews_nodup
+#print axioms CovenStorage.ReplacementRead.view_order_irrelevant
+#print axioms CovenStorage.ReplacementRead.view_stable
+#print axioms CovenStorage.ReplacementRead.verdict_never_rejudged
+#print axioms CovenStorage.ReplacementRead.views_converge
+#print axioms CovenStorage.ReplacementRead.applied_never_retracted
+#print axioms CovenStorage.ReplacementRead.unstopped_copy_counts
+#print axioms CovenStorage.ReplacementRead.agrees_with_kept_set
 
 #print axioms CovenStorage.ReplacementRead.Examples.racing_upload_kept
 #print axioms CovenStorage.ReplacementRead.Examples.restored_and_live_copies_stop
@@ -145,6 +155,10 @@ import CovenStorage
 #print axioms CovenStorage.ReplacementRead.Examples.restored_copy_can_send
 #print axioms CovenStorage.ReplacementRead.Examples.unsent_loss
 #print axioms CovenStorage.ReplacementRead.Examples.colliding_copies_lose_one_value
+#print axioms CovenStorage.ReplacementRead.Examples.pinned_set_determined
+#print axioms CovenStorage.ReplacementRead.Examples.dropped_replacement_keeps_verdict
+#print axioms CovenStorage.ReplacementRead.Examples.removal_set_determined
+#print axioms CovenStorage.ReplacementRead.Examples.full_set_excludes_unstopped_write
 
 #print axioms CovenStorage.RowAuthorship.revealed_authentic
 #print axioms CovenStorage.RowAuthorship.snapshot_authorship
