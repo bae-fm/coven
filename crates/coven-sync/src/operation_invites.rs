@@ -169,6 +169,33 @@ impl StoreLogSync {
         Err(SyncError::InvitationChanged)
     }
 
+    /// Discarding an invite takes back what it granted, as cancelling does
+    /// (§13): its account share, its S3 key's deletion, or the rollback of a
+    /// key still being made. A reserved approval entry is published by the
+    /// generic discard instead, and a settled invite has granted nothing left.
+    pub(super) async fn discard_invite(
+        &self,
+        record: &OperationRecord,
+    ) -> Result<Option<Begun>, SyncError> {
+        let mut data = Data::read(record)?;
+        let Data::Invite(work) = &mut data else {
+            return Ok(None);
+        };
+        match work.state {
+            InviteState::Approving { entry: Some(_), .. } | InviteState::Settled => {
+                return Ok(None)
+            }
+            InviteState::Revoking => (),
+            InviteState::Grant | InviteState::Waiting { .. } | InviteState::Approving { .. } => {
+                work.state = InviteState::Revoking;
+                self.database
+                    .advance_operation(data.update(record, 0)?)
+                    .await?;
+            }
+        }
+        Ok(Some(Begun::Operation(record.id)))
+    }
+
     pub(super) async fn invite_step(
         &mut self,
         record: &OperationRecord,

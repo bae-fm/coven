@@ -155,6 +155,9 @@ impl StoreLogSync {
                 if let Some(begun) = self.discard_replacement(&record).await? {
                     return Ok(begun);
                 }
+                if let Some(begun) = self.discard_invite(&record).await? {
+                    return Ok(begun);
+                }
                 self.release_admin_access(id);
                 let data = Data::read(&record)?;
                 if let Data::Snapshots(task) = &data {

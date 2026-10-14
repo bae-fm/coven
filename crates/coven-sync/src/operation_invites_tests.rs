@@ -178,8 +178,8 @@ async fn invite_cursor_excludes_reserved_copies_until_the_invites_catch_up_publi
 }
 
 #[tokio::test]
-async fn decline_cancel_and_expiry_take_access_back() {
-    for settle in ["decline", "cancel", "expiry"] {
+async fn decline_cancel_discard_and_expiry_take_access_back() {
+    for settle in ["decline", "cancel", "discard", "expiry"] {
         let storage = google();
         let [mut a, _b, _c] = accounts(storage.clone()).await;
         let (operation, invite) = invite(&mut a, "join@example.com").await;
@@ -197,6 +197,9 @@ async fn decline_cancel_and_expiry_take_access_back() {
             }
             "cancel" => {
                 begin(&mut a, Command::Cancel(invite.id)).await;
+            }
+            "discard" => {
+                begin(&mut a, Command::Discard(operation)).await;
             }
             "expiry" => {
                 a.clock.set(invite.expires_at);
@@ -491,4 +494,30 @@ async fn a_failed_invite_is_retained_and_expiry_finishes_on_reconnect() {
     operations.set_storage(Some(storage.clone())).await.unwrap();
     assert!(a.db.operations().await.unwrap().is_empty());
     operations.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn discarding_a_waiting_invite_takes_its_access_back() {
+    let storage = storage();
+    let mut a = device(storage.clone(), 1, member(1), store(1)).await;
+    a.create(key(1)).await;
+    let id = begin(
+        &mut a,
+        Command::Invite(
+            MemberRole::Member,
+            InviteAccess::S3AccessKey {
+                access_key_id: "new-key".into(),
+                secret_access_key: coven_crypto::SecretText::new("secret".into()),
+            },
+        ),
+    )
+    .await;
+    finish(&mut a, id).await;
+    assert!(matches!(
+        a.sync.begin_operation_call(Command::Discard(id)).await,
+        Ok(Begun::Operation(found)) if found == id
+    ));
+    finish(&mut a, id).await;
+    assert!(a.db.operation(id).await.unwrap().is_none());
+    assert_eq!(access_keys(&a.db).await, [console_key("new-key", None)]);
 }

@@ -2533,6 +2533,9 @@ loop {
 - App work includes keeping a reset or schema change and an app-requested
   reload. Provider access work is recorded by replay; the app may retry a
   failed request but cannot discard the current access intention.
+  Discarding an invite takes back what it granted, as cancelling does, and
+  returns once that is done; an invite with a reserved approval entry
+  publishes it instead (§13).
   Single-entry calls return their errors directly; a reserved entry still
   has its own pending subject.
 - A record stores a typed reason, not an error string. The immediate call
