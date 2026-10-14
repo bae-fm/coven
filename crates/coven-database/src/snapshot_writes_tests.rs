@@ -474,6 +474,7 @@ mod differential {
     use crate::{BoundaryCoverage, Database, SnapshotReload};
     use coven_format::value::{Value as Scalar, WritePositions};
     use coven_format::write::{WriteDisposition, WriteRecord};
+    use coven_format::write_sources::{CellSource, ChangeId, WriteSources};
     use coven_foundation::id_source::{DeviceId, SequentialIds};
     use coven_merge::{Audience, Change, ColumnValue, History, Operation};
     use serde_json::{json, Value};
@@ -518,15 +519,36 @@ mod differential {
             // Empty-valued deletions still have an identity in a frozen loss.
             let mut deletion = insert(401, 0);
             deletion.header.disposition = WriteDisposition::Lost(2);
-            deletion.header.had_read = WritePositions(vec![
-                reload
-                    .writes
-                    .iter()
-                    .find(|w| w.header.position.device == DeviceId(100))
-                    .unwrap()
-                    .header
-                    .position,
-            ]);
+            let original = reload
+                .writes
+                .iter()
+                .find(|w| w.header.position.device == DeviceId(100))
+                .unwrap();
+            deletion.header.had_read = WritePositions(vec![original.header.position]);
+            // The deleted row's insert established generation 1 and set every
+            // replaced cell (Appendix D).
+            let source = ChangeId {
+                write: original.header.position,
+                row: original.parts[0].rows[0].row.clone(),
+            };
+            let Operation::Insert(set) = &original.parts[0].rows[0].change.operation else {
+                unreachable!()
+            };
+            deletion.parts[0].rows[0].sources = WriteSources {
+                generation: Some(source.clone()),
+                setters: set
+                    .keys()
+                    .map(|column| {
+                        (
+                            column.clone(),
+                            CellSource {
+                                change: source.clone(),
+                                column: column.clone(),
+                            },
+                        )
+                    })
+                    .collect(),
+            };
             deletion.parts[0].rows[0].change = Change {
                 generation: 1,
                 operation: Operation::Delete,
