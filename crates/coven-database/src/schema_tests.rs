@@ -689,3 +689,174 @@ async fn independent_keys_require_text_affinity_on_open_and_after_migrating() {
         db.close().await.unwrap();
     }
 }
+
+#[tokio::test]
+async fn nonprimary_references_fail_migration_and_both_open_modes() {
+    for (parent, reference) in [
+        (
+            "id TEXT NOT NULL PRIMARY KEY,code TEXT UNIQUE",
+            "FOREIGN KEY(x) REFERENCES PaReNt(CoDe)",
+        ),
+        (
+            "a TEXT NOT NULL,b TEXT NOT NULL,c TEXT,PRIMARY KEY(a,b),UNIQUE(a,c)",
+            "FOREIGN KEY(x,y) REFERENCES Parent(a,c)",
+        ),
+        (
+            "a TEXT NOT NULL,b TEXT NOT NULL,PRIMARY KEY(a,b),UNIQUE(a)",
+            "FOREIGN KEY(x) REFERENCES Parent(a)",
+        ),
+        (
+            "a TEXT NOT NULL,b TEXT NOT NULL,PRIMARY KEY(a,b),UNIQUE(a,a)",
+            "FOREIGN KEY(x,y) REFERENCES Parent(a,a)",
+        ),
+        (
+            "a TEXT NOT NULL,b TEXT NOT NULL,PRIMARY KEY(a,b)",
+            "FOREIGN KEY(x) REFERENCES Parent",
+        ),
+        ("code TEXT UNIQUE", "FOREIGN KEY(x) REFERENCES Parent(code)"),
+        (
+            "id TEXT NOT NULL PRIMARY KEY",
+            "FOREIGN KEY(x) REFERENCES absent(id)",
+        ),
+    ] {
+        let store = TestStore::new();
+        let schema = format!("CREATE TABLE Parent({parent}); CREATE TABLE Child(id TEXT NOT NULL PRIMARY KEY,x TEXT,y TEXT,{reference})");
+        let migration_schema = schema.clone();
+        let error = store
+            .builder(
+                vec![shared("CHILD")],
+                vec![Migration::run(1, "reference", move |sql| {
+                    sql.execute_batch(&migration_schema)?;
+                    Ok(())
+                })],
+            )
+            .open()
+            .await
+            .err()
+            .expect("invalid reference refused");
+        let DbError::Schema(expected @ SchemaError::ForeignKeyNotPrimaryKey { .. }) =
+            database_error(error)
+        else {
+            panic!("expected primary-key reference error for {reference}");
+        };
+        assert!(expected.to_string().contains("Child"));
+        let db = store.builder(vec![], vec![]).open().await.unwrap();
+        db.inspect_writer(|writer| {
+            assert_eq!(writer.schema_version().unwrap(), 0);
+            assert_eq!(
+                writer
+                    .query_row(
+                        "SELECT count(*) FROM sqlite_schema WHERE name IN ('Parent','Child')",
+                        [],
+                        |r| r.get::<_, i64>(0)
+                    )
+                    .unwrap(),
+                0
+            );
+            writer.batch(&schema).unwrap();
+        });
+        db.close().await.unwrap();
+        for read_only in [false, true] {
+            let builder = store.builder(vec![shared("CHILD")], vec![]);
+            let result = if read_only {
+                builder.open_read_only().await.map(|_| ())
+            } else {
+                builder.open().await.map(|_| ())
+            };
+            assert!(
+                matches!(database_error(result.expect_err("invalid reference refused")), DbError::Schema(error) if error == expected)
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn primary_references_accept_implicit_reordered_quoted_and_self_targets() {
+    for reference in [
+        "REFERENCES Parent",
+        "REFERENCES Parent(a,b)",
+        "REFERENCES pArEnT(\"B\",[A])",
+    ] {
+        let store = TestStore::new();
+        let schema = format!("CREATE TABLE Parent(a TEXT NOT NULL,b TEXT NOT NULL,PRIMARY KEY(a,b)); CREATE TABLE Child(id TEXT NOT NULL PRIMARY KEY,x TEXT,y TEXT,FOREIGN KEY(x,y) {reference})");
+        let tables = || vec![shared("Parent").key_columns(["a", "b"]), shared("Child")];
+        let db = store
+            .builder(
+                tables(),
+                vec![Migration::run(1, "reference", move |sql| {
+                    sql.execute_batch(&schema)?;
+                    Ok(())
+                })],
+            )
+            .open()
+            .await
+            .unwrap();
+        crate::write::tests::sql(
+            &db,
+            "INSERT INTO Parent VALUES('A','B'),('B','A'); INSERT INTO Child VALUES('c','A','B')",
+        )
+        .await
+        .unwrap();
+        db.close().await.unwrap();
+    }
+    let store = TestStore::new();
+    store
+        .schema(
+            vec![shared("nodes")],
+            "CREATE TABLE nodes(id TEXT NOT NULL PRIMARY KEY,parent TEXT REFERENCES nodes)",
+        )
+        .await
+        .unwrap()
+        .close()
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn nonprimary_reference_migration_preserves_the_previous_database() {
+    const INITIAL: &str = "CREATE TABLE parents(id TEXT NOT NULL PRIMARY KEY,code TEXT UNIQUE); CREATE TABLE children(id TEXT NOT NULL PRIMARY KEY,parent TEXT REFERENCES parents(id))";
+    let tables = || vec![shared("parents"), shared("children")];
+    let store = TestStore::new();
+    let db = store.schema(tables(), INITIAL).await.unwrap();
+    crate::write::tests::sql(
+        &db,
+        "INSERT INTO parents VALUES('p','p'); INSERT INTO children VALUES('c','p')",
+    )
+    .await
+    .unwrap();
+    let before = crate::tests::contents(&db);
+    db.close().await.unwrap();
+    let error = store.builder(tables(), vec![Migration::sql(1, "schema", INITIAL), Migration::sql(2, "nonprimary", "CREATE TABLE rebuilt(id TEXT NOT NULL PRIMARY KEY,parent TEXT REFERENCES parents(code)); INSERT INTO rebuilt SELECT * FROM children; DROP TABLE children; ALTER TABLE rebuilt RENAME TO children")]).open().await.err().expect("invalid target refused");
+    assert!(matches!(
+        database_error(error),
+        DbError::Schema(SchemaError::ForeignKeyNotPrimaryKey { .. })
+    ));
+    let db = store.schema(tables(), INITIAL).await.unwrap();
+    assert_eq!(db.schema_version().await.unwrap(), 1);
+    assert_eq!(crate::tests::contents(&db), before);
+    db.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn local_children_can_reference_unique_nonprimary_values() {
+    for synced_parent in [false, true] {
+        let store = TestStore::new();
+        let tables = if synced_parent {
+            vec![shared("parents")]
+        } else {
+            vec![]
+        };
+        let db = store.schema(tables, "CREATE TABLE parents(id TEXT NOT NULL PRIMARY KEY,code TEXT UNIQUE); CREATE TABLE children(parent TEXT REFERENCES parents(code) ON DELETE CASCADE ON UPDATE CASCADE)").await.unwrap();
+        crate::write::tests::sql(&db, "INSERT INTO parents VALUES('p','old'); INSERT INTO children VALUES('old'); UPDATE parents SET code='new'").await.unwrap();
+        db.read(|sql| {
+            assert_eq!(
+                sql.query_row("SELECT parent FROM children", [], |r| r.get::<_, String>(0))?,
+                "new"
+            );
+            Ok(())
+        })
+        .await
+        .unwrap();
+        db.close().await.unwrap();
+    }
+}

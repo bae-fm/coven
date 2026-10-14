@@ -635,16 +635,16 @@ async fn changing_primary_key_arity_deletes_old_rows_and_inserts_new_ones() {
 
 #[tokio::test]
 async fn renaming_a_composite_reference_keeps_its_shared_setter() {
-    const INITIAL: &str = "CREATE TABLE parents(id TEXT NOT NULL PRIMARY KEY,a TEXT,b TEXT,UNIQUE(a,b)); CREATE TABLE children(id TEXT NOT NULL PRIMARY KEY,a TEXT,b TEXT,FOREIGN KEY(a,b) REFERENCES parents(a,b))";
+    const INITIAL: &str = "CREATE TABLE parents(a TEXT NOT NULL,b TEXT NOT NULL,PRIMARY KEY(a,b)); CREATE TABLE children(id TEXT NOT NULL PRIMARY KEY,a TEXT,b TEXT,FOREIGN KEY(a,b) REFERENCES parents(a,b))";
     let tables = || {
         vec![
-            SyncedTable::new("parents", RowIdentity::SharedKey),
+            SyncedTable::new("parents", RowIdentity::SharedKey).key_columns(["a", "b"]),
             SyncedTable::new("children", RowIdentity::SharedKey),
         ]
     };
     let store = TestStore::new();
     let db = store.schema(tables(), INITIAL).await.unwrap();
-    sql(&db,"INSERT INTO parents VALUES('p','a','b'),('q','a','c'); INSERT INTO children VALUES('child','a','b')").await.unwrap();
+    sql(&db,"INSERT INTO parents VALUES('a','b'),('a','c'); INSERT INTO children VALUES('child','a','b')").await.unwrap();
     sql(&db, "UPDATE children SET b='c'").await.unwrap();
     db.close().await.unwrap();
     let db = store

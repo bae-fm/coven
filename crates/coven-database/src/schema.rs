@@ -138,29 +138,9 @@ impl Schema {
                         .iter()
                         .any(|action| *action == "SET DEFAULT")
                 {
-                    let columns = key
-                        .columns
-                        .iter()
-                        .map(|c| identifier(c))
-                        .collect::<Vec<_>>()
-                        .join(", ");
-                    let target_columns = key
-                        .target_columns
-                        .iter()
-                        .flatten()
-                        .map(|c| identifier(c))
-                        .collect::<Vec<_>>();
-                    let target_columns = if target_columns.is_empty() {
-                        String::new()
-                    } else {
-                        format!(" ({})", target_columns.join(", "))
-                    };
                     return Err(SchemaError::SetDefault {
                         table: table.name.clone(),
-                        key: format!(
-                            "({columns}) REFERENCES {}{target_columns}",
-                            identifier(&key.target)
-                        ),
+                        key: key.description(),
                     }
                     .into());
                 }
@@ -232,6 +212,33 @@ impl Schema {
                             .into());
                         }
                     }
+                }
+            }
+            for foreign_key in &table.foreign_keys {
+                let targets_primary = self
+                    .tables
+                    .get(&foreign_key.target.to_ascii_lowercase())
+                    .is_some_and(|parent| {
+                        let primary = crate::write_rows::key_columns(parent);
+                        !primary.is_empty()
+                            && foreign_key.target_columns.len() == primary.len()
+                            && (foreign_key.target_columns.iter().all(Option::is_none)
+                                || primary.iter().all(|column| {
+                                    foreign_key
+                                        .target_columns
+                                        .iter()
+                                        .flatten()
+                                        .filter(|target| target.eq_ignore_ascii_case(&column.name))
+                                        .count()
+                                        == 1
+                                }))
+                    });
+                if !targets_primary {
+                    return Err(SchemaError::ForeignKeyNotPrimaryKey {
+                        table: table.name.clone(),
+                        key: foreign_key.description(),
+                    }
+                    .into());
                 }
             }
             let audience_key = match &declaration.audience {
@@ -587,6 +594,30 @@ impl Schema {
 }
 
 impl SchemaForeignKey {
+    fn description(&self) -> String {
+        let columns = self
+            .columns
+            .iter()
+            .map(|c| identifier(c))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let target_columns = self
+            .target_columns
+            .iter()
+            .flatten()
+            .map(|c| identifier(c))
+            .collect::<Vec<_>>();
+        let target_columns = if target_columns.is_empty() {
+            String::new()
+        } else {
+            format!(" ({})", target_columns.join(", "))
+        };
+        format!(
+            "({columns}) REFERENCES {}{target_columns}",
+            identifier(&self.target)
+        )
+    }
+
     fn replaces_reference(&self) -> bool {
         [&self.on_update, &self.on_delete]
             .iter()

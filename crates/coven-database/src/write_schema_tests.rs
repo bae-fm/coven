@@ -128,15 +128,15 @@ async fn foreign_keys_on_one_column_keep_both_target_tables() {
 }
 
 #[tokio::test]
-async fn foreign_keys_on_one_column_keep_both_target_column_lists() {
+async fn foreign_keys_keep_both_primary_key_column_orders() {
     let store = TestStore::new();
     let db = store.schema(
-        ["parents", "children"].into_iter().map(|t| SyncedTable::new(t, RowIdentity::SharedKey)).collect(),
-        "CREATE TABLE parents(id TEXT NOT NULL PRIMARY KEY,alternate TEXT UNIQUE); CREATE TABLE children(id TEXT NOT NULL PRIMARY KEY,parent TEXT,FOREIGN KEY(parent) REFERENCES parents,FOREIGN KEY(parent) REFERENCES parents(alternate))",
+        vec![SyncedTable::new("parents", RowIdentity::SharedKey).key_columns(["id", "alternate"]), SyncedTable::new("children", RowIdentity::SharedKey)],
+        "CREATE TABLE parents(id TEXT NOT NULL,alternate TEXT NOT NULL,PRIMARY KEY(id,alternate)); CREATE TABLE children(id TEXT NOT NULL PRIMARY KEY,parent TEXT,other TEXT,FOREIGN KEY(parent,other) REFERENCES parents,FOREIGN KEY(parent,other) REFERENCES parents(alternate,id))",
     ).await.unwrap();
     crate::write::tests::sql(
         &db,
-        "INSERT INTO parents VALUES('1','2'),('2','1'); INSERT INTO children VALUES('c','1')",
+        "INSERT INTO parents VALUES('1','2'),('2','1'); INSERT INTO children VALUES('c','1','2')",
     )
     .await
     .unwrap();
@@ -152,11 +152,14 @@ async fn foreign_keys_on_one_column_keep_both_target_column_lists() {
     };
     let parents = &columns["parent"].parents;
     assert_eq!(parents.len(), 2);
-    for (target, id) in [("id", "1"), ("alternate", "2")] {
-        let key = coven_merge::ForeignKey::new(["parent"], "parents", [target]);
+    for (target, values) in [
+        (["id", "alternate"], ["1", "2"]),
+        (["alternate", "id"], ["2", "1"]),
+    ] {
+        let key = coven_merge::ForeignKey::new(["parent", "other"], "parents", target);
         assert_eq!(
             coven_format::key::decode_key(&parents[&key].row.key).unwrap(),
-            [coven_format::value::Value::Text(id.into())]
+            values.map(|v| coven_format::value::Value::Text(v.into()))
         );
     }
     db.close().await.unwrap();

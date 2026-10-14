@@ -242,7 +242,7 @@ async fn a_note_cannot_be_added_to_gifts_after_its_deletion_was_applied() {
 #[tokio::test]
 async fn references_use_the_parents_affinity_before_and_after_cascade() {
     let store = TestStore::new();
-    let db=store.schema(vec![SyncedTable::new("parents",RowIdentity::SharedKey),SyncedTable::new("children",RowIdentity::SharedKey)],"CREATE TABLE parents(id TEXT NOT NULL PRIMARY KEY,code INT UNIQUE); CREATE TABLE children(id TEXT NOT NULL PRIMARY KEY,parent TEXT REFERENCES parents(code) ON UPDATE CASCADE)").await.unwrap();
+    let db=store.schema(vec![SyncedTable::new("parents",RowIdentity::SharedKey).key_columns(["code"]),SyncedTable::new("children",RowIdentity::SharedKey)],"CREATE TABLE parents(id TEXT,code INT NOT NULL PRIMARY KEY); CREATE TABLE children(id TEXT NOT NULL PRIMARY KEY,parent TEXT REFERENCES parents(code) ON UPDATE CASCADE)").await.unwrap();
     sql(
         &db,
         "INSERT INTO parents VALUES('p',1); INSERT INTO children VALUES('c','1')",

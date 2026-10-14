@@ -538,6 +538,14 @@ impl From<rusqlite::Error> for DbError {
 /// A schema rule checked on open and after migrating (§8, §14.1).
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum SchemaError {
+    /// A synced foreign key does not reference the complete parent primary key (§8.4).
+    #[error("foreign key {table}: {key} must reference the parent's primary key")]
+    ForeignKeyNotPrimaryKey {
+        /// The referencing synced table.
+        table: String,
+        /// The foreign key's columns and referenced table and columns, as SQL.
+        key: String,
+    },
     /// SET DEFAULT is on a synced table or references one (§8.4).
     #[error("foreign key {table}: {key} cannot use SET DEFAULT")]
     SetDefault {

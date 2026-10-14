@@ -71,6 +71,8 @@
   - [A.5 CHECK constraints](#a5-check-constraints)
   - [A.6 Triggers that write synced tables](#a6-triggers-that-write-synced-tables)
   - [A.7 Schema changes](#a7-schema-changes)
+  - [A.8 SET DEFAULT foreign keys](#a8-set-default-foreign-keys)
+  - [A.9 References to non-key columns](#a9-references-to-non-key-columns)
 - [Appendix B. Proof of convergence](proofs/merge.md), in its own file
 - [Appendix C. Proof of the store log](proofs/storelog.md), in its own file
 - [Store-log effects on data](proofs/storelog-data.md), coupling Appendices B and C
@@ -2170,6 +2172,12 @@ Carol's tablet:
     as null, with the cell still naming Ben's write.
   - Dan's write then wins over Ben's, so every device ends with link 6 on
     note 44, whatever order the writes arrived in.
+- Foreign keys of synced tables must reference the parent's complete primary
+  key. An explicit column list may reorder those columns; an omitted list
+  means primary-key order. A UNIQUE non-key column, a subset of a composite
+  primary key, or repeated target columns is refused on open and after
+  migrating with `SchemaError::ForeignKeyNotPrimaryKey`, naming the table
+  and foreign key ([Appendix A.9](#a9-references-to-non-key-columns)).
 - Coven refuses `ON DELETE SET DEFAULT` and `ON UPDATE SET DEFAULT` on
   any foreign key of a synced table, and on a foreign key from a local
   table into a synced table, checked when the database opens and after
@@ -5790,3 +5798,14 @@ merge later.
   | `ON DELETE RESTRICT` | ~496,000 |
   | `ON DELETE NO ACTION` | ~115,000 |
   | `ON DELETE SET DEFAULT` | ~2,200 |
+
+### A.9 References to non-key columns
+
+- Problem: a parent can change a UNIQUE non-key value while another device
+  inserts a child referring to the old value. Parent row identity and
+  generation cannot track that mutable value; arrival order can either
+  refuse COMMIT or let SQLite rewrite a synced child with ON UPDATE CASCADE.
+- Status: refused for foreign keys of synced tables on open and after
+  migrating; the target must be the parent's complete primary key
+  ([§8.4](#84-foreign-keys)). Local children keep SQLite's behavior subject
+  to the existing foreign-key action restrictions.

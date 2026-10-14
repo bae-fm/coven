@@ -843,57 +843,17 @@ async fn a_constant_unique_index_keeps_its_expression_term() {
 }
 
 #[tokio::test]
-async fn concurrent_change_to_a_referenced_nonkey_column_depends_on_arrival_order() {
-    let ids = coven_foundation::id_source::SequentialIds::new();
-    let a_store = TestStore::with_ids(&ids);
-    let b_store = TestStore::with_ids(&ids);
-    let tables = || vec![table("parents"), table("children")];
+async fn references_to_mutable_nonkey_columns_are_refused() {
+    let fixture = TestStore::new();
     let schema = "CREATE TABLE parents(id TEXT NOT NULL PRIMARY KEY,code TEXT UNIQUE); CREATE TABLE children(id TEXT NOT NULL PRIMARY KEY,parent TEXT REFERENCES parents(code) ON UPDATE CASCADE)";
-    let a = a_store.schema(tables(), schema).await.unwrap();
-    let b = b_store.schema(tables(), schema).await.unwrap();
-    sql(&a, "INSERT INTO parents VALUES('p','old')")
-        .await
-        .unwrap();
-    b.apply_downloaded(records(&a)[0].clone().into())
-        .await
-        .unwrap();
-    sql(&a, "UPDATE parents SET code='new'").await.unwrap();
-    sql(&b, "INSERT INTO children VALUES('c','old')")
-        .await
-        .unwrap();
-    let parent_write = records(&a).pop().unwrap();
-    let child_write = records(&b).pop().unwrap();
-    let before = crate::tests::contents(&a);
-    let error = a
-        .apply_downloaded(child_write.clone().into())
-        .await
-        .unwrap_err();
+    let result = fixture
+        .schema(vec![table("parents"), table("children")], schema)
+        .await;
+    let error = crate::tests::database_error(result.err().expect("mutable parent key refused"));
     assert!(
-        matches!(&error, crate::DbError::Sqlite(rusqlite::Error::SqliteFailure(e, _))
-        if e.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_FOREIGNKEY),
-        "expected deferred foreign-key failure: {error:?}"
+        matches!(error, crate::DbError::Schema(crate::SchemaError::ForeignKeyNotPrimaryKey { table, key })
+        if table == "children" && key == "(\"parent\") REFERENCES \"parents\" (\"code\")")
     );
-    assert_eq!(crate::tests::contents(&a), before);
-
-    b.apply_downloaded(parent_write.into()).await.unwrap();
-    b.inspect_writer_schema(|db, schema| {
-        let app = crate::write_rows::AppView::after(db, schema);
-        let store = crate::merge_store::MergeStore::new(db, &app);
-        let child = &child_write.parts[0].rows[0];
-        let Operation::Insert(written) = &child.change.operation else {
-            panic!("child insert")
-        };
-        assert_eq!(written["parent"].value, Value::Text("old".into()));
-        let state = store.row(&child.row).unwrap().state;
-        assert_eq!(state.cells()["parent"].write, child_write.header.position);
-        assert_eq!(
-            state.cells()["parent"].value.value,
-            Value::Text("new".into())
-        );
-        assert!(state.lost().is_empty());
-    });
-    a.close().await.unwrap();
-    b.close().await.unwrap();
 }
 
 pub(crate) fn materialize_deleted(

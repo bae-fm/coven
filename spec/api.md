@@ -501,6 +501,9 @@ pub enum WriteWait {
 
 /// A schema rule checked on open and after migrating (§8, §14.1).
 pub enum SchemaError {
+    /// A synced foreign key does not reference the complete parent primary key (§8.4).
+    /// `key` names the referencing columns and referenced table and columns as SQL.
+    ForeignKeyNotPrimaryKey { table: String, key: String },
     /// SET DEFAULT is on a synced table or references one (§8.4).
     /// `key` names the referencing columns and referenced table and columns as SQL.
     SetDefault { table: String, key: String },

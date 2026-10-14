@@ -163,12 +163,18 @@ async fn a_null_reference_is_still_a_reference_when_converting() {
 
 #[tokio::test]
 async fn composite_reference_updates_keep_the_complete_tuple_through_renames() {
-    let schema = "CREATE TABLE parents(id TEXT NOT NULL PRIMARY KEY,a TEXT NOT NULL,b TEXT NOT NULL,UNIQUE(a,b)); CREATE TABLE children(id TEXT NOT NULL PRIMARY KEY,a TEXT,b TEXT,FOREIGN KEY(a,b) REFERENCES parents(a,b) ON DELETE CASCADE)";
+    let schema = "CREATE TABLE parents(a TEXT NOT NULL,b TEXT NOT NULL,PRIMARY KEY(a,b)); CREATE TABLE children(id TEXT NOT NULL PRIMARY KEY,a TEXT,b TEXT,FOREIGN KEY(a,b) REFERENCES parents(a,b) ON DELETE CASCADE)";
+    let tables = || {
+        vec![
+            SyncedTable::new("parents", RowIdentity::SharedKey).key_columns(["a", "b"]),
+            SyncedTable::new("children", RowIdentity::SharedKey),
+        ]
+    };
     let store = TestStore::new();
-    let db = store.schema(reference_tables(), schema).await.unwrap();
+    let db = store.schema(tables(), schema).await.unwrap();
     sql(
         &db,
-        "INSERT INTO parents VALUES('p','a','b'),('q','a','c'); INSERT INTO children VALUES('c','a','b')",
+        "INSERT INTO parents VALUES('a','b'),('a','c'); INSERT INTO children VALUES('c','a','b')",
     )
     .await
     .unwrap();
@@ -176,7 +182,7 @@ async fn composite_reference_updates_keep_the_complete_tuple_through_renames() {
     db.close().await.unwrap();
     let db = store
         .builder(
-            reference_tables(),
+            tables(),
             vec![
                 Migration::sql(1, "initial", schema),
                 Migration::sql(
@@ -234,20 +240,26 @@ async fn converting_does_not_add_a_reference_that_the_old_write_did_not_set() {
 }
 
 #[tokio::test]
-async fn two_references_on_one_column_keep_distinct_target_columns() {
-    let schema="CREATE TABLE parents(id TEXT NOT NULL PRIMARY KEY,alternate TEXT UNIQUE); CREATE TABLE children(id TEXT NOT NULL PRIMARY KEY,parent TEXT,FOREIGN KEY(parent) REFERENCES parents,FOREIGN KEY(parent) REFERENCES parents(alternate))";
+async fn two_references_keep_distinct_primary_key_orders() {
+    let schema="CREATE TABLE parents(id TEXT NOT NULL,alternate TEXT NOT NULL,PRIMARY KEY(id,alternate)); CREATE TABLE children(id TEXT NOT NULL PRIMARY KEY,parent TEXT,other TEXT,FOREIGN KEY(parent,other) REFERENCES parents,FOREIGN KEY(parent,other) REFERENCES parents(alternate,id))";
+    let tables = || {
+        vec![
+            SyncedTable::new("parents", RowIdentity::SharedKey).key_columns(["id", "alternate"]),
+            SyncedTable::new("children", RowIdentity::SharedKey),
+        ]
+    };
     let fixture = TestStore::new();
-    let db = fixture.schema(reference_tables(), schema).await.unwrap();
+    let db = fixture.schema(tables(), schema).await.unwrap();
     sql(
         &db,
-        "INSERT INTO parents VALUES('1','2'),('2','1'); INSERT INTO children VALUES('c','1')",
+        "INSERT INTO parents VALUES('1','2'),('2','1'); INSERT INTO children VALUES('c','1','2')",
     )
     .await
     .unwrap();
     db.close().await.unwrap();
     let db = fixture
         .builder(
-            reference_tables(),
+            tables(),
             vec![
                 Migration::sql(1, "references", schema),
                 Migration::sql(
@@ -277,11 +289,14 @@ async fn two_references_on_one_column_keep_distinct_target_columns() {
     };
     let parents = &columns["renamed"].parents;
     assert_eq!(parents.len(), 2);
-    for (target, id) in [("id", "1"), ("alternate", "2")] {
-        let key = coven_merge::ForeignKey::new(["renamed"], "parents", [target]);
+    for (target, values) in [
+        (["id", "alternate"], ["1", "2"]),
+        (["alternate", "id"], ["2", "1"]),
+    ] {
+        let key = coven_merge::ForeignKey::new(["renamed", "other"], "parents", target);
         assert_eq!(
             coven_format::key::decode_key(&parents[&key].row.key).unwrap(),
-            [WireValue::Text(id.into())]
+            values.map(|v| WireValue::Text(v.into()))
         );
     }
     db.close().await.unwrap();
@@ -289,17 +304,24 @@ async fn two_references_on_one_column_keep_distinct_target_columns() {
 
 #[tokio::test]
 async fn replacing_a_reference_target_cannot_reuse_the_old_parents_generation() {
-    let schema="CREATE TABLE parents(id TEXT NOT NULL PRIMARY KEY,alternate TEXT UNIQUE); CREATE TABLE children(id TEXT NOT NULL PRIMARY KEY,parent TEXT REFERENCES parents(id))";
+    let schema="CREATE TABLE parents(id TEXT NOT NULL PRIMARY KEY); CREATE TABLE others(id TEXT NOT NULL PRIMARY KEY); CREATE TABLE children(id TEXT NOT NULL PRIMARY KEY,parent TEXT REFERENCES parents(id))";
+    let tables = || {
+        vec![
+            SyncedTable::new("parents", RowIdentity::SharedKey),
+            SyncedTable::new("others", RowIdentity::SharedKey),
+            SyncedTable::new("children", RowIdentity::SharedKey),
+        ]
+    };
     let fixture = TestStore::new();
-    let db = fixture.schema(reference_tables(), schema).await.unwrap();
+    let db = fixture.schema(tables(), schema).await.unwrap();
     sql(
         &db,
-        "INSERT INTO parents VALUES('1','2'),('2','1'); INSERT INTO children VALUES('c','1')",
+        "INSERT INTO parents VALUES('1'); INSERT INTO others VALUES('1'); INSERT INTO children VALUES('c','1')",
     )
     .await
     .unwrap();
     db.close().await.unwrap();
-    let error=fixture.builder(reference_tables(),vec![Migration::sql(1,"references",schema),Migration::sql(2,"retarget","CREATE TABLE rebuilt(id TEXT NOT NULL PRIMARY KEY,parent TEXT REFERENCES parents(alternate)); INSERT INTO rebuilt SELECT * FROM children; DROP TABLE children; ALTER TABLE rebuilt RENAME TO children").writes(|_| Ok(()))]).open().await.err().unwrap();
+    let error=fixture.builder(tables(),vec![Migration::sql(1,"references",schema),Migration::sql(2,"retarget","CREATE TABLE rebuilt(id TEXT NOT NULL PRIMARY KEY,parent TEXT REFERENCES others(id)); INSERT INTO rebuilt SELECT * FROM children; DROP TABLE children; ALTER TABLE rebuilt RENAME TO children").writes(|_| Ok(()))]).open().await.err().unwrap();
     assert!(
         matches!(error,CovenError::Migration(MigrationError::Failed{version:2,name:"retarget",source}) if matches!(*source,DbError::MigrationReference{..}))
     );
