@@ -3322,17 +3322,21 @@ Carol's tablet:
 - A write counts only if its author was a member, and its device one of
   theirs, in the store log the write had read ([§7.1](#71-causality)), so
   a write by Ana's phone counts as Ana's.
-- For every kept entry retiring a write's device, the write counts only if
-  its `store_log_read` does not include that entry and storage published the
-  complete write no more than 30 days after the entry's storage time.
-  Device retirement is removal of the device, removal of its member, or
-  replacement of its id. Exactly 30 days is allowed. Ordinary authority, causality,
-  schema and reset checks still apply.
+- A write whose own `store_log_read`, replayed, retires its device never
+  counts. Device retirement is removal of the device, removal of its member,
+  or replacement of its id; that replay decides which of them it keeps.
+- Otherwise, for every kept entry retiring the write's device, read or not,
+  the write counts only if storage published the complete write no more than
+  30 days after the entry's storage time. Exactly 30 days is allowed.
+  Reading a retirement that the write's own replay dropped excludes nothing
+  by itself
+  ([`writeAllowed_iff`, `read_retirement_judged_by_time`, `read_unretired_write_counts`](proofs/io/CovenIO/Retired.lean)).
+  Ordinary authority, causality, schema and reset checks still apply.
   - Use first complete publication times, never authored timestamps or
     device clocks. Retries change neither bytes nor storage time (§4).
-  - A write made after reading its own kept retirement is refused before
-    its position passes (§7.1). A pre-retirement write published outside its
-    window is instead dropped as `Dropped(LandedTooLate)` for its write
+  - A write whose own replay keeps its retirement is refused before its
+    position passes (§7.1). A write published outside a window is instead
+    dropped as `Dropped(LandedTooLate)` for its write
     subject. Consume its position without effects or losses; this is not a
     permanent refusal and does not stop the log. Retain its original inputs
     and storage facts while a replay could restore it.
@@ -3345,8 +3349,9 @@ Carol's tablet:
     already in snapshots. If the retiring entry drops, this exclusion
     disappears; another kept retirement can still exclude it. A failed
     rebuild leaves the prior state intact and reports the failure.
-  - With the send gate above, this retirement verdict is final once its
-    deciding kept retiring entry is final (§9). Its preceding store-log
+  - This retirement verdict is final once its deciding kept retiring entry
+    is final (§9); it needs no assumption about what the write read
+    ([`retirement_verdict_final`](proofs/merge/CovenMerge/Retirement.lean)). Its preceding store-log
     prefix, including storage-time ties, is then stable. Later retirements
     cannot reverse either window verdict: an admitted write already met the
     final entry's earlier deadline. This needs no future reader or drained
@@ -3822,8 +3827,9 @@ Carol's tablet:
   scan still requires confirmed cut-off (§16.5). If replay restores the
   device after removal drops, poll it again; clear any drain record based
   on the dropped entry.
-- A removed device's writes count only before it read the kept retirement
-  and if they landed within 30 storage days of it (§10). This applies to a
+- A removed device's writes count only while their own recorded past does
+  not retire it, and if they landed within 30 storage days of the kept
+  retirement (§10). This applies to a
   member removal's devices too, independently of provider cut-off. Replaced
   ids have the same write deadline. Dropping the retirement recomputes the
   write verdict; entries keep §9's permanent landing rule instead.

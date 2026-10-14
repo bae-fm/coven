@@ -47,6 +47,7 @@ import CovenIO
 #print axioms CovenIO.Examples.disk_failure_keeps_progress
 #print axioms CovenIO.Examples.replacement_needs_landing_frontier
 #print axioms CovenIO.Examples.retired_write_boundary_and_restore
+#print axioms CovenIO.Examples.read_unretired_write_counts
 #print axioms CovenIO.Examples.fresh_gate_boundaries
 #print axioms CovenIO.Examples.last_send_settles
 #print axioms CovenIO.Examples.pass_can_download_file
@@ -75,9 +76,12 @@ import CovenIO
 #print axioms CovenIO.miss_before_retention
 #print axioms CovenIO.Retired.drained_not_polled
 #print axioms CovenIO.Retired.drained_not_named
+#print axioms CovenIO.Retired.writeAllowed_iff
 #print axioms CovenIO.Retired.write_verdict_agrees
 #print axioms CovenIO.Retired.dropped_retirement_restores
 #print axioms CovenIO.Retired.kept_retirement_rejects
+#print axioms CovenIO.Retired.view_retirement_rejects
+#print axioms CovenIO.Retired.read_retirement_judged_by_time
 #print axioms CovenIO.Retired.final_retirement_seen
 #print axioms CovenIO.Retired.publication_before_deadline
 #print axioms CovenIO.Retired.retirement_closed

@@ -90,7 +90,8 @@ An out-of-window write stays dropped. Each otherwise eligible change using
 its generation or replaced cell setter becomes a recorded loss; unrelated
 changes remain eligible. Recorded write frontiers do not decide dependency.
 `retirement_verdict_final` proves window-verdict stability once the deciding
-retirement and preceding entry prefix are final, under the post-read send gate.
+retirement and preceding entry prefix are final, with no assumption about
+what the write read.
 Later readers cannot change it. `send_gate_publication_bound` proves the one-day
 plus five-minute drain bound from finality. Both proofs state their store-log,
 catch-up and provider assumptions explicitly. This proposal changes neither
@@ -145,11 +146,11 @@ replaced. Both histories use a small replay that keeps and drops what the
 real one does on these entries. The `admission` differential runs both
 histories through Rust's real replay and checks those verdicts.
 
-The single-set reading is also the one §10's 30-day paragraph and the IO
-model's `writeAllowed` use: a write that read a kept retirement never counts.
-On the second history that excludes the write the per-object rule keeps.
-That paragraph is unchanged here; restating it per object needs the IO model
-updated first.
+§10's 30-day window follows the same rule. A write whose own replay keeps
+its retirement never counts; every other write is bounded by the 30 days of
+each kept retirement of its device, read or not. On the second history the
+write is therefore judged by the replacement's window alone
+([IO `read_unretired_write_counts`](io.md)).
 
 **Stored bytes are preserved; receipt is conditional.** `stored_object_survives` combines
 create-once storage with receipt: later publications preserve the original

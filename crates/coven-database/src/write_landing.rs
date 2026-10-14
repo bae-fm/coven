@@ -29,15 +29,11 @@ pub(crate) struct Retirement {
     pub(crate) stored_at: SystemTime,
 }
 
-/// Lean `Receive.withinWindow`: for every kept retirement of the write's
-/// device, the write did not read it and landed within its window.
-pub(crate) fn within_window(
-    stored_at: SystemTime,
-    read: impl Fn(EntryId) -> bool,
-    kept: &[Retirement],
-) -> bool {
-    kept.iter()
-        .all(|r| !read(r.entry) && stored_at <= r.stored_at + WRITE_WINDOW)
+/// Lean `Receive.withinWindow`: the write landed within the window of every
+/// kept retirement of its device, read or not. A write whose own recorded view
+/// retires its device was already refused by its authority check (§7.1, §10).
+pub(crate) fn within_window(stored_at: SystemTime, kept: &[Retirement]) -> bool {
+    kept.iter().all(|r| stored_at <= r.stored_at + WRITE_WINDOW)
 }
 
 /// The device and member columns `_coven_store_log` keeps for an entry that
@@ -106,18 +102,17 @@ pub(crate) fn judge(
     header: &WriteHeader,
     stored_at: SystemTime,
 ) -> Result<Landing, DbError> {
-    let read = |entry: EntryId| header.store_log_read.covers(entry);
     let candidates = candidates(db, header.position.device)?;
     let kept: Vec<_> = candidates
         .iter()
         .filter(|(_, kept, _)| *kept)
         .map(|(r, _, _)| *r)
         .collect();
-    let late = !within_window(stored_at, read, &kept);
+    let late = !within_window(stored_at, &kept);
     let fixed = if late {
         candidates
             .iter()
-            .any(|(r, kept, fixed)| *kept && *fixed && !within_window(stored_at, read, &[*r]))
+            .any(|(r, kept, fixed)| *kept && *fixed && !within_window(stored_at, &[*r]))
     } else {
         settled(horizon(db)?, stored_at)
     };

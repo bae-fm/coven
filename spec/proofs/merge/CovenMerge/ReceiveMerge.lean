@@ -12,11 +12,13 @@ structure Retirement where
   stored : Nat
   deriving DecidableEq, Repr
 
-def retirementAllows {W : Type} (logs : Logs W) (readEntry : W → Nat → Bool)
+/-- Every kept retirement of the write's device bounds it by storage time,
+whether or not the write read it (§10). Exclusion by the write's own view is
+the receive gate's, through `viewRetired`. -/
+def retirementAllows {W : Type} (logs : Logs W)
     (stored : W → Nat) (retirements : List Retirement) (w : W) : Bool :=
   retirements.all fun e =>
-    if e.device = logs.device w then
-      !readEntry w e.entry && decide (stored w ≤ e.stored + 30 * 86400)
+    if e.device = logs.device w then decide (stored w ≤ e.stored + 30 * 86400)
     else true
 
 structure Policy (W : Type) where
@@ -27,19 +29,23 @@ structure Policy (W : Type) where
   schema : W → SchemaDisposition
   retirements : List Retirement
   stored : W → Nat
+  /-- The replay of the write's own `store_log_read` retires its device:
+  removal of it or its member, or a replacement that replay keeps (§7.1, §10;
+  storage's `acceptsView`). -/
+  viewRetired : W → Bool
 
 /-- Storage times are seconds; exactly thirty days counts (§10). Only kept
-retirements are supplied. The caller's gate must refuse writes made after
-reading their own removal. -/
+retirements are supplied. The caller's gate must refuse writes whose own view
+retires their device (`beforeRemoval`). -/
 def withinWindow {W : Type} (P : Policy W) (w : W) : Bool :=
-  retirementAllows P.logs P.readEntry P.stored P.retirements w
+  retirementAllows P.logs P.stored P.retirements w
 
 def eligible {W : Type} (P : Policy W) (w : W) : Bool :=
   withinWindow P w && boundaryEligible P.reset P.readEntry P.schema w
 
 theorem window_exact {W : Type} (P : Policy W) (w : W) :
     withinWindow P w = true ↔ ∀ e ∈ P.retirements, e.device = P.logs.device w →
-      P.readEntry w e.entry = false ∧ P.stored w ≤ e.stored + 30 * 86400 := by
+      P.stored w ≤ e.stored + 30 * 86400 := by
   simp only [withinWindow, retirementAllows, List.all_eq_true]
   constructor
   · intro h e he hd

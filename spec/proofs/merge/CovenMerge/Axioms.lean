@@ -181,8 +181,7 @@ open CovenMerge
 #print axioms Data.loss_converges
 #print axioms Data.dependent_recorded
 #print axioms Data.value_accounted
-#print axioms Receive.beforeRemoval_iff
-#print axioms Receive.post_read_refused
+#print axioms Receive.window_ignores_reads
 #print axioms Receive.passed_before_removal
 #print axioms Receive.retirement_verdict_final
 #print axioms Receive.send_gate_publication_bound

@@ -328,15 +328,15 @@ theorem retired_write_lands :
     IOTrace ⟨none, none⟩ [.beginPass 1, .checked 1 .send false,
       .request .pass 1 (.create (.log .write 1 1) [7])]
       ⟨none, some ⟨1, 1, .send, false⟩⟩ ∧
-    Retired.writeAllowed [⟨2, 2, [1]⟩] (fun _ => false) ⟨1, 1, 3, [0]⟩ = true ∧
+    Retired.writeAllowed [⟨2, 2, [1]⟩] false ⟨1, 1, 3, [0]⟩ = true ∧
     1 ≤ 3 ∧ 3 ≤ 1 + day ∧
     gateStep ⟨none, some ⟨3, 3, .send, true⟩⟩
       (.request .pass 3 (.create (.log .write 1 2) [8])) = none := by
   refine ⟨?_, by decide⟩
   exact .cons rfl (.cons rfl (.cons rfl (.nil _)))
 
-example : Retired.writeAllowed [⟨2, 2, [1]⟩] (fun _ => false) ⟨1, 1, 2 + month, [0]⟩ = true ∧
-    Retired.writeAllowed [⟨2, 2, [1]⟩] (fun _ => false) ⟨1, 1, 3 + month, [0]⟩ = false := by decide
+example : Retired.writeAllowed [⟨2, 2, [1]⟩] false ⟨1, 1, 2 + month, [0]⟩ = true ∧
+    Retired.writeAllowed [⟨2, 2, [1]⟩] false ⟨1, 1, 3 + month, [0]⟩ = false := by decide
 
 /-- Retired.Publication covers a copy already in flight at finality. The
 actual IOTrace and one-day request bound supply its strict drain deadline. -/

@@ -43,6 +43,7 @@ def policy : Policy Write where
   schema _ := .eligible
   retirements := [⟨0, 0, 0⟩]
   stored | .create => 30 * 86400 + 1 | _ => 30 * 86400 + 2
+  viewRetired _ := false
 
 def past : Write → List Write
   | .create => []

@@ -573,15 +573,23 @@ discovery.
 
 **7. Retired devices (items 15, 16 and 18) — verdict and timed closure
 proved; complete drains require successful discovery.**
-`Retired.writeAllowed` uses only immutable write storage time and recorded
-reads, and the kept entries that retire its device. Retirement includes
-removal of the device, removal of its member and replacement of its id.
-`write_verdict_agrees` proves agreement for the same kept entries and reads,
-independently of list order. `kept_retirement_rejects` rejects a read retirement
-or landing strictly after its 30-day deadline. `dropped_retirement_restores`
-removes that exclusion when no other kept retirement blocks the write.
-`retired_write_boundary_and_restore` checks equality, one second beyond,
-restoration after dropping the retirement, and the recorded-read rejection.
+`Retired.writeAllowed` uses only immutable write storage time, whether the
+replay of the write's own `store_log_read` retires its device, and the kept
+entries that retire its device. Retirement includes removal of the device,
+removal of its member and replacement of its id. `writeAllowed_iff` states it:
+a write whose own view retires its device never counts, and every other write
+must land within 30 days of each kept retirement of its device, read or not.
+`write_verdict_agrees` proves agreement for the same kept entries and view,
+independently of list order. `kept_retirement_rejects` rejects a landing
+strictly after a kept retirement's 30-day deadline, and
+`view_retirement_rejects` a write whose own view retires its device.
+`read_retirement_judged_by_time` shows reading a retirement excludes nothing
+by itself. `dropped_retirement_restores` removes an exclusion when no other
+kept retirement blocks the write. `retired_write_boundary_and_restore` checks
+equality, one second beyond, restoration after dropping the retirement, and
+the own-view rejection. `read_unretired_write_counts` checks storage's
+`full_set_excludes_unstopped_write` history: a write that read a replacement
+its own replay dropped is judged by that replacement's window.
 Ordinary authority, schema and reset eligibility remain separate.
 
 This rule applies only to writes. Entries retain §9's permanent deadline

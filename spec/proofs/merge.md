@@ -923,15 +923,20 @@ a later reader cannot change the creation's own verdict.
 including replacement and member/device removal, using first complete provider
 publication times. Exactly thirty days counts. `retired_no_effects` applies
 also to snapshot contributions rebuilt under a changed retirement decision.
-`post_read_refused` and `passed_before_removal` retain the hard gate on a write
-made after reading its own retirement. Such a write is refused before its
-position passes; a late pre-retirement write is consumed without changes.
+The window compares storage times only: `window_ignores_reads` shows that
+what the write read plays no part. Exclusion by reading belongs to the
+receive gate: `Policy.viewRetired` says whether the replay of the write's own
+`store_log_read` retires its device, and `passed_before_removal` proves that
+no such write passes when the gate refuses them. A write past a window is
+consumed without changes. Which retirements a write's own replay keeps is
+proved per object in [storage](storage.md#each-object-judged-in-its-own-view).
 
 `retirement_verdict_final` uses the final kept retiring entry and the stable
 preceding store-log prefix supplied by §9, including storage-time ties.
-Retirements after that prefix may appear or disappear. With the post-read send
-gate in both views, those changes cannot reverse either window verdict: an
-admitted write already meets the final entry's earlier deadline. No premise concerns future
+Retirements after that prefix may appear or disappear. Each is stored after
+the final entry, so those changes cannot reverse either window verdict: an
+admitted write already meets the final entry's earlier deadline. The proof
+needs no assumption about what the write read. No premise concerns future
 readers, their admission, or draining their logs. This proves retirement
 admission finality; another independent schema/reset policy can still change
 its own verdict.
@@ -984,8 +989,9 @@ readiness function. `lean_differential_receive` calls the real database
 prerequisite function across three logs and consumed prefixes. Its `window`
 check runs `withinWindow` for `mg_differential_retirement_window`, which
 compares coven-database's retirement window over every subset of kept
-retirements, reads of them, and publication times at and around thirty days.
-For each case with a kept retirement it also keeps the final prefix through
+retirements, reads of them, which both sides ignore, and publication times at
+and around thirty days. For each case with a kept retirement, read or not, it
+also keeps the final prefix through
 the earliest one, adds a later retirement, and checks both runs agree, as
 `retirement_verdict_final` states. Its `dependency` check runs
 `DataDependency.retained` and `droppedSources` for

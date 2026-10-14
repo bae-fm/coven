@@ -458,10 +458,20 @@ example : ¬ Retired.ClosedAfter lateOldCopy 0 31 := replacement_needs_landing_f
 def removal : Retired.Retirement := ⟨4, 0, [0]⟩
 
 theorem retired_write_boundary_and_restore :
-    Retired.writeAllowed [removal] (fun _ => false) { anaWrite with storedAt := month } = true ∧
-    Retired.writeAllowed [removal] (fun _ => false) { anaWrite with storedAt := month + 1 } = false ∧
-    Retired.writeAllowed [] (fun _ => false) { anaWrite with storedAt := month + 1 } = true ∧
-    Retired.writeAllowed [removal] (fun _ => true) anaWrite = false := by decide
+    Retired.writeAllowed [removal] false { anaWrite with storedAt := month } = true ∧
+    Retired.writeAllowed [removal] false { anaWrite with storedAt := month + 1 } = false ∧
+    Retired.writeAllowed [] false { anaWrite with storedAt := month + 1 } = true ∧
+    Retired.writeAllowed [removal] true anaWrite = false := by decide
+
+/-- Storage's `full_set_excludes_unstopped_write`: phone 1's write read Ben's
+replacement, which its own view dropped and the full replay keeps. It is
+bounded by that replacement's 30 days like an unread retirement. -/
+def benReplacement : Retired.Retirement := ⟨7, 10, [1]⟩
+
+theorem read_unretired_write_counts :
+    Retired.writeAllowed [benReplacement] false ⟨1, 3, 12, [0]⟩ = true ∧
+    Retired.writeAllowed [benReplacement] false ⟨1, 3, 11 + month, [0]⟩ = false ∧
+    Retired.writeAllowed [benReplacement] true ⟨1, 3, 12, [0]⟩ = false := by decide
 
 theorem fresh_gate_boundaries :
     permitted (some ⟨0, 1, .send, false⟩) 299 = true ∧

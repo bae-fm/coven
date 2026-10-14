@@ -8,22 +8,14 @@ namespace CovenMerge.Receive
 
 variable {W : Type}
 
-def beforeRemoval (P : Policy W) (w : W) : Bool :=
-  P.retirements.all fun e => !(e.device == P.logs.device w && P.readEntry w e.entry)
+/-- The receive gate's own-view check: a write whose own view retires its
+device never passes (§7.1, §10). -/
+def beforeRemoval (P : Policy W) (w : W) : Bool := !P.viewRetired w
 
-theorem beforeRemoval_iff (P : Policy W) (w : W) :
-    beforeRemoval P w = true ↔ ∀ e ∈ P.retirements, e.device = P.logs.device w →
-      P.readEntry w e.entry = false := by
-  simp only [beforeRemoval, List.all_eq_true, Bool.not_eq_true', Bool.and_eq_false_iff]
-  grind
-
-theorem post_read_refused (P : Policy W) (w : W) (e : Retirement)
-    (kept : e ∈ P.retirements) (own : e.device = P.logs.device w)
-    (read : P.readEntry w e.entry = true) : withinWindow P w = false := by
-  cases h : withinWindow P w
-  · rfl
-  · have := ((window_exact P w).mp h e kept own).1
-    simp [read] at this
+/-- Reading a kept retirement does not by itself exclude a write; its own
+view decides that, and the window only compares storage times. -/
+theorem window_ignores_reads (P : Policy W) (readEntry : W → Nat → Bool) (w : W) :
+    withinWindow { P with readEntry } w = withinWindow P w := rfl
 
 section
 variable [DecidableEq W]
@@ -62,38 +54,33 @@ end
 
 /-- Finality fixes the kept entry prefix through the retiring entry's
 storage time, including ties. Later retirements may appear or disappear;
-none can tighten its earlier deadline. The send gate rules out reads of any
-own retirement while it is kept in either view. -/
+none can tighten its earlier deadline, since each is stored after the anchor.
+No hypothesis about the write's reads is needed. -/
 theorem retirement_verdict_final (P : Policy W) (later : List Retirement)
     (anchor : Retirement) (w : W)
     (kept : anchor ∈ P.retirements) (own : anchor.device = P.logs.device w)
-    (finalPrefix : ∀ e, e.stored ≤ anchor.stored → (e ∈ P.retirements ↔ e ∈ later))
-    (sendGate : ∀ e, e ∈ P.retirements ∨ e ∈ later →
-      e.device = P.logs.device w → P.readEntry w e.entry = false) :
+    (finalPrefix : ∀ e, e.stored ≤ anchor.stored → (e ∈ P.retirements ↔ e ∈ later)) :
     withinWindow { P with retirements := later } w = withinWindow P w := by
   have nextAnchor := (finalPrefix anchor (Nat.le_refl _)).mp kept
   have transfer (source target : List Retirement)
       (anchorPresent : anchor ∈ source)
       (prefixKept : ∀ e ∈ target, e.stored ≤ anchor.stored → e ∈ source)
-      (gate : ∀ e ∈ target, e.device = P.logs.device w → P.readEntry w e.entry = false)
       (h : ∀ e ∈ source, e.device = P.logs.device w →
-        P.readEntry w e.entry = false ∧ P.stored w ≤ e.stored + 30 * 86400) :
+        P.stored w ≤ e.stored + 30 * 86400) :
       ∀ e ∈ target, e.device = P.logs.device w →
-        P.readEntry w e.entry = false ∧ P.stored w ≤ e.stored + 30 * 86400 := by
+        P.stored w ≤ e.stored + 30 * 86400 := by
     intro e he hd
     by_cases old : e.stored ≤ anchor.stored
     · exact h e (prefixKept e he old) hd
-    · have bound := (h anchor anchorPresent own).2
-      exact ⟨gate e he hd, by omega⟩
+    · have bound := h anchor anchorPresent own
+      omega
   apply Bool.eq_iff_iff.mpr
   rw [window_exact, window_exact]
   constructor
   · exact transfer later P.retirements nextAnchor
       (fun e he old => (finalPrefix e old).mp he)
-      (fun e he hd => sendGate e (Or.inl he) hd)
   · exact transfer P.retirements later kept
       (fun e he old => (finalPrefix e old).mpr he)
-      (fun e he hd => sendGate e (Or.inr he) hd)
 
 /-- Every provider request uses completed catch-up less than five minutes
 old, measured from its start, and settles within one day, including lost replies.

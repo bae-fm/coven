@@ -163,6 +163,31 @@ async fn every_retirement_admits_exactly_thirty_days_and_consumes_later_writes()
     }
 }
 
+/// A write whose recorded past read a kept replacement is bounded by that
+/// replacement's thirty days, like an unread one. Its authority check, on the
+/// replay of that past, already refused it if that view kept the replacement;
+/// one that reaches landing had a view that dropped it (§10).
+#[tokio::test]
+async fn a_read_retirement_bounds_the_write_by_storage_time_alone() {
+    for (offset, late) in [(0, false), (1, true)] {
+        let p = pair().await;
+        sql(&p.source, "INSERT INTO notes VALUES('n','title','body')")
+            .await
+            .unwrap();
+        let mut write = records(&p.source).remove(0);
+        let read = retire(&p.target, write.header.position.device, 1, "replacement", 0).await;
+        write.header.store_log_read = EntryPositions(vec![read]);
+        p.target
+            .apply_downloaded::<Record>(write.into(), at(30 * DAY + offset))
+            .await
+            .unwrap();
+        assert_eq!(count(&p.target, "notes"), i64::from(!late));
+        assert_eq!(dropped_reports(&p.target).len(), usize::from(late));
+        p.target.close().await.unwrap();
+        p.source.close().await.unwrap();
+    }
+}
+
 /// Every kept retirement imposes its own window; dropping the deciding one
 /// rebuilds the audience with the write, and keeping it again removes it.
 #[tokio::test]
@@ -301,8 +326,10 @@ async fn an_admitted_verdict_settles_when_the_horizon_passes_its_window() {
 }
 
 /// Lean `Receive.withinWindow`, `window_exact` and `retirement_verdict_final`
-/// against the Rust window: every kept retirement, reads, exact boundaries,
-/// and later retirement sets agreeing on a final prefix through an anchor.
+/// against the Rust window: every kept retirement, exact boundaries, reads of
+/// kept retirements (which the window ignores: the write's own view decides
+/// exclusion), and later retirement sets agreeing on a final prefix through an
+/// anchor.
 #[test]
 #[ignore = "requires COVEN_RECEIVE_LEAN"]
 fn mg_differential_retirement_window() {
@@ -336,8 +363,7 @@ fn mg_differential_retirement_window() {
             40 * DAY + 1,
         ] {
             for read in [vec![], vec![1], vec![3]] {
-                let reads = |e: EntryId| read.contains(&e.number);
-                let verdict = within_window(at(stored), reads, &kept);
+                let verdict = within_window(at(stored), &kept);
                 let json_of = |set: &[Retirement]| {
                     set.iter()
                         .map(|r| {
@@ -349,26 +375,23 @@ fn mg_differential_retirement_window() {
                 let mut case = json!({"check": "window", "device": 7, "stored": stored,
                                       "read": read, "kept": json_of(&kept)});
                 // A later set: the final prefix through the earliest kept
-                // retirement is fixed; later retirements appear or vanish. The
-                // send gate rules out reads of any of them.
+                // retirement is fixed; later retirements appear or vanish.
                 if let Some(anchor) = kept.iter().min_by_key(|r| r.stored_at) {
-                    if read.is_empty() {
-                        let mut later: Vec<_> = kept
-                            .iter()
-                            .filter(|r| r.stored_at <= anchor.stored_at)
-                            .copied()
-                            .collect();
-                        later.push(Retirement {
-                            entry: entry(9),
-                            stored_at: anchor.stored_at + Duration::from_secs(DAY),
-                        });
-                        let again = within_window(at(stored), reads, &later);
-                        assert_eq!(again, verdict, "retirement verdict changed after finality");
-                        case["later"] = json!(json_of(&later));
-                        actual.push(json!([verdict, again]));
-                        cases.push(case);
-                        continue;
-                    }
+                    let mut later: Vec<_> = kept
+                        .iter()
+                        .filter(|r| r.stored_at <= anchor.stored_at)
+                        .copied()
+                        .collect();
+                    later.push(Retirement {
+                        entry: entry(9),
+                        stored_at: anchor.stored_at + Duration::from_secs(DAY),
+                    });
+                    let again = within_window(at(stored), &later);
+                    assert_eq!(again, verdict, "retirement verdict changed after finality");
+                    case["later"] = json!(json_of(&later));
+                    actual.push(json!([verdict, again]));
+                    cases.push(case);
+                    continue;
                 }
                 actual.push(json!(verdict));
                 cases.push(case);

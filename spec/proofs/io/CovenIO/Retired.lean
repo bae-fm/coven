@@ -37,47 +37,67 @@ def ClosedAfter (world : World) (writer cutoff : Nat) : Prop :=
     world time (.log kind writer n) = some o → world cutoff (.log kind writer n) = some o
 
 /-- Kept device removals, member removals and replacements are projected
-to the device ids they retire. Recorded read membership is immutable. -/
+to the device ids they retire. -/
 structure Retirement where
   entry : Nat
   storedAt : Nat
   devices : List Nat
   deriving DecidableEq, Repr
 
-def writeAllowed (kept : List Retirement) (read : Nat → Bool) (w : Write) : Bool :=
-  kept.all fun r => !(r.devices.contains w.writer) ||
-    (!read r.entry && decide (w.storedAt ≤ r.storedAt + month))
+/-- §10, per object. `retiredInView` says whether the replay of the write's
+own `store_log_read` retires its device (storage's `acceptsView`, §7.1 for
+removal); such a write never counts. Every kept retirement of its device,
+read or not, then bounds it by storage time: thirty days after the
+retirement's storage time, inclusive. -/
+def writeAllowed (kept : List Retirement) (retiredInView : Bool) (w : Write) : Bool :=
+  !retiredInView && kept.all fun r => !(r.devices.contains w.writer) ||
+    decide (w.storedAt ≤ r.storedAt + month)
 
-theorem write_verdict_agrees (a b : List Retirement) (readA readB : Nat → Bool) (w : Write)
-    (sameKept : ∀ r, r ∈ a ↔ r ∈ b) (sameRead : ∀ e, readA e = readB e) :
-    writeAllowed a readA w = writeAllowed b readB w := by
-  apply Bool.eq_iff_iff.mpr
-  simp only [writeAllowed, List.all_eq_true]
+theorem writeAllowed_iff (kept : List Retirement) (retiredInView : Bool) (w : Write) :
+    writeAllowed kept retiredInView w = true ↔ retiredInView = false ∧
+      ∀ r ∈ kept, w.writer ∈ r.devices → w.storedAt ≤ r.storedAt + month := by
+  simp only [writeAllowed, Bool.and_eq_true, Bool.not_eq_true', List.all_eq_true,
+    Bool.or_eq_true, Bool.not_eq_true', List.contains_eq_mem, decide_eq_false_iff_not,
+    decide_eq_true_eq]
   constructor
-  · intro allowed r hr
-    simpa only [sameRead] using allowed r ((sameKept r).mpr hr)
-  · intro allowed r hr
-    simpa only [sameRead] using allowed r ((sameKept r).mp hr)
+  · rintro ⟨hv, h⟩
+    exact ⟨hv, fun r hr hd => (h r hr).resolve_left (by simpa using hd)⟩
+  · rintro ⟨hv, h⟩
+    refine ⟨hv, fun r hr => ?_⟩
+    by_cases hd : w.writer ∈ r.devices
+    · exact Or.inr (h r hr hd)
+    · exact Or.inl (by simpa using hd)
 
-theorem dropped_retirement_restores (remaining : List Retirement) (read : Nat → Bool) (w : Write)
+theorem write_verdict_agrees (a b : List Retirement) (viewA viewB : Bool) (w : Write)
+    (sameKept : ∀ r, r ∈ a ↔ r ∈ b) (sameView : viewA = viewB) :
+    writeAllowed a viewA w = writeAllowed b viewB w := by
+  apply Bool.eq_iff_iff.mpr
+  simp only [writeAllowed_iff, sameKept, sameView]
+
+theorem dropped_retirement_restores (remaining : List Retirement) (w : Write)
     (otherRetirementsAllow : ∀ r ∈ remaining, w.writer ∈ r.devices →
-      read r.entry = false ∧ w.storedAt ≤ r.storedAt + month) :
-    writeAllowed remaining read w = true := by
-  apply List.all_eq_true.mpr
-  intro r hr
-  by_cases target : w.writer ∈ r.devices
-  · obtain ⟨unread, inTime⟩ := otherRetirementsAllow r hr target
-    simp [target, unread, inTime]
-  · simp [target]
+      w.storedAt ≤ r.storedAt + month) :
+    writeAllowed remaining false w = true :=
+  (writeAllowed_iff remaining false w).mpr ⟨rfl, otherRetirementsAllow⟩
 
-theorem kept_retirement_rejects (kept : List Retirement) (read : Nat → Bool) (w : Write)
+theorem kept_retirement_rejects (kept : List Retirement) (retiredInView : Bool) (w : Write)
     (r : Retirement) (member : r ∈ kept) (target : w.writer ∈ r.devices)
-    (excluded : read r.entry = true ∨ r.storedAt + month < w.storedAt) :
-    writeAllowed kept read w = false := by
+    (late : r.storedAt + month < w.storedAt) :
+    writeAllowed kept retiredInView w = false := by
   apply Bool.eq_false_iff.mpr
   intro allowed
-  have rule := List.all_eq_true.mp allowed r member
-  rcases excluded with read | late <;> simp_all [writeAllowed] <;> omega
+  have := ((writeAllowed_iff kept retiredInView w).mp allowed).2 r member target
+  omega
+
+theorem view_retirement_rejects (kept : List Retirement) (w : Write) :
+    writeAllowed kept true w = false := by simp [writeAllowed]
+
+/-- Reading a kept retirement excludes nothing by itself: a write whose own
+view does not retire its device is judged by storage time alone. -/
+theorem read_retirement_judged_by_time (kept : List Retirement) (w : Write)
+    (timely : ∀ r ∈ kept, w.writer ∈ r.devices → w.storedAt ≤ r.storedAt + month) :
+    writeAllowed kept false w = true :=
+  dropped_retirement_restores kept w timely
 
 /-- C10 supplies the stable kept verdict used by a completed catch-up.
 The receive set contains the old prefix certified by clock discovery. -/

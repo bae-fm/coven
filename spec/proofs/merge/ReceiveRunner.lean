@@ -31,8 +31,9 @@ private def publication (j : Json) : Except String Bool := do
 private def retirement (j : Json) : Except String Retirement := do
   pure ⟨← j.getObjValAs? Nat "device", ← j.getObjValAs? Nat "entry", ← j.getObjValAs? Nat "stored"⟩
 
-/-- One write's own retirement window: its device, first publication time and
-the retiring entries its recorded past read, against the kept retirements. -/
+/-- One write's own retirement window: its device and first publication time
+against the kept retirements. The entries its recorded past read are carried
+for the snapshot boundary; the window ignores them (`window_ignores_reads`). -/
 private def policy (j : Json) (retirements : List Retirement) : Except String (Policy Unit) := do
   let device ← j.getObjValAs? Nat "device"
   let stored ← j.getObjValAs? Nat "stored"
@@ -44,7 +45,8 @@ private def policy (j : Json) (retirements : List Retirement) : Except String (P
     readEntry := fun _ e => read.contains e
     schema := fun _ => .eligible
     retirements
-    stored := fun _ => stored }
+    stored := fun _ => stored
+    viewRetired := fun _ => false }
 
 /-- `withinWindow` under the kept retirements, and, when a later kept set is
 given with a final anchor, the same verdict under it (`retirement_verdict_final`). -/
