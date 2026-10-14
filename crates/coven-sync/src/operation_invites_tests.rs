@@ -322,6 +322,9 @@ impl Clock for RetryClock {
     fn now(&self) -> std::time::SystemTime {
         self.time.now()
     }
+    fn elapsed(&self) -> Duration {
+        self.time.elapsed()
+    }
     fn sleep(
         &self,
         duration: Duration,

@@ -25,7 +25,7 @@ impl StoreLogSync {
 
     /// A complete catch-up precedes this publication. The following
     /// scan captures its status time before making any discovery request.
-    pub(super) async fn observe_clock(&self, local: &LocalStoreLog) -> Result<(), SyncError> {
+    pub(crate) async fn observe_clock(&self, local: &LocalStoreLog) -> Result<(), SyncError> {
         let member = self.operation_member()?;
         crate::write_seal::check_member(&local.log, &member, local.device)?;
         let newest = crate::key_introductions::newest(&local.log, &coven_merge::Audience::Store)
@@ -51,14 +51,16 @@ impl StoreLogSync {
         hash.update(&bytes);
         bytes.extend_from_slice(member.sign_object(path.as_str(), &hash.finish()).as_bytes());
         let storage = self.storage.as_deref().ok_or(SyncError::NoStorage)?;
+        // Elapsed time counts from before the replacement, so the request,
+        // the status call and any sleep between them all count (§15).
+        let started = self.clock.elapsed();
         storage.replace(&path, &bytes).await?;
         let stored = storage.status(&path).await?.ok_or_else(|| {
             StorageFailure::NotFound.with_source("published clock is absent from exact status")
         })?;
-        self.finality
-            .lock()
-            .expect("finality lock poisoned")
-            .observe(&stored);
+        let mut observation = self.finality.lock().expect("finality lock poisoned");
+        observation.observe(&stored);
+        observation.clock_observed(stored.stored_at, started);
         Ok(())
     }
 }

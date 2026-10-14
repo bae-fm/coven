@@ -96,6 +96,9 @@ impl Clock for PollingClock {
     fn now(&self) -> std::time::SystemTime {
         self.0.now()
     }
+    fn elapsed(&self) -> Duration {
+        self.0.elapsed()
+    }
     fn sleep(
         &self,
         duration: Duration,

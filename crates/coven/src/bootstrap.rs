@@ -322,6 +322,13 @@ async fn prepare_and_load(
         member.clone(),
     )))?);
     let database = builder.database(directory.clone())?.open().await?;
+    let mut writes = coven_sync::DeviceLogSync::new(
+        storage.clone(),
+        database.clone(),
+        ring.clone(),
+        identity.clone(),
+        builder.clock.clone(),
+    );
     let mut sync = StoreLogSync::new(
         storage.clone(),
         database.clone(),
@@ -355,6 +362,7 @@ async fn prepare_and_load(
         status("Loading snapshots and later writes");
         refresh_sign_in(builder, &mut data, storage.as_ref(), cancel).await?;
         sync.load_new_device(device_name).await?;
+        sync.download_later_writes(&mut writes).await?;
         Ok::<_, BootstrapError>(true)
     };
     let mut cancellation = cancel.clone();

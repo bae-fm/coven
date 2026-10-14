@@ -6,6 +6,7 @@ pub(super) async fn post(device: &Device, storage: &Arc<MemoryStorage>) {
         device.db.clone(),
         device.custody.clone(),
         device.identity.clone(),
+        device.clock.clone(),
     )
     .post_positions()
     .await

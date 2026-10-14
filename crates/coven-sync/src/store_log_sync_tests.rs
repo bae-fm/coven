@@ -227,6 +227,7 @@ impl Device {
             db.clone(),
             custody.clone(),
             identity.clone(),
+            clock.clone(),
         );
         let sync = StoreLogSync::new(
             storage.clone(),
@@ -317,6 +318,7 @@ impl Device {
             self.db.clone(),
             self.custody.clone(),
             self.identity.clone(),
+            self.clock.clone(),
         )
     }
 

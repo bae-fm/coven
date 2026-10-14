@@ -53,3 +53,24 @@ async fn controlled_sleep_counts_forward_time_and_captures_its_start_before_poll
     clock.set(UNIX_EPOCH + Duration::from_secs(100));
     sleep.await;
 }
+
+#[test]
+fn system_elapsed_time_never_decreases() {
+    let first = SystemClock.elapsed();
+    let second = SystemClock.elapsed();
+    assert!(second >= first);
+}
+
+#[cfg(feature = "test-utils")]
+#[test]
+fn fixed_elapsed_time_counts_forward_settings_as_sleep_and_ignores_backward_ones() {
+    use std::time::{Duration, UNIX_EPOCH};
+    let fixed = FixedClock::new(UNIX_EPOCH + Duration::from_secs(100));
+    assert_eq!(fixed.elapsed(), Duration::ZERO);
+    fixed.set(UNIX_EPOCH + Duration::from_secs(130));
+    assert_eq!(fixed.elapsed(), Duration::from_secs(30));
+    fixed.set(UNIX_EPOCH);
+    assert_eq!(fixed.elapsed(), Duration::from_secs(30));
+    fixed.set(UNIX_EPOCH + Duration::from_secs(5));
+    assert_eq!(fixed.elapsed(), Duration::from_secs(35));
+}

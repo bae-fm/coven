@@ -137,6 +137,7 @@ async fn a_write_exceeds_the_transfer_budget_on_upload_and_download() {
             device.db.clone(),
             device.custody.clone(),
             device.identity.clone(),
+            device.clock.clone(),
         );
     }
     devices[0]
@@ -210,6 +211,7 @@ async fn write_publication_records_invalidated_session_before_returning_abort_fa
         devices[0].db.clone(),
         devices[0].custody.clone(),
         devices[0].identity.clone(),
+        devices[0].clock.clone(),
     );
     devices[0]
         .db
@@ -334,6 +336,7 @@ async fn occupied_publication_with_failed_cleanup_keeps_the_write_pending() {
             devices[0].db.clone(),
             devices[0].custody.clone(),
             devices[0].identity.clone(),
+            devices[0].clock.clone(),
         );
         assert!(matches!(
             devices[0].writes.upload_writes().await,

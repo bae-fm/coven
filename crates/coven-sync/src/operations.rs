@@ -526,9 +526,14 @@ impl OperationRun {
         if let Some(id) = self.sync.pending_reload().await? {
             return Err(SyncError::ReloadPending(id));
         }
-        self.sync.reload_deleted_history().await?;
+        self.sync.prepare_return().await?;
+        let checkpoint = self.sync.return_sample();
         self.writes.upload_writes().await?;
-        self.writes.download_writes().await?;
+        let mut discovery = self.writes.download_writes().await?;
+        if discovery.needs_snapshots {
+            self.sync.discover_snapshots().await?;
+            discovery = self.writes.download_writes().await?;
+        }
         self.drive_pass().await?;
         if let Some(id) = self.sync.pending_reload().await? {
             return Err(SyncError::ReloadPending(id));
@@ -537,7 +542,12 @@ impl OperationRun {
         self.writes.upload_writes().await?;
         self.sync.write_snapshots().await?;
         self.sync.run_retention().await?;
-        self.writes.post_positions().await?;
+        // Only a completed catch-up with confirmed positions moves `S` (§15).
+        if self.writes.post_positions().await? && discovery.complete {
+            if let Some(sample) = checkpoint {
+                self.sync.save_return_checkpoint(sample).await?;
+            }
+        }
         Ok(())
     }
 

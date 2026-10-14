@@ -876,6 +876,7 @@ mod recovery {
                             device.db.clone(),
                             device.custody.clone(),
                             device.identity.clone(),
+                            device.clock.clone(),
                         );
                         device.sync = StoreLogSync::new(
                             storage.clone(),

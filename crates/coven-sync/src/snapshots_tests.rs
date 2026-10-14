@@ -12,6 +12,8 @@ use std::num::NonZeroU64;
 mod boundaries;
 #[path = "snapshot_retention_tests.rs"]
 mod retention;
+#[path = "snapshot_return_tests.rs"]
+mod returns;
 #[path = "snapshot_catalog_tests.rs"]
 mod signatures;
 
@@ -89,6 +91,7 @@ async fn upload(device: &Device, storage: &Arc<MemoryStorage>) {
         device.db.clone(),
         device.custody.clone(),
         device.identity.clone(),
+        device.clock.clone(),
     )
     .upload_writes()
     .await
@@ -166,6 +169,7 @@ async fn far_future_threshold_snapshot_and_later_writes_reload_on_a_new_device()
     add_device(&mut b).await;
     b.clock.set(UNIX_EPOCH - Duration::from_secs(1));
     b.sync.reload_from_snapshots().await.unwrap();
+    b.writes.download_writes().await.unwrap();
     assert_eq!(tables(&a).await, tables(&b).await);
     assert_eq!(fingerprint(&a).await, fingerprint(&b).await);
     assert!(a.db.operations().await.unwrap().is_empty());
@@ -375,6 +379,7 @@ async fn concurrent_snapshots_covering_different_pasts_converge_from_either_one(
         .iter()
         .any(|o| o.path.snapshot_id() == Some(b_snapshot.clone())));
     c.sync.reload_from_snapshots().await.unwrap();
+    c.writes.download_writes().await.unwrap();
     assert_eq!(tables(&a).await, tables(&c).await);
     assert_eq!(fingerprint(&a).await, fingerprint(&c).await);
 }
@@ -428,6 +433,7 @@ async fn store_and_gifts_snapshots_at_different_points_load_in_one_transaction()
     let mut b = notes_device(storage.clone(), 2).await;
     add_device(&mut b).await;
     b.sync.reload_from_snapshots().await.unwrap();
+    b.writes.download_writes().await.unwrap();
     assert_eq!(tables(&a).await, tables(&b).await);
     assert_eq!(fingerprint(&a).await, fingerprint(&b).await);
 }
@@ -470,6 +476,8 @@ async fn deleted_history_reload_preserves_waiting_numbers_and_late_writes_conver
     assert_eq!(b.db.test_queued_writes().await.unwrap(), waiting);
     upload(&b, &storage).await;
     a.sync.reload_from_snapshots().await.unwrap();
+    // A reload stops at its target; ordinary discovery reads the later tail.
+    a.writes.download_writes().await.unwrap();
     assert_eq!(tables(&a).await, tables(&b).await);
     assert_eq!(fingerprint(&a).await, fingerprint(&b).await);
 }

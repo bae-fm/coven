@@ -1972,6 +1972,9 @@ Two mechanisms order writes:
   log, advanced in the transaction that retains the input reaching it, and
   zero for a discovered writer with nothing received yet. A miss or failed
   read never advances it, and it never substitutes for applied positions.
+- `_coven_catch_up` holds §15's return checkpoint `S`, absent until a
+  catch-up first completes with its positions confirmed posted. It only moves
+  forward; an unchanged time writes nothing.
 - The store log's effects that the database applies are kept with it:
   - `_coven_circle_deletions` records each deleted circle's responsible kept
     entry; local writes, downloaded writes and row recomputation all read

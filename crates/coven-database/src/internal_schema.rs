@@ -187,6 +187,13 @@ macro_rules! coven_tables {
             ) STRICT;
             INSERT INTO _coven_finality VALUES(1,NULL);
         ");
+        $visit!(_coven_catch_up, "
+            CREATE TABLE _coven_catch_up (
+                singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+                storage_time BLOB CHECK(storage_time IS NULL OR length(storage_time)=12)
+            ) STRICT;
+            INSERT INTO _coven_catch_up VALUES(1,NULL);
+        ");
         $visit!(_coven_log_inputs, "
             CREATE TABLE _coven_log_inputs (
                 kind TEXT NOT NULL CHECK(kind IN ('entry','key')),

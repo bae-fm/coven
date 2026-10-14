@@ -17,6 +17,8 @@ struct Reads {
     misses: BTreeSet<(coven_database::LogKind, DeviceId, u64)>,
     metadata: BTreeMap<ObjectPath, (StoredObject, Vec<u8>)>,
     files: BTreeMap<ObjectPath, (StoredObject, Option<FileReferences>)>,
+    /// Audience snapshot listings shared while one return observation lasts.
+    snapshot_listings: Option<BTreeMap<String, Vec<StoredObject>>>,
 }
 
 impl PassReads {
@@ -86,6 +88,37 @@ impl PassReads {
         }
     }
 
+    /// A return's snapshot observation also serves the reload it starts,
+    /// without listing again (§15). Sharing ends when the guard drops.
+    pub(crate) fn share_snapshot_listings(&self) -> SharedListings {
+        self.0
+            .lock()
+            .expect("pass reads lock poisoned")
+            .snapshot_listings
+            .get_or_insert_with(BTreeMap::new);
+        SharedListings(self.clone())
+    }
+
+    pub(crate) fn snapshot_listing(&self, prefix: &str) -> Option<Vec<StoredObject>> {
+        self.0
+            .lock()
+            .expect("pass reads lock poisoned")
+            .snapshot_listings
+            .as_ref()
+            .and_then(|listings| listings.get(prefix).cloned())
+    }
+
+    pub(crate) fn keep_snapshot_listing(&self, prefix: &str, objects: &[StoredObject]) {
+        if let Some(listings) = &mut self
+            .0
+            .lock()
+            .expect("pass reads lock poisoned")
+            .snapshot_listings
+        {
+            listings.insert(prefix.to_owned(), objects.to_vec());
+        }
+    }
+
     pub(crate) fn metadata(&self, object: &StoredObject) -> Option<Vec<u8>> {
         self.0
             .lock()
@@ -139,5 +172,17 @@ impl Drop for ReadScope {
             reads.metadata.clear();
             reads.files.clear();
         }
+    }
+}
+
+pub(crate) struct SharedListings(PassReads);
+
+impl Drop for SharedListings {
+    fn drop(&mut self) {
+        self.0
+             .0
+            .lock()
+            .expect("pass reads lock poisoned")
+            .snapshot_listings = None;
     }
 }

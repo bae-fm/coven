@@ -138,6 +138,8 @@ async fn removal_checks_the_authors_past_not_the_receivers_present() {
     devices[2].writes.download_writes().await.unwrap();
     assert_eq!(rows(&devices[2].db).await[0].1, "before");
     devices[2].sync.reload_from_snapshots().await.unwrap();
+    // A reload stops at its target; discovery reads the rest again.
+    devices[2].writes.download_writes().await.unwrap();
     assert_eq!(rows(&devices[2].db).await[0].1, "before");
     let log = devices[2].db.local_store_log().await.unwrap();
     after.header.position.number = 2;
@@ -163,6 +165,8 @@ async fn removal_checks_the_authors_past_not_the_receivers_present() {
         .filter(|(path, _, _)| path.write_id() == Some(after.header.position))
         .count();
     devices[2].sync.reload_from_snapshots().await.unwrap();
+    devices[2].writes.download_writes().await.unwrap();
+    // The refused write is never read again, by the reload or by discovery.
     assert_eq!(
         storage
             .reads()
@@ -375,6 +379,7 @@ async fn a_cached_read_view_still_checks_each_writes_timestamp() {
     devices[1].writes.download_writes().await.unwrap();
     assert_eq!(rows(&devices[1].db).await[0].1, "before");
     devices[1].sync.reload_from_snapshots().await.unwrap();
+    devices[1].writes.download_writes().await.unwrap();
     assert_eq!(
         devices[1]
             .db
@@ -431,20 +436,15 @@ async fn missing_read_view_waits_then_replays_after_the_store_log_arrives() {
         devices[1].writes.download_writes().await.unwrap();
         assert!(rows(&devices[1].db).await.is_empty());
         if reload {
-            assert!(matches!(
-                devices[1].sync.reload_from_snapshots().await,
-                Err(SyncError::Database(coven_database::DbError::Snapshot(
-                    coven_database::SnapshotError::WriteWaiting(
-                        coven_database::WriteWait::StoreLog(_)
-                    )
-                )))
-            ));
+            // No snapshot gives the reload a target past local positions; the
+            // waiting write stays with discovery.
+            devices[1].sync.reload_from_snapshots().await.unwrap();
             assert!(rows(&devices[1].db).await.is_empty());
         }
         devices[1].sync.sync_store_log().await.unwrap();
         if reload {
             devices[1].sync.reload_from_snapshots().await.unwrap();
-            assert_eq!(rows(&devices[1].db).await[0].1, "after");
+            assert!(rows(&devices[1].db).await.is_empty());
         }
         devices[1].writes.download_writes().await.unwrap();
         assert_eq!(rows(&devices[1].db).await[0].1, "after");

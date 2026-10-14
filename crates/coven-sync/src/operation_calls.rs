@@ -25,7 +25,7 @@ impl StoreLogSync {
             Command::ForgetKeys => {
                 self.store_keys.forget()?;
                 self.storage = None;
-                *self.finality.get_mut().expect("finality lock poisoned") = Default::default();
+                *self.finality.lock().expect("finality lock poisoned") = Default::default();
                 return Ok(Begun::Value(Output::Unit));
             }
             Command::Credentials {
@@ -94,7 +94,7 @@ impl StoreLogSync {
             }
             Command::Storage(storage) => {
                 self.storage = storage;
-                *self.finality.get_mut().expect("finality lock poisoned") = Default::default();
+                *self.finality.lock().expect("finality lock poisoned") = Default::default();
                 if self.storage.is_some() {
                     for pending in self.database.pending::<PendingRecord>().await? {
                         let PendingSubject::Operation { id, .. } = pending.subject else {

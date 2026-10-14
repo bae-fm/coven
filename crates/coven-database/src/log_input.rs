@@ -166,6 +166,47 @@ fn advance(db: &DatabaseConnection, kind: LogKind, writer: DeviceId) -> Result<u
     Ok(position)
 }
 
+/// The storage time `S` of the last completed catch-up (§15), or none for a
+/// device that has never completed one.
+pub(crate) fn checkpoint(
+    db: &DatabaseConnection,
+) -> Result<Option<coven_format::value::StorageTime>, DbError> {
+    let saved: Option<Vec<u8>> = db.query_row(
+        "SELECT storage_time FROM _coven_catch_up WHERE singleton=1",
+        [],
+        |row| row.get(0),
+    )?;
+    saved
+        .map(|bytes| {
+            let bytes: [u8; 12] = bytes.try_into().map_err(|_| DbError::DamagedDatabase)?;
+            coven_format::value::StorageTime::new(
+                u64::from_be_bytes(bytes[..8].try_into().expect("eight bytes")),
+                u32::from_be_bytes(bytes[8..].try_into().expect("four bytes")),
+            )
+            .map_err(|_| DbError::DamagedDatabase)
+        })
+        .transpose()
+}
+
+/// Keep the newest qualifying time; an older or equal one writes nothing.
+pub(crate) fn save_checkpoint(
+    db: &DatabaseConnection,
+    time: coven_format::value::StorageTime,
+) -> Result<bool, DbError> {
+    if checkpoint(db)?.is_some_and(|saved| saved >= time) {
+        return Ok(false);
+    }
+    let mut bytes = time.seconds().to_be_bytes().to_vec();
+    bytes.extend_from_slice(&time.nanos().to_be_bytes());
+    db.transaction(|db| {
+        db.internal_execute(
+            "UPDATE _coven_catch_up SET storage_time=?1 WHERE singleton=1",
+            [bytes],
+        )
+    })?;
+    Ok(true)
+}
+
 #[cfg(test)]
 #[path = "log_input_tests.rs"]
 mod tests;

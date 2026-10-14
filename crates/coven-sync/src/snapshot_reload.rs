@@ -13,7 +13,6 @@ use coven_database::{
 };
 use coven_format::{sealed_snapshot::SnapshotObjectPrefix, write_stream::WriteHeaderFrame};
 use coven_merge::WriteId;
-use coven_storage::ObjectPrefix;
 use std::collections::{BTreeMap, BTreeSet};
 
 impl StoreLogSync {
@@ -133,31 +132,8 @@ impl StoreLogSync {
                     positions.iter().flat_map(|p| &p.0).chain(&required.0),
                 );
                 let stuck = crate::pending_logs::local_refusals(&self.database).await?;
-                let mut objects = BTreeMap::new();
-                for object in self
-                    .storage
-                    .as_deref()
-                    .ok_or(SyncError::NoStorage)?
-                    .list(&ObjectPrefix::device_logs(self.directory.id()))
-                    .await?
-                {
-                    let id = object
-                        .path
-                        .write_id()
-                        .ok_or_else(|| inconsistent("device listing has another path layout"))?;
-                    if stuck
-                        .iter()
-                        .any(|record| record.blocks(coven_database::LogObject::Write(id)))
-                    {
-                        continue;
-                    }
-                    super::include_positions(&mut highest, [&id]);
-                    objects.insert(id, object);
-                }
-                if unknown_empty && objects.is_empty() {
-                    return Err(inconsistent("unreadable snapshot prefixes and missing logs cannot establish an empty audience"));
-                }
                 let readable = readable.into_keys().collect();
+                let storage = self.storage.as_deref().ok_or(SyncError::NoStorage)?;
                 let mut replays = ReplayCache::new(&local.log);
                 let mut needed = Vec::new();
                 for (device, highest) in highest {
@@ -184,7 +160,10 @@ impl StoreLogSync {
                                 crate::pending_logs::required(&self.database, *record).await?
                             );
                         }
-                        match objects.get(&id) {
+                        // Read to the fixed target by exact number, never a
+                        // listing of the moving log tail.
+                        let path = crate::write_seal::path(self.directory.id(), id);
+                        match storage.status(&path).await? {
                             Some(object) => needed.push(object),
                             None if positions.iter().any(|p| p.covers(id)) => {
                                 files.absent.push((device, number))
@@ -198,6 +177,26 @@ impl StoreLogSync {
                                 .into())
                             }
                         }
+                    }
+                }
+                // An unreadable prefix may cover deleted history. An empty
+                // audience is established only while some log still starts
+                // at its first write.
+                if unknown_empty && needed.is_empty() {
+                    let mut present = false;
+                    for device in local.log.replay.state.devices.keys() {
+                        let first = WriteId {
+                            device: *device,
+                            number: 1,
+                        };
+                        let path = crate::write_seal::path(self.directory.id(), first);
+                        if storage.status(&path).await?.is_some() {
+                            present = true;
+                            break;
+                        }
+                    }
+                    if !present {
+                        return Err(inconsistent("unreadable snapshot prefixes and missing logs cannot establish an empty audience"));
                     }
                 }
                 let mut count = 0;
@@ -214,7 +213,7 @@ impl StoreLogSync {
                     .reserve_snapshot_files(record, &mut task, count)
                     .await?
                     .into_iter();
-                for object in needed {
+                for object in &needed {
                     match self
                         .open_snapshot_write(
                             object,

@@ -99,6 +99,7 @@ async fn only_the_spec_tables_are_created() {
                 "_coven_boundaries",
                 "_coven_cache",
                 "_coven_cache_budgets",
+                "_coven_catch_up",
                 "_coven_cells",
                 "_coven_circle_deletions",
                 "_coven_circle_members",
@@ -349,7 +350,10 @@ mod query_plans {
                     .query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))
                     .unwrap();
                 match table.as_str() {
-                    "_coven_store_log_uploads" | "_coven_snapshot_schema" | "_coven_finality" => {
+                    "_coven_store_log_uploads"
+                    | "_coven_snapshot_schema"
+                    | "_coven_catch_up"
+                    | "_coven_finality" => {
                         assert_eq!(count, 1)
                     }
                     _ => assert!(

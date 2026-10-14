@@ -45,11 +45,13 @@ pub(crate) fn operation_owner(sync: StoreLogSync, files: Files) -> Operations {
             sync.database.clone(),
             sync.store_keys.clone(),
             sync.member_keys.clone(),
+            sync.clock.clone(),
         ),
         None => crate::DeviceLogSync::disconnected(
             sync.database.clone(),
             sync.store_keys.clone(),
             sync.member_keys.clone(),
+            sync.clock.clone(),
         ),
     };
     let clock = sync.clock.clone();

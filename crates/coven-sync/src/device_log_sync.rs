@@ -8,6 +8,7 @@ use coven_format::{
     sealed_single::SingleChunkPrefix,
     Object,
 };
+use coven_foundation::clock::ClockRef;
 use coven_merge::{Audience, WriteId};
 use coven_storage::{ObjectPath, ObjectPrefix, Storage};
 use std::collections::BTreeMap;
@@ -21,11 +22,100 @@ pub(crate) mod tests;
 #[path = "write_upload.rs"]
 mod upload;
 
+/// What one write discovery established (§15, SP step 6).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WriteDiscovery {
+    /// Every log reached a miss the recent-return rule trusts, and every write
+    /// found applied. Only then can the pass certify a return checkpoint.
+    pub complete: bool,
+    /// A miss could not be trusted, or required history is missing: snapshot
+    /// discovery must come before further misses are used.
+    pub needs_snapshots: bool,
+}
+
+/// Probe a writer's next numbers by exact status, fetching ahead in parallel
+/// up to `limit` after a hit and scheduling nothing past the first miss or a
+/// refused number `stop`. Returns the contiguous hits and the missed number,
+/// none when the refusal ended the log first. A failed probe fails the call
+/// after in-flight requests settle; it is never a miss.
+async fn next_writes(
+    storage: &dyn Storage,
+    store: coven_foundation::id_source::StoreId,
+    writer: coven_foundation::id_source::DeviceId,
+    after: u64,
+    stop: Option<u64>,
+    limit: std::num::NonZeroUsize,
+) -> Result<(Vec<(WriteId, coven_storage::StoredObject)>, Option<u64>), SyncError> {
+    use futures_util::{stream::FuturesUnordered, StreamExt};
+    let mut running = FuturesUnordered::new();
+    let mut next = after;
+    let mut width = 1;
+    let mut miss = None::<u64>;
+    let mut failed = None;
+    let mut found = BTreeMap::new();
+    loop {
+        while miss.is_none() && failed.is_none() && running.len() < width {
+            let number = next.checked_add(1).ok_or_else(|| {
+                coven_storage::StorageFailure::Protocol.with_source("write numbers exhausted")
+            })?;
+            if stop.is_some_and(|stop| number >= stop) {
+                break;
+            }
+            next = number;
+            let path = crate::write_seal::path(
+                store,
+                WriteId {
+                    device: writer,
+                    number,
+                },
+            );
+            running.push(async move { (number, storage.status(&path).await) });
+        }
+        let Some((number, result)) = running.next().await else {
+            break;
+        };
+        match result {
+            Ok(Some(object)) => {
+                found.insert(number, object);
+                width = limit.get();
+            }
+            Ok(None) => miss = Some(miss.map_or(number, |known| known.min(number))),
+            Err(error) => {
+                failed.get_or_insert(error);
+            }
+        }
+    }
+    if let Some(error) = failed {
+        return Err(error.into());
+    }
+    Ok((
+        found
+            .into_iter()
+            .filter(|(number, _)| miss.is_none_or(|miss| *number < miss))
+            .map(|(number, object)| {
+                (
+                    WriteId {
+                        device: writer,
+                        number,
+                    },
+                    object,
+                )
+            })
+            .collect(),
+        miss,
+    ))
+}
+
 /// Device-log transfer and position publication using the capabilities chosen
 /// by the opening composition root. Calls on one owner are serialized by `&mut
 /// self`; each step completes its database work before returning.
 pub struct DeviceLogSync {
     reads: crate::pass_reads::PassReads,
+    /// The pass's storage-time evidence; without it no write miss is trusted.
+    observation: Option<Arc<std::sync::Mutex<crate::finality::Observation>>>,
+    /// Sleep-inclusive monotonic time for judging each miss when it is used.
+    clock: ClockRef,
+    download_limit: std::num::NonZeroUsize,
     storage: Option<Arc<dyn Storage>>,
     database: Database,
     store_keys: Arc<KeySession<StoreKeyring>>,
@@ -39,9 +129,13 @@ impl DeviceLogSync {
         database: Database,
         store_keys: Arc<KeySession<StoreKeyring>>,
         member_keys: Arc<KeySession<MemberKeys>>,
+        clock: ClockRef,
     ) -> Self {
         Self {
             reads: crate::pass_reads::PassReads::default(),
+            observation: None,
+            clock,
+            download_limit: std::num::NonZeroUsize::MIN,
             storage: Some(storage),
             database,
             store_keys,
@@ -54,9 +148,13 @@ impl DeviceLogSync {
         database: Database,
         store_keys: Arc<KeySession<StoreKeyring>>,
         member_keys: Arc<KeySession<MemberKeys>>,
+        clock: ClockRef,
     ) -> Self {
         Self {
             reads: crate::pass_reads::PassReads::default(),
+            observation: None,
+            clock,
+            download_limit: std::num::NonZeroUsize::MIN,
             storage: None,
             database,
             store_keys,
@@ -70,6 +168,17 @@ impl DeviceLogSync {
 
     pub(crate) fn share_reads(&mut self, reads: crate::pass_reads::PassReads) {
         self.reads = reads;
+    }
+
+    pub(crate) fn share_observation(
+        &mut self,
+        observation: Arc<std::sync::Mutex<crate::finality::Observation>>,
+    ) {
+        self.observation = Some(observation);
+    }
+
+    pub(crate) fn set_download_limit(&mut self, limit: std::num::NonZeroUsize) {
+        self.download_limit = limit;
     }
 
     /// Publish queued writes in number order, fixing the sealing keys before the first
@@ -130,10 +239,13 @@ impl DeviceLogSync {
         Ok(uploaded)
     }
 
-    /// List device logs and apply ready writes until no further listed write can
-    /// advance. Permanent failures are recorded once and stop that log; independent
-    /// logs continue. Waiting prerequisites and failed reads remain retryable.
-    pub async fn download_writes(&mut self) -> Result<(), SyncError> {
+    /// GET each device's next write number, fetching ahead on a hit, and apply
+    /// ready writes until none can advance. Each miss is judged by the recent-
+    /// return rule when it is used (§15); an untrusted miss, or a missing number
+    /// another write needs, asks the pass for snapshot discovery first.
+    /// Permanent failures are recorded once and stop that log; independent logs
+    /// continue. Waiting prerequisites and failed reads remain retryable.
+    pub async fn download_writes(&mut self) -> Result<WriteDiscovery, SyncError> {
         let _reads = self.reads.enter();
         let local = self.database.local_store_log().await?;
         let state = self.database.sync_state(Vec::new()).await?;
@@ -148,24 +260,66 @@ impl DeviceLogSync {
             .store_keys
             .read()?
             .ok_or(SyncError::KeyUnavailable(key))?;
+        let saved = self.database.return_checkpoint().await?;
+        let storage = self.storage.as_deref().ok_or(SyncError::NoStorage)?;
+        let refused = crate::pending_logs::local_refusals(&self.database).await?;
+        let mut discovery = WriteDiscovery {
+            complete: true,
+            needs_snapshots: false,
+        };
         let mut objects = BTreeMap::new();
-        for object in self
-            .storage
-            .as_deref()
-            .ok_or(SyncError::NoStorage)?
-            .list(&ObjectPrefix::device_logs(local.store))
-            .await?
-        {
-            let (device, number) = object.path.write_position().expect("device-log prefix");
-            let write = WriteId {
-                device,
-                number: number.get(),
+        let mut ends = BTreeMap::new();
+        // Every device that ever registered, including removed and replaced
+        // ones, and this device's own log for its identity read.
+        let writers: std::collections::BTreeSet<_> = local
+            .log
+            .replay
+            .state
+            .devices
+            .keys()
+            .copied()
+            .chain([local.device])
+            .collect();
+        for writer in writers {
+            // A refused write stops its log: nothing at or past it is read.
+            let stop = refused
+                .iter()
+                .filter_map(|record| match record.object {
+                    LogObject::Write(id) if id.device == writer => Some(id.number),
+                    _ => None,
+                })
+                .min();
+            let after = state
+                .positions
+                .0
+                .iter()
+                .find(|position| position.device == writer)
+                .map_or(0, |position| position.number);
+            if stop.is_some() {
+                discovery.complete = false;
+            }
+            let (found, end) = next_writes(
+                storage,
+                local.store,
+                writer,
+                after,
+                stop,
+                self.download_limit,
+            )
+            .await?;
+            objects.extend(found);
+            let Some(miss) = end else {
+                continue;
             };
-            if !state.positions.covers(write) {
-                objects.insert(write, object);
+            ends.insert(writer, miss);
+            if !self.observation.as_ref().is_some_and(|observation| {
+                crate::recent_return::miss_is_recent(observation, self.clock.as_ref(), saved)
+            }) {
+                discovery.needs_snapshots = true;
             }
         }
-        let mut stuck = crate::pending_logs::local_refusals(&self.database).await?;
+        let mut stuck = refused;
+        let mut waits = BTreeMap::new();
         let mut positions = state.positions;
         let mut replays = crate::replay_cache::ReplayCache::new(&local.log);
         loop {
@@ -203,6 +357,7 @@ impl DeviceLogSync {
                     }
                     Ok(ApplyOutcome::Waiting(reason)) => {
                         tracing::debug!(?write, ?reason, "write is waiting for its prerequisites");
+                        waits.insert(*write, reason);
                     }
                     Err(SyncError::Damaged(damage)) => {
                         stuck.push(
@@ -225,7 +380,27 @@ impl DeviceLogSync {
                 break;
             }
         }
-        self.compare_fingerprints().await
+        for write in objects.keys() {
+            if positions.covers(*write) {
+                continue;
+            }
+            discovery.complete = false;
+            // A cause past its writer's miss is required history: only a fresh
+            // snapshot catalog can certify its deletion (§15).
+            if let Some(coven_database::WriteWait::Writes(needed)) = waits.get(write) {
+                if needed.iter().any(|cause| {
+                    ends.get(&cause.device)
+                        .is_some_and(|miss| cause.number >= *miss)
+                }) {
+                    discovery.needs_snapshots = true;
+                }
+            }
+        }
+        if discovery.needs_snapshots {
+            discovery.complete = false;
+        }
+        self.compare_fingerprints().await?;
+        Ok(discovery)
     }
 
     /// Replace this device's authenticated D8 object from one committed database

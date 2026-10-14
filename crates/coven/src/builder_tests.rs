@@ -521,6 +521,7 @@ mod recovery {
                 db.clone(),
                 key_session.clone(),
                 member_session.clone(),
+                clock.clone(),
             );
             writes.upload_writes().await.unwrap();
             sync.write_snapshot(Audience::Store).await.unwrap();
@@ -553,6 +554,7 @@ mod recovery {
                     db.clone(),
                     key_session.clone(),
                     member_session.clone(),
+                    clock.clone(),
                 ),
                 clock.clone(),
             );
@@ -760,6 +762,7 @@ mod recovery {
                 db.clone(),
                 Arc::new(KeySession::store(keys.clone()).unwrap()),
                 Arc::new(KeySession::member(identity.clone()).unwrap()),
+                clock.clone(),
             );
             writes.upload_writes().await.unwrap();
             assert_eq!(

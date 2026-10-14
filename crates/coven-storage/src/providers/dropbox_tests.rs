@@ -705,6 +705,9 @@ impl coven_foundation::clock::Clock for RemovalClock {
     fn now(&self) -> std::time::SystemTime {
         std::time::SystemTime::UNIX_EPOCH
     }
+    fn elapsed(&self) -> std::time::Duration {
+        self.0.lock().unwrap().iter().sum()
+    }
     fn sleep(
         &self,
         duration: std::time::Duration,

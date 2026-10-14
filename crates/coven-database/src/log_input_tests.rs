@@ -99,3 +99,20 @@ async fn a_remembered_writer_has_no_received_input() {
         assert!(db.log_inputs(kind).await.unwrap().is_empty());
     }
 }
+
+#[tokio::test]
+async fn the_return_checkpoint_only_moves_forward_and_survives_reopen() {
+    use coven_format::value::StorageTime;
+    let store = TestStore::new();
+    let db = store.builder(vec![], vec![]).open().await.unwrap();
+    assert_eq!(db.return_checkpoint().await.unwrap(), None);
+    let time = |seconds, nanos| StorageTime::new(seconds, nanos).unwrap();
+    assert!(db.save_return_checkpoint(time(10, 5)).await.unwrap());
+    assert!(!db.save_return_checkpoint(time(10, 5)).await.unwrap());
+    assert!(!db.save_return_checkpoint(time(9, 999)).await.unwrap());
+    db.close().await.unwrap();
+    let db = store.builder(vec![], vec![]).open().await.unwrap();
+    assert_eq!(db.return_checkpoint().await.unwrap(), Some(time(10, 5)));
+    assert!(db.save_return_checkpoint(time(10, 6)).await.unwrap());
+    assert_eq!(db.return_checkpoint().await.unwrap(), Some(time(10, 6)));
+}

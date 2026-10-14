@@ -20,6 +20,13 @@ pub(crate) struct Observation {
     sample: Option<(SystemTime, Duration)>,
     /// The sample known before the reads of the latest complete catch-up.
     caught_up: Option<SystemTime>,
+    /// This session's last clock-object time, paired with the sleep-inclusive
+    /// monotonic reading taken before its replacement request (§15). Only this
+    /// pairing can certify that a write miss is recent.
+    clock: Option<(SystemTime, Duration)>,
+    /// The sample before this session's last completed snapshot discovery;
+    /// later misses are judged against it as against a saved checkpoint.
+    discovered: Option<SystemTime>,
     retry: Option<std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>>,
 }
 
@@ -41,6 +48,25 @@ impl Observation {
     /// The `T_c` a snapshot prepared now records (§15): never device time.
     pub(crate) fn caught_up(&self) -> Option<SystemTime> {
         self.caught_up
+    }
+
+    /// Record a clock-object time with the monotonic reading from before its
+    /// replacement. A retained sample keeps its original starting point.
+    pub(crate) fn clock_observed(&mut self, stored: SystemTime, started: Duration) {
+        self.clock = Some((stored, started));
+    }
+
+    pub(crate) fn clock(&self) -> Option<(SystemTime, Duration)> {
+        self.clock
+    }
+
+    /// A completed snapshot discovery certifies misses from its sample on.
+    pub(crate) fn snapshots_discovered(&mut self, sample: SystemTime) {
+        self.discovered = Some(self.discovered.map_or(sample, |known| known.max(sample)));
+    }
+
+    pub(crate) fn discovered(&self) -> Option<SystemTime> {
+        self.discovered
     }
 
     pub(crate) fn through(&self) -> Option<(Duration, Duration)> {

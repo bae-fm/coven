@@ -59,11 +59,43 @@ private def catalog (j : Json) : Except String Json := do
     | some s => toJson [s.writer, s.number]
     | none => Json.null
 
+private def saved (j : Json) : Except String (Option Nat) := do
+  match j.getObjVal? "saved" with
+  | .ok .null => pure none
+  | .ok value => some <$> value.getNat?
+  | .error _ => pure none
+
+/-- `needsSnapshots`: no checkpoint, or the sample plus elapsed time has
+reached `S + 29 days` (`exact_boundary_discovers`). -/
+private def needs (j : Json) : Except String Json := do
+  let observed ← j.getObjValAs? Nat "observed"
+  let elapsed ← j.getObjValAs? Nat "elapsed"
+  return toJson (needsSnapshots (← saved j) observed elapsed)
+
+/-- `readRecentLog` over writer 0's write log, whose present numbers are
+1..count except `deleted`. Each request adds `step` to elapsed time after
+`base`, so the terminal miss is judged when it is used. -/
+private def recent (j : Json) : Except String Json := do
+  let count ← j.getObjValAs? Nat "count"
+  let deleted ← j.getObjValAs? (List Nat) "deleted"
+  let observed ← j.getObjValAs? Nat "observed"
+  let base ← j.getObjValAs? Nat "base"
+  let step ← j.getObjValAs? Nat "step"
+  let store : Store := (List.range count).foldl (fun store n =>
+    if deleted.contains (n + 1) then store else put store (.log .write 0 (n + 1)) [n + 1] 0) empty
+  let result := readRecentLog (fun _ => store) (fun _ => none) (fun _ => false) 0 (count + 2) 0 0
+    (← saved j) observed (fun t => base + step * (t + 1))
+  let stop := match result.stop with
+    | .miss => "miss" | .snapshots => "snapshots" | _ => "other"
+  return Json.mkObj [("stop", toJson stop), ("position", toJson result.position)]
+
 private def run (j : Json) : Except String Json := do
   match ← j.getObjValAs? String "check" with
   | "discovery" => discovery j
   | "counts" => counts j
   | "catalog" => catalog j
+  | "needs" => needs j
+  | "recent" => recent j
   | check => throw s!"unknown IO check {check}"
 
 def main : IO UInt32 := do

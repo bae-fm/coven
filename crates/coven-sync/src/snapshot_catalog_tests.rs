@@ -113,6 +113,8 @@ async fn unsigned_snapshot_cannot_replace_rows_or_authorize_log_deletion() {
     add_device(&mut b).await;
     let damages = b.sync.reload_from_snapshots().await.unwrap();
     assert!(damages.iter().any(|object| object.path == path.as_str()));
+    // Without a usable snapshot the reload has no target; discovery reads the log.
+    b.writes.download_writes().await.unwrap();
     assert_eq!(tables(&b).await[0].1, "note 0");
     assert_eq!(
         b.db.sync_state(Vec::new()).await.unwrap().positions.0[0].number,
@@ -197,6 +199,7 @@ async fn another_members_snapshot_signatures_never_authorize_selection_loading_o
         assert!(files.snapshots.is_empty());
         assert!(tables(&b).await.is_empty());
         b.sync.reload_from_snapshots().await.unwrap();
+        b.writes.download_writes().await.unwrap();
         assert_eq!(tables(&b).await, tables(&a).await);
         // The real author's signatures permit loading after the logs disappear.
         storage.delete(&path).await.unwrap();
@@ -227,7 +230,7 @@ async fn coverage_checks_read_exactly_the_signed_prefix_without_an_audience_key(
         .remove(0);
     a.custody.forget().unwrap();
     let before = storage.ranges().await.len();
-    a.sync.reload_deleted_history().await.unwrap();
+    a.sync.discover_snapshots().await.unwrap();
     let ranges = storage.ranges().await;
     assert_eq!(ranges.len() - before, 4);
     assert_eq!(ranges[before].start(), 0);
@@ -307,7 +310,7 @@ async fn a_truncated_body_does_not_erase_signed_required_history() {
     storage.create(&object.path, &bytes).await.unwrap();
     let mut b = notes_device(storage.clone(), 2).await;
     add_device(&mut b).await;
-    assert!(b.sync.reload_deleted_history().await.is_err());
+    assert!(b.sync.discover_snapshots().await.is_err());
     assert!(tables(&b).await.is_empty());
     assert!(b.sync.pending_reload().await.unwrap().is_some());
 }

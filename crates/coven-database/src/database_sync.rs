@@ -83,6 +83,34 @@ impl Database {
         .await
     }
 
+    /// The storage time certified by the last completed catch-up (§15's `S`).
+    pub async fn return_checkpoint(
+        &self,
+    ) -> Result<Option<coven_format::value::StorageTime>, DbError> {
+        self.call(move |inner| {
+            inner
+                .access
+                .readers
+                .acquire_reader()
+                .with_reader(crate::log_input::checkpoint)
+        })
+        .await
+    }
+
+    /// Save `S` after a completed catch-up whose positions were confirmed
+    /// posted. Only a newer time is written; returns whether it was.
+    pub async fn save_return_checkpoint(
+        &self,
+        time: coven_format::value::StorageTime,
+    ) -> Result<bool, DbError> {
+        self.call(move |inner| {
+            inner
+                .access
+                .with_writer(|writer| crate::log_input::save_checkpoint(writer, time))
+        })
+        .await
+    }
+
     /// Retain discovered writers even when their first exact read is still absent.
     pub async fn remember_log_writers(
         &self,

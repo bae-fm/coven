@@ -581,10 +581,17 @@ mod stuck {
             .unwrap();
         publish(storage, &record).await;
         if reload {
+            // Without a snapshot the reload's target stops at local positions;
+            // the refused write is first seen by ordinary discovery after it.
             devices[1].sync.reload_from_snapshots().await.unwrap();
-        } else {
-            devices[1].writes.download_writes().await.unwrap();
+            assert!(devices[1]
+                .db
+                .pending::<crate::PendingRecord>()
+                .await
+                .unwrap()
+                .is_empty());
         }
+        devices[1].writes.download_writes().await.unwrap();
         assert!(rows(&devices[1].db).await.is_empty());
         LogRefusal {
             object: LogObject::Write(record.header.position),
@@ -756,8 +763,11 @@ mod stuck {
     }
 
     #[tokio::test]
-    async fn listed_objects_with_failed_or_incomplete_reads_are_retried() {
-        for failure in ["missing", "network", "incomplete corrupt header"] {
+    async fn observed_objects_whose_reads_fail_are_retried_without_refusal() {
+        // Exact status finds the write; reading its body then fails or finds it
+        // gone. Neither is a miss or a refusal, and a later pass applies it.
+        use coven_storage::StorageFailure;
+        for failure in [StorageFailure::Network, StorageFailure::NotFound] {
             let storage = storage();
             let mut devices = group(storage.clone(), 2).await;
             sql(
@@ -767,38 +777,16 @@ mod stuck {
             .await;
             devices[0].writes.upload_writes().await.unwrap();
             let path = ObjectPath::device_log(STORE_ID, DeviceId(1), 1.try_into().unwrap());
-            let original = storage.read(&path).await.unwrap();
-            let (listed, waiting) = tokio::sync::oneshot::channel();
-            let (resume, held) = tokio::sync::oneshot::channel();
             storage
-                .hold_next_listing(ObjectPrefix::device_logs(STORE_ID), listed, held)
+                .set_faults(Faults {
+                    read_failures: [(path.clone(), failure)].into(),
+                    ..Faults::none()
+                })
                 .await;
-            let download = devices[1].writes.download_writes();
-            let interrupt = async {
-                waiting.await.unwrap();
-                match failure {
-                    "network" => {
-                        storage
-                            .set_faults(Faults {
-                                fail_next: 1,
-                                ..Faults::none()
-                            })
-                            .await
-                    }
-                    "missing" => storage.delete(&path).await.unwrap(),
-                    _ => {
-                        storage.delete(&path).await.unwrap();
-                        let mut partial = original[..23].to_vec();
-                        partial[0] = 255;
-                        storage.create(&path, &partial).await.unwrap();
-                    }
-                }
-                resume.send(()).unwrap();
-            };
-            let (result, ()) = tokio::join!(download, interrupt);
+            let result = devices[1].writes.download_writes().await;
             assert!(
                 matches!(result, Err(SyncError::Storage(_))),
-                "{failure}: {result:?}"
+                "{failure:?}: {result:?}"
             );
             assert!(devices[1]
                 .db
@@ -806,17 +794,14 @@ mod stuck {
                 .await
                 .unwrap()
                 .is_empty());
-            if failure != "network" {
-                storage.delete(&path).await.unwrap();
-                storage.create(&path, &original).await.unwrap();
-            }
+            storage.set_faults(Faults::none()).await;
             devices[1].writes.download_writes().await.unwrap();
             assert_eq!(rows(&devices[1].db).await, rows(&devices[0].db).await);
         }
     }
 
     #[tokio::test]
-    async fn a_refusal_first_seen_during_reload_is_recorded_without_advancing_its_log() {
+    async fn a_refusal_seen_after_a_reload_is_recorded_without_advancing_its_log() {
         let storage = storage();
         let mut devices = group(storage.clone(), 2).await;
         let record = refuse(&storage, &mut devices, true).await;

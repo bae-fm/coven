@@ -27,54 +27,14 @@ mod io;
 mod reload;
 #[path = "snapshot_retention.rs"]
 mod retention;
+#[path = "snapshot_return.rs"]
+mod return_check;
 #[path = "snapshot_seal.rs"]
 mod seal;
 #[path = "snapshot_write_input.rs"]
 mod write_input;
 
 impl StoreLogSync {
-    /// A signed snapshot prefix may require a reload, but never authorizes rows.
-    /// The reload authenticates the complete snapshot and its intervening writes
-    /// before its atomic database replacement (§15, §19.1).
-    pub(crate) async fn reload_deleted_history(&mut self) -> Result<(), SyncError> {
-        let _reads = self.reads.enter();
-        let mut damages = Vec::new();
-        let local = self.database.local_store_log().await?;
-        let state = self.database.sync_state(Vec::new()).await?;
-        let listed: std::collections::BTreeSet<_> = self
-            .storage
-            .as_deref()
-            .ok_or(SyncError::NoStorage)?
-            .list(&ObjectPrefix::device_logs(self.directory.id()))
-            .await?
-            .into_iter()
-            .filter_map(|object| object.path.write_id())
-            .collect();
-        for audience in self.snapshot_audiences(&local.log)?.into_keys() {
-            let catalog = self
-                .current_snapshot_candidates(&audience, &local.log, &mut damages)
-                .await?;
-            for covered in &catalog.required_positions.0 {
-                let after = point(&state.positions, covered.device);
-                if covered.number > after {
-                    let present = listed
-                        .iter()
-                        .filter(|write| {
-                            write.device == covered.device
-                                && write.number > after
-                                && write.number <= covered.number
-                        })
-                        .count() as u64;
-                    if present < covered.number - after {
-                        self.reload_from_snapshots().await?;
-                        return Ok(());
-                    }
-                }
-            }
-        }
-        Ok(())
-    }
-
     /// Resume retained snapshot work, then write each readable audience whose
     /// encoded parts since its latest signed snapshot prefix exceed the listed
     /// plaintext size, or 1 MiB when it has none (§15). Uploads always use the
@@ -98,6 +58,18 @@ impl StoreLogSync {
                 .await?;
             self.drive_snapshot(record.id, &mut damages).await?;
         }
+        Ok(())
+    }
+
+    /// Apply the writes that follow a reload's target by next-number discovery
+    /// from the loaded positions (§15: a reload stops at its target). Joining,
+    /// restore and recovery call this after loading snapshots.
+    pub async fn download_later_writes(
+        &mut self,
+        writes: &mut crate::DeviceLogSync,
+    ) -> Result<(), SyncError> {
+        let _pass = self.begin_pass(writes);
+        writes.download_writes().await?;
         Ok(())
     }
 

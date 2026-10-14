@@ -468,6 +468,14 @@ impl OpeningStore {
             })
             .await?;
         }
+        let mut writes = coven_sync::DeviceLogSync::new(
+            owners.storage.clone().expect("connected for recovery"),
+            database.clone(),
+            owners.keys.clone(),
+            owners.identity.clone(),
+            owners.clock.clone(),
+        );
+        sync.download_later_writes(&mut writes).await?;
         database.finish_recovery().await.map_err(CovenError::from)?;
         Ok(owners.handle(database, sync))
     }
@@ -507,11 +515,13 @@ impl OpeningOwners {
                 database.clone(),
                 self.keys.clone(),
                 self.identity.clone(),
+                self.clock.clone(),
             ),
             None => coven_sync::DeviceLogSync::disconnected(
                 database.clone(),
                 self.keys.clone(),
                 self.identity.clone(),
+                self.clock.clone(),
             ),
         };
         let files = coven_sync::Files::new(

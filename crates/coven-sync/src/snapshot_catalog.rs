@@ -39,12 +39,15 @@ impl StoreLogSync {
         // A snapshot's authorized key stays eligible when replay drops its
         // introduction; an unauthorized or conflicting one never is (§11).
         let keys = crate::key_introductions::needed(log);
-        let objects = storage
-            .list(&ObjectPrefix::audience_snapshots(
-                self.directory.id(),
-                audience,
-            ))
-            .await?;
+        let prefix = ObjectPrefix::audience_snapshots(self.directory.id(), audience);
+        let objects = match self.reads.snapshot_listing(prefix.as_str()) {
+            Some(objects) => objects,
+            None => {
+                let objects = storage.list(&prefix).await?;
+                self.reads.keep_snapshot_listing(prefix.as_str(), &objects);
+                objects
+            }
+        };
         let listed = objects.len();
         let mut candidates = Vec::new();
         let mut positions = BTreeMap::new();

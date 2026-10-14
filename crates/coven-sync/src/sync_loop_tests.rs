@@ -31,6 +31,9 @@ impl Clock for PassClock {
     fn now(&self) -> std::time::SystemTime {
         UNIX_EPOCH + Duration::from_secs(100)
     }
+    fn elapsed(&self) -> Duration {
+        Duration::ZERO
+    }
     fn sleep(
         &self,
         _: Duration,
@@ -160,8 +163,13 @@ impl Device<StoreLogSync> {
         );
         let entry_decodes = Arc::new(AtomicUsize::new(0));
         sync.test_track_received_entries(entry_decodes.clone());
-        let writes =
-            DeviceLogSync::new(storage.clone(), db.clone(), keys.clone(), identity.clone());
+        let writes = DeviceLogSync::new(
+            storage.clone(),
+            db.clone(),
+            keys.clone(),
+            identity.clone(),
+            clock.clone(),
+        );
         Self {
             data: DeviceData {
                 entry_decodes,
@@ -266,6 +274,7 @@ impl DeviceData {
             self.db.clone(),
             self.keys.clone(),
             self.identity.clone(),
+            self.clock.clone(),
         )
     }
 
@@ -724,21 +733,21 @@ async fn io_counts_first_catchup_baseline() {
     assert_eq!(
         (counts.requests, counts.requests_by_kind()),
         (
-            69,
+            75,
             RequestCounts {
-                lists: 10,
+                lists: 8,
                 gets: 38,
                 ranges: 14,
                 creates: 1,
-                replaces: 1,
-                statuses: 1,
+                replaces: 2,
+                statuses: 8,
                 other: 4,
                 ..Default::default()
             }
         ),
         "{counts:#?}"
     );
-    assert_eq!((counts.work.writer_holds, counts.work.commits), (78, 22));
+    assert_eq!((counts.work.writer_holds, counts.work.commits), (79, 23));
     assert_eq!(
         counts.work.store_log_commits, 2,
         "catch-up batch and own registration"
@@ -796,12 +805,13 @@ async fn io_counts_file_fetch_baseline() {
     assert_eq!(
         (counts.requests, counts.requests_by_kind()),
         (
-            39,
+            41,
             RequestCounts {
-                lists: 10,
+                lists: 7,
                 gets: 11,
                 ranges: 16,
                 replaces: 1,
+                statuses: 5,
                 other: 1,
                 ..Default::default()
             }
@@ -863,12 +873,13 @@ async fn io_counts_reopen_baseline() {
     assert_eq!(
         (counts.requests, counts.requests_by_kind()),
         (
-            27,
+            29,
             RequestCounts {
-                lists: 10,
+                lists: 7,
                 gets: 11,
                 ranges: 4,
-                replaces: 1,
+                replaces: 2,
+                statuses: 4,
                 other: 1,
                 ..Default::default()
             }

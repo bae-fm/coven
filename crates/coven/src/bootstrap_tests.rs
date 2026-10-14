@@ -60,6 +60,10 @@ impl Clock for JoinClock {
         self.clock.now()
     }
 
+    fn elapsed(&self) -> Duration {
+        self.clock.elapsed()
+    }
+
     fn sleep(
         &self,
         duration: Duration,
@@ -579,7 +583,7 @@ async fn a_device_removed_during_loading_receives_the_provider_refusal() {
     owner
         .storage
         .hold_next_listing(
-            ObjectPrefix::device_logs(owner.directory.id()),
+            ObjectPrefix::audience_snapshots(owner.directory.id(), &coven_merge::Audience::Store),
             listed,
             resumed,
         )

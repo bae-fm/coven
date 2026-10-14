@@ -11,6 +11,10 @@ use std::{future::Future, pin::Pin};
 pub trait Clock: Send + Sync {
     /// The wall clock's current time.
     fn now(&self) -> SystemTime;
+    /// Monotonic time since an arbitrary origin, counting time the system
+    /// spent asleep (§10, §15). Readings never decrease within a process; only
+    /// differences between two readings of one clock mean anything.
+    fn elapsed(&self) -> Duration;
     /// Wait for an elapsed duration. System clocks use the runtime's monotonic
     /// timer; controlled clocks wake only when their supplied time advances.
     fn sleep(&self, duration: Duration) -> Pin<Box<dyn Future<Output = ()> + Send>> {
@@ -28,6 +32,53 @@ impl Clock for SystemClock {
     fn now(&self) -> SystemTime {
         SystemTime::now()
     }
+    fn elapsed(&self) -> Duration {
+        boot_time()
+    }
+}
+
+/// Linux and Android count suspension only in `CLOCK_BOOTTIME`.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn boot_time() -> Duration {
+    timespec(rustix::time::clock_gettime(rustix::time::ClockId::Boottime))
+}
+
+/// Darwin's `CLOCK_MONOTONIC` keeps advancing while the system sleeps,
+/// unlike `CLOCK_UPTIME_RAW` and `std::time::Instant`.
+#[cfg(target_vendor = "apple")]
+fn boot_time() -> Duration {
+    timespec(rustix::time::clock_gettime(
+        rustix::time::ClockId::Monotonic,
+    ))
+}
+
+/// Other Unix systems: `CLOCK_MONOTONIC`, whose treatment of suspension is
+/// the platform's own.
+#[cfg(all(
+    unix,
+    not(any(target_os = "linux", target_os = "android", target_vendor = "apple"))
+))]
+fn boot_time() -> Duration {
+    timespec(rustix::time::clock_gettime(
+        rustix::time::ClockId::Monotonic,
+    ))
+}
+
+#[cfg(unix)]
+fn timespec(time: rustix::time::Timespec) -> Duration {
+    Duration::new(
+        u64::try_from(time.tv_sec).expect("monotonic seconds are nonnegative"),
+        u32::try_from(time.tv_nsec).expect("nanoseconds below one second"),
+    )
+}
+
+/// Windows interrupt time counts sleep and hibernation, in 100 ns units.
+#[cfg(windows)]
+fn boot_time() -> Duration {
+    let mut ticks = 0u64;
+    // SAFETY: the out pointer refers to a live, writable u64.
+    unsafe { windows_sys::Win32::System::WindowsProgramming::QueryInterruptTime(&mut ticks) };
+    Duration::from_nanos(ticks.saturating_mul(100))
 }
 
 /// A clock that returns the instant supplied by a test until it is set again.
@@ -69,6 +120,10 @@ impl Clock for FixedClock {
     fn now(&self) -> SystemTime {
         self.0.borrow().wall
     }
+    /// Forward settings advance it, as sleep would; backward ones do not.
+    fn elapsed(&self) -> Duration {
+        self.0.borrow().elapsed
+    }
     fn sleep(&self, duration: Duration) -> Pin<Box<dyn Future<Output = ()> + Send>> {
         let mut time = self.0.subscribe();
         let deadline = time.borrow().elapsed + duration;
@@ -91,6 +146,10 @@ pub struct ClosureClock<F>(
 impl<F: Fn() -> SystemTime + Send + Sync> Clock for ClosureClock<F> {
     fn now(&self) -> SystemTime {
         (self.0)()
+    }
+    /// A supplied wall reading has no monotonic counterpart: it never advances.
+    fn elapsed(&self) -> Duration {
+        Duration::ZERO
     }
 }
 

@@ -21,7 +21,7 @@ impl StoreLogSync {
     ) -> Result<(), SyncError> {
         let previous = self.storage.replace(storage);
         let previous_finality =
-            std::mem::take(self.finality.get_mut().expect("finality lock poisoned"));
+            std::mem::take(&mut *self.finality.lock().expect("finality lock poisoned"));
         let result = async {
             // Unlock needs only a usable store key (§11). Other damaged
             // objects and refused key copies stay in their pending records.
@@ -77,7 +77,7 @@ impl StoreLogSync {
         .await;
         if result.is_err() {
             self.storage = previous;
-            *self.finality.get_mut().expect("finality lock poisoned") = previous_finality;
+            *self.finality.lock().expect("finality lock poisoned") = previous_finality;
         }
         result
     }
@@ -345,7 +345,7 @@ impl StoreLogSync {
             return Err(compensate(error, rollback()));
         }
         self.storage = Some(storage);
-        *self.finality.get_mut().expect("finality lock poisoned") = Default::default();
+        *self.finality.lock().expect("finality lock poisoned") = Default::default();
         Ok(())
     }
 

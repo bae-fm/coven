@@ -567,6 +567,9 @@ async fn closing_erases_custody_even_when_releasing_a_worker_fails() {
         fn now(&self) -> SystemTime {
             SystemTime::UNIX_EPOCH + Duration::from_secs(1_000)
         }
+        fn elapsed(&self) -> Duration {
+            Duration::ZERO
+        }
         fn sleep(&self, _: Duration) -> Pin<Box<dyn Future<Output = ()> + Send>> {
             Box::pin(std::future::pending())
         }

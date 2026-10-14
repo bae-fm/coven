@@ -26,7 +26,9 @@ pub struct StoreLogSync {
     #[cfg(test)]
     received_entry_decodes: Option<Arc<std::sync::atomic::AtomicUsize>>,
     download_limit: std::num::NonZeroUsize,
-    finality: std::sync::Mutex<crate::finality::Observation>,
+    /// Storage-time samples, shared with the pass's device-log owner, which
+    /// checks its write misses against them (§15).
+    finality: Arc<std::sync::Mutex<crate::finality::Observation>>,
     reads: crate::pass_reads::PassReads,
     storage: Option<Arc<dyn Storage>>,
     database: Database,
@@ -56,7 +58,7 @@ impl StoreLogSync {
             #[cfg(test)]
             received_entry_decodes: None,
             download_limit: std::num::NonZeroUsize::MIN,
-            finality: std::sync::Mutex::default(),
+            finality: Arc::default(),
             reads: crate::pass_reads::PassReads::default(),
             storage: Some(storage),
             database,
@@ -82,7 +84,7 @@ impl StoreLogSync {
             #[cfg(test)]
             received_entry_decodes: None,
             download_limit: std::num::NonZeroUsize::MIN,
-            finality: std::sync::Mutex::default(),
+            finality: Arc::default(),
             reads: crate::pass_reads::PassReads::default(),
             storage: None,
             database,
@@ -107,6 +109,8 @@ impl StoreLogSync {
         writes: &mut crate::DeviceLogSync,
     ) -> crate::pass_reads::ReadScope {
         writes.share_reads(self.reads.clone());
+        writes.share_observation(self.finality.clone());
+        writes.set_download_limit(self.download_limit);
         self.reads.enter()
     }
 

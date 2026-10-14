@@ -208,14 +208,15 @@ async fn unreadable_circle_parts_are_skipped_but_missing_members_keys_wait() {
         .unwrap();
     devices[1].writes.download_writes().await.unwrap();
     assert!(rows(&devices[1].db).await.is_empty());
-    assert!(matches!(
-        devices[1].sync.reload_from_snapshots().await,
-        Err(SyncError::KeyUnavailable(_))
-    ));
+    // A reload without a snapshot has no target past local positions; the
+    // key wait stays with discovery.
+    devices[1].sync.reload_from_snapshots().await.unwrap();
+    assert!(rows(&devices[1].db).await.is_empty());
     devices[2].writes.download_writes().await.unwrap();
     assert_eq!(rows(&devices[2].db).await.len(), 1);
     assert_eq!(count(&devices[2].db).await, 0);
     devices[2].sync.reload_from_snapshots().await.unwrap();
+    devices[2].writes.download_writes().await.unwrap();
     assert_eq!(rows(&devices[2].db).await.len(), 1);
     assert_eq!(count(&devices[2].db).await, 0);
     devices[1].sync.sync_store_log().await.unwrap();
@@ -592,10 +593,10 @@ async fn reversed_removal_parts(
         }
         assert!(rows(&ben.db).await.is_empty());
         assert_eq!(count(&ben.db).await, 0);
-        assert!(matches!(
-            ben.sync.reload_from_snapshots().await,
-            Err(SyncError::KeyUnavailable(_))
-        ));
+        // Without a snapshot the reload has no target past local positions;
+        // the key wait stays with discovery.
+        ben.sync.reload_from_snapshots().await.unwrap();
+        assert!(rows(&ben.db).await.is_empty());
         assert!(!ben
             .db
             .sync_state(Vec::new())
@@ -655,6 +656,7 @@ async fn reversed_removal_parts(
         assert_eq!(count(&device.db).await, 1);
         assert!(device.db.lost_values().await.unwrap().is_empty());
         device.sync.reload_from_snapshots().await.unwrap();
+        device.writes.download_writes().await.unwrap();
         assert_eq!(rows(&device.db).await, expected);
         assert_eq!(count(&device.db).await, 1);
         assert!(device.writes.post_positions().await.unwrap());

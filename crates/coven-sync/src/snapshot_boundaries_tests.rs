@@ -57,6 +57,7 @@ async fn unusable_snapshots_do_not_turn_deleted_history_into_an_empty_audience()
             assert_eq!(tables(&b).await, before);
         } else {
             assert_eq!(result.unwrap().len(), 1);
+            b.writes.download_writes().await.unwrap();
             let mut expected = tables(&a).await;
             expected.extend(before);
             assert_eq!(tables(&b).await, expected);
@@ -398,6 +399,9 @@ mod reset {
         finish_reset(&mut a, reset).await;
         b.sync().await;
         c.sync().await;
+        for d in [&mut a, &mut b, &mut c] {
+            d.writes.download_writes().await.unwrap();
+        }
         // B's independent first write is late; C's write depended on B but did not
         // read A, so it is lost. This is §7.1's causal boundary, not a time cutoff.
         let ids: Vec<_> = tables(&a).await.into_iter().map(|r| r.0).collect();
@@ -436,6 +440,8 @@ mod reset {
         finish_reset(&mut b, second).await;
         finish_reset(&mut a, first).await;
         b.sync().await;
+        a.writes.download_writes().await.unwrap();
+        b.writes.download_writes().await.unwrap();
         assert_eq!(
             a.log().await.replay.state.resets,
             b.log().await.replay.state.resets
@@ -506,7 +512,7 @@ mod reset {
         let mut b = notes_device(storage.clone(), 2).await;
         let caught_up = b.sync.sync_store_log().await;
         assert!(
-            matches!(&caught_up, Err(crate::SyncFailure::Storage(error))
+            matches!(&caught_up, Err(crate::SyncError::Storage(error))
                 if error.failure() == coven_storage::StorageFailure::NotFound),
             "{caught_up:?}"
         );
