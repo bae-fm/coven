@@ -5234,7 +5234,8 @@ Carol's tablet:
     reload from that one.
   - A device that has migrated queues ordinary new-version writes behind
     its migration marker and sends them only after replay keeps a raise
-    to their version, its own or another device's
+    to their version, its own or another device's, or once a later local
+    breaking migration captures them (below)
     ([`post_migration_behind_marker`](proofs/queue/CovenQueue/RaiseUpload.lean),
     [`new_schema_send_requires_kept`](proofs/queue/CovenQueue/RaiseProgress.lean)).
   - A device whose app is older than the store stops uploading; after
@@ -5328,10 +5329,23 @@ Carol's tablet:
   captures the raise snapshot through that marker, excluding subsequent
   app writes
   ([`migration_preserves_waiting`, `post_migration_behind_marker`](proofs/queue/CovenQueue/RaiseUpload.lean)).
-  - The marker is the only new-schema record allowed to upload before a
-    kept raise; its row changes travel only in the snapshot
+  - Before a kept raise, the upload gate admits the captured prefix:
+    records older than the migration's version, and markers. The marker's
+    row changes travel only in the snapshot
     ([`migration_marker_enabled`](proofs/queue/CovenQueue/RaiseUpload.lean),
     [`old_prefix_and_marker_enabled`](proofs/queue/CovenQueue/RaiseProgress.lean)).
+  - A later breaking migration whose predecessor's raise never published
+    replaces that capture with its own, through its new marker. App writes
+    made between the two markers belong to it: they upload before the later
+    raise, and no raise to their own version is awaited. App writes after
+    the later marker wait for a raise to its version. Every queued record
+    stays byte for byte, and the latest raise publishes once its prefix is
+    confirmed
+    ([`later_capture_never_deadlocks`, `local_step_keeps_records`, `after_latest_marker_waits`](proofs/queue/CovenQueue/RaiseCaptures.lean)).
+    E.g. Ana writes 1, migrates to 2 (marker 2), writes 3, migrates to 3
+    (marker 4) and writes 5: with the store still at 1, records 1 to 4
+    upload, the raise to 3 publishes, and 5 waits for it
+    ([`between_write_joins_later_prefix`, `between_write_raise_publishes`](proofs/queue/CovenQueue/RaiseExamples.lean)).
   - Confirm the captured own prefix, including the marker, before sending
     the snapshot under §15's publication gates, then publish the raise
     entry after that snapshot is stored; every covered remote position

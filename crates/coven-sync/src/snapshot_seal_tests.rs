@@ -293,24 +293,19 @@ mod differential {
             .collect()
     }
 
-    /// The model's gate compares a record with one kept version, so a write
-    /// made between two unpublished migrations is outside its scope (see
-    /// `a_write_between_unpublished_migrations_joins_the_later_prefix`): a
-    /// migration follows another only with no app write between them.
+    /// Migrations may follow app writes made after an earlier unpublished
+    /// migration: those writes join the later captured prefix
+    /// (`RaiseCaptures.later_capture_never_deadlocks`,
+    /// `a_write_between_unpublished_migrations_joins_the_later_prefix`).
     fn generate(rng: &mut Rng) -> Vec<Value> {
         let mut version = 1;
-        let mut wrote = true;
         (0..16)
             .map(|_| match rng.pick(10) {
-                0 if version < 4 && (version == 1 || !wrote) => {
+                0 if version < 4 => {
                     version += 1;
-                    wrote = false;
                     json!({"event": "migrate", "version": version})
                 }
-                0..=2 => {
-                    wrote = true;
-                    json!({"event": "write"})
-                }
+                0..=2 => json!({"event": "write"}),
                 3..=5 => {
                     let fault = [0, 0, 1, 2][rng.pick(4) as usize];
                     json!({"event": "upload", "fault": fault})
@@ -412,7 +407,14 @@ mod differential {
                     let _ = device.writes.upload_writes().await;
                     storage.set_faults(Faults::none()).await;
                 }
-                "raise" => device.sync.sync_store_log().await.unwrap(),
+                "raise" => {
+                    // The model's raise event is a pass at which the raise's
+                    // retry wait is over (SP waiting): a wait armed before a
+                    // reopen otherwise outlasts the fixed clock.
+                    let now = coven_foundation::clock::Clock::now(device.clock.as_ref());
+                    device.clock.set(now + coven_storage::LONGEST_RETRY_DELAY);
+                    device.sync.sync_store_log().await.unwrap()
+                }
                 "crash" => {
                     device
                         .reopen(storage.clone(), tables(), migrations(version))
@@ -428,10 +430,21 @@ mod differential {
     #[tokio::test]
     #[ignore = "requires COVEN_QUEUE_LEAN; scripts/check.sh supplies the queue runner"]
     async fn queue_raise_differential_histories() {
-        let mut raised = 0;
+        let (mut raised, mut between) = (0, 0);
         for seed in 0..48 {
             let mut rng = Rng(seed * 7919 + 1);
             let events = generate(&mut rng);
+            // A write after one migration and before the next.
+            let kinds: Vec<_> = events
+                .iter()
+                .map(|e| e["event"].as_str().unwrap())
+                .collect();
+            between += usize::from(kinds.iter().enumerate().any(|(i, kind)| {
+                *kind == "migrate"
+                    && kinds[..i].contains(&"migrate")
+                    && kinds[kinds[..i].iter().rposition(|k| *k == "migrate").unwrap()..i]
+                        .contains(&"write")
+            }));
             let output = crate::tests::run_lean(
                 "COVEN_QUEUE_LEAN",
                 &json!({"mode": "raise", "app": 1, "events": events}),
@@ -452,6 +465,7 @@ mod differential {
             raised += usize::from(rust.iter().any(|s| s["stage"] == "entryStored"));
         }
         assert!(raised > 0, "some histories publish a raise");
+        assert!(between > 0, "some histories write between two migrations");
     }
 
     /// IO `SnapshotWrites` on Ana's raise: her capture may contain unsent own

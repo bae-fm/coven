@@ -17,4 +17,5 @@ import CovenQueue.OperationExamples
 import CovenQueue.AtomicReceive
 import CovenQueue.RaiseUpload
 import CovenQueue.RaiseProgress
+import CovenQueue.RaiseCaptures
 import CovenQueue.RaiseExamples

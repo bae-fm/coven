@@ -136,13 +136,13 @@ theorem committed_reachable : Reachable encode 0 committed :=
 
 theorem prepared_reachable : Reachable encode 0 prepared := by
   exact .next committed_reachable
-    (.prepare committed 2 [request] [key] 1 1 firstRecord []
-      (by decide) (by decide) (Or.inl (by decide)) (by decide)
+    (.prepare committed 2 [request] [key] 1 1 0 firstRecord []
+      (by decide) (by decide) (by decide) (by decide)
       ⟨request, [], rfl, rfl, rfl⟩)
 
 theorem sent_reachable : Reachable encode 0 sent := by
   exact .next prepared_reachable
-    (.send prepared ⟨1, 0, 0⟩ (some ⟨some 0, false, ⟨0, 0, 0⟩⟩) 1 1
+    (.send prepared ⟨1, 0, 0⟩ (some ⟨some 0, false, ⟨0, 0, 0⟩⟩) 1 1 0
       (by decide) (by decide) (by decide)
       (by
         intro a ha
@@ -150,7 +150,7 @@ theorem sent_reachable : Reachable encode 0 sent := by
           have head : prepared.queue.head = some attempt := by decide
           exact Option.some.inj (ha.symm.trans head)
         subst a
-        exact Or.inl (by decide)))
+        decide))
 
 /-- Send seems to fail and a read still finds no object; then
 the original request lands. Confirmation compares identical original bytes. -/

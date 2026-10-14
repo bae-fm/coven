@@ -165,8 +165,10 @@ private def receive (j : Json) : Except String Json := do
 /-! Raise mode: one device's queue and its captured raise, driven by events.
 Each event applies the model's own queue functions (`Queue.commit`,
 `RaiseUpload.migrate`, `Queue.prepare`, `World.send`, `World.land`,
-`Queue.finish`) under the `Uploadable` gate, and the raise advances only when
-`RaiseUpload.Confirmed` holds. Bytes are the attempt's identity: sealing and
+`Queue.finish`) under the `Uploadable` gate with the latest local migration's
+version, and the raise advances only when `RaiseUpload.Confirmed` holds. A
+later migration replaces the captured plan, as `RaiseUpload.Local.migrated`
+does. Bytes are the attempt's identity: sealing and
 real encodings are outside this comparison. -/
 
 private def sealAttempt : Seal := fun a => [a.record.identity.id.number, a.format]
@@ -176,19 +178,20 @@ private structure Raising where
   stage : Option RaiseUpload.Stage
   kept : Nat
   app : Nat
+  publication : Nat
   plan : Option (RaiseUpload.Plan × Nat)
 
 /-- One upload pass. `fault` 1 loses the first request before it lands;
 2 loses the reply of the first request that stores new bytes, as the
 provider's lost completion does; an already occupied path is confirmed by
 comparing bytes instead. Each head first needs the gate. -/
-private def uploadPass (kept : Nat) : Nat → Nat → World → World
+private def uploadPass (kept publication : Nat) : Nat → Nat → World → World
   | 0, _, s => s
   | fuel + 1, fault, s =>
     match s.queue.waiting with
     | [] => s
     | p :: _ =>
-      if !decide (Uploadable kept p.record) then s else
+      if !decide (Uploadable kept publication p.record) then s else
       let s := { s with queue := s.queue.prepare 1 [1] }
       match s.queue.head with
       | none => s
@@ -199,7 +202,8 @@ private def uploadPass (kept : Nat) : Nat → Nat → World → World
         let s := s.land sealAttempt a
         if fault = 2 && !occupied then s else
         if s.stored a.record.identity.id.number = some (sealAttempt a) then
-          uploadPass kept fuel (if fault = 2 then 2 else 0) { s with queue := s.queue.finish }
+          uploadPass kept publication fuel (if fault = 2 then 2 else 0)
+            { s with queue := s.queue.finish }
         else s
 
 private def raiseStep (s : Raising) (event : Json) : Except String Raising := do
@@ -217,11 +221,11 @@ private def raiseStep (s : Raising) (event : Json) : Except String Raising := do
     let covers := (List.range through).map fun n => (⟨q.device, n + 1⟩ : WriteId)
     let plan : RaiseUpload.Plan := ⟨through, covers, [], []⟩
     let world : World := { s.world with queue := q }
-    let captured : Raising := { s with world := world, app := version }
+    let captured : Raising := { s with world := world, app := version, publication := version }
     pure { captured with stage := some RaiseUpload.Stage.captured, plan := some (plan, version) }
   | "upload" =>
     let fault ← event.getObjValAs? Nat "fault"
-    let world := uploadPass s.kept (s.world.queue.waiting.length + 1) fault s.world
+    let world := uploadPass s.kept s.publication (s.world.queue.waiting.length + 1) fault s.world
     pure { s with world := world }
   | "raise" =>
     match s.stage, s.plan with
@@ -252,7 +256,7 @@ private def raise (j : Json) : Except String Json := do
   let events ← j.getObjValAs? (Array Json) "events"
   -- Before any raise the store is at the version its writes were made with.
   let app ← j.getObjValAs? Nat "app"
-  let start : Raising := ⟨⟨⟨1, 0, []⟩, fun _ => none, [], .empty⟩, none, app, app, none⟩
+  let start : Raising := ⟨⟨⟨1, 0, []⟩, fun _ => none, [], .empty⟩, none, app, app, 0, none⟩
   let mut s := start
   let mut out := #[]
   for event in events do

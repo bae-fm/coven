@@ -162,13 +162,39 @@ records. `post_migration_behind_marker` puts subsequent app writes behind it.
 The snapshot captures through that marker. It does not include later app writes.
 The marker carries no row changes; those travel in the snapshot alone.
 
-`old_schema_head_enabled` proves that an updated app can first-send the old
-head while the kept store version is still old. `old_prefix_and_marker_enabled`
-extends that permission through the migration marker. The marker is the sole
-new-schema exception before the kept raise: otherwise its own snapshot position
-would recreate a dependency cycle. `new_schema_send_requires_kept` applies the
-actual send guard to ordinary app writes, including retries. The supplied store
-version must come from a kept entry, not a merely published entry.
+The gate `Uploadable kept publication` is Rust's: `publication` is the
+version of the latest local breaking migration (zero for none). A marker
+always sends; a record older than `publication` sends while the store is
+older, since the latest capture covers it; a record at `publication` waits
+for a kept raise to it. `old_schema_head_enabled` proves that an updated app
+can first-send the old head while the kept store version is still old
+(`old_uploadable`). `old_prefix_and_marker_enabled` extends that permission
+through the migration marker. The marker must send before the kept raise:
+otherwise its own snapshot position would recreate a dependency cycle.
+`new_schema_send_requires_kept` applies the actual send guard to ordinary
+app writes at the latest migration's version, including retries. The
+supplied store version must come from a kept entry, not a merely published
+entry.
+
+**Successive unpublished migrations (proved).**
+[RaiseCaptures](queue/CovenQueue/RaiseCaptures.lean) adds the device's
+local state beside its queue: the app's version, the latest migration's
+version and the number of its marker. App writes take the app's version; a
+migration to a newer version appends its marker and replaces the capture
+with one through it, as Rust's `raise_capture::capture` does; every other
+queue event reserves no number. A write made after one marker and before the
+next is newer than the first marker's version, and no raise to that version
+will ever be kept. Comparing it with the kept version alone, as the gate
+did before T187, holds it, and with it the later raise, forever. In every
+such history `local_step_keeps_records` keeps the queued records byte for
+byte (events append or drop only the confirmed front), every record through
+the latest marker passes the gate, and `later_capture_never_deadlocks`
+constructs the confirmed prefix and the published latest raise.
+`after_latest_marker_waits` keeps app writes after the latest marker behind
+a kept raise to its version. `between_write_joins_later_prefix` and
+`between_write_raise_publishes` check Ana's case: write 1, marker 2, write 3,
+marker 4, write 5 with the store at 1; records 1 to 4 upload and the raise
+to 3 publishes, and 5 waits.
 
 `prefix_uploads` constructs a finite schedule of the actual queue's preparation,
 send, provider landing, reply and acknowledgement events. `no_raise_deadlock`
@@ -525,7 +551,8 @@ No normative spec, API, format or Rust file is changed by this proposal.
   interpretation of late records, independent of attempt status. Explicitly
   permit the empty migration marker to upload before the raise; its row effects
   travel only in the snapshot. Ordinary new-schema writes remain behind it
-  and wait for a kept raise, whether this device's or a competing device's.
+  and wait for a kept raise, whether this device's or a competing device's,
+  unless a later local migration's capture covers them.
   Do not require an empty queue before publication.
 - **E13:** change conversion eligibility and the `Migration::writes` callback
   wording from eligible writes to eligible changes. Specify that one received
@@ -648,14 +675,16 @@ version and kind, the raise stage and the kept version. It also checks that a
 migration leaves every queued record's bytes unchanged. Before any raise the
 model's kept version is the version the store's writes were made with.
 
-The model's gate compares each record with one kept version, so it does not
-cover a write made between two local breaking migrations whose first raise
-was never published: that write is new-schema for the first marker, and no
-raise to its version will be kept. Rust treats it as part of the later
-captured prefix, so it uploads before that raise
-(`a_write_between_unpublished_migrations_joins_the_later_prefix`); the
-generator therefore permits a second migration only with no app write since
-the first. A model of successive captured prefixes would close this gap.
+The gate is Rust's (`device_log_sync::uploadable`): a marker always sends;
+with no local breaking migration everything sends; otherwise a record older
+than the latest local migration's version sends, and one at that version
+waits for a kept raise to it. A later migration replaces the captured plan.
+The generator lets a migration follow app writes made after an earlier,
+still unpublished migration, and the test asserts that some of its 48
+histories do. Before each raise event the Rust device's clock moves past the
+longest retry wait: the model's raise event is a pass at which the raise is
+due, and a wait armed before a reopen would otherwise outlast the fixed
+clock (§3.1's waiting, which the model does not time).
 
 ```sh
 COVEN_QUEUE_LEAN="$PWD/spec/proofs/queue/.lake/build/bin/queueRunner" \

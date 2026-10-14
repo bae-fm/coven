@@ -177,3 +177,15 @@ import CovenQueue
 #print axioms CovenQueue.reset_ignored_not_converted
 #print axioms CovenQueue.refused_not_converted
 #print axioms CovenQueue.wrong_version_not_converted
+
+#print axioms CovenQueue.old_uploadable
+#print axioms CovenQueue.RaiseUpload.step_records
+#print axioms CovenQueue.RaiseUpload.local_step_inv
+#print axioms CovenQueue.RaiseUpload.reach_inv
+#print axioms CovenQueue.RaiseUpload.local_step_keeps_records
+#print axioms CovenQueue.RaiseUpload.numbered_take_lt
+#print axioms CovenQueue.RaiseUpload.later_capture_never_deadlocks
+#print axioms CovenQueue.RaiseUpload.after_latest_marker_waits
+#print axioms CovenQueue.RaiseExamples.two_migrations_reach
+#print axioms CovenQueue.RaiseExamples.between_write_joins_later_prefix
+#print axioms CovenQueue.RaiseExamples.between_write_raise_publishes
