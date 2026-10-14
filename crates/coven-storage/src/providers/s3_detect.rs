@@ -69,6 +69,11 @@ pub(crate) async fn detect(
     let Some(storage) = chosen else {
         return Err(refusal.unwrap_or(StorageFailure::Authentication.into()));
     };
+    let versioning = match storage.bucket_versioning().await {
+        Ok(state) => Ok(state),
+        Err(error) if versioning::unknown(&error) => Err(std::sync::Arc::new(error)),
+        Err(error) => return Err(error),
+    };
     let mut probes = Probes {
         prefix: namespace(&storage, store, run),
         s: &storage,
@@ -80,7 +85,7 @@ pub(crate) async fn detect(
     let result = probes.run().await;
     let cleanup = probes.cleanup().await;
     crate::transfer::with_cleanup(result, cleanup)?;
-    Ok(S3Detection::derive(probes.observations, base))
+    Ok(S3Detection::derive(probes.observations, base, versioning))
 }
 
 fn namespace(storage: &S3Storage, store: StoreId, run: uuid::Uuid) -> String {
@@ -118,7 +123,7 @@ fn observation(probe: S3Probe, held: bool, detail: impl Into<String>) -> S3Obser
 }
 
 /// A fixed-label outcome: the classification and native status, never a body.
-fn outcome<T>(result: &Result<T, StorageError>) -> String {
+pub(super) fn outcome<T>(result: &Result<T, StorageError>) -> String {
     match result {
         Ok(_) => "accepted".into(),
         Err(error) => match error::native_status(error) {

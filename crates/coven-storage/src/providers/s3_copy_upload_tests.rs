@@ -11,7 +11,7 @@ async fn lean_differential_s3_create() {
             }));
             let server =
                 TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
-            let mut storage = profile_tests::profile_provider(&server.url, profile.settings);
+            let mut storage = profile_provider(&server.url, profile.settings);
             Arc::get_mut(&mut storage.provider)
                 .unwrap()
                 .single_request_limit = limit;

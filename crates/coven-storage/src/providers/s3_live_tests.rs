@@ -4,11 +4,17 @@ use super::*;
 use aws_sdk_s3::operation::head_object::HeadObjectOutput;
 use coven_foundation::id_source::{DeviceId, StoreId};
 use profile::*;
-use std::{future::Future, time::Duration};
+use std::{
+    future::Future,
+    time::{Duration, Instant},
+};
+use tokio::{sync::Barrier, task::JoinSet};
 
-/// Version 3 detects with the production probes, including AWS's copy
-/// condition, and applies the setup safety check (§4).
-pub(super) const SUITE_VERSION: u32 = 3;
+/// Version 4 records bucket versioning and requires overlapping conditional races.
+pub(super) const SUITE_VERSION: u32 = 4;
+
+#[path = "s3_race.rs"]
+mod races;
 
 fn path(store: StoreId, number: u64) -> ObjectPath {
     ObjectPath::device_log(store, DeviceId(91), number.try_into().unwrap())
@@ -51,6 +57,10 @@ async fn folders(s: &S3Storage, prefix: &str) -> Result<Vec<String>, StorageErro
 /// Print every observation, the derived settings, the setup safety verdict
 /// for an uncatalogued location, and the catalogued entries they reproduce.
 fn report(detection: &crate::S3Detection, config: &StorageConfig) {
+    match &detection.versioning {
+        Ok(state) => println!("bucket versioning={state:?}"),
+        Err(error) => println!("bucket versioning=Unknown cause={error}"),
+    }
     for observation in &detection.observations {
         println!(
             "detect {:?} held={} {}",
@@ -106,6 +116,38 @@ async fn s3_detection() {
     report(&detection, &settings.config);
 }
 
+#[tokio::test]
+#[ignore = "COVEN_LIVE_S3_ENV; reads bucket versioning without writing objects"]
+async fn s3_bucket_versioning() {
+    let settings = live::LiveS3::load();
+    let s = settings.connect(None);
+    let versioning = s.provider.bucket_versioning().await.map_err(Arc::new);
+    match &versioning {
+        Ok(state) => println!("bucket versioning={state:?}"),
+        Err(error) => println!(
+            "bucket versioning=Unknown failure={:?} status={:?}",
+            error.failure(),
+            error::native_status(error)
+        ),
+    }
+    let StorageConfig::S3 {
+        endpoint, profile, ..
+    } = &settings.config
+    else {
+        unreachable!()
+    };
+    match versioning::check(endpoint.as_ref(), profile.as_ref(), &versioning) {
+        Ok(()) => println!("setup_versioning_check PASS"),
+        Err(error) => println!("setup_versioning_check refused: {error}"),
+    }
+    if let Err(error) = versioning {
+        assert!(
+            versioning::unknown(&error),
+            "versioning read failed: {error}"
+        );
+    }
+}
+
 /// Each independent case gets its own namespace. Unwinding still reaches cleanup.
 async fn case<T: Send + 'static, F, Fut>(
     settings: &live::LiveS3,
@@ -121,7 +163,7 @@ where
     let store = StoreId(uuid::Uuid::new_v4());
     let storage = Arc::new(settings.connect(Some(profile)));
     let result = tokio::spawn(work(storage.clone(), store)).await;
-    let cleanup = live::cleanup(&storage.provider, store).await;
+    let cleanup = live_cleanup::cleanup(&storage.provider, store).await;
     let value = match result {
         Ok(Ok(value)) => Some(value),
         Ok(Err(error)) => {
@@ -250,31 +292,169 @@ async fn listing_lag(
     Ok(())
 }
 
+async fn run_race(
+    s: Arc<StorageConnection<S3Storage>>,
+    store: StoreId,
+    race: races::Race,
+    width: usize,
+) -> Result<(), StorageError> {
+    use races::{fire, judge, prepare, Race, Reply, Write};
+    let trials = if width == 8 { 50 } else { 200 };
+    let mut overlapping = 0;
+    let mut violations = 0;
+    let mut successes = 0;
+    for trial in 1..=trials {
+        let target = if matches!(race, Race::Replace) {
+            ObjectPath::positions(store, DeviceId(trial))
+        } else {
+            path(store, trial)
+        };
+        let (header, value) = if matches!(race, Race::Replace) {
+            s.replace(&target, b"initial revision").await?;
+            let head = head(&s.provider, &target.under(&s.provider.prefix)).await?;
+            match s.provider.settings.revision {
+                S3Revision::ETag => (
+                    "if-match",
+                    metadata::required(head.e_tag(), "missing current ETag")?.to_owned(),
+                ),
+                S3Revision::Generation => (
+                    "x-goog-if-generation-match",
+                    metadata::required(head.version_id(), "missing current generation")?.to_owned(),
+                ),
+            }
+        } else {
+            let (header, value) = s.provider.settings.single_put.header();
+            (header, value.to_owned())
+        };
+        let payloads: Vec<_> = (0..width)
+            .map(|writer| {
+                let mut bytes = format!("trial={trial} writer={writer} ")
+                    .repeat(4096)
+                    .into_bytes();
+                bytes.truncate(64 * 1024);
+                bytes
+            })
+            .collect();
+        let mut prepared = Vec::new();
+        for (writer, bytes) in payloads.iter().enumerate() {
+            prepared.push(
+                if matches!(race, Race::Multipart) || matches!(race, Race::Mixed) && writer == 1 {
+                    prepare(&s, &target, bytes).await?
+                } else {
+                    Write::Put {
+                        header,
+                        value: value.clone(),
+                    }
+                },
+            );
+        }
+        let barrier = Arc::new(Barrier::new(width + 1));
+        let origin = Instant::now();
+        let mut tasks = JoinSet::new();
+        for (writer, write) in prepared.into_iter().enumerate() {
+            let s = s.clone();
+            let target = target.clone();
+            let bytes = payloads[writer].clone();
+            let barrier = barrier.clone();
+            tasks.spawn(async move {
+                barrier.wait().await;
+                let start = origin.elapsed();
+                let result = fire(&s.provider, &target, bytes, write).await;
+                Reply {
+                    writer,
+                    start,
+                    end: origin.elapsed(),
+                    result,
+                }
+            });
+        }
+        barrier.wait().await;
+        let mut joined = Vec::new();
+        while let Some(reply) = tasks.join_next().await {
+            joined.push(reply);
+        }
+        // Even a failed worker must not let cleanup race the other requests.
+        let mut replies = joined
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| StorageFailure::Protocol.with_source(error))?;
+        replies.sort_by_key(|reply| reply.writer);
+        let overlap = replies.iter().map(|reply| reply.start).max().unwrap()
+            < replies.iter().map(|reply| reply.end).min().unwrap();
+        overlapping += usize::from(overlap);
+        let accepted = replies.iter().filter(|reply| reply.result.is_ok()).count();
+        successes += accepted;
+        let stored = s.read(&target).await?;
+        let passed = judge(&replies, &payloads, &stored);
+        violations += usize::from(!passed);
+        for reply in &replies {
+            println!("race {race:?} writers={width} trial={trial} writer={} start_us={} end_us={} outcome={}",
+                reply.writer, reply.start.as_micros(), reply.end.as_micros(), detect::outcome(&reply.result));
+        }
+        println!("race {race:?} writers={width} trial={trial} overlap={overlap} successes={accepted} pass={passed}");
+    }
+    println!("race SUMMARY {race:?} writers={width} trials={trials} overlapping={overlapping} successes={successes} violations={violations}");
+    require(
+        violations == 0,
+        "concurrent conditional publication violated exclusivity, bytes or overlap",
+    )
+}
+
 #[tokio::test]
 #[ignore = "COVEN_LIVE_S3_ENV; creates and deletes live objects and multipart uploads"]
 async fn s3_certification() {
     let settings = live::LiveS3::load();
-    let detection = settings.detect().await;
-    let candidate = match &detection {
-        Ok(detection) => {
-            report(detection, &settings.config);
-            let safe = detection.check(&detection.settings);
-            println!(
-                "§4 native_behavior_detection {}",
-                if safe.is_ok() { "PASS" } else { "FAIL" }
-            );
-            safe.is_ok().then_some(detection.settings)
-        }
+    let detection = match settings.detect().await {
+        Ok(detection) => detection,
         Err(error) => {
             println!("§4 native_behavior_detection cause={error}");
             println!("§4 native_behavior_detection FAIL");
-            None
+            panic!("S3 certification could not detect the service");
         }
     };
-    let profile = candidate
-        .or(detection.as_ref().ok().map(|detection| detection.settings))
-        .unwrap_or(PLAIN);
-    let mut passed = candidate.is_some();
+    report(&detection, &settings.config);
+    let profile = detection.settings;
+    let mut passed = detection.check(&profile).is_ok();
+    println!(
+        "§4 native_behavior_detection {}",
+        if passed { "PASS" } else { "FAIL" }
+    );
+    assert!(
+        detection.versioning.is_ok(),
+        "certification requires a known bucket versioning state; see detection output"
+    );
+    // Certification can establish new evidence even when setup refuses the
+    // bucket's versioning state. The setup verdict above remains separate.
+    for (race, width, label) in [
+        (races::Race::Put, 2, "concurrent_put_2"),
+        (races::Race::Put, 8, "concurrent_put_8"),
+        (
+            races::Race::Multipart,
+            2,
+            "concurrent_multipart_publication_2",
+        ),
+        (
+            races::Race::Multipart,
+            8,
+            "concurrent_multipart_publication_8",
+        ),
+        (
+            races::Race::Mixed,
+            2,
+            "concurrent_put_and_multipart_publication",
+        ),
+        (
+            races::Race::Replace,
+            2,
+            "concurrent_replace_current_revision",
+        ),
+    ] {
+        passed &= case(&settings, &[label], profile, move |s, store| {
+            run_race(s, store, race, width)
+        })
+        .await
+        .is_some();
+    }
     passed &= case(
         &settings,
         &[
@@ -336,12 +516,32 @@ async fn s3_certification() {
     )
     .await
     .is_some();
+    let after = settings
+        .connect(Some(profile))
+        .provider
+        .bucket_versioning()
+        .await;
+    match after {
+        Ok(state) => {
+            let stable = detection
+                .versioning
+                .as_ref()
+                .is_ok_and(|before| *before == state);
+            println!("bucket versioning_after={state:?} stable={stable}");
+            passed &= stable;
+        }
+        Err(error) => {
+            println!("bucket versioning_after=Unknown cause={error}");
+            passed = false;
+        }
+    }
     let date = aws_sdk_s3::primitives::DateTime::from(SystemTime::now())
         .fmt(aws_sdk_s3::primitives::DateTimeFormat::DateTime)
         .unwrap();
     print_profile(
         profile,
         &settings.config,
+        detection.versioning.as_ref().unwrap(),
         if passed { Some(&date[..10]) } else { None },
     );
     println!(
@@ -351,21 +551,30 @@ async fn s3_certification() {
     assert!(passed, "S3 certification failed; see §4 lines above");
 }
 
-fn print_profile(p: S3Settings, config: &StorageConfig, date: Option<&str>) {
-    let StorageConfig::S3 { endpoint, .. } = config else {
+fn print_profile(
+    p: S3Settings,
+    config: &StorageConfig,
+    versioning: &S3BucketVersioning,
+    date: Option<&str>,
+) {
+    let StorageConfig::S3 {
+        endpoint, profile, ..
+    } = config
+    else {
         unreachable!()
     };
     // Only the hostname is source data, never a URL's credentials, path or query.
-    let (name, endpoint) = match endpoint.as_ref().map(CataloguedProfile::hosting) {
-        Some(Some(known)) => (
+    let selected = profile::select(endpoint.as_ref(), profile.as_ref()).unwrap();
+    let key_scope = selected.key_scope();
+    let (name, endpoint) = match selected {
+        Selected::Catalogued(known) => (
             format!("{:?}", known.name),
-            format!("Some(EndpointMatch::{:?})", known.endpoint.unwrap()),
+            match known.endpoint {
+                Some(endpoint) => format!("Some(EndpointMatch::{endpoint:?})"),
+                None => "None".into(),
+            },
         ),
-        Some(None) => ("Uncatalogued".into(), "None".into()),
-        None => (
-            "Aws".into(),
-            "Some(EndpointMatch::HostSuffix(\".amazonaws.com\"))".into(),
-        ),
+        Selected::Custom(_) | Selected::Undetected => ("Uncatalogued".into(), "None".into()),
     };
     let certification = match date {
         Some(date) => format!(
@@ -377,7 +586,22 @@ fn print_profile(p: S3Settings, config: &StorageConfig, date: Option<&str>) {
         ),
         None => "Uncertified".into(),
     };
-    println!("CataloguedProfile {{\n    name: S3ProfileName::{name},\n    endpoint: {endpoint},\n    settings: {p:#?},\n    certification: Certification::{certification},\n}},");
+    let versioned = if *versioning == S3BucketVersioning::Enabled {
+        certification.as_str()
+    } else {
+        "Uncertified"
+    };
+    let multipart = match p.multipart {
+        S3Multipart::ConditionalCompletion => "S3Multipart::ConditionalCompletion".into(),
+        S3Multipart::Copy(condition) => {
+            format!("S3Multipart::Copy(S3CopyCondition::{condition:?})")
+        }
+    };
+    println!(
+        "CataloguedProfile {{\n    name: S3ProfileName::{name},\n    endpoint: {endpoint},\n    settings: S3Settings {{\n        signing: S3Signing::{:?},\n        single_put: S3SinglePut::{:?},\n        multipart: {multipart},\n        multipart_timestamp: S3MultipartTimestamp::{:?},\n        checksums: S3Checksums::{:?},\n        listing: S3Listing::{:?},\n        revision: S3Revision::{:?},\n        response_headers: S3ResponseHeaders::{:?},\n        request_checksums: {},\n    }},\n    key_scope: S3KeyScope::{key_scope:?},\n    versioned_buckets: Certification::{versioned},\n    certification: Certification::{certification},\n}},",
+        p.signing, p.single_put, p.multipart_timestamp, p.checksums, p.listing,
+        p.revision, p.response_headers, p.request_checksums,
+    );
 }
 
 pub(super) async fn conformance(connected: Arc<StorageConnection<S3Storage>>, store: StoreId) {

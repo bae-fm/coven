@@ -90,6 +90,8 @@ struct Upload {
     parts: BTreeMap<u32, Vec<u8>>,
 }
 struct Remote {
+    versioning: &'static str,
+    versioning_failure: Option<u16>,
     service: Service,
     objects: BTreeMap<String, Object>,
     uploads: BTreeMap<String, Upload>,
@@ -153,6 +155,25 @@ async fn serve(
         .trim_start_matches('/')
         .to_owned();
     if key.is_empty() {
+        if q.contains_key("versioning") {
+            if let Some(status) = state.versioning_failure {
+                return error(
+                    status,
+                    match status {
+                        403 => "AccessDenied",
+                        501 => "NotImplemented",
+                        _ => "ServiceUnavailable",
+                    },
+                );
+            }
+            return response(
+                200,
+                format!(
+                    "<VersioningConfiguration>{}</VersioningConfiguration>",
+                    state.versioning
+                ),
+            );
+        }
         return match method {
             Method::HEAD => {
                 state.bucket_heads += 1;
@@ -376,6 +397,8 @@ struct Fixture {
 impl Fixture {
     async fn new(service: Service) -> Self {
         let state = Arc::new(Mutex::new(Remote {
+            versioning: "",
+            versioning_failure: None,
             service,
             objects: BTreeMap::new(),
             uploads: BTreeMap::new(),
@@ -431,6 +454,48 @@ impl Fixture {
     }
 }
 
+#[tokio::test]
+async fn versioned_uncertified_service_is_refused_even_when_sequential_checks_pass() {
+    let fixture = Fixture::new(RUSTFS).await;
+    fixture.state.lock().unwrap().versioning = "<Status>Enabled</Status>";
+    let detection = fixture.detect(None).await.unwrap();
+    detection.check(&detection.settings).unwrap();
+    for profile in [
+        None,
+        Some(S3Profile::Named(S3ProfileName::CephRgw)),
+        Some(S3Profile::Custom(detection.settings)),
+    ] {
+        assert!(matches!(
+            detection.resolve(fixture.location(profile)),
+            Err(StorageSetupError::S3VersioningUnsupported {
+                state: S3BucketVersioning::Enabled
+            })
+        ));
+    }
+    fixture.assert_clean();
+}
+
+#[tokio::test]
+async fn unknown_versioning_refuses_setup_and_outages_stop_detection_before_writes() {
+    for status in [403, 501, 503] {
+        let fixture = Fixture::new(RUSTFS).await;
+        fixture.state.lock().unwrap().versioning_failure = Some(status);
+        let result = fixture.detect(None).await;
+        if status == 503 {
+            assert_eq!(result.unwrap_err().failure(), StorageFailure::Network);
+            assert!(fixture.state.lock().unwrap().written.is_empty());
+        } else {
+            let detection = result.unwrap();
+            assert!(detection.versioning.is_err());
+            assert!(matches!(
+                detection.resolve(fixture.location(None)),
+                Err(StorageSetupError::S3VersioningUnknown { .. })
+            ));
+            fixture.assert_clean();
+        }
+    }
+}
+
 fn refused_check(result: Result<StorageConfig, StorageSetupError>) -> StorageCheck {
     match result {
         Err(StorageSetupError::ProviderCheck { check, source }) => {
@@ -449,6 +514,7 @@ async fn detection_reproduces_each_catalogued_entry() {
         (R2, S3ProfileName::R2),
         (RUSTFS, S3ProfileName::RustFs),
         (RUSTFS, S3ProfileName::SeaweedFs),
+        (RUSTFS, S3ProfileName::CephRgw),
     ] {
         let fixture = Fixture::new(service).await;
         let detection = fixture
@@ -667,7 +733,9 @@ async fn v2_is_unsupported_on_501_but_an_outage_fails_detection() {
     assert!(!detection.held(S3Probe::Listing(S3Listing::V2)));
     assert!(detection.held(S3Probe::Listing(S3Listing::V1)));
     let outage = TestServer::new(Router::new().fallback(|uri: Uri| async move {
-        if query(&uri).contains_key("list-type") {
+        if query(&uri).contains_key("versioning") {
+            response(200, "<VersioningConfiguration/>")
+        } else if query(&uri).contains_key("list-type") {
             error(503, "ServiceUnavailable")
         } else {
             response(

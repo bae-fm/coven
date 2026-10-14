@@ -69,11 +69,13 @@ pub(super) struct CataloguedProfile {
     pub(super) endpoint: Option<EndpointMatch>,
     pub(super) settings: S3Settings,
     pub(super) key_scope: S3KeyScope,
+    /// Separate evidence: a sequential or unversioned run cannot certify this.
+    pub(super) versioned_buckets: Certification<'static>,
     pub(super) certification: Certification<'static>,
 }
 
 /// Every catalogued service; hosted ones match hostnames in this order.
-pub(super) const PROFILES: &[CataloguedProfile] = &[AWS, GCS, R2, RUSTFS, SEAWEEDFS];
+pub(super) const PROFILES: &[CataloguedProfile] = &[AWS, GCS, R2, RUSTFS, SEAWEEDFS, CEPH_RGW];
 /// The plain S3 behaviors detection starts from and keeps where nothing held.
 /// AWS's entry differs in its copy publication and start timestamp.
 pub(super) const PLAIN: S3Settings = S3Settings {
@@ -102,6 +104,7 @@ const AWS: CataloguedProfile = CataloguedProfile {
     // IAM policies limit a key to the store's prefix with `s3:prefix`
     // conditions on listing and resource ARNs ending `<prefix>/<store>/*`.
     key_scope: S3KeyScope::Prefix,
+    versioned_buckets: Certification::Uncertified,
     certification: Certification::Uncertified,
 };
 const GCS: CataloguedProfile = CataloguedProfile {
@@ -121,6 +124,7 @@ const GCS: CataloguedProfile = CataloguedProfile {
     // A managed folder `<prefix>/<store>/` grants the HMAC key's service
     // account `roles/storage.objectUser` on that folder alone.
     key_scope: S3KeyScope::Prefix,
+    versioned_buckets: Certification::Uncertified,
     certification: Certification::Passed {
         date: "2026-10-13",
         suite: 1,
@@ -140,6 +144,7 @@ const R2: CataloguedProfile = CataloguedProfile {
     // (https://developers.cloudflare.com/r2/api/tokens/); only temporary
     // credentials, which need a session token, take a prefix.
     key_scope: S3KeyScope::Bucket,
+    versioned_buckets: Certification::Uncertified,
     certification: Certification::Passed {
         date: "2026-10-13",
         suite: 1,
@@ -162,6 +167,7 @@ const RUSTFS: CataloguedProfile = CataloguedProfile {
     // An access key's IAM policy takes `s3:prefix` conditions and object
     // resources under the store's prefix.
     key_scope: S3KeyScope::Prefix,
+    versioned_buckets: Certification::Uncertified,
     certification: Certification::Passed {
         date: "2026-10-13",
         suite: 2,
@@ -178,9 +184,26 @@ const SEAWEEDFS: CataloguedProfile = CataloguedProfile {
     // An identity's S3 policy takes `s3:prefix` conditions and object
     // resources under the store's prefix.
     key_scope: S3KeyScope::Prefix,
+    versioned_buckets: Certification::Uncertified,
     certification: Certification::Passed {
         date: "2026-10-13",
         suite: 2,
+    },
+};
+
+// Ceph RGW 20.2.4 has the same detected settings as RustFS. Versioned
+// conditional writes can both succeed in a race; see spec/s3-certification.md.
+const CEPH_RGW: CataloguedProfile = CataloguedProfile {
+    name: S3ProfileName::CephRgw,
+    endpoint: None,
+    settings: RUSTFS.settings,
+    // RGW bucket policies honor `s3:prefix` conditions and object resources
+    // under the store's prefix.
+    key_scope: S3KeyScope::Prefix,
+    versioned_buckets: Certification::Uncertified,
+    certification: Certification::Passed {
+        date: "2026-10-14",
+        suite: 4,
     },
 };
 
@@ -192,6 +215,7 @@ impl CataloguedProfile {
             S3ProfileName::R2 => R2,
             S3ProfileName::RustFs => RUSTFS,
             S3ProfileName::SeaweedFs => SEAWEEDFS,
+            S3ProfileName::CephRgw => CEPH_RGW,
         }
     }
     /// The catalogued profile a hosted endpoint's host selects.

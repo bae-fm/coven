@@ -15,8 +15,8 @@ mod desktop_oauth;
 pub use desktop_oauth::DesktopOAuthPresenter;
 mod s3;
 pub(crate) use s3::{
-    check_new_store as check_new_s3_store, detect as detect_s3, s3_key_scope, s3_settings,
-    S3KeyScope, S3Storage,
+    check_new_store as check_new_s3_store, check_s3_versioning, detect as detect_s3, s3_key_scope,
+    s3_settings, S3KeyScope, S3Storage,
 };
 mod google_drive;
 mod google_drive_access;

@@ -1510,7 +1510,7 @@ while let Ok(values) = lost.next().await {
   means GCS XML, using generation conditions and conditional copy to publish
   multipart uploads. Hosts ending in `.r2.cloudflarestorage.com` select R2,
   using conditional PUT and multipart completion and ignoring checksums
-  without stated scope. The self-hosted RustFS and SeaweedFS profiles
+  without stated scope. The self-hosted RustFS, SeaweedFS and Ceph RGW profiles
   are selected only by name. A name or custom profile contradicting a
   catalogued host, a name other than AWS or any custom profile without an
   endpoint, or plain `http` to a catalogued host is `InvalidConfiguration`;
@@ -1523,8 +1523,8 @@ while let Ok(values) = lost.next().await {
   A store's first setup lists the bucket's root before detection writes and
   refuses a bucket holding anything outside the store's folder with
   `OwnBucketRequired { reason: OwnBucketReason::Occupied }`, wrapped in
-  `StorageSetupError::Storage`. Reconnecting checks nothing outside the
-  store's folder. AWS, GCS, RustFS and SeaweedFS keys can be limited to the
+  `StorageSetupError::Storage`. Reconnecting checks no objects outside the
+  store's folder. AWS, GCS, RustFS, SeaweedFS and Ceph RGW keys can be limited to the
   store's prefix, so their stores share buckets and prefixes unchecked.
 - An endpoint matching no catalogued host and naming no profile has no AWS
   fallback: setup detects its settings and returns and records the location
@@ -1545,6 +1545,20 @@ while let Ok(values) = lost.next().await {
   connection is accepted only after all setup checks pass, including those
   using certified profiles. An endpoint that overwrites on
   create fails `CreateOnce`; setup preserves the prior connection.
+- Detection also reads bucket versioning through `GetBucketVersioning`,
+  including GCS's XML equivalent. Before the behavior checks, setup refuses
+  `Enabled` or `Suspended` with `S3VersioningUnsupported` unless the selected
+  service has separate certification with versioning enabled. Sequential
+  create-once probes cannot establish this: versioned Ceph RGW accepted both
+  concurrent writers while readers saw only one writer's bytes. Custom and
+  detected settings never support versioned buckets. A refused/unimplemented
+  read retains its cause in detection; uncertified profiles refuse it with
+  `S3VersioningUnknown`. A certified profile may proceed with a warning. Other
+  read failures fail detection. Member policies need `s3:GetBucketVersioning`
+  on the bucket (GCS: `storage.buckets.get`). Hosted R2 has no versioning
+  feature; its documented, refused API is recorded as `Unavailable`. Naming
+  R2 at another endpoint does not establish that exception. No setup changes
+  bucket versioning or commits credentials after a versioning refusal.
 - Setup commits the storage credentials, keys, location and restore code only
   once the connection is ready. Failure preserves their previous values and
   the previous connection. The fixed first-entry or access-update attempt stays
@@ -1747,10 +1761,21 @@ pub enum S3ResponseHeaders { S3, Google }
 
 /// What detection observed at one location (§4).
 pub struct S3Detection {
+    /// Bucket versioning, or a refused/unimplemented read with its native cause.
+    pub versioning: Result<S3BucketVersioning, Arc<StorageError>>,
     /// Settings derived from the observations; prefill advanced settings with them.
     pub settings: S3Settings,
     /// One observation per probe, in the order run.
     pub observations: Vec<S3Observation>,
+}
+
+/// Bucket state read through the XML API; a failed read is not Disabled.
+pub enum S3BucketVersioning {
+    Disabled,
+    Enabled,
+    Suspended,
+    /// Hosted R2 has no object-versioning feature.
+    Unavailable,
 }
 
 impl S3Detection {
@@ -1760,7 +1785,7 @@ impl S3Detection {
     /// failed check as setup would: CreateOnce, MultipartCreateOnce,
     /// PublicationTime, then Behavior.
     pub fn check(&self, settings: &S3Settings) -> Result<(), StorageSetupError>;
-    /// The location setup records, after checking its effective settings:
+    /// The location setup records, after checking versioning support and its effective settings:
     /// an uncatalogued endpoint naming no profile gets these settings as its
     /// custom profile; any other location is kept as given.
     pub fn resolve(&self, location: StorageConfig) -> Result<StorageConfig, StorageSetupError>;
@@ -1821,6 +1846,8 @@ pub enum S3ProfileName {
     RustFs,
     /// SeaweedFS's S3 gateway, self-hosted.
     SeaweedFs,
+    /// Ceph RADOS Gateway, self-hosted.
+    CephRgw,
 }
 
 /// Dropbox's location fixes its access level at cloud-store creation (§4).
@@ -1981,6 +2008,10 @@ impl ProviderResponse {
 
 /// Storage setup failed before committing credentials and keys (E5).
 pub enum StorageSetupError {
+    /// The profile has no certification with bucket versioning enabled.
+    S3VersioningUnsupported { state: S3BucketVersioning },
+    /// The bucket state is unknown and the profile has no versioning certification.
+    S3VersioningUnknown { source: Arc<StorageError> },
     /// A provider check failed; cleanup failures retain both causes.
     ProviderCheck { check: StorageCheck, source: StorageError },
     /// An existing store cannot be relocated by setting up another location.

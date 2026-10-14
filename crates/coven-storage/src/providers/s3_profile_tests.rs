@@ -161,29 +161,6 @@ async fn unstated_scope_skips_checksum_parsing_but_keeps_required_metadata() {
     );
 }
 
-pub(super) fn profile_provider(url: &str, settings: S3Settings) -> StorageConnection<S3Storage> {
-    StorageConnection::from_provider(Arc::new(
-        S3Storage::with_settings(
-            StorageConfig::S3 {
-                bucket: "bucket".into(),
-                region: "us-east-1".into(),
-                endpoint: Some(url.parse().unwrap()),
-                profile: None,
-                // An undetected endpoint's member keys reach the whole bucket (§4).
-                prefix: String::new(),
-            },
-            S3Credentials {
-                access_key_id: "access".into(),
-                secret_access_key: SecretText::new("secret".into()),
-            },
-            Arc::new(FixedClock::new(SystemTime::UNIX_EPOCH)),
-            Arc::new(SequentialIds::new()),
-            settings,
-        )
-        .unwrap(),
-    ))
-}
-
 #[test]
 fn r2_profile_matches_account_hosts_without_matching_lookalikes() {
     for (endpoint, r2) in [
@@ -377,7 +354,11 @@ async fn explicit_gcs_name_drives_the_adapter_at_an_uncatalogued_endpoint() {
 
 #[test]
 fn self_hosted_profiles_are_selected_only_by_name_at_their_own_endpoint() {
-    for name in [S3ProfileName::RustFs, S3ProfileName::SeaweedFs] {
+    for name in [
+        S3ProfileName::RustFs,
+        S3ProfileName::SeaweedFs,
+        S3ProfileName::CephRgw,
+    ] {
         let profile = CataloguedProfile::named(name);
         assert_eq!(profile.endpoint, None);
         assert_ne!(profile.certification, Certification::Uncertified);
@@ -396,7 +377,11 @@ fn self_hosted_profiles_are_selected_only_by_name_at_their_own_endpoint() {
             StorageFailure::InvalidConfiguration
         );
     }
-    for host in ["http://localhost:9000", "http://localhost:8333"] {
+    for host in [
+        "http://localhost:9000",
+        "http://localhost:8333",
+        "http://localhost:7480",
+    ] {
         assert_eq!(settings(Some(&host.parse().unwrap()), None).unwrap(), None);
     }
 }

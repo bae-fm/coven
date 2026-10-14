@@ -25,6 +25,21 @@ pub enum S3ProfileName {
     RustFs,
     /// SeaweedFS's S3 gateway, self-hosted.
     SeaweedFs,
+    /// Ceph RADOS Gateway, self-hosted.
+    CephRgw,
+}
+
+/// The bucket's versioning state, read through the service's XML API (§4).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum S3BucketVersioning {
+    /// The bucket has never enabled versioning.
+    Disabled,
+    /// New writes retain earlier versions.
+    Enabled,
+    /// Versioning was suspended; earlier versions may remain.
+    Suspended,
+    /// The hosted service has no object-versioning feature (R2).
+    Unavailable,
 }
 
 /// Every S3 behavior the adapter varies, one value each (§4).

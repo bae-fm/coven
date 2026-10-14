@@ -662,8 +662,10 @@ the file's ranges under `F`.
   - Catalogued services are const entries in the adapter's
     [`s3_profile.rs`](../crates/coven-storage/src/providers/s3_profile.rs):
     name, endpoint host or host suffix (none for a self-hosted service), the
-    settings they fill, the finest scope a member key can have (below), and
-    the date and suite version of their last certification.
+    settings they fill, the finest scope a member key can have (below), the
+    date and suite version of their last certification, and separate
+    certification evidence for versioned buckets. Versioning support belongs
+    to the service profile, never to `S3Settings`.
   - No endpoint selects **AWS S3**. Host suffix `.amazonaws.com` selects AWS;
     exact host `storage.googleapis.com` selects **Google Cloud Storage (GCS)**
     through its XML API; suffix `.r2.cloudflarestorage.com` selects
@@ -678,10 +680,10 @@ the file's ranges under `F`.
     the same machine or a private network can. A contradicting name or custom
     profile, or a plain-`http` catalogued host, fails validation with
     `InvalidConfiguration` before any request. The self-hosted profiles are
-    **RustFS** and **SeaweedFS**; no hostname selects them.
+    **RustFS**, **SeaweedFS** and **Ceph RGW**; no hostname selects them.
   - **Member key scope.** A service limits a member key either to a prefix
     inside a bucket or only to a whole bucket. AWS (IAM `s3:prefix`
-    conditions), GCS (a managed folder per store), RustFS and SeaweedFS
+    conditions), GCS (a managed folder per store), RustFS, SeaweedFS and Ceph RGW
     (policy `s3:prefix` conditions) limit it to the store's prefix, so their
     stores can share a bucket and base prefix. An R2 API token is limited to
     buckets, never to a folder inside one, so every member's key reaches
@@ -701,7 +703,7 @@ the file's ranges under `F`.
       applies: an object stored within M may be absent, so two stores
       created in one bucket within M of each other can both pass.
     - Reconnecting, restore and joining use the recorded location and check
-      nothing outside the store's own folder.
+      no objects outside the store's own folder.
     - Moving a store into its own bucket at its first invite would copy all
       its data, so the rule applies from creation, including to one-member
       stores.
@@ -768,10 +770,39 @@ the file's ranges under `F`.
     Google headers when GCS's headers arrive; and V2 when it agrees with V1.
     Where no behavior holds, the setting keeps the plain
     S3 value and the setup check below names the failure.
+  - **Versioned buckets require certification with versioning enabled.**
+    Setup reads `GetBucketVersioning` (GCS's
+    [`GET ?versioning` XML API](https://docs.cloud.google.com/storage/docs/xml-api/get-bucket-metadata#versioning)
+    uses the same `Status` values). `Enabled` and `Suspended` require the selected
+    profile's separate passing date and suite version; otherwise setup returns
+    `StorageSetupError::S3VersioningUnsupported`. Detected and custom settings
+    never inherit this certification, even when their settings equal a
+    catalogued profile's. Coven addresses current objects; it does not choose
+    older versions to repair an incorrect publication.
+    A versioned Ceph RGW 20.2.4 bucket accepted concurrent conditional creates
+    as separate versions: both writers received success while readers saw only
+    one writer's bytes. Sequential setup probes passed that bucket. Those
+    probes therefore cannot establish versioning support.
+  - A refused or unimplemented versioning read leaves the state unknown.
+    Profiles without versioning certification refuse it with
+    `S3VersioningUnknown`, retaining the native cause; certified profiles may
+    proceed and log the unknown state. Other failures, including malformed
+    responses and transport failures, fail detection. A member's policy needs
+    bucket-level `s3:GetBucketVersioning`, separately from its prefix-scoped
+    object/list permissions; GCS needs
+    [`storage.buckets.get`](https://docs.cloud.google.com/storage/docs/using-object-versioning#required_roles).
+    Setup never
+    changes the owner's versioning setting. The owner must keep the bucket in
+    a supported state while it holds the store; every setup reads it again.
+    Hosted R2 has no object versioning and
+    [no versioning API](https://developers.cloudflare.com/r2/api/s3/api/): its documented
+    absence, together with its refused read, is `Unavailable`, not an unknown
+    owner setting. This exception requires R2's catalogued hostname, not an
+    R2 name at an arbitrary endpoint.
   - **Every S3 setup checks safety against the server** before the provider
     check below, whatever selected its settings: detection runs, and the
     effective settings, detected, named or custom, must agree with what it
-    observed. In order, setup refuses with `StorageSetupError::ProviderCheck`
+    observed. After the versioning check, setup refuses in order with `StorageSetupError::ProviderCheck`
     naming the first failed check:
     - `CreateOnce`: the single-PUT condition was not enforced, or changed the
       occupied object's bytes or time;
@@ -795,7 +826,8 @@ the file's ranges under `F`.
   - Certification suite version 1 passed GCS and R2 on **2026-10-13**, and
     suite version 2 passed RustFS and SeaweedFS the same day. Suite version 3
     detects with the production probes; the same day it reproduced each of
-    those four entries and passed their setup safety check. AWS is
+    those four entries and passed their setup safety check. Suite version 4
+    passed Ceph RGW 20.2.4 with versioning disabled on **2026-10-14**. AWS is
     **uncertified**: there is no live account. The table's selected behaviors
     are:
 
@@ -806,9 +838,18 @@ the file's ranges under `F`.
     | R2 (certified) | AWS SigV4 | `If-None-Match: *` | Conditional completion | Completion | Unstated scope ignored | V2 | ETag |
     | RustFS (certified) | AWS SigV4 | `If-None-Match: *` | Conditional completion | Completion | None returned | V2 | ETag |
     | SeaweedFS (certified) | AWS SigV4 | `If-None-Match: *` | Conditional completion | Completion | None returned | V2 | ETag |
+    | Ceph RGW (certified, unversioned) | AWS SigV4 | `If-None-Match: *` | Conditional completion | Completion | None returned | V2 | ETag |
+
+    No profile currently supports versioned buckets. GCS's supplied live key
+    could neither read bucket versioning nor create a second bucket for
+    certification. RustFS and SeaweedFS have no versioned certification; their
+    test containers were unavailable. AWS remains uncertified. R2 has no
+    versioning feature. Ceph RGW 20.2.4 fails the versioned races. See
+    [suite 4 evidence](s3-certification.md#concurrent-certification-suite-4)
+    for the live runs and their bucket states.
 
     AWS and R2 request checksums; every profile but GCS consumes S3
-    response headers. RustFS and SeaweedFS are not asked for checksums they
+    response headers. RustFS, SeaweedFS and Ceph RGW are not asked for checksums they
     never return. GCS supplies
     its hashes without a checksum-mode request; the adapter translates Google
     headers. The ETag revision behavior uses native versions or `coven-revision`
@@ -816,21 +857,42 @@ the file's ranges under `F`.
   - To certify a service, put its bucket, region, endpoint and HMAC keys in an
     env file using `COVEN_LIVE_S3_{BUCKET,REGION,ENDPOINT,ACCESS_KEY_ID,SECRET_ACCESS_KEY}`.
     Run `COVEN_LIVE_S3_ENV=<file> cargo test -p coven-storage s3_certification -- --ignored --nocapture`.
+    Select a self-hosted profile with `COVEN_LIVE_S3_PROFILE=CephRgw`
+    (or `RustFs` / `SeaweedFs`); otherwise the suite detects its settings.
     The ignored test runs production detection from the location's settings,
     or the plain S3 settings where detection must supply them, and prints
     every observation. A detected entry that fails the setup safety
     check above prints as uncertified with each failed check. The candidate
     then runs the adapter's full live contracts, including setup, reads,
-    ranges, resumption, replacement revisions and listing lag. A service that
+    ranges, resumption, replacement revisions and listing lag. Suite 4 records
+    the bucket's versioning state and adds six concurrent checks: 2 and 8
+    conditional PUTs, 2 and 8 multipart publication requests, PUT racing
+    multipart publication, and 2 replacements conditioned on the current ETag
+    or generation. Copy profiles assemble their temporaries before racing the
+    publishing copy. Each trial uses one fresh destination and distinct 64-KiB
+    payloads, with every writer released by one barrier. Each request's start,
+    end and outcome are recorded; all intervals must overlap. Exactly one
+    request must succeed, every other request must refuse the condition
+    (`AlreadyExists` or `Conflict`), and the stored bytes must be the winner's.
+    Two-writer checks run 200 trials each; eight-writer checks run 50 each.
+    A non-overlapping trial fails certification too. Replacement races are
+    required, not observations exempted from failure. A service that
     returns no checksum on any probe, even with checksum mode, is recorded as
     returning none: §4 permits a missing checksum, so suite version 2 accepts
     that observation where version 1 failed detection. Each §4 requirement
     prints PASS or FAIL, and cleanup removes the run's objects, temporaries
-    and uploads even after a failed assertion. The suite prints a Rust profile
+    and uploads even after a failed assertion, including object versions and
+    delete markers in a versioned run. Certification needs permission to list
+    and delete those versions; ordinary member object deletion still addresses
+    the current object. The suite prints a Rust profile
     entry with the passing date and suite version; commit it only after every
     check passes, alongside
     the [raw certification evidence](s3-certification.md). Never publish the
     env file or credentials. A live sample measures lag; it does not prove M.
+    Only a passing suite with the recorded state `Enabled` supplies versioning
+    certification. A passing disabled-bucket run never supplies it. Certification
+    exercises a versioned candidate even when setup refuses it, reporting both
+    verdicts separately; an unknown bucket state cannot be certified.
   - AWS S3 creates once with `If-None-Match: *` on `PutObject`; an occupied
     destination returns HTTP 412 `PreconditionFailed`, mapped to
     `AlreadyExists`. Conditional replacements use `If-Match` with the observed
@@ -879,7 +941,8 @@ the file's ranges under `F`.
     namespace but are excluded from published-object listings. GCS uses
     `ListObjectsV2` with the requested prefix, continuation tokens and delimiter
     as AWS does; published objects retain the server's `LastModified`.
-  - AWS `ConditionalRequestConflict` and GCS `OperationAborted` indicate a
+  - AWS `ConditionalRequestConflict`, GCS `OperationAborted` and Ceph RGW
+    `ConcurrentModification` indicate a
     concurrent mutation, never throttling.
     A single-request PUT can retry its fixed bytes. At conditional multipart
     completion or copy publication, it invalidates the recorded session
@@ -907,10 +970,10 @@ the file's ranges under `F`.
     document `cf-copy-destination-if-none-match`. The R2 profile does not use
     that extension because native conditional completion passed. Profile values
     come from the live suite, rather than a compatibility claim.
-  - RustFS and SeaweedFS refused occupied names with HTTP 412 on
+  - RustFS, SeaweedFS and unversioned Ceph RGW refused occupied names with HTTP 412 on
     PUT and multipart completion, preserving bytes and times, and their
     multipart `Last-Modified` fell between the completion markers, so they use
-    conditional completion without a copy. Neither returned a checksum, even
+    conditional completion without a copy. None returned a checksum, even
     with checksum mode; their profiles do not request one and rely on the
     complete-byte comparison required for a missing checksum (below).
   - `RequestTimeTooSkewed` means the device clock is off, not that access
@@ -1045,7 +1108,7 @@ the file's ranges under `F`.
   Drive exposes MD5, Dropbox its block-based content hash, OneDrive SHA-1 or
   QuickXorHash, and S3 its explicitly returned checksum and scope. GCS's
   CRC32C is a whole-object checksum. R2's unscoped checksum is absent from
-  coven's metadata; its scope is never guessed. RustFS and SeaweedFS return
+  coven's metadata; its scope is never guessed. RustFS, SeaweedFS and Ceph RGW return
   none; a checksum returned under their profile, scoped or not, contradicts
   the certified observation and fails as a protocol error rather than being
   used. A missing checksum requires the byte
@@ -1080,7 +1143,7 @@ the file's ranges under `F`.
     cut-off assumption; nondecreasing publication times alone do not imply it.
 - Native publication gaps remain visible in the profiles and certification.
   GCS conditional-copy timestamps and R2 single-PUT and multipart timestamps
-  passed the completion checks, as did RustFS and SeaweedFS single-PUT and
+  passed the completion checks, as did RustFS, SeaweedFS and unversioned Ceph RGW single-PUT and
   multipart timestamps.
   AWS single-request PUT timestamps describe
   completion; AWS multipart `Last-Modified` instead records initiation
@@ -1150,7 +1213,9 @@ the file's ranges under `F`.
   - Setup writes only this store's prefix and reads only it, apart from
     the bucket-root listing that creates a store needing its own bucket
     (above); other stores and unrelated objects outside it do not compete
-    with this store.
+    with this store. S3's read-only bucket-versioning query has bucket scope
+    because the owner setting applies to every object; it reads no other
+    store's data.
   - E.g. Ana creates Household and Ben creates Garden in the same folder.
     Their store ids differ, so their first entries have different paths.
 - Reconnecting uses the recorded provider location. Setup does not move an

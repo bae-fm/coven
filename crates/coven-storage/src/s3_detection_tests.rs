@@ -37,7 +37,11 @@ fn failed(result: Result<(), StorageSetupError>) -> StorageCheck {
 #[test]
 fn derivation_keeps_each_held_behavior_and_conforming_settings_pass() {
     let detection = conforming_detection(SERVICE);
-    let derived = S3Detection::derive(detection.observations.clone(), SERVICE);
+    let derived = S3Detection::derive(
+        detection.observations.clone(),
+        SERVICE,
+        detection.versioning.clone(),
+    );
     assert_eq!(derived.settings, SERVICE);
     derived.check(&SERVICE).unwrap();
 }
@@ -62,6 +66,7 @@ fn setup_requires_the_prefix_scoped_bucket_listing() {
 #[test]
 fn checks_run_in_order_and_name_the_first_failure() {
     let nothing_held = S3Detection {
+        versioning: Ok(S3BucketVersioning::Disabled),
         settings: SERVICE,
         observations: Vec::new(),
     };

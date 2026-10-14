@@ -8,6 +8,9 @@ Suite version 3 runs the production detection that setup uses (§4); on
 2026-10-13 it reproduced the GCS, R2, RustFS and SeaweedFS entries and passed
 the setup safety check at each, and the full suite 3 passed RustFS. Its output
 is in [Detection](#detection-suite-3).
+Suite version 4 records bucket versioning and adds the concurrent conditional
+publication checks described in [Concurrent certification](#concurrent-certification-suite-4).
+Earlier certificates do not establish versioned-bucket support.
 The selected entries are in
 [`s3_profile.rs`](../crates/coven-storage/src/providers/s3_profile.rs); the
 contract and certification procedure are in [§4](coven.md#4-storage-providers-and-access).
@@ -608,3 +611,223 @@ detected S3Settings { signing: AwsSigV4, single_put: IfNoneMatch, multipart: Con
 setup_safety_check PASS
 catalogued entries reproduced: [RustFs, SeaweedFs]
 ```
+
+## Concurrent certification (suite 4)
+
+Each trial prepares distinct 64-KiB payloads for one fresh name, releases all
+writers from a barrier, and records every request's start and end relative to
+that trial's clock. The latest start must precede the earliest end. Exactly one
+native publication request must succeed; all others must return a failed
+condition (`AlreadyExists` or `Conflict`), and a read must return the winner's
+bytes. Adapter retry/recovery cannot turn a second accepted write into a
+refusal in this measurement. The checks are:
+
+- `concurrent_put_2`: 200 trials of two conditional PUTs.
+- `concurrent_put_8`: 50 trials of eight conditional PUTs.
+- `concurrent_multipart_publication_2`: 200 trials of two conditional
+  completions, or the profile's publication copies after temporary assembly.
+- `concurrent_multipart_publication_8`: 50 trials of eight such publications.
+- `concurrent_put_and_multipart_publication`: 200 trials of a conditional PUT
+  racing a completion or publication copy.
+- `concurrent_replace_current_revision`: 200 trials of two PUTs conditioned
+  on the same current ETag or GCS generation.
+
+All six checks affect the verdict. The suite records versioning before and
+after the run, requires it to stay unchanged, and prints the setup verdict
+separately: certification must be able to test a bucket setup refuses.
+Cleanup lists every version and delete marker before deleting them by version
+ID, as well as removing current objects and incomplete uploads. GCS version
+listings use `x-goog-interop-list-objects-format: enabled` for the XML API's
+[S3-compatible version IDs and pagination](https://docs.cloud.google.com/storage/docs/xml-api/get-bucket-list).
+A versioning certificate requires a passing run with versioning `Enabled`.
+
+### Ceph RGW 20.2.4
+
+Run on 2026-10-14 against the supplied local Ceph RGW 20.2.4 server, selecting
+`COVEN_LIVE_S3_PROFILE=CephRgw`. Its detected settings equal RustFS's: AWS
+signing, conditional PUT and multipart completion, completion timestamps,
+no returned checksum, V2 listing and ETag revisions.
+Unversioned conditional replacement losers use HTTP 409
+`ConcurrentModification`, which the adapter classifies as `Conflict`.
+
+#### Versioning disabled
+
+`ceph-rgw.env` reported `Disabled` before and after the suite. All 900 trials
+had overlapping requests, exactly one success, refused competitors, and the
+winner's stored bytes. Every existing contract and every cleanup passed.
+The unversioned profile is certified by suite 4 on 2026-10-14; its
+`versioned_buckets` property remains `Uncertified`.
+
+Each race's first trial and all aggregates and check verdicts follow:
+
+```text
+bucket versioning=Disabled
+setup_safety_check PASS
+§4 native_behavior_detection PASS
+race Put writers=2 trial=1 writer=0 start_us=259 end_us=36543 outcome=accepted
+race Put writers=2 trial=1 writer=1 start_us=62 end_us=44286 outcome=AlreadyExists HTTP 412
+race SUMMARY Put writers=2 trials=200 overlapping=200 successes=200 violations=0
+§4 concurrent_put_2 PASS cleanup=PASS
+race Put writers=8 trial=1 writer=0 start_us=284 end_us=51640 outcome=accepted
+race Put writers=8 trial=1 writer=1 start_us=579 end_us=69028 outcome=AlreadyExists HTTP 412
+race Put writers=8 trial=1 writer=2 start_us=509 end_us=68692 outcome=AlreadyExists HTTP 412
+race Put writers=8 trial=1 writer=3 start_us=367 end_us=110904 outcome=AlreadyExists HTTP 412
+race Put writers=8 trial=1 writer=4 start_us=440 end_us=51683 outcome=AlreadyExists HTTP 412
+race Put writers=8 trial=1 writer=5 start_us=649 end_us=110862 outcome=AlreadyExists HTTP 412
+race Put writers=8 trial=1 writer=6 start_us=713 end_us=68715 outcome=AlreadyExists HTTP 412
+race Put writers=8 trial=1 writer=7 start_us=48 end_us=68651 outcome=AlreadyExists HTTP 412
+race SUMMARY Put writers=8 trials=50 overlapping=50 successes=50 violations=0
+§4 concurrent_put_8 PASS cleanup=PASS
+race Multipart writers=2 trial=1 writer=0 start_us=161 end_us=106114 outcome=accepted
+race Multipart writers=2 trial=1 writer=1 start_us=11 end_us=131399 outcome=AlreadyExists HTTP 412
+race SUMMARY Multipart writers=2 trials=200 overlapping=200 successes=200 violations=0
+§4 concurrent_multipart_publication_2 PASS cleanup=PASS
+race Multipart writers=8 trial=1 writer=0 start_us=374 end_us=138063 outcome=AlreadyExists HTTP 412
+race Multipart writers=8 trial=1 writer=1 start_us=173 end_us=219319 outcome=AlreadyExists HTTP 412
+race Multipart writers=8 trial=1 writer=2 start_us=301 end_us=138081 outcome=AlreadyExists HTTP 412
+race Multipart writers=8 trial=1 writer=3 start_us=254 end_us=138095 outcome=AlreadyExists HTTP 412
+race Multipart writers=8 trial=1 writer=4 start_us=216 end_us=219112 outcome=AlreadyExists HTTP 412
+race Multipart writers=8 trial=1 writer=5 start_us=340 end_us=252616 outcome=accepted
+race Multipart writers=8 trial=1 writer=6 start_us=409 end_us=219095 outcome=AlreadyExists HTTP 412
+race Multipart writers=8 trial=1 writer=7 start_us=43 end_us=178725 outcome=AlreadyExists HTTP 412
+race SUMMARY Multipart writers=8 trials=50 overlapping=50 successes=50 violations=0
+§4 concurrent_multipart_publication_8 PASS cleanup=PASS
+race Mixed writers=2 trial=1 writer=0 start_us=149 end_us=84038 outcome=accepted
+race Mixed writers=2 trial=1 writer=1 start_us=11 end_us=154303 outcome=AlreadyExists HTTP 412
+race SUMMARY Mixed writers=2 trials=200 overlapping=200 successes=200 violations=0
+§4 concurrent_put_and_multipart_publication PASS cleanup=PASS
+race Replace writers=2 trial=1 writer=0 start_us=145 end_us=76514 outcome=Conflict HTTP 409
+race Replace writers=2 trial=1 writer=1 start_us=14 end_us=65757 outcome=accepted
+race SUMMARY Replace writers=2 trials=200 overlapping=200 successes=200 violations=0
+§4 concurrent_replace_current_revision PASS cleanup=PASS
+§4 create_once_single_put PASS cleanup=PASS
+§4 whole_object_reads PASS cleanup=PASS
+§4 ranged_reads PASS cleanup=PASS
+§4 prefix_listing PASS cleanup=PASS
+§4 exact_status PASS cleanup=PASS
+§4 deletion PASS cleanup=PASS
+§4 setup_provider_check PASS cleanup=PASS
+§4 create_once_multipart PASS cleanup=PASS
+§4 partial_uploads_hidden PASS cleanup=PASS
+§4 multipart_resume PASS cleanup=PASS
+§4 single_put_timestamp_equals_completion PASS cleanup=PASS
+§4 multipart_timestamp_equals_completion PASS cleanup=PASS
+§4 revision_changes_on_replace PASS cleanup=PASS
+§4 listing_lag PASS cleanup=PASS
+§4 immediate_device_folders PASS cleanup=PASS
+bucket versioning_after=Disabled stable=true
+certification suite=4 PASS
+```
+
+#### Versioning enabled
+
+`ceph-rgw-versioned.env` reported `Enabled` before and after the suite. Every
+one of the 900 overlapping trials accepted every writer: 2,400 successful
+requests where exclusivity required 900. Sequential detection and the existing
+adapter contracts passed; setup refused the bucket through
+`S3VersioningUnsupported`. Every case's cleanup passed, including versions and
+delete markers. No versioned certificate was issued.
+
+The following retains each check's verdict, every race aggregate, and each
+race's first trial with all writers' request intervals (microseconds from the
+trial's origin). The live suite prints those intervals for every trial.
+
+```text
+bucket versioning=Enabled
+setup_safety_check refused: S3 bucket versioning Enabled is not certified for this profile
+§4 native_behavior_detection PASS
+race Put writers=2 trial=1 writer=0 start_us=284 end_us=89682 outcome=accepted
+race Put writers=2 trial=1 writer=1 start_us=81 end_us=78865 outcome=accepted
+race SUMMARY Put writers=2 trials=200 overlapping=200 successes=400 violations=200
+§4 concurrent_put_2 cause=Protocol: concurrent conditional publication violated exclusivity, bytes or overlap
+§4 concurrent_put_2 FAIL cleanup=PASS
+race Put writers=8 trial=1 writer=0 start_us=678 end_us=139244 outcome=accepted
+race Put writers=8 trial=1 writer=1 start_us=533 end_us=150250 outcome=accepted
+race Put writers=8 trial=1 writer=2 start_us=603 end_us=125264 outcome=accepted
+race Put writers=8 trial=1 writer=3 start_us=303 end_us=115243 outcome=accepted
+race Put writers=8 trial=1 writer=4 start_us=386 end_us=163935 outcome=accepted
+race Put writers=8 trial=1 writer=5 start_us=745 end_us=154156 outcome=accepted
+race Put writers=8 trial=1 writer=6 start_us=459 end_us=161183 outcome=accepted
+race Put writers=8 trial=1 writer=7 start_us=51 end_us=122160 outcome=accepted
+race SUMMARY Put writers=8 trials=50 overlapping=50 successes=400 violations=50
+§4 concurrent_put_8 cause=Protocol: concurrent conditional publication violated exclusivity, bytes or overlap
+§4 concurrent_put_8 FAIL cleanup=PASS
+race Multipart writers=2 trial=1 writer=0 start_us=158 end_us=92866 outcome=accepted
+race Multipart writers=2 trial=1 writer=1 start_us=13 end_us=122427 outcome=accepted
+race SUMMARY Multipart writers=2 trials=200 overlapping=200 successes=400 violations=200
+§4 concurrent_multipart_publication_2 cause=Protocol: concurrent conditional publication violated exclusivity, bytes or overlap
+§4 concurrent_multipart_publication_2 FAIL cleanup=PASS
+race Multipart writers=8 trial=1 writer=0 start_us=188 end_us=451307 outcome=accepted
+race Multipart writers=8 trial=1 writer=1 start_us=359 end_us=597061 outcome=accepted
+race Multipart writers=8 trial=1 writer=2 start_us=274 end_us=473206 outcome=accepted
+race Multipart writers=8 trial=1 writer=3 start_us=428 end_us=584728 outcome=accepted
+race Multipart writers=8 trial=1 writer=4 start_us=319 end_us=558952 outcome=accepted
+race Multipart writers=8 trial=1 writer=5 start_us=234 end_us=485125 outcome=accepted
+race Multipart writers=8 trial=1 writer=6 start_us=393 end_us=584857 outcome=accepted
+race Multipart writers=8 trial=1 writer=7 start_us=49 end_us=365934 outcome=accepted
+race SUMMARY Multipart writers=8 trials=50 overlapping=50 successes=400 violations=50
+§4 concurrent_multipart_publication_8 cause=Protocol: concurrent conditional publication violated exclusivity, bytes or overlap
+§4 concurrent_multipart_publication_8 FAIL cleanup=PASS
+race Mixed writers=2 trial=1 writer=0 start_us=150 end_us=150365 outcome=accepted
+race Mixed writers=2 trial=1 writer=1 start_us=17 end_us=242881 outcome=accepted
+race SUMMARY Mixed writers=2 trials=200 overlapping=200 successes=400 violations=200
+§4 concurrent_put_and_multipart_publication cause=Protocol: concurrent conditional publication violated exclusivity, bytes or overlap
+§4 concurrent_put_and_multipart_publication FAIL cleanup=PASS
+race Replace writers=2 trial=1 writer=0 start_us=300 end_us=297029 outcome=accepted
+race Replace writers=2 trial=1 writer=1 start_us=23 end_us=270197 outcome=accepted
+race SUMMARY Replace writers=2 trials=200 overlapping=200 successes=400 violations=200
+§4 concurrent_replace_current_revision cause=Protocol: concurrent conditional publication violated exclusivity, bytes or overlap
+§4 concurrent_replace_current_revision FAIL cleanup=PASS
+§4 create_once_single_put PASS cleanup=PASS
+§4 whole_object_reads PASS cleanup=PASS
+§4 ranged_reads PASS cleanup=PASS
+§4 prefix_listing PASS cleanup=PASS
+§4 exact_status PASS cleanup=PASS
+§4 deletion PASS cleanup=PASS
+§4 setup_provider_check PASS cleanup=PASS
+§4 create_once_multipart PASS cleanup=PASS
+§4 partial_uploads_hidden PASS cleanup=PASS
+§4 multipart_resume PASS cleanup=PASS
+§4 single_put_timestamp_equals_completion PASS cleanup=PASS
+§4 multipart_timestamp_equals_completion PASS cleanup=PASS
+§4 revision_changes_on_replace PASS cleanup=PASS
+§4 listing_lag PASS cleanup=PASS
+§4 immediate_device_folders PASS cleanup=PASS
+bucket versioning_after=Enabled stable=true
+certification suite=4 FAIL
+```
+
+### Services without a versioned certificate
+
+On 2026-10-14 the supplied GCS HMAC key (`gcs-s3.env`) returned HTTP 403
+`AccessDenied` for bucket metadata and for an attempted second-bucket creation.
+No second bucket was created and the existing bucket setting was not changed.
+The versioned suite was not run; GCS therefore has no versioning certificate.
+The Rust XML read produced:
+
+```text
+bucket versioning=Unknown failure=PermissionDenied status=Some(403)
+setup_versioning_check refused: S3 bucket versioning is unknown; this profile requires a successful GetBucketVersioning (s3:GetBucketVersioning; GCS storage.buckets.get): S3: PermissionDenied: S3 request failed
+```
+
+Member access needs `storage.buckets.get` to read the XML versioning state;
+creating a certification bucket also requires the owner's bucket-creation
+permission.
+
+R2 has no object-versioning feature. Its official
+[S3 compatibility table](https://developers.cloudflare.com/r2/api/s3/api/)
+lists both `GetBucketVersioning` and `PutBucketVersioning` as unsupported.
+There is no versioning-on run to perform. The adapter records this as
+`Unavailable` only at the hosted R2 endpoint; an arbitrary endpoint merely
+named R2 still has to establish its bucket's state. The live read with `r2.env`
+returned HTTP 403; the Rust adapter recorded:
+
+```text
+bucket versioning=Unavailable
+setup_versioning_check PASS
+```
+
+RustFS and SeaweedFS's test containers were unavailable, so neither was run
+with versioning enabled. Both profiles refuse enabled, suspended and unknown
+versioning until a versioned certification is recorded. AWS has no reachable
+live account and likewise has no versioned certificate.

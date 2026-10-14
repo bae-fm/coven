@@ -143,6 +143,7 @@ pub fn conforming_detection(settings: S3Settings) -> S3Detection {
     })
     .collect();
     S3Detection {
+        versioning: Ok(S3BucketVersioning::Disabled),
         settings,
         observations,
     }

@@ -169,7 +169,7 @@ async fn every_profile_checks_missing_objects_with_a_prefix_scoped_listing() {
         }));
         let server =
             TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
-        let storage = super::profile_tests::profile_provider(&server.url, settings);
+        let storage = profile_provider(&server.url, settings);
         for (bucket_error, expected) in [
             (None, None),
             (

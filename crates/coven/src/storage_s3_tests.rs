@@ -46,6 +46,7 @@ impl StorageConnector for Overwrites {
         _store: StoreId,
     ) -> Result<S3Detection, StorageError> {
         Ok(S3Detection {
+            versioning: Ok(coven_storage::S3BucketVersioning::Disabled),
             settings: DETECTED_S3_SETTINGS,
             observations: Vec::new(),
         })
@@ -64,6 +65,92 @@ struct Opened {
     handle: CovenHandle,
     directory: StoreDir,
     _root: tempfile::TempDir,
+}
+
+struct BucketState {
+    storage: Arc<MemoryStorage>,
+    versioning: std::sync::Mutex<Result<S3BucketVersioning, Arc<StorageError>>>,
+}
+#[async_trait::async_trait]
+impl StorageConnector for BucketState {
+    async fn connect(
+        &self,
+        config: StorageConfig,
+        credentials: StorageCredentials,
+        device: DeviceId,
+    ) -> Result<Arc<StorageConnection>, StorageError> {
+        self.storage.connect(config, credentials, device).await
+    }
+    async fn detect_s3(
+        &self,
+        config: StorageConfig,
+        credentials: S3Credentials,
+        store: StoreId,
+    ) -> Result<S3Detection, StorageError> {
+        let mut detection = self.storage.detect_s3(config, credentials, store).await?;
+        detection.versioning = self.versioning.lock().unwrap().clone();
+        Ok(detection)
+    }
+    async fn check_new_s3_store(
+        &self,
+        config: StorageConfig,
+        credentials: S3Credentials,
+        store: StoreId,
+    ) -> Result<(), StorageError> {
+        self.storage
+            .check_new_s3_store(config, credentials, store)
+            .await
+    }
+}
+
+#[tokio::test]
+async fn versioning_refusal_commits_nothing_and_preserves_an_existing_connection() {
+    let location = uncatalogued(Some(S3Profile::Named(S3ProfileName::CephRgw)));
+    let storage = Arc::new(
+        MemoryStorage::builder()
+            .location(location.clone())
+            .build()
+            .unwrap(),
+    );
+    let connector = Arc::new(BucketState {
+        storage: storage.clone(),
+        versioning: std::sync::Mutex::new(Ok(S3BucketVersioning::Enabled)),
+    });
+    let opened = open(connector.clone()).await;
+    for state in [S3BucketVersioning::Enabled, S3BucketVersioning::Suspended] {
+        *connector.versioning.lock().unwrap() = Ok(state);
+        assert!(
+            matches!(setup(&opened.handle, location.clone()).await.unwrap_err(), StorageSetupError::S3VersioningUnsupported { state: actual } if actual == state)
+        );
+    }
+    *connector.versioning.lock().unwrap() = Err(Arc::new(StorageFailure::PermissionDenied.into()));
+    assert!(matches!(
+        setup(&opened.handle, location.clone()).await.unwrap_err(),
+        StorageSetupError::S3VersioningUnknown { .. }
+    ));
+    assert_eq!(storage.request_count(), 0);
+    assert_eq!(
+        StorageSettings::new(opened.directory.clone())
+            .read()
+            .unwrap(),
+        None
+    );
+    *connector.versioning.lock().unwrap() = Ok(S3BucketVersioning::Disabled);
+    setup(&opened.handle, location.clone()).await.unwrap();
+    let before = storage.request_count();
+    *connector.versioning.lock().unwrap() = Ok(S3BucketVersioning::Enabled);
+    assert!(matches!(
+        setup(&opened.handle, location.clone()).await.unwrap_err(),
+        StorageSetupError::S3VersioningUnsupported { .. }
+    ));
+    assert_eq!(storage.request_count(), before);
+    assert_eq!(
+        StorageSettings::new(opened.directory.clone())
+            .read()
+            .unwrap(),
+        Some(location)
+    );
+    opened.handle.close().await.unwrap();
 }
 
 async fn open(storage: Arc<dyn StorageConnector>) -> Opened {

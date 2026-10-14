@@ -16,6 +16,29 @@ use std::{
     time::SystemTime,
 };
 
+pub(super) fn profile_provider(url: &str, settings: S3Settings) -> StorageConnection<S3Storage> {
+    StorageConnection::from_provider(Arc::new(
+        S3Storage::with_settings(
+            StorageConfig::S3 {
+                bucket: "bucket".into(),
+                region: "us-east-1".into(),
+                endpoint: Some(url.parse().unwrap()),
+                profile: None,
+                // An undetected endpoint's member keys reach the whole bucket (§4).
+                prefix: String::new(),
+            },
+            S3Credentials {
+                access_key_id: "access".into(),
+                secret_access_key: SecretText::new("secret".into()),
+            },
+            Arc::new(FixedClock::new(SystemTime::UNIX_EPOCH)),
+            Arc::new(SequentialIds::new()),
+            settings,
+        )
+        .unwrap(),
+    ))
+}
+
 struct PendingUpload {
     key: String,
     token: String,
@@ -933,8 +956,14 @@ mod restart;
 #[path = "s3_live.rs"]
 mod live;
 #[cfg(not(any(target_os = "ios", target_os = "android")))]
+#[path = "s3_live_cleanup.rs"]
+mod live_cleanup;
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
 #[path = "s3_live_tests.rs"]
 mod live_tests;
 
 #[path = "s3_profile_tests.rs"]
 mod profile_tests;
+
+#[path = "s3_versioning_tests.rs"]
+mod versioning_tests;

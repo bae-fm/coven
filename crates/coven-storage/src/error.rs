@@ -178,6 +178,19 @@ pub enum StorageCheck {
 /// A failed setup commits no local storage settings or credentials.
 #[derive(Debug, thiserror::Error)]
 pub enum StorageSetupError {
+    /// This profile has no certification with bucket versioning enabled.
+    #[error("S3 bucket versioning {state:?} is not certified for this profile")]
+    S3VersioningUnsupported {
+        /// The bucket's observed versioning state.
+        state: crate::S3BucketVersioning,
+    },
+    /// The bucket state is unknown and this profile has no versioning certification.
+    #[error("S3 bucket versioning is unknown; this profile requires a successful GetBucketVersioning (s3:GetBucketVersioning; GCS storage.buckets.get): {source}")]
+    S3VersioningUnknown {
+        /// The refused versioning read, retaining its native cause.
+        #[source]
+        source: std::sync::Arc<StorageError>,
+    },
     /// A provider check failed; cleanup failures retain both causes.
     #[error("storage check {check:?}: {source}")]
     ProviderCheck {

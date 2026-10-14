@@ -2,14 +2,17 @@
 //! safety check of effective settings against it (§4). The probes themselves
 //! run in the adapter; this is the pure decision over their observations.
 use crate::{
-    S3Checksums, S3CopyCondition, S3Listing, S3Multipart, S3MultipartTimestamp, S3Profile,
-    S3ResponseHeaders, S3Revision, S3Settings, S3Signing, S3SinglePut, StorageCheck, StorageConfig,
-    StorageFailure, StorageSetupError,
+    S3BucketVersioning, S3Checksums, S3CopyCondition, S3Listing, S3Multipart, S3MultipartTimestamp,
+    S3Profile, S3ResponseHeaders, S3Revision, S3Settings, S3Signing, S3SinglePut, StorageCheck,
+    StorageConfig, StorageError, StorageFailure, StorageSetupError,
 };
+use std::sync::Arc;
 
 /// What detection observed at one location (§4).
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub struct S3Detection {
+    /// Bucket versioning, or the native refusal that left it unknown.
+    pub versioning: Result<S3BucketVersioning, Arc<StorageError>>,
     /// Settings derived from the observations; prefill advanced settings with them.
     pub settings: S3Settings,
     /// One observation per probe, in the order run.
@@ -76,8 +79,13 @@ pub(crate) const COPY_CONDITIONS: [S3CopyCondition; 3] = [
 impl S3Detection {
     /// Derive settings from observations. Where no behavior holds, `plain`'s
     /// value stays and [`Self::check`] names the failure.
-    pub(crate) fn derive(observations: Vec<S3Observation>, plain: S3Settings) -> Self {
+    pub(crate) fn derive(
+        observations: Vec<S3Observation>,
+        plain: S3Settings,
+        versioning: Result<S3BucketVersioning, Arc<StorageError>>,
+    ) -> Self {
         let detection = Self {
+            versioning,
             settings: plain,
             observations,
         };
@@ -238,7 +246,7 @@ impl S3Detection {
         }
     }
 
-    /// The location setup records, after checking its effective settings:
+    /// The location setup records, after checking versioning support and its effective settings:
     /// an uncatalogued endpoint naming no profile gets these detected
     /// settings as its custom profile; any other location is kept as given.
     pub fn resolve(&self, location: StorageConfig) -> Result<StorageConfig, StorageSetupError> {
@@ -259,6 +267,11 @@ impl S3Detection {
                 Some(settings) => (profile, settings),
                 None => (Some(S3Profile::Custom(self.settings)), self.settings),
             };
+        crate::providers::check_s3_versioning(
+            endpoint.as_ref(),
+            profile.as_ref(),
+            &self.versioning,
+        )?;
         self.check(&settings)?;
         Ok(StorageConfig::S3 {
             bucket,

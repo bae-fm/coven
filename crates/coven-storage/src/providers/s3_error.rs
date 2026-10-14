@@ -57,7 +57,9 @@ fn s3_service_failure(
         Some("NoSuchKey" | "NotFound") => StorageFailure::NotFound,
         Some("NoSuchUpload") => StorageFailure::SessionExpired,
         Some("PreconditionFailed") => StorageFailure::AlreadyExists,
-        Some("ConditionalRequestConflict" | "OperationAborted") => StorageFailure::Conflict,
+        Some("ConditionalRequestConflict" | "OperationAborted" | "ConcurrentModification") => {
+            StorageFailure::Conflict
+        }
         Some("SlowDown" | "Throttling") => StorageFailure::RateLimited,
         Some(
             "PermanentRedirect"

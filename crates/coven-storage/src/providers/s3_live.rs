@@ -17,6 +17,14 @@ impl LiveS3 {
         let endpoint = settings
             .remove("COVEN_LIVE_S3_ENDPOINT")
             .map(|value| value.as_str().parse().expect("valid live endpoint"));
+        let profile = match std::env::var("COVEN_LIVE_S3_PROFILE") {
+            Ok(name) => Some(S3Profile::Named(
+                serde_json::from_value(serde_json::Value::String(name))
+                    .expect("known S3 profile name"),
+            )),
+            Err(std::env::VarError::NotPresent) => None,
+            Err(error) => panic!("invalid live profile: {error}"),
+        };
         let mut take = |key| {
             settings
                 .remove(key)
@@ -24,7 +32,7 @@ impl LiveS3 {
         };
         // A service whose member keys reach a whole bucket keeps each store
         // at the bucket's root (§4); the suite's stores share the test bucket.
-        let prefix = match crate::providers::s3_key_scope(endpoint.as_ref(), None)
+        let prefix = match crate::providers::s3_key_scope(endpoint.as_ref(), profile.as_ref())
             .expect("valid live endpoint")
         {
             crate::providers::S3KeyScope::Bucket => String::new(),
@@ -34,7 +42,7 @@ impl LiveS3 {
             bucket: take("COVEN_LIVE_S3_BUCKET").as_str().to_owned(),
             region: take("COVEN_LIVE_S3_REGION").as_str().to_owned(),
             endpoint,
-            profile: None,
+            profile,
             prefix,
         };
         let credentials = S3Credentials {
@@ -49,14 +57,42 @@ impl LiveS3 {
     }
     /// Production detection from the env location, under a fresh store.
     pub(super) async fn detect(&self) -> Result<crate::S3Detection, StorageError> {
-        super::detect(
+        let store = StoreId(coven_foundation::id_source::IdSource::new_id(&UuidIds));
+        let result = super::detect(
             self.config.clone(),
             self.credentials.clone(),
-            StoreId(coven_foundation::id_source::IdSource::new_id(&UuidIds)),
+            store,
             Arc::new(SystemClock),
             Arc::new(UuidIds),
         )
-        .await
+        .await;
+        // Production detection removes current probe objects. Certification
+        // additionally removes retained versions and delete markers.
+        let settings = match &result {
+            Ok(detection) => detection.settings,
+            Err(_) => {
+                let StorageConfig::S3 {
+                    endpoint, profile, ..
+                } = &self.config
+                else {
+                    unreachable!()
+                };
+                profile::settings(endpoint.as_ref(), profile.as_ref())?.unwrap_or(profile::PLAIN)
+            }
+        };
+        let storage = self.connect(Some(settings));
+        let cleanup = match storage.provider.bucket_versioning().await {
+            Ok(S3BucketVersioning::Enabled | S3BucketVersioning::Suspended) => {
+                live_cleanup::cleanup_versions(
+                    &storage.provider,
+                    &ObjectPrefix::all(store).under(&storage.provider.prefix),
+                )
+                .await
+            }
+            Ok(_) => Ok(()),
+            Err(error) => Err(error),
+        };
+        crate::transfer::with_cleanup(result, cleanup)
     }
     pub(super) fn connect(&self, settings: Option<S3Settings>) -> StorageConnection<S3Storage> {
         let config = self.config.clone();
@@ -80,106 +116,4 @@ impl LiveS3 {
         provider.single_request_limit = 1024 * 1024;
         StorageConnection::from_provider(Arc::new(provider))
     }
-}
-
-/// Use native listings so completed temporaries and incomplete uploads are both
-/// removed, including after an assertion or a provider operation fails.
-pub(super) async fn cleanup(storage: &S3Storage, store: StoreId) -> Result<(), StorageError> {
-    let prefix = ObjectPrefix::all(store).under(&storage.prefix);
-    let mut key_marker = None;
-    let mut upload_marker = None;
-    let mut uploads = Vec::new();
-    let mut pages = Pagination::new();
-    loop {
-        let page = storage
-            .client
-            .list_multipart_uploads()
-            .bucket(&storage.bucket)
-            .prefix(&prefix)
-            .set_key_marker(key_marker)
-            .set_upload_id_marker(upload_marker)
-            .send()
-            .await
-            .map_err(s3_error)?;
-        for upload in page.uploads() {
-            uploads.push((
-                upload.key().expect("upload key").to_owned(),
-                upload.upload_id().expect("upload id").to_owned(),
-            ));
-        }
-        if !page.is_truncated().expect("multipart listing completion") {
-            break;
-        }
-        let key = page
-            .next_key_marker()
-            .expect("multipart key marker")
-            .to_owned();
-        let id = page
-            .next_upload_id_marker()
-            .expect("multipart id marker")
-            .to_owned();
-        pages.check(&format!("{key}/{id}"))?;
-        key_marker = Some(key);
-        upload_marker = Some(id);
-    }
-    let mut cleanup_result = Ok(());
-    for (key, id) in uploads {
-        assert!(key.starts_with(&prefix));
-        let result = storage
-            .client
-            .abort_multipart_upload()
-            .bucket(&storage.bucket)
-            .key(key)
-            .upload_id(id)
-            .send()
-            .await
-            .map(|_| ())
-            .map_err(s3_error);
-        cleanup_result = crate::transfer::with_cleanup(cleanup_result, result);
-    }
-    let mut marker = None;
-    let mut keys = Vec::new();
-    let mut pages = Pagination::new();
-    loop {
-        // V1 is probed before writes, so cleanup does not depend on V2 support.
-        let page = storage
-            .list_page(S3Listing::V1, &prefix, None, marker, None)
-            .await?;
-        for object in page.contents {
-            keys.push(metadata::required(object.key(), "cleanup listing omitted key")?.to_owned());
-        }
-        let Some(next) = page.next else {
-            break;
-        };
-        pages.check(&next)?;
-        marker = Some(next);
-    }
-    for key in keys {
-        assert!(key.starts_with(&prefix));
-        let result = storage
-            .client
-            .delete_object()
-            .bucket(&storage.bucket)
-            .key(key)
-            .send()
-            .await
-            .map(|_| ())
-            .map_err(s3_error);
-        cleanup_result = crate::transfer::with_cleanup(cleanup_result, result);
-    }
-    cleanup_result?;
-    let objects = storage
-        .list_page(S3Listing::V1, &prefix, None, None, Some(1))
-        .await?;
-    assert!(objects.contents.is_empty());
-    let uploads = storage
-        .client
-        .list_multipart_uploads()
-        .bucket(&storage.bucket)
-        .prefix(&prefix)
-        .send()
-        .await
-        .map_err(s3_error)?;
-    assert!(uploads.uploads().is_empty());
-    Ok(())
 }

@@ -18,7 +18,10 @@ mod error;
 use error::s3_error;
 #[path = "s3_profile.rs"]
 mod profile;
+#[path = "s3_versioning.rs"]
+mod versioning;
 pub(crate) use profile::{settings as s3_settings, S3KeyScope};
+pub(crate) use versioning::check as check_s3_versioning;
 #[path = "s3_checksum_headers.rs"]
 mod checksum_headers;
 #[path = "s3_copy_upload.rs"]
@@ -47,7 +50,7 @@ pub(crate) fn s3_key_scope(
     profile::select(endpoint, profile).map(profile::Selected::key_scope)
 }
 
-/// S3 and compatible endpoints, using only object operations and manually supplied keys.
+/// S3 and compatible endpoints, using owner-provisioned buckets and manually supplied keys.
 pub(crate) struct S3Storage {
     client: Client,
     credentials: SigningCredentials,
