@@ -1,5 +1,6 @@
 import CovenQueue.Checked
 import CovenQueue.RowMerge
+import CovenQueue.Retired
 import CovenQueue.RaiseProgress
 import CovenQueue.Conversion
 import Lean
@@ -88,6 +89,25 @@ private def rowJson (st : St Nat Nat Nat) (writes rows cols : Nat) (r : Nat) : J
   Json.mkObj [("id", toJson r), ("gen", toJson generation), ("gw", toJson gw),
     ("cells", toJson cells), ("lost", toJson lost)]
 
+/-- The receiver's own-window verdicts (§10): `Receive.withinWindow` under the
+kept retirements, each write's device and first publication time. -/
+private def windowLate (records : Array CheckedWrite) (stored : Array Nat)
+    (retirements : List CovenMerge.Receive.Retirement) : Nat → Bool :=
+  let policy : CovenMerge.Receive.Policy Nat := {
+    boundary := ⟨fun _ => false, fun _ => false, by simp⟩
+    logs := ⟨fun w => (records[w]?.map (·.record.identity.id.device)).getD 0,
+      fun w => (records[w]?.map (·.record.identity.id.number)).getD 0⟩
+    reset := none
+    readEntry := fun _ _ => false
+    schema := fun _ => .eligible
+    retirements
+    stored := fun w => stored[w]?.getD 0
+    viewRetired := fun _ => false }
+  fun w => !CovenMerge.Receive.withinWindow policy w
+
+private def readRetirement (j : Json) : Except String CovenMerge.Receive.Retirement := do
+  pure ⟨← j.getObjValAs? Nat "device", ← j.getObjValAs? Nat "entry", ← j.getObjValAs? Nat "stored"⟩
+
 private def receive (j : Json) : Except String Json := do
   let records ← (← j.getObjValAs? (Array Json) "writes").mapM readWrite
   let stamps := records.toList.map (·.record.identity.timestamp)
@@ -115,12 +135,30 @@ private def receive (j : Json) : Except String Json := do
       | none => ⟨original, checked⟩
     let h := interpreted.1
     let valid := interpreted.2
-    let start := snapshot.foldl (step (mergeInput h valid view)) St.init
-    let st := mergeRows h valid view start received
-    let changes := received.flatMap fun w => (changeResults h valid view w).map fun (ch, answer) =>
-      Json.mkObj [("write", toJson w), ("row", toJson ch.row), ("verdict", verdictJson answer)]
-    pure (Json.mkObj [("dataValid", toJson true), ("changes", toJson changes),
-      ("rows", toJson ((List.range rows).map (rowJson st records.size rows cols)))])
+    match j.getObjValD "retirements" with
+    | .null =>
+      let start := snapshot.foldl (step (mergeInput h valid view)) St.init
+      let st := mergeRows h valid view start received
+      let changes := received.flatMap fun w => (changeResults h valid view w).map fun (ch, answer) =>
+        Json.mkObj [("write", toJson w), ("row", toJson ch.row), ("verdict", verdictJson answer)]
+      pure (Json.mkObj [("dataValid", toJson true), ("changes", toJson changes),
+        ("rows", toJson ((List.range rows).map (rowJson st records.size rows cols)))])
+    | kept =>
+      -- Each write's own window under the receiver's final kept retirements.
+      let retirements ← (← kept.getArr?).toList.mapM readRetirement
+      let stored ← j.getObjValAs? (Array Nat) "stored"
+      if stored.size != records.size then throw "one storage time per write"
+      let late := windowLate records stored retirements
+      let start := snapshot.foldl (step (windowInput h valid view late)) St.init
+      let st := windowRows h valid view late start received
+      let changes := received.flatMap fun w =>
+        (windowResults h valid view late w).map fun (ch, answer) =>
+          Json.mkObj [("write", toJson w), ("row", toJson ch.row), ("verdict",
+            match answer with
+            | some answer => verdictJson answer
+            | none => Json.mkObj [("kind", "dropped")])]
+      pure (Json.mkObj [("dataValid", toJson true), ("changes", toJson changes),
+        ("rows", toJson ((List.range rows).map (rowJson st records.size rows cols)))])
   else
     pure (Json.mkObj [("dataValid", toJson false)])
 

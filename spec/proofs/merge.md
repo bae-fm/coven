@@ -1001,8 +1001,15 @@ the earliest one, adds a later retirement, and checks both runs agree, as
 classifier over generated rows with dropped bases, chains and repeated
 sources; the database receives every change through that classifier. The Boolean, reset and schema runners
 retain their existing paths and comparison scope.
-The database's per-change data losses are checked by its receive tests, not
-by a model comparison.
+The database's per-change data losses under retirement replay are compared
+with the queue model's `Retired.lean` composition of `withinWindow` and the
+shared classifier ([queue.md](queue.md), `queue_retirement_differential_histories`):
+the real receiver keeps and drops retiring entries between arrivals and must
+end, after its replay rebuilds, with the model's rows, verdicts and dependency
+losses for the final kept retirements in both arrival orders. Database tests
+check the four histories above after a retirement returns to replay, the
+setter-only variant, schema precedence, dismissal, release after finality,
+rollback of a failed rebuild and a snapshot loaded under another verdict.
 
 ### B18 Owner tables and row authenticity
 

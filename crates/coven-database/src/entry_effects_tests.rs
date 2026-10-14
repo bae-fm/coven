@@ -468,6 +468,9 @@ async fn final_boundaries_release_inputs_and_a_later_boundary_retains_again() {
     sql(&source, "INSERT INTO notes VALUES('early','before','')")
         .await
         .unwrap();
+    // With a horizon no unseen retirement can still exclude a received write,
+    // so its landing retains nothing (§10).
+    horizon(&target, 0).await;
     target
         .receive(records(&source).remove(0).into())
         .await

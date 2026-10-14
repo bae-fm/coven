@@ -5,6 +5,7 @@ import CovenQueue.Upload
 import CovenQueue.Verdicts
 import CovenQueue.Conversion
 import CovenQueue.RowMerge
+import CovenQueue.Retired
 import CovenQueue.Checked
 import CovenQueue.Progress
 import CovenQueue.Migration

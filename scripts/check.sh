@@ -284,6 +284,7 @@ proofs() {
         step "Rust / Lean queue change verdicts and row merge"
         COVEN_QUEUE_LEAN="$runner" cargo test -p coven-database --all-features queue_reset_differential_histories -- --ignored
         COVEN_QUEUE_LEAN="$runner" cargo test -p coven-database --all-features queue_conversion_differential_histories -- --ignored
+        COVEN_QUEUE_LEAN="$runner" cargo test -p coven-database --all-features queue_retirement_differential_histories -- --ignored
     fi
 
     if proof_selected queue || crate_selected coven-sync; then

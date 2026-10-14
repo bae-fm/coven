@@ -144,6 +144,11 @@ import CovenQueue
 #print axioms CovenQueue.mergeInput_effective
 #print axioms CovenQueue.mergeInput_valid
 #print axioms CovenQueue.rows_and_losses_converge
+#print axioms CovenQueue.window_applied_iff
+#print axioms CovenQueue.windowInput_effective
+#print axioms CovenQueue.window_rows_and_losses_converge
+#print axioms CovenQueue.window_late_no_change
+#print axioms CovenQueue.window_none_classify
 #print axioms CovenQueue.row_value_accounted
 #print axioms CovenQueue.Examples.independent_own_tail
 #print axioms CovenQueue.Examples.repeated_raise_independent

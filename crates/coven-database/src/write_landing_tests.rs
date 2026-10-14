@@ -9,9 +9,9 @@ use coven_format::store_log::{MemberRole, StoreLogEntry};
 use coven_format::value::EntryPositions;
 use coven_foundation::id_source::SequentialIds;
 
-const DAY: u64 = 24 * 60 * 60;
+pub(crate) const DAY: u64 = 24 * 60 * 60;
 
-fn at(seconds: u64) -> SystemTime {
+pub(crate) fn at(seconds: u64) -> SystemTime {
     UNIX_EPOCH + Duration::from_secs(seconds)
 }
 
@@ -118,7 +118,7 @@ async fn pair() -> Pair {
     }
 }
 
-fn dropped_reports(db: &crate::Database) -> Vec<Record> {
+pub(crate) fn dropped_reports(db: &crate::Database) -> Vec<Record> {
     db.inspect_writer(|sql| crate::pending::read::<Record>(sql).unwrap())
         .into_iter()
         .filter(|record| record.dropped_write().is_some())
@@ -220,10 +220,11 @@ async fn replay_recomputes_the_verdict_against_every_kept_retirement() {
     p.source.close().await.unwrap();
 }
 
-/// A retirement that arrives after the write it excludes finds no retained
-/// input: the audience keeps its rows, refuses writes and waits for a reload.
+/// A retirement that arrives after the write it excludes rebuilds the audience
+/// from the input retained when the unsettled write landed: the write leaves
+/// with no loss and app writes need no reload (§9, §10).
 #[tokio::test]
-async fn a_retirement_arriving_after_its_write_requires_a_reload() {
+async fn a_retirement_arriving_after_its_write_rebuilds_without_it() {
     let p = pair().await;
     sql(&p.source, "INSERT INTO notes VALUES('n','title','body')")
         .await
@@ -236,10 +237,11 @@ async fn a_retirement_arriving_after_its_write_requires_a_reload() {
         .unwrap();
     assert_eq!(count(&p.target, "notes"), 1);
     retire(&p.target, device, 1, "device", 0).await;
-    assert_eq!(count(&p.target, "notes"), 1);
-    assert!(sql(&p.target, "INSERT INTO notes VALUES('m','t','b')")
+    assert_eq!(count(&p.target, "notes"), 0);
+    assert!(p.target.lost_values().await.unwrap().is_empty());
+    sql(&p.target, "INSERT INTO notes VALUES('m','t','b')")
         .await
-        .is_err());
+        .unwrap();
     assert_eq!(dropped_reports(&p.target).len(), 1);
 }
 

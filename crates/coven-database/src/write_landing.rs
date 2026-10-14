@@ -120,11 +120,13 @@ pub(crate) fn judge(
 }
 
 /// Judge a write on its first application (§10). An unsettled verdict is
-/// recorded so replay can recompute it; with `retain`, a late write that a
-/// non-final retirement could still admit first retains its audiences' current
-/// data, so its parts are kept for a later rebuild. A reload's own data is
-/// not such an origin: reversing its verdict reloads again. Returns whether
-/// it is late.
+/// recorded so replay can recompute it; with `retain`, a write whose verdict a
+/// non-final or unseen retirement could still change first retains its
+/// audiences' current data, so its parts and every later one are kept: replay
+/// then rebuilds rows, source verdicts and losses from that input in its own
+/// transaction, whichever way the verdict turns. A reload's own data is not
+/// such an origin: reversing its verdict reloads again. Returns whether it is
+/// late.
 pub(crate) fn land<P: PendingValue>(
     db: &DatabaseConnection,
     schema: &crate::write_schema::WriteSchema,
@@ -134,7 +136,7 @@ pub(crate) fn land<P: PendingValue>(
     retain: bool,
 ) -> Result<bool, DbError> {
     let landing = judge(db, header, stored_at)?;
-    if retain && landing.late && !landing.fixed {
+    if retain && !landing.fixed {
         for audience in audiences {
             crate::entry_inputs::original(db, schema, audience)?;
         }
@@ -256,6 +258,34 @@ pub(crate) fn rejudge<P: PendingValue>(db: &DatabaseConnection) -> Result<Rejudg
         }
     }
     Ok(rejudged)
+}
+
+/// A loaded snapshot's verdict for a covered change must agree with this
+/// device's own window verdict for its write, when it holds one: only then do
+/// the snapshot's contributions count what this device's replay counts (§10).
+/// A dropped verdict and only it means the snapshot's author judged the write
+/// outside its window; every other verdict, unjudged included, kept its effects.
+pub(crate) fn agrees(
+    db: &DatabaseConnection,
+    authored: &coven_format::snapshot_rows::AuthoredChange,
+) -> Result<(), DbError> {
+    let write = authored.header.position;
+    let [device, number] = id(write);
+    let judged: Option<bool> = db.query_row(
+        "SELECT (SELECT late FROM _coven_write_landings WHERE device=?1 AND number=?2)",
+        params![device, number],
+        |r| r.get(0),
+    )?;
+    let dropped = matches!(
+        authored.verdict,
+        coven_format::snapshot_rows::ChangeVerdict::Dropped
+    );
+    match judged {
+        Some(late) if late != dropped => {
+            Err(crate::SnapshotError::RetirementVerdict { write }.into())
+        }
+        _ => Ok(()),
+    }
 }
 
 /// A late write is reported as dropped for its own subject; admission clears it.

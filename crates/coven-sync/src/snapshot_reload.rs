@@ -378,12 +378,15 @@ impl StoreLogSync {
                     }
                     Err(
                         error @ coven_database::DbError::Snapshot(
-                            coven_database::SnapshotError::MissingWrites { .. },
+                            coven_database::SnapshotError::MissingWrites { .. }
+                            | coven_database::SnapshotError::RetirementVerdict { .. },
                         ),
                     ) => {
                         // A write assumed to remain queued can finish uploading
-                        // during the download. Retry must fetch its stored copy,
-                        // rather than repeatedly loading the same stale inputs.
+                        // during the download, and a snapshot made under another
+                        // retirement verdict cannot load here (§10). Retry must
+                        // select and fetch again, rather than repeatedly loading
+                        // the same stale inputs.
                         let SnapshotJob::Reload { files, .. } = &mut task.job else {
                             unreachable!()
                         };

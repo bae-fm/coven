@@ -250,6 +250,14 @@ async fn reversible_inputs_protect_removed_file_losses_until_the_input_is_releas
 async fn a_dismissed_file_loss_releases_its_local_protection() {
     let (_store, db, record, file) = file_loss_fixture().await;
     let expected = (record.header.position.device, file);
+    // Settle the received write's landing, which retains its input until then.
+    db.advance_store_log_horizon(
+        db.store_log().await.unwrap(),
+        std::time::Duration::ZERO,
+        std::time::UNIX_EPOCH,
+    )
+    .await
+    .unwrap();
     assert!(db
         .retained_files()
         .await

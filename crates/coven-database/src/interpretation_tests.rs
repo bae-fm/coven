@@ -82,18 +82,27 @@ fn merge_write(record: &WriteRecord) -> Write<Scalar> {
 }
 
 /// The boundary the covered prefix ends at: a kept reset, or a kept raise to
-/// version 2 whose migration does or does not supply a converter.
+/// version 2 whose migration does or does not supply a converter. Or no
+/// boundary, with devices 104 and 105 retired by entries replay finally keeps
+/// or drops (§10).
 #[derive(Clone, Copy, Debug)]
 enum Kind {
     Reset,
     Raise { convert: bool },
+    Retire { kept: [bool; 2] },
 }
+
+/// The retired devices, their retiring entries' numbers and storage times.
+const RETIRED: [(u64, u64, u64); 2] = [(104, 1, 0), (105, 2, 5 * DAY)];
+const DAY: u64 = 24 * 60 * 60;
 
 /// Original records in timestamp order, the snapshot's covered prefix and the
 /// kept boundary every later author may or may not have read.
 #[derive(Clone)]
 struct QueueHistory {
     writes: Vec<WriteRecord>,
+    /// Each write's first complete publication, in storage seconds.
+    stored: Vec<u64>,
     covered: BTreeSet<WriteId>,
     kind: Kind,
 }
@@ -104,6 +113,7 @@ impl QueueHistory {
     /// changes can use it as sources (§19.3).
     fn generate(rng: &mut Generator, kind: Kind) -> Self {
         let mut writes = Vec::<WriteRecord>::new();
+        let mut stored = vec![0; 3];
         let mut numbers = BTreeMap::<DeviceId, u64>::new();
         let mut header = |device: u64, ms: u64| {
             let device = DeviceId(device);
@@ -140,6 +150,13 @@ impl QueueHistory {
                 parts: Vec::new(),
             };
             let own = write.header.position.device;
+            // A retired device's writes land around its thirty-day deadline.
+            stored.push(
+                RETIRED
+                    .iter()
+                    .find(|(device, _, _)| *device == own.0)
+                    .map_or(0, |(_, _, at)| at + 30 * DAY - 1 + rng.pick(3) as u64),
+            );
             let mut past = BTreeSet::new();
             for previous in &writes {
                 let id = previous.header.position;
@@ -176,16 +193,23 @@ impl QueueHistory {
                     // own late old-schema data until it reloads.
                     migrated && rng.pick(2) == 0
                 }
+                // An author whose replay already keeps the final retirements
+                // has rebuilt without late writes; another still holds them.
+                Kind::Retire { .. } => rng.pick(2) == 0,
             };
             // A reloaded author drops what receivers drop and freezes every
             // change using it, as receivers do; one that has not reloaded
             // still holds that data.
             let mut kept = BTreeSet::new();
-            for w in writes.iter().filter(|w| past.contains(&w.header.position)) {
+            for (index, w) in writes.iter().enumerate() {
+                if !past.contains(&w.header.position) {
+                    continue;
+                }
                 let ignored = !covered.contains(&w.header.position)
                     && match kind {
                         Kind::Reset => !w.header.store_log_read.covers(RESET),
                         Kind::Raise { convert } => w.header.schema_version < 2 && !convert,
+                        Kind::Retire { kept } => late(kept, w.header.position, stored[index]),
                     };
                 for change in w.parts.iter().flat_map(|p| &p.rows) {
                     let sources = change
@@ -249,6 +273,7 @@ impl QueueHistory {
         }
         Self {
             writes,
+            stored,
             covered,
             kind,
         }
@@ -322,11 +347,22 @@ impl QueueHistory {
                 json!({"entry": 2, "covers": covers, "version": 2}),
                 json!({"version": 2, "convert": convert}),
             ),
+            Kind::Retire { .. } => (Value::Null, Value::Null, Value::Null),
         };
-        json!({"mode": "receive", "writes": writes, "reset": reset, "raise": raise,
+        let mut input = json!({"mode": "receive", "writes": writes, "reset": reset, "raise": raise,
             "conversion": conversion, "drops": [], "snapshot": snapshot,
             "received": received.iter().map(|id| self.index(*id)).collect::<Vec<_>>(),
-            "rows": rows.len(), "columns": COLUMNS.len()})
+            "rows": rows.len(), "columns": COLUMNS.len()});
+        if let Kind::Retire { kept } = self.kind {
+            input["retirements"] = json!(RETIRED
+                .iter()
+                .zip(kept)
+                .filter(|(_, kept)| *kept)
+                .map(|((device, entry, stored), _)| json!({"device": device, "entry": entry, "stored": stored}))
+                .collect::<Vec<_>>());
+            input["stored"] = json!(self.stored);
+        }
+        input
     }
 
     /// A causal arrival order of the uncovered writes, own predecessors first.
@@ -357,6 +393,26 @@ impl QueueHistory {
         }
         order
     }
+}
+
+/// The real window under the finally kept retirements (§10).
+fn late(kept: [bool; 2], write: WriteId, stored: u64) -> bool {
+    let at = |seconds: u64| std::time::UNIX_EPOCH + std::time::Duration::from_secs(seconds);
+    let retirements: Vec<_> = RETIRED
+        .iter()
+        .zip(kept)
+        .filter(|((device, _, _), kept)| *kept && *device == write.device.0)
+        .map(
+            |((_, number, stored), _)| crate::write_landing::Retirement {
+                entry: crate::EntryId {
+                    device: DeviceId(97),
+                    number: *number,
+                },
+                stored_at: at(*stored),
+            },
+        )
+        .collect();
+    !crate::write_landing::within_window(at(stored), &retirements)
 }
 
 fn insert(target: RowId, n: usize) -> RowChange {
@@ -481,6 +537,7 @@ async fn rust_result(history: &QueueHistory, received: &[WriteId], streamed: boo
     if let Kind::Raise { convert } = history.kind {
         return raise_result(history, received, convert).await;
     }
+    assert!(matches!(history.kind, Kind::Reset));
     let ids = SequentialIds::new();
     let source_store = TestStore::with_ids(&ids);
     let target_store = TestStore::with_ids(&ids);
@@ -588,6 +645,7 @@ async fn raise_result(history: &QueueHistory, received: &[WriteId], convert: boo
 fn verdict_json(history: &QueueHistory, verdict: &ChangeVerdict) -> Value {
     match verdict {
         ChangeVerdict::Applied => json!({"kind": "applied"}),
+        ChangeVerdict::Dropped => json!({"kind": "dropped"}),
         ChangeVerdict::Ignored(entry) => {
             assert_eq!(*entry, RESET);
             json!({"kind": "ignored", "entry": 1})
@@ -789,4 +847,130 @@ async fn queue_conversion_differential_histories() {
         }
     }
     assert!(dependent > 0 && schema > 0, "{dependent} {schema}");
+}
+
+/// Rust/Lean comparison of retirement replay (§9, §10, B17): the real receiver
+/// applies writes at their publication times while replay keeps and drops the
+/// retiring entries between arrivals, rebuilding each time; its committed rows,
+/// per-change verdicts and losses must equal the queue model's
+/// `windowRows`/`windowResults` under the final kept retirements, with
+/// `Receive.withinWindow` deciding each write's own window.
+mod retire {
+    use super::*;
+    use crate::entry_effects::tests::fate;
+    use crate::write_landing::tests::retire;
+
+    /// Replay's current fate for each retiring entry.
+    async fn set_fates(db: &Database, entries: &[crate::EntryId; 2], fates: [bool; 2]) {
+        for (entry, kept) in entries.iter().zip(fates) {
+            fate(db, *entry, kept).await.unwrap();
+        }
+    }
+
+    async fn retire_result(
+        history: &QueueHistory,
+        received: &[WriteId],
+        rng: &mut Generator,
+    ) -> (Value, usize) {
+        let Kind::Retire { kept } = history.kind else {
+            unreachable!()
+        };
+        let store = TestStore::new();
+        let target = store.schema(tables(), SCHEMA).await.unwrap();
+        for write in history
+            .writes
+            .iter()
+            .filter(|w| history.covered.contains(&w.header.position))
+        {
+            assert_eq!(
+                target.receive(write.clone().into()).await.unwrap(),
+                ApplyOutcome::Applied
+            );
+        }
+        let mut entries = Vec::new();
+        for (device, number, stored) in RETIRED {
+            entries.push(retire(&target, DeviceId(device), number, "device", stored).await);
+        }
+        let entries: [crate::EntryId; 2] = entries.try_into().unwrap();
+        let mut fates = [rng.pick(2) == 0, rng.pick(2) == 0];
+        set_fates(&target, &entries, fates).await;
+        let mut flips = 0;
+        for id in received {
+            // Replay keeps or drops a retirement between arrivals.
+            if rng.pick(3) == 0 {
+                let which = rng.pick(2);
+                fates[which] = !fates[which];
+                fate(&target, entries[which], fates[which]).await.unwrap();
+                flips += 1;
+            }
+            let index = history.index(*id);
+            let at = std::time::UNIX_EPOCH + std::time::Duration::from_secs(history.stored[index]);
+            assert_eq!(
+                target
+                    .apply_downloaded::<PendingRecord>(history.writes[index].clone().into(), at)
+                    .await
+                    .unwrap(),
+                ApplyOutcome::Applied
+            );
+        }
+        set_fates(&target, &entries, kept).await;
+        let positions = target.sync_state(Vec::new()).await.unwrap().positions;
+        assert!(
+            history
+                .writes
+                .iter()
+                .all(|w| positions.covers(w.header.position)),
+            "every original position is consumed"
+        );
+        let reloading = target
+            .inspect_writer(|db| crate::entry_effects::reloading(db, &Audience::Store).unwrap());
+        assert!(!reloading, "every change was rebuilt from retained inputs");
+        let result = observed(&target, history, received);
+        target.close().await.unwrap();
+        (result, flips)
+    }
+
+    /// Lean `window_rows_and_losses_converge` and B17's retirement histories,
+    /// generated: late writes' changes are dropped without losses, otherwise
+    /// eligible changes using them are dependency losses beside their writes'
+    /// other changes, and the result is independent of arrival order and of
+    /// the replay changes made on the way.
+    #[tokio::test]
+    #[ignore = "requires COVEN_QUEUE_LEAN; scripts/check.sh supplies the queue runner"]
+    async fn queue_retirement_differential_histories() {
+        let runner = std::env::var_os("COVEN_QUEUE_LEAN").expect("built queueRunner");
+        let (mut dropped, mut dependent, mut flips) = (0, 0, 0);
+        for seed in 0..48 {
+            let mut rng = Generator::new(seed + 60_000);
+            let kept = [rng.pick(4) != 0, rng.pick(4) != 0];
+            let history = QueueHistory::generate(&mut rng, Kind::Retire { kept });
+            let mut results = Vec::new();
+            for _ in 0..2 {
+                let received = history.arrival(&mut rng);
+                let (rust, flipped) = retire_result(&history, &received, &mut rng).await;
+                let rust = sorted(rust);
+                let lean = sorted(lean_result(&runner, &history, &received));
+                assert_eq!(
+                    rust,
+                    lean,
+                    "queue retirement differential, seed {seed}\ninput: {}",
+                    history.input(&received)
+                );
+                flips += flipped;
+                dependent += rust["frozen"].as_array().unwrap().len();
+                dropped += rust["changes"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter(|c| c["verdict"]["kind"] == "dropped")
+                    .count();
+                results.push((rust["rows"].clone(), rust["frozen"].clone()));
+            }
+            assert_eq!(results[0], results[1], "arrival orders agree, seed {seed}");
+        }
+        assert!(
+            dropped > 0 && dependent > 0 && flips > 0,
+            "{dropped} {dependent} {flips}"
+        );
+    }
 }

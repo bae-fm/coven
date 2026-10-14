@@ -600,6 +600,32 @@ same verdicts, frozen causes and rows are compared
 (`converted_change_matches_receiver`, `rows_and_losses_converge`). The callback
 is the identity here; renamed columns and references are Rust-tested.
 
+`Retired.lean` composes a write's own retirement window with this classifier,
+as merge's `Receive.base` composes `withinWindow` with the boundary verdict:
+`windowChange` drops every change of a late write with no loss of its own,
+and `windowLoss` judges sources under `windowState`, so otherwise eligible
+changes using a late write become dependency losses. `windowInput_effective`
+identifies the merge input with B17's `effective` history,
+`window_rows_and_losses_converge` gives equal rows and verdicts for equal
+consumed sets in any causal order, and `window_none_classify` recovers
+`classifyChange` when nothing is late. Given kept retirements and each
+write's storage time, the runner decides lateness with `Receive.withinWindow`
+and reports `windowResults` and `windowRows`.
+`queue_retirement_differential_histories` generates 48 histories in which
+devices 104 and 105 are retired by entries stored at 0 and 5 days and publish
+writes one second either side of their thirty-day deadlines. Authors either
+already rebuilt without late writes or still hold them, so chains of changes
+built on late writes occur. The real receiver applies the writes at their
+publication times while replay keeps and drops the two entries between
+arrivals, rebuilding in each replay transaction, then settles on the
+history's final fates. Each history runs in two arrival orders; it compares
+every change's retained verdict, including `dropped`, the frozen dependency
+losses and the merge rows with the model under the final kept retirements,
+requires every position consumed and no audience left waiting for a reload,
+and requires the two orders to agree (`receive_runs_agree`,
+`replay_restores_by_own_window`). Retirements of covered writes, snapshot
+contributions and finality are Rust-tested.
+
 Run them with:
 
 ```sh

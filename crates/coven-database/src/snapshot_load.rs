@@ -228,6 +228,7 @@ pub(crate) fn read(
                     crate::snapshot_state::loss(database, schema, loss, &metadata, &mut loss_state)?
                 }
                 SnapshotRecord::Authored(authored) => {
+                    crate::write_landing::agrees(database, &authored)?;
                     crate::write_sources::load_evidence(database, &authored)?;
                     if authored.complete {
                         complete.insert((

@@ -41,6 +41,14 @@ pub enum SnapshotError {
     /// A supplied write cannot yet apply under the normal download checks.
     #[error("reload write cannot apply: {0:?}")]
     WriteWaiting(crate::WriteWait),
+    /// The snapshot judged a covered write's own retirement window otherwise
+    /// than this device's replay does (§10). Its contributions cannot be
+    /// rebuilt here, so nothing loads; a snapshot made under the same verdict can.
+    #[error("snapshot judged write {write:?}'s retirement window otherwise")]
+    RetirementVerdict {
+        /// The covered write this device judged itself.
+        write: coven_merge::WriteId,
+    },
     /// Individually valid records disagree with one another or the schema.
     #[error("inconsistent snapshot: {0}")]
     Inconsistent(&'static str),
