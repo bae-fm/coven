@@ -166,30 +166,61 @@ async fn a_provider_access_wait_does_not_hold_unrelated_data() {
     operations.close().await.unwrap();
 }
 
-/// SD `KeyPhases.begin` over IO `readLog`: a first phase whose entry or copy
-/// log does not end in a terminal miss (a failed read, or an entry its reader
-/// refuses) permits no first attempt; the real pass agrees.
+/// IO `PassPhases.run` over `readLog`: a first phase whose entry log reaches
+/// a refused entry is incomplete, so the pass makes no first attempt and only
+/// resends an attempted write, under the previous pass's catch-up while it is
+/// fresh. A failed entry or copy read ends the pass. The real pass agrees.
 #[test]
 #[ignore = "requires COVEN_IO_RUNNER"]
 fn io_differential_pass_phases() {
+    use coven_foundation::clock::Clock;
+    use coven_storage::test_utils::Faults;
     use serde_json::json;
+    use std::time::Duration;
     let runtime = tokio::runtime::Runtime::new().unwrap();
     let mut cases = Vec::new();
     let mut results = Vec::new();
-    for (entry_failed, entry_refused, copy_failed) in [
-        (false, false, false),
-        (true, false, false),
-        (false, true, false),
-        (false, false, true),
+    for (entry_failed, entry_refused, copy_failed, attempted, expired) in [
+        (false, false, false, false, false),
+        (true, false, false, false, false),
+        (false, true, false, false, false),
+        (false, false, true, false, false),
+        (false, false, false, true, false),
+        (false, true, false, true, false),
+        (false, true, false, true, true),
+        (false, false, false, true, true),
+        (true, false, false, true, false),
+        (false, false, true, true, false),
     ] {
-        let first_attempt = runtime.block_on(async {
+        let (first_attempt, retried) = runtime.block_on(async {
             let storage = storage();
-            let ana = group(storage.clone(), 1).await.remove(0);
+            let mut ana = group(storage.clone(), 1).await.remove(0);
             sql(&ana.db, "INSERT INTO notes VALUES('one','title','body')").await;
+            if attempted {
+                // Write 1's first attempt fixes its keys, then fails.
+                let mut faults = Faults::none();
+                faults.fail_next = 1;
+                storage.set_faults(faults).await;
+                assert!(ana.writes.upload_writes().await.is_err());
+                storage.set_faults(Faults::none()).await;
+                let fixed = ana
+                    .db
+                    .read_oldest_upload(|upload| {
+                        Ok::<_, coven_database::DbError>(upload.keys.is_some())
+                    })
+                    .await
+                    .unwrap();
+                assert_eq!(fixed, Some(true));
+                sql(&ana.db, "INSERT INTO notes VALUES('two','title','body')").await;
+            }
+            if expired {
+                // The last completed catch-up started five minutes ago.
+                ana.clock.set(ana.clock.now() + Duration::from_secs(300));
+            }
             if entry_refused {
                 plant_refused_entry(&storage).await;
             }
-            let mut faults = coven_storage::test_utils::Faults::none();
+            let mut faults = Faults::none();
             if entry_failed {
                 faults.read_failures.insert(
                     ObjectPath::store_log(STORE_ID, DeviceId(1), NonZeroU64::new(2).unwrap()),
@@ -205,14 +236,20 @@ fn io_differential_pass_phases() {
             storage.set_faults(faults).await;
             let (operations, _ana) = start(ana);
             let _ = operations.sync().await;
-            let sent = storage.status(&write_path(1)).await.unwrap().is_some();
+            let present = |number| {
+                let storage = storage.clone();
+                async move { storage.status(&write_path(number)).await.unwrap().is_some() }
+            };
+            let untried = if attempted { 2 } else { 1 };
+            let sent = (present(untried).await, attempted && present(1).await);
             operations.close().await.unwrap();
             sent
         });
         cases.push(json!({"check":"phases",
             "entry":{"count":usize::from(entry_refused),"failed":entry_failed,"refused":entry_refused},
-            "copy":{"count":0,"failed":copy_failed,"refused":false}}));
-        results.push(json!({"first_attempt":first_attempt}));
+            "copy":{"count":0,"failed":copy_failed,"refused":false},
+            "attempted":attempted,"elapsed":if expired { 300 } else { 0 }}));
+        results.push(json!({"first_attempt":first_attempt,"retried":retried}));
     }
     assert_eq!(results, crate::discovery::tests::io_runner(&cases));
 }

@@ -700,6 +700,70 @@ transfer limits, worker scheduling and its independence from pass completion
 remain outside this trace model. Moving requests to the worker does not
 remove them from total IO accounting.
 
+### One pass's phases
+
+**A pass's work uses its own first phase — proved for the modeled pass.**
+[`PassPhases`](io/CovenIO/PassPhases.lean) runs one pass over the same gate.
+Phase 1 reads the entry and copy logs with `readLog`. It is complete when
+both logs reach a terminal miss and every copy's clear prefix decodes; only
+then does it record its catch-up, started at the pass's start. The pass then
+sends, in this order: copies reserved earlier, this pass's new shares, the
+reserved entry, due operations (each operation's copies before its entry),
+attempted writes, untried writes, operations resumed by those uploads, and
+positions. Every ordinary request goes through Trace's `gateStep`. A refused
+request ends the pass's sending; that work waits for the next pass.
+
+What each theorem shows:
+
+- `gated`: every request except an admission was accepted by the gate, so
+  its catch-up completed with a sending identity and started less than five
+  minutes before the request.
+- `current_uses_this_pass`: work decided from the current membership and
+  copies — a new share, a new entry, an admission or a first attempt — uses a
+  catch-up started within this pass. `caught_uses_this_pass` says the same
+  for every request of a pass whose phase 1 completed.
+- `incomplete_only_retries`: after an incomplete phase 1 the pass decides
+  nothing new. It only resends copies and the entry reserved before the pass
+  and attempted writes, and posts positions, each under the last completed
+  catch-up from before the pass. That catch-up must still be fresh.
+- `begin_iff_complete`: the data package's `KeyPhases.begin`, which
+  `firstSend` needs, succeeds exactly when phase 1 is complete. So first
+  attempts select keys from this pass's membership and copies.
+- `sent_prefix`: what a pass sends is a prefix of the order above. Copies go
+  up in number order, an operation's copies before its entry, and writes in
+  queue order: an untried write never precedes an attempted one.
+- `keys_before_data`: if any write goes up, every planned phase-2 copy and
+  entry went up before it, including a needed rotation's copies and entry.
+- `admission_rescans` and `admission_identity`: an entry published under
+  §10's admission exception uses a membership-complete catch-up of a member
+  that is not retired and has no ordinary authority yet. Every ordinary
+  request after it uses a catch-up that started after it, so that observation
+  includes the admission.
+- `invite_after_reserved`: publishing and confirming every reserved copy in
+  number order confirms all of them, from any reachable copy log, including
+  one with a lost reply. An invite that reads its copy number after this names
+  a number at or after every copy reserved before it.
+  `unsettled_cursor_precedes_reserved` checks that reading it first names an
+  earlier number.
+
+**Deciding phase 1 from its entries alone — checked counterexample.**
+`entries_only_reuses_previous`: the previous pass's catch-up started at
+second 0. This pass starts at second 10 and reads every entry and copy to its
+miss, but one copy's clear prefix does not decode. If the pass counts phase 1
+as complete because its entries completed and the earlier catch-up is still
+fresh, write 1's first attempt goes up with the previous pass's copies. The
+copy this pass could not read may expose that key. Deciding from the pass's
+own observation sends only positions. `failed_sends_nothing`: a failed read
+in phase 1 ends the pass with nothing sent.
+
+[`IORunner.lean`](io/IORunner.lean)'s `phases` case runs `PassPhases.run`
+for the Rust test `io_differential_pass_phases`
+([`operation_pass_tests.rs`](../../crates/coven-sync/src/operation_pass_tests.rs)).
+It covers a failed entry or copy read, a refused entry, an attempted write
+from an earlier pass, and that pass's catch-up being fresh or five minutes
+old. It compares whether an untried write got its first attempt and whether
+the attempted write was resent.
+
 ### Joined revocation
 
 **The conditional §3 guarantee is proved across the two packages.**
@@ -951,6 +1015,16 @@ The model does not establish them.
 - Confirm cutoff includes in-flight sessions, orphan scans survive reopen, a new
   access epoch requires a new scan, and rows, losses, history and non-final effects
   continue protecting file deletion.
+- A pass whose copy observation meets an unreadable clear prefix must not
+  count phase 1 as complete (`entries_only_reuses_previous`). The current
+  `catch_up_membership` decides from entry completeness and `can_send()`, which
+  can still see the previous pass's catch-up: such a pass shares keys and makes
+  first attempts with that earlier pass's copies. Test a phase 1 that ends in
+  an unreadable copy while the previous catch-up is fresh.
+- The reserved store-log entry is held after an incomplete phase 1 by the
+  pass's own settling step, while an operation already publishing its reserved
+  entry and copies resends them. Both send only fixed attempts, as
+  `incomplete_only_retries` allows, but the two paths differ.
 
 ## Readings and limits
 
@@ -986,6 +1060,21 @@ uses a shared duration scale. Dropping one retirement restores admission only
 when no other kept retirement blocks it. Out-of-band file work means uploads;
 eager downloads remain in the pass. Numbering starts at 1, completion requires
 retained input and terminal observation, and byte receipt is not application.
+
+Pass phases: phase 1 is complete only when both logs end in a terminal miss
+and every copy prefix decodes; a refused entry, exhausted scan or unreadable
+prefix leaves it incomplete and the pass continues, while a failed read ends
+the pass with nothing sent. After an incomplete phase 1, fixed attempts —
+copies and the entry reserved before the pass, and attempted writes — may be
+resent under the last completed fresh catch-up; new shares, new entries,
+admission and first attempts wait. Operations need phase 1 completed with
+sending authority; a pass that completed it without that authority holds its
+reserved copies, admits its registration, observes again, then makes first
+attempts but runs no operation. A refused request ends the pass's sending.
+Requests are sequential, at clock readings no earlier than the pass's start;
+the admission theorem needs those readings to be nondecreasing. Waiting
+operations, reloads, snapshots, retention and file work are outside this pass
+model.
 
 ## Spec publication edit
 

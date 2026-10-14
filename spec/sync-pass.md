@@ -252,6 +252,16 @@ catch-up also prevents new administrative work, key sharing and first
 attempts requiring a current membership view; it is not permission to seal
 against an older replay. Fixed attempted uploads retain their bytes, but
 every retry still needs §10's fresh completed catch-up.
+The first phase is complete only when the entry and copy logs reach their
+misses and every copy's clear prefix decodes. A pass's operations, new
+sharing, admission and first attempts use its own completed first phase,
+never an earlier catch-up that is still fresh enough for sending. After an
+incomplete one, the pass only resends copies and an entry reserved before it
+and attempted writes, and posts positions, each through §10's gate
+([`current_uses_this_pass`, `incomplete_only_retries`, `gated`](proofs/io/CovenIO/PassPhases.lean)).
+Counting the phase as complete because its entries completed while an earlier
+catch-up is fresh would first-send with that earlier pass's copies
+([`entries_only_reuses_previous`](proofs/io/CovenIO/PassPhases.lean)).
 
 Advance the single finality horizon only from all entries through `T′`
 and the inclusive §9 window `[T′ - 30 days, T′]`. Its cutoff is
@@ -335,7 +345,9 @@ or usable fingerprint key changes.
 Only a complete membership and key-copy observation with committed replay
 and a successful identity check supplies the completed first phase's start
 to senders. Completion never substitutes its own time for that start. A
-phase taking five minutes or more supplies no permission to send.
+phase taking five minutes or more supplies no permission to send. Key
+selection's caught-up view exists exactly when this observation is complete
+([`begin_iff_complete`](proofs/io/CovenIO/PassPhases.lean)).
 
 ## Phase 2: make keys and access match
 
@@ -346,7 +358,11 @@ retired credentials from each kept replacement's recorded view (§11). Use an
 existing usable replacement; if none is held, acquire one or have a current
 audience member's device rotate. Share historical keys with current members
 who lack copies for their current non-retired sealing credential. Complete a needed rotation's copies and entry before
-first sending data with its key. If no usable key can be acquired or made,
+first sending data with its key. Every copy and entry a pass sends in
+phase 2 goes up before its writes: copies in number order, an operation's
+copies before its entry, and writes in queue order
+([`sent_prefix`, `keys_before_data`](proofs/io/CovenIO/PassPhases.lean)).
+If no usable key can be acquired or made,
 that audience's sends wait with their first reason; app writes still commit.
 
 The owner's device runs the access work recorded when entries were applied.
@@ -390,6 +406,10 @@ asynchronous-job polling as operation requests, subject to backoff.
 First settle any reserved store-log entry and its remaining prerequisite
 copies before reserving another entry. This includes queued entries whose
 initiating operation was discarded; discarding it cannot leave a log gap.
+A reserved registration sent under §10's admission exception is followed by
+another read-only first phase before any ordinary send, and ordinary sends
+use that later observation
+([`admission_rescans`, `admission_identity`](proofs/io/CovenIO/PassPhases.lean)).
 
 While this device has open invites and a request check is due, list
 **`<store>/join-requests/` once**, serving all its invites. Read only newly
@@ -783,7 +803,10 @@ immediately. An app retry can override ordinary backoff, never this cooldown.
 A joiner keeps its encrypted request, writer-copy download position,
 downloaded copies and entries across polling iterations. It does not run a
 complete store sync on every wait. The invite names the initial key, inviting
-writer, fixed member id and last published key-copy number at invite time. Each due attempt
+writer, fixed member id and last published key-copy number at invite time.
+Before reading that number, the inviting device publishes its reserved
+copies in number order, so the number follows every copy reserved before the
+invite ([`invite_after_reserved`](proofs/io/CovenIO/PassPhases.lean)). Each due attempt
 GETs the next number, reading whole copies and inspecting their clear prefixes
 until an initial-key copy naming both its fixed id and new sealing key
 appears or a miss ends the attempt. Hits can

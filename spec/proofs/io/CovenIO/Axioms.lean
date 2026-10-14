@@ -384,3 +384,20 @@ import CovenIO
 #print axioms CovenIO.ListingMarginExamples.Endpoint.revised_endpoint_safe
 #print axioms CovenIO.ListingMarginExamples.Endpoint.next_tick_sees_late
 #print axioms CovenIO.ListingMarginExamples.Endpoint.revised_replay_stable
+
+#print axioms CovenIO.PassPhases.observe_completed
+#print axioms CovenIO.PassPhases.begin_iff_complete
+#print axioms CovenIO.PassPhases.step_cases
+#print axioms CovenIO.PassPhases.steps_prefix
+#print axioms CovenIO.PassPhases.gated
+#print axioms CovenIO.PassPhases.caught_uses_this_pass
+#print axioms CovenIO.PassPhases.incomplete_only_retries
+#print axioms CovenIO.PassPhases.current_uses_this_pass
+#print axioms CovenIO.PassPhases.sent_prefix
+#print axioms CovenIO.PassPhases.keys_before_data
+#print axioms CovenIO.PassPhases.failed_sends_nothing
+#print axioms CovenIO.PassPhases.admission_rescans
+#print axioms CovenIO.PassPhases.admission_identity
+#print axioms CovenIO.PassPhases.entries_only_reuses_previous
+#print axioms CovenIO.PassPhases.invite_after_reserved
+#print axioms CovenIO.PassPhases.unsettled_cursor_precedes_reserved

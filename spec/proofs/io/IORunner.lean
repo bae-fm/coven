@@ -2,7 +2,7 @@ import CovenIO.Execution
 import CovenIO.Trace
 import CovenIO.Downloads
 import CovenIO.Retired
-import CovenStorelogData.KeyPhases
+import CovenIO.PassPhases
 import Lean
 
 /-! The IO differential runner. Each case names the executable transition it
@@ -230,30 +230,36 @@ private def drain (j : Json) : Except String Json := do
   return Json.mkObj [("drained", toJson drained),
     ("polled", toJson (Retired.polling after known))]
 
-/-- SD `KeyPhases.begin` over IO `readLog`: phase 1 supplies membership and
-the copy listing only when the entry and key-copy logs each reach a terminal
-miss. A failed read or a refused entry leaves no completed observation, and
-`firstSend` needs one (`incomplete_membership_waits`, `incomplete_listing_waits`). -/
+/-- `PassPhases.run` over IO `readLog`. Phase 1 reads the entry log, then
+the copy log once the entries reach their miss: a failed read ends the pass,
+a refused entry leaves phase 1 incomplete. The previous pass's catch-up
+started at second 0; this pass starts `elapsed` seconds later. Write 1 is
+attempted or untried; with an attempted write 1, write 2 is untried.
+Reports whether an untried write had its first attempt and whether an
+attempted write was resent (`incomplete_only_retries`, `gated`). -/
 private def phases (j : Json) : Except String Json := do
-  let observe (kind : Kind) (field : String) : Except String Bool := do
+  let observe (kind : Kind) (field : String) : Except String Execution := do
     let log ← j.getObjVal? field
     let count ← log.getObjValAs? Nat "count"
     let failed ← log.getObjValAs? Bool "failed"
     let refused ← log.getObjValAs? Bool "refused"
     let store : Store := (List.range count).foldl
       (fun store n => put store (.log kind 1 (n + 1)) [n + 1] 0) empty
-    let result := readLog (fun _ => store) (fun _ => if failed then some .network else none)
-      (fun _ => refused) kind 1 (count + 2) 0 0
-    pure (result.stop == .miss)
-  let wait : CovenStorelogData.Pending.Reason := .dropped .notAllowed
-  let membership : Except CovenStorelogData.Pending.Reason (List Nat) :=
-    if ← observe .entry "entry" then .ok [] else .error wait
-  let listing : Except CovenStorelogData.Pending.Reason CovenStorelogData.KeySelection.Copies :=
-    if ← observe .copy "copy" then .ok [] else .error wait
-  let caughtUp := match CovenStorelogData.KeyPhases.begin [] membership listing with
-    | .ok _ => true
-    | .error _ => false
-  return Json.mkObj [("first_attempt", toJson caughtUp)]
+    pure (readLog (fun _ => store) (fun _ => if failed then some .network else none)
+      (fun _ => refused) kind 1 (count + 2) 0 0)
+  let attempted ← j.getObjValAs? Bool "attempted"
+  let elapsed ← j.getObjValAs? Nat "elapsed"
+  let entries ← observe .entry "entry"
+  let copies ← observe .copy "copy"
+  let plan : PassPhases.Plan := {
+    writer := 1, start := elapsed, phase := ⟨entries, copies, true, .send, false, elapsed⟩,
+    copies := [], shares := [], entry := none, admission := none, operations := [],
+    attempted := if attempted then [1] else [], untried := if attempted then [2] else [1],
+    resumed := [], clock := fun _ => elapsed }
+  let sent := (PassPhases.run plan ⟨none, some ⟨0, 0, .send, false⟩⟩).sent.map (·.work)
+  return Json.mkObj [
+    ("first_attempt", toJson (sent.any fun w => match w with | .first _ => true | _ => false)),
+    ("retried", toJson (sent.any fun w => match w with | .retry _ => true | _ => false))]
 
 private def run (j : Json) : Except String Json := do
   match ← j.getObjValAs? String "check" with

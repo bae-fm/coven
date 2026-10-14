@@ -1416,7 +1416,10 @@ the file's ranges under `F`.
 
 A sync pass has three phases: catch up on membership and key copies; make
 keys and provider access match that view; then sync data. The request order
-and pending-work gates are in [One sync pass](sync-pass.md).
+and pending-work gates are in [One sync pass](sync-pass.md). A pass's
+operations, key sharing and first attempts use its own completed first phase;
+after an incomplete one it only resends attempts already fixed
+([`current_uses_this_pass`, `incomplete_only_retries`](proofs/io/CovenIO/PassPhases.lean)).
 File uploads run in their own worker (§16.5); a pass does not wait for them.
 
 - Each device uploads its writes to its own log in storage, and the other
