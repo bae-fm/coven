@@ -5516,6 +5516,19 @@ holds failures and rejected entries, without making either wait look completed.
   - Observe a block and save its record in one transaction. Replace it if
     the first condition changes; delete it when the subject advances or
     replay removes the need for that work.
+  - Positions that move past a waiting write without applying it, as a
+    loaded snapshot's do, end this device's wait for that write in the same
+    transaction: the download never fetches a covered write again. A
+    refusal or drop of the write's bytes stays
+    ([`cover_safe`, `cover_keeps_verdicts`](proofs/storelog-data/CovenStorelogData/Pending.lean)).
+  - A completed listing replaces this device's records for its subjects as
+    a whole: each pass's positions scan decides every peer's positions
+    record, and each audience's snapshot listing decides that audience's
+    snapshot records. A subject the listing does not name has no object to
+    process and loses its record; a failed listing changes nothing. This
+    device's own positions record clears only when its publication is
+    confirmed
+    ([`listing_decides`, `listing_safe`, `own_positions_kept`](proofs/storelog-data/CovenStorelogData/Pending.lean)).
   - No wall-clock time or attempt counter controls these records. They
     describe current work, not a history of attempts.
 - Record every wait and failure, including:
