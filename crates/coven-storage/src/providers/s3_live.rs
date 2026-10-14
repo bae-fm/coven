@@ -81,15 +81,23 @@ impl LiveS3 {
             }
         };
         let storage = self.connect(Some(settings));
+        // A refused versioning read, which detection records as unknown, may
+        // hide retained versions; the version listing itself establishes them.
         let cleanup = match storage.provider.bucket_versioning().await {
-            Ok(S3BucketVersioning::Enabled | S3BucketVersioning::Suspended) => {
+            Ok(S3BucketVersioning::Enabled | S3BucketVersioning::Suspended) => Ok(true),
+            Err(error) if versioning::unknown(&error) => Ok(true),
+            Ok(_) => Ok(false),
+            Err(error) => Err(error),
+        };
+        let cleanup = match cleanup {
+            Ok(true) => {
                 live_cleanup::cleanup_versions(
                     &storage.provider,
                     &ObjectPrefix::all(store).under(&storage.provider.prefix),
                 )
                 .await
             }
-            Ok(_) => Ok(()),
+            Ok(false) => Ok(()),
             Err(error) => Err(error),
         };
         crate::transfer::with_cleanup(result, cleanup)
