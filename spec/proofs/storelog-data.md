@@ -431,8 +431,9 @@ a snapshot whose complete body checked and which this device had not
 refused; `load_refuses_failed` proves each snapshot passed over failed its
 check. `refused_stays_unoffered` follows a history: the refusal a failed load
 records keeps that snapshot out of every later catalog while listings still
-name it. A newer installed version may retry a refusal (§19.1); the model
-runs one version, so that retry is outside it.
+name it. A newer installed version may retry a refusal (§19.1); loading
+here runs one version, so that retry is outside it. Retention across
+versions is modeled below.
 
 **Passing over a newer-format snapshot in retention fails (checked
 counterexample).** `select` makes the reload and the return check wait with
@@ -468,6 +469,77 @@ its author's registration
 (`a_snapshot_waiting_for_its_authors_registration_holds_log_retention`); this
 model does not cover that case.
 
+**Passing over a refused snapshot in retention fails (checked
+counterexamples).** [RefusedRetention](storelog-data/CovenStorelogData/RefusedRetention.lean)
+gives each installed version its own verdicts on a listed snapshot: whether
+it reads the prefix format, whether the prefix check passes, a body refusal
+this device recorded, and whether it accepts the key sealing the rows. The
+signed positions belong to the object and do not change between versions.
+
+§19.1 makes no refusal final across versions. Every `Refusal` variant has
+retry class `AfterUpdate` (`every_refusal_after_update`), and a different
+installed version checks the bytes once more whatever check failed
+(`every_kind_rechecked`); the refusing version never does
+(`same_version_keeps`). So a snapshot one version refuses can be the newest
+for a later version, or for a device on a version whose check passes.
+
+The examples use one store. Ana's snapshot covers her writes through 10 and
+Ben's through 2; Ben's covers Ana through 3 and himself through 20, so it is
+the newest. Ana has uploaded her writes through 10, so her reload's fixed
+target includes them. In each, Ana's retention deletes her write 4. A
+version whose checks pass selects Ben's snapshot and needs write 4, and
+§15's missing-write rule skips it as having no part, so its changes are lost.
+
+- `refused_body_retention_counterexample`: Ana's version refuses Ben's body.
+  Rust's log retention judges by its loading candidates, which leave refused
+  bodies out, so it judges by Ana's snapshot. §15 as written does not fail
+  here: a refused body's verified prefix still establishes history, and the
+  current newest is chosen by prefix.
+- `missing_key_retention_counterexample`: the same through a snapshot whose
+  key introduction Ana's device does not accept, which Rust's candidates
+  also leave out.
+- `refused_prefix_retention_counterexample`: Ana's version refuses Ben's
+  prefix signature. §15 says a refused prefix "establishes nothing and does
+  not hold deletion", so retention judges by Ana's snapshot. This is the
+  spec as written; her updated version verifies the prefix.
+
+`classified_safe` and `classified_never_skips` prove the general rule.
+Retention holds an audience while any listed prefix waits for an update or
+is refused with a kind not marked permanent; otherwise it judges by the
+newest verified prefix, whatever this device found in that snapshot's body
+or key. When it deletes a write, every later version selects a current
+newest snapshot covering it, so the reload loads that snapshot, or waits if
+it cannot load its body, and never skips the write. The premises: the later
+version reads every format and verifies every prefix the earlier one did,
+and no later version verifies a prefix refused with a kind marked permanent
+(`Sound`). The spec marks no kind permanent, so the rule it supports holds on
+every refused prefix: `holding_safe` and `holding_never_skips` need no
+classification premise. `as_written_safe_for_bodies` proves §15 as written
+safe while no listed prefix is refused. The prefix counterexample shows that
+treating the signature refusal as permanent is unsound.
+
+What the safe rule costs. A body refusal, or a key this device does not
+accept, never holds retention (`retention_ignores_bodies`). A refused prefix
+holds every write of its audience (`refused_prefix_holds`) until a newer
+version verifies it or the listing stops naming it; then the rule is T149's
+`retentionCoversAll` (`holding_without_refusals`). A prefix no version can
+verify, such as damaged bytes, stays listed until its author deletes it, and
+§15 lets an author delete its own snapshot only once a newer one covers
+everything it covers, which no reader can check against an unverifiable
+prefix. `holding_judges_by_newest` checks the rule on the store: with Ben's
+body refused it keeps write 4 and deletes write 3; with his prefix refused
+it keeps both.
+
+Readings: the current newest counting snapshot, in §15's deletion rule and
+its missing-write rule, is chosen among verified prefixes whatever their
+bodies (§19.1: a damaged snapshot's verified prefix still establishes
+required history; "passed over" applies to loading). A version's verdict on
+a prefix is the same on every device running it. The listing is fixed, as in
+`waiting_retention_safe`; new arrivals and snapshot deletion between the two
+versions are outside the model, as are the other deletion gates, the
+registration wait, reset and raise boundaries, and a later version stricter
+than an earlier one.
+
 The Rust comparison `data_differential_pending_records`
 ([`pending_tests.rs`](../../crates/coven-sync/src/pending_tests.rs)) mixes
 the four steps in random histories against the real pending table. A cover
@@ -485,8 +557,8 @@ histories and must survive passes. After each step, Rust's `pending()` must
 equal `Local.step` followed by `Pending.pending`, retry class included. The
 code that builds listings and scans from storage (the positions pass,
 snapshot catalog and store-log scan) is not driven by this comparison, and
-`PendingScans`' catalog, loading and retention models have no Rust
-comparison.
+`PendingScans`' catalog, loading and retention models and `RefusedRetention`
+have no Rust comparison.
 
 **Loss metadata is proved.** `LostValues.pending_exact` contains exactly the
 non-final entries in a loss's dependency expression, without duplicates.

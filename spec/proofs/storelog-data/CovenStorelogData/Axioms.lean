@@ -205,6 +205,22 @@ import CovenStorelogData
 #print axioms CovenStorelogData.Pending.reload_waits_for_newer
 #print axioms CovenStorelogData.Pending.newer_snapshot_retention_counterexample
 #print axioms CovenStorelogData.Pending.waiting_retention_safe
+#print axioms CovenStorelogData.Pending.every_refusal_after_update
+#print axioms CovenStorelogData.Pending.every_kind_rechecked
+#print axioms CovenStorelogData.Pending.same_version_keeps
+#print axioms CovenStorelogData.Pending.selectChecked_eq_select
+#print axioms CovenStorelogData.Pending.classified_safe
+#print axioms CovenStorelogData.Pending.classified_never_skips
+#print axioms CovenStorelogData.Pending.holding_safe
+#print axioms CovenStorelogData.Pending.holding_never_skips
+#print axioms CovenStorelogData.Pending.as_written_safe_for_bodies
+#print axioms CovenStorelogData.Pending.retention_ignores_bodies
+#print axioms CovenStorelogData.Pending.refused_prefix_holds
+#print axioms CovenStorelogData.Pending.holding_without_refusals
+#print axioms CovenStorelogData.Pending.refused_body_retention_counterexample
+#print axioms CovenStorelogData.Pending.missing_key_retention_counterexample
+#print axioms CovenStorelogData.Pending.refused_prefix_retention_counterexample
+#print axioms CovenStorelogData.Pending.holding_judges_by_newest
 #print axioms CovenStorelogData.RetentionSafety.first_finality_wait_visible
 
 #print axioms CovenStorelogData.ReplayEffects.scan_realizes
