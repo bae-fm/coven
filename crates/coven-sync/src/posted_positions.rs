@@ -138,13 +138,15 @@ async fn scan(
         let known = previous
             .get(&device)
             .filter(|known| same_revision(&known.object, &object));
-        let checked = match known.map(|known| &known.checked) {
-            Some(Checked::Valid(bytes)) => Checked::Valid(bytes.clone()),
-            Some(checked @ Checked::Invalid { version, .. })
-                if version == env!("CARGO_PKG_VERSION") =>
-            {
-                checked.clone()
-            }
+        let (object, checked) = match known {
+            Some(Observed {
+                object,
+                checked: Checked::Valid(bytes),
+            }) => (object.clone(), Checked::Valid(bytes.clone())),
+            Some(Observed {
+                object,
+                checked: checked @ Checked::Invalid { version, .. },
+            }) if version == env!("CARGO_PKG_VERSION") => (object.clone(), checked.clone()),
             _ => check(database, storage, local, ring, &object)
                 .await
                 .map_err(|error| (device, error))?,
@@ -166,13 +168,7 @@ async fn scan(
                 })
             }
         }
-        next.insert(
-            device,
-            Observed {
-                object: known.map_or(object.clone(), |known| known.object.clone()),
-                checked,
-            },
-        );
+        next.insert(device, Observed { object, checked });
     }
     let reports = relevant_reports(database, local, &observed)
         .await
@@ -189,13 +185,16 @@ async fn check(
     storage: &dyn Storage,
     local: &LocalStoreLog,
     ring: Option<&StoreKeyring>,
-    object: &StoredObject,
-) -> Result<Checked, SyncError> {
-    let input = crate::object_input::ObjectInput::observe(database, object).await?;
-    let bytes = input.whole(storage).await?;
+    listed: &StoredObject,
+) -> Result<(StoredObject, Checked), SyncError> {
+    // The verdict belongs to the revision actually read, which can be newer
+    // than the listing's.
+    let (input, bytes) =
+        crate::object_input::ObjectInput::whole_replaceable(database, storage, listed).await?;
+    let object = input.object().clone();
     // A verdict on these bytes holds for this coven version; a wait for a
     // registration or key is checked again on the next listing.
-    Ok(match open(&bytes, &object.path, ring, &local.log)? {
+    let checked = match open(&bytes, &object.path, ring, &local.log)? {
         Ok(positions) => Checked::Valid(Object::PostedPositions(positions).encode()?),
         Err(reason @ (PendingReason::InvalidPositions(_) | PendingReason::UpdateRequired(_))) => {
             Checked::Invalid {
@@ -204,7 +203,8 @@ async fn check(
             }
         }
         Err(reason) => Checked::Waiting(reason),
-    })
+    };
+    Ok((object, checked))
 }
 
 async fn relevant_reports(

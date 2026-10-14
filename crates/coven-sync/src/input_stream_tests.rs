@@ -7,6 +7,12 @@ use coven_storage::{
 };
 use std::sync::Arc;
 
+/// The whole retained object and its missing suffix through one stream.
+async fn whole(input: &ObjectInput, storage: &dyn Storage) -> Result<Vec<u8>, SyncError> {
+    let stream = input.stream(storage).await;
+    input.collect(stream).await
+}
+
 #[tokio::test]
 async fn split_transport_frames_share_one_response_and_bounded_received_buffers() {
     for chunk in [1, 3, 65_535, 65_536, 65_537] {
@@ -72,7 +78,7 @@ async fn failed_transport_eof_cannot_be_recovered_from_a_complete_cached_body() 
         storage.set_faults(Faults::none()).await;
         let before = storage.reads().await.len();
         let input = ObjectInput::observe(&receiver.db, &object).await.unwrap();
-        assert_eq!(input.whole(storage.as_ref()).await.unwrap(), bytes);
+        assert_eq!(whole(&input, storage.as_ref()).await.unwrap(), bytes);
         let reads = storage.reads().await;
         assert_eq!(&reads[before..], &[(path, retained, 150_000 - retained)]);
         assert!(input.received().await.unwrap());
@@ -88,12 +94,12 @@ async fn empty_response_completion_survives_reopen_without_a_second_request() {
     let object = storage.status(&path).await.unwrap().unwrap();
     let before = storage.reads().await.len();
     let input = ObjectInput::observe(&receiver.db, &object).await.unwrap();
-    assert!(input.whole(storage.as_ref()).await.unwrap().is_empty());
+    assert!(whole(&input, storage.as_ref()).await.unwrap().is_empty());
     assert!(input.received().await.unwrap());
     drop(input);
     receiver.reopen(storage.clone(), vec![], vec![]).await;
     let input = ObjectInput::observe(&receiver.db, &object).await.unwrap();
-    assert!(input.whole(storage.as_ref()).await.unwrap().is_empty());
+    assert!(whole(&input, storage.as_ref()).await.unwrap().is_empty());
     assert_eq!(storage.reads().await.len() - before, 1);
 }
 
@@ -107,7 +113,7 @@ async fn failed_input_commit_preserves_neither_completion_nor_bytes() {
     let object = storage.status(&path).await.unwrap().unwrap();
     let input = ObjectInput::observe(&receiver.db, &object).await.unwrap();
     assert!(matches!(
-        input.whole(storage.as_ref()).await,
+        whole(&input, storage.as_ref()).await,
         Err(SyncError::Database(
             coven_database::DbError::InputBudgetExceeded { .. }
         ))

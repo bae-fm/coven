@@ -85,8 +85,52 @@ impl ObjectInput {
     pub(crate) async fn release_ranges(self) -> Result<(), SyncError> {
         Ok(self.retained.release_ranges().await?)
     }
-    pub(crate) async fn whole(&self, storage: &dyn Storage) -> Result<Vec<u8>, SyncError> {
-        let mut stream = self.stream(storage).await;
+    /// Read a replaceable object whole, returning the observation its bytes
+    /// belong to. A listing can name a revision that is replaced before this
+    /// GET; a response describing another revision is then the newer
+    /// observation, retained under its own metadata before its bytes are
+    /// checked, never combined with bytes of the listed revision (§4).
+    /// Retained bytes of the listed revision are used first, fetching only a
+    /// missing suffix.
+    pub(crate) async fn whole_replaceable(
+        database: &Database,
+        storage: &dyn Storage,
+        listed: &StoredObject,
+    ) -> Result<(Self, Vec<u8>), SyncError> {
+        debug_assert!(listed.path.is_replaceable());
+        let input = Self::observe(database, listed).await?;
+        let mut stream = input.stream(storage).await;
+        if input.retains_bytes().await? {
+            let bytes = input.collect(stream).await?;
+            return Ok((input, bytes));
+        }
+        let response = storage.stream_object(&listed.path, None).await?;
+        if response.metadata().path != listed.path {
+            return Err(StorageFailure::Protocol
+                .with_source("stream names another path")
+                .into());
+        }
+        if identity(response.metadata())? == identity(&input.object)? {
+            stream.start_with(response);
+            let bytes = input.collect(stream).await?;
+            return Ok((input, bytes));
+        }
+        drop(stream);
+        let newer = Self::observe(database, response.metadata()).await?;
+        let mut stream = newer.stream(storage).await;
+        if !newer.retains_bytes().await? {
+            stream.start_with(response);
+        }
+        let bytes = newer.collect(stream).await?;
+        Ok((newer, bytes))
+    }
+
+    /// Checked while holding this observation's receiving guard.
+    async fn retains_bytes(&self) -> Result<bool, SyncError> {
+        Ok(self.received().await? || !self.retained.ranges(0, self.object.size).await?.is_empty())
+    }
+
+    async fn collect(&self, mut stream: InputStream<'_>) -> Result<Vec<u8>, SyncError> {
         let length = usize::try_from(self.object.size)
             .map_err(|error| StorageFailure::Protocol.with_source(error))?;
         if self.object.size > coven_storage::BUFFERED_READ_LIMIT {

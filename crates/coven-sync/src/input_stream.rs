@@ -31,7 +31,14 @@ impl ObjectInput {
     }
 }
 
-impl InputStream<'_> {
+impl<'a> InputStream<'a> {
+    /// Consume a whole-object response opened for this observation, which
+    /// retains no bytes yet: the response supplies them from offset 0.
+    pub(super) fn start_with(&mut self, response: ObjectStream<'a>) {
+        debug_assert!(self.position == 0 && self.response.is_none());
+        self.response = Some(response);
+    }
+
     pub(crate) fn position(&self) -> u64 {
         self.position
     }

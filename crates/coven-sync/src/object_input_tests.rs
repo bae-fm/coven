@@ -87,6 +87,39 @@ async fn same_size_same_time_positions_replacement_fetches_the_new_revision() {
     );
 }
 
+/// A peer replaces its post between this device's listing and its GET. The
+/// response is the newer observation, not a protocol failure, and its bytes
+/// are retained under that revision rather than the listed one.
+#[tokio::test]
+async fn positions_replaced_after_listing_are_read_as_the_newer_revision() {
+    let storage = Arc::new(MemoryStorage::builder().build().unwrap());
+    let receiver = device(storage.clone(), 9, member(1), store(1)).await;
+    let path = ObjectPath::positions(store(1), DeviceId(1));
+    storage.replace(&path, b"listed").await.unwrap();
+    let listed = storage.status(&path).await.unwrap().unwrap();
+    storage.replace(&path, b"newer!").await.unwrap();
+    let newer = storage.status(&path).await.unwrap().unwrap();
+    assert_ne!(listed.revision, newer.revision);
+    let before = storage.request_trace().len();
+    let (input, bytes) = ObjectInput::whole_replaceable(&receiver.db, storage.as_ref(), &listed)
+        .await
+        .unwrap();
+    assert_eq!(bytes, b"newer!");
+    assert_eq!(input.object().revision, newer.revision);
+    assert_eq!(
+        storage.request_trace()[before..],
+        [MemoryRequest::Read(path.clone(), None)]
+    );
+    // The next listing names the revision already read: no request.
+    let before = storage.request_trace().len();
+    let (input, bytes) = ObjectInput::whole_replaceable(&receiver.db, storage.as_ref(), &newer)
+        .await
+        .unwrap();
+    assert_eq!(bytes, b"newer!");
+    assert_eq!(input.object().revision, newer.revision);
+    assert_eq!(storage.request_trace().len(), before);
+}
+
 #[tokio::test]
 async fn simultaneous_consumers_share_the_in_flight_range() {
     let storage = Arc::new(MemoryStorage::builder().build().unwrap());
