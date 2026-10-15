@@ -756,3 +756,119 @@ fn crashing_removal_writer() {
         .unwrap();
     panic!("write did not reach its removal crash point");
 }
+
+async fn run(db: &Database, statement: String) -> Result<(), crate::DbError> {
+    db.write(move |sql| {
+        sql.execute(&statement, [])?;
+        Ok(())
+    })
+    .await
+}
+
+/// A-D2: receivers compare a root's audience cell with the circle id's
+/// canonical lowercase text, so the author refuses every other spelling of
+/// it, such as Swift's uppercase `uuidString`, instead of committing a write
+/// every receiver refuses (§14). Statements, shared triggers and moves are
+/// all refused, and the transaction rolls back.
+#[tokio::test]
+async fn a_root_audience_must_be_spelled_canonically() {
+    let author = TestStore::new();
+    let db = author.schema(circle_tables(), CIRCLE_SCHEMA).await.unwrap();
+    author.join_circle(&db, circle());
+    run(
+        &db,
+        format!("INSERT INTO roots VALUES('{ROOT}','store','moved')"),
+    )
+    .await
+    .unwrap();
+    let queued = records(&db).len();
+    let other = "00000000-0000-4000-8000-000000000002";
+    let spellings = [
+        CIRCLE.to_uppercase(),
+        format!("{{{CIRCLE}}}"),
+        format!("urn:uuid:{CIRCLE}"),
+        CIRCLE.replace('-', ""),
+        "STORE".into(),
+        "not a circle".into(),
+    ];
+    for spelling in spellings {
+        for statement in [
+            format!("INSERT INTO roots VALUES('{other}','{spelling}','new')"),
+            format!("INSERT INTO events VALUES('{other}','{spelling}')"),
+            format!("UPDATE roots SET audience='{spelling}' WHERE id='{ROOT}'"),
+        ] {
+            let error = db
+                .write(move |sql| {
+                    sql.execute("INSERT INTO local_rows VALUES('rollback')", [])?;
+                    sql.execute(&statement, [])?;
+                    Ok(())
+                })
+                .await
+                .unwrap_err();
+            let crate::DbError::InvalidAudience { table, key } = error else {
+                panic!("{spelling}: expected InvalidAudience, received {error:?}");
+            };
+            assert_eq!(table, "roots");
+            assert!(matches!(
+                key.0.as_slice(),
+                [rusqlite::types::Value::Text(id)] if id == other || id == ROOT
+            ));
+            assert_eq!(count(&db, "local_rows"), 0);
+            assert_eq!(records(&db).len(), queued);
+        }
+    }
+    run(
+        &db,
+        format!("UPDATE roots SET audience='{CIRCLE}' WHERE id='{ROOT}'"),
+    )
+    .await
+    .unwrap();
+    // The canonical spelling is the one a receiver accepts.
+    let receiver = TestStore::new();
+    let copy = receiver
+        .schema(circle_tables(), CIRCLE_SCHEMA)
+        .await
+        .unwrap();
+    receiver.join_circle(&copy, circle());
+    for record in records(&db) {
+        copy.receive(record.into()).await.unwrap();
+    }
+    db.close().await.unwrap();
+    copy.close().await.unwrap();
+}
+
+/// A received root whose audience cell spells its circle another way is
+/// refused, whoever wrote it (§14).
+#[tokio::test]
+async fn a_received_root_spelling_its_circle_another_way_is_refused() {
+    let author = TestStore::new();
+    let db = author.schema(circle_tables(), CIRCLE_SCHEMA).await.unwrap();
+    author.join_circle(&db, circle());
+    run(
+        &db,
+        format!("INSERT INTO roots VALUES('{ROOT}','{CIRCLE}','x')"),
+    )
+    .await
+    .unwrap();
+    let mut record = records(&db).pop().unwrap();
+    db.close().await.unwrap();
+    let coven_merge::Operation::Insert(columns) = &mut record.parts[0].rows[0].change.operation
+    else {
+        panic!("an insert");
+    };
+    columns.get_mut("audience").unwrap().value = Value::Text(CIRCLE.to_uppercase());
+    let receiver = TestStore::new();
+    let copy = receiver
+        .schema(circle_tables(), CIRCLE_SCHEMA)
+        .await
+        .unwrap();
+    receiver.join_circle(&copy, circle());
+    assert!(matches!(
+        copy.receive(record.into()).await,
+        Err(crate::DbError::Snapshot(
+            crate::SnapshotError::Inconsistent(_)
+        ))
+    ));
+    assert_eq!(count(&copy, "roots"), 0);
+    copy.close().await.unwrap();
+}

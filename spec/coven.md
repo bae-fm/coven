@@ -138,8 +138,9 @@ are those of [§2](#2-threat-model); the write-ups state their additional limits
     writable; an ordinary snapshot reload permits app writes throughout (§15).
   - `NotInCircle` and `DeletedCircle` refuse writes using the locally applied
     membership/deletion state; `ReferenceAudience` refuses a reference or move
-    across an unreadable audience, and `KeyNotUuid` refuses an invalid independent
-    row key (§8.5, §14.5–§14.7). None requests a network check at commit.
+    across an unreadable audience, `KeyNotUuid` refuses an invalid independent
+    row key and `InvalidAudience` an invalid root audience cell (§8.5, §14,
+    §14.5–§14.7). None requests a network check at commit.
   - Schema declarations and migration/version errors gate opening or migration
     (§8, §14.1, §17). SQL constraints and trigger failures can reject a write;
     `InternalTable`, `StatementForbidden`, `TriggerTarget` and `FileColumnWrite`
@@ -4347,7 +4348,9 @@ Carol's tablet:
     in a circle of their own.
 - The app declares, for each synced table, how its rows get their audience:
   - a *root* table names a column holding each row's audience: `store` or
-    a circle's id, and never NULL;
+    a circle's id in canonical lowercase hyphenated form, and never NULL.
+    Receivers compare the cell with that text, so a write spelling the id
+    any other way, such as uppercase, is refused with `InvalidAudience`;
   - a *descendant* table names one foreign key, and each row takes the
     audience of the row it points at;
   - a table that declares neither is in the store, every row of it.

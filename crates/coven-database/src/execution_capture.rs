@@ -14,7 +14,9 @@ use crate::declaration::AudienceSource;
 use crate::schema::{SchemaForeignKey, TableSchema};
 use crate::sqlite::{DatabaseConnection, Event};
 use crate::write_capture::values;
-use crate::write_rows::{column_name, row_key, target_columns, AppKey, AppValues, AppView};
+use crate::write_rows::{
+    column_audience, column_name, row_key, target_columns, AppKey, AppValues, AppView,
+};
 use crate::write_schema::WriteSchema;
 use crate::DbError;
 use coven_format::value::Value;
@@ -113,15 +115,7 @@ impl Tracker<'_> {
     ) -> Result<Option<Audience>, DbError> {
         match &self.schema.declaration(&table.name).audience {
             AudienceSource::Store => Ok(Some(Audience::Store)),
-            AudienceSource::Column(column) => match &values[column_name(table, column)] {
-                Value::Text(text) => Ok(Some(crate::write_encoding::audience(text)?)),
-                value => Err(rusqlite::Error::InvalidColumnType(
-                    0,
-                    column.clone(),
-                    crate::write_encoding::sql_value(value).data_type(),
-                )
-                .into()),
-            },
+            AudienceSource::Column(column) => column_audience(table, column, values).map(Some),
             AudienceSource::ForeignKey(column) => {
                 let key = table
                     .foreign_keys

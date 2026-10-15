@@ -101,14 +101,24 @@ pub(crate) fn audience_text(audience: &Audience) -> String {
     }
 }
 
-pub(crate) fn audience(text: &str) -> rusqlite::Result<Audience> {
+/// Audience text that is neither `store` nor a circle id's canonical form.
+#[derive(Debug, thiserror::Error)]
+#[error("audience text is neither `store` nor a canonical lowercase circle id")]
+pub(crate) struct AudienceText;
+
+/// The audience `text` names, spelled exactly as [`audience_text`] writes
+/// it: receivers compare a root's audience cell with that text, so any other
+/// spelling of the same circle id names no audience (§14).
+pub(crate) fn canonical_audience(text: &str) -> Option<Audience> {
     if text == "store" {
-        Ok(Audience::Store)
-    } else {
-        uuid::Uuid::parse_str(text)
-            .map(|id| Audience::Circle(coven_foundation::id_source::CircleId(id)))
-            .map_err(|error| decode_failure(0, Type::Text, error))
+        return Some(Audience::Store);
     }
+    let id = uuid::Uuid::parse_str(text).ok()?;
+    (id.to_string() == text).then_some(Audience::Circle(coven_foundation::id_source::CircleId(id)))
+}
+
+pub(crate) fn audience(text: &str) -> rusqlite::Result<Audience> {
+    canonical_audience(text).ok_or_else(|| decode_failure(0, Type::Text, AudienceText))
 }
 
 pub(crate) fn counter(bytes: Vec<u8>) -> u64 {

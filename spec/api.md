@@ -379,6 +379,9 @@ pub enum DbError {
     MemberKeysChanging,
     /// An inserted row's independent key holds no UUID (§8.5).
     KeyNotUuid { table: String, key: RowKey },
+    /// A root row's audience cell is neither `store` nor a circle id in
+    /// canonical lowercase form (§14).
+    InvalidAudience { table: String, key: RowKey },
     /// A downloaded write fails the merge's checks, such as a timestamp no
     /// later than a write it had read; it is never applied (§19.1).
     InvalidWrite { write: WriteId, error: MergeError },
@@ -993,7 +996,8 @@ impl SyncedTable {
     pub fn owner_only(self) -> Self;
 
     /// Makes the table a root: its text `column` holds each row's audience,
-    /// `store` or a circle's id, and is never NULL (§14).
+    /// `store` or a circle's id in canonical lowercase form, and is never
+    /// NULL (§14).
     pub fn audience_column(self, column: impl Into<String>) -> Self;
 
     /// A descendant: each row takes the audience of the row its

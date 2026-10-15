@@ -218,6 +218,15 @@ pub enum DbError {
         /// Its primary key, in declared key order.
         key: crate::RowKey,
     },
+    /// A root row's audience cell is neither `store` nor a circle id in
+    /// canonical lowercase form (§14).
+    #[error("audience cell of {table} at {key:?} is neither `store` nor a canonical lowercase circle id")]
+    InvalidAudience {
+        /// The written row's table.
+        table: String,
+        /// Its primary key, in declared key order.
+        key: crate::RowKey,
+    },
     /// A downloaded write fails the merge's checks and is never applied (§19.1).
     #[error("invalid write {write:?}: {error}")]
     InvalidWrite {

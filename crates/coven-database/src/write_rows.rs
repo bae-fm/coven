@@ -5,7 +5,7 @@ use crate::schema::{SchemaForeignKey, TableSchema};
 use crate::sql::identifier;
 use crate::sqlite::DatabaseConnection;
 use crate::write_capture::CapturedRow;
-use crate::write_encoding::{audience, encoded, sql_value, value};
+use crate::write_encoding::{encoded, sql_value, value};
 use crate::write_schema::WriteSchema;
 use crate::{DbError, RowKey};
 use coven_format::value::Value;
@@ -135,17 +135,7 @@ impl<'a> AppView<'a> {
         }
         let audience = match &self.schema.declaration(&table.name).audience {
             AudienceSource::Store => Audience::Store,
-            AudienceSource::Column(column) => match &values[column_name(table, column)] {
-                Value::Text(text) => audience(text)?,
-                v => {
-                    return Err(rusqlite::Error::InvalidColumnType(
-                        0,
-                        column.clone(),
-                        sql_value(v).data_type(),
-                    )
-                    .into())
-                }
-            },
+            AudienceSource::Column(column) => column_audience(table, column, &values)?,
             AudienceSource::ForeignKey(column) => {
                 let fk = table
                     .foreign_keys
@@ -413,17 +403,42 @@ pub(crate) fn row_key(table: &TableSchema, values: &AppValues) -> Result<Vec<u8>
     equality_key(&components)
 }
 
+/// A root row's audience: its column's `store` or circle id, in the one
+/// spelling every receiver accepts (§14).
+pub(crate) fn column_audience(
+    table: &TableSchema,
+    column: &str,
+    values: &AppValues,
+) -> Result<Audience, DbError> {
+    match &values[column_name(table, column)] {
+        Value::Text(text) => crate::write_encoding::canonical_audience(text).ok_or_else(|| {
+            DbError::InvalidAudience {
+                table: table.name.clone(),
+                key: error_key(table, values),
+            }
+        }),
+        v => Err(
+            rusqlite::Error::InvalidColumnType(0, column.into(), sql_value(v).data_type()).into(),
+        ),
+    }
+}
+
 pub(crate) fn reference_error(table: &TableSchema, values: &AppValues, column: &str) -> DbError {
     DbError::ReferenceAudience {
         table: table.name.clone(),
-        key: RowKey(
-            key_columns(table)
-                .iter()
-                .map(|column| sql_value(&values[&column.name]))
-                .collect(),
-        ),
+        key: error_key(table, values),
         column: column.into(),
     }
+}
+
+/// A row's primary key as an error reports it.
+fn error_key(table: &TableSchema, values: &AppValues) -> RowKey {
+    RowKey(
+        key_columns(table)
+            .iter()
+            .map(|column| sql_value(&values[&column.name]))
+            .collect(),
+    )
 }
 
 #[cfg(test)]
