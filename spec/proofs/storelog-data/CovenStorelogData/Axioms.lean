@@ -123,6 +123,8 @@ import CovenStorelogData
 #print axioms CovenStorelogData.KeySelection.revocation_between_listings
 
 #print axioms CovenStorelogData.Pending.every_pending_subject
+#print axioms CovenStorelogData.Pending.coven_owned_waits_only_on_people
+#print axioms CovenStorelogData.Pending.coven_owned_retries_as_it_clears
 #print axioms CovenStorelogData.Pending.only_first_reason
 #print axioms CovenStorelogData.Pending.first_unmet
 #print axioms CovenStorelogData.Pending.observed_wait_visible
@@ -253,7 +255,7 @@ import CovenStorelogData
 #print axioms CovenStorelogData.Pending.late_depends_on_old
 #print axioms CovenStorelogData.Pending.disagreement_none
 #print axioms CovenStorelogData.Pending.verdict_iff
-#print axioms CovenStorelogData.Pending.verdict_needs_app_action
+#print axioms CovenStorelogData.Pending.verdict_retried
 #print axioms CovenStorelogData.Pending.verdict_load_agrees
 #print axioms CovenStorelogData.Pending.agreeing_never_waits
 #print axioms CovenStorelogData.Pending.prepared_agrees

@@ -27,7 +27,7 @@ private def readObservation (j : Json) : Except String (Option Access.S3.Observa
       match ← j.getObjValAs? String "reply" with
       | "absent" => pure (Except.ok .absent)
       | "present" => pure (Except.ok .present)
-      | "failed" => pure (Except.error (.storage false))
+      | "failed" => pure (Except.error (.storage .byPerson))
       | other => throw s!"unknown read reply {other}"
     pure (some ⟨key, reply⟩)
 
@@ -41,7 +41,7 @@ private def readEvent (bound : Nat) (j : Json) : Except String Event := do
   | _, _, .ok deletion =>
       let key ← deletion.getObjValAs? String "key"
       let deleted : Except Pending.Reason Unit :=
-        if ← deletion.getObjValAs? Bool "deleted" then .ok () else .error (.storage false)
+        if ← deletion.getObjValAs? Bool "deleted" then .ok () else .error (.storage .byPerson)
       pure (.providerDeletion key true deleted (← readObservation (← deletion.getObjVal? "observation")))
   | _, _, _ => throw "unknown event"
 

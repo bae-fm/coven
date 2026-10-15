@@ -69,6 +69,15 @@ private def dropJson : DropReason → Json
   | .notAllowed => "notAllowed"
   | _ => Json.null
 
+private def clears : String → Except String Clears
+  | "byItself" => pure .byItself
+  | "byPerson" => pure .byPerson
+  | "never" => pure .never
+  | other => throw s!"unknown clearing {other}"
+
+private def clearsJson : Clears → Json
+  | .byItself => "byItself" | .byPerson => "byPerson" | .never => "never"
+
 private def failure : String → Except String Failure
   | "database" => pure .database
   | "disk" => pure .disk
@@ -86,7 +95,7 @@ def reason (j : Json) : Except String Reason := do
   | "keyUnavailable" => pure (.keyUnavailable (audience (← nat j 1)) (← nat j 2))
   | "updateRequired" => pure (.updateRequired (← nat j 1))
   | "noStorage" => pure .noStorage
-  | "storage" => pure (.storage (← (← j.getArrVal? 1).getBool?))
+  | "storage" => pure (.storage (← clears (← str j 1)))
   | "refused" => pure .refused
   | "invalidPositions" => pure .invalidPositions
   | "dropped" => pure (.dropped (← dropReason (← str j 1)))
@@ -102,7 +111,7 @@ def reasonJson : Reason → Json
   | .keyUnavailable a key => Json.arr #["keyUnavailable", toJson (audienceNumber a), toJson key]
   | .updateRequired v => Json.arr #["updateRequired", toJson v]
   | .noStorage => Json.arr #["noStorage"]
-  | .storage retryable => Json.arr #["storage", toJson retryable]
+  | .storage c => Json.arr #["storage", clearsJson c]
   | .refused => Json.arr #["refused"]
   | .invalidPositions => Json.arr #["invalidPositions"]
   | .dropped d => Json.arr #["dropped", dropJson d]

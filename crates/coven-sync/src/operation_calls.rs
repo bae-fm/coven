@@ -81,6 +81,9 @@ impl StoreLogSync {
                         }
                         return Err(error);
                     }
+                    // New credentials are evidence for work waiting on storage.
+                    self.connection_changed();
+                    self.retry_resolved().await?;
                 }
                 return Ok(Begun::Value(Output::Unit));
             }
@@ -103,22 +106,7 @@ impl StoreLogSync {
                 self.storage = storage;
                 *self.finality.lock().expect("finality lock poisoned") = Default::default();
                 if self.storage.is_some() {
-                    for pending in self.database.pending::<PendingRecord>().await? {
-                        let PendingSubject::Operation { id, .. } = pending.subject else {
-                            continue;
-                        };
-                        let record = self
-                            .database
-                            .operation(id)
-                            .await?
-                            .ok_or(coven_database::DbError::OperationChanged(id))?;
-                        if matches!(pending.reason, PendingReason::NoStorage)
-                            || (record.started_by == "coven"
-                                && matches!(pending.reason, PendingReason::Storage { .. }))
-                        {
-                            self.retry_operation(&record).await?;
-                        }
-                    }
+                    self.retry_resolved().await?;
                 }
                 return Ok(Begun::Value(Output::Unit));
             }
@@ -380,6 +368,29 @@ impl StoreLogSync {
         ))
     }
 
+    /// A new connection or new credentials can resolve what waits for them:
+    /// work waiting for storage, and coven's own work waiting for a person
+    /// to act, such as signing in again (E5).
+    async fn retry_resolved(&self) -> Result<(), SyncError> {
+        for pending in self.database.pending::<PendingRecord>().await? {
+            let PendingSubject::Operation { id, kind } = pending.subject else {
+                continue;
+            };
+            if matches!(pending.reason, PendingReason::NoStorage)
+                || (kind.coven_owned()
+                    && pending.reason.clears() == Some(crate::pending::Clears::ByPerson))
+            {
+                let record = self
+                    .database
+                    .operation(id)
+                    .await?
+                    .ok_or(coven_database::DbError::OperationChanged(id))?;
+                self.retry_operation(&record).await?;
+            }
+        }
+        Ok(())
+    }
+
     async fn retry_operation(&self, record: &OperationRecord) -> Result<(), SyncError> {
         if let Data::ProviderAccess { account } = Data::read(record)? {
             let log = self.database.local_store_log().await?.log;
@@ -471,9 +482,10 @@ impl StoreLogSync {
             .operation_pending::<PendingRecord>(id)
             .await?
             .ok_or(SyncError::NotPending(id))?;
-        let app_owned = record.started_by != "coven" || data.kind() == OperationKind::SchemaChange;
         // Provider access work can be retried, never discarded (§18).
-        if !app_owned && (discard || !matches!(data, Data::ProviderAccess { .. })) {
+        if data.kind(&record.started_by).coven_owned()
+            && (discard || !matches!(data, Data::ProviderAccess { .. }))
+        {
             return Err(SyncError::NotPending(id));
         }
         if !discard

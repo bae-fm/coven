@@ -400,15 +400,15 @@ async fn a_refused_file_upload_leaves_the_pass_synced_with_its_pending_record() 
         .storage
         .set_faults(Faults {
             fail_next: 1,
-            failure: StorageFailure::QuotaExceeded,
-            response: Some(507),
+            failure: StorageFailure::PermissionDenied,
+            response: Some(403),
             ..Faults::none()
         })
         .await;
     let refused = |records: &[PendingRecord]| {
         records.iter().any(|record| {
             matches!(record.subject, PendingSubject::File { .. })
-                && matches!(record.reason, PendingReason::Storage { failure, .. } if failure == StorageFailure::QuotaExceeded)
+                && matches!(record.reason, PendingReason::Storage { failure, .. } if failure == StorageFailure::PermissionDenied)
         })
     };
     let mut pending = device.handle.subscribe_pending();
@@ -439,6 +439,78 @@ async fn a_refused_file_upload_leaves_the_pass_synced_with_its_pending_record() 
     );
     assert_eq!(stored_writes(device).await, writes + 1);
     assert!(refused(&device.handle.pending().await.unwrap()));
+    network.close().await;
+}
+
+/// Coven's own rotation that the provider refuses for want of space is
+/// never shown as `Synced`: the pass reports it while it retries itself, and
+/// status turns `Synced` once a retry succeeds, with no app call (E5).
+#[tokio::test]
+async fn a_refused_rotation_is_reported_until_it_retries_itself() {
+    let network = Network::new(2).await;
+    let owner = &network.devices[0];
+    network.devices[1].handle.stop_sync();
+    let members = owner.handle.members().await.unwrap();
+    let me = members.iter().find(|m| m.is_self).unwrap();
+    let removed = members.iter().find(|m| !m.is_self).unwrap().id;
+    let own = owner
+        .storage
+        .list(&ObjectPrefix::store_log(owner.store, me.devices[0].id))
+        .await
+        .unwrap()
+        .len() as u64;
+    // The removal is the next entry; the rotation it requires follows.
+    let rotation = coven_storage::ObjectPath::store_log(
+        owner.store,
+        me.devices[0].id,
+        std::num::NonZeroU64::new(own + 2).unwrap(),
+    );
+    let mut faults = Faults::none();
+    faults
+        .create_failures
+        .insert(rotation.clone(), (StorageFailure::QuotaExceeded, 507));
+    owner.storage.set_faults(faults).await;
+    owner.handle.remove_member(&removed).await.unwrap();
+    let mut status = owner.handle.subscribe_sync_status();
+    owner.handle.sync_now();
+    tokio::time::timeout(
+        Duration::from_secs(15),
+        status.wait_for(|s| {
+            matches!(s, SyncStatus::Failed { error: SyncFailure::Operation(record) }
+                if matches!(record.subject, PendingSubject::Operation { kind: OperationKind::RotateKey, .. }))
+        }),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    owner.storage.set_faults(Faults::none()).await;
+    tokio::time::timeout(Duration::from_secs(15), async {
+        owner.handle.sync_now();
+        loop {
+            status.changed().await.unwrap();
+            match &*status.borrow_and_update() {
+                SyncStatus::Synced { .. } => break,
+                SyncStatus::Syncing => {}
+                _ => owner.handle.sync_now(),
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert!(owner.storage.status(&rotation).await.unwrap().is_some());
+    assert!(!owner
+        .handle
+        .pending()
+        .await
+        .unwrap()
+        .iter()
+        .any(|record| matches!(
+            record.subject,
+            PendingSubject::Operation {
+                kind: OperationKind::RotateKey,
+                ..
+            }
+        )));
     network.close().await;
 }
 

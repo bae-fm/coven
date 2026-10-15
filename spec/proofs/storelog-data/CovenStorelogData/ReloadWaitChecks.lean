@@ -1,4 +1,5 @@
 import CovenStorelogData.ReloadWait
+import CovenStorelogData.OperationRetry
 
 /-! §15, §19.1: three decisions that compare against a snapshot other than
 the current newest, checked against the waiting reload.
@@ -191,9 +192,9 @@ def attempt (c : Checks) (listed : List Listed) (target : Nat → Nat)
 refusal (`pending_logs::required`, `record_operation_error`). -/
 def blockedRecord : Reason := .refused
 
-/-- Rust `operation_can_retry` at the same installed version: work is driven
-again only while its record retries automatically. -/
-def drivenAgain (record : Reason) : Bool := retry record == .automatic
+/-- Rust `operation_can_retry` at the same installed version for coven's own
+reload: it is driven again only while its record retries automatically. -/
+def drivenAgain (record : Reason) : Bool := operationRetry true record == .automatic
 
 /-- Carol's store listing holds Ana's snapshot through Ana 3 and Ben 10, and
 an older one through Ana 4. Carol's version refuses Ana's write 4. Her

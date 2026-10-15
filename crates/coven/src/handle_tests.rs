@@ -753,6 +753,8 @@ fn storage_pending_retry_distinguishes_transient_failures_from_app_actions() {
                 StorageFailure::RateLimited,
                 StorageFailure::NotFound,
                 StorageFailure::SessionExpired,
+                StorageFailure::QuotaExceeded,
+                StorageFailure::File,
             ],
         ),
         (
@@ -773,7 +775,6 @@ fn storage_pending_retry_distinguishes_transient_failures_from_app_actions() {
                 StorageFailure::AlreadyExists,
                 StorageFailure::ContainerNotFound,
                 StorageFailure::RegionMismatch,
-                StorageFailure::QuotaExceeded,
                 StorageFailure::InvalidConfiguration,
                 StorageFailure::Refused,
                 StorageFailure::Protocol,
@@ -786,7 +787,6 @@ fn storage_pending_retry_distinguishes_transient_failures_from_app_actions() {
                 StorageFailure::InvalidPart,
                 StorageFailure::SingleRequestTooLarge { size: 2, limit: 1 },
                 StorageFailure::Encoding,
-                StorageFailure::File,
                 StorageFailure::MemberKeysMissing,
             ],
         ),
@@ -868,7 +868,7 @@ fn local_and_access_failures_require_app_action() {
 }
 
 #[test]
-fn replay_drops_are_final_for_logs_and_app_retriable_for_operations() {
+fn replay_drops_are_final_for_logs_and_retried_for_operations() {
     for (subject, expected) in [
         (
             PendingSubject::Write(WriteId {
@@ -890,6 +890,14 @@ fn replay_drops_are_final_for_logs_and_app_retriable_for_operations() {
                 kind: OperationKind::CreateCircle,
             },
             Retry::AppAction,
+        ),
+        // Coven's own operation retries itself (§18).
+        (
+            PendingSubject::Operation {
+                id: OperationId(4),
+                kind: OperationKind::RotateKey,
+            },
+            Retry::Automatic,
         ),
     ] {
         for reason in [

@@ -20,6 +20,7 @@ import CovenStorelogData.EntryFateLive
 import CovenStorelogData.EntryFate_tests
 import CovenStorelogData.EntryFateKeys_tests
 import CovenStorelogData.KeySelection
+import CovenStorelogData.OperationRetry
 import CovenStorelogData.Pending
 import CovenStorelogData.PendingScans
 import CovenStorelogData.RefusedRetention

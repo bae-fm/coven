@@ -38,7 +38,7 @@ impl StoreLogSync {
             .database
             .pending_can_retry::<PendingRecord>(PendingSubject::Operation {
                 id: record.id,
-                kind: Data::read(record)?.kind(),
+                kind: Data::read(record)?.kind(&record.started_by),
             })
             .await?)
     }
@@ -86,6 +86,32 @@ impl StoreLogSync {
                 PendingReason::Waits(Prerequisite::Object(path)) => path.write_position().is_some(),
                 _ => false,
             }))
+    }
+
+    /// Coven's own operation whose last attempt failed or replay dropped, if
+    /// any: it retries under backoff, and the store is not synced until it
+    /// succeeds (E5).
+    pub(crate) async fn failing_work(&self) -> Result<Option<PendingRecord>, SyncError> {
+        for record in self.database.operations().await? {
+            let Some(pending) = self
+                .database
+                .operation_pending::<PendingRecord>(record.id)
+                .await?
+            else {
+                continue;
+            };
+            if matches!(&pending.subject, PendingSubject::Operation { kind, .. } if kind.coven_owned())
+                && matches!(
+                    pending.reason,
+                    PendingReason::Failed(_)
+                        | PendingReason::Storage { .. }
+                        | PendingReason::Dropped(_)
+                )
+            {
+                return Ok(Some(pending));
+            }
+        }
+        Ok(None)
     }
 
     /// The storage connection changed: waits for storage are woken.
@@ -173,7 +199,7 @@ impl StoreLogSync {
         Ok(PendingRecord {
             subject: PendingSubject::Operation {
                 id: record.id,
-                kind: Data::read(record)?.kind(),
+                kind: Data::read(record)?.kind(&record.started_by),
             },
             reason,
             reported_by: self.database.sync_state(Vec::new()).await?.device,

@@ -366,7 +366,14 @@ impl StoreLogSync {
         };
         let change = match intent {
             Intent::RotateKey { audience } => {
-                effects::Authority::audience(audience).check(state, me)?;
+                // A member who left the audience holds no key of it to
+                // replace: the rotation is the remaining members' (§11).
+                if effects::Authority::audience(audience)
+                    .check(state, me)
+                    .is_err()
+                {
+                    return Ok(None);
+                }
                 self.rotation_change(audience.clone(), ring)?
             }
             Intent::Reset { snapshot } => StoreChange::Reset {

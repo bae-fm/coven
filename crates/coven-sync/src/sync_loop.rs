@@ -31,7 +31,8 @@ pub enum SyncStatus {
         finished_at: SystemTime,
     },
     /// The last pass failed as a whole, including a provider's error
-    /// response; per-subject failures belong only in pending().
+    /// response, or coven's own work failed its last attempt; other
+    /// per-subject failures belong only in pending().
     Failed {
         /// The failure and its original cause.
         error: SyncFailure,
@@ -490,7 +491,7 @@ impl SyncRun {
                         if self.connection.is_none() {
                             self.connect().await?;
                         }
-                        self.operations.sync().await?;
+                        let failing = self.operations.sync().await?;
                         // An admin's replacement of this member's key arrives
                         // sealed to them; adopt it before the old key goes (§13).
                         let held = match self.codes.connection().await? {
@@ -503,13 +504,18 @@ impl SyncRun {
                         if let Some(key) = self.operations.delivered_access_key(held).await? {
                             self.codes.adopt_delivered_key(key).await?;
                         }
-                        Ok::<_, SyncError>(())
+                        Ok::<_, SyncError>(failing)
                     }.await;
                     match result {
-                        Ok(()) => {
+                        // A finished pass ends the connection's backoff; failing
+                        // work retries under its own.
+                        Ok(failing) => {
                             self.failures = 0;
                             self.backoff = None;
-                            self.status.send_replace(SyncStatus::Synced { finished_at: self.clock.now() });
+                            self.status.send_replace(match failing {
+                                None => SyncStatus::Synced { finished_at: self.clock.now() },
+                                Some(record) => SyncStatus::Failed { error: SyncFailure::Operation(Box::new(record)) },
+                            });
                         }
                         Err(error) => {
                             self.failures = self.failures.saturating_add(1);

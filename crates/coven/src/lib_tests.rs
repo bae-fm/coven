@@ -827,17 +827,7 @@ async fn an_internal_reload_failure_reports_sync_status_and_retries_without_app_
     let path = &snapshots[0].path;
     let bytes = storage.read(path).await.unwrap();
     storage.delete(path).await.unwrap();
-    let device = reader
-        .members()
-        .await
-        .unwrap()
-        .into_iter()
-        .find(|m| m.is_self)
-        .unwrap()
-        .devices[0]
-        .id;
-    let positions = ObjectPath::positions(network.devices[0].store, device);
-    let before = storage.read(&positions).await.unwrap();
+    let before = posted(&network.devices[1]).await.writes;
     reader.start_sync().await.unwrap();
     let mut status = reader.subscribe_sync_status();
     tokio::time::timeout(
@@ -855,14 +845,16 @@ async fn an_internal_reload_failure_reports_sync_status_and_retries_without_app_
         .any(|record| matches!(
             record.subject,
             PendingSubject::Operation {
-                kind: OperationKind::ReloadFromSnapshot,
+                kind: OperationKind::RequiredReload,
                 ..
             }
         )));
-    assert_eq!(storage.read(&positions).await.unwrap(), before);
+    // The post claims the applied store log, but no write past the reload.
+    let positions = posted(&network.devices[1]).await;
+    assert_eq!(positions.writes, before);
     storage.create(path, &bytes).await.unwrap();
     network.sync(1).await;
-    assert_ne!(storage.read(&positions).await.unwrap(), before);
+    assert_ne!(posted(&network.devices[1]).await, positions);
     network.close().await;
 }
 

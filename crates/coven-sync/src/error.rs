@@ -217,6 +217,10 @@ pub enum SyncFailure {
     /// The provider refused or failed a request.
     #[error("storage failed: {0}")]
     Storage(#[source] Arc<StorageError>),
+    /// The pass finished, but this work of coven's own failed its last
+    /// attempt; it retries under backoff (E5).
+    #[error("{0:?}")]
+    Operation(Box<crate::PendingRecord>),
     /// Any other failure, retaining its typed cause.
     #[error("sync failed: {0}")]
     Other(#[source] Arc<dyn std::error::Error + Send + Sync>),

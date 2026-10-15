@@ -372,6 +372,10 @@ list. Paired calls and subscriptions use the same query. Reset suppression
 retains the original observations and restores them when its entries drop.
 These proofs concern the modeled work registry. They do not establish that
 Rust observes every storage failure, nor model every native error payload.
+Coven's own operations retry as their failure clears (`operationRetry`,
+`Clears`): `coven_owned_retries_as_it_clears`, and
+`coven_owned_waits_only_on_people` proves they wait for the app only on a
+failure a person must clear.
 
 **Two more ways a record ends are proved safe.** A loaded snapshot can move
 this device's write positions past a write that was waiting. `Pending.cover`
@@ -668,9 +672,9 @@ compares each carried verdict with the landing verdict this device
 recorded for the same write, if any, and a difference fails the load
 (`write_landing::agrees`, `SnapshotError::RetirementVerdict`). Nothing is
 recorded against the snapshot. The reload's own record is
-`Failed(Database)`, which only an app action retries, and a retry selects
-again (`chooseVerdict`: `choose` followed by that check; `verdictRecord`,
-`verdict_needs_app_action`). The window verdict is merge's
+`Failed(Database)`; coven retries its own reload under backoff, and a retry
+selects again (`chooseVerdict`: `choose` followed by that check;
+`verdictRecord`, `verdict_retried`). The window verdict is merge's
 `Receive.withinWindow` over the kept retirements (`lateUnder`).
 
 - `verdict_load_agrees`, `verdict_iff`: a reload loads only `choose`'s
@@ -702,8 +706,8 @@ the promotion and then Ben's removal, which would leave no admin; the drop
 is final from day 91 (`removal_kept_then_dropped`). The final replay admits
 write 1.
 
-- Ben recorded his admission while it was not fixed. Every reload fails
-  the check on Ana's snapshot, and its record waits for an app action. §15
+- Ben recorded his admission while it was not fixed. Every reload and
+  every retry fails the check on Ana's snapshot. §15
   requests no newer snapshot in a store with no further writes, since
   Ana's covers every write (`requestsSnapshot`). The reload never ends.
 - Rust records a landing only while it is late or not fixed

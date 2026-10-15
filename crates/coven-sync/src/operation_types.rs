@@ -24,6 +24,9 @@ pub enum OperationKind {
     Reset,
     /// Reload snapshots at the app's request, keeping waiting writes.
     ReloadFromSnapshot,
+    /// Reload what sync requires: a changed schema or reset, a returning
+    /// circle, joining or recovery.
+    RequiredReload,
     /// Publish a fresh audience key and its sealed copies.
     RotateKey,
     /// Create a circle and its first key.
@@ -43,6 +46,21 @@ pub enum OperationKind {
     /// Replace a member's signing and sealing pair: this member's own, with a
     /// candidate kept in identity custody, or a prepared pair as an admin (§9).
     ReplaceMemberKeys,
+}
+
+impl OperationKind {
+    /// Coven's own work, which no app call retries or discards: a failed or
+    /// dropped attempt retries under the shared backoff (§18, E5).
+    pub(crate) fn coven_owned(self) -> bool {
+        matches!(
+            self,
+            Self::WriteSnapshot
+                | Self::RequiredReload
+                | Self::RotateKey
+                | Self::RevokeAccess
+                | Self::DeleteAccessKey
+        )
+    }
 }
 
 /// A member's replaced S3 key (§13): the new key, which the member keeps

@@ -198,7 +198,11 @@ impl StoreLogSync {
                     })?;
                 Err(SyncError::Pending(Box::new(pending)))
             }
-            Driven::Finished(None) | Driven::Entry => Err(coven_database::DbError::Invariant {
+            // This member left the audience before its preparation.
+            Driven::Finished(None) => {
+                Err(SyncError::Rejected(coven_database::DropReason::NotAllowed))
+            }
+            Driven::Entry => Err(coven_database::DbError::Invariant {
                 what: "a requested snapshot publishes or waits",
             }
             .into()),

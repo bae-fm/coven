@@ -228,8 +228,9 @@ impl Data {
         }
         Ok(data)
     }
-    /// The purpose of every operation, including automatic maintenance.
-    pub(crate) fn kind(&self) -> OperationKind {
+    /// The purpose of every operation, including automatic maintenance. A
+    /// reload is the app's only when an app call started it.
+    pub(crate) fn kind(&self, started_by: &str) -> OperationKind {
         match self {
             Self::PublishSchema { .. } => OperationKind::SchemaChange,
             Self::Entry(work) => work.intent.kind(),
@@ -243,6 +244,9 @@ impl Data {
                     ..
                 } => OperationKind::Reset,
                 SnapshotJob::Write { .. } => OperationKind::WriteSnapshot,
+                SnapshotJob::Reload { .. } if started_by == "coven" => {
+                    OperationKind::RequiredReload
+                }
                 SnapshotJob::Reload { .. } => OperationKind::ReloadFromSnapshot,
             },
             Self::Invite(_) => OperationKind::Invite,

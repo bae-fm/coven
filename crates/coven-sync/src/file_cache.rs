@@ -308,7 +308,9 @@ impl FilesInner {
 /// update wait for app action or an update (§16.3; io `Downloads.automatic`).
 fn retries(reason: &PendingReason) -> bool {
     match reason {
-        PendingReason::Storage { failure, .. } => crate::pending::automatic_storage(*failure),
+        PendingReason::Storage { failure, .. } => {
+            crate::pending::storage_clears(*failure) == crate::pending::Clears::ByItself
+        }
         PendingReason::Refused(_)
         | PendingReason::FileUnavailable(_)
         | PendingReason::UpdateRequired(_) => false,

@@ -12,8 +12,8 @@ for covered writes. Rust's load transaction therefore compares each carried
 verdict with the landing verdict this device recorded for the same write,
 if it recorded one, and fails the load on a difference
 (`write_landing::agrees`, `SnapshotError::RetirementVerdict`). The reload
-records `Failed(Database)`, which only an app action retries; a retry
-selects again (`chooseVerdict`, `verdictRecord`).
+records `Failed(Database)`; coven retries its own reload under backoff, and
+a retry selects again (`chooseVerdict`, `verdictRecord`).
 
 What holds:
 - the check never adopts a verdict that disagrees with one this device
@@ -34,7 +34,7 @@ prepared while the retirement deciding a covered write can still drop.
 write's deadline, and dropped once a later entry lands. Ana's snapshot
 carries the write as `dropped`; the final replay admits it.
 - Ben recorded his unfixed admission: every reload fails the check on Ana's
-  snapshot, its record waits for an app action, and in a store with no
+  snapshot, every retry fails it again, and in a store with no
   further writes nothing requests another snapshot, since Ana's covers
   every write. The reload never ends.
 - Once Ben's admission is fixed Rust no longer records it, and Carol, who
@@ -282,10 +282,11 @@ theorem verdict_iff (c : Checks) (v : Verdicts) (listed : List Listed) (s : List
 gives `SnapshotError::RetirementVerdict` the record `Failed(Database)`. -/
 def verdictRecord : Reason := .failed .database
 
-/-- Only an app action drives the reload again (`ReloadWaitChecks.drivenAgain`,
-Rust `operation_can_retry`). -/
-theorem verdict_needs_app_action :
-    retry verdictRecord = .appAction ∧ drivenAgain verdictRecord = false := ⟨rfl, rfl⟩
+/-- Coven drives its own reload again under backoff; the app's own reload
+waits for the app (`ReloadWaitChecks.drivenAgain`, Rust `operation_can_retry`). -/
+theorem verdict_retried :
+    drivenAgain verdictRecord = true ∧ operationRetry false verdictRecord = .appAction :=
+  ⟨rfl, rfl⟩
 
 /-- Loading never adopts a verdict that differs from one this device
 recorded: it loads `choose`'s snapshot, whose carried verdicts all agree. -/
@@ -414,8 +415,7 @@ def requestsSnapshot (c : Checks) (listed : List Listed) (writes : List (Nat × 
 /-- Ana's snapshot carries Ben's write as dropped by his removal, which her
 replay keeps when she prepares it and the final replay drops: that replay
 admits the write. Ben, who recorded his unfixed admission, fails the check
-on every reload, its record is not retried automatically, and nothing
-requests a newer snapshot. A device recording
+on every reload and every retry, and nothing requests a newer snapshot. A device recording
 nothing, Ben once his admission is fixed or Carol who never received the
 write, loads the dropped verdict. -/
 theorem unfinal_snapshot_counterexample :
@@ -427,7 +427,7 @@ theorem unfinal_snapshot_counterexample :
     lateUnder [] benStored benWrite = false ∧
     chooseVerdict passes (judgedBy fun _ => landingRecord false false) [anaPrepared] =
       .verdict anaPrepared benWrite ∧
-    drivenAgain verdictRecord = false ∧
+    drivenAgain verdictRecord = true ∧
     requestsSnapshot passes [anaPrepared] [benWrite] = false ∧
     landingRecord false true = none ∧
     chooseVerdict passes (judgedBy fun _ => none) [anaPrepared] = .choice (.load anaPrepared) ∧

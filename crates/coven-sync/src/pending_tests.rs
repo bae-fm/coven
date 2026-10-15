@@ -14,21 +14,78 @@ fn conditional_conflicts_retry_without_becoming_throttling() {
     assert_eq!(record.retry(), Retry::Automatic);
 }
 
+/// Coven's own operation retries as its failure clears: by itself under
+/// backoff, after a person acts, or never; a replay drop retries under
+/// backoff. The app's own operation waits for the app (E5).
 #[test]
-fn a_dropped_operation_waits_for_the_app_but_a_dropped_entry_or_write_is_final() {
-    let record = |subject| PendingRecord {
+fn operation_failures_retry_as_they_clear_and_only_app_operations_wait_for_it() {
+    let record = |subject, reason| PendingRecord {
         subject,
-        reason: PendingReason::Dropped(DropReason::NotAllowed),
+        reason,
         reported_by: DeviceId(1),
     };
-    assert_eq!(
-        record(PendingSubject::Operation {
-            id: OperationId(1),
-            kind: OperationKind::AddCircleMember,
-        })
-        .retry(),
-        Retry::AppAction
-    );
+    let operation = |kind| PendingSubject::Operation {
+        id: OperationId(1),
+        kind,
+    };
+    let storage = |failure| PendingReason::Storage {
+        provider: CloudProvider::S3,
+        failure,
+    };
+    for (reason, coven) in [
+        (
+            PendingReason::Dropped(DropReason::NotAllowed),
+            Retry::Automatic,
+        ),
+        (PendingReason::Failed(LocalFailure::Disk), Retry::Automatic),
+        (
+            PendingReason::Failed(LocalFailure::Database),
+            Retry::Automatic,
+        ),
+        (
+            PendingReason::Failed(LocalFailure::KeyCustody),
+            Retry::Automatic,
+        ),
+        (PendingReason::Failed(LocalFailure::Operation), Retry::Never),
+        (storage(StorageFailure::Network), Retry::Automatic),
+        (storage(StorageFailure::QuotaExceeded), Retry::Automatic),
+        (storage(StorageFailure::Authentication), Retry::AppAction),
+        (storage(StorageFailure::PermissionDenied), Retry::AppAction),
+        (storage(StorageFailure::Refused), Retry::Never),
+        (storage(StorageFailure::Protocol), Retry::Never),
+    ] {
+        for kind in [
+            OperationKind::WriteSnapshot,
+            OperationKind::RequiredReload,
+            OperationKind::RotateKey,
+            OperationKind::RevokeAccess,
+        ] {
+            assert_eq!(
+                record(operation(kind), reason.clone()).retry(),
+                coven,
+                "{kind:?} {reason:?}"
+            );
+        }
+        let app = match &reason {
+            PendingReason::Storage {
+                failure: StorageFailure::Network | StorageFailure::QuotaExceeded,
+                ..
+            } => Retry::Automatic,
+            _ => Retry::AppAction,
+        };
+        for kind in [
+            OperationKind::AddCircleMember,
+            OperationKind::ReloadFromSnapshot,
+            OperationKind::SchemaChange,
+            OperationKind::Reset,
+        ] {
+            assert_eq!(
+                record(operation(kind), reason.clone()).retry(),
+                app,
+                "{kind:?} {reason:?}"
+            );
+        }
+    }
     for subject in [
         PendingSubject::Entry(EntryId {
             device: DeviceId(1),
@@ -39,7 +96,10 @@ fn a_dropped_operation_waits_for_the_app_but_a_dropped_entry_or_write_is_final()
             number: 1,
         }),
     ] {
-        assert_eq!(record(subject).retry(), Retry::Never);
+        assert_eq!(
+            record(subject, PendingReason::Dropped(DropReason::NotAllowed)).retry(),
+            Retry::Never
+        );
     }
 }
 
@@ -100,14 +160,21 @@ async fn data_differential_pending_records() {
                 provider: CloudProvider::S3,
                 failure: StorageFailure::Network,
             },
-            json!(["storage", true]),
+            json!(["storage", "byItself"]),
         ),
         (
             PendingReason::Storage {
                 provider: CloudProvider::S3,
                 failure: StorageFailure::PermissionDenied,
             },
-            json!(["storage", false]),
+            json!(["storage", "byPerson"]),
+        ),
+        (
+            PendingReason::Storage {
+                provider: CloudProvider::S3,
+                failure: StorageFailure::Refused,
+            },
+            json!(["storage", "never"]),
         ),
         (
             PendingReason::Refused(Refusal::Signature { cause: None }),

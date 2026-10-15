@@ -31,6 +31,11 @@ inductive Failure where
   | database | disk | keyCustody | crypto | operation
   deriving DecidableEq, Repr
 
+/-- How a failure clears (E5): on its own, after a person acts, or never. -/
+inductive Clears where
+  | byItself | byPerson | never
+  deriving DecidableEq, Repr
+
 inductive AccessAction where
   | grant | revoke
   deriving DecidableEq, Repr
@@ -39,7 +44,7 @@ inductive Reason where
   | missing (path : String) | waits (prerequisite : Prerequisite)
   | keyUnavailable (audience : Audience) (key : Nat)
   | updateRequired (version : Nat) | noStorage
-  | storage (retryable : Bool) | refused | invalidPositions
+  | storage (clears : Clears) | refused | invalidPositions
   | dropped (reason : DropReason)
   | providerPending (action : AccessAction) (account : String)
   | pendingOwner (account : String) | accountInUse (account : String)
@@ -53,7 +58,7 @@ inductive Retry where
 
 def retry : Reason → Retry
   | .missing _ | .waits _ | .keyUnavailable _ _ | .invalidPositions |
-    .providerPending _ _ | .pendingOwner _ | .accountInUse _ | .storage true => .automatic
+    .providerPending _ _ | .pendingOwner _ | .accountInUse _ | .storage .byItself => .automatic
   | .updateRequired _ | .refused => .afterUpdate
   | .dropped _ | .removed => .never
   | _ => .appAction
@@ -931,7 +936,7 @@ registration and peer 4's fail their check. The next pass lists only peer 4,
 now valid: both peer records end, while the snapshot wait from another
 listing and Ana's own publication failure stay. -/
 private def listingHistory : List Step :=
-  [.observe ⟨.positions 2, 2, [⟨false, .storage true⟩]⟩,
+  [.observe ⟨.positions 2, 2, [⟨false, .storage .byItself⟩]⟩,
     .listing ⟨.positions, [(.positions 3, [⟨false, .waits (.deviceRegistration 3)⟩]),
       (.positions 4, [⟨false, .invalidPositions⟩])]⟩,
     .listing ⟨.snapshots .store, [(.snapshot ⟨.store, 1⟩, [⟨false, .waits (.deviceRegistration 5)⟩])]⟩,
@@ -939,7 +944,7 @@ private def listingHistory : List Step :=
 
 example : records (Local.run ⟨2, fun _ => 0, []⟩ listingHistory).work =
     [⟨.snapshot ⟨.store, 1⟩, 2, .waits (.deviceRegistration 5)⟩,
-      ⟨.positions 2, 2, .storage true⟩] := by decide
+      ⟨.positions 2, 2, .storage .byItself⟩] := by decide
 
 /-- A positions listing that names this device's own subject is refused. -/
 example : (Local.run ⟨2, fun _ => 0, []⟩

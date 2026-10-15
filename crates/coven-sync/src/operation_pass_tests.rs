@@ -3,11 +3,14 @@
 
 use crate::device_log_sync::tests::{group, sql, storage, STORE_ID};
 use crate::store_log_sync::tests::{member, Device};
-use crate::{operation_data::Data, Files, Operations, TransferLimits};
+use crate::{
+    operation_data::Data, Files, OperationKind, Operations, PendingReason, PendingSubject, Retry,
+    SyncError, TransferLimits,
+};
 use coven_format::sealed_single::SingleChunkPrefix;
 use coven_format::store_log::{MemberRole, StoreChange};
 use coven_foundation::id_source::{DeviceId, KeyId};
-use coven_storage::test_utils::{MemoryRequest, MemoryStorage};
+use coven_storage::test_utils::{Faults, MemoryRequest, MemoryStorage};
 use coven_storage::{ObjectPath, Storage, StorageFailure};
 use std::num::NonZeroU64;
 use std::sync::Arc;
@@ -216,6 +219,159 @@ async fn rotation_receipts_precede_new_sealing() {
     .expect("rotation copy created in this pass");
     let write = created(&|path| *path == write_path(1)).expect("write sent in this pass");
     assert!(copy < entry && entry < write, "{trace:?}");
+    operations.close().await.unwrap();
+}
+
+/// A rotation whose entry the provider refuses: Ana's device with the
+/// removal published, the rotation's entry path refused with `failure`, and
+/// a write waiting on the rotated key.
+async fn refused_rotation(
+    failure: StorageFailure,
+    status: u16,
+) -> (Operations, Device, Arc<MemoryStorage>, ObjectPath) {
+    let storage = storage();
+    let mut ana = group(storage.clone(), 1).await.remove(0);
+    let outsider = member(9);
+    ana.add(&outsider, MemberRole::Member).await;
+    ana.sync().await;
+    ana.sync
+        .make_and_upload_entry(StoreChange::RemoveMember {
+            member: outsider.member(),
+        })
+        .await
+        .unwrap();
+    sql(&ana.db, "INSERT INTO notes VALUES('one','title','body')").await;
+    let own = ana
+        .log()
+        .await
+        .entries
+        .iter()
+        .filter(|entry| entry.entry.position.device == DeviceId(1))
+        .map(|entry| entry.entry.position.number)
+        .max()
+        .unwrap();
+    let rotation = ObjectPath::store_log(STORE_ID, DeviceId(1), NonZeroU64::new(own + 1).unwrap());
+    let mut faults = Faults::none();
+    faults
+        .create_failures
+        .insert(rotation.clone(), (failure, status));
+    storage.set_faults(faults).await;
+    let (operations, ana) = start(ana);
+    (operations, ana, storage, rotation)
+}
+
+/// Coven's own rotation is never `Synced` while it fails, and the app
+/// cannot retry it, nor needs to. A failure that clears on its own retries
+/// under backoff; one a person must clear waits, shown, for a new
+/// connection or credentials; one that never clears stays shown (E5).
+#[tokio::test]
+async fn a_refused_rotation_is_reported_and_retried_as_its_failure_clears() {
+    use coven_foundation::clock::Clock;
+    for (failure, status, retry) in [
+        (StorageFailure::QuotaExceeded, 507, Retry::Automatic),
+        (StorageFailure::PermissionDenied, 403, Retry::AppAction),
+        (StorageFailure::Refused, 400, Retry::Never),
+    ] {
+        let (operations, ana, storage, rotation) = refused_rotation(failure, status).await;
+        let failing = operations
+            .sync()
+            .await
+            .unwrap()
+            .expect("the rotation is reported");
+        let PendingSubject::Operation {
+            id,
+            kind: OperationKind::RotateKey,
+        } = failing.subject
+        else {
+            panic!("{failing:?}");
+        };
+        assert!(
+            matches!(failing.reason, PendingReason::Storage { failure: found, .. } if found == failure)
+        );
+        assert_eq!(failing.retry(), retry, "{failure:?}");
+        assert!(matches!(
+            operations.retry_pending_operation(id).await,
+            Err(SyncError::NotPending(found)) if found == id
+        ));
+        assert!(storage.status(&write_path(1)).await.unwrap().is_none());
+        storage.set_faults(Faults::none()).await;
+        // The reserved entry also waits in the store-log queue, which every
+        // pass sends; only the rotation's own retry finishes the operation.
+        ana.clock
+            .set(ana.clock.now() + std::time::Duration::from_secs(600));
+        let after_backoff = operations.sync().await.unwrap();
+        if retry == Retry::Automatic {
+            assert_eq!(after_backoff, None);
+        } else {
+            assert!(after_backoff.is_some_and(|record| record.subject == failing.subject));
+            // A new connection is what a person's action brings.
+            operations
+                .set_storage(Some(storage.clone() as Arc<dyn Storage>))
+                .await
+                .unwrap();
+            let reconnected = operations.sync().await.unwrap();
+            assert_eq!(
+                reconnected.is_none(),
+                retry == Retry::AppAction,
+                "{failure:?}"
+            );
+        }
+        assert_eq!(
+            ana.db.operation(id).await.unwrap().is_none(),
+            retry != Retry::Never,
+            "{failure:?}"
+        );
+        assert_eq!(
+            storage.status(&rotation).await.unwrap().is_some(),
+            retry != Retry::Never,
+            "{failure:?}"
+        );
+        operations.close().await.unwrap();
+    }
+}
+
+/// Coven's own work for an audience this member is not in has nothing left
+/// to do: a rotation or a snapshot of it finishes without publishing.
+#[tokio::test]
+async fn coven_work_for_an_audience_left_finishes_without_publishing() {
+    use crate::operation_data::{EntryWork, Intent};
+    use crate::snapshot_data::{SnapshotJob, SnapshotTask, SnapshotTrigger};
+    let storage = storage();
+    let ana = group(storage.clone(), 1).await.remove(0);
+    let left = coven_merge::Audience::Circle(coven_foundation::id_source::CircleId(
+        uuid::Uuid::from_u128(77),
+    ));
+    for data in [
+        Data::Entry(EntryWork {
+            intent: Intent::RotateKey {
+                audience: left.clone(),
+            },
+            entry: None,
+        }),
+        Data::Snapshots(SnapshotTask {
+            job: SnapshotJob::Write {
+                audience: left.clone(),
+                device: DeviceId(1),
+                trigger: SnapshotTrigger::Requested,
+                attempt: None,
+                abandoned: Vec::new(),
+            },
+            temporary: Vec::new(),
+        }),
+    ] {
+        ana.db
+            .start_operation(data.new_operation("coven").unwrap())
+            .await
+            .unwrap();
+    }
+    let before = storage.request_trace().len();
+    let (operations, ana) = start(ana);
+    assert_eq!(operations.sync().await.unwrap(), None);
+    assert!(ana.db.operations().await.unwrap().is_empty());
+    assert!(!storage.request_trace()[before..]
+        .iter()
+        .any(|request| matches!(request, MemoryRequest::Create(path)
+            if path.store_log_position().is_some() || path.key_copy_position().is_some())));
     operations.close().await.unwrap();
 }
 

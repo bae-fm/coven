@@ -178,7 +178,19 @@ impl StoreLogSync {
             }
         }
         if !self.snapshot_audiences(log)?.contains(&audience) {
-            return Err(SyncError::Rejected(coven_database::DropReason::NotAllowed));
+            // Coven's own snapshot of an audience this member left has
+            // nothing left to do; the app's raise or reset is refused.
+            if matches!(
+                trigger,
+                SnapshotTrigger::Raise { .. } | SnapshotTrigger::Reset
+            ) {
+                return Err(SyncError::Rejected(coven_database::DropReason::NotAllowed));
+            }
+            if let Some(wait) = self.unsettled(&task)? {
+                return Ok(wait);
+            }
+            self.database.finish_operation(record.id).await?;
+            return Ok(Progress::Finished(Output::Unit));
         }
         if let Some(reason) = self.replacement_holds_snapshots().await? {
             return Ok(Progress::Waiting(reason));

@@ -246,29 +246,82 @@ pub enum Retry {
 }
 impl PendingRecord {
     /// Derive retry policy from the reason and its subject. A dropped entry or
-    /// write is recomputed by replay; an operation whose attempt replay dropped runs again
-    /// on an explicit retry, validating against the current replay (§18).
+    /// write is recomputed by replay. An operation whose attempt replay
+    /// dropped runs again, validating against the current replay: coven's
+    /// own under backoff, the app's on an explicit retry (§18). Coven's own
+    /// operation retries as its failure clears: by itself under backoff,
+    /// after a person acts once that is resolved, or never (storelog-data
+    /// `operationRetry`).
     pub fn retry(&self) -> Retry {
         match (&self.subject, &self.reason) {
+            (PendingSubject::Operation { kind, .. }, PendingReason::Dropped(_))
+                if kind.coven_owned() =>
+            {
+                Retry::Automatic
+            }
             (PendingSubject::Operation { .. }, PendingReason::Dropped(_)) => Retry::AppAction,
+            (PendingSubject::Operation { kind, .. }, reason) if kind.coven_owned() => {
+                match reason.clears() {
+                    Some(Clears::ByItself) => Retry::Automatic,
+                    Some(Clears::ByPerson) => Retry::AppAction,
+                    Some(Clears::Never) => Retry::Never,
+                    None => reason.retry(),
+                }
+            }
             (_, reason) => reason.retry(),
         }
     }
 }
 
-/// Storage failures that transient work retries automatically (E5).
-pub(crate) fn automatic_storage(failure: StorageFailure) -> bool {
-    matches!(
-        failure,
-        StorageFailure::Network
-            | StorageFailure::Conflict
-            | StorageFailure::RateLimited
-            | StorageFailure::NotFound
-            | StorageFailure::SessionExpired
-    )
+/// How a failure clears (E5). Every failure is classified here, once.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Clears {
+    /// It can clear on its own: retry under the shared backoff.
+    ByItself,
+    /// Only a person's action clears it, such as signing in again.
+    ByPerson,
+    /// Nothing clears it: the provider or this installation refuses outright.
+    Never,
+}
+
+/// How a provider failure clears.
+pub(crate) fn storage_clears(failure: StorageFailure) -> Clears {
+    use StorageFailure::*;
+    match failure {
+        Network | Conflict | RateLimited | NotFound | SessionExpired | CatchUpRequired
+        | QuotaExceeded | File => Clears::ByItself,
+        Authentication
+        | PermissionDenied
+        | AccessNotRegistered { .. }
+        | AccessNotGranted { .. }
+        | AccountMismatch
+        | GoogleDriveFolderNotVisible
+        | ContainerNotFound
+        | RegionMismatch
+        | ClockSkew
+        | InvalidConfiguration
+        | NotStoreOwner
+        | AccountIdUnavailable
+        | ProviderUnavailable
+        | MemberKeysMissing => Clears::ByPerson,
+        _ => Clears::Never,
+    }
 }
 
 impl PendingReason {
+    /// How the failure this reason reports clears; `None` for a wait or a
+    /// verdict, which are not failures.
+    pub(crate) fn clears(&self) -> Option<Clears> {
+        match self {
+            Self::Failed(
+                LocalFailure::Database | LocalFailure::Disk | LocalFailure::KeyCustody,
+            ) => Some(Clears::ByItself),
+            Self::Failed(LocalFailure::Crypto | LocalFailure::Operation) => Some(Clears::Never),
+            Self::Storage { failure, .. } => Some(storage_clears(*failure)),
+            _ => None,
+        }
+    }
+
     fn retry(&self) -> Retry {
         match self {
             Self::Missing { .. }
@@ -278,7 +331,9 @@ impl PendingReason {
             | Self::PendingOwner { .. }
             | Self::AccountInUse { .. }
             | Self::InvalidPositions(_) => Retry::Automatic,
-            Self::Storage { failure, .. } if automatic_storage(*failure) => Retry::Automatic,
+            Self::Storage { failure, .. } if storage_clears(*failure) == Clears::ByItself => {
+                Retry::Automatic
+            }
             Self::Refused(_) | Self::UpdateRequired(_) => Retry::AfterUpdate,
             Self::Dropped(_) | Self::Removed => Retry::Never,
             _ => Retry::AppAction,

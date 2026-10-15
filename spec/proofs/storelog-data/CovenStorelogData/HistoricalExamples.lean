@@ -67,10 +67,10 @@ theorem rotation_in_second_phase :
   ⟨rfl, rfl, rfl, rfl, rfl, by decide⟩
 
 theorem failed_rotation_waits :
-    KeyPhases.rotate history 30 11 2 2 caught 10 (.error (.storage true)) (.ok ()) =
-      .error (.storage true) ∧
-    KeyPhases.rotate history 30 11 2 2 caught 10 (.ok ()) (.error (.storage true)) =
-      .error (.storage true) := ⟨rfl, rfl⟩
+    KeyPhases.rotate history 30 11 2 2 caught 10 (.error (.storage .byItself)) (.ok ()) =
+      .error (.storage .byItself) ∧
+    KeyPhases.rotate history 30 11 2 2 caught 10 (.ok ()) (.error (.storage .byItself)) =
+      .error (.storage .byItself) := ⟨rfl, rfl⟩
 
 theorem carol_revokes_ben (later : KeySelection.Copies) (noLaterCopy : (k2, 1) ∉ later) :
     (k2, 1) ∉ rotated.observation.copies ++ later :=

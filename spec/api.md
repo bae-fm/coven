@@ -1673,9 +1673,9 @@ while let Ok(values) = lost.next().await {
   - Every subject that cannot advance has its first unmet condition in `pending()`.
     This includes missing prerequisites, key copies, damaged objects, dropped
     entries, fingerprint disagreements, pending operations and file failures.
-  - Independent work continues. Per-object and maintenance pending records do not
-    fail sync status; a failed required reload prevents positions advancing
-    past that reload, and is recorded under its audience and operation.
+  - Independent work continues. Only coven's own failing operations fail
+    sync status; a failed required reload holds positions at it, recorded
+    under its audience and operation.
   - Posted positions never advance over unfinished work. A device can replace
     its previous post with updated pending records while its positions wait.
     It omits fingerprints unless they describe exactly the posted positions.
@@ -1684,7 +1684,7 @@ while let Ok(values) = lost.next().await {
   - Reset and coven-update retry rules are in §19.1. Neither a disagreement
     nor a peer's silence triggers recovery on its own.
 - `Offline` describes the last failed attempt, not the connection's history.
-  `Failed` means storage answered with an error that prevented the whole pass.
+  `Failed`: storage refused the whole pass, or coven's own operation failed.
   - Keep whether the provider answered; `StorageFailure::Network` alone
     cannot decide this. A server error response is not an offline device.
   - A denied store listing can fail the pass. A refused write, missing key,
@@ -2376,13 +2376,15 @@ pub enum Retry {
 impl PendingRecord {
     /// Automatic: missing objects, prerequisites, keys, pending provider/owner
     /// work, shared-account waits, invalid replaceable positions, and storage
-    /// Network/Conflict/RateLimited/NotFound/SessionExpired.
+    /// failures that clear on their own (Network/Conflict/RateLimited/
+    /// NotFound/SessionExpired/QuotaExceeded/File).
     /// AfterUpdate: Refused and UpdateRequired.
     /// Never: a dropped entry or write, or this device's removal.
-    /// An operation whose attempt replay dropped is AppAction: an explicit
-    /// retry catches up and validates again, and a cause that still stands
-    /// drops it again (§18).
-    /// AppAction: every other reason, including source files and disagreements.
+    /// AppAction: every other reason, including source files, disagreements
+    /// and an app operation replay dropped.
+    /// Coven's own operation: Automatic on a drop or database, disk or custody
+    /// failure; AppAction, retried on new credentials or connection, if a
+    /// person clears it; else Never.
     /// A replay change can clear a replay-dependent reason without retrying
     /// its subject. It cannot undo an entry's LandedTooLate, but can undo a
     /// write's retirement-dependent LandedTooLate (§10).
@@ -2550,9 +2552,8 @@ pub enum SyncStatus {
     Syncing,
     /// The last pass finished; individual subjects may still be pending.
     Synced { finished_at: SystemTime },
-    /// Storage answered with an error preventing the whole pass.
-    /// Per-object and maintenance failures belong only in pending().
-    Failed { error: Arc<StorageError> },
+    /// Storage refused the whole pass, or coven's own operation failed.
+    Failed { error: SyncFailure },
 }
 
 /// Storage this device has set up, with whether it holds the store key.
@@ -2620,7 +2621,7 @@ loop {
   first unmet condition in `pending()` (E5). Pending work appears there too.
 - Automatic snapshot writing, retention and reloads use the same list.
   Retention is derived each pass and has a path subject, with no operation
-  row. Automatic operation records cannot be discarded through app-work calls.
+  row. App-work calls cannot discard coven's own operations.
 - App work includes keeping a reset or schema change and an app-requested
   reload. Provider access work is recorded by replay; the app may retry a
   failed request but cannot discard the current access intention.
@@ -2648,8 +2649,10 @@ pub enum OperationKind {
     GrantAccess,
     /// Migrate the schema, snapshot it and raise the version.
     SchemaChange,
-    /// Reload an audience, requested by the app or required by sync.
+    /// Reload at the app's request.
     ReloadFromSnapshot,
+    /// A reload sync requires.
+    RequiredReload,
     /// Replace an audience key exposed to an excluded member or credential (§11).
     RotateKey,
     /// Publish a member's replacement pair and finish required custody (§11, E9).

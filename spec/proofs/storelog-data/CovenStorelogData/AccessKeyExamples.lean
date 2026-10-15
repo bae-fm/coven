@@ -119,11 +119,11 @@ def absence (key : String) : Option S3.Observation := some ⟨key, .ok .absent�
 
 theorem deletion_observations :
     verifyDeletion "carol-old" false (.ok ()) (absence "carol-old") = .error .adminRequired ∧
-    verifyDeletion "carol-old" true (.error (.storage true)) (absence "carol-old") =
-      .error (.deleteFailed (.storage true)) ∧
+    verifyDeletion "carol-old" true (.error (.storage .byItself)) (absence "carol-old") =
+      .error (.deleteFailed (.storage .byItself)) ∧
     verifyDeletion "carol-old" true (.ok ()) none = .error .observationMissing ∧
-    verifyDeletion "carol-old" true (.ok ()) (some ⟨"carol-old", .error (.storage true)⟩) =
-      .error (.observationFailed (.storage true)) ∧
+    verifyDeletion "carol-old" true (.ok ()) (some ⟨"carol-old", .error (.storage .byItself)⟩) =
+      .error (.observationFailed (.storage .byItself)) ∧
     verifyDeletion "carol-old" true (.ok ()) (some ⟨"carol-old", .ok .present⟩) =
       .error .stillPresent ∧
     verifyDeletion "carol-old" true (.ok ()) (absence "carol-other") = .error .wrongKey ∧
@@ -133,7 +133,7 @@ theorem deletion_observations :
 theorem failed_or_missing_read_keeps_pending :
     keys (clear (removed 1) (.providerDeletion "carol-old" true (.ok ()) none)) = keys (removed 1) ∧
     keys (clear (removed 1) (.providerDeletion "carol-old" true (.ok ())
-      (some ⟨"carol-old", .error (.storage true)⟩))) = keys (removed 1) ∧
+      (some ⟨"carol-old", .error (.storage .byItself)⟩))) = keys (removed 1) ∧
     keys (clear (removed 1) (.providerDeletion "carol-old" true (.ok ())
       (absence "carol-other"))) = keys (removed 1) := by decide
 

@@ -5,7 +5,7 @@ use serde_json::{json, Value};
 use std::time::Duration;
 
 #[tokio::test]
-async fn maintenance_failures_are_visible_and_wait_for_a_changed_connection() {
+async fn maintenance_failures_a_person_clears_retry_on_a_changed_connection() {
     for job in [
         SnapshotJob::Write {
             audience: Audience::Store,
@@ -46,12 +46,13 @@ async fn maintenance_failures_are_visible_and_wait_for_a_changed_connection() {
         assert_eq!(pending(&operations, &a.db).await.len(), 1);
         let failed = a.db.operations().await.unwrap().remove(0);
         assert_eq!(failed.id, id);
-        assert!(a
-            .db
-            .operation_pending::<PendingRecord>(id)
-            .await
-            .unwrap()
-            .is_some());
+        // A refused permission waits for a person; the app has nothing to retry.
+        let failed =
+            a.db.operation_pending::<PendingRecord>(id)
+                .await
+                .unwrap()
+                .unwrap();
+        assert_eq!(failed.retry(), Retry::AppAction, "{failed:?}");
         assert!(
             matches!(operations.retry_pending_operation(id).await, Err(SyncError::NotPending(found)) if found == id)
         );

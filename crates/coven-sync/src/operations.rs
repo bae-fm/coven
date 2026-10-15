@@ -91,6 +91,7 @@ pub(crate) enum Output {
     Invite(Invite),
     AccessKeyReplaced(AccessKeyReplacement),
     DeliveredKey(Option<coven_format::access_key_delivery::DeliveredKey>),
+    Failing(Option<PendingRecord>),
 }
 
 type Reply = oneshot::Sender<Result<Output, SyncError>>;
@@ -240,8 +241,13 @@ impl Operations {
     }
     /// Run one entire pass under the operation worker's serialization. Replay,
     /// reloads, writes and snapshots cannot interleave with another operation.
-    pub async fn sync(&self) -> Result<(), SyncError> {
-        self.unit(Command::SyncAll).await
+    /// A finished pass returns coven's own work whose last attempt failed,
+    /// if any: it retries under backoff, but has not succeeded (E5).
+    pub async fn sync(&self) -> Result<Option<PendingRecord>, SyncError> {
+        match self.call(Command::SyncAll).await? {
+            Output::Failing(failing) => Ok(failing),
+            _ => unreachable!("pass result"),
+        }
     }
     /// Change a member's role as a plain store-log entry.
     pub async fn set_member_role(
@@ -507,7 +513,7 @@ impl OperationRun {
                         if result.is_err() { self.sync.invalidate_sends(); }
                         let _ = reply.send(result.map(|()| Output::Unit));
                     } else if matches!(command, Command::SyncAll) {
-                        response = Some((reply, self.sync_pass().await.map(|()| Output::Unit)));
+                        response = Some((reply, self.sync_pass().await.map(Output::Failing)));
                     } else {
                         let removal = matches!(command, Command::RemoveMember(_) | Command::RemoveCircleMember(..));
                         match self.sync.begin_operation_call(command).await {
@@ -569,27 +575,27 @@ impl OperationRun {
         }
     }
 
-    async fn sync_pass(&mut self) -> Result<(), SyncError> {
+    async fn sync_pass(&mut self) -> Result<Option<PendingRecord>, SyncError> {
         let result = self.pass_steps().await;
         // Any sender may have stopped this copy; decide its reset durably.
         if self.sync.send_stopped() {
             return Err(self.sync.record_device_reset().await);
         }
-        result
+        result?;
+        self.sync.failing_work().await
     }
 
     async fn drive_pass(&mut self) -> Result<(), SyncError> {
-        match self.drive(false).await? {
-            Some(error) => Err(error),
-            None => Ok(()),
-        }
+        self.drive(false).await
     }
 
-    // Journal failures stop the worker; maintenance failures stop only the pass.
+    // Journal failures stop the worker. Every other failure is its
+    // operation's recorded condition, and independent work continues; the
+    // pass reports coven's own failing work when it finishes.
     // Outside a pass, a snapshot waiting to be prepared, such as an app's
     // reset, first gets the catch-up it follows (§15); in a pass, step 8
     // prepares it after step 6.
-    async fn drive(&mut self, outside_pass: bool) -> Result<Option<SyncError>, SyncError> {
+    async fn drive(&mut self, outside_pass: bool) -> Result<(), SyncError> {
         self.sync
             .set_discovery_download_limit(self.files.transfer_limits().downloads);
         self.sync.forget_join_requests();
@@ -598,8 +604,6 @@ impl OperationRun {
         } else {
             None
         };
-        // Maintenance that failed and has not recovered within this drive.
-        let mut maintenance_failures: Vec<(OperationId, SyncError)> = Vec::new();
         loop {
             match self.sync.schedule_version_changes().await {
                 Ok(()) | Err(SyncError::UpdateRequired(_)) => (),
@@ -682,8 +686,6 @@ impl OperationRun {
                 {
                     continue;
                 }
-                let maintenance = record.started_by == "coven"
-                    && !matches!(data, crate::operation_data::Data::ProviderAccess { .. });
                 let step = self.sync.operation_step(&record, data).await;
                 match step {
                     Ok(Progress::Waiting(reason)) => {
@@ -697,20 +699,15 @@ impl OperationRun {
                             }
                         }
                     }
-                    Ok(Progress::Advanced) => {
-                        advanced = true;
-                        maintenance_failures.retain(|(id, _)| *id != record.id);
-                    }
+                    Ok(Progress::Advanced) => advanced = true,
                     Ok(Progress::Reply(result)) => {
                         advanced = true;
-                        maintenance_failures.retain(|(id, _)| *id != record.id);
                         if let Some(reply) = self.waiters.remove(&record.id) {
                             let _ = reply.send(result);
                         }
                     }
                     Ok(Progress::Finished(value)) => {
                         advanced = true;
-                        maintenance_failures.retain(|(id, _)| *id != record.id);
                         if let Some(reply) = self.waiters.remove(&record.id) {
                             let _ = reply.send(Ok(value));
                         }
@@ -719,9 +716,6 @@ impl OperationRun {
                         self.sync.record_operation_error(&record, &error).await?;
                         if let Some(reply) = self.waiters.remove(&record.id) {
                             let _ = reply.send(Err(error));
-                        } else if maintenance {
-                            maintenance_failures.retain(|(id, _)| *id != record.id);
-                            maintenance_failures.push((record.id, error));
                         }
                     }
                 }
@@ -736,12 +730,7 @@ impl OperationRun {
                 }
             });
             if !advanced {
-                // A failure its own retry resolved within this drive, after
-                // other work advanced, does not fail the pass.
-                return Ok(maintenance_failures
-                    .into_iter()
-                    .next()
-                    .map(|(_, error)| error));
+                return Ok(());
             }
         }
     }

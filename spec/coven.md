@@ -6131,9 +6131,9 @@ Carol's tablet:
     and pending provider access work. Retention uses its own path subject.
   - The reason determines retry: automatic, after an update, app action,
     or never (§19.1, E5). Unrelated operations can still advance.
-  - The app can retry or discard its own pending operations with E6.
-    It can also retry failed provider access work. It cannot discard that
-    current intention or automatic maintenance through those calls.
+  - The app can retry or discard its own pending operations with E6, and
+    retry failed provider access work. Coven retries its own operations as
+    their failure clears (E5); the app cannot discard them.
   - A failed reload leaves the old database in place. No positions pass
     it until the replacement and its dependent work commit.
 - An operation's row is deleted when its last step completes.

@@ -704,10 +704,17 @@ async fn dropped_rotation_restarts_with_new_material_only_after_revalidation() {
             .collect::<Vec<_>>();
         let retry = ben.step(id).await;
         if authority_lost {
-            assert!(matches!(
-                retry,
-                Err(SyncError::Rejected(coven_database::DropReason::NotAllowed))
-            ));
+            // Ben left the circle: its rotation is the remaining members',
+            // so his finishes with no new material or entry (§11).
+            retry.unwrap();
+            ben.step(id).await.unwrap();
+            assert!(ben
+                .db
+                .operations()
+                .await
+                .unwrap()
+                .iter()
+                .all(|r| r.id != id));
             assert!(ben.db.local_store_log().await.unwrap().upload.is_none());
             assert_eq!(
                 ben.custody
