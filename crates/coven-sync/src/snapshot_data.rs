@@ -74,7 +74,11 @@ pub(crate) enum AbandonedLanding {
 #[derive(Clone, Serialize, Deserialize)]
 pub(crate) enum ReloadScope {
     All,
+    /// Audiences whose reset or schema version replay changed, while the
+    /// database still requires their reload.
     Changed(#[serde(with = "audiences")] Vec<Audience>),
+    /// Audiences whose newest snapshot passes a returning device's positions.
+    Returned(#[serde(with = "audiences")] Vec<Audience>),
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -282,7 +286,8 @@ impl SnapshotJob {
             }
             (Self::Reload { scope: a, .. }, Self::Reload { scope: b, .. }) => match (a, b) {
                 (ReloadScope::All, ReloadScope::All) => true,
-                (ReloadScope::Changed(a), ReloadScope::Changed(b)) => a == b,
+                (ReloadScope::Changed(a), ReloadScope::Changed(b))
+                | (ReloadScope::Returned(a), ReloadScope::Returned(b)) => a == b,
                 _ => false,
             },
             _ => false,

@@ -39,11 +39,17 @@ impl StoreLogSync {
                 let SnapshotJob::Reload { scope, .. } = &task.job else {
                     unreachable!()
                 };
-                if let ReloadScope::Changed(changed) = scope {
-                    let required = self.database.reloading_audiences().await?;
-                    audiences.retain(|audience| {
-                        changed.contains(audience) && required.contains(audience)
-                    });
+                match scope {
+                    ReloadScope::All => (),
+                    ReloadScope::Changed(changed) => {
+                        let required = self.database.reloading_audiences().await?;
+                        audiences.retain(|audience| {
+                            changed.contains(audience) && required.contains(audience)
+                        });
+                    }
+                    ReloadScope::Returned(returned) => {
+                        audiences.retain(|audience| returned.contains(audience))
+                    }
                 }
                 if audiences.is_empty() {
                     self.database.finish_operation(record.id).await?;

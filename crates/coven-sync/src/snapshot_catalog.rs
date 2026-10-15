@@ -33,9 +33,6 @@ pub(super) struct Catalog {
     /// Every verified snapshot, newest first. The newest that follows the
     /// replay's reset/version boundary is the audience's current newest.
     pub(super) verified: Vec<Verified>,
-    /// Verified prefixes that follow the replay's reset/version boundary require
-    /// history, even when their keys cannot authorize loading their rows.
-    pub(super) required_positions: coven_format::value::WritePositions,
     /// A listed prefix this device has not verified: it waits, for an update
     /// or for its author's registration, or this version refused it, and a
     /// later version may verify it (§19.1). It establishes no coverage, but
@@ -217,25 +214,9 @@ impl StoreLogSync {
             .await?;
         candidates.sort_by(|a, b| newest_first((&a.object, &a.prefix), (&b.object, &b.prefix)));
         verified.sort_by(|a, b| newest_first((&a.object, &a.prefix), (&b.object, &b.prefix)));
-        // A snapshot prepared for a concurrent raise can include its author's
-        // unpublished migration write. A boundary that excludes that snapshot
-        // also excludes its demand for that write's history.
-        let mut positions = BTreeMap::new();
-        for snapshot in verified
-            .iter()
-            .filter(|snapshot| snapshot.follows_boundary(log))
-        {
-            super::include_positions(&mut positions, &snapshot.prefix.writes.0);
-        }
         Ok(Catalog {
             candidates,
             verified,
-            required_positions: coven_format::value::WritePositions(
-                positions
-                    .into_iter()
-                    .map(|(device, number)| coven_merge::WriteId { device, number })
-                    .collect(),
-            ),
             newest_unknown,
             update,
         })

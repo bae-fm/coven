@@ -37,9 +37,9 @@ impl StoreLogSync {
     }
 
     /// The away-device path (§15): list each readable audience's snapshots
-    /// after a fresh storage sample and reload only if a counting snapshot
-    /// covers past this device's positions on some writer. Afterwards that
-    /// sample certifies write misses for this session.
+    /// after a fresh storage sample and reload only the audiences whose
+    /// current newest snapshot goes past this device's positions on some
+    /// writer. Afterwards that sample certifies write misses for this session.
     pub(crate) async fn discover_snapshots(&mut self) -> Result<(), SyncError> {
         let _reads = self.reads.enter();
         let _shared = self.reads.share_snapshot_listings();
@@ -59,7 +59,7 @@ impl StoreLogSync {
             .clock()
             .expect("observed storage time");
         let state = self.database.sync_state(Vec::new()).await?;
-        let mut advances = false;
+        let mut advanced = Vec::new();
         for audience in self.snapshot_audiences(&local.log)? {
             let catalog = self
                 .current_snapshot_candidates(&audience, &local.log)
@@ -67,14 +67,25 @@ impl StoreLogSync {
             if let Some(update) = catalog.update {
                 return Err(SyncError::UpdateRequired(update));
             }
-            advances |= catalog
-                .required_positions
-                .0
+            if catalog
+                .verified
                 .iter()
-                .any(|covered| covered.number > point(&state.positions, covered.device));
+                .find(|newest| newest.follows_boundary(&local.log))
+                .is_some_and(|newest| {
+                    newest
+                        .prefix
+                        .writes
+                        .0
+                        .iter()
+                        .any(|covered| covered.number > point(&state.positions, covered.device))
+                })
+            {
+                advanced.push(audience);
+            }
         }
-        if advances {
-            self.reload_from_snapshots().await?;
+        if !advanced.is_empty() {
+            self.reload(crate::snapshot_data::ReloadScope::Returned(advanced))
+                .await?;
         }
         self.finality
             .lock()

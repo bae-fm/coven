@@ -118,13 +118,18 @@ impl StoreLogSync {
     /// required write this device refused makes the reload wait on that write
     /// until a snapshot covering it lands (§15).
     pub async fn reload_from_snapshots(&mut self) -> Result<(), SyncError> {
+        self.reload(crate::snapshot_data::ReloadScope::All).await
+    }
+
+    /// Reload the audiences `scope` names (§15).
+    pub(super) async fn reload(
+        &mut self,
+        scope: crate::snapshot_data::ReloadScope,
+    ) -> Result<(), SyncError> {
         let _reads = self.reads.enter();
         self.resume_snapshots().await?;
         let record = self
-            .start_snapshot_task(SnapshotJob::Reload {
-                scope: crate::snapshot_data::ReloadScope::All,
-                files: None,
-            })
+            .start_snapshot_task(SnapshotJob::Reload { scope, files: None })
             .await?;
         self.drive_snapshot(record.id).await?;
         Ok(())

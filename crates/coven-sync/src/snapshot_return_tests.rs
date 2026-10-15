@@ -82,6 +82,88 @@ async fn a_snapshot_that_does_not_advance_leaves_local_state_alone() {
     assert_eq!(tables(&b).await, local);
 }
 
+/// Ana's and Ben's snapshots each cover only their own write; Ana's, first by
+/// path, is the newest. Carol has applied Ana's write alone. Ben's older
+/// snapshot passes her position, but the newest does not, so she keeps her
+/// state and reads Ben's write from his log (§15).
+#[tokio::test]
+async fn only_the_newest_snapshot_decides_a_return_reload() {
+    use crate::snapshot_data::{SnapshotJob, SnapshotTask};
+    let (storage, _) = timed_storage();
+    let mut a = notes_device(storage.clone(), 1).await;
+    a.create(key(1)).await;
+    let mut b = notes_device(storage.clone(), 2).await;
+    add_device(&mut b).await;
+    let mut c = notes_device(storage.clone(), 3).await;
+    add_device(&mut c).await;
+    a.sync().await;
+    b.sync().await;
+    write_rows(&a, 0, 1, 17, Audience::Store).await;
+    write_rows(&b, 1, 1, 17, Audience::Store).await;
+    let data = Data::Snapshots(SnapshotTask {
+        job: SnapshotJob::Write {
+            audience: Audience::Store,
+            device: b.device().await,
+            trigger: crate::snapshot_data::SnapshotTrigger::Requested,
+            attempt: None,
+            abandoned: Vec::new(),
+        },
+        temporary: Vec::new(),
+    });
+    let id =
+        b.db.start_operation(data.new_operation("coven").unwrap())
+            .await
+            .unwrap();
+    {
+        let _pass = b.caught_up_pass().await;
+        let record = b.operation(id).await;
+        b.sync
+            .operation_step(&record, Data::read(&record).unwrap())
+            .await
+            .unwrap();
+    }
+    assert!(a.write_snapshot(Audience::Store).await.is_err());
+    upload(&a, &storage).await;
+    c.writes.download_writes().await.unwrap();
+    upload(&b, &storage).await;
+    a.sync.sync_store_log().await.unwrap();
+    while let Some(record) =
+        b.db.operations()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|r| r.id == id)
+    {
+        b.sync
+            .operation_step(&record, Data::read(&record).unwrap())
+            .await
+            .unwrap();
+    }
+    let snapshots = storage
+        .list(&ObjectPrefix::snapshots(store(1)))
+        .await
+        .unwrap();
+    assert_eq!(snapshots.len(), 2);
+    let mut signed = Vec::new();
+    for object in &snapshots {
+        let bytes = storage.read(&object.path).await.unwrap();
+        let length = coven_format::sealed_snapshot::SnapshotObjectPrefix::length(&bytes).unwrap();
+        signed.push((object.path.clone(), length as u64 + 64));
+    }
+    let reads = storage.reads().await.len();
+    c.sync.prepare_return().await.unwrap();
+    assert!(
+        storage.reads().await[reads..]
+            .iter()
+            .all(|(path, start, length)| signed
+                .iter()
+                .all(|(signed, end)| path != signed || start + length <= *end)),
+        "a snapshot body was read"
+    );
+    c.writes.download_writes().await.unwrap();
+    assert_eq!(tables(&c).await.len(), 2);
+}
+
 #[tokio::test]
 async fn returning_after_thirty_days_reloads_history_deleted_meanwhile() {
     let (storage, clock) = timed_storage();
