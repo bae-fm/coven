@@ -959,7 +959,7 @@ async fn lean_differential_receive() {
                                 // Exercise the actual hold-until-ready function, including
                                 // its implicit preceding-own-write and metadata checks.
                                 let ready = database.inspect_writer(|db| {
-                                    match prerequisite(db, &header).unwrap() {
+                                    match prerequisite(db, &header, &[]).unwrap() {
                                         None => true,
                                         Some(WriteWait::Writes(_)) => false,
                                         other => panic!("unexpected prerequisite: {other:?}"),

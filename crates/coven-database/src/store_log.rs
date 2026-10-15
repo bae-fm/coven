@@ -93,6 +93,18 @@ impl StoreLog {
         }))
     }
 
+    /// The boundaries the final entries alone select, in replay order: no
+    /// later entry can change these (§9). Retention judges coverage under
+    /// them as well as under every boundary a non-final raise could select.
+    pub fn final_boundaries(&self) -> impl Iterator<Item = crate::Boundary> + '_ {
+        crate::Boundary::select(self.entries.iter().filter_map(|entry| {
+            (self.replay.entries[&entry.entry.position] == EntryOutcome::Kept
+                && self.is_final(entry.entry.position))
+            .then(|| crate::Boundary::from_entry(&entry.entry))
+            .flatten()
+        }))
+    }
+
     /// Applied positions represented by these entries, including dropped entries.
     pub fn positions(&self) -> coven_format::value::EntryPositions {
         let mut positions = BTreeMap::new();

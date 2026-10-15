@@ -312,6 +312,13 @@ impl SnapshotDecoder {
             "snapshot prefix audience",
             Rule::Audience,
         )?;
+        require(
+            prefix
+                .raise
+                .is_none_or(|version| version.get() == header.schema_version),
+            "snapshot raise version",
+            Rule::RaiseVersion,
+        )?;
         input.finish()?;
         header.validate()?;
         Ok(Self(StreamState::new(header)))

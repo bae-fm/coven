@@ -10,6 +10,7 @@ use coven_format::{
     write::{WriteHeader, WritePart},
 };
 use coven_foundation::id_source::DeviceId;
+use coven_merge::Audience;
 use rusqlite::params;
 use std::collections::BTreeSet;
 
@@ -242,9 +243,19 @@ fn retained(database: &DatabaseConnection) -> Result<Vec<RetainedBoundary>, DbEr
     )
 }
 
+/// What a realized boundary decides about an uncovered part of its audience.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum BoundaryRule {
+    /// A raise excludes a part authored at an older schema version (§17.1).
+    Raise(u32),
+    /// A reset ignores a part whose write had not read this entry (§19.3).
+    Reset(EntryId),
+}
+
 /// The boundary facts realized by the current data projection.
 pub(crate) struct WriteBoundary {
-    pub(crate) boundary: Boundary,
+    pub(crate) audience: Audience,
+    pub(crate) rule: BoundaryRule,
     pub(crate) included: WritePositions,
 }
 
@@ -259,7 +270,11 @@ impl WriteBoundary {
             row.boundary.apply(&mut state);
             if row.applied {
                 result.push(Self {
-                    boundary: row.boundary,
+                    audience: row.boundary.snapshot().audience.clone(),
+                    rule: match &row.boundary {
+                        Boundary::SchemaChange(version) => BoundaryRule::Raise(version.number),
+                        Boundary::Reset { entry, .. } => BoundaryRule::Reset(*entry),
+                    },
                     included: row.included.ok_or(DbError::DamagedDatabase)?,
                 });
             }
@@ -267,19 +282,41 @@ impl WriteBoundary {
         Ok(result)
     }
 
+    /// The realized boundaries, with each unpublished raise capture judging
+    /// its audience as its kept raise will: a migrated device applies
+    /// received writes before its raise is kept, so a capture taken again
+    /// after its catch-up covers them (§15, §17.1). A capture whose
+    /// audience already realized a raise to its version adds nothing.
+    pub(crate) fn judging(database: &DatabaseConnection) -> Result<Vec<Self>, DbError> {
+        let mut boundaries = Self::load(database)?;
+        for (audience, version, included) in crate::raise_capture::provisional(database)? {
+            let realized = boundaries.iter().any(|b| {
+                b.audience == audience
+                    && matches!(b.rule, BoundaryRule::Raise(number) if number >= version)
+            });
+            if !realized {
+                boundaries.push(Self {
+                    audience,
+                    rule: BoundaryRule::Raise(version),
+                    included,
+                });
+            }
+        }
+        Ok(boundaries)
+    }
+
     /// This boundary's verdict on an uncovered part of its audience: a kept
     /// reset ignores a part whose write had not read the reset entry (§19.3);
     /// a raise excludes a part authored at an older schema version (§17.1).
     pub(crate) fn excludes(&self, header: &WriteHeader, part: &WritePart) -> Option<ChangeVerdict> {
-        if part.audience != self.boundary.snapshot().audience
-            || self.included.covers(header.position)
-        {
+        if part.audience != self.audience || self.included.covers(header.position) {
             return None;
         }
-        match &self.boundary {
-            Boundary::SchemaChange(version) => (header.schema_version < version.number)
-                .then_some(ChangeVerdict::Excluded(version.number)),
-            Boundary::Reset { entry, .. } => {
+        match &self.rule {
+            BoundaryRule::Raise(version) => {
+                (header.schema_version < *version).then_some(ChangeVerdict::Excluded(*version))
+            }
+            BoundaryRule::Reset(entry) => {
                 (!header.store_log_read.covers(*entry)).then_some(ChangeVerdict::Ignored(*entry))
             }
         }

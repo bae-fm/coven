@@ -406,6 +406,14 @@ impl Device {
     pub(crate) async fn catch_up(&self) {
         self.sync.scan_store_log_once(true).await.unwrap();
     }
+    /// Enter a pass and complete its write catch-up, as SP step 6 does, so
+    /// operations driven while the returned scope lives can prepare raise
+    /// snapshots (§15).
+    pub(crate) async fn caught_up_pass(&mut self) -> crate::pass_reads::ReadScope {
+        let pass = self.sync.begin_pass(&mut self.writes);
+        self.sync.catch_up_writes(&mut self.writes).await.unwrap();
+        pass
+    }
     pub(crate) async fn log(&self) -> StoreLog {
         self.db.local_store_log().await.unwrap().log
     }

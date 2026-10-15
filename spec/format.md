@@ -588,7 +588,7 @@
   | --- | --- | --- |
   | 32 | Write | `header_key:uuid \| part_keys:[uuid]` |
   | 33 | Store log entry | `key:uuid` |
-  | 34 | Snapshot | `audience:Audience \| key:uuid \| caught_at:StorageTime \| writes:WritePositions \| store_log:EntryPositions` |
+  | 34 | Snapshot | `audience:Audience \| key:uuid \| caught_at:StorageTime \| raise:Option<u32> \| writes:WritePositions \| store_log:EntryPositions` |
   | 35 | Posted positions | `key:uuid` |
   | 36 | Join request | nothing |
   | 39 | Clock observation | `key:uuid` |
@@ -651,6 +651,11 @@
     ([`late_snapshot_ignored`, `Snapshot.counts`](proofs/io/CovenIO/Retention.lean)).
   - E.g. `caught_at = (100, 0)` admits a landing at `(86500, 0)`, but not
     `(86501, 0)` ([`late_snapshot_ignored`](proofs/io/CovenIO/Retention.lean)).
+  - `raise` is the positive version a raise snapshot raises its audience to
+    (§17.1), absent for every other snapshot; the header's `schema_version`
+    must equal it. Retention reads it before any entry names the snapshot,
+    and a raise entry's boundary refuses a named snapshot without its own
+    version here (§15).
   - `prefix_signature` signs the D11 context of `coven/prefix-signature/v1`,
     the path, and the exact cleartext `kind | version | prefix` bytes. The
     separate label distinguishes this message from a whole-object digest.
@@ -941,8 +946,8 @@
     across creation and addition, key-free removals, and all three kinds of
     key introduction with their key hashes;
   - a dismissal frame;
-  - a snapshot with its signed catch-up storage time, every section and
-    active, frozen and excluded losses;
+  - a snapshot with its signed catch-up storage time and raised version,
+    every section and active, frozen and excluded losses;
   - a migration write;
   - a clock frame and sealed clock object, with its path, `store_log_read`
     and author signature;

@@ -9,6 +9,7 @@ import CovenIO.WaitingEvidence
 import CovenIO.Wakes
 import CovenIO.Writers
 import CovenIO.DroppedRegistrations
+import CovenIO.RaiseCoverage
 import Lean
 
 /-! The IO differential runner. Each case names the executable transition it
@@ -479,6 +480,39 @@ private def retirementDevices (j : Json) : Except String Json := do
   let result : CovenStorelog.Result := ⟨CovenStorelog.State.empty, kept, dropped⟩
   let retired := (Writers.retirements (fun w => log.getD w blank) result id).flatMap (·.devices)
   return toJson retired.eraseDups.mergeSort
+/-- `RaiseHistory.Held` for one part audience: under every possible boundary
+(`null` for none, or a named snapshot's `[writer, number]`), the newest
+counting snapshot it admits covers the write. A snapshot admits under a
+named boundary when it is that snapshot or its signed view read the entry
+naming it (`reads`). -/
+private def held (j : Json) : Except String Json := do
+  let audience ← j.getObjValAs? Nat "audience"
+  let writer ← j.getObjValAs? Nat "writer"
+  let number ← j.getObjValAs? Nat "number"
+  let entries ← j.getObjValAs? (Array Json) "snapshots"
+  let parsed ← entries.toList.mapM fun s => do
+    let snapshotWriter ← s.getObjValAs? Nat "writer"
+    let snapshotNumber ← s.getObjValAs? Nat "number"
+    let stored ← s.getObjValAs? Nat "stored"
+    let caught ← s.getObjValAs? Nat "caught"
+    let positions ← s.getObjValAs? (List (Nat × Nat)) "positions"
+    let reads ← s.getObjValAs? (List (Nat × Nat)) "reads"
+    pure (Snapshot.mk audience snapshotWriter snapshotNumber stored caught positions, reads)
+  let landed := parsed.map Prod.fst
+  let find (path : Nat × Nat) : Except String Snapshot :=
+    match landed.find? (fun s => s.writer == path.1 && s.number == path.2) with
+    | some s => .ok s
+    | none => .error "a boundary names an unlisted snapshot"
+  let reads := (← parsed.mapM fun (s, named) => named.mapM fun path => do
+    pure (s, ← find path)).flatten
+  let possible ← (← j.getObjValAs? (Array Json) "possible").toList.mapM fun b =>
+    match b with
+    | .null => pure none
+    | path => do some <$> find (← fromJson? path)
+  let write : Write := ⟨writer, number, 0, [audience]⟩
+  return toJson (possible.all fun b =>
+    decide (RaiseCoverage.RaiseHistory.CoversIn
+      (RaiseCoverage.RaiseHistory.selected .writes landed reads audience b) write audience))
 
 private def run (j : Json) : Except String Json := do
   match ← j.getObjValAs? String "check" with
@@ -501,6 +535,7 @@ private def run (j : Json) : Except String Json := do
   | "waiting" => waiting j
   | "evidence" => evidence j
   | "wakes" => wakes j
+  | "held" => held j
   | check => throw s!"unknown IO check {check}"
 
 def main : IO UInt32 := do

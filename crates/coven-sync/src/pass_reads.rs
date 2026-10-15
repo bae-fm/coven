@@ -19,6 +19,11 @@ struct Reads {
     drains: BTreeMap<DeviceId, coven_format::value::StorageTime>,
     /// This pass's first phase: whether it completed with sending authority.
     membership: Option<bool>,
+    /// The storage sample taken before this pass's write discovery, once
+    /// that discovery completed: every writer's log read through its miss and
+    /// every found write applied. A raise snapshot prepared now records it as
+    /// its `T_c` (§15).
+    write_catch_up: Option<coven_format::value::StorageTime>,
     /// Audience snapshot listings shared while one return observation lasts.
     snapshot_listings: Option<BTreeMap<String, Vec<StoredObject>>>,
 }
@@ -138,6 +143,22 @@ impl PassReads {
         self.0.lock().expect("pass reads lock poisoned").membership
     }
 
+    /// Record this pass's completed write discovery and the sample before it.
+    pub(crate) fn keep_write_catch_up(&self, sample: coven_format::value::StorageTime) {
+        let mut reads = self.0.lock().expect("pass reads lock poisoned");
+        if reads.scopes > 0 {
+            reads.write_catch_up = Some(sample);
+        }
+    }
+
+    /// The sample before this pass's completed write discovery, if one completed.
+    pub(crate) fn write_catch_up(&self) -> Option<coven_format::value::StorageTime> {
+        self.0
+            .lock()
+            .expect("pass reads lock poisoned")
+            .write_catch_up
+    }
+
     pub(crate) fn keep_miss(&self, kind: coven_database::LogKind, writer: DeviceId, number: u64) {
         let mut reads = self.0.lock().expect("pass reads lock poisoned");
         if reads.scopes > 0 {
@@ -189,6 +210,7 @@ impl Drop for ReadScope {
             reads.misses.clear();
             reads.drains.clear();
             reads.membership = None;
+            reads.write_catch_up = None;
         }
     }
 }

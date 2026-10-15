@@ -66,7 +66,8 @@ pub enum WriteWait {
     Sources(Vec<coven_format::write_sources::ChangeId>),
     /// The app must support this schema version.
     SchemaVersion(u32),
-    /// The local breaking migration awaits publication and snapshot reload.
+    /// The local breaking migration awaits publication and snapshot reload,
+    /// and an opened part's audience has no capture to judge it under.
     SchemaPublication(u32),
     /// The selected boundary has not committed its replacement data.
     Reload(Audience),
@@ -114,7 +115,7 @@ pub(crate) fn apply<P: crate::PendingValue>(
             retain_sources(database, &download)?;
             return Ok(ApplyOutcome::AlreadyApplied);
         }
-        if let Some(wait) = prerequisite(database, header)? {
+        if let Some(wait) = prerequisite(database, header, &opened_audiences(&download))? {
             return Ok(ApplyOutcome::Waiting(wait));
         }
         for part in &download.parts {
@@ -168,6 +169,7 @@ pub(crate) fn source_wait(result: Result<ApplyOutcome, DbError>) -> Result<Apply
 pub(crate) fn prerequisite(
     database: &DatabaseConnection,
     header: &WriteHeader,
+    opened: &[Audience],
 ) -> Result<Option<WriteWait>, DbError> {
     let positions = positions(database)?;
     let entries = crate::store_log::positions(database)?;
@@ -201,18 +203,26 @@ pub(crate) fn prerequisite(
     if let Some(publication) = publication.filter(|version| *version > 0) {
         let applied = crate::write_boundary::WriteBoundary::load(database)?
             .into_iter()
-            .filter_map(|b| match b.boundary {
-                crate::Boundary::SchemaChange(version)
-                    if version.snapshot.audience == Audience::Store =>
+            .filter_map(|b| match b.rule {
+                crate::write_boundary::BoundaryRule::Raise(version)
+                    if b.audience == Audience::Store =>
                 {
-                    Some(version.number)
+                    Some(version)
                 }
                 _ => None,
             })
             .max()
             .unwrap_or(0);
+        // Before its raise is kept, a migrated device judges a received
+        // write under its captures; a part in an audience without one waits.
         if publication > applied {
-            return Ok(Some(WriteWait::SchemaPublication(publication)));
+            let captured: BTreeSet<_> = crate::raise_capture::provisional(database)?
+                .into_iter()
+                .map(|(audience, _, _)| audience)
+                .collect();
+            if !opened.iter().all(|audience| captured.contains(audience)) {
+                return Ok(Some(WriteWait::SchemaPublication(publication)));
+            }
         }
     }
     Ok(None)
@@ -284,6 +294,9 @@ pub struct SyncState {
     pub reloading: bool,
     /// The final version of the last breaking migration batch; uploads await its raise.
     pub breaking_version: u32,
+    /// The newest own write an unpublished raise capture includes: it and
+    /// every earlier own write upload before that raise publishes (§17.1).
+    pub captured_through: Option<u64>,
     /// Fingerprints may be compared only at the same app schema version.
     pub schema_version: u32,
     /// Applied positions, including skipped and excluded writes.

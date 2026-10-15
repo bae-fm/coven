@@ -366,7 +366,11 @@ async fn reset_coverage_survives_noops_reversal_and_failed_replacement() {
     );
     let boundaries = db.inspect_writer(super::WriteBoundary::load).unwrap();
     assert_eq!(boundaries.len(), 1);
-    assert_eq!(boundaries[0].boundary.entry(), id(1));
+    assert_eq!(
+        boundaries[0].rule,
+        super::BoundaryRule::Reset(id(1)),
+        "the realized reset is the first entry"
+    );
     assert_eq!(count(&db, "_coven_boundaries"), 2);
     db.close().await.unwrap();
 }
@@ -383,18 +387,8 @@ async fn schema_boundaries_are_independent_for_each_audience() {
         uuid::Uuid::from_u128(1),
     ));
     let boundary = super::WriteBoundary {
-        boundary: crate::Boundary::SchemaChange(crate::StoreVersion {
-            number: 2,
-            snapshot: coven_format::store_log::SnapshotId {
-                audience: circle.clone(),
-                device: DeviceId(99),
-                number: 1,
-            },
-            entry: EntryId {
-                device: DeviceId(99),
-                number: 1,
-            },
-        }),
+        audience: circle.clone(),
+        rule: super::BoundaryRule::Raise(2),
         included: WritePositions(Vec::new()),
     };
     assert!(boundary

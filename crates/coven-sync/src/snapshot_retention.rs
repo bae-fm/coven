@@ -75,26 +75,25 @@ impl StoreLogSync {
             // body or whether it accepts its key. A version that loads that
             // body selects it and needs every write it leaves out (§15,
             // §19.1; storelog-data `retention_ignores_bodies`).
-            if let Some(newest) = catalog
-                .verified
-                .iter()
-                .find(|snapshot| snapshot.follows_boundary(&local.log))
+            // A listed prefix this device has not verified, because it
+            // waits or this version refused it, may be the newest for a
+            // later version, and need writes the chosen snapshot covers:
+            // deleting this audience's parts waits until it verifies or is
+            // no longer listed (§15, §19.1; `waiting_retention_safe`,
+            // storelog-data `holding_safe`, `refused_prefix_holds`). That
+            // prefix's record says why. A refused body never holds.
+            if catalog.newest_unknown {
+                tracing::debug!(
+                    ?audience,
+                    "unverified snapshot prefix holds back log retention"
+                );
+            // Coverage must hold under every boundary replay could still
+            // select, including a listed raise snapshot no entry names yet
+            // (§15; io `RaiseHistory.deleted_stays_covered`).
+            } else if let Some(selections) =
+                super::boundaries::held_coverage(&local.log, audience, &catalog.verified)
             {
-                // A listed prefix this device has not verified, because it
-                // waits or this version refused it, may be the newest for a
-                // later version, and need writes the chosen snapshot covers:
-                // deleting this audience's parts waits until it verifies or
-                // is no longer listed (§15, §19.1; `waiting_retention_safe`,
-                // storelog-data `holding_safe`, `refused_prefix_holds`). That
-                // prefix's record says why. A refused body never holds.
-                if catalog.newest_unknown {
-                    tracing::debug!(
-                        ?audience,
-                        "unverified snapshot prefix holds back log retention"
-                    );
-                } else {
-                    coverage.insert(audience.clone(), newest.prefix.writes.clone());
-                }
+                coverage.insert(audience.clone(), selections);
             }
             // An own snapshot goes once a newer one this device can load
             // covers everything it covers.
@@ -167,10 +166,11 @@ impl StoreLogSync {
                     continue;
                 }
             };
-            let covered = header
-                .parts
-                .iter()
-                .all(|part| coverage.get(&part.audience).is_some_and(|p| p.covers(id)));
+            let covered = header.parts.iter().all(|part| {
+                coverage
+                    .get(&part.audience)
+                    .is_some_and(|selections| selections.iter().all(|p| p.covers(id)))
+            });
             let posted = local
                 .log
                 .replay

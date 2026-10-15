@@ -724,8 +724,13 @@ complete catch-up supply. Rust gates this device's own writes, which have no
 recorded publication time, on every retirement of its device being final;
 that each such write a counting snapshot covers is published within thirty
 days of the catch-up's receipt end is a hand argument from §15's one-day
-counting deadline, not modeled. A raise snapshot seals the migration's
-earlier capture and is not gated. The model reads the queue package's
+counting deadline, not modeled. A raise snapshot is gated too: it seals the
+migration's capture only when nothing has applied since it was taken, so its
+replay then keeps the capture's retirements and the gate on the current state
+gives the capture's verdicts their final values (`capture_prepared_final`);
+otherwise it captures again. Reusing a capture taken before a verdict flipped
+would carry the old verdict though the gate passes
+(`stale_capture_counterexample`). The model reads the queue package's
 `Retired.lean` only through its `late` input: rows and losses under a
 verdict are that package's (`window_rows_and_losses_converge`).
 

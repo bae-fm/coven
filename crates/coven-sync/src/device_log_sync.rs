@@ -244,7 +244,12 @@ impl DeviceLogSync {
             else {
                 break;
             };
-            if !uploadable(&local.log, state.breaking_version, &head) {
+            if !uploadable(
+                &local.log,
+                state.breaking_version,
+                state.captured_through,
+                &head,
+            ) {
                 break;
             }
             // Every attempt, first or retried, verifies with the key its
@@ -525,10 +530,13 @@ mod positions;
 
 /// §17.1's upload gate: a record made before the local breaking migration and
 /// the migration's empty marker send while the store is still at the old
-/// version; an ordinary write made after it needs a kept raise to that version.
+/// version; an ordinary write made after it needs a kept raise to that version,
+/// unless a raise capture taken again after a catch-up includes it: then it
+/// uploads before that raise publishes (§15).
 pub(crate) fn uploadable(
     log: &coven_database::StoreLog,
     publication: u32,
+    captured_through: Option<u64>,
     head: &coven_format::write::WriteHeader,
 ) -> bool {
     let kept = log
@@ -541,4 +549,5 @@ pub(crate) fn uploadable(
         || publication == 0
         || head.schema_version < publication
         || kept >= publication
+        || captured_through.is_some_and(|through| head.position.number <= through)
 }

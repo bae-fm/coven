@@ -323,6 +323,7 @@ pub fn snapshot_prefix(header: &SnapshotHeader) -> crate::sealed_snapshot::Snaps
         audience: header.id.audience.clone(),
         key: KeyId(Uuid::from_bytes([1; 16])),
         caught_at: caught_at(),
+        raise: std::num::NonZeroU32::new(header.schema_version),
         writes: header.writes.clone(),
         store_log: header.store_log.clone(),
     }
@@ -751,6 +752,7 @@ pub fn encoded_examples() -> Vec<Zeroizing<Vec<u8>>> {
             audience: Audience::Store,
             key: KeyId(Uuid::from_bytes([1; 16])),
             caught_at: caught_at(),
+            raise: std::num::NonZeroU32::new(crate::test_utils::snapshot_header().schema_version),
             writes: crate::test_utils::snapshot_header().writes,
             store_log: crate::test_utils::snapshot_header().store_log,
         }

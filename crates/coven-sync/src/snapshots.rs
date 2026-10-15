@@ -16,7 +16,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroU64;
 
 #[path = "snapshot_boundaries.rs"]
-mod boundaries;
+pub(super) mod boundaries;
 #[path = "snapshot_catalog.rs"]
 pub(super) mod catalog;
 #[path = "snapshot_file_retention.rs"]
@@ -373,35 +373,50 @@ impl StoreLogSync {
             if record.last_step >= 2 {
                 return self.raise_snapshot_step(record, task, version, id).await;
             }
+            // A later breaking migration replaced this capture: its own
+            // raise supersedes this one.
+            let Some(capture) = self
+                .database
+                .raise_captures()
+                .await?
+                .into_iter()
+                .find(|c| c.audience == audience && c.version == version)
+            else {
+                self.discard_snapshot(record, task).await?;
+                self.database.finish_operation(record.id).await?;
+                return Ok(Progress::Finished(Output::Unit));
+            };
             if record.last_step == 0 {
-                // A later breaking migration replaced this capture: its own
-                // raise supersedes this one before anything was sealed.
-                let Some(capture) = self
-                    .database
-                    .raise_captures()
-                    .await?
-                    .into_iter()
-                    .find(|c| c.audience == audience && c.version == version)
-                else {
-                    self.discard_snapshot(record, task).await?;
-                    self.database.finish_operation(record.id).await?;
-                    return Ok(Progress::Finished(Output::Unit));
-                };
-                // Confirm the captured own prefix, marker included, before
-                // sending the snapshot that covers it (§15, §17.1).
-                if let Some(write) = self
-                    .database
-                    .unconfirmed_raise_prefix(capture.through)
-                    .await?
-                {
-                    return Ok(Progress::Waiting(crate::PendingReason::Waits(
-                        crate::Prerequisite::Object(crate::write_seal::path(
-                            self.directory.id(),
-                            write,
-                        )),
-                    )));
+                // Like any snapshot, a raise snapshot is prepared right after
+                // a completed catch-up, taken again if that catch-up applied
+                // anything past the capture (§15; io `RaiseHistory`).
+                match self.raise_capture(&audience, version, &local.log).await? {
+                    RaiseCapture::Ready(caught_at) => {
+                        raise = Some((version, caught_at));
+                    }
+                    RaiseCapture::Replaced => {
+                        self.discard_snapshot(record, task).await?;
+                        self.database.finish_operation(record.id).await?;
+                        return Ok(Progress::Finished(Output::Unit));
+                    }
+                    RaiseCapture::Waiting(reason) => {
+                        return Ok(Progress::Waiting(reason));
+                    }
                 }
-                raise = Some(version);
+            } else if let Some(write) = self
+                .database
+                .unconfirmed_raise_prefix(capture.through)
+                .await?
+            {
+                // Confirm the captured own prefix, marker and any later
+                // writes a recapture took in, before sending the snapshot
+                // that covers it (§15, §17.1).
+                return Ok(Progress::Waiting(crate::PendingReason::Waits(
+                    crate::Prerequisite::Object(crate::write_seal::path(
+                        self.directory.id(),
+                        write,
+                    )),
+                )));
             }
         }
         match record.last_step {
@@ -425,7 +440,7 @@ impl StoreLogSync {
         path: &ObjectPath,
         log: &StoreLog,
         member: &coven_crypto::MemberIdentity,
-        raise: Option<u32>,
+        raise: Option<(u32, coven_format::value::StorageTime)>,
     ) -> Result<Progress, SyncError> {
         let id = path.snapshot_id().expect("snapshot path");
         self.clear_snapshot_files(record, &mut task).await?;
@@ -469,33 +484,35 @@ impl StoreLogSync {
             Err(error) => return Err(error),
         };
         let key = io::key(&ring, &id.audience, key_id)?;
-        let caught_at = self.catch_up_time().await?;
+        let caught_at = match raise {
+            Some((_, caught_at)) => caught_at,
+            None => self.catch_up_time().await?,
+        };
         // Every covered write's retirement-window verdict must be final, so
         // a loader holds what the final replay holds (§15, storelog-data
-        // `prepared_final`). A raise seals the migration's capture, whose
-        // verdicts this check cannot see.
-        if raise.is_none() {
-            let latest = self
-                .finality
-                .lock()
-                .expect("finality lock poisoned")
-                .caught_up_window();
-            if let Some(wait) = self
-                .database
-                .snapshot_verdict_wait(
-                    id.audience.clone(),
-                    member.keys().public_keys().signing,
-                    latest,
-                )
-                .await?
-            {
-                return Ok(Progress::Waiting(crate::PendingReason::Waits(match wait {
-                    coven_database::VerdictWait::Entry(entry) => {
-                        crate::Prerequisite::EntryFinality(entry)
-                    }
-                    coven_database::VerdictWait::CatchUp => crate::Prerequisite::CatchUp,
-                })));
-            }
+        // `prepared_final`). A raise's capture was kept only if nothing it
+        // was taken from has applied since, so this check of the current
+        // state covers its verdicts too (io `RaiseHistory`).
+        let latest = self
+            .finality
+            .lock()
+            .expect("finality lock poisoned")
+            .caught_up_window();
+        if let Some(wait) = self
+            .database
+            .snapshot_verdict_wait(
+                id.audience.clone(),
+                member.keys().public_keys().signing,
+                latest,
+            )
+            .await?
+        {
+            return Ok(Progress::Waiting(crate::PendingReason::Waits(match wait {
+                coven_database::VerdictWait::Entry(entry) => {
+                    crate::Prerequisite::EntryFinality(entry)
+                }
+                coven_database::VerdictWait::CatchUp => crate::Prerequisite::CatchUp,
+            })));
         }
         let name = self
             .reserve_snapshot_files(record, &mut task, 1)
@@ -504,7 +521,7 @@ impl StoreLogSync {
         let (sealed, captured) = self
             .seal_snapshot(
                 id.clone(),
-                raise,
+                raise.map(|(version, _)| version),
                 (key_id, key),
                 caught_at,
                 member,
@@ -532,7 +549,9 @@ impl StoreLogSync {
     /// catch-up. An older sample could already be more than a day old, so
     /// every preparation observes storage time first; the device clock never
     /// stands in for it.
-    async fn catch_up_time(&self) -> Result<coven_format::value::StorageTime, SyncError> {
+    pub(super) async fn catch_up_time(
+        &self,
+    ) -> Result<coven_format::value::StorageTime, SyncError> {
         self.observe_clock(&self.database.local_store_log().await?)
             .await?;
         // T_c must precede this catch-up's reads, so the pass's earlier first
@@ -721,6 +740,52 @@ impl StoreLogSync {
         Ok(Progress::Finished(Output::Unit))
     }
 
+    /// The capture a raise snapshot is prepared from, right after this pass's
+    /// completed write catch-up: kept when that catch-up applied nothing past
+    /// it, otherwise captured again from the current state (§15, §17.1).
+    /// It must still cover the audience's current newest counting snapshot.
+    async fn raise_capture(
+        &self,
+        audience: &Audience,
+        version: u32,
+        log: &coven_database::StoreLog,
+    ) -> Result<RaiseCapture, SyncError> {
+        let Some(caught_at) = self.reads.write_catch_up() else {
+            return Ok(RaiseCapture::Waiting(crate::PendingReason::Waits(
+                crate::Prerequisite::CatchUp,
+            )));
+        };
+        let Some(capture) = self
+            .database
+            .prepare_raise_capture(audience.clone(), version)
+            .await?
+        else {
+            return Ok(RaiseCapture::Replaced);
+        };
+        let catalog = self.current_snapshot_candidates(audience, log).await?;
+        if let Some(newest) = catalog
+            .verified
+            .iter()
+            .find(|snapshot| snapshot.follows_boundary(log))
+        {
+            if !newest
+                .prefix
+                .writes
+                .0
+                .iter()
+                .all(|id| capture.writes.covers(*id))
+            {
+                // A completed catch-up reads every position a counting
+                // snapshot lists; one it could not reach waits for the next.
+                tracing::debug!(?audience, "raise capture is behind the current snapshot");
+                return Ok(RaiseCapture::Waiting(crate::PendingReason::Waits(
+                    crate::Prerequisite::CatchUp,
+                )));
+            }
+        }
+        Ok(RaiseCapture::Ready(caught_at))
+    }
+
     pub(super) fn snapshot_audiences(
         &self,
         log: &StoreLog,
@@ -771,6 +836,15 @@ impl StoreLogSync {
         self.save_snapshot_task(record, task, record.last_step)
             .await
     }
+}
+
+/// Whether a raise snapshot can be prepared now.
+enum RaiseCapture {
+    /// From the capture, with this `T_c`.
+    Ready(coven_format::value::StorageTime),
+    /// A later breaking migration replaced the capture.
+    Replaced,
+    Waiting(crate::PendingReason),
 }
 
 /// The audiences a member can read and snapshot (§15). Which key seals each

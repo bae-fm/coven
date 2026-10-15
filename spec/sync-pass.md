@@ -395,10 +395,11 @@ entry prerequisites are published by the ordered work in step 5.
 Only due operations whose prerequisites changed or whose retry delay
 elapsed run. All their catalog reads use steps 2–4. They issue their
 remaining requests in §18.1 order: prerequisite sealed-key creates or
-snapshot uploads, then the referencing entry create. A raise waits for
-step 6 to confirm the captured own prefix, including the empty migration
-marker, before its snapshot request; ordinary new-schema writes behind the
-marker wait for a kept raise
+snapshot uploads, then the referencing entry create. A raise snapshot is
+prepared in step 8 like any snapshot, and waits for step 6 to confirm the
+captured own prefix, including the empty migration marker, before its
+snapshot request; ordinary new-schema writes behind the marker wait for a
+kept raise unless a capture taken again in step 8 includes them
 ([`publication_after_confirmation`](proofs/queue/CovenQueue/RaiseUpload.lean),
 [`new_schema_send_requires_kept`](proofs/queue/CovenQueue/RaiseProgress.lean)).
 Applying an entry records any access change; the owner's serialized access
@@ -584,6 +585,10 @@ supported by checked published logs or previously published snapshots under
 the same gate ([`snapshot_covers_published`, `inherited_position_published`](proofs/io/CovenIO/SnapshotWrites.lean)).
 Later app commits do not extend that captured cut
 ([`publication_after_confirmation`](proofs/queue/CovenQueue/RaiseUpload.lean)).
+A raise snapshot uses its migration's capture only when step 6's catch-up
+applied nothing past it; otherwise it captures the audience again through
+this device's newest write (§15, §17.1;
+[`RaiseHistory.unchanged_capture_prepares`](proofs/io/CovenIO/RaiseCoverage.lean)).
 Upload and check the stored checksum, or fetch the stored bytes once if the provider
 has no complete-object checksum. That confirmation is shared with any
 occupied-path comparison. No snapshot task is created and deleted merely
@@ -599,10 +604,13 @@ noon Tuesday cannot become usable by landing later
 
 From the same write, snapshot and positions catalogs, delete only objects
 whose coverage, finality, age/reader positions and ownership satisfy §15.
-For every part audience require both current newest counting coverage and
-historical counting coverage whose landing was strictly more than one day
-ago; a replacement does not restart that historical age
-([`Eligible`, `maturity_survives_new_snapshots`](proofs/io/CovenIO/Retention.lean)).
+For every part audience require both newest counting coverage under every
+boundary replay could still select, including a listed raise snapshot no
+entry names yet, and historical counting coverage whose landing was
+strictly more than one day ago; a replacement does not restart that
+historical age
+([`Eligible`, `maturity_survives_new_snapshots`](proofs/io/CovenIO/Retention.lean),
+[`RaiseHistory.deleted_stays_covered`](proofs/io/CovenIO/RaiseCoverage.lean)).
 For example, replacing Monday noon's covering snapshot on Tuesday morning
 still permits deletion after Tuesday noon if all other gates hold
 ([`eligible_after_day`](proofs/io/CovenIO/Retention.lean)).

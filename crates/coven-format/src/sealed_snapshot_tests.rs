@@ -12,6 +12,7 @@ fn listed_snapshot_size_recovers_plaintext_at_chunk_boundaries() {
         audience: Audience::Store,
         key: KeyId(uuid::Uuid::from_bytes([1; 16])),
         caught_at: test_utils::caught_at(),
+        raise: None,
         writes: crate::test_utils::snapshot_header().writes,
         store_log: crate::test_utils::snapshot_header().store_log,
     };
@@ -58,6 +59,7 @@ fn signed_prefix_length_bounds_each_count() {
             audience,
             key: KeyId(uuid::Uuid::nil()),
             caught_at: test_utils::caught_at(),
+            raise: None,
             writes: crate::test_utils::snapshot_header().writes,
             store_log: crate::test_utils::snapshot_header().store_log,
         };
@@ -86,6 +88,7 @@ fn sealed_snapshot_has_its_own_kind_outside_the_plaintext_frames() {
         audience: Audience::Store,
         key: KeyId(uuid::Uuid::from_bytes([1; 16])),
         caught_at: test_utils::caught_at(),
+        raise: None,
         writes: crate::test_utils::snapshot_header().writes,
         store_log: crate::test_utils::snapshot_header().store_log,
     };
@@ -106,6 +109,7 @@ fn a_snapshot_is_sealed_opened_and_applied_a_chunk_at_a_time() {
         audience: Audience::Store,
         key: key.id(),
         caught_at: test_utils::caught_at(),
+        raise: None,
         writes: crate::test_utils::snapshot_header().writes,
         store_log: crate::test_utils::snapshot_header().store_log,
     };
@@ -171,6 +175,7 @@ fn prefix_and_chunk_lengths_are_bounded_and_have_no_aliases() {
             audience,
             key: KeyId(uuid::Uuid::from_bytes([0xab; 16])),
             caught_at: test_utils::caught_at(),
+            raise: None,
             writes: crate::test_utils::snapshot_header().writes,
             store_log: crate::test_utils::snapshot_header().store_log,
         };
@@ -222,6 +227,7 @@ fn positions_are_canonical_and_each_list_has_its_own_bound() {
         audience: Audience::Store,
         key: KeyId(uuid::Uuid::nil()),
         caught_at: test_utils::caught_at(),
+        raise: None,
         writes: WritePositions(
             (0..MAX_ITEMS as u64)
                 .map(|i| WriteId {
@@ -249,13 +255,15 @@ fn positions_are_canonical_and_each_list_has_its_own_bound() {
     prefix.writes.0.truncate(2);
     prefix.store_log.0.truncate(2);
     let bytes = prefix.encode().unwrap();
+    // The absent raise is one byte after the catch-up time.
+    assert_eq!(bytes[32], 0);
     let mut bad = bytes.clone();
-    bad[32..36].copy_from_slice(&u32::MAX.to_be_bytes());
+    bad[33..37].copy_from_slice(&u32::MAX.to_be_bytes());
     assert!(matches!(
         SnapshotObjectPrefix::decode(&bad),
         Err(Error::Limit { .. })
     ));
-    for offset in [36, 72] {
+    for offset in [37, 73] {
         let mut bad = bytes.clone();
         bad[offset..offset + 16].copy_from_slice(&bytes[offset + 16..offset + 32]);
         assert!(SnapshotObjectPrefix::decode(&bad).is_err());
@@ -347,4 +355,64 @@ fn counting_admits_exactly_one_day_and_never_rounds_forward() {
     prefix.caught_at = time(u64::MAX - StorageTime::DAY_SECONDS, 7);
     assert!(prefix.counts(time(u64::MAX, 7)));
     assert!(!prefix.counts(time(u64::MAX, 8)));
+}
+
+#[test]
+fn a_raise_snapshot_signs_its_version_into_the_prefix() {
+    let header = test_utils::snapshot_header();
+    let prefix = test_utils::snapshot_prefix(&header);
+    assert_eq!(prefix.raise.map(|v| v.get()), Some(header.schema_version));
+    let bytes = prefix.encode().unwrap();
+    // After the catch-up time: present, then the raised version.
+    assert_eq!(&bytes[32..37], &[1, 0, 0, 0, 2]);
+    assert_eq!(SnapshotObjectPrefix::decode(&bytes).unwrap(), prefix);
+    for end in 32..37 {
+        assert_eq!(
+            SnapshotObjectPrefix::decode(&bytes[..end]),
+            Err(Error::Truncated)
+        );
+    }
+    let mut zero = bytes.clone();
+    zero[33..37].fill(0);
+    assert_eq!(
+        SnapshotObjectPrefix::decode(&zero),
+        Err(Error::Invalid {
+            field: "snapshot raise version",
+            rule: crate::error::Rule::Required,
+        })
+    );
+    let mut tag = bytes.clone();
+    tag[32] = 2;
+    assert!(matches!(
+        SnapshotObjectPrefix::decode(&tag),
+        Err(Error::UnknownTag { .. })
+    ));
+    let ordinary = SnapshotObjectPrefix {
+        raise: None,
+        ..prefix.clone()
+    };
+    let encoded = ordinary.encode().unwrap();
+    assert_eq!(encoded.len() + 4, bytes.len());
+    assert_eq!(SnapshotObjectPrefix::decode(&encoded).unwrap(), ordinary);
+}
+
+#[test]
+fn a_raise_snapshot_must_hold_the_schema_it_raises_to() {
+    let header = test_utils::snapshot_header();
+    let mut encoder_header = header.clone();
+    encoder_header.schema_version = 3;
+    let (_, frame) = crate::snapshot::SnapshotEncoder::start(encoder_header).unwrap();
+    let prefix = test_utils::snapshot_prefix(&header);
+    assert!(matches!(
+        crate::snapshot::SnapshotDecoder::start(&frame, &prefix),
+        Err(Error::Invalid {
+            rule: crate::error::Rule::RaiseVersion,
+            ..
+        })
+    ));
+    let ordinary = SnapshotObjectPrefix {
+        raise: None,
+        ..prefix
+    };
+    assert!(crate::snapshot::SnapshotDecoder::start(&frame, &ordinary).is_ok());
 }

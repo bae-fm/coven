@@ -62,6 +62,7 @@ pub(super) async fn sealed_snapshot(
                             audience: header.id.audience.clone(),
                             key: key_id,
                             caught_at: coven_format::value::StorageTime::new(1, 0).unwrap(),
+                            raise: None,
                             writes: header.writes.clone(),
                             store_log: header.store_log.clone(),
                         }

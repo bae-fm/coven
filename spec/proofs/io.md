@@ -379,6 +379,52 @@ deleted. The boundary then excludes Ben's snapshot and the reload skips the
 write. Here the raise snapshot was listed when Ben deleted, so retention that
 held writes a listed, not yet kept raise snapshot omits would keep it.
 
+**Recapture and the retention hold — proved.** The rules that replace
+option A are in the same module's `RaiseHistory`. A raise snapshot is
+prepared like any snapshot, right after a completed catch-up whose storage
+sample is its `T_c`, so it is `SnapshotHistory.Sound`. A migration's capture
+is sent only when that catch-up applied nothing past it; otherwise the
+device captures again, and its later local writes join the captured prefix.
+`unchanged_capture_prepares` shows such a capture meets §15's preparation
+rule; storelog-data's `capture_prepared_final` shows the retirement-verdict
+gate then holds for the capture as well. Its signed prefix marks it as a raise
+snapshot, so retention can see it before any entry names it.
+
+Deleting a write then needs, for each part audience, coverage under every
+boundary replay could still select (`Held`): the current one, the one final
+entries fix, and every listed counting raise snapshot that a raise could
+still name, each with the snapshots whose signed view read the entry naming
+it. The model's history (`Step`) lets snapshots land with the entries their
+views read, raise entries publish, replay move among possible boundaries,
+finality rule boundaries out, time pass and writes be deleted under the hold.
+
+- `deleted_stays_covered`: in every reachable state, under whatever boundary
+  replay keeps, each part audience's newest usable counting snapshot covers
+  every deleted write. `reload_never_skips` turns this into the reload: a
+  missing deleted write is loaded from a snapshot, never skipped as having
+  no part there.
+- The key step, `late_landing_covers`: a counting sound snapshot that lands
+  after a deletion covers the deleted write, because its catch-up began
+  after the write's mature witness landed. This is why a raise snapshot
+  landing after the deletion, as in `option_a_loses_write`, is safe once it
+  is sound; the hold covers a raise snapshot already listed, as in
+  `kept_late_raise_loses_write`.
+- `held_without_raises`: with no raise pending the hold is exactly §15's
+  existing current-coverage gate.
+- `recapture_keeps_write`: in the option-A history, Ana's recaptured raise
+  snapshots are sound and every audience's reload loads Ben's write 1.
+  `kept_late_held`: in the kept-late history, Ana's listed raise snapshot is
+  a possible store boundary that omits Ben's write, so the hold refuses the
+  deletion.
+
+Outside the model: that Rust replay only keeps a raise naming a counting
+snapshot marked as that raise in its prefix, and that a raise snapshot
+whose version is not above the audience's finally kept version can no
+longer become its boundary (the `replay` and `finalize` premises); how the
+catch-up is completed and confirmed; and the liveness of recapture, which
+needs a completed catch-up without a newer remote write before the raise
+snapshot's day runs out.
+
 **3. Snapshot coverage proposal — revision 4.** This checks a proposal;
 [§15](../coven.md#15-snapshots) and Rust are unchanged. The publication and
 deletion rules remain:

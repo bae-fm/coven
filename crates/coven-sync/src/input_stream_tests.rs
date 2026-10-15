@@ -146,6 +146,7 @@ async fn maximum_header_vectors_use_two_ranges_and_preserve_every_overread_byte(
         )),
         key,
         caught_at: coven_format::value::StorageTime::new(0, 0).unwrap(),
+        raise: Some(std::num::NonZeroU32::MAX),
         writes: coven_format::value::WritePositions(
             (0..65_536)
                 .map(|i| coven_merge::WriteId {

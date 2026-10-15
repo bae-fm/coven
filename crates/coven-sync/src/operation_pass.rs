@@ -40,11 +40,7 @@ impl OperationRun {
         if !uploaded.is_empty() {
             self.drive_pass().await?;
         }
-        let mut discovery = self.writes.download_writes().await?;
-        if discovery.needs_snapshots {
-            self.sync.discover_snapshots().await?;
-            discovery = self.writes.download_writes().await?;
-        }
+        let discovery = self.sync.catch_up_writes(&mut self.writes).await?;
         self.files.sync_files().await?;
         self.sync.write_snapshots().await?;
         self.sync.run_retention().await?;

@@ -54,7 +54,7 @@ pub(crate) fn interpret(
         record.parts.clear();
         return Ok(record);
     }
-    let boundaries = crate::write_boundary::WriteBoundary::load(database)?;
+    let boundaries = crate::write_boundary::WriteBoundary::judging(database)?;
     let mut kept = Vec::new();
     for mut part in record.parts {
         if record.header.disposition == WriteDisposition::Migration {

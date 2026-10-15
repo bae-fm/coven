@@ -694,4 +694,47 @@ theorem gated_snapshot_waits_then_loads (early : List Nat)
   ⟨waits_on_day_51 early byThen, ready_on_day_91 later, VerdictHistory.settled_drops_removal.1,
     VerdictHistory.settled_drops_removal.2, gated_ben_loads, gated_carol_loads, gated_admitted⟩
 
+/-! ## Raise snapshots
+
+A raise snapshot seals its breaking migration's capture, whose verdicts are
+the ones its replay held when the capture was taken. The device sends a
+capture only when nothing has applied since it was taken; otherwise it
+captures again from the current state (io `RaiseHistory`). So at preparation
+its replay keeps the capture's retirements, and the same gate on the current
+state gives the capture's verdicts their final values. A capture reused after
+its kept retirements changed would not: `stale_capture_counterexample`. -/
+
+theorem capture_prepared_final (v : Verdicts) (s : Listed) (p : Preparation)
+    (captured prep final : List Retirement) (stored : Nat × Nat → Nat)
+    (unchanged : ∀ e, e ∈ captured ↔ e ∈ prep)
+    (gate : ∀ w ∈ v.carried s, p.ready prep stored w = true)
+    (judged : ∀ w ∈ v.carried s, v.late s w = lateUnder captured stored w)
+    (sub : ∀ e ∈ prep, e ∈ p.received)
+    (stable : ∀ e : Retirement, e.stored < p.horizon → (e ∈ prep ↔ e ∈ final))
+    (complete : ∀ e ∈ final, e.stored ≤ p.through → e ∈ p.received) :
+    ∀ w ∈ v.carried s, v.late s w = lateUnder final stored w :=
+  prepared_final v s p prep final stored gate
+    (fun w hw => by
+      rw [judged w hw]
+      exact late_depends_on_old captured prep stored w (fun e _ _ => unchanged e))
+    sub stable complete
+
+/-- Ana's capture of day 51, under Ben's then-kept removal, reused on day 91. -/
+def staleCapture : Verdicts :=
+  { carried := fun s => if s = anaGated then [benWrite] else []
+    late := fun _ w => lateUnder [benRemoval] benStored w
+    held := fun _ => none }
+
+/-- On day 91 the gate on Ana's current state passes, but a capture taken on
+day 51 carries Ben's write as dropped, which the final replay admits; its
+kept retirements differ from the current ones, so the reuse rule captures
+again instead. -/
+theorem stale_capture_counterexample (later : List Nat) :
+    (anaAt (Horizon.horizon VerdictHistory.history VerdictHistory.window 7
+        (later ++ [VerdictHistory.settled])) VerdictHistory.settled).ready [] benStored
+        benWrite = true ∧
+    staleCapture.late anaGated benWrite ≠ lateUnder [] benStored benWrite ∧
+    ¬ (∀ e, e ∈ [benRemoval] ↔ e ∈ ([] : List Retirement)) :=
+  ⟨ready_on_day_91 later, by decide, fun same => by simpa using (same benRemoval).mp (by simp)⟩
+
 end CovenStorelogData.Pending

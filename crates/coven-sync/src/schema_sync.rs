@@ -119,6 +119,38 @@ impl StoreLogSync {
         Ok(())
     }
 
+    /// SP step 6: discover and apply every writer's new writes, after a
+    /// snapshot discovery if a miss cannot be trusted. A completed discovery
+    /// records the storage sample taken before its reads. A raise snapshot
+    /// is prepared only right after one, with that sample as its `T_c`, so
+    /// while a raise is unpublished the catch-up observes storage time and
+    /// completes a store-log catch-up first (§15).
+    pub async fn catch_up_writes(
+        &mut self,
+        writes: &mut crate::DeviceLogSync,
+    ) -> Result<crate::WriteDiscovery, SyncError> {
+        // An unpublished capture means a raise snapshot may be prepared: take
+        // a fresh sample before a complete store-log catch-up, which the
+        // retirement-verdict gate also needs (§15).
+        let sample = if self.database.raise_captures().await?.is_empty() {
+            self.finality
+                .lock()
+                .expect("finality lock poisoned")
+                .sample_time()
+        } else {
+            Some(self.catch_up_time().await?)
+        };
+        let mut discovery = writes.download_writes().await?;
+        if discovery.needs_snapshots {
+            self.discover_snapshots().await?;
+            discovery = writes.download_writes().await?;
+        }
+        if let Some(sample) = sample.filter(|_| discovery.complete) {
+            self.reads.keep_write_catch_up(sample);
+        }
+        Ok(discovery)
+    }
+
     pub(super) async fn raise_snapshot_step(
         &mut self,
         record: &OperationRecord,

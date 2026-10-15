@@ -618,6 +618,7 @@ async fn data_differential_reload_choice() {
                     key(1)
                 },
                 caught_at: StorageTime::new(LANDED, 0).unwrap(),
+                raise: None,
                 writes: WritePositions(
                     positions
                         .iter()

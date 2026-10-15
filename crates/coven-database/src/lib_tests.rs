@@ -186,6 +186,18 @@ pub(crate) async fn try_remote_update(
     id: &str,
     changes: &[(&str, coven_format::value::Value)],
 ) -> Result<crate::ApplyOutcome, DbError> {
+    try_remote_update_at(database, table, id, changes, None).await
+}
+
+/// [`try_remote_update`] authored at `schema_version`, or at this database's
+/// version when none is given.
+pub(crate) async fn try_remote_update_at(
+    database: &crate::Database,
+    table: &str,
+    id: &str,
+    changes: &[(&str, coven_format::value::Value)],
+    schema_version: Option<u32>,
+) -> Result<crate::ApplyOutcome, DbError> {
     use coven_merge::Operation;
     let records = crate::write::tests::records(database);
     let key =
@@ -216,12 +228,12 @@ pub(crate) async fn try_remote_update(
         columns.insert((*name).into(), column);
     }
     row.change.operation = Operation::Update(columns);
-    try_remote_write(database, row).await
+    try_remote_write(database, row, schema_version).await
 }
 
 pub(crate) async fn remote_write(database: &crate::Database, row: coven_format::write::RowChange) {
     assert_eq!(
-        try_remote_write(database, row).await.unwrap(),
+        try_remote_write(database, row, None).await.unwrap(),
         crate::ApplyOutcome::Applied
     );
 }
@@ -229,6 +241,7 @@ pub(crate) async fn remote_write(database: &crate::Database, row: coven_format::
 async fn try_remote_write(
     database: &crate::Database,
     row: coven_format::write::RowChange,
+    schema_version: Option<u32>,
 ) -> Result<crate::ApplyOutcome, DbError> {
     use coven_format::write::{WriteHeader, WritePart, WriteRecord};
     let row = database.inspect_writer_schema(|db, schema| {
@@ -264,7 +277,7 @@ async fn try_remote_write(
             timestamp,
             had_read: state.positions,
             store_log_read: state.store_log,
-            schema_version: state.schema_version,
+            schema_version: schema_version.unwrap_or(state.schema_version),
             disposition: coven_format::write::WriteDisposition::Apply,
         },
         parts: vec![WritePart {

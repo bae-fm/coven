@@ -15,13 +15,13 @@ use std::collections::BTreeMap;
 /// counts. Its positions establish coverage whatever this device found in its
 /// body and whether it accepts its key: readers choose by the authenticated
 /// prefix (§15, §19.1).
-pub(super) struct Verified {
-    pub(super) object: StoredObject,
-    pub(super) prefix: SnapshotObjectPrefix,
+pub(crate) struct Verified {
+    pub(crate) object: StoredObject,
+    pub(crate) prefix: SnapshotObjectPrefix,
     /// What loading its rows waits for: the snapshot itself, whose own record
     /// is this version's refusal of its body, or its key's introduction. None
     /// for a loading candidate.
-    pub(super) load_waits: Option<PendingReason>,
+    pub(crate) load_waits: Option<PendingReason>,
 }
 
 pub(super) struct Catalog {

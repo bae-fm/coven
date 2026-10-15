@@ -85,22 +85,6 @@ impl<R: Read> DownloadedWriteStream<R> {
                 authenticate()?;
                 return Ok(crate::ApplyOutcome::AlreadyApplied);
             }
-            if let Some(wait) = crate::download::prerequisite(database, &self.header.header)? {
-                return Ok(crate::ApplyOutcome::Waiting(wait));
-            }
-            for (part, stream) in self.header.parts.iter().zip(&self.parts) {
-                if matches!(stream, DownloadedPartStream::Opened(_))
-                    && crate::entry_effects::reloading(database, &part.audience)?
-                {
-                    return Ok(crate::ApplyOutcome::Waiting(crate::WriteWait::Reload(
-                        part.audience.clone(),
-                    )));
-                }
-            }
-            crate::pending::clear_log(
-                database,
-                crate::LogObject::Write(self.header.header.position),
-            )?;
             let opened: Vec<_> = self
                 .header
                 .parts
@@ -109,6 +93,22 @@ impl<R: Read> DownloadedWriteStream<R> {
                 .filter(|(_, stream)| matches!(stream, DownloadedPartStream::Opened(_)))
                 .map(|(part, _)| part.audience.clone())
                 .collect();
+            if let Some(wait) =
+                crate::download::prerequisite(database, &self.header.header, &opened)?
+            {
+                return Ok(crate::ApplyOutcome::Waiting(wait));
+            }
+            for audience in &opened {
+                if crate::entry_effects::reloading(database, audience)? {
+                    return Ok(crate::ApplyOutcome::Waiting(crate::WriteWait::Reload(
+                        audience.clone(),
+                    )));
+                }
+            }
+            crate::pending::clear_log(
+                database,
+                crate::LogObject::Write(self.header.header.position),
+            )?;
             let late = crate::write_landing::land::<P>(
                 database,
                 schema,

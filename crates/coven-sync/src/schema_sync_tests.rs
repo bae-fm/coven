@@ -1,7 +1,12 @@
 use super::*;
 use coven_format::write::WriteDisposition;
 
-async fn update(device: &mut Device, storage: Arc<MemoryStorage>, rename: bool, convert: bool) {
+pub(crate) async fn update(
+    device: &mut Device,
+    storage: Arc<MemoryStorage>,
+    rename: bool,
+    convert: bool,
+) {
     let change = if rename {
         "ALTER TABLE notes RENAME COLUMN title TO name"
     } else {
@@ -49,15 +54,75 @@ async fn reopen(
 
 /// A migrated device sends its old prefix and empty marker, confirmed before
 /// its raise snapshot, then publishes the raise (§17.1, §18.1).
-async fn publish_raise(device: &mut Device) {
+pub(crate) async fn publish_raise(device: &mut Device) {
     if !device.send.can_send() {
         device.catch_up().await;
     }
     device.writes.upload_writes().await.unwrap();
+    raise_pass(device).await;
+}
+
+/// A store-log sync inside a pass whose write catch-up completed, where a
+/// raise snapshot can be prepared (§15).
+pub(crate) async fn raise_pass(device: &mut Device) {
+    let _pass = device.caught_up_pass().await;
     device.sync.sync_store_log().await.unwrap();
 }
 
-async fn sync_all(devices: &mut [Device]) {
+/// Take a device's uploaded writes numbered past `after` out of storage, as
+/// if they had not landed yet; returns them for `restore`.
+pub(crate) async fn hide_writes(
+    storage: &MemoryStorage,
+    device: DeviceId,
+    after: u64,
+) -> Vec<(ObjectPath, Vec<u8>)> {
+    let mut hidden = Vec::new();
+    for object in storage
+        .list(&ObjectPrefix::device_logs(STORE_ID))
+        .await
+        .unwrap()
+    {
+        let id = object.path.write_id().unwrap();
+        if id.device == device && id.number > after {
+            hidden.push((
+                object.path.clone(),
+                storage.read(&object.path).await.unwrap(),
+            ));
+            storage.delete(&object.path).await.unwrap();
+        }
+    }
+    hidden
+}
+
+/// Take a device's snapshots out of storage, as if they had not landed yet.
+pub(crate) async fn hide_snapshots(
+    storage: &MemoryStorage,
+    device: DeviceId,
+) -> Vec<(ObjectPath, Vec<u8>)> {
+    let mut hidden = Vec::new();
+    for object in storage
+        .list(&ObjectPrefix::snapshots(STORE_ID))
+        .await
+        .unwrap()
+    {
+        if object.path.device() == Some(device) {
+            hidden.push((
+                object.path.clone(),
+                storage.read(&object.path).await.unwrap(),
+            ));
+            storage.delete(&object.path).await.unwrap();
+        }
+    }
+    hidden
+}
+
+pub(crate) async fn restore(storage: &MemoryStorage, hidden: Vec<(ObjectPath, Vec<u8>)>) {
+    for (path, bytes) in hidden {
+        storage.create(&path, &bytes).await.unwrap();
+    }
+}
+
+pub(crate) async fn sync_all(devices: &mut [Device]) {
     for device in &mut *devices {
         if !device.send.can_send() {
             device.catch_up().await;
@@ -75,13 +140,13 @@ async fn sync_all(devices: &mut [Device]) {
     }
 }
 
-async fn name(db: &Database) -> String {
+pub(crate) async fn name(db: &Database) -> String {
     db.read(|sql| Ok(sql.query_row("SELECT name FROM notes WHERE id='42'", [], |r| r.get(0))?))
         .await
         .unwrap()
 }
 
-async fn seed(devices: &mut [Device]) {
+pub(crate) async fn seed(devices: &mut [Device]) {
     sql(
         &devices[0].db,
         "INSERT INTO notes VALUES('42','Groceries','body')",
@@ -228,7 +293,11 @@ async fn concurrent_raises_choose_the_earlier_timestamp_even_when_it_arrives_las
     );
     let snapshot = storage.read(&snapshot_path).await.unwrap();
     storage.delete(&snapshot_path).await.unwrap();
+    // Ben has not read Ana's marker either: his raise keeps its earlier
+    // timestamp.
+    let marker = hide_writes(&storage, DeviceId(1), 1).await;
     publish_raise(&mut devices[1]).await;
+    restore(&storage, marker).await;
     let winner =
         devices[1].db.store_log().await.unwrap().replay.state.schema[&Audience::Store].clone();
     assert_ne!(first.snapshot, winner.snapshot);
@@ -266,6 +335,7 @@ async fn a_raise_resumes_after_reopening_at_every_publication_step() {
         device.writes.upload_writes().await.unwrap();
         device.sync.schedule_version_changes().await.unwrap();
         let id = device.db.operations().await.unwrap()[0].id;
+        let pass = device.caught_up_pass().await;
         for _ in 0..crash {
             match device.step(id).await.unwrap() {
                 crate::operations::Progress::Finished(_) => break 'crashes,
@@ -273,6 +343,7 @@ async fn a_raise_resumes_after_reopening_at_every_publication_step() {
                 _ => panic!("unexpected schema publication progress"),
             }
         }
+        drop(pass);
         let local = device.db.local_store_log().await.unwrap();
         let fixed = local.upload.clone();
         let expected = fixed.as_ref().map(|upload| {
@@ -286,7 +357,7 @@ async fn a_raise_resumes_after_reopening_at_every_publication_step() {
             .unwrap()
         });
         update(device, storage.clone(), true, true).await;
-        device.sync.sync_store_log().await.unwrap();
+        raise_pass(device).await;
         let raised =
             device.db.store_log().await.unwrap().replay.state.schema[&Audience::Store].clone();
         assert_eq!(raised.number, 2);
@@ -533,6 +604,7 @@ async fn concurrent_raises_to_different_versions_are_both_kept() {
     devices[1].writes.upload_writes().await.unwrap();
     devices[1].sync.schedule_version_changes().await.unwrap();
     let id = devices[1].db.operations().await.unwrap()[0].id;
+    let pass = devices[1].caught_up_pass().await;
     for _ in 0..3 {
         let record = devices[1]
             .db
@@ -548,7 +620,12 @@ async fn concurrent_raises_to_different_versions_are_both_kept() {
             .await
             .unwrap();
     }
+    drop(pass);
+    // Ana's catch-up has not read Ben's version-3 prefix or snapshot yet.
+    let mut hidden = hide_writes(&storage, DeviceId(2), 0).await;
+    hidden.extend(hide_snapshots(&storage, DeviceId(2)).await);
     publish_raise(&mut devices[0]).await;
+    restore(&storage, hidden).await;
     let first =
         devices[0].db.store_log().await.unwrap().replay.state.schema[&Audience::Store].clone();
     devices[1].sync.sync_store_log().await.unwrap();
@@ -601,8 +678,11 @@ async fn reference_checks_do_not_reject_writes_from_before_a_table_rename() {
         ],
     )
     .await;
+    // Before its raise is kept, Ana judges Ben's old-schema edit under her
+    // capture: with no converter it is excluded as a loss, as every device
+    // judges it once the raise is kept (§17.1).
     devices[0].writes.download_writes().await.unwrap();
-    assert!(devices[0].db.lost_values().await.unwrap().is_empty());
+    assert_eq!(devices[0].db.lost_values().await.unwrap().len(), 1);
     publish_raise(&mut devices[0]).await;
     devices[0].writes.download_writes().await.unwrap();
     assert_eq!(devices[0].db.lost_values().await.unwrap().len(), 1);

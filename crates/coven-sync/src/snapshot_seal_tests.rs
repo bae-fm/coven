@@ -36,7 +36,7 @@ async fn the_old_write_and_marker_publish_the_raise_while_a_new_schema_write_wai
     let device = ana.db.sync_state(Vec::new()).await.unwrap().device;
     ana.catch_up().await;
     // The raise waits for its captured prefix before requesting the snapshot.
-    ana.sync.sync_store_log().await.unwrap();
+    raise_pass(ana).await;
     assert!(ana
         .db
         .store_log()
@@ -104,7 +104,7 @@ async fn a_lost_reply_keeps_the_prefix_unconfirmed_until_the_stored_bytes_match(
     );
     // The raise does not send its snapshot on the unconfirmed prefix, even
     // after reopening.
-    ana.sync.sync_store_log().await.unwrap();
+    raise_pass(ana).await;
     assert!(storage
         .list(&ObjectPrefix::snapshots(STORE_ID))
         .await
@@ -239,7 +239,7 @@ async fn a_write_between_unpublished_migrations_joins_the_later_prefix() {
         numbers(&ana.writes.upload_writes().await.unwrap()),
         [1, 2, 3]
     );
-    ana.sync.sync_store_log().await.unwrap();
+    raise_pass(ana).await;
     let log = ana.db.store_log().await.unwrap();
     assert_eq!(log.replay.state.schema[&Audience::Store].number, 3);
     assert_eq!(
@@ -413,7 +413,7 @@ mod differential {
                     // reopen otherwise outlasts the fixed clock.
                     let now = coven_foundation::clock::Clock::now(device.clock.as_ref());
                     device.clock.set(now + coven_storage::LONGEST_RETRY_DELAY);
-                    device.sync.sync_store_log().await.unwrap()
+                    raise_pass(&mut device).await
                 }
                 "crash" => {
                     device
@@ -484,6 +484,14 @@ mod differential {
             let mut trace = Vec::new();
             let mut admitted = Vec::new();
             let (mut migrated, mut raised, mut rows) = (false, false, 0);
+            // The capture each request sends: the migration's, or the one a
+            // completed catch-up took again (§15).
+            let (mut captured, mut captures) = (None, 0);
+            let capture_event = |positions: &coven_format::value::WritePositions| {
+                let positions: Vec<_> =
+                    positions.0.iter().map(|p| (p.device.0, p.number)).collect();
+                json!({"event": "capture", "writer": 1, "positions": positions})
+            };
             for _ in 0..14 {
                 let choice = rng.pick(8);
                 let index = (rng.pick(2)) as usize;
@@ -535,14 +543,8 @@ mod differential {
                             .await;
                         trace.push(json!({"event": "reserve", "writer": 1}));
                         let capture = devices[0].db.raise_captures().await.unwrap().remove(0);
-                        let positions: Vec<_> = capture
-                            .writes
-                            .0
-                            .iter()
-                            .map(|p| (p.device.0, p.number))
-                            .collect();
-                        trace
-                            .push(json!({"event": "capture", "writer": 1, "positions": positions}));
+                        trace.push(capture_event(&capture.writes));
+                        captured = Some(capture.writes);
                     }
                     _ if migrated && !raised => {
                         let listed = || async {
@@ -553,12 +555,19 @@ mod differential {
                                 .len()
                         };
                         let before = listed().await;
-                        devices[0].sync.sync_store_log().await.unwrap();
+                        raise_pass(&mut devices[0]).await;
                         raised = listed().await > before;
-                        trace.push(json!({"event": "request", "snapshot": 0}));
+                        if let Some(capture) = devices[0].db.raise_captures().await.unwrap().pop() {
+                            if Some(&capture.writes) != captured.as_ref() {
+                                trace.push(capture_event(&capture.writes));
+                                captured = Some(capture.writes);
+                                captures += 1;
+                            }
+                        }
+                        trace.push(json!({"event": "request", "snapshot": captures}));
                         admitted.push(raised);
                         if raised {
-                            trace.push(json!({"event": "landSnapshot", "snapshot": 0}));
+                            trace.push(json!({"event": "landSnapshot", "snapshot": captures}));
                         }
                     }
                     _ => {}
@@ -593,5 +602,180 @@ mod differential {
             }
         }
         assert!(requests.0 > 0 && requests.1 > 0, "{requests:?}");
+    }
+}
+
+/// A raise snapshot is prepared after a completed catch-up and captured again
+/// when that catch-up applied anything past the migration's capture, and
+/// retention holds writes a listed raise snapshot omits (§15, §17.1; io
+/// `RaiseHistory`).
+mod recapture {
+    use super::*;
+
+    const ANA: DeviceId = DeviceId(1);
+    const BEN: DeviceId = DeviceId(2);
+
+    /// The signed prefixes of an author's listed store snapshots.
+    async fn store_snapshots(
+        storage: &MemoryStorage,
+        author: DeviceId,
+    ) -> Vec<(ObjectPath, SnapshotObjectPrefix)> {
+        let mut prefixes = Vec::new();
+        for object in storage
+            .list(&ObjectPrefix::audience_snapshots(
+                STORE_ID,
+                &Audience::Store,
+            ))
+            .await
+            .unwrap()
+        {
+            if object.path.device() != Some(author) {
+                continue;
+            }
+            let bytes = storage.read(&object.path).await.unwrap();
+            let length = SnapshotObjectPrefix::signed_length(&bytes).unwrap();
+            let (prefix, _) = SnapshotObjectPrefix::decode_signed(&bytes[..length]).unwrap();
+            prefixes.push((object.path, prefix));
+        }
+        prefixes
+    }
+
+    async fn stored(storage: &MemoryStorage, write: WriteId) -> bool {
+        storage
+            .status(&crate::write_seal::path(STORE_ID, write))
+            .await
+            .unwrap()
+            .is_some()
+    }
+
+    /// Ben's old-schema edits, uploaded, with his snapshot covering them; two,
+    /// so his snapshot counts more writes than Ana's raise snapshot.
+    async fn bens_covered_edit(devices: &mut [Device]) -> WriteId {
+        sql(&devices[1].db, "UPDATE notes SET title='Shopping'").await;
+        sql(&devices[1].db, "UPDATE notes SET body='list'").await;
+        devices[1].writes.upload_writes().await.unwrap();
+        devices[1]
+            .sync
+            .write_snapshot(Audience::Store)
+            .await
+            .unwrap();
+        let edit = WriteId {
+            device: BEN,
+            number: 1,
+        };
+        assert!(stored(&devices[1].storage, edit).await);
+        let (_, bens) = store_snapshots(&devices[1].storage, BEN).await.remove(0);
+        assert!(bens.writes.covers(edit));
+        edit
+    }
+
+    #[tokio::test]
+    async fn a_snapshot_landing_before_the_raise_makes_the_device_capture_again() {
+        let storage = storage();
+        let mut devices = group(storage.clone(), 2).await;
+        seed(&mut devices).await;
+        update(&mut devices[0], storage.clone(), true, true).await;
+        let migrated = devices[0].db.raise_captures().await.unwrap().remove(0);
+        // Ben, still on the old schema, edits the note and his snapshot of the
+        // store lands before Ana's raise.
+        let edit = bens_covered_edit(&mut devices).await;
+        assert!(!migrated.writes.covers(edit));
+        // Ana's catch-up applies the edit under her capture, converting it, so
+        // her raise snapshot is captured again and covers it (§15, §17.1).
+        publish_raise(&mut devices[0]).await;
+        assert_eq!(name(&devices[0].db).await, "Shopping");
+        let log = devices[0].db.store_log().await.unwrap();
+        let raised = &log.replay.state.schema[&Audience::Store];
+        assert_eq!(raised.number, 2);
+        let (path, prefix) = store_snapshots(&storage, ANA).await.remove(0);
+        assert_eq!(path.snapshot_id().unwrap(), raised.snapshot);
+        assert_eq!(prefix.raise.map(|v| v.get()), Some(2));
+        assert!(prefix.writes.covers(edit));
+        // Ben updates and reloads from that snapshot; both converge with no loss.
+        assert!(matches!(
+            devices[1].sync.sync_store_log().await,
+            Err(SyncError::UpdateRequired(_))
+        ));
+        update(&mut devices[1], storage.clone(), true, true).await;
+        sync_all(&mut devices).await;
+        for device in &devices {
+            assert_eq!(name(&device.db).await, "Shopping");
+            assert!(device.db.lost_values().await.unwrap().is_empty());
+        }
+        // The published raise leaves no capture behind.
+        assert!(devices[0].db.raise_captures().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn retention_keeps_a_write_a_listed_raise_snapshot_omits() {
+        let storage = storage();
+        let mut devices = group(storage.clone(), 2).await;
+        seed(&mut devices).await;
+        update(&mut devices[0], storage.clone(), true, true).await;
+        // Ana's raise snapshot is prepared and lands; her raise entry does not.
+        devices[0].catch_up().await;
+        devices[0].writes.upload_writes().await.unwrap();
+        devices[0].sync.schedule_version_changes().await.unwrap();
+        let raise = devices[0].db.operations().await.unwrap()[0].id;
+        {
+            let _pass = devices[0].caught_up_pass().await;
+            for _ in 0..2 {
+                assert!(matches!(
+                    devices[0].step(raise).await.unwrap(),
+                    crate::operations::Progress::Advanced
+                ));
+            }
+        }
+        let (_, listed) = store_snapshots(&storage, ANA).await.remove(0);
+        assert_eq!(listed.raise.map(|v| v.get()), Some(2));
+        // Ben's later old-schema edit is covered by his newer snapshot, and every
+        // device posts past it.
+        let edit = bens_covered_edit(&mut devices).await;
+        assert!(!listed.writes.covers(edit));
+        devices[0].writes.download_writes().await.unwrap();
+        for device in &mut devices {
+            device.writes.post_positions().await.unwrap();
+        }
+        // Under Ana's listed raise snapshot the store's selection omits the
+        // edit, so retention keeps it (`kept_late_held`).
+        devices[1].sync.run_retention().await.unwrap();
+        assert!(stored(&storage, edit).await);
+        // Once Ana's raise is kept, its snapshot is the store's selection and
+        // the edit still waits for a snapshot that read the raise.
+        {
+            let _pass = devices[0].caught_up_pass().await;
+            devices[0].sync.sync_store_log().await.unwrap();
+        }
+        assert_eq!(
+            devices[0].db.store_log().await.unwrap().replay.state.schema[&Audience::Store].number,
+            2
+        );
+        assert!(matches!(
+            devices[1].sync.sync_store_log().await,
+            Err(SyncError::UpdateRequired(_))
+        ));
+        // Ben updates; his reload converts the edit the kept snapshot omits, as
+        // Ana did on receipt, and both converge.
+        update(&mut devices[1], storage.clone(), true, true).await;
+        sync_all(&mut devices).await;
+        for device in &devices {
+            assert_eq!(name(&device.db).await, "Shopping");
+        }
+        for device in &mut devices {
+            device.writes.post_positions().await.unwrap();
+        }
+        devices[1].sync.run_retention().await.unwrap();
+        assert!(stored(&storage, edit).await);
+        // A snapshot that read the raise and covers the edit releases it.
+        devices[1]
+            .sync
+            .write_snapshot(Audience::Store)
+            .await
+            .unwrap();
+        for device in &mut devices {
+            device.writes.post_positions().await.unwrap();
+        }
+        devices[1].sync.run_retention().await.unwrap();
+        assert!(!stored(&storage, edit).await);
     }
 }

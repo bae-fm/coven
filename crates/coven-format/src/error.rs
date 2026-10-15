@@ -47,6 +47,8 @@ pub enum Rule {
     Nanoseconds,
     /// A storage time precedes the Unix epoch.
     Range,
+    /// A raise snapshot's schema version is not the version its prefix raises to.
+    RaiseVersion,
 }
 
 /// A typed failure, preserving the field and the failed structural requirement.

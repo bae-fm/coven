@@ -200,6 +200,33 @@ impl Database {
         .await
     }
 
+    /// The capture to seal for an audience's raise, right after a completed
+    /// catch-up: kept if that catch-up applied nothing past it, otherwise
+    /// captured again from the current state through this device's newest
+    /// write, which then joins the prefix to confirm (§15, §17.1). None when
+    /// a later migration replaced the capture.
+    pub async fn prepare_raise_capture(
+        &self,
+        audience: coven_merge::Audience,
+        version: u32,
+    ) -> Result<Option<crate::RaiseCapture>, DbError> {
+        self.call(move |inner| {
+            let device = inner.access.device;
+            inner.access.with_writer(|writer| {
+                writer.transaction(|writer| {
+                    crate::raise_capture::prepare(
+                        writer,
+                        &inner.access.write_schema,
+                        device,
+                        &audience,
+                        version,
+                    )
+                })
+            })
+        })
+        .await
+    }
+
     /// The first own write of a captured prefix not yet confirmed stored.
     /// A raise snapshot is sent only once this is `None` (§15).
     pub async fn unconfirmed_raise_prefix(

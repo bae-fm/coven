@@ -40,6 +40,7 @@ impl StoreLogSync {
                     audience: header.id.audience.clone(),
                     key: key_id,
                     caught_at,
+                    raise: raise.and_then(std::num::NonZeroU32::new),
                     writes: header.writes.clone(),
                     store_log: header.store_log.clone(),
                 })

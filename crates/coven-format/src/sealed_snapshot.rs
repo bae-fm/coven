@@ -8,6 +8,7 @@ use crate::wire::{Decoder, Encoder, Wire, MAX_ITEMS};
 use coven_crypto::{Signature, SEALED_OBJECT_CHUNK_OVERHEAD};
 use coven_foundation::id_source::KeyId;
 use coven_merge::Audience;
+use std::num::NonZeroU32;
 
 /// Cleartext routing information for the snapshot's single encrypted section.
 /// Decoding alone does not authenticate it: verify its prefix signature before
@@ -21,6 +22,10 @@ pub struct SnapshotObjectPrefix {
     /// The storage time `T_c` sampled before the catch-up this snapshot was
     /// prepared from (§15). Fixed with the captured prefix across retries.
     pub caught_at: StorageTime,
+    /// The version a raise snapshot raises its audience to, or none for any
+    /// other snapshot. Retention reads it before an entry names the snapshot,
+    /// and a raise entry's boundary requires its own version here (§15, §17.1).
+    pub raise: Option<NonZeroU32>,
     /// Applied write positions, strictly increasing by device.
     pub writes: WritePositions,
     /// Applied store-log positions, strictly increasing by device.
@@ -34,7 +39,7 @@ impl SnapshotObjectPrefix {
     }
 
     /// Greatest signed prefix end, allowing both independently bounded position lists.
-    pub const MAX_SIGNED_PREFIX: usize = 48 + 8 + 2 * 16 * MAX_ITEMS + 64;
+    pub const MAX_SIGNED_PREFIX: usize = 53 + 8 + 2 * 16 * MAX_ITEMS + 64;
 
     /// Exact signed prefix end once both count fields are available. Counts are
     /// bounded before use; unverified positions confer no authority.
@@ -58,8 +63,8 @@ impl SnapshotObjectPrefix {
         Ok(sealed - chunks * overhead)
     }
 
-    /// Encode kind 34, version, audience, key, catch-up time and both counted
-    /// position lists.
+    /// Encode kind 34, version, audience, key, catch-up time, raised version
+    /// and both counted position lists.
     pub fn encode(&self) -> Result<Vec<u8>, Error> {
         self.writes.validate()?;
         self.store_log.validate()?;
@@ -69,6 +74,7 @@ impl SnapshotObjectPrefix {
         self.audience.put(&mut out)?;
         self.key.put(&mut out)?;
         self.caught_at.put(&mut out)?;
+        self.raise.map(NonZeroU32::get).put(&mut out)?;
         // This unframed prefix has two independently bounded collections.
         let mut writes = Encoder::new();
         self.writes.put(&mut writes)?;
@@ -112,6 +118,13 @@ impl SnapshotObjectPrefix {
         let audience = Audience::get(&mut routing)?;
         let key = KeyId::get(&mut routing)?;
         let caught_at = StorageTime::get(&mut routing)?;
+        let raise = match Option::<u32>::get(&mut routing)? {
+            None => None,
+            Some(version) => Some(NonZeroU32::new(version).ok_or(Error::Invalid {
+                field: "snapshot raise version",
+                rule: Rule::Required,
+            })?),
+        };
         routing.finish()?;
         let mut input = Decoder::new(&bytes[writes_start..entries_start])?;
         let writes = WritePositions::get(&mut input)?;
@@ -125,19 +138,31 @@ impl SnapshotObjectPrefix {
             audience,
             key,
             caught_at,
+            raise,
             writes,
             store_log,
         })
     }
 
-    /// Kind, version, audience, key and the 12-byte catch-up time.
+    /// Kind, version, audience, key, the 12-byte catch-up time and the
+    /// optional raised version.
     fn routing_length(bytes: &[u8]) -> Result<usize, Error> {
         sealed::prefix(bytes, 34)?;
-        match *bytes.get(3).ok_or(Error::Truncated)? {
-            0 => Ok(32),
-            1 => Ok(48),
+        let raise = match *bytes.get(3).ok_or(Error::Truncated)? {
+            0 => 32,
+            1 => 48,
+            tag => {
+                return Err(Error::UnknownTag {
+                    field: "audience",
+                    tag,
+                })
+            }
+        };
+        match *bytes.get(raise).ok_or(Error::Truncated)? {
+            0 => Ok(raise + 1),
+            1 => Ok(raise + 5),
             tag => Err(Error::UnknownTag {
-                field: "audience",
+                field: "option",
                 tag,
             }),
         }

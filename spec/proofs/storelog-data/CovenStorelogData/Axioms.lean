@@ -443,3 +443,5 @@ import CovenStorelogData
 #print axioms CovenStorelogData.CircleReturnExamples.only_late_earlier_creation_no_reload
 #print axioms CovenStorelogData.CircleReturnExamples.fresh_circle_available_and_wait_preserved
 #print axioms CovenStorelogData.CircleReturnExamples.boundary_changes_still_reload
+#print axioms CovenStorelogData.Pending.capture_prepared_final
+#print axioms CovenStorelogData.Pending.stale_capture_counterexample

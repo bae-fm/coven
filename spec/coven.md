@@ -4413,7 +4413,8 @@ Carol's tablet:
   - Snapshots live at `<store>/snapshots/<audience>/<device>/<n>`, where the
     audience is `store` or a circle's id.
   - Its prefix, outside its encryption, names its audience, its key,
-    its catch-up storage time `T_c` (D9), and its positions, so any device can
+    its catch-up storage time `T_c` (D9), the version a raise snapshot
+    raises its audience to, and its positions, so any device can
     choose one and decide what it covers by verifying the prefix's own member signature, without opening
     its encrypted data. Unverified positions never establish coverage.
   - A snapshot is one object, encrypted in chunks like a write
@@ -4552,6 +4553,9 @@ Carol's tablet:
     retirements hold it, never further writes, and every history reaches
     the finality it waits for
     ([`waiting_names`, `ready_of_final`, `every_history_prepares`](proofs/storelog-data/CovenStorelogData/ReloadVerdict.lean)).
+    A raise snapshot waits too: its capture, kept only when nothing has
+    applied since it was taken, carries the verdicts of the current state
+    ([`capture_prepared_final`, `stale_capture_counterexample`](proofs/storelog-data/CovenStorelogData/ReloadVerdict.lean)).
   - E.g. Ben's write lands one second past his removal's deadline, and Ana's
     replay keeps the removal on day 51 while it is not final. Her snapshot
     waits; on day 91 the removal is final and dropped, and her snapshot
@@ -4588,6 +4592,14 @@ Carol's tablet:
     snapshot covering the current selection: a landing at noon Tuesday
     counts, while a landing one second later is ignored
     ([`late_snapshot_ignored`](proofs/io/CovenIO/Retention.lean)).
+  - A raise snapshot follows the same rule (§17.1). The migration's capture
+    is sent only when the completed catch-up that sampled its `T_c` applied
+    nothing past it. Otherwise the device captures that audience again from
+    its current state, through its newest write; its own later writes join
+    the captured prefix and are confirmed before the snapshot is sent
+    ([`RaiseHistory.unchanged_capture_prepares`, `recapture_keeps_write`](proofs/io/CovenIO/RaiseCoverage.lean)).
+    A capture sent with a later sample would omit writes stored before it
+    ([`capture_unsound`, `option_a_loses_write`](proofs/io/CovenIO/RaiseCoverage.lean)).
 - Before sending any snapshot, including a raise snapshot, confirm every
   own write through its captured position; remote positions must come from
   checked published log prefixes or previously published snapshots subject
@@ -4754,10 +4766,12 @@ Carol's tablet:
   It can post new pending records without advancing them (§6).
 - Deleting a log object requires all of the following:
   - for each part audience, a counting snapshot covering the write landed
-    strictly more than one day ago, and that audience's current newest
-    counting snapshot also covers it
+    strictly more than one day ago, and that audience's newest counting
+    snapshot also covers it under every boundary replay could still select
+    for it (below)
     ([`Eligible`](proofs/io/CovenIO/Retention.lean),
-    [`SnapshotHistory.deleted_stays_covered`](proofs/io/CovenIO/Reload.lean));
+    [`SnapshotHistory.deleted_stays_covered`](proofs/io/CovenIO/Reload.lean),
+    [`RaiseHistory.deleted_stays_covered`](proofs/io/CovenIO/RaiseCoverage.lean));
   - every store-log entry that makes this coverage usable, or makes the
     object unnecessary, is final (§9;
     [`Eligible`](proofs/io/CovenIO/Retention.lean));
@@ -4768,6 +4782,19 @@ Carol's tablet:
     its current snapshot need not itself be a day old; replacing a snapshot
     does not restart the historical covering snapshot's age
     ([`maturity_survives_new_snapshots`, `eligible_after_day`](proofs/io/CovenIO/Retention.lean)).
+  - The boundaries replay could still select for an audience are its
+    current one, the one its final entries alone select, each non-final
+    raise entry above the final version, and each listed counting raise
+    snapshot above it, which a raise entry published later could still
+    name. Under each, the newest counting snapshot it admits must cover the
+    write. Without a pending raise this is the current newest alone
+    ([`held_without_raises`, `reload_never_skips`](proofs/io/CovenIO/RaiseCoverage.lean)).
+  - E.g. Ana's store raise snapshot is listed, but her raise entry is not
+    published yet. Ben's newer snapshot covers his old-schema write 5, which
+    Ana's raise snapshot omits. Ben keeps write 5: once Ana's raise is
+    kept, only her snapshot and those that read her entry are usable, and a
+    reload would skip write 5 as having no store part
+    ([`kept_late_raise_loses_write`, `kept_late_held`](proofs/io/CovenIO/RaiseCoverage.lean)).
   - While an audience lists a snapshot whose prefix this device has not
     verified, its current newest counting snapshot is unknown: the prefix
     is in a newer format, by an author whose device registration has not
@@ -4856,6 +4883,9 @@ Carol's tablet:
   - A snapshot named by a kept reset or version-raise entry that changes
     the replayed state stays: new devices need its authenticated coverage
     to judge late writes and select a snapshot following that boundary.
+    A raise entry's snapshot must mark that raise's version in its prefix,
+    and a reset's must mark none; otherwise the boundary's snapshot is
+    refused.
   - Each device deletes its own log objects.
   - A removed device's are deleted by another device of the same member,
     since they were uploaded with that member's account.
@@ -5455,7 +5485,8 @@ Carol's tablet:
   app writes
   ([`migration_preserves_waiting`, `post_migration_behind_marker`](proofs/queue/CovenQueue/RaiseUpload.lean)).
   - Before a kept raise, the upload gate admits the captured prefix:
-    records older than the migration's version, and markers. The marker's
+    records older than the migration's version, markers, and own writes
+    through a capture taken again after a catch-up (§15). The marker's
     row changes travel only in the snapshot
     ([`migration_marker_enabled`](proofs/queue/CovenQueue/RaiseUpload.lean),
     [`old_prefix_and_marker_enabled`](proofs/queue/CovenQueue/RaiseProgress.lean)).
@@ -5471,8 +5502,13 @@ Carol's tablet:
     (marker 4) and writes 5: with the store still at 1, records 1 to 4
     upload, the raise to 3 publishes, and 5 waits for it
     ([`between_write_joins_later_prefix`, `between_write_raise_publishes`](proofs/queue/CovenQueue/RaiseExamples.lean)).
-  - Confirm the captured own prefix, including the marker, before sending
-    the snapshot under §15's publication gates, then publish the raise
+  - Prepare the raise snapshot under §15's publication gates: right after a
+    completed catch-up, from the capture if that catch-up applied nothing
+    past it and otherwise from a fresh capture of the audience through the
+    device's newest write
+    ([`RaiseHistory.unchanged_capture_prepares`, `recapture_keeps_write`](proofs/io/CovenIO/RaiseCoverage.lean)).
+    Confirm the captured own prefix, including the marker, before sending
+    the snapshot, then publish the raise
     entry after that snapshot is stored; every covered remote position
     also requires retained publication evidence
     ([`publication_after_confirmation`, `published_raise_covers_published`, `entry_has_snapshot`](proofs/queue/CovenQueue/RaiseUpload.lean),

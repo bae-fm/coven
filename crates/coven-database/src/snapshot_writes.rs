@@ -156,7 +156,15 @@ pub(crate) fn apply<P: crate::PendingValue, R: Read>(
                 )?;
                 return Ok(());
             }
-            if let Some(wait) = crate::download::prerequisite(database, &write.header)? {
+            let opened: Vec<_> = write
+                .parts
+                .iter()
+                .filter_map(|part| match part {
+                    crate::DownloadedPart::Opened(part) => Some(part.audience.clone()),
+                    crate::DownloadedPart::Skipped(_) => None,
+                })
+                .collect();
+            if let Some(wait) = crate::download::prerequisite(database, &write.header, &opened)? {
                 return Err(match wait {
                     WriteWait::Writes(missing) => SnapshotError::MissingWrites { missing },
                     wait => SnapshotError::WriteWaiting(wait),
@@ -164,14 +172,6 @@ pub(crate) fn apply<P: crate::PendingValue, R: Read>(
                 .into());
             }
             if let Some(published) = published {
-                let opened: Vec<_> = write
-                    .parts
-                    .iter()
-                    .filter_map(|part| match part {
-                        crate::DownloadedPart::Opened(part) => Some(part.audience.clone()),
-                        crate::DownloadedPart::Skipped(_) => None,
-                    })
-                    .collect();
                 crate::write_landing::land::<P>(
                     database,
                     schema,

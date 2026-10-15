@@ -740,6 +740,7 @@ impl Database {
                         [],
                         |r| r.get(0),
                     )?,
+                    captured_through: crate::raise_capture::captured_through(writer)?,
                     schema_version,
                     positions,
                     fingerprints,
