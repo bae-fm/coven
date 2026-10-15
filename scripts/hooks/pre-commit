@@ -1,5 +1,5 @@
 #!/bin/bash
-# coven pre-commit: format, lint, and test before every commit.
+# coven pre-commit: format, lint and the checker; tests only with COVEN_HOOK_TESTS=1.
 set -e
 
 TMPFILE=$(mktemp)
