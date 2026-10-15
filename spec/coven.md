@@ -4810,8 +4810,7 @@ Carol's tablet:
   - At preparation, the new snapshot must cover every position of that
     audience's current newest counting snapshot; this check does not lock
     the remote catalog or require covering a concurrent arrival at landing
-    ([`SnapshotPublication.canPrepare`](proofs/io/CovenIO/Retention.lean),
-    [`SnapshotRefresh.refresh_outranks`](proofs/io/CovenIO/SnapshotRefresh.lean)).
+    ([`SnapshotPublication.canPrepare`](proofs/io/CovenIO/Retention.lean)).
   - While the audience lists a snapshot whose prefix this device has not
     verified, that snapshot may be its newest, so preparation waits until it
     verifies or is no longer listed, as retention does (below). With the
