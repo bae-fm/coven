@@ -843,8 +843,10 @@ the file's ranges under `F`.
     publication, passed SeaweedFS's copy publication with versioning disabled
     and enabled on **2026-10-14**, but with versioning disabled a conditional
     PUT racing a conditional copy of one name both succeeded in 14 of 200
-    trials, so the refusal stands. AWS is **uncertified**: there is no
-    live account. The table's selected
+    trials, so the refusal stands. The same day suite 5 passed R2, RustFS
+    1.0.1 with versioning disabled and enabled, and Ceph RGW 20.2.4 and GCS
+    with versioning disabled; those entries record suite 5 certificates. AWS
+    is **uncertified**: there is no live account. The table's selected
     behaviors are:
 
     | Profile | Signing | Single PUT | Multipart publication | Native multipart time | Checksums | Listing | Revision |
@@ -856,13 +858,15 @@ the file's ranges under `F`.
     | SeaweedFS (uncertified, refused) | AWS SigV4 | `If-None-Match: *` | Copy with `If-None-Match: *` | Completion | None returned | V2 | ETag |
     | Ceph RGW (certified, unversioned) | AWS SigV4 | `If-None-Match: *` | Conditional completion | Completion | None returned | V2 | ETag |
 
-    RustFS alone supports versioned buckets: RustFS 1.0.1 passed every suite 4
-    race with versioning enabled. GCS's supplied live key could neither read
-    bucket versioning nor create a second bucket for certification.
+    RustFS alone supports versioned buckets: RustFS 1.0.1 passed every suite 5
+    race with versioning enabled. GCS ran only with versioning disabled, so it
+    has no versioned-bucket evidence.
     SeaweedFS 4.48 fails the multipart races with versioning enabled or not.
     AWS remains uncertified. R2 has no versioning feature. Ceph
-    RGW 20.2.4 fails the versioned races. See
-    [suite 4 evidence](s3-certification.md#concurrent-certification-suite-4)
+    RGW 20.2.4 fails the versioned races. See the
+    [suite 4 evidence](s3-certification.md#concurrent-certification-suite-4),
+    the [full battery](s3-certification.md#full-battery-2026-10-14) and the
+    [GCS run](s3-certification.md#gcs-and-versity-gateway-2026-10-14)
     for the live runs and their bucket states.
 
     AWS and R2 request checksums; every profile but GCS consumes S3

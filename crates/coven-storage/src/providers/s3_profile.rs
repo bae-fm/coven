@@ -131,6 +131,8 @@ const AWS: CataloguedProfile = CataloguedProfile {
     certification: Certification::Uncertified,
     setup: Setup::Admitted,
 };
+// Suite 5 passed GCS's generation-conditioned copy publication with
+// versioning disabled on 2026-10-14; no versioned bucket was run.
 const GCS: CataloguedProfile = CataloguedProfile {
     name: S3ProfileName::Gcs,
     endpoint: Some(EndpointMatch::Host("storage.googleapis.com")),
@@ -151,14 +153,15 @@ const GCS: CataloguedProfile = CataloguedProfile {
     versioned_buckets: Certification::Uncertified,
     minter: Some(&super::gcs_keys::GCS_KEYS),
     certification: Certification::Passed {
-        date: "2026-10-13",
-        suite: 1,
+        date: "2026-10-14",
+        suite: 5,
     },
     setup: Setup::Admitted,
 };
 // Detected by certification suite 1; the raw observations are in spec/s3-certification.md.
 // Cloudflare documents the API differences at https://developers.cloudflare.com/r2/api/s3/api/.
 // Native completion passed create-once and completion-time checks, so no copy is needed.
+// Suite 5 passed on 2026-10-14; R2 has no bucket versioning to certify.
 const R2: CataloguedProfile = CataloguedProfile {
     name: S3ProfileName::R2,
     endpoint: Some(EndpointMatch::HostSuffix(".r2.cloudflarestorage.com")),
@@ -173,8 +176,8 @@ const R2: CataloguedProfile = CataloguedProfile {
     versioned_buckets: Certification::Uncertified,
     minter: Some(&super::r2_keys::R2_TOKENS),
     certification: Certification::Passed {
-        date: "2026-10-13",
-        suite: 1,
+        date: "2026-10-14",
+        suite: 5,
     },
     setup: Setup::Admitted,
 };
@@ -184,7 +187,7 @@ const R2: CataloguedProfile = CataloguedProfile {
 // names on PUT and multipart completion with HTTP 412 and timestamp multipart
 // completion, so no copy is needed. Neither returned a checksum, even when
 // asked; §4's complete-byte comparison applies instead. RustFS 1.0.1 passed
-// suite 4 with versioning disabled and enabled: one conditional writer won
+// suite 5 with versioning disabled and enabled: one conditional writer won
 // every race in both buckets.
 const RUSTFS: CataloguedProfile = CataloguedProfile {
     name: S3ProfileName::RustFs,
@@ -199,12 +202,12 @@ const RUSTFS: CataloguedProfile = CataloguedProfile {
     key_scope: S3KeyScope::Prefix,
     versioned_buckets: Certification::Passed {
         date: "2026-10-14",
-        suite: 4,
+        suite: 5,
     },
     minter: Some(&super::rustfs_keys::RUSTFS_ACCOUNTS),
     certification: Certification::Passed {
         date: "2026-10-14",
-        suite: 4,
+        suite: 5,
     },
     setup: Setup::Admitted,
 };
@@ -234,8 +237,10 @@ const SEAWEEDFS: CataloguedProfile = CataloguedProfile {
     setup: Setup::Refused,
 };
 
-// Ceph RGW 20.2.4 has the same detected settings as RustFS. Versioned
-// conditional writes can both succeed in a race; see spec/s3-certification.md.
+// Ceph RGW 20.2.4 has the same detected settings as RustFS. It passed suite 5
+// with versioning disabled; with versioning enabled every conditional writer
+// in a race succeeded, so versioned buckets stay uncertified. See
+// spec/s3-certification.md.
 const CEPH_RGW: CataloguedProfile = CataloguedProfile {
     name: S3ProfileName::CephRgw,
     endpoint: None,
@@ -247,7 +252,7 @@ const CEPH_RGW: CataloguedProfile = CataloguedProfile {
     minter: Some(&super::iam::CEPH_RGW_IAM),
     certification: Certification::Passed {
         date: "2026-10-14",
-        suite: 4,
+        suite: 5,
     },
     setup: Setup::Admitted,
 };
