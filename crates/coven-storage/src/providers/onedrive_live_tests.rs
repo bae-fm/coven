@@ -179,8 +179,11 @@ fn run(test: impl AsyncFnOnce(&mut Live<'_>)) {
 #[ignore = "requires COVEN_LIVE_ONEDRIVE_ENV and a live personal OneDrive"]
 fn onedrive_live_conformance() {
     run(async |live| {
-        crate::test_utils::Conformance::new(live.storage.clone(), live.store)
-            .run()
+        let suite = crate::test_utils::Conformance::new(live.storage.clone(), live.store);
+        suite.run().await.unwrap();
+        let storage: Arc<dyn Storage> = live.storage.clone();
+        suite
+            .creation_race([storage.clone(), storage.clone(), storage])
             .await
             .unwrap();
         println!("onedrive_live conformance: passed");

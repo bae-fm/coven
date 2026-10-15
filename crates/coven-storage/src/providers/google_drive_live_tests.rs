@@ -186,8 +186,11 @@ async fn child_listed(
 #[ignore = "requires COVEN_LIVE_DRIVE_ENV and a real Google Drive account"]
 async fn drive_live_conformance() {
     run(|drive| async move {
-        crate::test_utils::Conformance::new(drive.storage.clone(), drive.store)
-            .run()
+        let suite = crate::test_utils::Conformance::new(drive.storage.clone(), drive.store);
+        suite.run().await.unwrap();
+        let storage: Arc<dyn Storage> = drive.storage.clone();
+        suite
+            .creation_race([storage.clone(), storage.clone(), storage])
             .await
             .unwrap();
         println!("Drive conformance store={}: passed", drive.store);

@@ -118,6 +118,46 @@ async fn s3_detection() {
     report(&detection, &settings.config);
 }
 
+/// Three installations' setups of one store claim its creation marker at once
+/// (§10, D10), each through its own connection: one claim wins and the others
+/// are refused, in each of 20 fresh stores.
+#[tokio::test]
+#[ignore = "COVEN_LIVE_S3_ENV; creates and deletes live creation markers"]
+async fn s3_creation_marker_race() {
+    let settings = live::LiveS3::load();
+    let StorageConfig::S3 {
+        endpoint, profile, ..
+    } = &settings.config
+    else {
+        unreachable!()
+    };
+    let selected = match profile::settings(endpoint.as_ref(), profile.as_ref())
+        .expect("valid live location")
+    {
+        Some(selected) => selected,
+        None => settings.detect().await.expect("detection").settings,
+    };
+    for _ in 0..20 {
+        let rivals: [Arc<dyn Storage>; 2] = [
+            Arc::new(settings.connect(Some(selected))),
+            Arc::new(settings.connect(Some(selected))),
+        ];
+        let raced = case(
+            &settings,
+            &["creation_marker_race"],
+            selected,
+            |s, store| async move {
+                let [second, third] = rivals;
+                crate::test_utils::Conformance::new(s.clone(), store)
+                    .creation_race([s, second, third])
+                    .await
+            },
+        )
+        .await;
+        assert!(raced.is_some(), "creation marker race failed");
+    }
+}
+
 #[tokio::test]
 #[ignore = "COVEN_LIVE_S3_ENV; reads bucket versioning without writing objects"]
 async fn s3_bucket_versioning() {

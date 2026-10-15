@@ -7,6 +7,7 @@ use coven_crypto::{
     MemberIdentity, StoreKey, StoreKeyring,
 };
 use coven_format::{
+    creation_marker::CreationMarker,
     sealed_single::SingleChunkObject,
     store_log::{StoreChange, StoreLogEntry},
 };
@@ -119,25 +120,14 @@ impl StoreLogSync {
             )
             .await?
         } else {
-            // Another installation of this never-connected store may already
-            // have created it here. After §10's storage-less reset the two
-            // hold different device ids, so their creation entries have
-            // different paths and create-once never compares them. Only this
-            // device's own retried creation may already be in the folder.
-            let own = local.device;
-            if storage
-                .list(&coven_storage::ObjectPrefix::store_logs(store_id))
-                .await?
-                .iter()
-                .any(|object| {
-                    object
-                        .path
-                        .store_log_position()
-                        .is_none_or(|(device, _)| device != own)
-                })
-            {
-                return Err(coven_storage::StorageFailure::StoreExists.into());
-            }
+            // Another installation of this never-connected store may set it up
+            // here too. After §10's storage-less reset the two hold different
+            // device ids, so their creation entries have different paths and
+            // create-once never compares them. Every setup therefore claims
+            // the store's one creation marker before writing anything else;
+            // only this device's own retried claim may already hold it
+            // (StoreCreation.marked_setups_create_once).
+            claim_creation(storage.as_ref(), &self.send, store_id, local.device).await?;
             if local.upload.is_none() {
                 let settings = self.directory.settings().map_err(SyncError::disk)?;
                 let key = coven_crypto::StoreKey::generate(coven_foundation::id_source::KeyId(
@@ -400,6 +390,32 @@ impl StoreLogSync {
         Ok(staged_keys
             .read()?
             .expect("setup retains the opened keyring"))
+    }
+}
+
+/// Claim the store's creation marker with a create-once write. An occupied
+/// marker passes only when it holds this device's own claim; any other refuses
+/// setup before it writes anything (StoreCreation.refused_setup_no_creation).
+async fn claim_creation(
+    storage: &dyn Storage,
+    send: &crate::SendGate,
+    store: coven_foundation::id_source::StoreId,
+    device: coven_foundation::id_source::DeviceId,
+) -> Result<(), SyncError> {
+    let path = ObjectPath::created(store);
+    let own = CreationMarker { store, device }.encode()?;
+    let _claim = send.bootstrap([path.clone()].into(), false);
+    match storage.create(&path, &own).await {
+        Ok(()) => Ok(()),
+        Err(error @ coven_storage::StorageError::Cleanup { .. }) => Err(error.into()),
+        Err(error) if error.failure() == coven_storage::StorageFailure::AlreadyExists => {
+            if storage.read(&path).await? == own {
+                Ok(())
+            } else {
+                Err(coven_storage::StorageFailure::StoreExists.into())
+            }
+        }
+        Err(error) => Err(error.into()),
     }
 }
 

@@ -867,3 +867,19 @@ async fn folder_visibility_uses_the_grant_sent_with_the_request() {
         StorageFailure::GoogleDriveFolderNotVisible
     );
 }
+
+/// Installations of one store on three devices race for its creation marker
+/// (§10). Drive keeps every copy; the first by creation time and id is the
+/// object, and the later devices' creates report it occupied.
+#[tokio::test]
+async fn devices_racing_for_the_creation_marker_leave_one_winner() {
+    let state = Arc::new(Mutex::new(Remote::default()));
+    let server = TestServer::new(Router::new().fallback(endpoint).with_state(state)).await;
+    let claimants: [Arc<dyn Storage>; 3] = [31, 32, 33].map(|device| {
+        Arc::new(provider_for_device(&server.url, DeviceId(device))) as Arc<dyn Storage>
+    });
+    crate::test_utils::Conformance::new(claimants[0].clone(), STORE_ID)
+        .creation_race(claimants)
+        .await
+        .unwrap();
+}

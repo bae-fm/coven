@@ -1960,8 +1960,8 @@ pub enum StorageFailure {
     /// A member key coven made could list outside its store's prefix (§4).
     KeyBeyondStore,
     /// Setting up a store that never had storage found another device's
-    /// store-log entry in its folder: another installation of the store
-    /// already created it at this location (§10). Restore or join it instead.
+    /// creation marker: another installation of the store claimed this
+    /// location first (§10, D10). Restore or join it instead.
     StoreExists,
     /// S3 rejected the device clock after one retry with the learned offset (§4).
     ClockSkew,

@@ -3376,14 +3376,25 @@ Carol's tablet:
     - The original installation and the reset copy then hold the store under
       different device ids, so their creation entries (entry 1 of each
       device) have different paths and create-once never compares them.
-      Setting up storage for a store that has never had it therefore first
-      lists the store's `store-log/` folder. An entry by another device
-      means the store was already created there: setup refuses with
-      `StorageFailure::StoreExists` and creates nothing. This device's own
-      retried creation passes. The listing is not a lock: two setups that
-      both list before either creates can both pass, within §4's listing
-      margin
-      ([`blind_setup_two_creations`, `listed_setup_one_creation`, `retry_passes`, `concurrent_setups_two_creations`](proofs/storage/CovenStorage/StoreCreation.lean)).
+      A listing is not a lock either: two setups that both list the folder
+      before either creates can both pass
+      ([`blind_setup_two_creations`, `concurrent_setups_two_creations`](proofs/storage/CovenStorage/StoreCreation.lean)).
+    - So setting up storage for a store that has never had it first claims
+      the store's creation marker `<store>/created`
+      ([D10](format.md#d10-paths)) with a create-once write naming the store
+      and this device, before writing anything else to the store. An
+      occupied marker naming another device, or anything else, means another
+      installation claimed the location: setup refuses with
+      `StorageFailure::StoreExists` and writes nothing more. A marker holding
+      this device's own claim, left by a retry whose reply was lost, passes.
+      In every interleaving of any number of setups at most one creation is
+      stored, and a refused setup stores none
+      ([`marked_setups_create_once`, `refused_setup_no_creation`, `refused_claim_writes_nothing`, `own_marker_passes`, `concurrent_marked_setups_one_creation`](proofs/storage/CovenStorage/StoreCreation.lean)).
+    - The §4 provider check before the claim writes and deletes one fresh
+      test object; it creates no store state.
+    - A claim whose device never goes on to create keeps refusing other
+      installations at that location; that device's retried setup completes
+      it.
   - Tell the app which old id was replaced and why, and that unsent edits
     were discarded. Store the `DeviceReset` record in `_coven_device_reset`
     in the replacement database before publishing its usable handle (E5).

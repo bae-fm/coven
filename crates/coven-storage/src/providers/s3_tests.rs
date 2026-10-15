@@ -435,8 +435,11 @@ fn provider(url: &str) -> StorageConnection<S3Storage> {
 async fn real_s3_client_conforms_with_pagination() {
     let state = Arc::new(Mutex::new(Remote::default()));
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state)).await;
-    crate::test_utils::Conformance::new(Arc::new(provider(&server.url)), STORE_ID)
-        .run()
+    let storage: Arc<dyn Storage> = Arc::new(provider(&server.url));
+    let suite = crate::test_utils::Conformance::new(storage.clone(), STORE_ID);
+    suite.run().await.unwrap();
+    suite
+        .creation_race([storage.clone(), storage.clone(), storage])
         .await
         .unwrap();
 }

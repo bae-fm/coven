@@ -217,6 +217,11 @@ def join_request(sodium):
     return frame(9, bytes([0x55]) * 16 + ANA + pair(sodium, 0x34) + text(b"D"))
 
 
+def creation_marker():
+    """D9's creation marker (kind 41): store, then device 1. Unsealed."""
+    return bytes([41]) + u16(1) + STORE + u64(1)
+
+
 def clock():
     return frame(12, u64(1) + collection([entry_id(1, 2)]))
 
@@ -334,6 +339,7 @@ def main():
     frames = objects(sodium, positions[0]) + pinned[rest_at:]
     (directory / "v1.hex").write_text("".join(frame_.hex() + "\n" for frame_ in frames))
     (directory / "clock.hex").write_text(clock().hex() + "\n")
+    (directory / "creation-marker.hex").write_text(creation_marker().hex() + "\n")
     (directory / "pending-reports.hex").write_text(pending_reports(sodium).hex() + "\n")
 
     path = STORE_TEXT + b"devices/1/3"

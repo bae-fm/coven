@@ -4,8 +4,10 @@ use super::*;
 #[ignore = "requires COVEN_LIVE_DROPBOX_ENV and writes to Dropbox"]
 fn dropbox_live_conformance() {
     run(async |live, storage| {
-        crate::test_utils::Conformance::new(storage, live.store)
-            .run()
+        let suite = crate::test_utils::Conformance::new(storage.clone(), live.store);
+        suite.run().await.unwrap();
+        suite
+            .creation_race([storage.clone(), storage.clone(), storage])
             .await
             .unwrap();
         println!("Dropbox Conformance passed: store={}", live.store);

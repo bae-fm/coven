@@ -44,6 +44,7 @@ fn storage_paths_require_a_canonical_store_id() {
         "files/1/11111111-1111-1111-1111-111111111111".to_owned(),
         "join-requests/11111111-1111-1111-1111-111111111111".to_owned(),
         "keys/1/1".to_owned(),
+        "created".to_owned(),
     ] {
         let scoped = ObjectPath::parse(&format!("{STORE_ID}/{tail}")).unwrap();
         assert_eq!(scoped.store(), STORE_ID);
@@ -180,6 +181,7 @@ fn every_layout_round_trips_without_aliases() {
         (ObjectPath::clock(STORE_ID, device), true),
         (ObjectPath::key_copy(STORE_ID, device, number), false),
         (ObjectPath::join_request(STORE_ID, InviteId(id)), false),
+        (ObjectPath::created(STORE_ID), false),
         (
             ObjectPath::file(STORE_ID, device, FileId(uuid::Uuid::from_bytes([0xab; 16]))),
             false,
@@ -197,6 +199,13 @@ fn every_layout_round_trips_without_aliases() {
         ObjectPath::device_log(STORE_ID, device, number).as_str(),
         "10101010-1010-1010-1010-101010101010/devices/42/3"
     );
+    let created = ObjectPath::created(STORE_ID);
+    assert_eq!(
+        created.as_str(),
+        "10101010-1010-1010-1010-101010101010/created"
+    );
+    assert_eq!(created.device(), None);
+    assert!(!ObjectPrefix::store_logs(STORE_ID).contains(&created));
     assert_eq!(
         ObjectPath::store_log(STORE_ID, device, number).as_str(),
         "10101010-1010-1010-1010-101010101010/store-log/42/3"
@@ -225,6 +234,8 @@ fn every_layout_round_trips_without_aliases() {
         "/10101010-1010-1010-1010-101010101010/devices/42/1",
         "10101010-1010-1010-1010-101010101010/devices/42/18446744073709551616",
         "10101010-1010-1010-1010-101010101010/join-requests/no-id",
+        "10101010-1010-1010-1010-101010101010/created/1",
+        "10101010-1010-1010-1010-101010101010/store-log/created",
     ] {
         assert!(ObjectPath::parse(path).is_err(), "{path}");
     }

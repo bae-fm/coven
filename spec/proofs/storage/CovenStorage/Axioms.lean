@@ -94,6 +94,14 @@ import CovenStorage
 #print axioms CovenStorage.StoreCreation.listed_setup_one_creation
 #print axioms CovenStorage.StoreCreation.retry_passes
 #print axioms CovenStorage.StoreCreation.concurrent_setups_two_creations
+#print axioms CovenStorage.StoreCreation.step_inv
+#print axioms CovenStorage.StoreCreation.run_inv
+#print axioms CovenStorage.StoreCreation.fresh_inv
+#print axioms CovenStorage.StoreCreation.marked_setups_create_once
+#print axioms CovenStorage.StoreCreation.refused_setup_no_creation
+#print axioms CovenStorage.StoreCreation.refused_claim_writes_nothing
+#print axioms CovenStorage.StoreCreation.own_marker_passes
+#print axioms CovenStorage.StoreCreation.concurrent_marked_setups_one_creation
 #print axioms CovenStorage.replacement_has_owner
 #print axioms CovenStorage.applyOnce_nodup
 #print axioms CovenStorage.applyOnce_members

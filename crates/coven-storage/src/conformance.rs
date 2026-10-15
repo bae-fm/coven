@@ -237,6 +237,41 @@ impl Conformance {
         self.storage.delete(&path).await?;
         Ok(())
     }
+
+    /// Setups of one store race for its creation marker (§10, D10): of three
+    /// concurrent creates, one per claimant connection, exactly one wins and
+    /// keeps its bytes, and the others are refused as occupied. The winner's
+    /// connection deletes the marker afterwards.
+    pub async fn creation_race(
+        &self,
+        claimants: [Arc<dyn Storage>; 3],
+    ) -> Result<(), StorageError> {
+        let marker = ObjectPath::created(self.store);
+        let claims: [&[u8]; 3] = [b"claim 1", b"claim 2", b"claim 3"];
+        let (first, second, third) = tokio::join!(
+            claimants[0].create(&marker, claims[0]),
+            claimants[1].create(&marker, claims[1]),
+            claimants[2].create(&marker, claims[2]),
+        );
+        let mut winners = Vec::new();
+        for (index, result) in [first, second, third].into_iter().enumerate() {
+            match result {
+                Ok(()) => winners.push(index),
+                Err(error)
+                    if error.failure() == StorageFailure::AlreadyExists
+                        && !matches!(error, StorageError::Cleanup { .. }) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        let [winner] = winners.as_slice() else {
+            return Err(StorageFailure::Protocol
+                .with_source(format!("{} concurrent creates won one path", winners.len())));
+        };
+        if self.storage.read(&marker).await? != claims[*winner] {
+            return Err(StorageFailure::Protocol.with_source("creation race kept another claim"));
+        }
+        claimants[*winner].delete(&marker).await
+    }
 }
 
 impl Conformance {

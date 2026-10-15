@@ -370,18 +370,35 @@ creation entries have different paths and create-once never compares them.
   location (`blind_setup_two_creations`, checked).
 - Setup that first lists the store's entries and refuses one by another
   device creates the store once when the listing includes the first
-  creation (`listed_setup_one_creation`, proved). This device's own retried
-  creation still passes and keeps its first bytes (`retry_passes`).
-- The listing is not a lock. Two setups whose listings both come before the
-  other's creation both pass (`concurrent_setups_two_creations`, checked),
-  as §4 accepts for two stores created in one bucket within the listing
-  margin. Preventing it would need one create-once object every creation
-  must claim, which D10 does not have.
+  creation (`listed_setup_one_creation`, proved), and this device's own
+  retried creation passes (`retry_passes`). But the listing is not a lock:
+  two setups whose listings both come before the other's creation both pass
+  (`concurrent_setups_two_creations`, checked).
+- So every setup now first claims one create-once path, the creation marker
+  `created` (T205, D10), holding its store and device, and goes on only when
+  the stored marker is its own. `Run` and `step` model any number of setups
+  whose claim and creation steps interleave freely; `Inv` holds in every
+  reachable state (`step_inv`, `run_inv`, `fresh_inv`, proved).
+  - From a location with no creation entry, at most one device's creation
+    entry is ever stored, in every interleaving
+    (`marked_setups_create_once`, proved). A marker already stored there is
+    allowed; only its own device can pass it.
+  - A setup whose claim was refused stores no creation entry
+    (`refused_setup_no_creation`, proved), and its refused claim leaves
+    storage exactly as it was (`refused_claim_writes_nothing`, proved).
+  - A retried claim by the device whose marker is stored passes again
+    (`own_marker_passes`, proved).
+  - T163's interleaving, both setups claiming before either writes, now
+    creates the store once and refuses the second
+    (`concurrent_marked_setups_one_creation`, checked).
 
-Listing completeness (§4's margin), the replay of two creation entries and
-the provider calls are outside the model. Rust's test
-`a_second_installation_never_creates_a_store_already_created_here`
-(`storage_setup_tests.rs`) runs the sequential history.
+Create-once of the marker is the model's atomic `create`; each provider's
+create-once write, the marker's encoding and the provider check's test
+object are outside the model. Rust's `storage_setup_tests.rs` runs the
+sequential history (`a_second_installation_never_creates_a_store_already_created_here`),
+the concurrent one with both claims before either write
+(`concurrent_setups_of_one_store_create_it_once`) and the retried claim
+(`a_retried_setup_passes_its_own_creation_marker`).
 
 `Identity` also contains a separate model with recorded replacement ends.
 Its `ends_*`, `combined_end_keeps_completed` and `beyond_end_waits` results

@@ -581,7 +581,7 @@
 
 ### D9 Sealed objects
 
-- Every object in storage but a file is sealed:
+- Every object in storage but a file and the creation marker is sealed:
 
   ```
   kind:u8 | version:u16 | prefix | chunks | signature
@@ -609,6 +609,16 @@
   use that prefix, including when the reader is not the recipient. Audience,
   key id, recipient id and exact sealing credential are public routing facts; the key and its hash are
   not exposed. D11 binds this prefix into the box's authentication.
+
+- The creation marker is neither sealed nor signed:
+
+  ```
+  kind:u8 (41) | version:u16 | store:uuid | device:DeviceId
+  ```
+
+  A setup compares the stored bytes with its own claim's exact bytes
+  ([§10](coven.md#10-device-identity)); storage that forges or damages a
+  marker can only make setups refuse.
 
 - A delivered S3 key ([§13](coven.md#13-removing-members-and-devices)) is
   sealed to its member with the same box, then signed by its author:
@@ -771,6 +781,7 @@
 | `<store>/access-keys/<member>/<attempt>` | An S3 key delivered to a member, one per replacement attempt |
 | `<store>/files/<device>/<file>` | An uploaded file |
 | `<store>/join-requests/<invite>` | A join request |
+| `<store>/created` | The store's creation marker (D9), claimed create-once by the first setup ([§10](coven.md#10-device-identity)) |
 
 - Device and key-copy writer ids and `n` are decimal, with no leading zeros;
   `n` is at least 1. Each sealed-copy path belongs to its named writer.
@@ -968,7 +979,8 @@
   `sealed-snapshot.hex`, `sealed-positions.hex` and `sealed-join-request.hex`;
   `sealed-store-key.hex` and `sealed-circle-key.hex` hold the two key boxes.
   `file.hex` has a full 64-KiB chunk and a 29-byte last chunk; `file-reference.txt`
-  pins its device-qualified path and fixed row reference. The code frames
+  pins its device-qualified path and fixed row reference. `creation-marker.hex`
+  pins the creation marker. The code frames
   are `restore-code.hex` and `invite-code.hex`, with their text in `codes.txt`.
   All key material and fixed nonces in these fixtures are public test data.
   Ciphertext, HKDF and signatures must be calculated independently using

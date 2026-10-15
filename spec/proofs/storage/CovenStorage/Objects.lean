@@ -8,6 +8,8 @@ inductive Path where
   | entry (device number : Nat)
   | snapshot (audience device number : Nat)
   | file (device id : Nat)
+  /-- The store's create-once creation marker, claimed before setup writes. -/
+  | created
   deriving DecidableEq, Repr
 
 /-- Exact symbolic bytes; encryption and encoding are outside this model. -/

@@ -62,6 +62,11 @@ async fn memory_conforms() {
         );
         let suite = Conformance::new(storage.clone(), STORE_ID);
         suite.run().await.unwrap();
+        let claimant: Arc<dyn Storage> = storage.clone();
+        suite
+            .creation_race([claimant.clone(), claimant.clone(), claimant])
+            .await
+            .unwrap();
         suite
             .shared_location(coven_foundation::id_source::StoreId(
                 uuid::Uuid::from_bytes([0x20; 16]),

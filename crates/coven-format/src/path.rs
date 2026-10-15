@@ -118,6 +118,11 @@ impl ObjectPath {
     ) -> Self {
         Self(format!("{store}/access-keys/{member}/{attempt}"))
     }
+    /// The store's creation marker, which every setup of a never-connected
+    /// store claims create-once before writing anything else (§10).
+    pub fn created(store: StoreId) -> Self {
+        Self(format!("{store}/created"))
+    }
     /// Parse a listed or recorded path without permitting traversal or other layouts.
     pub fn parse(value: &str) -> Result<Self, PathError> {
         value.to_owned().try_into()
@@ -208,6 +213,7 @@ impl TryFrom<String> for ObjectPath {
             ["positions" | "clock", device] => decimal(device, false),
             ["files", device, name] => decimal(device, false) && canonical_uuid(name),
             ["join-requests", invite] => canonical_uuid(invite),
+            ["created"] => true,
             ["access-keys", member, attempt] => member_id(member) && canonical_uuid(attempt),
             _ => false,
         };
