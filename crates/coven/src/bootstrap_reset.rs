@@ -113,9 +113,9 @@ pub(crate) async fn reset_device(
 /// Keep what the discarded database made or owed at the provider pending
 /// deletion in its replacement, which has loaded the store log (§10, T203).
 /// A database too damaged to read, whatever the reset's reason, carries
-/// nothing: its keys are left to an admin's catch-up, which lists the
-/// provider's keys for the store (§13). Any other failure fails the reset,
-/// which retries.
+/// nothing; a key only it recorded stays live at the provider, which only a
+/// listing of the provider's keys could find (T204, undecided). Any other
+/// failure fails the reset, which retries.
 pub(super) async fn carry_discarded_keys(
     database: &coven_database::Database,
     pending: &BootstrapStore,
