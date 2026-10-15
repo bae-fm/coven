@@ -4633,12 +4633,12 @@ Carol's tablet:
   file retain it.
   - Once the deletion is kept and final, its rows can never return. In the
     transaction that makes it final, this device cleans them up: they name
-    no original any more, so their originals' records go (§16.5). Their
-    merge rows and loss records stay. A write into the circle that had not
-    read the deletion can still arrive and merges into them, and the app
+    no original any more, so their originals' records go (§16.5;
+    [`hidden_released_when_final`](proofs/storelog-data/CovenStorelogData/LocalSources.lean)).
+    Their merge rows and loss records stay. A write into the circle that had
+    not read the deletion can still arrive and merges into them, and the app
     can still read and dismiss those losses, so every device holding the
-    same writes keeps the same merge state whenever it cleaned up
-    ([`hidden_released_when_final`](proofs/storelog-data/CovenStorelogData/LocalSources.lean)).
+    same writes keeps the same merge state whenever it cleaned up.
 
 ## 15. Snapshots
 
