@@ -2891,6 +2891,14 @@ Carol's tablet:
     step is direct. A trigger's step that equals such a consequence, made
     before SQLite's action reaches the row, is that action's exact effect and
     counts as it ([B18](proofs/merge.md#b18-owner-tables-and-row-authenticity)).
+  - An action also records the columns another reference shares with its
+    own, and that reference's parent: the one it held, when the action
+    leaves its values as they were, or else the row its new values key, as
+    the write's earlier steps leave it. When the write never touched that
+    row, or a recorded reference's parent may have ended before the write,
+    the step depends on rows of the authoring view that no step carries.
+    Receivers refuse it, and so does its author, which runs the same check
+    before the write leaves (B18 `Overlapping`).
   - Match the exact row, generation, operation and every changed column and
     value, including all components of a compound key. Several actions on
     one row must match their complete combined effect in original execution

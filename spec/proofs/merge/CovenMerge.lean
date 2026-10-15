@@ -40,5 +40,6 @@ import CovenMerge.OwnerForeignKeyExamples
 import CovenMerge.OwnerTransientForeignKey
 import CovenMerge.ForeignKeyClassification
 import CovenMerge.ForeignKeyRecords
+import CovenMerge.ForeignKeyOverlap
 import CovenMerge.OwnerMoves
 import CovenMerge.OwnerSnapshotAuthors

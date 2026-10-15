@@ -65,9 +65,9 @@ impl Ids {
     }
 }
 
-const TABLES: [&str; 11] = [
+const TABLES: [&str; 12] = [
     "tracks", "reviews", "comments", "pins", "keys", "labels", "albums", "logs", "notes", "codes",
-    "tags",
+    "tags", "artists",
 ];
 
 fn action(rule: &str) -> &'static str {

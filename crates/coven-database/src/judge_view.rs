@@ -332,8 +332,11 @@ impl<'a> ChildView<'a> {
     /// What an action through `key` records besides the key's own columns
     /// (D5): every other column sharing a reference with them, with the value
     /// it holds now, and the parent each other reference over the recorded
-    /// columns names, given the values `recorded` holds. None when the write
-    /// does not determine those parents.
+    /// columns names, given the values `recorded` holds. A reference the
+    /// action leaves as it was keeps the parent it names; one the action
+    /// points elsewhere names the row its new values key, as the write's
+    /// earlier steps leave it. None when the write does not determine that
+    /// row's incarnation (Lean `Overlapping`).
     #[allow(clippy::too_many_arguments, clippy::type_complexity)]
     fn recorded(
         &self,
@@ -346,15 +349,18 @@ impl<'a> ChildView<'a> {
         step: &Step,
     ) -> Result<(BTreeMap<String, Value>, Option<OtherParents>), DbError> {
         let names = self.authoring.closure(table, columns);
-        let mut carried = BTreeMap::new();
-        let mut setters = BTreeMap::new();
-        for name in names.iter().filter(|name| !columns.contains(name)) {
-            let cell = self.value(db, name)?;
-            if let Some(cell) = &cell {
-                setters.insert(name.clone(), cell.parents.clone());
-            }
-            carried.insert(name.clone(), cell.map_or(Value::Null, |cell| cell.value));
+        let mut current = BTreeMap::new();
+        for name in &names {
+            current.insert(name.clone(), self.value(db, name)?);
         }
+        let carried: BTreeMap<String, Value> = current
+            .iter()
+            .filter(|(name, _)| !columns.contains(name))
+            .map(|(name, cell)| {
+                let value = cell.as_ref().map_or(Value::Null, |cell| cell.value.clone());
+                (name.clone(), value)
+            })
+            .collect();
         let acting = self.authoring.schema.foreign_key(table, key);
         let mut others = OtherParents::new();
         for other in &table.foreign_keys {
@@ -363,27 +369,31 @@ impl<'a> ChildView<'a> {
             if name == acting || !other_columns.iter().all(|c| names.contains(c)) {
                 continue;
             }
-            let complete = other_columns.iter().all(|c| {
-                let value = if columns.contains(c) {
-                    recorded.get(c).map(|cell| &cell.value)
-                } else {
-                    carried.get(c)
-                };
-                value.is_some_and(|value| *value != Value::Null)
-            });
-            if !complete {
+            let values: Vec<Value> = other_columns
+                .iter()
+                .map(|c| {
+                    if columns.contains(c) {
+                        recorded
+                            .get(c)
+                            .map_or(Value::Null, |cell| cell.value.clone())
+                    } else {
+                        carried[c].clone()
+                    }
+                })
+                .collect();
+            if values.contains(&Value::Null) {
                 continue;
             }
-            let parent = if other_columns.iter().any(|c| columns.contains(c)) {
-                // A tuple the action changes names whatever parent its new
-                // values reach, which only SQLite's own capture knows here.
-                return Ok((carried, None));
-            } else {
-                // An unchanged reference keeps the parent its setter
-                // recorded, unless an earlier step of this write ended it.
+            let unchanged = other_columns
+                .iter()
+                .zip(&values)
+                .all(|(c, value)| current[c].as_ref().is_some_and(|cell| cell.value == *value));
+            let parent = if unchanged {
+                // The reference keeps the parent its setter recorded, unless
+                // an earlier step of this write ended it.
                 other_columns
                     .iter()
-                    .find_map(|c| setters.get(c).and_then(|parents| parents.get(&name)))
+                    .find_map(|c| current[c].as_ref().and_then(|cell| cell.parents.get(&name)))
                     .cloned()
                     .and_then(
                         |parent| match index.last_before(&parent.row, step.sequence) {
@@ -395,6 +405,11 @@ impl<'a> ChildView<'a> {
                             None => Some(parent),
                         },
                     )
+            } else {
+                match self.retargeted(db, index, other, &values, step)? {
+                    Some(parent) => parent,
+                    None => return Ok((carried, None)),
+                }
             };
             if let Some(parent) = parent {
                 for column in other_columns {
@@ -406,6 +421,46 @@ impl<'a> ChildView<'a> {
             }
         }
         Ok((carried, Some(others)))
+    }
+
+    /// The parent a reference names once an action gives it `values`: the
+    /// row they key in the child's audience or the store, as the write's
+    /// earlier steps leave it, or none when those steps deleted it. None at
+    /// all when the write never touched a row that may hold that key: its
+    /// incarnation is the authoring view's, which no step carries.
+    fn retargeted(
+        &self,
+        db: &DatabaseConnection,
+        index: &StepIndex,
+        key: &SchemaForeignKey,
+        values: &[Value],
+        step: &Step,
+    ) -> Result<Option<Option<Parent>>, DbError> {
+        let Some(parent_table) = self.authoring.table(&key.target) else {
+            return Ok(None);
+        };
+        let targets = target_columns(parent_table, key);
+        let stored = self.authoring.stored(db, parent_table, &targets, values)?;
+        let written = parent_key(parent_table, &targets, &stored)?;
+        let mut untouched = false;
+        for audience in [self.row.audience.clone(), Audience::Store] {
+            let row = RowId {
+                table: parent_table.name.clone(),
+                key: written.clone(),
+                audience,
+            };
+            match index.last_before(&row, step.sequence) {
+                Some(last) if !last.delete => {
+                    return Ok(Some(Some(Parent {
+                        row,
+                        generation: last.after(),
+                    })))
+                }
+                Some(_) => {}
+                None => untouched = true,
+            }
+        }
+        Ok((!untouched).then_some(None))
     }
 
     /// The operation an action through `held` on the parent's step records,

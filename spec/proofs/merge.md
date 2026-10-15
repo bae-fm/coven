@@ -1266,6 +1266,26 @@ the parent holds it calls that cascade a direct edit; `stored_classifies`
 compares values as the child's columns store them (`storedRule`), as both the
 receiver and the author's own capture do.
 
+**Actions through shared columns.** A cascade into a compound key also
+writes the columns another reference of the child shares with it, and its
+recorded step names that reference's parent too (D5).
+`ForeignKeyOverlap.lean` checks when the write determines that parent.
+`Overlap`: Ben changes his album's id; the cascade rewrites Ana's track's
+artist column with the same value, so its artist reference keeps its parent
+(`kept_classified`), and without that parent SQLite's action would be refused
+(`unknown_refuses`). `Retargeted`: Ben inserts an artist and moves his album
+to it; the cascade points the track's artist reference at that artist, whose
+incarnation the insert made (`retargeted_classified`). `Untouched` and
+`Stale` are why the receiver refuses the rest. When the cascade points the
+reference at an artist the write never touched, or carries a reference whose
+parent may have ended before the write, the step SQLite records depends on
+that row's incarnation in the authoring view. Two authoring views with the
+same write make different steps (`views_differ`), and `one_view_misjudged`
+proves a receiver reading only the write accepts at most one of them: it
+refuses SQLite's action in one view or accepts in the other a step that
+points Ana's row at an ended incarnation. The author runs the receivers'
+check before its write leaves, so it refuses such a write too.
+
 **Moving owned rows.** `OwnerMoves.lean` treats every row a move carries as
 a copy: a direct change of the mover's write, made without SQL, keeping its
 original creation. `refused_iff` proves a move is permitted exactly when its
@@ -1329,8 +1349,9 @@ generation, setter and execution sources of every change with those that do
 not survive. `store` gives a cascaded key as the child's column stores it.
 `judge_view::tests::receipt_matches_the_model` receives direct,
 derived, transitive, coalesced, trigger and unauthorized-root writes, a forged
-action payload, actions across affinities and through references recorded by
-value alone, and an action whose cause's net change differs from its steps,
+action payload, actions across affinities, through references recorded by
+value alone and through columns another reference shares, and an action
+whose cause's net change differs from its steps,
 and requires each recorded verdict to be the model's cause, with the roots of
 each derived change (`applied_derived_recorded`) and the failed sources of each
 dependent one (`dependencies`, `dropped_contributing_root_no_effect`).

@@ -326,6 +326,17 @@ open CovenMerge
 #print axioms Ownership.Classification.Affinity.stored_classifies
 #print axioms Ownership.Classification.held_follows_cause
 #print axioms Ownership.Classification.undetermined_refuses
+#print axioms Ownership.Classification.Overlapping.one_view_misjudged
+#print axioms Ownership.Classification.Overlapping.Overlap.faithful
+#print axioms Ownership.Classification.Overlapping.Overlap.kept_classified
+#print axioms Ownership.Classification.Overlapping.Overlap.unknown_refuses
+#print axioms Ownership.Classification.Overlapping.Retargeted.faithful
+#print axioms Ownership.Classification.Overlapping.Retargeted.retargeted_classified
+#print axioms Ownership.Classification.Overlapping.Untouched.views_differ
+#print axioms Ownership.Classification.Overlapping.Untouched.misjudged
+#print axioms Ownership.Classification.Overlapping.Stale.live_exact
+#print axioms Ownership.Classification.Overlapping.Stale.ended_exact
+#print axioms Ownership.Classification.Overlapping.Stale.views_differ
 -- moving owned rows and what they carry (§8.8, §14.2)
 #print axioms Ownership.Moves.refused_iff
 #print axioms Ownership.Moves.carried_foreign_refuses

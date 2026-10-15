@@ -759,11 +759,105 @@ async fn actions_across_affinities_are_actions() {
     }
 }
 
+/// Ben's artists and album, keyed by artist and id; Ana's track refers to
+/// its artist, and to its album through both columns.
+const OVERLAP: &str = "CREATE TABLE artists(id TEXT NOT NULL PRIMARY KEY);
+CREATE TABLE albums(artist TEXT NOT NULL REFERENCES artists(id), id TEXT NOT NULL,
+  PRIMARY KEY(artist,id));
+CREATE TABLE tracks(id TEXT NOT NULL PRIMARY KEY, artist TEXT REFERENCES artists(id), album TEXT,
+  FOREIGN KEY(artist,album) REFERENCES albums(artist,id) ON UPDATE CASCADE ON DELETE CASCADE);";
+
+fn overlapping(owned: bool) -> Vec<SyncedTable> {
+    ["artists", "albums", "tracks"]
+        .into_iter()
+        .map(|table| {
+            let mut declared = SyncedTable::new(table, RowIdentity::SharedKey);
+            if table == "albums" {
+                declared = declared.key_columns(["artist", "id"]);
+            }
+            if owned {
+                declared.owner_only()
+            } else {
+                declared
+            }
+        })
+        .collect()
+}
+
+/// Ben's artists a and b, his album (a, x), and Ana's track on it, on every
+/// device.
+async fn overlap_devices() -> Devices {
+    let devices = Devices::with(overlapping(true), overlapping(false), OVERLAP).await;
+    sql(
+        &devices.ben,
+        "INSERT INTO artists VALUES('a'),('b'); INSERT INTO albums VALUES('a','x');",
+    )
+    .await
+    .unwrap();
+    deliver(&devices.ben, &devices.ana).await;
+    sql(&devices.ana, "INSERT INTO tracks VALUES('t','a','x')")
+        .await
+        .unwrap();
+    for to in [&devices.ben, &devices.mallory, &devices.carol] {
+        deliver(&devices.ben, to).await;
+        deliver(&devices.ana, to).await;
+    }
+    devices
+}
+
+/// The cascade into Ana's track also writes its artist column, which its
+/// artist reference shares. Changing the album's id leaves that reference as
+/// it was; moving the album to an artist Ben inserts first points it at
+/// that artist. Both are actions: Ben's device commits them and a receiver
+/// records them as derived. Moving the album to an artist the write never
+/// touches names that artist's incarnation in Ben's view, which no step
+/// carries: receivers refuse it, so Ben's device refuses it too (§8.8,
+/// B18 `Overlapping`).
+#[tokio::test]
+async fn actions_through_shared_columns_are_actions_when_the_write_names_their_parents() {
+    for (statement, accepted) in [
+        ("UPDATE albums SET id='y' WHERE id='x'", true),
+        (
+            "INSERT INTO artists VALUES('c'); UPDATE albums SET artist='c' WHERE id='x'",
+            true,
+        ),
+        ("UPDATE albums SET artist='b' WHERE id='x'", false),
+    ] {
+        let devices = overlap_devices().await;
+        let track = key("tracks", "t");
+        let local = sql(&devices.ben, statement).await;
+        assert_eq!(local.is_ok(), accepted, "{statement}: {local:?}");
+        sql(&devices.mallory, statement).await.unwrap();
+        let record = records(&devices.mallory).pop().unwrap();
+        receive(&devices.carol, &record).await;
+        let verdict = verdict(&devices.carol, &record, &track);
+        if accepted {
+            let own = records(&devices.ben).pop().unwrap();
+            assert_eq!(
+                cause_rows(&verdict),
+                cause_rows(&super::tests::verdict(&devices.ben, &own, &track)),
+                "{statement}"
+            );
+        } else {
+            assert_eq!(verdict, not_owner(ANA), "{statement}");
+        }
+        devices.close().await;
+    }
+}
+
+/// The rows a derived verdict names as causes.
+fn cause_rows(verdict: &ChangeVerdict) -> Vec<RowId> {
+    match verdict {
+        ChangeVerdict::Derived(causes) => causes.iter().map(|cause| cause.row.clone()).collect(),
+        verdict => panic!("not derived: {verdict:?}"),
+    }
+}
+
 /// The receipts the model comparison checks (`judge_view::tests`), each
 /// passed with the device that received it: direct, derived, transitive and
 /// coalesced changes, triggers, unauthorized roots, a forged action payload,
-/// actions across affinities and by value alone, and an action whose cause is
-/// refused.
+/// actions across affinities, by value alone and through shared columns, and
+/// an action whose cause is refused.
 pub(crate) async fn receipts(mut compare: impl FnMut(&Database, &WriteRecord)) {
     for statement in [
         "DELETE FROM tracks WHERE id='t'",
@@ -813,6 +907,19 @@ pub(crate) async fn receipts(mut compare: impl FnMut(&Database, &WriteRecord)) {
         .unwrap();
         deliver(&devices.ana, &devices.mallory).await;
         deliver(&devices.ana, &devices.carol).await;
+        sql(&devices.mallory, statement).await.unwrap();
+        let record = records(&devices.mallory).pop().unwrap();
+        receive(&devices.carol, &record).await;
+        compare(&devices.carol, &record);
+        devices.close().await;
+    }
+    // Cascades into Ana's track whose columns its artist reference shares.
+    for statement in [
+        "UPDATE albums SET id='y' WHERE id='x'",
+        "INSERT INTO artists VALUES('c'); UPDATE albums SET artist='c' WHERE id='x'",
+        "UPDATE albums SET artist='b' WHERE id='x'",
+    ] {
+        let devices = overlap_devices().await;
         sql(&devices.mallory, statement).await.unwrap();
         let record = records(&devices.mallory).pop().unwrap();
         receive(&devices.carol, &record).await;
