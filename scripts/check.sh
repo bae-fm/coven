@@ -401,6 +401,9 @@ proofs() {
         step "Rust / Lean uploaded-file deletion"
         COVEN_STORELOG_DATA_LEAN="$runner" exact_ignored coven-sync --all-features -- \
             files::tests::retention::data_differential_file_deletion
+        step "Rust / Lean snapshot pruning from the catalog"
+        COVEN_STORELOG_DATA_LEAN="$runner" exact_ignored coven-sync --all-features -- \
+            store_log_sync::tests::snapshots::selection::data_differential_snapshot_pruning
     fi
 
     if proof_selected io || crate_selected coven-sync; then

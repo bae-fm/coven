@@ -6,6 +6,7 @@ import StorelogDataEffects
 import PendingJson
 import CovenStorelogData.RetentionSafety
 import CovenStorelogData.LocalSources
+import CovenStorelogData.Retention
 
 /-! Compare replay realization, effective snapshot boundaries and circle
 reloads with Rust. The adapter calls the model's functions on checked causal
@@ -140,12 +141,45 @@ private def sources (j : Json) : Except String Json := do
     out := out.push (Json.mkObj [("stated", toJson stated), ("implemented", toJson implemented)])
   return toJson out
 
+/-- §15/§18.1: the listed snapshots of one audience that a retention
+evaluation keeps. Each of `stored` has a path `[device, number]` and its
+covered writes as `[device, number]` pairs; `pending` numbers this device's
+unfinished publications. The model chooses the current newest loadable
+snapshot with `preferredSnapshot` and keeps what `pruneSnapshots` keeps. A
+one-entry log creates the store and introduces its key, so no boundary or
+key decides; a path is numbered device first, as the path order is. -/
+private def prunes (j : Json) : Except String Json := do
+  let own ← j.getObjValAs? Nat "own"
+  let pair (p : Json) : Except String (Nat × Nat) := do
+    match (← p.getArr?).toList with
+    | [a, b] => pure (← a.getNat?, ← b.getNat?)
+    | _ => throw "expected a pair"
+  let number (p : Nat × Nat) : Nat := p.1 * 2 ^ 32 + p.2
+  let stored ← (← j.getObjValAs? (Array Json) "stored").toList.mapM fun s => do
+    let path ← pair (← s.getObjVal? "path")
+    let writes ← (← s.getObjValAs? (Array Json) "writes").toList.mapM pair
+    let snapshot : StoredSnapshot Nat Nat := StoredSnapshot.mk ⟨.store, number path⟩ path.1
+      ⟨0, .store⟩ [] ⟨CovenMerge.St.init, writes.map number, [], []⟩
+    pure (path, snapshot)
+  let pending := (← j.getObjValAs? (List Nat) "pending").map fun n =>
+    (⟨.store, number (own, n)⟩ : SnapshotId)
+  let log : Log := fun _ => ⟨0, own, [], .create ""⟩
+  let result : Result := ⟨State.empty, [0], []⟩
+  let snapshots := stored.map (·.2)
+  let kept := match preferredSnapshot (snapshotCandidates log 1 result .store snapshots) with
+    | none => snapshots
+    | some chosen => pruneSnapshots log 1 result own pending chosen snapshots
+  pure (toJson ((stored.filter fun (_, s) => kept.any (·.id == s.id)).map fun (p, _) =>
+    Json.arr #[toJson p.1, toJson p.2]))
+
 def main : IO UInt32 := do
   let input ← (← IO.getStdin).readToEnd
   let output := do
     let j ← Json.parse input
     if let .ok cases := j.getObjVal? "files" then
       return toJson (← (← cases.getArr?).mapM fileDeletable)
+    if let .ok cases := j.getObjVal? "prunes" then
+      return toJson (← (← cases.getArr?).mapM prunes)
     match j.getObjVal? "reloads", j.getObjVal? "circles", j.getObjVal? "effects",
         j.getObjVal? "pending", j.getObjVal? "choices", j.getObjVal? "sources" with
     | .ok histories, _, _, _, _, _ => toJson <$> (← histories.getArr?).mapM reloads

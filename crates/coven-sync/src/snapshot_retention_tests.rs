@@ -306,6 +306,7 @@ async fn a_file_named_only_by_a_retained_log_write_stays_until_that_log_goes() {
         a.catch_up().await;
     }
     a.write_snapshot(Audience::Store).await.unwrap();
+    a.sync.run_retention().await.unwrap();
     assert!(storage
         .list(&ObjectPrefix::device_logs(store(1)))
         .await
@@ -898,4 +899,78 @@ async fn a_device_clock_jump_never_ages_a_log() {
     storage_clock.set(day(30));
     a.sync.run_retention().await.unwrap();
     assert_eq!(logs().await, 0);
+}
+
+/// §18.1: publication ends at confirmed upload. A failed deletion neither
+/// fails nor holds the snapshot operation: it is the path's own
+/// `Retention { path }` record, the object stays, and the next evaluation
+/// derives the deletion again from the catalog and clears the record.
+#[tokio::test]
+async fn a_confirmed_snapshot_finishes_despite_a_failed_deletion() {
+    use coven_storage::{
+        test_utils::{Faults, MemoryRequest},
+        StorageFailure,
+    };
+    let (storage, storage_clock) = timed_snapshot_storage();
+    let mut a = notes_device(storage.clone(), 1).await;
+    a.create(key(1)).await;
+    write_rows(&a, 0, 1, 17, Audience::Store).await;
+    upload(&a, &storage).await;
+    let logs = || async {
+        storage
+            .list(&ObjectPrefix::device_logs(store(1)))
+            .await
+            .unwrap()
+    };
+    let log = logs().await.remove(0).path;
+    // Day 31: the covered log may go by its storage age, but deleting it fails.
+    a.clock.set(UNIX_EPOCH + Duration::from_secs(31 * 86400));
+    storage_clock.set(UNIX_EPOCH + Duration::from_secs(31 * 86400));
+    storage
+        .set_faults(Faults {
+            delete_failures: [(log.clone(), StorageFailure::PermissionDenied)].into(),
+            ..Faults::none()
+        })
+        .await;
+    if !a.send.can_send() {
+        a.catch_up().await;
+    }
+    let before = storage.request_trace().len();
+    a.write_snapshot(Audience::Store).await.unwrap();
+    assert!(!storage.request_trace()[before..]
+        .iter()
+        .any(|request| matches!(request, MemoryRequest::Delete(_))));
+    assert!(a.db.operations().await.unwrap().is_empty());
+    let retention = || async {
+        a.db.pending::<crate::PendingRecord>()
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|r| matches!(r.subject, crate::PendingSubject::Retention { .. }))
+            .map(|r| (r.subject, r.reason))
+            .collect::<Vec<_>>()
+    };
+    for _ in 0..2 {
+        let error = a.sync.run_retention().await.unwrap_err();
+        assert!(
+            matches!(&error, SyncError::Storage(e) if e.failure() == StorageFailure::PermissionDenied),
+            "{error:?}"
+        );
+        assert!(a.db.operations().await.unwrap().is_empty());
+        assert_eq!(
+            retention().await,
+            vec![(
+                crate::PendingSubject::Retention { path: log.clone() },
+                crate::PendingReason::Storage {
+                    provider: storage.config().provider(),
+                    failure: StorageFailure::PermissionDenied,
+                }
+            )]
+        );
+        assert_eq!(logs().await.len(), 1);
+    }
+    storage.set_faults(Faults::none()).await;
+    a.sync.run_retention().await.unwrap();
+    assert!(logs().await.is_empty());
+    assert!(retention().await.is_empty());
 }

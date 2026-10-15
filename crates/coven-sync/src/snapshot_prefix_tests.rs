@@ -351,6 +351,7 @@ async fn a_truncated_body_does_not_erase_signed_required_history() {
         a.catch_up().await;
     }
     a.write_snapshot(Audience::Store).await.unwrap();
+    a.sync.run_retention().await.unwrap();
     assert!(storage
         .list(&ObjectPrefix::device_logs(store(1)))
         .await

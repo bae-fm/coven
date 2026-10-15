@@ -18,10 +18,12 @@ use std::collections::{BTreeMap, BTreeSet};
 impl StoreLogSync {
     /// Delete the candidates no retained row, loss, input, queued write,
     /// upload, snapshot or log write names. `logs` is this pass's listing of
-    /// retained writes, less the ones it deleted.
+    /// retained writes, less the ones it deleted. The first failed deletion
+    /// joins `failures` and ends deletion; its candidate stays.
     pub(super) async fn retain_uploaded_files(
         &self,
         logs: &[StoredObject],
+        failures: &mut Vec<(ObjectPath, SyncError)>,
     ) -> Result<(), SyncError> {
         let storage = self.storage.as_deref().ok_or(SyncError::NoStorage)?;
         let local = self.database.local_store_log().await?;
@@ -51,16 +53,13 @@ impl StoreLogSync {
             return Ok(());
         };
         let mut deleted = Vec::new();
-        let mut result = Ok(());
         for (device, file) in open.difference(&references) {
             // Idempotent deletion also confirms absence after a lost reply.
-            match storage
-                .delete(&ObjectPath::file(self.directory.id(), *device, *file))
-                .await
-            {
+            let path = ObjectPath::file(self.directory.id(), *device, *file);
+            match storage.delete(&path).await {
                 Ok(()) => deleted.push((*device, *file)),
                 Err(error) => {
-                    result = Err(error.into());
+                    failures.push((path, error.into()));
                     break;
                 }
             }
@@ -68,7 +67,7 @@ impl StoreLogSync {
         self.database
             .settle_file_candidates(Vec::new(), deleted)
             .await?;
-        result
+        Ok(())
     }
 
     /// Every path the retained snapshots and log writes name, or `None` when

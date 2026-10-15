@@ -42,26 +42,12 @@ impl StoreLogSync {
             {
                 pinned.insert(snapshot_path(self.directory.id(), snapshot)?);
             }
-            if let crate::operation_data::Data::Snapshots(crate::snapshot_data::SnapshotTask {
-                job:
-                    crate::snapshot_data::SnapshotJob::Write {
-                        audience, device, ..
-                    },
-                ..
-            }) = &data
-            {
-                pinned.insert(snapshot_path(
-                    self.directory.id(),
-                    &coven_format::store_log::SnapshotId {
-                        audience: audience.clone(),
-                        device: *device,
-                        number: pending
-                            .id
-                            .0
-                            .try_into()
-                            .map_err(|_| coven_database::DbError::DamagedDatabase)?,
-                    },
-                )?);
+            // An unfinished publication's prepared attempt keeps its path,
+            // numbered from the snapshot sequence, not the operation's id.
+            if let crate::operation_data::Data::Snapshots(task) = &data {
+                if let Some(id) = task.published() {
+                    pinned.insert(snapshot_path(self.directory.id(), &id)?);
+                }
             }
         }
         for boundary in local.log.boundaries() {
@@ -130,10 +116,18 @@ impl StoreLogSync {
         let mut observed = false;
         let mut stuck = crate::pending_logs::local_refusals(&self.database).await?;
         let mut retained = Vec::new();
+        let mut failures = Vec::new();
+        let mut held = false;
         for object in storage
             .list(&ObjectPrefix::device_logs(self.directory.id()))
             .await?
         {
+            // A waiting write holds back the rest of log retention, and the
+            // first failed deletion ends this evaluation's deletions: they stay.
+            if held || !failures.is_empty() {
+                retained.push(object);
+                continue;
+            }
             let id = object
                 .path
                 .write_id()
@@ -151,7 +145,11 @@ impl StoreLogSync {
             }
             let header = match self.open_write_header(&object).await {
                 Ok(header) => header,
-                Err(error) if waiting(&object.path, &error) => return Ok(()),
+                Err(error) if waiting(&object.path, &error) => {
+                    held = true;
+                    retained.push(object);
+                    continue;
+                }
                 // Opening the header recorded a refusal as the write's own
                 // record; it stops that log here as well.
                 Err(error) => {
@@ -191,15 +189,58 @@ impl StoreLogSync {
                 aged = reached_age(storage_time, object.stored_at);
             }
             if covered && (posted || aged) {
-                self.delete_retained(&object).await?;
+                if let Err(error) = self.delete_retained(&object).await {
+                    failures.push((object.path.clone(), error));
+                    retained.push(object);
+                }
             } else {
                 retained.push(object);
             }
         }
         for object in superseded {
-            self.delete_retained(&object).await?;
+            if !failures.is_empty() {
+                break;
+            }
+            if let Err(error) = self.delete_retained(&object).await {
+                failures.push((object.path, error));
+            }
         }
-        self.retain_uploaded_files(&retained).await
+        if failures.is_empty() {
+            self.retain_uploaded_files(&retained, &mut failures).await?;
+        }
+        self.record_retention_failures(failures).await
+    }
+
+    /// A completed evaluation's failed deletions become exactly this device's
+    /// `Retention { path }` records: a path deleted since, or no longer
+    /// eligible, loses its record in the same transaction. Each object stays
+    /// protected, and the next evaluation derives its eligibility again
+    /// (§18.1, SP step 8). The first failure still fails the pass.
+    async fn record_retention_failures(
+        &self,
+        failures: Vec<(coven_storage::ObjectPath, SyncError)>,
+    ) -> Result<(), SyncError> {
+        let own = self.database.local_store_log().await?.device;
+        let mut records = Vec::new();
+        for (path, error) in &failures {
+            records.push(crate::PendingRecord {
+                subject: crate::PendingSubject::Retention { path: path.clone() },
+                reason: self.pending_reason(error).await?,
+                reported_by: own,
+            });
+        }
+        self.database
+            .replace_local_pending(
+                |record: &crate::PendingRecord| {
+                    matches!(record.subject, crate::PendingSubject::Retention { .. })
+                },
+                records,
+            )
+            .await?;
+        match failures.into_iter().next() {
+            Some((_, error)) => Err(error),
+            None => Ok(()),
+        }
     }
 
     /// Delete a log write or snapshot. The files its checked references named

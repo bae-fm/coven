@@ -181,6 +181,9 @@ async fn locally_protected_files_reuse_the_checked_snapshot_prefix() {
     sync.write_snapshot(&mut writes, Audience::Store)
         .await
         .unwrap();
+    // The first retention after publication checks the new prefix by range
+    // once; later evaluations reuse it.
+    sync.run_retention().await.unwrap();
     let object = f
         .storage
         .list(&ObjectPrefix::snapshots(f.directory.id()))
@@ -223,10 +226,11 @@ async fn a_late_upload_goes_once_nothing_retained_names_it() {
         writes.upload_writes().await.unwrap();
         assert!(writes.post_positions().await.unwrap());
         // The snapshot names only the kept file; the covered, posted writes
-        // naming the late one go with this snapshot's retention.
+        // naming the late one go with the next retention.
         sync.write_snapshot(&mut writes, Audience::Store)
             .await
             .unwrap();
+        sync.run_retention().await.unwrap();
         assert!(f
             .storage
             .list(&ObjectPrefix::device_logs(f.directory.id()))

@@ -1,4 +1,5 @@
-//! Journal state for snapshot publication, reload and retention.
+//! Journal state for snapshot publication and reload. Retention is derived
+//! each pass and has no journal state (§18.1).
 
 use coven_foundation::id_source::DeviceId;
 use coven_merge::Audience;
@@ -27,7 +28,6 @@ pub(crate) enum SnapshotJob {
         scope: ReloadScope,
         files: Option<ReloadFiles>,
     },
-    Retain,
 }
 
 /// One preparation's publication: the path number it reserved and the
@@ -205,7 +205,6 @@ impl SnapshotJob {
                 (ReloadScope::Changed(a), ReloadScope::Changed(b)) => a == b,
                 _ => false,
             },
-            (Self::Retain, Self::Retain) => true,
             _ => false,
         }
     }

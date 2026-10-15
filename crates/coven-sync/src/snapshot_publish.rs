@@ -603,7 +603,9 @@ impl StoreLogSync {
                 .await?;
             return Ok(Progress::Advanced);
         }
-        self.retain_snapshot_objects().await?;
+        // Confirmed upload ends publication. Retention derives what this
+        // snapshot permits deleting from the catalog in a later pass step,
+        // so its waits and failures never hold this operation (§18.1).
         self.clear_snapshot_files(record, &mut task).await?;
         self.database.finish_operation(record.id).await?;
         Ok(Progress::Finished(Output::Unit))

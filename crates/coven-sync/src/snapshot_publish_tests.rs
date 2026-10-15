@@ -809,3 +809,86 @@ async fn io_differential_ordinary_snapshot_writes() {
     }
     assert!(requests.0 > 0 && requests.1 > 0, "{requests:?}");
 }
+
+#[tokio::test]
+async fn writing_resumes_after_each_recorded_step_with_identical_ciphertext() {
+    'crashes: for crash_step in 0.. {
+        let storage = snapshot_storage();
+        let mut a = notes_device(storage.clone(), 1).await;
+        a.create(key(1)).await;
+        write_rows(&a, 0, 35, 32768, Audience::Store).await;
+        upload(&a, &storage).await;
+        let data = Data::Snapshots(SnapshotTask {
+            job: SnapshotJob::Write {
+                audience: Audience::Store,
+                device: a.device().await,
+                trigger: crate::snapshot_data::SnapshotTrigger::Growth,
+                attempt: None,
+            },
+            temporary: Vec::new(),
+        });
+        let id =
+            a.db.start_operation(data.new_operation("coven").unwrap())
+                .await
+                .unwrap();
+        // Preparation follows this pass's fresh catch-up (§15).
+        let pass = a.caught_up_pass().await;
+        for _ in 0..crash_step {
+            let record = a.operation(id).await;
+            match a
+                .sync
+                .operation_step(&record, Data::read(&record).unwrap())
+                .await
+                .unwrap()
+            {
+                Progress::Advanced => (),
+                Progress::Finished(crate::operations::Output::Unit) => break 'crashes,
+                _ => panic!("unexpected snapshot progress"),
+            }
+        }
+        let before = a.db.operations().await.unwrap().remove(0);
+        let Data::Snapshots(task) = Data::read(&before).unwrap() else {
+            panic!()
+        };
+        let fixed = if before.last_step > 0 {
+            Some(
+                a.directory
+                    .file(
+                        coven_foundation::files::FileArea::AppProvided,
+                        &coven_foundation::files::FileName::new(task.temporary[0].clone()).unwrap(),
+                    )
+                    .open_reader()
+                    .map(|reader| reader.read_at(0, reader.size() as usize).unwrap())
+                    .unwrap(),
+            )
+        } else {
+            None
+        };
+        drop(pass);
+        a.reopen(storage.clone(), notes_tables(), notes_migrations())
+            .await;
+        a.catch_up().await;
+        let start = storage.request_trace().len();
+        a.write_snapshots().await.unwrap();
+        // Confirmed upload is the last storage step: resuming after it sends
+        // nothing and only finishes the operation (§18.1).
+        if before.last_step >= 2 {
+            assert!(!storage.request_trace()[start..]
+                .iter()
+                .any(|request| matches!(
+                    request,
+                    coven_storage::test_utils::MemoryRequest::Create(_)
+                        | coven_storage::test_utils::MemoryRequest::Other(_)
+                )));
+        }
+        let objects = storage
+            .list(&ObjectPrefix::snapshots(store(1)))
+            .await
+            .unwrap();
+        assert_eq!(objects.len(), 1);
+        if let Some(bytes) = fixed {
+            assert_eq!(storage.read(&objects[0].path).await.unwrap(), bytes);
+        }
+        assert!(a.db.operations().await.unwrap().is_empty());
+    }
+}

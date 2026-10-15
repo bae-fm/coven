@@ -16,6 +16,7 @@ async fn unusable_snapshots_do_not_turn_deleted_history_into_an_empty_audience()
             a.catch_up().await;
         }
         a.write_snapshot(Audience::Store).await.unwrap();
+        a.sync.run_retention().await.unwrap();
         assert_eq!(
             storage
                 .list(&ObjectPrefix::device_logs(store(1)))

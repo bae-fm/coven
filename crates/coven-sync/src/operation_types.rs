@@ -18,8 +18,6 @@ pub type OperationError = crate::SyncError;
 pub enum OperationKind {
     /// Write and verify a maintenance snapshot.
     WriteSnapshot,
-    /// Delete covered history.
-    Retention,
     /// Publish the app's migrated schema and its audience snapshots.
     SchemaChange,
     /// Snapshot this device and reset one audience to that state.

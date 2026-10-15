@@ -157,7 +157,32 @@ impl StoreLogSync {
         record: &OperationRecord,
         error: &SyncError,
     ) -> Result<(), SyncError> {
-        let reason = match error {
+        let reason = self.pending_reason(error).await?;
+        let data = Data::read(record)?;
+        if let Data::ProviderAccess { account } = &data {
+            if record.last_step == 1 {
+                let pending = self.operation_condition(record, reason).await?;
+                self.database
+                    .fail_provider_request(
+                        account.clone(),
+                        data.update(record, 2)?,
+                        pending.clone(),
+                    )
+                    .await?;
+                return self.schedule_retry(record, &pending).await;
+            }
+        }
+        self.record_operation_condition(record, reason).await?;
+        Ok(())
+    }
+
+    /// The typed first unmet condition a failure leaves, for an operation's
+    /// record or a retention path's (§18, E5).
+    pub(crate) async fn pending_reason(
+        &self,
+        error: &SyncError,
+    ) -> Result<PendingReason, SyncError> {
+        Ok(match error {
             SyncError::Pending(record) => record.reason.clone(),
             SyncError::NoStorage => PendingReason::NoStorage,
             SyncError::UpdateRequired(update) => PendingReason::UpdateRequired(*update),
@@ -219,26 +244,10 @@ impl StoreLogSync {
                 _ => PendingReason::Failed(LocalFailure::Database),
             },
             SyncError::Cleanup { operation, .. } => {
-                return Box::pin(self.record_operation_error(record, operation)).await
+                return Box::pin(self.pending_reason(operation)).await
             }
             error => PendingReason::Failed(error.local_failure()),
-        };
-        let data = Data::read(record)?;
-        if let Data::ProviderAccess { account } = &data {
-            if record.last_step == 1 {
-                let pending = self.operation_condition(record, reason).await?;
-                self.database
-                    .fail_provider_request(
-                        account.clone(),
-                        data.update(record, 2)?,
-                        pending.clone(),
-                    )
-                    .await?;
-                return self.schedule_retry(record, &pending).await;
-            }
-        }
-        self.record_operation_condition(record, reason).await?;
-        Ok(())
+        })
     }
 }
 

@@ -17,7 +17,6 @@ async fn maintenance_failures_are_visible_and_wait_for_a_changed_connection() {
             scope: ReloadScope::All,
             files: None,
         },
-        SnapshotJob::Retain,
     ] {
         let storage = Arc::new(
             MemoryStorage::builder()

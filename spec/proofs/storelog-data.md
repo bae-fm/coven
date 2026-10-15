@@ -885,6 +885,13 @@ The current spec resolves or narrows the historical witnesses as follows:
   The Rust comparison `data_differential_file_deletion` runs retention on a
   file named by each kind of retained reference in turn, by none, and behind
   an unreadable snapshot, and compares its deletions with `fileDeletable`.
+- **Pruning own snapshots:** retention derives which of this device's
+  snapshots go from the listed prefixes and its unfinished publications; a
+  finished publication deletes nothing itself (§18.1). The Rust comparison
+  `data_differential_snapshot_pruning` publishes a lone snapshot, a
+  superseded one, one whose publication is still unfinished, and one another
+  device's newest covers or leaves out, then compares what retention keeps
+  with `Retention.pruneSnapshots` after `preferredSnapshot`.
 - **Snapshot pins returning:** retention must retain every still-possible
   boundary, not just currently selected ones. The dependency theorem covers
   this provided its conditions name all such entries. Automatic discovery of

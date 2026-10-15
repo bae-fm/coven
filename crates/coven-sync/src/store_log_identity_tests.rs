@@ -287,7 +287,10 @@ async fn st_differential_snapshot_sequence() {
                 continue;
             }
             let data = Data::Snapshots(SnapshotTask {
-                job: SnapshotJob::Retain,
+                job: SnapshotJob::Reload {
+                    scope: crate::snapshot_data::ReloadScope::All,
+                    files: None,
+                },
                 temporary: Vec::new(),
             });
             let id = device
@@ -329,7 +332,10 @@ async fn other_operations_never_hide_a_newer_own_snapshot() {
         let mut last = 0;
         for _ in 0..extra {
             let data = crate::operation_data::Data::Snapshots(crate::snapshot_data::SnapshotTask {
-                job: crate::snapshot_data::SnapshotJob::Retain,
+                job: crate::snapshot_data::SnapshotJob::Reload {
+                    scope: crate::snapshot_data::ReloadScope::All,
+                    files: None,
+                },
                 temporary: Vec::new(),
             });
             let id = restored

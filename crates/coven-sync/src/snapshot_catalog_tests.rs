@@ -807,3 +807,164 @@ mod held {
             .is_some_and(|selections| selections.iter().all(|p| p.covers(write))));
     }
 }
+
+/// SD `Retention.pruneSnapshots` after `preferredSnapshot`: a retention
+/// evaluation keeps exactly the snapshots the model keeps. It derives them
+/// from the listed prefixes and this device's unfinished publications; a
+/// finished publication pruned nothing by itself (§15, §18.1).
+#[tokio::test]
+#[ignore = "requires COVEN_STORELOG_DATA_LEAN, supplied by scripts/check.sh"]
+async fn data_differential_snapshot_pruning() {
+    use serde_json::{json, Value};
+    // Drive a snapshot operation of this device's to completion, or only
+    // through its confirmed upload, leaving it unfinished.
+    async fn publish(device: &mut Device, finish: bool) {
+        let id = prepare(device).await;
+        drive(device, id, finish).await;
+    }
+    // Start one and prepare it after a fresh catch-up (§15).
+    async fn prepare(device: &mut Device) -> coven_database::OperationId {
+        let data = Data::Snapshots(SnapshotTask {
+            job: SnapshotJob::Write {
+                audience: Audience::Store,
+                device: device.device().await,
+                trigger: crate::snapshot_data::SnapshotTrigger::Requested,
+                attempt: None,
+            },
+            temporary: Vec::new(),
+        });
+        let id = device
+            .db
+            .start_operation(data.new_operation("coven").unwrap())
+            .await
+            .unwrap();
+        let _pass = device.caught_up_pass().await;
+        device.step(id).await.unwrap();
+        id
+    }
+    async fn drive(device: &mut Device, id: coven_database::OperationId, finish: bool) {
+        while let Some(record) = device
+            .db
+            .operations()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|r| r.id == id)
+        {
+            if !finish && record.last_step == 2 {
+                break;
+            }
+            device.step(id).await.unwrap();
+        }
+    }
+    let paths = |objects: Vec<coven_storage::StoredObject>| -> Vec<Value> {
+        objects
+            .iter()
+            .map(|o| {
+                let id = o.path.snapshot_id().unwrap();
+                json!([id.device.0, id.number])
+            })
+            .collect()
+    };
+    let mut cases = Vec::new();
+    let mut kept = Vec::new();
+    for case in [
+        "only",
+        "superseded",
+        "unfinished",
+        "covered by another",
+        "outside another",
+    ] {
+        let storage = snapshot_storage();
+        let mut a = notes_device(storage.clone(), 1).await;
+        a.create(key(1)).await;
+        let mut b = notes_device(storage.clone(), 2).await;
+        add_device(&mut b).await;
+        a.sync().await;
+        // Ben prepares before Ana's write and snapshot exist, so his newest
+        // leaves them out: preparation covers only the current newest then.
+        let mut early = None;
+        if case == "outside another" {
+            for row in 1..3 {
+                write_rows(&b, row, 1, 17, Audience::Store).await;
+                upload(&b, &storage).await;
+            }
+            early = Some(prepare(&mut b).await);
+        }
+        write_rows(&a, 0, 1, 17, Audience::Store).await;
+        upload(&a, &storage).await;
+        publish(&mut a, case != "unfinished").await;
+        match case {
+            "superseded" | "unfinished" => {
+                write_rows(&a, 1, 1, 17, Audience::Store).await;
+                upload(&a, &storage).await;
+                publish(&mut a, true).await;
+            }
+            "covered by another" => {
+                b.writes.download_writes().await.unwrap();
+                write_rows(&b, 1, 1, 17, Audience::Store).await;
+                upload(&b, &storage).await;
+                publish(&mut b, true).await;
+            }
+            "outside another" => drive(&mut b, early.unwrap(), true).await,
+            _ => (),
+        }
+        let listed = storage
+            .list(&ObjectPrefix::snapshots(store(1)))
+            .await
+            .unwrap();
+        let mut stored = Vec::new();
+        for object in &listed {
+            let bytes = storage.read(&object.path).await.unwrap();
+            let length = SnapshotObjectPrefix::length(&bytes).unwrap();
+            let prefix = SnapshotObjectPrefix::decode(&bytes[..length]).unwrap();
+            let writes: Vec<Value> = prefix
+                .writes
+                .0
+                .iter()
+                .flat_map(|id| (1..=id.number).map(move |n| json!([id.device.0, n])))
+                .collect();
+            stored.push(json!({"path": paths(vec![object.clone()])[0], "writes": writes}));
+        }
+        let mut pending = Vec::new();
+        for record in a.db.operations().await.unwrap() {
+            if let Data::Snapshots(task) = Data::read(&record).unwrap() {
+                pending.extend(task.published().map(|id| id.number));
+            }
+        }
+        assert_eq!(pending.is_empty(), case != "unfinished", "{case}");
+        a.sync.run_retention().await.unwrap();
+        cases.push(json!({"own": a.device().await.0, "pending": pending, "stored": stored}));
+        let mut remaining = paths(
+            storage
+                .list(&ObjectPrefix::snapshots(store(1)))
+                .await
+                .unwrap(),
+        );
+        remaining.sort_by_key(|p| p.to_string());
+        kept.push(Value::Array(remaining));
+    }
+    let output = crate::tests::run_lean("COVEN_STORELOG_DATA_LEAN", &json!({ "prunes": cases }));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let lean: Vec<Value> = serde_json::from_slice::<Vec<Vec<Value>>>(&output.stdout)
+        .unwrap()
+        .into_iter()
+        .map(|mut paths| {
+            paths.sort_by_key(|p| p.to_string());
+            Value::Array(paths)
+        })
+        .collect();
+    assert_eq!(kept, lean);
+    // Each rule decided a case: only the superseded own snapshot, and the own
+    // snapshot another device's newest covers, went.
+    assert_eq!(
+        kept.iter()
+            .map(|paths| paths.as_array().unwrap().len())
+            .collect::<Vec<_>>(),
+        [1, 1, 2, 1, 2]
+    );
+}

@@ -1,12 +1,8 @@
-//! Durable snapshot writing, reload and retention, invoked without a sync loop.
+//! Durable snapshot writing and reload, and the derived retention step,
+//! invoked without a sync loop.
 
 use super::StoreLogSync;
-use crate::{
-    operation_data::Data,
-    operations::{Output, Progress},
-    snapshot_data::*,
-    SyncError,
-};
+use crate::{operation_data::Data, operations::Progress, snapshot_data::*, SyncError};
 use coven_database::{OperationRecord, StoreLog};
 use coven_format::{store_log::SnapshotId, value::WritePositions};
 use coven_foundation::id_source::DeviceId;
@@ -130,13 +126,13 @@ impl StoreLogSync {
     }
 
     /// Delete covered logs, this device's superseded snapshots, and eligible
-    /// unreferenced uploaded files under §§15 and 16.5. No timer is installed.
+    /// unreferenced uploaded files under §§15 and 16.5. Retention is derived
+    /// from the committed facts each time and has no operation row: a failed
+    /// deletion keeps its object and its `Retention { path }` record (§18.1).
+    /// No timer is installed.
     pub async fn run_retention(&mut self) -> Result<(), SyncError> {
         let _reads = self.reads.enter();
-        self.resume_snapshots().await?;
-        let record = self.start_snapshot_task(SnapshotJob::Retain).await?;
-        self.drive_snapshot(record.id).await?;
-        Ok(())
+        self.retain_snapshot_objects().await
     }
 
     /// Write and publish a requested audience snapshot regardless of growth,
@@ -354,18 +350,12 @@ impl StoreLogSync {
     pub(crate) async fn snapshot_step(
         &mut self,
         record: &OperationRecord,
-        mut task: SnapshotTask,
+        task: SnapshotTask,
     ) -> Result<Progress, SyncError> {
         let _reads = self.reads.enter();
         match &task.job {
             SnapshotJob::Write { .. } => self.write_snapshot_step(record, task).await,
             SnapshotJob::Reload { .. } => self.reload_snapshot_step(record, task).await,
-            SnapshotJob::Retain => {
-                self.clear_snapshot_files(record, &mut task).await?;
-                self.retain_snapshot_objects().await?;
-                self.database.finish_operation(record.id).await?;
-                Ok(Progress::Finished(Output::Unit))
-            }
         }
     }
 

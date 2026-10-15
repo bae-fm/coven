@@ -107,6 +107,7 @@ async fn returning_after_thirty_days_reloads_history_deleted_meanwhile() {
         a.catch_up().await;
     }
     a.write_snapshot(Audience::Store).await.unwrap();
+    a.sync.run_retention().await.unwrap();
     assert!(storage
         .list(&ObjectPrefix::device_logs(store(1)))
         .await
