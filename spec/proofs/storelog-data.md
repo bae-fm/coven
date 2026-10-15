@@ -1007,8 +1007,26 @@ members with their old pair or a fresh one, and adds new ids borrowing an
 added member's pair or one of its keys. Every bound pair is compared with
 `Keyed`'s history. Two concurrent leaves add one new id with equal or
 differing payloads
-([`Keyed.Additions`](storelog.md#member-additions)). The histories contain no
-replacement, so member-key replacement itself still has no Rust differential.
+([`Keyed.Additions`](storelog.md#member-additions)).
+
+[`lean_differential_member_key_replacements`](../../crates/coven-sync/src/member_key_differential_tests.rs)
+runs the same runner on histories with replacements. After a linear prefix,
+concurrent leaves have Ben replace his own keys and Ana and Carol replace
+his, with fresh, identical or reused pairs, or Ana remove him or replace
+Carol's keys; Ben's follow-up reads some of them and replaces his keys again
+or signs with his current or replaced key. Stored times tie or meet or miss
+the 30-day landing deadline, and some cases omit one leaf and what read it.
+Rust receives the real sealed entries in two arrival orders through the
+production batch. The runner's optional `received`, `writes` and `horizon`
+fields add `Keyed.authorized` per entry, every conflicting pair with
+`prefer` both ways, and per write `OldKeyObjects.authorized`, `timely`,
+`countInReplay` and `writerCurrent`, with finality by
+[`KeyedHorizon`](storelog.md#c13-stable-members-and-replaceable-keys--checked-proposal).
+The test compares them with signature refusals, kept and dropped entries,
+current and bound pairs, each `StoreLogCheck`'s authority, Rust's
+`conflict`/`before`, and, for writes from Ben's device, the production
+recorded-view authority, the database window verdict and its finality
+against an applied store log with that horizon, and the sending check.
 
 A recipient contains a stable member id and the exact sealing public key.
 An old copy and a new copy can address the same member while disclosing their
@@ -1094,10 +1112,11 @@ hash; it treats the recorded recipient sealing key as the box's routing fact.
 Historical reads and exact-byte retries retain their old keys.
 
 The storelog package proves old-key window finality from the stable kept
-entry prefix and separately proves the send gate's one-day-and-five-minute
-publication bound. The general IO discovery and horizon theorems for the
-unkeyed model have not been transferred to this proposal: complete catch-up,
-continued refusal of old credentials and the stable entry prefix remain
+entry prefix, supplies that prefix from §9's horizon for the keyed replay
+([`KeyedHorizon`](storelog.md#c13-stable-members-and-replaceable-keys--checked-proposal)),
+and separately proves the send gate's one-day-and-five-minute publication
+bound. The general IO discovery theorems have not been transferred to this
+proposal: complete catch-up and continued refusal of old credentials remain
 explicit inputs. SQL rebuilds and physical retention remain outside these
 member-key proofs. The exact spec/format changes, including window-only
 admission, per-change losses and credential-bearing copy prefixes and reports,

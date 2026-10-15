@@ -107,7 +107,29 @@ pub(crate) fn readable_key(
         })
 }
 
+/// Sending needs this installation's device and its member's current
+/// credentials in the latest replay: an installation still holding replaced
+/// keys stops sending, keeping its device id and queues (§10).
 pub(crate) fn check_member(
+    log: &StoreLog,
+    member: &MemberIdentity,
+    device: coven_foundation::id_source::DeviceId,
+) -> Result<(), SyncError> {
+    check_device(log, member, device)?;
+    let current = crate::effects::member(&log.replay.state, &member.member())
+        .expect("checked member")
+        .keys;
+    if current != member.keys().public_keys() {
+        return Err(SyncError::MemberKeysReplaced {
+            member: member.member(),
+        });
+    }
+    Ok(())
+}
+
+/// This installation's device is still registered to its active member;
+/// reading needs no more than this.
+pub(crate) fn check_device(
     log: &StoreLog,
     member: &MemberIdentity,
     device: coven_foundation::id_source::DeviceId,

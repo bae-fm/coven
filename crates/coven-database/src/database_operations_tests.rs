@@ -171,6 +171,28 @@ impl Database {
         .await
     }
 
+    /// The production window verdict for a received write against the
+    /// applied store log, without applying it: whether it is late and whether
+    /// that verdict is final (§10). Differentials compare it with the model.
+    pub async fn test_write_landing(
+        &self,
+        header: coven_format::write::WriteHeader,
+        published: crate::Published,
+    ) -> Result<(bool, bool), DbError> {
+        self.call(move |inner| {
+            inner.access.with_writer(|writer| {
+                let landing = crate::write_landing::judge(
+                    writer,
+                    &header,
+                    &published.signer,
+                    published.stored_at,
+                )?;
+                Ok((landing.late, landing.fixed))
+            })
+        })
+        .await
+    }
+
     /// Test transport: read actual queued records without reauthoring their writes.
     pub async fn test_queued_writes(
         &self,

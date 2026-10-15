@@ -1,16 +1,18 @@
 //! A received write's own retirement window (§10, D5): its first complete
-//! publication against every kept entry retiring its device. The verdict is
-//! derived from storage times and kept entries, so replay recomputes it; the
-//! write's inputs stay retained while a non-final retirement could change it.
+//! publication against every kept entry retiring its device, and against every
+//! unread kept replacement of its owner's keys installing a signing key other
+//! than the one that authenticated it. The verdict is derived from storage
+//! times and kept entries, so replay recomputes it; the write's inputs stay
+//! retained while a non-final retirement could change it.
 
 use crate::{
     sqlite::DatabaseConnection,
-    store_log_tables::entry_id,
     write_encoding::{audience_text, counter},
     DbError, EntryId, PendingValue,
 };
+use coven_crypto::SigningKey;
 use coven_format::value::StorageTime;
-use coven_format::{merge_fields, store_log::StoreChange, write::WriteHeader};
+use coven_format::{merge_fields, write::WriteHeader};
 use coven_foundation::id_source::DeviceId;
 use coven_merge::{Audience, WriteId};
 use rusqlite::params;
@@ -21,13 +23,26 @@ use std::time::Duration;
 /// each kept entry retiring its device; exactly thirty days counts (§10).
 pub(crate) const WRITE_WINDOW: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 
-/// A kept entry retiring a write's device, with its first publication time.
+/// A kept entry retiring a write: its device's retirement, or an unread
+/// replacement of its owner's signing key, with its first publication time.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Retirement {
-    /// The removal of the device or its member, or the replacement of its id.
+    /// The removal of the device or its member, the replacement of its id,
+    /// or the replacement of its owner's keys.
     pub(crate) entry: EntryId,
     /// The entry's first complete publication time.
     pub(crate) stored_at: StorageTime,
+}
+
+/// A received write's provider and authentication facts: its first complete
+/// publication time and the signing key current for its device's owner in the
+/// replay of its `store_log_read`, which verified it (§10, D5).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Published {
+    /// First complete publication time, from provider metadata.
+    pub stored_at: StorageTime,
+    /// The signing key that authenticated the write in its recorded view.
+    pub signer: SigningKey,
 }
 
 /// Lean `Receive.withinWindow`: the write landed within the window of every
@@ -45,53 +60,6 @@ fn within(stored_at: StorageTime, start: StorageTime) -> bool {
         .is_none_or(|after| after <= WRITE_WINDOW)
 }
 
-/// The device and member columns `_coven_store_log` keeps for an entry that
-/// retires a device: removal of the device or its member, or replacement (§10).
-pub(crate) fn retires(
-    entry: &coven_format::store_log::StoreLogEntry,
-) -> (Option<Vec<u8>>, Option<Vec<u8>>) {
-    match &entry.change {
-        StoreChange::RemoveDevice { device }
-        | StoreChange::AddDevice {
-            replaces: Some(device),
-            ..
-        } => (Some(device.0.to_be_bytes().to_vec()), None),
-        StoreChange::RemoveMember { member } => (None, Some(member.0.as_bytes().to_vec())),
-        _ => (None, None),
-    }
-}
-
-/// Every entry retiring `device`, except permanently late ones, with whether replay keeps it and
-/// whether it is final (stored strictly before the horizon, §9).
-fn candidates(
-    db: &DatabaseConnection,
-    device: DeviceId,
-) -> Result<Vec<(Retirement, bool, bool)>, DbError> {
-    let horizon = crate::store_log_tables::horizon(db)?;
-    let rows = db.query(
-        "SELECT device,number,stored_at,outcome='kept' FROM _coven_store_log
-         WHERE retires_device=?1 AND outcome<>'late'
-         UNION ALL
-         SELECT device,number,stored_at,outcome='kept' FROM _coven_store_log
-         WHERE retires_member=(SELECT member FROM _coven_devices WHERE device=?1) AND outcome<>'late'",
-        [device.0.to_be_bytes().as_slice()],
-        |r| {
-            Ok((
-                entry_id(r, 0)?,
-                r.get::<_, Vec<u8>>(2)?,
-                r.get::<_, bool>(3)?,
-            ))
-        },
-    )?;
-    rows.into_iter()
-        .map(|(entry, stored, kept)| {
-            let stored_at = crate::storage_time::decode(&stored)?;
-            let fixed = horizon.is_some_and(|h| stored_at < h);
-            Ok((Retirement { entry, stored_at }, kept, fixed))
-        })
-        .collect()
-}
-
 /// The window verdict and whether it is final (§10): a late verdict once a
 /// final kept retirement excludes the write (`retirement_verdict_final`); an
 /// admitted one once every retirement that could exclude it, stored more than
@@ -104,9 +72,10 @@ pub(crate) struct Landing {
 pub(crate) fn judge(
     db: &DatabaseConnection,
     header: &WriteHeader,
+    signer: &SigningKey,
     stored_at: StorageTime,
 ) -> Result<Landing, DbError> {
-    let candidates = candidates(db, header.position.device)?;
+    let candidates = crate::write_retirement::candidates(db, header, signer)?;
     let kept: Vec<_> = candidates
         .iter()
         .filter(|(_, kept, _)| *kept)
@@ -135,11 +104,12 @@ pub(crate) fn land<P: PendingValue>(
     db: &DatabaseConnection,
     schema: &crate::write_schema::WriteSchema,
     header: &WriteHeader,
-    stored_at: StorageTime,
+    published: Published,
     audiences: &[Audience],
     retain: bool,
 ) -> Result<bool, DbError> {
-    let landing = judge(db, header, stored_at)?;
+    let Published { stored_at, signer } = published;
+    let landing = judge(db, header, &signer, stored_at)?;
     if retain && !landing.fixed {
         for audience in audiences {
             crate::entry_inputs::original(db, schema, audience)?;
@@ -149,7 +119,7 @@ pub(crate) fn land<P: PendingValue>(
         record(
             db,
             header,
-            stored_at,
+            published,
             landing.late,
             audiences.iter().cloned(),
         )?;
@@ -161,23 +131,24 @@ pub(crate) fn land<P: PendingValue>(
     Ok(landing.late)
 }
 
-/// Record a received write's publication time, verdict and opened audiences.
+/// Record a received write's publication facts, verdict and opened audiences.
 fn record(
     db: &DatabaseConnection,
     header: &WriteHeader,
-    stored_at: StorageTime,
+    published: Published,
     late: bool,
     audiences: impl IntoIterator<Item = Audience>,
 ) -> Result<(), DbError> {
     let [device, number] = id(header.position);
     db.internal_execute(
-        "INSERT INTO _coven_write_landings(device,number,stored_at,header,late) VALUES(?1,?2,?3,?4,?5)
+        "INSERT INTO _coven_write_landings(device,number,stored_at,header,signer,late) VALUES(?1,?2,?3,?4,?5,?6)
          ON CONFLICT(device,number) DO UPDATE SET late=excluded.late",
         params![
             device,
             number,
-            crate::storage_time::encode(stored_at),
+            crate::storage_time::encode(published.stored_at),
             merge_fields::encode_write_header(header)?,
+            published.signer.as_bytes().as_slice(),
             late
         ],
     )?;
@@ -221,27 +192,10 @@ pub(crate) struct Rejudged {
 /// changed write's report changes with it; the audiences it opened must be
 /// rebuilt in this transaction (§9, §10).
 pub(crate) fn rejudge<P: PendingValue>(db: &DatabaseConnection) -> Result<Rejudged, DbError> {
-    let landings = db.query(
-        "SELECT device,number,stored_at,header,late FROM _coven_write_landings",
-        [],
-        |r| {
-            Ok((
-                WriteId {
-                    device: DeviceId(counter(r.get(0)?)),
-                    number: counter(r.get(1)?),
-                },
-                r.get::<_, Vec<u8>>(2)?,
-                r.get::<_, Vec<u8>>(3)?,
-                r.get::<_, bool>(4)?,
-            ))
-        },
-    )?;
     let own = db.pending_device().ok_or(DbError::DamagedDatabase)?;
     let mut rejudged = Rejudged::default();
-    for (write, stored, header, was_late) in landings {
-        let stored_at = crate::storage_time::decode(&stored)?;
-        let header = merge_fields::decode_write_header(&header)?;
-        let landing = judge(db, &header, stored_at)?;
+    for (write, landed, was_late) in landings(db)? {
+        let landing = judge(db, &landed.header, &landed.signer, landed.stored_at)?;
         if landing.late == was_late {
             continue;
         }
@@ -252,7 +206,7 @@ pub(crate) fn rejudge<P: PendingValue>(db: &DatabaseConnection) -> Result<Rejudg
         )?;
         report::<P>(db, write, own, landing.late)?;
         rejudged.causes.extend(
-            candidates(db, write.device)?
+            crate::write_retirement::candidates(db, &landed.header, &landed.signer)?
                 .into_iter()
                 .map(|(r, _, _)| r.entry),
         );
@@ -261,6 +215,46 @@ pub(crate) fn rejudge<P: PendingValue>(db: &DatabaseConnection) -> Result<Rejudg
         }
     }
     Ok(rejudged)
+}
+
+/// A recorded write's landing inputs.
+struct Landed {
+    header: WriteHeader,
+    stored_at: StorageTime,
+    signer: SigningKey,
+}
+
+/// Every recorded write with its inputs and recorded verdict.
+fn landings(db: &DatabaseConnection) -> Result<Vec<(WriteId, Landed, bool)>, DbError> {
+    let rows = db.query(
+        "SELECT device,number,stored_at,header,signer,late FROM _coven_write_landings",
+        [],
+        |r| {
+            Ok((
+                WriteId {
+                    device: DeviceId(counter(r.get(0)?)),
+                    number: counter(r.get(1)?),
+                },
+                r.get::<_, Vec<u8>>(2)?,
+                r.get::<_, Vec<u8>>(3)?,
+                r.get::<_, [u8; 32]>(4)?,
+                r.get::<_, bool>(5)?,
+            ))
+        },
+    )?;
+    rows.into_iter()
+        .map(|(write, stored, header, signer, late)| {
+            Ok((
+                write,
+                Landed {
+                    header: merge_fields::decode_write_header(&header)?,
+                    stored_at: crate::storage_time::decode(&stored)?,
+                    signer: SigningKey::from_bytes(signer).map_err(|_| DbError::DamagedDatabase)?,
+                },
+                late,
+            ))
+        })
+        .collect()
 }
 
 /// A loaded snapshot's verdict for a covered change must agree with this
@@ -310,25 +304,13 @@ pub(crate) fn report<P: PendingValue>(
 
 /// Every recorded verdict, with whether it is final now.
 fn recorded(db: &DatabaseConnection) -> Result<Vec<(WriteId, Landing)>, DbError> {
-    let rows = db.query(
-        "SELECT device,number,stored_at,header FROM _coven_write_landings",
-        [],
-        |r| {
+    landings(db)?
+        .into_iter()
+        .map(|(write, landed, _)| {
             Ok((
-                WriteId {
-                    device: DeviceId(counter(r.get(0)?)),
-                    number: counter(r.get(1)?),
-                },
-                r.get::<_, Vec<u8>>(2)?,
-                r.get::<_, Vec<u8>>(3)?,
+                write,
+                judge(db, &landed.header, &landed.signer, landed.stored_at)?,
             ))
-        },
-    )?;
-    rows.into_iter()
-        .map(|(write, stored, header)| {
-            let stored_at = crate::storage_time::decode(&stored)?;
-            let header = merge_fields::decode_write_header(&header)?;
-            Ok((write, judge(db, &header, stored_at)?))
         })
         .collect()
 }

@@ -49,7 +49,9 @@ async fn apply_all(a: &Fixture, b: &Fixture) {
         b.database
             .apply_downloaded::<crate::PendingRecord>(
                 write.into(),
-                coven_format::value::StorageTime::since_epoch(std::time::Duration::ZERO),
+                coven_database::test_utils::published(
+                    coven_format::value::StorageTime::since_epoch(std::time::Duration::ZERO),
+                ),
             )
             .await
             .unwrap();
@@ -87,7 +89,7 @@ async fn eager_commit_observation_handles_download_apply() {
         b.database
             .apply_downloaded::<crate::PendingRecord>(
                 write.into(),
-                coven_format::value::StorageTime::UNIX_EPOCH,
+                coven_database::test_utils::published(coven_format::value::StorageTime::UNIX_EPOCH),
             )
             .await
             .unwrap();
@@ -170,7 +172,7 @@ async fn one_files_failure_leaves_its_record_while_the_fill_continues() {
         b.database
             .apply_downloaded::<crate::PendingRecord>(
                 write.into(),
-                coven_format::value::StorageTime::UNIX_EPOCH,
+                coven_database::test_utils::published(coven_format::value::StorageTime::UNIX_EPOCH),
             )
             .await
             .unwrap();
@@ -269,7 +271,7 @@ async fn a_sync_preserves_eager_cancellation_and_retries_network_failures() {
         b.database
             .apply_downloaded::<crate::PendingRecord>(
                 write.into(),
-                coven_format::value::StorageTime::UNIX_EPOCH,
+                coven_database::test_utils::published(coven_format::value::StorageTime::UNIX_EPOCH),
             )
             .await
             .unwrap();
@@ -304,7 +306,7 @@ async fn a_sync_preserves_eager_cancellation_and_retries_network_failures() {
         b.database
             .apply_downloaded::<crate::PendingRecord>(
                 write.into(),
-                coven_format::value::StorageTime::UNIX_EPOCH,
+                coven_database::test_utils::published(coven_format::value::StorageTime::UNIX_EPOCH),
             )
             .await
             .unwrap();

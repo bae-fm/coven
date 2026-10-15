@@ -28,10 +28,8 @@ pub(super) fn reason(statement: &Statement, relation: &str) -> Option<&'static s
     Some("release checks every reset that still conditionally suppresses observations"),
 ("members.rs", "SELECT member,role,signing,sealing FROM _coven_members WHERE removed=0", "_coven_members") =>
     Some("the member list returns every current member"),
-("write_landing.rs", "SELECT device,number,stored_at,header,late FROM _coven_write_landings", "_coven_write_landings") =>
-    Some("replay rejudges every verdict a retirement can still change; final ones are released"),
-("write_landing.rs", "SELECT device,number,stored_at,header FROM _coven_write_landings", "_coven_write_landings") =>
-    Some("release and retention check every verdict a retirement can still change"),
+("write_landing.rs", "SELECT device,number,stored_at,header,signer,late FROM _coven_write_landings", "_coven_write_landings") =>
+    Some("replay, release and retention check every verdict a retirement can still change"),
 ("retirement_drain.rs", "SELECT device FROM _coven_retirement_finality", "_coven_retirement_finality") =>
     Some("finality recording skips every retired device that already has its F"),
 ("retirement_drain.rs", "SELECT device FROM _coven_drained_devices", "_coven_drained_devices") =>

@@ -269,9 +269,12 @@ async fn relevant_reports(
 
 /// Authenticate and decode a peer's posted positions. The inner error is the
 /// positions subject's first unmet condition, in processing order: a newer
-/// format, its author's registration or store key not yet applied, or a failed
-/// check of this replaceable object, which counts as not posted (§19.1). The
-/// outer error is a local failure.
+/// format, its store key not yet applied, an entry of its signed store-log
+/// view or its author's registration not yet applied, or a failed check of
+/// this replaceable object, which counts as not posted (§19.1). The outer
+/// error is a local failure. The signer is the path device's owner's key in
+/// the replay of the positions' own signed `store_log`; nothing decoded is
+/// used before that signature verifies (D9).
 pub(crate) fn open(
     bytes: &[u8],
     path: &ObjectPath,
@@ -292,18 +295,6 @@ pub(crate) fn open(
     else {
         return invalid(Refusal::WrongIdentity { cause: None });
     };
-    let (author, signer) =
-        match crate::object_author::owner(log, path.device().expect("positions path")) {
-            Ok(owner) => owner,
-            Err(reason) => return Ok(Err(reason)),
-        };
-    let mut hash = ObjectHasher::new();
-    hash.update(&bytes[..bytes.len() - 64]);
-    if let Err(error) = signer.verify_object(path.as_str(), &hash.finish(), signature) {
-        return invalid(Refusal::Signature {
-            cause: Some(Arc::new(error)),
-        });
-    }
     let secret = match ring.map(|ring| crate::write_seal::derive(ring, &Audience::Store, key)) {
         Some(Ok(secret)) => secret,
         None | Some(Err(SyncError::KeyUnavailable(_))) => {
@@ -328,7 +319,21 @@ pub(crate) fn open(
         Ok(_) => return invalid(Refusal::WrongIdentity { cause: None }),
         Err(reason) => return Ok(Err(reason)),
     };
-    if path.device() != Some(positions.device) {
+    let device = path.device().expect("positions path");
+    let (author, signer) =
+        match crate::object_author::owner(log, path.store(), device, &positions.store_log) {
+            Ok(owner) => owner,
+            Err(crate::object_author::Unresolved::Waits(reason)) => return Ok(Err(reason)),
+            Err(crate::object_author::Unresolved::Refused(failure)) => return invalid(failure),
+        };
+    let mut hash = ObjectHasher::new();
+    hash.update(&bytes[..bytes.len() - 64]);
+    if let Err(error) = signer.verify_object(path.as_str(), &hash.finish(), signature) {
+        return invalid(Refusal::Signature {
+            cause: Some(Arc::new(error)),
+        });
+    }
+    if Some(positions.device) != path.device() {
         return invalid(Refusal::WrongIdentity { cause: None });
     }
     Ok(checked(positions.validate_reporter(&author, path.store())).map(|()| positions))

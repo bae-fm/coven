@@ -141,6 +141,7 @@ impl StoreLogSync {
                 n if n == data.entry_step_number(2) => {
                     let bytes = crate::store_log_object::seal_upload(
                         self.directory.id(),
+                        &local.log,
                         upload,
                         self.store_keys.read()?.as_ref(),
                         &member,

@@ -338,6 +338,15 @@ impl StoreLogSync {
             self.send.invalidate();
             return Err(SyncError::Removed);
         }
+        // Held credentials a kept replacement retired cannot author anything;
+        // the installation keeps its device id and queues (§10).
+        if crate::effects::member(state, &member.member())
+            .is_some_and(|held| held.keys != member.keys().public_keys())
+        {
+            return Err(SyncError::MemberKeysReplaced {
+                member: member.member(),
+            });
+        }
         Ok(())
     }
 
@@ -468,7 +477,13 @@ impl StoreLogSync {
                         .persist(ring.as_ref().expect("recovered creation key"))?;
                 }
             }
-            let bytes = object::seal_upload(self.directory.id(), upload, ring.as_ref(), member)?;
+            let bytes = object::seal_upload(
+                self.directory.id(),
+                &local.log,
+                upload,
+                ring.as_ref(),
+                member,
+            )?;
             let _bootstrap = self.bootstrap_publication(local, upload, member)?;
             object::upload(
                 self.directory.id(),

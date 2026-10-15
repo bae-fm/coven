@@ -58,6 +58,9 @@ pub(crate) struct SavedWrite {
     pub(crate) parts: Vec<Option<String>>,
     /// First complete publication time, for the retirement window (§10).
     pub(crate) stored_at: coven_format::value::StorageTime,
+    /// The signing key that authenticated the write in its recorded view,
+    /// for the old-key window (§10).
+    pub(crate) signer: [u8; 32],
 }
 
 pub(crate) mod audience {

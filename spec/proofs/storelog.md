@@ -1068,11 +1068,31 @@ replacements and every possible write publication time.
 
 This is conditional on entry finality supplying that stable prefix. Keeping
 one replacement alone is not sufficient if an earlier replacement can still
-change. The general horizon theorem has not been transferred to key-aware
-replay; its final-prefix conclusion is an explicit input here. The history
-and bound may contain any finite continuation; the write's recorded authority
-view remains fixed. Independent schema/reset decisions can still change their
-own verdicts.
+change. The history and bound may contain any finite continuation; the
+write's recorded authority view remains fixed. Independent schema/reset
+decisions can still change their own verdicts.
+
+**The horizon supplies the final prefix for keyed replay.**
+`KeyedHorizon.lean` transfers §9's horizon to `Keyed.resolve` itself rather
+than to its membership projection. `ReplayMachinePrefix.settle_prefix`
+re-proves `ReplayPrefix.settle_prefix` for the generalized replay machine:
+a settled timestamp prefix is unaffected by a suffix none of whose entries
+conflicts with it, through restarts. The horizon's quiet window depends only
+on recorded pasts and storage times (`Final.timing`), so
+`Horizon.survivor_reads_old` still shows every admitted entry outside the old
+prefix read all of it; `keyed_prefix` and `keyed_stability` follow, and
+`keyed_horizon_stability` states that every entry stored strictly before the
+horizon keeps its kept and dropped status in every received set holding all
+entries before it (`metadata_past` derives the causal order it needs from
+`metadataValid`). `horizon_final_prefix` is then exactly
+`replacement_window_final`'s premise for a replacement stored before the
+horizon: `horizon_finalizes_replacement` fixes a verdict decided by such a
+kept retiring replacement. `horizon_finalizes_window` needs no retiring
+replacement at all: once the write's storage time is at most the horizon
+plus the window, every replacement able to exclude it is final, so an
+admitted verdict is fixed too. `horizon_finalizes_count` lifts both to
+`countInReplay`. Rust releases a write's retained verdict on exactly these
+two conditions.
 
 **The send gate bounds remaining publication.** `writerCurrent` checks the
 member, device owner and signing key in the supplied view. Admission uses the
@@ -1122,7 +1142,8 @@ Encryption, signature verification, entry path/device validation, complete
 provider discovery, random ids, SQL rebuilding and physical retention are
 outside this proposal. Historical key-copy exposure and replacement rotation
 are proved in [storelog-data](storelog-data.md#member-key-replacement).
-No Rust correspondence is claimed for the new keyed interface.
+`lean_differential_member_key_replacements` compares Rust with `Keyed` and
+`OldKeyObjects` (storelog-data.md).
 
 ### C14 Spec and format checklist for stable members
 

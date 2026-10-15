@@ -321,7 +321,7 @@ async fn budgets_pins_eviction_and_second_device_reads() {
             .database
             .apply_downloaded::<crate::PendingRecord>(
                 write.into(),
-                coven_format::value::StorageTime::UNIX_EPOCH,
+                coven_database::test_utils::published(coven_format::value::StorageTime::UNIX_EPOCH),
             )
             .await
             .unwrap();
@@ -549,7 +549,7 @@ async fn whole_reads_and_pins_check_the_row_hash_after_authenticating_chunks() {
         b.database
             .apply_downloaded::<crate::PendingRecord>(
                 write.into(),
-                coven_format::value::StorageTime::UNIX_EPOCH,
+                coven_database::test_utils::published(coven_format::value::StorageTime::UNIX_EPOCH),
             )
             .await
             .unwrap();
@@ -699,7 +699,9 @@ async fn waiting_files_name_the_attaching_device_until_its_automatic_upload() {
             b.database
                 .apply_downloaded::<crate::PendingRecord>(
                     write.into(),
-                    coven_format::value::StorageTime::UNIX_EPOCH,
+                    coven_database::test_utils::published(
+                        coven_format::value::StorageTime::UNIX_EPOCH,
+                    ),
                 )
                 .await
                 .unwrap();

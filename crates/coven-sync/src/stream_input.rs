@@ -48,7 +48,7 @@ impl ChannelParts {
     pub(crate) fn new(
         header: WriteHeaderFrame,
         opens: &[bool],
-        stored_at: coven_format::value::StorageTime,
+        published: coven_database::Published,
     ) -> (Self, DownloadedWriteStream<StreamInput>) {
         let (senders, parts) = opens
             .iter()
@@ -66,7 +66,7 @@ impl ChannelParts {
             DownloadedWriteStream {
                 header,
                 parts,
-                stored_at,
+                published,
             },
         )
     }

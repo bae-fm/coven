@@ -7,16 +7,28 @@ use coven_merge::Audience;
 
 use crate::replay::had_read;
 
-fn priority(change: &StoreChange, view: &StoreLogCheck) -> u8 {
+/// Appendix C's tiers, doubled so member-key replacements fit between them:
+/// a replacement conflicts only with another replacement of the same member,
+/// where another admin's beats self-replacement, and with that member's
+/// removal, which beats both (§9, `Keyed.tier`).
+fn priority(entry: &StoreLogEntry, view: &StoreLogCheck) -> u8 {
     use StoreChange::*;
-    match change {
+    match &entry.change {
         RemoveMember { .. } | RemoveDevice { .. } => 0,
-        DeleteCircle { .. } => 1,
+        DeleteCircle { .. } => 2,
         RemoveCircleMember { circle, .. } => {
             if view.deletes_circle(*circle) {
-                1
-            } else {
                 2
+            } else {
+                4
+            }
+        }
+        // Classified by stable ids: an admin replacing their own keys is self.
+        ReplaceMemberKeys { member, .. } => {
+            if *member == entry.author {
+                4
+            } else {
+                3
             }
         }
         AddMember {
@@ -26,8 +38,8 @@ fn priority(change: &StoreChange, view: &StoreLogCheck) -> u8 {
         | ChangeRole {
             role: MemberRole::Admin,
             ..
-        } => 4,
-        _ => 3,
+        } => 8,
+        _ => 6,
     }
 }
 
@@ -37,7 +49,7 @@ pub(crate) fn before(
     b: &StoreLogEntry,
     vb: &StoreLogCheck,
 ) -> bool {
-    (priority(&a.change, va), a.timestamp) < (priority(&b.change, vb), b.timestamp)
+    (priority(a, va), a.timestamp) < (priority(b, vb), b.timestamp)
 }
 
 fn membership_state(change: &StoreChange) -> Option<&MemberId> {
@@ -58,7 +70,7 @@ fn required_member<'a>(entry: &'a StoreLogEntry, view: &'a StoreLogCheck) -> Opt
         ChangeRole { member, .. }
         | AddCircleMember { member, .. }
         | RemoveCircleMember { member, .. } => Some(member),
-        SetAccess { member, .. } => Some(member),
+        SetAccess { member, .. } | ReplaceMemberKeys { member, .. } => Some(member),
         AddDevice { .. } | CreateCircle { .. } | DeleteCircle { .. } => Some(&entry.author),
         RemoveDevice { .. } => match view {
             StoreLogCheck::DeviceOwner(owner) => Some(owner),
@@ -229,6 +241,9 @@ fn contradiction(
     use StoreChange::*;
     let access_membership_and_snapshots = match (&a.change, &b.change) {
         (SetAccess { member: m, .. }, SetAccess { member: n, .. }) => m == n,
+        // Concurrent replacements of one id conflict even with equal pairs:
+        // each is an event exposing the old keys (`Keyed.replacements_conflict`).
+        (ReplaceMemberKeys { member: m, .. }, ReplaceMemberKeys { member: n, .. }) => m == n,
         (
             AddCircleMember {
                 circle: c,

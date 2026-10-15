@@ -111,8 +111,12 @@ impl StoreLogSync {
             targets,
         };
         let opens = files.iter().map(Option::is_some).collect::<Vec<_>>();
+        let published = coven_database::Published {
+            stored_at: object.stored_at,
+            signer,
+        };
         let (references, input) =
-            crate::stream_input::ChannelParts::new(opened.header.clone(), &opens, object.stored_at);
+            crate::stream_input::ChannelParts::new(opened.header.clone(), &opens, published);
         let transfer = async {
             let mut sink = crate::stream_input::WithReferences {
                 primary,
@@ -128,6 +132,7 @@ impl StoreLogSync {
             header,
             parts: files,
             stored_at: object.stored_at,
+            signer: *signer.as_bytes(),
         })
     }
 }

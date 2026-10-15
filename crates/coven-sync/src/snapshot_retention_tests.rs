@@ -181,7 +181,7 @@ async fn removed_member_logs_belong_to_the_store_owner_and_leave_google_drives_f
         write_rows(&b, 0, 1, 17, Audience::Store).await;
         a.db.apply_downloaded::<crate::PendingRecord>(
             b.db.test_queued_writes().await.unwrap().remove(0).into(),
-            coven_format::value::StorageTime::UNIX_EPOCH,
+            coven_database::test_utils::published(coven_format::value::StorageTime::UNIX_EPOCH),
         )
         .await
         .unwrap();
@@ -336,7 +336,7 @@ async fn a_snapshot_keeps_its_key_when_a_removal_is_dropped() {
     assert_eq!(
         b.db.apply_downloaded::<crate::PendingRecord>(
             a.db.test_queued_writes().await.unwrap().remove(0).into(),
-            coven_format::value::StorageTime::UNIX_EPOCH
+            coven_database::test_utils::published(coven_format::value::StorageTime::UNIX_EPOCH)
         )
         .await
         .unwrap(),
@@ -434,7 +434,7 @@ async fn bens_snapshot_is_newest(
     for write in writes.iter().take(3) {
         b.db.apply_downloaded::<crate::PendingRecord>(
             write.clone().into(),
-            coven_format::value::StorageTime::UNIX_EPOCH,
+            coven_database::test_utils::published(coven_format::value::StorageTime::UNIX_EPOCH),
         )
         .await
         .unwrap();
@@ -503,9 +503,17 @@ async fn a_snapshot_waiting_for_its_authors_registration_holds_log_retention() {
     assert_eq!(retained(&storage, &writes).await, [true; 4]);
     assert_eq!(
         snapshot_record(&a, &ben).await,
-        Some(crate::PendingReason::Waits(
-            crate::Prerequisite::DeviceRegistration(ben.device().unwrap())
-        ))
+        // Its signed coverage names Ben's registration, which Ana has not
+        // applied: the signer is looked up in that view (D9).
+        Some(crate::PendingReason::Waits(crate::Prerequisite::Object(
+            crate::store_log_object::path(
+                store(1),
+                coven_format::value::EntryId {
+                    device: ben.device().unwrap(),
+                    number: 1
+                }
+            )
+        )))
     );
     // With Ben's registration applied his prefix checks and is the newest.
     a.sync().await;
@@ -536,7 +544,7 @@ async fn ana_ten_ben_twenty() -> (Arc<MemoryStorage>, Device, ObjectPath, Vec<Ob
     for write in a.db.test_queued_writes().await.unwrap() {
         b.db.apply_downloaded::<crate::PendingRecord>(
             write.into(),
-            coven_format::value::StorageTime::UNIX_EPOCH,
+            coven_database::test_utils::published(coven_format::value::StorageTime::UNIX_EPOCH),
         )
         .await
         .unwrap();
@@ -547,7 +555,7 @@ async fn ana_ten_ben_twenty() -> (Arc<MemoryStorage>, Device, ObjectPath, Vec<Ob
     for write in b.db.test_queued_writes().await.unwrap().into_iter().take(2) {
         a.db.apply_downloaded::<crate::PendingRecord>(
             write.into(),
-            coven_format::value::StorageTime::UNIX_EPOCH,
+            coven_database::test_utils::published(coven_format::value::StorageTime::UNIX_EPOCH),
         )
         .await
         .unwrap();

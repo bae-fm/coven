@@ -356,9 +356,19 @@ impl StoreLogSync {
                 .ok_or(coven_format::Error::Truncated),
         )?;
         let (prefix, signature) = checked(path, SnapshotObjectPrefix::decode_signed(signed))?;
-        let signer = match crate::object_author::owner(log, path.device().expect("snapshot path")) {
+        // The signed coverage selects the signer; until verified it is only a
+        // lookup hint, which can request entries but establishes nothing (D9).
+        let signer = match crate::object_author::owner(
+            log,
+            path.store(),
+            path.device().expect("snapshot path"),
+            &prefix.store_log,
+        ) {
             Ok((_, signer)) => signer,
-            Err(reason) => return Ok(Err(reason)),
+            Err(crate::object_author::Unresolved::Waits(reason)) => return Ok(Err(reason)),
+            Err(crate::object_author::Unresolved::Refused(failure)) => {
+                return Err(damaged(path, failure))
+            }
         };
         signer
             .verify_prefix(path.as_str(), &signed[..length], &signature)

@@ -242,7 +242,9 @@ async fn supplied_write_streams_are_bounded_and_fail_atomically() {
                     Cursor::new(snapshot.clone())
                 )],
                 vec![DownloadedWriteStream {
-                    stored_at: coven_format::value::StorageTime::UNIX_EPOCH,
+                    published: crate::test_utils::published(
+                        coven_format::value::StorageTime::UNIX_EPOCH
+                    ),
                     header: input.header.clone(),
                     parts: vec![DownloadedPartStream::Opened(Cursor::new(bytes.clone()))],
                 }]
@@ -259,7 +261,9 @@ async fn supplied_write_streams_are_bounded_and_fail_atomically() {
                 Cursor::new(snapshot.clone())
             )],
             vec![DownloadedWriteStream::<Cursor<Vec<u8>>> {
-                stored_at: coven_format::value::StorageTime::UNIX_EPOCH,
+                published: crate::test_utils::published(
+                    coven_format::value::StorageTime::UNIX_EPOCH
+                ),
                 header: input.header.clone(),
                 parts: vec![DownloadedPartStream::Skipped],
             }]
@@ -277,7 +281,7 @@ async fn supplied_write_streams_are_bounded_and_fail_atomically() {
             Cursor::new(snapshot),
         )],
         vec![DownloadedWriteStream {
-            stored_at: coven_format::value::StorageTime::UNIX_EPOCH,
+            published: crate::test_utils::published(coven_format::value::StorageTime::UNIX_EPOCH),
             header: input.header,
             parts: vec![DownloadedPartStream::Opened(BoundedFile(file))],
         }],

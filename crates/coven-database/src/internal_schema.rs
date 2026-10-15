@@ -204,7 +204,11 @@ macro_rules! coven_tables {
                 target BLOB,
                 retires_device BLOB CHECK(length(retires_device)=8),
                 retires_member BLOB CHECK(length(retires_member)=16),
+                keys_member BLOB CHECK(length(keys_member)=16),
+                keys_signing BLOB CHECK(length(keys_signing)=32),
                 CHECK(retires_device IS NULL OR retires_member IS NULL),
+                CHECK((keys_member IS NULL)=(keys_signing IS NULL)),
+                CHECK(keys_member IS NULL OR (retires_device IS NULL AND retires_member IS NULL)),
                 CHECK((author_view IN (x'0400',x'0401'))=(outcome='late')),
                 CHECK((outcome='target-member' AND target IS NOT NULL AND length(target)=16)
                    OR (outcome='target-device' AND target IS NOT NULL AND length(target)=8)
@@ -218,15 +222,18 @@ macro_rules! coven_tables {
             CREATE INDEX _coven_store_log_timestamp ON _coven_store_log(timestamp);
             CREATE INDEX _coven_store_log_retires_device ON _coven_store_log(retires_device) WHERE retires_device IS NOT NULL;
             CREATE INDEX _coven_store_log_retires_member ON _coven_store_log(retires_member) WHERE retires_member IS NOT NULL;
+            CREATE INDEX _coven_store_log_keys_member ON _coven_store_log(keys_member) WHERE keys_member IS NOT NULL;
         ");
-        // A received write's first complete publication time and its window
-        // verdict, kept while a retirement it depends on could still change.
+        // A received write's first complete publication time, the signing key
+        // that authenticated it in its recorded view, and its window verdict,
+        // kept while a retirement it depends on could still change.
         $visit!(_coven_write_landings, "
             CREATE TABLE _coven_write_landings (
                 device BLOB NOT NULL CHECK(length(device)=8),
                 number BLOB NOT NULL CHECK(length(number)=8 AND number>x'0000000000000000'),
                 stored_at BLOB NOT NULL CHECK(length(stored_at)=12),
                 header BLOB NOT NULL,
+                signer BLOB NOT NULL CHECK(length(signer)=32),
                 late INTEGER NOT NULL CHECK(late IN (0,1)),
                 PRIMARY KEY(device,number)
             ) STRICT, WITHOUT ROWID;
@@ -350,12 +357,15 @@ macro_rules! coven_tables {
                 removed INTEGER NOT NULL CHECK(removed IN (0,1))
             ) STRICT, WITHOUT ROWID;
         ");
-        // Every pair replay's kept creation and additions bound (§9). Replay
-        // rewrites it with the member tables; fresh additions keep both keys unique.
+        // Every pair replay's kept creation, additions and member-key
+        // replacements bound (§9). Replay rewrites it with the member tables.
+        // Freshness is judged in each entry's recorded view, so concurrent
+        // kept bindings can still share a key: neither key is unique here.
         $visit!(_coven_bound_keys, "
             CREATE TABLE _coven_bound_keys (
-                signing BLOB PRIMARY KEY NOT NULL CHECK(length(signing)=32),
-                sealing BLOB NOT NULL UNIQUE CHECK(length(sealing)=32)
+                signing BLOB NOT NULL CHECK(length(signing)=32),
+                sealing BLOB NOT NULL CHECK(length(sealing)=32),
+                PRIMARY KEY(signing,sealing)
             ) STRICT, WITHOUT ROWID;
         ");
         $visit!(_coven_devices, "

@@ -367,12 +367,13 @@ async fn every_rotation_step_resumes_with_fixed_copies_and_entry() {
             ana.sync().await;
         }
         let row = ana.operation(id).await;
-        let queued = ana.db.local_store_log().await.unwrap().upload;
-        let fixed = queued.as_ref().map(|upload| {
+        let local = ana.db.local_store_log().await.unwrap();
+        let fixed = local.upload.as_ref().map(|upload| {
             (
                 upload.clone(),
                 object::seal_upload(
                     store(1),
+                    &local.log,
                     upload,
                     ana.custody.read().unwrap().as_ref(),
                     &ana.member,
@@ -386,7 +387,7 @@ async fn every_rotation_step_resumes_with_fixed_copies_and_entry() {
         let provider = ana.storage.clone();
         ana.restart(provider.clone()).await;
         assert_same_operation(&ana.operation(id).await, &row);
-        assert_eq!(ana.db.local_store_log().await.unwrap().upload, queued);
+        assert_eq!(ana.db.local_store_log().await.unwrap().upload, local.upload);
         finish_rotation(&mut ana).await;
         let fresh = selected(&ana).await.unwrap();
         assert_ne!(fresh, key(1));

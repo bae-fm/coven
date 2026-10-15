@@ -421,11 +421,12 @@ impl Database {
     }
     /// Apply one authenticated download, or report the prerequisite it awaits.
     /// Row changes, merge state, fingerprints and positions commit together.
-    /// `stored_at` is the write's first complete publication time (§10).
+    /// `published` is the write's first complete publication time and the
+    /// signing key that authenticated it in its recorded view (§10).
     pub async fn apply_downloaded<P: crate::PendingValue>(
         &self,
         write: crate::DownloadedWrite,
-        stored_at: coven_format::value::StorageTime,
+        published: crate::Published,
     ) -> Result<crate::ApplyOutcome, DbError> {
         self.call(move |inner| {
             inner.with_files(Vec::new(), |writer, files| {
@@ -433,7 +434,7 @@ impl Database {
                     writer,
                     &inner.access.write_schema,
                     write,
-                    stored_at,
+                    published,
                     files,
                 )
             })

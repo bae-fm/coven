@@ -88,13 +88,15 @@ impl DeviceLogSync {
             Some(current) => current,
             None => {
                 // Retained fingerprints describe the retained past exactly. With
-                // no confirmation yet, the empty past asserts no realized work.
+                // no confirmation yet, no writes assert no realized work. The
+                // applied store log is still claimed: readers find this
+                // device's signing key in that signed view (D9).
                 let mut held = match &post.confirmed {
                     Some(bytes) => decode(bytes)?,
                     None => PostedPositions {
                         device: local.device,
                         writes: coven_format::value::WritePositions(Vec::new()),
-                        store_log: coven_format::value::EntryPositions(Vec::new()),
+                        store_log: local.log.positions(),
                         schema_version: self.database.sync_state(Vec::new()).await?.schema_version,
                         fingerprints: Vec::new(),
                         pending: Vec::new(),

@@ -299,7 +299,7 @@ async fn a_cause_past_its_writers_miss_requires_snapshot_discovery() {
         .db
         .apply_downloaded::<crate::PendingRecord>(
             cause.into(),
-            coven_format::value::StorageTime::UNIX_EPOCH,
+            coven_database::test_utils::published(coven_format::value::StorageTime::UNIX_EPOCH),
         )
         .await
         .unwrap();

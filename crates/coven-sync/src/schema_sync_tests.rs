@@ -273,10 +273,12 @@ async fn a_raise_resumes_after_reopening_at_every_publication_step() {
                 _ => panic!("unexpected schema publication progress"),
             }
         }
-        let fixed = device.db.local_store_log().await.unwrap().upload;
+        let local = device.db.local_store_log().await.unwrap();
+        let fixed = local.upload.clone();
         let expected = fixed.as_ref().map(|upload| {
             crate::store_log_object::seal_upload(
                 STORE_ID,
+                &local.log,
                 upload,
                 device.custody.read().unwrap().as_ref(),
                 &device.identity.read().unwrap().unwrap(),

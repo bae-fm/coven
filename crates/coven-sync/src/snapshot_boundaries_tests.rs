@@ -194,7 +194,7 @@ async fn a_newer_schema_snapshot_makes_the_reload_wait_for_the_app_update() {
     write_rows(&a, 0, 1, 17, Audience::Store).await;
     b.db.apply_downloaded::<crate::PendingRecord>(
         a.db.test_queued_writes().await.unwrap().remove(0).into(),
-        coven_format::value::StorageTime::UNIX_EPOCH,
+        coven_database::test_utils::published(coven_format::value::StorageTime::UNIX_EPOCH),
     )
     .await
     .unwrap();
@@ -376,7 +376,7 @@ async fn queued_entries_wait_for_reload_and_finishing_a_queued_reset_blocks_new_
         Err(SyncError::Storage(_))
     ));
     let queued = a.db.local_store_log().await.unwrap().upload.unwrap();
-    let expected = a.reseal(&queued);
+    let expected = a.reseal(&queued).await;
     let reload = Data::Snapshots(SnapshotTask {
         job: SnapshotJob::Reload {
             scope: crate::snapshot_data::ReloadScope::All,
@@ -555,7 +555,7 @@ mod reset {
         let omitted = b.db.test_queued_writes().await.unwrap().remove(0);
         c.db.apply_downloaded::<crate::PendingRecord>(
             omitted.into(),
-            coven_format::value::StorageTime::UNIX_EPOCH,
+            coven_database::test_utils::published(coven_format::value::StorageTime::UNIX_EPOCH),
         )
         .await
         .unwrap();
@@ -569,7 +569,9 @@ mod reset {
             for write in d.db.test_queued_writes().await.unwrap() {
                 a.db.apply_downloaded::<crate::PendingRecord>(
                     write.into(),
-                    coven_format::value::StorageTime::UNIX_EPOCH,
+                    coven_database::test_utils::published(
+                        coven_format::value::StorageTime::UNIX_EPOCH,
+                    ),
                 )
                 .await
                 .unwrap();

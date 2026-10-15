@@ -32,7 +32,7 @@ async fn transfer(a: &Device, b: &Device) {
         assert!(!matches!(
             b.db.apply_downloaded::<crate::PendingRecord>(
                 record.into(),
-                coven_format::value::StorageTime::UNIX_EPOCH
+                coven_database::test_utils::published(coven_format::value::StorageTime::UNIX_EPOCH)
             )
             .await
             .unwrap(),

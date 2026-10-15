@@ -41,3 +41,5 @@ import CovenStorelog.MemberKeys
 import CovenStorelog.MemberKeyExamples
 import CovenStorelog.MemberAdditions
 import CovenStorelog.OldKeyObjects
+import CovenStorelog.ReplayMachinePrefix
+import CovenStorelog.KeyedHorizon

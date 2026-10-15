@@ -911,7 +911,10 @@ mod retire {
             ));
             assert_eq!(
                 target
-                    .apply_downloaded::<PendingRecord>(history.writes[index].clone().into(), at)
+                    .apply_downloaded::<PendingRecord>(
+                        history.writes[index].clone().into(),
+                        crate::test_utils::published(at)
+                    )
                     .await
                     .unwrap(),
                 ApplyOutcome::Applied

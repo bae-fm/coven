@@ -25,6 +25,21 @@ pub enum WriteCheckpoint {
     Finished,
 }
 
+/// Publication facts for a write a test applies as already authenticated,
+/// signed by a fixed key no fixture member binds: no member-key replacement
+/// names it, so only device retirements decide its window (§10).
+pub fn published(stored_at: coven_format::value::StorageTime) -> crate::Published {
+    let mut secret = b"CVMK\x01".to_vec();
+    secret.extend([0xA5; 64]);
+    crate::Published {
+        stored_at,
+        signer: coven_crypto::MemberKeys::from_secret_bytes(&secret)
+            .expect("fixed fixture pair")
+            .public_keys()
+            .signing,
+    }
+}
+
 /// Declarations for a UUID-keyed notes table in the store audience.
 pub fn notes_tables() -> Vec<SyncedTable> {
     vec![SyncedTable::new("notes", RowIdentity::IndependentUuid)]

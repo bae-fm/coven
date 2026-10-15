@@ -133,9 +133,10 @@ pub struct StoreLogState {
     pub store: Option<StoreIdentity>,
     /// Every member added by a kept entry, including removed members.
     pub members: BTreeMap<MemberId, StoreMember>,
-    /// Every public pair a kept creation or addition bound, including pairs
-    /// of removed members and pairs a later binding replaced. An addition of
-    /// an id not active in its view must share no key with these (§9,
+    /// Every public pair a kept creation, addition or member-key replacement
+    /// bound, including pairs of removed members and pairs a later replacement
+    /// retired. An addition of an id not active in its view, and every
+    /// replacement, must share no key with these (§9, `Keyed.freshKeys`,
     /// `Keyed.Additions.authorized_addition_fresh`).
     pub bound_keys: BTreeSet<MemberPublicKeys>,
     /// Every device added by a kept entry, including removed devices.
@@ -314,7 +315,7 @@ pub enum DropReason {
     /// Its effect would leave no admin.
     NoAdminLeft,
     /// The proposed member pair reuses a signing or sealing key already bound
-    /// in its author's view (§9).
+    /// in its author's view, or, for a replacement, at its replay position (§9).
     KeysAlreadyUsed,
     /// Its author's view did not authorize the change, including an unseen device.
     NotAllowed,
@@ -387,14 +388,14 @@ pub(crate) fn apply<P: crate::PendingValue>(
         }
         for (incoming, bytes, author_view, stored_at, timestamp) in &encoded {
             let id = incoming.entry.position;
-            let (retires_device, retires_member) = crate::write_landing::retires(&incoming.entry);
+            let retires = crate::write_retirement::retires(&incoming.entry);
             database.internal_execute(
-                "INSERT INTO _coven_store_log(device,number,record,author_view,stored_at,outcome,timestamp,retires_device,retires_member)
-                 VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9) ON CONFLICT(device,number) DO NOTHING",
+                "INSERT INTO _coven_store_log(device,number,record,author_view,stored_at,outcome,timestamp,retires_device,retires_member,keys_member,keys_signing)
+                 VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11) ON CONFLICT(device,number) DO NOTHING",
                 rusqlite::params![id.device.0.to_be_bytes().as_slice(), id.number.to_be_bytes().as_slice(),
                  bytes, author_view, stored_at,
                  if incoming.check.landed_too_late() { "late" } else { "kept" }, timestamp,
-                 retires_device, retires_member],
+                 retires.device, retires.member, retires.keys_member, retires.keys_signing],
             )?;
             if let Some(boundary) = crate::Boundary::from_entry(&incoming.entry) {
                 boundary.record(database)?;

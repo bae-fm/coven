@@ -200,7 +200,7 @@ impl StoreLogSync {
             } else {
                 previous.as_ref()
             };
-            let bytes = object::seal_upload(store_id, upload, sealing_ring, &member)?;
+            let bytes = object::seal_upload(store_id, &local.log, upload, sealing_ring, &member)?;
             let _bootstrap = self.bootstrap_publication(&local, upload, &member)?;
             object::upload(
                 store_id,
@@ -310,7 +310,8 @@ impl StoreLogSync {
                 }
                 let upload = local.upload.as_ref().expect("reserved access entry");
                 let path = object::path(store_id, upload.entry.position);
-                let bytes = object::seal_upload(store_id, upload, Some(&ring), &member)?;
+                let bytes =
+                    object::seal_upload(store_id, &local.log, upload, Some(&ring), &member)?;
                 object::create_own(storage.as_ref(), &self.send, &path, &bytes).await?;
                 creation = Some(upload.entry.clone());
             }

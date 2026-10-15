@@ -100,8 +100,8 @@ pub(crate) fn apply<P: crate::PendingValue, R: Read>(
         };
         let result = (|| -> Result<(), DbError> {
             let supplied = matches!(source, Source::Download(_));
-            let stored_at = match &source {
-                Source::Download(stream) => Some(stream.stored_at),
+            let published = match &source {
+                Source::Download(stream) => Some(stream.published),
                 _ => None,
             };
             let write = match source {
@@ -163,7 +163,7 @@ pub(crate) fn apply<P: crate::PendingValue, R: Read>(
                 }
                 .into());
             }
-            if let Some(stored_at) = stored_at {
+            if let Some(published) = published {
                 let opened: Vec<_> = write
                     .parts
                     .iter()
@@ -176,7 +176,7 @@ pub(crate) fn apply<P: crate::PendingValue, R: Read>(
                     database,
                     schema,
                     &write.header,
-                    stored_at,
+                    published,
                     &opened,
                     false,
                 )?;

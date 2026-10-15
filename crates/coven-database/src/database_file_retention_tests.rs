@@ -39,7 +39,9 @@ async fn overwritten_and_deleted_old_values_protect_their_uploaded_files() {
             .collect();
         let references = db
             .write_file_references(DownloadedWriteStream {
-                stored_at: coven_format::value::StorageTime::UNIX_EPOCH,
+                published: crate::test_utils::published(
+                    coven_format::value::StorageTime::UNIX_EPOCH,
+                ),
                 header,
                 parts: vec![DownloadedPartStream::Opened(std::io::Cursor::new(bytes))],
             })

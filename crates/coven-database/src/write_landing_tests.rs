@@ -5,7 +5,7 @@ use crate::store_log::tests::{checked, keys, member};
 use crate::tests::TestStore;
 use crate::write::tests::{count, notes, records, sql, NOTES};
 use crate::{DeviceState, EntryOutcome, StoreDevice, StoreMember};
-use coven_format::store_log::{MemberRole, StoreLogEntry};
+use coven_format::store_log::{MemberRole, StoreChange, StoreLogEntry};
 use coven_format::value::EntryPositions;
 use coven_foundation::id_source::SequentialIds;
 
@@ -140,7 +140,10 @@ async fn every_retirement_admits_exactly_thirty_days_and_consumes_later_writes()
             let position = write.header.position;
             retire(&p.target, position.device, 1, kind, 0).await;
             p.target
-                .apply_downloaded::<Record>(write.into(), at(30 * DAY + offset))
+                .apply_downloaded::<Record>(
+                    write.into(),
+                    crate::test_utils::published(at(30 * DAY + offset)),
+                )
                 .await
                 .unwrap();
             assert_eq!(count(&p.target, "notes"), i64::from(!late), "{kind}");
@@ -178,7 +181,10 @@ async fn a_read_retirement_bounds_the_write_by_storage_time_alone() {
         let read = retire(&p.target, write.header.position.device, 1, "replacement", 0).await;
         write.header.store_log_read = EntryPositions(vec![read]);
         p.target
-            .apply_downloaded::<Record>(write.into(), at(30 * DAY + offset))
+            .apply_downloaded::<Record>(
+                write.into(),
+                crate::test_utils::published(at(30 * DAY + offset)),
+            )
             .await
             .unwrap();
         assert_eq!(count(&p.target, "notes"), i64::from(!late));
@@ -201,7 +207,7 @@ async fn replay_recomputes_the_verdict_against_every_kept_retirement() {
     let first = retire(&p.target, device, 1, "device", 0).await;
     let second = retire(&p.target, device, 2, "replacement", 10 * DAY).await;
     p.target
-        .apply_downloaded::<Record>(write.into(), at(35 * DAY))
+        .apply_downloaded::<Record>(write.into(), crate::test_utils::published(at(35 * DAY)))
         .await
         .unwrap();
     assert_eq!(count(&p.target, "notes"), 0);
@@ -232,7 +238,7 @@ async fn a_retirement_arriving_after_its_write_rebuilds_without_it() {
     let write = records(&p.source).remove(0);
     let device = write.header.position.device;
     p.target
-        .apply_downloaded::<Record>(write.into(), at(31 * DAY))
+        .apply_downloaded::<Record>(write.into(), crate::test_utils::published(at(31 * DAY)))
         .await
         .unwrap();
     assert_eq!(count(&p.target, "notes"), 1);
@@ -256,7 +262,7 @@ async fn a_settled_verdict_releases_its_retained_inputs() {
     let device = write.header.position.device;
     retire(&p.target, device, 1, "device", 0).await;
     p.target
-        .apply_downloaded::<Record>(write.into(), at(31 * DAY))
+        .apply_downloaded::<Record>(write.into(), crate::test_utils::published(at(31 * DAY)))
         .await
         .unwrap();
     let retained = |db: &crate::Database| {
@@ -292,7 +298,7 @@ async fn an_admitted_verdict_settles_when_the_horizon_passes_its_window() {
         .unwrap();
     let write = records(&p.source).remove(0);
     p.target
-        .apply_downloaded::<Record>(write.into(), at(31 * DAY))
+        .apply_downloaded::<Record>(write.into(), crate::test_utils::published(at(31 * DAY)))
         .await
         .unwrap();
     let landings = |db: &crate::Database| {
@@ -461,7 +467,10 @@ async fn changes_built_on_a_late_write_are_frozen_and_unrelated_ones_apply() {
     for (target, delete_first) in [(first, false), (second, true)] {
         let removal = retire(target, creation.header.position.device, 1, "device", 0).await;
         target
-            .apply_downloaded::<Record>(creation.clone().into(), at(30 * DAY + 1))
+            .apply_downloaded::<Record>(
+                creation.clone().into(),
+                crate::test_utils::published(at(30 * DAY + 1)),
+            )
             .await
             .unwrap();
         target.receive(ben_writes[0].clone().into()).await.unwrap();
@@ -540,7 +549,10 @@ async fn snapshot_evidence_keeps_sources_and_verdicts_for_later_changes() {
     let ben_write = records(ben).remove(0);
     retire(source, ana_write.header.position.device, 1, "device", 0).await;
     source
-        .apply_downloaded::<Record>(ana_write.clone().into(), at(30 * DAY + 1))
+        .apply_downloaded::<Record>(
+            ana_write.clone().into(),
+            crate::test_utils::published(at(30 * DAY + 1)),
+        )
         .await
         .unwrap();
     source.receive(ben_write.clone().into()).await.unwrap();

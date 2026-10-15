@@ -92,6 +92,14 @@ pub enum SyncError {
     /// store must be reset as a new device before further use (§10).
     #[error("this installation must reset as a new device: {0:?}")]
     DeviceReset(coven_foundation::files::DeviceResetReason),
+    /// Held signing credentials are no longer current for this stable id, or
+    /// an object was fixed under credentials that are no longer current.
+    /// Sending stops; it never re-signs an old object with newer keys (§10).
+    #[error("member {member:?} has newer keys; held credentials cannot send")]
+    MemberKeysReplaced {
+        /// The stable member whose keys were replaced.
+        member: coven_foundation::id_source::MemberId,
+    },
     /// This call needs a newer app schema or coven format (§17).
     #[error("an update is required: {0:?}")]
     UpdateRequired(crate::RequiredUpdate),

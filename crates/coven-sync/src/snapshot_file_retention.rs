@@ -197,7 +197,10 @@ impl StoreLogSync {
         let (mut sink, input) = crate::stream_input::ChannelParts::new(
             opened.header.clone(),
             &opens,
-            retained.object().stored_at,
+            coven_database::Published {
+                stored_at: retained.object().stored_at,
+                signer,
+            },
         );
         let transfer = async {
             let result =

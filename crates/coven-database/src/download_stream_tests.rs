@@ -7,7 +7,7 @@ use std::io::Cursor;
 fn stream(record: &WriteRecord) -> DownloadedWriteStream<Cursor<Vec<u8>>> {
     let encoder = WriteEncoder::new(record).unwrap();
     DownloadedWriteStream {
-        stored_at: coven_format::value::StorageTime::UNIX_EPOCH,
+        published: crate::test_utils::published(coven_format::value::StorageTime::UNIX_EPOCH),
         header: encoder.header().clone(),
         parts: (0..record.parts.len())
             .map(|part| {
@@ -465,7 +465,7 @@ mod memory {
             }).collect();
             assert!(held.iter().map(|bytes| bytes.len()).sum::<usize>() > 32 * 1024 * 1024);
             let input = || DownloadedWriteStream {
-                stored_at: coven_format::value::StorageTime::UNIX_EPOCH,
+                published: crate::test_utils::published(coven_format::value::StorageTime::UNIX_EPOCH),
                 header: prepared.header.clone(),
                 parts: held.iter().map(|bytes| DownloadedPartStream::Opened(Cursor::new(bytes.clone()))).collect(),
             };

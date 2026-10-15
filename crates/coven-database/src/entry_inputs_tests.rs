@@ -510,7 +510,10 @@ mod retirement_replay {
             fate(target, removal, false).await.unwrap();
             assert_eq!(
                 target
-                    .apply_downloaded::<Record>(h.creation.clone().into(), at(30 * DAY + 1))
+                    .apply_downloaded::<Record>(
+                        h.creation.clone().into(),
+                        crate::test_utils::published(at(30 * DAY + 1))
+                    )
                     .await
                     .unwrap(),
                 ApplyOutcome::Applied
@@ -622,7 +625,10 @@ mod retirement_replay {
         target.receive(h.delete.clone().into()).await.unwrap();
         target.receive(insert.clone().into()).await.unwrap();
         target
-            .apply_downloaded::<Record>(retitle.clone().into(), at(30 * DAY + 1))
+            .apply_downloaded::<Record>(
+                retitle.clone().into(),
+                crate::test_utils::published(at(30 * DAY + 1)),
+            )
             .await
             .unwrap();
         target.receive(h.ben[0].clone().into()).await.unwrap();
@@ -682,7 +688,10 @@ mod retirement_replay {
         });
         let removal = retire(&target, write.header.position.device, 1, "device", 0).await;
         target
-            .apply_downloaded::<Record>(write.clone().into(), at(30 * DAY + 1))
+            .apply_downloaded::<Record>(
+                write.clone().into(),
+                crate::test_utils::published(at(30 * DAY + 1)),
+            )
             .await
             .unwrap();
         assert!(target.lost_values().await.unwrap().is_empty());
@@ -711,7 +720,10 @@ mod retirement_replay {
         let removal = retire(target, created.device, 1, "device", 0).await;
         fate(target, removal, false).await.unwrap();
         target
-            .apply_downloaded::<Record>(h.creation.clone().into(), at(30 * DAY + 1))
+            .apply_downloaded::<Record>(
+                h.creation.clone().into(),
+                crate::test_utils::published(at(30 * DAY + 1)),
+            )
             .await
             .unwrap();
         target.receive(h.ben[0].clone().into()).await.unwrap();
@@ -742,7 +754,10 @@ mod retirement_replay {
         let created = h.creation.header.position;
         retire(target, created.device, 1, "device", 0).await;
         target
-            .apply_downloaded::<Record>(h.creation.clone().into(), at(30 * DAY + 1))
+            .apply_downloaded::<Record>(
+                h.creation.clone().into(),
+                crate::test_utils::published(at(30 * DAY + 1)),
+            )
             .await
             .unwrap();
         target
@@ -784,7 +799,10 @@ mod retirement_replay {
         let removal = retire(&target, write.header.position.device, 1, "device", 0).await;
         fate(&target, removal, false).await.unwrap();
         target
-            .apply_downloaded::<Record>(write.clone().into(), at(30 * DAY + 1))
+            .apply_downloaded::<Record>(
+                write.clone().into(),
+                crate::test_utils::published(at(30 * DAY + 1)),
+            )
             .await
             .unwrap();
         type Frame = (String, Vec<u8>, i64, Vec<u8>);
@@ -865,14 +883,20 @@ mod retirement_replay {
         let dropping = fresh.schema(notes(), NOTES).await.unwrap();
         retire(&dropping, created.device, 1, "device", 0).await;
         dropping
-            .apply_downloaded::<Record>(h.creation.clone().into(), at(30 * DAY + 1))
+            .apply_downloaded::<Record>(
+                h.creation.clone().into(),
+                crate::test_utils::published(at(30 * DAY + 1)),
+            )
             .await
             .unwrap();
         let dropped = frames(&dropping, Audience::Store).await;
 
         retire(target, created.device, 1, "device", 0).await;
         target
-            .apply_downloaded::<Record>(h.creation.clone().into(), at(30 * DAY + 1))
+            .apply_downloaded::<Record>(
+                h.creation.clone().into(),
+                crate::test_utils::published(at(30 * DAY + 1)),
+            )
             .await
             .unwrap();
         assert_eq!(count(target, "notes"), 0);

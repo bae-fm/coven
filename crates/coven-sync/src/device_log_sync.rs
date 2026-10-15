@@ -247,6 +247,16 @@ impl DeviceLogSync {
             if !uploadable(&local.log, state.breaking_version, &head) {
                 break;
             }
+            // Every attempt, first or retried, verifies with the key its
+            // recorded view binds to this member (§10, D5).
+            crate::object_author::check_signer(
+                &member,
+                crate::object_author::recorded_signer(
+                    &local.log,
+                    &head.store_log_read,
+                    &member.member(),
+                ),
+            )?;
             let store_key = crate::key_introductions::newest(&local.log, &Audience::Store)
                 .expect("checked store membership");
             let ring = self
@@ -323,7 +333,9 @@ impl DeviceLogSync {
             .member_keys
             .read()?
             .ok_or(coven_storage::StorageFailure::MemberKeysMissing)?;
-        crate::write_seal::check_member(&local.log, &member, local.device)?;
+        // Reading needs only the registered device; sending also needs
+        // current credentials (§10).
+        crate::write_seal::check_device(&local.log, &member, local.device)?;
         let key = crate::key_introductions::newest(&local.log, &Audience::Store)
             .expect("checked membership");
         let ring = self

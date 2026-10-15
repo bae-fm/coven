@@ -440,7 +440,8 @@ async fn an_initial_post_with_own_uploads_claims_only_the_empty_past() {
     .unwrap()
     .unwrap();
     assert!(posted.writes.0.is_empty());
-    assert!(posted.store_log.0.is_empty());
+    let applied = devices[0].db.store_log().await.unwrap();
+    assert_eq!(posted.store_log, applied.positions());
     assert!(posted.fingerprints.is_empty());
     devices[0].writes.upload_writes().await.unwrap();
     assert!(devices[0].writes.post_positions().await.unwrap());
@@ -469,16 +470,17 @@ async fn waiting_author_and_key_reuse_retained_bytes_after_the_prerequisite_arri
     let device = &mut devices[0];
     let mut peer = device.writes.current_positions().await.unwrap().unwrap();
     peer.device = DeviceId(2);
+    // Its signed view names device 2's registration, not yet applied (D9).
+    peer.store_log.0[0].number += 1;
+    let registration = crate::store_log_object::path(STORE_ID, peer.store_log.0[0]);
+    let waits = Reason::Waits(crate::Prerequisite::Object(registration));
     let path = ObjectPath::positions(STORE_ID, peer.device);
     storage
         .replace(&path, &signed_positions(device, peer))
         .await
         .unwrap();
     device.writes.observe_positions().await.unwrap();
-    assert!(pending(device)
-        .await
-        .iter()
-        .any(|r| r.reason == Reason::Waits(crate::Prerequisite::DeviceRegistration(DeviceId(2)))));
+    assert!(pending(device).await.iter().any(|r| r.reason == waits));
     let reads = storage.reads().await;
     device.writes.observe_positions().await.unwrap();
     assert_eq!(storage.reads().await, reads);

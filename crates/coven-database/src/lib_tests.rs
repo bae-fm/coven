@@ -396,7 +396,7 @@ impl crate::Database {
     ) -> Result<crate::ApplyOutcome, DbError> {
         self.apply_downloaded::<crate::pending::tests::Record>(
             write,
-            coven_format::value::StorageTime::UNIX_EPOCH,
+            crate::test_utils::published(coven_format::value::StorageTime::UNIX_EPOCH),
         )
         .await
     }

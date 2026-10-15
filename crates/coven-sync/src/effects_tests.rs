@@ -478,27 +478,6 @@ fn a_dropped_replacement_restores_the_old_id_without_rejudging_recorded_pasts() 
     ));
 }
 
-#[test]
-fn a_member_key_replacement_is_not_yet_authorized_by_any_view() {
-    let mut h = household(Admin, Member);
-    // Sentinel coverage until T105 replays replacements (§9).
-    h.all(
-        1,
-        1,
-        StoreChange::ReplaceMemberKeys {
-            member: member(1),
-            keys: keys(3),
-        },
-    );
-    h.every_order(|r| {
-        assert_eq!(
-            r.entries[&h.entries[5].position],
-            coven_database::EntryOutcome::Dropped(coven_database::DropReason::NotAllowed)
-        );
-        assert_eq!(r.state.members[&member(1)].keys, keys(1));
-    });
-}
-
 /// The pair an addition of `member` uses in `log`'s view: an active member's
 /// own, or else the first pair sharing no key with one that view bound, as a
 /// removed member's return needs (§9).

@@ -1,0 +1,97 @@
+//! Which kept entries retire a received write (§10, D5): removal of its
+//! device or member, replacement of its device id, and each unread
+//! replacement of its owner's keys installing another signing key. A key
+//! replacement retires no device: its member's device logs continue.
+
+use crate::{
+    sqlite::DatabaseConnection, store_log_tables::entry_id, write_landing::Retirement, DbError,
+};
+use coven_crypto::SigningKey;
+use coven_format::{store_log::StoreChange, write::WriteHeader};
+use rusqlite::params;
+
+/// The columns `_coven_store_log` keeps for an entry that can retire writes:
+/// the device a removal or device replacement retires, the member a removal
+/// retires, and a member-key replacement's target and new signing key (§10).
+#[derive(Default)]
+pub(crate) struct Retires {
+    pub(crate) device: Option<Vec<u8>>,
+    pub(crate) member: Option<Vec<u8>>,
+    pub(crate) keys_member: Option<Vec<u8>>,
+    pub(crate) keys_signing: Option<Vec<u8>>,
+}
+
+pub(crate) fn retires(entry: &coven_format::store_log::StoreLogEntry) -> Retires {
+    match &entry.change {
+        StoreChange::RemoveDevice { device }
+        | StoreChange::AddDevice {
+            replaces: Some(device),
+            ..
+        } => Retires {
+            device: Some(device.0.to_be_bytes().to_vec()),
+            ..Retires::default()
+        },
+        StoreChange::RemoveMember { member } => Retires {
+            member: Some(member.0.as_bytes().to_vec()),
+            ..Retires::default()
+        },
+        StoreChange::ReplaceMemberKeys { member, keys } => Retires {
+            keys_member: Some(member.0.as_bytes().to_vec()),
+            keys_signing: Some(keys.signing.as_bytes().to_vec()),
+            ..Retires::default()
+        },
+        _ => Retires::default(),
+    }
+}
+
+/// Every entry retiring this write, except permanently late ones, with
+/// whether replay keeps it and whether it is final (stored strictly before the
+/// horizon, §9). A key replacement retires it only when the write's own
+/// `store_log_read` did not cover it and it installs a signing key other than
+/// `signer`, the key current for the owner in that recorded view: a read
+/// replacement cannot retire a later key current there, and the winner's
+/// own key is current (`OldKeyObjects.retires`).
+pub(crate) fn candidates(
+    db: &DatabaseConnection,
+    header: &WriteHeader,
+    signer: &SigningKey,
+) -> Result<Vec<(Retirement, bool, bool)>, DbError> {
+    let horizon = crate::store_log_tables::horizon(db)?;
+    let device = header.position.device;
+    let rows = db.query(
+        "SELECT device,number,stored_at,outcome='kept',0 FROM _coven_store_log
+         WHERE retires_device=?1 AND outcome<>'late'
+         UNION ALL
+         SELECT device,number,stored_at,outcome='kept',0 FROM _coven_store_log
+         WHERE retires_member=(SELECT member FROM _coven_devices WHERE device=?1) AND outcome<>'late'
+         UNION ALL
+         SELECT device,number,stored_at,outcome='kept',1 FROM _coven_store_log
+         WHERE keys_member=(SELECT member FROM _coven_devices WHERE device=?1) AND outcome<>'late'
+           AND keys_signing<>?2",
+        params![device.0.to_be_bytes().as_slice(), signer.as_bytes().as_slice()],
+        |r| {
+            Ok((
+                entry_id(r, 0)?,
+                r.get::<_, Vec<u8>>(2)?,
+                r.get::<_, bool>(3)?,
+                r.get::<_, bool>(4)?,
+            ))
+        },
+    )?;
+    rows.into_iter()
+        // A device retirement counts read or not: one the write's own view
+        // kept already refused it, and one that view dropped is judged by
+        // time alone (`read_retirement_judged_by_time`). A key replacement
+        // counts only unread.
+        .filter(|(entry, _, _, key)| !key || !header.store_log_read.covers(*entry))
+        .map(|(entry, stored, kept, _)| {
+            let stored_at = crate::storage_time::decode(&stored)?;
+            let fixed = horizon.is_some_and(|h| stored_at < h);
+            Ok((Retirement { entry, stored_at }, kept, fixed))
+        })
+        .collect()
+}
+
+#[cfg(test)]
+#[path = "write_retirement_tests.rs"]
+mod tests;

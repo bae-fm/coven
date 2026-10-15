@@ -1,10 +1,14 @@
 import StorelogJson
 import CovenStorelogData.MemberKeySelection
+import CovenStorelog.OldKeyObjects
 
 /-! Compare decoded store-log entries and key-copy routing with the keyed
 model. Each entry carries its stable author, the signing key that actually
-signed it and, for creation and addition, its initial public pair; key-copy
-recipients carry their member and exact sealing key. -/
+signed it and, for creation, addition and replacement, its public pair;
+key-copy recipients carry their member and exact sealing key. Optional
+`received` names the received entry set (all entries by default), and
+optional `writes` are old-key write objects judged by `OldKeyObjects`, with
+`horizon` the stored finality horizon their window verdicts are final by. -/
 open Lean CovenStorelog CovenStorelogData
 
 private def readKeys (j : Json) : Except String CurrentReplay.Keyed.MemberKeys := do
@@ -38,6 +42,16 @@ private def readEntry (j : Json) : Except String CurrentReplay.Keyed.Entry := do
     ← StorelogJson.nat j "device", ← j.getObjValAs? (List Nat) "past",
     ← readAction (← j.getObjVal? "action")⟩
 
+private def readWrite (j : Json) : Except String CurrentReplay.Keyed.OldKeyObjects.Write := do
+  pure ⟨← StorelogJson.nat j "author", ← StorelogJson.nat j "signer",
+    ← StorelogJson.nat j "device", ← j.getObjValAs? (List Nat) "read",
+    ← StorelogJson.nat j "stored"⟩
+
+private def field? (j : Json) (name : String) : Option Json :=
+  match j.getObjVal? name with
+  | .ok value => some value
+  | .error _ => none
+
 private def sortedPairs (xs : List (List Nat)) : List (List Nat) :=
   xs.mergeSort fun a b => decide (a.headD 0 ≤ b.headD 0)
 
@@ -52,9 +66,48 @@ private def run (j : Json) : Except String Json := do
   let H : CurrentReplay.Keyed.History := ⟨fun e => entries[e]?.getD root,
     fun e => stored[e]?.getD stored[0]!, fun e => attempted[e]?.getD attempted[0]!⟩
   if !CurrentReplay.Keyed.metadataValid H n then throw "history violates Keyed.metadataValid"
-  let received := entrySet (List.range n)
+  let receivedList ← match field? j "received" with
+    | some list => fromJson? (α := List Nat) list
+    | none => pure (List.range n)
+  let received := entrySet receivedList
   let views := CurrentReplay.Keyed.authorViews H W n n
   let r := CurrentReplay.Keyed.resolve H W n received
+  -- Authority in each entry's recorded view, and every conflicting pair
+  -- with its preference both ways (`Keyed.authorized`, `conflict`, `prefer`).
+  let authorized := (List.range n).map fun e =>
+    CurrentReplay.Keyed.authorized (views e) (H.log e)
+  let conflicts := ((List.range n).flatMap fun a => (List.range n).filterMap fun b =>
+    if a < b && CurrentReplay.Keyed.conflict H.log views a b then
+      some [a, b, if CurrentReplay.Keyed.prefer H.log views a b then 1 else 0,
+        if CurrentReplay.Keyed.prefer H.log views b a then 1 else 0]
+    else none)
+  let rawWrites ← match field? j "writes" with
+    | some list => fromJson? (α := Array Json) list
+    | none => pure #[]
+  let writeList ← rawWrites.mapM readWrite
+  let writes : CurrentReplay.Keyed.OldKeyObjects.Writes := fun w =>
+    writeList[w]?.getD ⟨0, 0, 0, [], 0⟩
+  let horizon ← match field? j "horizon" with
+    | some h => some <$> fromJson? (α := Nat) h
+    | none => pure none
+  let judged := (List.range writeList.size).map fun w =>
+    let obj := writes w
+    let timely := CurrentReplay.Keyed.OldKeyObjects.timely H W r obj
+    -- `Final.horizon_finalizes_window` and `horizon_finalizes_replacement`.
+    -- Without a horizon nothing is final.
+    let fixed := match horizon with
+      | none => false
+      | some horizon => decide (obj.stored ≤ horizon + W) ||
+          (!timely && r.kept.any fun e => CurrentReplay.Keyed.OldKeyObjects.retires H obj e &&
+            decide (H.stored e < horizon) && !decide (obj.stored ≤ H.stored e + W))
+    Json.mkObj [
+      ("authorized", toJson (CurrentReplay.Keyed.OldKeyObjects.authorized H W n
+        (fun _ => true) writes w)),
+      ("timely", toJson timely),
+      ("counted", toJson (CurrentReplay.Keyed.OldKeyObjects.countInReplay H W n received
+        (fun _ => true) writes (fun _ => true) w)),
+      ("current", toJson (CurrentReplay.Keyed.OldKeyObjects.writerCurrent r.state obj)),
+      ("fixed", toJson fixed)]
   -- The key each entry's recorded view selects to verify it.
   let signatures := (List.range n).map fun e =>
     Json.mkObj [("current", toJson (CurrentReplay.Keyed.signatureCurrent (views e) (H.log e))),
@@ -90,7 +143,9 @@ private def run (j : Json) : Except String Json := do
     ("dropped", toJson (StorelogJson.sorted r.dropped)),
     ("current", toJson (copies.map fun (_, recipient) =>
       KeySelection.MemberKeys.currentCredential r.state recipient)),
-    ("selected", toJson selected)])
+    ("selected", toJson selected),
+    ("authorized", toJson authorized), ("conflicts", toJson conflicts),
+    ("writes", toJson judged)])
 
 def main : IO UInt32 := do
   let input ← (← IO.getStdin).readToEnd

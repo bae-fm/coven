@@ -621,8 +621,8 @@ async fn late_edits_to_a_migration_deleted_row_lose_to_its_delete() {
         db.receive(edit.clone().into()).await.unwrap();
         db.apply_downloaded::<crate::pending::tests::Record>(
             dropped.clone().into(),
-            coven_format::value::StorageTime::since_epoch(std::time::Duration::from_secs(
-                30 * DAY + 1,
+            crate::test_utils::published(coven_format::value::StorageTime::since_epoch(
+                std::time::Duration::from_secs(30 * DAY + 1),
             )),
         )
         .await

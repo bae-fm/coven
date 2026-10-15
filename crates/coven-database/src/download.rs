@@ -89,7 +89,7 @@ pub(crate) fn apply<P: crate::PendingValue>(
     database: &DatabaseConnection,
     schema: &WriteSchema,
     download: DownloadedWrite,
-    stored_at: coven_format::value::StorageTime,
+    published: crate::Published,
     files: &crate::file_write::FileWrite<'_>,
 ) -> Result<ApplyOutcome, DbError> {
     source_wait(database.transaction(|database| {
@@ -132,7 +132,7 @@ pub(crate) fn apply<P: crate::PendingValue>(
             database,
             schema,
             header,
-            stored_at,
+            published,
             &opened_audiences(&download),
             true,
         )?;

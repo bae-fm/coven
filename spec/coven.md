@@ -3169,9 +3169,12 @@ Carol's tablet:
 - An old-key write's window becomes final with a kept replacement and the
   final entry prefix through its storage time, including ties (§10).
   Before then, replacement decisions and dependent rows, source verdicts
-  and losses change in the same replay transaction. The checked member-key
-  proofs assume this final prefix; the general horizon theorem has not been
-  extended to keyed replay ([C13](proofs/storelog.md#c13-stable-members-and-replaceable-keys--checked-proposal)).
+  and losses change in the same replay transaction. The horizon supplies
+  that final prefix for the keyed replay itself: every entry stored before
+  `H` keeps its fate, so a kept retiring replacement stored before `H` fixes
+  the verdict, and so does `H` reaching the write's storage time minus 30
+  days
+  ([`keyed_horizon_stability`, `horizon_finalizes_replacement`, `horizon_finalizes_window`](proofs/storelog/CovenStorelog/KeyedHorizon.lean)).
 - Concurrent entries, and what applies:
 
   ```

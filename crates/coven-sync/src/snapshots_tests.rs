@@ -412,7 +412,7 @@ async fn concurrent_snapshots_covering_different_pasts_converge_from_either_one(
     let first = a.db.test_queued_writes().await.unwrap().remove(0);
     b.db.apply_downloaded::<crate::PendingRecord>(
         first.into(),
-        coven_format::value::StorageTime::UNIX_EPOCH,
+        coven_database::test_utils::published(coven_format::value::StorageTime::UNIX_EPOCH),
     )
     .await
     .unwrap();
@@ -427,13 +427,13 @@ async fn concurrent_snapshots_covering_different_pasts_converge_from_either_one(
     upload(&b, &storage).await;
     a.db.apply_downloaded::<crate::PendingRecord>(
         b_write.into(),
-        coven_format::value::StorageTime::UNIX_EPOCH,
+        coven_database::test_utils::published(coven_format::value::StorageTime::UNIX_EPOCH),
     )
     .await
     .unwrap();
     b.db.apply_downloaded::<crate::PendingRecord>(
         a_write.into(),
-        coven_format::value::StorageTime::UNIX_EPOCH,
+        coven_database::test_utils::published(coven_format::value::StorageTime::UNIX_EPOCH),
     )
     .await
     .unwrap();
@@ -526,7 +526,7 @@ async fn deleted_history_reload_preserves_waiting_numbers_and_late_writes_conver
     write_rows(&a, 0, 1, 17, Audience::Store).await;
     b.db.apply_downloaded::<crate::PendingRecord>(
         a.db.test_queued_writes().await.unwrap().remove(0).into(),
-        coven_format::value::StorageTime::UNIX_EPOCH,
+        coven_database::test_utils::published(coven_format::value::StorageTime::UNIX_EPOCH),
     )
     .await
     .unwrap();

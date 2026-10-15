@@ -328,7 +328,7 @@ async fn queued_creation_rejects_a_copy_with_the_right_identity_and_wrong_materi
         Err(SyncError::Storage(_))
     ));
     let mut upload = a.db.local_store_log().await.unwrap().upload.unwrap();
-    object::seal_upload(store(1), &upload, None, &a.member).unwrap();
+    object::seal_upload(store(1), &StoreLog::default(), &upload, None, &a.member).unwrap();
     let wrong = StoreKey::from_bytes(key(1), [0x91; 32]);
     assert_ne!(wrong.hash(), key_hash);
     upload.sealing.keys[0].bytes = keys::store_copy(
@@ -339,7 +339,7 @@ async fn queued_creation_rejects_a_copy_with_the_right_identity_and_wrong_materi
     )
     .unwrap();
     assert!(
-        matches!(object::seal_upload(store(1), &upload, None, &a.member),
+        matches!(object::seal_upload(store(1), &StoreLog::default(), &upload, None, &a.member),
         Err(SyncError::Key(coven_crypto::MaterialError::StoreKeyConflict(id))) if id == key(1))
     );
 }
@@ -638,6 +638,9 @@ async fn damaged_entries_block_only_their_device_and_retain_each_cause() {
         };
         assert_eq!(entry_reads(storage.reads().await), entry_reads(before));
         c.writes().post_positions().await.unwrap();
+        // C's post names B's entry in its signed view; Ana applies it before
+        // the post can verify (D9).
+        a.sync.sync_store_log().await.unwrap();
         a.writes().download_writes().await.unwrap();
         assert_eq!(
             a.db.pending::<crate::PendingRecord>().await.unwrap(),
@@ -925,7 +928,7 @@ async fn a_waiting_entry_reseals_with_its_recorded_key_after_rotation() {
         .unwrap();
     a.restart(storage.clone()).await;
     assert_eq!(a.newest(Audience::Store).await, key(2));
-    assert_eq!(a.reseal(&pending), first);
+    assert_eq!(a.reseal(&pending).await, first);
     // Remove the fixture's first copy so the retry must actually reproduce it.
     storage.delete(&path).await.unwrap();
     a.sync().await;

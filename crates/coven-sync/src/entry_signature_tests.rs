@@ -32,7 +32,7 @@ use crate::store_log_sync::tests as fixture;
 use crate::tests::{audience_number, key_number, run_lean, Generator};
 use crate::Refusal;
 
-const STORE: StoreId = StoreId(uuid::Uuid::from_u128(1));
+pub(crate) const STORE: StoreId = StoreId(uuid::Uuid::from_u128(1));
 /// Members the generator may add; member 5 is never added.
 const MEMBERS: u8 = 5;
 /// The id the two concurrent addition leaves add.
@@ -76,25 +76,25 @@ fn device_of(author: u8) -> u64 {
     }
 }
 
-fn store_key() -> StoreKey {
+pub(crate) fn store_key() -> StoreKey {
     StoreKey::from_bytes(history::key(1), [17; 32])
 }
 
 /// Small model numbers for ids and public keys, in first-seen order.
 #[derive(Default)]
-struct Numbers {
+pub(crate) struct Numbers {
     signing: Vec<SigningKey>,
     sealing: Vec<SealingKey>,
 }
 
 impl Numbers {
-    fn member(id: &MemberId) -> u64 {
+    pub(crate) fn member(id: &MemberId) -> u64 {
         (0..=CONCURRENT)
             .find(|&n| history::member(n) == *id)
             .map(u64::from)
             .expect("generated member")
     }
-    fn signing(&mut self, key: SigningKey) -> usize {
+    pub(crate) fn signing(&mut self, key: SigningKey) -> usize {
         self.signing
             .iter()
             .position(|k| *k == key)
@@ -103,7 +103,7 @@ impl Numbers {
                 self.signing.len() - 1
             })
     }
-    fn sealing(&mut self, key: SealingKey) -> usize {
+    pub(crate) fn sealing(&mut self, key: SealingKey) -> usize {
         self.sealing
             .iter()
             .position(|k| *k == key)
@@ -112,7 +112,7 @@ impl Numbers {
                 self.sealing.len() - 1
             })
     }
-    fn keys(&mut self, keys: coven_crypto::MemberPublicKeys) -> Value {
+    pub(crate) fn keys(&mut self, keys: coven_crypto::MemberPublicKeys) -> Value {
         json!({"signing": self.signing(keys.signing), "sealing": self.sealing(keys.sealing)})
     }
 }
@@ -392,7 +392,7 @@ fn readd(n: u8, role: MemberRole, variant: usize) -> StoreChange {
     }
 }
 
-fn action(entry: &StoreLogEntry, numbers: &mut Numbers) -> Value {
+pub(crate) fn action(entry: &StoreLogEntry, numbers: &mut Numbers) -> Value {
     let commitment =
         |key: KeyId, hash: &[u8; 32]| json!({"key": key_number(key), "key_hash": hash});
     match &entry.change {

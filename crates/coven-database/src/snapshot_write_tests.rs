@@ -128,7 +128,7 @@ pub(crate) fn stream(
 ) -> crate::DownloadedWriteStream<std::io::Cursor<Vec<u8>>> {
     let encoder = coven_format::write_stream::WriteEncoder::new(record).unwrap();
     crate::DownloadedWriteStream {
-        stored_at: coven_format::value::StorageTime::UNIX_EPOCH,
+        published: crate::test_utils::published(coven_format::value::StorageTime::UNIX_EPOCH),
         header: encoder.header().clone(),
         parts: (0..record.parts.len())
             .map(|index| {

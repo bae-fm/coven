@@ -47,6 +47,9 @@ pub(crate) enum Authority {
         target: MemberId,
         s3: bool,
     },
+    /// Replacing a member's keys: their own, or another member's as an admin.
+    /// Self is classified by stable id even when the member is an admin (§9).
+    Keys(MemberId),
 }
 
 impl Authority {
@@ -74,6 +77,14 @@ impl Authority {
                     && member(state, target).is_some()
                     && (target == author || (*s3 && admin(state, author)))
             }
+            // Both must be members in the recorded view; the target must
+            // also exist at the replacement's replay position (§9,
+            // `Keyed.replacement_authority`).
+            Self::Keys(target) => {
+                member(state, author).is_some()
+                    && member(state, target).is_some()
+                    && (target == author || admin(state, author))
+            }
         };
         if allowed {
             Ok(())
@@ -82,14 +93,10 @@ impl Authority {
         }
     }
 
-    fn for_change(change: &StoreChange) -> Option<Self> {
+    fn for_change(change: &StoreChange) -> Self {
         use StoreChange::*;
-        Some(match change {
-            // Sentinel: removed in T105, which introduces the keyed replay of
-            // member-key replacements (self or another admin, fresh keys, and
-            // their own conflicts and landing windows). Until then no view
-            // authorizes one, so its entry drops as `NotAllowed`.
-            ReplaceMemberKeys { .. } => return None,
+        match change {
+            ReplaceMemberKeys { member, .. } => Self::Keys(*member),
             CreateStore { .. } => Self::Creation,
             AddMember { .. } | RemoveMember { .. } | ChangeRole { .. } => Self::Admin,
             SetAccess { member, access } => Self::Access {
@@ -105,7 +112,7 @@ impl Authority {
             | AddCircleMember { circle, .. }
             | RemoveCircleMember { circle, .. } => Self::Circle(*circle),
             Reset { snapshot } => Self::reset(&snapshot.audience),
-        })
+        }
     }
 
     pub(crate) fn audience(audience: &Audience) -> Self {
@@ -133,8 +140,7 @@ fn check_change(view: &StoreLogState, author: &MemberId, change: &StoreChange) -
     #[cfg(test)]
     crate::replay::tests::author_check();
     use StoreChange::*;
-    if Authority::for_change(change).is_none_or(|authority| authority.check(view, author).is_err())
-    {
+    if Authority::for_change(change).check(view, author).is_err() {
         return StoreLogCheck::NotAllowed;
     }
     // An addition of an active id only repeats it: keys change by replacement
@@ -156,6 +162,14 @@ fn check_change(view: &StoreLogState, author: &MemberId, change: &StoreChange) -
             Some(_) => {}
             None if !fresh(view, keys) => return StoreLogCheck::KeysAlreadyUsed,
             None => {}
+        }
+    }
+    // A replacement must bind a pair sharing neither key with any pair its
+    // view bound, the target's current pair included: replacing a leaked
+    // credential with itself revokes nothing (`Keyed.freshKeys`).
+    if let ReplaceMemberKeys { keys, .. } = change {
+        if !fresh(view, keys) {
+            return StoreLogCheck::KeysAlreadyUsed;
         }
     }
     // Only the old id's own member replaces it, with a distinct new id (D6).
@@ -296,7 +310,17 @@ pub(crate) fn validate_effect(
     }
     let missing = match change {
         RotateKey { .. } | CreateStore { .. } | AddMember { .. } => None,
-        ReplaceMemberKeys { .. } => unreachable!("no view authorizes a key replacement"),
+        // Replacement never restores a removed member (`removed_cannot_be_replaced`).
+        ReplaceMemberKeys { member: id, keys } => match member(state, id) {
+            None => Some(EntryTarget::Member(*id)),
+            // At its replay position the pair must still be unbound, unless
+            // the target already holds exactly it: an equal-payload winner
+            // keeps the pair its defeated contender installed (`Keyed.effect`).
+            Some(target) if target.keys != *keys && !fresh(state, keys) => {
+                return Err(DropReason::KeysAlreadyUsed)
+            }
+            Some(_) => None,
+        },
         SetAccess { member: id, .. } => member(state, id)
             .is_none()
             .then_some(EntryTarget::Member(*id)),
@@ -539,7 +563,13 @@ pub(crate) fn apply_effect(next: &mut StoreLogState, view: &StoreLogCheck, entry
                 .expect("matched boundary entry")
                 .apply(next);
         }
-        ReplaceMemberKeys { .. } => unreachable!("no view authorizes a key replacement"),
+        // Only the pair changes: role, access, devices and circle memberships
+        // stay (`replacement_preserves_membership`). The pair stays bound for
+        // good, so no later binding may reuse either key (`Keyed.effect`).
+        ReplaceMemberKeys { member: id, keys } => {
+            next.members.get_mut(id).expect("checked member").keys = *keys;
+            next.bound_keys.insert(*keys);
+        }
     }
 }
 

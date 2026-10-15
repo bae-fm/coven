@@ -588,6 +588,7 @@ impl StoreLogSync {
             .ok_or(coven_database::DbError::DamagedDatabase)?;
         let input = io::SnapshotInput::open(&self.directory, name)?;
         let storage = self.storage.as_deref().ok_or(SyncError::NoStorage)?;
+        self.check_snapshot_signer(&input).await?;
         let recorded = session.clone();
         let mut transfer = SnapshotTransfer {
             sync: self,
@@ -621,6 +622,31 @@ impl StoreLogSync {
         }
         self.save_snapshot_task(record, &task, 2).await?;
         Ok(Progress::Advanced)
+    }
+
+    /// A snapshot's both signatures are fixed with its sealed file. Each
+    /// request, first or retried, needs that signer to be this member's key
+    /// in the snapshot's signed coverage and its current key now: current
+    /// custody never sends a file signed under replaced keys (§10, D9).
+    async fn check_snapshot_signer(&self, input: &io::SnapshotInput) -> Result<(), SyncError> {
+        use coven_format::sealed_snapshot::SnapshotObjectPrefix;
+        let member = self.operation_member()?;
+        let local = self.database.local_store_log().await?;
+        crate::write_seal::check_member(&local.log, &member, local.device)?;
+        let bytes = input.read_at(
+            0,
+            (SnapshotObjectPrefix::MAX_SIGNED_PREFIX as u64).min(input.size()) as usize,
+        )?;
+        let length = SnapshotObjectPrefix::length(&bytes)?;
+        let (prefix, _) = SnapshotObjectPrefix::decode_signed(
+            bytes
+                .get(..length + 64)
+                .ok_or(coven_format::Error::Truncated)?,
+        )?;
+        crate::object_author::check_signer(
+            &member,
+            crate::object_author::recorded_signer(&local.log, &prefix.store_log, &member.member()),
+        )
     }
 
     async fn finish_snapshot(

@@ -18,7 +18,7 @@ async fn receiver(a: &Fixture, file: &FileRef) -> (Fixture, FileRef) {
         b.database
             .apply_downloaded::<PendingRecord>(
                 write.into(),
-                coven_format::value::StorageTime::UNIX_EPOCH,
+                coven_database::test_utils::published(coven_format::value::StorageTime::UNIX_EPOCH),
             )
             .await
             .unwrap();
@@ -178,7 +178,7 @@ async fn an_authenticated_object_with_other_content_is_present_but_unreadable() 
         b.database
             .apply_downloaded::<PendingRecord>(
                 write.into(),
-                coven_format::value::StorageTime::UNIX_EPOCH,
+                coven_database::test_utils::published(coven_format::value::StorageTime::UNIX_EPOCH),
             )
             .await
             .unwrap();

@@ -1,9 +1,14 @@
-use coven_database::{DropReason, EntryOutcome};
-use coven_format::store_log::{MemberRole::Admin, StoreChange};
+use coven_database::{DeviceState, DropReason, EntryOutcome, EntryTarget, StoreLogCheck};
+use coven_format::store_log::{
+    MemberPublicKeys,
+    MemberRole::{Admin, Member},
+    StoreChange,
+};
+use coven_foundation::id_source::DeviceId;
 use coven_merge::Audience;
 
 use crate::{
-    effects::tests::{raise, snapshot},
+    effects::tests::{add_with, raise, snapshot},
     replay::tests::*,
 };
 
@@ -581,4 +586,274 @@ fn additions_of_one_id_combine_only_with_the_same_keys_role_and_access() {
             });
         }
     }
+}
+
+// Member-key replacements (§9, D6; Appendix C13 `Keyed`): authority in the
+// recorded view, fresh pairs, the replacement conflicts and their winners,
+// and the target required at the replay position.
+
+/// Replace member `m`'s pair with fixture pair `k`.
+pub(crate) fn rekey(m: u8, k: u8) -> StoreChange {
+    StoreChange::ReplaceMemberKeys {
+        member: member(m),
+        keys: keys(k),
+    }
+}
+
+fn outcome(h: &History, r: &coven_database::StoreLogReplay, index: usize) -> EntryOutcome {
+    r.entries[&h.entries[index].position].clone()
+}
+
+fn beaten_by(h: &History, index: usize) -> EntryOutcome {
+    EntryOutcome::Dropped(DropReason::BeatenBy(h.entries[index].position))
+}
+
+/// Ben replaces his own pair: only the pair changes, and both pairs stay
+/// bound (`replacement_preserves_membership`, `Keyed.effect`).
+#[test]
+fn a_replacement_changes_only_the_pair_and_binds_it_for_good() {
+    let mut h = household(Member, Member);
+    h.all(1, 1, make(0, "Gifts"));
+    h.all(1, 1, rekey(1, 7));
+    h.every_order(|r| {
+        let ben = &r.state.members[&member(1)];
+        assert_eq!((ben.keys, ben.role, ben.removed), (keys(7), Member, false));
+        assert_eq!(r.state.devices[&DeviceId(1)].state, DeviceState::Active);
+        assert!(r.state.circles[&circle(0)].members.contains(&member(1)));
+        assert!(r.state.bound_keys.contains(&keys(1)));
+        assert!(r.state.bound_keys.contains(&keys(7)));
+        assert!(h.drops(r).is_empty());
+    });
+}
+
+/// The author replaces their own keys or is an admin in the recorded view;
+/// another member cannot, and a removed member is no target
+/// (`replacement_authority`).
+#[test]
+fn only_the_member_or_an_admin_in_the_recorded_view_replaces_keys() {
+    for (author, device, allowed) in [(2, 2, false), (0, 0, true), (1, 1, true)] {
+        let mut h = household(Member, Member);
+        h.all(author, device, rekey(1, 7));
+        h.every_order(|r| {
+            let expected = if allowed {
+                (EntryOutcome::Kept, keys(7))
+            } else {
+                (EntryOutcome::Dropped(DropReason::NotAllowed), keys(1))
+            };
+            assert_eq!(
+                (outcome(&h, r, 5), r.state.members[&member(1)].keys),
+                expected
+            );
+        });
+    }
+    let mut h = household(Member, Member);
+    h.all(0, 0, remove(1));
+    h.all(0, 0, rekey(1, 7));
+    h.every_order(|r| {
+        assert_eq!(
+            outcome(&h, r, 6),
+            EntryOutcome::Dropped(DropReason::NotAllowed)
+        );
+        assert_eq!(r.state.members[&member(1)].keys, keys(1));
+    });
+}
+
+/// Neither key may repeat a pair the view bound: the member's current pair,
+/// another member's keys, or a pair an earlier replacement retired. Reusing
+/// a leaked credential would revoke nothing (`Keyed.freshKeys`).
+#[test]
+fn a_replacement_needs_keys_no_pair_has_bound() {
+    use crate::effects::validate_change;
+    let carol = keys(2);
+    for pair in [
+        keys(1),
+        carol,
+        MemberPublicKeys {
+            signing: keys(7).signing,
+            sealing: carol.sealing,
+        },
+        MemberPublicKeys {
+            signing: carol.signing,
+            sealing: keys(7).sealing,
+        },
+    ] {
+        let mut h = household(Member, Member);
+        let change = StoreChange::ReplaceMemberKeys {
+            member: member(1),
+            keys: pair,
+        };
+        assert_eq!(
+            validate_change(&replay(&h.entries).state, &member(1), &change),
+            Err(DropReason::KeysAlreadyUsed)
+        );
+        h.all(1, 1, change);
+        h.every_order(|r| {
+            assert_eq!(
+                outcome(&h, r, 5),
+                EntryOutcome::Dropped(DropReason::KeysAlreadyUsed)
+            );
+            assert_eq!(r.state.members[&member(1)].keys, keys(1));
+        });
+    }
+    // Ben's retired pair can neither return to him nor go to a new id.
+    let mut h = household(Member, Member);
+    h.all(1, 1, rekey(1, 7));
+    h.all(1, 1, rekey(1, 1));
+    h.all(0, 0, add_with(3, keys(1)));
+    h.every_order(|r| {
+        let reused = EntryOutcome::Dropped(DropReason::KeysAlreadyUsed);
+        assert_eq!(
+            (outcome(&h, r, 6), outcome(&h, r, 7)),
+            (reused.clone(), reused)
+        );
+        assert_eq!(r.state.members[&member(1)].keys, keys(7));
+        assert!(!r.state.members.contains_key(&member(3)));
+    });
+}
+
+/// Concurrent replacements of one id: another admin beats self-replacement,
+/// classified by stable ids even when the member is an admin; otherwise the
+/// earlier wins (`admin_preferred`, `same_kind_timestamp`).
+#[test]
+fn another_admins_replacement_beats_self_replacement_then_the_earlier_wins() {
+    let all: Vec<usize> = (0..5).collect();
+    for ben in [Member, Admin] {
+        for self_first in [true, false] {
+            let mut h = household(ben, Admin);
+            if self_first {
+                h.push(1, 1, &all, rekey(1, 7));
+                h.push(0, 0, &all, rekey(1, 8));
+            } else {
+                h.push(0, 0, &all, rekey(1, 8));
+                h.push(1, 1, &all, rekey(1, 7));
+            }
+            let (admin, own) = if self_first { (6, 5) } else { (5, 6) };
+            h.every_order(|r| {
+                assert_eq!(r.state.members[&member(1)].keys, keys(8));
+                assert_eq!(outcome(&h, r, admin), EntryOutcome::Kept);
+                assert_eq!(outcome(&h, r, own), beaten_by(&h, admin));
+                // The losing pair was never bound by a kept entry.
+                assert!(!r.state.bound_keys.contains(&keys(7)));
+            });
+        }
+    }
+    // Two admins replacing Ben: the earlier timestamp wins.
+    let mut h = household(Member, Admin);
+    h.push(2, 2, &all, rekey(1, 7));
+    h.push(0, 0, &all, rekey(1, 8));
+    h.every_order(|r| {
+        assert_eq!(r.state.members[&member(1)].keys, keys(7));
+        assert_eq!(outcome(&h, r, 6), beaten_by(&h, 5));
+    });
+}
+
+/// Equal payloads are still two events and conflict; the winner may keep the
+/// pair its defeated contender installed first (`Keyed.effect`,
+/// `equal_payload_admin_wins`).
+#[test]
+fn equal_replacements_still_conflict_and_the_winner_keeps_the_pair() {
+    let all: Vec<usize> = (0..5).collect();
+    let mut h = household(Member, Admin);
+    h.push(1, 1, &all, rekey(1, 7));
+    h.push(0, 0, &all, rekey(1, 7));
+    h.every_order(|r| {
+        assert_eq!(r.state.members[&member(1)].keys, keys(7));
+        assert_eq!(outcome(&h, r, 6), EntryOutcome::Kept);
+        assert_eq!(outcome(&h, r, 5), beaten_by(&h, 6));
+    });
+    let mut h = household(Member, Admin);
+    h.push(0, 0, &all, rekey(1, 7));
+    h.push(2, 2, &all, rekey(1, 7));
+    h.every_order(|r| {
+        assert_eq!(outcome(&h, r, 6), beaten_by(&h, 5));
+    });
+}
+
+/// Removing the member beats every replacement of their keys, earlier or
+/// later; the pair stays the one the removal saw (`removal_beats_replacement`).
+#[test]
+fn removing_the_member_beats_every_replacement_of_their_keys() {
+    let all: Vec<usize> = (0..5).collect();
+    for (author, device) in [(1, 1), (2, 2)] {
+        for replacement_first in [true, false] {
+            let mut h = household(Member, Admin);
+            if replacement_first {
+                h.push(author, device, &all, rekey(1, 7));
+                h.push(0, 0, &all, remove(1));
+            } else {
+                h.push(0, 0, &all, remove(1));
+                h.push(author, device, &all, rekey(1, 7));
+            }
+            let (removal, replacement) = if replacement_first { (6, 5) } else { (5, 6) };
+            // A later replacement finds no target at its replay position; an
+            // earlier one loses the conflict.
+            let lost = if replacement_first {
+                beaten_by(&h, removal)
+            } else {
+                EntryOutcome::Dropped(DropReason::TargetGone(EntryTarget::Member(member(1))))
+            };
+            h.every_order(|r| {
+                let ben = &r.state.members[&member(1)];
+                assert_eq!((ben.keys, ben.removed), (keys(1), true));
+                assert_eq!(outcome(&h, r, replacement), lost);
+            });
+        }
+    }
+}
+
+/// A replacement conflicts with no role, access, device, circle or other
+/// member's change, and replacements of different members both apply.
+#[test]
+fn replacements_conflict_with_nothing_else() {
+    let mut h = household(Member, Admin);
+    h.all(1, 1, make(0, "Gifts"));
+    let all: Vec<usize> = (0..6).collect();
+    h.push(1, 1, &all, rekey(1, 7));
+    h.push(0, 0, &all, role(1, Admin));
+    h.push(2, 2, &all, rekey(2, 8));
+    h.push(1, 3, &all, device(3));
+    h.push(
+        0,
+        4,
+        &all,
+        crate::effects::tests::rotation(coven_merge::Audience::Store, 50),
+    );
+    h.every_order(|r| {
+        assert!(h.drops(r).is_empty());
+        let ben = &r.state.members[&member(1)];
+        assert_eq!((ben.keys, ben.role), (keys(7), Admin));
+        assert_eq!(r.state.members[&member(2)].keys, keys(8));
+        assert_eq!(r.state.devices[&DeviceId(3)].member, member(1));
+    });
+}
+
+/// A pair bound by a concurrent kept entry earlier in replay is no longer
+/// fresh at the replacement's position (`Keyed.effect`).
+#[test]
+fn a_pair_bound_earlier_in_replay_drops_the_replacement() {
+    let all: Vec<usize> = (0..5).collect();
+    let mut h = household(Member, Member);
+    h.push(0, 0, &all, add_with(3, keys(7)));
+    h.push(1, 1, &all, rekey(1, 7));
+    h.every_order(|r| {
+        assert_eq!(r.state.members[&member(3)].keys, keys(7));
+        assert_eq!(
+            outcome(&h, r, 6),
+            EntryOutcome::Dropped(DropReason::KeysAlreadyUsed)
+        );
+        assert_eq!(r.state.members[&member(1)].keys, keys(1));
+    });
+}
+
+/// Authorized in an older view, a replacement whose target is gone at its
+/// replay position does not restore it (`removed_cannot_be_replaced`).
+#[test]
+fn a_replacement_never_restores_a_removed_member() {
+    let mut h = household(Member, Member);
+    h.all(0, 0, remove(1));
+    let state = replay(&h.entries).state;
+    assert_eq!(
+        crate::effects::validate_effect(&state, &StoreLogCheck::Allowed, &member(0), &rekey(1, 7)),
+        Err(DropReason::TargetGone(EntryTarget::Member(member(1))))
+    );
 }

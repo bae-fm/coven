@@ -91,10 +91,12 @@ impl DeviceLogSync {
         };
         // The apply below holds the database writer; it reads only local input.
         stream.retain_rest().await?;
-        let (primary, download) =
-            ChannelParts::new(opened.header.clone(), &opens, object.stored_at);
-        let (references, input) =
-            ChannelParts::new(opened.header.clone(), &opens, object.stored_at);
+        let published = coven_database::Published {
+            stored_at: object.stored_at,
+            signer,
+        };
+        let (primary, download) = ChannelParts::new(opened.header.clone(), &opens, published);
+        let (references, input) = ChannelParts::new(opened.header.clone(), &opens, published);
         let (validation, validated) = oneshot::channel();
         let apply = self
             .database

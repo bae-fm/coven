@@ -785,7 +785,7 @@ async fn partially_confirmed_prerequisites_resume_before_their_entry() {
     }
     assert_eq!(
         storage.read(&entry_path).await.unwrap(),
-        ana.reseal(&upload)
+        ana.reseal(&upload).await
     );
     assert!(ana.db.key_uploads().await.unwrap().is_empty());
     assert!(ana.db.local_store_log().await.unwrap().upload.is_none());
@@ -831,7 +831,7 @@ async fn creation_recovers_after_copy_confirmation_without_resealing_the_copy() 
             Err(SyncError::Storage(_))
         ));
         let upload = ana.db.local_store_log().await.unwrap().upload.unwrap();
-        let expected = ana.reseal(&upload);
+        let expected = ana.reseal(&upload).await;
         assert!(upload.sealing.keys.is_empty());
         assert!(ana.db.key_uploads().await.unwrap().is_empty());
         let copy_path = ObjectPath::key_copy(store(1), DeviceId(1), 1.try_into().unwrap());

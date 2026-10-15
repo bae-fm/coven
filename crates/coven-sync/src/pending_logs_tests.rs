@@ -227,7 +227,14 @@ async fn unregistered_peers_positions_wait_then_check_from_retained_bytes() {
         pending(&devices[1].db).await,
         vec![PendingRecord {
             subject: PendingSubject::Positions(DeviceId(3)),
-            reason: PendingReason::Waits(Prerequisite::DeviceRegistration(DeviceId(3))),
+            // The registration is the entry the post's signed view names (D9).
+            reason: PendingReason::Waits(Prerequisite::Object(crate::store_log_object::path(
+                STORE_ID,
+                coven_format::value::EntryId {
+                    device: DeviceId(1),
+                    number: 3
+                }
+            ))),
             reported_by: DeviceId(2),
         }]
     );

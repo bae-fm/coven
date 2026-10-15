@@ -59,4 +59,4 @@ impl OpenedEntry {
 
 #[cfg(test)]
 #[path = "entry_signature_tests.rs"]
-mod tests;
+pub(crate) mod tests;

@@ -444,7 +444,11 @@ impl StoreLogSync {
         Ok(DownloadedWriteStream {
             header: WriteHeaderFrame::decode(&write.header)?,
             parts,
-            stored_at: write.stored_at,
+            published: coven_database::Published {
+                stored_at: write.stored_at,
+                signer: coven_crypto::SigningKey::from_bytes(write.signer)
+                    .map_err(|_| coven_database::DbError::DamagedDatabase)?,
+            },
         })
     }
 }

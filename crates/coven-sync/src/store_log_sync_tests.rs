@@ -344,9 +344,13 @@ impl Device {
         self.sync.operation_step(&row, data).await
     }
 
-    fn reseal(&self, upload: &coven_database::StoreLogUpload) -> Vec<u8> {
+    /// The bytes every attempt of a queued entry sends, signed with the key
+    /// its recorded past binds (§10).
+    pub(crate) async fn reseal(&self, upload: &coven_database::StoreLogUpload) -> Vec<u8> {
+        let log = self.db.local_store_log().await.unwrap().log;
         object::seal_upload(
             self.directory.id(),
+            &log,
             upload,
             self.custody.read().unwrap().as_ref(),
             &self.member,
@@ -528,7 +532,7 @@ async fn fixed_bytes_survive_restart_and_lost_create_reply() {
             .await;
         assert!(matches!(result, Err(SyncError::Storage(_))));
         let fixed = a.db.local_store_log().await.unwrap().upload.unwrap();
-        let expected = a.reseal(&fixed);
+        let expected = a.reseal(&fixed).await;
         assert_eq!(fixed.format, coven_format::FormatVersion::V1);
         assert_eq!(&expected[..3], &[33, 0, 1]);
         assert_eq!(fixed.entry.position.number, 2);
@@ -544,7 +548,7 @@ async fn fixed_bytes_survive_restart_and_lost_create_reply() {
         a.restart(storage.clone()).await;
         let reopened = a.db.local_store_log().await.unwrap().upload.unwrap();
         assert_eq!(reopened, fixed);
-        assert_eq!(a.reseal(&reopened), expected);
+        assert_eq!(a.reseal(&reopened).await, expected);
         a.sync().await;
         assert_eq!(
             storage
@@ -741,9 +745,9 @@ async fn key_objects_are_fixed_and_published_before_the_entry() {
         .unwrap()
         .is_empty());
     assert!(a.custody.read().unwrap().is_none());
-    let expected = a.reseal(&pending);
+    let expected = a.reseal(&pending).await;
     assert!(matches!(
-        object::seal_upload(store(1), &pending, None, &member(2)),
+        object::seal_upload(store(1), &StoreLog::default(), &pending, None, &member(2)),
         Err(SyncError::Rejected(coven_database::DropReason::NotAllowed))
     ));
     let sealed_key = &pending.sealing.keys[0];
@@ -754,7 +758,7 @@ async fn key_objects_are_fixed_and_published_before_the_entry() {
     a.restart(storage.clone()).await;
     let reopened = a.db.local_store_log().await.unwrap().upload.unwrap();
     assert_eq!(reopened, pending);
-    assert_eq!(a.reseal(&reopened), expected);
+    assert_eq!(a.reseal(&reopened).await, expected);
     a.sync().await;
     assert_eq!(
         storage

@@ -419,12 +419,19 @@ async fn authors_must_be_in_the_applied_store_log_and_remain_known_after_removal
     ));
     {
         let ring = a.custody.read().unwrap().unwrap();
-        // An unregistered author's positions wait for its registration.
+        // An unregistered author's positions wait for the registration
+        // their signed store-log view names (D9).
         assert_eq!(
             crate::posted_positions::open(&bytes, &path, Some(&ring), &before).unwrap(),
-            Err(crate::PendingReason::Waits(
-                crate::Prerequisite::DeviceRegistration(b.device().await)
-            ))
+            Err(crate::PendingReason::Waits(crate::Prerequisite::Object(
+                crate::store_log_object::path(
+                    store(1),
+                    coven_format::value::EntryId {
+                        device: b.device().await,
+                        number: 1
+                    }
+                )
+            )))
         );
     }
     a.sync().await;
@@ -439,9 +446,16 @@ async fn authors_must_be_in_the_applied_store_log_and_remain_known_after_removal
         })
         .unwrap();
     assert_eq!(snapshot.0.device, b.device().await);
+    // It waits for the registration entry its signed coverage names (D9).
     assert_eq!(
         snapshot.1,
-        crate::PendingReason::Waits(crate::Prerequisite::DeviceRegistration(b.device().await))
+        crate::PendingReason::Waits(crate::Prerequisite::Object(crate::store_log_object::path(
+            store(1),
+            coven_format::value::EntryId {
+                device: b.device().await,
+                number: 1
+            }
+        )))
     );
     let operation = pending
         .iter()
@@ -828,7 +842,7 @@ async fn selection_orders_coverage_then_path_and_waits_on_a_damaged_newest() {
     write_rows(&a, 0, 1, 17, Audience::Store).await;
     b.db.apply_downloaded::<crate::PendingRecord>(
         a.db.test_queued_writes().await.unwrap().remove(0).into(),
-        coven_format::value::StorageTime::UNIX_EPOCH,
+        coven_database::test_utils::published(coven_format::value::StorageTime::UNIX_EPOCH),
     )
     .await
     .unwrap();

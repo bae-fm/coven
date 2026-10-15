@@ -14,8 +14,9 @@ pub struct DownloadedWriteStream<R> {
     pub header: WriteHeaderFrame,
     /// Opened plaintext or an explicit unreadable audience, in header order.
     pub parts: Vec<DownloadedPartStream<R>>,
-    /// The object's first complete publication time, from provider metadata (§10).
-    pub stored_at: coven_format::value::StorageTime,
+    /// The object's first complete publication time, from provider metadata,
+    /// and the signing key that authenticated it in its recorded view (§10).
+    pub published: crate::Published,
 }
 
 /// Whether sync could decrypt the corresponding part in the header.
@@ -112,7 +113,7 @@ impl<R: Read> DownloadedWriteStream<R> {
                 database,
                 schema,
                 &self.header.header,
-                self.stored_at,
+                self.published,
                 &opened,
                 true,
             )?;

@@ -43,8 +43,9 @@ pub enum StoreLogCheck {
     Allowed,
     /// The author's view did not allow the change.
     NotAllowed,
-    /// An addition of an id not active in the author's view whose pair shares
-    /// a signing or sealing key with a pair already bound in that view (§9).
+    /// An addition of an id not active in the author's view, or a member-key
+    /// replacement, whose pair shares a signing or sealing key with a pair
+    /// already bound in that view (§9).
     KeysAlreadyUsed,
     /// An authorized device removal, with the owner its author observed.
     DeviceOwner(MemberId),

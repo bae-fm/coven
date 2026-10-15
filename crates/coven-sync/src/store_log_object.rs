@@ -17,8 +17,13 @@ use coven_storage::{ObjectPath, Storage};
 use std::sync::Arc;
 
 /// Reproduce an entry using the key fixed with its plaintext queue record.
+/// Every attempt signs with the held key, which must be the one the entry
+/// verifies with: creation's supplied pair, or else its author's key in the
+/// replay of its recorded past in `log`. Newer custody never re-signs an
+/// entry fixed under replaced keys (§10, D6).
 pub(crate) fn seal_upload(
     store: StoreId,
+    log: &StoreLog,
     upload: &StoreLogUpload,
     ring: Option<&StoreKeyring>,
     member: &MemberIdentity,
@@ -26,6 +31,15 @@ pub(crate) fn seal_upload(
     if upload.entry.author != member.member() {
         return Err(SyncError::Rejected(coven_database::DropReason::NotAllowed));
     }
+    let signer = match &upload.entry.change {
+        StoreChange::CreateStore { admin, .. } => Some(admin.signing),
+        _ => crate::object_author::recorded_signer(
+            log,
+            &crate::replay::author_positions(&upload.entry),
+            &upload.entry.author,
+        ),
+    };
+    crate::object_author::check_signer(member, signer)?;
     let id = upload.sealing.key;
     let creation;
     let key = if let StoreChange::CreateStore { key_hash, .. } = &upload.entry.change {

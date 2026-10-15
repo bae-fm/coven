@@ -319,7 +319,7 @@ async fn interrupted_plain_removal_keeps_its_entry_and_schedules_access_on_repla
             Err(SyncError::Storage(_))
         ));
         let fixed = a.db.local_store_log().await.unwrap().upload.unwrap();
-        let bytes = a.reseal(&fixed);
+        let bytes = a.reseal(&fixed).await;
         assert!(a.db.operations().await.unwrap().is_empty());
         a.restart(storage.clone()).await;
         a.sync().await;
@@ -464,7 +464,7 @@ async fn permanent_storage_failure_preserves_fixed_bytes_for_retry_and_discard()
             (material.circle(), material.id(), material.hash()),
             (*circle, *key, *key_hash)
         );
-        let expected = a.reseal(&fixed);
+        let expected = a.reseal(&fixed).await;
         a.sync.storage = Some(Arc::new(
             MemoryStorage::for_recipient(&storage, "uninvited@example.com").unwrap(),
         ));
