@@ -653,3 +653,109 @@ async fn a_request_awaiting_the_persons_decision_is_not_read_again() {
     operations.approve_join_request(&request).await.unwrap();
     operations.close().await.unwrap();
 }
+
+/// Ana's approval of Carol is reserved, then lands more than 30 days after
+/// Ben's later entry and drops (§9). Every admin makes the invite's key
+/// pending deletion and Carol's installation reports the rejection, so the
+/// approval settles the invite instead of binding Carol again with a key
+/// pending deletion (§18; InviteApproval `restart_binds_pending_key`).
+#[tokio::test]
+async fn a_dropped_approval_settles_its_invite() {
+    use coven_foundation::clock::FixedClock;
+    use std::time::{Duration, UNIX_EPOCH};
+    let clock = Arc::new(FixedClock::new(UNIX_EPOCH));
+    let storage = Arc::new(
+        MemoryStorage::builder()
+            .clock(clock.clone())
+            .build()
+            .unwrap(),
+    );
+    let mut a = device(storage.clone(), 1, member(1), store(1)).await;
+    let mut b = device(storage.clone(), 2, member(2), store(1)).await;
+    a.create(key(1)).await;
+    a.add(&b.member, MemberRole::Admin).await;
+    b.sync().await;
+    b.sync.load_new_device("Ben", None).await.unwrap();
+    a.sync().await;
+    let operation = begin(
+        &mut a,
+        Command::Invite(
+            InviteTarget::NewMember {
+                role: MemberRole::Member,
+            },
+            InviteAccess::S3AccessKey {
+                access_key_id: "new-key".into(),
+                secret_access_key: coven_crypto::SecretText::new("secret".into()),
+            },
+        ),
+    )
+    .await;
+    let Output::Invite(invite) = finish(&mut a, operation).await else {
+        panic!("invite")
+    };
+    let carol = joiner(&invite, 9);
+    request(storage.as_ref(), &invite, &carol, "New phone").await;
+    assert!(matches!(
+        step(&mut a, operation).await.unwrap(),
+        Progress::Advanced
+    ));
+    let requests = a.sync.current_join_requests().await.unwrap();
+    begin(&mut a, Command::Approve(requests[0].clone())).await;
+    let local = a.db.local_store_log().await.unwrap();
+    let next = local
+        .log
+        .entries
+        .iter()
+        .filter(|e| e.entry.position.device == local.device)
+        .count() as u64
+        + 1;
+    a.interrupt_entry(next).await;
+    loop {
+        match step(&mut a, operation).await {
+            Ok(Progress::Advanced) => (),
+            Err(SyncError::Storage(_)) => break,
+            other => panic!("{:?}", other.map(|_| ())),
+        }
+    }
+    a.restore_storage();
+    clock.set(UNIX_EPOCH + Duration::from_secs(86400));
+    b.sync
+        .make_and_upload_entry(StoreChange::AddDevice {
+            device: coven_foundation::id_source::DeviceId(9),
+            name: "witness".into(),
+            replaces: None,
+        })
+        .await
+        .unwrap();
+    clock.set(UNIX_EPOCH + Duration::from_secs(32 * 86400));
+    let reply = loop {
+        match step(&mut a, operation).await.unwrap() {
+            Progress::Advanced => (),
+            Progress::Reply(reply) => break reply.err(),
+            Progress::Finished(_) => break None,
+            Progress::Waiting(reason) => panic!("waits {reason:?}"),
+        }
+    };
+    let log = a.log().await;
+    let pending = access_keys(&a.db)
+        .await
+        .iter()
+        .any(|key| key.access_key_id == "new-key");
+    assert!(pending);
+    assert!(
+        !log.replay.state.members.contains_key(&carol.member()),
+        "Carol is bound with a key pending deletion"
+    );
+    assert!(
+        matches!(
+            &reply,
+            Some(SyncError::Rejected(
+                coven_database::DropReason::LandedTooLate
+            ))
+        ),
+        "{reply:?}"
+    );
+    while a.db.operation(operation).await.unwrap().is_some() {
+        step(&mut a, operation).await.unwrap();
+    }
+}

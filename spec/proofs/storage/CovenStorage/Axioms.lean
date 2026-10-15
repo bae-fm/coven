@@ -302,3 +302,7 @@ import CovenStorage
 #print axioms CovenStorage.AdminAccess.failure_makes_nothing_until_supplied
 #print axioms CovenStorage.AdminAccess.check_keeps_admin
 #print axioms CovenStorage.AdminAccess.old_rule_mints_without_supply
+#print axioms CovenStorage.InviteApproval.settled_stays
+#print axioms CovenStorage.InviteApproval.settle_once
+#print axioms CovenStorage.InviteApproval.settled_key_never_pending
+#print axioms CovenStorage.InviteApproval.restart_binds_pending_key

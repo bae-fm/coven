@@ -604,6 +604,20 @@ journal row and the admin access the app supplies, held in memory (§4).
   step kept admin access, the automatic retry made a key Ana never supplied
   admin access for again.
 
+**T243: a dropped approval settles the invite (proved).**
+[InviteApproval](storage/CovenStorage/InviteApproval.lean) follows one
+invite's key `K` through the approver's binding entries. Every admin makes
+`K` pending deletion once a binding recording it drops while no kept one
+binds the member, and nothing cancels that; the joiner reads a dropped
+binding as final.
+- `restart_binds_pending_key` (checked counterexample): under §18's general
+  restart, Ana's approval of Carol lands too late and drops, and Ana publishes
+  it again, kept. Carol is a member whose key is pending deletion, and her
+  installation has already reported the rejection.
+- `settle_once`, `settled_key_never_pending`: when the first published
+  binding settles the invite whatever its fate, the member never uses a key
+  pending deletion, and the approver binds her exactly when she is admitted.
+
 ## Undecodable own key copies
 
 T182 made a pass's scan reset the device with `SlotMismatch` when a copy

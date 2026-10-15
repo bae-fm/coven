@@ -14,6 +14,7 @@ import CovenStorage.KeyDelivery
 import CovenStorage.KeyDeliveryExamples
 import CovenStorage.KeyListing
 import CovenStorage.AdminAccess
+import CovenStorage.InviteApproval
 import CovenStorage.CopyPublication
 import CovenStorage.OwnCopyDamage
 import CovenStorage.OwnCopyDamageExamples

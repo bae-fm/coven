@@ -6063,6 +6063,11 @@ Carol's tablet:
     replay reason and does not restart with a new entry to overrule the
     winner. Replacing again requires a new explicit call or approved invite.
     Publication retries of the same attempt retain its exact keys and bytes.
+  - So is an invite's approval: a dropped binding or access entry ends the
+    invite, which takes back its grants, as the joiner reports the drop
+    (§12.2). Publishing it again could bind a key the drop already made
+    pending deletion
+    ([`settled_key_never_pending`, `restart_binds_pending_key`](proofs/storage/CovenStorage/InviteApproval.lean)).
   - Unless the drop leaves nothing to do, such as removing a member a
     concurrent entry already removed.
   - Starting over repeats §9's online catch-up and validation. This also
@@ -6194,8 +6199,8 @@ Carol's tablet:
      initial and held historical audience-key copies to that credential,
      then publish Add member or Replace member keys as the invite specifies;
   3. bootstrap waits for the kept matching binding before registering the
-     device and recording any separate access change. A losing replacement
-     reports rejection; it does not restart against the winning pair;
+     device and recording any separate access change. A dropped binding or
+     access entry reports rejection and ends the invite; it does not restart;
   4. on decline or expiry, take back only the invite's new access instead.
 - Self-replacement of member keys (§10, §11) pauses local app writes and
   confirms queued writes/entries first. Persist the candidate private pair,

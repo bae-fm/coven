@@ -3,7 +3,7 @@
 use super::StoreLogSync;
 use crate::{
     effects,
-    operation_data::{Data, Intent, InviteBinding, InviteState},
+    operation_data::{Data, Intent, InviteState},
     operations::{Output, Progress},
     *,
 };
@@ -258,14 +258,12 @@ impl StoreLogSync {
                     .advance_operation(data.update(&current, data.entry_step_number(5))?)
                     .await?;
             }
-            Some(EntryOutcome::Dropped(reason))
-                if matches!(&data, Data::Invite(work)
-                    if matches!(work.binding, InviteBinding::Replace)
-                        && matches!(work.state, InviteState::Approving { .. })) =>
-            {
-                // A losing replacement is reported, never published again to
-                // override the winner; the invite takes back only its own
-                // new grants (§12.2).
+            Some(EntryOutcome::Dropped(reason)) if matches!(&data, Data::Invite(_)) => {
+                // A dropped approval or access entry ends the invite, as the
+                // joiner reads it: published again it could override a
+                // winning replacement, or bind a key the drop made pending
+                // deletion. The invite takes back only its own new grants
+                // (§12.2, §18).
                 let reason = reason.clone();
                 let Data::Invite(work) = &mut data else {
                     unreachable!()
