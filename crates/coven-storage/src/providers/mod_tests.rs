@@ -580,12 +580,14 @@ pub(crate) mod google_drive {
 #[cfg(not(any(target_os = "ios", target_os = "android")))]
 pub(crate) async fn live_drive_tokens(clock: coven_foundation::clock::ClockRef) -> OAuthTokens {
     use super::OAuthClients;
-    let mut settings = live_settings("COVEN_LIVE_DRIVE_ENV");
-    let client_id = settings
-        .remove("GOOGLE_CLIENT_ID")
-        .expect("GOOGLE_CLIENT_ID")
-        .as_str()
-        .to_owned();
+    let (client_id, client_secret, refresh_token) =
+        read_live_settings("COVEN_LIVE_DRIVE_ENV", |settings| {
+            (
+                settings.take("GOOGLE_CLIENT_ID").as_str().to_owned(),
+                settings.take("GOOGLE_CLIENT_SECRET"),
+                settings.take("GOOGLE_REFRESH_TOKEN"),
+            )
+        });
     let clients = OAuthClients::new(
         Some(super::GoogleDriveClient::new(
             client_id.clone(),
@@ -595,15 +597,8 @@ pub(crate) async fn live_drive_tokens(clock: coven_foundation::clock::ClockRef) 
         None,
         clock,
     )
-    .with_google_client_secret(
-        settings
-            .remove("GOOGLE_CLIENT_SECRET")
-            .expect("GOOGLE_CLIENT_SECRET"),
-    )
+    .with_google_client_secret(client_secret)
     .unwrap();
-    let refresh_token = settings
-        .remove("GOOGLE_REFRESH_TOKEN")
-        .expect("GOOGLE_REFRESH_TOKEN");
     clients
         .refresh(&refresh_only(
             &client_id,
@@ -614,41 +609,120 @@ pub(crate) async fn live_drive_tokens(clock: coven_foundation::clock::ClockRef) 
         .unwrap()
 }
 
-/// Read live credentials without exposing their contents in diagnostics.
+/// A live env file's settings, held without exposing their contents in
+/// diagnostics. A loader takes every key it reads inside
+/// [`read_live_settings`]; a key it leaves fails the run, so a setting placed
+/// where nothing reads it is refused rather than silently ignored.
 #[cfg(not(any(target_os = "ios", target_os = "android")))]
-pub(crate) fn live_settings(variable: &str) -> std::collections::BTreeMap<String, SecretText> {
-    let path = std::env::var(variable)
-        .expect("live credentials environment variable names the credentials file");
-    let text = SecretText::new(std::fs::read_to_string(path).expect("credentials file"));
-    let mut settings = std::collections::BTreeMap::new();
-    for line in text.as_str().lines().map(str::trim) {
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        let (key, value) = line
-            .split_once('=')
-            .expect("credentials must use KEY=value");
-        let value = value.trim();
-        let value = match value.as_bytes().first() {
-            Some(b'\'' | b'"') => {
-                assert!(value.len() >= 2, "unterminated credential quote");
-                assert!(
-                    value.as_bytes().first() == value.as_bytes().last(),
-                    "unterminated credential quote"
-                );
-                &value[1..value.len() - 1]
+pub(crate) struct LiveSettings {
+    variable: String,
+    settings: std::collections::BTreeMap<String, SecretText>,
+}
+
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
+impl LiveSettings {
+    /// Parse `KEY=value` lines, optionally `export`ed and quoted; blank lines
+    /// and `#` comments are skipped.
+    pub(crate) fn parse(variable: &str, text: &SecretText) -> Self {
+        let mut settings = std::collections::BTreeMap::new();
+        for line in text.as_str().lines().map(str::trim) {
+            if line.is_empty() || line.starts_with('#') {
+                continue;
             }
-            _ => value,
-        };
-        assert!(!value.is_empty(), "empty credential");
-        assert!(
-            settings
-                .insert(key.trim().to_owned(), SecretText::new(value.to_owned()))
-                .is_none(),
-            "duplicate credential"
-        );
+            let line = line.strip_prefix("export ").unwrap_or(line);
+            let (key, value) = line
+                .split_once('=')
+                .expect("credentials must use KEY=value");
+            let value = value.trim();
+            let value = match value.as_bytes().first() {
+                Some(b'\'' | b'"') => {
+                    assert!(
+                        value.len() >= 2 && value.as_bytes().first() == value.as_bytes().last(),
+                        "unterminated credential quote"
+                    );
+                    &value[1..value.len() - 1]
+                }
+                _ => value,
+            };
+            assert!(!value.is_empty(), "empty credential");
+            assert!(
+                settings
+                    .insert(key.trim().to_owned(), SecretText::new(value.to_owned()))
+                    .is_none(),
+                "duplicate credential"
+            );
+        }
+        Self {
+            variable: variable.to_owned(),
+            settings,
+        }
     }
-    settings
+    /// A setting the loader requires.
+    pub(crate) fn take(&mut self, key: &str) -> SecretText {
+        self.settings
+            .remove(key)
+            .unwrap_or_else(|| panic!("{} lacks {key}", self.variable))
+    }
+    /// A setting the loader reads when present.
+    pub(crate) fn optional(&mut self, key: &str) -> Option<SecretText> {
+        self.settings.remove(key)
+    }
+    /// Run `read` over the settings, then refuse any it left.
+    pub(crate) fn read<T>(mut self, read: impl FnOnce(&mut Self) -> T) -> T {
+        let value = read(&mut self);
+        let unread: Vec<&String> = self.settings.keys().collect();
+        assert!(
+            unread.is_empty(),
+            "{} holds settings nothing reads: {unread:?}",
+            self.variable
+        );
+        value
+    }
+}
+
+/// Read the env file `variable` names through `read`, refusing any setting
+/// `read` does not take.
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
+pub(crate) fn read_live_settings<T>(
+    variable: &str,
+    read: impl FnOnce(&mut LiveSettings) -> T,
+) -> T {
+    let path = std::env::var(variable)
+        .unwrap_or_else(|_| panic!("{variable} must name the credentials file"));
+    let text = SecretText::new(std::fs::read_to_string(path).expect("credentials file"));
+    LiveSettings::parse(variable, &text).read(read)
+}
+
+/// Every live loader reads its env file through one reader, which accepts
+/// shell-style `export` lines, quotes and comments, and refuses a setting its
+/// loader leaves unread.
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
+#[test]
+fn live_settings_refuse_unread_settings() {
+    let text = SecretText::new(
+        "# credentials\nexport DROPBOX_APP_KEY='key'\n\nDROPBOX_REFRESH_TOKEN=\"token\"\nEXTRA=1\n"
+            .to_owned(),
+    );
+    let read = |settings: &mut LiveSettings| {
+        (
+            settings.take("DROPBOX_APP_KEY").as_str().to_owned(),
+            settings.take("DROPBOX_REFRESH_TOKEN").as_str().to_owned(),
+        )
+    };
+    let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        LiveSettings::parse("LIVE_ENV", &text).read(read)
+    }))
+    .unwrap_err();
+    assert_eq!(
+        refused.downcast_ref::<String>().unwrap(),
+        "LIVE_ENV holds settings nothing reads: [\"EXTRA\"]"
+    );
+    let read_all = LiveSettings::parse("LIVE_ENV", &text).read(|settings| {
+        assert!(settings.optional("ABSENT").is_none());
+        settings.take("EXTRA");
+        read(settings)
+    });
+    assert_eq!(read_all, ("key".to_owned(), "token".to_owned()));
 }
 
 #[cfg(not(any(target_os = "ios", target_os = "android")))]

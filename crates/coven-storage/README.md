@@ -104,6 +104,12 @@ behavior, exercises the adapter and deletes its live objects and uploads. GCS
 and R2 passed suite version 1 on 2026-10-13; AWS remains uncertified without a
 live account. See the [procedure](../../spec/coven.md#4-storage-providers-and-access)
 and [raw evidence](../../spec/s3-certification.md).
+Every live test that reads an env file (`COVEN_LIVE_S3_ENV`,
+`COVEN_LIVE_DRIVE_ENV`, `COVEN_LIVE_DROPBOX_ENV`, `COVEN_LIVE_DROPBOX_B_ENV`,
+`COVEN_LIVE_ONEDRIVE_ENV`) reads it through one reader that fails the run on a
+setting its loader does not read, so a misplaced setting is never silently
+ignored. Process settings such as `COVEN_LIVE_S3_PROFILE` stay in the
+environment.
 
 | Provider | Objects and listing | Recorded uploads | Sharing and recipient access |
 | --- | --- | --- | --- |

@@ -137,15 +137,13 @@ async fn provider_access_live_google_upgrade() {
 #[tokio::test]
 #[ignore = "requires COVEN_LIVE_DROPBOX_ENV for an App-folder app; creates and deletes its test store"]
 async fn provider_access_live_dropbox_app_folder() {
-    let mut settings = super::live_settings("COVEN_LIVE_DROPBOX_ENV");
-    let client_id = settings
-        .remove("DROPBOX_APP_KEY")
-        .expect("Dropbox app key")
-        .as_str()
-        .to_owned();
-    let refresh_token = settings
-        .remove("DROPBOX_REFRESH_TOKEN")
-        .expect("Dropbox refresh token");
+    let (client_id, refresh_token) =
+        super::read_live_settings("COVEN_LIVE_DROPBOX_ENV", |settings| {
+            (
+                settings.take("DROPBOX_APP_KEY").as_str().to_owned(),
+                settings.take("DROPBOX_REFRESH_TOKEN"),
+            )
+        });
     let clock: ClockRef = Arc::new(SystemClock);
     let tokens = OAuthClients::new(
         None,

@@ -12,7 +12,7 @@
 
 use super::{DropboxStorage, PROVIDER};
 use crate::providers::http::{self, Body, OAuthSession};
-use crate::providers::tests::live_settings;
+use crate::providers::tests::read_live_settings;
 use crate::providers::{DropboxClients, OAuthClients};
 use crate::*;
 use coven_format::value::StorageTime;
@@ -42,15 +42,12 @@ struct Live {
 }
 
 async fn tokens(variable: &str, clock: ClockRef) -> OAuthTokens {
-    let mut settings = live_settings(variable);
-    let client_id = settings
-        .remove("DROPBOX_APP_KEY")
-        .expect("DROPBOX_APP_KEY missing")
-        .as_str()
-        .to_owned();
-    let refresh_token = settings
-        .remove("DROPBOX_REFRESH_TOKEN")
-        .expect("DROPBOX_REFRESH_TOKEN missing");
+    let (client_id, refresh_token) = read_live_settings(variable, |settings| {
+        (
+            settings.take("DROPBOX_APP_KEY").as_str().to_owned(),
+            settings.take("DROPBOX_REFRESH_TOKEN"),
+        )
+    });
     let clients = OAuthClients::new(
         None,
         Some(DropboxClients::FullDropbox {

@@ -13,7 +13,6 @@ use coven_foundation::{
     id_source::{IdSource, UuidIds},
 };
 use std::{
-    collections::BTreeMap,
     ops::AsyncFnOnce,
     panic::{catch_unwind, resume_unwind, AssertUnwindSafe},
     sync::Mutex,
@@ -25,42 +24,13 @@ use tokio::time::Instant as Monotonic;
 static LIVE_LOCK: Mutex<()> = Mutex::new(());
 
 async fn tokens(clock: ClockRef) -> OAuthTokens {
-    let path = std::env::var("COVEN_LIVE_ONEDRIVE_ENV")
-        .expect("COVEN_LIVE_ONEDRIVE_ENV must name the credentials file");
-    let contents = SecretText::new(std::fs::read_to_string(path).expect("read credentials file"));
-    let mut settings = BTreeMap::new();
-    for line in contents.as_str().lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        let line = line.strip_prefix("export ").unwrap_or(line);
-        let (key, value) = line
-            .split_once('=')
-            .expect("credentials must use KEY=VALUE");
-        let value = value.trim();
-        let value = match value.as_bytes().first() {
-            Some(b'\'' | b'"') => {
-                assert!(value.len() >= 2 && value.ends_with(value.as_bytes()[0] as char));
-                &value[1..value.len() - 1]
-            }
-            _ => value,
-        };
-        assert!(
-            settings
-                .insert(key.trim(), SecretText::new(value.to_owned()))
-                .is_none(),
-            "duplicate credentials key"
-        );
-    }
-    let mut take = |key| {
-        settings
-            .remove(key)
-            .expect("required OneDrive credential missing")
-    };
-    let client_id = take("ONEDRIVE_CLIENT_ID");
-    let refresh_token = take("ONEDRIVE_REFRESH_TOKEN");
-    assert!(!client_id.as_str().is_empty() && !refresh_token.as_str().is_empty());
+    let (client_id, refresh_token) =
+        crate::providers::tests::read_live_settings("COVEN_LIVE_ONEDRIVE_ENV", |settings| {
+            (
+                settings.take("ONEDRIVE_CLIENT_ID"),
+                settings.take("ONEDRIVE_REFRESH_TOKEN"),
+            )
+        });
     OAuthClients::new(None, None, Some(client_id.as_str().to_owned()), clock)
         .refresh(&crate::providers::tests::refresh_only(
             client_id.as_str(),

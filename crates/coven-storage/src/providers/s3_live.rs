@@ -21,27 +21,23 @@ impl LiveS3 {
             Err(std::env::VarError::NotPresent) => None,
             Err(error) => panic!("invalid live profile: {error}"),
         };
-        Self::from_file(
-            crate::providers::tests::live_settings("COVEN_LIVE_S3_ENV"),
-            profile,
-        )
+        crate::providers::tests::read_live_settings("COVEN_LIVE_S3_ENV", |settings| {
+            Self::from_file(settings, profile)
+        })
     }
     /// The env file's location and key, with the profile the process
-    /// environment names. Every file setting must be read: a profile name
-    /// left in the file would otherwise be ignored, and certification would
-    /// race the detected settings instead of the profile's own publication.
+    /// environment names (`COVEN_LIVE_S3_PROFILE` and
+    /// `COVEN_LIVE_S3_IAM_ENDPOINT` are process settings). The reader refuses
+    /// a file setting this leaves: a profile name left in the file would
+    /// otherwise be ignored, and certification would race the detected
+    /// settings instead of the profile's own publication.
     fn from_file(
-        mut settings: std::collections::BTreeMap<String, SecretText>,
+        settings: &mut crate::providers::tests::LiveSettings,
         profile: Option<S3Profile>,
     ) -> Self {
         let endpoint = settings
-            .remove("COVEN_LIVE_S3_ENDPOINT")
+            .optional("COVEN_LIVE_S3_ENDPOINT")
             .map(|value| value.as_str().parse().expect("valid live endpoint"));
-        let mut take = |key| {
-            settings
-                .remove(key)
-                .expect("required live S3 setting missing")
-        };
         // A service whose member keys reach a whole bucket keeps each store
         // at the bucket's root (§4); the suite's stores share the test bucket.
         let prefix = match crate::providers::s3_key_scope(endpoint.as_ref(), profile.as_ref())
@@ -51,22 +47,19 @@ impl LiveS3 {
             crate::providers::S3KeyScope::Prefix => "coven-live".into(),
         };
         let config = StorageConfig::S3 {
-            bucket: take("COVEN_LIVE_S3_BUCKET").as_str().to_owned(),
-            region: take("COVEN_LIVE_S3_REGION").as_str().to_owned(),
+            bucket: settings.take("COVEN_LIVE_S3_BUCKET").as_str().to_owned(),
+            region: settings.take("COVEN_LIVE_S3_REGION").as_str().to_owned(),
             endpoint,
             profile,
             prefix,
         };
         let credentials = S3Credentials {
-            access_key_id: take("COVEN_LIVE_S3_ACCESS_KEY_ID").as_str().to_owned(),
-            secret_access_key: take("COVEN_LIVE_S3_SECRET_ACCESS_KEY"),
+            access_key_id: settings
+                .take("COVEN_LIVE_S3_ACCESS_KEY_ID")
+                .as_str()
+                .to_owned(),
+            secret_access_key: settings.take("COVEN_LIVE_S3_SECRET_ACCESS_KEY"),
         };
-        let unread: Vec<&String> = settings.keys().collect();
-        assert!(
-            unread.is_empty(),
-            "the live S3 env file holds settings nothing reads: {unread:?}; \
-             COVEN_LIVE_S3_PROFILE and COVEN_LIVE_S3_IAM_ENDPOINT belong in the process environment"
-        );
         config.validate().expect("valid live configuration");
         Self {
             config,
@@ -164,18 +157,20 @@ impl LiveS3 {
 
 /// A profile name in the env file is refused rather than ignored.
 #[test]
-#[should_panic(expected = "settings nothing reads: [\"COVEN_LIVE_S3_PROFILE\"]")]
+#[should_panic(
+    expected = "COVEN_LIVE_S3_ENV holds settings nothing reads: [\"COVEN_LIVE_S3_PROFILE\"]"
+)]
 fn a_setting_the_loader_does_not_read_is_refused() {
-    let settings = [
-        ("COVEN_LIVE_S3_BUCKET", "bucket"),
-        ("COVEN_LIVE_S3_REGION", "us-east-1"),
-        ("COVEN_LIVE_S3_ENDPOINT", "http://localhost:8333"),
-        ("COVEN_LIVE_S3_ACCESS_KEY_ID", "access"),
-        ("COVEN_LIVE_S3_SECRET_ACCESS_KEY", "secret"),
-        ("COVEN_LIVE_S3_PROFILE", "SeaweedFs"),
-    ]
-    .into_iter()
-    .map(|(key, value)| (key.to_owned(), SecretText::new(value.to_owned())))
-    .collect();
-    LiveS3::from_file(settings, None);
+    let text = SecretText::new(
+        "COVEN_LIVE_S3_BUCKET=bucket
+COVEN_LIVE_S3_REGION=us-east-1
+COVEN_LIVE_S3_ENDPOINT=http://localhost:8333
+COVEN_LIVE_S3_ACCESS_KEY_ID=access
+COVEN_LIVE_S3_SECRET_ACCESS_KEY=secret
+COVEN_LIVE_S3_PROFILE=SeaweedFs
+"
+        .to_owned(),
+    );
+    crate::providers::tests::LiveSettings::parse("COVEN_LIVE_S3_ENV", &text)
+        .read(|settings| LiveS3::from_file(settings, None));
 }
