@@ -1,6 +1,7 @@
 import CovenMerge.Boundary
 import CovenMerge.OwnerAdmission
 import CovenMerge.ForeignKeyRecords
+import CovenMerge.ForeignKeyAuthoring
 import Lean
 
 /-! JSON adapter for differential tests. All merge and removal computation calls
@@ -400,8 +401,9 @@ private def runAdmission (j : Json) : Except String Json := do
 -- are numbered apart from rows, as changes of write 1; `droppedExternal` and
 -- `prior` name the external and own changes whose verdict already drops them.
 -- A direct row's proposed payload is its direct effect unless `payloads`
--- names the net change its steps do not end at. `store` gives a cascaded key
--- as the child's column stores it. For each row:
+-- names the net change its steps do not end at, which only a row whose steps
+-- cause actions must not do. `store` gives a cascaded key as the child's
+-- column stores it. For each row:
 -- `Admission.check`, `Admission.guard`'s cause, the roots its derivation
 -- reaches and the sources `dependencies` gives it.
 open Ownership Ownership.ForeignKey Ownership.Admission in
@@ -476,6 +478,11 @@ private def runReceive (j : Json) : Except String Json := do
     sources := fun w r => if w != 0 then [] else
       (((external.find? (·.1 == r)).map (·.2.toList)).getD []).map ((1 : Nat), ·) ++
         (fkSources r).map ((0 : Nat), ·) }
+  -- A direct row's net change must end where its steps end only when its
+  -- steps cause actions (`checkSteps`, decided as `check` of the relaxed
+  -- evidence).
+  let causes := fun (w r : Nat) => w == 0 && rows.any fun (x, _, _) => (fkSources x).contains r
+  let E := relaxed E causes
   let priorCause : Nat → Nat → Option (Cause Nat Nat Nat) := fun w r =>
     if (w == 0 && prior.contains r) || (w == 1 && droppedExternal.contains r) then
       some (.dependency []) else none

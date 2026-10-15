@@ -532,6 +532,13 @@ async fn coalesced_actions_keep_every_cause_and_lose_with_any() {
     devices.close().await;
 }
 
+/// Set one column in a row change's net change only.
+fn set_net(row: &mut RowChange, column: &str, value: Value) {
+    if let coven_merge::Operation::Update(columns) = &mut row.change.operation {
+        columns.get_mut(column).unwrap().value = value;
+    }
+}
+
 /// The write with track y's net change an update its steps never made.
 fn inconsistent_root(genuine: &WriteRecord) -> WriteRecord {
     let mut forged = genuine.clone();
@@ -888,6 +895,25 @@ pub(crate) async fn receipts(mut compare: impl FnMut(&Database, &WriteRecord)) {
     set(label, "slot", Value::Text("taken".into()));
     label.old.insert("slot".into(), Value::Text("free".into()));
     receive(&devices.ana, &forged).await;
+    compare(&devices.ana, &forged);
+    devices.close().await;
+    // A net change of Ben's own track its steps do not end at causes nothing,
+    // so it applies (`checkSteps`).
+    let devices = Devices::seeded().await;
+    sql(
+        &devices.mallory,
+        "UPDATE tracks SET title='kept' WHERE id='s'",
+    )
+    .await
+    .unwrap();
+    let mut forged = records(&devices.mallory).pop().unwrap();
+    let track = forged.parts[0].rows.iter_mut().next().unwrap();
+    set_net(track, "title", Value::Text("elsewhere".into()));
+    receive(&devices.ana, &forged).await;
+    assert_eq!(
+        verdict(&devices.ana, &forged, &key("tracks", "s")),
+        ChangeVerdict::Applied
+    );
     compare(&devices.ana, &forged);
     devices.close().await;
     // Ana's tag holds code 7 as text; Mallory's last write inserts his own

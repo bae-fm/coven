@@ -1,4 +1,5 @@
 import CovenMerge.ForeignKeyRecords
+import CovenMerge.ForeignKeyAuthoring
 
 /-! Actions whose columns another reference shares (§8.4, §8.8, D5).
 
@@ -22,7 +23,7 @@ too. The receiver knows that parent when the write determines it:
   most one of them: it refuses SQLite's action in one view, or accepts in the
   other a step SQLite would not make, which points the other member's row at
   an incarnation that has ended. Its author runs the receivers' check before
-  the write leaves and refuses it too.
+  the write leaves and refuses it too (`rebuild_refusal_refuses`).
 
 Rows: 0 artist a, 1 album (a, x), 2 album after its key changes, 3 Ana's
 track, 4 another artist. Columns: 10 and 11 the track's artist and album, 20

@@ -12,9 +12,10 @@
 //! a shared trigger is.
 //!
 //! A row change passes when the author may change the row of every direct
-//! step, every action reaches a direct step on such a row, and a row only
-//! actions changed has exactly their combined effect as its net change
-//! (Lean `Admission.check`). A failure names the row's owner when the author
+//! step, every action reaches a direct step on such a row, a row only actions
+//! changed has exactly their combined effect as its net change, and a row
+//! whose steps cause actions has its net change where its steps end (Lean
+//! `Admission.checkSteps`, `applied_root_ends_where_steps_end`). A failure names the row's owner when the author
 //! may not change the row itself, and an invalid foreign-key effect otherwise
 //! (`Admission.guard`).
 

@@ -1266,6 +1266,34 @@ the parent holds it calls that cascade a direct edit; `stored_classifies`
 compares values as the child's columns store them (`storedRule`), as both the
 receiver and the author's own capture do.
 
+**What an author checks, and which net changes must end where their steps
+do.** `ForeignKeyAuthoring.lean` states the author's check before a write
+leaves (`LocalAccept`): every step on a row its writer may not change must be
+an action twice over, made as one by SQLite and classified as one by the
+receivers' label-free rule. `rebuild_refusal_refuses` proves the author
+refuses its own write whenever that rule would call such a step direct, so no
+device keeps an effect the others refuse, and `accepted_rooted` composes the
+check with `every_step_rooted`: every step of an accepted write has a
+certificate rooted in direct steps its writer may change, so every receiver
+admits it. `TriggerFirst.author_refuses` shows the other half is needed too:
+receivers classify that trigger's step as an action, while its author knows a
+trigger made it on Ana's row and refuses.
+
+A row's net change is the payload that merges; its steps are the execution
+classification reads. `checkSteps` is the receiver's check as coven runs it:
+a direct row's net change must equal where its steps end only when its steps
+cause actions, since only then do they justify effects on other rows.
+`checkSteps_relaxed` reduces it to `Admission.check` over evidence in which
+every other direct row proposes where its steps end, so every theorem above
+holds for it, and the `receive` mode decides it. `applied_root_ends_where_steps_end`
+proves what the condition buys: every root of an applied derived change has
+its merged net change exactly where its steps end. `InconsistentCause` is the
+counterexample without it: Ben's track whose steps delete it while its net
+change only renames it would still set Ana's note's reference NULL
+(`accepted_without_condition`), though the merge keeps the track; with it,
+the track's change is refused and the note's change drops with it
+(`refused_with_condition`).
+
 **Actions through shared columns.** A cascade into a compound key also
 writes the columns another reference of the child shares with it, and its
 recorded step names that reference's parent too (D5).
@@ -1284,7 +1312,8 @@ same write make different steps (`views_differ`), and `one_view_misjudged`
 proves a receiver reading only the write accepts at most one of them: it
 refuses SQLite's action in one view or accepts in the other a step that
 points Ana's row at an ended incarnation. The author runs the receivers'
-check before its write leaves, so it refuses such a write too.
+check before its write leaves, so it refuses such a write too
+(`rebuild_refusal_refuses`).
 
 **Moving owned rows.** `OwnerMoves.lean` treats every row a move carries as
 a copy: a direct change of the mover's write, made without SQL, keeping its
@@ -1341,7 +1370,7 @@ referenced-key updates and compound and transitive actions on SQLite,
 rebuilds each captured foreign-key action's `Reference` from the schema and
 its cause's own captured step, and requires the model's exact consequence.
 That checks the author's capture against B18's effects.
-The `receive` mode decides `Admission.check` and `Admission.guard` for a
+The `receive` mode decides `checkSteps` and `Admission.guard` for a
 received write from the receiver's reconstructed execution: the references
 behind each action the receiver found, each row's direct effect, each derived
 row's paths combined with `together`, its proposed net change, and the
@@ -1350,8 +1379,9 @@ not survive. `store` gives a cascaded key as the child's column stores it.
 `judge_view::tests::receipt_matches_the_model` receives direct,
 derived, transitive, coalesced, trigger and unauthorized-root writes, a forged
 action payload, actions across affinities, through references recorded by
-value alone and through columns another reference shares, and an action
-whose cause's net change differs from its steps,
+value alone and through columns another reference shares, an action whose
+cause's net change differs from its steps, and an own row's net change that
+differs from its steps but causes nothing,
 and requires each recorded verdict to be the model's cause, with the roots of
 each derived change (`applied_derived_recorded`) and the failed sources of each
 dependent one (`dependencies`, `dropped_contributing_root_no_effect`).
