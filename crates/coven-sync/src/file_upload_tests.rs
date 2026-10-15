@@ -1,10 +1,8 @@
 use super::{files_runner, Fixture, CHUNK};
 use crate::files::file_error::*;
 use crate::files::file_upload::*;
-use coven_database::FileRef;
-use coven_database::{CacheFill, Provenance};
-use coven_storage::{test_utils::Faults, Storage};
-use coven_storage::{ObjectPath, UploadSession};
+use coven_database::{CacheFill, FileRef, Provenance};
+use coven_storage::{test_utils::Faults, ObjectPath, Storage, UploadSession};
 use std::time::Duration;
 
 #[tokio::test]
@@ -975,6 +973,8 @@ async fn a_file_goes_in_one_request_up_to_the_providers_limit() {
 async fn a_single_request_retry_refuses_a_source_changed_after_a_failed_send() {
     use coven_storage::test_utils::MemoryRequest;
     let f = Fixture::new(Provenance::UserProvided, CacheFill::CacheLazy).await;
+    // Only the app's retries attempt it: the worker's own drains would race them.
+    f.files.stop_background_for_counts().await;
     let file = f.original("take", &vec![7; CHUNK - 100]).await;
     f.storage
         .set_faults(Faults {
