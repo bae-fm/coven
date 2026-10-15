@@ -521,7 +521,19 @@ async fn newer_snapshots_delete_covered_logs_and_older_own_snapshots() {
         assert_eq!(logs.len(), 1);
         note(handle, body).await;
         f.sync(handle).await;
-        // This pass sees the position posted after snapshot publication.
+        // A covered log goes only once its covering snapshot is a storage
+        // day old (§15): a pass that sees the position posted after
+        // snapshot publication still keeps the old log and the new one.
+        f.sync(handle).await;
+        let held = f
+            .storage
+            .list(&ObjectPrefix::device_logs(f.directory.id()))
+            .await
+            .unwrap();
+        assert_eq!(held.len(), 2);
+        assert_eq!(held[0].path, logs[0].path);
+        // This pass observes the storage time a day later.
+        f.clock.set(f.clock.now() + Duration::from_secs(86400));
         f.sync(handle).await;
         assert!(f
             .storage
