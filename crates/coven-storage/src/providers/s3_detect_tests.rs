@@ -112,6 +112,9 @@ struct Remote {
     written: Vec<String>,
     next: u64,
     fail_copies: bool,
+    /// The one second every publication is dated, when the server's clock
+    /// stands still.
+    frozen: Option<u64>,
     /// The status a V2 listing with `max-keys=0` answers instead of a page.
     empty_v2_listing: Option<u16>,
     bucket_heads: usize,
@@ -290,6 +293,7 @@ async fn serve(
 }
 
 fn publish(state: &mut Remote, key: String, bytes: Vec<u8>, modified: u64) {
+    let modified = state.frozen.unwrap_or(modified);
     state.next += 1;
     let etag = state.next;
     state.written.push(key.clone());
@@ -421,6 +425,7 @@ impl Fixture {
             written: Vec::new(),
             next: 0,
             fail_copies: false,
+            frozen: None,
             empty_v2_listing: None,
             bucket_heads: 0,
         }));
@@ -437,11 +442,18 @@ impl Fixture {
         }
     }
     async fn detect(&self, profile: Option<S3Profile>) -> Result<S3Detection, StorageError> {
+        self.detect_with(profile, Arc::new(SystemClock)).await
+    }
+    async fn detect_with(
+        &self,
+        profile: Option<S3Profile>,
+        clock: ClockRef,
+    ) -> Result<S3Detection, StorageError> {
         detect(
             self.location(profile),
             credentials(),
             STORE,
-            Arc::new(SystemClock),
+            clock,
             Arc::new(UuidIds),
         )
         .await
@@ -794,4 +806,38 @@ async fn v2_is_unsupported_on_501_but_an_outage_fails_detection() {
     .await
     .unwrap_err();
     assert_eq!(failed.failure(), StorageFailure::Network);
+}
+
+/// System time that records each pause instead of waiting it.
+#[derive(Default)]
+struct Pauses(Mutex<Vec<std::time::Duration>>);
+impl coven_foundation::clock::Clock for Pauses {
+    fn now(&self) -> std::time::SystemTime {
+        std::time::SystemTime::now()
+    }
+    fn elapsed(&self) -> std::time::Duration {
+        self.0.lock().unwrap().iter().sum()
+    }
+    fn sleep(
+        &self,
+        duration: std::time::Duration,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
+        self.0.lock().unwrap().push(duration);
+        Box::pin(std::future::ready(()))
+    }
+}
+
+/// A marker the server never dates later fails detection after the 1 second
+/// wait and 40 pauses of 250 ms between its attempts (§4).
+#[tokio::test]
+async fn a_marker_that_never_advances_fails_after_forty_pauses() {
+    let fixture = Fixture::new(AWS).await;
+    fixture.state.lock().unwrap().frozen = Some(now());
+    let pauses = Arc::new(Pauses::default());
+    let error = fixture.detect_with(None, pauses.clone()).await.unwrap_err();
+    assert_eq!(error.failure(), StorageFailure::Protocol);
+    let mut expected = vec![std::time::Duration::from_secs(1)];
+    expected.extend([std::time::Duration::from_millis(250); 40]);
+    assert_eq!(*pauses.0.lock().unwrap(), expected);
+    fixture.assert_clean();
 }

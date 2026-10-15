@@ -303,13 +303,15 @@ impl Probes<'_> {
         after: StorageTime,
     ) -> Result<StorageTime, StorageError> {
         self.clock.sleep(FIRST_PAUSE).await;
-        for _ in 0..=RETRIES {
+        for attempt in 0..=RETRIES {
+            if attempt > 0 {
+                self.clock.sleep(RETRY_PAUSE).await;
+            }
             self.put(key, b"later marker", None).await?;
             let marked = time(&self.head(key).await?)?;
             if marked > after {
                 return Ok(marked);
             }
-            self.clock.sleep(RETRY_PAUSE).await;
         }
         Err(StorageFailure::Protocol.with_source("server time did not advance"))
     }
