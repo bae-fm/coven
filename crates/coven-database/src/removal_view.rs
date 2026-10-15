@@ -46,7 +46,6 @@ pub(crate) struct EvaluatedRow {
     pub(crate) facts: RemovalRow,
     pub(crate) values: AppValues,
     pub(crate) constraints: Constraints,
-    pub(crate) readings: BTreeMap<ForeignKey, ReferenceValue>,
 }
 
 pub(crate) struct DatabaseRemovalView<'a> {
@@ -151,7 +150,6 @@ impl<'a> DatabaseRemovalView<'a> {
                 facts: RemovalRow::Absent { generation },
                 values: BTreeMap::new(),
                 constraints: Constraints::default(),
-                readings: BTreeMap::new(),
             };
             return Ok(self.remember(id, row));
         }
@@ -197,7 +195,6 @@ impl<'a> DatabaseRemovalView<'a> {
                 },
             );
         }
-        let mut readings = BTreeMap::new();
         for (name, reference) in &references {
             let parent_generation = self.state(&reference.parent.row)?.generation();
             let reading = coven_merge::resolve_reference(id, reference, parent_generation)
@@ -213,7 +210,6 @@ impl<'a> DatabaseRemovalView<'a> {
                     .expect("reference columns");
                 values.extend(crate::removal_sql::null_reference(table, fk));
             }
-            readings.insert(name.clone(), reading);
         }
         values = crate::removal_sql::evaluate_values(self.database, table, &values)?;
         let constraints = crate::removal_sql::constraints(
@@ -237,7 +233,6 @@ impl<'a> DatabaseRemovalView<'a> {
             facts,
             values,
             constraints,
-            readings,
         };
         Ok(self.remember(id, row))
     }
@@ -275,17 +270,15 @@ impl RemovalView for DatabaseRemovalView<'_> {
     fn row(&self, row: &RowId) -> Result<RemovalRow, Self::Error> {
         Ok(self.evaluated(row)?.facts)
     }
+    /// The row's evaluation already resolved each reference with
+    /// `coven_merge::resolve_reference` against the parent generations this
+    /// view reports, which are the merge's inputs for `_references`.
     fn constraints(
         &self,
         row: &RowId,
-        references: &BTreeMap<ForeignKey, ReferenceValue>,
+        _references: &BTreeMap<ForeignKey, ReferenceValue>,
     ) -> Result<Constraints, Self::Error> {
-        let evaluated = self.evaluated(row)?;
-        assert_eq!(
-            &evaluated.readings, references,
-            "SQLite and merge resolved different references"
-        );
-        Ok(evaluated.constraints)
+        Ok(self.evaluated(row)?.constraints)
     }
     fn related(&self, id: &RowId) -> Result<BTreeSet<RowId>, Self::Error> {
         let mut related = BTreeSet::new();

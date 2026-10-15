@@ -163,6 +163,24 @@ impl MigrationHistory {
     }
 }
 
+/// A row's references as the merge resolves them against this view.
+fn readings(
+    view: &crate::removal_view::DatabaseRemovalView<'_>,
+    row: &RowId,
+) -> Result<BTreeMap<ForeignKey, ReferenceValue>, crate::DbError> {
+    let RemovalRow::Present { references, .. } = view.evaluated(row)?.facts else {
+        return Ok(BTreeMap::new());
+    };
+    references
+        .iter()
+        .map(|(name, reference)| {
+            let parent = view.state(&reference.parent.row)?.generation();
+            let reading = coven_merge::resolve_reference(row, reference, parent).unwrap();
+            Ok((name.clone(), reading))
+        })
+        .collect()
+}
+
 // Read the actual SQL predicates, resolved references and claims. Only the
 // finality/entry selection is supplied, as it is to the Lean model's theorem.
 fn migration_input(db: &Database, history: &MigrationHistory) -> (Value, Vec<(RowId, u64)>) {
@@ -182,7 +200,7 @@ fn migration_input(db: &Database, history: &MigrationHistory) -> (Value, Vec<(Ro
             .map(|r| r.row.clone())
             .collect();
         for r in identities.clone() {
-            for reading in view.evaluated(&r)?.readings.values() {
+            for reading in readings(&view, &r)?.values() {
                 if let ReferenceValue::Original { parent, .. } = reading {
                     identities.insert(parent.row.clone());
                 }
@@ -196,8 +214,7 @@ fn migration_input(db: &Database, history: &MigrationHistory) -> (Value, Vec<(Ro
         for (i, row) in rows.iter().enumerate() {
             let evaluated = view.evaluated(row)?;
             before.push((row.clone(), evaluated.facts.generation()));
-            let refs: Vec<_> = evaluated
-                .readings
+            let refs: Vec<_> = readings(&view, row)?
                 .values()
                 .filter_map(|reading| match reading {
                     ReferenceValue::Original { parent, stale } => Some(json!({
