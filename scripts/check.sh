@@ -299,6 +299,11 @@ proofs() {
         COVEN_MERGE_LEAN="$runner" exact_ignored coven-database --all-features -- \
             migration_state::tests::migration_differential_histories \
             migration_state::tests::migration_differential_agreement
+
+        step "Rust / Lean frozen losses under dropped schema"
+        COVEN_MERGE_LEAN="$runner" exact_ignored coven-database --all-features -- \
+            migration_hidden::tests::freeze_differential_histories \
+            migration_hidden::tests::freeze_differential_agreement
     fi
 
     if proof_selected merge || proof_selected queue || crate_selected coven-database; then

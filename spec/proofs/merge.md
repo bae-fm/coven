@@ -578,6 +578,17 @@ that no record, setter, old name or original cause is removed. A whole-row
 loss keeps the whole row. `dropped_schema_keeps_losses` checks both a pending
 color value and a whole-row loss.
 
+`droppedBy` is the affected predicate, by table and column identity: the
+migration drops the loss's table, the column of a cell loss, or a column a
+whole-row loss's values name. `dropSchema` is the merge state the drop
+leaves: a dropped table's rows lose their merge history, a dropped column
+its cells and cell losses. A row hidden only by reversible causes stays
+hidden, so it keeps a live removed-row record. `hidden_row_after_drop`
+proves that record is the old one without the dropped columns' values, and
+`dropped_column_frozen_whole` that a record naming a dropped column is
+frozen whole, that value included, while the live record no longer holds
+it.
+
 ### B13 Reset contents on every device
 
 For [§19.3](../coven.md#193-resetting-a-store), `ResetBoundary` distinguishes
@@ -822,13 +833,35 @@ to the retained delete on the migrating device and on a device that loads
 its snapshot. For `freezeDropped`, they check that dropping a table or a
 column freezes each affected pending cell or removed-row loss with its old
 names, setters and cause, through name reuse, renames, snapshot reload with
-equal fingerprints, and dismissal; there is no model comparison of it.
+equal fingerprints, and dismissal.
 
-`scripts/check.sh` runs the strict comparison and the agreement case:
+`freeze_differential_histories`
+([`migration_hidden_tests.rs`](../../crates/coven-database/src/migration_hidden_tests.rs))
+compares the real migration with `freezeDropped` over generated stores. Two
+devices edit the same store-row and tag cells concurrently, so the subject
+holds cell losses; circle rows, some setting the droppable columns, are
+hidden by a non-final circle deletion, so it holds removed-row losses. One
+or two later migrations then drop column `c`, rename `d` to `e`, drop `d`
+or `e`, and drop table `tags`, in random combinations. Before each step
+the runner's `freeze` mode receives every stored loss, as rows, columns and
+setters numbered from the old names, with the tables and columns that step
+drops. It applies `freezeDropped` with `droppedBy` and returns the frozen
+records, the cell losses still active, and each kept hidden row's live
+record under `dropSchema` (`lossRecord`). After the step Rust's stored
+losses must equal them, frozen ones under their old names and active ones
+under the new. Values are compared by setter, as the model identifies them.
+All 48 seeds agree over 69 steps, comparing 57 frozen cell losses, 33
+frozen whole rows and 69 live removed-row records; the test requires each
+kind to occur. With `droppedBy` ignoring whole-row values it fails at one
+hidden row and a dropped `d`. `freeze_differential_agreement` checks one migration with each
+kind of record. Rows the migration deletes (`captureHidden`), and losses
+under other migration changes, are outside this comparison.
+
+`scripts/check.sh` runs the strict comparisons and the agreement cases:
 
 ```sh
 COVEN_MERGE_LEAN="$PWD/spec/proofs/merge/.lake/build/bin/mergeRunner" \
-  cargo test -p coven-database migration_differential -- --ignored --nocapture
+  cargo test -p coven-database migration_ -- --ignored --nocapture
 ```
 
 <a id="b17-receive-order-progress-and-the-retirement-gap"></a>

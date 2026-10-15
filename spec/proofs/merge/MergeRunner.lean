@@ -204,8 +204,85 @@ private def readInputs (j : Json) : Except String (Array InputRow × Inputs Nat 
       | none => 0 }
   pure (rows, I)
 
+private def readRule (j : Json) : Except String Rule := do
+  match ← natField j "kind" with
+  | 0 => pure .foreignKey
+  | 1 => pure .check
+  | 2 => pure (.deletedCircleEntry (← natField j "entry"))
+  | 3 => pure .otherAudience
+  | 4 => pure .unique
+  | _ => throw "unknown removal rule"
+
+private def readCause (j : Json) : Except String (LossCause Nat) := do
+  match ← j.getObjValAs? String "kind" with
+  | "write" => pure (.write (← natField j "write"))
+  | "rules" => pure (.rules ((← (← j.getObjValAs? (Array Json) "rules").mapM readRule).toList))
+  | "schema" => pure (.schemaChange (← natField j "version") (← natField j "write"))
+  | "dependency" =>
+    pure (.dependency (← natField j "write") (← j.getObjValAs? (Array Nat) "sources").toList)
+  | _ => throw "unknown loss cause"
+
+private def causeJson : LossCause Nat → Json
+  | .write w => Json.mkObj [("kind", "write"), ("write", toJson w)]
+  | .rules rules => Json.mkObj [("kind", "rules"), ("rules", toJson (rules.map namedRuleJson))]
+  | .schemaChange version w =>
+    Json.mkObj [("kind", "schema"), ("version", toJson version), ("write", toJson w)]
+  | .dependency w sources =>
+    Json.mkObj [("kind", "dependency"), ("write", toJson w), ("sources", toJson sources)]
+
+/-- A stored loss: `frozen`, its row, generation, the column of a cell loss,
+each value's setter by column, and its cause. -/
+private def readLoss (j : Json) : Except String (PendingLoss Nat Nat Nat) := do
+  let values ← j.getObjValAs? (Array (Nat × Nat)) "values"
+  let record : LossRecord Nat Nat Nat := ⟨← natField j "row", ← natField j "gen",
+    ← j.getObjValAs? (Option Nat) "column", fun c => (values.find? (·.1 == c)).map (·.2),
+    ← readCause (← j.getObjVal? "cause")⟩
+  if ← j.getObjValAs? Bool "frozen" then pure (.frozen (freeze record)) else pure (.active record)
+
+private def lossJson (cols : Nat) (r : LossRecord Nat Nat Nat) : Json :=
+  let values := (List.range cols).filterMap fun c => (r.values c).map fun w => toJson [c, w]
+  Json.mkObj [("row", toJson r.row), ("gen", toJson r.generation), ("column", toJson r.column),
+    ("values", toJson values), ("cause", causeJson r.cause)]
+
+/-- A migration that drops tables and columns: `freezeDropped` over the
+stored losses with `droppedBy`, then the live records the dropped state
+leaves. A cell loss stays active unless affected; a hidden row of a kept
+table keeps its removed-row record under `dropSchema`, whatever was frozen. -/
+private def runFreeze (j : Json) : Except String Json := do
+  let cols ← natField j "columns"
+  let droppedRows ← j.getObjValAs? (Array Nat) "droppedRows"
+  let droppedColumns ← j.getObjValAs? (Array (Nat × Nat)) "droppedColumns"
+  let losses ← (← j.getObjValAs? (Array Json) "losses").mapM readLoss
+  let table := fun r => droppedRows.contains r
+  let column := fun r c => droppedColumns.contains (r, c)
+  let affected := droppedBy (List.range cols) table column
+  let frozen := (losses.map (freezeDropped affected)).toList.filterMap fun
+    | .frozen loss => some loss.record
+    | .active _ => none
+  let mut active : Array (LossRecord Nat Nat Nat) := #[]
+  for loss in losses do
+    match loss with
+    | .frozen _ => pure ()
+    | .active record =>
+      match record.column, record.cause with
+      | some _, _ => if !affected record then active := active.push record
+      | none, .rules rules =>
+        if !table record.row then
+          let st : St Nat Nat Nat := { St.init with
+            gen := fun r => if r = record.row then record.generation else 0
+            cell := fun r c => if r = record.row then record.values c else none }
+          let v : View Nat := ⟨fun _ => false, fun r => r == record.row,
+            fun r => if r = record.row then rules else []⟩
+          match lossRecord (dropSchema st table column) v record.row none with
+          | some live => active := active.push live
+          | none => throw "a hidden row has no removed-row record"
+      | none, _ => throw "an active whole-row loss is a removal"
+  pure (Json.mkObj [("frozen", toJson (frozen.map (lossJson cols))),
+    ("active", toJson (active.toList.map (lossJson cols)))])
+
 private def run (j : Json) : Except String Json := do
   let mode ← j.getObjValAs? String "mode"
+  if mode == "freeze" then return ← runFreeze j
   if mode == "migration" then
     let (rows, I) ← readInputs j
     let named ← readEntries j I

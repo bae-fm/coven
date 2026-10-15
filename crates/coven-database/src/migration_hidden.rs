@@ -222,3 +222,7 @@ fn final_deletions(
     }
     Ok(kept)
 }
+
+#[cfg(test)]
+#[path = "migration_hidden_tests.rs"]
+mod tests;

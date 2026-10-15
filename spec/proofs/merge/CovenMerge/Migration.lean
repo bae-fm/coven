@@ -111,6 +111,54 @@ theorem drop_preserves_all_pending (affected : LossRecord W Row Col → Bool)
   funext loss
   exact drop_preserves_pending affected loss
 
+/-- §17.1's affected losses, by table and column identity: the migration
+drops the loss's table, the column of a cell loss, or a column that a
+whole-row loss's values name. `cols` lists the columns values can name. -/
+def droppedBy (cols : List Col) (table : Row → Bool) (column : Row → Col → Bool)
+    (r : LossRecord W Row Col) : Bool :=
+  table r.row || match r.column with
+    | some c => column r.row c
+    | none => cols.any fun c => (r.values c).isSome && column r.row c
+
+/-- The merge state a migration leaves when it drops tables and columns: a
+dropped table's rows lose their merge history, a dropped column its cells
+and cell losses. Stored loss records are `freezeDropped`'s. -/
+def dropSchema (st : St W Row Col) (table : Row → Bool) (column : Row → Col → Bool) :
+    St W Row Col where
+  gen r := if table r then 0 else st.gen r
+  genWrite r g := if table r then none else st.genWrite r g
+  cell r c := if table r || column r c then none else st.cell r c
+  lost r c w := if table r || column r c then none else st.lost r c w
+
+/-- A hidden row of a kept table keeps its live removed-row record after the
+drop, without the dropped columns' values; `freezeDropped` keeps the whole
+record, those values included, as a frozen loss. -/
+theorem hidden_row_after_drop [DecidableEq Col] (st : St W Row Col) (v : View Row)
+    (table : Row → Bool) (column : Row → Col → Bool) (r : Row)
+    (kept : table r = false) (hidden : v.removed r = true) :
+    lossRecord (dropSchema st table column) v r none =
+      some ⟨r, st.gen r, none, fun c => if column r c then none else st.cell r c,
+        .rules (v.rules r)⟩ := by
+  simp [lossRecord, dropSchema, kept, hidden]
+
+/-- A removed-row record naming a dropped column is affected: it becomes
+frozen whole, while the live record no longer holds that value. -/
+theorem dropped_column_frozen_whole [DecidableEq Col] (cols : List Col) (st : St W Row Col)
+    (v : View Row) (table : Row → Bool) (column : Row → Col → Bool) (r : Row) (c : Col)
+    (kept : table r = false) (hidden : v.removed r = true) (listed : c ∈ cols)
+    (held : (st.cell r c).isSome = true) (dropped : column r c = true) :
+    let record : LossRecord W Row Col := ⟨r, st.gen r, none, st.cell r, .rules (v.rules r)⟩
+    freezeDropped (droppedBy cols table column) (.active record) = .frozen (freeze record) ∧
+      (freeze record).record.values c = st.cell r c ∧
+      ((lossRecord (dropSchema st table column) v r none).map (·.values c)) = some none := by
+  intro record
+  have affected : droppedBy cols table column record = true := by
+    simp only [droppedBy, record, kept, Bool.false_or, List.any_eq_true, Bool.and_eq_true]
+    exact ⟨c, listed, held, dropped⟩
+  refine ⟨drop_freezes_affected _ record affected, rfl, ?_⟩
+  rw [hidden_row_after_drop st v table column r kept hidden]
+  simp [dropped]
+
 def captureHidden (st : St W Row Col) (I : EntryInputs Row K) (final : Nat → Bool)
     (migration : W) (version : Nat) (r : Row) : Option (FrozenLoss W Row Col) :=
   if migrationRemoves I final r then

@@ -15,7 +15,7 @@ const MIGRATION_SCHEMA: &str = "CREATE TABLE rows(id TEXT NOT NULL PRIMARY KEY,a
 fn migration_tables() -> Vec<SyncedTable> {
     vec![SyncedTable::new("rows", RowIdentity::IndependentUuid).audience_column("audience")]
 }
-fn circle_id() -> CircleId {
+pub(crate) fn circle_id() -> CircleId {
     CircleId(uuid::Uuid::from_u128(1))
 }
 
@@ -29,7 +29,7 @@ struct MigrationHistory {
     writes: Vec<WriteRecord>,
     deletion: Option<Finality>,
 }
-fn migration_insert(n: u64, key: usize, audience: Audience) -> WriteRecord {
+pub(crate) fn migration_insert(n: u64, key: usize, audience: Audience) -> WriteRecord {
     let mut write = insert(n, key);
     let key =
         uuid::Uuid::from_u128(0x00000000000040008000000000000000 + key as u128 + 1).to_string();

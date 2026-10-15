@@ -89,6 +89,8 @@ open CovenMerge
 #print axioms drop_preserves_pending
 #print axioms drop_freezes_affected
 #print axioms drop_preserves_all_pending
+#print axioms hidden_row_after_drop
+#print axioms dropped_column_frozen_whole
 -- resets, including the author (§19.3)
 #print axioms reset_valid
 #print axioms reset_causal
