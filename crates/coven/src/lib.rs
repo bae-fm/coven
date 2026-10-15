@@ -39,8 +39,9 @@ pub use coven_database::{
     FileSource, LiveQuery, LiveQueryCause, LiveQueryClosed, LiveQueryRequests, LiveQueryRevision,
     Lost, LostCell, LostValue, Migration, MigrationChange, MigrationContext, MigrationError,
     MigrationOutcome, Params, PreparedUserFile, Provenance, Read, ReconfigurableLiveQuery,
-    ReconfigurableLiveQueryEvent, RemovalRule, Replacement, Row, RowChange, RowIdentity, RowKey,
-    SchemaError, SqlContext, SqlReadContext, SyncedTable, ToSql, UserFile, WriteBatch, WriteId,
+    ReconfigurableLiveQueryEvent, RemovalRule, Replacement, Row, RowAuthorizationFailure,
+    RowChange, RowIdentity, RowKey, SchemaError, SqlContext, SqlReadContext, SyncedTable, ToSql,
+    UserFile, WriteBatch, WriteId,
 };
 pub use coven_database::{DropReason, EntryTarget};
 pub use coven_database::{LogObject, LogRefusal};

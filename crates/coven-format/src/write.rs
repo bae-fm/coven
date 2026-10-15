@@ -552,7 +552,7 @@ pub enum PartRecord<'a> {
     /// Operations with no net change.
     Execution(&'a RowExecution),
 }
-impl PartRecord<'_> {
+impl<'a> PartRecord<'a> {
     /// The row this record changes.
     pub fn row(&self) -> &RowId {
         match self {
@@ -562,7 +562,7 @@ impl PartRecord<'_> {
     }
 
     /// The row's operations.
-    pub fn execution(&self) -> &Execution {
+    pub fn execution(&self) -> &'a Execution {
         match self {
             Self::Change(change) => &change.execution,
             Self::Execution(execution) => &execution.execution,

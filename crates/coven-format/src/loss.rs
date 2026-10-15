@@ -4,6 +4,7 @@ use crate::error::{require, Error, Rule as FormatRule};
 use crate::value::{name, positive, row, Value, WritePositions};
 use crate::wire::{Decoder, Encoder, Wire};
 use crate::write_sources::ChangeId;
+use coven_foundation::id_source::MemberId;
 use coven_merge::{Cell, LostKey, LostValue, RowId, Rule, WriteId};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -111,13 +112,61 @@ pub enum LossCause {
         version: u32,
     },
     /// An admitted row change that used data which does not survive (§8):
-    /// its generation source or a cell setter it replaced.
+    /// its generation source, a cell setter it replaced, a source its
+    /// operations used, or a foreign-key cause in its own write.
     Dependency {
         /// The write whose row change this is, even for an empty delete.
         write: WriteId,
-        /// Failed sources in generation-then-setter role order, with repeats.
+        /// Failed sources in role order, with repeats: generation, replaced
+        /// setters, additional execution sources, then foreign-key causes.
         sources: Vec<ChangeId>,
     },
+    /// A member's row change without permission: a direct change of another
+    /// member's owned row, or a foreign-key effect the receiver could not
+    /// derive exactly from an authorized direct change (§8.8).
+    NotAuthorized {
+        /// The write whose row change this is, even for an empty delete.
+        write: WriteId,
+        /// Why the change was refused.
+        reason: AuthorizationFailure,
+    },
+}
+
+/// Why a row change lacked permission (§8.8).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AuthorizationFailure {
+    /// The row belongs to this member, and the change was not an exact
+    /// foreign-key effect of an authorized change.
+    NotOwner {
+        /// The member whose write created the row.
+        owner: MemberId,
+    },
+    /// A derived change differs from the schema's effect of authorized
+    /// direct changes in its write, or has no authorized root.
+    InvalidForeignKeyEffect,
+}
+impl Wire for AuthorizationFailure {
+    fn put(&self, out: &mut Encoder) -> Result<(), Error> {
+        match self {
+            Self::NotOwner { owner } => {
+                0u8.put(out)?;
+                owner.put(out)
+            }
+            Self::InvalidForeignKeyEffect => 1u8.put(out),
+        }
+    }
+    fn get(input: &mut Decoder<'_>) -> Result<Self, Error> {
+        match u8::get(input)? {
+            0 => Ok(Self::NotOwner {
+                owner: Wire::get(input)?,
+            }),
+            1 => Ok(Self::InvalidForeignKeyEffect),
+            tag => Err(Error::UnknownTag {
+                field: "authorization failure",
+                tag,
+            }),
+        }
+    }
 }
 impl Wire for LossCause {
     fn put(&self, out: &mut Encoder) -> Result<(), Error> {
@@ -140,6 +189,11 @@ impl Wire for LossCause {
                 write.put(out)?;
                 sources.put(out)
             }
+            Self::NotAuthorized { write, reason } => {
+                4u8.put(out)?;
+                write.put(out)?;
+                reason.put(out)
+            }
         }
     }
     fn get(input: &mut Decoder<'_>) -> Result<Self, Error> {
@@ -153,6 +207,10 @@ impl Wire for LossCause {
             3 => Ok(Self::Dependency {
                 write: Wire::get(input)?,
                 sources: Wire::get(input)?,
+            }),
+            4 => Ok(Self::NotAuthorized {
+                write: Wire::get(input)?,
+                reason: Wire::get(input)?,
             }),
             tag => Err(Error::UnknownTag {
                 field: "loss cause",
@@ -168,6 +226,33 @@ pub(crate) enum LossIdentity {
     Cell(LostKey),
     Row(BTreeMap<String, WriteId>),
 }
+impl LossCause {
+    /// The original change's own write, for a frozen change loss.
+    pub fn change_write(&self) -> Option<WriteId> {
+        match self {
+            Self::Excluded { write, .. }
+            | Self::Dependency { write, .. }
+            | Self::NotAuthorized { write, .. } => Some(*write),
+            Self::Write(_) | Self::Rules(_) => None,
+        }
+    }
+
+    pub(crate) fn tag(&self) -> u8 {
+        match self {
+            Self::Write(_) => 0,
+            Self::Rules(_) => 1,
+            Self::Excluded { .. } => 2,
+            Self::Dependency { .. } => 3,
+            Self::NotAuthorized { .. } => 4,
+        }
+    }
+
+    /// A frozen original row change: excluded, dependent or unauthorized.
+    pub fn freezes_change(&self) -> bool {
+        self.change_write().is_some()
+    }
+}
+
 impl Loss {
     /// Project a concurrent merge loss into the common record.
     pub fn cell(row: RowId, key: LostKey, value: LostValue<Value>) -> Self {
@@ -207,24 +292,13 @@ impl Loss {
                 LossIdentity::Row(cells.iter().map(|(n, c)| (n.clone(), c.write)).collect())
             }
         };
-        let cause = match self.cause {
-            LossCause::Write(_) => 0,
-            LossCause::Rules(_) => 1,
-            LossCause::Excluded { .. } => 2,
-            LossCause::Dependency { .. } => 3,
-        };
         (
             self.row.clone(),
             self.generation,
             identity,
             self.frozen,
-            cause,
-            match self.cause {
-                LossCause::Excluded { write, .. } | LossCause::Dependency { write, .. } => {
-                    Some(write)
-                }
-                _ => None,
-            },
+            self.cause.tag(),
+            self.cause.change_write(),
         )
     }
 
@@ -280,11 +354,20 @@ impl Loss {
                 for source in sources {
                     positive(source.write.number)?;
                     require(
-                        source.row.key == self.row.key && source.row.audience == self.row.audience,
+                        dependency_source(&self.row, *write, source),
                         "dependency source row",
                         FormatRule::Required,
                     )?;
                 }
+            }
+            (LossValues::Row(cells), LossCause::NotAuthorized { write, .. }) => {
+                positive(write.number)?;
+                require(
+                    cells.values().all(|cell| cell.write == *write),
+                    "unauthorized setters",
+                    FormatRule::Required,
+                )?;
+                require(self.frozen, "unauthorized loss", FormatRule::Required)?;
             }
             _ => {
                 return Err(Error::Invalid {
@@ -293,10 +376,7 @@ impl Loss {
                 })
             }
         }
-        if !matches!(
-            self.cause,
-            LossCause::Excluded { .. } | LossCause::Dependency { .. }
-        ) {
+        if !self.cause.freezes_change() {
             require(
                 !self.generation.is_multiple_of(2),
                 "loss incarnation",
@@ -307,12 +387,7 @@ impl Loss {
             name(n)?;
             positive(cell.write.number)?;
             crate::merge_wire::column(&cell.value)?;
-            if self.frozen
-                && !matches!(
-                    self.cause,
-                    LossCause::Excluded { .. } | LossCause::Dependency { .. }
-                )
-            {
+            if self.frozen && !self.cause.freezes_change() {
                 require(
                     cell.value.parents.is_empty(),
                     "frozen references",
@@ -341,15 +416,21 @@ impl Loss {
         };
         values
             && match self.cause {
-                LossCause::Write(write) | LossCause::Excluded { write, .. } => {
-                    positions.covers(write)
-                }
+                LossCause::Write(write)
+                | LossCause::Excluded { write, .. }
+                | LossCause::NotAuthorized { write, .. } => positions.covers(write),
                 LossCause::Dependency { write, ref sources } => {
                     positions.covers(write) && sources.iter().all(|s| positions.covers(s.write))
                 }
                 _ => true,
             }
     }
+}
+
+/// A dependent change's source: a change at the same row (its generation,
+/// setters and execution sources), or a foreign-key cause in its own write.
+pub(crate) fn dependency_source(row: &RowId, write: WriteId, source: &ChangeId) -> bool {
+    source.write == write || (source.row.key == row.key && source.row.audience == row.audience)
 }
 
 #[cfg(test)]

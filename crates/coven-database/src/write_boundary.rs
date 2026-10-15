@@ -7,7 +7,7 @@ use coven_format::{
     snapshot_rows::ChangeVerdict,
     store_log::{SnapshotId, StoreChange, StoreLogEntry},
     value::{EntryId, WritePositions},
-    write::{WriteHeader, WritePart},
+    write::WriteHeader,
 };
 use coven_foundation::id_source::DeviceId;
 use coven_merge::Audience;
@@ -308,8 +308,12 @@ impl WriteBoundary {
     /// This boundary's verdict on an uncovered part of its audience: a kept
     /// reset ignores a part whose write had not read the reset entry (§19.3);
     /// a raise excludes a part authored at an older schema version (§17.1).
-    pub(crate) fn excludes(&self, header: &WriteHeader, part: &WritePart) -> Option<ChangeVerdict> {
-        if part.audience != self.audience || self.included.covers(header.position) {
+    pub(crate) fn excludes(
+        &self,
+        header: &WriteHeader,
+        audience: &Audience,
+    ) -> Option<ChangeVerdict> {
+        if *audience != self.audience || self.included.covers(header.position) {
             return None;
         }
         match &self.rule {
@@ -328,11 +332,11 @@ impl WriteBoundary {
     pub(crate) fn part_verdict(
         boundaries: &[Self],
         header: &WriteHeader,
-        part: &WritePart,
+        audience: &Audience,
     ) -> Option<ChangeVerdict> {
         let verdicts: Vec<_> = boundaries
             .iter()
-            .filter_map(|boundary| boundary.excludes(header, part))
+            .filter_map(|boundary| boundary.excludes(header, audience))
             .collect();
         verdicts
             .iter()

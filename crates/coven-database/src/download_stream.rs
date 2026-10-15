@@ -210,13 +210,7 @@ impl<R: Read> DownloadedWriteStream<R> {
                         }
                         return Ok(());
                     }
-                    crate::download_stage::frame(
-                        database,
-                        schema,
-                        &self.header.header,
-                        &audience,
-                        frame,
-                    )
+                    crate::download_stage::frame(database, &self.header.header, &audience, frame)
                 })?;
                 root.finish(database, write, &audience)?;
                 crate::write_sources::complete(database, &self.header.header, &audience)?;
@@ -229,6 +223,7 @@ impl<R: Read> DownloadedWriteStream<R> {
                 before,
                 schema,
                 &self.header.header,
+                &opened,
                 &deleted,
                 files,
             )?;

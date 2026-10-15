@@ -88,42 +88,56 @@ pub(crate) fn offer(
 }
 
 /// Offer a part's generation-zero inserts as creations, before any check
-/// decides about them (§8.8). Rows are keyed by their current table names;
-/// each creation keeps the original change's own names. Returns each row
-/// whose selected creation this replaced, with the replaced one.
+/// decides about them (§8.8). Returns each row whose selected creation this
+/// replaced, with the replaced one.
 pub(crate) fn offer_part(
     db: &DatabaseConnection,
     header: &coven_format::write::WriteHeader,
     part: &coven_format::write::WritePart,
 ) -> Result<Vec<(RowId, Option<Creation>)>, DbError> {
-    let current = db.schema_version()?;
     let mut replaced = Vec::new();
     for change in &part.rows {
-        if change.change.generation != 0
-            || !matches!(change.change.operation, coven_merge::Operation::Insert(_))
-        {
-            continue;
-        }
-        let Some(table) =
-            crate::source_names::table(db, header.schema_version, &change.row.table, current)?
-        else {
-            continue;
-        };
-        let row = RowId {
-            table,
-            ..change.row.clone()
-        };
-        let creator = change.creator.clone().unwrap_or(ChangeId {
-            write: header.position,
-            row: change.row.clone(),
-        });
-        if let Offer::Selected { previous } =
-            offer(db, &row, header.position, header.timestamp, creator)?
-        {
-            replaced.push((row, previous));
-        }
+        replaced.extend(offer_change(db, header, change)?);
     }
     Ok(replaced)
+}
+
+/// Offer one original change as its row's creation if it is a
+/// generation-zero insert. Rows are keyed by their current table names; the
+/// creation keeps the original change's own names.
+pub(crate) fn offer_change(
+    db: &DatabaseConnection,
+    header: &coven_format::write::WriteHeader,
+    change: &coven_format::write::RowChange,
+) -> Result<Option<(RowId, Option<Creation>)>, DbError> {
+    if change.change.generation != 0
+        || !matches!(change.change.operation, coven_merge::Operation::Insert(_))
+    {
+        return Ok(None);
+    }
+    let Some(table) = crate::source_names::table(
+        db,
+        header.schema_version,
+        &change.row.table,
+        db.schema_version()?,
+    )?
+    else {
+        return Ok(None);
+    };
+    let row = RowId {
+        table,
+        ..change.row.clone()
+    };
+    let creator = change.creator.clone().unwrap_or(ChangeId {
+        write: header.position,
+        row: change.row.clone(),
+    });
+    Ok(
+        match offer(db, &row, header.position, header.timestamp, creator)? {
+            Offer::Selected { previous } => Some((row, previous)),
+            Offer::Kept => None,
+        },
+    )
 }
 
 /// Whether an offered insert became the row's creation.

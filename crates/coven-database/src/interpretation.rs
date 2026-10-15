@@ -1,17 +1,19 @@
 //! The received interpretation of authenticated original changes: each
 //! part's direct admission by the selected boundaries and its own retirement
-//! window, then every admitted change's data sources (§8, §10, §17.1, §19.3).
-//! Original bytes stay retained; only this interpretation reaches the merge.
+//! window, then every admitted change's permission and data sources (§8,
+//! §8.8, §10, §17.1, §19.3). Original bytes stay retained; only this
+//! interpretation reaches the merge.
 use crate::sqlite::DatabaseConnection;
 use crate::write_schema::WriteSchema;
 use crate::{DbError, DownloadedPart, DownloadedWrite};
 use coven_format::{
     loss::LossCause,
-    snapshot_rows::ChangeVerdict,
+    snapshot_rows::{ChangeVerdict, OriginalRow},
     write::{RowChange, WriteDisposition, WriteHeader, WritePart, WriteRecord},
+    write_sources::ChangeId,
 };
-use coven_merge::{ColumnValue, Operation};
-use std::collections::BTreeMap;
+use coven_merge::{Audience, ColumnValue, Operation, Provenance, RowId};
+use std::collections::{BTreeMap, BTreeSet};
 
 pub(crate) fn accepted(
     database: &DatabaseConnection,
@@ -27,184 +29,382 @@ pub(crate) fn interpret(
     schema: &WriteSchema,
     download: DownloadedWrite,
 ) -> Result<WriteRecord, DbError> {
-    let mut record = WriteRecord {
-        header: download.header,
-        parts: download
-            .parts
-            .into_iter()
-            .filter_map(|part| match part {
-                DownloadedPart::Opened(part) => Some(part),
-                DownloadedPart::Skipped(_) => None,
-            })
-            .collect(),
-    };
-    // A write outside its own retirement window is consumed without effects
-    // or losses; later readers never rescue it (§10).
-    if crate::write_landing::late(database, record.header.position)? {
-        for part in &record.parts {
-            for row in part.records() {
-                crate::write_sources::admit(
-                    database,
-                    &record.header,
-                    row.row(),
-                    &ChangeVerdict::Dropped,
-                )?;
-            }
-        }
-        record.parts.clear();
-        return Ok(record);
-    }
-    let boundaries = crate::write_boundary::WriteBoundary::judging(database)?;
+    let parts: Vec<WritePart> = download
+        .parts
+        .into_iter()
+        .filter_map(|part| match part {
+            DownloadedPart::Opened(part) => Some(part),
+            DownloadedPart::Skipped(_) => None,
+        })
+        .collect();
+    let audiences: Vec<_> = parts.iter().map(|part| part.audience.clone()).collect();
+    let interpreter = Interpreter::new(database, schema, &download.header, &audiences)?;
     let mut kept = Vec::new();
-    for mut part in record.parts {
-        if record.header.disposition == WriteDisposition::Migration {
-            continue;
-        }
-        // The part's direct admission before its changes' sources are followed.
-        let verdict =
-            crate::write_boundary::WriteBoundary::part_verdict(&boundaries, &record.header, &part);
-        // A late old-schema part the winning raise's converters reach is a
-        // candidate for admission at that version; without them it is excluded.
-        let converts = match verdict {
-            Some(ChangeVerdict::Excluded(version)) => crate::migration_receive::available(
-                &schema.conversions,
-                record.header.schema_version,
-                version,
-            )
-            .then_some(version),
-            _ => None,
+    for part in parts {
+        kept.extend(interpreter.part(database, schema, part)?);
+    }
+    Ok(WriteRecord {
+        header: download.header,
+        parts: kept,
+    })
+}
+
+/// How a whole part is admitted before its changes are judged (§10, §17.1,
+/// §19.3).
+#[derive(Clone, Debug)]
+enum PartAdmission {
+    /// Its write landed outside its own retirement window.
+    Late,
+    /// A kept reset ignores the part, dismissals included, with no loss.
+    Ignored(crate::EntryId),
+    /// A breaking change excluded it, and no converter reaches its version:
+    /// each original change is a frozen schema loss.
+    Excluded(u32),
+    /// Its changes are judged, then converted to this version if given.
+    Judged(Option<u32>),
+}
+
+/// One write's received interpretation: every opened change's verdict,
+/// decided for the whole write before any part merges, since a foreign-key
+/// action and its causes can be in different parts (§8, §8.8).
+pub(crate) struct Interpreter {
+    header: WriteHeader,
+    parts: BTreeMap<Audience, PartAdmission>,
+    verdicts: BTreeMap<RowId, ChangeVerdict>,
+}
+
+impl Interpreter {
+    /// Judge every change of the write's parts in `audiences`, whose original
+    /// records the caller has retained. Changes in other parts this device
+    /// holds keep the verdicts already recorded for them.
+    pub(crate) fn new(
+        database: &DatabaseConnection,
+        schema: &WriteSchema,
+        header: &WriteHeader,
+        audiences: &[Audience],
+    ) -> Result<Self, DbError> {
+        let mut interpreter = Self {
+            header: header.clone(),
+            parts: BTreeMap::new(),
+            verdicts: BTreeMap::new(),
         };
-        match verdict {
-            // A reset ignores the whole part, dismissals included, with no
-            // loss; its position still passes (§19.3).
-            Some(ChangeVerdict::Ignored(entry)) => {
+        // A write outside its own retirement window is consumed without effects
+        // or losses; later readers never rescue it (§10).
+        if crate::write_landing::late(database, header.position)? {
+            for audience in audiences {
+                interpreter
+                    .parts
+                    .insert(audience.clone(), PartAdmission::Late);
+            }
+            return Ok(interpreter);
+        }
+        let boundaries = crate::write_boundary::WriteBoundary::judging(database)?;
+        for audience in audiences {
+            // The part's direct admission before its changes' sources are followed.
+            let admission = match crate::write_boundary::WriteBoundary::part_verdict(
+                &boundaries,
+                header,
+                audience,
+            ) {
+                _ if header.disposition == WriteDisposition::Migration => {
+                    PartAdmission::Judged(None)
+                }
+                Some(ChangeVerdict::Ignored(entry)) => PartAdmission::Ignored(entry),
+                // A late old-schema part the winning raise's converters reach is a
+                // candidate for admission at that version; without them it is excluded.
+                Some(ChangeVerdict::Excluded(version)) => {
+                    if crate::migration_receive::available(
+                        &schema.conversions,
+                        header.schema_version,
+                        version,
+                    ) {
+                        PartAdmission::Judged(Some(version))
+                    } else {
+                        PartAdmission::Excluded(version)
+                    }
+                }
+                _ => PartAdmission::Judged(None),
+            };
+            interpreter.parts.insert(audience.clone(), admission);
+        }
+        let judged: BTreeSet<&Audience> = interpreter
+            .parts
+            .iter()
+            .filter(|(_, admission)| matches!(admission, PartAdmission::Judged(_)))
+            .map(|(audience, _)| audience)
+            .collect();
+        // An admitted part's creations are offered before any check decides
+        // about its changes (§8.8).
+        let mut sources = BTreeMap::new();
+        let mut fixed = BTreeMap::new();
+        crate::judge::visit_write(database, header, |record| {
+            let row = record.row().clone();
+            match interpreter.parts.get(&row.audience) {
+                Some(PartAdmission::Judged(_)) => {
+                    if let OriginalRow::Change(change) = &record {
+                        crate::ownership::offer_change(database, header, change)?;
+                    }
+                    sources.insert(row, provenance(&record));
+                }
+                Some(PartAdmission::Excluded(version)) => {
+                    fixed.insert(row, ChangeVerdict::Excluded(*version));
+                }
+                Some(PartAdmission::Ignored(entry)) => {
+                    fixed.insert(row, ChangeVerdict::Ignored(*entry));
+                }
+                Some(PartAdmission::Late) => {
+                    fixed.insert(row, ChangeVerdict::Dropped);
+                }
+                None => {
+                    let verdict = crate::judge::stored(database, header, &row)?;
+                    fixed.insert(row, verdict);
+                }
+            }
+            Ok(())
+        })?;
+        if judged.is_empty() {
+            return Ok(interpreter);
+        }
+        let judgement = crate::judge::judge(database, schema, header)?;
+        interpreter.verdicts = verdicts(database, header, &judgement, sources, &fixed)?;
+        Ok(interpreter)
+    }
+
+    /// Admit one opened part's changes, or any slice of them in row order,
+    /// under the write's verdicts: frozen losses for changes that do not
+    /// apply, and the changes that do, converted where a raise requires it.
+    pub(crate) fn part(
+        &self,
+        database: &DatabaseConnection,
+        schema: &WriteSchema,
+        mut part: WritePart,
+    ) -> Result<Option<WritePart>, DbError> {
+        let header = &self.header;
+        let admission = self.parts.get(&part.audience).ok_or(DbError::Invariant {
+            what: "an interpreted part was judged with its write",
+        })?;
+        if header.disposition == WriteDisposition::Migration {
+            return Ok(None);
+        }
+        match admission {
+            PartAdmission::Late => {
                 for row in part.records() {
                     crate::write_sources::admit(
                         database,
-                        &record.header,
+                        header,
                         row.row(),
-                        &ChangeVerdict::Ignored(entry),
+                        &ChangeVerdict::Dropped,
                     )?;
                 }
-                continue;
+                Ok(None)
             }
-            // Without a converter, each original change is a frozen schema loss (§17.1).
-            Some(ChangeVerdict::Excluded(version)) if converts.is_none() => {
+            PartAdmission::Ignored(entry) => {
+                for row in part.records() {
+                    crate::write_sources::admit(
+                        database,
+                        header,
+                        row.row(),
+                        &ChangeVerdict::Ignored(*entry),
+                    )?;
+                }
+                Ok(None)
+            }
+            PartAdmission::Excluded(version) => {
                 // Operations alone have no values to keep.
                 for execution in &part.executions {
                     crate::write_sources::admit(
                         database,
-                        &record.header,
+                        header,
                         &execution.row,
-                        &ChangeVerdict::Excluded(version),
+                        &ChangeVerdict::Excluded(*version),
                     )?;
                 }
                 for change in &part.rows {
                     crate::write_sources::admit(
                         database,
-                        &record.header,
+                        header,
                         &change.row,
-                        &ChangeVerdict::Excluded(version),
+                        &ChangeVerdict::Excluded(*version),
                     )?;
                     freeze(
                         database,
                         schema,
-                        &record.header,
+                        header,
                         change,
                         LossCause::Excluded {
-                            write: record.header.position,
-                            version,
+                            write: header.position,
+                            version: *version,
                         },
                     )?;
                 }
-                if !part.dismissals.is_empty() {
-                    kept.push(WritePart {
-                        rows: Vec::new(),
-                        executions: Vec::new(),
-                        ..part
-                    });
-                }
-                continue;
+                Ok((!part.dismissals.is_empty()).then(|| WritePart {
+                    rows: Vec::new(),
+                    executions: Vec::new(),
+                    ..part
+                }))
             }
-            _ => {}
+            PartAdmission::Judged(converts) => {
+                for execution in &part.executions {
+                    crate::write_sources::admit(
+                        database,
+                        header,
+                        &execution.row,
+                        self.verdict(&execution.row)?,
+                    )?;
+                }
+                // Verdicts are decided on the original changes; a change that
+                // does not apply stays frozen in its original shape and never
+                // reaches a converter (E13).
+                let mut applied = Vec::new();
+                for change in std::mem::take(&mut part.rows) {
+                    let verdict = self.verdict(&change.row)?;
+                    crate::write_sources::admit(database, header, &change.row, verdict)?;
+                    let cause = match verdict {
+                        ChangeVerdict::NotAuthorized(reason) => LossCause::NotAuthorized {
+                            write: header.position,
+                            reason: reason.clone(),
+                        },
+                        ChangeVerdict::Dependent(sources) => LossCause::Dependency {
+                            write: header.position,
+                            sources: sources.clone(),
+                        },
+                        ChangeVerdict::Applied | ChangeVerdict::Derived(_) => {
+                            applied.push(change);
+                            continue;
+                        }
+                        _ => {
+                            return Err(DbError::Invariant {
+                                what: "a judged change is applied, dependent or unauthorized",
+                            })
+                        }
+                    };
+                    freeze(database, schema, header, &change, cause)?;
+                }
+                part.rows = applied;
+                if let Some(version) = converts {
+                    crate::migration_receive::convert(
+                        &schema.conversions,
+                        header.schema_version,
+                        *version,
+                        &mut part,
+                    )?;
+                }
+                crate::download_checks::part(schema, &part)?;
+                Ok(Some(part))
+            }
         }
-        // An admitted part's creations are offered before any check decides
-        // about its changes (§8.8).
-        crate::ownership::offer_part(database, &record.header, &part)?;
-        for execution in &part.executions {
-            crate::write_sources::admit(
-                database,
-                &record.header,
-                &execution.row,
-                &ChangeVerdict::Applied,
-            )?;
-        }
-        // Sources are resolved on the original changes; a dependent one stays
-        // frozen in its original shape and never reaches a converter (E13).
-        part.rows = classify(database, schema, &record.header, part.rows)?;
-        if let Some(version) = converts {
-            crate::migration_receive::convert(
-                &schema.conversions,
-                record.header.schema_version,
-                version,
-                &mut part,
-            )?;
-        }
-        crate::download_checks::part(schema, &part)?;
-        kept.push(part);
     }
-    record.parts = kept;
-    Ok(record)
+
+    fn verdict(&self, row: &RowId) -> Result<&ChangeVerdict, DbError> {
+        self.verdicts.get(row).ok_or(DbError::Invariant {
+            what: "every judged change was retained before its write was judged",
+        })
+    }
 }
 
-/// The shared data rule (§8): an admitted change whose generation source or
-/// replaced setter does not survive becomes a frozen loss naming those
-/// sources; its write's other changes still apply.
-fn classify(
-    database: &DatabaseConnection,
-    schema: &WriteSchema,
-    header: &WriteHeader,
-    rows: Vec<RowChange>,
-) -> Result<Vec<RowChange>, DbError> {
-    let mut applied = Vec::new();
-    for row in rows {
-        let provenance = coven_merge::Provenance {
-            generation: row.sources.generation.clone(),
-            setters: row
+/// A change's data sources in role order (§8, Lean `Admission.dependencies`):
+/// generation, replaced setters, then the further sources its operations used.
+fn provenance(record: &OriginalRow) -> Provenance<ChangeId> {
+    let (generation, setters) = match record {
+        OriginalRow::Change(change) => (
+            change.sources.generation.clone(),
+            change
                 .sources
                 .setters
                 .values()
                 .map(|setter| setter.change.clone())
                 .collect(),
-        };
-        match coven_merge::classify(true, &provenance, |source| {
-            crate::write_sources::retained(database, source)
-        })? {
-            coven_merge::DataVerdict::Dependent(sources) => {
-                crate::write_sources::admit(
-                    database,
-                    header,
-                    &row.row,
-                    &ChangeVerdict::Dependent(sources.clone()),
-                )?;
-                freeze(
-                    database,
-                    schema,
-                    header,
-                    &row,
-                    LossCause::Dependency {
-                        write: header.position,
-                        sources,
-                    },
-                )?;
-            }
-            _ => {
-                crate::write_sources::admit(database, header, &row.row, &ChangeVerdict::Applied)?;
-                applied.push(row);
+        ),
+        OriginalRow::Execution(_) => (None, Vec::new()),
+    };
+    Provenance {
+        generation,
+        setters,
+        execution: record
+            .record()
+            .execution()
+            .sources
+            .changes()
+            .cloned()
+            .collect(),
+        causes: Vec::new(),
+    }
+}
+
+/// Every judged change's verdict (Lean `Admission.guard`): a failed
+/// permission check first, then a fixed admission, then dependence on a
+/// change that does not survive, followed within the write as a least
+/// closure, so a cycle without a failed cause drops nothing.
+fn verdicts(
+    database: &DatabaseConnection,
+    header: &WriteHeader,
+    judgement: &crate::judge::Judgement,
+    mut sources: BTreeMap<RowId, Provenance<ChangeId>>,
+    fixed: &BTreeMap<RowId, ChangeVerdict>,
+) -> Result<BTreeMap<RowId, ChangeVerdict>, DbError> {
+    let checked = |row: &RowId| {
+        judgement.rows.get(row).ok_or(DbError::Invariant {
+            what: "every retained change of a write is judged",
+        })
+    };
+    let mut retained = BTreeMap::new();
+    let mut dropped: BTreeSet<RowId> = fixed
+        .iter()
+        .filter(|(_, verdict)| !verdict.retained())
+        .map(|(row, _)| row.clone())
+        .collect();
+    for (row, provenance) in &mut sources {
+        let checked = checked(row)?;
+        provenance.causes = checked.causes(header.position);
+        if checked.check.is_err() {
+            dropped.insert(row.clone());
+        }
+        for source in provenance.sources() {
+            if source.write != header.position && !retained.contains_key(source) {
+                retained.insert(
+                    source.clone(),
+                    crate::write_sources::retained(database, source)?,
+                );
             }
         }
     }
-    Ok(applied)
+    let failed = |source: &ChangeId, dropped: &BTreeSet<RowId>| {
+        if source.write == header.position {
+            dropped.contains(&source.row)
+        } else {
+            !retained[source]
+        }
+    };
+    loop {
+        let mut grew = false;
+        for (row, provenance) in &sources {
+            if !dropped.contains(row) && provenance.sources().any(|s| failed(s, &dropped)) {
+                dropped.insert(row.clone());
+                grew = true;
+            }
+        }
+        if !grew {
+            break;
+        }
+    }
+    let mut verdicts = BTreeMap::new();
+    for (row, provenance) in sources {
+        let checked = checked(&row)?;
+        let verdict = match &checked.check {
+            Err(reason) => ChangeVerdict::NotAuthorized(reason.clone()),
+            Ok(()) if dropped.contains(&row) => ChangeVerdict::Dependent(
+                provenance
+                    .sources()
+                    .filter(|s| failed(s, &dropped))
+                    .cloned()
+                    .collect(),
+            ),
+            Ok(()) if checked.derived => ChangeVerdict::Derived(checked.causes(header.position)),
+            Ok(()) => ChangeVerdict::Applied,
+        };
+        verdicts.insert(row, verdict);
+    }
+    Ok(verdicts)
 }
 
 /// Keep one original row change as a frozen loss with its written values:

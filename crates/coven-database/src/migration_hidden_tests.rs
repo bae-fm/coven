@@ -375,6 +375,7 @@ impl Encoding {
                 let sources: Vec<_> = sources.iter().map(|s| self.id(s)).collect();
                 json!({"kind":"dependency","write":self.id(write),"sources":sources})
             }
+            LossCause::NotAuthorized { .. } => panic!("the freeze model has no owner tables"),
         };
         let row = self.row(&loss.row);
         json!({"frozen":loss.frozen,"row":row,"gen":loss.generation,"column":column,

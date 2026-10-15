@@ -31,6 +31,8 @@ mod file_write;
 mod fingerprint;
 mod internal_schema;
 mod interpretation;
+mod judge;
+mod judge_view;
 mod key_scope;
 mod key_upload;
 pub use key_upload::{KeyUpload, KeyUploadBatch};
@@ -142,7 +144,9 @@ pub use live_query::{
     ReconfigurableLiveQuery, ReconfigurableLiveQueryEvent,
 };
 pub use log_refusal::{LogObject, LogRefusal};
-pub use lost::{ChangeSource, Lost, LostCell, LostValue, RemovalRule, Replacement};
+pub use lost::{
+    ChangeSource, Lost, LostCell, LostValue, RemovalRule, Replacement, RowAuthorizationFailure,
+};
 pub use members::{Circle, CircleMemberInfo, DeviceInfo, MemberInfo};
 pub use migration::{Migration, MigrationChange, MigrationContext, MigrationOutcome};
 pub use migration_change::{ChangeOp, ColumnChange, RowChange};

@@ -1,24 +1,37 @@
 //! The shared data rule for received row changes (§8, D5; Lean
-//! `DataDependency`). A change survives only if its own admission does and every
-//! change whose data it actually used survives: its generation source and each
-//! cell setter it replaced, at the same row. Recorded reads, later readers and
-//! loss dismissal never decide dependence.
+//! `DataDependency` and `Admission.dependencies`). A change survives only if
+//! its own admission does and every change whose data it actually used
+//! survives: its generation source and each cell setter it replaced at the
+//! same row, the further sources its operations used there, and the changes in
+//! its own write whose foreign-key actions produced it. Recorded reads, later
+//! readers and loss dismissal never decide dependence.
 
 /// The changes one row change used, in role order: the generation source
-/// first, then each replaced setter in the authored column order. A source
-/// that fills several roles appears once per role.
+/// first, then each replaced setter in the authored column order, then the
+/// sources its operations used beyond those, then its foreign-key causes in
+/// execution order. A source that fills several roles appears once per role.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Provenance<C> {
     /// The change that established the generation this change advanced.
     pub generation: Option<C>,
     /// The change that set each cell this change replaced.
     pub setters: Vec<C>,
+    /// The generation source and replaced setters its operations used that
+    /// the net change does not already name (D5 `Execution`).
+    pub execution: Vec<C>,
+    /// The direct changes and intermediate actions in the same write whose
+    /// foreign-key actions produced this change (§8.8).
+    pub causes: Vec<C>,
 }
 
 impl<C> Provenance<C> {
     /// Every source, in role order, keeping repeats.
     pub fn sources(&self) -> impl Iterator<Item = &C> {
-        self.generation.iter().chain(&self.setters)
+        self.generation
+            .iter()
+            .chain(&self.setters)
+            .chain(&self.execution)
+            .chain(&self.causes)
     }
 }
 

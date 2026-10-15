@@ -100,7 +100,7 @@ pub(crate) fn dismiss(
         files.retain_rows(affected)?;
         files.before_commit()?;
         crate::operation::check_write_pause(database)?;
-        crate::write_commit::queue(database, &record)
+        crate::write_commit::queue(database, schema, &record)
     })
 }
 

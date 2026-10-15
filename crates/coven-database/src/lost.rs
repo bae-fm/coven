@@ -48,7 +48,8 @@ pub struct LostCell {
     pub set_by: WriteId,
 }
 
-/// The write, rules, breaking schema version or dropped data responsible for a loss.
+/// The write, rules, breaking schema version, dropped data or refused
+/// permission responsible for a loss.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Replacement {
     /// A write that had not read the displaced value.
@@ -60,18 +61,40 @@ pub enum Replacement {
         /// The schema version reached by the breaking change.
         version: u32,
     },
-    /// This original row change used dropped data (§8, §10): its generation
-    /// source or a cell setter it replaced, named in role order with repeats.
-    /// An empty delete still names its write.
+    /// This original row change used dropped data (§8, §10). Sources name
+    /// generation/setter changes, additional direct-execution sources, then
+    /// verified foreign-key causes (§8.8), in authored role/execution order,
+    /// with repeats. Row identity distinguishes several causes in the same
+    /// write. An empty delete still names its write.
     DataDependency {
         /// The write containing this row change.
         write: WriteId,
-        /// The failed sources, generation first, then replaced setters.
+        /// The failed sources, in role order.
         sources: Vec<ChangeSource>,
+    },
+    /// A member's row change lacked permission; other changes may apply (§8.8).
+    NotAuthorized {
+        /// The write containing this row change.
+        write: WriteId,
+        /// Why it was refused.
+        reason: RowAuthorizationFailure,
     },
 }
 
-/// An original row change used as data (§8).
+/// Why a member's row change was refused (§8.8).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RowAuthorizationFailure {
+    /// A direct target belongs to this member, or a foreign target had no
+    /// valid foreign-key derivation from an authorized direct change.
+    NotOwner {
+        /// The member whose write created the row.
+        owner: coven_foundation::id_source::MemberId,
+    },
+    /// The proposed derived payload differs from the reconstructed schema effect.
+    InvalidForeignKeyEffect,
+}
+
+/// An original row change or direct execution target used as data (§8, §8.8).
 #[derive(Clone, Debug, PartialEq)]
 pub struct ChangeSource {
     /// The write containing it.
@@ -182,6 +205,17 @@ impl LostValue {
                         })
                     })
                     .collect::<Result<_, DbError>>()?,
+            },
+            LossCause::NotAuthorized { write, reason } => Replacement::NotAuthorized {
+                write,
+                reason: match reason {
+                    coven_format::loss::AuthorizationFailure::NotOwner { owner } => {
+                        RowAuthorizationFailure::NotOwner { owner }
+                    }
+                    coven_format::loss::AuthorizationFailure::InvalidForeignKeyEffect => {
+                        RowAuthorizationFailure::InvalidForeignKeyEffect
+                    }
+                },
             },
         };
         let row = record.row;

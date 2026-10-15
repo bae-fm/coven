@@ -397,12 +397,12 @@ async fn schema_boundaries_are_independent_for_each_audience() {
         included: WritePositions(Vec::new()),
     };
     assert!(boundary
-        .excludes(&record.header, &record.parts[0])
+        .excludes(&record.header, &record.parts[0].audience)
         .is_none());
     let mut part = record.parts[0].clone();
     part.audience = circle.clone();
     assert!(matches!(
-        boundary.excludes(&record.header, &part),
+        boundary.excludes(&record.header, &part.audience),
         Some(coven_format::snapshot_rows::ChangeVerdict::Excluded(2))
     ));
     assert!(db

@@ -125,7 +125,7 @@ impl Writer {
 }
 
 /// A row's primary key as SQL values, in declared key order.
-fn row_key(row: &RowId) -> Result<crate::RowKey, DbError> {
+pub(crate) fn row_key(row: &RowId) -> Result<crate::RowKey, DbError> {
     let values = coven_format::key::decode_key(&row.key)?;
     Ok(crate::RowKey(
         values
@@ -137,4 +137,4 @@ fn row_key(row: &RowId) -> Result<crate::RowKey, DbError> {
 
 #[cfg(test)]
 #[path = "owner_permission_tests.rs"]
-mod tests;
+pub(crate) mod tests;

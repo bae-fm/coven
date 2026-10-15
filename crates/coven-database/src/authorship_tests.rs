@@ -63,6 +63,10 @@ fn overwrite() -> WriteRecord {
 /// A database holding device 100's owned row, as streamed writes left it.
 async fn source(store: &TestStore, writes: &[WriteRecord]) -> Database {
     let db = store.schema(owned(), SCHEMA).await.unwrap();
+    // Devices 100 and 101 are one member's, who may edit the row (§8.8).
+    for write in writes {
+        TestStore::register(&db, write.header.position.device, 1);
+    }
     for write in writes {
         db.receive_stream(stream(write), EntryPositions(Vec::new()), || Ok(()))
             .await

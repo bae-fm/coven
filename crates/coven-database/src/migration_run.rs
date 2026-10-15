@@ -279,7 +279,7 @@ fn finish(
             crate::write_sources::complete(database, &record.header, &part.audience)?;
         }
         record.parts.clear();
-        crate::write_commit::queue(database, &record)?;
+        crate::write_commit::queue(database, &schema, &record)?;
         crate::migration_state::refresh(database, &schema, &refresh)?;
         snapshot.drop(database)?;
         Ok(record.header.position)

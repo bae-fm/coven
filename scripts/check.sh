@@ -305,11 +305,12 @@ proofs() {
             migration_hidden::tests::freeze_differential_histories \
             migration_hidden::tests::freeze_differential_agreement
 
-        step "Rust / Lean owner creation, foreign-key effects and local admission"
+        step "Rust / Lean owner creation, foreign-key effects, local admission and receipt"
         COVEN_MERGE_LEAN="$runner" exact_ignored coven-database --all-features -- \
             ownership::tests::creation_differential_histories \
             execution_capture::tests::lean::captured_actions_are_the_models_consequences \
-            owner_permission::tests::local_admission_matches_the_model
+            owner_permission::tests::local_admission_matches_the_model \
+            judge_view::tests::receipt_matches_the_model
     fi
 
     if proof_selected storage || crate_selected coven-database; then

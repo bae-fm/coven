@@ -276,6 +276,10 @@ fn dependency_losses_round_trip_with_their_sources() {
     };
     let mut loss = test_utils::excluded_loss();
     let write = test_utils::write().header.position;
+    let other = coven_merge::RowId {
+        key: b"other".to_vec(),
+        ..loss.row.clone()
+    };
     let source = crate::write_sources::ChangeId {
         write,
         row: loss.row.clone(),
@@ -300,14 +304,16 @@ fn dependency_losses_round_trip_with_their_sources() {
             write,
             sources: vec![],
         },
+        // Another row's change is a source only as a foreign-key cause in
+        // the loss's own write.
         LossCause::Dependency {
             write,
             sources: vec![crate::write_sources::ChangeId {
-                write,
-                row: coven_merge::RowId {
-                    key: b"other".to_vec(),
-                    ..loss.row.clone()
+                write: coven_merge::WriteId {
+                    number: write.number + 1,
+                    ..write
                 },
+                row: other.clone(),
             }],
         },
     ] {
@@ -315,6 +321,41 @@ fn dependency_losses_round_trip_with_their_sources() {
         bad.cause = invalid;
         assert!(bad.validate().is_err());
     }
+    let mut caused = loss.clone();
+    caused.cause = LossCause::Dependency {
+        write,
+        sources: vec![crate::write_sources::ChangeId { write, row: other }],
+    };
+    caused.validate().unwrap();
+    let mut unfrozen = loss;
+    unfrozen.frozen = false;
+    assert!(unfrozen.validate().is_err());
+}
+
+/// An unauthorized change's loss keeps its write and reason through the
+/// snapshot section, frozen with its own write as setter (§8.8, D7).
+#[test]
+fn unauthorized_losses_round_trip_with_their_reason() {
+    let empty = test_utils::TestOracle {
+        writes: BTreeMap::new(),
+    };
+    let mut loss = test_utils::excluded_loss();
+    let write = test_utils::write().header.position;
+    let (mut encoder, mut decoder) = encoder(2);
+    for reason in [
+        crate::loss::AuthorizationFailure::NotOwner {
+            owner: coven_foundation::id_source::MemberId(uuid::Uuid::from_u128(7)),
+        },
+        crate::loss::AuthorizationFailure::InvalidForeignKeyEffect,
+    ] {
+        loss.cause = LossCause::NotAuthorized { write, reason };
+        loss.generation += 1;
+        let record = SnapshotRecord::Loss(loss.clone());
+        let frame = encoder.record(record.clone()).unwrap();
+        assert_eq!(decoder.frame(&frame, &empty).unwrap(), Some(record));
+    }
+    decoder.frame(&encoder.finish().unwrap(), &empty).unwrap();
+    decoder.finish().unwrap();
     let mut unfrozen = loss;
     unfrozen.frozen = false;
     assert!(unfrozen.validate().is_err());

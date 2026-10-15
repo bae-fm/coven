@@ -38,6 +38,9 @@ async fn the_earliest_concurrent_creation_is_selected_in_either_receipt_order() 
     for order in [[0, 1], [1, 0]] {
         let store = TestStore::new();
         let db = store.schema(owned(), SCHEMA).await.unwrap();
+        // Two members' devices, so the earlier creation decides the owner.
+        TestStore::register(&db, earliest.device, 1);
+        TestStore::register(&db, later.device, 2);
         db.receive(insert(order[0], 0).into()).await.unwrap();
         // Alone, the first arrival is the creation.
         let first = if order[0] == 0 { earliest } else { later };
@@ -207,6 +210,10 @@ async fn creation_differential_histories() {
             history.writes = rng.order(&history.writes);
             let store = TestStore::new();
             let db = store.schema(owned(), SCHEMA).await.unwrap();
+            // One member's devices: selection, not permission, is compared.
+            for write in &history.writes {
+                TestStore::register(&db, write.header.position.device, 1);
+            }
             for write in &history.writes {
                 db.receive_stream(
                     stream(write),

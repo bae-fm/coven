@@ -153,10 +153,14 @@ pub(crate) fn persist(
     Ok(())
 }
 
-/// Queue a new write only after authorizing every circle part.
-/// The caller's write transaction holds the writer lock through this check and
-/// commit, so a membership change cannot race the authorization.
-pub(crate) fn queue(database: &DatabaseConnection, record: &WriteRecord) -> Result<(), DbError> {
+/// Queue a new write only after authorizing every circle part and every row
+/// change. The caller's write transaction holds the writer lock through these
+/// checks and commit, so a membership change cannot race the authorization.
+pub(crate) fn queue(
+    database: &DatabaseConnection,
+    schema: &crate::write_schema::WriteSchema,
+    record: &WriteRecord,
+) -> Result<(), DbError> {
     for part in &record.parts {
         if crate::entry_effects::refuses_writes(database, &part.audience)? {
             return Err(DbError::AudienceReloading(part.audience.clone()));
@@ -169,13 +173,38 @@ pub(crate) fn queue(database: &DatabaseConnection, record: &WriteRecord) -> Resu
     retain_queue(database, record)?;
     for part in &record.parts {
         crate::ownership::offer_part(database, &record.header, part)?;
+    }
+    if record.parts.is_empty() {
+        return Ok(());
+    }
+    // The author's write passes the check every receiver makes (§8.8): a
+    // change receivers would refuse fails here instead, so no device keeps an
+    // effect the others reject.
+    let judgement = crate::judge::judge(database, schema, &record.header)?;
+    for part in &record.parts {
         for row in part.records() {
-            crate::write_sources::admit(
-                database,
-                &record.header,
-                row.row(),
-                &coven_format::snapshot_rows::ChangeVerdict::Applied,
-            )?;
+            let checked = judgement.rows.get(row.row()).ok_or(DbError::Invariant {
+                what: "every queued change is judged",
+            })?;
+            let verdict = match &checked.check {
+                Ok(()) if checked.derived => coven_format::snapshot_rows::ChangeVerdict::Derived(
+                    checked.causes(record.header.position),
+                ),
+                Ok(()) => coven_format::snapshot_rows::ChangeVerdict::Applied,
+                Err(coven_format::loss::AuthorizationFailure::NotOwner { owner }) => {
+                    return Err(DbError::NotOwner {
+                        table: row.row().table.clone(),
+                        key: crate::owner_permission::row_key(row.row())?,
+                        owner: *owner,
+                    })
+                }
+                Err(coven_format::loss::AuthorizationFailure::InvalidForeignKeyEffect) => {
+                    return Err(DbError::Invariant {
+                        what: "receivers reconstruct a local write's foreign-key actions",
+                    })
+                }
+            };
+            crate::write_sources::admit(database, &record.header, row.row(), &verdict)?;
         }
     }
     Ok(())

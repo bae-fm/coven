@@ -452,8 +452,14 @@
   - `cause` is `0 | replacing:WriteId`, `1 | rules:set<Rule>`,
     `2 | write:WriteId | version:u32` for a schema-excluded loss, or
     `3 | write:WriteId | sources:[ChangeId]` for a dependent row change (§8):
-    its write and the failed sources in generation-then-setter role order,
-    repeats retained, each naming the loss's key and audience.
+    its write and the failed sources in role order, repeats retained:
+    generation, replaced setters and additional execution sources, each
+    naming the loss's key and audience, then foreign-key causes, which are
+    changes of the loss's own write (§8.8), or
+    `4 | write:WriteId | reason` for an unauthorized row change (§8.8), where
+    `reason` is `0 | owner:MemberId` for a change of that member's owned row
+    or `1` for a foreign-key effect not derived exactly from authorized
+    changes.
     Resets create no loss records (§19.3).
     A replacing write requires cell values; rules and schema changes require
     row values. The schema loss's `write` is the excluded write, or the
@@ -466,9 +472,10 @@
     cells and rules are nonempty. An excluded row keeps the generation of
     its row change; inserts and updates keep their new values and parents,
     deletes their old scalar values with empty parent maps.
-  - Dependent values name their own write as setter and have empty parent
-    maps; the identity remains for a delete with no old values.
-  - `frozen` is true for schema-excluded and dependent rows, and for losses frozen by a breaking
+  - Dependent and unauthorized values name their own write as setter and
+    have empty parent maps; the identity remains for a delete with no old
+    values.
+  - `frozen` is true for schema-excluded, dependent and unauthorized rows, and for losses frozen by a breaking
     migration. Migration-frozen values have empty parent maps, keeping their
     written scalar values and names independently of the current schema.
     Active losses follow merge and removal rules; frozen ones do not.
@@ -478,7 +485,7 @@
   - A schema-change version is positive and at most the snapshot's schema
     version.
   - Loss identity orders by row, generation, values identity, frozen flag,
-    cause tag, then the schema or dependency loss's write ID when present. Values identity is
+    cause tag, then the schema, dependency or unauthorized loss's write ID when present. Values identity is
     `0 | column:name | setter:WriteId` for a cell or
     `1 | setters:map<name, WriteId>` for a row. Columns and maps compare
     logically as in D2. Duplicate identities are refused.
@@ -528,8 +535,12 @@
   `0` unjudged (its effects arrived in an earlier snapshot), `1` applied,
   `2 | version:u32` excluded by the breaking change to that version, `3`
   dropped by its own retirement window, `4 | sources:[ChangeId]` dependent,
-  or `5 | entry:EntryId` ignored by that kept reset (§19.3), which it had not
-  read. Only unjudged and applied changes survive as sources. Its write and every source it names must be
+  `5 | entry:EntryId` ignored by that kept reset (§19.3), which it had not
+  read, `6 | reason` unauthorized, with loss cause 4's `reason`, or
+  `7 | causes:[ChangeId]` applied as the exact foreign-key effect of those
+  changes of its own write: each action's root, then its intermediate
+  causes, in execution order (§8.8). Only unjudged, applied and derived
+  changes survive as sources. Its write and every source it names must be
   covered by the positions; dismissing a loss never changes a verdict.
   A loader keeps the same original bytes for one identity and adopts the
   snapshot's verdicts with its data.

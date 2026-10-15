@@ -248,6 +248,28 @@ pub fn decode_dependency(
     Ok((write, sources))
 }
 
+/// Encode an unauthorized change's write and reason for its loss record.
+pub fn encode_unauthorized(
+    write: WriteId,
+    reason: &crate::loss::AuthorizationFailure,
+) -> Result<Vec<u8>, Error> {
+    crate::value::positive(write.number)?;
+    let mut out = Encoder::new();
+    write.put(&mut out)?;
+    reason.put(&mut out)?;
+    Ok(out.bytes)
+}
+
+/// Decode an unauthorized change's write and reason.
+pub fn decode_unauthorized(
+    bytes: &[u8],
+) -> Result<(WriteId, crate::loss::AuthorizationFailure), Error> {
+    let (write, reason): (WriteId, crate::loss::AuthorizationFailure) =
+        decode_with(bytes, |input| Ok((Wire::get(input)?, Wire::get(input)?)))?;
+    crate::value::positive(write.number)?;
+    Ok((write, reason))
+}
+
 /// Encode a change's verdict with the bytes its snapshot evidence uses.
 pub fn encode_change_verdict(
     value: &crate::snapshot_rows::ChangeVerdict,
@@ -320,7 +342,7 @@ pub fn encode_write_frame(value: &crate::dismissal::WriteFrame) -> Result<Vec<u8
 
 /// Encode a loss identity without its values or changing replacement details.
 pub fn encode_loss_identity(value: &crate::loss::Loss) -> Result<Vec<u8>, Error> {
-    use crate::loss::{LossCause, LossValues};
+    use crate::loss::LossValues;
     let mut out = Encoder::new();
     value.row.put(&mut out)?;
     value.generation.put(&mut out)?;
@@ -340,14 +362,8 @@ pub fn encode_loss_identity(value: &crate::loss::Loss) -> Result<Vec<u8>, Error>
         }
     }
     u8::from(value.frozen).put(&mut out)?;
-    match value.cause {
-        LossCause::Write(_) => 0u8,
-        LossCause::Rules(_) => 1,
-        LossCause::Excluded { .. } => 2,
-        LossCause::Dependency { .. } => 3,
-    }
-    .put(&mut out)?;
-    if let LossCause::Excluded { write, .. } | LossCause::Dependency { write, .. } = value.cause {
+    value.cause.tag().put(&mut out)?;
+    if let Some(write) = value.cause.change_write() {
         write.put(&mut out)?;
     }
     Ok(out.bytes)

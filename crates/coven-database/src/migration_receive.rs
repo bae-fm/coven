@@ -71,6 +71,19 @@ pub(crate) fn read(
         .collect()
 }
 
+/// The schema a write at `version` was authored under, when a breaking
+/// migration since then retained it: additions alone never change an
+/// existing table's references, so the next retained one serves.
+pub(crate) fn authored(steps: &BTreeMap<u32, ReceivedMigration>, version: u32) -> Option<&Schema> {
+    steps
+        .range((
+            std::ops::Bound::Excluded(version),
+            std::ops::Bound::Unbounded,
+        ))
+        .next()
+        .map(|(_, step)| &step.before)
+}
+
 pub(crate) fn available(steps: &BTreeMap<u32, ReceivedMigration>, from: u32, to: u32) -> bool {
     let mut steps = steps
         .range((

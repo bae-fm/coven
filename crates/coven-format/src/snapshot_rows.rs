@@ -117,6 +117,13 @@ pub enum ChangeVerdict {
     Dependent(Vec<crate::write_sources::ChangeId>),
     /// A kept reset ignored its part: it had not read that entry (§19.3).
     Ignored(EntryId),
+    /// It lacked permission: it directly changed another member's owned row,
+    /// or was not the exact foreign-key effect of authorized changes (§8.8).
+    NotAuthorized(crate::loss::AuthorizationFailure),
+    /// It entered the merge as the exact foreign-key effect of these changes
+    /// in its own write: each action's root and intermediate causes, in
+    /// execution order (§8.8).
+    Derived(Vec<crate::write_sources::ChangeId>),
 }
 impl ChangeVerdict {
     pub(crate) fn validate(&self) -> Result<(), Error> {
@@ -127,21 +134,17 @@ impl ChangeVerdict {
                 FormatRule::Required,
             ),
             Self::Ignored(entry) => positive(entry.number),
-            Self::Dependent(sources) => {
-                require(
-                    !sources.is_empty(),
-                    "dependency sources",
-                    FormatRule::Required,
-                )?;
+            Self::Dependent(sources) | Self::Derived(sources) => {
+                require(!sources.is_empty(), "verdict sources", FormatRule::Required)?;
                 sources.iter().try_for_each(|s| positive(s.write.number))
             }
-            Self::Unjudged | Self::Applied | Self::Dropped => Ok(()),
+            Self::Unjudged | Self::Applied | Self::Dropped | Self::NotAuthorized(_) => Ok(()),
         }
     }
 
     /// Whether the change survives as data for later changes.
     pub fn retained(&self) -> bool {
-        matches!(self, Self::Unjudged | Self::Applied)
+        matches!(self, Self::Unjudged | Self::Applied | Self::Derived(_))
     }
 }
 impl Wire for ChangeVerdict {
@@ -162,6 +165,14 @@ impl Wire for ChangeVerdict {
                 5u8.put(out)?;
                 entry.put(out)
             }
+            Self::NotAuthorized(reason) => {
+                6u8.put(out)?;
+                reason.put(out)
+            }
+            Self::Derived(causes) => {
+                7u8.put(out)?;
+                causes.put(out)
+            }
         }
     }
     fn get(input: &mut Decoder<'_>) -> Result<Self, Error> {
@@ -172,6 +183,8 @@ impl Wire for ChangeVerdict {
             3 => Ok(Self::Dropped),
             4 => Ok(Self::Dependent(Wire::get(input)?)),
             5 => Ok(Self::Ignored(Wire::get(input)?)),
+            6 => Ok(Self::NotAuthorized(Wire::get(input)?)),
+            7 => Ok(Self::Derived(Wire::get(input)?)),
             tag => Err(Error::UnknownTag {
                 field: "change verdict",
                 tag,
@@ -227,6 +240,14 @@ impl OriginalRow {
         match self {
             Self::Change(change) => crate::write::PartRecord::Change(change),
             Self::Execution(execution) => crate::write::PartRecord::Execution(execution),
+        }
+    }
+
+    /// The row's operations and the sources they used.
+    pub fn execution(&self) -> &crate::write::Execution {
+        match self {
+            Self::Change(change) => &change.execution,
+            Self::Execution(execution) => &execution.execution,
         }
     }
 
@@ -332,14 +353,24 @@ impl AuthoredChange {
             ChangeVerdict::Dependent(sources) => {
                 for source in sources {
                     require(
-                        source.row.key == self.change.row().key
-                            && source.row.audience == self.change.row().audience,
+                        crate::loss::dependency_source(
+                            self.change.row(),
+                            self.header.position,
+                            source,
+                        ),
                         "dependency source row",
                         FormatRule::Required,
                     )?;
                 }
                 Ok(())
             }
+            ChangeVerdict::Derived(causes) => require(
+                causes
+                    .iter()
+                    .all(|cause| cause.write == self.header.position),
+                "derivation cause write",
+                FormatRule::Required,
+            ),
             _ => Ok(()),
         }
     }

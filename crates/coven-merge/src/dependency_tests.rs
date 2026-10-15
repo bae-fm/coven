@@ -4,6 +4,8 @@ fn provenance(generation: Option<u8>, setters: &[u8]) -> Provenance<u8> {
     Provenance {
         generation,
         setters: setters.to_vec(),
+        execution: Vec::new(),
+        causes: Vec::new(),
     }
 }
 

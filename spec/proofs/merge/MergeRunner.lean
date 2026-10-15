@@ -391,11 +391,104 @@ private def runAdmission (j : Json) : Except String Json := do
   pure (toJson (rows.map fun (r, _, _) =>
     Json.mkObj [("row", toJson r), ("check", toJson (check P E 0 r))]))
 
+-- Receipt of one write (B18): the receiver's reconstructed execution, as
+-- `admission` reads it, and the data sources `Admission.dependencies`
+-- combines. Each derived row names one path per foreign-key action on it,
+-- combined with `together` in execution order; a row with a direct step as
+-- well starts that combination with its own direct effect. External sources
+-- are numbered apart from rows, as changes of write 1; `droppedExternal` and
+-- `prior` name the external and own changes whose verdict already drops them.
+-- A direct row's proposed payload is its direct effect unless `payloads`
+-- names the net change its steps do not end at. For each row:
+-- `Admission.check`, `Admission.guard`'s cause, the roots its derivation
+-- reaches and the sources `dependencies` gives it.
+open Ownership Ownership.ForeignKey Ownership.Admission in
+private def runReceive (j : Json) : Except String Json := do
+  let references := (← (← j.getObjValAs? (Array Json) "references").mapM readReference).toList
+  let directs ← (← j.getObjValAs? (Array Json) "direct").mapM readEffect
+  let derived ← (← j.getObjValAs? (Array Json) "derived").mapM fun d => do
+    pure (← d.getObjValAs? Nat "row", ← d.getObjValAs? (Array (Array Nat)) "paths",
+      ← d.getObjValAs? Bool "direct", ← readEffect (← d.getObjVal? "effect"))
+  let rows ← (← j.getObjValAs? (Array Json) "rows").mapM fun r => do
+    pure (← natField r "row", ← natField r "table", ← natField r "owner")
+  let owned ← j.getObjValAs? (Array Nat) "owned"
+  let writer ← natField j "author"
+  let external ← (← j.getObjValAs? (Array Json) "external").mapM fun e => do
+    pure (← natField e "row", ← e.getObjValAs? (Array Nat) "sources")
+  let droppedExternal ← j.getObjValAs? (Array Nat) "droppedExternal"
+  let prior ← j.getObjValAs? (Array Nat) "prior"
+  let payloads ← (← j.getObjValAs? (Array Json) "payloads").mapM readEffect
+  let schema := resolvedSchema references
+  let plain : Nat → Option (Effect Nat Nat Nat) := fun r => directs.find? (·.row == r)
+  let path := fun (path : Array Nat) =>
+    (path.toList.drop 1).foldl (fun (acc : Option (Derivation Nat)) child =>
+      acc.bind fun parent =>
+        (evaluate schema plain parent).bind fun (row, payload) =>
+          ((schema.consequences row payload).findIdx? (·.1 == child)).map (.foreign parent ·))
+      (path[0]?.map .direct)
+  let derivation := fun (r : Nat) (paths : Array (Array Nat)) (direct : Bool) =>
+    let actions := paths.toList.map path
+    let start : Option (Derivation Nat) := if direct then some (.direct r) else none
+    actions.foldl (fun acc action => match acc, action with
+      | none, a => a
+      | some d, some a => some (.together d a)
+      | some _, none => none) start
+  let P : Policy Nat Nat Nat Nat := {
+    table := fun r => ((rows.find? (·.1 == r)).map (·.2.1)).getD 1000000
+    owned := fun t => owned.contains t
+    creator := fun r => r + 1
+    author := fun w => if w == 0 then writer else
+      ((rows.find? (·.1 == w - 1)).map (·.2.2)).getD 0 }
+  -- A path that names no schema consequence still marks the row derived;
+  -- its unevaluable certificate fails the check, as an unrooted cycle would.
+  let origin : Nat → Origin Nat := fun r =>
+    match derived.find? (·.1 == r) with
+    | some (_, paths, direct, _) => match derivation r paths direct with
+      | some d => .foreign d
+      | none => .foreign (.foreign (.direct r) 1000000)
+    | none => .direct
+  let E : Evidence Nat Nat (Effect Nat Nat Nat) := {
+    payload := fun w r => if w != 0 then none else
+      match derived.find? (·.1 == r) with
+      | some (_, _, _, effect) => some effect
+      | none => (payloads.find? (·.row == r)).orElse fun _ => plain r
+    execution := fun _ => {
+      direct := fun r => (plain r).map fun e => ⟨e, []⟩
+      origin := origin
+      schema := schema } }
+  let fkSources := fun r => match origin r with
+    | .direct => []
+    | .foreign d => ForeignKey.sources schema (direct P E 0) d
+  let D : Dependencies Nat Nat := {
+    changes := rows.toList.map (fun (r, _, _) => (0, r)) ++
+      (external.toList.flatMap fun (_, sources) => sources.toList).map ((1 : Nat), ·)
+    sources := fun w r => if w != 0 then [] else
+      (((external.find? (·.1 == r)).map (·.2.toList)).getD []).map ((1 : Nat), ·) ++
+        (fkSources r).map ((0 : Nat), ·) }
+  let priorCause : Nat → Nat → Option (Cause Nat Nat Nat) := fun w r =>
+    if (w == 0 && prior.contains r) || (w == 1 && droppedExternal.contains r) then
+      some (.dependency []) else none
+  let causeJson : Option (Cause Nat Nat Nat) → Json
+    | none => Json.null
+    | some (.notOwner owner) => Json.mkObj [("kind", "notOwner"), ("owner", toJson owner)]
+    | some .foreignKey => Json.mkObj [("kind", "foreignKey")]
+    | some (.move _ owner) => Json.mkObj [("kind", "move"), ("owner", toJson owner)]
+    | some (.dependency sources) => Json.mkObj [("kind", "dependency"),
+      ("sources", toJson (sources.map fun ((w, r) : Nat × Nat) => [w, r]))]
+  pure (toJson (rows.map fun (r, _, _) =>
+    Json.mkObj [("row", toJson r), ("check", toJson (check P E 0 r)),
+      ("guard", causeJson (guard P E D priorCause 0 r)),
+      ("roots", match origin r with
+        | .direct => toJson ([] : List Nat)
+        | .foreign d => toJson (roots d)),
+      ("sources", toJson ((D.sources 0 r).map fun ((w, row) : Nat × Nat) => [w, row]))]))
+
 private def run (j : Json) : Except String Json := do
   let mode ← j.getObjValAs? String "mode"
   if mode == "freeze" then return ← runFreeze j
   if mode == "effects" then return ← runEffects j
   if mode == "admission" then return ← runAdmission j
+  if mode == "receive" then return ← runReceive j
   if mode == "migration" then
     let (rows, I) ← readInputs j
     let named ← readEntries j I

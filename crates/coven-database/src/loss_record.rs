@@ -18,7 +18,7 @@ pub(crate) fn visit<E: From<DbError>>(
     mut visit: impl FnMut(Loss) -> Result<(), E>,
 ) -> Result<(), E> {
     database.for_each(
-        &format!("{SELECT} WHERE l.audience=?1 ORDER BY l.table_name,l.key,l.generation,_coven_loss_order(c.column_name,l.set_by),l.frozen,CASE l.replacement_kind WHEN 'write' THEN 0 WHEN 'rules' THEN 1 WHEN 'excluded' THEN 2 ELSE 3 END,CASE WHEN l.replacement_kind IN ('excluded','dependency') THEN substr(l.replaced_by,1,16) END"),
+        &format!("{SELECT} WHERE l.audience=?1 ORDER BY l.table_name,l.key,l.generation,_coven_loss_order(c.column_name,l.set_by),l.frozen,CASE l.replacement_kind WHEN 'write' THEN 0 WHEN 'rules' THEN 1 WHEN 'excluded' THEN 2 WHEN 'dependency' THEN 3 ELSE 4 END,CASE WHEN l.replacement_kind IN ('excluded','dependency','unauthorized') THEN substr(l.replaced_by,1,16) END"),
         [audience_text(audience)],
         |r| visit(read(r).map_err(DbError::from)?),
     )
@@ -72,6 +72,10 @@ pub(crate) fn read(r: &rusqlite::Row<'_>) -> rusqlite::Result<Loss> {
             let (write, sources) = decoded(merge_fields::decode_dependency(&replacement))?;
             LossCause::Dependency { write, sources }
         }
+        "unauthorized" => {
+            let (write, reason) = decoded(merge_fields::decode_unauthorized(&replacement))?;
+            LossCause::NotAuthorized { write, reason }
+        }
         _ => return Err(damaged()),
     };
     if !matches!(
@@ -79,7 +83,10 @@ pub(crate) fn read(r: &rusqlite::Row<'_>) -> rusqlite::Result<Loss> {
         (LossValues::Cell { .. }, LossCause::Write(_))
             | (
                 LossValues::Row(_),
-                LossCause::Rules(_) | LossCause::Excluded { .. } | LossCause::Dependency { .. }
+                LossCause::Rules(_)
+                    | LossCause::Excluded { .. }
+                    | LossCause::Dependency { .. }
+                    | LossCause::NotAuthorized { .. }
             )
     ) {
         return Err(damaged());
@@ -132,6 +139,10 @@ pub(crate) fn put(
         LossCause::Dependency { write, sources } => (
             "dependency",
             encoded(merge_fields::encode_dependency(*write, sources))?,
+        ),
+        LossCause::NotAuthorized { write, reason } => (
+            "unauthorized",
+            encoded(merge_fields::encode_unauthorized(*write, reason))?,
         ),
     };
     database.internal_execute("INSERT INTO _coven_lost(id,table_name,key,audience,generation,column_id,value,set_by,replacement_kind,replaced_by,frozen) VALUES(?11,?1,?2,?3,?4,?5,?6,?7,?8,?9,?10) ON CONFLICT(id) DO UPDATE SET table_name=excluded.table_name,key=excluded.key,audience=excluded.audience,generation=excluded.generation,column_id=excluded.column_id,value=excluded.value,set_by=excluded.set_by,replacement_kind=excluded.replacement_kind,replaced_by=excluded.replaced_by,frozen=excluded.frozen",params![loss.row.table,loss.row.key,audience_text(&loss.row.audience),loss.generation.to_be_bytes().as_slice(),column,value,setter,kind,cause,loss.frozen,id])?;

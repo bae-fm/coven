@@ -6,7 +6,8 @@ use crate::{sqlite::DatabaseConnection, write_schema::WriteSchema, DbError};
 use coven_format::{
     dismissal::WriteFrame,
     merge_fields,
-    write::{WriteHeader, WritePart, WriteRecord},
+    snapshot_rows::OriginalRow,
+    write::{PartRecord, WriteHeader, WritePart, WriteRecord},
 };
 use coven_merge::{Audience, RowId};
 use rusqlite::params;
@@ -32,23 +33,20 @@ pub(crate) fn values(
         .transpose()
 }
 
+/// Keep one streamed frame: its original record, checked and retained as
+/// evidence, or a dismissal for after the write's rows. Nothing merges until
+/// the whole write is judged, since a foreign-key action and its causes can
+/// be anywhere in it (§8.8).
 pub(crate) fn frame(
     database: &DatabaseConnection,
-    schema: &WriteSchema,
     header: &WriteHeader,
     audience: &Audience,
     frame: WriteFrame,
 ) -> Result<(), DbError> {
     crate::retained_writes::frame(database, header, audience, &frame)?;
-    let mut part = WritePart {
-        audience: audience.clone(),
-        rows: Vec::new(),
-        executions: Vec::new(),
-        dismissals: Vec::new(),
-    };
-    match frame {
-        WriteFrame::Change(row) => part.rows.push(row),
-        WriteFrame::Execution(execution) => part.executions.push(execution),
+    let record = match &frame {
+        WriteFrame::Change(row) => PartRecord::Change(row),
+        WriteFrame::Execution(execution) => PartRecord::Execution(execution),
         WriteFrame::Dismissal(dismissal) => {
             dismissal.validate_past(header)?;
             database.internal_execute(
@@ -57,18 +55,63 @@ pub(crate) fn frame(
             )?;
             return Ok(());
         }
-    }
-    let download = crate::DownloadedWrite {
-        header: header.clone(),
-        parts: vec![crate::DownloadedPart::Opened(part)],
     };
-    crate::download::retain_source_rows(database, &download)?;
-    let record = crate::interpretation::interpret(database, schema, download)?;
-    let store = MergeStore::from_staged(database, &schema.schema);
-    let updates = store.apply(&record)?;
-    crate::write_commit::commit(database, &record, &store, &updates)?;
-    for (row, update) in updates {
-        retain_values(database, &row, &update.state)?;
+    crate::write_sources::validate(database, header, record)?;
+    crate::write_sources::retain(database, header, record)
+}
+
+/// Judge the whole streamed write, then stage each opened part's admitted
+/// changes one record at a time, as they were retained.
+fn stage(
+    database: &DatabaseConnection,
+    schema: &WriteSchema,
+    header: &WriteHeader,
+    opened: &[Audience],
+) -> Result<(), DbError> {
+    let interpreter = crate::interpretation::Interpreter::new(database, schema, header, opened)?;
+    let write = merge_fields::encode_write_id(&header.position)?;
+    for audience in opened {
+        // One record at a time, past the last: admitting it updates its row.
+        let mut last: Option<(String, Vec<u8>)> = None;
+        while let Some((table, key, bytes)) = database
+            .query(
+                "SELECT table_name,key,record FROM _coven_authored_changes WHERE write_id=?1 AND audience=?2
+                 AND (?3 IS NULL OR (table_name,key)>(?3,?4)) ORDER BY table_name,key LIMIT 1",
+                params![
+                    write,
+                    audience_text(audience),
+                    last.as_ref().map(|(t, _)| t),
+                    last.as_ref().map(|(_, k)| k)
+                ],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, Vec<u8>>(1)?, r.get::<_, Vec<u8>>(2)?)),
+            )?
+            .pop()
+        {
+            last = Some((table, key));
+            let mut part = WritePart {
+                audience: audience.clone(),
+                rows: Vec::new(),
+                executions: Vec::new(),
+                dismissals: Vec::new(),
+            };
+            match OriginalRow::decode(&bytes)? {
+                OriginalRow::Change(row) => part.rows.push(row),
+                OriginalRow::Execution(execution) => part.executions.push(execution),
+            }
+            let Some(part) = interpreter.part(database, schema, part)? else {
+                continue;
+            };
+            let record = WriteRecord {
+                header: header.clone(),
+                parts: vec![part],
+            };
+            let store = MergeStore::from_staged(database, &schema.schema);
+            let updates = store.apply(&record)?;
+            crate::write_commit::commit(database, &record, &store, &updates)?;
+            for (row, update) in updates {
+                retain_values(database, &row, &update.state)?;
+            }
+        }
     }
     Ok(())
 }
@@ -100,9 +143,11 @@ pub(crate) fn finish(
     before: &DatabaseConnection,
     schema: &WriteSchema,
     header: &WriteHeader,
+    opened: &[Audience],
     deleted: &BTreeMap<coven_foundation::id_source::CircleId, crate::EntryId>,
     files: &crate::file_write::FileWrite<'_>,
 ) -> Result<(), DbError> {
+    stage(database, schema, header, opened)?;
     let touched = database.query("SELECT table_name,key,audience FROM temp._coven_download_rows ORDER BY table_name,key,audience",[],crate::row_queries::read_identity)?.into_iter().collect::<BTreeSet<_>>();
     if !touched.is_empty() {
         let prior = AppView::after(before, schema).without_row_cache();
