@@ -338,7 +338,12 @@ This device's successful creates also establish presence. An expected copy
 not yet observed stays a wait; a later due read can supply it, without a
 separate probe for every possible recipient. Decide recipients and usable
 keys from the current received log before first attempts. Own publication
-updates the catalog without restarting discovery after each entry.
+updates the catalog without restarting discovery after each entry. Its
+lateness is still judged against every stored entry (§9): the latest
+complete catch-up received every entry through its `T′` (step 2), enough
+for an entry landing at most 30 days after `T′`. One landing later, or with
+no such catch-up, reads every writer's log again after its publication: a
+catch-up still fresh by device time never vouches for storage time.
 
 Read each peer's positions only for new or changed listed identity, or a
 missing local checked record. Verify once; use the decoded value for

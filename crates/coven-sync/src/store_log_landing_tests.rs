@@ -91,6 +91,60 @@ async fn own_publication_does_not_restart_entry_discovery() {
         .contains(&MemoryRequest::Read(object::path(store(1), created), None)));
 }
 
+/// Ben's catch-up is still fresh by his own clock when his entry lands a month
+/// after Ana's entry he never read, so that catch-up cannot have received it.
+/// Storage time, not his clock, bounds what it received: he reads every
+/// writer's log again and judges his entry late, as Ana does (§9).
+#[tokio::test]
+async fn own_entry_landing_a_month_past_its_catch_up_is_judged_as_readers_judge_it() {
+    let clock = Arc::new(FixedClock::new(UNIX_EPOCH));
+    let storage = Arc::new(
+        MemoryStorage::builder()
+            .clock(clock.clone())
+            .build()
+            .unwrap(),
+    );
+    let mut a = device(storage.clone(), 1, member(1), store(1)).await;
+    let mut b = device(storage.clone(), 2, member(1), store(1)).await;
+    a.create(key(1)).await;
+    b.sync().await;
+    b.sync.load_new_device("second", None).await.unwrap();
+    b.catch_up().await;
+    clock.set(UNIX_EPOCH + Duration::from_secs(86400));
+    let witness = a
+        .sync
+        .make_and_upload_entry(StoreChange::AddDevice {
+            device: DeviceId(9),
+            name: "witness".into(),
+            replaces: None,
+        })
+        .await
+        .unwrap();
+    clock.set(UNIX_EPOCH + Duration::from_secs(31 * 86400) + Duration::from_millis(1));
+    let late = b
+        .sync
+        .make_and_upload_entry(StoreChange::AddDevice {
+            device: DeviceId(8),
+            name: "late".into(),
+            replaces: None,
+        })
+        .await;
+    assert!(
+        matches!(
+            late,
+            Err(SyncError::Rejected(
+                coven_database::DropReason::LandedTooLate
+            ))
+        ),
+        "{late:?}"
+    );
+    a.sync().await;
+    b.sync().await;
+    let (ana, ben) = (a.log().await, b.log().await);
+    assert_eq!(ana.replay.entries[&witness], EntryOutcome::Kept);
+    assert_eq!(ana.replay, ben.replay);
+}
+
 /// Device 2 registers itself, but its first attempt is interrupted; device 3
 /// registers at day 1, and device 2's retry lands at day 31, more than thirty
 /// days after that registration it never read: it landed too late (§9).

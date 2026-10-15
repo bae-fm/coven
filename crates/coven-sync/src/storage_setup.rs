@@ -315,10 +315,14 @@ impl StoreLogSync {
             let publications = crate::store_log_landing::observe_publication(
                 &self.database,
                 &self.reads,
+                self.download_limit,
                 store_id,
                 Some(storage.as_ref()),
                 &local.log,
                 entry.position,
+                // The candidate's catch-up bounds no storage time this
+                // connection's observation holds: read every log again.
+                None,
             )
             .await?;
             let (entry, replay) = crate::replay_entry(&local.log, entry, &publications);

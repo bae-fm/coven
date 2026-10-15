@@ -417,13 +417,20 @@ impl StoreLogSync {
         if let Some(entry) = self.upload_queued(local, member, ring).await? {
             // Observe all landing witnesses after publication, before retaining
             // this entry's author-view checks.
+            let received_through = self
+                .finality
+                .lock()
+                .expect("finality lock poisoned")
+                .entries_received_through();
             let publications = crate::store_log_landing::observe_publication(
                 &self.database,
                 &self.reads,
+                self.download_limit,
                 self.directory.id(),
                 self.storage.as_deref(),
                 &local.log,
                 entry.position,
+                received_through,
             )
             .await?;
             self.apply(local, entry, &publications, member, ring)

@@ -190,13 +190,20 @@ impl StoreLogSync {
                 }
                 n if n == data.entry_step_number(3) => {
                     let mut ring = self.store_keys.read()?;
+                    let received_through = self
+                        .finality
+                        .lock()
+                        .expect("finality lock poisoned")
+                        .entries_received_through();
                     let publications = crate::store_log_landing::observe_publication(
                         &self.database,
                         &self.reads,
+                        self.download_limit,
                         self.directory.id(),
                         self.storage.as_deref(),
                         &local.log,
                         entry.position,
+                        received_through,
                     )
                     .await?;
                     // Applying a removal or a replacement of this member's

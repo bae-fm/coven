@@ -658,9 +658,17 @@ async fn a_request_awaiting_the_persons_decision_is_not_read_again() {
 /// Ben's later entry and drops (§9). Every admin makes the invite's key
 /// pending deletion and Carol's installation reports the rejection, so the
 /// approval settles the invite instead of binding Carol again with a key
-/// pending deletion (§18; InviteApproval `restart_binds_pending_key`).
+/// pending deletion (§18; InviteApproval `restart_binds_pending_key`). Ana
+/// judges her approval late whether or not she read Ben's entry before
+/// publishing it, as Ben does (§9).
 #[tokio::test]
 async fn a_dropped_approval_settles_its_invite() {
+    for reads_first in [true, false] {
+        dropped_approval_settles_its_invite(reads_first).await;
+    }
+}
+
+async fn dropped_approval_settles_its_invite(reads_first: bool) {
     use coven_foundation::clock::FixedClock;
     use std::time::{Duration, UNIX_EPOCH};
     let clock = Arc::new(FixedClock::new(UNIX_EPOCH));
@@ -728,7 +736,12 @@ async fn a_dropped_approval_settles_its_invite() {
         .await
         .unwrap();
     clock.set(UNIX_EPOCH + Duration::from_secs(32 * 86400));
-    a.catch_up().await;
+    // Without this catch-up, her earlier one is still fresh by her clock but
+    // a month older in storage time than her publication: she reads the
+    // logs again and finds Ben's entry.
+    if reads_first {
+        a.catch_up().await;
+    }
     let reply = loop {
         match step(&mut a, operation).await.unwrap() {
             Progress::Advanced => (),
@@ -759,4 +772,6 @@ async fn a_dropped_approval_settles_its_invite() {
     while a.db.operation(operation).await.unwrap().is_some() {
         step(&mut a, operation).await.unwrap();
     }
+    b.catch_up().await;
+    assert_eq!(b.log().await.replay, a.log().await.replay);
 }

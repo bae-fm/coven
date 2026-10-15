@@ -8,17 +8,23 @@ use coven_storage::Storage;
 use std::collections::BTreeMap;
 
 /// Observe every landing witness after publishing a local entry, including on
-/// a retry whose first publication preceded this call. Entries landing before
-/// this publication decide its lateness; the catch-up that permitted it
-/// retained them, so discovery does not restart (SP step 4). The entry's own
-/// create reply is retained with them; without one, exact status supplies it.
+/// a retry whose first publication preceded this call. Every entry stored
+/// more than 30 days before this publication decides its lateness, as it does
+/// for every reader (§9). The latest complete catch-up received every entry
+/// through `received_through` (its `T′`, SP step 2), so a publication no more
+/// than 30 days after that is judged from the retained input without
+/// restarting discovery (SP step 4). A later one, or one with no such
+/// catch-up, reads every writer's log again. The entry's own create reply is
+/// retained with them; without one, exact status supplies it.
 pub(crate) async fn observe_publication(
     database: &coven_database::Database,
     reads: &crate::pass_reads::PassReads,
+    limit: std::num::NonZeroUsize,
     store: coven_foundation::id_source::StoreId,
     storage: Option<&dyn Storage>,
     log: &StoreLog,
     entry: EntryId,
+    received_through: Option<StorageTime>,
 ) -> Result<BTreeMap<EntryId, StorageTime>, SyncError> {
     // This device's own log gained the entry's prerequisite copies.
     reads.forget_misses(coven_database::LogKind::KeyCopy, entry.device);
@@ -35,13 +41,44 @@ pub(crate) async fn observe_publication(
     .into_values()
     .map(|read| read.metadata)
     .collect();
-    if !objects.iter().any(|object| object.path == path) {
+    let published = match objects.iter().find(|object| object.path == path) {
+        Some(object) => object.stored_at,
+        None => {
+            let storage = storage.ok_or(SyncError::NoStorage)?;
+            let published = storage.status(&path).await?.ok_or_else(|| {
+                coven_storage::StorageFailure::NotFound
+                    .with_source("published store-log entry is absent from exact status")
+            })?;
+            let stored_at = published.stored_at;
+            objects.push(published);
+            stored_at
+        }
+    };
+    // Only entries stored strictly before this cutoff can make it late.
+    let received = match published.checked_sub(crate::replay::ENTRY_WINDOW) {
+        Some(cutoff) => received_through.is_some_and(|through| cutoff <= through),
+        None => true,
+    };
+    if !received {
+        // This listing follows the publication, so §4's listing guarantee
+        // makes every entry stored more than an hour before it visible.
         let storage = storage.ok_or(SyncError::NoStorage)?;
-        let published = storage.status(&path).await?.ok_or_else(|| {
-            coven_storage::StorageFailure::NotFound
-                .with_source("published store-log entry is absent from exact status")
-        })?;
-        objects.push(published);
+        reads.reset_discovery_of(coven_database::LogKind::Entry);
+        let mut writers = crate::discovery::writers(database, reads, storage, store).await?;
+        writers.insert(entry.device);
+        for read in crate::discovery::scan(
+            database,
+            reads,
+            storage,
+            store,
+            coven_database::LogKind::Entry,
+            &crate::discovery::past_applied(log, writers),
+            limit,
+        )
+        .await?
+        {
+            add_observation(&mut objects, read.metadata)?;
+        }
     }
     publication_times(log, &objects)
 }
