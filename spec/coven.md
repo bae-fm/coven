@@ -3421,6 +3421,22 @@ Carol's tablet:
     already in snapshots. If the retiring entry drops, this exclusion
     disappears; another kept retirement can still exclude it. A failed
     rebuild leaves the prior state intact and reports the failure.
+  - A snapshot names no storage time for the writes it covers, so a loader
+    cannot judge their windows again. Loading compares each covered
+    change's carried verdict with this device's recorded verdict for its
+    write and loads nothing on a difference
+    ([`verdict_load_agrees`](proofs/storelog-data/CovenStorelogData/ReloadVerdict.lean)).
+    A verdict reads only the kept retirements stored more than 30 days
+    before its write, so a snapshot prepared once that prefix was final for
+    every covered write carries each final verdict
+    ([`late_depends_on_old`, `loaded_verdict_final`](proofs/storelog-data/CovenStorelogData/ReloadVerdict.lean)).
+    §15 does not require that finality, and this rule is then not met. E.g.
+    Ana's replay keeps Ben's removal when she snapshots his write published
+    a second past its deadline, and a later entry drops the removal. Ben,
+    who recorded the write admitted, cannot reload while her snapshot is
+    the newest; a device that recorded nothing, including Ben once his
+    verdict is fixed, loads the write as dropped
+    ([checked history: `unfinal_snapshot_counterexample`](proofs/storelog-data.md#results-and-their-assumptions)).
   - This retirement verdict is final once its deciding kept retiring entry
     is final (§9); it needs no assumption about what the write read
     ([`retirement_verdict_final`](proofs/merge/CovenMerge/Retirement.lean)). Its preceding store-log
@@ -4369,6 +4385,9 @@ Carol's tablet:
   rows and losses in the loading transaction; retain original inputs until
   the deciding replacement prefix is final and independent retention checks
   pass. A snapshot cannot rescue an old-key write by covering it.
+  A covered write's retirement-window verdict is the author's; §10 states
+  when a loader can rely on it
+  ([`loaded_verdict_final`, `unfinal_snapshot_counterexample`](proofs/storelog-data/CovenStorelogData/ReloadVerdict.lean)).
 - Snapshots also retain the original creator identities and verified direct
   and foreign-key provenance required by §8.8. A snapshot author's signature
   cannot substitute for another member's original authorship. Recheck exact

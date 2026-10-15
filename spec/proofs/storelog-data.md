@@ -624,6 +624,74 @@ device can load rather than the newest verified one.
   `a_required_stuck_gap_waits_for_a_covering_snapshot_and_keeps_local_edits`
   (`device_log_sync_tests.rs`) runs the history.
 
+**A snapshot's retirement-window verdicts (proved; counterexample
+checked).**
+[ReloadVerdict](storelog-data/CovenStorelogData/ReloadVerdict.lean) adds
+the check Rust's load transaction makes since T103. A snapshot carries each
+covered change it holds with its author's verdict, including `dropped` by
+the write's own retirement window (D7 section 5). It names no storage time
+for covered writes, so a loader cannot judge that window again. Instead it
+compares each carried verdict with the landing verdict this device
+recorded for the same write, if any, and a difference fails the load
+(`write_landing::agrees`, `SnapshotError::RetirementVerdict`). Nothing is
+recorded against the snapshot. The reload's own record is
+`Failed(Database)`, which only an app action retries, and a retry selects
+again (`chooseVerdict`: `choose` followed by that check; `verdictRecord`,
+`verdict_needs_app_action`). The window verdict is merge's
+`Receive.withinWindow` over the kept retirements (`lateUnder`).
+
+- `verdict_load_agrees`, `verdict_iff`: a reload loads only `choose`'s
+  snapshot, and never one whose carried verdict differs from a verdict this
+  device recorded.
+- `late_depends_on_old`: a window verdict reads only the kept retirements of
+  the write's device stored more than thirty days before the write.
+- `prepared_agrees`, `agreeing_never_waits`: when the author's kept
+  retirements agree there with this device's, the check never fails and
+  the reload is `choose`'s.
+- `loaded_verdict_final`: a snapshot prepared once that old prefix was
+  final, for every carried write, carries each write's final verdict. A
+  device that loads it holds what a device judging each write itself under
+  the final kept retirements holds.
+- `newer_agreeing_ends_wait`: once the reload runs again, a newer snapshot
+  this device can load, whose verdicts agree, ends the failure.
+
+§15 does not require that finality, and without it the check both stalls
+and lets divergent verdicts load (`unfinal_snapshot_counterexample`,
+checked). `VerdictHistory` is a store-log history in §9's storage-time
+replay (`Finality.resolve`). Ana and Ben are admins, Carol a member. Without
+reading one another, Ana's tablet makes Carol an admin, Ben demotes Ana, and
+Ana's phone removes Ben on day 20, safe only while Carol is an admin. Ben's
+device publishes write 1 one second after that removal's thirty-day
+deadline. On day 51 Ana has read every entry, her replay keeps the removal
+(not yet final), and her snapshot carries write 1 as `dropped`. On day 60
+Carol sets her own access, having read Ben's removal but not her promotion.
+That change contradicts the promotion and wins, so the final replay drops
+the promotion and then Ben's removal, which would leave no admin; the drop
+is final from day 91 (`removal_kept_then_dropped`). The final replay admits
+write 1.
+
+- Ben recorded his admission while it was not fixed. Every reload fails
+  the check on Ana's snapshot, and its record waits for an app action. §15
+  requests no newer snapshot in a store with no further writes, since
+  Ana's covers every write (`requestsSnapshot`). The reload never ends.
+- Rust records a landing only while it is late or not fixed
+  (`write_landing::land`, `landingRecord`). Once Ben's admission is fixed,
+  and for Carol, who never received the write, there is nothing to compare:
+  both load Ana's snapshot and drop write 1, while a device that received
+  it keeps its effects. §10's rebuild "including contributions already in
+  snapshots" does not happen.
+
+Readings: the kept retirements at preparation and at the end come from
+`Finality.resolve`. The snapshot's carried verdicts, the device's recorded
+ones and the reload's record are inputs restating Rust, not derived from a
+database model. Changing §15 or D7 so that no snapshot carries a verdict a
+later replay reverses is a decision the spec has not made: preparing only
+once each carried write's old prefix is final (`loaded_verdict_final`
+proves that sufficient), or carrying what a loader needs to judge the
+window itself. The model also reads the queue package's `Retired.lean` only
+through its `late` input: rows and losses under a verdict are that
+package's (`window_rows_and_losses_converge`).
+
 What the safe rule costs. A body refusal, or a key this device does not
 accept, never holds retention (`retention_ignores_bodies`). A refused prefix
 holds every write of its audience (`refused_prefix_holds`) until a newer

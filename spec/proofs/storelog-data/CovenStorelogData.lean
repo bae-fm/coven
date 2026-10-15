@@ -25,6 +25,7 @@ import CovenStorelogData.PendingScans
 import CovenStorelogData.RefusedRetention
 import CovenStorelogData.ReloadWait
 import CovenStorelogData.ReloadWaitChecks
+import CovenStorelogData.ReloadVerdict
 import CovenStorelogData.Access
 import CovenStorelogData.AccessKeys
 import CovenStorelogData.AccessKeyExamples
