@@ -210,6 +210,11 @@ impl StoreLogSync {
                     boundaries,
                     expected_entries,
                 };
+                let starts: BTreeMap<_, _> = plan
+                    .starts
+                    .iter()
+                    .map(|(audience, start)| (audience.clone(), start.positions.clone()))
+                    .collect();
                 let mut selections = Vec::new();
                 for (audience, start) in plan.starts {
                     match start.origin {
@@ -234,13 +239,33 @@ impl StoreLogSync {
                     }
                 }
                 // The committing round's own reads: each write some audience
-                // lacks, retained as checked bytes until the commit.
-                let needed: Vec<_> = plan.present.iter().map(|id| objects[id].clone()).collect();
+                // lacks, retained as checked bytes until the commit. Only the
+                // parts of audiences whose start lacks the write are opened.
+                let needed: Vec<_> = plan
+                    .present
+                    .iter()
+                    .map(|id| {
+                        let opens: BTreeSet<_> = readable
+                            .iter()
+                            .filter(|audience| {
+                                !starts.get(*audience).is_some_and(|start| start.covers(*id))
+                            })
+                            .cloned()
+                            .collect();
+                        (objects[id].clone(), opens)
+                    })
+                    .collect();
                 let mut replays = ReplayCache::new(&local.log);
                 let mut count = 0;
-                for object in &needed {
+                for (object, opens) in &needed {
                     match self.open_write_header(object).await {
-                        Ok(header) => count += header.parts.len(),
+                        Ok(header) => {
+                            count += header
+                                .parts
+                                .iter()
+                                .filter(|part| opens.contains(&part.audience))
+                                .count()
+                        }
                         // The recorded stop changes which optional tail writes can
                         // be downloaded. Select again before installing any rows.
                         Err(SyncError::Damaged(_)) => return Ok(Progress::Advanced),
@@ -251,15 +276,9 @@ impl StoreLogSync {
                     .reserve_snapshot_files(record, &mut task, count)
                     .await?
                     .into_iter();
-                for object in &needed {
+                for (object, opens) in &needed {
                     match self
-                        .open_snapshot_write(
-                            object,
-                            &local.log,
-                            &mut replays,
-                            &readable,
-                            &mut names,
-                        )
+                        .open_snapshot_write(object, &local.log, &mut replays, opens, &mut names)
                         .await
                     {
                         Ok(write) => files.writes.push(write),

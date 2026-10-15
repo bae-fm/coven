@@ -268,6 +268,42 @@ async fn a_deletion_during_the_reads_replaces_only_the_audience_lacking_it() {
     assert_eq!(rows(&ben.db).await, rows(&ana.db).await);
 }
 
+/// Ana's write 1 has a store and a Gifts part, and her Gifts snapshot covers
+/// it while the store has none. Ben's reload reads the write for its store
+/// part only: Gifts' part is never decrypted to disk, so the write keeps no
+/// complete file evidence from the reload (§15, SP step 5).
+#[tokio::test]
+async fn a_reload_opens_only_the_parts_its_starts_lack() {
+    let storage = storage();
+    let mut devices = household(storage.clone()).await;
+    let [ana, ben, _] = devices.as_mut_slice() else {
+        panic!("three members")
+    };
+    sql(&ana.db, "INSERT INTO notes VALUES('first','public','one'); INSERT INTO pins VALUES('00000000-0000-4000-8000-000000000001','00000000-0000-0000-0000-00000000000a','one')").await;
+    let first = ana.writes.upload_writes().await.unwrap()[0];
+    ana.write_snapshot(Audience::Circle(GIFTS)).await.unwrap();
+    ben.sync.reload_from_snapshots().await.unwrap();
+    assert_eq!(pins(&ben.db).await, ["one"]);
+    assert_eq!(rows(&ben.db).await, rows(&ana.db).await);
+    let object = storage
+        .status(&crate::write_seal::path(STORE_ID, first))
+        .await
+        .unwrap()
+        .unwrap();
+    let evidence = crate::object_input::ObjectInput::observe(&ben.db, &object)
+        .await
+        .unwrap()
+        .files()
+        .await
+        .unwrap();
+    assert!(
+        matches!(&evidence, Some(coven_database::FileEvidence::Unproven(
+            coven_database::UnprovenFiles::Parts(parts)
+        )) if parts.iter().all(|(audience, _)| *audience == Audience::Circle(GIFTS))),
+        "{evidence:?}"
+    );
+}
+
 mod histories {
     use crate::replay::tests::*;
     use coven_database::{StoreLog, StoreLogState};

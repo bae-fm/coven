@@ -39,11 +39,11 @@ impl StoreLogSync {
         object: &StoredObject,
         log: &StoreLog,
         replays: &mut ReplayCache<'_>,
-        readable: &BTreeSet<Audience>,
+        uncovered: &BTreeSet<Audience>,
         names: &mut impl Iterator<Item = String>,
     ) -> Result<SavedWrite, SyncError> {
         let result = self
-            .download_snapshot_write(object, log, replays, readable, names)
+            .download_snapshot_write(object, log, replays, uncovered, names)
             .await;
         let result = match result {
             Err(SyncError::Format(error)) => crate::write_object::checked(&object.path, Err(error)),
@@ -69,7 +69,7 @@ impl StoreLogSync {
         object: &StoredObject,
         log: &StoreLog,
         replays: &mut ReplayCache<'_>,
-        readable: &BTreeSet<Audience>,
+        uncovered: &BTreeSet<Audience>,
         names: &mut impl Iterator<Item = String>,
     ) -> Result<SavedWrite, SyncError> {
         let storage = self.storage.as_deref().ok_or(SyncError::NoStorage)?;
@@ -89,7 +89,7 @@ impl StoreLogSync {
         let mut files = Vec::new();
         let mut targets = Vec::new();
         for (part, eligible) in opened.header.parts.iter().zip(eligible) {
-            if eligible && readable.contains(&part.audience) {
+            if eligible && uncovered.contains(&part.audience) {
                 let name = names.next().expect("reserved log part files");
                 let writer = self
                     .directory
