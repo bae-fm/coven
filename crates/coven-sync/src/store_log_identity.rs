@@ -114,7 +114,10 @@ impl StoreLogSync {
     /// `reset_device`, which moves this copy aside and loads a new device.
     pub(crate) async fn record_device_reset(&self) -> SyncError {
         let Some(reason) = self.send.stopped() else {
-            return coven_database::DbError::DamagedDatabase.into();
+            return coven_database::DbError::Invariant {
+                what: "a device reset is decided only after sending stopped",
+            }
+            .into();
         };
         let recorded = (|| {
             let old = self

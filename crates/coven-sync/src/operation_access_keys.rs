@@ -177,16 +177,18 @@ impl StoreLogSync {
             unreachable!()
         };
         let key = minted(work)?.clone();
-        let entry = data
-            .entry()?
-            .ok_or(coven_database::DbError::DamagedDatabase)?;
+        let entry = data.entry()?.ok_or(coven_database::DbError::Invariant {
+            what: "a key replacement publishing its entry has it fixed",
+        })?;
         let local = self.database.local_store_log().await?;
         let positions = crate::replay::author_positions(&entry);
         let view = crate::replay::at(&local.log, &positions).state;
         let member = work.member;
         let old = crate::effects::member(&view, &member)
             .map(|member| member.access.clone())
-            .ok_or(coven_database::DbError::DamagedDatabase)?;
+            .ok_or(SyncError::Rejected(coven_database::DropReason::TargetGone(
+                coven_database::EntryTarget::Member(member),
+            )))?;
         let old_key = match old {
             MemberAccess::S3AccessKey { access_key_id, .. }
                 if access_key_id != key.credentials.access_key_id =>
@@ -407,7 +409,12 @@ fn minted(work: &ReplaceKeyWork) -> Result<&S3MemberKey, SyncError> {
         .minted
         .as_ref()
         .filter(|_| work.mint.checked)
-        .ok_or_else(|| coven_database::DbError::DamagedDatabase.into())
+        .ok_or_else(|| {
+            coven_database::DbError::Invariant {
+                what: "a key replacement past minting holds its checked key",
+            }
+            .into()
+        })
 }
 
 #[cfg(test)]

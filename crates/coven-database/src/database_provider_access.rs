@@ -109,7 +109,9 @@ impl crate::Database {
                         || pending.operation() != Some(update.id)
                         || pending.reported_by() != inner.access.device
                     {
-                        return Err(DbError::DamagedDatabase);
+                        return Err(DbError::Invariant {
+                            what: "a provider request's condition names its own operation",
+                        });
                     }
                     crate::operation::advance(db, &update)?;
                     crate::pending::save(db, &pending)
@@ -138,7 +140,9 @@ impl crate::Database {
                     let record =
                         crate::operation::find(db, id)?.ok_or(DbError::OperationChanged(id))?;
                     let target = if record.last_step == 1 {
-                        request.target.ok_or(DbError::DamagedDatabase)?
+                        request.target.ok_or(DbError::Invariant {
+                            what: "a sent provider request records its target",
+                        })?
                     } else {
                         db.internal_execute(
                             "UPDATE _coven_operations SET last_step=0 WHERE id=?1",

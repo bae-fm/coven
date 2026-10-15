@@ -120,7 +120,9 @@ impl StoreLogSync {
             let upload = local
                 .upload
                 .as_ref()
-                .ok_or(coven_database::DbError::DamagedDatabase)?;
+                .ok_or(coven_database::DbError::Invariant {
+                    what: "an unapplied fixed entry is queued",
+                })?;
             if upload.entry != entry {
                 return Err(coven_database::DbError::StoreLogEntryChanged(entry.position).into());
             }
@@ -178,7 +180,12 @@ impl StoreLogSync {
                         Err(error) => return Err(error),
                     }
                 }
-                _ => return Err(coven_database::DbError::DamagedDatabase.into()),
+                _ => {
+                    return Err(coven_database::DbError::Invariant {
+                        what: "an unapplied entry's step is one of its publication steps",
+                    }
+                    .into())
+                }
             }
         }
         // Completion uses replay after downloading concurrent entries; within
@@ -227,7 +234,12 @@ impl StoreLogSync {
                     .advance_operation(data.update(&current, 0)?)
                     .await?;
             }
-            None => return Err(coven_database::DbError::DamagedDatabase.into()),
+            None => {
+                return Err(coven_database::DbError::Invariant {
+                    what: "a published entry has a replay outcome",
+                }
+                .into())
+            }
         }
         Ok(Progress::Advanced)
     }

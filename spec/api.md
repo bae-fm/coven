@@ -328,6 +328,10 @@ pub enum DbError {
     Sqlite(rusqlite::Error),
     /// SQLite's integrity check or decoding stored facts found damage (§19.1).
     DamagedDatabase,
+    /// Coven's own code broke a rule it relies on, such as a caller's contract
+    /// or a step its state machine cannot reach: a bug, never stored damage.
+    /// Sync reports it as `Failed(LocalFailure::Database)` (§19.1).
+    Invariant { what: &'static str },
     /// Directory settings disagree with the store's creation entry when it
     /// is prepared, applied or read at opening (§9); these are the id and
     /// name in that entry.

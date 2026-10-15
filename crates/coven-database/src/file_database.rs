@@ -235,7 +235,9 @@ impl FileDatabase {
                     [id],
                     |r| r.get::<_, bool>(0),
                 )? {
-                    return Err(DbError::DamagedDatabase);
+                    return Err(DbError::Invariant {
+                        what: "the upload recording progress is queued",
+                    });
                 }
                 crate::pending::save(db, &record(device))?;
                 let subject = crate::RetrySubject::Upload(id);
@@ -594,7 +596,9 @@ fn changed(count: usize) -> Result<(), DbError> {
     if count == 1 {
         Ok(())
     } else {
-        Err(DbError::DamagedDatabase)
+        Err(DbError::Invariant {
+            what: "a queued upload's update changes exactly its row",
+        })
     }
 }
 fn read_only() -> DbError {

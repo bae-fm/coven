@@ -122,7 +122,7 @@ fn insert(db: &DatabaseConnection, kind: LogKind, input: &LogInput) -> Result<()
         // Discovery never rereads a retained number, so another version here
         // means the retained table no longer matches its own reads.
         Some((observation, bytes)) if observation != input.observation || bytes != input.bytes => {
-            Err(DbError::DamagedDatabase)
+            Err(DbError::Invariant { what: "discovery never rereads a retained number" })
         }
         Some(_) => Ok(()),
         None => db

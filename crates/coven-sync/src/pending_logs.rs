@@ -87,6 +87,11 @@ pub(crate) async fn reports(
 
 /// A write's first unmet history or schema condition, named by the object or
 /// update it waits for (§19.1).
+/// A wait always names what it waits for.
+const EMPTY_WAIT: coven_database::DbError = coven_database::DbError::Invariant {
+    what: "a write wait names what it waits for",
+};
+
 pub(crate) fn write_wait(
     store: coven_foundation::id_source::StoreId,
     wait: &coven_database::WriteWait,
@@ -98,26 +103,19 @@ pub(crate) fn write_wait(
         coven_database::WriteWait::Writes(missing) => {
             PendingReason::Waits(crate::Prerequisite::Object(crate::write_seal::path(
                 store,
-                *missing
-                    .first()
-                    .ok_or(coven_database::DbError::DamagedDatabase)?,
+                *missing.first().ok_or(EMPTY_WAIT)?,
             )))
         }
         coven_database::WriteWait::Sources(missing) => {
             PendingReason::Waits(crate::Prerequisite::Object(crate::write_seal::path(
                 store,
-                missing
-                    .first()
-                    .ok_or(coven_database::DbError::DamagedDatabase)?
-                    .write,
+                missing.first().ok_or(EMPTY_WAIT)?.write,
             )))
         }
         coven_database::WriteWait::StoreLog(missing) => {
             PendingReason::Waits(crate::Prerequisite::Object(crate::store_log_object::path(
                 store,
-                *missing
-                    .first()
-                    .ok_or(coven_database::DbError::DamagedDatabase)?,
+                *missing.first().ok_or(EMPTY_WAIT)?,
             )))
         }
         coven_database::WriteWait::SchemaVersion(version) => {

@@ -111,7 +111,9 @@ pub(super) fn put(
     bytes: &[u8],
 ) -> Result<(), DbError> {
     if chunks < 1 || (first < 0 && chunks != 1) {
-        return Err(DbError::DamagedDatabase);
+        return Err(DbError::Invariant {
+            what: "a cached range covers whole chunks, or only the header",
+        });
     }
     let id = id(file)?;
     db.transaction(|db| {
@@ -136,7 +138,9 @@ pub(super) fn put(
             [name.as_str()],
             |r| r.get::<_, bool>(0),
         )? {
-            return Err(DbError::DamagedDatabase);
+            return Err(DbError::Invariant {
+                what: "a cache file being published is not awaiting removal",
+            });
         }
         // Another reader may have published part of this range meanwhile;
         // stored entries never overlap, so these bytes are then left unused.

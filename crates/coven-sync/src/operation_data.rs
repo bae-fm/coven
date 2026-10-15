@@ -337,7 +337,12 @@ impl Data {
                 ..
             }) => *entry = value,
             Self::ReplaceAccessKey(work) => work.entry = value,
-            _ => return Err(coven_database::DbError::DamagedDatabase.into()),
+            _ => {
+                return Err(coven_database::DbError::Invariant {
+                    what: "only entry-publishing work fixes an entry",
+                }
+                .into())
+            }
         }
         Ok(())
     }

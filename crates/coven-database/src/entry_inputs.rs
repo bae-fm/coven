@@ -76,7 +76,7 @@ pub(crate) fn reads(db: &DatabaseConnection, audience: &Audience) -> Result<bool
     let Audience::Circle(circle) = audience else {
         return Ok(true);
     };
-    let device = db.pending_device().ok_or(DbError::DamagedDatabase)?;
+    let device = crate::pending::own_device(db)?;
     db.query_row(
         "SELECT EXISTS(SELECT 1 FROM _coven_devices d JOIN _coven_circle_members m ON m.member=d.member
          WHERE d.device=?1 AND d.state<>'removed' AND m.circle=?2)",

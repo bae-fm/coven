@@ -252,7 +252,9 @@ impl Database {
                     .map(|path| {
                         observation(db, &path)?
                             .map(|(id, _)| id)
-                            .ok_or(DbError::DamagedDatabase)
+                            .ok_or(DbError::Invariant {
+                                what: "a retained input path has its observation",
+                            })
                     })
                     .collect::<Result<Vec<_>, _>>()
             })?;
@@ -432,14 +434,16 @@ impl RetainedInput {
         }
         let end = offset
             .checked_add(bytes.len() as u64)
-            .ok_or(DbError::DamagedDatabase)?;
+            .ok_or(DbError::Invariant {
+                what: "an input range's end fits u64",
+            })?;
         let offset = sql_offset(offset)?;
         let end = sql_offset(end)?;
         let id = self.id;
         self.database.call(move |inner| inner.inputs.write(|db| {
             if !bytes.is_empty() {
                 let overlap: bool = db.query_row(RANGE_OVERLAP, (id,offset,end), |r| r.get(0))?;
-                if overlap { return Err(DbError::DamagedDatabase); }
+                if overlap { return Err(DbError::Invariant { what: "input ranges never overlap" }); }
                 db.internal_execute("INSERT INTO _coven_input_ranges(object,start,end,bytes) VALUES(?1,?2,?3,?4)", (id,offset,end,bytes))?;
             }
             if complete {

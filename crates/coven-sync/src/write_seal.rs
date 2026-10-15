@@ -65,7 +65,10 @@ pub(crate) fn first_attempt(
     );
     let waiting = |key: Option<KeyId>| match key {
         Some(key) => SyncError::KeyUnavailable(key),
-        None => DbError::DamagedDatabase.into(),
+        None => DbError::Invariant {
+            what: "a readable audience has introduced a key",
+        }
+        .into(),
     };
     match crate::key_introductions::select(
         &introductions,
@@ -103,7 +106,10 @@ pub(crate) fn readable_key(
         .map(|i| i.key)
         .ok_or_else(|| match newest(log, audience) {
             Some(key) => SyncError::KeyUnavailable(key),
-            None => DbError::DamagedDatabase.into(),
+            None => DbError::Invariant {
+                what: "a readable audience has introduced a key",
+            }
+            .into(),
         })
 }
 

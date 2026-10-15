@@ -61,7 +61,9 @@ impl<'a> UploadBytes<'a> {
 
     fn check_length(&self, offset: usize, length: usize) -> Result<(), DbError> {
         if offset > self.end || length > self.end - offset {
-            return Err(DbError::DamagedDatabase);
+            return Err(DbError::Invariant {
+                what: "upload reads stay inside the queued plaintext",
+            });
         }
         Ok(())
     }
@@ -227,7 +229,9 @@ pub(crate) fn prepare(
         let (header, _, _) = plaintext(database, &entry)?;
         let keys = select(log, database.schema_version()?, &header)?;
         if keys.part_keys.len() != header.parts.len() {
-            return Err(DbError::DamagedDatabase);
+            return Err(DbError::Invariant {
+                what: "sealing selects one key per write part",
+            });
         }
         database.internal_execute(
             "UPDATE _coven_uploads SET sealing_keys=?1 WHERE rowid=?2",

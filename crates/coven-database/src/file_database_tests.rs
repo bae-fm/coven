@@ -207,9 +207,10 @@ async fn completion_retires_the_queue_without_writing_whatever_the_row_became() 
             owner.validate(&after).await.unwrap();
             assert!(owner.open_local(&after).await.unwrap().is_none());
         }
+        // Completing it again breaks the queue's own rule; nothing is damaged.
         assert!(matches!(
             owner.complete_upload(first_id, ()).await,
-            Err(DbError::DamagedDatabase)
+            Err(DbError::Invariant { .. })
         ));
         db.close().await.unwrap();
     }
@@ -351,6 +352,29 @@ async fn an_empty_file_queues_no_chunk_hash_and_a_missing_one_is_damage() {
     });
     assert!(matches!(
         owner.upload_chunk_hash(&file, 0).await,
+        Err(DbError::DamagedDatabase)
+    ));
+    db.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_damaged_queue_row_fails_the_query_instead_of_emptying_it() {
+    use crate::file_write::tests::SCHEMA;
+    let store = TestStore::new();
+    let db = store
+        .schema(tables(Provenance::AppProvided), SCHEMA)
+        .await
+        .unwrap();
+    let owner = FileDatabase::new(db.clone());
+    attach(&db, vec![5; 3], true).await.unwrap();
+    assert_eq!(owner.uploads().await.unwrap().len(), 1);
+    // A stored time no decoder accepts: decoding stored facts finds damage.
+    db.commit_writer(|sql| {
+        sql.internal_execute("UPDATE _coven_file_uploads SET queued_at=x'00'", [])
+            .unwrap()
+    });
+    assert!(matches!(
+        owner.uploads().await,
         Err(DbError::DamagedDatabase)
     ));
     db.close().await.unwrap();

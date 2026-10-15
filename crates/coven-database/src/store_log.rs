@@ -441,7 +441,7 @@ pub(crate) fn apply<P: crate::PendingValue>(
         for operation in operations {
             crate::operation::insert(database, operation)?;
         }
-        let own = database.pending_device().ok_or(DbError::DamagedDatabase)?;
+        let own = crate::pending::own_device(database)?;
         crate::operation::record_access_keys::<P>(database, own, access_keys)?;
         crate::provider_access::adopt::<P>(database, own, provider_access)?;
         for (id, outcome) in &replay.entries {

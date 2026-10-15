@@ -349,7 +349,9 @@ impl<P: PendingValue> Replacement<P> {
         let mut identities = std::collections::BTreeSet::new();
         for record in &next {
             if !identities.insert((record.subject(), record.reported_by())) {
-                return Err(DbError::DamagedDatabase);
+                return Err(DbError::Invariant {
+                    what: "replacement records have distinct identities",
+                });
             }
         }
         let values = previous
@@ -377,7 +379,9 @@ impl<P: PendingValue> Replacement<P> {
             .iter()
             .any(|r| r.reported_by() == own || r.operation().is_some())
         {
-            return Err(DbError::DamagedDatabase);
+            return Err(DbError::Invariant {
+                what: "peer reports never replace this device's records",
+            });
         }
         Self::new(
             retained::<P>(db)?
@@ -399,4 +403,11 @@ impl<P: PendingValue> Replacement<P> {
         }
         Ok(())
     }
+}
+
+/// This device, which every writer connection observes for pending state.
+pub(crate) fn own_device(db: &DatabaseConnection) -> Result<DeviceId, DbError> {
+    db.pending_device().ok_or(DbError::Invariant {
+        what: "a writer connection observes this device",
+    })
 }

@@ -238,7 +238,9 @@ impl Database {
                 if pending.operation() != Some(update.id)
                     || pending.reported_by() != inner.access.device
                 {
-                    return Err(DbError::DamagedDatabase);
+                    return Err(DbError::Invariant {
+                        what: "an operation's own condition names it and this device",
+                    });
                 }
                 writer.transaction(|db| {
                     crate::operation::advance(db, &update)?;

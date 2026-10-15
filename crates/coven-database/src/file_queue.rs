@@ -110,7 +110,9 @@ pub(crate) fn enqueue(
     now: SystemTime,
 ) -> Result<(), DbError> {
     if attachment.chunks.len() as u64 != FileHeader::new(file.plaintext_size()).chunk_count() {
-        return Err(DbError::DamagedDatabase);
+        return Err(DbError::Invariant {
+            what: "an attachment hashes every plaintext chunk",
+        });
     }
     let device = file.uploader().0.to_be_bytes();
     let id = file.id().0;
@@ -210,7 +212,9 @@ pub(crate) fn chunk_hash(
     file: &FileRef,
     index: u64,
 ) -> Result<ContentHash, DbError> {
-    let index = i64::try_from(index).map_err(|_| DbError::DamagedDatabase)?;
+    let index = i64::try_from(index).map_err(|_| DbError::Invariant {
+        what: "a chunk index fits SQLite",
+    })?;
     let hash = db
         .query_row(
             "SELECT hash FROM _coven_file_chunks WHERE device=?1 AND file=?2 AND chunk=?3",
@@ -249,7 +253,9 @@ pub(crate) fn complete(db: &DatabaseConnection, id: i64) -> Result<FileRef, DbEr
             },
         )
         .map_err(|error| match error {
-            DbError::Sqlite(rusqlite::Error::QueryReturnedNoRows) => DbError::DamagedDatabase,
+            DbError::Sqlite(rusqlite::Error::QueryReturnedNoRows) => DbError::Invariant {
+                what: "a completed upload is queued",
+            },
             error => error,
         })?;
     for path in db.query(
@@ -265,7 +271,9 @@ pub(crate) fn complete(db: &DatabaseConnection, id: i64) -> Result<FileRef, DbEr
         )?;
     }
     if db.internal_execute("DELETE FROM _coven_file_uploads WHERE id=?1", [id])? != 1 {
-        return Err(DbError::DamagedDatabase);
+        return Err(DbError::Invariant {
+            what: "completing an upload removes its one queue row",
+        });
     }
     FileRef::decode(&reference)
 }

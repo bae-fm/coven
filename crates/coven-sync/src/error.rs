@@ -137,7 +137,8 @@ impl From<DbError> for SyncError {
             | DbError::UploadNotOldest { .. }
             | DbError::UploadNotAttempted { .. }
             | DbError::KeyUploadChanged { .. }
-            | DbError::OperationChanged(_)) => Self::Failed {
+            | DbError::OperationChanged(_)
+            | DbError::Invariant { .. }) => Self::Failed {
                 failure: crate::LocalFailure::Database,
                 source: Arc::new(error),
             },

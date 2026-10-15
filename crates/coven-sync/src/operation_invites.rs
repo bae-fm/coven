@@ -254,17 +254,19 @@ impl StoreLogSync {
                                 .with_source("S3 invitation needs its own access key")
                                 .into());
                         }
-                        let access = self
-                            .database
-                            .provider_access(email.clone())
-                            .await?
-                            .ok_or(coven_database::DbError::DamagedDatabase)?;
+                        let access = self.database.provider_access(email.clone()).await?.ok_or(
+                            coven_database::DbError::Invariant {
+                                what: "an account invite records its intended access",
+                            },
+                        )?;
                         if let Some(request) = access.request {
                             let pending = self
                                 .database
                                 .operation_pending::<PendingRecord>(request.operation)
                                 .await?
-                                .ok_or(coven_database::DbError::DamagedDatabase)?;
+                                .ok_or(coven_database::DbError::Invariant {
+                                    what: "a provider request in flight has its condition",
+                                })?;
                             if pending.retry() != Retry::Automatic {
                                 return Err(SyncError::Pending(Box::new(pending)));
                             }
@@ -278,7 +280,9 @@ impl StoreLogSync {
                                 .invitation
                                 .as_ref()
                                 .map(coven_crypto::SecretBytes::as_bytes)
-                                .ok_or(coven_database::DbError::DamagedDatabase)?,
+                                .ok_or(coven_database::DbError::Invariant {
+                                    what: "a granted account keeps its invitation",
+                                })?,
                         )?
                     }
                     InviteGrant::Minting(_) => unreachable!("minted before granting"),
@@ -467,13 +471,16 @@ impl StoreLogSync {
             },
             InviteGrant::Minting(_) => unreachable!("minted before granting"),
         };
-        let store = local
-            .log
-            .replay
-            .state
-            .store
-            .as_ref()
-            .ok_or(coven_database::DbError::DamagedDatabase)?;
+        let store =
+            local
+                .log
+                .replay
+                .state
+                .store
+                .as_ref()
+                .ok_or(coven_database::DbError::Invariant {
+                    what: "an inviting device's replay has its store",
+                })?;
         if store.id != local.store {
             return Err(SyncError::WrongStore {
                 expected: local.store,
@@ -494,7 +501,9 @@ impl StoreLogSync {
                 }
                 _ => None,
             })
-            .ok_or(coven_database::DbError::DamagedDatabase)?;
+            .ok_or(coven_database::DbError::Invariant {
+                what: "an inviting device has kept its store's creation",
+            })?;
         // The cursor names published copies only: reserved numbers go up
         // first, in order, so the joiner's tail starts after them (SP step 4).
         crate::store_log_object::upload_keys(

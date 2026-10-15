@@ -71,7 +71,9 @@ impl Database {
         self.call(move |inner| {
             inner.access.with_writer(|writer| {
                 if record.reported_by() != inner.access.device || record.operation().is_some() {
-                    return Err(DbError::DamagedDatabase);
+                    return Err(DbError::Invariant {
+                        what: "a retried subject's record is this device's own",
+                    });
                 }
                 writer.pending_transaction(|db| {
                     crate::pending::save(db, &record)?;

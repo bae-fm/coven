@@ -146,7 +146,7 @@ where
         )?;
         for key in &sealed.keys {
             if key.writer != device || key.before_entry != Some(entry.position) {
-                return Err(DbError::DamagedDatabase);
+                return Err(DbError::Invariant { what: "an entry's prerequisite copies are this writer's, before it" });
             }
             crate::key_upload::insert(database, key)?;
         }

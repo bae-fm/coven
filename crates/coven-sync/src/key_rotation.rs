@@ -54,7 +54,9 @@ impl StoreLogSync {
                             .database
                             .operation_pending::<crate::PendingRecord>(record.id)
                             .await?
-                            .ok_or(coven_database::DbError::DamagedDatabase)?;
+                            .ok_or(coven_database::DbError::Invariant {
+                                what: "an operation not ready has its condition",
+                            })?;
                         return Err(SyncError::Pending(Box::new(pending)));
                     }
                     match self.operation_step(&record, Data::read(&record)?).await {

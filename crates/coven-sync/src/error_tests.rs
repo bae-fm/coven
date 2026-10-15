@@ -116,6 +116,9 @@ fn refusals_of_syncs_own_requests_fail_internally_and_keep_their_native_cause() 
         number: 3,
     };
     let internal = [
+        DbError::Invariant {
+            what: "a broken rule of coven's own code",
+        },
         DbError::StoreLogEntriesChanged,
         DbError::StoreLogEntryChanged(entry),
         DbError::UploadNotOldest { write },
@@ -225,4 +228,39 @@ fn removal_and_required_updates_stop_the_pass_as_themselves() {
         SyncFailure::from(SyncError::UpdateRequired(update)),
         SyncFailure::UpdateRequired(found) if found == update
     ));
+}
+
+#[test]
+fn stored_damage_an_invariant_and_a_remote_refusal_stay_distinct() {
+    let path = coven_storage::ObjectPath::device_log(
+        coven_foundation::id_source::StoreId(uuid::Uuid::from_u128(1)),
+        DeviceId(1),
+        std::num::NonZeroU64::MIN,
+    );
+    // Decoding stored facts failed: the database is damaged.
+    assert!(matches!(
+        SyncError::from(DbError::DamagedDatabase),
+        SyncError::Database(DbError::DamagedDatabase)
+    ));
+    // Coven's own rule broke: a local failure keeping the rule, never damage.
+    let SyncError::Failed { failure, source } = SyncError::from(DbError::Invariant {
+        what: "a completed upload is queued",
+    }) else {
+        panic!("an invariant is a local failure")
+    };
+    assert_eq!(failure, crate::LocalFailure::Database);
+    assert!(matches!(
+        source.downcast_ref::<DbError>(),
+        Some(DbError::Invariant {
+            what: "a completed upload is queued"
+        })
+    ));
+    // A received object the database refuses is that object's refusal.
+    let SyncError::Damaged(object) = crate::write_object::database_failure(
+        &path,
+        DbError::WriteFormat(coven_format::Error::Truncated),
+    ) else {
+        panic!("a refused remote object")
+    };
+    assert_eq!(object.failure, crate::Refusal::Parse { cause: None });
 }

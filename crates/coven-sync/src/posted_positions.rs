@@ -127,10 +127,14 @@ async fn scan(
         .map(|r| r.subject);
     let mut subjects: Vec<_> = subjects.collect();
     for object in objects {
-        let device = object
-            .path
-            .device()
-            .ok_or_else(|| local_error(coven_database::DbError::DamagedDatabase.into()))?;
+        let device = object.path.device().ok_or_else(|| {
+            local_error(
+                coven_database::DbError::Invariant {
+                    what: "a positions listing names devices",
+                }
+                .into(),
+            )
+        })?;
         let subject = PendingSubject::Positions(device);
         if device != local.device {
             subjects.push(subject.clone());
@@ -221,7 +225,9 @@ async fn relevant_reports(
         .state
         .devices
         .get(&local.device)
-        .ok_or(coven_database::DbError::DamagedDatabase)?
+        .ok_or(coven_database::DbError::Invariant {
+            what: "a device posting positions is in its replay",
+        })?
         .member;
     let mut reports = Vec::new();
     for peer in observed

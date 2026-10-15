@@ -160,7 +160,9 @@ fn local_changes<P: PendingValue>(
     if records.iter().any(|r| {
         r.reported_by() != own || r.operation().is_some() || !subjects.contains(r.subject())
     }) {
-        return Err(DbError::DamagedDatabase);
+        return Err(DbError::Invariant {
+            what: "positions replace only this device's own position records",
+        });
     }
     let previous = pending::retained::<P>(db)?
         .into_iter()

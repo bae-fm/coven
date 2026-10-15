@@ -125,7 +125,7 @@ pub(crate) fn land<P: PendingValue>(
         )?;
     }
     if landing.late {
-        let own = db.pending_device().ok_or(DbError::DamagedDatabase)?;
+        let own = crate::pending::own_device(db)?;
         report::<P>(db, header.position, own, true)?;
     }
     Ok(landing.late)
@@ -192,7 +192,7 @@ pub(crate) struct Rejudged {
 /// changed write's report changes with it; the audiences it opened must be
 /// rebuilt in this transaction (§9, §10).
 pub(crate) fn rejudge<P: PendingValue>(db: &DatabaseConnection) -> Result<Rejudged, DbError> {
-    let own = db.pending_device().ok_or(DbError::DamagedDatabase)?;
+    let own = crate::pending::own_device(db)?;
     let mut rejudged = Rejudged::default();
     for (write, landed, was_late) in landings(db)? {
         let landing = judge(db, &landed.header, &landed.signer, landed.stored_at)?;

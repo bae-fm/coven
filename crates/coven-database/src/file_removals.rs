@@ -57,7 +57,7 @@ impl<'a> FileRemovals<'a> {
                         [name.as_str()],
                         |r| r.get::<_, bool>(0),
                     )? {
-                        return Err(DbError::DamagedDatabase);
+                        return Err(DbError::Invariant { what: "a file awaiting removal is no longer referenced" });
                     }
                     remove(database, self.directory, &name, &area)?;
                     Ok(())

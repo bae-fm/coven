@@ -25,7 +25,14 @@ struct RunningOperations {
     commands: mpsc::UnboundedSender<Request>,
     joins: watch::Receiver<Vec<JoinRequest>>,
     task: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// Why the worker stopped on its journal: later calls fail with it.
+    stopped: Arc<std::sync::OnceLock<Stopped>>,
 }
+
+type Stopped = (
+    crate::LocalFailure,
+    Arc<dyn std::error::Error + Send + Sync>,
+);
 
 pub(crate) enum Command {
     Reload,
@@ -110,6 +117,7 @@ struct OperationRun {
     commands: mpsc::UnboundedReceiver<Request>,
     joins: watch::Sender<Vec<JoinRequest>>,
     waiters: BTreeMap<OperationId, Reply>,
+    stopped: Arc<std::sync::OnceLock<Stopped>>,
     /// The earliest expiry among open invitations, read with the journal.
     invite_expiry: Option<std::time::SystemTime>,
 }
@@ -121,6 +129,7 @@ impl Operations {
     pub fn new(sync: StoreLogSync, files: Files, writes: DeviceLogSync, clock: ClockRef) -> Self {
         let (commands, receiver) = mpsc::unbounded_channel();
         let (joins, subscription) = watch::channel(Vec::new());
+        let stopped = Arc::new(std::sync::OnceLock::new());
         let run = OperationRun {
             sync,
             files,
@@ -129,6 +138,7 @@ impl Operations {
             commands: receiver,
             joins,
             waiters: BTreeMap::new(),
+            stopped: stopped.clone(),
             invite_expiry: None,
         };
         Self {
@@ -136,19 +146,33 @@ impl Operations {
                 commands,
                 joins: subscription,
                 task: Mutex::new(Some(tokio::spawn(run.run()))),
+                stopped,
             }),
         }
     }
 
     async fn call(&self, command: Command) -> Result<Output, SyncError> {
         let (reply, result) = oneshot::channel();
-        self.inner
+        if self
+            .inner
             .commands
             .send(Request { command, reply })
-            .map_err(|_| coven_database::DbError::StoreClosed)?;
-        result
-            .await
-            .map_err(|_| coven_database::DbError::StoreClosed)?
+            .is_err()
+        {
+            return Err(self.ended());
+        }
+        result.await.unwrap_or_else(|_| Err(self.ended()))
+    }
+
+    /// The worker is gone: closed, or stopped on its journal with that cause.
+    fn ended(&self) -> SyncError {
+        match self.inner.stopped.get() {
+            Some((failure, source)) => SyncError::Failed {
+                failure: *failure,
+                source: source.clone(),
+            },
+            None => coven_database::DbError::StoreClosed.into(),
+        }
     }
 
     /// Verify and publish setup before committing credentials and keys. The
@@ -384,8 +408,12 @@ impl Operations {
             .await
     }
     /// Stop the task before closing its database; journal rows remain for reopening.
+    /// A worker already stopped on its journal has nothing left to stop.
     pub async fn close(&self) -> Result<(), SyncError> {
-        self.unit(Command::Close).await
+        match self.unit(Command::Close).await {
+            Err(SyncError::Failed { .. }) if self.inner.stopped.get().is_some() => Ok(()),
+            result => result,
+        }
     }
 
     async fn unit(&self, command: Command) -> Result<(), SyncError> {
@@ -476,6 +504,7 @@ impl OperationRun {
                 // owner and fail every waiter with one shared typed cause.
                 tracing::error!(error = %error, "operation journal failed; worker stopped");
                 let (failure, source) = error.into_shared();
+                let _ = self.stopped.set((failure, source.clone()));
                 let shared = || SyncError::Failed {
                     failure,
                     source: source.clone(),

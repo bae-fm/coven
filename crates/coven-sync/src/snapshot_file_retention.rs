@@ -30,9 +30,9 @@ impl StoreLogSync {
         let paths: BTreeSet<_> = objects.into_iter().map(|object| object.path).collect();
         let mut eligible = BTreeSet::new();
         for path in paths {
-            let device = path
-                .device()
-                .ok_or(coven_database::DbError::DamagedDatabase)?;
+            let device = path.device().ok_or(coven_database::DbError::Invariant {
+                what: "a file listing names devices",
+            })?;
             if self.can_delete_device(&local.log, local.device, device)?
                 && !references.contains(&path)
             {
@@ -50,7 +50,9 @@ impl StoreLogSync {
             let id = object
                 .path
                 .snapshot_id()
-                .ok_or(coven_database::DbError::DamagedDatabase)?;
+                .ok_or(coven_database::DbError::Invariant {
+                    what: "a snapshot listing names snapshots",
+                })?;
             if !readable.contains(&id.audience) {
                 tracing::debug!(
                     path = object.path.as_str(),
@@ -111,7 +113,9 @@ impl StoreLogSync {
             let id = object
                 .path
                 .write_id()
-                .ok_or(coven_database::DbError::DamagedDatabase)?;
+                .ok_or(coven_database::DbError::Invariant {
+                    what: "a write listing names writes",
+                })?;
             if stuck
                 .iter()
                 .any(|record| record.blocks(coven_database::LogObject::Write(id)))

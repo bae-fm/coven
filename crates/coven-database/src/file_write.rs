@@ -442,7 +442,9 @@ impl<'a> FileWrite<'a> {
             if reference.content_hash() != attached.hash
                 || reference.plaintext_size() != attached.size
             {
-                return Err(DbError::DamagedDatabase);
+                return Err(DbError::Invariant {
+                    what: "a write attaches the file it prepared",
+                });
             }
             // Reattaching identical bytes can change only local file records,
             // leaving no row-write part on which to check membership.

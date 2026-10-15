@@ -246,11 +246,16 @@ fn reload_audience(data: &Data) -> Result<Audience, SyncError> {
             ..
         }) => match scope {
             ReloadScope::All => Ok(Audience::Store),
-            ReloadScope::Changed(audiences) => audiences
-                .first()
-                .cloned()
-                .ok_or_else(|| coven_database::DbError::DamagedDatabase.into()),
+            ReloadScope::Changed(audiences) => audiences.first().cloned().ok_or_else(|| {
+                coven_database::DbError::Invariant {
+                    what: "a changed-audience reload names an audience",
+                }
+                .into()
+            }),
         },
-        _ => Err(coven_database::DbError::DamagedDatabase.into()),
+        _ => Err(coven_database::DbError::Invariant {
+            what: "a reload's condition names a reload",
+        }
+        .into()),
     }
 }

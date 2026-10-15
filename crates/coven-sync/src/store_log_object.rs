@@ -47,7 +47,10 @@ pub(crate) fn seal_upload(
         // After confirmation the caller acquires the published copy into `ring`.
         if let Some(copy) = upload.sealing.keys.first() {
             if upload.sealing.keys.len() != 1 {
-                return Err(coven_database::DbError::DamagedDatabase.into());
+                return Err(coven_database::DbError::Invariant {
+                    what: "a store's creation seals exactly its first key",
+                }
+                .into());
             }
             creation = SealedKey::decode(&copy.bytes)?
                 .open_store_key(member, copy.path(store).as_str())?;
@@ -58,7 +61,10 @@ pub(crate) fn seal_upload(
                 .clone();
         }
         if creation.id() != id {
-            return Err(coven_database::DbError::DamagedDatabase.into());
+            return Err(coven_database::DbError::Invariant {
+                what: "a creation's sealed copy holds the key it introduces",
+            }
+            .into());
         }
         creation.check_hash(key_hash)?;
         &creation

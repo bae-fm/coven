@@ -105,7 +105,9 @@ impl StoreLogSync {
                 .entries
                 .iter()
                 .find(|entry| matches!(entry.entry.change, StoreChange::CreateStore { .. }))
-                .ok_or(coven_database::DbError::DamagedDatabase)?;
+                .ok_or(coven_database::DbError::Invariant {
+                    what: "a replayed store has its creation entry",
+                })?;
             let path = object::path(store_id, recorded.entry.position);
             read_setup_entry(
                 &self.database,
@@ -253,8 +255,11 @@ impl StoreLogSync {
         }
         if local.log.replay.state.store.is_some() {
             let needed = crate::key_introductions::needed(&local.log);
-            let key = crate::key_introductions::newest(&local.log, &Audience::Store)
-                .ok_or(coven_database::DbError::DamagedDatabase)?;
+            let key = crate::key_introductions::newest(&local.log, &Audience::Store).ok_or(
+                coven_database::DbError::Invariant {
+                    what: "a replayed store has introduced a store key",
+                },
+            )?;
             let opened = keys::read_store_key(
                 &self.database,
                 &self.reads,

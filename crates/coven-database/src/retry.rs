@@ -214,7 +214,9 @@ pub(crate) fn find(
 /// `W` is stored in whole milliseconds, rounded up so a persisted wait never
 /// shortens the one the session armed.
 fn millis(wait: &RetryWait) -> Result<i64, DbError> {
-    i64::try_from(wait.wait.as_nanos().div_ceil(1_000_000)).map_err(|_| DbError::DamagedDatabase)
+    i64::try_from(wait.wait.as_nanos().div_ceil(1_000_000)).map_err(|_| DbError::Invariant {
+        what: "a retry wait fits SQLite's integer",
+    })
 }
 
 /// Replace the subject's wait. A download's wait is saved only with its
@@ -247,7 +249,9 @@ pub(crate) fn save_download(
     wait: &RetryWait,
 ) -> Result<(), DbError> {
     let key @ Key::Download(_) = key(subject) else {
-        return Err(DbError::DamagedDatabase);
+        return Err(DbError::Invariant {
+            what: "only a download's wait records its pending record",
+        });
     };
     clear(db, subject)?;
     db.internal_execute(

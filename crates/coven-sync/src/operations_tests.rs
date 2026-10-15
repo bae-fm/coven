@@ -793,3 +793,26 @@ async fn removal_returns_unit_before_provider_work_and_has_no_operation_row() {
 
 #[path = "operation_access_tests.rs"]
 mod access;
+
+#[tokio::test]
+async fn a_worker_stopped_on_its_journal_fails_later_calls_with_that_database_cause() {
+    let storage = google();
+    let [a, _b, _c] = accounts(storage).await;
+    let files = file_owner(&a);
+    let db = a.db.clone();
+    let operations = operation_owner(a.sync, files);
+    operations.barrier().await.unwrap();
+    // The journal becomes unreadable under the running worker.
+    db.close().await.unwrap();
+    for _ in 0..2 {
+        let Err(SyncError::Failed { failure, source }) = operations.barrier().await else {
+            panic!("a stopped worker's calls fail with its cause")
+        };
+        assert_eq!(failure, crate::LocalFailure::Database);
+        assert!(matches!(
+            source.downcast_ref::<SyncError>(),
+            Some(SyncError::Database(coven_database::DbError::StoreClosed))
+        ));
+    }
+    operations.close().await.unwrap();
+}

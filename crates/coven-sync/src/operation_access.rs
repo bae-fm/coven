@@ -107,7 +107,10 @@ impl StoreLogSync {
             let mut data = Data::read(&row)?;
             if row.id == record.id {
                 let Data::Invite(work) = &mut data else {
-                    return Err(coven_database::DbError::DamagedDatabase.into());
+                    return Err(coven_database::DbError::Invariant {
+                        what: "an invite's grant step reads its invite",
+                    }
+                    .into());
                 };
                 // Keep the account in the universe while withdrawing this invitation.
                 work.state = InviteState::Settled;
@@ -186,11 +189,11 @@ impl StoreLogSync {
             .provider_access(account.clone())
             .await?
             .ok_or(coven_database::DbError::OperationChanged(record.id))?;
-        let target = state
-            .request
-            .as_ref()
-            .and_then(|r| r.target)
-            .ok_or(coven_database::DbError::DamagedDatabase)?;
+        let target = state.request.as_ref().and_then(|r| r.target).ok_or(
+            coven_database::DbError::Invariant {
+                what: "a sent provider request records its target",
+            },
+        )?;
         let invitation = if target {
             match storage.grant_access(&account).await? {
                 coven_storage::AccessGrant::Granted { invitation } => Some(invitation.encode()?),

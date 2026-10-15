@@ -197,11 +197,13 @@ impl FilesInner {
             .ok_or(FileReadError::NoStorage)?;
         // The queue fixed this source at attachment; the row may have been
         // retargeted, moved or deleted since without affecting it (§16.5).
-        let source = self
-            .database
-            .open_upload_source(&item.file)
-            .await?
-            .ok_or(FileReadError::Database(DbError::DamagedDatabase))?;
+        let source =
+            self.database
+                .open_upload_source(&item.file)
+                .await?
+                .ok_or(FileReadError::Database(DbError::Invariant {
+                    what: "a queued upload keeps the source fixed at attachment",
+                }))?;
         let total = FileHeader::new(item.file.plaintext_size())
             .encrypted_size()
             .map_err(|_| FileReadError::Integrity {
@@ -296,7 +298,9 @@ impl FileTransfer<'_> {
         let end = offset
             .checked_add(length as u64)
             .filter(|end| *end <= self.total)
-            .ok_or(DbError::DamagedDatabase)?;
+            .ok_or(DbError::Invariant {
+                what: "an upload part lies inside the encrypted file",
+            })?;
         let mut bytes = Vec::with_capacity(length);
         let mut position = offset;
         if position < FILE_HEADER_LEN as u64 {
@@ -307,7 +311,9 @@ impl FileTransfer<'_> {
         while position < end {
             let index =
                 (position - FILE_HEADER_LEN as u64) / (CHUNK_SIZE + FILE_CHUNK_TAG_LEN) as u64;
-            let chunk = header.chunk(index).map_err(|_| DbError::DamagedDatabase)?;
+            let chunk = header.chunk(index).map_err(|_| DbError::Invariant {
+                what: "an upload part's chunks exist in the file",
+            })?;
             let expected = self
                 .owner
                 .database

@@ -281,7 +281,10 @@ impl StoreLogSync {
                     files: Some(files), ..
                 } = &task.job
                 else {
-                    return Err(coven_database::DbError::DamagedDatabase.into());
+                    return Err(coven_database::DbError::Invariant {
+                        what: "a reload past its first step has its files",
+                    }
+                    .into());
                 };
                 let mut snapshots = Vec::new();
                 for snapshot in &files.snapshots {
@@ -402,7 +405,10 @@ impl StoreLogSync {
                     files: Some(files), ..
                 } = &task.job
                 else {
-                    return Err(coven_database::DbError::DamagedDatabase.into());
+                    return Err(coven_database::DbError::Invariant {
+                        what: "a reload past its first step has its files",
+                    }
+                    .into());
                 };
                 let mut paths: Vec<_> = files
                     .snapshots
@@ -422,7 +428,12 @@ impl StoreLogSync {
                 self.database.finish_operation(record.id).await?;
                 return Ok(Progress::Finished(Output::Unit));
             }
-            _ => return Err(coven_database::DbError::DamagedDatabase.into()),
+            _ => {
+                return Err(coven_database::DbError::Invariant {
+                    what: "a reload has three steps",
+                }
+                .into())
+            }
         }
         Ok(Progress::Advanced)
     }

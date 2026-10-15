@@ -424,7 +424,7 @@ pub(crate) fn forget_own_migration(
     covered: &coven_format::value::WritePositions,
     carried: &std::collections::BTreeSet<(WriteId, String, Vec<u8>)>,
 ) -> Result<(), DbError> {
-    let own = db.pending_device().ok_or(DbError::DamagedDatabase)?;
+    let own = crate::pending::own_device(db)?;
     let audience = audience_text(audience);
     let first = merge_fields::encode_write_id(&WriteId {
         device: own,

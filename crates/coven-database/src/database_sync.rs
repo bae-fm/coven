@@ -187,7 +187,9 @@ impl Database {
         self.call(move |inner| {
             inner.access.with_writer(|writer| {
                 if record.reported_by() != inner.access.device {
-                    return Err(DbError::DamagedDatabase);
+                    return Err(DbError::Invariant {
+                        what: "a recorded local condition is this device's own",
+                    });
                 }
                 if let Some(id) = record.operation() {
                     if crate::operation::find(writer, id)?.is_none() {
@@ -244,7 +246,9 @@ impl Database {
                     || !scanned(record)
                     || !identities.insert(record.subject())
                 {
-                    return Err(DbError::DamagedDatabase);
+                    return Err(DbError::Invariant {
+                        what: "a scan replaces distinct own records it covers",
+                    });
                 }
             }
             let encode = |r: &P| serde_json::to_vec(r).map_err(DbError::PendingEncoding);

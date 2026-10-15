@@ -137,7 +137,9 @@ impl StoreLogSync {
                 .database
                 .operation_pending::<crate::PendingRecord>(record.id)
                 .await?
-                .ok_or(coven_database::DbError::DamagedDatabase)?;
+                .ok_or(coven_database::DbError::Invariant {
+                    what: "an operation not ready has its condition",
+                })?;
             return Err(SyncError::Pending(Box::new(pending)));
         }
         Ok(SnapshotId {
@@ -264,12 +266,17 @@ impl StoreLogSync {
                     .database
                     .operation_pending::<crate::PendingRecord>(id)
                     .await?
-                    .ok_or(coven_database::DbError::DamagedDatabase)?;
+                    .ok_or(coven_database::DbError::Invariant {
+                        what: "an operation not ready has its condition",
+                    })?;
                 return Err(SyncError::Pending(Box::new(pending)));
             }
             let data = Data::read(&record)?;
             let Data::Snapshots(task) = data else {
-                return Err(coven_database::DbError::DamagedDatabase.into());
+                return Err(coven_database::DbError::Invariant {
+                    what: "a snapshot record holds snapshot work",
+                }
+                .into());
             };
             let progress = match self.snapshot_step(&record, task).await {
                 Ok(progress) => progress,
@@ -400,7 +407,10 @@ impl StoreLogSync {
             }
             1 => self.upload_snapshot(record, task, &path).await,
             2 => self.finish_snapshot(record, task, id).await,
-            _ => Err(coven_database::DbError::DamagedDatabase.into()),
+            _ => Err(coven_database::DbError::Invariant {
+                what: "a snapshot write has three steps",
+            }
+            .into()),
         }
     }
 
@@ -585,7 +595,9 @@ impl StoreLogSync {
         let name = task
             .temporary
             .first()
-            .ok_or(coven_database::DbError::DamagedDatabase)?;
+            .ok_or(coven_database::DbError::Invariant {
+                what: "an uploading snapshot has its prepared file",
+            })?;
         let input = io::SnapshotInput::open(&self.directory, name)?;
         let storage = self.storage.as_deref().ok_or(SyncError::NoStorage)?;
         self.check_snapshot_signer(&input).await?;
@@ -761,7 +773,9 @@ pub(super) fn snapshot_path(
         store,
         id.audience.clone(),
         id.device,
-        NonZeroU64::new(id.number).ok_or(coven_database::DbError::DamagedDatabase)?,
+        NonZeroU64::new(id.number).ok_or(coven_database::DbError::Invariant {
+            what: "snapshot numbers start at one",
+        })?,
     ))
 }
 
