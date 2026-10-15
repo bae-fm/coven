@@ -1,11 +1,12 @@
 //! Member keys on GCS (§4): a service account per key, granted
-//! `roles/storage.objectUser` on the store's managed folder `<prefix>/<store>/`,
-//! whose HMAC key is the member key. Managed folders need uniform bucket-level
+//! `roles/storage.objectUser` on the store's managed folder `<prefix>/<store>/`
+//! and `roles/storage.bucketViewer` on the bucket, whose `storage.buckets.get`
+//! setup's versioning read needs, and whose HMAC key is the member key. Managed folders need uniform bucket-level
 //! access; a bucket without it is refused. A new HMAC key can take up to 60
 //! seconds to work, so the member-side check retries within that bound.
 //!
 //! Revocation sets the HMAC key inactive and deletes it, removes the folder
-//! binding and deletes the service account. The folder is the store's and
+//! and bucket bindings and deletes the service account. The folder is the store's and
 //! stays. Absence is read from the key itself.
 use super::minting::{AdminRequest, KeyMinter, Pending};
 use super::*;
@@ -18,6 +19,15 @@ use std::time::Duration;
 use url::Url;
 
 const OBJECT_USER: &str = "roles/storage.objectUser";
+const BUCKET_VIEWER: &str = "roles/storage.bucketViewer";
+
+/// Where a member is bound: objects on the store's managed folder, metadata
+/// on the bucket.
+#[derive(Clone, Copy, Debug)]
+enum Grant {
+    Folder,
+    Bucket,
+}
 
 fn mint_key<'a>(context: &'a AdminRequest, scope: &'a MintScope) -> Pending<'a, S3MemberKey> {
     Box::pin(mint(context, scope))
@@ -192,16 +202,25 @@ impl<'a> Gcs<'a> {
         url
     }
 
+    /// The IAM policy's address and the role a member holds there.
+    fn grant(&self, grant: Grant) -> (Url, &'static str) {
+        match grant {
+            Grant::Folder => (self.folder_url("iam"), OBJECT_USER),
+            Grant::Bucket => (
+                self.storage(&format!("b/{}/iam", self.bucket)),
+                BUCKET_VIEWER,
+            ),
+        }
+    }
+
     /// Add or remove the member's binding, retrying once on a concurrent change.
-    async fn bind(&self, email: &str, present: bool) -> Result<(), StorageError> {
+    async fn bind(&self, grant: Grant, email: &str, present: bool) -> Result<(), StorageError> {
+        let (url, role) = self.grant(grant);
         let member = format!("serviceAccount:{email}");
         for _ in 0..2 {
-            let Some(mut policy) = self
-                .call(Method::GET, self.folder_url("iam"), None, &[404])
-                .await?
-            else {
+            let Some(mut policy) = self.call(Method::GET, url.clone(), None, &[404]).await? else {
                 return if present {
-                    Err(StorageFailure::NotFound.with_source("managed folder is absent"))
+                    Err(StorageFailure::NotFound.with_source(format!("{grant:?} is absent")))
                 } else {
                     Ok(())
                 };
@@ -211,7 +230,7 @@ impl<'a> Gcs<'a> {
             let mut kept = Vec::new();
             let mut granted = false;
             for mut binding in bindings {
-                if binding["role"] == OBJECT_USER {
+                if binding["role"] == role {
                     let mut members: Vec<Value> =
                         binding["members"].as_array().cloned().unwrap_or_default();
                     let had = members.iter().any(|m| m == &json!(member));
@@ -232,7 +251,7 @@ impl<'a> Gcs<'a> {
                 kept.push(binding);
             }
             if present && !granted {
-                kept.push(json!({"role": OBJECT_USER, "members": [member]}));
+                kept.push(json!({"role": role, "members": [member]}));
                 changed = true;
             }
             if !changed {
@@ -240,14 +259,14 @@ impl<'a> Gcs<'a> {
             }
             policy["bindings"] = json!(kept);
             match self
-                .call(Method::PUT, self.folder_url("iam"), Some(policy), &[412])
+                .call(Method::PUT, url.clone(), Some(policy), &[412])
                 .await?
             {
                 Some(_) => return Ok(()),
                 None => continue,
             }
         }
-        Err(StorageFailure::Conflict.with_source("managed folder policy kept changing"))
+        Err(StorageFailure::Conflict.with_source(format!("{grant:?} policy kept changing")))
     }
 
     fn hmac_url(&self, project: &str, access_id: Option<&str>) -> Url {
@@ -329,7 +348,8 @@ impl<'a> Gcs<'a> {
                 self.delete_hmac(project, &key).await?;
             }
         }
-        self.bind(email, false).await?;
+        self.bind(Grant::Folder, email, false).await?;
+        self.bind(Grant::Bucket, email, false).await?;
         self.call(Method::DELETE, account, None, &[404]).await?;
         Ok(())
     }
@@ -372,7 +392,8 @@ async fn mint(context: &AdminRequest, scope: &MintScope) -> Result<S3MemberKey, 
         &[409],
     )
     .await?;
-    gcs.bind(&email, true).await?;
+    gcs.bind(Grant::Folder, &email, true).await?;
+    gcs.bind(Grant::Bucket, &email, true).await?;
     let mut url = gcs.hmac_url(&project, None);
     url.query_pairs_mut()
         .append_pair("serviceAccountEmail", &email);

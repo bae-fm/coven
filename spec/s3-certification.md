@@ -1376,6 +1376,40 @@ roll_back PASS cleanup PASS
 SeaweedFS, Ceph RGW and Versity Gateway printed the same lines with
 `principal=IamUser`.
 
+On 2026-10-15 the GCS minter ran against `gcs-s3.env`'s bucket (uniform
+bucket-level access, prefix `coven-live`) with the signed-in `gcloud`
+account's access token as admin access. Its first live runs never made a
+key (a bodiless POST refused with 411) and, once fixed, failed on Google's
+IAM lag for a new account and on the deleted account's 404; with those
+fixed, a member key read bucket versioning `PermissionDenied` and setup's
+check refused it (`S3VersioningUnknown`), until the account was also bound
+to the bucket as `roles/storage.bucketViewer`. Then it printed, apart from
+the cargo harness lines (one earlier run failed with HTTP 429 from Google
+before minting):
+
+```text
+mint PASS principal=GcsServiceAccount
+key_exists_after_mint=true after_s=0
+store_listing_after_mint=true listed=1
+member_check PASS
+member_versioning=Disabled
+setup_versioning_check passed=true
+write_other_store refused=PermissionDenied
+read_other_store refused=PermissionDenied
+list_other_store refused=PermissionDenied
+write_outside_base_prefix refused=PermissionDenied
+revoke PASS
+key_exists_after_revoke=false
+revoke_again PASS
+store_listing_after_revoke=0
+revoked_key refused=Authentication after_s=0
+member_key_lifecycle PASS
+roll_back PASS cleanup PASS
+```
+
+Versity Gateway 1.9.0 and SeaweedFS 4.48 printed the same lines with
+`principal=IamUser`; their versioning reads are `Disabled` too.
+
 ## Full battery, 2026-10-14
 
 Run on 2026-10-14 between 20:55 and 22:50 UTC from `main` at `e5718b511`,

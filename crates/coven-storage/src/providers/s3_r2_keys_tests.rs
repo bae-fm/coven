@@ -218,6 +218,11 @@ async fn bucket(
         .trim_start_matches("/household")
         .trim_start_matches('/')
         .to_owned();
+    // Hosted R2 has no versioning API; this endpoint is not R2's own host,
+    // so it answers the member check's read as a disabled bucket.
+    if key.is_empty() && uri.query() == Some("versioning") {
+        return response(200, "<VersioningConfiguration/>");
+    }
     if key.is_empty() {
         return response(200, "<ListBucketResult><Name>household</Name><IsTruncated>false</IsTruncated></ListBucketResult>");
     }

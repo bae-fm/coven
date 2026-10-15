@@ -61,18 +61,27 @@ impl S3Storage {
     }
 }
 
-pub(crate) fn check(
+/// Whether the selected profile holds certification with versioning enabled,
+/// which lets setup proceed when the versioning read is refused.
+pub(super) fn certified(
     endpoint: Option<&url::Url>,
     profile: Option<&S3Profile>,
-    versioning: &Result<S3BucketVersioning, Arc<StorageError>>,
-) -> Result<(), StorageSetupError> {
-    let certified = matches!(
+) -> Result<bool, StorageError> {
+    Ok(matches!(
         profile::select(endpoint, profile)?,
         profile::Selected::Catalogued(profile::CataloguedProfile {
             versioned_buckets: profile::Certification::Passed { .. },
             ..
         })
-    );
+    ))
+}
+
+pub(crate) fn check(
+    endpoint: Option<&url::Url>,
+    profile: Option<&S3Profile>,
+    versioning: &Result<S3BucketVersioning, Arc<StorageError>>,
+) -> Result<(), StorageSetupError> {
+    let certified = certified(endpoint, profile)?;
     match versioning {
         Ok(S3BucketVersioning::Disabled | S3BucketVersioning::Unavailable) => Ok(()),
         Ok(state) if !certified => {

@@ -1,8 +1,9 @@
 //! A minted member key checked from the member's side before delivery (§4):
 //! it writes, reads, lists objects (and, on a copy profile, multipart
 //! uploads) and deletes under the store's reserved
-//! `<store>/.coven-check/<run>/` prefix, and a listing outside the store's
-//! prefix must be refused, which catches a policy reaching too far.
+//! `<store>/.coven-check/<run>/` prefix, reads bucket versioning as setup
+//! does, and a listing outside the store's prefix must be refused, which
+//! catches a policy reaching too far.
 use super::*;
 use coven_foundation::id_source::StoreId;
 
@@ -97,6 +98,21 @@ impl S3Storage {
         // Listing lags publication; this proves the key may list its prefix.
         self.list_page(self.settings.listing, namespace, None, None, None)
             .await?;
+        // Setup reads the bucket's versioning with this key; only a profile
+        // certified with versioning enabled proceeds when it is refused (§4).
+        if let Err(error) = self.bucket_versioning().await {
+            let StorageConfig::S3 {
+                endpoint, profile, ..
+            } = &self.config
+            else {
+                unreachable!("S3 configuration")
+            };
+            if !(versioning::unknown(&error)
+                && versioning::certified(endpoint.as_ref(), profile.as_ref())?)
+            {
+                return Err(error);
+            }
+        }
         // A copy profile lists a session's uploads to abort one whose
         // initiation reply was lost (§4).
         if self.settings.copy_publication.multipart().is_some() {

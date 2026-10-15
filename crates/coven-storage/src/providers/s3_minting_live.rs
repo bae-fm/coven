@@ -169,6 +169,21 @@ async fn lifecycle(
         Arc::new(UuidIds),
         std::sync::Arc::new(crate::NoCooldown),
     )?;
+    // Setup's versioning check, read with the member key.
+    let StorageConfig::S3 {
+        endpoint, profile, ..
+    } = &live.config
+    else {
+        unreachable!("live S3 configuration")
+    };
+    let versioning = member.bucket_versioning().await.map_err(Arc::new);
+    match &versioning {
+        Ok(state) => println!("member_versioning={state:?}"),
+        Err(error) => println!("member_versioning failure={:?}", error.failure()),
+    }
+    let checked = versioning::check(endpoint.as_ref(), profile.as_ref(), &versioning);
+    println!("setup_versioning_check passed={}", checked.is_ok());
+    checked.map_err(|error| StorageFailure::PermissionDenied.with_source(error))?;
     let elsewhere = ObjectPath::device_log(other, DeviceId(93), NonZeroU64::MIN);
     refused(
         "write_other_store",

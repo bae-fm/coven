@@ -1417,13 +1417,14 @@ the file's ranges under `F`.
     policy and is not used. GCS, R2 and RustFS have their own minters; a
     custom profile uses guided console steps. On **2026-10-14** the RustFS,
     SeaweedFS and Ceph RGW 20.2.4 minters, and on **2026-10-15** the Versity
-    Gateway 1.9.0 minter, each made a key live with an admin key, passed the member-side check below, were
+    Gateway 1.9.0 and GCS minters, each made a key live with admin access, passed the member-side check below, were
     refused writes, reads and listings outside the store's prefix, revoked
     the key twice, read it absent and saw the service refuse it
     ([evidence](s3-certification.md#member-keys)). Run
     `COVEN_LIVE_S3_ENV=<file holding the admin key> COVEN_LIVE_S3_PROFILE=<name>
     cargo test -p coven-storage s3_member_key_lifecycle -- --ignored --nocapture`,
-    adding `COVEN_LIVE_S3_IAM_ENDPOINT=<url>` for Versity Gateway.
+    adding `COVEN_LIVE_S3_IAM_ENDPOINT=<url>` for Versity Gateway; GCS's admin
+    access is the signed-in `gcloud` account's.
   - On GCS each member key is the HMAC key of its own service account. The
     minter reads the bucket's project through the JSON API and refuses a
     bucket without uniform bucket-level access, which managed folders need.
@@ -1431,13 +1432,14 @@ the file's ranges under `F`.
     under the short name, whose description is the key name followed by
     ` member <member or invite id>`, creates the store's managed
     folder `<prefix>/<store>/` if absent, and binds the account to it as
-    `roles/storage.objectUser`, retrying once when the folder's policy changes
-    concurrently. Then `hmacKeys?serviceAccountEmail=` creates the key, whose
+    `roles/storage.objectUser` and to the bucket as
+    `roles/storage.bucketViewer`, whose only bucket permission is
+    `storage.buckets.get`, retrying once when a policy changes concurrently. Then `hmacKeys?serviceAccountEmail=` creates the key, whose
     access id is the member key id. The admin access is an OAuth access token
     with the `cloud-platform` scope. Google can take 60 seconds to see a new
     account or key; the retry window is 60 seconds.
   - Revoking a GCS key deletes it and, while IAM has the account, its other
-    HMAC keys, then the folder binding and the account; the store's managed
+    HMAC keys, then both bindings and the account; the store's managed
     folder stays. Absence is read from the key: `DELETED` or gone.
   - On R2 each member key is a Cloudflare account API token, named with the
     key name followed by ` member <member or invite id>`, and limited to the
@@ -1500,7 +1502,8 @@ the file's ranges under `F`.
   - Before delivery the key is checked from the member's side. Under it, an
     object in `<store>/.coven-check/<run>/` is created, refused a second time,
     read back and deleted, and that prefix is listed, with its multipart
-    uploads on a copy profile. Where keys reach a
+    uploads on a copy profile. Bucket versioning is read as setup reads it.
+    Where keys reach a
     prefix, a listing of the location's base prefix, outside every store,
     must be refused; where they reach a whole bucket, the account's bucket
     listing must be. Otherwise the check fails with

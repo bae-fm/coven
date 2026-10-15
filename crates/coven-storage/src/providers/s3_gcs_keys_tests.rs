@@ -1,5 +1,6 @@
 //! GCS minting against an in-process JSON API and XML API. The XML side lets
-//! an HMAC key reach only the managed folders bound to its service account.
+//! an HMAC key reach only the managed folders bound to its service account,
+//! and read bucket versioning only as a bucket viewer.
 use super::*;
 use crate::providers::tests::{query, response, TestServer};
 use crate::{AccessKeyAdmin, AdminCredential, S3Profile, S3ProfileName};
@@ -23,8 +24,10 @@ struct Remote {
     /// Service account email to its description.
     descriptions: BTreeMap<String, String>,
     folders: Vec<String>,
-    /// Folder name to (etag, role bindings).
+    /// Folder name to (etag, `objectUser` members).
     policies: BTreeMap<String, (u32, Vec<String>)>,
+    /// The bucket's (etag, `bucketViewer` members).
+    bucket_viewers: (u32, Vec<String>),
     /// Access id to (service account, state, secret).
     hmac: BTreeMap<String, (String, String, String)>,
     objects: BTreeMap<String, Vec<u8>>,
@@ -61,6 +64,39 @@ impl Clock for Pauses {
 
 fn json(value: serde_json::Value) -> Response<Body> {
     response(200, value.to_string())
+}
+
+/// One IAM policy's GET or etag-checked PUT, holding `role`'s members
+/// beside a binding the fake keeps.
+fn iam_policy(
+    policy: &mut (u32, Vec<String>),
+    role: &str,
+    method: HttpMethod,
+    body: serde_json::Value,
+) -> Response<Body> {
+    let (etag, members) = policy;
+    if method == HttpMethod::GET {
+        let mut bindings = vec![
+            serde_json::json!({"role": "roles/storage.legacyBucketReader", "members": ["projectViewer:household"]}),
+        ];
+        if !members.is_empty() {
+            bindings.push(serde_json::json!({"role": role, "members": members.clone()}));
+        }
+        return json(serde_json::json!({"etag": etag.to_string(), "bindings": bindings}));
+    }
+    if body["etag"] != serde_json::json!(etag.to_string()) {
+        return response(412, "{}");
+    }
+    *etag += 1;
+    *members = body["bindings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|binding| binding["role"] == role)
+        .flat_map(|binding| binding["members"].as_array().unwrap().clone())
+        .map(|member| member.as_str().unwrap().to_owned())
+        .collect();
+    json(body)
 }
 
 fn decode(segment: &str) -> String {
@@ -152,47 +188,30 @@ fn api(
         state.policies.insert(name, (1, Vec::new()));
         return json(serde_json::json!({}));
     }
+    // Google refuses a binding for an account it does not yet see.
+    let iam_put = method == HttpMethod::PUT && path.ends_with("/iam");
+    if iam_put && state.unseen_binds > 0 {
+        state.unseen_binds -= 1;
+        let message = "Service account coven-1@household.iam.gserviceaccount.com does not exist.";
+        return response(
+            400,
+            serde_json::json!({"error": {"code": 400, "message": message, "errors": [{"message": message, "reason": "invalid"}]}}).to_string(),
+        );
+    }
+    if path == "/storage/v1/b/bucket/iam" {
+        return iam_policy(
+            &mut state.bucket_viewers,
+            "roles/storage.bucketViewer",
+            method,
+            body,
+        );
+    }
     if let Some(rest) = path.strip_prefix("/storage/v1/b/bucket/managedFolders/") {
         let folder = decode(rest.strip_suffix("/iam").unwrap());
-        let Some((etag, members)) = state.policies.get_mut(&folder) else {
+        let Some(policy) = state.policies.get_mut(&folder) else {
             return response(404, "{}");
         };
-        if method == HttpMethod::GET {
-            let bindings: Vec<_> = if members.is_empty() {
-                vec![
-                    serde_json::json!({"role": "roles/storage.legacyBucketReader", "members": ["projectViewer:household"]}),
-                ]
-            } else {
-                vec![
-                    serde_json::json!({"role": "roles/storage.legacyBucketReader", "members": ["projectViewer:household"]}),
-                    serde_json::json!({"role": "roles/storage.objectUser", "members": members.clone()}),
-                ]
-            };
-            return json(serde_json::json!({"etag": etag.to_string(), "bindings": bindings}));
-        }
-        if body["etag"] != serde_json::json!(etag.to_string()) {
-            return response(412, "{}");
-        }
-        if state.unseen_binds > 0 {
-            state.unseen_binds -= 1;
-            let message =
-                "Service account coven-1@household.iam.gserviceaccount.com does not exist.";
-            return response(
-                400,
-                serde_json::json!({"error": {"code": 400, "message": message, "errors": [{"message": message, "reason": "invalid"}]}}).to_string(),
-            );
-        }
-        let (etag, members) = state.policies.get_mut(&folder).unwrap();
-        *etag += 1;
-        *members = body["bindings"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter(|binding| binding["role"] == "roles/storage.objectUser")
-            .flat_map(|binding| binding["members"].as_array().unwrap().clone())
-            .map(|member| member.as_str().unwrap().to_owned())
-            .collect();
-        return json(body);
+        return iam_policy(policy, "roles/storage.objectUser", method, body);
     }
     if path == "/storage/v1/projects/household/hmacKeys" {
         let email = q["serviceAccountEmail"].clone();
@@ -296,6 +315,13 @@ fn xml(
         .trim_start_matches('/')
         .to_owned();
     let q = query(uri);
+    if object.is_empty() && q.contains_key("versioning") {
+        return if state.bucket_viewers.1.contains(&member) {
+            response(200, "<VersioningConfiguration/>")
+        } else {
+            xml_error(403, "AccessDenied")
+        };
+    }
     let reach = if object.is_empty() {
         q.get("prefix").cloned().unwrap_or_default()
     } else {
@@ -408,7 +434,15 @@ async fn a_service_account_hmac_key_reaches_only_its_managed_folder() {
             managed_folder: folder.clone(),
         }
     );
+    // The check reads bucket versioning, which only the bucket binding allows.
     admin.probe(&scope, &minted.credentials).await.unwrap();
+    let S3Principal::GcsServiceAccount { email, .. } = &minted.principal else {
+        unreachable!("GCS principal")
+    };
+    assert_eq!(
+        state.lock().unwrap().bucket_viewers.1,
+        [format!("serviceAccount:{email}")]
+    );
     let id = minted.credentials.access_key_id.clone();
     assert!(admin.key_exists(&id, &minted.principal).await.unwrap());
     // Minting deletes no key, even one whose secret was lost.
@@ -437,6 +471,7 @@ async fn a_service_account_hmac_key_reaches_only_its_managed_folder() {
         "the store's folder stays"
     );
     assert!(state.policies[&folder].1.is_empty());
+    assert!(state.bucket_viewers.1.is_empty());
     assert!(state.bearer_seen);
 }
 
@@ -452,6 +487,7 @@ async fn buckets_without_uniform_access_are_refused_and_rollback_removes_the_acc
     admin.mint(&scope()).await.unwrap();
     admin.roll_back(&scope()).await.unwrap();
     let state = state.lock().unwrap();
+    assert!(state.bucket_viewers.1.is_empty());
     assert!(state.accounts.is_empty() && state.hmac.values().all(|(_, key, _)| key == "DELETED"));
 }
 
