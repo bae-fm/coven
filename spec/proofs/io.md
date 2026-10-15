@@ -429,6 +429,15 @@ It includes the empty migration marker in that prefix; later app writes wait
 for a kept raise. This package proves the resulting publication and loader
 boundary, not the application migration or choice of the winning raise.
 
+**A never-counting snapshot can be deleted — proved.**
+[`LateDeletion`](io/CovenIO/LateDeletion.lean): `late_deletion_unseen`
+shows the current selection, a fresh catalog's deletion certificate
+(`coveredMiss`) and mature coverage are the same with or without a listed
+snapshot that does not count, and `late_landing_never_counts` that a landing
+more than a day after its sample is one. So the author may delete its own
+attempt once it confirms that landing (§15); Rust tests cover the deletion
+recorded with the abandonment and its resumption.
+
 **Raise snapshots judged only by what they cover — checked counterexample.**
 A migration captures one raise snapshot per readable audience in its own
 transaction, so a newer snapshot landing afterwards cannot be taken in, and

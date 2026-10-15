@@ -37,6 +37,9 @@ pub(crate) enum SnapshotJob {
 pub(crate) struct SnapshotAttempt {
     pub(crate) number: std::num::NonZeroU64,
     pub(crate) session: Option<UploadSession>,
+    /// Its landing was confirmed too late to count: the abandoning operation
+    /// deletes it before preparing afresh, resuming after a crash (§15).
+    pub(crate) late: bool,
 }
 
 #[derive(Clone, Serialize, Deserialize)]

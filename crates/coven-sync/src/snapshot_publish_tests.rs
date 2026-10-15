@@ -406,10 +406,21 @@ async fn an_attempt_counts_through_its_day_and_is_abandoned_after_it() {
 }
 
 /// A request that lands more than a day after its sample does not count:
-/// the device abandons it, readers ignore it whatever it covers, and the
-/// device prepares again after a fresh catch-up (§15, `late_snapshot_ignored`).
+/// the device abandons it, readers ignore it whatever it covers, the device
+/// deletes it in that operation, and prepares again after a fresh catch-up
+/// (§15, `late_snapshot_ignored`, `late_deletion_unseen`).
 #[tokio::test]
-async fn a_late_landing_is_abandoned_and_ignored_by_readers() {
+async fn a_late_landing_is_abandoned_deleted_and_ignored_by_readers() {
+    late_landing(false).await;
+}
+
+/// The deletion resumes after a crash that left its object already gone.
+#[tokio::test]
+async fn a_late_landings_deletion_resumes_after_a_crash() {
+    late_landing(true).await;
+}
+
+async fn late_landing(resumed: bool) {
     let (storage, clock, mut a, _b) = pair().await;
     set_time(&clock, 10_000);
     write_rows(&a, 0, 1, 17, Audience::Store).await;
@@ -428,7 +439,8 @@ async fn a_late_landing_is_abandoned_and_ignored_by_readers() {
     // Ana has not observed the time, so the request is sent and lands late.
     set_time(&clock, 10_000 + DAY + 1);
     assert!(matches!(step(&mut a, id).await, Some(Progress::Advanced)));
-    assert_eq!(task(&a, id).await, Some((0, None)));
+    // The abandoning operation records the late attempt for deletion.
+    assert_eq!(task(&a, id).await, Some((0, Some(late.clone()))));
     let snapshots = listed(&storage).await;
     let landed = snapshots
         .iter()
@@ -439,6 +451,16 @@ async fn a_late_landing_is_abandoned_and_ignored_by_readers() {
         device: a.device().await,
         number: 2
     }));
+    assert_eq!(current(&storage).await, Some(path_of(&timely)));
+    // It deletes the never-counting snapshot before preparing afresh.
+    // Run again after the object is gone, as after a crash between the
+    // deletion and its record, it finishes the same way (§15 T221).
+    if resumed {
+        storage.delete(&path_of(&late)).await.unwrap();
+    }
+    assert!(matches!(step(&mut a, id).await, Some(Progress::Advanced)));
+    assert_eq!(task(&a, id).await, Some((0, None)));
+    assert!(storage.status(&path_of(&late)).await.unwrap().is_none());
     assert_eq!(current(&storage).await, Some(path_of(&timely)));
     // Within the same pass the abandoned sample cannot serve again.
     {

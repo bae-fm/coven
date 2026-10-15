@@ -498,3 +498,5 @@ import CovenIO
 #print axioms CovenIO.SnapshotAttempts.abandoned_never_counts_later
 #print axioms CovenIO.SnapshotAttempts.retry_new_path
 #print axioms CovenIO.SnapshotAttempts.retry_counts
+#print axioms CovenIO.late_deletion_unseen
+#print axioms CovenIO.late_landing_never_counts

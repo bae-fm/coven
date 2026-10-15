@@ -5092,6 +5092,15 @@ Carol's tablet:
 - A device deletes a snapshot of its own once a newer one of the same
   audience covers everything it covers, and the entries that make that
   replacement usable are final (§9).
+  - It also deletes its own attempt whose landing it confirmed too late to
+    count, in the operation that abandons that attempt: the operation
+    records the attempt for deletion with the abandonment and deletes it
+    before preparing afresh, resuming after a crash. No reader selects,
+    loads or takes coverage, deletion evidence or a witness from a
+    snapshot that never counts, so nothing needs it
+    ([`late_deletion_unseen`, `late_landing_never_counts`](proofs/io/CovenIO/LateDeletion.lean)).
+    An abandoned request whose landing the device never confirms is not
+    covered by this rule.
   - A snapshot named by a kept reset or version-raise entry that changes
     the replayed state stays: new devices need its authenticated coverage
     to judge late writes and select a snapshot following that boundary.

@@ -116,6 +116,12 @@ impl StoreLogSync {
             }
         }
         match (record.last_step, attempt) {
+            // A landing confirmed too late can never count; the operation
+            // that abandoned it deletes it first (§15; io `late_deletion_unseen`).
+            (0, Some(late)) if late.late => {
+                self.delete_late_attempt(record, task, published(&late))
+                    .await
+            }
             (0, _) => {
                 self.prepare_snapshot(record, task, &local.log, &member)
                     .await
@@ -294,6 +300,7 @@ impl StoreLogSync {
             Some(SnapshotAttempt {
                 number,
                 session: None,
+                late: false,
             }),
         );
         self.save_snapshot_task(record, &task, 1).await?;
@@ -535,6 +542,7 @@ impl StoreLogSync {
             }
         }
         let recorded = attempt.session.clone();
+        let number = attempt.number;
         let mut transfer = SnapshotTransfer {
             sync: self,
             record,
@@ -581,9 +589,45 @@ impl StoreLogSync {
             .observe(&stored);
         if !prefix.counts(stored.stored_at) {
             tracing::debug!(path = path.as_str(), "snapshot landed too late to count");
-            return self.abandon_snapshot(record, task).await;
+            for name in &task.temporary {
+                io::remove(&self.directory, name)?;
+            }
+            task.temporary.clear();
+            set_attempt(
+                &mut task,
+                Some(SnapshotAttempt {
+                    number,
+                    session: None,
+                    late: true,
+                }),
+            );
+            self.database
+                .advance_operation(Data::Snapshots(task).update(record, 0)?)
+                .await?;
+            return Ok(Progress::Advanced);
         }
         self.save_snapshot_task(record, &task, 2).await?;
+        Ok(Progress::Advanced)
+    }
+
+    /// Delete this device's own attempt whose landing was confirmed too late:
+    /// no reader selects, loads or counts it, so nothing needs it (§15, §16).
+    /// An absent object was deleted by an earlier run of this step.
+    async fn delete_late_attempt(
+        &self,
+        record: &OperationRecord,
+        mut task: SnapshotTask,
+        id: SnapshotId,
+    ) -> Result<Progress, SyncError> {
+        let storage = self.storage.as_deref().ok_or(SyncError::NoStorage)?;
+        let path = snapshot_path(self.directory.id(), &id)?;
+        if storage.status(&path).await?.is_some() {
+            storage.delete(&path).await?;
+        }
+        set_attempt(&mut task, None);
+        self.database
+            .advance_operation(Data::Snapshots(task).update(record, 0)?)
+            .await?;
         Ok(Progress::Advanced)
     }
 
