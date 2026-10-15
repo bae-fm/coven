@@ -13,10 +13,6 @@ pub(super) struct LiveS3 {
 }
 impl LiveS3 {
     pub(super) fn load() -> Self {
-        let mut settings = crate::providers::tests::live_settings("COVEN_LIVE_S3_ENV");
-        let endpoint = settings
-            .remove("COVEN_LIVE_S3_ENDPOINT")
-            .map(|value| value.as_str().parse().expect("valid live endpoint"));
         let profile = match std::env::var("COVEN_LIVE_S3_PROFILE") {
             Ok(name) => Some(S3Profile::Named(
                 serde_json::from_value(serde_json::Value::String(name))
@@ -25,6 +21,22 @@ impl LiveS3 {
             Err(std::env::VarError::NotPresent) => None,
             Err(error) => panic!("invalid live profile: {error}"),
         };
+        Self::from_file(
+            crate::providers::tests::live_settings("COVEN_LIVE_S3_ENV"),
+            profile,
+        )
+    }
+    /// The env file's location and key, with the profile the process
+    /// environment names. Every file setting must be read: a profile name
+    /// left in the file would otherwise be ignored, and certification would
+    /// race the detected settings instead of the profile's own publication.
+    fn from_file(
+        mut settings: std::collections::BTreeMap<String, SecretText>,
+        profile: Option<S3Profile>,
+    ) -> Self {
+        let endpoint = settings
+            .remove("COVEN_LIVE_S3_ENDPOINT")
+            .map(|value| value.as_str().parse().expect("valid live endpoint"));
         let mut take = |key| {
             settings
                 .remove(key)
@@ -49,6 +61,12 @@ impl LiveS3 {
             access_key_id: take("COVEN_LIVE_S3_ACCESS_KEY_ID").as_str().to_owned(),
             secret_access_key: take("COVEN_LIVE_S3_SECRET_ACCESS_KEY"),
         };
+        let unread: Vec<&String> = settings.keys().collect();
+        assert!(
+            unread.is_empty(),
+            "the live S3 env file holds settings nothing reads: {unread:?}; \
+             COVEN_LIVE_S3_PROFILE and COVEN_LIVE_S3_IAM_ENDPOINT belong in the process environment"
+        );
         config.validate().expect("valid live configuration");
         Self {
             config,
@@ -142,4 +160,22 @@ impl LiveS3 {
         provider.single_request_limit = 1024 * 1024;
         StorageConnection::from_provider(Arc::new(provider))
     }
+}
+
+/// A profile name in the env file is refused rather than ignored.
+#[test]
+#[should_panic(expected = "settings nothing reads: [\"COVEN_LIVE_S3_PROFILE\"]")]
+fn a_setting_the_loader_does_not_read_is_refused() {
+    let settings = [
+        ("COVEN_LIVE_S3_BUCKET", "bucket"),
+        ("COVEN_LIVE_S3_REGION", "us-east-1"),
+        ("COVEN_LIVE_S3_ENDPOINT", "http://localhost:8333"),
+        ("COVEN_LIVE_S3_ACCESS_KEY_ID", "access"),
+        ("COVEN_LIVE_S3_SECRET_ACCESS_KEY", "secret"),
+        ("COVEN_LIVE_S3_PROFILE", "SeaweedFs"),
+    ]
+    .into_iter()
+    .map(|(key, value)| (key.to_owned(), SecretText::new(value.to_owned())))
+    .collect();
+    LiveS3::from_file(settings, None);
 }

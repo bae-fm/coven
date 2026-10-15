@@ -853,13 +853,12 @@ the file's ranges under `F`.
     disabled a conditional PUT racing a conditional copy of one name both
     succeeded in 14 of 200 trials. Its entry now publishes every object by
     copy, and on **2026-10-15** suite 5 passed it with versioning disabled
-    and enabled. A rerun later that day failed its two- and eight-writer
-    multipart races and its mixed race three times with versioning disabled,
-    so both certificates are withdrawn and SeaweedFS is **uncertified**.
-    Setup refuses the SeaweedFS profile before any request with
-    `StorageSetupError::S3ProfileRefused` naming it, until suite 5 passes it
-    again; detection does not identify a service, so the refusal covers only
-    the named profile. On 2026-10-14 suite 5 passed R2, RustFS
+    and enabled. A rerun later that day failed its multipart and mixed races
+    three times, but it had named the profile in the env file, which the
+    suite then ignored, so it raced the detected settings' conditional
+    completion, not the entry's copies. Run again as the named entry, suite 5
+    passed it three times with versioning disabled and three times with it
+    enabled; its certificates cover both states. On 2026-10-14 suite 5 passed R2, RustFS
     1.0.1 with versioning disabled and enabled, and Ceph RGW 20.2.4 and GCS
     with versioning disabled; those entries record suite 5 certificates. It
     also passed Versity Gateway 1.9.0 with versioning disabled and enabled
@@ -874,21 +873,22 @@ the file's ranges under `F`.
     | GCS (certified) | Google HMAC | `x-goog-if-generation-match: 0` | Multipart, the same generation condition | Completion | Scope stated | V2 | Generation |
     | R2 (certified) | AWS SigV4 | `If-None-Match: *` | Never (conditional completion) | Completion | Unstated scope ignored | V2 | ETag |
     | RustFS (certified, versioned too) | AWS SigV4 | `If-None-Match: *` | Never (conditional completion) | Completion | None returned | V2 | ETag |
-    | SeaweedFS (uncertified, refused) | AWS SigV4 | `If-None-Match: *` | Every object, `If-None-Match: *` | Completion | None returned | V2 | ETag |
+    | SeaweedFS (certified, versioned too) | AWS SigV4 | `If-None-Match: *` | Every object, `If-None-Match: *` | Completion | None returned | V2 | ETag |
     | Ceph RGW (certified, unversioned) | AWS SigV4 | `If-None-Match: *` | Never (conditional completion) | Completion | None returned | V2 | ETag |
     | Versity Gateway (certified, versioned too) | AWS SigV4 | `If-None-Match: *` | Never (conditional completion) | Completion | Scope stated | V2 | ETag |
 
-    RustFS and Versity Gateway support versioned buckets: RustFS 1.0.1 and
-    Versity Gateway 1.9.0 (POSIX backend with `--versioning-dir`) passed every
-    suite 5 race with versioning enabled. SeaweedFS's withdrawn certificates
-    leave it no versioned-bucket certificate either. GCS ran only with versioning disabled, so it
+    RustFS, SeaweedFS and Versity Gateway support versioned buckets: RustFS
+    1.0.1, SeaweedFS 4.48 publishing every object by copy, and Versity Gateway
+    1.9.0 (POSIX backend with `--versioning-dir`) passed every suite 5 race
+    with versioning enabled. GCS ran only with versioning disabled, so it
     has no versioned-bucket evidence. AWS remains uncertified. R2 has no versioning feature. Ceph
     RGW 20.2.4 fails the versioned races. See the
     [suite 4 evidence](s3-certification.md#concurrent-certification-suite-4),
     the [full battery](s3-certification.md#full-battery-2026-10-14), the
-    [GCS and Versity Gateway runs](s3-certification.md#gcs-and-versity-gateway-2026-10-14)
-    the [SeaweedFS every-object run](s3-certification.md#seaweedfs-every-object-copy-publication-2026-10-15)
-    and the [SeaweedFS rerun](s3-certification.md#seaweedfs-rerun-2026-10-15)
+    [GCS and Versity Gateway runs](s3-certification.md#gcs-and-versity-gateway-2026-10-14),
+    the [SeaweedFS every-object run](s3-certification.md#seaweedfs-every-object-copy-publication-2026-10-15),
+    the [SeaweedFS rerun](s3-certification.md#seaweedfs-rerun-2026-10-15)
+    and the [named-entry reruns](s3-certification.md#seaweedfs-reruns-as-the-named-entry-2026-10-15)
     for the live runs and their bucket states.
 
     AWS, R2 and Versity Gateway request checksums; every profile but GCS consumes S3
@@ -901,8 +901,10 @@ the file's ranges under `F`.
     env file using `COVEN_LIVE_S3_{BUCKET,REGION,ENDPOINT,ACCESS_KEY_ID,SECRET_ACCESS_KEY}`.
     Run `COVEN_LIVE_S3_ENV=<file> cargo test -p coven-storage s3_certification -- --ignored --nocapture`.
     Select a self-hosted profile with `COVEN_LIVE_S3_PROFILE=CephRgw`
-    (or `RustFs` / `SeaweedFs` / `VersityGw`); otherwise the suite detects its
-    settings.
+    (or `RustFs` / `SeaweedFs` / `VersityGw`) in the process environment;
+    otherwise the suite detects its settings. The env file holds only the
+    five settings above: the suite refuses a file holding any other, so a
+    profile name written there cannot be silently ignored.
     The ignored test runs production detection from the location's settings,
     or the plain S3 settings where detection must supply them, and prints
     every observation. A detected entry that fails the setup safety

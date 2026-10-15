@@ -1548,9 +1548,7 @@ while let Ok(values) = lost.next().await {
   using conditional PUT and multipart completion and ignoring checksums
   without stated scope. The self-hosted RustFS, SeaweedFS, Ceph RGW and
   Versity Gateway profiles are selected only by name; SeaweedFS publishes
-  every object by conditional copy (§4). Setup refuses SeaweedFS before any
-  request with `StorageSetupError::S3ProfileRefused { profile: SeaweedFs }`:
-  its suite 5 certificate did not reproduce (§4). A name or custom profile contradicting a
+  every object by conditional copy (§4). A name or custom profile contradicting a
   catalogued host, a name other than AWS or any custom profile without an
   endpoint, or plain `http` to a catalogued host is `InvalidConfiguration`;
   other endpoints may use `http`.
@@ -2071,9 +2069,6 @@ impl ProviderResponse {
 
 /// Storage setup failed before committing credentials and keys (E5).
 pub enum StorageSetupError {
-    /// The named catalogued S3 profile failed certification's concurrent
-    /// create-once races; setup refuses it before any request (§4).
-    S3ProfileRefused { profile: S3ProfileName },
     /// The profile has no certification with bucket versioning enabled.
     S3VersioningUnsupported { state: S3BucketVersioning },
     /// The bucket state is unknown and the profile has no versioning certification.

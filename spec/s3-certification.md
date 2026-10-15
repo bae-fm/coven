@@ -1321,10 +1321,9 @@ bucket versioning=Unavailable
 setup_versioning_check PASS
 ```
 
-SeaweedFS failed suite 4's versioned races and suite 5's unversioned mixed
-race above, so setup still refuses the profile, and with it every
-versioning state. AWS has no reachable
-live account and likewise has no versioned certificate.
+SeaweedFS's versioned certificate comes from its every-object copy
+publication (below). AWS has no reachable
+live account and has no versioned certificate.
 
 ## Member keys
 
@@ -3039,9 +3038,9 @@ single-request create racing a multipart publication, were both accepted:
 | 3 | 148 of 200 | 45 of 50 | 21 of 200 |
 
 The run above recorded no failing trial in these races, so the certificate
-does not reproduce. Until suite 5 passes SeaweedFS again, its entry records
-no certificate for either bucket state and setup refuses it
-(`S3ProfileRefused`). The third run's summaries and a failing trial:
+was withdrawn and setup refused the profile until it was explained. Its
+explanation is below: these runs raced conditional completion, not the
+entry's copies. The third run's summaries and a failing trial:
 
 ```text
 bucket versioning=Disabled
@@ -3057,3 +3056,81 @@ race SUMMARY Replace writers=2 trials=200 overlapping=200 successes=200 violatio
 bucket versioning_after=Disabled stable=true
 certification suite=5 FAIL
 ```
+
+### Why the rerun failed
+
+The rerun put `COVEN_LIVE_S3_PROFILE=SeaweedFs` in its env file. The suite
+reads the profile from the process environment and ignored the file's line,
+so the location named no profile and the suite raced the detected settings.
+Detection cannot see that SeaweedFS needs copy publication, so those
+settings publish multipart uploads by conditional completion, which
+SeaweedFS 4.48 lets two racers both win (suite 4). Every rerun log shows it:
+
+```text
+differs from SeaweedFs: copy_publication=Every(IfNoneMatch)/Never
+candidate S3Settings { signing: AwsSigV4, single_put: IfNoneMatch, copy_publication: Never, multipart_timestamp: Completion, checksums: Absent, listing: V2, revision: ETag, response_headers: S3, request_checksums: false }
+```
+
+No copy was sent: the failing multipart races were conditional completions,
+the mixed race a conditional PUT against one, and the passing PUT races
+plain conditional PUTs. The passing run's candidate was the entry's own,
+`copy_publication: Every(IfNoneMatch)`. The suite now refuses an env file
+holding any setting it does not read, naming it, so a misplaced profile
+name stops the run instead of changing what it certifies.
+
+## SeaweedFS reruns as the named entry, 2026-10-15
+
+Run on 2026-10-15 from `seg-t222` (based on `main` at `26dda7270`, with the
+publication code unchanged) against `chrislusf/seaweedfs:4.48` (image
+`sha256:8f17c8c82e03`; `weed server -dir=/data -s3
+-s3.config=<identities> -master.volumeSizeLimitMB=128 -volume.max=16`,
+container memory 768 MiB), with `COVEN_LIVE_S3_PROFILE=SeaweedFs` in the
+process environment, three times in a new unversioned bucket and three
+times in a new bucket with versioning `Enabled`. Every run's candidate was
+the entry's `copy_publication: Every(IfNoneMatch)`, every trial of every
+race kept exactly one winner with its bytes stored and all intervals
+overlapping, and every run printed `certification suite=5 PASS`:
+
+| Run | Bucket | PUT 2 / 8 | Multipart 2 / 8 | Mixed | Replace | Suite |
+| --- | --- | --- | --- | --- | --- | --- |
+| 1 | Unversioned | 0 of 200 / 0 of 50 failed | 0 of 200 / 0 of 50 | 0 of 200 | 0 of 200 | PASS |
+| 2 | Unversioned | 0 / 0 | 0 / 0 | 0 | 0 | PASS |
+| 3 | Unversioned | 0 / 0 | 0 / 0 | 0 | 0 | PASS |
+| 1 | Versioned | 0 / 0 | 0 / 0 | 0 | 0 | PASS |
+| 2 | Versioned | 0 / 0 | 0 / 0 | 0 | 0 | PASS |
+| 3 | Versioned | 0 / 0 | 0 / 0 | 0 | 0 | PASS |
+
+The first unversioned run shared its container with the other buckets;
+each later run had a fresh container holding only its bucket. Six
+attempts are not counted. A first versioned attempt was stopped by the
+harness's 20-minute time limit during the replacement race, after 152
+passing replacement trials and passing every other race. Five attempts in
+the shared container stopped at detection with a network failure: each
+bucket is a SeaweedFS collection with volumes of its own, and with
+`-volume.max=16` the seventh bucket found no writable volume (`failed to
+find writable volumes for collection`). Both runs pass in both bucket
+states, so the entry keeps its suite 5 certificates for unversioned and
+versioned buckets and setup admits it. The third versioned run:
+
+```text
+bucket versioning=Enabled
+setup_safety_check refused: S3 bucket versioning Enabled is not certified for this profile
+candidate S3Settings { signing: AwsSigV4, single_put: IfNoneMatch, copy_publication: Every(IfNoneMatch), multipart_timestamp: Completion, checksums: Absent, listing: V2, revision: ETag, response_headers: S3, request_checksums: false }
+§4 native_behavior_detection PASS
+race SUMMARY Put writers=2 trials=200 overlapping=200 successes=200 violations=0
+race SUMMARY Put writers=8 trials=50 overlapping=50 successes=50 violations=0
+race SUMMARY Multipart writers=2 trials=200 overlapping=200 successes=200 violations=0
+race SUMMARY Multipart writers=8 trials=50 overlapping=50 successes=50 violations=0
+race SUMMARY Mixed writers=2 trials=200 overlapping=200 successes=200 violations=0
+race SUMMARY Replace writers=2 trials=200 overlapping=200 successes=200 violations=0
+§4 create_once_multipart PASS cleanup=PASS
+§4 multipart_resume PASS cleanup=PASS
+§4 single_put_timestamp_equals_completion PASS cleanup=PASS
+§4 multipart_timestamp_equals_completion PASS cleanup=PASS
+§4 listing_lag PASS cleanup=PASS
+bucket versioning_after=Enabled stable=true
+certification suite=5 PASS
+```
+
+The versioned runs' `setup_safety_check` refusal is that of the code under
+test, whose entry recorded no versioned certificate while they ran.
