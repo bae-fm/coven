@@ -174,5 +174,7 @@ pub use operation::{
     OperationUpdate,
 };
 
+mod commit_scope;
+pub use commit_scope::CommitScope;
 mod database_changes;
 pub use database_changes::DatabaseChanges;

@@ -815,7 +815,11 @@ pass completion that supplied new evidence, or its next due timer. There
 is no unconditional one-second database/operation scan. A wake reevaluates
 only affected work and never resets an unchanged wait's backoff (§3.1;
 [`evidence_keeps_backoff`](proofs/io/CovenIO/WaitingEvidence.lean),
-[`evidence_due_once`](proofs/io/CovenIO/WaitingEvidence.lean)).
+[`evidence_due_once`](proofs/io/CovenIO/WaitingEvidence.lean)). A wait begins
+when the attempt that ends in it started: a prerequisite commit by other work
+while the attempt runs makes that wait due at once, while the attempt's own
+commits never do
+([`racing_commit_wakes`](proofs/io/CovenIO/WaitingEvidence.lean)).
 Key waits share the keys observation, invite waits share the join-request
 observation, and agreement/retention share positions. Unchanged app-action
 and after-update pending records issue no automatic requests.

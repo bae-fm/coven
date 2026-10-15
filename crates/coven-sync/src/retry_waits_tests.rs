@@ -291,7 +291,9 @@ async fn io_differential_waiting() {
     }
     // IO `WaitingEvidence`: one operation's wait through monotonic time,
     // committed prerequisite evidence and automatic attempts, each failing
-    // at once when due. Evidence makes it due once and keeps its backoff.
+    // when due. Evidence makes it due once and keeps its backoff. A raced
+    // attempt fails after other work committed while it ran; any attempt may
+    // commit to a prerequisite table itself, which the model does not see.
     for _ in 0..32 {
         let fixture = Fixture::new();
         let (database, waits) = fixture.open().await;
@@ -308,7 +310,7 @@ async fn io_differential_waiting() {
         let mut actions = Vec::new();
         let mut attempts = Vec::new();
         for _ in 0..32 {
-            match pick(4) {
+            match pick(5) {
                 0 => {
                     waits.prerequisites_changed();
                     actions.push(json!({"op": "evidence"}));
@@ -318,11 +320,20 @@ async fn io_differential_waiting() {
                     fixture.advance(seconds);
                     actions.push(json!({"op": "advance", "seconds": seconds}));
                 }
-                _ => {
+                choice => {
+                    let raced = choice == 2;
                     let previous = database.retry_wait(operation).await.unwrap();
                     let due = waits.due(operation, previous.as_ref());
                     if due {
-                        waits.fail(operation, previous.as_ref()).await.unwrap();
+                        // Every prerequisite commit while it ran counts for
+                        // other waits, its own included.
+                        if raced || pick(2) == 0 {
+                            waits.prerequisites_changed();
+                        }
+                        waits
+                            .fail_attempt(operation, previous.as_ref(), raced)
+                            .await
+                            .unwrap();
                     }
                     let failures = database
                         .retry_wait(operation)
@@ -330,7 +341,7 @@ async fn io_differential_waiting() {
                         .unwrap()
                         .map_or(0, |wait| wait.failures);
                     attempts.push(json!({"due": due, "failures": failures}));
-                    actions.push(json!({"op": "attempt"}));
+                    actions.push(json!({"op": if raced { "raced" } else { "attempt" }}));
                 }
             }
         }

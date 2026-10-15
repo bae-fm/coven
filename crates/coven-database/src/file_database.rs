@@ -555,7 +555,7 @@ impl CacheReservation {
         let mut pending = self;
         let file = file.clone();
         finish_blocking(
-            tokio::task::spawn_blocking(move || {
+            tokio::task::spawn_blocking(crate::commit_scope::bind(move || {
                 {
                     let slot = pending.database.read().expect("database lock poisoned");
                     let inner = slot.as_ref().ok_or(DbError::StoreClosed)?;
@@ -579,7 +579,7 @@ impl CacheReservation {
                     })?;
                 }
                 Ok(())
-            })
+            }))
             .await,
         )
     }

@@ -2,7 +2,7 @@
 //! dependencies are known; idle subscriptions retain only a changed bit.
 
 use crate::sql_value::SqlValue as Value;
-use crate::{key_scope::KeyScope, DbError};
+use crate::{key_scope::KeyScope, CommitScope, DbError};
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::{Arc, Mutex, Weak},
@@ -95,6 +95,8 @@ enum Tracking {
 struct SubscriptionState {
     tracking: Mutex<Tracking>,
     state: watch::Sender<CommitState>,
+    /// Commits made within this scope are not observed.
+    outside: Option<CommitScope>,
 }
 
 #[derive(Clone)]
@@ -104,7 +106,7 @@ pub(crate) struct CommitSubscription {
 }
 
 impl CommitSubscription {
-    fn new(closed: bool, failure: Option<HandleFailure>) -> Self {
+    fn new(closed: bool, failure: Option<HandleFailure>, outside: Option<CommitScope>) -> Self {
         let (state, receiver) = watch::channel(CommitState {
             changed: false,
             closed,
@@ -114,13 +116,14 @@ impl CommitSubscription {
             shared: Arc::new(SubscriptionState {
                 tracking: Mutex::new(Tracking::Waiting(Vec::new())),
                 state,
+                outside,
             }),
             receiver,
         }
     }
 
     pub(crate) fn closed() -> Self {
-        Self::new(true, None)
+        Self::new(true, None, None)
     }
 
     pub(crate) fn state(&self) -> CommitState {
@@ -209,8 +212,13 @@ impl CommitObserver {
     }
 
     pub(crate) fn subscribe(&self) -> CommitSubscription {
+        self.subscribe_outside(None)
+    }
+
+    /// Observe every commit except those made within `outside`.
+    pub(crate) fn subscribe_outside(&self, outside: Option<CommitScope>) -> CommitSubscription {
         let mut state = self.state.lock().expect("observer lock poisoned");
-        let subscription = CommitSubscription::new(state.closed, state.failure.clone());
+        let subscription = CommitSubscription::new(state.closed, state.failure.clone(), outside);
         state
             .subscriptions
             .retain(|subscription| subscription.strong_count() != 0);
@@ -220,7 +228,8 @@ impl CommitObserver {
         subscription
     }
 
-    pub(crate) fn commit(&self, changes: Vec<RowChange>) {
+    /// Report a commit made within `scope`, if any.
+    pub(crate) fn commit(&self, changes: Vec<RowChange>, scope: Option<CommitScope>) {
         let changes = Arc::new(changes);
         self.state
             .lock()
@@ -230,6 +239,9 @@ impl CommitObserver {
                 let Some(subscription) = subscription.upgrade() else {
                     return false;
                 };
+                if scope.is_some() && scope == subscription.outside {
+                    return true;
+                }
                 let mut tracking = subscription
                     .tracking
                     .lock()

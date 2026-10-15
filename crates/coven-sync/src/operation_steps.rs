@@ -12,7 +12,19 @@ use coven_format::store_log::StoreChange;
 use coven_foundation::id_source::{KeyId, MemberId};
 
 impl StoreLogSync {
+    /// One attempt at an operation's next step. Its commits are the
+    /// attempt's own, never evidence against the wait it may end in (SP
+    /// waiting).
     pub(crate) async fn operation_step(
+        &mut self,
+        record: &OperationRecord,
+        data: Data,
+    ) -> Result<Progress, SyncError> {
+        let attempt = self.attempt_scope();
+        attempt.run(self.operation_attempt(record, data)).await
+    }
+
+    async fn operation_attempt(
         &mut self,
         record: &OperationRecord,
         data: Data,

@@ -150,8 +150,11 @@ import CovenIO
 #print axioms CovenIO.Waiting.evidence_waits_rate
 #print axioms CovenIO.Waiting.evidence_due_once
 #print axioms CovenIO.Waiting.evidence_keeps_backoff
+#print axioms CovenIO.Waiting.racing_evidence_due
+#print axioms CovenIO.Waiting.racing_commit_wakes
 #print axioms CovenIO.Waiting.Examples.evidence_exceeds_unchanged_bound
-#print axioms CovenIO.Waiting.Examples.racing_commit_waits_full_delay
+#print axioms CovenIO.Waiting.Examples.racing_commit_wakes_at_once
+#print axioms CovenIO.Waiting.Examples.unraced_waits_full_delay
 #print axioms CovenIO.Wakes.initial_covered
 #print axioms CovenIO.Wakes.covered_run
 #print axioms CovenIO.Wakes.write_never_lost

@@ -357,7 +357,18 @@ impl StoreLogSync {
         }
     }
 
+    /// One attempt at a snapshot task's next step; its commits are the
+    /// attempt's own (SP waiting).
     pub(crate) async fn snapshot_step(
+        &mut self,
+        record: &OperationRecord,
+        task: SnapshotTask,
+    ) -> Result<Progress, SyncError> {
+        let attempt = self.attempt_scope();
+        attempt.run(self.snapshot_attempt(record, task)).await
+    }
+
+    async fn snapshot_attempt(
         &mut self,
         record: &OperationRecord,
         task: SnapshotTask,

@@ -5,8 +5,31 @@ use crate::{
     snapshot_data::{ReloadScope, SnapshotJob},
     *,
 };
-use coven_database::OperationRecord;
+use coven_database::{CommitScope, Database, DatabaseChanges, OperationRecord};
 use coven_merge::Audience;
+
+/// Commits that can satisfy waiting operations' prerequisites (SP waiting).
+pub(crate) struct Prerequisites {
+    /// Every operation attempt's commits belong to this scope.
+    attempt: CommitScope,
+    /// Every prerequisite commit: evidence for each operation then waiting.
+    all: DatabaseChanges,
+    /// Prerequisite commits outside any attempt. Attempts run one at a time,
+    /// so during one these are other work's commits (IO
+    /// `racing_commit_wakes`).
+    others: DatabaseChanges,
+}
+
+impl Prerequisites {
+    pub(crate) fn new(database: &Database) -> Self {
+        let attempt = CommitScope::new();
+        Self {
+            attempt,
+            all: database.operation_prerequisite_changes(None),
+            others: database.operation_prerequisite_changes(Some(attempt)),
+        }
+    }
+}
 
 impl StoreLogSync {
     pub(crate) async fn operation_can_retry(
@@ -55,23 +78,34 @@ impl StoreLogSync {
             self.waits.seen(subject);
             return Ok(false);
         }
+        // An attempt starting here sees only other work's commits from now
+        // on as evidence against the wait it may end in.
         self.observe_prerequisites()?;
         let persisted = self.database.retry_wait(subject).await?;
         Ok(self.waits.due(subject, persisted.as_ref()))
     }
 
-    /// A commit that can satisfy a prerequisite, such as an own upload or an
-    /// applied entry, makes every operation then waiting due once.
-    fn observe_prerequisites(&self) -> Result<(), SyncError> {
-        if self
-            .prerequisites
+    /// The scope every operation attempt's commits belong to.
+    pub(crate) fn attempt_scope(&self) -> CommitScope {
+        self.prerequisites
             .lock()
             .expect("prerequisite observation poisoned")
-            .take_changed()?
-        {
+            .attempt
+    }
+
+    /// A commit that can satisfy a prerequisite, such as an own upload or an
+    /// applied entry, makes every operation then waiting due once. Returns
+    /// whether a commit outside the attempts landed since the last
+    /// observation.
+    fn observe_prerequisites(&self) -> Result<bool, SyncError> {
+        let mut prerequisites = self
+            .prerequisites
+            .lock()
+            .expect("prerequisite observation poisoned");
+        if prerequisites.all.take_changed()? {
             self.waits.prerequisites_changed();
         }
-        Ok(())
+        Ok(prerequisites.others.take_changed()?)
     }
 
     /// Committed work may satisfy waiting operations' prerequisites: each
@@ -103,10 +137,14 @@ impl StoreLogSync {
         if pending.retry() == Retry::Automatic
             && pending.reason != PendingReason::Waits(Prerequisite::CatchUp)
         {
-            // Commits before this wait began are not evidence against it.
-            self.observe_prerequisites()?;
+            // The attempt's own commits are not evidence against the wait
+            // it ends in; other work's commits while it ran are, so that wait
+            // is due at once (IO `racing_commit_wakes`).
+            let raced = self.observe_prerequisites()?;
             let previous = self.database.retry_wait(subject).await?;
-            self.waits.fail(subject, previous.as_ref()).await
+            self.waits
+                .fail_attempt(subject, previous.as_ref(), raced)
+                .await
         } else {
             self.waits.clear(subject).await
         }
@@ -141,18 +179,36 @@ impl StoreLogSync {
         })
     }
 
+    /// Record why an attempt stopped, and its next wait. Its commits are the
+    /// attempt's own.
     pub(crate) async fn record_operation_condition(
         &self,
         record: &OperationRecord,
         reason: PendingReason,
     ) -> Result<PendingRecord, SyncError> {
-        let pending = self.operation_condition(record, reason).await?;
-        self.database.record_pending(pending.clone()).await?;
-        self.schedule_retry(record, &pending).await?;
-        Ok(pending)
+        self.attempt_scope()
+            .run(async {
+                let pending = self.operation_condition(record, reason).await?;
+                self.database.record_pending(pending.clone()).await?;
+                self.schedule_retry(record, &pending).await?;
+                Ok(pending)
+            })
+            .await
     }
 
+    /// Record an attempt's failure and its next wait. Its commits are the
+    /// attempt's own.
     pub(crate) async fn record_operation_error(
+        &self,
+        record: &OperationRecord,
+        error: &SyncError,
+    ) -> Result<(), SyncError> {
+        self.attempt_scope()
+            .run(self.record_attempt_error(record, error))
+            .await
+    }
+
+    async fn record_attempt_error(
         &self,
         record: &OperationRecord,
         error: &SyncError,

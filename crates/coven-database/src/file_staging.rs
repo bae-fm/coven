@@ -141,7 +141,7 @@ impl FileStaging {
             // cannot remove a name before this blocking call creates its bytes.
             let file_name = name.clone();
             let (next, writer) = finish_blocking(
-                tokio::task::spawn_blocking(move || {
+                tokio::task::spawn_blocking(crate::commit_scope::bind(move || {
                     let writer = (|| -> Result<_, DbError> {
                         let slot = self.database.read().expect("database lock poisoned");
                         let inner = slot.as_ref().expect("staging holds close guard");
@@ -153,7 +153,7 @@ impl FileStaging {
                             .create_writer(lock)?)
                     })();
                     (self, writer)
-                })
+                }))
                 .await,
             );
             self = next;

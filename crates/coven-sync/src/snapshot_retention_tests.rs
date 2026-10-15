@@ -131,7 +131,9 @@ async fn a_file_named_only_by_a_retained_log_write_stays_until_that_log_goes() {
         .await
         .unwrap();
     a.sync.database = a.db.clone();
-    a.sync.prerequisites = std::sync::Mutex::new(a.sync.database.operation_prerequisite_changes());
+    a.sync.prerequisites = std::sync::Mutex::new(
+        crate::store_log_sync::operation_pending::Prerequisites::new(&a.sync.database),
+    );
     a.writes = a.writes();
     a.create(key(1)).await;
     let files = crate::Files::new(

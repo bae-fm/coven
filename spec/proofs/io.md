@@ -1161,11 +1161,21 @@ table, or any operation advancing, as evidence for every waiting operation,
 so a wait whose own prerequisite never changed is not held to §3.1's rate:
 its starts follow the commit rate.
 
-`racing_commit_waits_full_delay` checks the other edge: a commit landing while
-an attempt runs, after the attempt read its prerequisite, is counted before
-the next wait begins. The operation then waits its full delay (up to 300
-seconds) although its prerequisite arrived. Rust absorbs those commits on
-purpose, since an attempt's own commits would otherwise make it due at once.
+A commit landing while an attempt runs, after the attempt read its
+prerequisite, is evidence against the wait the attempt ends in: that wait
+begins when the attempt started (`step`'s `finish` arms it with the start's
+evidence count). `racing_evidence_due` and `racing_commit_wakes` prove the
+wait is then due at once, and `racing_commit_wakes_at_once` checks it on a
+capped wait whose delay is 300 seconds; `unraced_waits_full_delay` checks
+that the same attempt without the racing commit waits that delay. The
+attempt's own commits are no evidence events in the model: Rust attributes
+every commit a running attempt makes to one `CommitScope` and observes
+prerequisite commits outside it separately, so they cannot make the attempt's
+own wait due at once. `evidence_rate` holds with this rule too: each start
+after the first is still paid by a delay or by one commit.
+[`io_differential_waiting`](../../crates/coven-sync/src/retry_waits_tests.rs)
+runs attempts that commit to a prerequisite table themselves and attempts
+other work races against the model.
 
 **Wakes — proved.** `Wakes.lean` models the sync loop and its write-queue
 observation (`sync_loop.rs`, `Database::sync_changes`). `write_never_lost`:

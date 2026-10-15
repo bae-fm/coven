@@ -890,7 +890,7 @@ impl DatabaseConnection {
             #[cfg(any(test, feature = "test-utils"))]
             self.checkpoint(crate::test_utils::WriteCheckpoint::Committed);
             if let Some(handle) = &self.handle {
-                handle.commit(changes);
+                handle.commit(changes, crate::commit_scope::committing());
             }
             #[cfg(any(test, feature = "test-utils"))]
             self.checkpoint(crate::test_utils::WriteCheckpoint::Observed);

@@ -275,15 +275,19 @@ impl Database {
     /// and wakes nothing (SP step 9). Register before the first sync to
     /// include writes committed while a pass is running.
     pub fn sync_changes(&self) -> crate::DatabaseChanges {
-        self.table_changes(&["_coven_uploads"], true, true)
+        self.table_changes(&["_coven_uploads"], true, true, None)
     }
 
     /// Observe commits that can satisfy a waiting operation's prerequisites:
     /// own uploads and queued entries, received and applied store-log
     /// entries and key copies, reloads, provider access and write positions.
     /// Operation journal and pending rows, which every attempt rewrites, are
-    /// not among them (SP waiting). Only commits after this call count.
-    pub fn operation_prerequisite_changes(&self) -> crate::DatabaseChanges {
+    /// not among them (SP waiting). Only commits after this call count, and
+    /// none made within `outside`.
+    pub fn operation_prerequisite_changes(
+        &self,
+        outside: Option<crate::CommitScope>,
+    ) -> crate::DatabaseChanges {
         self.table_changes(
             &[
                 "_coven_uploads",
@@ -298,16 +302,19 @@ impl Database {
             ],
             false,
             false,
+            outside,
         )
     }
 
     /// `first` reports the initial state as a change; `inserted_only`
-    /// ignores updates and deletions.
+    /// ignores updates and deletions; commits made within `outside` are not
+    /// changes.
     fn table_changes(
         &self,
         tables: &[&str],
         first: bool,
         inserted_only: bool,
+        outside: Option<crate::CommitScope>,
     ) -> crate::DatabaseChanges {
         let slot = self.inner.read().expect("database lock poisoned");
         let reads: Vec<_> = tables
@@ -320,7 +327,7 @@ impl Database {
             })
             .collect();
         let commits = match slot.as_ref() {
-            Some(inner) => inner.access.observer.subscribe(),
+            Some(inner) => inner.access.observer.subscribe_outside(outside),
             None => CommitSubscription::closed(),
         };
         commits.begin();
@@ -535,13 +542,18 @@ impl Database {
         let lease = self.file_tasks.clone().read_owned().await;
         let database = self.inner.clone();
         let staging = finish_blocking(
-            tokio::task::spawn_blocking(move || {
+            tokio::task::spawn_blocking(crate::commit_scope::bind(move || {
                 file_staging::FileStaging::new(database, lease, build)
-            })
+            }))
             .await,
         )?;
         let (staging, result) = staging.write().await;
-        finish_blocking(tokio::task::spawn_blocking(move || staging.finish(result, sql)).await)
+        finish_blocking(
+            tokio::task::spawn_blocking(crate::commit_scope::bind(move || {
+                staging.finish(result, sql)
+            }))
+            .await,
+        )
     }
 
     /// The committed app schema version, read on a read-only connection.
@@ -568,7 +580,7 @@ impl Database {
             tokio::spawn(async move {
                 let file_tasks = database.file_tasks.clone().write_owned().await;
                 finish_blocking(
-                    tokio::task::spawn_blocking(move || {
+                    tokio::task::spawn_blocking(crate::commit_scope::bind(move || {
                         let _file_tasks = file_tasks;
                         let mut slot = database.inner.write().expect("database lock poisoned");
                         let Some(inner) = slot.take() else {
@@ -587,7 +599,7 @@ impl Database {
                         } else {
                             Err(DbError::Closing { failures })
                         }
-                    })
+                    }))
                     .await,
                 )
             })
@@ -725,10 +737,10 @@ where
     R: Send + 'static,
     E: From<DbError> + Send + 'static,
 {
-    tokio::task::spawn_blocking(move || {
+    tokio::task::spawn_blocking(crate::commit_scope::bind(move || {
         let slot = inner.read().expect("database lock poisoned");
         run(slot.as_ref().ok_or(DbError::StoreClosed)?)
-    })
+    }))
 }
 
 pub(crate) fn finish_blocking<T>(result: Result<T, tokio::task::JoinError>) -> T {

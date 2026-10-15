@@ -479,13 +479,15 @@ private def waiting (j : Json) : Except String Json := do
     ("retried", toJson (Waiting.due (Waiting.appRetry timer time) time))]
 
 /-- `Waiting.step` for one operation's wait: monotonic `advance`s, committed
-prerequisite `evidence`, and automatic `attempt`s, each starting only when
-`Session.ready` and failing at once. Reports, per attempt, whether it was due
-and the persisted failure count afterward (`evidence_due_once`,
-`evidence_keeps_backoff`). -/
+prerequisite `evidence` by other work, and automatic `attempt`s, each starting
+only when `Session.ready` and failing. A `raced` attempt fails after other
+work committed while it ran; an attempt's own commits are no evidence.
+Reports, per attempt, whether it was due and the persisted failure count
+afterward (`evidence_due_once`, `evidence_keeps_backoff`,
+`racing_commit_wakes`). -/
 private def evidence (j : Json) : Except String Json := do
   let actions ← j.getObjValAs? (Array Json) "actions"
-  let mut s : Waiting.Session := ⟨0, 0, none, false⟩
+  let mut s : Waiting.Session := ⟨0, 0, none, none⟩
   let mut out := #[]
   for action in actions do
     let op ← action.getObjValAs? String "op"
@@ -494,9 +496,10 @@ private def evidence (j : Json) : Except String Json := do
     | "advance" => events := [.tick (← action.getObjValAs? Nat "seconds")]
     | "evidence" => events := [.evidence]
     | "attempt" => if s.ready then events := [.start, .finish]
+    | "raced" => if s.ready then events := [.start, .evidence, .finish]
     | other => throw s!"unknown evidence action {other}"
     let some next := Waiting.run s events | throw "invalid wait transition"
-    if op == "attempt" then
+    if op == "attempt" || op == "raced" then
       out := out.push (Json.mkObj [("due", toJson s.ready),
         ("failures", toJson ((next.armed.map (·.failures)).getD 0))])
     s := next

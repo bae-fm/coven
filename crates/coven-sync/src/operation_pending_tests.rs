@@ -811,3 +811,66 @@ async fn approval_polls_back_off_across_reopening_and_end_with_the_outcome() {
     a.sync.join_poll_settled().await.unwrap();
     assert_eq!(a.db.retry_wait(RetrySubject::Join).await.unwrap(), None);
 }
+
+/// SP waiting, IO `racing_commit_wakes`: an app write committing while an
+/// operation's attempt runs makes the wait that attempt ends in due at once,
+/// keeping its backoff. A commit the attempt makes itself to the same table
+/// leaves its wait to run its delay.
+#[tokio::test]
+async fn a_commit_racing_an_attempt_wakes_its_wait_and_the_attempts_own_does_not() {
+    use coven_database::{Migration, RowIdentity, SyncedTable};
+    let storage = google();
+    let [mut a, _b, _c] = accounts(storage.clone()).await;
+    a.reopen(
+        storage.clone(),
+        vec![SyncedTable::new("notes", RowIdentity::SharedKey)],
+        vec![Migration::sql(
+            1,
+            "notes",
+            "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY, title TEXT)",
+        )],
+    )
+    .await;
+    let note = |db: coven_database::Database, id: &'static str| async move {
+        db.write(move |sql| {
+            sql.execute("INSERT INTO notes VALUES(?1,'title')", [id])?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    };
+    let id = begin(&mut a, Command::CreateCircle("Gifts".into())).await;
+    let record = a.operation(id).await;
+    assert!(a.sync.operation_ready(&record).await.unwrap());
+    // The attempt queues a write itself, then fails: its own commit is no
+    // evidence against the one-second wait it ends in.
+    storage
+        .set_faults(fail_next(StorageFailure::Network, None))
+        .await;
+    let attempt = a.sync.attempt_scope();
+    attempt.run(note(a.db.clone(), "own")).await;
+    attempt_fails(&mut a, id).await;
+    let record = a.operation(id).await;
+    assert!(!a.sync.operation_ready(&record).await.unwrap());
+    a.elapse_retry_delays();
+    assert!(a.sync.operation_ready(&record).await.unwrap());
+    // The app writes while the next attempt runs: the two-second wait it ends
+    // in is due at once, and the backoff continues.
+    storage
+        .set_faults(fail_next(StorageFailure::Network, None))
+        .await;
+    note(a.db.clone(), "app").await;
+    attempt_fails(&mut a, id).await;
+    assert_eq!(wait_of(&a, id).await.unwrap().wait, Duration::from_secs(2));
+    let record = a.operation(id).await;
+    assert!(a.sync.operation_ready(&record).await.unwrap());
+    // That evidence is spent: failing again without a racing commit waits.
+    storage
+        .set_faults(fail_next(StorageFailure::Network, None))
+        .await;
+    attempt_fails(&mut a, id).await;
+    assert_eq!(wait_of(&a, id).await.unwrap().wait, Duration::from_secs(4));
+    let record = a.operation(id).await;
+    assert!(!a.sync.operation_ready(&record).await.unwrap());
+    finish(&mut a, id).await;
+}
