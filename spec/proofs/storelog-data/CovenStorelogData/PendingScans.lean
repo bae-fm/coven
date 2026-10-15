@@ -445,8 +445,8 @@ theorem refused_stays_unoffered (s : Local) (a : Audience) (id : SnapshotId)
 
 A listed snapshot whose prefix this version cannot read could be the
 audience's newest (§15). The reload and the return check wait for the update
-rather than choose without it. Rust's retention instead treats it as
-unreadable and judges deletion against the newest readable snapshot. -/
+rather than choose without it. Rust's retention waits too; judging deletion
+against the newest readable snapshot instead loses a write. -/
 
 /-- A listed snapshot: its path `(device, number)`, its signed positions
 `(device, highest number)` and the format of its prefix. -/
@@ -483,7 +483,7 @@ def select (supported : Nat) (listed : List Listed) : Except Reason (Option List
   | some s => .error (.updateRequired s.format)
   | none => .ok (newest listed)
 
-/-- Rust `retain_snapshot_objects`' coverage test for a write: the newest
+/-- Retention's coverage test before it waited for such a prefix: the newest
 snapshot among those whose prefixes this version reads covers it. The other
 §15 gates (historical coverage a day old, posted positions or 30 storage
 days, finality) are separate conjuncts, taken to pass. -/

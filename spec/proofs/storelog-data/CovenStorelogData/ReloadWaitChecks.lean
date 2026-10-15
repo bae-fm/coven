@@ -206,7 +206,7 @@ def carolTarget : Nat → Nat := fun d => if d = 1 then 4 else 10
 def carolLogs : List (Nat × Nat) := [(1, 4)] ++ (List.range 10).map fun n => (2, n + 1)
 
 /-- The reload selects Ana's snapshot through 3, needs write 4 and is
-blocked; Rust records the write's refusal as its reason, which is not driven
+blocked; recording the write's refusal as its reason, as Rust did, is not driven
 again at this version. Once a snapshot covering the gap lands, the reload
 would load it without the write (§15: "A snapshot covering it can load
 without reading it"), but it is never attempted before an update. -/

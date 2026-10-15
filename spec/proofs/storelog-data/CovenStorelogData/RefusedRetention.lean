@@ -8,8 +8,8 @@ therefore be the one a later version, or a device whose check passes,
 selects as the audience's newest. Retention that passes over it judges
 deletion against an older snapshot and can delete a write that newest
 snapshot leaves out:
-- passing over a refused body (Rust's retention, which uses its loading
-  candidates) fails: `refused_body_retention_counterexample`, and the same
+- passing over a refused body (Rust's retention before it ignored bodies)
+  fails: `refused_body_retention_counterexample`, and the same
   for a snapshot whose key this device has not authorized,
   `missing_key_retention_counterexample`;
 - passing over a refused prefix (§15 as written: "a refused prefix
@@ -423,7 +423,7 @@ theorem store_later (earlier : Checks) (formats : earlier.supported ≤ 1) :
   ⟨formats, fun s hs _ => by simp only [store, List.mem_cons, List.not_mem_nil] at hs
                              rcases hs with rfl | rfl | h <;> first | decide | cases h⟩
 
-/-- Rust's retention, passing over the body Ana refused, judges by her own
+/-- Retention passing over the body Ana refused, as Rust's did, judges by her own
 snapshot and deletes her write 4. A version whose check passes (Ana's after
 the update, or any device on it) selects Ben's snapshot, needs write 4, and
 §15's missing-write rule skips it as having no part: its row changes are
