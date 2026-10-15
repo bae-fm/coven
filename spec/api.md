@@ -3062,7 +3062,7 @@ impl CovenHandle {
     /// Publishes a prepared public pair for an active member under §9's
     /// authority rules. The target retains its private pair before this call;
     /// this call receives no private keys and changes no local private custody.
-    /// Confirms the initial and held historical audience-key copies before
+    /// Confirms copies of every store key and the held circle keys before
     /// publishing the replacement; returns once replay keeps it.
     /// Any admin may replace another member, independently of provider ownership.
     /// A self target is still self-replacement, even for an admin; callers
@@ -3385,7 +3385,7 @@ pub enum ProviderSignOut {
   treat an incomplete view of other members' files as an empty store.
 - A replacement invite fixes an existing active id before the requester
   generates keys. Approval binds the exact signed request's new pair after
-  publishing the initial and available historical audience-key copies. The
+  publishing copies of every store key and the held circle keys. The
   join waits for its approving writer's kept matching id-and-pair binding
   before registration; an equal-payload winner does not rescue a rejected approval.
   A losing replacement fails with its replay reason even if copies exist.

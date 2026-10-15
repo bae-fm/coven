@@ -4106,9 +4106,9 @@ Carol's tablet:
   audiences without opening their boxes. She
   retains her progress and stops each attempt at the next-number miss.
   The approving device publishes her initial-key copy after the invite's
-  number, plus its available historical store and authorized circle keys,
-  before the binding entry, even if the store has rotated. The initial key
-  is required; if unavailable approval waits. Each prerequisite copy names
+  number, plus every other store key, and for a replacement the circle keys
+  it holds, before the binding entry, even if the store has rotated.
+  Approval waits for a store key it lacks. Each prerequisite copy names
   the validated new sealing credential, even before its binding is current.
   No polling iteration scans every device's entry 1 while she waits.
   - Ana's invite names K1, her phone and copy 12. Copy 13 goes to Ben;
@@ -6200,9 +6200,9 @@ Carol's tablet:
      made in the console, or make and check the key with admin access in one
      call (§4), and record the invite's chosen stable id. A failed call rolls
      back; cancelling before the key exists needs no admin access;
-  2. once an admin approves the exact id and new public pair, confirm the
-     initial and held historical audience-key copies to that credential,
-     then publish Add member or Replace member keys as the invite specifies;
+  2. once an admin approves the exact id and new public pair, confirm copies
+     of every store key and the held keys of circles the member reads to
+     that credential, then publish Add member or Replace member keys;
   3. bootstrap waits for the kept matching binding before registering the
      device and recording any separate access change. A dropped binding or
      access entry reports rejection and ends the invite; it does not restart;
