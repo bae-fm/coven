@@ -50,8 +50,13 @@ pub(super) fn decode(saved: &SavedBoundary) -> Result<BoundaryCoverage, SyncErro
 }
 
 impl StoreLogSync {
+    /// The readable audiences' boundaries, each with its named snapshot's
+    /// checked prefix. The reload refuses a boundary until its snapshot is
+    /// listed, counting and marked; it waits on an unlisted one, and the
+    /// snapshot's own record names any other condition (§15, §19.1).
     pub(super) async fn snapshot_boundaries(
         &self,
+        reload: &coven_database::OperationRecord,
         log: &StoreLog,
     ) -> Result<Vec<SavedBoundary>, SyncError> {
         let readable = self.snapshot_audiences(log)?;
@@ -70,49 +75,29 @@ impl StoreLogSync {
         for boundary in boundaries {
             let id = boundary.snapshot();
             let path = snapshot_path(self.directory.id(), id)?;
-            let object = objects
-                .iter()
-                .find(|object| object.path == path)
-                .ok_or(coven_storage::StorageFailure::NotFound)?;
+            let Some(object) = objects.iter().find(|object| object.path == path) else {
+                let reason = crate::PendingReason::Waits(crate::Prerequisite::Object(path));
+                return Err(SyncError::Pending(Box::new(
+                    self.operation_condition(reload, reason).await?,
+                )));
+            };
             let candidate = match self.snapshot_prefix(object, log).await? {
                 Ok(candidate) => candidate,
-                // The named snapshot's wait or refusal is its own record, and
-                // the reload that needs it fails with that record (§19.1).
-                Err(reason) => {
-                    let record = crate::PendingRecord {
-                        subject: crate::PendingSubject::Snapshot(id.clone()),
-                        reason,
-                        reported_by: self.database.local_store_log().await?.device,
-                    };
-                    self.database.record_pending(record.clone()).await?;
-                    return Err(SyncError::Pending(Box::new(record)));
-                }
+                Err(reason) => return Err(self.boundary_condition(id, reason).await?),
             };
-            // A named snapshot that landed late is ignored like any other:
-            // the boundary waits as if it had not arrived.
-            if !candidate.prefix.counts(object.stored_at) {
-                return Err(coven_storage::StorageFailure::NotFound
-                    .with_source("the boundary's snapshot landed after its catch-up deadline")
-                    .into());
-            }
-            // A raise names a snapshot whose signed prefix marks that raise,
-            // which retention held writes for while it was listed, and
-            // carries that prefix's `T_c`, which replay's landing window
-            // judged; a reset names an unmarked one (§9, §15, §17.1).
-            if candidate.prefix.raise != raised_version(&boundary)
+            // A raise names a counting snapshot whose signed prefix marks
+            // that raise, which retention held writes for while it was
+            // listed, and carries that prefix's `T_c`, which replay's landing
+            // window judged; a reset names an unmarked one (§9, §15, §17.1).
+            if !candidate.prefix.counts(object.stored_at)
+                || candidate.prefix.raise != raised_version(&boundary)
                 || named_catch_up(log, &boundary)
                     .is_some_and(|caught_at| caught_at != candidate.prefix.caught_at)
             {
                 let reason = self
                     .snapshot_condition(object, crate::Refusal::WrongIdentity { cause: None })
                     .await?;
-                let record = crate::PendingRecord {
-                    subject: crate::PendingSubject::Snapshot(id.clone()),
-                    reason,
-                    reported_by: self.database.local_store_log().await?.device,
-                };
-                self.database.record_pending(record.clone()).await?;
-                return Err(SyncError::Pending(Box::new(record)));
+                return Err(self.boundary_condition(id, reason).await?);
             }
             let clear = candidate.prefix.encode()?;
             saved.push(SavedBoundary {
@@ -121,6 +106,22 @@ impl StoreLogSync {
             });
         }
         Ok(saved)
+    }
+
+    /// Record why a boundary's named snapshot cannot be loaded, as that
+    /// snapshot's own record; the reload that needs it fails with it.
+    async fn boundary_condition(
+        &self,
+        id: &SnapshotId,
+        reason: crate::PendingReason,
+    ) -> Result<SyncError, SyncError> {
+        let record = crate::PendingRecord {
+            subject: crate::PendingSubject::Snapshot(id.clone()),
+            reason,
+            reported_by: self.database.local_store_log().await?.device,
+        };
+        self.database.record_pending(record.clone()).await?;
+        Ok(SyncError::Pending(Box::new(record)))
     }
 
     pub(super) fn has_snapshot_boundary(&self, log: &StoreLog, audience: &Audience) -> bool {

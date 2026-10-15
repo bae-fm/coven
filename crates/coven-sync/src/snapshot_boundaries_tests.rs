@@ -448,7 +448,8 @@ async fn a_failed_internal_reload_prevents_snapshot_publication_until_it_can_res
         a.elapse_retry_delays();
         let error = a.write_snapshot(Audience::Store).await.unwrap_err();
         assert!(
-            matches!(&error, SyncError::Storage(error) if error.failure() == StorageFailure::NotFound),
+            matches!(&error, SyncError::Pending(waiting) if waiting.reason
+                == crate::PendingReason::Waits(crate::Prerequisite::Object(snapshot.clone()))),
             "{error:?}"
         );
         assert!(storage
@@ -663,8 +664,43 @@ mod reset {
         assert_eq!(fingerprint(&a).await, fingerprint(&b).await);
     }
 
+    /// A kept reset whose snapshot is not listed yet makes the reload wait
+    /// on that object, a pending record rather than a storage failure,
+    /// until it is listed (§15).
     #[tokio::test]
-    async fn a_reset_naming_a_late_snapshot_is_ignored_like_an_absent_one() {
+    async fn a_reset_naming_an_unlisted_snapshot_waits_for_it() {
+        let storage = snapshot_storage();
+        let mut a = notes_device(storage.clone(), 1).await;
+        a.create(key(1)).await;
+        write_rows(&a, 1, 1, 7, Audience::Store).await;
+        upload(&a, &storage).await;
+        let id = begin_reset(&mut a, Audience::Store).await;
+        finish_reset(&mut a, id).await;
+        let mut snapshots = storage
+            .list(&ObjectPrefix::snapshots(store(1)))
+            .await
+            .unwrap();
+        assert_eq!(snapshots.len(), 1);
+        let snapshot = snapshots.remove(0);
+        let bytes = storage.read(&snapshot.path).await.unwrap();
+        storage.delete(&snapshot.path).await.unwrap();
+        let mut b = notes_device(storage.clone(), 2).await;
+        let caught_up = b.sync.sync_store_log().await;
+        assert!(
+            matches!(&caught_up, Err(crate::SyncError::Pending(waiting))
+            if waiting.reason == crate::PendingReason::Waits(
+                crate::Prerequisite::Object(snapshot.path.clone())
+            )),
+            "{caught_up:?}"
+        );
+        storage.create(&snapshot.path, &bytes).await.unwrap();
+        b.elapse_retry_delays();
+        b.sync.sync_store_log().await.unwrap();
+        assert_eq!(tables(&a).await, tables(&b).await);
+    }
+
+    #[tokio::test]
+    async fn a_reset_naming_a_late_snapshot_refuses_that_boundary() {
         let start = UNIX_EPOCH + Duration::from_secs(1_760_400_000);
         let clock = Arc::new(coven_foundation::clock::FixedClock::new(start));
         let storage = Arc::new(
@@ -701,20 +737,25 @@ mod reset {
         // A reset entry naming it anyway is kept, as one from a device that
         // did not abandon it would be.
         a.sync
-            .make_and_upload_entry(StoreChange::Reset { snapshot: late })
+            .make_and_upload_entry(StoreChange::Reset {
+                snapshot: late.clone(),
+            })
             .await
             .unwrap();
         assert!(
             a.log().await.boundaries().any(|_| true),
             "the reset entry is kept"
         );
-        // A peer applying the reset cannot load its late snapshot; the reload
-        // waits as if the snapshot had not arrived.
+        // A peer applying the reset refuses its late snapshot as that
+        // boundary's: the snapshot's own record names it, and the reload waits.
         let mut b = notes_device(storage.clone(), 2).await;
         let caught_up = b.sync.sync_store_log().await;
         assert!(
-            matches!(&caught_up, Err(crate::SyncError::Storage(error))
-                if error.failure() == coven_storage::StorageFailure::NotFound),
+            matches!(&caught_up, Err(crate::SyncError::Pending(refused))
+            if refused.subject == crate::PendingSubject::Snapshot(late.clone())
+                && matches!(refused.reason, crate::PendingReason::Refused(
+                    crate::Refusal::WrongIdentity { .. }
+                ))),
             "{caught_up:?}"
         );
         assert!(tables(&b).await.is_empty());

@@ -67,7 +67,7 @@ impl StoreLogSync {
                         },
                     ));
                 }
-                let boundaries = self.snapshot_boundaries(&local.log).await?;
+                let boundaries = self.snapshot_boundaries(record, &local.log).await?;
                 let expected_entries = local
                     .log
                     .entries
