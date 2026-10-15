@@ -3022,3 +3022,38 @@ listing_lag SUMMARY provider_case=S3_object trials=20 min_s=0.006007416 median_s
 bucket versioning_after=Enabled stable=true
 certification suite=5 PASS
 ```
+
+## SeaweedFS rerun, 2026-10-15
+
+Later on 2026-10-15 suite 5 was run again against SeaweedFS 4.48
+(`chrislusf/seaweedfs:4.48`, the flags of the run above) in a new
+unversioned bucket, from the working tree that became `26dda7270`. It
+failed three times in a row. Conditional PUTs and conditional replacements
+kept one winner in every trial, but racing multipart publications, and a
+single-request create racing a multipart publication, were both accepted:
+
+| Run | `concurrent_multipart_publication_2` | `concurrent_multipart_publication_8` | `concurrent_put_and_multipart_publication` |
+| --- | --- | --- | --- |
+| 1 | 177 of 200 trials failed | 48 of 50 | 28 of 200 |
+| 2 | 154 of 200 | 48 of 50 | 23 of 200 |
+| 3 | 148 of 200 | 45 of 50 | 21 of 200 |
+
+The run above recorded no failing trial in these races, so the certificate
+does not reproduce. Until suite 5 passes SeaweedFS again, its entry records
+no certificate for either bucket state and setup refuses it
+(`S3ProfileRefused`). The third run's summaries and a failing trial:
+
+```text
+bucket versioning=Disabled
+race SUMMARY Put writers=2 trials=200 overlapping=200 successes=200 violations=0
+race SUMMARY Put writers=8 trials=50 overlapping=50 successes=50 violations=0
+race Multipart writers=2 trial=2 writer=0 start_us=246 end_us=4306 outcome=accepted
+race Multipart writers=2 trial=2 writer=1 start_us=20 end_us=3997 outcome=accepted
+race Multipart writers=2 trial=2 overlap=true successes=2 pass=false
+race SUMMARY Multipart writers=2 trials=200 overlapping=200 successes=348 violations=148
+race SUMMARY Multipart writers=8 trials=50 overlapping=50 successes=347 violations=45
+race SUMMARY Mixed writers=2 trials=200 overlapping=200 successes=221 violations=21
+race SUMMARY Replace writers=2 trials=200 overlapping=200 successes=200 violations=0
+bucket versioning_after=Disabled stable=true
+certification suite=5 FAIL
+```

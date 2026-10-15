@@ -221,6 +221,13 @@ pub enum StorageCheck {
 /// A failed setup commits no local storage settings or credentials.
 #[derive(Debug, thiserror::Error)]
 pub enum StorageSetupError {
+    /// The named catalogued S3 profile failed certification's concurrent
+    /// create-once races, so setup refuses it before any request (§4).
+    #[error("S3 profile {profile:?} is refused: concurrent create-once publication failed certification")]
+    S3ProfileRefused {
+        /// The refused profile.
+        profile: crate::S3ProfileName,
+    },
     /// This profile has no certification with bucket versioning enabled.
     #[error("S3 bucket versioning {state:?} is not certified for this profile")]
     S3VersioningUnsupported {

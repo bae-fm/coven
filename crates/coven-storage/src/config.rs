@@ -106,6 +106,17 @@ impl StorageConfig {
         }
     }
 
+    /// Refuse, before any request, a location whose catalogued S3 profile
+    /// setup does not admit (§4). Other locations are admitted.
+    pub fn admit_setup(&self) -> Result<(), crate::StorageSetupError> {
+        match self {
+            Self::S3 {
+                endpoint, profile, ..
+            } => crate::providers::admit_s3_setup(endpoint.as_ref(), profile.as_ref()),
+            _ => Ok(()),
+        }
+    }
+
     /// Reject missing location information before making a request.
     pub fn validate(&self) -> Result<(), crate::StorageError> {
         let fields: Vec<&str> = match self {

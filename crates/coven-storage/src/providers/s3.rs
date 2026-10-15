@@ -25,7 +25,7 @@ use error::s3_error;
 mod profile;
 #[path = "s3_versioning.rs"]
 mod versioning;
-pub(crate) use profile::{settings as s3_settings, S3KeyScope};
+pub(crate) use profile::{admit_setup as admit_s3_setup, settings as s3_settings, S3KeyScope};
 pub(crate) use versioning::check as check_s3_versioning;
 #[path = "s3_checksum_headers.rs"]
 mod checksum_headers;

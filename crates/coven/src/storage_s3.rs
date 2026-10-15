@@ -27,6 +27,8 @@ impl StorageConnections {
             let recorded = owner.codes.location().await.map_err(setup_error)?;
             let config = recorded_s3(storage, recorded.as_ref());
             owner.check_location(&config).await?;
+            // A profile that failed certification is refused before any request.
+            config.admit_setup()?;
             if recorded.is_none() {
                 // Creating the store: where member keys reach the whole
                 // bucket, the bucket must hold nothing but this store (§4).
