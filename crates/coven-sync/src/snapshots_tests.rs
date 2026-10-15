@@ -18,6 +18,8 @@ mod held;
 mod publication;
 #[path = "snapshot_retention_tests.rs"]
 mod retention;
+#[path = "snapshot_retention_dependencies_tests.rs"]
+mod retention_dependencies;
 #[path = "snapshot_retention_waits_tests.rs"]
 mod retention_waits;
 #[path = "snapshot_return_tests.rs"]

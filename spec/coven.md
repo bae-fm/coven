@@ -4993,7 +4993,12 @@ Carol's tablet:
     [`RaiseHistory.deleted_stays_covered`](proofs/io/CovenIO/RaiseHistory.lean));
   - every store-log entry that makes this coverage usable, or makes the
     object unnecessary, is final (§9;
-    [`Eligible`](proofs/io/CovenIO/Retention.lean));
+    [`Eligible`](proofs/io/CovenIO/Retention.lean)). For another device's
+    object those are the entries registering, replacing or removing its
+    uploader, or removing a member that registered it; short of 30 storage
+    days, also those of every device that is neither an active reader nor
+    posted past it. Store creation registers the device that wrote it
+    ([`deletion_survives_later_replay`, `eligible_eventually_deleted`, `creation_device_counterexample`](proofs/storelog-data/CovenStorelogData/RetentionDependencies.lean));
   - every device's posted write position has passed it, or storage has
     held it for 30 days
     ([`recent_write_protected`](proofs/io/CovenIO/Retention.lean)).
@@ -5484,7 +5489,9 @@ Carol's tablet:
   - Rows may arrive before their files. No write waits for file bytes.
 - Physical deletion of a circle's rows, files and objects, pre-migration
   inputs and local file sources also waits for every entry it depends on
-  to be final (§9). Current replay alone cannot release them.
+  to be final (§9). Current replay alone cannot release them. Another
+  uploader's files wait for the entries deciding its state, as its logs do
+  (§15; [`files_survive_later_replay`](proofs/storelog-data/CovenStorelogData/RetentionDependencies.lean)).
 - A stored file is deleted only when no retained row, loss, snapshot or
   log write refers to its fixed path. Local rows, waiting writes, upload
   queues and inputs retained for non-final entries protect it too.

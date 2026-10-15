@@ -34,15 +34,10 @@ impl StoreLogSync {
             }
         }
         self.scan_removed_uploaders(&local.log, &uploaders).await?;
-        // Another uploader's files go only once the entries removing it are
-        // final: a returning device may still name them (§9, §16.5).
-        let dependencies = super::retention::waits::Dependencies::new(&local.log);
-        uploaders.retain(|device| {
-            *device == local.device
-                || dependencies
-                    .device(*device)
-                    .all(|entry| local.log.is_final(entry))
-        });
+        // Another uploader's files go only once the entries deciding its
+        // state are final: a returning device may still name them (§9, §16.5).
+        let dependencies = super::retention::dependencies::Dependencies::new(&local.log);
+        uploaders.retain(|device| dependencies.releases_files(&local.log, local.device, *device));
         let candidates = self.database.file_candidates(uploaders).await?;
         let (protected, open): (Vec<_>, Vec<_>) = candidates
             .into_iter()

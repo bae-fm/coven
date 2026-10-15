@@ -5,6 +5,7 @@ import CovenStorelogData.CurrentData
 import StorelogDataEffects
 import PendingJson
 import CovenStorelogData.RetentionSafety
+import CovenStorelogData.RetentionDependencies
 import CovenStorelogData.LocalSources
 import CovenStorelogData.Retention
 
@@ -202,6 +203,39 @@ private def retention (j : Json) : Except String Json := do
       | _ => Json.null),
     ("delete", toJson (RetentionSafety.mayDelete (fun _ => true) final input))])
 
+/-- §9/§15/§16.5: which entries one covered log's deletion depends on, its
+record and deletion, and whether its uploader's files are released
+(`RetentionSafety.Deletion`). `entries` lists the received entries in replay
+order as `{id, change, kept, final}`; ids order them as coven's entry ids. -/
+private def deletion (j : Json) : Except String Json := do
+  let entries ← (← j.getObjValAs? (Array Json) "entries").toList.mapM fun e => do
+    let change : RetentionSafety.Change ← match (← (← e.getObjVal? "change").getArr?).toList with
+      | [.str "create", d, m] => pure (.create (← d.getNat?) (← m.getNat?))
+      | [.str "addDevice", d, m, .null] => pure (.addDevice (← d.getNat?) (← m.getNat?) none)
+      | [.str "addDevice", d, m, r] => pure (.addDevice (← d.getNat?) (← m.getNat?) (some (← r.getNat?)))
+      | [.str "removeDevice", d] => pure (.removeDevice (← d.getNat?))
+      | [.str "removeMember", m] => pure (.removeMember (← m.getNat?))
+      | [.str "other"] => pure .other
+      | _ => throw "unknown change"
+    pure ((⟨← e.getObjValAs? Nat "id", change⟩ : RetentionSafety.Entry),
+      ← e.getObjValAs? Bool "kept", ← e.getObjValAs? Bool "final")
+  let posted ← j.getObjValAs? (List Nat) "posted"
+  let flag (pick : Bool × Bool → Bool) (e : Nat) : Bool :=
+    (entries.find? (·.1.id == e)).any (pick ·.2)
+  let x : RetentionSafety.Deletion := {
+    entries := entries.map (·.1), kept := flag (·.1), final := flag (·.2),
+    own := ← j.getObjValAs? Nat "own", uploader := ← j.getObjValAs? Nat "uploader",
+    posted := (· ∈ posted), aged := ← j.getObjValAs? Bool "aged",
+    covered := ← j.getObjValAs? Bool "covered", entitled := ← j.getObjValAs? Bool "entitled" }
+  pure (Json.mkObj [
+    ("dependencies", toJson x.dependencies.eraseDups),
+    ("record", match x.record with
+      | some (.waits (.entryFinality e)) => Json.arr #["entryFinality", toJson e]
+      | some (.waits (.positions d)) => Json.arr #["positions", toJson d]
+      | _ => Json.null),
+    ("delete", toJson x.mayDelete),
+    ("files", toJson x.filesReleased)])
+
 def main : IO UInt32 := do
   let input ← (← IO.getStdin).readToEnd
   let output := do
@@ -212,6 +246,8 @@ def main : IO UInt32 := do
       return toJson (← (← cases.getArr?).mapM prunes)
     if let .ok cases := j.getObjVal? "retention" then
       return toJson (← (← cases.getArr?).mapM retention)
+    if let .ok cases := j.getObjVal? "deletions" then
+      return toJson (← (← cases.getArr?).mapM deletion)
     match j.getObjVal? "reloads", j.getObjVal? "circles", j.getObjVal? "effects",
         j.getObjVal? "pending", j.getObjVal? "choices", j.getObjVal? "sources" with
     | .ok histories, _, _, _, _, _ => toJson <$> (← histories.getArr?).mapM reloads

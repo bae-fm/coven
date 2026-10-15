@@ -843,13 +843,57 @@ reader's acknowledgement.
 The Rust comparison `data_differential_retention_record` runs coven's
 retention decision on every combination of dependency finality, reader
 posts and storage age, and compares its record and deletion with
-`RetentionSafety.work` and `mayDelete`. Which entries a deletion depends
-on is the implementation's choice, not modeled here. A covered log depends
-on the entries removing an uploader whose objects this device deletes and,
-short of thirty storage days, on the entries registering or removing a
-reader that has not posted; its coverage already holds under every
-boundary replay could still select (§15). A superseded own snapshot
-depends on every reset and raise of its audience.
+`RetentionSafety.work` and `mayDelete`.
+
+Which entries a deletion depends on is modeled in
+`RetentionDependencies.lean`. A device's state (absent, active, replaced or
+removed) is replayed from the kept entries that register it (store creation
+or an addition), replace it, remove it, or remove the member some entry
+registered it for, in the order coven's replay applies them. A covered log
+depends on the entries deciding its uploader's state when this device
+deletes another device's objects and, short of thirty storage days, on the
+entries deciding the state of every named device that is neither an active
+reader nor posted past it. Its coverage already holds under every boundary
+replay could still select (§15). A superseded own snapshot depends on every
+reset and raise of its audience, which this file does not model.
+
+- `state_determined`: two replays that agree on the entries concerning a
+  device give it one state.
+- `later_state`, `later_active`, `later_removed`: a later replay, with more
+  entries interleaved by timestamp and none registering a device the
+  received entries name, can only retire a device further.
+- `deletion_survives_later_replay`: once a log is deleted, no later replay in
+  which every non-final entry may change its fate makes its uploader anything
+  but removed, or restores a named reader that has not posted past it, short
+  of thirty storage days. No deletion depends on an entry that can still
+  drop.
+- `files_survive_later_replay`: the same for releasing another uploader's
+  files.
+- `waits_only_on_finality_and_posts` and `eligible_eventually_deleted`: the
+  decision waits on nothing else. With no further arrivals, finality that
+  only grows, and storage age that eventually passes thirty days, a log that
+  is covered and owned once every received entry is final is deleted at some
+  evaluation, whether or not every reader posts.
+- `creation_device_counterexample`: a rule that learns devices only from
+  additions, replacements and removals misses the creation device. Ben
+  removes Ana, whose phone created the store and never posted; that rule
+  deletes Ben's covered log, and Ana's earlier concurrent removal of Ben then
+  drops his removal of her, leaving her phone an active reader that needs it.
+  coven waits for those entries to be final; the Rust test
+  `the_creation_devices_member_removal_holds_deletion_until_final` replays it.
+
+Outside the model: a device registered only by an entry this device has not
+received starts from a snapshot, which the coverage check covers (§12.1); a
+device registers itself once (§10), so a later arrival never registers a
+named device again; whether this device is entitled to another member's
+objects (§13) decides who deletes, not whether anyone needs them, and is an
+input. The Rust comparison `data_differential_retention_dependencies`
+replays four histories (Ben removing the creator, concurrent removals, a
+replacement and a device removal, a registration a concurrent removal
+defeats) under finality patterns, local devices, uploaders, posts, storage
+age and entitlement, and compares coven's dependencies, record, deletion
+and file release with `Deletion.dependencies`, `record`, `mayDelete` and
+`filesReleased`.
 
 The model supplies complete storage metadata as an input; numbered discovery and
 authentication are outside the proof. Dependency expressions must name every

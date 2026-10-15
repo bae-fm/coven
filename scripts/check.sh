@@ -421,6 +421,9 @@ proofs() {
         step "Rust / Lean retention records and deletion"
         COVEN_STORELOG_DATA_LEAN="$runner" exact_ignored coven-sync --all-features -- \
             store_log_sync::tests::snapshots::retention_waits::data_differential_retention_record
+        step "Rust / Lean which entries a deletion depends on"
+        COVEN_STORELOG_DATA_LEAN="$runner" exact_ignored coven-sync --all-features -- \
+            store_log_sync::tests::snapshots::retention_dependencies::data_differential_retention_dependencies
     fi
 
     if proof_selected io || crate_selected coven-sync; then

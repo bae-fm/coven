@@ -3,17 +3,20 @@
 
 use super::{catalog::inconsistent, prefix::failure, snapshot_path, StoreLogSync};
 use crate::SyncError;
-use coven_database::{EntryOutcome, StoreLog};
+use coven_database::{EntryOutcome, StoreDevice, StoreLog};
 use coven_format::{
     store_log::StoreChange,
     value::{StorageTime, WritePositions},
 };
 use coven_foundation::id_source::DeviceId;
 use coven_storage::{CloudProvider, ObjectPath, ObjectPrefix, StoredObject};
+use dependencies::Dependencies;
 use std::collections::{BTreeMap, BTreeSet};
-use waits::{Dependencies, Facts};
+use waits::Facts;
 use witness::Threshold;
 
+#[path = "snapshot_retention_dependencies.rs"]
+pub(crate) mod dependencies;
 #[path = "snapshot_retention_waits.rs"]
 pub(crate) mod waits;
 #[path = "snapshot_witness.rs"]
@@ -249,10 +252,7 @@ impl StoreLogSync {
             // Coverage already holds under every boundary replay could still
             // select, so no boundary's fate decides it; the removal that lets
             // this device delete another's objects does (§9, §15).
-            let mut entries = BTreeSet::new();
-            if id.device != local.device {
-                entries.extend(dependencies.device(id.device));
-            }
+            let entries = dependencies.deleting(local.device, id.device);
             let facts = |time| {
                 Facts::for_write(
                     &local.log,
@@ -407,15 +407,12 @@ impl StoreLogSync {
         own: DeviceId,
         uploader: DeviceId,
     ) -> Result<bool, SyncError> {
-        if uploader == own {
-            return Ok(true);
-        }
-        let Some(device) = log.replay.state.devices.get(&uploader) else {
-            return Ok(false);
-        };
-        if !device.removed() {
-            return Ok(false);
-        }
+        dependencies::deletes_for(log, own, uploader, |device| self.entitled(log, device))
+    }
+
+    /// Whether this device may delete a removed device's objects: its own
+    /// member's, or a removed member's whose storage it owns (§13).
+    fn entitled(&self, log: &StoreLog, device: &StoreDevice) -> Result<bool, SyncError> {
         let me = self.operation_member()?.member();
         if device.member == me {
             return Ok(true);

@@ -274,6 +274,15 @@ import CovenStorelogData
 #print axioms CovenStorelogData.Pending.ready_on_day_91
 #print axioms CovenStorelogData.Pending.gated_snapshot_waits_then_loads
 #print axioms CovenStorelogData.RetentionSafety.first_finality_wait_visible
+#print axioms CovenStorelogData.RetentionSafety.state_determined
+#print axioms CovenStorelogData.RetentionSafety.later_state
+#print axioms CovenStorelogData.RetentionSafety.later_active
+#print axioms CovenStorelogData.RetentionSafety.later_removed
+#print axioms CovenStorelogData.RetentionSafety.deletion_survives_later_replay
+#print axioms CovenStorelogData.RetentionSafety.files_survive_later_replay
+#print axioms CovenStorelogData.RetentionSafety.waits_only_on_finality_and_posts
+#print axioms CovenStorelogData.RetentionSafety.eligible_eventually_deleted
+#print axioms CovenStorelogData.RetentionSafety.CreationExample.creation_device_counterexample
 
 #print axioms CovenStorelogData.ReplayEffects.scan_realizes
 #print axioms CovenStorelogData.ReplayEffects.settleN_realizes

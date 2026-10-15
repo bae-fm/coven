@@ -48,13 +48,15 @@ fn waits(
 }
 
 /// Ben removes Ana's old phone and may delete its covered log, but only once
-/// his removal is final: until then a later arrival could drop it and make
-/// the phone's objects its own again (§9, §15).
+/// the entries deciding the phone's state are final: until then a later
+/// arrival could drop his removal and make the phone's objects its own
+/// again. The phone registered itself by creating the store, so the record
+/// names that older entry first (§9, §15).
 #[tokio::test]
 async fn a_removed_devices_member_deletes_its_covered_logs_once_the_removal_is_final() {
     let (storage, storage_clock) = timed_snapshot_storage();
     let mut a = notes_device(storage.clone(), 1).await;
-    a.create(key(1)).await;
+    let creation = a.create(key(1)).await;
     let mut b = notes_device(storage.clone(), 2).await;
     add_device(&mut b).await;
     a.sync().await;
@@ -74,9 +76,10 @@ async fn a_removed_devices_member_deletes_its_covered_logs_once_the_removal_is_f
     b.sync.run_retention().await.unwrap();
     let log = logs(&storage).await;
     assert_eq!(log.len(), 1);
+    assert!(creation < removal);
     assert_eq!(
         records(&b).await,
-        [waits(&log[0], crate::Prerequisite::EntryFinality(removal))]
+        [waits(&log[0], crate::Prerequisite::EntryFinality(creation))]
     );
     storage_clock.set(at(31, 0));
     b.clock.set(at(31, 0));
