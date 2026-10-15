@@ -194,8 +194,10 @@ async fn publication_during_a_session_refresh_moves_the_replacement_to_device_cu
     server.entered.notified().await;
     session.publish(&device, commit).unwrap();
     assert_eq!(held(&store), "token");
-    server.release.add_permits(2);
+    server.release.add_permits(1);
     let replacement = refresh.await.unwrap().unwrap();
-    assert_eq!(replacement.access_token.as_str(), "access-1");
-    assert_eq!(held(&store), "access-1");
+    // One rejection, one refresh: its replacement is committed in device custody.
+    assert_eq!(replacement.access_token.as_str(), "access-0");
+    assert_eq!(held(&store), "access-0");
+    assert_eq!(server.requests(), 1);
 }

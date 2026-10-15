@@ -71,8 +71,20 @@ impl TokenCustody for DeviceCredentials {
             return Ok(held);
         }
         let refreshed = refresh(self.oauth.as_ref(), &held).await?;
+        self.commit_refresh(rejected, refreshed)
+    }
+}
+
+impl DeviceCredentials {
+    /// Commit `refreshed` in place of `rejected`, unless custody holds other
+    /// tokens by now, which then win: a sign-in committed meanwhile, such as
+    /// a Drive upgrade, or another refresh of the same rejection.
+    fn commit_refresh(
+        &self,
+        rejected: &OAuthTokens,
+        refreshed: OAuthTokens,
+    ) -> Result<OAuthTokens, StorageError> {
         self.write(|keychain| {
-            // A sign-in committed meanwhile, such as a Drive upgrade, wins.
             let held = held_tokens(keychain)?;
             if held.access_token.as_str() != rejected.access_token.as_str() {
                 return Ok(held);
@@ -176,9 +188,9 @@ impl TokenCustody for SessionSignIn {
             }
             (_, Some(device)) => device.clone(),
         };
-        // Publication moved the rejected tokens to device custody meanwhile;
-        // only a refresh committed there may replace them.
-        device.replace(rejected).await
+        // Publication moved the rejected tokens to device custody meanwhile:
+        // this one refresh is committed there instead (§4).
+        device.commit_refresh(rejected, refreshed)
     }
 }
 
