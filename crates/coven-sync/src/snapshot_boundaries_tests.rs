@@ -3,13 +3,14 @@ use super::*;
 #[tokio::test]
 async fn unusable_snapshots_do_not_turn_deleted_history_into_an_empty_audience() {
     for (deleted, damaged_prefix) in [(false, false), (true, false), (false, true), (true, true)] {
-        let storage = snapshot_storage();
+        let (storage, storage_clock) = timed_snapshot_storage();
         let mut a = notes_device(storage.clone(), 1).await;
         a.create(key(1)).await;
         write_rows(&a, 0, 1, 17, Audience::Store).await;
         upload(&a, &storage).await;
         if deleted {
             a.clock.set(UNIX_EPOCH + Duration::from_secs(31 * 86400));
+            storage_clock.set(UNIX_EPOCH + Duration::from_secs(31 * 86400));
         }
         if !a.send.can_send() {
             a.catch_up().await;

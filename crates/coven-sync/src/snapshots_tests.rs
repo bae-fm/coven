@@ -32,12 +32,19 @@ async fn snapshot_record(device: &Device, path: &ObjectPath) -> Option<crate::Pe
 }
 
 fn snapshot_storage() -> Arc<MemoryStorage> {
-    Arc::new(
-        MemoryStorage::builder()
-            .transfer_limits(65536, 65536)
-            .build()
-            .unwrap(),
-    )
+    timed_snapshot_storage().0
+}
+
+/// Snapshot storage whose provider time the test advances: retention ages a
+/// write object by storage time, never by a device clock (§15).
+fn timed_snapshot_storage() -> (Arc<MemoryStorage>, Arc<FixedClock>) {
+    let clock = Arc::new(FixedClock::new(UNIX_EPOCH));
+    let storage = MemoryStorage::builder()
+        .clock(clock.clone())
+        .transfer_limits(65536, 65536)
+        .build()
+        .unwrap();
+    (Arc::new(storage), clock)
 }
 
 fn notes_tables() -> Vec<SyncedTable> {
@@ -360,7 +367,14 @@ async fn writing_resumes_after_each_recorded_step_with_identical_ciphertext() {
 
 #[tokio::test]
 async fn uncovered_logs_survive_thirty_days_and_never_posting_devices_hold_covered_logs() {
-    let storage = snapshot_storage();
+    let (storage, storage_clock) = timed_snapshot_storage();
+    let day = |n: u64| UNIX_EPOCH + Duration::from_secs(n * 86400);
+    let logs = |storage: Arc<MemoryStorage>| async move {
+        storage
+            .list(&ObjectPrefix::device_logs(store(1)))
+            .await
+            .unwrap()
+    };
     let mut a = notes_device(storage.clone(), 1).await;
     a.create(key(1)).await;
     let mut b = notes_device(storage.clone(), 2).await;
@@ -368,34 +382,26 @@ async fn uncovered_logs_survive_thirty_days_and_never_posting_devices_hold_cover
     a.sync().await;
     write_rows(&a, 0, 35, 32768, Audience::Store).await;
     upload(&a, &storage).await;
-    a.clock.set(UNIX_EPOCH + Duration::from_secs(31 * 86400));
+    // Thirty-one storage days later no snapshot covers the log: it stays.
+    a.clock.set(day(31));
+    storage_clock.set(day(31));
     a.sync.run_retention().await.unwrap();
-    assert_eq!(
-        storage
-            .list(&ObjectPrefix::device_logs(store(1)))
-            .await
-            .unwrap()
-            .len(),
-        1
-    );
-    a.clock.set(UNIX_EPOCH + Duration::from_secs(1));
+    let old = logs(storage.clone()).await;
+    assert_eq!(old.len(), 1);
+    // A snapshot covers it and a new log. Ben never posts: the old log goes
+    // by its storage age, the new one waits for him.
+    write_rows(&a, 35, 1, 17, Audience::Store).await;
+    upload(&a, &storage).await;
     a.catch_up().await;
     a.sync.write_snapshots().await.unwrap();
-    assert_eq!(
-        storage
-            .list(&ObjectPrefix::device_logs(store(1)))
-            .await
-            .unwrap()
-            .len(),
-        1
-    );
-    a.clock.set(UNIX_EPOCH + Duration::from_secs(31 * 86400));
+    let held = logs(storage.clone()).await;
+    assert_eq!(held.len(), 1);
+    assert_ne!(held[0].path, old[0].path);
+    // Thirty storage days after it, the new log goes too.
+    a.clock.set(day(62));
+    storage_clock.set(day(62));
     a.sync.run_retention().await.unwrap();
-    assert!(storage
-        .list(&ObjectPrefix::device_logs(store(1)))
-        .await
-        .unwrap()
-        .is_empty());
+    assert!(logs(storage.clone()).await.is_empty());
     b.sync.reload_from_snapshots().await.unwrap();
     assert_eq!(tables(&a).await, tables(&b).await);
 }
@@ -517,7 +523,7 @@ async fn store_and_gifts_snapshots_at_different_points_load_in_one_transaction()
 
 #[tokio::test]
 async fn deleted_history_reload_preserves_waiting_numbers_and_late_writes_converge() {
-    let storage = snapshot_storage();
+    let (storage, storage_clock) = timed_snapshot_storage();
     let mut a = notes_device(storage.clone(), 1).await;
     a.create(key(1)).await;
     let mut b = notes_device(storage.clone(), 2).await;
@@ -546,6 +552,7 @@ async fn deleted_history_reload_preserves_waiting_numbers_and_late_writes_conver
     .unwrap();
     upload(&a, &storage).await;
     a.clock.set(UNIX_EPOCH + Duration::from_secs(31 * 86400));
+    storage_clock.set(UNIX_EPOCH + Duration::from_secs(31 * 86400));
     a.catch_up().await;
     a.sync.write_snapshot(Audience::Store).await.unwrap();
     assert!(storage
@@ -840,7 +847,7 @@ async fn idle_pass_uses_bounded_header_ranges_and_reuses_overread_bytes() {
 #[tokio::test]
 async fn a_pass_reuses_loaded_snapshot_and_write_references() {
     for deleted_history in [false, true] {
-        let storage = snapshot_storage();
+        let (storage, storage_clock) = timed_snapshot_storage();
         let mut a = notes_device(storage.clone(), 1).await;
         a.create(key(1)).await;
         let mut b = notes_device(storage.clone(), 2).await;
@@ -849,6 +856,7 @@ async fn a_pass_reuses_loaded_snapshot_and_write_references() {
         upload(&b, &storage).await;
         if deleted_history {
             b.clock.set(UNIX_EPOCH + Duration::from_secs(31 * 86400));
+            storage_clock.set(UNIX_EPOCH + Duration::from_secs(31 * 86400));
             b.catch_up().await;
             b.sync.write_snapshot(Audience::Store).await.unwrap();
             assert!(storage

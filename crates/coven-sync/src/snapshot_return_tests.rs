@@ -101,6 +101,8 @@ async fn returning_after_thirty_days_reloads_history_deleted_meanwhile() {
     upload(&a, &storage).await;
     a.clock
         .set(UNIX_EPOCH + Duration::from_secs(START + 31 * DAY));
+    // Thirty-one storage days pass: retention ages logs by storage time.
+    clock.set(UNIX_EPOCH + Duration::from_secs(START + 31 * DAY));
     if !a.send.can_send() {
         a.catch_up().await;
     }
@@ -111,7 +113,6 @@ async fn returning_after_thirty_days_reloads_history_deleted_meanwhile() {
         .unwrap()
         .is_empty());
     // Ben returns 31 storage days later; a reopened session has no sample.
-    clock.set(UNIX_EPOCH + Duration::from_secs(START + 31 * DAY));
     b.reopen(storage.clone(), notes_tables(), notes_migrations())
         .await;
     let before = storage.request_trace().len();

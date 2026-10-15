@@ -144,7 +144,7 @@ async fn unsigned_snapshot_cannot_replace_rows_or_authorize_log_deletion() {
 #[tokio::test]
 async fn another_members_snapshot_signatures_never_authorize_selection_loading_or_retention() {
     for object_owner in [false, true] {
-        let storage = snapshot_storage();
+        let (storage, storage_clock) = timed_snapshot_storage();
         let mut a = notes_device(storage.clone(), 1).await;
         a.create(key(1)).await;
         let other = member(2);
@@ -172,6 +172,7 @@ async fn another_members_snapshot_signatures_never_authorize_selection_loading_o
         storage.delete(&path).await.unwrap();
         storage.create(&path, &forged).await.unwrap();
         a.clock.set(UNIX_EPOCH + Duration::from_secs(31 * 86400));
+        storage_clock.set(UNIX_EPOCH + Duration::from_secs(31 * 86400));
         a.sync.run_retention().await.unwrap();
         assert_eq!(
             storage
@@ -280,7 +281,7 @@ async fn coverage_checks_read_exactly_the_signed_prefix_without_an_audience_key(
 
 #[tokio::test]
 async fn signed_coverage_does_not_require_opening_the_body_but_loading_does() {
-    let storage = snapshot_storage();
+    let (storage, storage_clock) = timed_snapshot_storage();
     let mut a = notes_device(storage.clone(), 1).await;
     a.create(key(1)).await;
     write_rows(&a, 0, 1, 17, Audience::Store).await;
@@ -301,6 +302,7 @@ async fn signed_coverage_does_not_require_opening_the_body_but_loading_does() {
     storage.create(&path, &wrong_body_signature).await.unwrap();
     a.sync.write_snapshots().await.unwrap();
     a.clock.set(UNIX_EPOCH + Duration::from_secs(31 * 86400));
+    storage_clock.set(UNIX_EPOCH + Duration::from_secs(31 * 86400));
     a.sync.run_retention().await.unwrap();
     assert!(storage
         .list(&ObjectPrefix::device_logs(store(1)))
@@ -323,12 +325,13 @@ async fn signed_coverage_does_not_require_opening_the_body_but_loading_does() {
 
 #[tokio::test]
 async fn a_truncated_body_does_not_erase_signed_required_history() {
-    let storage = snapshot_storage();
+    let (storage, storage_clock) = timed_snapshot_storage();
     let mut a = notes_device(storage.clone(), 1).await;
     a.create(key(1)).await;
     write_rows(&a, 0, 1, 17, Audience::Store).await;
     upload(&a, &storage).await;
     a.clock.set(UNIX_EPOCH + Duration::from_secs(31 * 86400));
+    storage_clock.set(UNIX_EPOCH + Duration::from_secs(31 * 86400));
     if !a.send.can_send() {
         a.catch_up().await;
     }

@@ -6,13 +6,26 @@ use super::{
 };
 use crate::SyncError;
 use coven_database::{EntryOutcome, StoreLog};
-use coven_format::{store_log::StoreChange, value::WritePositions};
+use coven_format::{
+    store_log::StoreChange,
+    value::{StorageTime, WritePositions},
+};
 use coven_foundation::id_source::DeviceId;
 use coven_storage::{CloudProvider, ObjectPrefix};
 use std::{
     collections::{BTreeMap, BTreeSet},
     time::Duration,
 };
+
+/// A covered write object whose readers have not all posted past it may go
+/// once its storage age reaches thirty days (§15).
+const RETENTION_AGE: Duration = Duration::from_secs(30 * 24 * 60 * 60);
+
+/// Whether storage time `now` is at least thirty days after `stored_at`.
+fn reached_age(now: Option<StorageTime>, stored_at: StorageTime) -> bool {
+    now.and_then(|now| now.duration_since(stored_at))
+        .is_some_and(|age| age >= RETENTION_AGE)
+}
 
 impl StoreLogSync {
     pub(super) async fn retain_snapshot_objects(&self) -> Result<(), SyncError> {
@@ -117,6 +130,8 @@ impl StoreLogSync {
             }
         }
         let positions = self.retention_positions().await?;
+        let mut storage_time = self.storage_time();
+        let mut observed = false;
         let mut stuck = crate::pending_logs::local_refusals(&self.database).await?;
         for object in storage
             .list(&ObjectPrefix::device_logs(self.directory.id()))
@@ -163,10 +178,17 @@ impl StoreLogSync {
                 .iter()
                 .filter(|(_, d)| d.active())
                 .all(|(device, _)| positions.get(device).is_some_and(|p| p.covers(id)));
-            let aged = coven_format::value::StorageTime::from_system_time(self.clock.now())
-                .ok()
-                .and_then(|now| now.duration_since(object.stored_at))
-                .is_some_and(|age| age >= Duration::from_secs(30 * 24 * 60 * 60));
+            // Age compares storage times only: the observed provider time T
+            // against the object's first stored time. The device clock only
+            // schedules one fresh observation when the known T is too old to
+            // decide; it never establishes storage age (§9, §15).
+            let mut aged = reached_age(storage_time, object.stored_at);
+            if covered && !posted && !aged && !observed && self.age_may_have_passed(&object) {
+                self.observe_clock(&local).await?;
+                observed = true;
+                storage_time = self.storage_time();
+                aged = reached_age(storage_time, object.stored_at);
+            }
             if covered && (posted || aged) {
                 storage.delete(&object.path).await?;
             }
@@ -175,6 +197,21 @@ impl StoreLogSync {
             storage.delete(&path).await?;
         }
         self.retain_uploaded_files().await
+    }
+
+    /// The newest provider time this session knows, a lower bound on storage's.
+    fn storage_time(&self) -> Option<StorageTime> {
+        self.finality
+            .lock()
+            .expect("finality lock poisoned")
+            .sample_time()
+    }
+
+    /// Whether the device clock says a write may have reached its storage age,
+    /// which schedules an observation only.
+    fn age_may_have_passed(&self, object: &coven_storage::StoredObject) -> bool {
+        StorageTime::from_system_time(self.clock.now())
+            .is_ok_and(|now| reached_age(Some(now), object.stored_at))
     }
 
     pub(super) fn can_delete_device(

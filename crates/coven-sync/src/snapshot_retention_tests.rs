@@ -141,15 +141,16 @@ async fn a_removed_devices_member_can_delete_its_covered_logs() {
 /// uploader's own account (§15): the folder no longer lists it.
 async fn removed_member_logs_belong_to_the_store_owner_and_leave_google_drives_folder() {
     for google in [false, true] {
-        let storage = if google {
-            Arc::new(
-                MemoryStorage::builder()
-                    .provider(coven_storage::CloudProvider::GoogleDrive)
-                    .build()
-                    .unwrap(),
-            )
+        let (storage, storage_clock) = if google {
+            let clock = Arc::new(FixedClock::new(UNIX_EPOCH));
+            let storage = MemoryStorage::builder()
+                .provider(coven_storage::CloudProvider::GoogleDrive)
+                .clock(clock.clone())
+                .build()
+                .unwrap();
+            (Arc::new(storage), clock)
         } else {
-            snapshot_storage()
+            timed_snapshot_storage()
         };
         let mut a = notes_device(storage.clone(), 1).await;
         a.create(key(1)).await;
@@ -199,6 +200,7 @@ async fn removed_member_logs_belong_to_the_store_owner_and_leave_google_drives_f
                 .clock
                 .set(UNIX_EPOCH + Duration::from_secs(31 * 86400));
         }
+        storage_clock.set(UNIX_EPOCH + Duration::from_secs(31 * 86400));
         c.sync.run_retention().await.unwrap();
         assert_eq!(
             storage
@@ -224,7 +226,7 @@ async fn removed_member_logs_belong_to_the_store_owner_and_leave_google_drives_f
 #[tokio::test]
 async fn a_file_named_only_by_a_retained_log_write_stays_until_that_log_goes() {
     use coven_database::{CacheFill, FileDatabase, FileDecl, Provenance};
-    let storage = snapshot_storage();
+    let (storage, storage_clock) = timed_snapshot_storage();
     let mut a = device(storage.clone(), 1, member(1), store(1)).await;
     a.db.close().await.unwrap();
     a.db = DatabaseBuilder::new(a.directory.clone())
@@ -298,6 +300,7 @@ async fn a_file_named_only_by_a_retained_log_write_stays_until_that_log_goes() {
     }
     assert!(storage.read(&path).await.is_ok());
     a.clock.set(UNIX_EPOCH + Duration::from_secs(31 * 86400));
+    storage_clock.set(UNIX_EPOCH + Duration::from_secs(31 * 86400));
     if !a.send.can_send() {
         a.catch_up().await;
     }
@@ -408,16 +411,35 @@ async fn a_snapshot_keeps_its_key_when_a_removal_is_dropped() {
     assert_eq!(tables(&a).await, tables(&b).await);
 }
 
+/// Storage and its clock, Ana, the path of Ben's snapshot and Ana's writes,
+/// thirty-one storage days after the writes were published.
+type Fixture = (
+    Arc<MemoryStorage>,
+    Arc<FixedClock>,
+    Device,
+    ObjectPath,
+    Vec<ObjectPath>,
+);
+
+/// Replace Ben's snapshot with `bytes` published at its original storage
+/// time, as if he had published them: whether a prefix counts depends on
+/// its storage time (§15).
+async fn republish(storage: &MemoryStorage, clock: &FixedClock, path: &ObjectPath, bytes: &[u8]) {
+    let now = coven_foundation::clock::Clock::now(clock);
+    let published = storage.status(path).await.unwrap().unwrap().stored_at;
+    clock.set(UNIX_EPOCH + published.elapsed_since_epoch());
+    storage.delete(path).await.unwrap();
+    storage.create(path, bytes).await.unwrap();
+    clock.set(now);
+}
+
 /// `newer_snapshot_retention_counterexample` (storelog-data `PendingScans`):
 /// Ana's snapshot covers her writes 1 to 4. Ben's covers her 1 to 3 and his
 /// own 1 and 2, more writes, so his is the store's newest (§15). `registered`
-/// is whether Ana has applied Ben's device registration. Ana's clock is past
-/// 30 storage days, so coverage alone decides deletion. Returns Ana, the path
-/// of Ben's snapshot and the paths of Ana's writes.
-async fn bens_snapshot_is_newest(
-    registered: bool,
-) -> (Arc<MemoryStorage>, Device, ObjectPath, Vec<ObjectPath>) {
-    let storage = snapshot_storage();
+/// is whether Ana has applied Ben's device registration. Storage time is
+/// past 30 days after the writes, so coverage alone decides deletion.
+async fn bens_snapshot_is_newest(registered: bool) -> Fixture {
+    let (storage, storage_clock) = timed_snapshot_storage();
     let mut a = notes_device(storage.clone(), 1).await;
     a.create(key(1)).await;
     for n in 0..4 {
@@ -444,6 +466,7 @@ async fn bens_snapshot_is_newest(
     upload(&b, &storage).await;
     let id = b.sync.write_snapshot(Audience::Store).await.unwrap();
     a.clock.set(UNIX_EPOCH + Duration::from_secs(31 * 86400));
+    storage_clock.set(UNIX_EPOCH + Duration::from_secs(31 * 86400));
     let ben = ObjectPath::snapshot(
         store(1),
         id.audience,
@@ -454,7 +477,7 @@ async fn bens_snapshot_is_newest(
         .iter()
         .map(|write| crate::write_seal::path(store(1), write.header.position))
         .collect();
-    (storage, a, ben, writes)
+    (storage, storage_clock, a, ben, writes)
 }
 
 async fn retained(storage: &MemoryStorage, writes: &[ObjectPath]) -> Vec<bool> {
@@ -467,12 +490,11 @@ async fn retained(storage: &MemoryStorage, writes: &[ObjectPath]) -> Vec<bool> {
 
 #[tokio::test]
 async fn a_newer_format_snapshot_holds_log_retention_like_the_reload() {
-    let (storage, mut a, ben, writes) = bens_snapshot_is_newest(true).await;
+    let (storage, clock, mut a, ben, writes) = bens_snapshot_is_newest(true).await;
     let readable = storage.read(&ben).await.unwrap();
     let mut newer = readable.clone();
     newer[2] = 2;
-    storage.delete(&ben).await.unwrap();
-    storage.create(&ben, &newer).await.unwrap();
+    republish(&storage, &clock, &ben, &newer).await;
     // Ana's own snapshot covers her write 4, but Ben's, which she cannot
     // read, may be the newest: retention waits for the update, as her
     // reload does, and the snapshot's record says why.
@@ -487,8 +509,7 @@ async fn a_newer_format_snapshot_holds_log_retention_like_the_reload() {
     // A version that reads Ben's snapshot selects it as the newest; it
     // covers Ana's writes 1 to 3 only, and the reload needs her write 4.
     // Ana's retained bytes are the newer format's, so a new device reads it.
-    storage.delete(&ben).await.unwrap();
-    storage.create(&ben, &readable).await.unwrap();
+    republish(&storage, &clock, &ben, &readable).await;
     let mut c = notes_device(storage.clone(), 3).await;
     add_device(&mut c).await;
     c.sync.reload_from_snapshots().await.unwrap();
@@ -498,7 +519,7 @@ async fn a_newer_format_snapshot_holds_log_retention_like_the_reload() {
 
 #[tokio::test]
 async fn a_snapshot_waiting_for_its_authors_registration_holds_log_retention() {
-    let (storage, mut a, ben, writes) = bens_snapshot_is_newest(false).await;
+    let (storage, _clock, mut a, ben, writes) = bens_snapshot_is_newest(false).await;
     a.sync.run_retention().await.unwrap();
     assert_eq!(retained(&storage, &writes).await, [true; 4]);
     assert_eq!(
@@ -528,11 +549,10 @@ async fn a_snapshot_waiting_for_its_authors_registration_holds_log_retention() {
 /// The store of storelog-data `RefusedRetention`: Ana's snapshot covers her
 /// writes 1 to 10 and Ben's 1 and 2; Ben's covers Ana 1 to 3 and his own 1 to
 /// 20, more writes, so his is the store's newest (§15). Ana has applied Ben's
-/// registration and her clock is past 30 storage days, so coverage alone
-/// decides deletion. Returns Ana, the path of Ben's snapshot and the paths of
-/// Ana's writes.
-async fn ana_ten_ben_twenty() -> (Arc<MemoryStorage>, Device, ObjectPath, Vec<ObjectPath>) {
-    let storage = snapshot_storage();
+/// registration and storage time is past 30 days after the writes, so
+/// coverage alone decides deletion.
+async fn ana_ten_ben_twenty() -> Fixture {
+    let (storage, storage_clock) = timed_snapshot_storage();
     let mut a = notes_device(storage.clone(), 1).await;
     a.create(key(1)).await;
     let mut b = notes_device(storage.clone(), 2).await;
@@ -570,6 +590,7 @@ async fn ana_ten_ben_twenty() -> (Arc<MemoryStorage>, Device, ObjectPath, Vec<Ob
     a.sync.write_snapshot(Audience::Store).await.unwrap();
     let id = b.sync.write_snapshot(Audience::Store).await.unwrap();
     a.clock.set(UNIX_EPOCH + Duration::from_secs(31 * 86400));
+    storage_clock.set(UNIX_EPOCH + Duration::from_secs(31 * 86400));
     let ben = ObjectPath::snapshot(
         store(1),
         id.audience,
@@ -580,7 +601,7 @@ async fn ana_ten_ben_twenty() -> (Arc<MemoryStorage>, Device, ObjectPath, Vec<Ob
         .iter()
         .map(|write| crate::write_seal::path(store(1), write.header.position))
         .collect();
-    (storage, a, ben, writes)
+    (storage, storage_clock, a, ben, writes)
 }
 
 /// Ana's writes 1 to 3 go and 4 to 10 stay: Ben's snapshot, the newest,
@@ -605,7 +626,7 @@ async fn a_passing_version_needs_write_4(storage: &Arc<MemoryStorage>, ben: &Obj
 /// which it leaves out (`retention_ignores_bodies`).
 #[tokio::test]
 async fn a_refused_body_still_decides_log_retention_by_its_prefix() {
-    let (storage, mut a, ben, writes) = ana_ten_ben_twenty().await;
+    let (storage, clock, mut a, ben, writes) = ana_ten_ben_twenty().await;
     let readable = storage.read(&ben).await.unwrap();
     storage
         .corrupt_byte(&ben, readable.len() - 1)
@@ -633,8 +654,7 @@ async fn a_refused_body_still_decides_log_retention_by_its_prefix() {
     a.db.finish_operation(id).await.unwrap();
     a.sync.run_retention().await.unwrap();
     assert_eq!(retained(&storage, &writes).await, JUDGED_BY_BENS);
-    storage.delete(&ben).await.unwrap();
-    storage.create(&ben, &readable).await.unwrap();
+    republish(&storage, &clock, &ben, &readable).await;
     a_passing_version_needs_write_4(&storage, &ben).await;
 }
 
@@ -643,7 +663,7 @@ async fn a_refused_body_still_decides_log_retention_by_its_prefix() {
 /// she cannot load it, and it still decides her log retention.
 #[tokio::test]
 async fn a_snapshot_whose_key_is_not_accepted_still_decides_log_retention() {
-    let (storage, mut a, ben, writes) = ana_ten_ben_twenty().await;
+    let (storage, clock, mut a, ben, writes) = ana_ten_ben_twenty().await;
     let readable = storage.read(&ben).await.unwrap();
     let length = SnapshotObjectPrefix::length(&readable).unwrap();
     let (mut prefix, _) = SnapshotObjectPrefix::decode_signed(&readable[..length + 64]).unwrap();
@@ -652,8 +672,7 @@ async fn a_snapshot_whose_key_is_not_accepted_still_decides_log_retention() {
     unsigned.extend_from_slice(&readable[length + 64..readable.len() - 64]);
     // Every notes device belongs to member 1, Ben's member.
     let unaccepted = super::signatures::signed_snapshot(&unsigned, &ben, &a.member, &a.member);
-    storage.delete(&ben).await.unwrap();
-    storage.create(&ben, &unaccepted).await.unwrap();
+    republish(&storage, &clock, &ben, &unaccepted).await;
     assert!(
         !crate::key_introductions::needed(&a.log().await).contains_key(&(Audience::Store, key(2)))
     );
@@ -670,8 +689,7 @@ async fn a_snapshot_whose_key_is_not_accepted_still_decides_log_retention() {
         }),
         "{result:?}"
     );
-    storage.delete(&ben).await.unwrap();
-    storage.create(&ben, &readable).await.unwrap();
+    republish(&storage, &clock, &ben, &readable).await;
     a_passing_version_needs_write_4(&storage, &ben).await;
 }
 
@@ -683,12 +701,11 @@ async fn a_snapshot_whose_key_is_not_accepted_still_decides_log_retention() {
 /// listing stops naming his snapshot (`holding_without_refusals`).
 #[tokio::test]
 async fn a_refused_snapshot_prefix_holds_log_retention_while_it_is_listed() {
-    let (storage, mut a, ben, writes) = ana_ten_ben_twenty().await;
+    let (storage, clock, mut a, ben, writes) = ana_ten_ben_twenty().await;
     let readable = storage.read(&ben).await.unwrap();
     let mut refused = readable.clone();
     refused[SnapshotObjectPrefix::length(&readable).unwrap()] ^= 1;
-    storage.delete(&ben).await.unwrap();
-    storage.create(&ben, &refused).await.unwrap();
+    republish(&storage, &clock, &ben, &refused).await;
     a.sync.run_retention().await.unwrap();
     assert_eq!(retained(&storage, &writes).await, [true; 10]);
     assert!(matches!(
@@ -697,8 +714,7 @@ async fn a_refused_snapshot_prefix_holds_log_retention_while_it_is_listed() {
             crate::Refusal::Signature { .. }
         ))
     ));
-    storage.delete(&ben).await.unwrap();
-    storage.create(&ben, &readable).await.unwrap();
+    republish(&storage, &clock, &ben, &readable).await;
     a_passing_version_needs_write_4(&storage, &ben).await;
     storage.delete(&ben).await.unwrap();
     a.sync.run_retention().await.unwrap();
@@ -774,4 +790,36 @@ async fn a_stalled_snapshot_body_does_not_hold_the_database_writer() {
         .unwrap(),
         1
     );
+}
+
+/// §15: Ana's phone clock jumps ahead a year. A covered log Ben never read is
+/// still one storage day old, so the jump cannot release it; a fresh
+/// observation of storage time decides. Thirty storage days do.
+#[tokio::test]
+async fn a_device_clock_jump_never_ages_a_log() {
+    let (storage, storage_clock) = timed_snapshot_storage();
+    let day = |n: u64| UNIX_EPOCH + Duration::from_secs(n * 86400);
+    let mut a = notes_device(storage.clone(), 1).await;
+    a.create(key(1)).await;
+    let mut b = notes_device(storage.clone(), 2).await;
+    add_device(&mut b).await;
+    a.sync().await;
+    write_rows(&a, 0, 1, 17, Audience::Store).await;
+    upload(&a, &storage).await;
+    a.sync.write_snapshot(Audience::Store).await.unwrap();
+    let logs = || async {
+        storage
+            .list(&ObjectPrefix::device_logs(store(1)))
+            .await
+            .unwrap()
+            .len()
+    };
+    assert_eq!(logs().await, 1);
+    storage_clock.set(day(1));
+    a.clock.set(day(366));
+    a.sync.run_retention().await.unwrap();
+    assert_eq!(logs().await, 1);
+    storage_clock.set(day(30));
+    a.sync.run_retention().await.unwrap();
+    assert_eq!(logs().await, 0);
 }
