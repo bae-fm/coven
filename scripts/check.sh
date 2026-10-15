@@ -161,7 +161,8 @@ code_checks() {
 
     if crate_selected coven-sync; then
         step "release store-log replay cost (2,000 entries)"
-        cargo test -p coven-sync --release replay_cost -- --ignored --nocapture
+        exact_ignored coven-sync --release -- --nocapture replay::tests::replay_cost \
+            replay_cache::tests::read_view_replay_cost
     fi
 }
 
@@ -232,6 +233,29 @@ runner() {
     echo "$path"
 }
 
+# Run exactly the named ignored tests of one package: cargo flags, `--`, then
+# full test paths and test-harness flags. A bare filter would also run every
+# longer name containing it, which can need another runner; an --exact name
+# the binary lacks would run nothing, so each one must be listed.
+exact_ignored() {
+    local package=$1 flags=() listed test
+    shift
+    while [ "$1" != -- ]; do
+        flags+=("$1")
+        shift
+    done
+    shift
+    listed=$(cargo test -p "$package" ${flags[@]+"${flags[@]}"} -- --list --ignored | tr -d '\r')
+    for test in "$@"; do
+        case $test in --*) continue ;; esac
+        if ! printf '%s\n' "$listed" | grep -qxF "$test: test"; then
+            echo "the $package test binary is missing $test" >&2
+            exit 1
+        fi
+    done
+    cargo test -p "$package" ${flags[@]+"${flags[@]}"} -- --ignored --exact "$@"
+}
+
 # Merge, replay, access visibility, clocks and create-once uploads have Rust differential tests.
 # Data coupling also has checked counterexamples (spec/proofs/storelog-data.md).
 # Each runs when its Lean package or the Rust crate it compares is selected.
@@ -247,59 +271,61 @@ proofs() {
     if proof_selected merge || crate_selected coven-merge; then
         runner=$(runner merge mergeRunner)
         step "Rust / Lean Boolean merge differential"
-        COVEN_MERGE_LEAN="$runner" cargo test -p coven-merge --all-features lean_differential -- --ignored
+        COVEN_MERGE_LEAN="$runner" exact_ignored coven-merge --all-features -- \
+            tests::differential::lean_differential
 
         step "Rust / Lean circle-entry differential"
-        COVEN_MERGE_LEAN="$runner" cargo test -p coven-merge --all-features entry_differential_histories -- --ignored
-        COVEN_MERGE_LEAN="$runner" cargo test -p coven-merge --all-features entry_differential_agreement -- --ignored
+        COVEN_MERGE_LEAN="$runner" exact_ignored coven-merge --all-features -- \
+            tests::differential::entry_differential_histories \
+            tests::differential::entry_differential_agreement
     fi
 
     if proof_selected merge || crate_selected coven-database; then
         runner=$(runner merge mergeRunner)
         step "Rust / Lean composite reference differential"
-        if ! cargo test -p coven-database --all-features composite_reference_differential -- --list |
-            grep '::composite_reference_differential: test$' > /dev/null; then
-            echo "the Rust test binary is missing the composite reference differential" >&2
-            exit 1
-        fi
-        COVEN_MERGE_LEAN="$runner" cargo test -p coven-database --all-features composite_reference_differential -- --ignored
+        COVEN_MERGE_LEAN="$runner" exact_ignored coven-database --all-features -- \
+            download::tests::streams::composite_reference_differential
 
         step "Rust / Lean reset differential"
-        COVEN_MERGE_LEAN="$runner" cargo test -p coven-database --all-features reset_differential_histories -- --ignored
-        COVEN_MERGE_LEAN="$runner" cargo test -p coven-database --all-features reset_differential_agreement -- --ignored
+        COVEN_MERGE_LEAN="$runner" exact_ignored coven-database --all-features -- \
+            write_boundary::tests::differential::reset_differential_histories \
+            write_boundary::tests::differential::reset_differential_agreement
 
         step "Rust / Lean schema-boundary differential"
-        COVEN_MERGE_LEAN="$runner" cargo test -p coven-database --all-features schema_differential_histories -- --ignored
+        COVEN_MERGE_LEAN="$runner" exact_ignored coven-database --all-features -- \
+            snapshot_writes::tests::differential::schema_differential_histories
 
         step "Rust / Lean migration selection"
-        COVEN_MERGE_LEAN="$runner" cargo test -p coven-database --all-features migration_differential_histories -- --ignored
-        COVEN_MERGE_LEAN="$runner" cargo test -p coven-database --all-features migration_differential_agreement -- --ignored
+        COVEN_MERGE_LEAN="$runner" exact_ignored coven-database --all-features -- \
+            migration_state::tests::migration_differential_histories \
+            migration_state::tests::migration_differential_agreement
     fi
 
     if proof_selected merge || proof_selected queue || crate_selected coven-database; then
         runner=$(runner queue authoredRunner)
         step "Rust / Lean authored source evidence and data validity"
-        COVEN_AUTHORED_LEAN="$runner" cargo test -p coven-database --all-features authored_sources_differential -- --ignored
+        COVEN_AUTHORED_LEAN="$runner" exact_ignored coven-database --all-features -- \
+            write_sources::tests::authored_sources_differential
 
         runner=$(runner queue queueRunner)
         step "Rust / Lean queue change verdicts and row merge"
-        COVEN_QUEUE_LEAN="$runner" cargo test -p coven-database --all-features queue_reset_differential_histories -- --ignored
-        COVEN_QUEUE_LEAN="$runner" cargo test -p coven-database --all-features queue_conversion_differential_histories -- --ignored
-        COVEN_QUEUE_LEAN="$runner" cargo test -p coven-database --all-features queue_retirement_differential_histories -- --ignored
+        COVEN_QUEUE_LEAN="$runner" exact_ignored coven-database --all-features -- \
+            interpretation::tests::queue_reset_differential_histories \
+            interpretation::tests::queue_conversion_differential_histories \
+            interpretation::tests::retire::queue_retirement_differential_histories
     fi
 
     if proof_selected queue || crate_selected coven-sync; then
         runner=$(runner queue queueRunner)
         step "Rust / Lean upload queue and raise publication"
-        COVEN_QUEUE_LEAN="$runner" cargo test -p coven-sync --all-features queue_raise_differential_histories -- --ignored
+        COVEN_QUEUE_LEAN="$runner" exact_ignored coven-sync --all-features -- \
+            device_log_sync::tests::schema::raise_publication::differential::queue_raise_differential_histories
     fi
 
     if proof_selected storelog || crate_selected coven-sync; then
         runner=$(runner storelog storelogRunner)
         step "Rust / Lean CurrentReplay agreement"
-        local storelog_tests test
-        storelog_tests=$(cargo test -p coven-sync --all-features lean_differential -- --list)
-        for test in \
+        COVEN_STORELOG_LEAN="$runner" exact_ignored coven-sync --all-features -- \
             tests::lean_differential_generated \
             tests::lean_differential_checked_examples \
             tests::lean_differential_circle_replay \
@@ -310,110 +336,69 @@ proofs() {
             key_introductions::tests::lean_differential_introductions \
             key_introductions::tests::lean_differential_accepted_copies \
             key_introductions::tests::lean_differential_first_attempts \
-            finality::tests::lean_differential_finality_horizon; do
-            if ! printf '%s\n' "$storelog_tests" | grep -qxF "$test: test"; then
-                echo "the Rust test binary is missing $test" >&2
-                exit 1
-            fi
-            COVEN_STORELOG_LEAN="$runner" cargo test -p coven-sync --all-features "$test" -- --ignored --exact
-        done
+            finality::tests::lean_differential_finality_horizon
     fi
 
     if proof_selected storelog-data || crate_selected coven-sync; then
         runner=$(runner storelog-data accessRunner)
         step "Rust / Lean serialized provider access and pending visibility"
-        local access_tests test
-        access_tests=$(cargo test -p coven-sync --all-features lean_differential_access -- --list)
-        for test in \
+        COVEN_ACCESS_LEAN="$runner" exact_ignored coven-sync --all-features -- \
             store_log_sync::tests::operations::access::lean_differential_access_phases \
             store_log_sync::tests::operations::pending_records::lean_differential_access_pending \
-            store_log_sync::tests::operations::pending_records::lean_differential_access_rejects_invalid_inputs; do
-            if ! printf '%s\n' "$access_tests" | grep -qxF "$test: test"; then
-                echo "the Rust test binary is missing $test" >&2
-                exit 1
-            fi
-            COVEN_ACCESS_LEAN="$runner" cargo test -p coven-sync --all-features "$test" -- --ignored --exact
-        done
+            store_log_sync::tests::operations::pending_records::lean_differential_access_rejects_invalid_inputs
     fi
 
     if proof_selected storelog-data || crate_selected coven-sync; then
         runner=$(runner storelog-data rotationRunner)
         step "Rust / Lean durable rotation and first-send phases"
-        COVEN_ROTATION_LEAN="$runner" cargo test -p coven-sync --all-features lean_differential_rotation_phases -- --ignored
+        COVEN_ROTATION_LEAN="$runner" exact_ignored coven-sync --all-features -- \
+            store_log_sync::key_rotation::tests::lean_differential_rotation_phases
     fi
 
     if proof_selected storelog-data || crate_selected coven-sync; then
         runner=$(runner storelog-data memberKeyRunner)
         step "Rust / Lean stable member ids, entry signers and copy credentials"
-        COVEN_MEMBER_KEY_LEAN="$runner" cargo test -p coven-sync --all-features lean_differential_member_keys -- --ignored
+        COVEN_MEMBER_KEY_LEAN="$runner" exact_ignored coven-sync --all-features -- \
+            entry_signature::tests::lean_differential_member_keys
     fi
 
     if proof_selected storelog-data || crate_selected coven-sync; then
         runner=$(runner storelog-data accessKeyRunner)
         step "Rust / Lean S3 key deletion journal"
-        COVEN_ACCESS_KEY_LEAN="$runner" cargo test -p coven-sync --all-features lean_differential_access_keys -- --ignored
+        COVEN_ACCESS_KEY_LEAN="$runner" exact_ignored coven-sync --all-features -- \
+            access_keys::tests::lean_differential_access_keys
     fi
 
     if proof_selected storelog-data || crate_selected coven-sync || crate_selected coven-database; then
         runner=$(runner storelog-data storelogDataRunner)
         step "Rust / Lean replay-selected boundaries"
-        if ! cargo test -p coven-sync --all-features data_differential_boundaries -- --list |
-            grep '::data_differential_boundaries: test$' > /dev/null; then
-            echo "the Rust test binary is missing the boundary differential" >&2
-            exit 1
-        fi
-        COVEN_STORELOG_DATA_LEAN="$runner" cargo test -p coven-sync --all-features data_differential_boundaries -- --ignored
-        if ! cargo test -p coven-database --all-features data_differential_entry_effects -- --list |
-            grep '::data_differential_entry_effects: test$' > /dev/null; then
-            echo "the Rust test binary is missing the entry effects differential" >&2
-            exit 1
-        fi
-        COVEN_STORELOG_DATA_LEAN="$runner" cargo test -p coven-database --all-features data_differential_entry_effects -- --ignored
+        COVEN_STORELOG_DATA_LEAN="$runner" exact_ignored coven-sync --all-features -- \
+            store_log_sync::tests::snapshots::boundaries::data_differential_boundaries
+        COVEN_STORELOG_DATA_LEAN="$runner" exact_ignored coven-database --all-features -- \
+            entry_inputs::tests::data_differential_entry_effects \
+            entry_inputs::tests::data_differential_entry_effects_circles
         step "Rust / Lean circles readable again"
-        if ! cargo test -p coven-sync --all-features data_differential_circle_returns -- --list |
-            grep '::data_differential_circle_returns: test$' > /dev/null; then
-            echo "the Rust test binary is missing the circle return differential" >&2
-            exit 1
-        fi
-        COVEN_STORELOG_DATA_LEAN="$runner" cargo test -p coven-sync --all-features data_differential_circle_returns -- --ignored
+        COVEN_STORELOG_DATA_LEAN="$runner" exact_ignored coven-sync --all-features -- \
+            store_log_sync::snapshots::reload::tests::data_differential_circle_returns
         step "Rust / Lean first unmet condition per subject"
-        if ! cargo test -p coven-sync --all-features data_differential_pending_records -- --list |
-            grep '::data_differential_pending_records: test$' > /dev/null; then
-            echo "the Rust test binary is missing the pending records differential" >&2
-            exit 1
-        fi
-        COVEN_STORELOG_DATA_LEAN="$runner" cargo test -p coven-sync --all-features data_differential_pending_records -- --ignored
+        COVEN_STORELOG_DATA_LEAN="$runner" exact_ignored coven-sync --all-features -- \
+            pending::tests::data_differential_pending_records
         step "Rust / Lean reload choice and wait records"
-        if ! cargo test -p coven-sync --all-features data_differential_reload_choice -- --list |
-            grep '::data_differential_reload_choice: test$' > /dev/null; then
-            echo "the Rust test binary is missing the reload choice differential" >&2
-            exit 1
-        fi
-        COVEN_STORELOG_DATA_LEAN="$runner" cargo test -p coven-sync --all-features data_differential_reload_choice -- --ignored
+        COVEN_STORELOG_DATA_LEAN="$runner" exact_ignored coven-sync --all-features -- \
+            store_log_sync::snapshots::reload::tests::data_differential_reload_choice
     fi
 
     if proof_selected io || crate_selected coven-sync; then
         runner=$(runner io finalityRunner)
         step "Rust / Lean finality observation endpoint"
-        COVEN_IO_LEAN="$runner" cargo test -p coven-sync --all-features io_differential_finality -- --ignored
+        COVEN_IO_LEAN="$runner" exact_ignored coven-sync --all-features -- \
+            finality::tests::io_differential_finality_observation \
+            finality::tests::io_differential_finality_requires_the_old_prefix_even_when_the_window_is_quiet \
+            store_log_sync::store_log_finality::tests::listing::io_differential_finality_discovery_receipts
         runner=$(runner io ioRunner)
         step "Rust / Lean numbered discovery, snapshot selection and recent returns"
-        io_tests=$(cargo test -p coven-sync --all-features -- --list --ignored)
-        for test in io_differential_discovery io_differential_snapshot_counts \
-            io_differential_catalog_current io_differential_needs_snapshots \
-            io_differential_recent_return io_differential_streaming_download_dispositions \
-            io_differential_positions io_differential_retained_ranges_and_refusal_eviction \
-            io_differential_send_gate io_differential_retired_drain \
-            io_differential_pass_phases io_differential_snapshot_writes \
-            io_differential_waiting io_differential_upload_worker \
-            io_differential_dropped_registration; do
-            if ! printf '%s\n' "$io_tests" | grep -q "::$test: test\$"; then
-                echo "the Rust test binary is missing $test" >&2
-                exit 1
-            fi
-        done
-        COVEN_IO_RUNNER="$runner" cargo test -p coven-sync --all-features -- --ignored \
-            --exact discovery::tests::io_differential_discovery \
+        COVEN_IO_RUNNER="$runner" exact_ignored coven-sync --all-features -- \
+            discovery::tests::io_differential_discovery \
             store_log_sync::tests::snapshots::signatures::io_differential_snapshot_counts \
             store_log_sync::tests::snapshots::signatures::io_differential_catalog_current \
             recent_return::tests::io_differential_needs_snapshots \
@@ -433,54 +418,58 @@ proofs() {
     if proof_selected merge || crate_selected coven-sync; then
         runner=$(runner merge receiveRunner)
         step "Rust / Lean send-gate publication bound"
-        COVEN_RECEIVE_LEAN="$runner" cargo test -p coven-sync --all-features mg_differential_send_gate_publication_bound -- --ignored
+        COVEN_RECEIVE_LEAN="$runner" exact_ignored coven-sync --all-features -- \
+            send_gate::tests::mg_differential_send_gate_publication_bound
     fi
 
     if proof_selected storage || crate_selected coven-database; then
         runner=$(runner storage clockRunner)
         step "Rust / Lean differential clock test"
-        COVEN_CLOCK_LEAN="$runner" cargo test -p coven-database --all-features lean_differential_clocks -- --ignored
+        COVEN_CLOCK_LEAN="$runner" exact_ignored coven-database --all-features -- \
+            write_encoding::tests::lean_differential_clocks
     fi
 
     if proof_selected storage || crate_selected coven-sync; then
         runner=$(runner storage identityRunner)
         step "Rust / Lean identity check and replacement read"
-        COVEN_IDENTITY_LEAN="$runner" cargo test -p coven-sync --all-features st_differential_identity -- --ignored
-        COVEN_IDENTITY_LEAN="$runner" cargo test -p coven-sync --all-features st_differential_replacement_read -- --ignored
-        COVEN_IDENTITY_LEAN="$runner" cargo test -p coven-sync --all-features st_differential_replacement_admission -- --ignored
-        COVEN_IDENTITY_LEAN="$runner" cargo test -p coven-sync --all-features st_differential_snapshot_sequence -- --ignored
+        COVEN_IDENTITY_LEAN="$runner" exact_ignored coven-sync --all-features -- \
+            identity::tests::st_differential_identity \
+            identity::tests::st_differential_replacement_read \
+            identity::tests::st_differential_replacement_admission \
+            store_log_sync::store_log_identity::tests::st_differential_snapshot_sequence
         runner=$(runner storage filesRunner)
         step "Rust / Lean file attachment, upload completion and status"
-        COVEN_FILES_LEAN="$runner" cargo test -p coven-sync --all-features st_differential_files -- --ignored
-        COVEN_FILES_LEAN="$runner" cargo test -p coven-sync --all-features st_differential_file_status -- --ignored
+        COVEN_FILES_LEAN="$runner" exact_ignored coven-sync --all-features -- \
+            files::tests::uploads::differential::st_differential_files \
+            files::tests::status::st_differential_file_status
     fi
 
     if proof_selected storage || crate_selected coven; then
         runner=$(runner storage identityRunner)
         step "Rust / Lean device reset boundary"
-        COVEN_IDENTITY_LEAN="$runner" cargo test -p coven --all-features st_differential_reset_boundary -- --ignored
+        COVEN_IDENTITY_LEAN="$runner" exact_ignored coven --all-features -- \
+            builder::bootstrap::reset::tests::st_differential_reset_boundary
     fi
 
     if proof_selected storage || crate_selected coven-storage; then
         runner=$(runner storage createRunner)
         step "Rust / Lean differential provider create-once tests"
-        COVEN_CREATE_LEAN="$runner" cargo test -p coven-storage --all-features lean_differential_s3_create -- --ignored
-        COVEN_CREATE_LEAN="$runner" cargo test -p coven-storage --all-features lean_differential_onedrive_create -- --ignored
+        COVEN_CREATE_LEAN="$runner" exact_ignored coven-storage --all-features -- \
+            providers::s3::tests::gcs::lean_differential_s3_create \
+            providers::onedrive::tests::upload_tests::lean_differential_onedrive_create
     fi
 
     if proof_selected merge || crate_selected coven-database; then
         runner=$(runner merge receiveRunner)
         step "Rust / Lean differential causal receive test"
-        if ! cargo test -p coven-database --all-features lean_differential_receive -- --list |
-            grep -x 'download::tests::lean_differential_receive: test' > /dev/null; then
-            echo "the Rust test binary is missing the causal receive differential" >&2
-            exit 1
-        fi
-        COVEN_RECEIVE_LEAN="$runner" cargo test -p coven-database --all-features lean_differential_receive -- --ignored
+        COVEN_RECEIVE_LEAN="$runner" exact_ignored coven-database --all-features -- \
+            download::tests::lean_differential_receive
         step "Rust / Lean retirement window"
-        COVEN_RECEIVE_LEAN="$runner" cargo test -p coven-database --all-features mg_differential_retirement_window -- --ignored
+        COVEN_RECEIVE_LEAN="$runner" exact_ignored coven-database --all-features -- \
+            write_landing::tests::mg_differential_retirement_window
         step "Rust / Lean data dependency"
-        COVEN_RECEIVE_LEAN="$runner" cargo test -p coven-merge mg_differential_data_dependency -- --ignored
+        COVEN_RECEIVE_LEAN="$runner" exact_ignored coven-merge -- \
+            dependency::tests::mg_differential_data_dependency
     fi
 }
 
