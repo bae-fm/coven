@@ -6608,8 +6608,7 @@ holds failures and rejected entries, without making either wait look completed.
   OS keychain      coven-crypto's custody
   current time     coven-foundation's clock
   new ids          coven-foundation's id source
-  files on disk    coven-foundation's file writes, and the file cache
-                   in coven-sync
+  files on disk    coven-foundation's files
   ```
 
 - Everything else reaches a capability through the object that owns it,
