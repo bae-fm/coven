@@ -118,7 +118,7 @@ async fn failed_minting_rolls_back_and_a_restart_needs_admin_access_again() {
 }
 
 #[tokio::test]
-async fn cancelling_before_a_key_exists_rolls_back_with_admin_access() {
+async fn cancelling_before_a_key_exists_needs_no_admin_access() {
     let storage = storage();
     let mut a = device(storage.clone(), 1, member(1), store(1)).await;
     a.create(key(1)).await;
@@ -130,13 +130,8 @@ async fn cancelling_before_a_key_exists_rolls_back_with_admin_access() {
     };
     a.restart(storage.clone()).await;
     begin(&mut a, Command::Cancel(work.id)).await;
-    assert!(matches!(
-        step(&mut a, id).await,
-        Ok(Progress::Waiting(PendingReason::AdminAccessRequired))
-    ));
-    a.sync.hold_admin_access(id, Arc::new(admin.clone()));
     finish(&mut a, id).await;
-    assert_eq!(admin.calls(), ["roll_back"]);
+    assert!(admin.calls().is_empty());
     assert!(access_keys(&a.db).await.is_empty());
     assert!(a.db.operations().await.unwrap().is_empty());
 }

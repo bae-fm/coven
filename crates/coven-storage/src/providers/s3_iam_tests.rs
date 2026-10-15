@@ -556,7 +556,7 @@ async fn aws_puts_an_inline_policy_on_a_tagged_user_at_the_iam_endpoint() {
 }
 
 #[tokio::test]
-async fn a_retry_replaces_keys_whose_secret_was_lost() {
+async fn minting_deletes_no_key_already_under_its_name() {
     for profile in [
         S3ProfileName::Aws,
         S3ProfileName::SeaweedFs,
@@ -575,17 +575,14 @@ async fn a_retry_replaces_keys_whose_secret_was_lost() {
             fake.state.lock().unwrap().users[&scope.key_name].keys.len(),
             1
         );
-        // The user already exists; the lost key is deleted before a new one.
+        // Each call's names are fresh (§4); reused, they still lose no key.
         let minted = admin.mint(&scope).await.unwrap();
-        let again = admin.mint(&scope).await.unwrap();
         let state = fake.state.lock().unwrap();
         let keys = &state.users[&scope.key_name].keys;
-        assert_eq!(keys.len(), 1);
-        assert_eq!(keys[0].0, again.credentials.access_key_id);
-        assert_ne!(
-            minted.credentials.access_key_id,
-            again.credentials.access_key_id
-        );
+        assert_eq!(keys.len(), 2);
+        assert!(keys
+            .iter()
+            .any(|key| key.0 == minted.credentials.access_key_id));
     }
 }
 
@@ -647,13 +644,8 @@ async fn ceph_and_versity_mint_inline_keys_at_their_iam_and_revoke_them() {
             let state = fake.state.lock().unwrap();
             assert_eq!(
                 state.actions,
-                [
-                    "CreateUser",
-                    "PutUserPolicy",
-                    "ListAccessKeys",
-                    "CreateAccessKey"
-                ]
-                .map(|action| (path.into(), action.into()))
+                ["CreateUser", "PutUserPolicy", "CreateAccessKey"]
+                    .map(|action| (path.into(), action.into()))
             );
             let user = &state.users[&scope.key_name];
             assert!(user.attached.is_empty() && state.policies.is_empty());

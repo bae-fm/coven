@@ -1,11 +1,13 @@
 //! Member S3 keys coven makes with admin access, one journaled step at a time
-//! (§4, §18). The journal fixes the principal's name before the first provider
-//! call; a failure that cannot finish rolls back what that name created and
-//! reports both causes. Admin access stays in memory with its operation.
+//! (§4, §18). Each mint call names its principal afresh and deletes nothing,
+//! so a second copy of the journal never takes a key this one made (KeyListing
+//! `clone_mint_spares_recorded_key`). A failure that cannot finish rolls back
+//! what the call's names created and reports both causes. Admin access stays
+//! in memory with its operation.
 
 use super::StoreLogSync;
 use crate::{operation_data::MintWork, *};
-use coven_storage::{AccessKeyAdmin, S3MemberKey};
+use coven_storage::{AccessKeyAdmin, MintScope, S3MemberKey};
 use std::sync::Arc;
 
 /// Where one mint step left its work.
@@ -41,9 +43,14 @@ impl StoreLogSync {
         work: &mut MintWork,
     ) -> Minting {
         let result = match &work.minted {
-            None => admin.mint(&work.scope).await.map(|key| {
-                work.minted = Some(key);
-            }),
+            None => {
+                let scope = &work.scope;
+                work.scope =
+                    MintScope::new(scope.store, &scope.member, scope.device, self.ids.new_id());
+                admin.mint(&work.scope).await.map(|key| {
+                    work.minted = Some(key);
+                })
+            }
             Some(key) if !work.checked => admin
                 .probe(&work.scope, &key.credentials)
                 .await

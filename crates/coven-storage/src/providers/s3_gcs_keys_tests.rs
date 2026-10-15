@@ -345,11 +345,11 @@ async fn a_service_account_hmac_key_reaches_only_its_managed_folder() {
     admin.probe(&scope, &minted.credentials).await.unwrap();
     let id = minted.credentials.access_key_id.clone();
     assert!(admin.key_exists(&id, &minted.principal).await.unwrap());
-    // A second mint replaces the key whose secret an earlier attempt lost.
+    // Minting deletes no key, even one whose secret was lost.
     state.lock().unwrap().lose_key_reply = true;
     assert!(admin.mint(&scope).await.is_err());
     let again = admin.mint(&scope).await.unwrap();
-    assert_eq!(state.lock().unwrap().hmac.len(), 1);
+    assert_eq!(state.lock().unwrap().hmac.len(), 3);
     admin
         .revoke(&again.credentials.access_key_id, &again.principal)
         .await

@@ -3,9 +3,7 @@
 //! embedded IAM with a managed policy attached to the user, because its
 //! PutUserPolicy drops conditions.
 //!
-//! Every step tolerates what an earlier attempt with the same deterministic
-//! user name already created. A user holds at most two keys and coven holds
-//! the secret of none an earlier attempt made, so minting deletes them first.
+//! Each mint call's user name is fresh (§4), so minting deletes nothing.
 use super::minting::{member_policy, AdminRequest, KeyMinter, Pending};
 use super::*;
 use crate::providers::s3_admin_query::{elements, send, QueryService};
@@ -415,8 +413,6 @@ async fn mint(
             IamPolicy::Managed { arn }
         }
     };
-    // An earlier attempt's key may exist with a secret this attempt never held.
-    iam.delete_keys(user).await?;
     let body = iam.call("CreateAccessKey", &[("UserName", user)]).await?;
     let id = elements(&body, "AccessKeyId")?.into_iter().next();
     let secret = elements(&body, "SecretAccessKey")?.into_iter().next();

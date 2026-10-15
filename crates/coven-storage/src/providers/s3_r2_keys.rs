@@ -197,10 +197,6 @@ async fn mint(context: &AdminRequest, scope: &MintScope) -> Result<S3MemberKey, 
         return Err(StorageFailure::InvalidConfiguration.with_source("expected S3"));
     };
     let cloudflare = Cloudflare { context, account };
-    // An earlier attempt's token exists with a value this attempt never held.
-    for id in cloudflare.named(&scope.label()).await? {
-        cloudflare.delete(&id).await?;
-    }
     let group = cloudflare.permission_group().await?;
     let resource = format!(
         "com.cloudflare.edge.r2.bucket.{}_{jurisdiction}_{bucket}",

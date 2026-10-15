@@ -54,9 +54,9 @@ pub(crate) struct EntryWork {
     pub(crate) entry: Option<Vec<u8>>,
 }
 
-/// A key coven makes with admin access (§4, §18). The scope, and with it the
-/// principal's name, is fixed before the first provider call; the minted key's
-/// secret joins the journal as an invite's does.
+/// A key coven makes with admin access (§4, §18). Each mint call draws the
+/// scope's names afresh before it reaches the provider; the minted key's
+/// secret joins the journal with them, as an invite's does.
 #[derive(Serialize, Deserialize)]
 pub(crate) struct MintWork {
     pub(crate) scope: coven_storage::MintScope,
@@ -80,15 +80,12 @@ impl MintWork {
 #[derive(Serialize, Deserialize)]
 pub(crate) struct ReplaceKeyWork {
     pub(crate) member: MemberId,
-    /// The attempt naming the principal and the delivery.
+    /// The attempt naming the delivery.
     pub(crate) attempt: uuid::Uuid,
     pub(crate) mint: MintWork,
     /// The sealed delivery's fixed bytes, retained for every retry.
     pub(crate) delivery: Option<Vec<u8>>,
     pub(crate) entry: Option<Vec<u8>>,
-    /// Discarded before any key was made: only rolling back what the attempt
-    /// may have made at the provider remains.
-    pub(crate) abandoned: bool,
 }
 
 /// How an invited person reaches storage, as the invite's journal keeps it.

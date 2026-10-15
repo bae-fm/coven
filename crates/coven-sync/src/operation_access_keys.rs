@@ -64,7 +64,6 @@ impl StoreLogSync {
             )),
             delivery: None,
             entry: None,
-            abandoned: false,
         });
         let operation = self
             .database
@@ -227,66 +226,37 @@ impl StoreLogSync {
         )))
     }
 
-    /// Discarding a replacement leaves nothing unrecorded at the provider
-    /// (§13, §18). A reserved entry is published by the generic discard and the
-    /// store log covers its key, so this returns `None`. A made key becomes
-    /// pending deletion as the row goes. An attempt with no key yet rolls back
-    /// what it may have made, with the admin access held; without it the row
-    /// waits for admin access with nothing left to do but that.
+    /// Discarding a replacement leaves no key it holds unrecorded (§13, §18).
+    /// A reserved entry is published by the generic discard and the store log
+    /// covers its key, so this returns `None`. A made key becomes pending
+    /// deletion as the row goes. With no key yet the row simply goes: each
+    /// failed mint call rolled back what its names created, and a lost call's
+    /// key is reclaimed once this device is retired.
     pub(super) async fn discard_replacement(
         &mut self,
         record: &OperationRecord,
     ) -> Result<Option<Begun>, SyncError> {
-        let mut data = Data::read(record)?;
-        let Data::ReplaceAccessKey(work) = &mut data else {
+        let Data::ReplaceAccessKey(work) = Data::read(record)? else {
             return Ok(None);
         };
         if work.entry.is_some() {
             return Ok(None);
         }
-        if let Some(key) = &work.mint.minted {
-            let made = MemberAccess::S3AccessKey {
-                access_key_id: key.credentials.access_key_id.clone(),
-                principal: key.principal.clone(),
-            };
-            let deletion =
-                crate::access_keys::deletion(&made, Some(work.member)).expect("an S3 key")?;
-            self.database
-                .finish_operation_with_access_keys::<PendingRecord>(record.id, vec![deletion])
-                .await?;
-            self.release_admin_access(record.id);
-            return Ok(Some(Begun::Value(Output::Unit)));
-        }
-        if self.admin_access(record.id).is_some() {
-            self.abandon_replacement(record, &data).await?;
-            return Ok(Some(Begun::Value(Output::Unit)));
-        }
-        work.abandoned = true;
-        let pending = self
-            .operation_condition(record, PendingReason::AdminAccessRequired)
-            .await?;
+        let deletions = match &work.mint.minted {
+            Some(key) => {
+                let made = MemberAccess::S3AccessKey {
+                    access_key_id: key.credentials.access_key_id.clone(),
+                    principal: key.principal.clone(),
+                };
+                vec![crate::access_keys::deletion(&made, Some(work.member)).expect("an S3 key")?]
+            }
+            None => Vec::new(),
+        };
         self.database
-            .advance_operation_pending(data.update(record, record.last_step)?, pending.clone())
+            .finish_operation_with_access_keys::<PendingRecord>(record.id, deletions)
             .await?;
-        Err(SyncError::Pending(Box::new(pending)))
-    }
-
-    /// Roll back what a discarded attempt may have made, then retire it.
-    pub(super) async fn abandon_replacement(
-        &mut self,
-        record: &OperationRecord,
-        data: &Data,
-    ) -> Result<Progress, SyncError> {
-        let Data::ReplaceAccessKey(work) = data else {
-            unreachable!()
-        };
-        let Some(admin) = self.admin_access(record.id) else {
-            return Ok(Progress::Waiting(PendingReason::AdminAccessRequired));
-        };
-        admin.roll_back(&work.mint.scope).await?;
-        self.database.finish_operation(record.id).await?;
         self.release_admin_access(record.id);
-        Ok(Progress::Finished(Output::Unit))
+        Ok(Some(Begun::Value(Output::Unit)))
     }
 
     /// The open deletion obligation for a key id, and the principal it names.

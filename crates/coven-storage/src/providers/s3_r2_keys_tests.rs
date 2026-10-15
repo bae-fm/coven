@@ -142,8 +142,8 @@ async fn a_token_reaches_the_stores_own_bucket_and_its_hash_is_the_secret() {
         let state = state.lock().unwrap();
         assert_eq!(
             state.tokens.len(),
-            1,
-            "the token whose value was lost is gone"
+            2,
+            "minting deletes no token, even one whose value was lost"
         );
         let (name, resource, group, value) = &state.tokens[&minted.credentials.access_key_id];
         assert_eq!(*name, scope.label());

@@ -31,25 +31,30 @@ fn copy_tree(from: &std::path::Path, to: &std::path::Path) {
 }
 
 /// Back up the whole closed store directory, as a device backup would, then
-/// reopen the original installation.
-async fn backup(device: &mut Device, storage: &Arc<MemoryStorage>) -> tempfile::TempDir {
+/// reopen the original installation with its app's tables.
+pub(crate) async fn backup(
+    device: &mut Device,
+    storage: &Arc<MemoryStorage>,
+    app: (Vec<SyncedTable>, Vec<coven_database::Migration>),
+) -> tempfile::TempDir {
     device.db.close().await.unwrap();
     let copy = tempfile::tempdir().unwrap();
     copy_tree(device._temporary.path(), copy.path());
-    device.reopen(storage.clone(), tables(), migrations()).await;
+    device.reopen(storage.clone(), app.0, app.1).await;
     copy
 }
 
 /// Open a backup as a second live copy holding the same device id and keys.
-async fn restored(
+pub(crate) async fn restored(
     original: &Device,
     backup: tempfile::TempDir,
     storage: &Arc<MemoryStorage>,
+    app: (Vec<SyncedTable>, Vec<coven_database::Migration>),
 ) -> Device {
     let directory = StoreLayout::new(backup.path().into()).store_dir(&original.directory.id());
     let db = DatabaseBuilder::new(directory.clone())
-        .synced_tables(tables())
-        .migrations(migrations())
+        .synced_tables(app.0)
+        .migrations(app.1)
         .clock(original.clock.clone())
         .open()
         .await
@@ -129,12 +134,12 @@ async fn a_restored_backup_behind_storage_resets_before_sending_its_queue() {
     let original = &mut devices[0];
     sql(&original.db, "INSERT INTO notes VALUES('first','t','b')").await;
     original.writes.upload_writes().await.unwrap();
-    let copy = backup(original, &storage).await;
+    let copy = backup(original, &storage, (tables(), migrations())).await;
     original.catch_up().await;
     sql(&original.db, "INSERT INTO notes VALUES('second','t','b')").await;
     sql(&original.db, "INSERT INTO notes VALUES('third','t','b')").await;
     assert_eq!(original.writes.upload_writes().await.unwrap().len(), 2);
-    let mut restored = restored(original, copy, &storage).await;
+    let mut restored = restored(original, copy, &storage, (tables(), migrations())).await;
     // An edit made only in the restored copy reserves write number 2, which
     // storage already holds; storage's write 3 is beyond every reservation.
     sql(&restored.db, "INSERT INTO notes VALUES('restored','t','b')").await;
@@ -166,9 +171,9 @@ async fn a_backup_that_storage_has_not_passed_continues_as_the_same_device() {
     let original = &mut devices[0];
     sql(&original.db, "INSERT INTO notes VALUES('queued','t','b')").await;
     // The queued write was backed up before any attempt; nothing newer is stored.
-    let copy = backup(original, &storage).await;
+    let copy = backup(original, &storage, (tables(), migrations())).await;
     original.db.close().await.unwrap();
-    let mut restored = restored(original, copy, &storage).await;
+    let mut restored = restored(original, copy, &storage, (tables(), migrations())).await;
     restored.sync.sync_store_log().await.unwrap();
     assert_eq!(restored.writes.upload_writes().await.unwrap().len(), 1);
     assert_eq!(restored.directory.device_reset().unwrap(), None);
@@ -179,8 +184,8 @@ async fn a_second_live_copy_that_loses_a_slot_stops_and_resets() {
     let storage = storage();
     let mut devices = group(storage.clone(), 1).await;
     let original = &mut devices[0];
-    let copy = backup(original, &storage).await;
-    let mut second = restored(original, copy, &storage).await;
+    let copy = backup(original, &storage, (tables(), migrations())).await;
+    let mut second = restored(original, copy, &storage, (tables(), migrations())).await;
     original.catch_up().await;
     second.catch_up().await;
     sql(&original.db, "INSERT INTO notes VALUES('one','t','b')").await;
@@ -322,13 +327,13 @@ async fn other_operations_never_hide_a_newer_own_snapshot() {
         let original = &mut devices[0];
         sql(&original.db, "INSERT INTO notes VALUES('first','t','b')").await;
         original.writes.upload_writes().await.unwrap();
-        let copy = backup(original, &storage).await;
+        let copy = backup(original, &storage, (tables(), migrations())).await;
         original.catch_up().await;
         let snapshot = original
             .write_snapshot(coven_merge::Audience::Store)
             .await
             .unwrap();
-        let mut restored = restored(original, copy, &storage).await;
+        let mut restored = restored(original, copy, &storage, (tables(), migrations())).await;
         let mut last = 0;
         for _ in 0..extra {
             let data = crate::operation_data::Data::Snapshots(crate::snapshot_data::SnapshotTask {

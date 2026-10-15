@@ -473,9 +473,9 @@ for the replacement rule without recorded ends.
 ## S3 key deliveries
 
 `KeyDelivery` models §13's S3 key replacement from the admin desktop's side:
-journal a fresh attempt id, make a key under that attempt's name (§4), seal
-it to the member, publish it at `<store>/access-keys/<member>/<attempt>` (D10),
-then record it in a set-access entry. On an occupied delivery path it follows
+journal a fresh attempt id, make a key (§4), seal it to the member, publish
+it at `<store>/access-keys/<member>/<attempt>` (D10), then record it in a
+set-access entry. On an occupied delivery path it follows
 §10: equal bytes count as delivered, different bytes reset this copy as a new
 device with an empty database. A database copy is a backup, the database a
 restore overwrites, or a second live clone. One counter supplies fresh
@@ -506,10 +506,9 @@ restore resends the stored bytes and records the key
 (`bound_sealing_continues`), as does a backup taken after sealing with today's
 sealing (`restored_after_seal_continues`). But in
 `restored_before_mint_orphans_key` the backup predates the key: the restored
-copy's mint deletes key 101 under the attempt's name and makes 103. The
-stored delivery holds the deleted key, so counting it would leave Ben unable
-to install the recorded one; the comparison is right to refuse it. The reset
-then leaves 103 unrecorded under either sealer.
+copy's mint makes 103 beside 101. The stored delivery holds 101, so counting
+it would record 103 while Ben can install only 101; the comparison is right
+to refuse it. The reset then leaves 103 unrecorded under either sealer.
 
 **T267: the reset keeps only owed deletions.** T203 had the reset also keep
 its made key pending deletion; with a second live copy of the database that
@@ -585,10 +584,13 @@ store-log replay, what a drain reads, provider listing lag (a key missing from
 one listing is found by a later one), and keys handed out of band in an invite
 code before an entry records them.
 
-**§4's retry deletes a recorded key (checked counterexample).**
-`same_name_mint_deletes_recorded_key`: a clone taken after the attempt was
-journaled and before its key was made mints under the same name after the
-original recorded 101, and deletes 101 as a key whose secret it does not hold.
+**T259: a mint deletes nothing (proved).** §4's retry used to delete keys
+under the attempt's name whose secret the journal did not hold, so a clone
+taken before the key was made deleted the key the original then recorded.
+Each mint call now names its principal afresh and deletes nothing:
+`run_keeps_provider` proves no step of a database removes a key at the
+provider, and `clone_mint_spares_recorded_key` checks that history. A key a
+lost mint call made is the listing's once its device is retired.
 
 ## Undecodable own key copies
 

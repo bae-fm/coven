@@ -266,10 +266,6 @@ impl<'a> Admin<'a> {
 async fn mint(context: &AdminRequest, scope: &MintScope) -> Result<S3MemberKey, StorageError> {
     let admin = Admin::new(context)?;
     admin.parent().await?;
-    // An earlier attempt's account exists with a secret this attempt never held.
-    for key in admin.named(&scope.name).await? {
-        admin.delete(&key).await?;
-    }
     let policy: Value = serde_json::from_str(&member_policy(&context.config, scope.store)?)
         .map_err(|error| StorageFailure::Protocol.with_source(error))?;
     let created = admin

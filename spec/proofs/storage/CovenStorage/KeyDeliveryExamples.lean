@@ -30,7 +30,7 @@ theorem restored_before_seal_orphans_key :
     Accounted restored ∧
     after.resets = [7] ∧
     after.copies 1 = some ⟨104, none⟩ ∧
-    after.provider = [⟨101, 100, 7⟩] ∧ after.recorded = [] ∧
+    after.provider = [⟨101, 7⟩] ∧ after.recorded = [] ∧
     ¬ Accounted after := by decide
 
 /-- The same restore with sealing bound to its inputs resends the stored bytes,
@@ -46,20 +46,18 @@ theorem restored_after_seal_continues :
       [.begin 0, .mint 0, .sealKey 0, .clone 0, .deliver 0, .drop 0, .deliver 1, .record 1]
     after.resets = [] ∧ after.recorded = [101] ∧ Accounted after := by decide
 
-/-- A backup taken before the key is made: the restored copy's mint deletes
-key 101 under the attempt's name (§4) and makes 103. The stored delivery holds
-the deleted key, so counting it would leave Ben unable to install the
-recorded one; the comparison must refuse it. The reset then leaves 103
-unrecorded, whatever the sealer. -/
+/-- A backup taken before the key is made: the restored copy's mint makes 103
+beside 101 (§4). The stored delivery holds 101, so counting it would record
+103 while Ben can install only 101; the comparison must refuse it. The reset
+then leaves 103 unrecorded, whatever the sealer. -/
 theorem restored_before_mint_orphans_key :
     let restored := run .bound desktop
       [.begin 0, .clone 0, .mint 0, .sealKey 0, .deliver 0, .drop 0, .mint 1, .sealKey 1]
     let after := deliver restored 1
     restored.storage 100 = some ⟨[101], 7⟩ ∧
-    restored.provider = [⟨103, 100, 7⟩] ∧
+    restored.provider = [⟨101, 7⟩, ⟨103, 7⟩] ∧
     restored.copies 1 = some ⟨7, some ⟨100, some 103, some [103], false⟩⟩ ∧
-    Accounted restored ∧
-    after.resets = [7] ∧ after.provider = [⟨103, 100, 7⟩] ∧ after.recorded = [] ∧
+    after.resets = [7] ∧ after.provider = [⟨101, 7⟩, ⟨103, 7⟩] ∧ after.recorded = [] ∧
     ¬ Accounted after := by decide
 
 end CovenStorage.KeyDelivery.Examples

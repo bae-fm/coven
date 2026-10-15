@@ -3181,12 +3181,12 @@ pub enum IamPolicy {
 /// for one operation (§4). Coven's minters implement it per catalogued profile.
 #[async_trait]
 pub trait AccessKeyAdmin: Send + Sync {
-    /// Create the principal and a key limited to the scope's store, tolerating
-    /// what an earlier attempt with this scope made.
+    /// Create the principal and a key limited to the scope's store, under
+    /// names fresh for this call; nothing is deleted first.
     async fn mint(&self, scope: &MintScope) -> Result<S3MemberKey, StorageError>;
     /// The member-side check before delivery (§4).
     async fn probe(&self, scope: &MintScope, key: &S3Credentials) -> Result<(), StorageError>;
-    /// Remove whatever an attempt with this scope made.
+    /// Remove whatever a failed call with this scope made.
     async fn roll_back(&self, scope: &MintScope) -> Result<(), StorageError>;
     /// Delete the key and the principal holding it; absence succeeds.
     async fn revoke(&self, access_key_id: &str, principal: &S3Principal) -> Result<(), StorageError>;
@@ -3240,9 +3240,9 @@ pub struct GuidedAccessKey {
     pub policy: String,
 }
 
-/// What a minted key reaches and who makes it; the journal fixes the names.
+/// What a minted key reaches and who makes it, named afresh for each mint call.
 /// `name` is the short principal name, `key_name` the name carrying the store,
-/// the minting device and the attempt (§4).
+/// the minting device and the call (§4).
 pub struct MintScope {
     pub store: StoreId,
     pub device: DeviceId,

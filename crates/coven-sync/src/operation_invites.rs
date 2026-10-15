@@ -407,11 +407,9 @@ impl StoreLogSync {
                     // A made key is pending deletion like any invite's key.
                     work.access = InviteGrant::S3Key(key.clone());
                 } else {
-                    // Nothing reached the member; remove whatever the attempt made.
-                    let Some(admin) = self.admin_access(record.id) else {
-                        return Ok(Progress::Waiting(PendingReason::AdminAccessRequired));
-                    };
-                    admin.roll_back(&mint.scope).await?;
+                    // No key was made: a failed mint call rolled back what its
+                    // names created, and a lost call's key is reclaimed once
+                    // this device is retired (§4, §13).
                     self.release_admin_access(record.id);
                     work.state = InviteState::Settled;
                 }

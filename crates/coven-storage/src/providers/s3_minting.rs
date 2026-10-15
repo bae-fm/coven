@@ -12,12 +12,12 @@ use url::Url;
 /// A minter's pending provider work, borrowing its context.
 pub(crate) type Pending<'a, T> = Pin<Box<dyn Future<Output = Result<T, StorageError>> + Send + 'a>>;
 
-/// One service's admin key operations. Each tolerates what an earlier attempt
-/// with the same scope already created or deleted.
+/// One service's admin key operations.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct KeyMinter {
     pub(super) name: &'static str,
-    /// Create the principal and a key whose secret this call returns.
+    /// Create the principal and a key whose secret this call returns, under
+    /// the scope's fresh names.
     pub(super) mint: for<'a> fn(&'a AdminRequest, &'a MintScope) -> Pending<'a, S3MemberKey>,
     /// Remove whatever an attempt with this scope created.
     pub(super) roll_back: for<'a> fn(&'a AdminRequest, &'a MintScope) -> Pending<'a, ()>,

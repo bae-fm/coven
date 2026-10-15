@@ -328,10 +328,6 @@ async fn mint(context: &AdminRequest, scope: &MintScope) -> Result<S3MemberKey, 
     )
     .await?;
     gcs.bind(&email, true).await?;
-    // An earlier attempt's key may exist with a secret this attempt never held.
-    for key in gcs.hmac_keys(&project, &email).await? {
-        gcs.delete_hmac(&project, &key).await?;
-    }
     let mut url = gcs.hmac_url(&project, None);
     url.query_pairs_mut()
         .append_pair("serviceAccountEmail", &email);

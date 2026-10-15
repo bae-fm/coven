@@ -42,10 +42,7 @@ impl StoreLogSync {
             // Only explicit confirmation or a verified admin deletion clears it.
             return Ok(Progress::Waiting(PendingReason::DeleteAccessKey(key)));
         }
-        if let Data::ReplaceAccessKey(work) = &data {
-            if work.abandoned {
-                return self.abandon_replacement(record, &data).await;
-            }
+        if matches!(data, Data::ReplaceAccessKey(_)) {
             if record.last_step < data.entry_step_number(0) {
                 return self.replace_key_prelude(record, data).await;
             }

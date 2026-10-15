@@ -1432,8 +1432,7 @@ the file's ranges under `F`.
     ` member <member or invite id>`, creates the store's managed
     folder `<prefix>/<store>/` if absent, and binds the account to it as
     `roles/storage.objectUser`, retrying once when the folder's policy changes
-    concurrently. HMAC keys an earlier attempt left are set inactive and
-    deleted; then `hmacKeys?serviceAccountEmail=` creates the key, whose
+    concurrently. Then `hmacKeys?serviceAccountEmail=` creates the key, whose
     access id is the member key id. The admin access is an OAuth access token
     with the `cloud-platform` scope. A new HMAC key can take up to 60 seconds
     to work, so the member-side check retries for 60 seconds.
@@ -1448,8 +1447,7 @@ the file's ranges under `F`.
     the `Workers R2 Storage Bucket Item Write` permission group, object reads
     and writes. The location's endpoint host names the account and its
     jurisdiction. The token id is the S3 key id and the hex SHA-256 of the
-    token value its secret. Tokens an earlier attempt named are deleted
-    first. The admin access is an API token allowed to write account tokens,
+    token value its secret. The admin access is an API token allowed to write account tokens,
     which can grant anything its owner holds. Revocation deletes the token;
     absence is read from the token itself. Because the key reaches its whole
     bucket, its member-side check requires the account's bucket listing to be
@@ -1462,8 +1460,7 @@ the file's ranges under `F`.
     account's access is its parent's intersected with its own policy.
     Deleting that parent would delete every member's key, so coven never
     deletes it. Each account takes the short name, and its description is the
-    key name followed by ` member <member or invite id>`. Accounts an earlier
-    attempt named are deleted first.
+    key name followed by ` member <member or invite id>`.
     Requests are signed with Signature Version 4 for `s3`. Revocation calls
     `delete-service-account`; absence is read with `info-service-account`.
     RustFS answers a delete of an absent account with HTTP 400
@@ -1479,17 +1476,17 @@ the file's ranges under `F`.
     or writes outside its store. It never adds a `Deny` on
     `StringNotLike` `s3:prefix`: a request carrying no prefix, such as a bucket
     check, matches the negated condition and would be denied.
-  - Making a key is one journaled operation (§18). Before the first provider
-    call the journal records a fresh attempt and the principal's names derived
-    from it, so every retry finds what an earlier attempt made: an existing
-    user or policy is kept, and keys whose secret no attempt holds are deleted
-    before a new one is created (an IAM user holds at most two). The minted
-    key's secret then joins the journal, as an invite's key does. The short
-    name is `coven-` and 24 hex digits of the attempt, for GCS service
-    accounts (6 to 30 characters) and RustFS service accounts. The key name
-    carries the store and the device making the key, for §13's reclaim:
-    `coven-<store>-<device>-<attempt>`, with the first 24 hex digits of the
-    store id, the device id's 16 and the attempt's first 16, 64 characters,
+  - Making a key is one journaled operation (§18). Each mint call names its
+    principal from a fresh random id and deletes nothing, so a second live
+    copy of the database never takes a key this one made
+    ([`run_keeps_provider`](proofs/storage/CovenStorage/KeyDelivery.lean),
+    [`clone_mint_spares_recorded_key`](proofs/storage/CovenStorage/KeyListing.lean)).
+    The key's secret joins the journal with those names, as an invite's key
+    does. The short name is `coven-` and 24 hex digits of the call's id, for
+    GCS service accounts (6 to 30 characters) and RustFS service accounts.
+    The key name carries the store and the device making the key, for §13's
+    reclaim: `coven-<store>-<device>-<call>`, with the first 24 hex digits of
+    the store id, the device id's 16 and the call's first 16, 64 characters,
     an IAM user name's limit.
   - A store's listing returns every key held under a key name for that store,
     with the device the name carries: on IAM services, `ListUsers` (under
@@ -1515,7 +1512,7 @@ the file's ranges under `F`.
     whose gateways read identity changes asynchronously. The 60-second window
     is a retry limit, not a verified provider propagation guarantee; a key
     still refused at the limit fails the operation.
-  - A failed mint or check rolls back what the attempt's name created — keys,
+  - A failed mint or check rolls back what the call's names created — keys,
     policy and user — and reports the failure, with the rollback's own failure
     if that fails too. Admin access is held only by the operation that needs
     it and released once its key is checked or its step fails; after a restart
@@ -4217,11 +4214,10 @@ Carol's tablet:
   - Discarding a replacement leaves no key unrecorded. Once its entry is
     reserved, the discard publishes it and the store log covers the key. Before
     that, a made key becomes pending `DeleteAccessKey` in the transaction that
-    removes the operation; with no key yet, what the attempt may have made is
-    rolled back with admin access, and without it the operation waits for
-    admin access with only that rollback left.
+    removes the operation; with no key yet, the operation just goes.
   - A key coven made can stay unrecorded with nothing to delete it: its
-    database lost or reset (§10) before an entry records it. Every
+    database lost or reset (§10) before an entry records it, or its mint
+    call's reply lost. Every
     made key's provider-side name carries its store and minting device (§4).
     An admin's `reclaim_access_keys` (E9), with admin access, lists the
     store's keys and, in one transaction, makes pending `DeleteAccessKey` each
@@ -6184,11 +6180,10 @@ Carol's tablet:
   There is no preceding write or wait for row uploads.
 - Inviting a person ([§12.2](#122-adding-a-person)):
   1. share the storage with their account, or record the S3 key the admin
-     made in the console, or make the key with admin access (§4: the attempt
-     and principal name are recorded first, then the key, then its
-     member-side check), and record the invite's chosen stable id. A failed
-     mint rolls back; cancelling before the key exists rolls back with admin
-     access;
+     made in the console, or make the key with admin access (§4: the key and
+     its fresh principal names, then its member-side check), and record the
+     invite's chosen stable id. A failed mint rolls back; cancelling before
+     the key exists needs no admin access;
   2. once an admin approves the exact id and new public pair, confirm the
      initial and held historical audience-key copies to that credential,
      then publish Add member or Replace member keys as the invite specifies;

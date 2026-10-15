@@ -198,6 +198,7 @@ import CovenStorage
 
 #print axioms CovenStorage.KeyDelivery.run_inv
 #print axioms CovenStorage.KeyDelivery.start_inv
+#print axioms CovenStorage.KeyDelivery.run_keeps_provider
 #print axioms CovenStorage.KeyDelivery.occupant_is_own_copy
 #print axioms CovenStorage.KeyDelivery.reset_is_own_copy
 #print axioms CovenStorage.KeyDelivery.settled_step
@@ -293,4 +294,4 @@ import CovenStorage
 #print axioms CovenStorage.KeyDelivery.Listing.pending_never_recorded
 #print axioms CovenStorage.KeyDelivery.Listing.reset_spares_recorded_key
 #print axioms CovenStorage.KeyDelivery.Listing.reset_key_reclaimed_once_retired
-#print axioms CovenStorage.KeyDelivery.Listing.same_name_mint_deletes_recorded_key
+#print axioms CovenStorage.KeyDelivery.Listing.clone_mint_spares_recorded_key

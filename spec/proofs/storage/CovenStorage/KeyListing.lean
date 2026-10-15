@@ -57,7 +57,7 @@ copy journals 101 and nothing records it. Carol's catch-up lists it and
 keeps it pending deletion. -/
 theorem lost_database_key_found_by_listing :
     let lost := run .random (start [7, 9] 100) [.begin 0, .mint 0, .drop 0]
-    lost.provider = [⟨101, 100, 7⟩] ∧ ¬ Accounted lost ∧
+    lost.provider = [⟨101, 7⟩] ∧ ¬ Accounted lost ∧
     (catchUp lost 1).pending 1 = [101] ∧ Accounted (catchUp lost 1) := by
   decide
 
@@ -71,7 +71,7 @@ entry records until the person joins, is deleted the same way. -/
 theorem catch_up_deletes_in_flight_key :
     let delivered := run .random (start [7, 9] 100) [.begin 0, .mint 0, .sealKey 0, .deliver 0]
     let after := deletePending (record (catchUp delivered 1) 0) 1
-    delivered.provider = [⟨101, 100, 7⟩] ∧
+    delivered.provider = [⟨101, 7⟩] ∧
     (catchUp delivered 1).pending 1 = [101] ∧
     after.recorded = [101] ∧ after.provider = [] := by
   decide
@@ -251,8 +251,8 @@ theorem step_provider (sealer : Sealer) (w : World) (st : Step) (p : ProviderKey
     simp only [step] at hp ⊢; revert hp; unfold mint; split
     · rename_i d a sd v hc
       intro hp
-      simp only [List.mem_append, List.mem_filter, List.mem_singleton] at hp
-      rcases hp with ⟨hp, -⟩ | rfl
+      simp only [List.mem_append, List.mem_singleton] at hp
+      rcases hp with hp | rfl
       · exact .inl hp
       · exact .inr ⟨i, _, hc, rfl, rfl, rfl, rfl⟩
     · intro hp; exact .inl hp
@@ -770,7 +770,7 @@ theorem device_rule_spares_in_flight_key :
     let t := srun .random (sstart [7, 9] 100)
       [.base (.begin 0), .base (.mint 0), .base (.sealKey 0), .base (.deliver 0), .reclaim 1,
         .base (.record 0), .delete 1]
-    t.w.provider = [⟨101, 100, 7⟩] ∧ t.w.recorded = [101] ∧ t.w.pending 1 = [] ∧
+    t.w.provider = [⟨101, 7⟩] ∧ t.w.recorded = [101] ∧ t.w.pending 1 = [] ∧
     t.reclaimed = [] := by
   decide
 
@@ -796,7 +796,7 @@ theorem reset_spares_recorded_key :
       [.base (.begin 0), .base (.mint 0), .base (.clone 0), .base (.sealKey 0),
         .base (.deliver 0), .base (.sealKey 2), .base (.deliver 2), .base (.record 0),
         .retire 7, .stop 0, .reclaim 1, .delete 1, .delete 2]
-    t.w.resets = [7, 7] ∧ t.w.recorded = [101] ∧ t.w.provider = [⟨101, 100, 7⟩] := by
+    t.w.resets = [7, 7] ∧ t.w.recorded = [101] ∧ t.w.provider = [⟨101, 7⟩] := by
   decide
 
 /-- The key a reset leaves (KeyDeliveryExamples `restored_before_seal_orphans_key`)
@@ -808,19 +808,18 @@ theorem reset_key_reclaimed_once_retired :
     let reset := srun .random (sstart [7, 9] 100)
       [.base (.begin 0), .base (.mint 0), .base (.clone 0), .base (.sealKey 0),
         .base (.deliver 0), .base (.drop 0), .base (.sealKey 2), .base (.deliver 2)]
-    reset.w.resets = [7] ∧ reset.w.provider = [⟨101, 100, 7⟩] ∧ reset.w.recorded = [] ∧
+    reset.w.resets = [7] ∧ reset.w.provider = [⟨101, 7⟩] ∧ reset.w.recorded = [] ∧
     (srun .random reset [.retire 7, .reclaim 1, .delete 1]).w.provider = [] := by
   decide
 
-/-- §4's retry rule deletes a recorded key under the same two live copies
-(checked counterexample). The clone was taken after the attempt was
-journaled and before its key was made; the original makes, delivers and
-records 101; the clone's mint then deletes the keys under the attempt's name
-whose secret it does not hold, which is 101, and makes 103. -/
-theorem same_name_mint_deletes_recorded_key :
+/-- T259: a clone's mint keeps the original's recorded key. The clone was
+taken after the attempt was journaled and before its key was made; the
+original makes, delivers and records 101; the clone's mint names its
+principal afresh and makes 103 beside it. -/
+theorem clone_mint_spares_recorded_key :
     let after := run .random (start [7] 100)
       [.begin 0, .clone 0, .mint 0, .sealKey 0, .deliver 0, .record 0, .mint 1]
-    after.recorded = [101] ∧ after.provider = [⟨103, 100, 7⟩] := by
+    after.recorded = [101] ∧ after.provider = [⟨101, 7⟩, ⟨103, 7⟩] := by
   decide
 
 end CovenStorage.KeyDelivery.Listing

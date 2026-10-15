@@ -43,8 +43,9 @@ impl fmt::Debug for AdminCredential {
     }
 }
 
-/// What a minted key may reach, and the principal names its journal fixed
-/// before the first provider call (§4, §18).
+/// What a minted key may reach, and the principal names of one mint call.
+/// Each call draws fresh names, so two copies of a database never share a
+/// principal and minting deletes nothing (§4).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MintScope {
     /// The store whose prefix the key reaches.
@@ -53,10 +54,9 @@ pub struct MintScope {
     /// entry records is reclaimed only once that device is retired (§13).
     pub device: DeviceId,
     /// The principal's short name, for services whose names are short (GCS
-    /// service accounts, RustFS service accounts); a retry with the same
-    /// scope finds what an earlier attempt created.
+    /// service accounts, RustFS service accounts).
     pub name: String,
-    /// The name carrying the store, the minting device and the attempt, which
+    /// The name carrying the store, the minting device and the call, which
     /// a store's key listing reads back (`named_device`): an IAM user's name,
     /// and the first word of an R2 token's name or a GCS or RustFS
     /// description.
@@ -69,24 +69,24 @@ pub struct MintScope {
 const STORE_DIGITS: usize = 24;
 
 impl MintScope {
-    /// Name the principal from a journal attempt id. The short name is
-    /// `coven-` and 24 hex digits, within every service's limit (GCS service
-    /// accounts take 6 to 30 lowercase letters, digits and hyphens, starting
-    /// with a letter). The key name is `coven-<store>-<device>-<attempt>`: 24
-    /// hex digits of the store id, the device's 16 and 16 of the attempt's,
+    /// Name the principal from a fresh id drawn for one mint call. The short
+    /// name is `coven-` and 24 hex digits, within every service's limit (GCS
+    /// service accounts take 6 to 30 lowercase letters, digits and hyphens,
+    /// starting with a letter). The key name is `coven-<store>-<device>-<call>`:
+    /// 24 hex digits of the store id, the device's 16 and 16 of the call's,
     /// 64 characters, an IAM user name's limit.
-    pub fn new(store: StoreId, member: &str, device: DeviceId, attempt: uuid::Uuid) -> Self {
-        let attempt = attempt.simple().to_string();
+    pub fn new(store: StoreId, member: &str, device: DeviceId, call: uuid::Uuid) -> Self {
+        let call = call.simple().to_string();
         let store_digits = store.0.simple().to_string();
         Self {
             store,
             device,
-            name: format!("coven-{}", &attempt[..24]),
+            name: format!("coven-{}", &call[..24]),
             key_name: format!(
                 "coven-{}-{:016x}-{}",
                 &store_digits[..STORE_DIGITS],
                 device.0,
-                &attempt[..16]
+                &call[..16]
             ),
             member: member.to_owned(),
         }
@@ -161,9 +161,8 @@ impl fmt::Debug for S3MemberKey {
 /// both together clear the key's pending deletion (§13).
 #[async_trait]
 pub trait AccessKeyAdmin: Send + Sync {
-    /// Create the principal and a key limited to the scope's store. Each step
-    /// tolerates what an earlier attempt with this scope created; a key whose
-    /// secret that attempt lost is replaced.
+    /// Create the principal and a key limited to the scope's store, under
+    /// names no earlier call used (§4). Nothing is deleted first.
     async fn mint(&self, scope: &MintScope) -> Result<S3MemberKey, StorageError>;
     /// Check the key from the member's side before it is delivered: a write,
     /// read, listing and deletion under the store's reserved check prefix,

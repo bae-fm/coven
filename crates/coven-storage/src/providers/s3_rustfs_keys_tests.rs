@@ -279,8 +279,8 @@ async fn service_accounts_share_one_parent_and_reach_only_the_store() {
         let state = state.lock().unwrap();
         assert_eq!(
             state.accounts.len(),
-            1,
-            "the account with a lost secret is gone"
+            2,
+            "minting deletes no account, even one whose secret was lost"
         );
         assert_eq!(state.users["coven"].1.as_deref(), Some("readwrite"));
         assert_ne!(state.users["coven"].0, "", "the parent's secret is random");

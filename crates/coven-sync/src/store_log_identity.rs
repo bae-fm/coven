@@ -148,4 +148,4 @@ impl StoreLogSync {
 
 #[cfg(test)]
 #[path = "store_log_identity_tests.rs"]
-mod tests;
+pub(crate) mod tests;

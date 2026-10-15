@@ -33,11 +33,10 @@ structure Stored where
   writer : Nat
   deriving DecidableEq, Repr
 
-/-- A live key at the provider, the attempt whose principal name made it (§4),
-and the minting device its provider-side name carries (T237). -/
+/-- A live key at the provider and the minting device its provider-side name
+carries (T237). -/
 structure ProviderKey where
   id : Nat
-  attempt : Nat
   device : Nat
   deriving DecidableEq, Repr
 
@@ -80,14 +79,14 @@ def begin (w : World) (i : Nat) : World :=
              next := w.next + 1 }
   | _ => w
 
-/-- §4: keys under the attempt's name whose secret the journal does not hold
-are deleted before a new key is made; the new key's secret joins the journal.
-The key's provider-side name carries the minting device (T237). -/
+/-- §4: each mint call names its principal afresh and deletes nothing (T259);
+the new key's secret joins the journal. The key's provider-side name carries
+the minting device (T237). -/
 def mint (w : World) (i : Nat) : World :=
   match w.copies i with
   | some ⟨d, some ⟨a, none, s, v⟩⟩ =>
     { w with copies := fun k => if k = i then some ⟨d, some ⟨a, some w.next, s, v⟩⟩ else w.copies k
-             provider := w.provider.filter (fun p => p.attempt != a) ++ [⟨w.next, a, d⟩]
+             provider := w.provider ++ [⟨w.next, d⟩]
              next := w.next + 1 }
   | _ => w
 
@@ -404,6 +403,35 @@ theorem run_inv {w : World} (h : Inv w) (sealer : Sealer) (steps : List Step) :
   | nil => exact h
   | cons s ss ih => exact ih (step_inv h sealer s)
 
+/-- No step of a database deletes a key at the provider: a mint call names its
+principal afresh and deletes nothing (§4, T259), so a copy's mint cannot take
+a key another copy of its database made and recorded. -/
+theorem step_keeps_provider (sealer : Sealer) (w : World) (s : Step) :
+    ∀ p ∈ w.provider, p ∈ (step sealer w s).provider := by
+  intro p hp
+  cases s with
+  | mint i =>
+    simp only [step]; unfold mint; split
+    · exact List.mem_append_left _ hp
+    · exact hp
+  | begin i => simp only [step]; unfold begin; split <;> exact hp
+  | sealKey i => simp only [step]; unfold sealKey; split <;> exact hp
+  | deliver i =>
+    simp only [step]; unfold deliver; split
+    · split
+      · exact hp
+      · split <;> exact hp
+    · exact hp
+  | record i => simp only [step]; unfold record; split <;> exact hp
+  | clone i => simp only [step]; unfold clone; split <;> exact hp
+  | drop i => exact hp
+
+theorem run_keeps_provider (sealer : Sealer) (w : World) (steps : List Step) :
+    ∀ p ∈ w.provider, p ∈ (run sealer w steps).provider := by
+  induction steps generalizing w with
+  | nil => intro p hp; exact hp
+  | cons s ss ih => intro p hp; exact ih _ p (step_keeps_provider sealer w s p hp)
+
 theorem start_inv (devices : List Nat) (next : Nat) : Inv (start devices next) := by
   refine ⟨?_, ?_, ?_, ?_, ?_⟩
   · intro k hk; simp [start] at hk ⊢; omega
@@ -536,8 +564,8 @@ theorem settled_step {w : World} (h : Settled w) (sealer : Sealer) (s : Step)
         · exact h.stored k c j o hk hj ho
       · intro p hp
         have hi := slot_bound h.toInv hc
-        simp only [List.mem_append, List.mem_filter, List.mem_singleton] at hp
-        rcases hp with ⟨hp, -⟩ | rfl
+        simp only [List.mem_append, List.mem_singleton] at hp
+        rcases hp with hp | rfl
         · rcases h.accounted p hp with r | ⟨k, hk', held⟩ | pend
           · exact .inl r
           · refine .inr (.inl ⟨k, hk', ?_⟩)
