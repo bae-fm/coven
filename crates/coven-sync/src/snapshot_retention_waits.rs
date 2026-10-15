@@ -189,3 +189,16 @@ impl Facts {
             .map(|(device, _)| crate::Prerequisite::Positions(*device))
     }
 }
+
+/// io `RetentionDeadline.refreshDue`: a write whose dependencies are final
+/// and whose readers posted past it, or which storage held thirty days, needs
+/// a fresh snapshot of each readable part audience whose current newest
+/// counting snapshot (`current`, none without one) does not cover it (§15).
+pub(crate) fn refresh_due(
+    facts: &Facts,
+    readable: bool,
+    current: Option<&WritePositions>,
+    write: WriteId,
+) -> bool {
+    readable && facts.first_unmet().is_none() && !current.is_some_and(|p| p.covers(write))
+}

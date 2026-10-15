@@ -129,10 +129,18 @@ impl StoreLogSync {
     /// unreferenced uploaded files under §§15 and 16.5. Retention is derived
     /// from the committed facts each time and has no operation row: a failed
     /// deletion keeps its object and its `Retention { path }` record (§18.1).
-    /// No timer is installed.
+    /// It asks for coverage a due write lacks (§15). No timer is installed.
     pub async fn run_retention(&mut self) -> Result<(), SyncError> {
         let _reads = self.reads.enter();
-        self.retain_snapshot_objects().await
+        let retained = self.retain_snapshot_objects().await;
+        // Coverage it asked for is prepared on this pass's completed
+        // catch-up, so it costs none of its own; without one it waits for
+        // the next (§15, SP step 8).
+        let driven = match self.reads.write_catch_up() {
+            Some(_) => self.resume_snapshots().await.map(|_| ()),
+            None => Ok(()),
+        };
+        retained.and(driven)
     }
 
     /// Write and publish a requested audience snapshot regardless of growth,
@@ -253,7 +261,9 @@ impl StoreLogSync {
                 if matches!(
                     job,
                     SnapshotJob::Write {
-                        trigger: SnapshotTrigger::Growth | SnapshotTrigger::Requested,
+                        trigger: SnapshotTrigger::Growth
+                            | SnapshotTrigger::Requested
+                            | SnapshotTrigger::Coverage { .. },
                         ..
                     }
                 ) && self.pending_reload().await?.is_some()

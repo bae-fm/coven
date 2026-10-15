@@ -484,7 +484,12 @@ The Rust comparison `io_differential_deletable` runs coven's deletion
 decision for one covered or uncovered write against `Deletable`: finality,
 each active reader's posted position, and thirty storage days counting at
 equality. Mature historical coverage (`MatureCoverage`) is not yet in that
-decision.
+decision. `io_differential_refresh_due` compares coven's request for a
+fresh snapshot with `RetentionDeadline.refreshDue` on generated catalogs,
+including late landings, a newer snapshot that leaves the write out and an
+audience with none; there the historical-witness-only trigger
+`witnessedRefreshDue` never asks (`no_first_witness`). The deadline bounds
+of `AudienceRetention` are not compared.
 
 The required lower bound is frozen at reload start, including the remote past
 of waiting writes, already uploaded own writes and their past, and the positions

@@ -10,6 +10,7 @@ import CovenIO.Wakes
 import CovenIO.Writers
 import CovenIO.DroppedRegistrations
 import CovenIO.RaiseCoverage
+import CovenIO.RetentionDeadline
 import Lean
 
 /-! The IO differential runner. Each case names the executable transition it
@@ -91,6 +92,29 @@ private def deletable (j : Json) : Except String Json := do
     ((readers.find? (·.1 == reader)).map (·.2)).getD 0
   return toJson (decide (Deletable current (readers.map (·.1)) posted
     (← j.getObjValAs? Nat "time") (final = true) write))
+
+/-- `RetentionDeadline.refreshDue` and the historical-witness-only trigger
+`witnessedRefreshDue`, for one write of `writer` 0 numbered `number` with a
+part in audience 0, under the landed `snapshots` of audience 0 (as in
+`catalog`), each active reader's posted position for writer 0, and storage
+times in seconds. -/
+private def refresh (j : Json) : Except String Json := do
+  let number ← j.getObjValAs? Nat "number"
+  let readers ← j.getObjValAs? (List (Nat × Nat)) "posted"
+  let snapshots ← (← j.getObjValAs? (Array Json) "snapshots").toList.mapM fun s => do
+    pure (Snapshot.mk 0 (← s.getObjValAs? Nat "writer") (← s.getObjValAs? Nat "number")
+      (← s.getObjValAs? Nat "stored") (← s.getObjValAs? Nat "caught")
+      (← s.getObjValAs? (List (Nat × Nat)) "positions"))
+  let write : Write := ⟨0, number, ← j.getObjValAs? Nat "stored", [0]⟩
+  let state : SnapshotPublication.State :=
+    ⟨← j.getObjValAs? Nat "time", readers.map (·.1), [write], [], snapshots, [], []⟩
+  let posted := readers.map fun (reader, position) => (reader, 0, position)
+  let final ← j.getObjValAs? Bool "final"
+  let readable ← j.getObjValAs? Bool "readable"
+  return Json.mkObj [
+    ("due", toJson (RetentionDeadline.refreshDue .writes state posted final readable write 0)),
+    ("witnessed", toJson
+      (RetentionDeadline.witnessedRefreshDue .writes state posted final readable write 0))]
 
 private def saved (j : Json) : Except String (Option Nat) := do
   match j.getObjVal? "saved" with
@@ -609,6 +633,7 @@ private def run (j : Json) : Except String Json := do
   | "discovery" => discovery j
   | "counts" => counts j
   | "deletable" => deletable j
+  | "refresh" => refresh j
   | "catalog" => catalog j
   | "needs" => needs j
   | "recent" => recent j

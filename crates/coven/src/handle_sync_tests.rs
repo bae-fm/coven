@@ -33,13 +33,20 @@ async fn insert(handle: &CovenHandle, id: &str) {
         .unwrap();
 }
 
+/// The newest write number in storage. Writes are numbered in order and
+/// retention deletes only covered ones, so this counts uploads even after
+/// earlier writes went (§15).
 async fn stored_writes(device: &crate::tests::Device) -> usize {
     device
         .storage
         .list(&ObjectPrefix::device_logs(device.store))
         .await
         .unwrap()
-        .len()
+        .iter()
+        .filter_map(|object| object.path.write_id())
+        .map(|id| id.number as usize)
+        .max()
+        .unwrap_or(0)
 }
 
 async fn wait_for_writes(device: &crate::tests::Device, count: usize) {
@@ -52,12 +59,26 @@ async fn wait_for_writes(device: &crate::tests::Device, count: usize) {
     .unwrap();
 }
 
+/// A requested snapshot's own catch-up samples storage time by replacing this
+/// device's clock object first (§15). It lists positions, but it is no pass.
+fn snapshot_catch_ups(device: &crate::tests::Device) -> usize {
+    let clock = format!("{}/clock/", device.store);
+    device
+        .storage
+        .request_trace()
+        .iter()
+        .filter(|request| {
+            matches!(request, MemoryRequest::Replace(path) if path.as_str().starts_with(&clock))
+        })
+        .count()
+}
+
 #[tokio::test]
 async fn a_write_racing_a_pass_retains_one_pass_and_own_commits_retain_none() {
     let network = Network::new(1).await;
     let device = &network.devices[0];
     let writes = stored_writes(device).await;
-    let before = passes(device);
+    let before = passes(device) - snapshot_catch_ups(device);
     let (started, held) = tokio::sync::oneshot::channel();
     let (resume, holding) = tokio::sync::oneshot::channel();
     device
@@ -73,7 +94,7 @@ async fn a_write_racing_a_pass_retains_one_pass_and_own_commits_retain_none() {
     wait_for_writes(device, writes + 3).await;
     // Retiring uploaded rows and posting positions schedule nothing more.
     tokio::time::sleep(Duration::from_millis(200)).await;
-    assert_eq!(passes(device) - before, 2);
+    assert_eq!(passes(device) - snapshot_catch_ups(device) - before, 2);
     network.close().await;
 }
 

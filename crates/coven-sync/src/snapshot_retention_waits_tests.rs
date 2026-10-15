@@ -449,3 +449,384 @@ fn io_differential_deletable() {
     }
     assert_eq!(actual, crate::discovery::tests::io_runner(&cases));
 }
+
+/// The audiences this device has asked to cover a due write (§15).
+async fn coverage_requests(device: &Device) -> Vec<Audience> {
+    device
+        .db
+        .operations()
+        .await
+        .unwrap()
+        .into_iter()
+        .filter_map(|record| match Data::read(&record).unwrap() {
+            Data::Snapshots(SnapshotTask {
+                job:
+                    SnapshotJob::Write {
+                        audience,
+                        trigger: crate::snapshot_data::SnapshotTrigger::Coverage { .. },
+                        ..
+                    },
+                ..
+            }) => Some(audience),
+            _ => None,
+        })
+        .collect()
+}
+
+async fn snapshots(storage: &MemoryStorage) -> Vec<ObjectPath> {
+    storage
+        .list(&ObjectPrefix::snapshots(store(1)))
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|object| object.path)
+        .collect()
+}
+
+/// §15: Ana's only write is far below the growth threshold and Ben never
+/// posts. Once storage has held it thirty days, retention asks for the
+/// store's first snapshot; that snapshot lets the write go
+/// (io `first_snapshot_deleted`).
+#[tokio::test]
+async fn an_old_write_below_the_growth_threshold_requests_the_first_snapshot() {
+    let (storage, storage_clock) = timed_snapshot_storage();
+    let mut a = notes_device(storage.clone(), 1).await;
+    a.create(key(1)).await;
+    let mut b = notes_device(storage.clone(), 2).await;
+    add_device(&mut b).await;
+    a.sync().await;
+    write_rows(&a, 0, 1, 17, Audience::Store).await;
+    upload(&a, &storage).await;
+    post(&a, &storage).await;
+    a.sync.write_snapshots().await.unwrap();
+    a.sync.run_retention().await.unwrap();
+    assert!(snapshots(&storage).await.is_empty());
+    assert!(coverage_requests(&a).await.is_empty());
+    storage_clock.set(at(30, 0));
+    a.clock.set(at(30, 0));
+    a.sync.run_retention().await.unwrap();
+    assert_eq!(coverage_requests(&a).await, [Audience::Store]);
+    // The same due write asks once.
+    a.sync.run_retention().await.unwrap();
+    assert_eq!(coverage_requests(&a).await, [Audience::Store]);
+    a.write_snapshots().await.unwrap();
+    assert_eq!(snapshots(&storage).await.len(), 1);
+    assert!(a.db.operations().await.unwrap().is_empty());
+    a.sync.run_retention().await.unwrap();
+    assert!(logs(&storage).await.is_empty());
+}
+
+/// §15: an older snapshot covered Ana's write, but Ben's newer one, with
+/// more writes, does not: he prepared it before her write existed. Retention
+/// asks again. Ben's later snapshot covering it lands before the request
+/// runs: the request then ends without publishing, and the write goes.
+#[tokio::test]
+async fn coverage_a_newer_snapshot_leaves_out_is_requested_until_supplied() {
+    let storage = snapshot_storage();
+    let mut a = notes_device(storage.clone(), 1).await;
+    a.create(key(1)).await;
+    let mut b = notes_device(storage.clone(), 2).await;
+    add_device(&mut b).await;
+    a.sync().await;
+    // Ben's writes stay local until his snapshot of them is prepared.
+    for row in 1..4 {
+        write_rows(&b, row, 1, 17, Audience::Store).await;
+    }
+    let data = Data::Snapshots(SnapshotTask {
+        job: SnapshotJob::Write {
+            audience: Audience::Store,
+            device: b.device().await,
+            trigger: crate::snapshot_data::SnapshotTrigger::Requested,
+            attempt: None,
+        },
+        temporary: Vec::new(),
+    });
+    let early =
+        b.db.start_operation(data.new_operation("coven").unwrap())
+            .await
+            .unwrap();
+    let pass = b.caught_up_pass().await;
+    b.step(early).await.unwrap();
+    drop(pass);
+    write_rows(&a, 0, 1, 17, Audience::Store).await;
+    upload(&a, &storage).await;
+    a.write_snapshot(Audience::Store).await.unwrap();
+    upload(&b, &storage).await;
+    while b
+        .db
+        .operations()
+        .await
+        .unwrap()
+        .iter()
+        .any(|r| r.id == early)
+    {
+        b.step(early).await.unwrap();
+    }
+    b.writes.download_writes().await.unwrap();
+    post(&a, &storage).await;
+    post(&b, &storage).await;
+    a.sync.run_retention().await.unwrap();
+    assert_eq!(coverage_requests(&a).await, [Audience::Store]);
+    assert_eq!(logs(&storage).await.len(), 4);
+    b.write_snapshot(Audience::Store).await.unwrap();
+    let listed = snapshots(&storage).await.len();
+    a.write_snapshots().await.unwrap();
+    assert!(coverage_requests(&a).await.is_empty());
+    assert_eq!(snapshots(&storage).await.len(), listed);
+    a.sync.run_retention().await.unwrap();
+    let ana = a.device().await;
+    assert!(!logs(&storage)
+        .await
+        .iter()
+        .any(|path| path.write_id().unwrap().device == ana));
+}
+
+/// §15: a snapshot that lands more than a day after its catch-up does not
+/// count, so its coverage does not stop retention asking for a timely one.
+#[tokio::test]
+async fn a_late_landing_does_not_supply_coverage() {
+    let (storage, storage_clock) = timed_snapshot_storage();
+    let mut a = notes_device(storage.clone(), 1).await;
+    a.create(key(1)).await;
+    write_rows(&a, 0, 1, 17, Audience::Store).await;
+    upload(&a, &storage).await;
+    post(&a, &storage).await;
+    let data = Data::Snapshots(SnapshotTask {
+        job: SnapshotJob::Write {
+            audience: Audience::Store,
+            device: a.device().await,
+            trigger: crate::snapshot_data::SnapshotTrigger::Requested,
+            attempt: None,
+        },
+        temporary: Vec::new(),
+    });
+    let id =
+        a.db.start_operation(data.new_operation("coven").unwrap())
+            .await
+            .unwrap();
+    let pass = a.caught_up_pass().await;
+    a.step(id).await.unwrap();
+    drop(pass);
+    // The upload lands a day and a second after its catch-up sample, and
+    // its attempt is abandoned.
+    storage_clock.set(at(1, 0) + Duration::from_secs(1));
+    a.step(id).await.unwrap();
+    assert_eq!(snapshots(&storage).await.len(), 1);
+    a.sync.run_retention().await.unwrap();
+    assert_eq!(coverage_requests(&a).await, [Audience::Store]);
+    assert_eq!(logs(&storage).await.len(), 1);
+}
+
+/// §9, §15: while Ben's removal is not final he may return as a reader who
+/// needs Ana's write, so it is not yet due and nothing is requested.
+#[tokio::test]
+async fn a_write_gated_on_a_provisional_removal_requests_nothing() {
+    let (storage, storage_clock) = timed_snapshot_storage();
+    let mut a = notes_device(storage.clone(), 1).await;
+    a.create(key(1)).await;
+    let mut b = notes_device(storage.clone(), 2).await;
+    add_device(&mut b).await;
+    a.sync().await;
+    a.sync
+        .make_and_upload_entry(StoreChange::RemoveDevice {
+            device: b.device().await,
+        })
+        .await
+        .unwrap();
+    write_rows(&a, 0, 1, 17, Audience::Store).await;
+    upload(&a, &storage).await;
+    post(&a, &storage).await;
+    a.sync.run_retention().await.unwrap();
+    assert!(coverage_requests(&a).await.is_empty());
+    storage_clock.set(at(31, 0));
+    a.clock.set(at(31, 0));
+    a.sync().await;
+    a.sync.run_retention().await.unwrap();
+    assert_eq!(coverage_requests(&a).await, [Audience::Store]);
+}
+
+/// §15: Carol cannot read Gifts, whose members are offline. For Ana's
+/// write with a store part and a Gifts part, Carol asks only for store
+/// coverage and supplies it; the write stays for its Gifts part.
+#[tokio::test]
+async fn an_offline_circle_keeps_a_shared_write_while_store_coverage_progresses() {
+    let storage = snapshot_storage();
+    let mut a = notes_device(storage.clone(), 1).await;
+    a.create(key(1)).await;
+    let mut c = device(storage.clone(), 2, member(2), store(1)).await;
+    c.reopen(storage.clone(), notes_tables(), notes_migrations())
+        .await;
+    a.add(&c.member, MemberRole::Member).await;
+    add_device(&mut c).await;
+    a.sync().await;
+    let gifts = crate::store_log_sync::tests::circle(1);
+    a.sync
+        .make_and_upload_entry(StoreChange::CreateCircle {
+            circle: gifts,
+            name: "Gifts".into(),
+            key: key(2),
+            key_hash: a.sync.test_key(Audience::Circle(gifts), key(2)),
+        })
+        .await
+        .unwrap();
+    let audience = gifts.to_string();
+    a.db.write(move |sql| {
+        for audience in ["store".to_owned(), audience] {
+            sql.execute(
+                "INSERT INTO notes VALUES('1',?1,'gift',x'00')",
+                coven_database::params![audience],
+            )?;
+        }
+        Ok(())
+    })
+    .await
+    .unwrap();
+    upload(&a, &storage).await;
+    post(&a, &storage).await;
+    c.sync().await;
+    c.writes.download_writes().await.unwrap();
+    post(&c, &storage).await;
+    c.sync.run_retention().await.unwrap();
+    assert_eq!(coverage_requests(&c).await, [Audience::Store]);
+    c.write_snapshots().await.unwrap();
+    let listed = snapshots(&storage).await;
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].snapshot_id().unwrap().audience, Audience::Store);
+    c.sync.run_retention().await.unwrap();
+    assert!(coverage_requests(&c).await.is_empty());
+    assert_eq!(logs(&storage).await.len(), 1);
+}
+
+/// io `RetentionDeadline.refreshDue`, and `witnessedRefreshDue` for the
+/// historical-witness-only trigger coven does not use: on generated
+/// catalogs, reader posts, ages and finality, coven asks for coverage
+/// exactly when `refreshDue` holds, including where no snapshot ever covered
+/// the write and the witness-only trigger would never ask (`no_first_witness`).
+#[test]
+#[ignore = "scripts/check.sh supplies the Lean IO runner"]
+fn io_differential_refresh_due() {
+    use crate::store_log_sync::snapshots::catalog::newest_first;
+    use crate::store_log_sync::snapshots::retention::waits::refresh_due;
+    use coven_format::sealed_snapshot::SnapshotObjectPrefix;
+    use coven_format::value::EntryPositions;
+    const MONTH: u64 = 30 * DAY;
+    let write = coven_merge::WriteId {
+        device: DeviceId(0),
+        number: 2,
+    };
+    // (writer, number, stored, caught, position of writer 0, other writes)
+    type Listed = (u64, u64, u64, u64, u64, u64);
+    let catalogs: [&[Listed]; 5] = [
+        &[],
+        &[(1, 1, 0, 0, 2, 0)],
+        // A late landing covers it; nothing counting does.
+        &[(1, 1, DAY + 1, 0, 2, 0)],
+        // The older snapshot covers it; the newer, with more writes, does not.
+        &[(1, 1, 0, 0, 2, 0), (2, 1, 5, 5, 1, 9)],
+        &[(1, 1, 0, 0, 1, 0)],
+    ];
+    let mut cases = Vec::new();
+    let mut actual = Vec::new();
+    for catalog in catalogs {
+        let listed: Vec<_> = catalog
+            .iter()
+            .map(|(writer, number, stored, caught, position, others)| {
+                let mut writes = vec![coven_merge::WriteId {
+                    device: DeviceId(0),
+                    number: *position,
+                }];
+                if *others > 0 {
+                    writes.push(coven_merge::WriteId {
+                        device: DeviceId(9),
+                        number: *others,
+                    });
+                }
+                (
+                    coven_storage::StoredObject {
+                        path: ObjectPath::snapshot(
+                            store(1),
+                            Audience::Store,
+                            DeviceId(*writer),
+                            (*number).try_into().unwrap(),
+                        ),
+                        size: 0,
+                        stored_at: StorageTime::new(*stored, 0).unwrap(),
+                        time_resolution: Duration::from_secs(1),
+                        object_id: "id".into(),
+                        revision: "1".into(),
+                        checksum: None,
+                    },
+                    SnapshotObjectPrefix {
+                        audience: Audience::Store,
+                        key: key(1),
+                        caught_at: StorageTime::new(*caught, 0).unwrap(),
+                        raise: None,
+                        writes: WritePositions(writes),
+                        store_log: EntryPositions(Vec::new()),
+                    },
+                )
+            })
+            .collect();
+        let mut counting: Vec<_> = listed
+            .iter()
+            .filter(|(object, prefix)| prefix.counts(object.stored_at))
+            .collect();
+        counting.sort_by(|a, b| newest_first((&a.0, &a.1), (&b.0, &b.1)));
+        let current = counting.first().map(|(_, prefix)| &prefix.writes);
+        for last in [false, true] {
+            for readable in [false, true] {
+                for posted in [[2, 2], [2, 1]] {
+                    for time in [10, MONTH, MONTH - 1] {
+                        let facts = Facts {
+                            dependencies: vec![(
+                                EntryId {
+                                    device: DeviceId(1),
+                                    number: 1,
+                                },
+                                last,
+                            )],
+                            readers: posted
+                                .iter()
+                                .enumerate()
+                                .map(|(reader, number)| {
+                                    (DeviceId(reader as u64 + 1), *number >= write.number)
+                                })
+                                .collect(),
+                            aged: reached_age(
+                                Some(StorageTime::new(time, 0).unwrap()),
+                                StorageTime::new(0, 0).unwrap(),
+                            ),
+                        };
+                        actual.push(refresh_due(&facts, readable, current, write));
+                        cases.push(json!({
+                            "check": "refresh", "number": write.number,
+                            "posted": [[1, posted[0]], [2, posted[1]]],
+                            "snapshots": catalog.iter().map(|(writer, number, stored, caught, position, others)| {
+                                let mut positions = vec![json!([0, position])];
+                                if *others > 0 {
+                                    positions.push(json!([9, others]));
+                                }
+                                json!({"writer": writer, "number": number, "stored": stored,
+                                       "caught": caught, "positions": positions})
+                            }).collect::<Vec<_>>(),
+                            "stored": 0, "time": time, "final": last, "readable": readable,
+                        }));
+                    }
+                }
+            }
+        }
+    }
+    let lean = crate::discovery::tests::io_runner(&cases);
+    assert_eq!(
+        actual,
+        lean.iter()
+            .map(|result| result["due"].as_bool().unwrap())
+            .collect::<Vec<_>>()
+    );
+    // The first catalog has no snapshot: refreshDue asks, the witness-only
+    // trigger never would.
+    assert!(lean
+        .iter()
+        .zip(&actual)
+        .any(|(result, due)| *due && result["witnessed"] == json!(false)));
+}

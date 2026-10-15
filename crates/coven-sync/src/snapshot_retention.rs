@@ -24,6 +24,9 @@ impl StoreLogSync {
         let readable = self.snapshot_audiences(&local.log)?;
         let dependencies = Dependencies::new(&local.log);
         let mut coverage = BTreeMap::new();
+        // Each readable audience's current newest counting snapshot, or none,
+        // once its newest is known (§15).
+        let mut current = BTreeMap::new();
         let mut superseded = Vec::new();
         let mut pinned = BTreeSet::new();
         for pending in self.database.operations().await? {
@@ -61,6 +64,16 @@ impl StoreLogSync {
             // no longer listed (§15, §19.1; `waiting_retention_safe`,
             // storelog-data `holding_safe`, `refused_prefix_holds`). That
             // prefix's record says why. A refused body never holds.
+            if catalog.newest_unknown.is_none() {
+                current.insert(
+                    audience.clone(),
+                    catalog
+                        .verified
+                        .iter()
+                        .find(|snapshot| snapshot.follows_boundary(&local.log))
+                        .map(|newest| newest.prefix.writes.clone()),
+                );
+            }
             if catalog.newest_unknown.is_some() {
                 tracing::debug!(
                     ?audience,
@@ -118,6 +131,7 @@ impl StoreLogSync {
         let mut retained = Vec::new();
         let mut failures = Vec::new();
         let mut waits = Vec::new();
+        let mut due = BTreeMap::new();
         let mut held = false;
         for object in storage
             .list(&ObjectPrefix::device_logs(self.directory.id()))
@@ -133,10 +147,7 @@ impl StoreLogSync {
                 .path
                 .write_id()
                 .ok_or_else(|| inconsistent("device listing has another path layout"))?;
-            if !self.can_delete_device(&local.log, local.device, id.device)? {
-                retained.push(object);
-                continue;
-            }
+            let owned = self.can_delete_device(&local.log, local.device, id.device)?;
             if stuck
                 .iter()
                 .any(|record| record.blocks(coven_database::LogObject::Write(id)))
@@ -148,8 +159,10 @@ impl StoreLogSync {
                 Ok(header) => header,
                 // The write's first prerequisite is this object's record.
                 Err(error) if waiting(&object.path, &error) => {
-                    waits.push((object.path.clone(), self.pending_reason(&error).await?));
-                    held = true;
+                    if owned {
+                        waits.push((object.path.clone(), self.pending_reason(&error).await?));
+                        held = true;
+                    }
                     retained.push(object);
                     continue;
                 }
@@ -167,6 +180,43 @@ impl StoreLogSync {
                     continue;
                 }
             };
+            // Every device asks for coverage of a final write past its reader
+            // gate, owned or not, in each readable part audience whose current
+            // newest counting snapshot misses it, even one with no snapshot
+            // (§15; io `RetentionDeadline.refreshDue`).
+            let gate = |time| {
+                Facts::for_write(
+                    &local.log,
+                    &dependencies,
+                    BTreeSet::new(),
+                    id,
+                    object.stored_at,
+                    time,
+                    &positions,
+                )
+            };
+            let mut gated = gate(storage_time);
+            if gated.first_unmet().is_some()
+                && !gated.aged
+                && !observed
+                && self.age_may_have_passed(&object)
+            {
+                self.observe_clock(&local).await?;
+                observed = true;
+                storage_time = self.storage_time();
+                gated = gate(storage_time);
+            }
+            for part in &header.parts {
+                if let Some(newest) = current.get(&part.audience) {
+                    if waits::refresh_due(&gated, true, newest.as_ref(), id) {
+                        due.entry(part.audience.clone()).or_insert(id);
+                    }
+                }
+            }
+            if !owned {
+                retained.push(object);
+                continue;
+            }
             let covered = header.parts.iter().all(|part| {
                 coverage
                     .get(&part.audience)
@@ -236,6 +286,20 @@ impl StoreLogSync {
         }
         if failures.is_empty() {
             self.retain_uploaded_files(&retained, &mut failures).await?;
+        }
+        // One request per audience, run in this pass's operation work or the
+        // next; an unchanged one is the same operation, under its own backoff.
+        for (audience, write) in due {
+            self.start_snapshot_task(crate::snapshot_data::SnapshotJob::Write {
+                audience,
+                device: local.device,
+                trigger: crate::snapshot_data::SnapshotTrigger::Coverage {
+                    writer: write.device,
+                    number: write.number,
+                },
+                attempt: None,
+            })
+            .await?;
         }
         self.record_retention(waits, failures).await
     }

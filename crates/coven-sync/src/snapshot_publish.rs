@@ -126,6 +126,16 @@ impl StoreLogSync {
             self.database.finish_operation(record.id).await?;
             return Ok(Progress::Finished(Output::Unit));
         }
+        if let SnapshotTrigger::Coverage { writer, number } = trigger {
+            let write = coven_merge::WriteId {
+                device: writer,
+                number,
+            };
+            if self.currently_covered(&audience, log, write).await? {
+                self.database.finish_operation(record.id).await?;
+                return Ok(Progress::Finished(Output::Unit));
+            }
+        }
         if !self.snapshot_audiences(log)?.contains(&audience) {
             return Err(SyncError::Rejected(coven_database::DropReason::NotAllowed));
         }
@@ -263,6 +273,25 @@ impl StoreLogSync {
         );
         self.save_snapshot_task(record, &task, 1).await?;
         Ok(Progress::Advanced)
+    }
+
+    /// Whether the audience's current newest counting snapshot, as its
+    /// catalog lists it now, covers `write`: another device's snapshot may
+    /// have supplied the coverage retention asked for (§15). An unverified
+    /// newest decides nothing, so the request stands.
+    async fn currently_covered(
+        &self,
+        audience: &Audience,
+        log: &StoreLog,
+        write: coven_merge::WriteId,
+    ) -> Result<bool, SyncError> {
+        let catalog = self.snapshot_candidates(audience, log).await?;
+        Ok(catalog.newest_unknown.is_none()
+            && catalog
+                .verified
+                .iter()
+                .find(|snapshot| snapshot.follows_boundary(log))
+                .is_some_and(|newest| newest.prefix.writes.covers(write)))
     }
 
     /// What holds a preparation back from its audience's current newest

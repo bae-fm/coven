@@ -136,6 +136,13 @@ pub(crate) struct SavedBoundary {
 pub(crate) enum SnapshotTrigger {
     Growth,
     Requested,
+    /// Retention found this final, gated write uncovered by the audience's
+    /// current newest counting snapshot (§15). Preparation publishes only
+    /// while that is still so.
+    Coverage {
+        writer: DeviceId,
+        number: u64,
+    },
     Reset,
     Raise {
         version: u32,
@@ -196,6 +203,7 @@ impl SnapshotJob {
                         ) => a == b,
                         (SnapshotTrigger::Growth, SnapshotTrigger::Growth)
                         | (SnapshotTrigger::Requested, SnapshotTrigger::Requested)
+                        | (SnapshotTrigger::Coverage { .. }, SnapshotTrigger::Coverage { .. })
                         | (SnapshotTrigger::Reset, SnapshotTrigger::Reset) => true,
                         _ => false,
                     }
