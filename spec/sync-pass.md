@@ -608,8 +608,10 @@ to record an idle check.
 Abandon an attempt that passes `T_c + one day` without confirmed counting
 publication and prepare afresh at a new path, which each preparation
 reserves (§10). It has passed once a storage time this device observed, or
-its confirmed landing time, is later than `T_c + one day`. The model has no local
-confirmation or abandonment state, so that rule is not proved. Every reader
+its confirmed landing time, is later than `T_c + one day`. A request of an
+attempt abandoned on time that lands afterwards never counts, and the next
+attempt never reuses its path
+([`abandoned_never_counts_later`, `retry_new_path`](proofs/io/CovenIO/SnapshotAttempts.lean)). Every reader
 ignores an old attempt landing after that deadline
 ([`late_snapshot_ignored`](proofs/io/CovenIO/Retention.lean)).
 For example, an attempt caught up at noon Monday and still unconfirmed after

@@ -4744,6 +4744,17 @@ Carol's tablet:
     the remote catalog or require covering a concurrent arrival at landing
     ([`SnapshotPublication.canPrepare`](proofs/io/CovenIO/Retention.lean),
     [`SnapshotRefresh.refresh_outranks`](proofs/io/CovenIO/SnapshotRefresh.lean)).
+  - While the audience lists a snapshot whose prefix this device has not
+    verified, that snapshot may be its newest, so preparation waits until it
+    verifies or is no longer listed, as retention does (below). With the
+    wait, the device's own check is the check against the true current
+    newest; without it, a snapshot covering everything the device can read
+    can miss a newer one, which stays every updated reader's selection
+    ([`known_prepare_is_global`, `unverified_newest_counterexample`](proofs/io/CovenIO/SnapshotAttempts.lean)).
+  - A preparation whose sample the device already observes as more than a
+    day old waits for a later catch-up: it could never count, and the next
+    catch-up samples a time that can
+    ([`stale_sample_never_counts`, `fresh_catchup_may_prepare`](proofs/io/CovenIO/SnapshotAttempts.lean)).
   - A snapshot *counts* only if its first complete publication time is at
     most `T_c + one day`; readers ignore later landings for loading,
     selection and coverage, including snapshots named by raises or resets
@@ -4753,11 +4764,14 @@ Carol's tablet:
     stopping locally does not prevent the old request landing remotely. It
     has passed once a storage time the device observed, or its confirmed
     landing time, is later than `T_c + one day`; each preparation reserves
-    its own path number (§10).
-    [`late_snapshot_ignored`](proofs/io/CovenIO/Retention.lean) proves that
-    selection ignores a late landing. `SnapshotPublication.act` permits a
-    fresh path while an old request can still land, but has no local
-    confirmation or abandonment state: the abandonment rule is not proved.
+    its own path number (§10). Abandonment is always possible for an
+    attempt that can no longer count; a request of an attempt abandoned on
+    time that lands afterwards never counts, so readers ignore it; the next
+    attempt cannot reuse an abandoned path; and with a catch-up and upload
+    completing within a day of the new sample, the retry lands counting and
+    is confirmed
+    ([`abandon_enabled`, `abandoned_never_counts_later`, `retry_new_path`, `retry_counts`](proofs/io/CovenIO/SnapshotAttempts.lean),
+    [`late_snapshot_ignored`](proofs/io/CovenIO/Retention.lean)).
   - Exactly one day counts, but nothing here guarantees an upload duration
     or eventual successful catch-up
     ([`Snapshot.counts`](proofs/io/CovenIO/Retention.lean),

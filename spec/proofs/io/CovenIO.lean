@@ -2,6 +2,7 @@ import CovenIO.Storage
 import CovenIO.Publication
 import CovenIO.Retention
 import CovenIO.SnapshotTiming
+import CovenIO.SnapshotAttempts
 import CovenIO.Discovery
 import CovenIO.Execution
 import CovenIO.Trace

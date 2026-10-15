@@ -386,7 +386,42 @@ counting snapshot landed after the catch-up), whether each landing counts, and
 the `catalogCurrent .writes` selection after every step agree. A catch-up
 first drops its author's earlier session that never prepared, local state the
 device discarded; an attempt Rust abandons before sending has no landing, as
-one the model leaves uploading. The abandonment itself stays outside the model.
+one the model leaves uploading.
+
+**The preparing device: waits and abandonment — proved.**
+[`SnapshotAttempts`](io/CovenIO/SnapshotAttempts.lean) adds the preparing
+device to `SnapshotPublication`: the newest storage time it observed (never
+ahead of storage, `observed_before`), the listed snapshots whose prefix it
+cannot verify, and its attempts, each active until confirmed counting or
+abandoned. Its preparation runs the remote `prepare` action, so the
+publication results above still apply.
+
+- `known_prepare_is_global`: when no listed snapshot of the audience is
+  unverified, the device's check against the newest snapshot it can read is
+  §15's check against the true current newest. `unverified_newest_counterexample`
+  is the history without the wait: Ben's three-write snapshot is listed but
+  unverified by Ana; her new snapshot dominates what she reads, fails §15's
+  check, and after it lands Ben's snapshot is still every updated reader's
+  selection.
+- `stale_sample_never_counts`: a preparation whose sample the device already
+  observes as more than a day old could never count, since it lands no
+  earlier than storage time. `fresh_catchup_may_prepare`: a catch-up begun
+  now samples a time the device can count, so the wait ends.
+- `abandon_enabled`: an attempt past its day by observation, or with a
+  confirmed late landing, can always be abandoned, freeing its writer to
+  prepare again. `abandoned_never_counts_later`: a request of an attempt
+  abandoned on time that lands afterwards carries that attempt's sample and
+  never counts. `retry_new_path`: a new catch-up cannot take a path still
+  uploading or landed. `retry_counts`: a retry whose request lands within a
+  day of its fresh sample counts and is confirmed.
+
+Bounded successful service is the explicit hypothesis of `retry_counts`;
+nothing bounds catch-up or upload durations. No Rust comparison runs these
+device steps: the time a Rust device observes is its session's provider
+sample, which the publication differential's event trace does not carry, so
+the abandonment decisions stay covered by Rust tests
+(`an_attempt_counts_through_its_day_and_is_abandoned_after_it`,
+`a_late_landing_is_abandoned_and_ignored_by_readers`).
 
 The [queue proposal](queue.md#spec-edits-required-by-this-proposal) keeps old
 upload records unchanged and drains the captured prefix before the raise.

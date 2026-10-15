@@ -489,3 +489,12 @@ import CovenIO
 #print axioms CovenIO.Writers.carol_again_registers_twice
 #print axioms CovenIO.Writers.carol_registers_once
 #print axioms CovenIO.Writers.late_phone_retired
+#print axioms CovenIO.SnapshotAttempts.observed_before
+#print axioms CovenIO.SnapshotAttempts.known_prepare_is_global
+#print axioms CovenIO.SnapshotAttempts.unverified_newest_counterexample
+#print axioms CovenIO.SnapshotAttempts.stale_sample_never_counts
+#print axioms CovenIO.SnapshotAttempts.fresh_catchup_may_prepare
+#print axioms CovenIO.SnapshotAttempts.abandon_enabled
+#print axioms CovenIO.SnapshotAttempts.abandoned_never_counts_later
+#print axioms CovenIO.SnapshotAttempts.retry_new_path
+#print axioms CovenIO.SnapshotAttempts.retry_counts
