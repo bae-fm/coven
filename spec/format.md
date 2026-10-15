@@ -199,7 +199,7 @@
     generation  u64                    the row's generation before the change
     operation   u8                     0 insert · 1 update · 2 delete
     columns     map<name, ColumnValue> new values; insert and update only, nonempty
-    old         map<name, Value>       insert none; update the same columns; delete any
+    old         map<name, Value>       insert none; update the same columns; delete each replaced cell
     generation_source option<ChangeId> absent exactly at generation zero
     replaced_setters  map<name, CellSource>
     creator     Option<ChangeId>       an audience copy's original creation
@@ -233,7 +233,10 @@
     names, before conversion. Setter map keys use this change's authored column
     names, in strictly increasing name order. An insert has no replaced setters;
     an update includes each previously set cell it replaces, and a delete includes
-    every current cell setter independently of its `old` scalar map. A cell never
+    every current cell setter. A delete's `old` map holds exactly those cells,
+    each with the value its setter wrote, never a displayed substitution such
+    as a stale reference's NULL; a receiver refuses a foreign-key action's
+    delete whose `old` map differs (§8.8). A cell never
     set in the author's merge state has no setter (the model's `St.cell = none`).
     Generation is the first source role, followed by setter map order; repeated
     source identities in distinct roles are retained. Schema name matching tracks

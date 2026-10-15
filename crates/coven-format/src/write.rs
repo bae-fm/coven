@@ -120,8 +120,9 @@ pub struct RowChange {
     pub row: RowId,
     /// The pre-change generation and merge operation, including parent metadata.
     pub change: Change<Value>,
-    /// Previous SQL values: empty on insert, matching updated columns on update,
-    /// and optionally populated on delete. SQL NULL is a value, not absence.
+    /// Previous values: empty on insert, matching updated columns on update,
+    /// and on delete every replaced cell with the value its setter wrote. SQL
+    /// NULL is a value, not absence.
     pub old: BTreeMap<String, Value>,
     /// Authenticated original generation and cell sources, independent of scalars.
     pub sources: crate::write_sources::WriteSources,

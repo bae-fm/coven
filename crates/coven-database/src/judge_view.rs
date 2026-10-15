@@ -197,6 +197,29 @@ impl<'a> ChildView<'a> {
         Ok(cell)
     }
 
+    /// Whether `old` holds exactly the cells this row held when the write
+    /// began: every cell its replaced setters wrote, with the value each
+    /// wrote (D5). Asked before any step applies.
+    pub(crate) fn began_with(
+        &self,
+        db: &DatabaseConnection,
+        old: &BTreeMap<String, Value>,
+    ) -> Result<bool, DbError> {
+        let OriginalRow::Change(change) = self.record else {
+            return Ok(true);
+        };
+        if old.len() != change.sources.setters.len() {
+            return Ok(false);
+        }
+        for column in change.sources.setters.keys() {
+            match (old.get(column), self.value(db, column)?) {
+                (Some(value), Some(cell)) if *value == cell.value => {}
+                _ => return Ok(false),
+            }
+        }
+        Ok(true)
+    }
+
     /// The parent step this step is exactly the schema's action of, if any:
     /// of several, the nearest (Lean `Classification.cause` with `heldRule`).
     pub(crate) fn action(

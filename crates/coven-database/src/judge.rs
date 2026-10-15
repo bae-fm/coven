@@ -185,6 +185,8 @@ struct Shape {
     exact: bool,
     /// The steps end where the net change does (Lean `Capture`).
     consistent: bool,
+    /// A delete's old values are the cells it replaced.
+    began: bool,
 }
 
 /// Judge every row change of the write's parts this device holds. The
@@ -203,6 +205,13 @@ pub(crate) fn judge(
         let row = record.row().clone();
         let execution = record.execution();
         let mut view = ChildView::new(&authoring, &row, &record, header.schema_version);
+        // A delete's old values are the cells it replaced (D5).
+        let began = match &record {
+            OriginalRow::Change(change) if change.change.operation == Operation::Delete => {
+                view.began_with(db, &change.old)?
+            }
+            _ => true,
+        };
         let mut derived = 0;
         for step in &execution.steps {
             if let Some(cause) = view.action(db, &index, step)? {
@@ -229,6 +238,7 @@ pub(crate) fn judge(
                 normalized,
                 exact,
                 consistent: consistent(&record),
+                began,
             },
         );
         Ok(())
@@ -286,8 +296,10 @@ pub(crate) fn judge(
             }
             chains.push((sequence, chain));
         }
-        // Actions alone must combine to exactly the net change (`derived_exact`).
-        if check.is_ok() && !direct && !shape.exact {
+        // Actions alone must combine to exactly the net change (`derived_exact`),
+        // and a delete they make shows the values its setters wrote, not
+        // values its author chose (Lean `originalCell`).
+        if check.is_ok() && !direct && (!shape.exact || !shape.began) {
             check = Err(refuse());
         }
         rows.insert(

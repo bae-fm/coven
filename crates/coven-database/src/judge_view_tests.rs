@@ -627,3 +627,100 @@ async fn classification_matches_the_model() {
         "{compared} steps, {actions} actions"
     );
 }
+
+/// A delete records the cells it replaces as their setters wrote them, and
+/// a receiver refuses a cascade's delete whose old values say otherwise
+/// (D5). Ana's review points at Ben's track and at a pin Carol deleted
+/// concurrently, so Ben's device shows the pin reference NULL; its cell keeps
+/// what Ana wrote, and so do the delete's old values.
+#[tokio::test]
+async fn a_cascade_delete_shows_what_its_setters_wrote() {
+    use crate::owner_permission::tests::deliver;
+    use crate::tests::TestStore;
+    use crate::write::tests::{records, sql};
+    use crate::{RowIdentity, SyncedTable};
+    use coven_foundation::id_source::SequentialIds;
+    const SCHEMA: &str = "CREATE TABLE tracks(id TEXT NOT NULL PRIMARY KEY);
+CREATE TABLE pins(id TEXT NOT NULL PRIMARY KEY);
+CREATE TABLE reviews(id TEXT NOT NULL PRIMARY KEY, track TEXT REFERENCES tracks(id) ON DELETE CASCADE,
+  pin TEXT REFERENCES pins(id) ON DELETE SET NULL, body TEXT,
+  loud TEXT GENERATED ALWAYS AS (body || '!'));";
+    let ids = SequentialIds::new();
+    let stores: Vec<_> = (0..4).map(|_| TestStore::with_ids(&ids)).collect();
+    let mut dbs = Vec::new();
+    for store in &stores {
+        let tables = ["tracks", "pins", "reviews"]
+            .map(|table| SyncedTable::new(table, RowIdentity::SharedKey))
+            .to_vec();
+        dbs.push(store.schema(tables, SCHEMA).await.unwrap());
+    }
+    let [ben, ana, carol, dan] = [&dbs[0], &dbs[1], &dbs[2], &dbs[3]];
+    sql(
+        ben,
+        "INSERT INTO tracks VALUES('t'); INSERT INTO pins VALUES('p')",
+    )
+    .await
+    .unwrap();
+    for to in [ana, carol, dan] {
+        deliver(ben, to).await;
+    }
+    sql(carol, "DELETE FROM pins").await.unwrap();
+    sql(
+        ana,
+        "INSERT INTO reviews(id,track,pin,body) VALUES('r','t','p','good')",
+    )
+    .await
+    .unwrap();
+    for to in [ben, dan] {
+        deliver(carol, to).await;
+        deliver(ana, to).await;
+    }
+    let shown = ben.inspect_writer(|c| {
+        c.query_row("SELECT pin FROM reviews WHERE id='r'", [], |r| {
+            r.get::<_, Option<String>>(0)
+        })
+        .unwrap()
+    });
+    assert_eq!(shown, None);
+    sql(ben, "DELETE FROM tracks").await.unwrap();
+    let genuine = records(ben).pop().unwrap();
+    let review = RowId {
+        table: "reviews".into(),
+        key: coven_format::key::encode_key(&[Value::Text("r".into())]).unwrap(),
+        audience: coven_merge::Audience::Store,
+    };
+    let change = genuine.parts[0]
+        .rows
+        .iter()
+        .find(|change| change.row == review)
+        .unwrap();
+    let text = |s: &str| Value::Text(s.into());
+    assert_eq!(
+        change.old,
+        BTreeMap::from([
+            ("body".to_owned(), text("good")),
+            ("id".to_owned(), text("r")),
+            ("loud".to_owned(), text("good!")),
+            ("pin".to_owned(), text("p")),
+            ("track".to_owned(), text("t")),
+        ])
+    );
+    let mut forged = genuine.clone();
+    for change in &mut forged.parts[0].rows {
+        if change.row == review {
+            change.old.insert("body".into(), text("forged"));
+        }
+    }
+    crate::judge::tests::receive(dan, &forged).await;
+    assert_eq!(
+        crate::judge::tests::verdict(dan, &forged, &review),
+        ChangeVerdict::NotAuthorized(AuthorizationFailure::InvalidForeignKeyEffect)
+    );
+    deliver(ana, carol).await;
+    crate::judge::tests::receive(carol, &genuine).await;
+    let verdict = crate::judge::tests::verdict(carol, &genuine, &review);
+    assert!(matches!(verdict, ChangeVerdict::Derived(_)), "{verdict:?}");
+    for db in dbs {
+        db.close().await.unwrap();
+    }
+}

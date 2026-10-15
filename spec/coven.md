@@ -2900,7 +2900,8 @@ Carol's tablet:
     Receivers refuse it, and so does its author, which runs the same check
     before the write leaves (B18 `Overlapping`).
   - Match the exact row, generation, operation and every changed column and
-    value, including all components of a compound key. Several actions on
+    value, including all components of a compound key. An action's delete
+    shows the values its replaced setters wrote (D5). Several actions on
     one row must match their complete combined effect in original execution
     order; accepting only one component is not sufficient.
   - Every derivation must reach authorized direct causes in this write. A

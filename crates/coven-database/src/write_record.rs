@@ -128,6 +128,16 @@ pub(crate) fn changes(
             if moving || new.is_none() {
                 let generation = generation(database, &row)?;
                 assert_eq!(generation % 2, 1, "visible row has no present generation");
+                // A delete's old values are the cells it replaces, as their
+                // setters wrote them: what receivers can check (D5), not a
+                // display substitution such as a stale reference's NULL.
+                let cells = stored
+                    .row(&row)?
+                    .state
+                    .cells()
+                    .iter()
+                    .map(|(name, cell)| (name.clone(), cell.value.value.clone()))
+                    .collect();
                 changes.insert(
                     row.clone(),
                     crate::write_sources::authored(
@@ -138,7 +148,7 @@ pub(crate) fn changes(
                             generation,
                             operation: Operation::Delete,
                         },
-                        old.values.clone(),
+                        cells,
                     )?,
                 );
             }
