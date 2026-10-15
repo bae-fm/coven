@@ -830,11 +830,11 @@ async fn io_counts_file_fetch_baseline() {
     assert_eq!(
         (counts.requests, counts.requests_by_kind()),
         (
-            20,
+            19,
             RequestCounts {
                 lists: 5,
                 gets: 7,
-                ranges: 2,
+                ranges: 1,
                 replaces: 1,
                 statuses: 4,
                 other: 1,
@@ -851,7 +851,6 @@ async fn io_counts_file_fetch_baseline() {
 }
 
 #[tokio::test]
-#[ignore = "observed 2 file range requests (11-byte header, 65599-byte body); §16.3 states header and initial chunks share 1 request below 1 MiB"]
 async fn io_counts_file_fetch_combines_header_and_chunks() {
     let counts = scenario(Scenario::FileFetch).await;
     assert_eq!(counts.file_reads(), [(0, 65610)]);

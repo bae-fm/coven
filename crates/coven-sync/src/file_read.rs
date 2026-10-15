@@ -42,7 +42,12 @@ impl Drop for ReadState {
 pub(crate) struct UploadedFile {
     owner: Arc<FilesInner>,
     file: FileRef,
+    /// The layout the row's plaintext size fixes; the stored header must
+    /// equal it before any of its chunks is trusted.
     header: FileHeader,
+    /// Whether this open has checked the stored header, from the cache or
+    /// from storage. Set under the file's fetch lock.
+    header_checked: std::sync::atomic::AtomicBool,
     key: FileKey,
     path: ObjectPath,
     _lock: StoreReadLock,
@@ -188,6 +193,11 @@ impl FileRangeStream<'_> {
     }
 }
 impl UploadedFile {
+    /// Open an uploaded file without a request when its header is cached.
+    /// Otherwise the first fetch checks the header: one starting at chunk
+    /// zero carries it in the same request, and any other first fetch reads
+    /// it alone (§16.3). An empty file's header is the whole object, so it
+    /// is checked here.
     pub(crate) async fn open(owner: Arc<FilesInner>, file: FileRef) -> Result<Self, FileReadError> {
         let directory = owner.directory.clone();
         let lock = crate::files::join(tokio::task::spawn_blocking(move || {
@@ -196,14 +206,61 @@ impl UploadedFile {
         .await?;
         let coven_format::file_reference::FileReference { device, id, key } = file.reference()?;
         let path = ObjectPath::file(owner.directory.id(), device, id);
-        let _file = owner.lock_file(&file).await;
-        let _guard = owner.cache.read().await;
-        let cached = owner.database.cached(&file, -1).await?;
-        let bytes = match &cached {
-            Some(bytes) => bytes.clone(),
-            None => fetch(&owner, &file, &path, 0, FILE_HEADER_LEN as u64).await?,
+        let opened = Self {
+            header: FileHeader::new(file.plaintext_size()),
+            header_checked: std::sync::atomic::AtomicBool::new(false),
+            owner,
+            file,
+            key,
+            path,
+            _lock: lock,
         };
-        let header = FileHeader::decode(&bytes).map_err(|error| match error {
+        if opened.header.chunk_count() == 0 {
+            let _file = opened.owner.lock_file(&opened.file).await;
+            let _guard = opened.owner.cache.read().await;
+            if !opened.cached_header().await? {
+                opened.fetch_header().await?;
+            }
+        }
+        Ok(opened)
+    }
+    /// Accept the header cached for this file, if one is.
+    async fn cached_header(&self) -> Result<bool, FileReadError> {
+        if self
+            .header_checked
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Ok(true);
+        }
+        let Some(bytes) = self.owner.database.cached(&self.file, -1).await? else {
+            return Ok(false);
+        };
+        self.accept_header(&bytes)?;
+        Ok(true)
+    }
+    /// Read the header alone, check it and cache it.
+    async fn fetch_header(&self) -> Result<(), FileReadError> {
+        let bytes = fetch(
+            &self.owner,
+            &self.file,
+            &self.path,
+            0,
+            FILE_HEADER_LEN as u64,
+        )
+        .await?;
+        self.publish_header(bytes).await
+    }
+    /// Check fetched header bytes, then cache them before any chunk.
+    async fn publish_header(&self, bytes: Vec<u8>) -> Result<(), FileReadError> {
+        self.accept_header(&bytes)?;
+        cache(&self.owner, &self.file, -1, 1, bytes).await?;
+        self.owner.trim(self.file.namespace()).await;
+        Ok(())
+    }
+    /// The stored header must be the one the row's size fixes; a newer format
+    /// needs an update, anything else is damage at the fixed path.
+    fn accept_header(&self, bytes: &[u8]) -> Result<(), FileReadError> {
+        let header = FileHeader::decode(bytes).map_err(|error| match error {
             coven_format::Error::UnsupportedVersion(version)
                 if version > coven_format::FORMAT_VERSION =>
             {
@@ -211,28 +268,14 @@ impl UploadedFile {
                     version,
                 })
             }
-            _ => FileReadError::Integrity {
-                id: file.id().to_string(),
-            },
+            _ => self.integrity(),
         })?;
-        if header.size() != file.plaintext_size() {
-            return Err(FileReadError::Integrity {
-                id: file.id().to_string(),
-            });
+        if header != self.header {
+            return Err(self.integrity());
         }
-        if cached.is_none() {
-            cache(&owner, &file, -1, 1, bytes).await?;
-            owner.trim(file.namespace()).await;
-        }
-        drop(_guard);
-        Ok(Self {
-            owner,
-            file,
-            header,
-            key,
-            path,
-            _lock: lock,
-        })
+        self.header_checked
+            .store(true, std::sync::atomic::Ordering::Release);
+        Ok(())
     }
     /// Fetch every chunk into the cache, authenticating each, then compare the
     /// whole plaintext with the row's content hash. A mismatch is the inner
@@ -365,7 +408,18 @@ impl UploadedFile {
         self.owner.check_open()?;
         let _file = self.owner.lock_file(&self.file).await;
         let _guard = self.owner.cache.read().await;
-        if let Some(bytes) = self.owner.database.cached(&self.file, first as i64).await? {
+        let cached = self.owner.database.cached(&self.file, first as i64).await?;
+        // An unchecked header comes with an uncached chunk zero; any other
+        // first read checks it alone (§16.3).
+        let mut with_header = false;
+        if !self.cached_header().await? {
+            if first == 0 && cached.is_none() {
+                with_header = true;
+            } else {
+                self.fetch_header().await?;
+            }
+        }
+        if let Some(bytes) = cached {
             let plain = self
                 .header
                 .open_chunk(&self.key, self.path.as_str(), first, &bytes)
@@ -397,7 +451,8 @@ impl UploadedFile {
                 .chunk(end_index + 1)
                 .map_err(|_| self.integrity())?;
             let next_end = next.offset + (next.plaintext_length + 16) as u64;
-            if next_end - start > REQUEST_BYTES {
+            let request_start = if with_header { 0 } else { start };
+            if next_end - request_start > REQUEST_BYTES {
                 break;
             }
             if self
@@ -412,7 +467,15 @@ impl UploadedFile {
             end_index += 1;
             end = next_end;
         }
-        let bytes = fetch(&self.owner, &self.file, &self.path, start, end).await?;
+        let bytes = if with_header {
+            // The header precedes chunk zero: one request carries both.
+            let mut bytes = fetch(&self.owner, &self.file, &self.path, 0, end).await?;
+            let chunks = bytes.split_off(FILE_HEADER_LEN);
+            self.publish_header(bytes).await?;
+            chunks
+        } else {
+            fetch(&self.owner, &self.file, &self.path, start, end).await?
+        };
         let mut plain = Vec::new();
         let mut cursor = 0;
         for index in first..=end_index {

@@ -640,7 +640,8 @@ async fn overlapping_readers_fetch_each_byte_once() {
         .map(|(_, _, length)| *length)
         .sum::<u64>()
         - before;
-    assert_eq!(fetched, 4 * (CHUNK as u64 + 16));
+    // The header arrives with the first reader's range (§16.3).
+    assert_eq!(fetched, 11 + 4 * (CHUNK as u64 + 16));
     f.close().await;
 }
 
@@ -666,7 +667,8 @@ async fn a_cancelled_range_leaves_no_bytes() {
         .set_faults(coven_storage::test_utils::Faults::none())
         .await;
     f.reopen().await;
-    assert_eq!(cache_files(&f), 1, "only the header");
+    // The header travels with the cancelled range, so nothing is cached.
+    assert_eq!(cache_files(&f), 0);
     assert_eq!(
         f.database
             .pin_progress(vec![file])

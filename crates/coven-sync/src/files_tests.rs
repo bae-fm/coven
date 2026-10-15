@@ -261,15 +261,17 @@ async fn ranges_authenticate_cache_batch_and_fail_offline() {
         .collect::<Vec<_>>();
     let file = f.uploaded("one", bytes.clone()).await;
     let stream = f.files.open_file_stream(&file).await.unwrap();
-    assert_eq!(f.storage.ranges().await.len(), 1);
-    assert_eq!(f.storage.ranges().await[0].start(), 0);
-    assert_eq!(f.storage.ranges().await[0].len(), 11);
+    // Opening reads nothing; a first read elsewhere than chunk zero fetches
+    // the header alone, then its chunk (§16.3).
+    assert!(f.storage.ranges().await.is_empty());
     assert_eq!(
         stream.read_at(CHUNK as u64 * 4 + 5, 19).await.unwrap(),
         bytes[CHUNK * 4 + 5..CHUNK * 4 + 24]
     );
     let ranges = f.storage.ranges().await;
     assert_eq!(ranges.len(), 2);
+    assert_eq!(ranges[0].start(), 0);
+    assert_eq!(ranges[0].len(), 11);
     assert_eq!(ranges[1].start(), 11 + 4 * (CHUNK as u64 + 16));
     assert_eq!(ranges[1].len(), CHUNK as u64 + 16);
     let requests = f.storage.request_count();
@@ -615,8 +617,17 @@ async fn pinning_preserves_cached_tail_chunks_while_assembling_the_whole_file() 
 #[tokio::test]
 async fn unused_headers_do_not_displace_recently_read_chunks() {
     let f = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
-    let old = f.uploaded("old-header", vec![75]).await;
+    // An empty file's header is its whole object, cached on opening.
+    let old = f.uploaded("old-header", Vec::new()).await;
     f.files.open_file_stream(&old).await.unwrap();
+    assert!(f
+        .files
+        .inner
+        .database
+        .cached(&old, -1)
+        .await
+        .unwrap()
+        .is_some());
     let recent = f.uploaded("recent", vec![76; CHUNK]).await;
     f.files
         .set_cache_budget("files", 11 + CHUNK as u64 + 16)
@@ -665,11 +676,52 @@ async fn a_file_from_a_newer_format_requests_an_update() {
     bytes[1..3].copy_from_slice(&(coven_format::FORMAT_VERSION + 1).to_be_bytes());
     f.storage.delete(&path).await.unwrap();
     f.storage.create(&path, &bytes).await.unwrap();
-    let error = match f.files.open_file_stream(&file).await {
+    // The first read fetches the header with chunk zero and rejects both.
+    let stream = f.files.open_file_stream(&file).await.unwrap();
+    let error = match stream.read_at(0, 1).await {
         Ok(_) => panic!("future format was accepted"),
         Err(error) => error,
     };
     assert!(matches!(error, FileReadError::UpdateRequired(_)), "{error}");
+    for index in [-1, 0] {
+        assert!(f
+            .files
+            .inner
+            .database
+            .cached(&file, index)
+            .await
+            .unwrap()
+            .is_none());
+    }
+    f.close().await;
+}
+
+/// §16.3: a one-byte uncached file read from offset zero fetches its header
+/// and its chunk in one request, caches both, and a later open reads nothing.
+#[tokio::test]
+async fn a_first_read_from_zero_fetches_the_header_with_the_first_chunks() {
+    let f = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
+    let file = f.uploaded("byte", vec![93]).await;
+    let requests = f.storage.request_count();
+    let stream = f.files.open_file_stream(&file).await.unwrap();
+    assert_eq!(f.storage.request_count(), requests);
+    assert_eq!(stream.read_at(0, 1).await.unwrap(), [93]);
+    let ranges = f.storage.ranges().await;
+    assert_eq!(ranges.len(), 1);
+    assert_eq!((ranges[0].start(), ranges[0].len()), (0, 11 + 1 + 16));
+    for index in [-1, 0] {
+        assert!(f
+            .files
+            .inner
+            .database
+            .cached(&file, index)
+            .await
+            .unwrap()
+            .is_some());
+    }
+    let requests = f.storage.request_count();
+    assert_eq!(f.files.read_file(&file).await.unwrap(), [93]);
+    assert_eq!(f.storage.request_count(), requests);
     f.close().await;
 }
 
