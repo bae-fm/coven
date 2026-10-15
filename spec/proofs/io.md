@@ -1017,6 +1017,49 @@ and failure to persist a delay remain Rust obligations.
 runs the IO runner's `waiting` check against the Rust delay, restart arm and
 due decisions before and after an app retry.
 
+**Evidence-triggered attempts — the bound changes; checked counterexample to
+the unchanged-wait bound.** `WaitingEvidence.lean` models one operation's wait
+as `retry_waits.rs` runs it: due when its monotonic deadline passes, or when a
+prerequisite commit arrived after the wait began. An attempt that fails again
+continues the count (`evidence_keeps_backoff`), and the wait it arms is not due
+again until new evidence or its delay (`evidence_due_once`).
+
+`evidence_rate` proves the bound that does hold: in any run, starts are at most
+one, plus one per evidence commit, plus the elapsed time over the delay
+(`evidence_one_second` for 1 second, `evidence_capped` for 300 once nine
+failures are counted; `evidence_waits_rate` sums `W` waits). Every start after
+the first is paid for by a full delay or by one commit.
+
+§3.1's `W * (1 + floor(t / d))` does not hold for such a wait.
+`evidence_exceeds_unchanged_bound` runs a capped wait through three commits at
+one instant, three operations advancing in one drive say, and gets three
+starts where the bound allows one. Rust counts any commit to a prerequisite
+table, or any operation advancing, as evidence for every waiting operation,
+so a wait whose own prerequisite never changed is not held to §3.1's rate:
+its starts follow the commit rate.
+
+`racing_commit_waits_full_delay` checks the other edge: a commit landing while
+an attempt runs, after the attempt read its prerequisite, is counted before
+the next wait begins. The operation then waits its full delay (up to 300
+seconds) although its prerequisite arrived. Rust absorbs those commits on
+purpose, since an attempt's own commits would otherwise make it due at once.
+
+**Wakes — proved.** `Wakes.lean` models the sync loop and its write-queue
+observation (`sync_loop.rs`, `Database::sync_changes`). `write_never_lost`:
+in every reachable state, a queued write that no pass has read keeps a wake,
+whatever raced it. `bookkeeping_retains_none`: an attempt's update or a
+confirmed upload's removal leaves the wake as it was. `racing_passes`: after a
+pass during which any commits and commands arrived, before or after it read
+the queue, the loop runs exactly one more pass if one of them was an app write
+or `sync_now`, and none otherwise (`one_pass` for the wake itself).
+[`io_differential_wakes`](../../crates/coven-database/src/database_changes_tests.rs)
+compares the model's observation with the real one over random writes,
+attempts, confirmations and pass starts. The loop's select and its
+`take_changed` call before reading the queue are covered by the Rust test
+`a_write_racing_a_pass_retains_one_pass_and_own_commits_retain_none`, not by a
+differential. A failed pass keeps the writes it read for the idle schedule,
+which the model leaves outside.
+
 ## Delivery refinement
 
 **12. Delivery — proved up to validated inputs; application prerequisites

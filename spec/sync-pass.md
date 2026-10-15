@@ -661,7 +661,10 @@ do not schedule an immediate full pass. If an app write or explicit command
 arrived after the pass's captured work and was not serviced, retain that
 wake and run once more. Otherwise wait for the idle schedule, a genuine
 external change, a new app command or the earliest due retry. Do not lose a
-write racing pass completion.
+write racing pass completion
+([`write_never_lost`](proofs/io/CovenIO/Wakes.lean),
+[`racing_passes`](proofs/io/CovenIO/Wakes.lean),
+[`bookkeeping_retains_none`](proofs/io/CovenIO/Wakes.lean)).
 
 ## File uploads outside the pass
 
@@ -790,7 +793,9 @@ its separate §3.1 term; none is hidden behind 'one arrival'.
 The operation worker wakes for a command, a committed prerequisite change,
 pass completion that supplied new evidence, or its next due timer. There
 is no unconditional one-second database/operation scan. A wake reevaluates
-only affected work and never resets an unchanged wait's backoff (§3.1).
+only affected work and never resets an unchanged wait's backoff (§3.1;
+[`evidence_keeps_backoff`](proofs/io/CovenIO/WaitingEvidence.lean),
+[`evidence_due_once`](proofs/io/CovenIO/WaitingEvidence.lean)).
 Key waits share the keys observation, invite waits share the join-request
 observation, and agreement/retention share positions. Unchanged app-action
 and after-update pending records issue no automatic requests.

@@ -5,6 +5,8 @@ import CovenIO.Retired
 import CovenIO.PassPhases
 import CovenIO.SnapshotWrites
 import CovenIO.Waiting
+import CovenIO.WaitingEvidence
+import CovenIO.Wakes
 import CovenIO.Writers
 import Lean
 
@@ -360,6 +362,58 @@ private def waiting (j : Json) : Except String Json := do
     ("due", toJson (Waiting.due timer time)),
     ("retried", toJson (Waiting.due (Waiting.appRetry timer time) time))]
 
+/-- `Waiting.step` for one operation's wait: monotonic `advance`s, committed
+prerequisite `evidence`, and automatic `attempt`s, each starting only when
+`Session.ready` and failing at once. Reports, per attempt, whether it was due
+and the persisted failure count afterward (`evidence_due_once`,
+`evidence_keeps_backoff`). -/
+private def evidence (j : Json) : Except String Json := do
+  let actions ← j.getObjValAs? (Array Json) "actions"
+  let mut s : Waiting.Session := ⟨0, 0, none, false⟩
+  let mut out := #[]
+  for action in actions do
+    let op ← action.getObjValAs? String "op"
+    let mut events : List Waiting.Event := []
+    match op with
+    | "advance" => events := [.tick (← action.getObjValAs? Nat "seconds")]
+    | "evidence" => events := [.evidence]
+    | "attempt" => if s.ready then events := [.start, .finish]
+    | other => throw s!"unknown evidence action {other}"
+    let some next := Waiting.run s events | throw "invalid wait transition"
+    if op == "attempt" then
+      out := out.push (Json.mkObj [("due", toJson s.ready),
+        ("failures", toJson ((next.armed.map (·.failures)).getD 0))])
+    s := next
+  return toJson out
+
+/-- `Wakes.step` over the write queue's commits: app writes insert, attempts
+update, confirmations remove the oldest row. A `take` is a pass start: it
+reports whether the observation saw a commit since the previous start, then
+runs a pass (`write_never_lost`, `bookkeeping_retains_none`). -/
+private def wakes (j : Json) : Except String Json := do
+  let actions ← j.getObjValAs? (Array Json) "actions"
+  let mut s := Wakes.initial []
+  let mut written := 0
+  let mut out := #[]
+  for action in actions do
+    let mut events : List Wakes.Event := []
+    match ← action.getObjValAs? String "op" with
+    | "write" =>
+      written := written + 1
+      events := [.commit (.insert written)]
+    | "update" => events := [.commit .update]
+    | "remove" =>
+      match s.queue with
+      | w :: _ => events := [.commit (.remove w)]
+      | [] => throw "removing from an empty queue"
+    | "take" =>
+      out := out.push (toJson s.observed)
+      events := [.command, .take, .capture, .finish]
+    | other => throw s!"unknown wake action {other}"
+    let some next := Wakes.run s events | throw "invalid loop transition"
+    s := next
+  return toJson out
+
 /-- `Writers.known`: the received entries, by writing device and registered
 device, and remembered folders give the write logs probed, less drained ids
 and the reader itself. No replay verdict is an input. -/
@@ -421,6 +475,8 @@ private def run (j : Json) : Except String Json := do
   | "phases" => phases j
   | "snapshot_writes" => snapshotWrites j
   | "waiting" => waiting j
+  | "evidence" => evidence j
+  | "wakes" => wakes j
   | check => throw s!"unknown IO check {check}"
 
 def main : IO UInt32 := do

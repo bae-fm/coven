@@ -6,6 +6,8 @@ import CovenIO.Discovery
 import CovenIO.Execution
 import CovenIO.Trace
 import CovenIO.Waiting
+import CovenIO.WaitingEvidence
+import CovenIO.Wakes
 import CovenIO.Downloads
 import CovenIO.Retired
 import CovenIO.Refinement

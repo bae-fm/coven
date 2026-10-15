@@ -429,6 +429,13 @@ proofs() {
             write_object::tests::io_differential_dropped_registration
     fi
 
+    if proof_selected io || crate_selected coven-database; then
+        runner=$(runner io ioRunner)
+        step "Rust / Lean write-queue wakes"
+        COVEN_IO_RUNNER="$runner" exact_ignored coven-database --all-features -- \
+            database_changes::tests::io_differential_wakes
+    fi
+
     if proof_selected merge || crate_selected coven-sync; then
         runner=$(runner merge receiveRunner)
         step "Rust / Lean send-gate publication bound"

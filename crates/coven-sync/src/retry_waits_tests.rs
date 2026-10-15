@@ -230,7 +230,8 @@ async fn a_wait_that_cannot_be_persisted_holds_until_the_app_retries() {
 }
 
 /// IO `Waiting`: the ordinary delay, the restart arm and whether a timer is
-/// due before and after an app retry, from the Rust owner's decisions.
+/// due before and after an app retry, from the Rust owner's decisions; and
+/// `WaitingEvidence`'s evidence-triggered attempts on an operation's wait.
 #[tokio::test]
 #[ignore = "requires COVEN_IO_RUNNER"]
 async fn io_differential_waiting() {
@@ -287,6 +288,55 @@ async fn io_differential_waiting() {
             "due": timer_due,
             "retried": retried,
         }));
+    }
+    // IO `WaitingEvidence`: one operation's wait through monotonic time,
+    // committed prerequisite evidence and automatic attempts, each failing
+    // at once when due. Evidence makes it due once and keeps its backoff.
+    for _ in 0..32 {
+        let fixture = Fixture::new();
+        let (database, waits) = fixture.open().await;
+        let id = database
+            .start_operation(coven_database::NewOperation {
+                kind: "circle".into(),
+                data: vec![1],
+                started_by: "app".into(),
+                reserves_snapshot: false,
+            })
+            .await
+            .unwrap();
+        let operation = RetrySubject::Operation(id);
+        let mut actions = Vec::new();
+        let mut attempts = Vec::new();
+        for _ in 0..32 {
+            match pick(4) {
+                0 => {
+                    waits.prerequisites_changed();
+                    actions.push(json!({"op": "evidence"}));
+                }
+                1 => {
+                    let seconds = pick(400);
+                    fixture.advance(seconds);
+                    actions.push(json!({"op": "advance", "seconds": seconds}));
+                }
+                _ => {
+                    let previous = database.retry_wait(operation).await.unwrap();
+                    let due = waits.due(operation, previous.as_ref());
+                    if due {
+                        waits.fail(operation, previous.as_ref()).await.unwrap();
+                    }
+                    let failures = database
+                        .retry_wait(operation)
+                        .await
+                        .unwrap()
+                        .map_or(0, |wait| wait.failures);
+                    attempts.push(json!({"due": due, "failures": failures}));
+                    actions.push(json!({"op": "attempt"}));
+                }
+            }
+        }
+        cases.push(json!({"check": "evidence", "actions": actions}));
+        actual.push(json!(attempts));
+        database.close().await.unwrap();
     }
     assert_eq!(actual, crate::discovery::tests::io_runner(&cases));
 }
