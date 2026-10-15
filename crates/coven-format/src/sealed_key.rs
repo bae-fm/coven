@@ -61,19 +61,28 @@ impl KeyCopyPrefix {
     fn length(&self) -> usize {
         match self.audience {
             Audience::Store => 68,
-            Audience::Circle(_) => 84,
+            Audience::Circle(_) => CIRCLE_PREFIX,
         }
     }
 
     fn box_length(&self) -> usize {
-        // Ephemeral key, nonce, identified key material and authentication tag.
-        32 + coven_crypto::SEALED_OBJECT_CHUNK_OVERHEAD
+        BOX_OVERHEAD
             + match self.audience {
                 Audience::Store => 48,
-                Audience::Circle(_) => 64,
+                Audience::Circle(_) => CIRCLE_MATERIAL,
             }
     }
 }
+
+const CIRCLE_PREFIX: usize = 84;
+/// A circle key's identified material: its circle, key id and secret.
+const CIRCLE_MATERIAL: usize = 64;
+/// The box's ephemeral key, nonce and authentication tag.
+const BOX_OVERHEAD: usize = 32 + coven_crypto::SEALED_OBJECT_CHUNK_OVERHEAD;
+
+/// The longest copy, a circle key's. Every copy has an exact length, so a
+/// longer object is no copy and readers never receive past this bound.
+pub const MAX_KEY_COPY_OBJECT: usize = CIRCLE_PREFIX + BOX_OVERHEAD + CIRCLE_MATERIAL;
 
 /// A complete kind-37 copy, borrowing the exact prefix and randomized box bytes.
 #[derive(Debug)]

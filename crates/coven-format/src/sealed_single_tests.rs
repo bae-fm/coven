@@ -152,5 +152,8 @@ fn a_chunk_holds_one_bounded_frame() {
         bytes.extend_from_slice(&[0; 64]);
         assert!(SingleChunkObject::decode(&bytes).is_ok());
         assert_eq!(bytes.len(), 19 + length + 44 + 64);
+        if length == MAX_OBJECT {
+            assert_eq!(bytes.len(), MAX_SINGLE_CHUNK_OBJECT);
+        }
     }
 }

@@ -268,3 +268,43 @@ async fn oversized_reports_fail_publication_without_replacing_or_truncating_the_
         64
     );
 }
+
+// SP step 3: positions longer than any positions object are that peer's
+// invalid version, judged from the listed size without a GET.
+#[tokio::test]
+async fn oversize_positions_are_invalid_without_a_download() {
+    use coven_foundation::id_source::DeviceId;
+    use coven_storage::test_utils::{MemoryRequest, MemoryStorage};
+    use coven_storage::Storage;
+    let storage = std::sync::Arc::new(
+        MemoryStorage::builder()
+            .transfer_limits(64 * 1024 * 1024, 64 * 1024)
+            .build()
+            .unwrap(),
+    );
+    let mut devices = group(storage.clone(), 3).await;
+    devices[1].writes.post_positions().await.unwrap();
+    devices[2].writes.post_positions().await.unwrap();
+    let path = ObjectPath::positions(STORE_ID, DeviceId(2));
+    let oversize = coven_format::sealed_single::MAX_SINGLE_CHUNK_OBJECT + 1;
+    storage.replace(&path, &vec![0; oversize]).await.unwrap();
+    for _ in 0..2 {
+        let before = storage.request_trace().len();
+        let observed = devices[0].writes.observe_positions().await.unwrap();
+        assert!(!storage.request_trace()[before..]
+            .iter()
+            .any(|request| matches!(request, MemoryRequest::Read(read, _) if read == &path)));
+        assert!(observed.positions.contains_key(&DeviceId(3)));
+        assert!(!observed.positions.contains_key(&DeviceId(2)));
+    }
+    assert!(devices[0]
+        .db
+        .pending::<crate::PendingRecord>()
+        .await
+        .unwrap()
+        .iter()
+        .any(
+            |record| record.subject == crate::PendingSubject::Positions(DeviceId(2))
+                && matches!(record.reason, crate::PendingReason::InvalidPositions(_))
+        ));
+}

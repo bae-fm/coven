@@ -540,3 +540,53 @@ async fn applied_entries_are_not_read_again() {
         [(DeviceId(1), 4.try_into().unwrap())]
     );
 }
+
+/// An entry or key copy longer than its format allows fails the read before
+/// any of its body is received or retained; one at the bound is read (§6).
+#[tokio::test]
+async fn a_log_object_past_its_format_bound_fails_its_read_unreceived() {
+    use coven_storage::StorageFailure;
+    let storage = Arc::new(MemoryStorage::builder().build().unwrap());
+    let receiver = device(storage.clone(), 9, member(1), store(1)).await;
+    for (kind, bound) in [
+        (
+            LogKind::Entry,
+            coven_format::store_log::MAX_STORE_LOG_OBJECT,
+        ),
+        (
+            LogKind::KeyCopy,
+            coven_format::sealed_key::MAX_KEY_COPY_OBJECT,
+        ),
+    ] {
+        let path = |n: u64| discovery::path(store(1), kind, DeviceId(1), n.try_into().unwrap());
+        storage.create(&path(1), &vec![1; bound]).await.unwrap();
+        storage.plant(&path(2), &vec![2; bound + 1]).await.unwrap();
+        let error = discovery::scan(
+            &receiver.db,
+            &PassReads::default(),
+            storage.as_ref(),
+            store(1),
+            kind,
+            &BTreeMap::from([(DeviceId(1), 0)]),
+            NonZeroUsize::new(3).unwrap(),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(&error, crate::SyncError::Storage(error) if error.failure() == StorageFailure::Protocol),
+            "{error:?}"
+        );
+        let retained = receiver
+            .db
+            .log_inputs(kind, vec![(DeviceId(1), 0)])
+            .await
+            .unwrap();
+        assert_eq!(
+            retained
+                .iter()
+                .map(|input| (input.number.get(), input.bytes.len()))
+                .collect::<Vec<_>>(),
+            [(1, bound)]
+        );
+    }
+}

@@ -86,18 +86,23 @@ impl ObjectInput {
     /// observation, retained under its own metadata before its bytes are
     /// checked, never combined with bytes of the listed revision (§4).
     /// Retained bytes of the listed revision are used first, fetching only a
-    /// missing suffix.
+    /// missing suffix. A revision longer than `maximum`, its format's bound,
+    /// returns no bytes: its size alone settles it, with no body read.
     pub(crate) async fn whole_replaceable(
         database: &Database,
         storage: &dyn Storage,
         listed: &StoredObject,
-    ) -> Result<(Self, Vec<u8>), SyncError> {
+        maximum: u64,
+    ) -> Result<(Self, Option<Vec<u8>>), SyncError> {
         debug_assert!(listed.path.is_replaceable());
         let input = Self::observe(database, listed).await?;
+        if input.object.size > maximum {
+            return Ok((input, None));
+        }
         let mut stream = input.stream(storage).await;
         if input.retains_bytes().await? {
             let bytes = input.collect(stream).await?;
-            return Ok((input, bytes));
+            return Ok((input, Some(bytes)));
         }
         let response = storage.stream_object(&listed.path, None).await?;
         if response.metadata().path != listed.path {
@@ -108,16 +113,19 @@ impl ObjectInput {
         if identity(response.metadata())? == identity(&input.object)? {
             stream.start_with(response);
             let bytes = input.collect(stream).await?;
-            return Ok((input, bytes));
+            return Ok((input, Some(bytes)));
         }
         drop(stream);
         let newer = Self::observe(database, response.metadata()).await?;
+        if newer.object.size > maximum {
+            return Ok((newer, None));
+        }
         let mut stream = newer.stream(storage).await;
         if !newer.retains_bytes().await? {
             stream.start_with(response);
         }
         let bytes = newer.collect(stream).await?;
-        Ok((newer, bytes))
+        Ok((newer, Some(bytes)))
     }
 
     /// Retain a whole-object GET's response under the observation it
@@ -167,14 +175,10 @@ impl ObjectInput {
         Ok(self.received().await? || !self.retained.ranges(0, self.object.size).await?.is_empty())
     }
 
+    /// The caller has bounded this observation's size by its format.
     async fn collect(&self, mut stream: InputStream<'_>) -> Result<Vec<u8>, SyncError> {
         let length = usize::try_from(self.object.size)
             .map_err(|error| StorageFailure::Protocol.with_source(error))?;
-        if self.object.size > coven_storage::BUFFERED_READ_LIMIT {
-            return Err(StorageFailure::Protocol
-                .with_source("object exceeds the consumer's buffered-read bound")
-                .into());
-        }
         let bytes = stream.read_exact(length).await?;
         stream.drain().await?;
         Ok(bytes)

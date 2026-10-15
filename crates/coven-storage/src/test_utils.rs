@@ -359,6 +359,23 @@ impl MemoryStorage {
         *byte ^= 1;
         Ok(())
     }
+    /// Store an object without a request or this connection's size limits,
+    /// as anyone holding the storage's credentials could (§2).
+    pub async fn plant(&self, path: &ObjectPath, bytes: &[u8]) -> Result<(), StorageError> {
+        let stored_at = self.provider.storage_time()?;
+        let mut state = self.provider.state.lock().await;
+        let revision = state.next_id()?;
+        state.objects.insert(
+            path.clone(),
+            Object {
+                revision,
+                upload_id: None,
+                bytes: bytes.into(),
+                stored_at,
+            },
+        );
+        Ok(())
+    }
     /// Refuse this access token from now on, on every connection, as a
     /// provider 401 would (§4).
     pub async fn reject_access_token(&self, token: &str) {

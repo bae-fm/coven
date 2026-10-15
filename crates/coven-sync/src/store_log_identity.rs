@@ -81,9 +81,11 @@ impl StoreLogSync {
                 &self.database,
                 storage,
                 &object,
+                coven_format::sealed_single::MAX_SINGLE_CHUNK_OBJECT as u64,
             )
             .await?;
-            {
+            // Longer than any positions object: damage, so no post.
+            if let Some(bytes) = bytes {
                 let ring = self.store_keys.read()?;
                 // Damage or an unmet condition counts as no post (§19.1).
                 if let Ok(positions) =

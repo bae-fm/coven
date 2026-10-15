@@ -6,6 +6,12 @@ use crate::wire::{Decoder, Encoder, Wire, MAX_OBJECT};
 use coven_crypto::{Signature, SEALED_OBJECT_CHUNK_OVERHEAD};
 use coven_foundation::id_source::KeyId;
 
+/// The longest single-chunk object: the 19-byte prefix, the chunk's length,
+/// its largest frame sealed, and the signature. Readers never receive past
+/// it. Store-log entries have their own smaller bound,
+/// [`crate::store_log::MAX_STORE_LOG_OBJECT`].
+pub const MAX_SINGLE_CHUNK_OBJECT: usize = 19 + 4 + MAX_OBJECT + SEALED_OBJECT_CHUNK_OVERHEAD + 64;
+
 /// Cleartext routing fields available before sealing the frame or signing it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SingleChunkPrefix {

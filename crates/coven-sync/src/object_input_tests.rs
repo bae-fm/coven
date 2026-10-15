@@ -101,10 +101,10 @@ async fn positions_replaced_after_listing_are_read_as_the_newer_revision() {
     let newer = storage.status(&path).await.unwrap().unwrap();
     assert_ne!(listed.revision, newer.revision);
     let before = storage.request_trace().len();
-    let (input, bytes) = ObjectInput::whole_replaceable(&receiver.db, storage.as_ref(), &listed)
+    let (input, bytes) = ObjectInput::whole_replaceable(&receiver.db, storage.as_ref(), &listed, 6)
         .await
         .unwrap();
-    assert_eq!(bytes, b"newer!");
+    assert_eq!(bytes.unwrap(), b"newer!");
     assert_eq!(input.object().revision, newer.revision);
     assert_eq!(
         storage.request_trace()[before..],
@@ -112,12 +112,28 @@ async fn positions_replaced_after_listing_are_read_as_the_newer_revision() {
     );
     // The next listing names the revision already read: no request.
     let before = storage.request_trace().len();
-    let (input, bytes) = ObjectInput::whole_replaceable(&receiver.db, storage.as_ref(), &newer)
+    let (input, bytes) = ObjectInput::whole_replaceable(&receiver.db, storage.as_ref(), &newer, 6)
         .await
         .unwrap();
-    assert_eq!(bytes, b"newer!");
+    assert_eq!(bytes.unwrap(), b"newer!");
     assert_eq!(input.object().revision, newer.revision);
     assert_eq!(storage.request_trace().len(), before);
+    // A revision longer than its format's bound is settled by its size alone,
+    // whether listed or met in the GET's response.
+    storage.replace(&path, b"fresh!").await.unwrap();
+    let fresh = storage.status(&path).await.unwrap().unwrap();
+    storage.replace(&path, b"longest").await.unwrap();
+    let longest = storage.status(&path).await.unwrap().unwrap();
+    for (listed, requests) in [(&fresh, 1), (&longest, 0)] {
+        let before = storage.request_trace().len();
+        let (input, bytes) =
+            ObjectInput::whole_replaceable(&receiver.db, storage.as_ref(), listed, 6)
+                .await
+                .unwrap();
+        assert!(bytes.is_none());
+        assert_eq!(input.object().revision, longest.revision);
+        assert_eq!(storage.request_trace().len(), before + requests);
+    }
 }
 
 #[tokio::test]

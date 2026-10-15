@@ -50,6 +50,15 @@ pub(crate) fn path(
     }
 }
 
+/// The format's bound on one object of this kind (D2, D9). A hit declaring
+/// more fails its read before any of its body is received.
+fn bound(kind: LogKind) -> u64 {
+    match kind {
+        LogKind::Entry => coven_format::store_log::MAX_STORE_LOG_OBJECT as u64,
+        LogKind::KeyCopy => coven_format::sealed_key::MAX_KEY_COPY_OBJECT as u64,
+    }
+}
+
 /// Each writer's numbers past its newest applied entry, keeping that entry:
 /// the decoded log holds the rest, and the newest one's observation keeps
 /// the storage-time sample a restarted session starts from.
@@ -176,7 +185,13 @@ pub(crate) async fn scan_tail(
                 continue;
             }
             let path = path(store, kind, writer, number);
-            running.push(async move { (number, storage.read_object(&path, None).await) });
+            running.push(async move {
+                let read = match storage.stream_object(&path, None).await {
+                    Ok(response) => response.collect(bound(kind)).await,
+                    Err(error) => Err(error),
+                };
+                (number, read)
+            });
         }
         let Some((number, result)) = running.next().await else {
             break;

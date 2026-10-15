@@ -1687,8 +1687,9 @@ File uploads run in their own worker (§16.5); a pass does not wait for them.
   writes, store-log entries and sealed key copies. Each starts at 1 and
   publishes in order. Discovery GETs the next number after the contiguous
   input already retained or covered by an applied snapshot.
-  - A hit supplies the object itself. Fetch ahead in parallel up to the
-    transfer limit, and stop scheduling beyond the first miss. Retain
+  - A hit supplies the object itself; an entry or key copy longer than D2 or
+    D9 allows is a failed read, its body unreceived. Fetch ahead in parallel
+    up to the transfer limit, and stop scheduling beyond the first miss. Retain
     completed reads and their check results; never advance over a failed
     read or input not durably retained, or over a miss except for §15's
     certified deleted-number handling

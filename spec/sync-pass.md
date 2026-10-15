@@ -50,8 +50,9 @@ These local records survive reopening and have no pass-end expiry:
 - **Peer positions:** the last checked object identity and decoded positions,
   fingerprints and relevant reports, including invalid-position verdicts.
   Keep them until a completed observation replaces or removes that object.
-  An unchanged invalid version is not downloaded again; discovery continues
-  so its replacement can be checked. Unknown authors or keys are waits on
+  A version listed longer than D9 allows is invalid unread, and an unchanged
+  invalid version is not downloaded again; discovery continues so its
+  replacement can be checked. Unknown authors or keys are waits on
   locally retained bytes, retried when those prerequisites arrive.
 - **Own post:** the exact canonical D8 plaintext last confirmed published,
   with the stored metadata when known. Compare all its fields, including

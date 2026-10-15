@@ -193,9 +193,30 @@ async fn check(
 ) -> Result<(StoredObject, Checked), SyncError> {
     // The verdict belongs to the revision actually read, which can be newer
     // than the listing's.
-    let (input, bytes) =
-        crate::object_input::ObjectInput::whole_replaceable(database, storage, listed).await?;
+    let maximum = coven_format::sealed_single::MAX_SINGLE_CHUNK_OBJECT;
+    let (input, bytes) = crate::object_input::ObjectInput::whole_replaceable(
+        database,
+        storage,
+        listed,
+        maximum as u64,
+    )
+    .await?;
     let object = input.object().clone();
+    // Longer than any positions object: an invalid version, from its size.
+    let Some(bytes) = bytes else {
+        let failure = coven_format::Error::Limit {
+            field: "positions object",
+            actual: usize::try_from(object.size).unwrap_or(usize::MAX),
+            maximum,
+        };
+        return Ok((
+            object,
+            Checked::Invalid {
+                version: env!("CARGO_PKG_VERSION").into(),
+                reason: PendingReason::InvalidPositions(Refusal::from(failure)),
+            },
+        ));
+    };
     // A verdict on these bytes holds for this coven version; a wait for a
     // registration or key is checked again on the next listing.
     let checked = match open(&bytes, &object.path, ring, &local.log)? {

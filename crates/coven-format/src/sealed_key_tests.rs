@@ -481,3 +481,16 @@ fn check_encoding(bytes: &[u8]) {
         assert_eq!(key.encode(), bytes);
     }
 }
+
+#[test]
+fn a_circle_copy_is_the_longest_copy() {
+    let member = crate::test_utils::identity();
+    for audience in [Audience::Store, circle()] {
+        let prefix = prefix(audience.clone());
+        let bytes = seal(&prefix, &audience, prefix.key, [17; 32], &sealing(&member));
+        match audience {
+            Audience::Store => assert!(bytes.len() < MAX_KEY_COPY_OBJECT),
+            Audience::Circle(_) => assert_eq!(bytes.len(), MAX_KEY_COPY_OBJECT),
+        }
+    }
+}
