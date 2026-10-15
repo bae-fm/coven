@@ -480,6 +480,11 @@ abandonment state, so it does not prove signed-prefix preservation through
 retries or the required one-day abandonment and restart. `late_snapshot_ignored`
 proves only that catalog selection ignores a late landing; `act` retains
 outstanding remote requests and permits a new path while an old one can land.
+The Rust comparison `io_differential_deletable` runs coven's deletion
+decision for one covered or uncovered write against `Deletable`: finality,
+each active reader's posted position, and thirty storage days counting at
+equality. Mature historical coverage (`MatureCoverage`) is not yet in that
+decision.
 
 The required lower bound is frozen at reload start, including the remote past
 of waiting writes, already uploaded own writes and their past, and the positions

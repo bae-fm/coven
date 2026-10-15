@@ -172,6 +172,40 @@ private def prunes (j : Json) : Except String Json := do
   pure (toJson ((stored.filter fun (_, s) => kept.any (·.id == s.id)).map fun (p, _) =>
     Json.arr #[toJson p.1, toJson p.2]))
 
+/-- §9/§15: one covered, owned object's retention record and deletion,
+`RetentionSafety.work` and `mayDelete`. `entries` lists its dependencies
+`[number, final]`; under the current replay the object is not needed, so
+each enters `needed` as a condition that is false whichever way it goes.
+`readers` lists active readers `[device, posted]` in device order and
+`aged` whether storage held it thirty days: the one remaining check, whose
+unmet reason names the first reader that has not posted. -/
+private def retention (j : Json) : Except String Json := do
+  let entries ← (← j.getObjValAs? (Array Json) "entries").toList.mapM fun e => do
+    match (← e.getArr?).toList with
+    | [n, f] => pure (← n.getNat?, ← f.getBool?)
+    | _ => throw "expected [number, final]"
+  let readers ← (← j.getObjValAs? (Array Json) "readers").toList.mapM fun r => do
+    match (← r.getArr?).toList with
+    | [d, p] => pure (← d.getNat?, ← p.getBool?)
+    | _ => throw "expected [device, posted]"
+  let aged ← j.getObjValAs? Bool "aged"
+  let needed := entries.foldr (fun (e, _) rest =>
+    RetentionSafety.Need.either (.both (.kept e) (.not (.kept e))) rest) RetentionSafety.Need.never
+  let lagging := (readers.find? (!·.2)).map (·.1)
+  let check : Pending.Condition :=
+    ⟨aged || readers.all (·.2), .waits (.positions (lagging.getD 0))⟩
+  let input : RetentionSafety.Input := ⟨0, .deviceLog, needed, [check]⟩
+  let final (e : Nat) : Bool := (entries.find? (·.1 == e)).any (·.2)
+  let records := Pending.records [RetentionSafety.work "object" 0 final input]
+  pure (Json.mkObj [
+    ("record", match records.map (·.reason) with
+      | [Pending.Reason.waits (Pending.Prerequisite.entryFinality e)] =>
+        Json.arr #["entryFinality", toJson e]
+      | [Pending.Reason.waits (Pending.Prerequisite.positions d)] =>
+        Json.arr #["positions", toJson d]
+      | _ => Json.null),
+    ("delete", toJson (RetentionSafety.mayDelete (fun _ => true) final input))])
+
 def main : IO UInt32 := do
   let input ← (← IO.getStdin).readToEnd
   let output := do
@@ -180,6 +214,8 @@ def main : IO UInt32 := do
       return toJson (← (← cases.getArr?).mapM fileDeletable)
     if let .ok cases := j.getObjVal? "prunes" then
       return toJson (← (← cases.getArr?).mapM prunes)
+    if let .ok cases := j.getObjVal? "retention" then
+      return toJson (← (← cases.getArr?).mapM retention)
     match j.getObjVal? "reloads", j.getObjVal? "circles", j.getObjVal? "effects",
         j.getObjVal? "pending", j.getObjVal? "choices", j.getObjVal? "sources" with
     | .ok histories, _, _, _, _, _ => toJson <$> (← histories.getArr?).mapM reloads

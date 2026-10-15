@@ -105,6 +105,49 @@ async fn an_excluded_snapshot_prevents_proving_file_absence() {
     f.close().await;
 }
 
+/// §15, §16.5: a log write this device refused is not read again, so it
+/// cannot help prove a file absent. Its object stays, and so does every
+/// file whose absence would need it, even one no readable data names.
+#[tokio::test]
+async fn a_refused_log_write_blocks_proving_file_absence() {
+    for refused in [false, true] {
+        let f = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
+        let (mut sync, _, mut writes) = sync(&f).await;
+        let old = f.uploaded("old", vec![31; CHUNK]).await;
+        f.database
+            .write(|sql| {
+                sql.execute("DELETE FROM files WHERE id='old'", [])?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        writes.upload_writes().await.unwrap();
+        assert!(writes.post_positions().await.unwrap());
+        sync.write_snapshot(&mut writes, Audience::Store)
+            .await
+            .unwrap();
+        // A later write, uncovered, stays as a retained log.
+        f.uploaded("kept", vec![32; CHUNK]).await;
+        writes.upload_writes().await.unwrap();
+        let logs = f
+            .storage
+            .list(&ObjectPrefix::device_logs(f.directory.id()))
+            .await
+            .unwrap();
+        let later = logs.last().unwrap();
+        if refused {
+            f.storage
+                .corrupt_byte(&later.path, later.size as usize - 1)
+                .await
+                .unwrap();
+        }
+        sync.run_retention().await.unwrap();
+        assert_eq!(f.storage.read(&path(&f, &old)).await.is_ok(), refused);
+        assert!(f.storage.read(&later.path).await.is_ok());
+        f.close().await;
+    }
+}
+
 #[tokio::test]
 async fn file_references_survive_in_waiting_writes_and_kept_snapshots() {
     let f = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;

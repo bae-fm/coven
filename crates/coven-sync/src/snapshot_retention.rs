@@ -1,4 +1,5 @@
-//! Deletion follows authenticated coverage, posted positions and ownership.
+//! Deletion follows authenticated coverage, the finality of the entries it
+//! depends on, posted positions or storage age, and ownership (§9, §15).
 
 use super::{catalog::inconsistent, prefix::failure, snapshot_path, StoreLogSync};
 use crate::SyncError;
@@ -8,21 +9,12 @@ use coven_format::{
     value::{StorageTime, WritePositions},
 };
 use coven_foundation::id_source::DeviceId;
-use coven_storage::{CloudProvider, ObjectPrefix, StoredObject};
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    time::Duration,
-};
+use coven_storage::{CloudProvider, ObjectPath, ObjectPrefix, StoredObject};
+use std::collections::{BTreeMap, BTreeSet};
+use waits::{reached_age, Dependencies, Facts};
 
-/// A covered write object whose readers have not all posted past it may go
-/// once its storage age reaches thirty days (§15).
-const RETENTION_AGE: Duration = Duration::from_secs(30 * 24 * 60 * 60);
-
-/// Whether storage time `now` is at least thirty days after `stored_at`.
-fn reached_age(now: Option<StorageTime>, stored_at: StorageTime) -> bool {
-    now.and_then(|now| now.duration_since(stored_at))
-        .is_some_and(|age| age >= RETENTION_AGE)
-}
+#[path = "snapshot_retention_waits.rs"]
+pub(crate) mod waits;
 
 impl StoreLogSync {
     pub(super) async fn retain_snapshot_objects(&self) -> Result<(), SyncError> {
@@ -30,6 +22,7 @@ impl StoreLogSync {
         let local = self.database.local_store_log().await?;
         self.check_stopped(&local, &self.operation_member()?)?;
         let readable = self.snapshot_audiences(&local.log)?;
+        let dependencies = Dependencies::new(&local.log);
         let mut coverage = BTreeMap::new();
         let mut superseded = Vec::new();
         let mut pinned = BTreeSet::new();
@@ -82,7 +75,8 @@ impl StoreLogSync {
                 coverage.insert(audience.clone(), selections);
             }
             // An own snapshot goes once a newer one this device can load
-            // covers everything it covers.
+            // covers everything it covers, and the entries that make that
+            // replacement usable are final (§15).
             let candidates = catalog.candidates;
             let chosen = candidates.iter().find(|c| {
                 super::boundaries::allows(
@@ -106,7 +100,13 @@ impl StoreLogSync {
                             .iter()
                             .all(|id| chosen.prefix.writes.covers(*id))
                     {
-                        superseded.push(older.object.clone());
+                        superseded.push((
+                            older.object.clone(),
+                            Facts::for_snapshot(
+                                &local.log,
+                                dependencies.audience(audience).collect(),
+                            ),
+                        ));
                     }
                 }
             }
@@ -117,6 +117,7 @@ impl StoreLogSync {
         let mut stuck = crate::pending_logs::local_refusals(&self.database).await?;
         let mut retained = Vec::new();
         let mut failures = Vec::new();
+        let mut waits = Vec::new();
         let mut held = false;
         for object in storage
             .list(&ObjectPrefix::device_logs(self.directory.id()))
@@ -145,7 +146,9 @@ impl StoreLogSync {
             }
             let header = match self.open_write_header(&object).await {
                 Ok(header) => header,
+                // The write's first prerequisite is this object's record.
                 Err(error) if waiting(&object.path, &error) => {
+                    waits.push((object.path.clone(), self.pending_reason(&error).await?));
                     held = true;
                     retained.push(object);
                     continue;
@@ -169,37 +172,63 @@ impl StoreLogSync {
                     .get(&part.audience)
                     .is_some_and(|selections| selections.iter().all(|p| p.covers(id)))
             });
-            let posted = local
-                .log
-                .replay
-                .state
-                .devices
-                .iter()
-                .filter(|(_, d)| d.active())
-                .all(|(device, _)| positions.get(device).is_some_and(|p| p.covers(id)));
+            if !covered {
+                retained.push(object);
+                continue;
+            }
+            // Coverage already holds under every boundary replay could still
+            // select, so no boundary's fate decides it; the removal that lets
+            // this device delete another's objects does (§9, §15).
+            let mut entries = BTreeSet::new();
+            if id.device != local.device {
+                entries.extend(dependencies.device(id.device));
+            }
+            let facts = |time| {
+                Facts::for_write(
+                    &local.log,
+                    &dependencies,
+                    entries.clone(),
+                    id,
+                    object.stored_at,
+                    time,
+                    &positions,
+                )
+            };
+            let known = facts(storage_time);
+            let mut unmet = known.first_unmet();
             // Age compares storage times only: the observed provider time T
             // against the object's first stored time. The device clock only
             // schedules one fresh observation when the known T is too old to
             // decide; it never establishes storage age (§9, §15).
-            let mut aged = reached_age(storage_time, object.stored_at);
-            if covered && !posted && !aged && !observed && self.age_may_have_passed(&object) {
+            if unmet.is_some() && !known.aged && !observed && self.age_may_have_passed(&object) {
                 self.observe_clock(&local).await?;
                 observed = true;
                 storage_time = self.storage_time();
-                aged = reached_age(storage_time, object.stored_at);
+                unmet = facts(storage_time).first_unmet();
             }
-            if covered && (posted || aged) {
-                if let Err(error) = self.delete_retained(&object).await {
-                    failures.push((object.path.clone(), error));
+            match unmet {
+                None => {
+                    if let Err(error) = self.delete_retained(&object).await {
+                        failures.push((object.path.clone(), error));
+                        retained.push(object);
+                    }
+                }
+                Some(prerequisite) => {
+                    waits.push((
+                        object.path.clone(),
+                        crate::PendingReason::Waits(prerequisite),
+                    ));
                     retained.push(object);
                 }
-            } else {
-                retained.push(object);
             }
         }
-        for object in superseded {
+        for (object, facts) in superseded {
             if !failures.is_empty() {
                 break;
+            }
+            if let Some(prerequisite) = facts.first_unmet() {
+                waits.push((object.path, crate::PendingReason::Waits(prerequisite)));
+                continue;
             }
             if let Err(error) = self.delete_retained(&object).await {
                 failures.push((object.path, error));
@@ -208,20 +237,30 @@ impl StoreLogSync {
         if failures.is_empty() {
             self.retain_uploaded_files(&retained, &mut failures).await?;
         }
-        self.record_retention_failures(failures).await
+        self.record_retention(waits, failures).await
     }
 
-    /// A completed evaluation's failed deletions become exactly this device's
-    /// `Retention { path }` records: a path deleted since, or no longer
-    /// eligible, loses its record in the same transaction. Each object stays
-    /// protected, and the next evaluation derives its eligibility again
-    /// (§18.1, SP step 8). The first failure still fails the pass.
-    async fn record_retention_failures(
+    /// A completed evaluation's waits and failed deletions become exactly
+    /// this device's `Retention { path }` records, each naming the object's
+    /// first unmet condition: a path deleted since, or no longer a covered
+    /// candidate, loses its record in the same transaction, and an unchanged
+    /// set writes nothing. Each object stays protected, and the next
+    /// evaluation derives its eligibility again (§15, §18.1, SP step 8). The
+    /// first failure still fails the pass.
+    async fn record_retention(
         &self,
-        failures: Vec<(coven_storage::ObjectPath, SyncError)>,
+        waits: Vec<(ObjectPath, crate::PendingReason)>,
+        failures: Vec<(ObjectPath, SyncError)>,
     ) -> Result<(), SyncError> {
         let own = self.database.local_store_log().await?.device;
         let mut records = Vec::new();
+        for (path, reason) in waits {
+            records.push(crate::PendingRecord {
+                subject: crate::PendingSubject::Retention { path },
+                reason,
+                reported_by: own,
+            });
+        }
         for (path, error) in &failures {
             records.push(crate::PendingRecord {
                 subject: crate::PendingSubject::Retention { path: path.clone() },

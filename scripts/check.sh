@@ -404,6 +404,9 @@ proofs() {
         step "Rust / Lean snapshot pruning from the catalog"
         COVEN_STORELOG_DATA_LEAN="$runner" exact_ignored coven-sync --all-features -- \
             store_log_sync::tests::snapshots::selection::data_differential_snapshot_pruning
+        step "Rust / Lean retention records and deletion"
+        COVEN_STORELOG_DATA_LEAN="$runner" exact_ignored coven-sync --all-features -- \
+            store_log_sync::tests::snapshots::retention_waits::data_differential_retention_record
     fi
 
     if proof_selected io || crate_selected coven-sync; then
@@ -417,8 +420,9 @@ proofs() {
         step "Rust / Lean numbered discovery, snapshot selection and recent returns"
         COVEN_IO_RUNNER="$runner" exact_ignored coven-sync --all-features -- \
             discovery::tests::io_differential_discovery \
-            store_log_sync::tests::snapshots::signatures::io_differential_snapshot_counts \
-            store_log_sync::tests::snapshots::signatures::io_differential_catalog_current \
+            store_log_sync::tests::snapshots::selection::io_differential_snapshot_counts \
+            store_log_sync::tests::snapshots::selection::io_differential_catalog_current \
+            store_log_sync::tests::snapshots::retention_waits::io_differential_deletable \
             recent_return::tests::io_differential_needs_snapshots \
             recent_return::tests::io_differential_recent_return \
             device_log_sync::tests::validation::io_differential_streaming_download_dispositions \

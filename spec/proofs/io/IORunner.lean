@@ -75,6 +75,23 @@ private def catalog (j : Json) : Except String Json := do
     | some s => toJson [s.writer, s.number]
     | none => Json.null
 
+/-- `Deletable` on the catalog's current snapshot: one write of `writer`
+numbered `number` in audience 0, covered or not, with every dependency
+final or not, each active reader's posted position for that writer, and
+storage times in seconds. Thirty storage days count at equality. -/
+private def deletable (j : Json) : Except String Json := do
+  let number ← j.getObjValAs? Nat "number"
+  let covered ← j.getObjValAs? Bool "covered"
+  let final ← j.getObjValAs? Bool "final"
+  let readers ← j.getObjValAs? (List (Nat × Nat)) "posted"
+  let write : Write := ⟨0, number, ← j.getObjValAs? Nat "stored", [0]⟩
+  let current : Current := fun a =>
+    if covered && a == 0 then some ⟨0, 0, 1, 0, 0, [(0, number)]⟩ else none
+  let posted (reader _writer : Nat) : Nat :=
+    ((readers.find? (·.1 == reader)).map (·.2)).getD 0
+  return toJson (decide (Deletable current (readers.map (·.1)) posted
+    (← j.getObjValAs? Nat "time") (final = true) write))
+
 private def saved (j : Json) : Except String (Option Nat) := do
   match j.getObjVal? "saved" with
   | .ok .null => pure none
@@ -591,6 +608,7 @@ private def run (j : Json) : Except String Json := do
   match ← j.getObjValAs? String "check" with
   | "discovery" => discovery j
   | "counts" => counts j
+  | "deletable" => deletable j
   | "catalog" => catalog j
   | "needs" => needs j
   | "recent" => recent j

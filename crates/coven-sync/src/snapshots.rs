@@ -28,7 +28,7 @@ mod publish;
 #[path = "snapshot_reload.rs"]
 mod reload;
 #[path = "snapshot_retention.rs"]
-mod retention;
+pub(super) mod retention;
 #[path = "snapshot_return.rs"]
 mod return_check;
 #[path = "snapshot_seal.rs"]

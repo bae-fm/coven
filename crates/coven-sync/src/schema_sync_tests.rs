@@ -821,12 +821,16 @@ async fn a_migration_waits_for_an_operation_that_already_reserved_the_entry_numb
         );
         operations.barrier().await.unwrap();
         operations.sync().await.unwrap();
-        assert!(device
+        // Retention may wait for this pass's own post, which follows it (§15).
+        let pending: Vec<_> = device
             .db
             .pending::<crate::PendingRecord>()
             .await
             .unwrap()
-            .is_empty());
+            .into_iter()
+            .filter(|r| !matches!(r.subject, crate::PendingSubject::Retention { .. }))
+            .collect();
+        assert!(pending.is_empty(), "{pending:?}");
         assert_eq!(device.db.circles().await.unwrap()[0].name, "waiting");
         assert_eq!(
             device.db.store_log().await.unwrap().replay.state.schema[&Audience::Store].number,

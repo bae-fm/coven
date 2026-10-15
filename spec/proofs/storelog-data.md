@@ -840,6 +840,16 @@ data, not a constant bound on an ever-growing store. Frozen losses and retained
 replay inputs both protect file references; unreadable data prevents deletion.
 Storage age can satisfy the posted-position alternative without an absent
 reader's acknowledgement.
+The Rust comparison `data_differential_retention_record` runs coven's
+retention decision on every combination of dependency finality, reader
+posts and storage age, and compares its record and deletion with
+`RetentionSafety.work` and `mayDelete`. Which entries a deletion depends
+on is the implementation's choice, not modeled here. A covered log depends
+on the entries removing an uploader whose objects this device deletes and,
+short of thirty storage days, on the entries registering or removing a
+reader that has not posted; its coverage already holds under every
+boundary replay could still select (§15). A superseded own snapshot
+depends on every reset and raise of its audience.
 
 The model supplies complete storage metadata as an input; numbered discovery and
 authentication are outside the proof. Dependency expressions must name every

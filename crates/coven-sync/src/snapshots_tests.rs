@@ -14,6 +14,8 @@ mod boundaries;
 mod publication;
 #[path = "snapshot_retention_tests.rs"]
 mod retention;
+#[path = "snapshot_retention_waits_tests.rs"]
+mod retention_waits;
 #[path = "snapshot_return_tests.rs"]
 mod returns;
 #[path = "snapshot_catalog_tests.rs"]

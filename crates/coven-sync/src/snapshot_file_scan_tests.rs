@@ -1,12 +1,14 @@
 //! The one-time listing of a removed uploader's file folder (§16.5).
 use crate::operations::Command;
-use crate::store_log_sync::tests::operations::{accounts, drive_access, google, publish};
-use crate::store_log_sync::tests::store;
+use crate::store_log_sync::tests::operations::{accounts, drive_access, publish};
+use crate::store_log_sync::tests::{store, Device};
 use coven_format::store_log::StoreChange;
+use coven_foundation::clock::FixedClock;
 use coven_foundation::id_source::{DeviceId, FileId};
 use coven_storage::test_utils::{Faults, MemoryRequest, MemoryStorage};
 use coven_storage::{ObjectPath, ObjectPrefix, Storage, StorageFailure};
 use std::sync::Arc;
+use std::time::{Duration, UNIX_EPOCH};
 
 async fn fail_folder_listing(storage: &MemoryStorage, device: DeviceId) {
     storage
@@ -21,6 +23,26 @@ async fn fail_folder_listing(storage: &MemoryStorage, device: DeviceId) {
         .await;
 }
 
+/// Google Drive storage whose provider time the test advances.
+fn google() -> (Arc<MemoryStorage>, Arc<FixedClock>) {
+    let clock = Arc::new(FixedClock::new(UNIX_EPOCH));
+    let storage = MemoryStorage::builder()
+        .provider(coven_storage::CloudProvider::GoogleDrive)
+        .clock(clock.clone())
+        .build()
+        .unwrap();
+    (Arc::new(storage), clock)
+}
+
+/// Thirty-one storage days on, Ana's catch-up makes the day-0 removal final:
+/// only then may she delete what its uploader left (§9, §16.5).
+async fn finalize(a: &mut Device, clock: &FixedClock) {
+    let later = UNIX_EPOCH + Duration::from_secs(31 * 86400);
+    clock.set(later);
+    a.clock.set(later);
+    a.sync().await;
+}
+
 fn folder_listings(storage: &MemoryStorage, device: DeviceId) -> usize {
     let folder = ObjectPrefix::device_files(store(1), device);
     storage
@@ -32,14 +54,15 @@ fn folder_listings(storage: &MemoryStorage, device: DeviceId) -> usize {
 
 /// Carol uploaded a photo whose attaching row never reached Ana. Ana removes
 /// her; removal alone is no cut-off, so nothing lists her folder. Once Ana's
-/// device confirms Carol's account revoked, it lists the folder once: a
+/// device confirms Carol's account revoked, it lists the folder once, and
+/// deletes what it found once her removal is final: a
 /// failed listing records nothing and the next retention lists again. The
 /// completed scan survives reopening. Ben taking Carol's account restores
 /// her access and forgets the scan; revoking it again is a new cut-off, which
 /// lists again.
 #[tokio::test]
 async fn a_removed_uploaders_folder_is_listed_once_per_cut_off() {
-    let storage = google();
+    let (storage, clock) = google();
     let [mut a, mut b, c] = accounts(storage.clone()).await;
     let carol = c.device().await;
     let orphan = |n| ObjectPath::file(store(1), carol, FileId(uuid::Uuid::from_u128(n)));
@@ -51,6 +74,7 @@ async fn a_removed_uploaders_folder_is_listed_once_per_cut_off() {
     assert!(storage.read(&orphan(1)).await.is_ok());
 
     drive_access(&mut a).await;
+    finalize(&mut a, &clock).await;
     fail_folder_listing(&storage, carol).await;
     assert!(a.sync.run_retention().await.is_err());
     assert_eq!(a.db.file_scan(carol).await.unwrap(), None);
@@ -71,7 +95,9 @@ async fn a_removed_uploaders_folder_is_listed_once_per_cut_off() {
     assert!(storage.read(&orphan(2)).await.is_ok());
 
     // Ben moves to Carol's account and back, reaching storage through the
-    // account he held before each move.
+    // account he held before each move, caught up to the same day.
+    b.clock.set(UNIX_EPOCH + Duration::from_secs(31 * 86400));
+    b.sync().await;
     for (held, account, scanned) in [
         ("ben@example.com", "cat@example.com", false),
         ("cat@example.com", "ben@example.com", true),
@@ -113,11 +139,12 @@ async fn io_differential_file_scan() {
         [false, false, true],
         [true, true, false],
     ] {
-        let storage = google();
+        let (storage, clock) = google();
         let [mut a, _, c] = accounts(storage.clone()).await;
         let carol = c.device().await;
         publish(&mut a, Command::RemoveMember(c.member.member())).await;
         drive_access(&mut a).await;
+        finalize(&mut a, &clock).await;
         let mut listings = Vec::new();
         let mut observed = Vec::new();
         let mut landed = Vec::new();
