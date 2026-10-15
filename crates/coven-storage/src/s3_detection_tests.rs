@@ -159,6 +159,21 @@ fn a_start_timestamp_needs_an_enforced_copy_dated_by_publication() {
         failed(detection.check(&detection.settings)),
         StorageCheck::PublicationTime
     );
+    // Derivation still takes the enforced copy condition, so setup names
+    // the copy's timestamp, not a create-once failure (§4).
+    let derived = S3Detection::derive(
+        detection.observations.clone(),
+        SERVICE,
+        detection.versioning.clone(),
+    );
+    assert_eq!(
+        derived.settings.copy_publication,
+        S3CopyPublication::Multipart(S3CopyCondition::IfNoneMatch)
+    );
+    assert_eq!(
+        failed(derived.check(&derived.settings)),
+        StorageCheck::PublicationTime
+    );
 }
 
 #[test]

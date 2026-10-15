@@ -110,10 +110,9 @@ impl S3Detection {
             && held(S3Probe::CompletionTimestamp)
         {
             S3CopyPublication::Never
-        } else if let (Some(S3Probe::CopyPublication(condition)), true) = (
-            first(&COPY_CONDITIONS.map(S3Probe::CopyPublication)),
-            held(S3Probe::CopyTimestamp),
-        ) {
+        } else if let Some(S3Probe::CopyPublication(condition)) =
+            first(&COPY_CONDITIONS.map(S3Probe::CopyPublication))
+        {
             S3CopyPublication::Multipart(condition)
         } else {
             S3CopyPublication::Never
