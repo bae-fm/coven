@@ -320,13 +320,13 @@ pub(crate) fn pinned(db: &DatabaseConnection, file: &FileRef) -> Result<bool, Db
     let id = id(file)?;
     db.query_row("SELECT EXISTS(SELECT 1 FROM _coven_cache WHERE namespace=?1 AND file_id=?2 AND chunk=?4 AND pinned=1 AND checked_hash=?3)",(file.namespace(),id,file.content_hash().as_bytes().as_slice(),COMPLETE_FILE),|r|r.get(0))
 }
-pub(super) fn publish(
-    db: &DatabaseConnection,
+/// Check a finished whole cache file's header and length on disk, and return
+/// its size. It reads only the reserved file, so no writer is held (§3.1).
+pub(super) fn whole_size(
     directory: &StoreDir,
     file: &FileRef,
     name: &FileName,
-) -> Result<(), DbError> {
-    let id = id(file)?;
+) -> Result<i64, DbError> {
     let reader = directory
         .file(FileArea::Cache, name)
         .open_reader()
@@ -339,11 +339,21 @@ pub(super) fn publish(
     if header.size() != file.plaintext_size() || header.encrypted_size()? != reader.size() {
         return Err(DbError::DamagedDatabase);
     }
-    let size = i64::try_from(reader.size()).map_err(|_| DbError::TooLarge {
+    i64::try_from(reader.size()).map_err(|_| DbError::TooLarge {
         field: "cached file",
         actual: reader.size(),
         maximum: i64::MAX as u64,
-    })?;
+    })
+}
+/// Publish a whole file `whole_size` checked as the file's only cache entry,
+/// pinned; older entries become recorded removals in the same transaction.
+pub(super) fn publish(
+    db: &DatabaseConnection,
+    file: &FileRef,
+    name: &FileName,
+    size: i64,
+) -> Result<(), DbError> {
+    let id = id(file)?;
     db.internal_execute("INSERT INTO _coven_file_removals(area,path) SELECT 'cache',path FROM _coven_cache WHERE namespace=?1 AND file_id=?2",(file.namespace(),&id))?;
     db.internal_execute(
         "DELETE FROM _coven_cache WHERE namespace=?1 AND file_id=?2",

@@ -559,10 +559,13 @@ impl CacheReservation {
                 {
                     let slot = pending.database.read().expect("database lock poisoned");
                     let inner = slot.as_ref().ok_or(DbError::StoreClosed)?;
+                    // Disk reads finish before the writer is taken: a stalled
+                    // read must not hold back app writes (§3.1).
+                    let size = cache::whole_size(&inner.access.directory, &file, &pending.name)?;
                     inner.access.with_writer(|writer| {
                         writer.transaction(|db| {
                             file_ref::validate(db, &inner.access.write_schema, &file)?;
-                            cache::publish(db, &inner.access.directory, &file, &pending.name)
+                            cache::publish(db, &file, &pending.name, size)
                         })?;
                         let mut active = inner.staging.lock().expect("staging lock poisoned");
                         active.remove(&pending.name);

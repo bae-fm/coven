@@ -563,3 +563,59 @@ async fn cache_totals_follow_their_records() {
     assert_eq!(total(&db), 0);
     db.close().await.unwrap();
 }
+
+/// SP 517–518, §3.1: publishing a completed pin reads the finished file's
+/// header before taking the writer. A FIFO stands in for a stalled disk: the
+/// publication blocks opening it while an app write commits. Releasing it
+/// with bytes that are not the file fails the publication, publishing nothing.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_stalled_pin_read_holds_back_no_app_write() {
+    use crate::file_write::tests::{local_count, SCHEMA};
+    let store = TestStore::new();
+    let db = store
+        .schema(tables(Provenance::AppProvided), SCHEMA)
+        .await
+        .unwrap();
+    attach(&db, vec![5; 3], true).await.unwrap();
+    let file = db.file_ref("files", "7").await.unwrap();
+    let owner = FileDatabase::new(db.clone());
+    let name = FileName::new("pinned").unwrap();
+    let reservation = owner.reserve_cache_file(name.clone()).await.unwrap();
+    let path = store
+        .database_path()
+        .parent()
+        .unwrap()
+        .join("cache")
+        .join(name.as_str());
+    assert!(std::process::Command::new("mkfifo")
+        .arg(&path)
+        .status()
+        .unwrap()
+        .success());
+    let publication = tokio::spawn(async move { reservation.publish(&file).await });
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    assert!(!publication.is_finished(), "the read is stalled");
+    let written = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        db.write(|sql| {
+            sql.execute("UPDATE files SET title='while pinning'", [])?;
+            Ok(())
+        }),
+    )
+    .await;
+    // Release the read before judging, so a held writer fails the test
+    // instead of hanging it.
+    let release = path.clone();
+    tokio::task::spawn_blocking(move || {
+        drop(std::fs::OpenOptions::new().write(true).open(release))
+    })
+    .await
+    .unwrap();
+    written
+        .expect("an app write waited for a stalled cache read")
+        .unwrap();
+    assert!(publication.await.unwrap().is_err());
+    assert_eq!(local_count(&db, "_coven_cache"), 0);
+    db.close().await.unwrap();
+}
