@@ -700,15 +700,14 @@ pub(crate) const POLICY: Policy = Policy {
         "SyncCommand",
         "Request",
     ],
-    // Writes and pending deletions borrow the database's retained connection,
-    // StoreDir and id source; app SQL receives none of those dependencies.
+    // Writes borrow the database's retained connection and id source; app
+    // SQL receives none of those dependencies.
     borrowed_facade_types: &[
         // A setup or admission exception borrows the gate for exact paths.
         "PublicationScope",
         "SnapshotMetadata",
         "Circles",
         "FileWrite",
-        "FileRemovals",
         "SqlReadContext",
         "Read",
         "ReadOwner",
@@ -756,7 +755,6 @@ pub(crate) const POLICY: Policy = Policy {
         "FileStream",
         "FileStaging",
         "FileWrite",
-        "FileRemovals",
         "SqlReadContext",
         "Read",
         "ReadOwner",
@@ -781,7 +779,6 @@ pub(crate) const POLICY: Policy = Policy {
     internal_dependency_types: &["DatabaseConnection"],
     closed_session_types: &[
         "FileWrite",
-        "FileRemovals",
         "SqlReadContext",
         "MigrationContext",
         "SqlContext",

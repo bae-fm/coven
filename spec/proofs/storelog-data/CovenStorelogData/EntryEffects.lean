@@ -54,7 +54,7 @@ structure FileDevice (W Col : Type) where
   state : State W Col
   files : List LocalFile
 
-/-- store_log.rs::apply → retain_rows → FileRemovals::finish. Successful
+/-- store_log.rs::apply → retain_rows → file_removals::remove_bytes. Successful
 completion deletes the owned bytes whose fact was removed. Re-keeping only
 recomputes the row; neither it nor the upload queue recreates the source. -/
 def fileEntry {W Col : Type} [DecidableEq W]
