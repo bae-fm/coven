@@ -250,3 +250,6 @@ import CovenStorage
 #print axioms CovenStorage.OwnCopyDamage.Examples.damage_waits_with_edits
 #print axioms CovenStorage.OwnCopyDamage.Examples.read_before_damage_keeps_bytes
 #print axioms CovenStorage.OwnCopyDamage.Examples.live_copies_still_reset
+#print axioms CovenStorage.KeyDelivery.Listing.catchUp_accounts
+#print axioms CovenStorage.KeyDelivery.Listing.lost_database_key_found_by_listing
+#print axioms CovenStorage.KeyDelivery.Listing.catch_up_deletes_in_flight_key

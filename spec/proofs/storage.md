@@ -488,6 +488,24 @@ path. The reading chosen for §10's "nothing newer in storage" is that a
 delivery stored after the backup counts as newer, so the reset itself is
 permitted; the loss is what it discards.
 
+**T204: listing the provider's keys (checked counterexample).**
+[KeyListing](storage/CovenStorage/KeyListing.lean) adds T204's catch-up as
+decided: an admin lists the store's keys, which coven names by store and
+member, and makes every key no kept entry records pending deletion, leaving
+out only the key its own database is making.
+- `catchUp_accounts` (proved): after any surviving admin copy's completed
+  catch-up, every live key is recorded, journaled by that copy or pending
+  deletion there, also when the minting database was lost
+  (`lost_database_key_found_by_listing`, checked).
+- `catch_up_deletes_in_flight_key` (checked counterexample): Ana makes key
+  101 for Ben and delivers it; before her set-access entry is kept, Carol's
+  catch-up lists 101 as unrecorded. Ana records 101 as Ben's access, and
+  Carol deletes what her catch-up made pending. Ben's recorded current key
+  is gone, so his devices that install it are locked out. An outstanding
+  invite's key, which no entry records until the person joins, goes the
+  same way. A key being made on another admin device is not distinguishable
+  by the listing as decided, so the rule is not in §13.
+
 ## Undecodable own key copies
 
 T182 made a pass's scan reset the device with `SlotMismatch` when a copy

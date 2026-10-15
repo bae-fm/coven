@@ -12,6 +12,7 @@ import CovenStorage.RowAuthorship
 import CovenStorage.CellProof
 import CovenStorage.KeyDelivery
 import CovenStorage.KeyDeliveryExamples
+import CovenStorage.KeyListing
 import CovenStorage.CopyPublication
 import CovenStorage.OwnCopyDamage
 import CovenStorage.OwnCopyDamageExamples
