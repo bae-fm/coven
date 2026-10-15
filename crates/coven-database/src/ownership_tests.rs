@@ -58,7 +58,12 @@ async fn the_earliest_concurrent_creation_is_selected_in_either_receipt_order() 
 async fn later_generations_keep_the_original_creation() {
     let store = TestStore::new();
     let db = store.schema(owned(), SCHEMA).await.unwrap();
-    db.receive(insert(0, 0).into()).await.unwrap();
+    // The creating device is another of this device's member's, who may
+    // edit the row (§8.8).
+    let creator = insert(0, 0);
+    TestStore::register(&db, store.device(), 1);
+    TestStore::register(&db, creator.header.position.device, 1);
+    db.receive(creator.into()).await.unwrap();
     let original = selected(&db, &row(0));
     assert!(original.is_some());
     sql(&db, "UPDATE rows SET a='changed' WHERE id='0'")

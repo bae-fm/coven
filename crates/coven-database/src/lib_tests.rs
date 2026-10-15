@@ -57,6 +57,47 @@ impl TestStore {
         self.directory.database_path()
     }
 
+    /// This store's device.
+    pub(crate) fn device(&self) -> coven_foundation::id_source::DeviceId {
+        self.directory.settings().unwrap().device_id
+    }
+
+    /// Record `device` as member `seed`'s, as an applied registration would,
+    /// without replaying a log.
+    pub(crate) fn register(
+        database: &crate::Database,
+        device: coven_foundation::id_source::DeviceId,
+        seed: u8,
+    ) {
+        let keys = crate::store_log::tests::keys(seed);
+        let member = crate::store_log::tests::member(seed);
+        database.inspect_writer(|db| {
+            db.transaction(|db| {
+                db.internal_execute(
+                    "INSERT INTO _coven_members(member,signing,sealing,role,removed,access)
+                     VALUES(?1,?2,?3,'member',0,?4) ON CONFLICT(member) DO NOTHING",
+                    (
+                        member.0.as_bytes(),
+                        keys.signing.as_bytes(),
+                        keys.sealing.as_bytes(),
+                        serde_json::to_vec(&coven_format::MemberAccess::S3AccessKey {
+                            access_key_id: format!("fixture-key-{seed}"),
+                            principal: coven_format::S3Principal::Console,
+                        })
+                        .unwrap(),
+                    ),
+                )?;
+                db.internal_execute(
+                    "INSERT INTO _coven_devices(device,member,name,state)
+                     VALUES(?1,?2,'Device','active') ON CONFLICT(device) DO NOTHING",
+                    (device.0.to_be_bytes(), member.0.as_bytes()),
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        });
+    }
+
     /// Supply committed membership for tests of local writes, without replaying a log.
     pub(crate) fn join_circle(
         &self,

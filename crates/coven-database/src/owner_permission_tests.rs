@@ -1,0 +1,446 @@
+use super::*;
+use crate::snapshot_write::tests::stream;
+use crate::tests::TestStore;
+use crate::write::tests::{count, records, sql};
+use crate::{Database, RowIdentity, SyncedTable};
+use coven_format::value::EntryPositions;
+use coven_foundation::id_source::{MemberId, SequentialIds};
+use coven_merge::Audience;
+
+/// Ben's tracks and Ana's reviews of them, all owned by their creators.
+/// Reviews cascade from a track, comments from a review; a pin restricts a
+/// track's deletion; a label's key reference is set NULL when its key
+/// changes. Two shared triggers write Ana's rows from Ben's changes.
+pub(crate) const SCHEMA: &str = "CREATE TABLE tracks(id TEXT NOT NULL PRIMARY KEY, title TEXT);
+CREATE TABLE reviews(id TEXT NOT NULL PRIMARY KEY, track TEXT REFERENCES tracks(id) ON DELETE CASCADE, body TEXT);
+CREATE TABLE comments(id TEXT NOT NULL PRIMARY KEY, review TEXT REFERENCES reviews(id) ON DELETE CASCADE);
+CREATE TABLE pins(id TEXT NOT NULL PRIMARY KEY, track TEXT REFERENCES tracks(id) ON DELETE RESTRICT);
+CREATE TABLE keys(id TEXT NOT NULL PRIMARY KEY);
+CREATE TABLE labels(id TEXT NOT NULL PRIMARY KEY, key TEXT REFERENCES keys(id) ON UPDATE SET NULL, slot TEXT);
+CREATE UNIQUE INDEX label_slots ON labels(coalesce(key, slot));
+CREATE TABLE albums(id TEXT NOT NULL PRIMARY KEY);
+CREATE TABLE logs(id TEXT NOT NULL PRIMARY KEY, n INTEGER NOT NULL);
+CREATE TRIGGER album_gone AFTER DELETE ON albums WHEN NOT coven_applying()
+  BEGIN UPDATE reviews SET body='album gone' WHERE id='r'; END;
+CREATE TRIGGER review_gone AFTER DELETE ON reviews WHEN NOT coven_applying() AND old.id='watched'
+  BEGIN UPDATE logs SET n=n+1 WHERE id='log'; END;";
+
+pub(crate) fn tables() -> Vec<SyncedTable> {
+    [
+        "tracks", "reviews", "comments", "pins", "keys", "labels", "albums", "logs",
+    ]
+    .into_iter()
+    .map(|table| {
+        let declared = SyncedTable::new(table, RowIdentity::SharedKey).owner_only();
+        match table {
+            "albums" => declared.shared_trigger("album_gone"),
+            "reviews" => declared.shared_trigger("review_gone"),
+            _ => declared,
+        }
+    })
+    .collect()
+}
+
+pub(crate) struct Pair {
+    ana: Database,
+    ben: Database,
+    _stores: (TestStore, TestStore),
+}
+
+pub(crate) const ANA: u8 = 1;
+pub(crate) const BEN: u8 = 2;
+
+pub(crate) fn member(seed: u8) -> MemberId {
+    crate::store_log::tests::member(seed)
+}
+
+/// Deliver every write `from` has queued that `to` has not applied.
+pub(crate) async fn deliver(from: &Database, to: &Database) {
+    let applied = to.sync_state(Vec::new()).await.unwrap().positions;
+    for record in records(from) {
+        if !applied.covers(record.header.position) {
+            to.receive_stream(stream(&record), EntryPositions(Vec::new()), || Ok(()))
+                .await
+                .unwrap();
+        }
+    }
+}
+
+impl Pair {
+    /// Ana's and Ben's devices, each knowing both members.
+    pub(crate) async fn new() -> Self {
+        Self::with(tables(), SCHEMA).await
+    }
+
+    pub(crate) async fn with(tables: Vec<SyncedTable>, schema: &'static str) -> Self {
+        let ids = SequentialIds::new();
+        let ana_store = TestStore::with_ids(&ids);
+        let ben_store = TestStore::with_ids(&ids);
+        let ana = ana_store.schema(tables.clone(), schema).await.unwrap();
+        let ben = ben_store.schema(tables, schema).await.unwrap();
+        for db in [&ana, &ben] {
+            TestStore::register(db, ana_store.device(), ANA);
+            TestStore::register(db, ben_store.device(), BEN);
+        }
+        Self {
+            ana,
+            ben,
+            _stores: (ana_store, ben_store),
+        }
+    }
+
+    fn circle(&self, circle: coven_foundation::id_source::CircleId) {
+        self._stores.0.join_circle(&self.ana, circle);
+        self._stores.1.join_circle(&self.ben, circle);
+    }
+
+    /// Ben's tracks, keys and album; Ana's reviews, comments, pin, labels
+    /// and log; both devices hold all of them.
+    pub(crate) async fn seeded() -> Self {
+        let pair = Self::new().await;
+        sql(
+            &pair.ben,
+            "INSERT INTO tracks VALUES('t','Song'),('s','Other'),('w','Watched'),('p','Pinned');
+             INSERT INTO keys VALUES('7'),('9');
+             INSERT INTO albums VALUES('a');",
+        )
+        .await
+        .unwrap();
+        deliver(&pair.ben, &pair.ana).await;
+        sql(
+            &pair.ana,
+            "INSERT INTO reviews VALUES('r','t','good'),('q','s','fine'),('watched','w','seen');
+             INSERT INTO comments VALUES('c','r');
+             INSERT INTO pins VALUES('pin','p');
+             INSERT INTO labels VALUES('l7','7','free'),('l9','9','nine'),('m9',NULL,'other');
+             INSERT INTO logs VALUES('log',0);",
+        )
+        .await
+        .unwrap();
+        deliver(&pair.ana, &pair.ben).await;
+        pair
+    }
+
+    pub(crate) async fn close(self) {
+        self.ana.close().await.unwrap();
+        self.ben.close().await.unwrap();
+    }
+}
+
+fn refused_for(error: DbError, table: &str, owner: u8) {
+    match error {
+        DbError::NotOwner {
+            table: refused,
+            owner: member_id,
+            ..
+        } => {
+            assert_eq!(refused, table);
+            assert_eq!(member_id, member(owner));
+        }
+        error => panic!("expected NotOwner on {table}, got {error:?}"),
+    }
+}
+
+fn value(db: &Database, sql: &'static str) -> Option<String> {
+    db.inspect_writer(|c| {
+        c.query_row(sql, [], |r| r.get::<_, Option<String>>(0))
+            .unwrap()
+    })
+}
+
+/// Ben deleting his track cascades to Ana's review and on to her comment:
+/// exact actions of an authorized root need no permission of their own.
+#[tokio::test]
+async fn cascades_from_an_authorized_delete_change_another_members_rows() {
+    let pair = Pair::seeded().await;
+    sql(&pair.ben, "DELETE FROM tracks WHERE id='t'")
+        .await
+        .unwrap();
+    assert_eq!(count(&pair.ben, "comments"), 0);
+    assert_eq!(
+        value(&pair.ben, "SELECT (SELECT id FROM reviews WHERE id='r')"),
+        None
+    );
+    // A RESTRICT reference refuses the delete as SQLite always does.
+    let error = sql(&pair.ben, "DELETE FROM tracks WHERE id='p'")
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&error, DbError::Sqlite(e) if e.to_string().contains("FOREIGN KEY")),
+        "{error:?}"
+    );
+    pair.close().await;
+}
+
+/// Ben can never directly update, delete or insert over Ana's review. The
+/// whole transaction rolls back, and the refused write's upload number is
+/// used by his next one.
+#[tokio::test]
+async fn direct_targets_of_another_members_rows_refuse_the_whole_transaction() {
+    let pair = Pair::seeded().await;
+    let queued = records(&pair.ben).len();
+    for attempt in [
+        "UPDATE tracks SET title='kept?' WHERE id='s'; UPDATE reviews SET body='mine' WHERE id='r'",
+        "DELETE FROM reviews WHERE id='q'",
+        "INSERT OR REPLACE INTO reviews VALUES('r','t','replaced')",
+        // A direct edit coalesced with an authorized action on the same row.
+        "UPDATE reviews SET body='before' WHERE id='r'; DELETE FROM tracks WHERE id='t'",
+    ] {
+        refused_for(sql(&pair.ben, attempt).await.unwrap_err(), "reviews", ANA);
+    }
+    assert_eq!(records(&pair.ben).len(), queued);
+    assert_eq!(
+        value(&pair.ben, "SELECT title FROM tracks WHERE id='s'"),
+        Some("Other".into())
+    );
+    assert_eq!(
+        value(&pair.ben, "SELECT body FROM reviews WHERE id='r'"),
+        Some("good".into())
+    );
+    sql(&pair.ben, "UPDATE tracks SET title='mine' WHERE id='s'")
+        .await
+        .unwrap();
+    let all = records(&pair.ben);
+    assert_eq!(all.len(), queued + 1);
+    assert_eq!(
+        all[queued].header.position.number,
+        all[queued - 1].header.position.number + 1
+    );
+    pair.close().await;
+}
+
+/// A shared trigger cannot borrow permission from the row that fired it,
+/// whether a statement or a foreign-key action fired it.
+#[tokio::test]
+async fn trigger_writes_are_direct_even_when_an_action_fires_them() {
+    let pair = Pair::seeded().await;
+    refused_for(
+        sql(&pair.ben, "DELETE FROM albums WHERE id='a'")
+            .await
+            .unwrap_err(),
+        "reviews",
+        ANA,
+    );
+    assert_eq!(count(&pair.ben, "albums"), 1);
+    // Deleting Ben's track cascades to Ana's watched review, which is
+    // authorized; the trigger it fires on Ana's log is not.
+    refused_for(
+        sql(&pair.ben, "DELETE FROM tracks WHERE id='w'")
+            .await
+            .unwrap_err(),
+        "logs",
+        ANA,
+    );
+    assert_eq!(count(&pair.ben, "reviews"), 3);
+    // Ana's own trigger targets are hers.
+    sql(&pair.ana, "DELETE FROM reviews WHERE id='watched'")
+        .await
+        .unwrap();
+    assert_eq!(
+        value(&pair.ana, "SELECT CAST(n AS TEXT) FROM logs"),
+        Some("1".into())
+    );
+    pair.close().await;
+}
+
+/// A referenced key changing 7 to 8 and back sets Ana's reference NULL,
+/// where it stays. Unique expressions over the NULLs apply as always.
+#[tokio::test]
+async fn set_null_actions_follow_referenced_key_updates() {
+    let pair = Pair::seeded().await;
+    sql(
+        &pair.ben,
+        "UPDATE keys SET id='8' WHERE id='7'; UPDATE keys SET id='7' WHERE id='8'",
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        value(&pair.ben, "SELECT key FROM labels WHERE id='l7'"),
+        None
+    );
+    // l9's expression becomes its slot, 'nine', still unique.
+    sql(&pair.ben, "UPDATE keys SET id='10' WHERE id='9'")
+        .await
+        .unwrap();
+    assert_eq!(
+        value(&pair.ben, "SELECT key FROM labels WHERE id='l9'"),
+        None
+    );
+    // Ana's own edit colliding with another expression fails as always.
+    deliver(&pair.ben, &pair.ana).await;
+    let error = sql(&pair.ana, "UPDATE labels SET slot='other' WHERE id='l7'")
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&error, DbError::Sqlite(e) if e.to_string().contains("UNIQUE")),
+        "{error:?}"
+    );
+    pair.close().await;
+}
+
+/// Dismissing a removed row deletes it, which is its owner's to do.
+#[tokio::test]
+async fn only_the_owner_dismisses_a_removed_row() {
+    let pair = Pair::seeded().await;
+    // Both devices give a label the same slot concurrently: one is removed.
+    sql(&pair.ana, "INSERT INTO labels VALUES('ana',NULL,'same')")
+        .await
+        .unwrap();
+    sql(&pair.ben, "INSERT INTO labels VALUES('ben',NULL,'same')")
+        .await
+        .unwrap();
+    deliver(&pair.ana, &pair.ben).await;
+    deliver(&pair.ben, &pair.ana).await;
+    for (db, seed) in [(&pair.ana, ANA), (&pair.ben, BEN)] {
+        let lost = db.lost_values().await.unwrap();
+        let removed: Vec<_> = lost
+            .into_iter()
+            .filter(|value| matches!(value.target, crate::lost::LossTarget::Removed { .. }))
+            .collect();
+        assert_eq!(removed.len(), 1);
+        let owner = if removed[0].key.0[0] == rusqlite::types::Value::Text("ana".into()) {
+            ANA
+        } else {
+            BEN
+        };
+        let result = db.dismiss_lost_values(&removed).await;
+        if owner == seed {
+            result.unwrap();
+        } else {
+            refused_for(
+                crate::tests::database_error(result.unwrap_err()),
+                "labels",
+                owner,
+            );
+        }
+    }
+    pair.close().await;
+}
+
+/// Each of Ben's local writes against `Admission.check`: the write commits
+/// exactly when every row it changed passes, whether a statement, a trigger
+/// or an exact foreign-key action changed it (`statement_authorized`,
+/// `derived_roots_authorized`, and the accepted cascade).
+#[tokio::test]
+#[ignore = "requires COVEN_MERGE_LEAN; scripts/check.sh supplies the merge runner"]
+async fn local_admission_matches_the_model() {
+    use crate::execution_capture::tests::lean::effects;
+    use crate::test_utils::tests::run_lean;
+    let runner = std::env::var_os("COVEN_MERGE_LEAN").expect("built mergeRunner");
+    let cases = [
+        ("DELETE FROM tracks WHERE id='t'", true),
+        ("UPDATE keys SET id='8' WHERE id='7'; UPDATE keys SET id='7' WHERE id='8'", true),
+        ("UPDATE reviews SET body='mine' WHERE id='r'", false),
+        ("DELETE FROM reviews WHERE id='q'", false),
+        ("UPDATE reviews SET body='x' WHERE id='r'; DELETE FROM tracks WHERE id='t'", false),
+        ("DELETE FROM albums WHERE id='a'", false),
+        ("DELETE FROM tracks WHERE id='w'", false),
+        ("INSERT INTO tracks VALUES('new','New'); UPDATE tracks SET title='Renamed' WHERE id='s'", true),
+    ];
+    let tables = [
+        "tracks", "reviews", "comments", "pins", "keys", "labels", "albums", "logs",
+    ];
+    for (statement, expected) in cases {
+        let pair = Pair::seeded().await;
+        let committed = sql(&pair.ben, statement).await;
+        assert_eq!(committed.is_ok(), expected, "{statement}: {committed:?}");
+        let operations = pair.ben.inspect_writer(|c| c.take_captured().unwrap());
+        let (mut input, ids) = pair
+            .ben
+            .inspect_writer_schema(|_, schema| effects(schema, &operations, true));
+        // Owners as the rolled-back database holds them; a new row is Ben's.
+        let rows: Vec<_> = pair.ben.inspect_writer(|c| {
+            ids.rows
+                .iter()
+                .map(|(row, id)| {
+                    let owner = match crate::ownership::creation(c, row).unwrap() {
+                        Some(creation) => {
+                            crate::ownership::member(c, creation.creator.write.device)
+                                .unwrap()
+                                .unwrap()
+                        }
+                        None => member(BEN),
+                    };
+                    let owner = if owner == member(ANA) { ANA } else { BEN };
+                    serde_json::json!({"row": id, "owner": owner,
+                        "table": tables.iter().position(|t| *t == row.table).unwrap()})
+                })
+                .collect()
+        });
+        input["mode"] = "admission".into();
+        input["rows"] = rows.into();
+        input["owned"] = (0..tables.len()).collect::<Vec<_>>().into();
+        input["author"] = BEN.into();
+        let verdicts = run_lean(&runner, &input);
+        let passed = verdicts
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|verdict| verdict["check"] == true);
+        assert_eq!(passed, expected, "{statement}: {input} -> {verdicts}");
+        pair.close().await;
+    }
+}
+
+/// Moving a row into another audience copies it, keeping its creation, so
+/// only its owner may move it (§8.8, §14.2).
+#[tokio::test]
+async fn moving_another_members_row_is_a_direct_change_of_it() {
+    let circle = coven_foundation::id_source::CircleId(uuid::Uuid::from_u128(10));
+    let pair = Pair::with(
+        vec![SyncedTable::new("notes", RowIdentity::IndependentUuid)
+            .owner_only()
+            .audience_column("audience")],
+        "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY, audience TEXT NOT NULL)",
+    )
+    .await;
+    pair.circle(circle);
+    sql(
+        &pair.ana,
+        "INSERT INTO notes VALUES('f47ac10b-58cc-4372-a567-0e02b2c3d479','store')",
+    )
+    .await
+    .unwrap();
+    deliver(&pair.ana, &pair.ben).await;
+    let audience = circle.to_string();
+    let moved = audience.clone();
+    let error = pair
+        .ben
+        .write(move |sql| {
+            sql.execute(
+                "UPDATE notes SET audience=?1 WHERE id='f47ac10b-58cc-4372-a567-0e02b2c3d479'",
+                [&moved],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap_err();
+    refused_for(error, "notes", ANA);
+    // His own row moves, and its copy names his creation.
+    sql(
+        &pair.ben,
+        "INSERT INTO notes VALUES('f47ac10b-58cc-4372-a567-0e02b2c3d47a','store')",
+    )
+    .await
+    .unwrap();
+    pair.ben
+        .write(move |sql| {
+            sql.execute(
+                "UPDATE notes SET audience=?1 WHERE id='f47ac10b-58cc-4372-a567-0e02b2c3d47a'",
+                [&audience],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let copy = records(&pair.ben)
+        .pop()
+        .unwrap()
+        .parts
+        .into_iter()
+        .flat_map(|part| part.rows)
+        .find(|change| change.creator.is_some())
+        .unwrap();
+    assert_eq!(copy.creator.unwrap().row.audience, Audience::Store);
+    pair.close().await;
+}

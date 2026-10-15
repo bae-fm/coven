@@ -1232,14 +1232,24 @@ referenced-key updates and compound and transitive actions on SQLite,
 rebuilds each captured foreign-key action's `Reference` from the schema and
 its cause's own captured step, and requires the model's exact consequence.
 That checks the author's capture against B18's effects; the receiver's
-reconstruction of those causes without labels is not yet compared. The storage
+reconstruction of those causes without labels is not yet compared.
+The `admission` mode decides `Admission.check` for one local write, given
+each changed row's table and owner. `local_admission_matches_the_model` runs
+Ben's statements against Ana's rows on SQLite: an authorized cascade, a key
+changed 7 to 8 and back, direct edits and deletes, a direct edit coalesced
+with an authorized cascade, a shared trigger fired by a statement and one
+fired by a cascade, and new rows. The real write commits exactly when the
+model passes every row it changed (`statement_authorized`,
+`derived_roots_authorized`); otherwise it fails with `DbError::NotOwner` and
+leaves no row or upload. The storage
 model's comparison is in [storage.md](storage.md#signed-roots-and-row-authorship).
 
 ```sh
 COVEN_MERGE_LEAN="$PWD/spec/proofs/merge/.lake/build/bin/mergeRunner" \
   cargo test -p coven-database -- --ignored --exact \
   ownership::tests::creation_differential_histories \
-  execution_capture::tests::lean::captured_actions_are_the_models_consequences
+  execution_capture::tests::lean::captured_actions_are_the_models_consequences \
+  owner_permission::tests::local_admission_matches_the_model
 ```
 
 ### B19 Foreign keys on generated columns

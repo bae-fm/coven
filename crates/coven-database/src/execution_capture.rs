@@ -547,4 +547,4 @@ fn action_of<'a>(schema: &'a WriteSchema, parent: &Op, child: &Op) -> Option<&'a
 
 #[cfg(test)]
 #[path = "execution_capture_tests.rs"]
-mod tests;
+pub(crate) mod tests;

@@ -49,6 +49,9 @@ impl DatabaseConnection {
                 crate::execution_capture::capture(database, schema, &before, &after, &events)?;
             #[cfg(test)]
             database.captured.borrow_mut().push(operations.clone());
+            // Every direct target is its owner's before anything commits (§8.8).
+            let writer = crate::owner_permission::Writer::local(database, device)?;
+            writer.check_operations(database, schema, &operations)?;
             let changes = crate::write_record::changes(
                 database,
                 schema,
@@ -66,6 +69,7 @@ impl DatabaseConnection {
                 operations.steps,
                 &store,
             )?;
+            writer.check_copies(database, schema, record.as_ref())?;
             let affected = crate::write_apply::WriteApply::new(
                 database,
                 schema,

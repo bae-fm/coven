@@ -197,6 +197,19 @@ pub enum DbError {
     /// This audience still exposes its previous data while its selected boundary reloads (§15).
     #[error("audience {0:?} is reloading")]
     AudienceReloading(coven_merge::Audience),
+    /// A statement or shared trigger directly changed another member's row
+    /// of an `owner_only()` table, or coven was asked to copy or dismiss one
+    /// for it (§8.8). The transaction, including its upload record, did not
+    /// commit.
+    #[error("{table} row {key:?} belongs to member {owner:?}")]
+    NotOwner {
+        /// The owned row's table.
+        table: String,
+        /// Its primary key, in declared key order.
+        key: crate::RowKey,
+        /// The member who originally created it.
+        owner: coven_foundation::id_source::MemberId,
+    },
     /// An inserted row's independent key holds no UUID (§8.5).
     #[error("independent key {key:?} of {table} does not contain a canonical lowercase UUIDv4 or UUIDv7")]
     KeyNotUuid {

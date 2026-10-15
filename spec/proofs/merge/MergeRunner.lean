@@ -1,5 +1,5 @@
 import CovenMerge.Boundary
-import CovenMerge.ForeignKeyActions
+import CovenMerge.OwnerAdmission
 import Lean
 
 /-! JSON adapter for differential tests. All merge and removal computation calls
@@ -346,10 +346,56 @@ private def runEffects (j : Json) : Except String Json := do
       ("verifies", toJson (derivation.any fun d => verifies schema direct d proposed.row proposed))])
   pure (toJson results)
 
+-- Local owner admission (B18): the write's direct effects and its derived
+-- rows' derivations, as `effects` reads them, with each row's table and
+-- owner, the owned tables and the writing member. `Admission.check` decides
+-- each row for the local write, numbered 0; row `r`'s creator is write
+-- `r + 1`, authored by that row's owner.
+open Ownership Ownership.ForeignKey Ownership.Admission in
+private def runAdmission (j : Json) : Except String Json := do
+  let references := (← (← j.getObjValAs? (Array Json) "references").mapM readReference).toList
+  let directs ← (← j.getObjValAs? (Array Json) "direct").mapM readEffect
+  let derived ← (← j.getObjValAs? (Array Json) "derived").mapM fun d => do
+    pure (← d.getObjValAs? (Array Nat) "path", ← readEffect (← d.getObjVal? "effect"))
+  let rows ← (← j.getObjValAs? (Array Json) "rows").mapM fun r => do
+    pure (← natField r "row", ← natField r "table", ← natField r "owner")
+  let owned ← j.getObjValAs? (Array Nat) "owned"
+  let writer ← natField j "author"
+  let schema := resolvedSchema references
+  let plain : Nat → Option (Effect Nat Nat Nat) := fun r => directs.find? (·.row == r)
+  let derivation := fun (path : Array Nat) =>
+    (path.toList.drop 1).foldl (fun (acc : Option (Derivation Nat)) child =>
+      acc.bind fun parent =>
+        (evaluate schema plain parent).bind fun (row, payload) =>
+          ((schema.consequences row payload).findIdx? (·.1 == child)).map (.foreign parent ·))
+      (path[0]?.map .direct)
+  let P : Policy Nat Nat Nat Nat := {
+    table := fun r => ((rows.find? (·.1 == r)).map (·.2.1)).getD 0
+    owned := fun t => owned.contains t
+    creator := fun r => r + 1
+    author := fun w => if w == 0 then writer else
+      ((rows.find? (·.1 == w - 1)).map (·.2.2)).getD 0 }
+  let origin : Nat → Origin Nat := fun r =>
+    match (derived.find? fun (path, _) => path.back? == some r).bind (derivation ·.1) with
+    | some d => .foreign d
+    | none => .direct
+  let E : Evidence Nat Nat (Effect Nat Nat Nat) := {
+    payload := fun w r => if w != 0 then none else
+      match derived.find? fun (path, _) => path.back? == some r with
+      | some (_, effect) => some effect
+      | none => plain r
+    execution := fun _ => {
+      direct := fun r => (plain r).map fun e => ⟨e, []⟩
+      origin := origin
+      schema := schema } }
+  pure (toJson (rows.map fun (r, _, _) =>
+    Json.mkObj [("row", toJson r), ("check", toJson (check P E 0 r))]))
+
 private def run (j : Json) : Except String Json := do
   let mode ← j.getObjValAs? String "mode"
   if mode == "freeze" then return ← runFreeze j
   if mode == "effects" then return ← runEffects j
+  if mode == "admission" then return ← runAdmission j
   if mode == "migration" then
     let (rows, I) ← readInputs j
     let named ← readEntries j I

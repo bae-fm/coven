@@ -196,7 +196,7 @@ async fn revisited_and_cancelled_rows_keep_each_operation() {
     db.close().await.unwrap();
 }
 
-mod lean {
+pub(crate) mod lean {
     // Real SQLite foreign-key actions against `ForeignKey.consequence` and
     // `evaluate` (B18): each captured action, rebuilt from its schema reference
     // and its causes' own steps, must be the model's exact consequence.
@@ -210,8 +210,8 @@ mod lean {
 
     /// Dense numbers for rows, columns and scalars, as the runner models them.
     #[derive(Default)]
-    struct Ids {
-        rows: BTreeMap<RowId, usize>,
+    pub(crate) struct Ids {
+        pub(crate) rows: BTreeMap<RowId, usize>,
         columns: BTreeMap<(String, String), usize>,
         values: Vec<Value>,
     }
@@ -323,6 +323,19 @@ mod lean {
 
     /// The runner input for every foreign-key action of one captured write.
     fn input(schema: &WriteSchema, operations: &CapturedOperations) -> (Json, usize) {
+        let (input, _) = effects(schema, operations, false);
+        let count = input["derived"].as_array().unwrap().len();
+        (input, count)
+    }
+
+    /// Every foreign-key action of one captured write with its references
+    /// and the direct roots it derives from; with `every_direct`, also every
+    /// other row a statement or trigger changed.
+    pub(crate) fn effects(
+        schema: &WriteSchema,
+        operations: &CapturedOperations,
+        every_direct: bool,
+    ) -> (Json, Ids) {
         let mut ids = Ids::default();
         let mut references = Vec::new();
         let mut direct = Vec::new();
@@ -378,10 +391,32 @@ mod lean {
                 "effect": proposed,
             }));
         }
-        let count = derived.len();
+        if every_direct {
+            let mut present: BTreeSet<RowId> = roots.iter().map(|(row, _)| row.clone()).collect();
+            for ((row, sequence), origin) in &operations.origins {
+                if matches!(origin, Origin::ForeignKey { .. }) {
+                    continue;
+                }
+                let at = (row.clone(), *sequence);
+                // One effect per row: its first direct operation.
+                let first = operations.steps[row]
+                    .iter()
+                    .find(|step| {
+                        !matches!(
+                            operations.origins[&(row.clone(), step.sequence)],
+                            Origin::ForeignKey { .. }
+                        )
+                    })
+                    .map(|step| step.sequence);
+                if first == Some(*sequence) && present.insert(row.clone()) {
+                    let step = step_of(operations, &at);
+                    direct.push(effect(&mut ids, schema, operations, row, &step, None));
+                }
+            }
+        }
         (
             json!({"mode": "effects", "references": references, "direct": direct, "derived": derived}),
-            count,
+            ids,
         )
     }
 

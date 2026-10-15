@@ -53,6 +53,7 @@ mod migration_run;
 mod migration_snapshot;
 mod migration_state;
 mod observation;
+mod owner_permission;
 mod ownership;
 mod pending;
 mod provider_access;

@@ -30,6 +30,7 @@ pub(crate) fn dismiss(
     database.transaction(|database| {
         let visible = AppView::after(database, schema);
         let store = MergeStore::new(database, &visible);
+        let writer = crate::owner_permission::Writer::local(database, device)?;
         let mut changes = BTreeMap::new();
         let mut cells = BTreeSet::new();
         for value in values {
@@ -38,6 +39,9 @@ pub(crate) fn dismiss(
                     let old = store.row(row)?;
                     // A stale query must not delete a restored or re-created row.
                     if old.loss.is_some() && old.state.generation() == *generation {
+                        // Deleting an owned removed row is its owner's to do;
+                        // dismissing a frozen record changes no row (§8.8).
+                        writer.may_change(database, schema, row)?;
                         changes.insert(
                             row.clone(),
                             crate::write_sources::authored(
