@@ -6,7 +6,7 @@ use crate::{chunks::PlaintextChunks, snapshot::SnapshotEncoder, test_utils, valu
 fn losses_stream_more_rows_than_a_frame_can_hold() {
     let count = 70_000;
     let mut header = test_utils::snapshot_header();
-    header.counts = [0, 0, 0, 0, count, 0];
+    header.counts = [0, 0, 0, 0, count, 0, 0, 0];
     let (mut encoder, first) = SnapshotEncoder::start(header).unwrap();
     let mut index = 0;
     let frames = std::iter::once(Ok(first)).chain(std::iter::from_fn(move || {

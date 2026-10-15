@@ -5,9 +5,9 @@ use crate::{
 };
 use coven_format::{
     merge_fields,
-    snapshot_rows::{AuthoredChange, ChangeVerdict},
+    snapshot_rows::{AuthoredChange, ChangeVerdict, OriginalRow},
     value::Value,
-    write::{RowChange, WriteHeader},
+    write::{PartRecord, RowChange, WriteHeader},
     write_sources::{CellSource, ChangeId, WriteSources},
 };
 use coven_merge::{Change, Operation, RowId, WriteId};
@@ -19,6 +19,12 @@ pub(crate) struct Evidence {
     pub(crate) original: RowChange,
 }
 
+/// A retained original record, a net change or an execution alone.
+pub(crate) struct Original {
+    pub(crate) header: WriteHeader,
+    pub(crate) record: OriginalRow,
+}
+
 fn invalid(field: &'static str) -> DbError {
     coven_format::Error::Invalid {
         field,
@@ -27,9 +33,20 @@ fn invalid(field: &'static str) -> DbError {
     .into()
 }
 
-/// Read the named original, never a current winner or an equal scalar. A known
-/// complete part can prove absence; otherwise the evidence is still unavailable.
+/// Read the named original net change, never a current winner or an equal
+/// scalar. A row with operations but no net change set no generation or cell,
+/// so it is never a source.
 pub(crate) fn evidence(db: &DatabaseConnection, source: &ChangeId) -> Result<Evidence, DbError> {
+    let Original { header, record } = original(db, source)?;
+    match record {
+        OriginalRow::Change(original) => Ok(Evidence { header, original }),
+        OriginalRow::Execution(_) => Err(invalid("source has no net change")),
+    }
+}
+
+/// Read the named original record. A known complete part can prove absence;
+/// otherwise the evidence is still unavailable.
+pub(crate) fn original(db: &DatabaseConnection, source: &ChangeId) -> Result<Original, DbError> {
     let write = merge_fields::encode_write_id(&source.write)?;
     let audience = audience_text(&source.row.audience);
     let part = db
@@ -50,14 +67,111 @@ pub(crate) fn evidence(db: &DatabaseConnection, source: &ChangeId) -> Result<Evi
             DbError::MissingWriteSources(vec![source.clone()])
         });
     };
-    Ok(Evidence {
+    Ok(Original {
         header: merge_fields::decode_write_header(&header)?,
-        original: RowChange::decode(&record)?,
+        record: OriginalRow::decode(&record)?,
     })
 }
 
-/// Capture the actual setters in the author's pre-write merge state. Renames
-/// resolve their original names through the recorded schema identities.
+/// The author's pre-write generation and cell setters of one row, named as
+/// their original changes. Renames resolve their original names through the
+/// recorded schema identities.
+struct PreWrite<'a> {
+    db: &'a DatabaseConnection,
+    row: RowId,
+    state: coven_merge::RowState<Value>,
+    version: u32,
+}
+
+impl<'a> PreWrite<'a> {
+    fn new(
+        db: &'a DatabaseConnection,
+        store: &MergeStore<'_>,
+        row: RowId,
+    ) -> Result<Self, DbError> {
+        Ok(Self {
+            state: store.row(&row)?.state,
+            version: db.schema_version()?,
+            db,
+            row,
+        })
+    }
+
+    fn source(&self, write: WriteId) -> Result<(ChangeId, u32), DbError> {
+        let bytes: Option<Vec<u8>> = self.db.query_row(
+            "SELECT (SELECT header FROM _coven_authored_parts WHERE write_id=?1 AND audience=?2)",
+            params![
+                merge_fields::encode_write_id(&write)?,
+                audience_text(&self.row.audience)
+            ],
+            |r| r.get(0),
+        )?;
+        let Some(bytes) = bytes else {
+            return Err(DbError::MissingWriteSources(vec![ChangeId {
+                write,
+                row: self.row.clone(),
+            }]));
+        };
+        let header = merge_fields::decode_write_header(&bytes)?;
+        let table = crate::source_names::table(
+            self.db,
+            self.version,
+            &self.row.table,
+            header.schema_version,
+        )?
+        .ok_or(DbError::DamagedDatabase)?;
+        Ok((
+            ChangeId {
+                write,
+                row: RowId {
+                    table,
+                    ..self.row.clone()
+                },
+            },
+            header.schema_version,
+        ))
+    }
+
+    /// The change that established `generation`, absent at generation zero.
+    fn generation(&self, generation: u64) -> Result<Option<ChangeId>, DbError> {
+        if generation == 0 {
+            return Ok(None);
+        }
+        let write = *self
+            .state
+            .generations()
+            .get(&generation)
+            .ok_or(DbError::DamagedDatabase)?;
+        Ok(Some(self.source(write)?.0))
+    }
+
+    /// The original setter of a pre-write cell, if it was ever set.
+    fn setter(&self, column: &str) -> Result<Option<CellSource>, DbError> {
+        let Some(cell) = self.state.cells().get(column) else {
+            return Ok(None);
+        };
+        let (change, source_version) = self.source(cell.write)?;
+        let original = crate::source_names::column(
+            self.db,
+            self.version,
+            &self.row.table,
+            column,
+            source_version,
+            &change.row.table,
+        )?
+        .ok_or(DbError::DamagedDatabase)?;
+        Ok(Some(CellSource {
+            change,
+            column: original,
+        }))
+    }
+
+    fn cells(&self) -> impl Iterator<Item = &String> {
+        self.state.cells().keys()
+    }
+}
+
+/// Capture the actual setters in the author's pre-write merge state.
 pub(crate) fn authored(
     db: &DatabaseConnection,
     store: &MergeStore<'_>,
@@ -65,81 +179,82 @@ pub(crate) fn authored(
     change: Change<Value>,
     old: BTreeMap<String, Value>,
 ) -> Result<RowChange, DbError> {
-    let state = store.row(&row)?.state;
-    let version = db.schema_version()?;
-    let source = |write: WriteId| -> Result<(ChangeId, u32), DbError> {
-        let bytes: Option<Vec<u8>> = db.query_row(
-            "SELECT (SELECT header FROM _coven_authored_parts WHERE write_id=?1 AND audience=?2)",
-            params![
-                merge_fields::encode_write_id(&write)?,
-                audience_text(&row.audience)
-            ],
-            |r| r.get(0),
-        )?;
-        let Some(bytes) = bytes else {
-            return Err(DbError::MissingWriteSources(vec![ChangeId {
-                write,
-                row: row.clone(),
-            }]));
-        };
-        let header = merge_fields::decode_write_header(&bytes)?;
-        let table = crate::source_names::table(db, version, &row.table, header.schema_version)?
-            .ok_or(DbError::DamagedDatabase)?;
-        Ok((
-            ChangeId {
-                write,
-                row: RowId {
-                    table,
-                    ..row.clone()
-                },
-            },
-            header.schema_version,
-        ))
-    };
-    let generation = if change.generation == 0 {
-        None
-    } else {
-        Some(
-            source(
-                *state
-                    .generations()
-                    .get(&change.generation)
-                    .ok_or(DbError::DamagedDatabase)?,
-            )?
-            .0,
-        )
-    };
+    let pre = PreWrite::new(db, store, row.clone())?;
     let mut setters = BTreeMap::new();
-    for (column, cell) in state.cells() {
+    for column in pre.cells() {
         let replaces = match &change.operation {
             Operation::Insert(_) => false,
             Operation::Update(columns) => columns.contains_key(column),
             Operation::Delete => true,
         };
         if replaces {
-            let (change, source_version) = source(cell.write)?;
-            let original = crate::source_names::column(
-                db,
-                version,
-                &row.table,
-                column,
-                source_version,
-                &change.row.table,
-            )?
-            .ok_or(DbError::DamagedDatabase)?;
-            setters.insert(
-                column.clone(),
-                CellSource {
-                    change,
-                    column: original,
-                },
-            );
+            setters.extend(pre.setter(column)?.map(|setter| (column.clone(), setter)));
         }
     }
     Ok(RowChange {
         row,
+        sources: WriteSources {
+            generation: pre.generation(change.generation)?,
+            setters,
+        },
         change,
         old,
+        creator: None,
+        execution: Default::default(),
+    })
+}
+
+/// The pre-write sources a row's operations used beyond its net change's own
+/// sources (§8, D5): the generation the first operation started from, and the
+/// setter of each pre-write cell an operation replaced before the row's
+/// incarnation ended. Cells this write itself set are not sources.
+pub(crate) fn executed(
+    db: &DatabaseConnection,
+    store: &MergeStore<'_>,
+    row: &RowId,
+    steps: Vec<coven_format::write::Step>,
+    net: Option<&WriteSources>,
+) -> Result<coven_format::write::Execution, DbError> {
+    let Some(first) = steps.first() else {
+        return Ok(Default::default());
+    };
+    let pre = PreWrite::new(db, store, row.clone())?;
+    // A row that moved into this audience earlier in the write starts from
+    // the incarnation the move began: nothing before the write is replaced.
+    if first.change.generation != pre.state.generation() {
+        return Ok(coven_format::write::Execution {
+            steps,
+            sources: Default::default(),
+        });
+    }
+    let mut remaining: std::collections::BTreeSet<String> = pre.cells().cloned().collect();
+    let mut replaced = std::collections::BTreeSet::new();
+    for step in &steps {
+        match &step.change.operation {
+            Operation::Update(columns) => {
+                for column in columns.keys() {
+                    if remaining.remove(column) {
+                        replaced.insert(column.clone());
+                    }
+                }
+            }
+            Operation::Delete => replaced.append(&mut remaining),
+            Operation::Insert(_) => remaining.clear(),
+        }
+    }
+    let generation = match net {
+        Some(net) if net.generation.is_some() => None,
+        _ => pre.generation(first.change.generation)?,
+    };
+    let mut setters = BTreeMap::new();
+    for column in replaced {
+        if net.is_some_and(|net| net.setters.contains_key(&column)) {
+            continue;
+        }
+        setters.extend(pre.setter(&column)?.map(|setter| (column, setter)));
+    }
+    Ok(coven_format::write::Execution {
+        steps,
         sources: WriteSources {
             generation,
             setters,
@@ -147,23 +262,120 @@ pub(crate) fn authored(
     })
 }
 
-/// Checks the original role in its original incarnation. Ordinary merge losses
-/// remain source evidence: admission is retained but does not establish validity.
+/// Checks a record's original roles in their original incarnation, and a
+/// copy's named creation. Ordinary merge losses remain source evidence:
+/// admission is retained but does not establish validity.
 pub(crate) fn validate(
     db: &DatabaseConnection,
     header: &WriteHeader,
-    row: &RowChange,
+    record: PartRecord<'_>,
 ) -> Result<(), DbError> {
-    row.encode().map_err(|error| match error {
+    let merge = |error| match error {
         coven_format::Error::Merge(error) => DbError::InvalidWrite {
             write: header.position,
             error,
         },
         error => error.into(),
-    })?;
-    row.sources.validate_past(header)?;
+    };
+    match record {
+        PartRecord::Change(row) => {
+            row.encode().map_err(merge)?;
+            row.sources.validate_past(header)?;
+            let incarnation = row
+                .change
+                .incarnation()
+                .map_err(coven_format::Error::Merge)?;
+            roles(
+                db,
+                header,
+                &row.row,
+                row.change.generation,
+                incarnation,
+                &row.sources,
+            )?;
+            if let Some(creator) = &row.creator {
+                creation(db, header, &row.row, creator)?;
+            }
+        }
+        PartRecord::Execution(execution) => {
+            execution.encode().map_err(merge)?;
+        }
+    }
+    let execution = record.execution();
+    execution.sources.validate_past(header)?;
+    if let Some(first) = execution.steps.first() {
+        let incarnation = first
+            .change
+            .incarnation()
+            .map_err(coven_format::Error::Merge)?;
+        roles(
+            db,
+            header,
+            record.row(),
+            first.change.generation,
+            incarnation,
+            &execution.sources,
+        )?;
+    }
+    Ok(())
+}
+
+/// A copy names an original generation-zero creation of the same row in
+/// another audience (§8.8). A part this device opened proves or refutes it;
+/// a part it could not read leaves the authenticated claim as written.
+fn creation(
+    db: &DatabaseConnection,
+    header: &WriteHeader,
+    row: &RowId,
+    creator: &ChangeId,
+) -> Result<(), DbError> {
+    let opened: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM _coven_authored_parts WHERE write_id=?1 AND audience=?2)",
+        params![
+            merge_fields::encode_write_id(&creator.write)?,
+            audience_text(&creator.row.audience)
+        ],
+        |r| r.get(0),
+    )?;
+    if !opened {
+        return Ok(());
+    }
+    let Original {
+        header: original,
+        record,
+    } = self::original(db, creator)?;
+    let OriginalRow::Change(change) = record else {
+        return Err(invalid("copied creation"));
+    };
+    let table = crate::source_names::table(
+        db,
+        original.schema_version,
+        &creator.row.table,
+        header.schema_version,
+    )?;
+    if change.change.generation != 0
+        || !matches!(change.change.operation, Operation::Insert(_))
+        || change.creator.is_some()
+        || table.as_ref() != Some(&row.table)
+        || original.timestamp >= header.timestamp
+    {
+        return Err(invalid("copied creation"));
+    }
+    Ok(())
+}
+
+/// The generation source and each replaced setter name changes at this row
+/// that established that generation, or set that cell in this incarnation.
+fn roles(
+    db: &DatabaseConnection,
+    header: &WriteHeader,
+    row: &RowId,
+    generation: u64,
+    incarnation: u64,
+    sources: &WriteSources,
+) -> Result<(), DbError> {
     let check = |source: &ChangeId| -> Result<Evidence, DbError> {
-        if source.row.key != row.row.key || source.row.audience != row.row.audience {
+        if source.row.key != row.key || source.row.audience != row.audience {
             return Err(invalid("source row identity"));
         }
         let evidence = evidence(db, source)?;
@@ -180,21 +392,21 @@ pub(crate) fn validate(
             header.schema_version,
         )?
         .as_ref()
-            != Some(&row.row.table)
+            != Some(&row.table)
         {
             return Err(invalid("source row identity"));
         }
         Ok(evidence)
     };
-    if let Some(source) = &row.sources.generation {
+    if let Some(source) = &sources.generation {
         let evidence = check(source)?;
         if matches!(evidence.original.change.operation, Operation::Update(_))
-            || evidence.original.change.generation.checked_add(1) != Some(row.change.generation)
+            || evidence.original.change.generation.checked_add(1) != Some(generation)
         {
             return Err(invalid("source generation advancement"));
         }
     }
-    for (column, source) in &row.sources.setters {
+    for (column, source) in &sources.setters {
         let evidence = check(&source.change)?;
         let columns = match &evidence.original.change.operation {
             Operation::Insert(columns) | Operation::Update(columns) => columns,
@@ -207,7 +419,7 @@ pub(crate) fn validate(
                 &source.change.row.table,
                 &source.column,
                 header.schema_version,
-                &row.row.table,
+                &row.table,
             )?
             .as_ref()
                 != Some(column)
@@ -219,10 +431,7 @@ pub(crate) fn validate(
             .change
             .incarnation()
             .map_err(coven_format::Error::Merge)?
-            != row
-                .change
-                .incarnation()
-                .map_err(coven_format::Error::Merge)?
+            != incarnation
         {
             return Err(invalid("source setter incarnation"));
         }
@@ -259,13 +468,17 @@ fn part(
 pub(crate) fn retain(
     db: &DatabaseConnection,
     header: &WriteHeader,
-    row: &RowChange,
+    record: PartRecord<'_>,
 ) -> Result<(), DbError> {
-    part(db, header, &row.row.audience)?;
+    let row = record.row();
+    part(db, header, &row.audience)?;
     let write = merge_fields::encode_write_id(&header.position)?;
-    let audience = audience_text(&row.row.audience);
-    let bytes = row.encode()?;
-    let original: Option<Vec<u8>> = db.query_row("SELECT (SELECT record FROM _coven_authored_changes WHERE write_id=?1 AND audience=?2 AND table_name=?3 AND key=?4)",params![write,audience,row.row.table,row.row.key],|r|r.get(0))?;
+    let audience = audience_text(&row.audience);
+    let bytes = match record {
+        PartRecord::Change(change) => change.encode()?,
+        PartRecord::Execution(execution) => execution.encode()?,
+    };
+    let original: Option<Vec<u8>> = db.query_row("SELECT (SELECT record FROM _coven_authored_changes WHERE write_id=?1 AND audience=?2 AND table_name=?3 AND key=?4)",params![write,audience,row.table,row.key],|r|r.get(0))?;
     if original.is_none()
         && db.query_row(
             "SELECT complete FROM _coven_authored_parts WHERE write_id=?1 AND audience=?2",
@@ -278,7 +491,7 @@ pub(crate) fn retain(
     if original.as_ref().is_some_and(|original| *original != bytes) {
         return Err(invalid("original source change changed"));
     }
-    db.internal_execute("INSERT INTO _coven_authored_changes VALUES(?1,?2,?3,?4,?5,NULL) ON CONFLICT(write_id,audience,table_name,key) DO NOTHING",params![write,audience,row.row.table,row.row.key,bytes])?;
+    db.internal_execute("INSERT INTO _coven_authored_changes VALUES(?1,?2,?3,?4,?5,NULL) ON CONFLICT(write_id,audience,table_name,key) DO NOTHING",params![write,audience,row.table,row.key,bytes])?;
     Ok(())
 }
 
@@ -378,7 +591,7 @@ pub(crate) fn visit_evidence<E: From<DbError>>(
             if !covered.covers(header.position) {
                 return Ok(());
             }
-            let change = RowChange::decode(&r.get::<_, Vec<u8>>(2).map_err(DbError::from)?)
+            let change = OriginalRow::decode(&r.get::<_, Vec<u8>>(2).map_err(DbError::from)?)
                 .map_err(DbError::from)?;
             visit(AuthoredChange {
                 header,
@@ -399,15 +612,16 @@ pub(crate) fn load_evidence(
     authored: &AuthoredChange,
 ) -> Result<(), DbError> {
     let header = &authored.header;
-    part(db, header, &authored.change.row.audience)?;
-    retain(db, header, &authored.change)?;
+    let row = authored.change.row();
+    part(db, header, &row.audience)?;
+    retain(db, header, authored.change.record())?;
     db.internal_execute(
         "UPDATE _coven_authored_changes SET admission=?5 WHERE write_id=?1 AND audience=?2 AND table_name=?3 AND key=?4",
         params![
             merge_fields::encode_write_id(&header.position)?,
-            audience_text(&authored.change.row.audience),
-            authored.change.row.table,
-            authored.change.row.key,
+            audience_text(&row.audience),
+            row.table,
+            row.key,
             stored_verdict(&authored.verdict)?
         ],
     )?;

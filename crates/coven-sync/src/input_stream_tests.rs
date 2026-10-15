@@ -135,8 +135,12 @@ async fn maximum_header_vectors_use_two_ranges_and_preserve_every_overread_byte(
     let mut header = write.encode().unwrap();
     let plaintext = 16 * 1024 * 1024;
     header.extend((plaintext as u32).to_be_bytes());
+    // The largest header, then one root per part and the header signature.
     header.resize(
-        header.len() + plaintext + coven_crypto::SEALED_OBJECT_CHUNK_OVERHEAD,
+        header.len()
+            + plaintext
+            + coven_crypto::SEALED_OBJECT_CHUNK_OVERHEAD
+            + WriteObjectPrefix::tail_length(65_536),
         0,
     );
     assert_eq!(header.len(), WriteObjectPrefix::MAX_HEADER_END);

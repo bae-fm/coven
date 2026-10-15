@@ -49,6 +49,7 @@ impl ChannelParts {
         header: WriteHeaderFrame,
         opens: &[bool],
         published: coven_database::Published,
+        authorship: coven_database::WriteAuthorship,
     ) -> (Self, DownloadedWriteStream<StreamInput>) {
         let (senders, parts) = opens
             .iter()
@@ -67,6 +68,7 @@ impl ChannelParts {
                 header,
                 parts,
                 published,
+                authorship,
             },
         )
     }

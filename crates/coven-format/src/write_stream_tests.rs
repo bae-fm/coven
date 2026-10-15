@@ -5,11 +5,14 @@ use crate::value::Value;
 use coven_merge::Operation;
 use std::collections::BTreeMap;
 
+/// Net row changes alone, with no operations or execution-only rows.
 fn rows(count: usize, payload: usize) -> WriteRecord {
     let mut record = test_utils::write();
+    record.parts[0].executions.clear();
     record.parts[0].rows = (0..count)
         .map(|index| {
             let mut row = test_utils::write().parts.remove(0).rows.remove(0);
+            row.execution = Default::default();
             row.row.key = crate::key::encode_key(&[Value::Integer(index as i64)]).unwrap();
             row.change.operation = Operation::Update(BTreeMap::from([(
                 "x".into(),
@@ -101,8 +104,8 @@ fn plaintext_encoder_fills_exactly_the_measured_buffer() {
     assert_eq!(decode_plaintext(&bytes).unwrap(), record);
     let mut expected = encoder.header_frame().to_vec();
     for part in &record.parts {
-        for row in &part.rows {
-            expected.extend(row.encode().unwrap());
+        for frame in part.frames() {
+            expected.extend(frame.unwrap());
         }
     }
     assert_eq!(bytes, expected);

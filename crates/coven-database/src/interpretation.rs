@@ -42,11 +42,11 @@ pub(crate) fn interpret(
     // or losses; later readers never rescue it (§10).
     if crate::write_landing::late(database, record.header.position)? {
         for part in &record.parts {
-            for row in &part.rows {
+            for row in part.records() {
                 crate::write_sources::admit(
                     database,
                     &record.header,
-                    &row.row,
+                    row.row(),
                     &ChangeVerdict::Dropped,
                 )?;
             }
@@ -78,11 +78,11 @@ pub(crate) fn interpret(
             // A reset ignores the whole part, dismissals included, with no
             // loss; its position still passes (§19.3).
             Some(ChangeVerdict::Ignored(entry)) => {
-                for row in &part.rows {
+                for row in part.records() {
                     crate::write_sources::admit(
                         database,
                         &record.header,
-                        &row.row,
+                        row.row(),
                         &ChangeVerdict::Ignored(entry),
                     )?;
                 }
@@ -90,6 +90,15 @@ pub(crate) fn interpret(
             }
             // Without a converter, each original change is a frozen schema loss (§17.1).
             Some(ChangeVerdict::Excluded(version)) if converts.is_none() => {
+                // Operations alone have no values to keep.
+                for execution in &part.executions {
+                    crate::write_sources::admit(
+                        database,
+                        &record.header,
+                        &execution.row,
+                        &ChangeVerdict::Excluded(version),
+                    )?;
+                }
                 for change in &part.rows {
                     crate::write_sources::admit(
                         database,
@@ -111,12 +120,24 @@ pub(crate) fn interpret(
                 if !part.dismissals.is_empty() {
                     kept.push(WritePart {
                         rows: Vec::new(),
+                        executions: Vec::new(),
                         ..part
                     });
                 }
                 continue;
             }
             _ => {}
+        }
+        // An admitted part's creations are offered before any check decides
+        // about its changes (§8.8).
+        crate::ownership::offer_part(database, &record.header, &part)?;
+        for execution in &part.executions {
+            crate::write_sources::admit(
+                database,
+                &record.header,
+                &execution.row,
+                &ChangeVerdict::Applied,
+            )?;
         }
         // Sources are resolved on the original changes; a dependent one stays
         // frozen in its original shape and never reaches a converter (E13).

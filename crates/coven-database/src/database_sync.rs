@@ -427,6 +427,9 @@ impl Database {
     /// Row changes, merge state, fingerprints and positions commit together.
     /// `published` is the write's first complete publication time and the
     /// signing key that authenticated it in its recorded view (§10).
+    /// For tests only: it keeps no header evidence, so an owner-only row it
+    /// creates cannot go into a snapshot (§8.8). Sync applies streams.
+    #[cfg(any(test, feature = "test-utils"))]
     pub async fn apply_downloaded<P: crate::PendingValue>(
         &self,
         write: crate::DownloadedWrite,

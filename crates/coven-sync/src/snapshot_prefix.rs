@@ -14,6 +14,9 @@ use std::sync::Arc;
 pub(super) struct Candidate {
     pub(super) object: StoredObject,
     pub(super) prefix: SnapshotObjectPrefix,
+    /// The member owning the snapshot's device in its signed view: whatever
+    /// the snapshot names that member as writing needs no other evidence.
+    pub(super) author: coven_foundation::id_source::MemberId,
     pub(super) signer: SigningKey,
     pub(super) signature: Signature,
 }
@@ -71,13 +74,13 @@ impl StoreLogSync {
         let (prefix, signature) = checked(path, SnapshotObjectPrefix::decode_signed(signed))?;
         // The signed coverage selects the signer; until verified it is only a
         // lookup hint, which can request entries but establishes nothing (D9).
-        let signer = match crate::object_author::owner(
+        let (author, signer) = match crate::object_author::owner(
             log,
             path.store(),
             path.device().expect("snapshot path"),
             &prefix.store_log,
         ) {
-            Ok((_, signer)) => signer,
+            Ok(owner) => owner,
             Err(crate::object_author::Unresolved::Waits(reason)) => return Ok(Err(reason)),
             Err(crate::object_author::Unresolved::Refused(failure)) => {
                 return Err(damaged(path, failure))
@@ -103,6 +106,7 @@ impl StoreLogSync {
         Ok(Ok(Candidate {
             object: object.clone(),
             prefix,
+            author,
             signer,
             signature,
         }))

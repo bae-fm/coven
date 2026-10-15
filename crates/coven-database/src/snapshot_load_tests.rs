@@ -49,11 +49,13 @@ async fn store_at_40_and_circle_at_38_replay_only_the_circles_missing_parts() {
                 id(Audience::Store),
                 store.prefix.clone(),
                 Cursor::new(store.concat()),
+                crate::snapshot_write::tests::author(),
             ),
             (
                 id(circle.clone()),
                 gifts.prefix.clone(),
                 Cursor::new(gifts.concat()),
+                crate::snapshot_write::tests::author(),
             ),
         ]
     };
@@ -63,7 +65,8 @@ async fn store_at_40_and_circle_at_38_replay_only_the_circles_missing_parts() {
         assert!(matches!(
             b.load_snapshots::<crate::pending::tests::Record, _, _>(crate::SnapshotReload::new(
                 snapshots(),
-                supplied
+                supplied,
+                std::sync::Arc::new(crate::test_utils::TestAuthorship)
             ))
             .await,
             Err(crate::DbError::Snapshot(
@@ -85,6 +88,7 @@ async fn store_at_40_and_circle_at_38_replay_only_the_circles_missing_parts() {
     b.load_snapshots::<crate::pending::tests::Record, _, _>(crate::SnapshotReload::new(
         snapshots(),
         writes.iter().rev().map(stream).collect(),
+        std::sync::Arc::new(crate::test_utils::TestAuthorship),
     ))
     .await
     .unwrap();
@@ -322,6 +326,7 @@ async fn loading_a_parent_snapshot_recomputes_other_audiences_without_rewriting_
         b.load_snapshots::<crate::pending::tests::Record, _, _>(crate::SnapshotReload::new(
             vec![frames(&a, Audience::Store).await.input()],
             missing.iter().map(stream).collect(),
+            std::sync::Arc::new(crate::test_utils::TestAuthorship),
         ))
         .await
         .unwrap();
@@ -357,12 +362,14 @@ async fn loading_a_parent_snapshot_recomputes_other_audiences_without_rewriting_
                 id(Audience::Store),
                 before.prefix.clone(),
                 Cursor::new(before.concat()),
+                crate::snapshot_write::tests::author(),
             )],
             missing
                 .iter()
                 .chain(records(&c).iter())
                 .map(stream)
                 .collect(),
+            std::sync::Arc::new(crate::test_utils::TestAuthorship),
         ))
         .await
         .unwrap();
@@ -623,6 +630,7 @@ async fn an_empty_loaded_audience_still_limits_later_snapshot_reloads() {
     b.load_snapshots::<crate::pending::tests::Record, _, _>(crate::SnapshotReload::new(
         vec![frames(&a, Audience::Store).await.input()],
         vec![stream(&records(&a)[2])],
+        std::sync::Arc::new(crate::test_utils::TestAuthorship),
     ))
     .await
     .unwrap();
@@ -652,8 +660,10 @@ async fn reloading_keeps_uploaded_own_history_before_authoring_another() {
             id(Audience::Store),
             snapshot.prefix.clone(),
             Cursor::new(snapshot.concat()),
+            crate::snapshot_write::tests::author(),
         )],
         vec![stream(&uploaded[1])],
+        std::sync::Arc::new(crate::test_utils::TestAuthorship),
     ))
     .await
     .unwrap();
@@ -868,8 +878,10 @@ async fn waiting_changes_replay_after_their_missing_own_predecessor() {
                     id(Audience::Store),
                     old_prefix.clone(),
                     Cursor::new(old.clone()),
+                    crate::snapshot_write::tests::author(),
                 )],
                 vec![stream(&missing)],
+                std::sync::Arc::new(crate::test_utils::TestAuthorship),
             ))
             .await
             .unwrap();
@@ -908,10 +920,16 @@ async fn an_edit_after_reload_reads_the_generation_from_the_newer_snapshot() {
     .unwrap();
     b.load_snapshots::<crate::pending::tests::Record, _, _>(crate::SnapshotReload::new(
         vec![
-            (id(circle), empty_prefix.clone(), Cursor::new(empty)),
+            (
+                id(circle),
+                empty_prefix.clone(),
+                Cursor::new(empty),
+                crate::snapshot_write::tests::author(),
+            ),
             frames(&a, Audience::Store).await.input(),
         ],
         vec![stream(&records(&a)[0])],
+        std::sync::Arc::new(crate::test_utils::TestAuthorship),
     ))
     .await
     .unwrap();

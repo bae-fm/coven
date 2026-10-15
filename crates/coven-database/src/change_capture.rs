@@ -174,3 +174,105 @@ fn value(
         Err(error) => Err(error),
     }
 }
+
+/// Read dependencies of a local write's app phase, from its row operations.
+/// Each operation counts as a session change of its row would: inserts and
+/// deletes change the whole row, updates each column whose value changed,
+/// and a primary-key update deletes the old key's row and inserts the new.
+/// Tables a session cannot key report table-wide changes.
+pub(crate) fn event_changes(
+    database: &DatabaseConnection,
+    events: &[crate::sqlite::Event],
+    supplemental: &BTreeMap<String, Option<String>>,
+) -> Result<Vec<RowChange>, DbError> {
+    struct Fields {
+        names: Vec<(String, bool, bool)>,
+        keyed: bool,
+        virtual_parent: Option<String>,
+    }
+    let mut tables = BTreeMap::<String, Fields>::new();
+    let mut changes = Vec::new();
+    for event in events {
+        let table = event.table.to_ascii_lowercase();
+        if !tables.contains_key(&table) {
+            let names = database.query(
+                "SELECT name,pk,hidden FROM pragma_table_xinfo(?1,'main') ORDER BY cid",
+                [&table],
+                |r| {
+                    Ok((
+                        r.get::<_, String>(0)?.to_ascii_lowercase(),
+                        r.get::<_, bool>(1)?,
+                        r.get::<_, u32>(2)? != 0,
+                    ))
+                },
+            )?;
+            let keyed = names.iter().any(|(_, pk, _)| *pk) && !supplemental.contains_key(&table);
+            tables.insert(
+                table.clone(),
+                Fields {
+                    names,
+                    keyed,
+                    virtual_parent: shadow_parent(database, &table)?,
+                },
+            );
+        }
+        let fields = &tables[&table];
+        if let Some(parent) = &fields.virtual_parent {
+            changes.push(RowChange {
+                table: parent.clone(),
+                column: String::new(),
+                keys: None,
+            });
+        }
+        if !fields.keyed {
+            changes.push(RowChange {
+                table,
+                column: String::new(),
+                keys: None,
+            });
+            continue;
+        }
+        let key = |values: &[Option<SqlValue>]| {
+            fields
+                .names
+                .iter()
+                .zip(values.iter().map(Some).chain(std::iter::repeat(None)))
+                .filter(|((_, pk, _), _)| *pk)
+                .map(|((name, _, _), value)| {
+                    let value = value.and_then(Option::clone).unwrap_or(SqlValue::Null);
+                    (name.clone(), value)
+                })
+                .collect::<BTreeMap<_, _>>()
+        };
+        let absent = key(&[]);
+        let old = key(&event.old);
+        let new = key(&event.new);
+        let whole = |old: BTreeMap<_, _>, new: BTreeMap<_, _>| RowChange {
+            table: table.clone(),
+            column: String::new(),
+            keys: Some((old, new)),
+        };
+        match event.action {
+            Action::SQLITE_INSERT => changes.push(whole(absent, new)),
+            Action::SQLITE_DELETE => changes.push(whole(old, absent)),
+            _ if old != new => {
+                changes.push(whole(old, absent.clone()));
+                changes.push(whole(absent, new));
+            }
+            _ => {
+                for (index, (name, pk, hidden)) in fields.names.iter().enumerate() {
+                    // Sessions omit generated columns; they can change with their inputs.
+                    if *pk || (!*hidden && event.old.get(index) == event.new.get(index)) {
+                        continue;
+                    }
+                    changes.push(RowChange {
+                        table: table.clone(),
+                        column: name.clone(),
+                        keys: Some((old.clone(), new.clone())),
+                    });
+                }
+            }
+        }
+    }
+    Ok(changes)
+}

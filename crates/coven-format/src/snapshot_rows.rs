@@ -180,9 +180,101 @@ impl Wire for ChangeVerdict {
     }
 }
 
-/// One original row change kept as source evidence (D7 section 5): the
+/// One row's original record in a write part (D5): its net change, or the
+/// SQL operations that left it with none.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum OriginalRow {
+    /// A net change, with its operations.
+    Change(crate::write::RowChange),
+    /// Operations with no net change.
+    Execution(crate::write::RowExecution),
+}
+impl Wire for OriginalRow {
+    fn put(&self, out: &mut Encoder) -> Result<(), Error> {
+        match self {
+            Self::Change(change) => {
+                0u8.put(out)?;
+                change.put(out)
+            }
+            Self::Execution(execution) => {
+                1u8.put(out)?;
+                execution.put(out)
+            }
+        }
+    }
+    fn get(input: &mut Decoder<'_>) -> Result<Self, Error> {
+        match u8::get(input)? {
+            0 => Ok(Self::Change(Wire::get(input)?)),
+            1 => Ok(Self::Execution(Wire::get(input)?)),
+            tag => Err(Error::UnknownTag {
+                field: "original row",
+                tag,
+            }),
+        }
+    }
+}
+impl OriginalRow {
+    /// The changed row.
+    pub fn row(&self) -> &RowId {
+        match self {
+            Self::Change(change) => &change.row,
+            Self::Execution(execution) => &execution.row,
+        }
+    }
+
+    /// The record as a part record.
+    pub fn record(&self) -> crate::write::PartRecord<'_> {
+        match self {
+            Self::Change(change) => crate::write::PartRecord::Change(change),
+            Self::Execution(execution) => crate::write::PartRecord::Execution(execution),
+        }
+    }
+
+    /// The record's own frame: kind 2 for a change, 13 for an execution.
+    pub fn encode(&self) -> Result<Vec<u8>, Error> {
+        match self {
+            Self::Change(change) => change.encode(),
+            Self::Execution(execution) => execution.encode(),
+        }
+    }
+
+    /// Decode either frame kind.
+    pub fn decode(bytes: &[u8]) -> Result<Self, Error> {
+        match crate::dismissal::WriteFrame::decode(bytes)? {
+            crate::dismissal::WriteFrame::Change(change) => Ok(Self::Change(change)),
+            crate::dismissal::WriteFrame::Execution(execution) => Ok(Self::Execution(execution)),
+            crate::dismissal::WriteFrame::Dismissal(_) => Err(Error::UnknownTag {
+                field: "original row kind",
+                tag: 3,
+            }),
+        }
+    }
+
+    pub(crate) fn validate(&self) -> Result<(), Error> {
+        match self {
+            Self::Change(change) => change.validate(),
+            Self::Execution(execution) => execution.validate(),
+        }
+    }
+
+    pub(crate) fn sources(&self) -> impl Iterator<Item = &crate::write_sources::ChangeId> {
+        let (net, execution) = match self {
+            Self::Change(change) => (Some(&change.sources), &change.execution),
+            Self::Execution(execution) => (None, &execution.execution),
+        };
+        net.into_iter()
+            .flat_map(|sources| sources.changes())
+            .chain(execution.sources.changes())
+            .chain(match self {
+                Self::Change(change) => change.creator.as_ref(),
+                Self::Execution(_) => None,
+            })
+    }
+}
+
+/// One original row record kept as source evidence (D7 section 5): the
 /// authored header of its part, whether that part arrived whole, the original
-/// change with its sources, and its author's verdict.
+/// change or execution with its sources, and its author's verdict.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AuthoredChange {
     /// The original write header, before any conversion.
@@ -190,8 +282,9 @@ pub struct AuthoredChange {
     /// Whether every original change of this part is known, so absence of a
     /// named row is proof rather than a wait.
     pub complete: bool,
-    /// The original change, with its generation source and replaced setters.
-    pub change: crate::write::RowChange,
+    /// The original record, with its generation source, replaced setters and
+    /// operations.
+    pub change: OriginalRow,
     /// Its interpretation by the snapshot's author.
     pub verdict: ChangeVerdict,
 }
@@ -227,7 +320,7 @@ impl AuthoredChange {
     pub fn id(&self) -> crate::write_sources::ChangeId {
         crate::write_sources::ChangeId {
             write: self.header.position,
-            row: self.change.row.clone(),
+            row: self.change.row().clone(),
         }
     }
 
@@ -239,8 +332,8 @@ impl AuthoredChange {
             ChangeVerdict::Dependent(sources) => {
                 for source in sources {
                     require(
-                        source.row.key == self.change.row.key
-                            && source.row.audience == self.change.row.audience,
+                        source.row.key == self.change.row().key
+                            && source.row.audience == self.change.row().audience,
                         "dependency source row",
                         FormatRule::Required,
                     )?;

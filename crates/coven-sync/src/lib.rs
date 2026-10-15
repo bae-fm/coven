@@ -19,6 +19,7 @@ pub use send_gate::{PublicationScope, SendGate};
 mod replay;
 mod replay_cache;
 mod stream_input;
+mod write_evidence;
 mod write_object;
 mod write_seal;
 

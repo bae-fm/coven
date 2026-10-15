@@ -6,7 +6,7 @@ use rusqlite::{
     ToSql,
 };
 
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) enum SqlValue {
     Null,
     Integer(i64),
@@ -29,6 +29,19 @@ impl From<ValueRef<'_>> for SqlValue {
             ValueRef::Real(value) => Self::Real(value),
             ValueRef::Text(value) => Self::Text(value.to_vec()),
             ValueRef::Blob(value) => Self::Blob(value.to_vec()),
+        }
+    }
+}
+
+impl SqlValue {
+    /// The value as SQLite reports it.
+    pub(crate) fn as_value_ref(&self) -> ValueRef<'_> {
+        match self {
+            Self::Null => ValueRef::Null,
+            Self::Integer(value) => ValueRef::Integer(*value),
+            Self::Real(value) => ValueRef::Real(*value),
+            Self::Text(value) => ValueRef::Text(value),
+            Self::Blob(value) => ValueRef::Blob(value),
         }
     }
 }

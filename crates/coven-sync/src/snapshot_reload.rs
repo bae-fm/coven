@@ -291,6 +291,7 @@ impl StoreLogSync {
                         })?,
                         prefix: SnapshotObjectPrefix::decode(&snapshot.prefix)?,
                         input: io::SnapshotInput::open(&self.directory, &snapshot.file)?,
+                        author: snapshot.author,
                     });
                 }
                 snapshots.extend(files.empty.iter().cloned().map(SnapshotSource::Empty));
@@ -328,6 +329,7 @@ impl StoreLogSync {
                             .collect(),
                     ),
                     operation: Some(Data::Snapshots(task.clone()).update(record, 2)?),
+                    authorship: self.evidence_keys().await?,
                 };
                 // Whether or not it commits, earlier write misses and the
                 // catch-up they completed no longer describe this device (§15).
@@ -400,6 +402,20 @@ impl StoreLogSync {
                             error @ coven_database::DbError::Snapshot(
                                 coven_database::SnapshotError::Schema { .. }
                                 | coven_database::SnapshotError::RetirementVerdict { .. },
+                            ) => return Err(error.into()),
+                            // Another member's write the snapshot carries is
+                            // sealed with a key, or names store-log entries,
+                            // that have not arrived: it waits, unrefused (§8.8).
+                            coven_database::DbError::Snapshot(
+                                coven_database::SnapshotError::KeyUnavailable { audience, key },
+                            ) => {
+                                let reason = crate::PendingReason::KeyUnavailable { audience, key };
+                                return Err(SyncError::Pending(Box::new(
+                                    self.operation_condition(record, reason).await?,
+                                )));
+                            }
+                            error @ coven_database::DbError::Snapshot(
+                                coven_database::SnapshotError::StoreLog { .. },
                             ) => return Err(error.into()),
                             error => error,
                         };
@@ -514,9 +530,20 @@ impl StoreLogSync {
                 None => Ok(DownloadedPartStream::Skipped),
             })
             .collect::<Result<_, SyncError>>()?;
+        let header = WriteHeaderFrame::decode(&write.header)?;
+        let opens: Vec<_> = write.parts.iter().map(Option::is_some).collect();
+        let ring = self
+            .store_keys
+            .read()?
+            .ok_or_else(|| coven_database::DbError::Invariant {
+                what: "a saved reload write was opened with held keys",
+            })?;
+        let authorship =
+            crate::write_object::authorship(&ring, write.evidence.evidence()?, &header, &opens)?;
         Ok(DownloadedWriteStream {
-            header: WriteHeaderFrame::decode(&write.header)?,
+            header,
             parts,
+            authorship,
             published: coven_database::Published {
                 stored_at: write.stored_at,
                 signer: coven_crypto::SigningKey::from_bytes(write.signer)

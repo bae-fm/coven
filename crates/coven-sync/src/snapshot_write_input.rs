@@ -116,8 +116,13 @@ impl StoreLogSync {
             stored_at: object.stored_at,
             signer,
         };
-        let (references, input) =
-            crate::stream_input::ChannelParts::new(opened.header.clone(), &opens, published);
+        let evidence = opened.evidence.clone();
+        let (references, input) = crate::stream_input::ChannelParts::new(
+            opened.header.clone(),
+            &opens,
+            published,
+            opened.authorship(ring, &opens)?,
+        );
         let transfer = async {
             let mut sink = crate::stream_input::WithReferences {
                 primary,
@@ -136,6 +141,7 @@ impl StoreLogSync {
             parts: files,
             stored_at: object.stored_at,
             signer: *signer.as_bytes(),
+            evidence: crate::snapshot_data::SavedEvidence::new(evidence),
         })
     }
 }

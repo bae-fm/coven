@@ -283,6 +283,7 @@ async fn try_remote_write(
         parts: vec![WritePart {
             audience: row.row.audience.clone(),
             rows: vec![row],
+            executions: vec![],
             dismissals: vec![],
         }],
     };

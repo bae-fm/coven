@@ -6,6 +6,7 @@
 //! Appendix D of `spec/format.md` specifies stored bytes.
 
 pub mod access_key_delivery;
+pub mod authorship;
 pub mod chunks;
 pub mod clock;
 pub mod codes;
@@ -128,7 +129,7 @@ impl Object {
 /// are ignored here; [`Object::decode`] requires exactly one complete frame.
 pub fn frame_length(prefix: &[u8]) -> Result<usize, Error> {
     let bytes = prefix.get(..3).ok_or(Error::Truncated)?;
-    if !matches!(bytes[0], 1..=12) {
+    if !matches!(bytes[0], 1..=13) {
         return Err(Error::UnknownTag {
             field: "object kind",
             tag: bytes[0],

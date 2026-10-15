@@ -912,9 +912,12 @@ mod queued {
                 disposition: WriteDisposition::Apply,
             },
             parts: vec![WritePart {
+                executions: Vec::new(),
                 dismissals: Vec::new(),
                 audience: Audience::Store,
                 rows: vec![coven_format::write::RowChange {
+                    creator: None,
+                    execution: Default::default(),
                     row: row.clone(),
                     change: Change {
                         generation: 1,

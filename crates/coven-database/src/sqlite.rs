@@ -1,17 +1,21 @@
 //! The leaf SQLite capability. Its connection is never returned or borrowed out.
 
+#[path = "event_capture.rs"]
+mod event_capture;
+#[path = "local_write.rs"]
+mod local_write;
 #[path = "rowid_policy.rs"]
 mod rowid_policy;
 #[path = "stream_capture.rs"]
 mod stream_capture;
 #[path = "transaction_capture.rs"]
 mod transaction_capture;
+pub(crate) use event_capture::Event;
 use transaction_capture::ChangeCapture;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::Arc;
-use std::time::SystemTime;
 
 use coven_foundation::id_source::DeviceId;
 
@@ -48,6 +52,9 @@ pub(crate) struct DatabaseConnection {
     scans: std::sync::Mutex<Vec<(String, i32)>>,
     #[cfg(test)]
     merge_loads: std::sync::Mutex<BTreeMap<String, usize>>,
+    /// Each local write's captured operations, for tests of their origins.
+    #[cfg(test)]
+    captured: std::cell::RefCell<Vec<crate::execution_capture::CapturedOperations>>,
 }
 
 struct WriterObservation {
@@ -56,6 +63,12 @@ struct WriterObservation {
 }
 
 impl DatabaseConnection {
+    /// The last local write's captured operations, for tests of their origins.
+    #[cfg(test)]
+    pub(crate) fn take_captured(&self) -> Option<crate::execution_capture::CapturedOperations> {
+        self.captured.borrow_mut().pop()
+    }
+
     #[cfg(any(test, feature = "test-utils"))]
     pub(crate) fn record_work(&self, update: impl FnOnce(&mut crate::test_utils::WorkCounts)) {
         if let Some(counter) = self.work.borrow().as_ref() {
@@ -140,6 +153,8 @@ impl DatabaseConnection {
             scans: std::sync::Mutex::new(Vec::new()),
             #[cfg(test)]
             merge_loads: std::sync::Mutex::new(BTreeMap::new()),
+            #[cfg(test)]
+            captured: std::cell::RefCell::new(Vec::new()),
         };
         db.batch("PRAGMA foreign_keys = ON; PRAGMA recursive_triggers = ON; PRAGMA trusted_schema = OFF;")?;
         db.refresh_hidden_rowids().map_err(opening_error)?;
@@ -216,6 +231,11 @@ impl DatabaseConnection {
         if read_only || current == supported {
             let schema = Schema::read(self)?;
             schema.validate(tables)?;
+            if let Some(table) =
+                crate::row_queries::owner_declaration_changed(self, &schema, tables)?
+            {
+                return Err(DbError::Schema(crate::SchemaError::OwnerOnlyChanged { table }).into());
+            }
             if !read_only {
                 self.transaction(|db| crate::row_queries::register_schema(db, &schema, tables))?;
             }
@@ -325,95 +345,6 @@ impl DatabaseConnection {
             rowid,
             true,
         )?))
-    }
-
-    pub(crate) fn local_write<F, R, E>(
-        &self,
-        schema: &crate::write_schema::WriteSchema,
-        device: DeviceId,
-        now: SystemTime,
-        files: &crate::file_write::FileWrite<'_>,
-        sql: F,
-    ) -> Result<R, E>
-    where
-        E: crate::WriteFailure,
-        F: FnOnce(crate::SqlContext<'_, '_>) -> Result<R, E>,
-    {
-        #[cfg(test)]
-        let _profile = self.profile_statements();
-        self.transaction_captured(false, |database| {
-            let deleted_circles = crate::store_log_tables::deleted_circles(database)?;
-            let mut session = rusqlite::session::Session::new(&database.connection)?;
-            for table in &schema.declarations {
-                session.attach(Some(table.name.as_str()))?;
-            }
-            let result = {
-                let _scope = database.authorization.write();
-                let result = sql(crate::SqlContext::new(files))?;
-                database.authorization.take_file_violation()?;
-                files.attach_app_files()?;
-                result
-            };
-            database.require_transaction()?;
-            let changeset = {
-                let _scope = database.authorization.internal();
-                session.changeset()?
-            };
-            let captured = crate::write_capture::capture(&changeset, schema)?;
-            {
-                let _scope = database.authorization.write();
-                files.clear_null_ids(&captured)?;
-            }
-            let changeset = {
-                let _scope = database.authorization.internal();
-                session.changeset()?
-            };
-            drop(session);
-            let captured = crate::write_capture::capture(&changeset, schema)?;
-            files.validate(&captured)?;
-            let before = crate::write_rows::AppView::before(database, schema, &captured)?;
-            let after = crate::write_rows::AppView::after(database, schema);
-            let store = crate::merge_store::MergeStore::new(database, &before);
-            let changes = crate::write_record::changes(
-                database,
-                schema,
-                &before,
-                &after,
-                &store,
-                &before.changes(&after, captured.keys().cloned())?,
-                &deleted_circles,
-            )?;
-            let record = if changes.is_empty() {
-                None
-            } else {
-                Some(crate::write_record::record(database, device, now, changes)?)
-            };
-            let affected = crate::write_apply::WriteApply::new(
-                database,
-                schema,
-                &store,
-                &before,
-                &after,
-                &deleted_circles,
-            )
-            .apply(record.as_ref(), BTreeSet::new())
-            .map_err(|error| match error {
-                // This device authored the record; rejecting it means our own
-                // authoring or removal machinery broke its invariants.
-                DbError::InvalidWrite { write, error } => {
-                    panic!("locally authored write {write:?} violates merge invariant: {error}")
-                }
-                error => error,
-            })?;
-            files.retain_rows(affected)?;
-            if let Some(record) = &record {
-                crate::operation::check_write_pause(database)?;
-                crate::write_commit::queue(database, record)?;
-            }
-            files.queue_attached(now)?;
-            files.before_commit()?;
-            Ok(result)
-        })
     }
 
     pub(crate) fn pending_transaction<T>(

@@ -1064,3 +1064,25 @@ complete snapshots, latest-write selection, Merkle construction memory use,
 retention and Rust correspondence are outside these proofs. A publisher
 cannot alter a checked opening, but can still omit history; authentication
 alone is not a completeness or freshness proof. B18 lists the spec/API edits.
+
+**The format and its Rust comparison.** D5, D7, D9 and D11 now fix the leaf
+encoding, the RFC 6962 split, the cleartext root list after the sealed header
+with its own header signature, and the snapshot's evidence section. The
+format adds one leaf per SQL operation, which this model need not open.
+Leaves are keyed with the part's audience key and branches are not, so a
+device keeping a part's leaf hashes can reopen it without the key; the
+confidentiality claim rests on the keyed leaves alone. `authorshipRunner`
+builds the same split over numbered leaves and runs `prune` over
+`neededLeaves` with the injective `freeHash`.
+`multiproofs_match_the_storage_model` compares every tree size up to 39 and
+many keep sets with Rust's multiproof: the same opened positions and the
+`hashes` count. `retained_openings_match_the_cell_proof_model` compares a real
+snapshot's retained opening of another member's part with `prune` over that
+part's leaves, needing its creation and the cells the merged row still shows.
+
+```sh
+COVEN_AUTHORSHIP_LEAN="$PWD/spec/proofs/storage/.lake/build/bin/authorshipRunner" \
+  cargo test -p coven-database -- --ignored --exact \
+  authorship::tests::multiproofs_match_the_storage_model \
+  authorship::tests::retained_openings_match_the_cell_proof_model
+```

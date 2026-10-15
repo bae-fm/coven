@@ -63,9 +63,11 @@ async fn waiting_changes_and_their_missing_history_commit_in_one_reload() {
             vec![(
                 id(Audience::Store),
                 snapshot_prefix.clone(),
-                Cursor::new(snapshot.clone())
+                Cursor::new(snapshot.clone()),
+                crate::snapshot_write::tests::author()
             )],
-            vec![stream(&missing)]
+            vec![stream(&missing)],
+            std::sync::Arc::new(crate::test_utils::TestAuthorship)
         ))
         .await
         .is_err());
@@ -83,8 +85,10 @@ async fn waiting_changes_and_their_missing_history_commit_in_one_reload() {
                 id(Audience::Store),
                 snapshot_prefix.clone(),
                 Cursor::new(snapshot.clone()),
+                crate::snapshot_write::tests::author(),
             )],
             supplied,
+            std::sync::Arc::new(crate::test_utils::TestAuthorship),
         ))
         .await
         .unwrap();
@@ -163,8 +167,10 @@ async fn waiting_files_survive_intermediate_snapshot_and_gap_write_states() {
             id(Audience::Store),
             snapshot_prefix.clone(),
             Cursor::new(snapshot),
+            crate::snapshot_write::tests::author(),
         )],
         vec![stream(&writes[1])],
+        std::sync::Arc::new(crate::test_utils::TestAuthorship),
     ))
     .await
     .unwrap();
@@ -239,7 +245,8 @@ async fn supplied_write_streams_are_bounded_and_fail_atomically() {
                 vec![(
                     id(Audience::Store),
                     snapshot_prefix.clone(),
-                    Cursor::new(snapshot.clone())
+                    Cursor::new(snapshot.clone()),
+                    crate::snapshot_write::tests::author()
                 )],
                 vec![DownloadedWriteStream {
                     published: crate::test_utils::published(
@@ -247,7 +254,9 @@ async fn supplied_write_streams_are_bounded_and_fail_atomically() {
                     ),
                     header: input.header.clone(),
                     parts: vec![DownloadedPartStream::Opened(Cursor::new(bytes.clone()))],
-                }]
+                    authorship: input.authorship.clone(),
+                }],
+                std::sync::Arc::new(crate::test_utils::TestAuthorship)
             ))
             .await
             .is_err());
@@ -258,7 +267,8 @@ async fn supplied_write_streams_are_bounded_and_fail_atomically() {
             vec![(
                 id(Audience::Store),
                 snapshot_prefix.clone(),
-                Cursor::new(snapshot.clone())
+                Cursor::new(snapshot.clone()),
+                crate::snapshot_write::tests::author()
             )],
             vec![DownloadedWriteStream::<Cursor<Vec<u8>>> {
                 published: crate::test_utils::published(
@@ -266,7 +276,9 @@ async fn supplied_write_streams_are_bounded_and_fail_atomically() {
                 ),
                 header: input.header.clone(),
                 parts: vec![DownloadedPartStream::Skipped],
-            }]
+                authorship: input.authorship.clone(),
+            }],
+            std::sync::Arc::new(crate::test_utils::TestAuthorship)
         ))
         .await
         .is_err());
@@ -279,12 +291,15 @@ async fn supplied_write_streams_are_bounded_and_fail_atomically() {
             id(Audience::Store),
             snapshot_prefix.clone(),
             Cursor::new(snapshot),
+            crate::snapshot_write::tests::author(),
         )],
         vec![DownloadedWriteStream {
             published: crate::test_utils::published(coven_format::value::StorageTime::UNIX_EPOCH),
+            authorship: input.authorship.clone(),
             header: input.header,
             parts: vec![DownloadedPartStream::Opened(BoundedFile(file))],
         }],
+        std::sync::Arc::new(crate::test_utils::TestAuthorship),
     ))
     .await
     .unwrap();
@@ -338,15 +353,18 @@ async fn snapshots_with_the_same_key_in_different_audiences_recompute_together()
                 (
                     id(Audience::Store),
                     store_prefix.clone(),
-                    Cursor::new(store.clone())
+                    Cursor::new(store.clone()),
+                    crate::snapshot_write::tests::author()
                 ),
                 (
                     id(circle.clone()),
                     gifts_prefix.clone(),
-                    Cursor::new(gifts[..gifts.len() - 1].to_vec())
+                    Cursor::new(gifts[..gifts.len() - 1].to_vec()),
+                    crate::snapshot_write::tests::author()
                 )
             ],
-            vec![stream(&a_write), stream(&b_write)]
+            vec![stream(&a_write), stream(&b_write)],
+            std::sync::Arc::new(crate::test_utils::TestAuthorship)
         ))
         .await
         .is_err());
@@ -357,11 +375,13 @@ async fn snapshots_with_the_same_key_in_different_audiences_recompute_together()
                 id(Audience::Store),
                 store_prefix.clone(),
                 Cursor::new(store.clone()),
+                crate::snapshot_write::tests::author(),
             ),
             (
                 id(circle.clone()),
                 gifts_prefix.clone(),
                 Cursor::new(gifts.clone()),
+                crate::snapshot_write::tests::author(),
             ),
         ];
         match mode {
@@ -374,6 +394,7 @@ async fn snapshots_with_the_same_key_in_different_audiences_recompute_together()
         c.load_snapshots::<crate::pending::tests::Record, _, _>(crate::SnapshotReload::new(
             snapshots,
             vec![stream(&b_write), stream(&a_write)],
+            std::sync::Arc::new(crate::test_utils::TestAuthorship),
         ))
         .await
         .unwrap();
@@ -436,9 +457,9 @@ async fn supplied_dismissals_apply_before_waiting_changes_and_validate_their_pas
             vec![(
                 id(Audience::Store),
                 snapshot_prefix.clone(),
-                Cursor::new(snapshot.clone())
+                Cursor::new(snapshot.clone()), crate::snapshot_write::tests::author()
             )],
-            vec![invalid],
+            vec![invalid], std::sync::Arc::new(crate::test_utils::TestAuthorship),
         ))
         .await,
         Err(crate::DbError::Snapshot(crate::SnapshotError::Write { write, error }))
@@ -450,8 +471,10 @@ async fn supplied_dismissals_apply_before_waiting_changes_and_validate_their_pas
             id(Audience::Store),
             snapshot_prefix.clone(),
             Cursor::new(snapshot),
+            crate::snapshot_write::tests::author(),
         )],
         vec![stream(&dismissal)],
+        std::sync::Arc::new(crate::test_utils::TestAuthorship),
     ))
     .await
     .unwrap();
@@ -736,6 +759,7 @@ mod differential {
         let mut reload = SnapshotReload::new(
             vec![snapshot.input()],
             history.reload.writes.iter().map(stream).collect(),
+            std::sync::Arc::new(crate::test_utils::TestAuthorship),
         );
         reload.boundaries = Some(boundary);
         target

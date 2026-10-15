@@ -535,12 +535,11 @@ async fn audience_validation_looks_up_children_only_when_the_parent_moves() {
     for moving in [false, true] {
         db.inspect_writer_schema(|writer,schema| {
             writer.batch("BEGIN IMMEDIATE").unwrap();
-            let mut session=rusqlite::session::Session::new(&writer.connection).unwrap();
-            session.attach(Some("albums")).unwrap();
+            let recording=super::event_capture::EventCapture::begin(writer).unwrap();
             writer.internal_execute(if moving { "UPDATE albums SET audience='00000000-0000-4000-8000-00000000000a' WHERE id='00000000-0000-4000-8000-000000000001'" } else { "UPDATE albums SET title='After' WHERE id='00000000-0000-4000-8000-000000000001'" },[]).unwrap();
-            let changeset = { let _scope=writer.authorization.internal(); session.changeset().unwrap() };
-            drop(session);
-            let captured=crate::write_capture::capture(&changeset,schema).unwrap();
+            let events=recording.events();
+            drop(recording);
+            let captured=crate::write_capture::capture(schema,&events).unwrap();
             let before=crate::write_rows::AppView::before(writer,schema,&captured).unwrap();
             let after=crate::write_rows::AppView::after(writer,schema);
             let stored=crate::merge_store::MergeStore::new(writer,&before);

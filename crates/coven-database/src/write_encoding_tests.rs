@@ -316,7 +316,8 @@ async fn far_future_snapshot_and_tail_apply_with_their_causes_and_preserve_queue
         receiver
             .load_snapshots::<crate::pending::tests::Record, _, _>(SnapshotReload::new(
                 vec![snapshot.input()],
-                vec![stream(&writes[2])]
+                vec![stream(&writes[2])],
+                std::sync::Arc::new(crate::test_utils::TestAuthorship)
             ))
             .await,
         Err(crate::DbError::Snapshot(
@@ -328,6 +329,7 @@ async fn far_future_snapshot_and_tail_apply_with_their_causes_and_preserve_queue
         .load_snapshots::<crate::pending::tests::Record, _, _>(SnapshotReload::new(
             vec![snapshot.input()],
             vec![] as Vec<crate::DownloadedWriteStream<std::io::Cursor<Vec<u8>>>>,
+            std::sync::Arc::new(crate::test_utils::TestAuthorship),
         ))
         .await
         .unwrap();
@@ -341,6 +343,7 @@ async fn far_future_snapshot_and_tail_apply_with_their_causes_and_preserve_queue
         .load_snapshots::<crate::pending::tests::Record, _, _>(SnapshotReload::new(
             vec![snapshot.input()],
             writes.iter().rev().map(stream).collect(),
+            std::sync::Arc::new(crate::test_utils::TestAuthorship),
         ))
         .await
         .unwrap();
@@ -433,6 +436,7 @@ async fn lean_differential_clocks() {
                     db.load_snapshots::<crate::pending::tests::Record, _, _>(SnapshotReload::new(
                         vec![snapshot.input()],
                         writes.iter().map(stream).collect(),
+                        std::sync::Arc::new(crate::test_utils::TestAuthorship),
                     ))
                     .await
                     .unwrap();
@@ -587,6 +591,12 @@ async fn queued_row_frames_pin_operation_tags_and_delete_field_omission() {
                 expected.extend(*column);
             }
         }
+        // No copied creation, then the statement's one operation: its
+        // sequence, `0` for the row change's own change written once, no key
+        // update, and no sources beyond the change's own.
+        expected.push(0);
+        expected.extend([0, 0, 0, 1, 0, 0, 0, 0, 0]);
+        expected.extend([0, 0, 0, 0, 0, 0]);
         let length = (expected.len() - 7) as u32;
         expected[3..7].copy_from_slice(&length.to_be_bytes());
         let header = coven_format::frame_length(record).unwrap();

@@ -398,6 +398,7 @@ impl StoreLogSync {
                     prefix: candidate.prefix.encode()?,
                     object: candidate.object,
                     file,
+                    author: candidate.author,
                 }))
             }
             Err(error) => error,
@@ -463,6 +464,8 @@ impl StoreLogSync {
                 .expect("checked snapshot path"),
             candidate.prefix.clone(),
             input,
+            candidate.author,
+            self.evidence_keys().await?,
         );
         let (transferred, checked) = tokio::join!(transfer, check);
         let evidence = match checked {
@@ -543,6 +546,22 @@ impl StoreLogSync {
             stream.drain().await?;
         }
         result
+    }
+}
+
+impl StoreLogSync {
+    /// What authenticates another member's write a snapshot carries: the
+    /// held keys and the applied store log, as of now (§8.8, D9).
+    pub(super) async fn evidence_keys(
+        &self,
+    ) -> Result<std::sync::Arc<dyn coven_database::Authorship>, SyncError> {
+        Ok(std::sync::Arc::new(
+            crate::write_evidence::EvidenceKeys::new(
+                self.directory.id(),
+                self.store_keys.read()?,
+                self.database.local_store_log().await?.log,
+            ),
+        ))
     }
 }
 

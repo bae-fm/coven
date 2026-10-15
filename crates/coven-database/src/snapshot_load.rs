@@ -16,6 +16,15 @@ use rusqlite::params;
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
 
+/// Who signed a snapshot being loaded, and how to authenticate the other
+/// members' writes it carries (§8.8, §15).
+#[derive(Clone, Copy)]
+pub(crate) struct SnapshotSigner<'a> {
+    pub(crate) authorship: &'a dyn crate::Authorship,
+    /// The snapshot author's member, unknown only before this device's own.
+    pub(crate) author: Option<coven_foundation::id_source::MemberId>,
+}
+
 pub(crate) fn load<P: crate::PendingValue, R: Read, W: Read>(
     database: &DatabaseConnection,
     before: &DatabaseConnection,
@@ -32,6 +41,7 @@ pub(crate) fn load<P: crate::PendingValue, R: Read, W: Read>(
             boundaries,
             expected_entries,
             operation,
+            authorship,
         } = reload;
         if let Some(expected) = expected_entries {
             let current = database.query(
@@ -80,10 +90,19 @@ pub(crate) fn load<P: crate::PendingValue, R: Read, W: Read>(
         let mut loaded = Vec::new();
         for source in snapshots {
             match source {
-                crate::SnapshotSource::Stored { id, prefix, input } => {
+                crate::SnapshotSource::Stored {
+                    id,
+                    prefix,
+                    input,
+                    author,
+                } => {
+                    let signer = SnapshotSigner {
+                        authorship: authorship.as_ref(),
+                        author: Some(author),
+                    };
                     // The only parse of this body: a failure names the
                     // snapshot, whose bytes sync then refuses (§19.1).
-                    let (header, rows, files) = read(database, schema, &id, prefix, input)
+                    let (header, rows, files) = read(database, schema, &id, prefix, input, &signer)
                         .and_then(|(header, rows)| {
                             let files = crate::database::file_retention::snapshot_references(
                                 database,
@@ -178,6 +197,7 @@ pub(crate) fn verify(
     prefix: coven_format::sealed_snapshot::SnapshotObjectPrefix,
     input: impl Read,
     captured: Option<crate::CapturedState>,
+    signer: &SnapshotSigner<'_>,
 ) -> Result<(), DbError> {
     let visible = AppView::after(before, schema);
     let old_store = MergeStore::from_schema(before, &schema.schema);
@@ -186,7 +206,7 @@ pub(crate) fn verify(
     let old =
         DatabaseRemovalView::new(before, &old_store, schema, &visible, &empty, &deleted, None)?;
     crate::snapshot_state::create_tables(database)?;
-    let (_, touched) = read(database, schema, &id, prefix, input)?;
+    let (_, touched) = read(database, schema, &id, prefix, input, signer)?;
     let selected = BTreeSet::from([id.audience.clone()]);
     let current = MergeStore::from_snapshot(database, &schema.schema, &selected);
     crate::write_apply::WriteApply::new(database, schema, &current, &visible, &visible, &deleted)
@@ -206,11 +226,15 @@ pub(crate) fn read(
     expected: &SnapshotId,
     prefix: coven_format::sealed_snapshot::SnapshotObjectPrefix,
     mut input: impl Read,
+    signer: &SnapshotSigner<'_>,
 ) -> Result<(SnapshotHeader, BTreeSet<RowId>), DbError> {
     #[cfg(any(test, feature = "test-utils"))]
     database.record_work(|work| work.snapshot_reads += 1);
+    let SnapshotSigner { authorship, author } = *signer;
     let local_version = *schema.versions.end();
     let mut touched = crate::snapshot_state::begin(database, schema, &expected.audience)?;
+    crate::ownership::clear_audience(database, &expected.audience)?;
+    crate::authorship::begin_load(database)?;
     let metadata = SnapshotMetadata::new(database);
     let mut decoder = SnapshotChunkDecoder::new(prefix);
     let mut checked_header = false;
@@ -281,19 +305,33 @@ pub(crate) fn read(
                 SnapshotRecord::Loss(loss) => {
                     crate::snapshot_state::loss(database, schema, loss, &metadata, &mut loss_state)?
                 }
+                SnapshotRecord::Creation(creation) => {
+                    schema.row_table(&creation.row)?;
+                    crate::ownership::put(
+                        database,
+                        &creation.row,
+                        &crate::ownership::Creation {
+                            write: creation.write,
+                            creator: creation.creator,
+                        },
+                    )?;
+                }
+                SnapshotRecord::Evidence(evidence) => {
+                    crate::authorship::load(database, authorship, &expected.audience, &evidence)?
+                }
                 SnapshotRecord::Authored(authored) => {
                     crate::write_landing::agrees(database, &authored)?;
                     crate::write_sources::load_evidence(database, &authored)?;
                     carried.insert((
                         authored.header.position,
-                        authored.change.row.table.clone(),
-                        authored.change.row.key.clone(),
+                        authored.change.row().table.clone(),
+                        authored.change.row().key.clone(),
                     ));
                     if authored.complete {
                         complete.insert((
                             coven_format::merge_fields::encode_write_header(&authored.header)
                                 .map_err(DbError::from)?,
-                            authored.change.row.audience.clone(),
+                            authored.change.row().audience.clone(),
                         ));
                     }
                 }
@@ -317,6 +355,16 @@ pub(crate) fn read(
         &carried,
     )?;
     crate::snapshot_state::finish(database)?;
+    crate::authorship::check(
+        database,
+        schema,
+        &expected.audience,
+        crate::authorship::Author {
+            device: expected.device,
+            member: author,
+        },
+    )?;
+    crate::authorship::end_load(database)?;
     database.batch(
         "DELETE FROM temp._coven_snapshot_writes; DELETE FROM temp._coven_snapshot_columns",
     )?;

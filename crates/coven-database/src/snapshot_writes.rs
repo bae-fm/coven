@@ -112,7 +112,7 @@ pub(crate) fn apply<P: crate::PendingValue, R: Read>(
             let write = match source {
                 Source::Download(stream) => {
                     crate::write_headers::retain(database, &stream.header)?;
-                    let write = stream.read()?;
+                    let write = stream.read(database)?;
                     crate::retained_writes::download(database, &write)?;
                     write
                 }

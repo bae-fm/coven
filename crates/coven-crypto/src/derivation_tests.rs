@@ -26,6 +26,11 @@ fn purpose_labels_and_hkdf_answers_are_pinned() {
             b"coven/sealed-box/v1",
             "2507974c84457b2d7fb35034f7de475379c05d8b428ab43e1d22ecebff2f3b07",
         ),
+        (
+            AUTHORSHIP,
+            b"coven/row-authorship/v1",
+            "8f0b41cb3dcf6da503cbb4fa43a556111b2ef687406693eab31cdea5a483fd52",
+        ),
     ];
     for (label, expected, answer) in vectors {
         assert_eq!(label, expected);
@@ -192,4 +197,36 @@ fn retry_nonce_vectors_pin_binary_fields_and_big_endian_u64_coordinates() {
             plain
         );
     }
+}
+
+#[test]
+fn authorship_leaves_are_keyed_and_branches_are_pinned() {
+    // HMAC-SHA256 and SHA-256 answers independently calculated with Python.
+    let keys = StoreKey::from_bytes(KeyId(uuid::Uuid::from_bytes([1; 16])), [17; 32]).derive();
+    let hasher = keys.authorship_hasher();
+    assert_eq!(
+        hex::encode(hasher.leaf(b"leaf")),
+        "b78c882d405ca07181c1a3f7d15e544268ee5c6ddc37dea035c27b663fe9f63e"
+    );
+    assert_eq!(
+        hex::encode(crate::authorship_node(&[0; 32], &[1; 32])),
+        "2ad82c3a51e8ed6418cb5bf267c5f9e521b99f7ab4fce657f460a8f1a3e87b2e"
+    );
+    assert_eq!(
+        hex::encode(crate::authorship_empty()),
+        "dbc1b4c900ffe48d575b5da5c638040125f65db0fe3e24494b76ea986457d986"
+    );
+    // A branch's two children never hash as one leaf of the same bytes.
+    let mut joined = vec![0; 32];
+    joined.extend([1; 32]);
+    assert_ne!(
+        hasher.leaf(&joined),
+        crate::authorship_node(&[0; 32], &[1; 32])
+    );
+    // Another audience's key gives unrelated hashes for the same leaf.
+    let other = StoreKey::from_bytes(KeyId(uuid::Uuid::from_bytes([2; 16])), [18; 32]).derive();
+    assert_ne!(
+        other.authorship_hasher().leaf(b"leaf"),
+        hasher.leaf(b"leaf")
+    );
 }

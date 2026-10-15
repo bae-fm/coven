@@ -435,6 +435,7 @@ async fn judgments_clear_only_with_a_committed_changed_reset() {
         boundaries: Some(vec![boundary()]),
         expected_entries: None,
         operation: None,
+        authorship: std::sync::Arc::new(crate::test_utils::TestAuthorship),
     };
     db.record_pending(record(&db, 1).await).await.unwrap();
     assert!(db

@@ -1,10 +1,14 @@
 import CovenMerge.Boundary
+import CovenMerge.ForeignKeyActions
 import Lean
 
 /-! JSON adapter for differential tests. All merge and removal computation calls
     the existing model; this file changes no theorem or proof. Values in the
     model are setter identities. Reference substitution and SQL constraint
-    evaluation are inputs, as in Appendix B's stated proof boundary. -/
+    evaluation are inputs, as in Appendix B's stated proof boundary. The
+    `creation` mode reports each row's selected original creation and the
+    `effects` mode recomputes foreign-key consequences from resolved
+    references (B18). -/
 
 open Lean CovenMerge
 
@@ -280,9 +284,72 @@ private def runFreeze (j : Json) : Except String Json := do
   pure (Json.mkObj [("frozen", toJson (frozen.map (lossJson cols))),
     ("active", toJson (active.toList.map (lossJson cols)))])
 
+open Ownership.ForeignKey in
+private def readAction (j : Json) (name : String) : Except String Action := do
+  match ← j.getObjValAs? String name with
+  | "cascade" => pure .cascade
+  | "setNull" => pure .setNull
+  | "restrict" => pure .restrict
+  | "noAction" => pure .noAction
+  | _ => throw "unknown foreign-key action"
+
+open Ownership.ForeignKey in
+private def readReference (j : Json) : Except String (Reference Nat Nat Nat) := do
+  pure ⟨← natField j "parent", ← natField j "parentGeneration", ← natField j "child",
+    ← natField j "childGeneration", (← j.getObjValAs? (Array Nat) "columns").toList,
+    (← j.getObjValAs? (Array (Option Nat)) "oldKey").toList, ← readAction j "onDelete",
+    ← readAction j "onUpdate", (← j.getObjValAs? (Array Nat) "parentColumns").toList⟩
+
+open Ownership.ForeignKey in
+private def readEffect (j : Json) : Except String (Effect Nat Nat Nat) := do
+  let kind ← match ← natField j "kind" with
+    | 0 => pure Kind.ins
+    | 1 => pure Kind.upd
+    | 2 => pure Kind.del
+    | _ => throw "unknown effect kind"
+  let cells ← (← j.getObjValAs? (Array Json) "cells").mapM fun cell => do
+    pure (← natField cell "column", ← cell.getObjValAs? (Option Nat) "value")
+  pure ⟨← natField j "row", ← natField j "generation", kind, cells.toList⟩
+
+open Ownership.ForeignKey in
+private def effectJson (e : Effect Nat Nat Nat) : Json :=
+  let kind : Nat := match e.kind with
+    | .ins => 0
+    | .upd => 1
+    | .del => 2
+  Json.mkObj [("row", toJson e.row), ("generation", toJson e.generation), ("kind", toJson kind),
+    ("cells", toJson (e.cells.map fun (c, v) => Json.mkObj [("column", toJson c), ("value", toJson v)]))]
+
+-- Each derived row names its chain of rows from a direct root. Each edge
+-- selects the consequence of its parent's recomputed payload on that child
+-- row; the payload itself is always recomputed by `evaluate`.
+open Ownership.ForeignKey in
+private def runEffects (j : Json) : Except String Json := do
+  let references := (← (← j.getObjValAs? (Array Json) "references").mapM readReference).toList
+  let directs ← (← j.getObjValAs? (Array Json) "direct").mapM readEffect
+  let schema := resolvedSchema references
+  let direct : Nat → Option (Effect Nat Nat Nat) := fun r => directs.find? (·.row == r)
+  let results ← (← j.getObjValAs? (Array Json) "derived").mapM fun d => do
+    let path ← d.getObjValAs? (Array Nat) "path"
+    let proposed ← readEffect (← d.getObjVal? "effect")
+    let some root := path[0]? | throw "an empty derivation path"
+    let derivation := path.toList.drop 1 |>.foldl (fun (acc : Option (Derivation Nat)) child =>
+      acc.bind fun parent =>
+        (evaluate schema direct parent).bind fun (row, payload) =>
+          ((schema.consequences row payload).findIdx? (·.1 == child)).map (.foreign parent ·))
+      (some (.direct root))
+    let evaluated := derivation.bind (evaluate schema direct)
+    pure (Json.mkObj [
+      ("effect", match evaluated with
+        | some (_, e) => effectJson e
+        | none => Json.null),
+      ("verifies", toJson (derivation.any fun d => verifies schema direct d proposed.row proposed))])
+  pure (toJson results)
+
 private def run (j : Json) : Except String Json := do
   let mode ← j.getObjValAs? String "mode"
   if mode == "freeze" then return ← runFreeze j
+  if mode == "effects" then return ← runEffects j
   if mode == "migration" then
     let (rows, I) ← readInputs j
     let named ← readEntries j I
@@ -305,6 +372,11 @@ private def run (j : Json) : Except String Json := do
       let c ← x.changes.find? (·.row == r)
       some c.change }
   if mode == "reset" then return ← runReset j M writes order
+  if mode == "creation" then
+    let rows ← j.getObjValAs? (Array Nat) "rowIds"
+    let st := order.toList.foldl (step M) (St.init : St Nat Nat Nat)
+    return toJson (rows.map fun r =>
+      Json.mkObj [("id", toJson r), ("creator", toJson (st.genWrite r 1))])
   if mode == "schema" then return ← runSchema j M writes order
   let (rows, I) ← readInputs j
   let cols ← natField j "columns"

@@ -27,7 +27,7 @@ pub struct CellSource {
 wire_struct!(CellSource, change, column => crate::wire::get_name);
 
 /// The author's observed generation source and replaced cell setters.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct WriteSources {
     /// Absent exactly at generation zero.
     pub generation: Option<ChangeId>,

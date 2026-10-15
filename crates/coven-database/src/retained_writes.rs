@@ -59,10 +59,13 @@ fn part_frames(
         return Ok(());
     }
     let frames = part
-        .rows
-        .iter()
-        .cloned()
-        .map(WriteFrame::Change)
+        .records()
+        .map(|record| match record {
+            coven_format::write::PartRecord::Change(row) => WriteFrame::Change(row.clone()),
+            coven_format::write::PartRecord::Execution(execution) => {
+                WriteFrame::Execution(execution.clone())
+            }
+        })
         .chain(part.dismissals.iter().cloned().map(WriteFrame::Dismissal));
     for frame in frames {
         self::frame(db, header, &part.audience, &frame)?;
@@ -112,6 +115,7 @@ pub(crate) fn visit(
         let mut part = WritePart {
             audience: target.clone(),
             rows: Vec::new(),
+            executions: Vec::new(),
             dismissals: Vec::new(),
         };
         for frame in db.query(
@@ -121,6 +125,7 @@ pub(crate) fn visit(
         )? {
             match WriteFrame::decode(&frame).map_err(|_| DbError::DamagedDatabase)? {
                 WriteFrame::Change(row) => part.rows.push(row),
+                WriteFrame::Execution(execution) => part.executions.push(execution),
                 WriteFrame::Dismissal(dismissal) => part.dismissals.push(dismissal),
             }
         }

@@ -106,6 +106,17 @@ pub(crate) fn write<E>(
         counts[5] += 1;
         Ok::<_, SnapshotWriteError<E>>(())
     })?;
+    crate::ownership::visit(database, &id.audience, |_, _| {
+        counts[6] += 1;
+        Ok::<_, SnapshotWriteError<E>>(())
+    })?;
+    // Another member's creations and cells of owned rows, opened (§8.8).
+    let author = crate::authorship::Author {
+        device: id.device,
+        member: crate::ownership::member(database, id.device)?,
+    };
+    let evidence = crate::authorship::evidence(database, schema, &id.audience, author)?;
+    counts[7] = evidence.len() as u64;
     let header = SnapshotHeader {
         id,
         schema_version: database.schema_version()?,
@@ -192,6 +203,18 @@ pub(crate) fn write<E>(
     crate::write_sources::visit_evidence(database, &selected, &covered, |authored| {
         record(SnapshotRecord::Authored(authored))
     })?;
+    crate::ownership::visit(database, &selected, |row, creation| {
+        record(SnapshotRecord::Creation(
+            coven_format::authorship::Creation {
+                row,
+                write: creation.write,
+                creator: creation.creator,
+            },
+        ))
+    })?;
+    for evidence in evidence {
+        record(SnapshotRecord::Evidence(evidence))?;
+    }
     emit(encoder.finish()?).map_err(SnapshotWriteError::Output)?;
     Ok(state)
 }

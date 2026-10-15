@@ -11,9 +11,11 @@ fn raw(write: &WriteRecord) -> Vec<u8> {
         .parts
         .iter()
         .map(|part| {
-            part.rows
-                .iter()
-                .flat_map(|row| encode_frame(2, row).unwrap())
+            part.records()
+                .flat_map(|record| match record {
+                    PartRecord::Change(row) => encode_frame(2, row).unwrap(),
+                    PartRecord::Execution(execution) => encode_frame(13, execution).unwrap(),
+                })
                 .collect()
         })
         .collect();
@@ -25,7 +27,7 @@ fn raw(write: &WriteRecord) -> Vec<u8> {
             .zip(&streams)
             .map(|(part, bytes)| PartHeader {
                 audience: part.audience.clone(),
-                record_count: part.rows.len() as u64,
+                record_count: (part.rows.len() + part.executions.len()) as u64,
                 plaintext_length: bytes.len() as u64,
             })
             .collect(),
@@ -66,6 +68,8 @@ fn merge_operations_own_generation_checks_and_preserve_old_values() {
     ] {
         let mut write = test_utils::write();
         let row = &mut write.parts[0].rows[0];
+        // These cases check the net change alone; it has no operations.
+        row.execution = Default::default();
         row.change = Change {
             generation,
             operation,
@@ -135,7 +139,8 @@ fn row_part_and_reference_audiences_are_enforced() {
     let mut write = test_utils::write();
     let mut circle = write.parts[0].clone();
     circle.audience = circle_id.clone();
-    circle.rows[0].row.audience = circle_id;
+    circle.rows[0].row.audience = circle_id.clone();
+    circle.executions[0].row.audience = circle_id;
     write.parts.push(circle);
     assert_eq!(
         decode_plaintext(&test_utils::write_plaintext(&write).unwrap()).unwrap(),
@@ -293,6 +298,7 @@ fn source_roles_are_canonical_and_repeated_identities_are_preserved() {
     let row = &mut write.parts[0].rows[0];
     row.change.operation = Operation::Delete;
     row.old.clear();
+    row.execution = Default::default();
     let change = row.sources.generation.clone().unwrap();
     let setter = crate::write_sources::CellSource {
         change: change.clone(),
@@ -306,10 +312,13 @@ fn source_roles_are_canonical_and_repeated_identities_are_preserved() {
     let sources = encode_frame(99, &row.sources).unwrap();
     let generation = encode_frame(99, &row.sources.generation).unwrap();
     let encoded = row.encode().unwrap();
-    assert!(encoded.ends_with(&sources[7..]));
+    // No copied creation and an empty execution follow the sources.
+    let tail = [0u8; 10];
+    assert!(encoded[..encoded.len() - tail.len()].ends_with(&sources[7..]));
+    assert!(encoded.ends_with(&tail));
     assert_eq!(RowChange::decode(&encoded).unwrap(), *row);
     let mut malformed = encoded.clone();
-    let source_offset = encoded.len() - (sources.len() - 7);
+    let source_offset = encoded.len() - tail.len() - (sources.len() - 7);
     // Move the first setter key after the second: the map must refuse this order.
     let first_name = source_offset + (generation.len() - 7) + 4 + 4;
     assert_eq!(malformed[first_name], b'a');
@@ -333,4 +342,278 @@ fn source_roles_are_canonical_and_repeated_identities_are_preserved() {
         decode_plaintext(&test_utils::write_plaintext(&write).unwrap()).unwrap(),
         write
     );
+}
+
+#[test]
+fn operations_are_ordered_continuous_and_start_at_the_change_generation() {
+    let write = test_utils::write();
+    assert_eq!(
+        decode_plaintext(&test_utils::write_plaintext(&write).unwrap()).unwrap(),
+        write
+    );
+    let mut same = test_utils::write();
+    same.parts[0].executions[0].execution.steps[1].sequence = 1;
+    refuses(
+        same,
+        Error::Invalid {
+            field: "execution steps",
+            rule: Rule::Order,
+        },
+    );
+    let mut gap = test_utils::write();
+    gap.parts[0].executions[0].execution.steps[1]
+        .change
+        .generation = 3;
+    refuses(
+        gap,
+        Error::Invalid {
+            field: "execution step generation",
+            rule: Rule::Generation,
+        },
+    );
+    let mut parity = test_utils::write();
+    parity.parts[0].executions[0].execution.steps[0]
+        .change
+        .generation = 1;
+    refuses(parity, Error::Merge(MergeError::GenerationParity(1)));
+    let mut key_update = test_utils::write();
+    key_update.parts[0].executions[0].execution.steps[0].key_update = true;
+    refuses(
+        key_update,
+        Error::Invalid {
+            field: "key update step",
+            rule: Rule::ColumnOperation,
+        },
+    );
+    // Only a delete is the old half of a primary-key update.
+    let mut moved = test_utils::write();
+    moved.parts[0].executions[0].execution.steps[1].key_update = true;
+    assert_eq!(
+        decode_plaintext(&test_utils::write_plaintext(&moved).unwrap()).unwrap(),
+        moved
+    );
+    let mut empty = test_utils::write();
+    empty.parts[0].executions[0].execution.steps.clear();
+    refuses(
+        empty,
+        Error::Invalid {
+            field: "execution steps",
+            rule: Rule::Required,
+        },
+    );
+    // A row has one record: its change, or its operations alone.
+    let mut both = test_utils::write();
+    both.parts[0].executions[0].row = both.parts[0].rows[0].row.clone();
+    assert_eq!(
+        test_utils::write_plaintext(&both),
+        Err(Error::Invalid {
+            field: "write part executions",
+            rule: Rule::Audience,
+        })
+    );
+    // The stream refuses the second record for the row as out of order.
+    assert_eq!(
+        decode_plaintext(&raw(&both)),
+        Err(Error::Invalid {
+            field: "write part rows",
+            rule: Rule::Order,
+        })
+    );
+    // An operation's parent obeys the same audience rule as a change's.
+    let mut parent = test_utils::write();
+    let circle = Audience::Circle(CircleId(Uuid::from_bytes([1; 16])));
+    let Operation::Insert(columns) = &mut parent.parts[0].executions[0].execution.steps[0]
+        .change
+        .operation
+    else {
+        unreachable!()
+    };
+    let mut row = test_utils::row();
+    row.audience = circle;
+    columns.get_mut("x").unwrap().parents.insert(
+        coven_merge::ForeignKey::new(["fk"], row.table.clone(), ["id"]),
+        Parent { row, generation: 1 },
+    );
+    let execution_row = parent.parts[0].executions[0].row.clone();
+    refuses(
+        parent,
+        Error::Merge(MergeError::ReferenceAudience(execution_row)),
+    );
+}
+
+fn copied(write: &mut WriteRecord) -> &mut RowChange {
+    let row = &mut write.parts[0].rows[0];
+    row.change = Change {
+        generation: 0,
+        operation: Operation::Insert(values()),
+    };
+    row.old.clear();
+    row.sources = Default::default();
+    row.execution = Default::default();
+    row.creator = Some(ChangeId {
+        write: WriteId {
+            device: DeviceId(2),
+            number: 1,
+        },
+        row: RowId {
+            audience: Audience::Circle(CircleId(Uuid::from_bytes([1; 16]))),
+            ..test_utils::row()
+        },
+    });
+    row
+}
+
+#[test]
+fn only_a_generation_zero_insert_copies_another_audiences_creation() {
+    let mut write = test_utils::write();
+    copied(&mut write);
+    assert_eq!(
+        decode_plaintext(&test_utils::write_plaintext(&write).unwrap()).unwrap(),
+        write
+    );
+    let invalid = || Error::Invalid {
+        field: "copied creation",
+        rule: Rule::ColumnOperation,
+    };
+    let mut same_audience = test_utils::write();
+    copied(&mut same_audience)
+        .creator
+        .as_mut()
+        .unwrap()
+        .row
+        .audience = Audience::Store;
+    refuses(same_audience, invalid());
+    let mut other_key = test_utils::write();
+    copied(&mut other_key).creator.as_mut().unwrap().row.key =
+        crate::key::encode_key(&[Value::Text("other".into())]).unwrap();
+    refuses(other_key, invalid());
+    let mut other_table = test_utils::write();
+    copied(&mut other_table).creator.as_mut().unwrap().row.table = "u".into();
+    refuses(other_table, invalid());
+    let mut readd = test_utils::write();
+    let row = copied(&mut readd);
+    row.change.generation = 2;
+    row.sources.generation = test_utils::write().parts[0].rows[0]
+        .sources
+        .generation
+        .clone();
+    refuses(readd, invalid());
+    let mut update = test_utils::write();
+    update.parts[0].rows[0].creator = copied(&mut test_utils::write()).creator.clone();
+    refuses(update, invalid());
+}
+
+#[test]
+fn copied_creations_and_operation_sources_must_have_been_read() {
+    let mut unread = test_utils::write();
+    copied(&mut unread).creator.as_mut().unwrap().write.device = DeviceId(3);
+    refuses(
+        unread,
+        Error::Invalid {
+            field: "copied creation read",
+            rule: Rule::Coverage,
+        },
+    );
+    let mut source = test_utils::write();
+    let unread = ChangeId {
+        write: WriteId {
+            device: DeviceId(3),
+            number: 1,
+        },
+        row: test_utils::row(),
+    };
+    source.parts[0].executions[0].execution.sources.generation = Some(unread.clone());
+    refuses(
+        source,
+        Error::Invalid {
+            field: "source read",
+            rule: Rule::Coverage,
+        },
+    );
+    // Sources the operations replaced beyond the change's own are read too.
+    let mut setter = test_utils::write();
+    setter.parts[0].rows[0].execution.sources.setters.insert(
+        "y".into(),
+        crate::write_sources::CellSource {
+            change: unread,
+            column: "y".into(),
+        },
+    );
+    refuses(
+        setter,
+        Error::Invalid {
+            field: "source read",
+            rule: Rule::Coverage,
+        },
+    );
+}
+
+/// A step that is exactly its row change's own change is written once; the
+/// same step written out again has a second encoding and is refused (D5).
+#[test]
+fn a_step_equal_to_its_row_change_is_written_once() {
+    let mut change = test_utils::write().parts.remove(0).rows.remove(0);
+    change.execution = Execution {
+        steps: vec![Step {
+            sequence: 0,
+            change: change.change.clone(),
+            key_update: false,
+        }],
+        sources: Default::default(),
+    };
+    let compact = change.encode().unwrap();
+    assert_eq!(RowChange::decode(&compact).unwrap(), change);
+    // The step's own bytes: sequence, tag 0, key update.
+    let mut tail = Encoder::new();
+    change
+        .execution
+        .put_against(&mut tail, Some(&change.change))
+        .unwrap();
+    assert_eq!(
+        tail.bytes,
+        [
+            &[0, 0, 0, 1][..],
+            &[0, 0, 0, 0],
+            &[0],
+            &[0],
+            &[0],
+            &[0, 0, 0, 0]
+        ]
+        .concat()
+    );
+    // The same step spelled out in full.
+    let mut full = Encoder::new();
+    change.row.put(&mut full).unwrap();
+    change.change.put(&mut full).unwrap();
+    change.old.put(&mut full).unwrap();
+    change.sources.put(&mut full).unwrap();
+    change.creator.put(&mut full).unwrap();
+    1u32.put(&mut full).unwrap();
+    0u32.put(&mut full).unwrap();
+    1u8.put(&mut full).unwrap();
+    change.change.put(&mut full).unwrap();
+    0u8.put(&mut full).unwrap();
+    change.execution.sources.put(&mut full).unwrap();
+    let mut input = Decoder::new(&full.bytes).unwrap();
+    assert!(matches!(
+        RowChange::get(&mut input),
+        Err(Error::Invalid {
+            field: "step change",
+            ..
+        })
+    ));
+    // An execution record has no own change: a `0` step is unknown there.
+    let mut record = Encoder::new();
+    change.row.put(&mut record).unwrap();
+    1u32.put(&mut record).unwrap();
+    0u32.put(&mut record).unwrap();
+    0u8.put(&mut record).unwrap();
+    let mut input = Decoder::new(&record.bytes).unwrap();
+    assert!(matches!(
+        RowExecution::get(&mut input),
+        Err(Error::UnknownTag {
+            field: "step change",
+            tag: 0
+        })
+    ));
 }

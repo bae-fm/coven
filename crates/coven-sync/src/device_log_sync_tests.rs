@@ -382,7 +382,7 @@ pub(crate) mod writes {
         .unwrap()
     }
 
-    pub(super) async fn resealed(device: &Device) -> (WriteId, Vec<u8>) {
+    pub(crate) async fn resealed(device: &Device) -> (WriteId, Vec<u8>) {
         let ring = device.custody.read().unwrap().unwrap();
         let member = device.identity.read().unwrap().unwrap();
         device
@@ -426,7 +426,7 @@ pub(crate) mod writes {
         let aad = layout.prefix().unwrap();
         let mut bytes = aad.clone();
         let key = StoreKey::from_bytes(KeyId(Uuid::from_u128(1)), [7; 32]).derive();
-        let mut put = |plain: &[u8]| {
+        let put = |layout: &mut WriteObjectLayout, plain: &[u8]| {
             let coordinate = layout.next_chunk().unwrap();
             let mut plain = plain.to_vec();
             alter(coordinate.section, &mut plain);
@@ -439,12 +439,34 @@ pub(crate) mod writes {
                     &plain,
                 )
                 .unwrap();
-            bytes.extend(layout.encode_chunk(&sealed).unwrap());
+            layout.encode_chunk(&sealed).unwrap()
         };
-        put(encoder.header_frame());
+        let header = put(&mut layout, encoder.header_frame());
+        let hasher = key.authorship_hasher();
+        let roots: Vec<_> = record
+            .parts
+            .iter()
+            .map(|part| {
+                coven_format::authorship::root(
+                    &hasher,
+                    &coven_format::authorship::part_leaves(part),
+                )
+                .unwrap()
+            })
+            .collect();
+        let signature = member()
+            .keys()
+            .sign_write_header(path.as_str(), &aad, &header, &roots);
+        bytes.extend(&header);
+        bytes.extend(
+            layout
+                .tail(&coven_format::sealed_write::HeaderTail { roots, signature })
+                .unwrap(),
+        );
         for part in 0..record.parts.len() {
             for chunk in encoder.part_chunks(part).unwrap() {
-                put(&chunk.unwrap());
+                let piece = put(&mut layout, &chunk.unwrap());
+                bytes.extend(piece);
             }
         }
         let mut hash = ObjectHasher::new();

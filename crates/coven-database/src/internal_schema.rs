@@ -33,6 +33,10 @@ pub(crate) fn reserved_name(name: &str) -> bool {
 }
 
 // This is also the ownership checker's source of reserved table names.
+#[macro_use]
+#[path = "internal_schema_ownership.rs"]
+mod ownership;
+
 macro_rules! coven_tables {
     ($visit:ident) => {
         $visit!(_coven_pending, "
@@ -462,7 +466,7 @@ macro_rules! coven_tables {
                 schema_version INTEGER NOT NULL,
                 writes BLOB NOT NULL,
                 store_log BLOB NOT NULL,
-                counts BLOB NOT NULL CHECK(length(counts)=48)
+                counts BLOB NOT NULL CHECK(length(counts)=64)
             ) STRICT, WITHOUT ROWID;
         ");
         $visit!(_coven_raise_capture_frames, "
@@ -539,6 +543,7 @@ macro_rules! coven_tables {
             ) STRICT, WITHOUT ROWID;
             CREATE INDEX _coven_authored_changes_audience ON _coven_authored_changes(audience,write_id,table_name,key);
         ");
+        coven_ownership_tables!($visit);
         $visit!(_coven_conversion_schemas, "
             CREATE TABLE _coven_conversion_schemas (
                 version INTEGER PRIMARY KEY,

@@ -95,6 +95,8 @@ pub(crate) struct SavedSnapshot {
     pub(crate) object: StoredObject,
     pub(crate) file: String,
     pub(crate) prefix: Vec<u8>,
+    /// The member whose device signed it, in its signed view (§15).
+    pub(crate) author: coven_foundation::id_source::MemberId,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -106,6 +108,44 @@ pub(crate) struct SavedWrite {
     /// The signing key that authenticated the write in its recorded view,
     /// for the old-key window (§10).
     pub(crate) signer: [u8; 32],
+    /// The write's signed header and part roots, which the loaded parts must
+    /// reproduce and later snapshots carry (D9).
+    pub(crate) evidence: SavedEvidence,
+}
+
+/// A write's header evidence, as the journal keeps it.
+#[derive(Clone, Serialize, Deserialize)]
+pub(crate) struct SavedEvidence {
+    prefix: Vec<u8>,
+    header: Vec<u8>,
+    roots: Vec<[u8; 32]>,
+    signature: Vec<u8>,
+}
+
+impl SavedEvidence {
+    pub(crate) fn new(evidence: coven_database::HeaderEvidence) -> Self {
+        Self {
+            prefix: evidence.prefix,
+            header: evidence.header,
+            roots: evidence.roots,
+            signature: evidence.signature.to_vec(),
+        }
+    }
+
+    pub(crate) fn evidence(
+        &self,
+    ) -> Result<coven_database::HeaderEvidence, coven_database::DbError> {
+        Ok(coven_database::HeaderEvidence {
+            prefix: self.prefix.clone(),
+            header: self.header.clone(),
+            roots: self.roots.clone(),
+            signature: self
+                .signature
+                .as_slice()
+                .try_into()
+                .map_err(|_| coven_database::DbError::DamagedDatabase)?,
+        })
+    }
 }
 
 pub(crate) mod audience {

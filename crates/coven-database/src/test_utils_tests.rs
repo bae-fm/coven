@@ -119,8 +119,11 @@ pub(crate) fn insert(n: u64, r: usize) -> WriteRecord {
             disposition: WriteDisposition::Apply,
         },
         parts: vec![WritePart {
+            executions: Vec::new(),
             audience: Audience::Store,
             rows: vec![RowChange {
+                creator: None,
+                execution: Default::default(),
                 row: row(r),
                 change: Change {
                     generation: 0,

@@ -804,7 +804,12 @@ async fn authored_sources_differential() {
         assert_eq!(refused["authored"], false);
         assert_eq!(refused["dataValid"], false);
         databases[0].inspect_writer(|db| {
-            assert!(validate(db, &forged[index].header, &forged[index].parts[0].rows[0]).is_err());
+            assert!(validate(
+                db,
+                &forged[index].header,
+                PartRecord::Change(&forged[index].parts[0].rows[0])
+            )
+            .is_err());
         });
         for db in databases {
             db.close().await.unwrap();

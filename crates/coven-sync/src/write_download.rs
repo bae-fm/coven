@@ -96,8 +96,11 @@ impl DeviceLogSync {
             signer,
         };
         let skipped = opened.unopened(&opens);
-        let (primary, download) = ChannelParts::new(opened.header.clone(), &opens, published);
-        let (references, input) = ChannelParts::new(opened.header.clone(), &opens, published);
+        let authorship = opened.authorship(ring, &opens)?;
+        let (primary, download) =
+            ChannelParts::new(opened.header.clone(), &opens, published, authorship.clone());
+        let (references, input) =
+            ChannelParts::new(opened.header.clone(), &opens, published, authorship);
         let (validation, validated) = oneshot::channel();
         let apply = self
             .database

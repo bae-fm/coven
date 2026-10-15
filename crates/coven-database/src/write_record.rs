@@ -9,7 +9,7 @@ use crate::DbError;
 use coven_format::{
     merge_fields,
     value::{Value, WritePositions},
-    write::{RowChange, WriteDisposition, WriteHeader, WritePart, WriteRecord},
+    write::{RowChange, RowExecution, WriteDisposition, WriteHeader, WritePart, WriteRecord},
 };
 use coven_foundation::id_source::{CircleId, DeviceId};
 use coven_merge::{Audience, Change, ColumnValue, Operation, Parent, RowId, WriteId};
@@ -278,6 +278,18 @@ pub(crate) fn changes(
             }
         }
     }
+    // A copy into another audience keeps the row's original creation (§8.8).
+    for (old, new) in &moved {
+        let Some(change) = changes.get_mut(new) else {
+            continue;
+        };
+        if change.change.generation == 0 && matches!(change.change.operation, Operation::Insert(_))
+        {
+            let creation =
+                crate::ownership::creation(database, old)?.ok_or(DbError::DamagedDatabase)?;
+            change.creator = Some(creation.creator);
+        }
+    }
     let generations: BTreeMap<_, _> = changes
         .iter()
         .map(|(row, c)| {
@@ -355,11 +367,61 @@ pub(crate) fn changes(
     }
     Ok(changes)
 }
+/// The write record of a local write's net changes and the SQL operations
+/// that produced them, or nothing when no row changed. Rows whose operations
+/// left no net change keep those operations as executions (D5).
 pub(crate) fn record(
     database: &DatabaseConnection,
     device: DeviceId,
     now: SystemTime,
     changes: BTreeMap<RowId, RowChange>,
+    steps: BTreeMap<RowId, Vec<coven_format::write::Step>>,
+    store: &MergeStore<'_>,
+) -> Result<Option<WriteRecord>, DbError> {
+    if changes.is_empty() {
+        return Ok(None);
+    }
+    let mut changes = changes;
+    let mut executions = BTreeMap::<Audience, Vec<RowExecution>>::new();
+    for (row, steps) in steps {
+        match changes.get_mut(&row) {
+            Some(change) => {
+                change.execution = crate::write_sources::executed(
+                    database,
+                    store,
+                    &row,
+                    steps,
+                    Some(&change.sources),
+                )?;
+            }
+            None => {
+                let execution = crate::write_sources::executed(database, store, &row, steps, None)?;
+                executions
+                    .entry(row.audience.clone())
+                    .or_default()
+                    .push(RowExecution { row, execution });
+            }
+        }
+    }
+    unordered(database, device, now, changes, executions).map(Some)
+}
+
+/// The record of these changes, for writes made without SQL operations.
+pub(crate) fn changed(
+    database: &DatabaseConnection,
+    device: DeviceId,
+    now: SystemTime,
+    changes: BTreeMap<RowId, RowChange>,
+) -> Result<WriteRecord, DbError> {
+    unordered(database, device, now, changes, BTreeMap::new())
+}
+
+fn unordered(
+    database: &DatabaseConnection,
+    device: DeviceId,
+    now: SystemTime,
+    changes: BTreeMap<RowId, RowChange>,
+    mut executions: BTreeMap<Audience, Vec<RowExecution>>,
 ) -> Result<WriteRecord, DbError> {
     let latest = crate::write_encoding::latest_timestamp(database)?;
     let timestamp = timestamp(latest, now, device)?;
@@ -401,11 +463,15 @@ pub(crate) fn record(
             .or_default()
             .push(change);
     }
+    for audience in executions.keys() {
+        parts.entry(audience.clone()).or_default();
+    }
     Ok(WriteRecord {
         header,
         parts: parts
             .into_iter()
             .map(|(audience, rows)| WritePart {
+                executions: executions.remove(&audience).unwrap_or_default(),
                 audience,
                 rows,
                 dismissals: Vec::new(),

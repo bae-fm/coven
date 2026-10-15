@@ -292,6 +292,7 @@ impl StoreLogSync {
                 stored_at: retained.object().stored_at,
                 signer,
             },
+            opened.authorship(ring, &opens)?,
         );
         let transfer = async {
             let result =

@@ -6,6 +6,7 @@
 use crate::error::{require, Error, Rule};
 use crate::value::{name, positive, row, EntryPositions, Value, WritePositions};
 use crate::wire::{wire_struct, Decoder, Encoder, Wire};
+use crate::write_sources::ChangeId;
 use coven_merge::{Audience, Change, Operation, RowId, Timestamp, WriteId};
 use std::collections::BTreeMap;
 
@@ -111,7 +112,8 @@ impl Wire for Operation<Value> {
 }
 wire_struct!(Change<Value>, generation, operation);
 
-/// Merge's change to one row, together with SQLite's old column values (§5).
+/// Merge's change to one row, together with SQLite's old column values (§5),
+/// the original creation it copies and the SQL operations that produced it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RowChange {
     /// Table, encoded primary key and audience.
@@ -123,8 +125,40 @@ pub struct RowChange {
     pub old: BTreeMap<String, Value>,
     /// Authenticated original generation and cell sources, independent of scalars.
     pub sources: crate::write_sources::WriteSources,
+    /// For an insert copying a row from another audience (§14.2), the copied
+    /// row's original creation, whose author keeps owning it (§8.8).
+    pub creator: Option<ChangeId>,
+    /// The statement, shared-trigger and foreign-key operations on this row,
+    /// in the write's execution order. Empty for a change coven made without
+    /// SQL, such as an audience move, a dismissal or a migration's difference.
+    pub execution: Execution,
 }
-wire_struct!(RowChange, row, change, old => crate::wire::get_name_map, sources);
+impl Wire for RowChange {
+    fn put(&self, out: &mut Encoder) -> Result<(), Error> {
+        self.row.put(out)?;
+        self.change.put(out)?;
+        self.old.put(out)?;
+        self.sources.put(out)?;
+        self.creator.put(out)?;
+        self.execution.put_against(out, Some(&self.change))
+    }
+    fn get(input: &mut Decoder<'_>) -> Result<Self, Error> {
+        let row = Wire::get(input)?;
+        let change = Wire::get(input)?;
+        let old = crate::wire::get_name_map(input)?;
+        let sources = Wire::get(input)?;
+        let creator = Wire::get(input)?;
+        let execution = Execution::get_against(input, Some(&change))?;
+        Ok(Self {
+            row,
+            change,
+            old,
+            sources,
+            creator,
+            execution,
+        })
+    }
+}
 impl RowChange {
     /// Validate and encode one bounded row-change frame (kind 2).
     pub fn encode(&self) -> Result<Vec<u8>, Error> {
@@ -171,7 +205,248 @@ impl RowChange {
             Operation::Delete => true,
         };
         require(valid, "replaced setters", Rule::ColumnOperation)?;
+        if let Some(creator) = &self.creator {
+            // Only a generation-zero insert in another audience copies a row.
+            require(
+                matches!(self.change.operation, Operation::Insert(_))
+                    && self.change.generation == 0
+                    && creator.row.table == self.row.table
+                    && creator.row.key == self.row.key
+                    && creator.row.audience != self.row.audience,
+                "copied creation",
+                Rule::ColumnOperation,
+            )?;
+            positive(creator.write.number)?;
+        }
+        self.execution.validate(&self.row)
+    }
+
+    /// Source identities must have been read, including implicit own predecessors.
+    pub(crate) fn validate_past(&self, header: &WriteHeader) -> Result<(), Error> {
+        self.sources.validate_past(header)?;
+        self.execution.sources.validate_past(header)?;
+        if let Some(creator) = &self.creator {
+            require(
+                coven_merge::WritePast::contains(
+                    &header.had_read.causal_past(header.position),
+                    &creator.write,
+                ),
+                "copied creation read",
+                Rule::Coverage,
+            )?;
+        }
         Ok(())
+    }
+}
+
+/// One SQLite row operation of a write, at its place in the whole write's
+/// execution (§8.8, D5). Statements, shared triggers and foreign-key actions
+/// all record steps; no step says which of them produced it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Step {
+    /// The operation's position in the write. Only the two halves of one
+    /// primary-key update share a position.
+    pub sequence: u32,
+    /// The row's generation before the operation, and the columns it set,
+    /// with the parents its references named at that moment.
+    pub change: Change<Value>,
+    /// A delete that is the old half of a primary-key update: its foreign
+    /// keys follow their ON UPDATE actions, not ON DELETE (§8.5).
+    pub key_update: bool,
+}
+impl crate::wire::Wire for Step {
+    fn put(&self, out: &mut crate::wire::Encoder) -> Result<(), Error> {
+        self.sequence.put(out)?;
+        self.change.put(out)?;
+        u8::from(self.key_update).put(out)
+    }
+    fn get(input: &mut crate::wire::Decoder<'_>) -> Result<Self, Error> {
+        let sequence = Wire::get(input)?;
+        let change = Wire::get(input)?;
+        let key_update = match u8::get(input)? {
+            0 => false,
+            1 => true,
+            tag => {
+                return Err(Error::UnknownTag {
+                    field: "key update",
+                    tag,
+                })
+            }
+        };
+        Ok(Self {
+            sequence,
+            change,
+            key_update,
+        })
+    }
+}
+impl Step {
+    /// The generation after this step: a delete or insert advances it.
+    pub fn after(&self) -> Option<u64> {
+        match self.change.operation {
+            Operation::Update(_) => Some(self.change.generation),
+            _ => self.change.generation.checked_add(1),
+        }
+    }
+}
+
+/// A row's operations in execution order, with the sources they replaced
+/// that its net change, if any, does not already name (§8, D5). An
+/// operation after the row moved into this audience in the same write
+/// starts from the generation the move began, not the net change's.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Execution {
+    /// In increasing sequence order, each starting at the previous one's
+    /// resulting generation.
+    pub steps: Vec<Step>,
+    /// The generation source and replaced setters the steps used beyond the
+    /// net change's own sources, in the same role order.
+    pub sources: crate::write_sources::WriteSources,
+}
+impl Execution {
+    /// Each step is `sequence | change | key_update`, with `change` as
+    /// `0` for exactly the row change's own change, written once, or as
+    /// `1 | change` otherwise (D5). An execution record has no own change.
+    fn put_against(&self, out: &mut Encoder, own: Option<&Change<Value>>) -> Result<(), Error> {
+        crate::error::bound(self.steps.len(), crate::wire::MAX_ITEMS, "collection")?;
+        out.charge_items(self.steps.len())?;
+        (self.steps.len() as u32).put(out)?;
+        for step in &self.steps {
+            step.sequence.put(out)?;
+            if own == Some(&step.change) {
+                0u8.put(out)?;
+            } else {
+                1u8.put(out)?;
+                step.change.put(out)?;
+            }
+            u8::from(step.key_update).put(out)?;
+        }
+        self.sources.put(out)
+    }
+
+    fn get_against(input: &mut Decoder<'_>, own: Option<&Change<Value>>) -> Result<Self, Error> {
+        let steps = crate::wire::get_sequence(input, |input| {
+            let sequence = Wire::get(input)?;
+            let change = match (u8::get(input)?, own) {
+                (0, Some(own)) => own.clone(),
+                (1, own) => {
+                    let change: Change<Value> = Wire::get(input)?;
+                    // The row change's own change is only ever written once.
+                    require(own != Some(&change), "step change", Rule::Required)?;
+                    change
+                }
+                (tag, _) => {
+                    return Err(Error::UnknownTag {
+                        field: "step change",
+                        tag,
+                    })
+                }
+            };
+            let key_update = match u8::get(input)? {
+                0 => false,
+                1 => true,
+                tag => {
+                    return Err(Error::UnknownTag {
+                        field: "key update",
+                        tag,
+                    })
+                }
+            };
+            Ok(Step {
+                sequence,
+                change,
+                key_update,
+            })
+        })?;
+        Ok(Self {
+            steps,
+            sources: Wire::get(input)?,
+        })
+    }
+
+    pub(crate) fn validate(&self, row_id: &RowId) -> Result<(), Error> {
+        for step in &self.steps {
+            step.change.validate(row_id).map_err(Error::Merge)?;
+            if let Operation::Insert(values) | Operation::Update(values) = &step.change.operation {
+                crate::merge_wire::columns(values)?;
+            }
+            require(
+                !step.key_update || matches!(step.change.operation, Operation::Delete),
+                "key update step",
+                Rule::ColumnOperation,
+            )?;
+        }
+        for pair in self.steps.windows(2) {
+            require(
+                pair[0].sequence < pair[1].sequence,
+                "execution steps",
+                Rule::Order,
+            )?;
+            require(
+                pair[0].after() == Some(pair[1].change.generation),
+                "execution step generation",
+                Rule::Generation,
+            )?;
+        }
+        for source in self.sources.changes() {
+            positive(source.write.number)?;
+            row(&source.row)?;
+        }
+        for (column, source) in &self.sources.setters {
+            name(column)?;
+            name(&source.column)?;
+        }
+        Ok(())
+    }
+}
+
+/// A row the write's SQL changed with no net change: it was inserted and
+/// deleted again, or ends with the values it began with (kind 13). Its
+/// operations can still cause foreign-key actions on other rows (§8.8).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RowExecution {
+    /// Table, encoded primary key and audience.
+    pub row: RowId,
+    /// At least one operation, with every source the operations replaced.
+    pub execution: Execution,
+}
+impl Wire for RowExecution {
+    fn put(&self, out: &mut Encoder) -> Result<(), Error> {
+        self.row.put(out)?;
+        self.execution.put_against(out, None)
+    }
+    fn get(input: &mut Decoder<'_>) -> Result<Self, Error> {
+        Ok(Self {
+            row: Wire::get(input)?,
+            execution: Execution::get_against(input, None)?,
+        })
+    }
+}
+impl RowExecution {
+    /// Validate and encode one bounded execution frame (kind 13).
+    pub fn encode(&self) -> Result<Vec<u8>, Error> {
+        self.validate()?;
+        crate::encode_frame(13, self)
+    }
+
+    /// Decode exactly one execution frame.
+    pub fn decode(bytes: &[u8]) -> Result<Self, Error> {
+        let (kind, mut input) = crate::wire::decode_frame(bytes)?;
+        require(kind == 13, "row execution kind", Rule::Kind)?;
+        let row = Self::get(&mut input)?;
+        input.finish()?;
+        row.validate()?;
+        Ok(row)
+    }
+
+    pub(crate) fn validate(&self) -> Result<(), Error> {
+        row(&self.row)?;
+        require(
+            !self.execution.steps.is_empty(),
+            "execution steps",
+            Rule::Required,
+        )?;
+        self.execution.validate(&self.row)
     }
 }
 
@@ -182,13 +457,16 @@ pub struct WritePart {
     pub audience: Audience,
     /// One change per row, in increasing merge row-identity order.
     pub rows: Vec<RowChange>,
+    /// Rows the SQL changed with no net change, in increasing row order; no
+    /// row also has a change.
+    pub executions: Vec<RowExecution>,
     /// Lost cells acknowledged by this write, ordered by row, column and setter.
     pub dismissals: Vec<crate::dismissal::Dismissal>,
 }
 impl WritePart {
     pub(crate) fn validate(&self) -> Result<(), Error> {
         require(
-            !self.rows.is_empty() || !self.dismissals.is_empty(),
+            !self.rows.is_empty() || !self.executions.is_empty() || !self.dismissals.is_empty(),
             "write part rows",
             Rule::Required,
         )?;
@@ -210,6 +488,11 @@ impl WritePart {
             "write part rows",
             Rule::Order,
         )?;
+        require(
+            self.executions.windows(2).all(|r| r[0].row < r[1].row),
+            "write part executions",
+            Rule::Order,
+        )?;
         for change in &self.rows {
             change.validate()?;
             require(
@@ -218,20 +501,79 @@ impl WritePart {
                 Rule::Audience,
             )?;
         }
+        for execution in &self.executions {
+            execution.validate()?;
+            require(
+                execution.row.audience == self.audience
+                    && self
+                        .rows
+                        .binary_search_by(|change| change.row.cmp(&execution.row))
+                        .is_err(),
+                "write part executions",
+                Rule::Audience,
+            )?;
+        }
         Ok(())
     }
 
-    pub(crate) fn frames(&self) -> impl Iterator<Item = Result<Vec<u8>, Error>> + '_ {
+    /// Each row's record, change or execution, in row order.
+    pub fn records(&self) -> impl Iterator<Item = PartRecord<'_>> + '_ {
         let mut rows = self.rows.iter().peekable();
-        let mut dismissals = self.dismissals.iter().peekable();
-        std::iter::from_fn(move || match (rows.peek(), dismissals.peek()) {
-            (Some(row), Some(dismissal)) if row.row <= dismissal.row => {
-                rows.next().map(RowChange::encode)
+        let mut executions = self.executions.iter().peekable();
+        std::iter::from_fn(move || match (rows.peek(), executions.peek()) {
+            (Some(row), Some(execution)) if row.row < execution.row => {
+                rows.next().map(PartRecord::Change)
             }
-            (_, Some(_)) => dismissals.next().map(crate::dismissal::Dismissal::encode),
-            (Some(_), None) => rows.next().map(RowChange::encode),
+            (_, Some(_)) => executions.next().map(PartRecord::Execution),
+            (Some(_), None) => rows.next().map(PartRecord::Change),
             (None, None) => None,
         })
+    }
+
+    pub(crate) fn frames(&self) -> impl Iterator<Item = Result<Vec<u8>, Error>> + '_ {
+        let mut records = self.records().peekable();
+        let mut dismissals = self.dismissals.iter().peekable();
+        std::iter::from_fn(move || match (records.peek(), dismissals.peek()) {
+            (Some(record), Some(dismissal)) if record.row() <= &dismissal.row => {
+                records.next().map(|record| record.encode())
+            }
+            (_, Some(_)) => dismissals.next().map(crate::dismissal::Dismissal::encode),
+            (Some(_), None) => records.next().map(|record| record.encode()),
+            (None, None) => None,
+        })
+    }
+}
+
+/// One row's record in a part: its net change or its execution alone.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PartRecord<'a> {
+    /// A net row change with its execution.
+    Change(&'a RowChange),
+    /// Operations with no net change.
+    Execution(&'a RowExecution),
+}
+impl PartRecord<'_> {
+    /// The row this record changes.
+    pub fn row(&self) -> &RowId {
+        match self {
+            Self::Change(change) => &change.row,
+            Self::Execution(execution) => &execution.row,
+        }
+    }
+
+    /// The row's operations.
+    pub fn execution(&self) -> &Execution {
+        match self {
+            Self::Change(change) => &change.execution,
+            Self::Execution(execution) => &execution.execution,
+        }
+    }
+
+    fn encode(&self) -> Result<Vec<u8>, Error> {
+        match self {
+            Self::Change(change) => change.encode(),
+            Self::Execution(execution) => execution.encode(),
+        }
     }
 }
 
@@ -255,7 +597,10 @@ impl WriteRecord {
         for part in &self.parts {
             part.validate()?;
             for row in &part.rows {
-                row.sources.validate_past(&self.header)?;
+                row.validate_past(&self.header)?;
+            }
+            for execution in &part.executions {
+                execution.execution.sources.validate_past(&self.header)?;
             }
             for dismissal in &part.dismissals {
                 dismissal.validate_past(&self.header)?;

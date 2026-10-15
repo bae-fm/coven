@@ -4,6 +4,14 @@ use crate::{
     write_stream::{decode_plaintext, PartDecoder, WriteEncoder},
 };
 
+/// The fixture write with only its row change, so its stream ends with the
+/// dismissals these tests add.
+fn changed_row() -> crate::write::WriteRecord {
+    let mut record = test_utils::write();
+    record.parts[0].executions.clear();
+    record
+}
+
 fn dismissal(column: &str) -> Dismissal {
     Dismissal {
         row: test_utils::row(),
@@ -21,7 +29,7 @@ fn dismissal_has_d5_bytes_and_survives_streaming_with_row_changes() {
     let bytes = lost.encode().unwrap();
     assert_eq!(bytes[0], 3);
     assert_eq!(Dismissal::decode(&bytes).unwrap(), lost);
-    let mut record = test_utils::write();
+    let mut record = changed_row();
     record.parts[0].dismissals = vec![lost.clone(), dismissal("y")];
     let encoder = WriteEncoder::new(&record).unwrap();
     assert_eq!(encoder.header().parts[0].record_count, 3);
@@ -47,7 +55,7 @@ fn dismissal_has_d5_bytes_and_survives_streaming_with_row_changes() {
 
 #[test]
 fn malformed_or_duplicate_dismissals_and_reversed_frames_are_refused() {
-    let mut record = test_utils::write();
+    let mut record = changed_row();
     record.parts[0].dismissals = vec![dismissal("x"), dismissal("x")];
     assert!(WriteEncoder::new(&record).is_err());
     record.parts[0].dismissals.pop();
@@ -74,7 +82,7 @@ fn malformed_or_duplicate_dismissals_and_reversed_frames_are_refused() {
 
 #[test]
 fn dismissals_require_explicit_peer_reads_or_implicit_own_predecessors() {
-    let original = test_utils::write();
+    let original = changed_row();
     for (device, number, accepted) in [
         (1, 2, true),
         (1, 3, false),

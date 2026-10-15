@@ -86,6 +86,7 @@ pub(crate) fn positions(database: &DatabaseConnection) -> Result<WritePositions,
     )?))
 }
 
+#[cfg(any(test, feature = "test-utils"))]
 pub(crate) fn apply<P: crate::PendingValue>(
     database: &DatabaseConnection,
     schema: &WriteSchema,
@@ -146,6 +147,7 @@ pub(crate) fn apply<P: crate::PendingValue>(
 }
 
 /// The audiences whose parts this device opened.
+#[cfg(any(test, feature = "test-utils"))]
 fn opened_audiences(download: &DownloadedWrite) -> Vec<Audience> {
     download
         .parts
@@ -273,9 +275,9 @@ pub(crate) fn retain_source_rows(
 ) -> Result<(), DbError> {
     for part in &download.parts {
         if let DownloadedPart::Opened(part) = part {
-            for row in &part.rows {
-                crate::write_sources::validate(database, &download.header, row)?;
-                crate::write_sources::retain(database, &download.header, row)?;
+            for record in part.records() {
+                crate::write_sources::validate(database, &download.header, record)?;
+                crate::write_sources::retain(database, &download.header, record)?;
             }
         }
     }

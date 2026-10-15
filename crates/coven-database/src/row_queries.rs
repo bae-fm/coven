@@ -41,6 +41,15 @@ pub(crate) fn register_schema(
     schema: &crate::schema::Schema,
     tables: &[crate::SyncedTable],
 ) -> Result<(), DbError> {
+    // The declarations a later open or migration compares against (§17.1).
+    database.internal_execute("DELETE FROM _coven_owner_tables", [])?;
+    for declaration in tables.iter().filter(|d| d.owner_only) {
+        let table = &schema.tables[&declaration.name.to_ascii_lowercase()];
+        database.internal_execute(
+            "INSERT INTO _coven_owner_tables(table_name) VALUES(?1)",
+            [&table.name],
+        )?;
+    }
     for declaration in tables {
         let table = &schema.tables[&declaration.name.to_ascii_lowercase()];
         for column in &table.columns {
@@ -65,6 +74,31 @@ pub(crate) fn register_schema(
         }
     }
     Ok(())
+}
+
+/// The first registered synced table whose `owner_only` declaration differs
+/// from the one last registered. A table never registered has no earlier
+/// declaration to change.
+pub(crate) fn owner_declaration_changed(
+    database: &DatabaseConnection,
+    schema: &crate::schema::Schema,
+    tables: &[crate::SyncedTable],
+) -> Result<Option<String>, DbError> {
+    for declaration in tables {
+        let Some(table) = schema.tables.get(&declaration.name.to_ascii_lowercase()) else {
+            continue;
+        };
+        let (registered, owner): (bool, bool) = database.query_row(
+            "SELECT EXISTS(SELECT 1 FROM _coven_columns WHERE table_name=?1),
+                    EXISTS(SELECT 1 FROM _coven_owner_tables WHERE table_name=?1)",
+            [&table.name],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        if registered && owner != declaration.owner_only {
+            return Ok(Some(table.name.clone()));
+        }
+    }
+    Ok(None)
 }
 
 pub(crate) fn constraint(

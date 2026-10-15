@@ -255,6 +255,11 @@ impl RowChange {
                     })
                     .collect(),
             },
+            // A converted copy keeps naming the original creation it copied.
+            // Operations stay in the original record, which owner and
+            // foreign-key checks read before conversion (§17.1).
+            creator: original.creator.clone(),
+            execution: Default::default(),
         })
     }
 

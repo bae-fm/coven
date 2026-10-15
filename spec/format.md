@@ -167,7 +167,7 @@
     without rewriting that object
     ([`conversions_preserve_untried`, `receive_agreement`](proofs/queue/CovenQueue/Conversion.lean)).
   - Parts are in increasing audience order, each with at least one record.
-    `rows` counts both row changes and dismissals. Own earlier writes are
+    `rows` counts row changes, execution records and dismissals. Own earlier writes are
     implicit in `had_read`; an explicit own-device position is refused.
   - A migration write has no parts; every other write has at least one
     ([§17.1](coven.md#171-host-application)).
@@ -202,9 +202,14 @@
     old         map<name, Value>       insert none; update the same columns; delete any
     generation_source option<ChangeId> absent exactly at generation zero
     replaced_setters  map<name, CellSource>
+    creator     Option<ChangeId>       an audience copy's original creation
+    execution   Execution              the SQL operations on this row
 
     ChangeId   = write:WriteId | row:RowId
     CellSource = change:ChangeId | column:name
+    Execution  = steps:[Step] | generation_source:Option<ChangeId> |
+                 replaced_setters:map<name, CellSource>
+    Step       = sequence:u32 | change | key_update:u8
     ```
 
   - A delete omits the `columns` field completely; every operation carries
@@ -252,6 +257,49 @@
     losses and consumed positions. Snapshot records, fingerprints and the loss
     API must preserve that evidence and dependency causes (§8, §17.1);
     the compact D7 layout alone does not supply this evidence either.
+  - `creator` is present only on a generation-zero insert that copies a row
+    from another audience (§14.2): it names the copied row's original
+    creation, at the same table and key in another audience, which the
+    author must have read. The copy's owner is that creation's author
+    (§8.8). Every other change has no creator; its own write is the
+    creation of a generation-zero insert.
+  - `execution` lists every SQLite operation the write's SQL made on this
+    row: app statements, shared triggers and foreign-key actions, as
+    SQLite ran them. A step's `sequence` is its position among all of the
+    write's operations, across its parts; steps are in increasing sequence
+    order, and only the two halves of one primary-key update share a
+    position. That update is a delete of the old key, its `key_update` 1,
+    and an insert of the new one: the old key's foreign keys follow their
+    ON UPDATE actions, not ON DELETE (§8.4). `key_update` is 0 everywhere else.
+  - A step's `change` is `0` when it is exactly the row change's own
+    `generation | operation | columns`, which is then written only once, and
+    otherwise `1 | generation:u64 | operation:u8 | columns`. An execution
+    record's steps always use `1`. Writing the own change again with `1` is
+    refused, so every step list has one encoding.
+  - A step's generation is the row's before that operation; each step starts
+    at the generation the previous one left. An insert step sets every stored
+    column, an update step the columns that operation changed, expanded to
+    complete reference tuples and generated inputs like a row change, with
+    the parents its references named at that moment; a delete sets none.
+    Inserting a removed row's key is an update step setting every column.
+    Generated columns are never set. Operations on a row after a move into
+    this audience in the same write start at the generation the move began.
+  - No step says whether a statement, a trigger or a foreign-key action
+    made it. A receiver reconstructs that from the original schema and the
+    steps themselves, never from a sender's label or cause list (§8.8).
+  - `Execution`'s sources are the generation source and replaced setters the
+    steps used beyond those the net change already names, in the same role
+    order. A change coven made without SQL has no steps: an audience move,
+    a dismissal's delete of a removed row, or a migration's difference.
+  - An execution record (kind 13) is `row:RowId | execution:Execution`, for a
+    row the write's SQL changed with no net change: inserted and deleted
+    again, or left with the values it began with. It has at least one step.
+    A row has a row change or an execution record, never both; both kinds
+    share the part's `RowId` order and count in its `rows`. Its steps can
+    still cause foreign-key actions on other rows, and its sources are data
+    sources like a row change's (§8).
+  - Every row change and execution record also commits to its part's
+    authorship root (D9, D11).
   - A dismissal (kind 3) names a lost cell the app dismissed
     ([E4](api.md#e4-reading)):
 
@@ -371,7 +419,7 @@
 
 - A snapshot's plaintext is a header frame, its record frames in order,
   then an end frame (kind 7).
-- The header (kind 5): `id:SnapshotId | schema_version:u32 | counts:6×u64`,
+- The header (kind 5): `id:SnapshotId | schema_version:u32 | counts:8×u64`,
   one count per section below. Its positions are in its sealed prefix (D9).
 - Records (kind 6) are `section:u8 | record`, sections in order, each
   ordered as shown:
@@ -383,7 +431,9 @@
   | 2 | Synced column: `table:name \| column:name` | table, column |
   | 3 | Merge row: `row:RowId \| generations:map<u64, WriteId> \| cells:map<name, Cell>` | `RowId` |
   | 4 | Loss: `row:RowId \| generation:u64 \| frozen:bool \| values \| cause` | identity below |
-  | 5 | Authored change: `header:WriteHeader \| complete:bool \| change:RowChange \| verdict` | `ChangeId` |
+  | 5 | Authored change: `header:WriteHeader \| complete:bool \| change:record \| verdict` | `ChangeId` |
+  | 6 | Creation: `row:RowId \| write:WriteId \| creator:ChangeId` | `RowId` |
+  | 7 | Write evidence: `write:WriteId \| prefix:bytes \| header:bytes \| roots:[32 bytes] \| header_signature:64 bytes \| proof:Multiproof` | `WriteId` |
 
   Empty sections emit nothing. `Cell` is `write:WriteId | value:ColumnValue`.
   Synced-row columns are nonempty. Applied-write timestamps name their
@@ -492,6 +542,48 @@
   replacement prefixes are final and the other retention checks pass.
   Section 5 and loss cause 3 supply that evidence for
   [B17](proofs/merge.md#b17-receive-order-progress-and-dropping-by-data).
+- A section 5 `record` is `0 | row change` or `1 | execution record`,
+  each the D5 frame body without its envelope: an execution record is
+  source evidence too, and its steps can cause foreign-key actions (§8.8).
+- Section 6 holds each row's selected creation (§8.8): `write` is the
+  generation-zero insert with the smallest timestamp, and `creator` the
+  creation it names, `write` and `row` themselves unless that insert copied
+  the row from another audience. `creator` has the row's key, and names
+  its table as its own write did, before any later rename; it is in another
+  audience exactly when `write` copied it.
+  It holds a row whenever any write has created it, through deletion,
+  removal and dismissal; a loader replaces the audience's creations with
+  these.
+- Section 7 lets the snapshot carry another member's authorship without
+  that write's parts. For every creation of an `owner_only()` row, and every
+  cell of a present owned row, set by a write whose device's member is not
+  the snapshot's signer, it holds that write's evidence. Writes of the
+  snapshot's own device are its signer's.
+  - `prefix` is the write object's exact cleartext `kind | version | prefix`,
+    `header` its sealed header chunk with its length field, and `roots` and
+    `header_signature` the D9 header tail. `proof` opens, in this
+    audience's part, each needed creation leaf and each leaf of a cell the
+    row still shows from that write, and nothing else (D11):
+
+    ```
+    Multiproof = leaves:u64 | opened:[index:u64 | leaf:bytes] | hidden:[32 bytes]
+    ```
+
+    `opened` is in increasing index order; `hidden` has one root for each
+    maximal subtree with no opened leaf, left to right. An overwritten value
+    is never opened; its subtree's hash stands in for it.
+  - A migration write sets no leaves: its evidence has an empty proof, and
+    its authenticated header's disposition shows it is one.
+  - The loader opens the header with the store key its prefix names,
+    verifies the header signature with the signing key of the write
+    device's owner in the header's `store_log_read`, and checks `proof`
+    against the root of this audience's part. A key not yet held waits; any
+    other failure refuses the snapshot. Then every creation and present cell
+    it attributes to another member must be among the opened leaves, at the
+    row, incarnation, column and value it claims. A snapshot cannot name
+    another member as an owned row's creator or setter without them.
+  - A loader keeps the openings: its own later snapshot reuses them for the
+    same writes, so it can carry evidence for parts it never held.
 
 ### D8 Small frames
 
@@ -712,6 +804,28 @@
   Replay their `store_log_read` to find the path device's member and current
   signing key. They contain no write positions, fingerprints or reports;
   the time probe reads their provider metadata through status, not their body.
+- A write has its parts' authorship roots and a second signature right
+  after its sealed header chunk, so another member's authorship can be
+  checked without its parts (D7 section 7):
+
+  ```
+  kind:u8 (32) | version:u16 | prefix | header chunk | roots:(32 bytes)×parts |
+  header_signature:64 bytes | part chunks | signature:64 bytes
+  ```
+
+  - `roots[i]` is part `i`'s D11 authorship root, cleartext; it has one root
+    per prefix part key and is never empty for a part with records.
+  - `header_signature` signs the context of `coven/write-header-signature/v1`,
+    the path, the exact cleartext `kind | version | prefix`, the complete
+    sealed header chunk with its length field, and the roots concatenated in
+    part order. Its signer is the whole object's.
+  - A reader verifies it with the same key as the final signature, after
+    resolving the author from the opened header, and checks each part it
+    opens against its root; a mismatch refuses the write like a bad
+    signature. The final signature still covers every preceding byte,
+    including the roots and header signature.
+  - Retries reproduce both signatures: the roots follow from the fixed
+    plaintext and keys, and Ed25519 signing is deterministic.
 - Write signatures use the device owner's signing key current in the
   header's `store_log_read`; entry signatures use D6's `had_read` lookup.
   Retain historical public bindings. All unverified view fields are lookup
@@ -773,6 +887,7 @@
   <store key id>                header_key
   00000002 <store key id> <Gifts key id>    part_keys
   <length><nonce><header frame sealed><tag>                 section 0
+  <store part root><Gifts part root><64-byte header signature>
   <length><nonce><notes row 47 sealed><tag>                 section 1, chunk 0
   <length><nonce><pins row 4 sealed><tag>                   section 2, chunk 0
   <64-byte signature>
@@ -812,13 +927,39 @@
 
 - A *context* encodes a list of byte strings as each one's
   `length:u64 | bytes`; it is used as associated data, as HKDF's info, and
-  for nonce derivation and D9's `coven/object-signature/v1` and
-  `coven/prefix-signature/v1` messages.
+  for nonce derivation and D9's `coven/object-signature/v1`,
+  `coven/prefix-signature/v1` and `coven/write-header-signature/v1` messages.
   A number in a context, such as a section or a chunk's index, is one
   string of its 8 bytes, as a `u64`.
 - From a store or circle key, HKDF-SHA256 with no salt derives 32-byte keys
-  by label: `coven/encryption/v1` for sealing objects and
-  `coven/fingerprints/v1` for fingerprints.
+  by label: `coven/encryption/v1` for sealing objects,
+  `coven/fingerprints/v1` for fingerprints and `coven/row-authorship/v1`
+  for authorship leaves.
+- A write part's authorship root is a binary hash tree over its leaves,
+  split as RFC 6962 splits a Merkle tree: a tree of `n > 1` leaves has the
+  largest power of two below `n` on its left.
+  - A leaf is `HMAC-SHA256(authorship_key, 0x00 | leaf bytes)`, with the key
+    derived from the part's key; a branch is `SHA-256(0x01 | left | right)`;
+    an empty part's root is `SHA-256(0x02)`. Keying the leaves keeps a reader
+    of another audience from testing a guessed row against a published
+    root. Branches are unkeyed, so a device that kept a part's leaf hashes
+    can open its leaves again without the key.
+  - Leaves follow the part's record order. A row change has its value
+    leaves, then one per step; an execution record one per step;
+    dismissals have none:
+
+    ```
+    0 | row:RowId | generation:u64 | creator:Option<ChangeId>     an insert's creation
+    1 | row:RowId | generation:u64 | kind:u8 | column:name | value:ColumnValue
+                                     each column an insert (kind 0) or update (1) set
+    2 | row:RowId | generation:u64                                a delete
+    3 | row:RowId | sequence:u32 | generation:u64 | operation:u8 | columns | key_update:u8
+                                                                  each SQL operation
+    ```
+
+    An insert has its creation leaf even when it sets no other column, and
+    it carries no values, so ownership stays checkable after every inserted
+    value is overwritten. Generations are the row's before the change.
 - For each write or store-log chunk, derive its 24-byte nonce as:
 
   ```
@@ -964,7 +1105,8 @@
   `coven-format` fixtures must hold, as hex, one of each frame, sealed object,
   sealed key, file and code, including:
   - a write with a store part and a circle part, the first spanning three
-    chunks;
+    chunks, with both parts' authorship roots and its header signature,
+    row changes with steps and an execution record;
   - every store-log change tag, including stable 16-byte author/member ids,
     signing and sealing public pairs, tag 16, and both member-access variants
     across creation and addition, key-free removals, and all three kinds of

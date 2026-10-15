@@ -172,8 +172,22 @@ async fn independent_key_changes_validate_the_inserted_key() {
 async fn valid_readds_advance_generations_and_canceled_inserts_leave_no_record() {
     let store = TestStore::new();
     let db = store.schema(independent(), NOTES).await.unwrap();
-    sql(&db, "INSERT INTO notes VALUES('not a uuid','temporary',''); DELETE FROM notes; INSERT INTO local_rows VALUES('kept')").await.unwrap();
-    assert!(records(&db).is_empty());
+    // Every insert the write makes needs a UUID key, even one it deletes
+    // again: the write's operations record it (§8.5, D5).
+    let error = sql(&db, "INSERT INTO notes VALUES('not a uuid','temporary',''); DELETE FROM notes; INSERT INTO local_rows VALUES('kept')").await.unwrap_err();
+    assert_key_error(error, vec![Value::Text("not a uuid".into())]);
+    assert_eq!(count(&db, "local_rows"), 0);
+    db.write(|context| {
+        context.execute("INSERT INTO notes VALUES(?1,'temporary','')", [V4])?;
+        context.execute_batch("DELETE FROM notes; INSERT INTO local_rows VALUES('kept')")?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    assert!(
+        records(&db).is_empty(),
+        "a canceled insert alone changes no row"
+    );
     for insert in [true, false, true] {
         db.write(move |context| {
             if insert {

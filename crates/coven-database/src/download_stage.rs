@@ -43,10 +43,12 @@ pub(crate) fn frame(
     let mut part = WritePart {
         audience: audience.clone(),
         rows: Vec::new(),
+        executions: Vec::new(),
         dismissals: Vec::new(),
     };
     match frame {
         WriteFrame::Change(row) => part.rows.push(row),
+        WriteFrame::Execution(execution) => part.executions.push(execution),
         WriteFrame::Dismissal(dismissal) => {
             dismissal.validate_past(header)?;
             database.internal_execute(
@@ -131,6 +133,7 @@ pub(crate) fn finish(
                     parts: vec![crate::DownloadedPart::Opened(WritePart {
                         audience: dismissal.row.audience.clone(),
                         rows: Vec::new(),
+                        executions: Vec::new(),
                         dismissals: vec![dismissal],
                     })],
                 },

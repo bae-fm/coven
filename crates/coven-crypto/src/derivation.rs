@@ -5,12 +5,13 @@ use hmac::{Hmac, KeyInit, Mac};
 use sha2::{Digest, Sha256};
 use zeroize::{Zeroize, Zeroizing};
 
-use crate::{cipher, CryptoError, FingerprintHasher};
+use crate::{cipher, AuthorshipHasher, CryptoError, FingerprintHasher};
 
 pub(crate) const ENCRYPTION: &[u8] = b"coven/encryption/v1";
 pub(crate) const FINGERPRINTS: &[u8] = b"coven/fingerprints/v1";
 pub(crate) const JOIN_REQUEST: &[u8] = b"coven/join-request/v1";
 pub(crate) const SEALED_BOX: &[u8] = b"coven/sealed-box/v1";
+pub(crate) const AUTHORSHIP: &[u8] = b"coven/row-authorship/v1";
 
 pub(crate) fn derive(key: &[u8; 32], context: &[u8]) -> Zeroizing<[u8; 32]> {
     let mut output = Zeroizing::new([0; 32]);
@@ -80,6 +81,7 @@ impl std::fmt::Debug for EncryptionKey {
 pub struct DerivedKeys {
     encryption: EncryptionKey,
     fingerprints: Zeroizing<[u8; 32]>,
+    authorship: Zeroizing<[u8; 32]>,
 }
 
 impl DerivedKeys {
@@ -87,7 +89,14 @@ impl DerivedKeys {
         Self {
             encryption: EncryptionKey(derive_label(key, ENCRYPTION)),
             fingerprints: derive_label(key, FINGERPRINTS),
+            authorship: derive_label(key, AUTHORSHIP),
         }
+    }
+
+    /// Hash a write part's authorship leaves and branches under this
+    /// audience's key, so only its readers can test a row guess (D9, D11).
+    pub fn authorship_hasher(&self) -> AuthorshipHasher {
+        AuthorshipHasher::new(&self.authorship)
     }
 
     /// Seal one chunk with this audience's derived encryption key (§11.1).

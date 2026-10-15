@@ -13,7 +13,8 @@ use coven_merge::{Audience, RowId, WriteId};
 pub struct PartHeader {
     /// Every row in the stream belongs to this audience.
     pub audience: Audience,
-    /// Number of change and dismissal frames, without a per-write collection bound.
+    /// Number of change, execution and dismissal frames, without a per-write
+    /// collection bound.
     pub record_count: u64,
     /// Sum of the complete change and dismissal frames' lengths, including frame prefixes.
     pub plaintext_length: u64,
@@ -97,7 +98,8 @@ impl<'a> WriteEncoder<'a> {
             }
             parts.push(PartHeader {
                 audience: part.audience.clone(),
-                record_count: (part.rows.len() + part.dismissals.len()) as u64,
+                record_count: (part.rows.len() + part.executions.len() + part.dismissals.len())
+                    as u64,
                 plaintext_length: length,
             });
         }
@@ -267,11 +269,13 @@ pub fn decode_plaintext(bytes: &[u8]) -> Result<WriteRecord, Error> {
         let audience = part.audience.clone();
         let mut decoder = PartDecoder::new(part)?;
         let mut rows = Vec::new();
+        let mut executions = Vec::new();
         let mut dismissals = Vec::new();
         for chunk in stream.chunks(CHUNK_SIZE) {
             for frame in decoder.chunk(chunk)? {
                 match frame {
                     WriteFrame::Change(row) => rows.push(row),
+                    WriteFrame::Execution(execution) => executions.push(execution),
                     WriteFrame::Dismissal(dismissal) => dismissals.push(dismissal),
                 }
             }
@@ -280,6 +284,7 @@ pub fn decode_plaintext(bytes: &[u8]) -> Result<WriteRecord, Error> {
         parts.push(WritePart {
             audience,
             rows,
+            executions,
             dismissals,
         });
     }

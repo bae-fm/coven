@@ -11,7 +11,7 @@ fn raw(record: &SnapshotRecord) -> Vec<u8> {
 }
 fn single_header(section: usize, audience: Audience, count: u64) -> SnapshotHeader {
     let mut header = test_utils::snapshot_header();
-    header.counts = [0; 6];
+    header.counts = [0; 8];
     header.counts[section] = count;
     header.id.audience = audience;
     header
@@ -153,7 +153,7 @@ fn a_snapshot_larger_than_the_frame_bound_is_streamed_in_key_order() {
 #[test]
 fn empty_snapshot_requires_an_exact_end_frame() {
     let mut header = test_utils::snapshot_header();
-    header.counts = [0; 6];
+    header.counts = [0; 8];
     let (mut writer, first) = SnapshotEncoder::start(header).unwrap();
     let mut reader =
         SnapshotDecoder::start(&first, &test_utils::snapshot_prefix(writer.header())).unwrap();
@@ -188,7 +188,7 @@ fn eof_before_the_end_marker_is_truncation_at_every_record_boundary() {
     assert_eq!(reader.finish(), Ok(()));
 
     let mut empty = header;
-    empty.counts = [0; 6];
+    empty.counts = [0; 8];
     let (mut writer, first) = SnapshotEncoder::start(empty).unwrap();
     let mut reader =
         SnapshotDecoder::start(&first, &test_utils::snapshot_prefix(writer.header())).unwrap();
@@ -378,7 +378,7 @@ fn snapshot_fixture_classifies_every_consumed_write_once() {
 fn snapshot_positions_are_bounded_in_the_prefix_independently_of_the_frame() {
     use coven_foundation::id_source::DeviceId;
     let mut header = test_utils::snapshot_header();
-    header.counts = [0; 6];
+    header.counts = [0; 8];
     header.writes.0 = (0..crate::wire::MAX_ITEMS)
         .map(|device| coven_merge::WriteId {
             device: DeviceId(device as u64),
@@ -396,7 +396,8 @@ fn snapshot_positions_are_bounded_in_the_prefix_independently_of_the_frame() {
         .collect();
     let prefix = test_utils::snapshot_prefix(&header);
     let (_, frame) = SnapshotEncoder::start(header.clone()).unwrap();
-    assert_eq!(frame.len(), 76);
+    // Kind, version and length; the identity; the schema; eight counts.
+    assert_eq!(frame.len(), 7 + 17 + 4 + 8 * 8);
     let prefix =
         crate::sealed_snapshot::SnapshotObjectPrefix::decode(&prefix.encode().unwrap()).unwrap();
     assert_eq!(
@@ -444,4 +445,64 @@ fn applied_write_identity_timestamp_and_past_are_checked() {
             assert!(matches!(result, Err(Error::Invalid { rule: actual, .. }) if actual == rule));
         }
     }
+}
+
+#[test]
+fn creations_name_their_own_insert_or_a_copy_from_another_audience() {
+    round_trip(
+        SnapshotRecord::Creation(test_utils::creation()),
+        Audience::Store,
+    );
+    let refused = |creation: crate::authorship::Creation| {
+        let (mut writer, _) = SnapshotEncoder::start(single_header(6, Audience::Store, 1)).unwrap();
+        assert!(writer.record(SnapshotRecord::Creation(creation)).is_err());
+    };
+    // A copy names a creation in another audience, by an earlier write.
+    let mut copy = test_utils::creation();
+    copy.write = test_utils::position();
+    copy.creator.row.audience = Audience::Circle(CircleId(Uuid::from_bytes([2; 16])));
+    round_trip(SnapshotRecord::Creation(copy.clone()), Audience::Store);
+    let mut same_write = copy.clone();
+    same_write.creator.write = same_write.write;
+    refused(same_write);
+    let mut unmoved = test_utils::creation();
+    unmoved.write = test_utils::position();
+    refused(unmoved);
+    let mut other_key = copy.clone();
+    other_key.creator.row.key = crate::key::encode_key(&[Value::Integer(3)]).unwrap();
+    refused(other_key);
+    // Its writes are within the snapshot's positions.
+    let mut uncovered = copy;
+    uncovered.creator.write = coven_merge::WriteId {
+        device: DeviceId(3),
+        number: 1,
+    };
+    refused(uncovered);
+}
+
+#[test]
+fn write_evidence_has_one_root_per_part_key_and_decodable_openings() {
+    round_trip(
+        SnapshotRecord::Evidence(test_utils::write_evidence()),
+        Audience::Store,
+    );
+    let refused = |evidence: crate::authorship::WriteEvidence| {
+        let (mut writer, _) = SnapshotEncoder::start(single_header(7, Audience::Store, 1)).unwrap();
+        assert!(writer.record(SnapshotRecord::Evidence(evidence)).is_err());
+    };
+    let mut roots = test_utils::write_evidence();
+    roots.roots.push([0; 32]);
+    refused(roots);
+    let mut header = test_utils::write_evidence();
+    header.header.truncate(20);
+    refused(header);
+    let mut prefix = test_utils::write_evidence();
+    prefix.prefix[0] = 33;
+    refused(prefix);
+    let mut leaf = test_utils::write_evidence();
+    leaf.proof.revealed[0].1 = vec![9];
+    refused(leaf);
+    let mut uncovered = test_utils::write_evidence();
+    uncovered.write.device = DeviceId(3);
+    refused(uncovered);
 }

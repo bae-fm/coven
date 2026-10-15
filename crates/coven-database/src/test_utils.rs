@@ -51,6 +51,104 @@ pub fn notes_migrations() -> Vec<Migration> {
     vec![Migration::sql(1, "notes", "CREATE TABLE notes (id TEXT NOT NULL PRIMARY KEY, title TEXT NOT NULL, body TEXT NOT NULL DEFAULT '')")]
 }
 
+/// Authorship of test writes, sealed and hashed with one fixed test key for
+/// every audience. It opens headers it sealed itself and checks no signature:
+/// the database checks roots and openings; sync checks signatures (D9).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct TestAuthorship;
+
+impl TestAuthorship {
+    const STORE: &'static str = "10101010-1010-1010-1010-101010101010";
+
+    /// The test key sealing headers and keying every part's leaves.
+    pub fn key() -> coven_crypto::StoreKey {
+        coven_crypto::StoreKey::from_bytes(
+            coven_foundation::id_source::KeyId(uuid::Uuid::from_bytes([1; 16])),
+            [17; 32],
+        )
+    }
+
+    fn path(write: coven_merge::WriteId) -> String {
+        format!(
+            "{}/devices/{}/{}",
+            Self::STORE,
+            write.device.0,
+            write.number
+        )
+    }
+
+    /// The evidence and hashers a stream of this record carries.
+    pub fn write(record: &coven_format::write::WriteRecord) -> crate::WriteAuthorship {
+        let encoder = coven_format::write_stream::WriteEncoder::new(record).unwrap();
+        let key = Self::key();
+        let prefix = coven_format::sealed_write::WriteObjectPrefix {
+            format: coven_format::FormatVersion::CURRENT,
+            store_key: key.id(),
+            part_keys: vec![key.id(); record.parts.len()],
+        }
+        .encode()
+        .unwrap();
+        let sealed = key
+            .derive()
+            .seal_object_chunk(
+                &Self::path(record.header.position),
+                &prefix,
+                0,
+                0,
+                encoder.header_frame(),
+            )
+            .unwrap();
+        let mut header = ((sealed.len() - coven_crypto::SEALED_OBJECT_CHUNK_OVERHEAD) as u32)
+            .to_be_bytes()
+            .to_vec();
+        header.extend(sealed);
+        let hasher = key.derive().authorship_hasher();
+        crate::WriteAuthorship {
+            evidence: crate::HeaderEvidence {
+                prefix,
+                header,
+                roots: record
+                    .parts
+                    .iter()
+                    .map(|part| {
+                        coven_format::authorship::root(
+                            &hasher,
+                            &coven_format::authorship::part_leaves(part),
+                        )
+                        .unwrap()
+                    })
+                    .collect(),
+                signature: [0; 64],
+            },
+            hashers: record.parts.iter().map(|_| Some(hasher.clone())).collect(),
+        }
+    }
+}
+
+impl crate::Authorship for TestAuthorship {
+    fn header(
+        &self,
+        evidence: &coven_format::authorship::WriteEvidence,
+    ) -> Result<coven_format::write_stream::WriteHeaderFrame, crate::DbError> {
+        let sealed = coven_format::sealed_write::WriteObjectPrefix::header_chunk(&evidence.header)?;
+        let plain = Self::key()
+            .derive()
+            .open_object_chunk(&Self::path(evidence.write), &evidence.prefix, 0, 0, sealed)
+            .map_err(|_| crate::snapshot_error::invalid("test evidence header does not open"))?;
+        Ok(coven_format::write_stream::WriteHeaderFrame::decode(
+            &plain,
+        )?)
+    }
+
+    fn hasher(
+        &self,
+        _audience: &coven_merge::Audience,
+        _key: coven_foundation::id_source::KeyId,
+    ) -> Result<coven_crypto::AuthorshipHasher, crate::DbError> {
+        Ok(Self::key().derive().authorship_hasher())
+    }
+}
+
 #[cfg(test)]
 #[path = "test_utils_tests.rs"]
 pub(crate) mod tests;

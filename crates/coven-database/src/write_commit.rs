@@ -162,17 +162,18 @@ pub(crate) fn queue(database: &DatabaseConnection, record: &WriteRecord) -> Resu
             return Err(DbError::AudienceReloading(part.audience.clone()));
         }
         check_membership(database, record.header.position.device, &part.audience)?;
-        for row in &part.rows {
+        for row in part.records() {
             crate::write_sources::validate(database, &record.header, row)?;
         }
     }
     retain_queue(database, record)?;
     for part in &record.parts {
-        for row in &part.rows {
+        crate::ownership::offer_part(database, &record.header, part)?;
+        for row in part.records() {
             crate::write_sources::admit(
                 database,
                 &record.header,
-                &row.row,
+                row.row(),
                 &coven_format::snapshot_rows::ChangeVerdict::Applied,
             )?;
         }
@@ -216,7 +217,7 @@ pub(crate) fn retain_queue(
     record: &WriteRecord,
 ) -> Result<(), DbError> {
     for part in &record.parts {
-        for row in &part.rows {
+        for row in part.records() {
             crate::write_sources::retain(database, &record.header, row)?;
         }
         crate::write_sources::complete(database, &record.header, &part.audience)?;

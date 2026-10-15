@@ -26,6 +26,24 @@ fn sealed_write_has_its_own_kind_outside_the_plaintext_frames() {
     }
 }
 
+const PATH: &str = "10101010-1010-1010-1010-101010101010/devices/1/3";
+
+/// Each part's authorship root under its own audience key.
+fn roots(record: &crate::write::WriteRecord) -> Vec<[u8; 32]> {
+    record
+        .parts
+        .iter()
+        .enumerate()
+        .map(|(index, part)| {
+            crate::authorship::root(
+                &key(index as u8 + 1).derive().authorship_hasher(),
+                &crate::authorship::part_leaves(part),
+            )
+            .unwrap()
+        })
+        .collect()
+}
+
 fn object() -> Vec<Vec<u8>> {
     let record = test_utils::chunked_write();
     let encoder = WriteEncoder::new(&record).unwrap();
@@ -57,6 +75,10 @@ fn object() -> Vec<Vec<u8>> {
         )
         .unwrap();
     pieces.push(layout.encode_chunk(&sealed).unwrap());
+    assert!(layout.next_chunk().is_none(), "the tail follows the header");
+    let roots = roots(&record);
+    let signature = test_utils::member_keys().sign_write_header(PATH, &prefix, &pieces[1], &roots);
+    pieces.push(layout.tail(&HeaderTail { roots, signature }).unwrap());
     for part in 0..record.parts.len() {
         for plain in encoder.part_chunks(part).unwrap() {
             let coordinate = layout.next_chunk().unwrap();
@@ -120,6 +142,15 @@ fn read(pieces: &[Vec<u8>]) -> Result<(), Box<dyn std::error::Error>> {
     )?;
     hash.update(&pieces[1]);
     let header_frame = WriteHeaderFrame::decode(&header)?;
+    let tail = prefix.decode_tail(&pieces[2])?;
+    hash.update(&pieces[2]);
+    test_utils::member().signing.verify_write_header(
+        PATH,
+        &pieces[0],
+        &pieces[1],
+        &tail.roots,
+        &tail.signature,
+    )?;
     let mut layout = prefix.opened_header(
         &header,
         header_frame
@@ -130,7 +161,7 @@ fn read(pieces: &[Vec<u8>]) -> Result<(), Box<dyn std::error::Error>> {
     )?;
     let mut store = PartDecoder::new(header_frame.parts[0].clone())?;
     let mut rows = Vec::new();
-    for piece in &pieces[2..pieces.len() - 1] {
+    for piece in &pieces[3..pieces.len() - 1] {
         hash.update(piece);
         assert_eq!(layout.chunk_length(&piece[..4])?, piece.len());
         let (coordinate, sealed) = layout.decode_chunk(piece)?;
@@ -147,15 +178,41 @@ fn read(pieces: &[Vec<u8>]) -> Result<(), Box<dyn std::error::Error>> {
         // This device lacks the other key; it still consumes and hashes the part.
     }
     store.finish()?;
+    let part = &test_utils::chunked_write().parts[0];
     assert_eq!(
         rows,
-        test_utils::chunked_write().parts[0]
-            .rows
+        part.rows
             .iter()
             .cloned()
             .map(crate::dismissal::WriteFrame::Change)
+            .chain(
+                part.executions
+                    .iter()
+                    .cloned()
+                    .map(crate::dismissal::WriteFrame::Execution)
+            )
             .collect::<Vec<_>>()
     );
+    // The opened part's leaves reproduce the root its header signature covers.
+    let hasher = key(1).derive().authorship_hasher();
+    let mut builder = crate::authorship::RootBuilder::new(&hasher);
+    for frame in &rows {
+        let record = match frame {
+            crate::dismissal::WriteFrame::Change(change) => {
+                crate::write::PartRecord::Change(change)
+            }
+            crate::dismissal::WriteFrame::Execution(execution) => {
+                crate::write::PartRecord::Execution(execution)
+            }
+            crate::dismissal::WriteFrame::Dismissal(_) => continue,
+        };
+        for leaf in crate::authorship::record_leaves(record) {
+            builder.push(&leaf)?;
+        }
+    }
+    if builder.finish() != tail.roots[0] {
+        return Err("store part root".into());
+    }
     let signature = layout.read_signature(pieces.last().unwrap())?;
     layout.finish(&[])?;
     test_utils::member().signing.verify_object(
@@ -173,6 +230,34 @@ fn skipped_circle_chunks_still_participate_in_the_object_signature() {
     let circle = pieces.len() - 2;
     pieces[circle][30] ^= 1;
     assert!(read(&pieces).is_err());
+}
+
+#[test]
+fn every_root_and_the_sealed_header_are_bound_by_the_header_signature() {
+    let pieces = object();
+    read(&pieces).unwrap();
+    // The circle's root binds the signature even for a reader without its key.
+    for byte in [0, 40] {
+        let mut altered = pieces.clone();
+        altered[2][byte] ^= 1;
+        assert!(read(&altered).is_err());
+    }
+    let mut altered = pieces.clone();
+    altered[1][10] ^= 1;
+    assert!(read(&altered).is_err());
+    let prefix = WriteObjectPrefix::decode(&pieces[0]).unwrap();
+    assert!(matches!(
+        prefix.decode_tail(&pieces[2][1..]),
+        Err(Error::Truncated)
+    ));
+    assert!(matches!(
+        prefix.decode_tail(&[pieces[2].as_slice(), &[0]].concat()),
+        Err(Error::TrailingBytes)
+    ));
+    assert_eq!(
+        WriteObjectPrefix::header_end(&pieces.concat()).unwrap(),
+        pieces[0].len() + pieces[1].len() + pieces[2].len()
+    );
 }
 
 #[test]
@@ -198,6 +283,11 @@ fn layout_refuses_wrong_counts_lengths_signature_positions_and_trailing_bytes() 
     .unwrap();
     assert!(layout.signature(&signature).is_err());
     assert!(layout.finish(&[]).is_err());
+    let tail = HeaderTail {
+        roots: vec![[0; 32]],
+        signature: signature.clone(),
+    };
+    assert!(layout.tail(&tail).is_err(), "the header comes first");
     for prefix in [0u32, SEALED_OBJECT_CHUNK_OVERHEAD as u32, u32::MAX] {
         assert!(layout.chunk_length(&prefix.to_be_bytes()).is_err());
     }
@@ -217,14 +307,29 @@ fn layout_refuses_wrong_counts_lengths_signature_positions_and_trailing_bytes() 
             .collect()
     )
     .is_err());
-    while let Some(chunk) = layout.next_chunk() {
-        // Layout-only test: arbitrary bytes stand in for independently checked crypto output.
-        layout
-            .encode_chunk(&vec![
-                0;
-                SEALED_OBJECT_CHUNK_OVERHEAD + chunk.plaintext_length
-            ])
-            .unwrap();
+    let mut tailed = false;
+    loop {
+        while let Some(chunk) = layout.next_chunk() {
+            // Layout-only test: arbitrary bytes stand in for independently checked crypto output.
+            layout
+                .encode_chunk(&vec![
+                    0;
+                    SEALED_OBJECT_CHUNK_OVERHEAD + chunk.plaintext_length
+                ])
+                .unwrap();
+        }
+        if tailed {
+            break;
+        }
+        assert!(layout.signature(&signature).is_err(), "the tail comes next");
+        let short = HeaderTail {
+            roots: Vec::new(),
+            signature: signature.clone(),
+        };
+        assert!(layout.tail(&short).is_err(), "one root per part");
+        assert_eq!(layout.tail(&tail).unwrap().len(), 32 + 64);
+        assert!(layout.tail(&tail).is_err(), "only one tail");
+        tailed = true;
     }
     assert!(layout.read_signature(&[0; 63]).is_err());
     assert!(layout.read_signature(&[0; 65]).is_err());
@@ -295,9 +400,18 @@ fn migration_object_authenticates_a_header_followed_directly_by_its_signature() 
         .unwrap();
     let chunk = layout.encode_chunk(&sealed).unwrap();
     assert!(layout.next_chunk().is_none());
+    let header_signature = test_utils::member_keys().sign_write_header(PATH, &prefix, &chunk, &[]);
+    let tail = layout
+        .tail(&HeaderTail {
+            roots: Vec::new(),
+            signature: header_signature,
+        })
+        .unwrap();
+    assert_eq!(tail.len(), 64, "no roots, then the header signature");
     let mut hash = ObjectHasher::new();
     hash.update(&prefix);
     hash.update(&chunk);
+    hash.update(&tail);
     let digest = hash.finish();
     let signature = test_utils::member_keys()
         .sign_object("10101010-1010-1010-1010-101010101010/devices/1/3", &digest);
@@ -305,7 +419,7 @@ fn migration_object_authenticates_a_header_followed_directly_by_its_signature() 
     layout.finish(&[]).unwrap();
     assert_eq!(
         sealed_length(encoder.header_frame().len(), &[]).unwrap(),
-        (prefix.len() + chunk.len() + signature.len()) as u64,
+        (prefix.len() + chunk.len() + tail.len() + signature.len()) as u64,
     );
     let opened = key(1)
         .derive()
@@ -348,7 +462,17 @@ fn migration_object_authenticates_a_header_followed_directly_by_its_signature() 
 fn stored_kind_and_chunk_length_match_the_storage_format() {
     let pieces = object();
     assert_eq!(&pieces[0][..3], &[32, 0, 1]);
-    for piece in &pieces[1..pieces.len() - 1] {
+    assert_eq!(
+        pieces[2].len(),
+        2 * 32 + 64,
+        "two roots and the header signature"
+    );
+    for piece in pieces[1..pieces.len() - 1]
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| *index != 1)
+        .map(|(_, piece)| piece)
+    {
         let length = u32::from_be_bytes(piece[..4].try_into().unwrap()) as usize;
         assert_eq!(piece.len(), length + 44);
     }
@@ -377,6 +501,7 @@ fn changing_only_source_evidence_changes_the_authenticated_object() {
     let mut hash = ObjectHasher::new();
     hash.update(prefix);
     hash.update(&pieces[1]);
+    hash.update(&pieces[2]);
     let mut layout = WriteObjectPrefix::decode(prefix)
         .unwrap()
         .opened_header(

@@ -84,3 +84,45 @@ impl std::fmt::Debug for FingerprintHasher {
 #[cfg(test)]
 #[path = "hashing_tests.rs"]
 mod tests;
+
+/// Keyed hashing of one write part's authorship leaves (D11). Each leaf is
+/// keyed with the part's audience key, so a member who cannot read the
+/// audience cannot confirm a guessed row from a published root. Branches and
+/// the empty tree are unkeyed: a device holding a part's leaf hashes can open
+/// any of its leaves again without the key.
+#[derive(Clone)]
+pub struct AuthorshipHasher(zeroize::Zeroizing<[u8; 32]>);
+
+impl AuthorshipHasher {
+    pub(crate) fn new(key: &[u8; 32]) -> Self {
+        Self(zeroize::Zeroizing::new(*key))
+    }
+
+    /// One leaf's encoded bytes, as D11 defines them.
+    pub fn leaf(&self, leaf: &[u8]) -> [u8; 32] {
+        let mut mac = crate::derivation::mac(&self.0);
+        mac.update(&[0]);
+        mac.update(leaf);
+        mac.finalize().into_bytes().into()
+    }
+}
+
+/// A branch of an authorship tree over its ordered children (D11).
+pub fn authorship_node(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
+    let mut hash = Sha256::new();
+    hash.update([1]);
+    hash.update(left);
+    hash.update(right);
+    hash.finalize().into()
+}
+
+/// The root of an authorship tree with no leaves (D11).
+pub fn authorship_empty() -> [u8; 32] {
+    Sha256::digest([2]).into()
+}
+
+impl std::fmt::Debug for AuthorshipHasher {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("AuthorshipHasher([REDACTED])")
+    }
+}

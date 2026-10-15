@@ -52,13 +52,21 @@ impl SnapshotFrames {
         SnapshotId,
         coven_format::sealed_snapshot::SnapshotObjectPrefix,
         std::io::Cursor<Vec<u8>>,
+        coven_foundation::id_source::MemberId,
     ) {
         (
             decode(self).0.id,
             self.prefix.clone(),
             std::io::Cursor::new(self.concat()),
+            author(),
         )
     }
+}
+
+/// The member signing test snapshots: no fixture device belongs to it, so
+/// every write a snapshot carries is another member's.
+pub(crate) fn author() -> coven_foundation::id_source::MemberId {
+    coven_foundation::id_source::MemberId(uuid::Uuid::from_bytes([0xa1; 16]))
 }
 
 pub(crate) fn prefix(
@@ -130,6 +138,7 @@ pub(crate) fn stream(
     let encoder = coven_format::write_stream::WriteEncoder::new(record).unwrap();
     crate::DownloadedWriteStream {
         published: crate::test_utils::published(coven_format::value::StorageTime::UNIX_EPOCH),
+        authorship: crate::test_utils::TestAuthorship::write(record),
         header: encoder.header().clone(),
         parts: (0..record.parts.len())
             .map(|index| {
@@ -155,8 +164,9 @@ pub(crate) async fn load_one<R: std::io::Read + Send + 'static>(
 ) -> Result<(), crate::DbError> {
     database
         .load_snapshots::<crate::pending::tests::Record, _, _>(crate::SnapshotReload::new(
-            vec![(expected.clone(), prefix, plaintext)],
+            vec![(expected.clone(), prefix, plaintext, author())],
             Vec::<crate::DownloadedWriteStream<std::io::Cursor<Vec<u8>>>>::new(),
+            std::sync::Arc::new(crate::test_utils::TestAuthorship),
         ))
         .await
         .map(drop)
@@ -207,7 +217,7 @@ async fn a_snapshot_round_trips_rows_history_and_excluded_changes() {
     assert_eq!(header.schema_version, 2);
     assert_eq!(header.writes.0, [excluded.header.position]);
     // Five original changes travel as source evidence with their verdicts.
-    assert_eq!(header.counts, [1, 5, 3, 1, 1, 5]);
+    assert_eq!(header.counts, [1, 5, 3, 1, 1, 5, 1, 0]);
     let verdicts: Vec<_> = snapshot
         .iter()
         .filter_map(|record| match record {
@@ -377,8 +387,9 @@ async fn circle_snapshot_has_only_its_rows_and_reference_metadata() {
             SnapshotRecord::Column(column) => assert_eq!(column.table, "notes"),
             SnapshotRecord::Write(_) => {}
             SnapshotRecord::Authored(authored) => {
-                assert_eq!(authored.change.row.audience, circle)
+                assert_eq!(authored.change.row().audience, circle)
             }
+            SnapshotRecord::Creation(creation) => assert_eq!(creation.row.audience, circle),
             other => panic!("unexpected record {other:?}"),
         }
     }

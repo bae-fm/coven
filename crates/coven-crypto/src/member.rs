@@ -59,6 +59,21 @@ impl SigningKey {
     ) -> Result<(), CryptoError> {
         self.verify(&prefix_message(path, prefix), signature)
     }
+
+    /// Verify a write's header signature without its part chunks (D9): the
+    /// exact cleartext prefix, the complete sealed header chunk and the part
+    /// roots. Snapshots carry these to authenticate another member's leaves.
+    /// Panics if the storage path is empty.
+    pub fn verify_write_header(
+        &self,
+        path: &str,
+        prefix: &[u8],
+        header: &[u8],
+        roots: &[[u8; 32]],
+        signature: &Signature,
+    ) -> Result<(), CryptoError> {
+        self.verify(&header_message(path, prefix, header, roots), signature)
+    }
 }
 
 /// The public half of a member's X25519 pair, used for anonymous sealed keys.
@@ -157,6 +172,19 @@ impl MemberKeys {
     /// Panics if the storage path is empty.
     pub fn sign_prefix(&self, path: &str, prefix: &[u8]) -> Signature {
         self.sign(&prefix_message(path, prefix))
+    }
+
+    /// Sign a write's cleartext prefix, sealed header chunk and part roots
+    /// (D9), separately from the whole-object signature.
+    /// Panics if the storage path is empty.
+    pub fn sign_write_header(
+        &self,
+        path: &str,
+        prefix: &[u8],
+        header: &[u8],
+        roots: &[[u8; 32]],
+    ) -> Signature {
+        self.sign(&header_message(path, prefix, header, roots))
     }
 
     /// Encode both private seeds for custody or the person's restore code (§12.1).
@@ -516,6 +544,17 @@ fn prefix_message(path: &str, prefix: &[u8]) -> Vec<u8> {
         b"coven/prefix-signature/v1",
         cipher::storage_path(path),
         prefix,
+    ])
+}
+
+fn header_message(path: &str, prefix: &[u8], header: &[u8], roots: &[[u8; 32]]) -> Vec<u8> {
+    let roots: Vec<u8> = roots.iter().flatten().copied().collect();
+    cipher::context(&[
+        b"coven/write-header-signature/v1",
+        cipher::storage_path(path),
+        prefix,
+        header,
+        &roots,
     ])
 }
 

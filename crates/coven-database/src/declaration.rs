@@ -17,7 +17,8 @@ pub(crate) enum AudienceSource {
     Both { column: String, foreign_key: String },
 }
 
-/// A synced table's key, audience, files and shared triggers (E2).
+/// A synced table's key, audience, files, shared triggers and whether only
+/// each row's original creator writes it directly (E2).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SyncedTable {
     pub(crate) name: String,
@@ -26,6 +27,7 @@ pub struct SyncedTable {
     pub(crate) audience: AudienceSource,
     pub(crate) files: Option<FileDecl>,
     pub(crate) shared_triggers: Vec<String>,
+    pub(crate) owner_only: bool,
 }
 
 impl SyncedTable {
@@ -38,7 +40,18 @@ impl SyncedTable {
             audience: AudienceSource::Store,
             files: None,
             shared_triggers: Vec::new(),
+            owner_only: false,
         }
+    }
+
+    /// Only each row's original creating member may directly update or
+    /// delete it (§8.8). Shared-trigger targets count as direct writes;
+    /// foreign-key actions from authorized changes may still reach the row.
+    /// No app owner column is needed. Changing this declaration for an
+    /// existing table is a breaking schema change (§17.1).
+    pub fn owner_only(mut self) -> Self {
+        self.owner_only = true;
+        self
     }
 
     /// The columns in PRIMARY KEY order.

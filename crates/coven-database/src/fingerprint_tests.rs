@@ -502,8 +502,14 @@ async fn a_written_snapshot_reproduces_its_captured_state_before_publication() {
         let db = db.clone();
         let (id, prefix) = (id.clone(), snapshot.prefix.clone());
         async move {
-            db.verify_snapshot(id, prefix, std::io::Cursor::new(bytes), Some(state))
-                .await
+            db.verify_snapshot(
+                id,
+                prefix,
+                std::io::Cursor::new(bytes),
+                Some(state),
+                std::sync::Arc::new(crate::test_utils::TestAuthorship),
+            )
+            .await
         }
     };
     verify(snapshot.concat(), state).await.unwrap();

@@ -7,6 +7,7 @@
 //! together on the writer connection.
 
 mod authorization;
+mod authorship;
 mod change_capture;
 mod database;
 mod declaration;
@@ -19,6 +20,7 @@ mod download_stream;
 mod entry_effects;
 mod entry_inputs;
 mod error;
+mod execution_capture;
 mod file_authorization;
 mod file_hashes;
 mod file_queue;
@@ -51,6 +53,7 @@ mod migration_run;
 mod migration_snapshot;
 mod migration_state;
 mod observation;
+mod ownership;
 mod pending;
 mod provider_access;
 mod raise_capture;
@@ -114,6 +117,7 @@ mod write_rows;
 mod write_schema;
 mod write_sources;
 
+pub use authorship::{Authorship, HeaderEvidence};
 pub use coven_format::value::EntryId;
 pub use coven_merge::WriteId;
 pub use database::file_database::{CacheReservation, FileDatabase};
@@ -126,7 +130,7 @@ pub use database::{
 };
 pub use declaration::{CacheFill, FileDecl, Provenance, RowIdentity, SyncedTable};
 pub use download::{ApplyOutcome, DownloadedPart, DownloadedWrite, SyncState, WriteWait};
-pub use download_stream::{DownloadedPartStream, DownloadedWriteStream};
+pub use download_stream::{DownloadedPartStream, DownloadedWriteStream, WriteAuthorship};
 pub use error::{
     CovenError, CovenMigrationError, CovenResult, DbError, MigrationError, SchemaError,
 };

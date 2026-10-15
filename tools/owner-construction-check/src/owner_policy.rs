@@ -19,7 +19,11 @@ pub(crate) const POLICY: Policy = Policy {
     capabilities: CAPABILITIES,
     database_schema: Some((
         "crates/coven-database/src/internal_schema.rs",
-        &["coven_tables", "coven_input_tables"],
+        &[
+            "coven_tables",
+            "coven_ownership_tables",
+            "coven_input_tables",
+        ],
     )),
     // One list for owner construction, runtime acquisition and task starts.
     // Owner constructors include their private representations; names grant no exemption.
@@ -719,6 +723,12 @@ pub(crate) const POLICY: Policy = Policy {
         "WriteMetadata",
         "DatabaseRemovalView",
         "WriteApply",
+        // A local write's operation hook, its phases and their capture borrow
+        // the writer connection for one transaction.
+        "EventCapture",
+        "LocalPhase",
+        "Tracker",
+        "PreWrite",
     ],
     task_types: &[
         "PublicationScope",
@@ -761,6 +771,12 @@ pub(crate) const POLICY: Policy = Policy {
         "WriteMetadata",
         "DatabaseRemovalView",
         "WriteApply",
+        // A local write's operation hook, its phases and their capture borrow
+        // the writer connection for one transaction.
+        "EventCapture",
+        "LocalPhase",
+        "Tracker",
+        "PreWrite",
     ],
     internal_dependency_types: &["DatabaseConnection"],
     closed_session_types: &[
@@ -774,6 +790,12 @@ pub(crate) const POLICY: Policy = Policy {
         "WriteMetadata",
         "DatabaseRemovalView",
         "WriteApply",
+        // A local write's operation hook, its phases and their capture borrow
+        // the writer connection for one transaction.
+        "EventCapture",
+        "LocalPhase",
+        "Tracker",
+        "PreWrite",
     ],
 };
 

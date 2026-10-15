@@ -69,7 +69,7 @@ pub(crate) fn dismiss(
         if changes.is_empty() && cells.is_empty() {
             return Ok(());
         }
-        let mut record = crate::write_record::record(database, device, now, changes)?;
+        let mut record = crate::write_record::changed(database, device, now, changes)?;
         for dismissal in cells {
             let audience = dismissal.row.audience.clone();
             match record
@@ -82,6 +82,7 @@ pub(crate) fn dismiss(
                     WritePart {
                         audience,
                         rows: Vec::new(),
+                        executions: Vec::new(),
                         dismissals: vec![dismissal],
                     },
                 ),

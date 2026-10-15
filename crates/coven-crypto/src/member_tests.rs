@@ -535,3 +535,33 @@ fn access_key_boxes_open_only_for_their_member_path_and_prefix() {
     )
     .is_err());
 }
+
+#[test]
+fn write_header_signatures_bind_path_prefix_header_and_every_root() {
+    let member = MemberKeys::generate().unwrap();
+    let signing = member.public_keys().signing;
+    let path = "10101010-1010-1010-1010-101010101010/devices/1/1";
+    let roots = [[3; 32], [4; 32]];
+    let signature = member.sign_write_header(path, b"prefix", b"sealed header", &roots);
+    signing
+        .verify_write_header(path, b"prefix", b"sealed header", &roots, &signature)
+        .unwrap();
+    for (path, prefix, header, roots) in [
+        (
+            "10101010-1010-1010-1010-101010101010/devices/1/2",
+            &b"prefix"[..],
+            &b"sealed header"[..],
+            &roots[..],
+        ),
+        (path, b"prefiX", b"sealed header", &roots),
+        (path, b"prefix", b"sealed headeR", &roots),
+        (path, b"prefix", b"sealed header", &[[3; 32]]),
+        (path, b"prefix", b"sealed header", &[[4; 32], [3; 32]]),
+    ] {
+        assert!(signing
+            .verify_write_header(path, prefix, header, roots, &signature)
+            .is_err());
+    }
+    // A header signature is not a whole-object or prefix signature.
+    assert!(signing.verify_prefix(path, b"prefix", &signature).is_err());
+}

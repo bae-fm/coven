@@ -204,6 +204,7 @@ async fn data_differential_entry_effects() {
             let mut reload = SnapshotReload::new(
                 vec![snapshot.input()],
                 order.iter().map(|i| stream(&writes[*i])).collect(),
+                std::sync::Arc::new(crate::test_utils::TestAuthorship),
             );
             reload.boundaries = Some(
                 (1..=number)
@@ -405,7 +406,7 @@ mod retirement_replay {
                     .collect(),
             );
             crate::write_sources::visit_evidence(sql, &Audience::Store, &covered, |change| {
-                let key = coven_format::key::decode_key(&change.change.row.key).unwrap();
+                let key = coven_format::key::decode_key(&change.change.row().key).unwrap();
                 all.insert((change.header.position, format!("{key:?}")), change.verdict);
                 Ok::<_, DbError>(())
             })

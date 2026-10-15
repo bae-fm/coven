@@ -364,9 +364,12 @@ async fn a_hidden_row_is_deleted_at_its_generation_and_reinsertion_follows_it() 
             disposition: WriteDisposition::Apply,
         },
         parts: vec![WritePart {
+            executions: Vec::new(),
             dismissals: Vec::new(),
             audience: Audience::Store,
             rows: vec![RowChange {
+                creator: None,
+                execution: Default::default(),
                 row: original.parts[0].rows[0].row.clone(),
                 change: Change {
                     generation: 1,

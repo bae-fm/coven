@@ -13,6 +13,9 @@ use std::sync::Arc;
 
 pub(crate) struct OpenedWrite {
     pub(crate) header: WriteHeaderFrame,
+    /// The cleartext prefix, sealed header, part roots and header signature,
+    /// checked once the author's key is known (D9).
+    pub(crate) evidence: coven_database::HeaderEvidence,
     prefix: WriteObjectPrefix,
     layout: WriteObjectLayout,
     hash: ObjectHasher,
@@ -31,6 +34,62 @@ impl OpenedWrite {
             .map(|((part, key), _)| (part.audience.clone(), *key))
             .collect()
     }
+
+    /// The header signature over the prefix, sealed header and part roots,
+    /// by the key that must also sign the whole object (D9).
+    fn verify_header(&self, path: &ObjectPath, signer: &SigningKey) -> Result<(), SyncError> {
+        signer
+            .verify_write_header(
+                path.as_str(),
+                &self.evidence.prefix,
+                &self.evidence.header,
+                &self.evidence.roots,
+                &coven_crypto::Signature::from_bytes(self.evidence.signature),
+            )
+            .map_err(|e| {
+                damaged(
+                    path,
+                    Refusal::Signature {
+                        cause: Some(Arc::new(e)),
+                    },
+                )
+            })
+    }
+
+    /// The evidence and each opened part's keyed leaf hasher, which the
+    /// database checks every opened part against its root with (D11).
+    pub(crate) fn authorship(
+        &self,
+        ring: &StoreKeyring,
+        opens: &[bool],
+    ) -> Result<coven_database::WriteAuthorship, SyncError> {
+        authorship(ring, self.evidence.clone(), &self.header, opens)
+    }
+}
+
+/// A write's evidence with the leaf hashers of the parts this device opens.
+pub(crate) fn authorship(
+    ring: &StoreKeyring,
+    evidence: coven_database::HeaderEvidence,
+    header: &WriteHeaderFrame,
+    opens: &[bool],
+) -> Result<coven_database::WriteAuthorship, SyncError> {
+    let prefix = WriteObjectPrefix::decode(&evidence.prefix)?;
+    let hashers = header
+        .parts
+        .iter()
+        .zip(&prefix.part_keys)
+        .zip(opens)
+        .map(|((part, key), opens)| {
+            opens
+                .then(|| {
+                    crate::write_seal::derive(ring, &part.audience, *key)
+                        .map(|keys| keys.authorship_hasher())
+                })
+                .transpose()
+        })
+        .collect::<Result<_, _>>()?;
+    Ok(coven_database::WriteAuthorship { evidence, hashers })
 }
 
 /// Each consumer chooses its opened parts and handles bounded plaintext chunks.
@@ -105,7 +164,10 @@ fn open_header(
     let mut hash = ObjectHasher::new();
     hash.update(aad);
     hash.update(bytes);
-    let sealed = checked(&object.path, WriteObjectPrefix::header_chunk(bytes))?;
+    let header_length = checked(&object.path, WriteObjectPrefix::header_chunk_length(bytes))?;
+    let (piece, tail) = bytes.split_at(header_length.min(bytes.len()));
+    let sealed = checked(&object.path, WriteObjectPrefix::header_chunk(piece))?;
+    let tail = checked(&object.path, prefix.decode_tail(tail))?;
     let key = crate::write_seal::derive(
         ring.ok_or(SyncError::KeyUnavailable(prefix.store_key))?,
         &Audience::Store,
@@ -153,6 +215,12 @@ fn open_header(
     )?;
     Ok(OpenedWrite {
         header,
+        evidence: coven_database::HeaderEvidence {
+            prefix: aad.to_vec(),
+            header: piece.to_vec(),
+            roots: tail.roots,
+            signature: *tail.signature.as_bytes(),
+        },
         prefix,
         layout,
         hash,
@@ -391,6 +459,7 @@ pub(crate) async fn download(
         }
         let signer = authority(log, replays, &opened.header.header)
             .map_err(|failure| damaged(&object.path, failure))?;
+        opened.verify_header(&object.path, &signer)?;
         let parts = match parts(
             &opened,
             ring.expect("opened header has its store key"),

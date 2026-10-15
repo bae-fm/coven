@@ -6,7 +6,7 @@ use coven_merge::{Audience, Parent};
 
 fn encoder(count: u64) -> (SnapshotEncoder, SnapshotDecoder) {
     let mut header = test_utils::snapshot_header();
-    header.counts = [0, 0, 0, 0, count, 0];
+    header.counts = [0, 0, 0, 0, count, 0, 0, 0];
     let (encoder, frame) = SnapshotEncoder::start(header.clone()).unwrap();
     (
         encoder,
@@ -198,7 +198,7 @@ fn circle_losses_keep_every_original_removal_reason() {
     ]);
     let mut header = test_utils::snapshot_header();
     header.id.audience = loss.row.audience.clone();
-    header.counts = [0, 0, 0, 0, 1, 0];
+    header.counts = [0, 0, 0, 0, 1, 0, 0, 0];
     let (mut encoder, first) = SnapshotEncoder::start(header).unwrap();
     let mut decoder =
         SnapshotDecoder::start(&first, &test_utils::snapshot_prefix(encoder.header())).unwrap();
@@ -226,7 +226,7 @@ fn circle_loss_requires_its_entry_in_snapshot_coverage() {
     loss.cause = LossCause::Rules([Rule::DeletedCircle(entry)].into());
     let mut header = test_utils::snapshot_header();
     header.id.audience = loss.row.audience.clone();
-    header.counts = [0, 0, 0, 0, 1, 0];
+    header.counts = [0, 0, 0, 0, 1, 0, 0, 0];
     let (mut encoder, first) = SnapshotEncoder::start(header.clone()).unwrap();
     let mut decoder =
         SnapshotDecoder::start(&first, &test_utils::snapshot_prefix(&header)).unwrap();

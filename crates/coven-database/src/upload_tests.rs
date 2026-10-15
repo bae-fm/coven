@@ -64,17 +64,20 @@ async fn reads_only_the_oldest_write_as_header_and_audience_streams() {
             for (part, bytes) in parts {
                 let mut decoder = PartDecoder::new(part.clone()).unwrap();
                 let mut rows = Vec::new();
+                let mut executions = Vec::new();
                 let mut dismissals = Vec::new();
                 for chunk in bytes {
                     for frame in decoder.chunk(&chunk?).unwrap() {
                         match frame {
                             WriteFrame::Change(row) => rows.push(row),
+                            WriteFrame::Execution(execution) => executions.push(execution),
                             WriteFrame::Dismissal(dismissal) => dismissals.push(dismissal),
                         }
                     }
                 }
                 decoder.finish().unwrap();
                 decoded.push(WritePart {
+                    executions,
                     audience: part.audience,
                     rows,
                     dismissals,

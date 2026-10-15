@@ -532,6 +532,9 @@ pub enum SchemaError {
     MissingTable { table: String },
     /// Two declarations name one table (E2).
     DuplicateTable { table: String },
+    /// A table's `owner_only` declaration changed without a breaking
+    /// migration (§8.8, §17.1).
+    OwnerOnlyChanged { table: String },
     /// A table declares both `audience_column` and `audience_from` (E2).
     TwoAudiences { table: String },
     /// A declared file column isn't in the table (E2).

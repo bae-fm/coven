@@ -17,6 +17,8 @@ pub enum SnapshotSource<R> {
         prefix: SnapshotObjectPrefix,
         /// Plaintext snapshot stream.
         input: R,
+        /// The member whose key signed the snapshot (§15).
+        author: coven_foundation::id_source::MemberId,
     },
     /// No stored snapshot exists for this readable audience.
     Empty(Audience),
@@ -53,20 +55,34 @@ pub struct SnapshotReload<R, W> {
     pub expected_entries: Option<Vec<coven_format::value::EntryId>>,
     /// Advance the initiating operation in the same commit as the loaded rows.
     pub operation: Option<OperationUpdate>,
+    /// Authenticates other members' writes the snapshots carry (§8.8).
+    pub authorship: std::sync::Arc<dyn crate::Authorship>,
 }
 
 impl<R, W> SnapshotReload<R, W> {
     /// Load stored snapshots and their gap writes, retaining existing boundaries
     /// and without an operation journal transition.
     pub fn new(
-        snapshots: Vec<(SnapshotId, SnapshotObjectPrefix, R)>,
+        snapshots: Vec<(
+            SnapshotId,
+            SnapshotObjectPrefix,
+            R,
+            coven_foundation::id_source::MemberId,
+        )>,
         writes: Vec<DownloadedWriteStream<W>>,
+        authorship: std::sync::Arc<dyn crate::Authorship>,
     ) -> Self {
         Self {
             snapshots: snapshots
                 .into_iter()
-                .map(|(id, prefix, input)| SnapshotSource::Stored { id, prefix, input })
+                .map(|(id, prefix, input, author)| SnapshotSource::Stored {
+                    id,
+                    prefix,
+                    input,
+                    author,
+                })
                 .collect(),
+            authorship,
             writes,
             absent: Vec::new(),
             boundaries: None,

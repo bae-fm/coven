@@ -44,6 +44,7 @@ pub(crate) fn carry(
                 db.internal_execute(&format!("DELETE FROM {child} WHERE row_id IN (SELECT id FROM _coven_rows WHERE table_name=?1)"), [&table.name])?;
             }
             db.internal_execute("DELETE FROM _coven_rows WHERE table_name=?1", [&table.name])?;
+            crate::ownership::forget_table(db, &table.name)?;
             // A dropped table's losses stay, frozen under its old names (§17.1).
             let losses = db.query(
                 "SELECT id FROM _coven_lost WHERE table_name=?1 AND frozen=0",
@@ -102,6 +103,8 @@ fn rename_table(db: &DatabaseConnection, old: &str, new: &str) -> Result<(), DbE
         "UPDATE _coven_rows SET table_name=?2 WHERE table_name=?1",
         params![old, new],
     )?;
+    // A renamed table's rows keep their original creations (§8.8).
+    crate::ownership::rename(db, old, new)?;
     // Active losses follow their row: a hidden row keeps its values in its
     // removal record (§17.1).
     db.internal_execute(

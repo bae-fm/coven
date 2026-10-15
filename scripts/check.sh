@@ -304,6 +304,19 @@ proofs() {
         COVEN_MERGE_LEAN="$runner" exact_ignored coven-database --all-features -- \
             migration_hidden::tests::freeze_differential_histories \
             migration_hidden::tests::freeze_differential_agreement
+
+        step "Rust / Lean owner creation and foreign-key effects"
+        COVEN_MERGE_LEAN="$runner" exact_ignored coven-database --all-features -- \
+            ownership::tests::creation_differential_histories \
+            execution_capture::tests::lean::captured_actions_are_the_models_consequences
+    fi
+
+    if proof_selected storage || crate_selected coven-database; then
+        runner=$(runner storage authorshipRunner)
+        step "Rust / Lean authorship multiproofs"
+        COVEN_AUTHORSHIP_LEAN="$runner" exact_ignored coven-database --all-features -- \
+            authorship::tests::multiproofs_match_the_storage_model \
+            authorship::tests::retained_openings_match_the_cell_proof_model
     fi
 
     if proof_selected merge || proof_selected queue || crate_selected coven-database; then

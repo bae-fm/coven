@@ -264,8 +264,11 @@ async fn reset_coverage_survives_noops_reversal_and_failed_replacement() {
         included: WritePositions(vec![]),
     };
     let reload = |boundaries| {
-        let mut reload =
-            crate::SnapshotReload::<std::io::Empty, std::io::Empty>::new(vec![], vec![]);
+        let mut reload = crate::SnapshotReload::<std::io::Empty, std::io::Empty>::new(
+            vec![],
+            vec![],
+            std::sync::Arc::new(crate::test_utils::TestAuthorship),
+        );
         reload.snapshots = vec![crate::SnapshotSource::Empty(Audience::Store)];
         reload.boundaries = Some(boundaries);
         reload
@@ -736,6 +739,7 @@ mod differential {
         let mut reload = SnapshotReload::new(
             vec![snapshot.input()],
             history.writes.iter().map(stream).collect(),
+            std::sync::Arc::new(crate::test_utils::TestAuthorship),
         );
         reload.boundaries = Some(if history.reset {
             vec![boundary]

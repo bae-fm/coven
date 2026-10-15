@@ -61,15 +61,21 @@ fn pinned_chunks_decode_with_their_declared_boundaries() {
             index += 1;
         }
         decoder.finish().unwrap();
+        let mut rows = Vec::new();
+        let mut executions = Vec::new();
+        for frame in frames {
+            match frame {
+                crate::dismissal::WriteFrame::Change(row) => rows.push(row),
+                crate::dismissal::WriteFrame::Execution(execution) => executions.push(execution),
+                crate::dismissal::WriteFrame::Dismissal(_) => {
+                    panic!("fixture contains row changes and executions")
+                }
+            }
+        }
         parts.push(crate::write::WritePart {
             audience: part.audience,
-            rows: frames
-                .into_iter()
-                .map(|frame| match frame {
-                    crate::dismissal::WriteFrame::Change(row) => row,
-                    _ => panic!("fixture contains row changes"),
-                })
-                .collect(),
+            rows,
+            executions,
             dismissals: Vec::new(),
         });
     }

@@ -39,6 +39,10 @@ def encryption_key(value):
     return derive(bytes([value]) * 32, b"coven/encryption/v1")
 
 
+def authorship_key(value):
+    return derive(bytes([value]) * 32, b"coven/row-authorship/v1")
+
+
 def checked(result):
     if result != 0:
         raise RuntimeError(f"libsodium failed: {result}")
@@ -177,6 +181,186 @@ def single_chunk(sodium, kind, key_id, key, path, plaintext, nonce, seed):
     prefix = bytes([kind, 0, 1]) + key_id
     return signed(sodium, path, prefix + sealed_chunk(
         sodium, key, path, prefix, 0, 0, plaintext, bytes([nonce]) * 24), seed)
+
+
+# D5 part records and their D11 authorship leaves, parsed independently of Rust.
+class Reader:
+    def __init__(self, data):
+        self.data = data
+        self.at = 0
+
+    def take(self, n):
+        piece = self.data[self.at:self.at + n]
+        assert len(piece) == n, "truncated"
+        self.at += n
+        return piece
+
+    def int(self, n):
+        return int.from_bytes(self.take(n), "big")
+
+    def blob(self):
+        return self.take(self.int(4))
+
+    def span(self, parse):
+        start = self.at
+        parse(self)
+        return self.data[start:self.at]
+
+
+def parse_audience(r):
+    if r.int(1) == 1:
+        r.take(16)
+
+
+def parse_row(r):
+    r.blob()
+    r.blob()
+    parse_audience(r)
+
+
+def parse_value(r):
+    tag = r.int(1)
+    if tag in (1, 2):
+        r.take(8)
+    elif tag in (3, 4):
+        r.blob()
+
+
+def parse_names(r):
+    for _ in range(r.int(4)):
+        r.blob()
+
+
+def parse_column_value(r):
+    parse_value(r)
+    for _ in range(r.int(4)):
+        parse_names(r)
+        r.blob()
+        parse_names(r)
+        parse_row(r)
+        r.take(8)
+
+
+def parse_columns(r):
+    """A map<name, ColumnValue>: each name with its length field, then its value."""
+    return [(r.span(lambda r: r.blob()), r.span(parse_column_value)) for _ in range(r.int(4))]
+
+
+def parse_change_id(r):
+    r.take(16)
+    parse_row(r)
+
+
+def parse_option(r, parse):
+    if r.int(1) == 1:
+        parse(r)
+
+
+def parse_sources(r):
+    parse_option(r, parse_change_id)
+    for _ in range(r.int(4)):
+        r.blob()
+        parse_change_id(r)
+        r.blob()
+
+
+def parse_change(r):
+    generation = r.int(8)
+    operation = r.int(1)
+    columns = parse_columns(r) if operation in (0, 1) else []
+    return generation, operation, columns
+
+
+def parse_execution(r, own=None):
+    """D5: each step is `sequence | change | key_update`, its change `0` for
+    exactly the row change's own (`own`, its bytes) or `1 | change`. The
+    returned steps are expanded to `sequence | change | key_update`, as
+    their D11 leaves encode them."""
+    steps = []
+    for _ in range(r.int(4)):
+        sequence = r.take(4)
+        tag = r.int(1)
+        if tag == 0:
+            assert own is not None, "an execution record has no own change"
+            change = own
+        else:
+            assert tag == 1
+            change = r.span(parse_change)
+            assert change != own, "the own change is written once"
+        steps.append(sequence + change + r.take(1))
+    parse_sources(r)
+    return steps
+
+
+def record_leaves(kind, payload):
+    """D11: an insert's creation marker and cells, an update's cells, a
+    delete's marker, then one leaf per operation; dismissals have none."""
+    r = Reader(payload)
+    if kind == 3:
+        return []
+    row = r.span(parse_row)
+    leaves = []
+    own = None
+    if kind == 2:
+        start = r.at
+        generation, operation, columns = parse_change(r)
+        own = r.data[start:r.at]
+        for _ in range(r.int(4)):
+            r.blob()
+            parse_value(r)
+        parse_sources(r)
+        creator = r.span(lambda r: parse_option(r, parse_change_id))
+        if operation == 0:
+            leaves.append(b"\x00" + row + u64(generation) + creator)
+        for column, value in columns:
+            leaves.append(b"\x01" + row + u64(generation) + u8(operation) + column + value)
+        if operation == 2:
+            leaves.append(b"\x02" + row + u64(generation))
+    else:
+        assert kind == 13
+    leaves.extend(b"\x03" + row + step for step in parse_execution(r, own))
+    assert r.at == len(payload), "trailing record bytes"
+    return leaves
+
+
+def part_leaves(plaintext):
+    leaves = []
+    r = Reader(plaintext)
+    while r.at < len(plaintext):
+        kind = r.int(1)
+        assert r.int(2) == 1
+        leaves.extend(record_leaves(kind, r.blob()))
+    return leaves
+
+
+def authorship_root(key, leaves):
+    """RFC 6962's split: the left subtree holds the largest power of two below
+    the count. Leaves are keyed with the audience key; branches are not."""
+    if not leaves:
+        return hashlib.sha256(b"\x02").digest()
+    if len(leaves) == 1:
+        return hmac.digest(key, b"\x00" + leaves[0], "sha256")
+    left = 1
+    while left * 2 < len(leaves):
+        left *= 2
+    return hashlib.sha256(b"\x01" + authorship_root(key, leaves[:left])
+                          + authorship_root(key, leaves[left:])).digest()
+
+
+def part_lengths(header):
+    """Each part's plaintext length, from a D5 header frame."""
+    r = Reader(header)
+    assert r.int(1) == 1 and r.int(2) == 1
+    r.take(4 + 32)
+    for _ in range(2):
+        r.take(16 * r.int(4))
+    r.take(4 + 1)
+    lengths = []
+    for _ in range(r.int(4)):
+        parse_audience(r)
+        r.take(8)
+        lengths.append(r.int(8))
+    return lengths
 
 
 # D6 store-log entries.
@@ -349,16 +533,25 @@ def main():
     write_at = next(i for i, frame_ in enumerate(frames) if frame_[0] == 32)
     snapshot_at = next(i for i, frame_ in enumerate(frames) if frame_[0] == 34)
     prefix = frames[write_at]
-    assert frames[write_at + 1][0] == 1 and snapshot_at == write_at + 6
-    body = prefix
-    for frame_, section, index, key in [
-        (frames[write_at + 1], 0, 0, encryption_key(17)),
-        (frames[write_at + 2], 1, 0, encryption_key(17)),
-        (frames[write_at + 3], 1, 1, encryption_key(17)),
-        (frames[write_at + 4], 1, 2, encryption_key(17)),
-        (frames[write_at + 5], 2, 0, encryption_key(18)),
-    ]:
-        body += chunk(sodium, key, path, prefix, section, index, frame_)
+    header = frames[write_at + 1]
+    assert header[0] == 1
+    # The store part uses the store key (bytes 17), the circle part key 18.
+    part_keys = [17, 18]
+    header_chunk = chunk(sodium, encryption_key(17), path, prefix, 0, 0, header)
+    pieces, at = [], write_at + 2
+    for length in part_lengths(header):
+        count = -(-length // 65536)
+        pieces.append(frames[at:at + count])
+        at += count
+    assert at == snapshot_at
+    roots = [authorship_root(authorship_key(key), part_leaves(b"".join(part)))
+             for key, part in zip(part_keys, pieces)]
+    tail = b"".join(roots) + signature(sodium, context(
+        b"coven/write-header-signature/v1", path, prefix, header_chunk, b"".join(roots)), 0x33)
+    body = prefix + header_chunk + tail
+    for section, (key, part) in enumerate(zip(part_keys, pieces), 1):
+        for index, frame_ in enumerate(part):
+            body += chunk(sodium, encryption_key(key), path, prefix, section, index, frame_)
     write = signed(sodium, path, body)
 
     # Creation is verified with the admin pair it supplies (seeds 0x33).

@@ -306,7 +306,13 @@ impl StoreLogSync {
             member.keys().public_keys().signing,
         )?;
         self.database
-            .verify_snapshot(id, sealed.prefix, opened, captured)
+            .verify_snapshot(
+                id,
+                sealed.prefix,
+                opened,
+                captured,
+                self.evidence_keys().await?,
+            )
             .await?;
         set_attempt(
             &mut task,

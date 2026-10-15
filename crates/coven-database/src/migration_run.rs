@@ -41,7 +41,14 @@ pub(crate) fn run<'a>(
 ) -> Result<MigrationRun, DbError> {
     let mut before = Schema::read(database)?;
     let capture = RefCell::new(MigrationCapture::new(database, tables)?);
-    let mut breaking = false;
+    // Changing an existing table's owner declaration is breaking (§17.1): the
+    // raise captures the state before any statement runs.
+    let declared =
+        crate::row_queries::owner_declaration_changed(database, &before, tables)?.is_some();
+    if declared {
+        capture.borrow_mut().capture_now(database, &before)?;
+    }
+    let mut breaking = declared;
     let mut steps = Vec::new();
     for migration in migrations.iter().filter(|m| m.version > current) {
         *at = migration;
@@ -102,6 +109,9 @@ pub(crate) fn run<'a>(
         after = &step.before;
     }
     outcomes.reverse();
+    if declared {
+        outcomes[0].change = MigrationChange::Breaking;
+    }
     database.batch(&format!("PRAGMA user_version = {}", supported as i32))?;
     for (index, step) in steps.iter().enumerate() {
         if outcomes[index].change == MigrationChange::Breaking {
@@ -238,7 +248,7 @@ fn finish(
                 changes.insert(row.clone(), change);
             }
         }
-        let mut record = crate::write_record::record(database, device, now, changes)?;
+        let mut record = crate::write_record::changed(database, device, now, changes)?;
         for row in &deletes {
             hidden.freeze(
                 database,
@@ -255,13 +265,14 @@ fn finish(
         // Migration row changes belong to the published snapshot, but remain
         // original source evidence for writes authored after the migration.
         for part in &record.parts {
-            for row in &part.rows {
+            crate::ownership::offer_part(database, &record.header, part)?;
+            for row in part.records() {
                 crate::write_sources::validate(database, &record.header, row)?;
                 crate::write_sources::retain(database, &record.header, row)?;
                 crate::write_sources::admit(
                     database,
                     &record.header,
-                    &row.row,
+                    row.row(),
                     &coven_format::snapshot_rows::ChangeVerdict::Applied,
                 )?;
             }

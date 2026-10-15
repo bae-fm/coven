@@ -289,6 +289,12 @@ impl StoreLogSync {
                         &coven_database::WriteWait::StoreLog(missing.clone()),
                     )?
                 }
+                coven_database::SnapshotError::KeyUnavailable { audience, key } => {
+                    PendingReason::KeyUnavailable {
+                        audience: audience.clone(),
+                        key: *key,
+                    }
+                }
                 coven_database::SnapshotError::WriteWaiting(wait) => {
                     crate::pending_logs::write_wait(self.directory.id(), wait)?
                 }

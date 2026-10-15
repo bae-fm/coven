@@ -45,6 +45,7 @@ async fn overwritten_and_deleted_old_values_protect_their_uploaded_files() {
                     ),
                     header,
                     parts: vec![DownloadedPartStream::Opened(std::io::Cursor::new(bytes))],
+                    authorship: crate::test_utils::TestAuthorship::write(&write),
                 },
                 BTreeSet::new(),
             )
@@ -76,6 +77,7 @@ async fn overwritten_and_deleted_old_values_protect_their_uploaded_files() {
                     ),
                     header: header.clone(),
                     parts: vec![DownloadedPartStream::Skipped],
+                    authorship: crate::test_utils::TestAuthorship::write(&write),
                 },
                 named.clone(),
             )
@@ -105,6 +107,7 @@ async fn overwritten_and_deleted_old_values_protect_their_uploaded_files() {
                 ),
                 header,
                 parts: vec![DownloadedPartStream::Skipped],
+                authorship: crate::test_utils::TestAuthorship::write(&newer),
             },
             BTreeSet::new(),
         )
@@ -161,8 +164,11 @@ async fn file_loss_fixture() -> (
         parts: vec![WritePart {
             audience: Audience::Store,
             dismissals: vec![],
+            executions: vec![],
             rows: vec![RowChange {
                 row,
+                creator: None,
+                execution: Default::default(),
                 change: Change {
                     generation: 0,
                     operation: Operation::Insert(BTreeMap::from([
@@ -345,8 +351,17 @@ async fn a_dismissed_file_loss_releases_its_local_protection() {
 async fn checked_snapshots_protect_files_named_only_by_losses() {
     let (_store, db, record, file) = file_loss_fixture().await;
     let snapshot = crate::snapshot_write::tests::frames(&db, coven_merge::Audience::Store).await;
-    let (id, prefix, input) = snapshot.input();
-    let references = db.validate_snapshot(id, prefix, input).await.unwrap();
+    let (id, prefix, input, author) = snapshot.input();
+    let references = db
+        .validate_snapshot(
+            id,
+            prefix,
+            input,
+            author,
+            std::sync::Arc::new(crate::test_utils::TestAuthorship),
+        )
+        .await
+        .unwrap();
     assert!(references.contains(&(record.header.position.device, file)));
 }
 
@@ -376,9 +391,15 @@ async fn frozen_losses_keep_file_paths_after_their_declaration_is_removed() {
         .references
         .contains(&(DeviceId(4), file)));
     let snapshot = crate::snapshot_write::tests::frames(&db, coven_merge::Audience::Store).await;
-    let (id, prefix, input) = snapshot.input();
+    let (id, prefix, input, author) = snapshot.input();
     assert!(db
-        .validate_snapshot(id, prefix, input)
+        .validate_snapshot(
+            id,
+            prefix,
+            input,
+            author,
+            std::sync::Arc::new(crate::test_utils::TestAuthorship)
+        )
         .await
         .unwrap()
         .contains(&(DeviceId(4), file)));

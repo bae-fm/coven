@@ -87,6 +87,7 @@ async fn reset(db: &crate::Database, writes: &[WriteRecord], included: WritePosi
             .iter()
             .map(crate::snapshot_write::tests::stream)
             .collect(),
+        std::sync::Arc::new(crate::test_utils::TestAuthorship),
     );
     reload.snapshots = vec![SnapshotSource::Empty(Audience::Store)];
     reload.boundaries = Some(vec![BoundaryCoverage { entry, included }]);

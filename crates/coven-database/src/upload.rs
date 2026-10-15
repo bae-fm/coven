@@ -36,6 +36,7 @@ pub enum UploadReadError<E> {
 }
 
 /// An incremental SQLite BLOB reader. It never collects the waiting write.
+#[derive(Clone)]
 pub struct UploadBytes<'a> {
     blob: Rc<rusqlite::blob::Blob<'a>>,
     offset: usize,
@@ -88,6 +89,7 @@ impl Iterator for UploadBytes<'_> {
 }
 
 /// Audience stream descriptors paired with their bounded plaintext readers.
+#[derive(Clone)]
 pub struct UploadParts<'a> {
     bytes: UploadBytes<'a>,
     headers: std::vec::IntoIter<PartHeader>,
@@ -108,6 +110,50 @@ impl<'a> Iterator for UploadParts<'a> {
                 end: self.bytes.offset,
             },
         ))
+    }
+}
+
+impl UploadParts<'_> {
+    /// Each part's authorship root (D11), read from the queued plaintext
+    /// without consuming these streams. `hasher` gives the keyed leaf hasher
+    /// of a part, by its index in header order, under its first-attempt key.
+    pub fn roots<E: From<DbError> + From<coven_format::Error>>(
+        &self,
+        mut hasher: impl FnMut(usize, &PartHeader) -> Result<coven_crypto::AuthorshipHasher, E>,
+    ) -> Result<Vec<[u8; 32]>, E> {
+        let mut roots = Vec::new();
+        for (index, (header, mut bytes)) in self.clone().enumerate() {
+            let hasher = hasher(index, &header)?;
+            let mut builder = coven_format::authorship::RootBuilder::new(&hasher);
+            crate::download_stream::visit_part::<E>(
+                header,
+                |chunk| {
+                    let plain = bytes.next().ok_or(DbError::DamagedDatabase)??;
+                    if plain.len() != chunk.len() {
+                        return Err(DbError::DamagedDatabase.into());
+                    }
+                    chunk.copy_from_slice(&plain);
+                    Ok(())
+                },
+                |frame| {
+                    let record = match &frame {
+                        coven_format::dismissal::WriteFrame::Change(row) => {
+                            coven_format::write::PartRecord::Change(row)
+                        }
+                        coven_format::dismissal::WriteFrame::Execution(execution) => {
+                            coven_format::write::PartRecord::Execution(execution)
+                        }
+                        coven_format::dismissal::WriteFrame::Dismissal(_) => return Ok(()),
+                    };
+                    for leaf in coven_format::authorship::record_leaves(record) {
+                        builder.push(&leaf)?;
+                    }
+                    Ok(())
+                },
+            )?;
+            roots.push(builder.finish());
+        }
+        Ok(roots)
     }
 }
 

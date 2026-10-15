@@ -15,6 +15,7 @@ pub fn sealed_length(header_length: usize, part_lengths: &[u64]) -> Result<u64, 
     let mut length = WriteObjectPrefix::encoded_length(part_lengths.len())? as u64
         + header_length as u64
         + overhead
+        + WriteObjectPrefix::tail_length(part_lengths.len()) as u64
         + 64;
     for part in part_lengths {
         length = part
@@ -48,6 +49,15 @@ fn validate_lengths(header_length: usize, part_lengths: &[u64]) -> Result<(), Er
     Ok(())
 }
 
+/// The part roots and header signature after a write's sealed header (D9).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HeaderTail {
+    /// Each part's keyed authorship root, in header order.
+    pub roots: Vec<[u8; 32]>,
+    /// The author's signature over the prefix, sealed header and roots.
+    pub signature: Signature,
+}
+
 /// Cleartext key identities, authenticated by the object's final signature.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WriteObjectPrefix {
@@ -59,16 +69,44 @@ pub struct WriteObjectPrefix {
     pub part_keys: Vec<KeyId>,
 }
 impl WriteObjectPrefix {
-    /// Greatest permitted end of the clear prefix and sealed header (D1/D2).
+    /// Greatest permitted end of the clear prefix, sealed header, part roots
+    /// and header signature (D1/D2, D9).
     pub const MAX_HEADER_END: usize =
-        23 + 16 * MAX_ITEMS + 4 + SEALED_OBJECT_CHUNK_OVERHEAD + MAX_OBJECT;
+        23 + 16 * MAX_ITEMS + 4 + SEALED_OBJECT_CHUNK_OVERHEAD + MAX_OBJECT + 32 * MAX_ITEMS + 64;
 
-    /// Exact end of the header once its length field is available. A truncated
-    /// prefix requires the caller's second bounded read to use MAX_HEADER_END.
+    /// Exact end of the header and its tail once its length field is
+    /// available. A truncated prefix requires the caller's second bounded
+    /// read to use MAX_HEADER_END.
     pub fn header_end(bytes: &[u8]) -> Result<usize, Error> {
         let prefix = Self::length(bytes)?;
+        let parts = (prefix - 23) / 16;
         let header = bytes.get(prefix..).ok_or(Error::Truncated)?;
-        Ok(prefix + Self::header_chunk_length(header)?)
+        Ok(prefix + Self::header_chunk_length(header)? + Self::tail_length(parts))
+    }
+
+    /// Bytes of the part roots and header signature for this many parts.
+    pub fn tail_length(parts: usize) -> usize {
+        32 * parts + 64
+    }
+
+    /// Read exactly the part roots and header signature that follow the
+    /// sealed header chunk.
+    pub fn decode_tail(&self, bytes: &[u8]) -> Result<HeaderTail, Error> {
+        let length = Self::tail_length(self.part_keys.len());
+        if bytes.len() < length {
+            return Err(Error::Truncated);
+        }
+        if bytes.len() > length {
+            return Err(Error::TrailingBytes);
+        }
+        let (roots, signature) = bytes.split_at(32 * self.part_keys.len());
+        Ok(HeaderTail {
+            roots: roots
+                .chunks_exact(32)
+                .map(|root| root.try_into().expect("32 bytes"))
+                .collect(),
+            signature: sealed::signature(signature)?,
+        })
     }
 
     /// Exact prefix size for this many parts, before their key ids are selected.
@@ -134,9 +172,10 @@ impl WriteObjectPrefix {
         sealed::chunk(piece, MAX_OBJECT)
     }
 
-    /// Begin part chunks after the caller authenticates and decodes the header.
-    /// `part_lengths` must come from that header, in part order. This layer
-    /// treats frame bytes as opaque; the final signature still must be checked.
+    /// Begin part chunks after the caller authenticates and decodes the header
+    /// and reads its tail. `part_lengths` must come from that header, in part
+    /// order. This layer treats frame bytes as opaque; the header signature and
+    /// the final signature still must be checked.
     pub fn opened_header(
         self,
         bytes: &[u8],
@@ -144,6 +183,7 @@ impl WriteObjectPrefix {
     ) -> Result<WriteObjectLayout, Error> {
         let mut layout = WriteObjectLayout::new(self, bytes, part_lengths)?;
         layout.advance();
+        layout.position = layout.after_tail();
         Ok(layout)
     }
 }
@@ -163,6 +203,7 @@ pub struct ObjectChunk {
 
 enum Position {
     Chunk { section: usize, index: u64 },
+    Tail,
     Signature,
     End,
 }
@@ -272,6 +313,33 @@ impl WriteObjectLayout {
         Ok((chunk, &piece[4..]))
     }
 
+    /// Write the part roots and header signature, only right after the header.
+    pub fn tail(&mut self, tail: &HeaderTail) -> Result<Vec<u8>, Error> {
+        require(
+            matches!(self.position, Position::Tail) && tail.roots.len() == self.part_lengths.len(),
+            "write header tail",
+            Rule::StreamLength,
+        )?;
+        let mut bytes = Vec::with_capacity(WriteObjectPrefix::tail_length(tail.roots.len()));
+        for root in &tail.roots {
+            bytes.extend_from_slice(root);
+        }
+        bytes.extend_from_slice(tail.signature.as_bytes());
+        self.position = self.after_tail();
+        Ok(bytes)
+    }
+
+    fn after_tail(&self) -> Position {
+        if self.part_lengths.is_empty() {
+            Position::Signature
+        } else {
+            Position::Chunk {
+                section: 1,
+                index: 0,
+            }
+        }
+    }
+
     /// Write a signature only after every declared chunk.
     pub fn signature(&mut self, signature: &Signature) -> Result<[u8; 64], Error> {
         require(
@@ -307,7 +375,9 @@ impl WriteObjectLayout {
         let Position::Chunk { section, index } = self.position else {
             unreachable!("a chunk was checked");
         };
-        if section > 0 && index + 1 < self.part_lengths[section - 1].div_ceil(CHUNK_SIZE as u64) {
+        if section == 0 {
+            self.position = Position::Tail;
+        } else if index + 1 < self.part_lengths[section - 1].div_ceil(CHUNK_SIZE as u64) {
             self.position = Position::Chunk {
                 section,
                 index: index + 1,

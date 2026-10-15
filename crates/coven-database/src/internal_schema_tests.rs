@@ -105,6 +105,7 @@ async fn only_the_spec_tables_are_created() {
                 "_coven_columns",
                 "_coven_constraints",
                 "_coven_conversion_schemas",
+                "_coven_creations",
                 "_coven_data_inputs",
                 "_coven_data_losses",
                 "_coven_data_origins",
@@ -140,6 +141,9 @@ async fn only_the_spec_tables_are_created() {
                 "_coven_lost",
                 "_coven_members",
                 "_coven_operations",
+                "_coven_owner_tables",
+                "_coven_part_leaves",
+                "_coven_part_proofs",
                 "_coven_peer_positions",
                 "_coven_pending",
                 "_coven_pending_resets",
@@ -164,6 +168,7 @@ async fn only_the_spec_tables_are_created() {
                 "_coven_upload_pause",
                 "_coven_uploads",
                 "_coven_user_files",
+                "_coven_write_evidence",
                 "_coven_write_headers",
                 "_coven_write_input_frames",
                 "_coven_write_inputs",
@@ -285,7 +290,7 @@ mod fixture {
      INSERT INTO _coven_boundaries SELECT device,n,'schema',1,audience,device,n,x'00',i,1 FROM fixture;
      INSERT INTO _coven_pending_resets SELECT key,device,device,n FROM fixture;
      INSERT INTO _coven_loaded_audiences SELECT 'audience_' || i FROM fixture;
-     INSERT INTO _coven_raise_captures SELECT 'audience_' || i,2,n,2,x'00',x'00',zeroblob(48) FROM fixture;
+     INSERT INTO _coven_raise_captures SELECT 'audience_' || i,2,n,2,x'00',x'00',zeroblob(64) FROM fixture;
      INSERT INTO _coven_raise_capture_frames SELECT 'audience_' || i,1,x'00' FROM fixture;
      INSERT INTO _coven_local_effects SELECT i,tab,key,audience FROM fixture;
      INSERT INTO _coven_local_effect_causes SELECT i,device,n FROM fixture;
@@ -302,6 +307,11 @@ mod fixture {
      INSERT INTO _coven_write_headers SELECT device,n,x'00' FROM fixture;
      INSERT INTO _coven_authored_parts SELECT CAST(device || n AS BLOB),audience,x'00',1 FROM fixture;
      INSERT INTO _coven_authored_changes SELECT CAST(device || n AS BLOB),audience,tab,key,x'00',NULL FROM fixture;
+     INSERT INTO _coven_creations SELECT tab,key,audience,CAST(device || n AS BLOB),x'00' FROM fixture;
+     INSERT INTO _coven_write_evidence SELECT CAST(device || n AS BLOB),x'00',x'00',x'',zeroblob(64) FROM fixture;
+     INSERT INTO _coven_part_leaves SELECT CAST(device || n AS BLOB),audience,zeroblob(32) FROM fixture;
+     INSERT INTO _coven_part_proofs SELECT CAST(device || n AS BLOB),audience,x'00' FROM fixture;
+     INSERT INTO _coven_owner_tables SELECT DISTINCT 'table_' || i FROM fixture;
      INSERT INTO _coven_table_origins SELECT i,tab,1,tab FROM fixture;
      INSERT INTO _coven_column_origins SELECT i,tab,'column_' || i,1,tab,'column_' || i FROM fixture;
      INSERT INTO _coven_conversion_schemas SELECT i,x'00',x'00',x'00',x'00' FROM fixture;
@@ -492,7 +502,7 @@ mod source {
         );
         let mut statements = Vec::new();
         for (file, source) in &sources {
-            if file == "internal_schema.rs" {
+            if file == "internal_schema.rs" || file == "internal_schema_ownership.rs" {
                 // The fixture explains each initial DDL statement before executing
                 // it; generated trigger bodies are explained separately below.
                 continue;

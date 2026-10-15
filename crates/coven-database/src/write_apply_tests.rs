@@ -173,6 +173,7 @@ async fn failure_after_every_remote_mutation_rolls_back_rows_metadata_and_notifi
                     published: crate::test_utils::published(
                         coven_format::value::StorageTime::UNIX_EPOCH,
                     ),
+                    authorship: crate::test_utils::TestAuthorship::write(&incoming),
                     header: encoder.header().clone(),
                     parts: (0..incoming.parts.len())
                         .map(|i| {

@@ -39,25 +39,40 @@ fn walk_write(
     header: &[u8],
     lengths: &[u64],
     mut visit: impl FnMut(ObjectChunk, &[u8]),
-) -> Result<Signature, Error> {
+) -> Result<(crate::sealed_write::HeaderTail, Signature), Error> {
     let length = WriteObjectPrefix::length(bytes)?;
     let prefix_bytes = take(&mut bytes, length)?;
     let prefix = WriteObjectPrefix::decode(prefix_bytes)?;
     assert_eq!(prefix.encode()?, prefix_bytes);
     let mut writer = WriteObjectLayout::new(prefix.clone(), header, lengths.to_vec())?;
-    let mut layout = WriteObjectLayout::new(prefix, header, lengths.to_vec())?;
-    while layout.next_chunk().is_some() {
-        let length = layout.chunk_length(bytes)?;
-        let piece = take(&mut bytes, length)?;
-        let (coordinate, sealed) = layout.decode_chunk(piece)?;
-        assert_eq!(writer.encode_chunk(sealed)?, piece);
-        visit(coordinate, sealed);
+    let mut layout = WriteObjectLayout::new(prefix.clone(), header, lengths.to_vec())?;
+    let mut tail = None;
+    loop {
+        while layout.next_chunk().is_some() {
+            let length = layout.chunk_length(bytes)?;
+            let piece = take(&mut bytes, length)?;
+            let (coordinate, sealed) = layout.decode_chunk(piece)?;
+            assert_eq!(writer.encode_chunk(sealed)?, piece);
+            visit(coordinate, sealed);
+        }
+        if tail.is_some() {
+            break;
+        }
+        // The roots and header signature follow the header chunk.
+        let piece = take(
+            &mut bytes,
+            WriteObjectPrefix::tail_length(prefix.part_keys.len()),
+        )?;
+        let decoded = prefix.decode_tail(piece)?;
+        assert_eq!(writer.tail(&decoded)?, piece);
+        layout.tail(&decoded)?;
+        tail = Some(decoded);
     }
     let signature = layout.read_signature(bytes)?;
     assert_eq!(writer.signature(&signature)?, bytes);
     layout.finish(&[])?;
     writer.finish(&[])?;
-    Ok(signature)
+    Ok((tail.expect("read the tail"), signature))
 }
 
 fn walk_snapshot(
@@ -101,6 +116,8 @@ fn sealed_write_fixture_opens_both_parts_and_reseals_identically() {
         .open_object_chunk(WRITE_PATH, prefix_bytes, 0, 0, sealed_header)
         .unwrap();
     let header = WriteHeaderFrame::decode(&header_bytes).unwrap();
+    // The row change carries the 128 KiB value once; its one operation is
+    // that same change, written without repeating it.
     assert_eq!(header.parts[0].chunk_count(), 3);
     assert_eq!(header.parts.len(), 2);
     let lengths: Vec<_> = header.parts.iter().map(|p| p.plaintext_length).collect();
@@ -114,8 +131,15 @@ fn sealed_write_fixture_opens_both_parts_and_reseals_identically() {
         .map(|p| PartDecoder::new(p).unwrap())
         .collect();
     let mut rows = [Vec::new(), Vec::new()];
-    let signature = walk_write(&bytes, &header_bytes, &lengths, |coordinate, sealed| {
+    let (tail, signature) = walk_write(&bytes, &header_bytes, &lengths, |coordinate, sealed| {
         encoded.extend(writer.encode_chunk(sealed).unwrap());
+        if coordinate.section == 0 {
+            let start = encoded.len();
+            let tail = prefix
+                .decode_tail(&bytes[start..start + WriteObjectPrefix::tail_length(2)])
+                .unwrap();
+            encoded.extend(writer.tail(&tail).unwrap());
+        }
         let keys = match coordinate.section {
             0 | 1 => {
                 assert_eq!(coordinate.key, store_key().id());
@@ -158,16 +182,45 @@ fn sealed_write_fixture_opens_both_parts_and_reseals_identically() {
         decoder.finish().unwrap();
     }
     let expected = test_utils::chunked_write();
-    for (rows, part) in rows.into_iter().zip(expected.parts) {
+    for (rows, part) in rows.iter().zip(&expected.parts) {
         assert_eq!(
             rows,
-            part.rows
+            &part
+                .rows
                 .iter()
                 .cloned()
                 .map(crate::dismissal::WriteFrame::Change)
+                .chain(
+                    part.executions
+                        .iter()
+                        .cloned()
+                        .map(crate::dismissal::WriteFrame::Execution)
+                )
                 .collect::<Vec<_>>()
         );
     }
+    // Python's independently parsed leaves and keyed tree give the roots the
+    // header signature covers.
+    for ((part, root), hasher) in expected.parts.iter().zip(&tail.roots).zip([
+        store_key().derive().authorship_hasher(),
+        circle_key().derive().authorship_hasher(),
+    ]) {
+        assert_eq!(
+            crate::authorship::root(&hasher, &crate::authorship::part_leaves(part)).unwrap(),
+            *root
+        );
+    }
+    let header_chunk = &bytes[prefix_length..prefix_length + chunk_length];
+    test_utils::member()
+        .signing
+        .verify_write_header(
+            WRITE_PATH,
+            prefix_bytes,
+            header_chunk,
+            &tail.roots,
+            &tail.signature,
+        )
+        .unwrap();
     encoded.extend(writer.signature(&signature).unwrap());
     writer.finish(&[]).unwrap();
     assert_eq!(encoded, bytes);

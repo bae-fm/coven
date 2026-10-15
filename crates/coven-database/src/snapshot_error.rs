@@ -43,6 +43,15 @@ pub enum SnapshotError {
         /// The snapshot's store-log positions not yet present locally.
         missing: Vec<coven_format::value::EntryId>,
     },
+    /// Authenticating another member's write that the snapshot carries needs
+    /// a key this device has not opened yet (§8.8, D9): loading waits for it.
+    #[error("snapshot write evidence needs key {key} of {audience:?}")]
+    KeyUnavailable {
+        /// The audience whose key seals the evidence.
+        audience: coven_merge::Audience,
+        /// The key the write named.
+        key: coven_foundation::id_source::KeyId,
+    },
     /// Required gap writes or causal predecessors were not supplied.
     #[error("reload is missing writes {missing:?}")]
     MissingWrites {

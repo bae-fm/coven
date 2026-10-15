@@ -1219,8 +1219,28 @@ Audience-move destination readability remains separately proved by
 membership. It confers no permission to forge a child's values. Owner identity
 travels with copies. Transporting snapshots, discovering unreadable evidence,
 SQL capture, local commit rollback, schema conversion, and atomic installation
-remain implementation obligations. The existing Rust differential paths are
-unchanged; this package adds no Rust ownership implementation or differential.
+remain implementation obligations.
+
+**Rust differentials.** `MergeRunner`'s `creation` mode reports each row's
+`genWrite r 1`, the creation `selected_creation` characterizes.
+`creation_differential_histories` receives generated concurrent creations,
+updates, deletes and reinserts of owner-table rows in several causal orders
+through the real database and compares each row's retained creation with it.
+The `effects` mode evaluates `resolvedSchema` derivations with `evaluate` and
+`verifies`. `captured_actions_are_the_models_consequences` runs SQL deletes,
+referenced-key updates and compound and transitive actions on SQLite,
+rebuilds each captured foreign-key action's `Reference` from the schema and
+its cause's own captured step, and requires the model's exact consequence.
+That checks the author's capture against B18's effects; the receiver's
+reconstruction of those causes without labels is not yet compared. The storage
+model's comparison is in [storage.md](storage.md#signed-roots-and-row-authorship).
+
+```sh
+COVEN_MERGE_LEAN="$PWD/spec/proofs/merge/.lake/build/bin/mergeRunner" \
+  cargo test -p coven-database -- --ignored --exact \
+  ownership::tests::creation_differential_histories \
+  execution_capture::tests::lean::captured_actions_are_the_models_consequences
+```
 
 ### B19 Foreign keys on generated columns
 

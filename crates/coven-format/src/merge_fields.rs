@@ -58,6 +58,31 @@ pub fn decode_write_id(bytes: &[u8]) -> Result<WriteId, Error> {
     Ok(value)
 }
 
+/// Encode an original row change's identity using its D5 field bytes.
+pub fn encode_change_id(value: &crate::write_sources::ChangeId) -> Result<Vec<u8>, Error> {
+    crate::value::positive(value.write.number)?;
+    crate::value::row(&value.row)?;
+    encode(value)
+}
+
+/// Decode exactly one original row change identity.
+pub fn decode_change_id(bytes: &[u8]) -> Result<crate::write_sources::ChangeId, Error> {
+    let value: crate::write_sources::ChangeId = decode(bytes)?;
+    crate::value::positive(value.write.number)?;
+    crate::value::row(&value.row)?;
+    Ok(value)
+}
+
+/// Encode a retained authorship opening using its D7 field bytes.
+pub fn encode_multiproof(value: &crate::authorship::Multiproof) -> Result<Vec<u8>, Error> {
+    encode(value)
+}
+
+/// Decode a retained authorship opening.
+pub fn decode_multiproof(bytes: &[u8]) -> Result<crate::authorship::Multiproof, Error> {
+    decode(bytes)
+}
+
 /// Encode a had-read set using its snapshot field bytes.
 pub fn encode_write_positions(value: &WritePositions) -> Result<Vec<u8>, Error> {
     value.validate()?;
@@ -282,11 +307,13 @@ pub fn decode_write_header(bytes: &[u8]) -> Result<crate::write::WriteHeader, Er
     decode(bytes)
 }
 
-/// Encode a received row change or dismissal as its D5 frame for local retention.
+/// Encode a received row change, execution or dismissal as its D5 frame for
+/// local retention.
 /// Decoding with `WriteFrame::decode` checks it again before it is reapplied.
 pub fn encode_write_frame(value: &crate::dismissal::WriteFrame) -> Result<Vec<u8>, Error> {
     match value {
         crate::dismissal::WriteFrame::Change(row) => crate::encode_frame(2, row),
+        crate::dismissal::WriteFrame::Execution(execution) => crate::encode_frame(13, execution),
         crate::dismissal::WriteFrame::Dismissal(dismissal) => crate::encode_frame(3, dismissal),
     }
 }

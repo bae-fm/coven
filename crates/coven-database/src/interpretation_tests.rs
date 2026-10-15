@@ -136,6 +136,7 @@ impl QueueHistory {
             writes.push(WriteRecord {
                 header,
                 parts: vec![WritePart {
+                    executions: Vec::new(),
                     audience: Audience::Store,
                     rows: vec![insert(row(n), n)],
                     dismissals: Vec::new(),
@@ -265,6 +266,7 @@ impl QueueHistory {
                     .collect(),
             );
             write.parts = vec![WritePart {
+                executions: Vec::new(),
                 audience: Audience::Store,
                 rows,
                 dismissals: Vec::new(),
@@ -422,6 +424,8 @@ fn insert(target: RowId, n: usize) -> RowChange {
         .unwrap()
         .remove(0);
     RowChange {
+        creator: None,
+        execution: Default::default(),
         row: target,
         change: Change {
             generation: 0,
@@ -568,6 +572,7 @@ async fn rust_result(history: &QueueHistory, received: &[WriteId], streamed: boo
         } else {
             Vec::new()
         },
+        std::sync::Arc::new(crate::test_utils::TestAuthorship),
     );
     reload.boundaries = Some(vec![BoundaryCoverage {
         entry: RESET,
@@ -686,7 +691,7 @@ fn observed(db: &Database, history: &QueueHistory, received: &[WriteId]) -> Valu
             ),
             |change| {
                 verdicts.insert(
-                    (history.index(change.header.position), change.change.row.clone()),
+                    (history.index(change.header.position), change.change.row().clone()),
                     change.verdict,
                 );
                 Ok::<_, crate::DbError>(())

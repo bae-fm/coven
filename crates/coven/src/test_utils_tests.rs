@@ -188,12 +188,26 @@ fn open_write(
         .unwrap();
     let header = WriteHeaderFrame::decode(&plain).unwrap();
     let mut layout = prefix
+        .clone()
         .opened_header(
             &plain,
             header.parts.iter().map(|p| p.plaintext_length).collect(),
         )
         .unwrap();
-    let mut offset = prefix_len + header_len;
+    // The part roots and header signature follow the sealed header (D9).
+    let tail_start = prefix_len + header_len;
+    let tail_end = tail_start + WriteObjectPrefix::tail_length(prefix.part_keys.len());
+    let tail = prefix.decode_tail(&bytes[tail_start..tail_end]).unwrap();
+    signer
+        .verify_write_header(
+            path.as_str(),
+            aad,
+            &bytes[prefix_len..tail_start],
+            &tail.roots,
+            &tail.signature,
+        )
+        .unwrap();
+    let mut offset = tail_end;
     while let Some(chunk) = layout.next_chunk() {
         let length = layout.chunk_length(&bytes[offset..]).unwrap();
         let (_, sealed) = layout
@@ -216,7 +230,23 @@ fn open_write(
         .verify_object(path.as_str(), &hash.finish(), &signature)
         .unwrap();
     layout.finish(&[]).unwrap();
-    coven_format::write_stream::decode_plaintext(&plain).unwrap()
+    let record = coven_format::write_stream::decode_plaintext(&plain).unwrap();
+    for (part, (root, key)) in record
+        .parts
+        .iter()
+        .zip(tail.roots.iter().zip(&prefix.part_keys))
+    {
+        let keys = match part.audience {
+            Audience::Store => ring.store_key(*key).unwrap().derive(),
+            Audience::Circle(circle) => ring.circle_key(circle, *key).unwrap().derive(),
+        };
+        let leaves = coven_format::authorship::part_leaves(part);
+        assert_eq!(
+            coven_format::authorship::root(&keys.authorship_hasher(), &leaves).unwrap(),
+            *root
+        );
+    }
+    record
 }
 
 async fn assert_uploaded(

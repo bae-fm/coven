@@ -53,11 +53,14 @@ impl Dismissal {
     }
 }
 
-/// One decoded write-part frame; row changes precede dismissals of that row.
+/// One decoded write-part frame; a row's change or execution precedes
+/// dismissals of that row.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum WriteFrame {
     /// An insert, update or delete of a row.
     Change(crate::write::RowChange),
+    /// SQL operations on a row with no net change.
+    Execution(crate::write::RowExecution),
     /// An acknowledgement of a lost cell.
     Dismissal(Dismissal),
 }
@@ -67,16 +70,18 @@ impl WriteFrame {
     pub fn encode(&self) -> Result<Vec<u8>, Error> {
         match self {
             Self::Change(row) => row.encode(),
+            Self::Execution(execution) => execution.encode(),
             Self::Dismissal(dismissal) => dismissal.encode(),
         }
     }
 
-    /// Decode a row change or dismissal, refusing other frame kinds.
+    /// Decode a row change, execution or dismissal, refusing other frame kinds.
     pub fn decode(bytes: &[u8]) -> Result<Self, Error> {
         let (kind, _) = decode_frame(bytes)?;
         match kind {
             2 => crate::write::RowChange::decode(bytes).map(Self::Change),
             3 => Dismissal::decode(bytes).map(Self::Dismissal),
+            13 => crate::write::RowExecution::decode(bytes).map(Self::Execution),
             tag => Err(Error::UnknownTag {
                 field: "write record kind",
                 tag,
@@ -87,6 +92,7 @@ impl WriteFrame {
     pub(crate) fn key(&self) -> (RowId, Option<(String, WriteId)>) {
         match self {
             Self::Change(row) => (row.row.clone(), None),
+            Self::Execution(execution) => (execution.row.clone(), None),
             Self::Dismissal(dismissal) => (
                 dismissal.row.clone(),
                 Some((dismissal.column.clone(), dismissal.write)),

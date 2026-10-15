@@ -153,19 +153,29 @@ async fn write_sealing_binds_each_chunks_plaintext_and_the_complete_prefix() {
         let first = seal(&device, 1, false).await;
         assert_eq!(first, seal(&device, 1, false).await);
         assert!(
-            first.len() > 4,
-            "prefix, header, multiple part chunks, signature"
+            first.len() > 5,
+            "prefix, header, roots and header signature, multiple part chunks, signature"
         );
+        // A changed header keeps the parts and their roots; the header
+        // signature covers the new header.
         let header = seal(&device, 1, true).await;
         assert_eq!(first[0], header[0]);
         assert_ne!(first[1][4..28], header[1][4..28]);
-        assert_eq!(first[2..first.len() - 1], header[2..header.len() - 1]);
+        assert_eq!(first[2][..32], header[2][..32]);
+        assert_ne!(first[2], header[2]);
+        assert_eq!(first[3..first.len() - 1], header[3..header.len() - 1]);
         let prefix = seal(&device, 2, false).await;
         assert_ne!(first[0], prefix[0]);
-        for (a, b) in first[1..first.len() - 1]
-            .iter()
-            .zip(&prefix[1..prefix.len() - 1])
-        {
+        assert_ne!(
+            first[2], prefix[2],
+            "the header signature covers the prefix"
+        );
+        let chunks = |pieces: &[Vec<u8>]| {
+            std::iter::once(pieces[1].clone())
+                .chain(pieces[3..pieces.len() - 1].iter().cloned())
+                .collect::<Vec<_>>()
+        };
+        for (a, b) in chunks(&first).iter().zip(&chunks(&prefix)) {
             assert_ne!(
                 a[4..28],
                 b[4..28],
@@ -175,14 +185,15 @@ async fn write_sealing_binds_each_chunks_plaintext_and_the_complete_prefix() {
         sealed.push(first);
     }
     assert_eq!(sealed[0][..2], sealed[1][..2], "same prefix and header");
+    assert_ne!(sealed[0][2], sealed[1][2], "the part's root changes");
     assert_ne!(
-        sealed[0][2][4..28],
-        sealed[1][2][4..28],
+        sealed[0][3][4..28],
+        sealed[1][3][4..28],
         "changed part plaintext"
     );
     assert_eq!(
-        sealed[0][3..sealed[0].len() - 1],
-        sealed[1][3..sealed[1].len() - 1]
+        sealed[0][4..sealed[0].len() - 1],
+        sealed[1][4..sealed[1].len() - 1]
     );
 }
 

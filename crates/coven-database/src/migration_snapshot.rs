@@ -135,6 +135,18 @@ impl MigrationCapture {
         Ok(())
     }
 
+    /// Capture the synced state now, before any statement of the batch.
+    pub(crate) fn capture_now(
+        &mut self,
+        db: &DatabaseConnection,
+        before: &Schema,
+    ) -> Result<(), DbError> {
+        if self.snapshot.is_none() {
+            self.snapshot = Some(MigrationSnapshot::capture(db, before, &self.synced)?);
+        }
+        Ok(())
+    }
+
     pub(crate) fn discard(&mut self, db: &DatabaseConnection) -> Result<(), DbError> {
         if let Some(snapshot) = self.snapshot.take() {
             snapshot.drop(db)?;

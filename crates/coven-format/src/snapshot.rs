@@ -1,4 +1,4 @@
-//! Snapshots stream a header, five ordered sections and an end marker (§15).
+//! Snapshots stream a header, eight ordered sections and an end marker (§15).
 //! The caller stages records and supplies the applied write metadata to merge.
 
 use crate::encode_frame_with;
@@ -21,12 +21,12 @@ pub struct SnapshotHeader {
     pub writes: WritePositions,
     /// Consumed store-log positions from the sealed prefix.
     pub store_log: EntryPositions,
-    /// Counts: synced rows, applied writes, columns, merged rows, losses and
-    /// authored changes.
+    /// Counts: synced rows, applied writes, columns, merged rows, losses,
+    /// authored changes, creations and write evidence.
     pub counts: [u64; SECTIONS],
 }
 /// The number of record sections (D7).
-pub const SECTIONS: usize = 6;
+pub const SECTIONS: usize = 8;
 impl Wire for [u64; SECTIONS] {
     fn put(&self, out: &mut Encoder) -> Result<(), Error> {
         for n in self {
@@ -65,6 +65,10 @@ pub enum SnapshotRecord {
     Loss(Loss),
     /// An original row change and its verdict, kept as source evidence.
     Authored(AuthoredChange),
+    /// A row's selected original creation (§8.8).
+    Creation(crate::authorship::Creation),
+    /// Another member's write header, roots and openings in this audience.
+    Evidence(crate::authorship::WriteEvidence),
 }
 impl SnapshotRecord {
     pub(crate) fn put(&self, out: &mut Encoder) -> Result<(), Error> {
@@ -76,6 +80,8 @@ impl SnapshotRecord {
             Self::Merge(v) => v.put(out),
             Self::Loss(v) => v.put(out),
             Self::Authored(v) => v.put(out),
+            Self::Creation(v) => v.put(out),
+            Self::Evidence(v) => v.put(out),
         }
     }
     pub(crate) fn get(input: &mut Decoder<'_>, oracle: &impl WriteOracle) -> Result<Self, Error> {
@@ -86,6 +92,8 @@ impl SnapshotRecord {
             3 => Ok(Self::Merge(MergeRow::get(input, oracle)?)),
             4 => Ok(Self::Loss(Wire::get(input)?)),
             5 => Ok(Self::Authored(Wire::get(input)?)),
+            6 => Ok(Self::Creation(Wire::get(input)?)),
+            7 => Ok(Self::Evidence(Wire::get(input)?)),
             tag => Err(Error::UnknownTag {
                 field: "snapshot section",
                 tag,
@@ -103,6 +111,8 @@ impl SnapshotRecord {
             Self::Merge(v) => v.validate(),
             Self::Loss(v) => v.validate(),
             Self::Authored(v) => v.validate(),
+            Self::Creation(v) => v.validate(),
+            Self::Evidence(v) => v.validate(),
         }
     }
     fn section(&self) -> u8 {
@@ -113,6 +123,8 @@ impl SnapshotRecord {
             Self::Merge(_) => 3,
             Self::Loss(_) => 4,
             Self::Authored(_) => 5,
+            Self::Creation(_) => 6,
+            Self::Evidence(_) => 7,
         }
     }
     fn key(&self) -> RecordKey {
@@ -123,6 +135,8 @@ impl SnapshotRecord {
             Self::Merge(v) => RecordKey::Row(v.state.row().clone()),
             Self::Loss(v) => RecordKey::Loss(v.key()),
             Self::Authored(v) => RecordKey::Change(v.id()),
+            Self::Creation(v) => RecordKey::Row(v.row.clone()),
+            Self::Evidence(v) => RecordKey::Write(v.write),
         }
     }
     fn check_header(&self, h: &SnapshotHeader) -> Result<(), Error> {
@@ -169,10 +183,16 @@ impl SnapshotRecord {
                 }
                 Ok(())
             }
+            Self::Creation(v) => {
+                audience(&v.row)?;
+                covered(v.write)?;
+                covered(v.creator.write)
+            }
+            Self::Evidence(v) => covered(v.write),
             Self::Authored(v) => {
-                audience(&v.change.row)?;
+                audience(v.change.row())?;
                 covered(v.header.position)?;
-                for source in v.change.sources.changes() {
+                for source in v.change.sources() {
                     covered(source.write)?;
                 }
                 match &v.verdict {

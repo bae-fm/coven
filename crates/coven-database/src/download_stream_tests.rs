@@ -8,6 +8,7 @@ fn stream(record: &WriteRecord) -> DownloadedWriteStream<Cursor<Vec<u8>>> {
     let encoder = WriteEncoder::new(record).unwrap();
     DownloadedWriteStream {
         published: crate::test_utils::published(coven_format::value::StorageTime::UNIX_EPOCH),
+        authorship: crate::test_utils::TestAuthorship::write(record),
         header: encoder.header().clone(),
         parts: (0..record.parts.len())
             .map(|part| {
@@ -97,6 +98,7 @@ async fn downloads_refuse_a_descendant_in_another_audience_than_its_parent() {
     record.parts.push(WritePart {
         audience,
         rows: vec![child],
+        executions: Vec::new(),
         dismissals: Vec::new(),
     });
     source.close().await.unwrap();
@@ -466,6 +468,7 @@ mod memory {
             assert!(held.iter().map(|bytes| bytes.len()).sum::<usize>() > 32 * 1024 * 1024);
             let input = || DownloadedWriteStream {
                 published: crate::test_utils::published(coven_format::value::StorageTime::UNIX_EPOCH),
+                authorship: prepared.authorship.clone(),
                 header: prepared.header.clone(),
                 parts: held.iter().map(|bytes| DownloadedPartStream::Opened(Cursor::new(bytes.clone()))).collect(),
             };

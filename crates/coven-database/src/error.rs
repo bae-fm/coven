@@ -612,6 +612,13 @@ pub enum SchemaError {
         /// The repeated table.
         table: String,
     },
+    /// A synced table's `owner_only` declaration changed without a breaking
+    /// migration to raise the schema (§17.1).
+    #[error("synced table {table} changed its owner_only declaration without a migration")]
+    OwnerOnlyChanged {
+        /// The table whose declaration changed.
+        table: String,
+    },
     /// A table declares both `audience_column` and `audience_from` (E2).
     #[error("synced table {table} declares two audience sources")]
     TwoAudiences {

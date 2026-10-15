@@ -66,7 +66,11 @@ async fn reset(target: &crate::Database, number: u64) -> EntryId {
 
 async fn empty(target: &crate::Database) {
     let log = target.store_log().await.unwrap();
-    let mut reload = SnapshotReload::<std::io::Empty, std::io::Empty>::new(vec![], vec![]);
+    let mut reload = SnapshotReload::<std::io::Empty, std::io::Empty>::new(
+        vec![],
+        vec![],
+        std::sync::Arc::new(crate::test_utils::TestAuthorship),
+    );
     reload.snapshots = vec![SnapshotSource::Empty(Audience::Store)];
     reload.boundaries = Some(
         log.boundaries()
@@ -118,7 +122,11 @@ async fn dropping_a_loaded_reset_restores_rows_and_suppressed_judgments() {
         })
         .await
         .unwrap();
-    let mut reload = SnapshotReload::<std::io::Empty, std::io::Empty>::new(vec![], vec![]);
+    let mut reload = SnapshotReload::<std::io::Empty, std::io::Empty>::new(
+        vec![],
+        vec![],
+        std::sync::Arc::new(crate::test_utils::TestAuthorship),
+    );
     reload.snapshots = vec![SnapshotSource::Empty(Audience::Store)];
     reload.boundaries = Some(vec![BoundaryCoverage {
         entry,
@@ -153,7 +161,11 @@ async fn dropping_a_raise_rejudges_retained_late_writes() {
     let target = target_store.schema(notes(), NOTES).await.unwrap();
     let boundary = target.schema_fixture(Audience::Store, 2).await.unwrap();
     let entry = target.check_boundary_fixture(boundary).await.unwrap();
-    let mut reload = SnapshotReload::<std::io::Empty, std::io::Empty>::new(vec![], vec![]);
+    let mut reload = SnapshotReload::<std::io::Empty, std::io::Empty>::new(
+        vec![],
+        vec![],
+        std::sync::Arc::new(crate::test_utils::TestAuthorship),
+    );
     reload.snapshots = vec![SnapshotSource::Empty(Audience::Store)];
     reload.boundaries = Some(vec![BoundaryCoverage {
         entry,
@@ -567,7 +579,11 @@ async fn a_reload_covering_unreceived_writes_reloads_again_when_its_boundary_dro
         },
     )
     .await;
-    let mut reload = SnapshotReload::<_, std::io::Empty>::new(vec![snapshot.input()], vec![]);
+    let mut reload = SnapshotReload::<_, std::io::Empty>::new(
+        vec![snapshot.input()],
+        vec![],
+        std::sync::Arc::new(crate::test_utils::TestAuthorship),
+    );
     reload.boundaries = Some(vec![BoundaryCoverage {
         entry,
         included: WritePositions(vec![writes[1].header.position]),

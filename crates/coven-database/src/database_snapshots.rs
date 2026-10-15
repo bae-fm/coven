@@ -67,6 +67,7 @@ impl Database {
         prefix: coven_format::sealed_snapshot::SnapshotObjectPrefix,
         input: R,
         captured: Option<crate::CapturedState>,
+        authorship: std::sync::Arc<dyn crate::Authorship>,
     ) -> Result<(), DbError> {
         self.call(move |inner| {
             let reader = inner.access.readers.acquire_reader();
@@ -75,6 +76,8 @@ impl Database {
                     reader.read_transaction(|| {
                         inner.access.write_schema.prepare(reader)?;
                         writer.discarded_transaction(|writer| {
+                            // The writer checks its own snapshot as its signer.
+                            let author = crate::ownership::member(writer, inner.access.device)?;
                             crate::snapshot_load::verify(
                                 writer,
                                 reader,
@@ -83,6 +86,10 @@ impl Database {
                                 prefix,
                                 input,
                                 captured,
+                                &crate::snapshot_load::SnapshotSigner {
+                                    authorship: authorship.as_ref(),
+                                    author,
+                                },
                             )
                         })
                     })
@@ -102,6 +109,8 @@ impl Database {
         id: coven_format::store_log::SnapshotId,
         prefix: coven_format::sealed_snapshot::SnapshotObjectPrefix,
         input: R,
+        author: coven_foundation::id_source::MemberId,
+        authorship: std::sync::Arc<dyn crate::Authorship>,
     ) -> Result<
         std::collections::BTreeSet<(
             coven_foundation::id_source::DeviceId,
@@ -119,6 +128,10 @@ impl Database {
                         &id,
                         prefix,
                         input,
+                        &crate::snapshot_load::SnapshotSigner {
+                            authorship: authorship.as_ref(),
+                            author: Some(author),
+                        },
                     )?;
                     super::file_retention::snapshot_references(
                         writer,

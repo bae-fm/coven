@@ -47,7 +47,7 @@ fn metadata_fields_are_the_bytes_in_snapshot_merge_records() {
     )
     .unwrap();
     let mut header = fixture::snapshot_header();
-    header.counts = [0, 0, 0, 1, 0, 0];
+    header.counts = [0, 0, 0, 1, 0, 0, 0, 0];
     let (mut encoder, _) = SnapshotEncoder::start(header).unwrap();
     let frame = encoder
         .record(SnapshotRecord::Merge(merged.clone()))
@@ -132,7 +132,10 @@ fn applied_write_and_loss_fields_match_snapshot_records() {
                 assert!(bytes.ends_with(&verdict));
                 assert_eq!(decode_change_verdict(&verdict).unwrap(), authored.verdict);
             }
-            SnapshotRecord::Column(_) | SnapshotRecord::Merge(_) => {}
+            SnapshotRecord::Column(_)
+            | SnapshotRecord::Merge(_)
+            | SnapshotRecord::Creation(_)
+            | SnapshotRecord::Evidence(_) => {}
         }
     }
     encoder.finish().unwrap();
@@ -572,7 +575,7 @@ fn unnamed_check_rules_retain_full_expressions_in_loss_fields() {
     let bytes = encode_loss(&loss).unwrap();
     assert_eq!(decode_loss(&bytes).unwrap(), loss);
     let mut header = fixture::snapshot_header();
-    header.counts = [0, 0, 0, 0, 1, 0];
+    header.counts = [0, 0, 0, 0, 1, 0, 0, 0];
     let (mut encoder, start) = SnapshotEncoder::start(header.clone()).unwrap();
     let mut decoder =
         crate::snapshot::SnapshotDecoder::start(&start, &fixture::snapshot_prefix(&header))

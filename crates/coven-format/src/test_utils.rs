@@ -117,8 +117,24 @@ pub fn write() -> WriteRecord {
         parts: vec![WritePart {
             dismissals: Vec::new(),
             audience: Audience::Store,
+            executions: vec![transient_execution(Audience::Store)],
             rows: vec![RowChange {
                 row: row(),
+                creator: None,
+                execution: Execution {
+                    steps: vec![Step {
+                        sequence: 0,
+                        change: Change {
+                            generation: 1,
+                            operation: Operation::Update(BTreeMap::from([(
+                                "x".into(),
+                                new.clone(),
+                            )])),
+                        },
+                        key_update: false,
+                    }],
+                    sources: Default::default(),
+                },
                 change: Change {
                     generation: 1,
                     operation: Operation::Update(BTreeMap::from([("x".into(), new)])),
@@ -149,6 +165,42 @@ pub fn write() -> WriteRecord {
                 },
             }],
         }],
+    }
+}
+/// A row the fixture write inserts and deletes again: no net change, two
+/// operations, which still reach the write's authorship leaves (D5).
+pub fn transient_execution(audience: Audience) -> RowExecution {
+    let row = RowId {
+        key: encode_key(&[Value::Text("l".into())]).unwrap(),
+        audience,
+        ..row()
+    };
+    RowExecution {
+        row,
+        execution: Execution {
+            steps: vec![
+                Step {
+                    sequence: 1,
+                    change: Change {
+                        generation: 0,
+                        operation: Operation::Insert(BTreeMap::from([(
+                            "x".into(),
+                            column(Value::Integer(5)),
+                        )])),
+                    },
+                    key_update: false,
+                },
+                Step {
+                    sequence: 2,
+                    change: Change {
+                        generation: 1,
+                        operation: Operation::Delete,
+                    },
+                    key_update: false,
+                },
+            ],
+            sources: Default::default(),
+        },
     }
 }
 /// The public fixture's store key, whose bytes are committed by creation.
@@ -310,7 +362,7 @@ pub fn snapshot_header() -> SnapshotHeader {
             },
         ]),
         store_log: EntryPositions(vec![loss_entry()]),
-        counts: [1, 4, 1, 1, 4, 1],
+        counts: [1, 4, 1, 1, 4, 1, 1, 1],
     }
 }
 /// The fixture's catch-up storage time, with a subsecond fraction.
@@ -357,7 +409,46 @@ pub fn snapshot_records() -> Vec<SnapshotRecord> {
             .map(SnapshotRecord::Loss),
     );
     records.push(SnapshotRecord::Authored(authored_change()));
+    records.push(SnapshotRecord::Creation(creation()));
+    records.push(SnapshotRecord::Evidence(write_evidence()));
     records
+}
+/// The fixture row's selected creation, by device one's first write.
+pub fn creation() -> crate::authorship::Creation {
+    let write = WriteId {
+        device: DeviceId(1),
+        number: 1,
+    };
+    crate::authorship::Creation {
+        row: row(),
+        write,
+        creator: crate::write_sources::ChangeId { write, row: row() },
+    }
+}
+/// Evidence for the fixture write's store part, opening its updated cell.
+pub fn write_evidence() -> crate::authorship::WriteEvidence {
+    let leaves = crate::authorship::part_leaves(&write().parts[0]);
+    let hasher = store_key().derive().authorship_hasher();
+    let proof = crate::authorship::Multiproof::prove(&hasher, &leaves, |leaf| {
+        matches!(leaf, crate::authorship::Leaf::Cell { .. })
+    })
+    .unwrap();
+    let mut header = 7u32.to_be_bytes().to_vec();
+    header.extend([0x23; 24 + 7 + 16]);
+    crate::authorship::WriteEvidence {
+        write: position(),
+        prefix: crate::sealed_write::WriteObjectPrefix {
+            format: crate::FormatVersion::CURRENT,
+            store_key: KeyId(Uuid::from_bytes([1; 16])),
+            part_keys: vec![KeyId(Uuid::from_bytes([1; 16]))],
+        }
+        .encode()
+        .unwrap(),
+        header,
+        roots: vec![crate::authorship::root(&hasher, &leaves).unwrap()],
+        signature: [0x22; 64],
+        proof,
+    }
 }
 /// The fixture write's row change as source evidence, applied by its author.
 pub fn authored_change() -> crate::snapshot_rows::AuthoredChange {
@@ -365,7 +456,7 @@ pub fn authored_change() -> crate::snapshot_rows::AuthoredChange {
     crate::snapshot_rows::AuthoredChange {
         header: write.header,
         complete: true,
-        change: write.parts[0].rows[0].clone(),
+        change: OriginalRow::Change(write.parts[0].rows[0].clone()),
         verdict: crate::snapshot_rows::ChangeVerdict::Applied,
     }
 }
@@ -675,11 +766,14 @@ pub fn chunked_write() -> WriteRecord {
     let mut circle = record.parts[0].clone();
     circle.audience = Audience::Circle(CircleId(Uuid::from_u128(1)));
     circle.rows[0].row.audience = circle.audience.clone();
+    circle.executions = vec![transient_execution(circle.audience.clone())];
     record.parts.push(circle);
-    record.parts[0].rows[0].change.operation = Operation::Update(BTreeMap::from([(
+    let blob = Operation::Update(BTreeMap::from([(
         "x".into(),
         column(Value::Blob(vec![0x41; crate::chunks::CHUNK_SIZE * 2 + 29])),
     )]));
+    record.parts[0].rows[0].change.operation = blob.clone();
+    record.parts[0].rows[0].execution.steps[0].change.operation = blob;
     record
 }
 /// A snapshot with a synced row spanning chunk boundaries.
