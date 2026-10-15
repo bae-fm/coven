@@ -2643,10 +2643,10 @@ pub enum OperationKind {
     CreateCircle,
     /// Seal the circle's history and add a member.
     AddCircleMember,
-    /// An owner's device takes back access under the current replay.
+    /// Delete a circle's rows and publish its deletion.
+    DeleteCircle,
+    /// An owner's device grants or takes back one account's access per replay.
     RevokeAccess,
-    /// An owner's device restores access when replay returns a member.
-    GrantAccess,
     /// Migrate the schema, snapshot it and raise the version.
     SchemaChange,
     /// Reload at the app's request.
