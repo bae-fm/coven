@@ -49,8 +49,6 @@ pub enum Rule {
     Range,
     /// A raise snapshot's schema version is not the version its prefix raises to.
     RaiseVersion,
-    /// A key-copy replacement names a number at or before the damaged copy.
-    CopyReplacement,
 }
 
 /// A typed failure, preserving the field and the failed structural requirement.

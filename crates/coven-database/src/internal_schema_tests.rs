@@ -151,7 +151,6 @@ async fn only_the_spec_tables_are_created() {
                 "_coven_positions",
                 "_coven_positions_post",
                 "_coven_provider_access",
-                "_coven_published_key_copies",
                 "_coven_queued_file_refs",
                 "_coven_raise_capture_frames",
                 "_coven_raise_captures",
@@ -265,7 +264,6 @@ mod fixture {
      INSERT INTO _coven_write_landing_parts SELECT device,n,audience FROM fixture;
      INSERT INTO _coven_store_log_uploads VALUES(counter(1),counter(1),zeroblob(128),CAST(counter(1) || counter(1) AS BLOB),zeroblob(16));
      INSERT INTO _coven_key_publications SELECT n,n FROM fixture;
-     INSERT INTO _coven_published_key_copies SELECT device,n,zeroblob(128) FROM fixture;
      INSERT INTO _coven_log_inputs
        SELECT CASE WHEN i%2=0 THEN 'entry' ELSE 'key' END,device,n,x'00',zeroblob(64) FROM fixture;
      INSERT INTO _coven_log_downloads

@@ -22,10 +22,6 @@ a mismatched S3 key delivery path can leave a made key live and unrecorded
 counterexample to a rule Rust followed until T188: resetting when an own
 key-copy number holds undecodable bytes discards unsent edits and still
 leaves the first phase incomplete ([Undecodable own key copies](#undecodable-own-key-copies)).
-Replacing such a copy by its publisher, the rule that followed, is proved
-safe and completes every reader's first phase once the replacement is kept,
-but two checked histories show damage it never reaches
-([Replacing a damaged key copy](#replacing-a-damaged-key-copy)).
 
 All named results are audited by `CovenStorage/Axioms.lean`. The package uses
 Lean 4.34.1 and its standard library, without additional axioms or unfinished
@@ -668,14 +664,16 @@ keeps the bytes it read and is not held at all
 comparison: a clone that seals copy 1 with other randomness still finds Ana's
 copy there and resets (`live_copies_still_reset`).
 
-So damage at an own copy number never resets, and on its own it leaves the
-read incomplete like any other writer's unreadable copy; T206 then lets its
-publisher replace it ([below](#replacing-a-damaged-key-copy)). A number beyond the reservations is different:
+So damage at an own copy number leaves the read incomplete and waits, like
+any other writer's unreadable copy; §2 already says coven does
+not recover damaged storage. A number beyond the reservations is different:
 its existence proves another copy reserved it, whatever its bytes, since a
 database that is never copied has nothing stored past its reservations (the
 invariant behind `uncopied_waiting_never_resets`). It still resets as
 storage ahead (`key_copy_ahead_resets`). §10 and §11 state this rule, and
-Rust follows it: the scan's own-number reset is gone.
+Rust follows it: the scan's own-number reset is gone, and
+`an_undecodable_own_copy_waits_as_damage` (`key_rotation_tests.rs`) runs
+the corrupted history.
 
 The model leaves out the store log, key selection, sharing, positions, the
 drain of a replaced id (whose retained history keeps the damaged object, so
@@ -684,76 +682,6 @@ catch-up. Corruption here changes the bytes of a stored object; it never
 creates one. Someone planting bytes at an empty path is outside the model:
 §2 trusts members on storage but lets a thief with storage credentials be
 hostile. Undecodable planted bytes are not another copy's object either.
-
-## Replacing a damaged key copy
-
-Waiting on damage, as above, waits for good: create-once forbids rewriting
-the path, and every reader keeps reading the same bytes. T206's rule: the
-device that published the copy reseals the same key to the same recipient
-under its next number and, once that copy is stored, publishes a store-log
-entry naming the damaged number and the replacement. A reader skips an
-undecodable copy that such a kept entry of the copy's writer marks.
-
-[CopyReplacement](storage/CovenStorage/CopyReplacement.lean) extends the
-model above. A copy now carries routing facts: its audience, key id,
-recipient and exact sealing key (D9), which is what §11's exposure rule
-reads. Each database remembers the facts of the copies it confirmed, as
-Rust keeps their bytes. The entry names numbers only, so its writer is the
-device whose log holds it. Like every send, reserving the replacement and
-publishing the entry need the device's own last reading to be complete.
-In that reading the publisher's record of its own confirmed copy stands in
-for undecodable bytes.
-
-**Skipping hides nothing (proved).** In every history a marked copy holds
-damaged, undecodable bytes, and the replacement its writer named holds a
-copy by that writer with the same routing facts (`marked_is_damage`). A
-reader skips only bytes it read as undecodable, which are damage, and the
-replacement carries what they held (`skipped_is_damage`). A reader that
-read the copy before the damage keeps decodable bytes and still observes
-them. A device can mark only its own log's copies, and it marks only a
-copy it read as undecodable.
-
-**The publisher's record is exact (proved).** What a database recorded for
-its own confirmed copy is what that copy held: a reading of the path,
-decodable or not, has the recorded facts (`own_record_matches`). So the
-publisher's observation, with its record standing in, is the one the
-undamaged copy would give, and the publisher keeps its sending authority.
-
-**Readers complete (proved).** Once every listed undecodable object is
-marked, or is the reader's own recorded copy, that reader's next scan
-completes its first phase, whatever bytes it retained
-(`complete_once_marked`). A publisher whose reading is complete, with
-nothing else reserved and its next number free, marks the copy in three
-steps: reserve the replacement with its entry, publish the copy, publish
-the entry (`publisher_marks`). `replaced_copy_completes` runs it: Ana's
-phone publishes copy 1 to Ben, the provider corrupts it, Ben waits, Ana's
-phone completes on its record, replaces the copy with copy 2, and Ben
-completes and observes the same facts at copy 2. A replacement damaged in
-turn is replaced again (`damaged_replacement_replaced_again`), and Ben,
-whose entries name his own log, cannot mark Ana's copy
-(`non_owner_cannot_mark`).
-
-**Where it does not reach (checked counterexamples).** The rule needs the
-publisher to read its copy after the damage. In `owner_read_first_stalls`
-Ana's phone read copy 1 before the provider corrupted it, keeps the bytes
-it read, never sees the damage, and Ben waits however often both scan. In
-`cross_damage_stalls` Ana's and Ben's copies are both corrupted before
-either reads them: each one's record stands in for its own copy, but the
-other's leaves its reading incomplete, so neither has the sending
-authority a replacement needs, and neither ever completes. A removed or
-replaced device sends nothing, so its damaged copies stay as well. §11
-states the rule and these limits.
-
-Rust follows the rule: `_coven_published_key_copies` keeps every confirmed
-copy's bytes; `CopyReading::settle` (`copy_replacement.rs`) skips marked
-copies and stands the device's own confirmed bytes in for its undecodable
-copies, which start a `ReplaceKeyCopy` operation; sealing its entry reseals
-the stood-in copy's prefix at the entry's replacement number.
-`the_publisher_replaces_a_damaged_copy_and_readers_complete` and
-`another_device_cannot_mark_a_copy` (`copy_replacement_tests.rs`) run the
-histories. The model leaves out replay (the entry's authority is that its
-author is a member, and it conflicts with nothing), sharing, key selection,
-positions and failed reads; the store-log model does not know the entry.
 
 ## Nonces
 

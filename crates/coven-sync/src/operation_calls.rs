@@ -371,9 +371,7 @@ impl StoreLogSync {
             Intent::CreateCircle { .. } => "circles.create",
             Intent::AddCircleMember { .. } => "circles.add_member",
             Intent::DeleteCircle { .. } => "circles.delete",
-            Intent::Reset { .. } | Intent::RotateKey { .. } | Intent::ReplaceKeyCopy { .. } => {
-                unreachable!()
-            }
+            Intent::Reset { .. } | Intent::RotateKey { .. } => unreachable!(),
         };
         let data = Data::Entry(EntryWork {
             intent,

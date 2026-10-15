@@ -393,7 +393,6 @@ def changes(sodium):
         b"\x0f" + store_audience() + bytes([3]) * 16 + bytes([0x91]) * 32,
         b"\x0f" + circle_audience(CIRCLE) + bytes([4]) * 16 + bytes([0xA2]) * 32,
         b"\x10" + ANA + pair(sodium, 0x34),
-        b"\x11" + u64(3) + u64(4),
     ]
 
 

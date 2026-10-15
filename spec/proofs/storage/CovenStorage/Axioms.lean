@@ -297,16 +297,3 @@ import CovenStorage
 #print axioms CovenStorage.KeyDelivery.Listing.reset_carry_deletes_recorded_key
 #print axioms CovenStorage.KeyDelivery.Listing.listing_spares_key_the_carry_takes
 #print axioms CovenStorage.KeyDelivery.Listing.same_name_mint_deletes_recorded_key
-#print axioms CovenStorage.CopyReplacement.step_inv
-#print axioms CovenStorage.CopyReplacement.run_inv
-#print axioms CovenStorage.CopyReplacement.marked_is_damage
-#print axioms CovenStorage.CopyReplacement.skipped_is_damage
-#print axioms CovenStorage.CopyReplacement.own_record_matches
-#print axioms CovenStorage.CopyReplacement.complete_once_marked
-#print axioms CovenStorage.CopyReplacement.publisher_marks
-#print axioms CovenStorage.CopyReplacement.Examples.replaced_copy_completes
-#print axioms CovenStorage.CopyReplacement.Examples.owner_read_first_stalls
-#print axioms CovenStorage.CopyReplacement.Examples.non_owner_cannot_mark
-#print axioms CovenStorage.CopyReplacement.Examples.damaged_replacement_replaced_again
-#print axioms CovenStorage.CopyReplacement.Examples.cross_damage_stalls
-#print axioms CovenStorage.CopyReplacement.complete_of_published

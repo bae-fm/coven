@@ -659,10 +659,6 @@ pub fn store_changes() -> Vec<StoreChange> {
             member: m,
             keys: replacement(),
         },
-        StoreChange::ReplaceKeyCopy {
-            damaged: 3,
-            replacement: 4,
-        },
     ]
 }
 /// Every independently decoded ordinary object kind.

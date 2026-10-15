@@ -149,35 +149,6 @@ pub(crate) fn seal(
             .route(member)
             .ok_or(SyncError::Rejected(coven_database::DropReason::NotAllowed))
     };
-    // A replacement reseals exactly what its damaged copy held: this
-    // device's confirmed bytes, which stand in for that copy in the completed
-    // observation, name its audience, key and recipient (§11).
-    let mut reseal = None;
-    if let StoreChange::ReplaceKeyCopy {
-        damaged,
-        replacement,
-    } = &entry.change
-    {
-        let recorded = observation
-            .iter()
-            .find(|copy| {
-                copy.path
-                    .key_copy_position()
-                    .is_some_and(|(writer, number)| {
-                        writer == entry.position.device && number.get() == *damaged
-                    })
-            })
-            .ok_or(SyncError::Rejected(coven_database::DropReason::NotAllowed))?;
-        let next = copies.next_number()?;
-        if next.get() != *replacement {
-            return Err(coven_database::DbError::KeyUploadChanged {
-                writer: entry.position.device,
-                number: next,
-            }
-            .into());
-        }
-        reseal = Some(recorded.prefix.clone());
-    }
     let mut needs = Vec::new();
     let need =
         |audience: Audience, key: KeyId, member: &MemberId, recipient: SealingKey| KeyCopyPrefix {
@@ -259,16 +230,12 @@ pub(crate) fn seal(
         }
         _ => (),
     }
-    // The replacement is sealed even though the damaged copy's prefix is
-    // observed: that copy is what it replaces.
-    for prefix in reseal.into_iter().chain(needs.into_iter().filter(|prefix| {
+    for prefix in needs {
         // A copy to another of the member's sealing keys does not stand in.
-        let observed = observation.iter().any(|copy| copy.prefix == *prefix);
-        if observed {
+        if observation.iter().any(|copy| copy.prefix == prefix) {
             tracing::debug!(?prefix, "entry prerequisite copy already observed");
+            continue;
         }
-        !observed
-    })) {
         copies.push(|path| match prefix.audience {
             Audience::Store => store_copy(
                 path,

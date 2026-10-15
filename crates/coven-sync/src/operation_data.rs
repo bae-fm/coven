@@ -33,11 +33,6 @@ pub(crate) enum Intent {
     DeleteCircle {
         circle: CircleId,
     },
-    /// Reseal this device's own key copy the provider damaged and record
-    /// the replacement (§11).
-    ReplaceKeyCopy {
-        damaged: std::num::NonZeroU64,
-    },
 }
 
 impl Intent {
@@ -48,7 +43,6 @@ impl Intent {
             Self::CreateCircle { .. } => OperationKind::CreateCircle,
             Self::AddCircleMember { .. } => OperationKind::AddCircleMember,
             Self::DeleteCircle { .. } => OperationKind::DeleteCircle,
-            Self::ReplaceKeyCopy { .. } => OperationKind::ReplaceKeyCopy,
         }
     }
 }
@@ -289,7 +283,6 @@ impl Data {
                 Intent::CreateCircle { .. } => "create-circle",
                 Intent::AddCircleMember { .. } => "add-circle-member",
                 Intent::DeleteCircle { .. } => "delete-circle",
-                Intent::ReplaceKeyCopy { .. } => "replace-key-copy",
             },
             Self::Snapshots(task) => match task.job {
                 SnapshotJob::Write {

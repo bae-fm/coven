@@ -3427,7 +3427,7 @@ Carol's tablet:
       that number, and a stored copy beyond it resets the copy
       ([`live_copy_sends`, `key_copy_ahead_resets`](proofs/storage/CovenStorage/IdentityCounters.lean)).
       A number within the reservations whose clear prefix does not decode
-      is storage damage, not a stale copy: this device replaces it (§11).
+      is storage damage, not a stale copy: it waits (§11).
     - Snapshot numbers come from their own sequence: each snapshot
       preparation reserves the next number before sealing, so an abandoned
       attempt's path is never reused (§15). Snapshots compare with the
@@ -3818,38 +3818,14 @@ Carol's tablet:
   copy history without another probe.
   - A copy whose clear prefix does not decode is damage, also at a number
     this device reserved: every copy of a database seals decodable bytes, so
-    it is never another copy's object. It leaves the read incomplete, and no
-    device resets on it. A reset would discard unsent edits, and the new
-    device would read the same bytes, so its first phase would stay
-    incomplete. An own number beyond the reservations still resets as
-    storage ahead, whatever its bytes (§10;
+    it is never another copy's object. It leaves the read incomplete like
+    any other damaged copy, and the device waits; it never resets on it.
+    A reset would discard unsent edits, and the new device would read the
+    same bytes, so its first phase would stay incomplete. An own number
+    beyond the reservations still resets as storage ahead, whatever its
+    bytes (§10;
     [`unreadable_is_damage`, `reset_never_completes`, `uncopied_waiting_never_resets`](proofs/storage/CovenStorage/OwnCopyDamage.lean),
     [`damage_resets_uncopied`](proofs/storage/CovenStorage/OwnCopyDamageExamples.lean)).
-  - Create-once forbids rewriting a damaged copy, so the device that
-    published it replaces it. Each device keeps the exact bytes of every
-    copy it confirmed. When one of its own copies does not decode, those
-    bytes stand in for it in its own reading; they are what the copy held,
-    so its first phase can still complete
-    ([`own_record_matches`](proofs/storage/CovenStorage/CopyReplacement.lean)).
-    With that sending authority it reseals the same key to the same
-    recipient and sealing key under its next number, and once that copy is
-    stored publishes a replace-key-copy entry naming the damaged number and
-    the replacement (D6 tag 17). The entry names numbers in its own log
-    only, so no device can mark another writer's copy.
-  - A reader skips an undecodable copy that a kept replace-key-copy entry
-    of its writer marks, and reads the replacement like any other copy.
-    Bytes it kept from before the damage stay observed. A marked copy is
-    always damage, and its replacement carries its audience, key and
-    recipient, so skipping it hides no exposure. Once every damaged copy a
-    reader holds is marked, or is its own, its first phase completes
-    ([`marked_is_damage`, `skipped_is_damage`, `complete_once_marked`, `publisher_marks`](proofs/storage/CovenStorage/CopyReplacement.lean),
-    [`replaced_copy_completes`](proofs/storage/CovenStorage/CopyReplacementExamples.lean)).
-  - Replacement does not reach every damage, and such a copy leaves its
-    readers waiting with its damaged-copy record (§19.1). A publisher that
-    read its copy before the damage keeps those bytes and never sees it;
-    two writers whose copies are both damaged each wait on the other's
-    and neither can send; a removed or replaced device sends nothing
-    ([`owner_read_first_stalls`, `cross_damage_stalls`](proofs/storage/CovenStorage/CopyReplacementExamples.lean)).
   - An observed copy means its recipient may hold the key, whether or not the
     recipient has downloaded it. Copies remain in storage for good.
   - A key with an exposed copy under the rule above is retired for first
@@ -4354,9 +4330,6 @@ Carol's tablet:
   that already knew of the removal, subject to §11's window for copies made
   after its copy observation (§3). Earlier attempted writes keep their keys on retry;
   provider revocation cuts off access to those objects.
-- A removed or replaced device sends nothing more, so it cannot replace a
-  key copy of its log that the provider damages later; a reader that meets
-  that damage waits with its record (§11, §19.1).
 - A circle the removed member was alone in is deleted by the same entry:
   no one is left who could read it ([§14.7](#147-deleting-a-circle)).
 - Adding a different member concurrently with a removal does not conflict.
@@ -6324,9 +6297,8 @@ holds failures and rejected entries, without making either wait look completed.
   - a missing or damaged sealed key copy. A copy whose clear prefix does not
     decode names no audience, key or recipient, so its record's subject is
     its path and its reason the refusal. Each completed copy reading decides
-    these records as a whole: a copy that now reads, that the reading no
-    longer finds, that its writer's kept entry marks replaced, or that is
-    this device's own confirmed copy (§11), loses its record;
+    these records as a whole: a copy that now reads, or that the reading no
+    longer finds, loses its record;
   - an app schema or object format that needs an update;
   - an unpublished schema raise, pending own uploads or a required reload;
   - a snapshot that cannot be used, a positions object that cannot be

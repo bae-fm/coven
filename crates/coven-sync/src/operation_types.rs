@@ -43,9 +43,6 @@ pub enum OperationKind {
     /// Replace a member's signing and sealing pair: this member's own, with a
     /// candidate kept in identity custody, or a prepared pair as an admin (§9).
     ReplaceMemberKeys,
-    /// Reseal this device's key copy the provider damaged under a new number
-    /// and record the replacement in the store log (§11).
-    ReplaceKeyCopy,
 }
 
 /// A member's replaced S3 key (§13): the new key, which the member keeps

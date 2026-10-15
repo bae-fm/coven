@@ -257,7 +257,6 @@ pub(crate) fn input(h: &History, stored: &[u64], received: &[Vec<usize>]) -> Val
             StoreChange::RotateKey { audience, key, key_hash } => json!({"kind":15,"audience":audience_number(audience),"key":key_number(*key),"key_hash":key_hash}),
             StoreChange::SetAccess { member, access } => json!({"kind":14,"member":member_number(member),"access":serde_json::to_string(access).unwrap()}),
             StoreChange::ReplaceMemberKeys { .. } => unreachable!("CurrentReplay has no member-key replacement"),
-            StoreChange::ReplaceKeyCopy { .. } => unreachable!("CurrentReplay has no key-copy replacement"),
         };
         // Attempt at the latest observed landing; a later stored time is a retry.
         let attempted = past.iter().map(|&p| stored[p]).max().unwrap_or(stored[0]);
