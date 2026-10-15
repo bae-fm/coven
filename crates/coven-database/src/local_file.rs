@@ -155,11 +155,32 @@ pub(crate) fn open(
 /// attachment, without consulting the row: a row retargeted, moved or deleted
 /// since cannot replace or release them (§16.5). The bytes must still match
 /// the captured size and content hash.
-pub(crate) fn open_queued(
+fn open_queued(
     db: &DatabaseConnection,
     directory: &StoreDir,
     reference: &FileRef,
 ) -> Result<Option<LocalFileStream>, LocalFileError> {
+    queued_source(db, reference)?
+        .map(|source| open_source(directory, reference, source))
+        .transpose()
+}
+
+/// Where a queued file's bytes are: the user's original, as recorded, or
+/// coven's own copy.
+pub(crate) enum QueuedSource {
+    Original {
+        path: PathBuf,
+        modified_at: std::time::SystemTime,
+    },
+    Copy(FileName),
+}
+
+/// The source a queued file's entry fixed at attachment; `None` once the
+/// file is no longer queued. Reads only the database.
+pub(crate) fn queued_source(
+    db: &DatabaseConnection,
+    reference: &FileRef,
+) -> Result<Option<QueuedSource>, DbError> {
     let sources = db.query(
         "SELECT u.original,u.modified_at,d.path FROM _coven_file_uploads u
          LEFT JOIN _coven_device_files d ON d.device=u.device AND d.file=u.file
@@ -179,28 +200,36 @@ pub(crate) fn open_queued(
     let Some(source) = sources.into_iter().next() else {
         return Ok(None);
     };
+    match source {
+        (Some(path), Some(modified_at), None) => Ok(Some(QueuedSource::Original {
+            path: crate::user_file::decode_path(path)?,
+            modified_at: crate::user_file::decode_time(&modified_at)?,
+        })),
+        (None, None, Some(name)) => Ok(Some(QueuedSource::Copy(
+            FileName::new(name).map_err(|_| DbError::DamagedDatabase)?,
+        ))),
+        _ => Err(DbError::DamagedDatabase),
+    }
+}
+
+/// Open a queued file's source and check its bytes against the captured
+/// size and content hash. Touches only the disk, never the database.
+pub(crate) fn open_source(
+    directory: &StoreDir,
+    reference: &FileRef,
+    source: QueuedSource,
+) -> Result<LocalFileStream, LocalFileError> {
     let id = reference.id().to_string();
     let lock = directory.lock_read_only()?;
     let (reader, original) = match source {
-        (Some(path), Some(modified_at), None) => {
-            let path = crate::user_file::decode_path(path)?;
-            (
-                FileReader::open_original(
-                    &path,
-                    reference.plaintext_size(),
-                    crate::user_file::decode_time(&modified_at)?,
-                ),
-                Some(path),
-            )
-        }
-        (None, None, Some(name)) => {
-            let name = FileName::new(name).map_err(|_| DbError::DamagedDatabase)?;
-            (
-                directory.file(FileArea::AppProvided, &name).open_reader(),
-                None,
-            )
-        }
-        _ => return Err(DbError::DamagedDatabase.into()),
+        QueuedSource::Original { path, modified_at } => (
+            FileReader::open_original(&path, reference.plaintext_size(), modified_at),
+            Some(path),
+        ),
+        QueuedSource::Copy(name) => (
+            directory.file(FileArea::AppProvided, &name).open_reader(),
+            None,
+        ),
     };
     let reader = reader.map_err(|error| observation(error, &id, original.is_some()))?;
     if !reference
@@ -209,14 +238,14 @@ pub(crate) fn open_queued(
     {
         return Err(changed(&id, original.as_ref()));
     }
-    Ok(Some(LocalFileStream {
+    Ok(LocalFileStream {
         file: Arc::new(LocalFileReader {
             reader,
             _lock: lock,
             id,
             original,
         }),
-    }))
+    })
 }
 
 fn observation(error: ObservationError, id: &str, original: bool) -> LocalFileError {

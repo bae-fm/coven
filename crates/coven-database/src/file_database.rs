@@ -262,14 +262,24 @@ impl FileDatabase {
     }
     /// Open the source an upload sends, from the facts its queue entry fixed at
     /// attachment; later row changes cannot replace them. `None` means the
-    /// file is no longer queued.
+    /// file is no longer queued. Its bytes are checked with no writer held.
     pub async fn open_upload_source(
         &self,
         file: &FileRef,
     ) -> Result<Option<crate::LocalFileStream>, crate::LocalFileError> {
         let file = file.clone();
-        self.run(move |db, _, directory, _| file_ref::open_queued(db, directory, &file))
-            .await
+        match &self.access {
+            FileDatabaseAccess::Writer(database) => {
+                database
+                    .call(move |inner| open_upload_source(&inner.access, &file))
+                    .await
+            }
+            FileDatabaseAccess::Reader(database) => {
+                database
+                    .call(move |access| open_upload_source(access, &file))
+                    .await
+            }
+        }
     }
 
     /// Persist the provider recording after each confirmed change in progress.
@@ -653,6 +663,17 @@ impl Drop for CacheReservation {
             .expect("reservation holds close guard")
             .release_file_reservations(std::iter::once(&self.name));
     }
+}
+/// Find a queued file's source under the writer, then open and check its
+/// bytes once the writer is free: checking reads the whole file (§3.1).
+fn open_upload_source<L>(
+    access: &DatabaseAccess<L>,
+    file: &FileRef,
+) -> Result<Option<crate::LocalFileStream>, crate::LocalFileError> {
+    let source = access.with_writer(|db| file_ref::queued_source(db, file))?;
+    source
+        .map(|source| file_ref::open_source(&access.directory, file, source))
+        .transpose()
 }
 fn changed(count: usize) -> Result<(), DbError> {
     if count == 1 {

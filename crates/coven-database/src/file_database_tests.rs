@@ -863,3 +863,49 @@ async fn a_stalled_cache_read_holds_back_no_app_write() {
     assert_eq!(local_count(&db, "_coven_cache"), 1);
     db.close().await.unwrap();
 }
+
+/// §3.1: opening an upload's source reads the whole copy to check it, with
+/// no writer held. A FIFO in place of the queue's copy stands in for a
+/// stalled disk: opening blocks while an app write commits. Released, it is
+/// no regular file, so opening fails.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_stalled_upload_source_holds_back_no_app_write() {
+    use crate::file_write::tests::{owned_paths, SCHEMA};
+    use std::time::Duration;
+    let store = TestStore::new();
+    let db = store
+        .schema(tables(Provenance::AppProvided), SCHEMA)
+        .await
+        .unwrap();
+    attach(&db, vec![5; 3], true).await.unwrap();
+    let owner = FileDatabase::new(db.clone());
+    let file = owner.uploads().await.unwrap().remove(0).file;
+    let [path] = owned_paths(&store).try_into().unwrap();
+    std::fs::remove_file(&path).unwrap();
+    fifo(&path);
+    let opening = tokio::spawn(async move { owner.open_upload_source(&file).await });
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(!opening.is_finished(), "opening the source is stalled");
+    let written = tokio::time::timeout(
+        Duration::from_secs(5),
+        db.write(|sql| {
+            sql.execute("UPDATE files SET title='while uploading'", [])?;
+            Ok(())
+        }),
+    )
+    .await;
+    // Release the open before judging, so a held writer fails the test
+    // instead of hanging it.
+    let release = path.clone();
+    tokio::task::spawn_blocking(move || {
+        drop(std::fs::OpenOptions::new().write(true).open(release))
+    })
+    .await
+    .unwrap();
+    written
+        .expect("an app write waited for a stalled upload source")
+        .unwrap();
+    assert!(opening.await.unwrap().is_err());
+    db.close().await.unwrap();
+}

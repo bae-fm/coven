@@ -18,7 +18,7 @@ use coven_merge::{Audience, RowId, WriteId};
 
 #[path = "local_file.rs"]
 mod local_file;
-pub(crate) use local_file::{open as open_local, open_queued};
+pub(crate) use local_file::{open as open_local, open_source, queued_source};
 pub use local_file::{LocalFileError, LocalFileStream};
 
 #[derive(Clone, Debug, PartialEq)]
