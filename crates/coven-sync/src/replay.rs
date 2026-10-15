@@ -96,6 +96,11 @@ impl ReplayBatch {
         self.entries.iter().any(|entry| entry.entry.position == id)
     }
 
+    /// The applied entries and those checked into this batch so far.
+    pub(crate) fn entries(&self) -> &[ReplayEntry] {
+        &self.entries
+    }
+
     /// Check a received entry against its own recorded past once that past
     /// has applied: its device's registered owner, then its signature with the
     /// author's key in that view (§9).

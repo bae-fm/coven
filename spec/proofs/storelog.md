@@ -669,7 +669,9 @@ admin's removal introduces no circle key.
 SHA-256. `accepted_copy_checked` checks the recipient, opened audience/id and
 authorized hash; `accepted_copy_authorized` traces that hash to a received
 entry with recorded-past authority. Tentative bytes with no such introduction
-cannot pass this check.
+cannot pass this check. The data package's `KeyPhases.confirm` models the
+scan that holds such a candidate before its entry's checks
+([storelog-data.md](storelog-data.md#results-and-their-assumptions)).
 
 Under an explicit injectivity hypothesis on the hash, `other_bytes_rejected`
 rejects different bytes, and `accepted_copies_unique` permits at most one

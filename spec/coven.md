@@ -3757,7 +3757,9 @@ Carol's tablet:
   - A candidate needed to open its introducing entry is tentative until that
     entry's signature, authority, identity and hash checks succeed. It may
     open that entry for validation, but cannot enter the accepted key set
-    or authorize other data before those checks.
+    or authorize other data before those checks. A forged entry claiming a
+    real key id therefore cannot keep that key from its genuine bytes
+    ([`scan_ignores_unverified`, `genuine_confirmed`, `dependent_accepted`, `planted_key_never_accepted`](proofs/storelog-data/CovenStorelogData/KeyPhases.lean)).
   - A publisher validates its locally authored introduction against the
     caught-up view before reserving it. Its fresh key may seal that introduction
     itself; other first attempts wait until the entry is stored and kept.

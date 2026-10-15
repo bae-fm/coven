@@ -361,6 +361,20 @@ import CovenStorelogData
 #print axioms CovenStorelogData.KeySelection.authorized_introduction_persists
 
 #print axioms CovenStorelogData.KeyPhases.rotation_by_remaining_member
+#print axioms CovenStorelogData.KeyPhases.unverified_keeps_custody
+#print axioms CovenStorelogData.KeyPhases.scan_ignores_unverified
+#print axioms CovenStorelogData.KeyPhases.keep_mem
+#print axioms CovenStorelogData.KeyPhases.confirm_mem
+#print axioms CovenStorelogData.KeyPhases.scan_mem
+#print axioms CovenStorelogData.KeyPhases.scan_accepted
+#print axioms CovenStorelogData.KeyPhases.keep_accepted
+#print axioms CovenStorelogData.KeyPhases.genuine_confirmed
+#print axioms CovenStorelogData.KeyPhases.dependent_accepted
+#print axioms CovenStorelogData.KeyPhases.keep_occupied
+#print axioms CovenStorelogData.KeyPhases.planted_blocks
+#print axioms CovenStorelogData.KeyPhases.unchecked_plants_chosen_bytes
+#print axioms CovenStorelogData.KeyPhases.planted_key_never_accepted
+#print axioms CovenStorelogData.KeyPhases.checked_keeps_genuine_bytes
 #print axioms CovenStorelogData.Access.retry_keeps_work_visible
 
 #print axioms CovenStorelogData.HistoricalExamples.ben_never_stopped

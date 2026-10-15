@@ -8,11 +8,47 @@ use crate::{PendingReason, PendingRecord, PendingSubject};
 use coven_crypto::CryptoError;
 use coven_format::sealed_single::SingleChunkObject;
 
-enum Tentative {
-    Confirmed,
+/// What the copies addressed to this member made of an entry sealed with a
+/// key not introduced in the applied log.
+enum Candidate {
+    /// A candidate opened the entry and matches the commitment of the named
+    /// entry, the entry itself or one opened earlier in this scan.
+    Opened(
+        crate::store_log_object::OpenedEntry,
+        EntryId,
+        coven_crypto::StoreKey,
+    ),
+    /// A candidate opened the entry, whose own bytes then failed.
     Refused(Refusal),
+    /// Neither the entry nor one opened earlier in this scan introduces its key.
     Uncommitted,
+    /// No candidate opened the entry and matched a commitment.
     Waits(PendingReason),
+}
+
+/// One scan's store-key introductions and candidates, all before their
+/// entries' checks (§11). None of them is in custody: once an introduction
+/// has applied, the ordinary copy reading accepts its key.
+#[derive(Default)]
+pub(super) struct Tentative {
+    /// The store-key commitment of each entry this scan opened.
+    commitments: Vec<(EntryId, KeyId, [u8; 32])>,
+    /// The candidate matching one, by its introducing entry.
+    candidates: BTreeMap<EntryId, coven_crypto::StoreKey>,
+}
+
+impl Tentative {
+    /// Note an entry this scan opened, which may introduce a store key.
+    pub(super) fn opened(&mut self, entry: &StoreLogEntry) {
+        if let Some((Audience::Store, key, hash)) = introduction(&entry.change) {
+            self.commitments.push((entry.position, key, hash));
+        }
+    }
+
+    /// The candidate that matched `introducer`'s commitment.
+    pub(super) fn candidate(&self, introducer: EntryId) -> &coven_crypto::StoreKey {
+        &self.candidates[&introducer]
+    }
 }
 
 fn refused(copy: &keys::ObservedCopy, failure: &Refusal) {
@@ -27,6 +63,10 @@ fn refused(copy: &keys::ObservedCopy, failure: &Refusal) {
 pub(super) enum EntryOpening {
     /// The entry, opened with an accepted key; its signature waits for its view.
     Opened(crate::store_log_object::OpenedEntry),
+    /// The entry, opened with this scan's tentative candidate introduced by
+    /// the named entry, possibly itself. It may be checked, but applies only
+    /// once that introduction has applied and the candidate is accepted.
+    Tentative(crate::store_log_object::OpenedEntry, EntryId),
     /// No accepted key opens it yet; its key copy subject says why.
     WaitsForKey,
     /// The entry's own bytes failed a check.
@@ -110,7 +150,7 @@ impl StoreLogSync {
             let PendingSubject::KeyCopy { audience, key, .. } = &record.subject else {
                 unreachable!("filtered key copy subjects")
             };
-            // A key not introduced yet keeps its tentative wait (see `confirm_tentative`).
+            // A key not introduced yet keeps its tentative wait (see `open_candidate`).
             let introduced = introductions
                 .iter()
                 .any(|i| &i.audience == audience && i.key == *key);
@@ -137,13 +177,14 @@ impl StoreLogSync {
 
     /// Open a received entry. Its key is accepted already, or a copy addressed
     /// to this member supplies it. A key not introduced in the applied log is
-    /// tentative: it is confirmed only by opening this entry and matching the
-    /// hash its introduction commits to, in this entry or in one opened earlier
-    /// in the same scan; until then nothing enters custody (§11).
+    /// tentative: a candidate that opens the entry and matches the commitment
+    /// of the entry itself, or of one opened earlier in this scan, joins
+    /// `tentative` and may open later entries of this scan. Nothing enters
+    /// custody before the introduction's checks (§11).
     pub(super) async fn open_entry(
         &self,
         log: &StoreLog,
-        scanned: &[&StoreLogEntry],
+        tentative: &mut Tentative,
         envelope: &SingleChunkObject<'_>,
         path: &ObjectPath,
         key: KeyId,
@@ -169,21 +210,29 @@ impl StoreLogSync {
             self.acquire(&Audience::Store, key, &introductions, member, ring)
                 .await?
         } else {
-            let scanned = scanned
-                .iter()
-                .find_map(|entry| match introduction(&entry.change) {
-                    Some((Audience::Store, introduced, hash)) if introduced == key => Some(hash),
-                    _ => None,
-                });
+            for (introducer, candidate) in &tentative.candidates {
+                if candidate.id() != key {
+                    continue;
+                }
+                match object::open(envelope, path, candidate) {
+                    Ok(entry) => return Ok(EntryOpening::Tentative(entry, *introducer)),
+                    // Another candidate under this id, e.g. a forged one.
+                    Err(Refusal::Decryption { .. }) => continue,
+                    Err(failure) => return Ok(EntryOpening::Refused(failure)),
+                }
+            }
             match self
-                .confirm_tentative(envelope, path, key, scanned, member, ring)
+                .open_candidate(envelope, path, key, &tentative.commitments, member)
                 .await?
             {
-                Tentative::Confirmed => None,
-                Tentative::Refused(failure) => return Ok(EntryOpening::Refused(failure)),
+                Candidate::Opened(entry, introducer, candidate) => {
+                    tentative.candidates.insert(introducer, candidate);
+                    return Ok(EntryOpening::Tentative(entry, introducer));
+                }
+                Candidate::Refused(failure) => return Ok(EntryOpening::Refused(failure)),
                 // Its introduction has not been opened yet in this scan.
-                Tentative::Uncommitted => return Ok(EntryOpening::WaitsForKey),
-                Tentative::Waits(reason) => Some(reason),
+                Candidate::Uncommitted => return Ok(EntryOpening::WaitsForKey),
+                Candidate::Waits(reason) => Some(reason),
             }
         };
         self.record_key_condition(&Audience::Store, key, member, condition.clone())
@@ -194,15 +243,18 @@ impl StoreLogSync {
         })
     }
 
-    async fn confirm_tentative(
+    /// Find the copy addressed to this member whose key opens the entry and
+    /// matches the commitment the entry itself makes, or else one in
+    /// `scanned`. Those entries are unchecked, so the candidate is returned,
+    /// never kept.
+    async fn open_candidate(
         &self,
         envelope: &SingleChunkObject<'_>,
         path: &ObjectPath,
         key: KeyId,
-        scanned: Option<[u8; 32]>,
+        scanned: &[(EntryId, KeyId, [u8; 32])],
         member: &MemberIdentity,
-        ring: &mut Option<StoreKeyring>,
-    ) -> Result<Tentative, SyncError> {
+    ) -> Result<Candidate, SyncError> {
         let storage = self.storage.as_deref().ok_or(SyncError::NoStorage)?;
         let mut refusal = None;
         for copy in keys::read_copies(
@@ -252,32 +304,38 @@ impl StoreLogSync {
                     continue;
                 }
                 // The key opened the entry, whose own bytes then failed.
-                Err(failure) => return Ok(Tentative::Refused(failure)),
+                Err(failure) => return Ok(Candidate::Refused(failure)),
             };
-            let commitment = match introduction(&entry.entry.change) {
-                Some((Audience::Store, introduced, hash)) if introduced == key => Some(hash),
-                _ => scanned,
+            let own = match introduction(&entry.entry.change) {
+                Some((Audience::Store, introduced, hash)) if introduced == key => {
+                    Some((entry.entry.position, key, hash))
+                }
+                _ => None,
             };
-            let Some(commitment) = commitment else {
-                return Ok(Tentative::Uncommitted);
-            };
-            if let Err(error) = candidate.check_hash(&commitment) {
-                let failure = Refusal::WrongIdentity {
-                    cause: Some(Arc::new(error)),
-                };
-                refused(&copy, &failure);
-                refusal.get_or_insert(failure);
-                continue;
+            let mut commitments = own
+                .iter()
+                .chain(scanned)
+                .filter(|(_, introduced, _)| *introduced == key)
+                .peekable();
+            if commitments.peek().is_none() {
+                return Ok(Candidate::Uncommitted);
             }
-            match ring {
-                Some(ring) => ring.insert_store_key(candidate)?,
-                None => *ring = Some(StoreKeyring::new(candidate)),
+            let mut mismatch = None;
+            for (introducer, _, commitment) in commitments {
+                match candidate.check_hash(commitment) {
+                    Ok(()) => return Ok(Candidate::Opened(entry, *introducer, candidate)),
+                    Err(error) => {
+                        mismatch.get_or_insert(error);
+                    }
+                }
             }
-            self.store_keys
-                .persist(ring.as_ref().expect("confirmed keyring"))?;
-            return Ok(Tentative::Confirmed);
+            let failure = Refusal::WrongIdentity {
+                cause: mismatch.map(|error| Arc::new(error) as _),
+            };
+            refused(&copy, &failure);
+            refusal.get_or_insert(failure);
         }
-        Ok(Tentative::Waits(refusal.map_or(
+        Ok(Candidate::Waits(refusal.map_or(
             PendingReason::KeyUnavailable {
                 audience: Audience::Store,
                 key,

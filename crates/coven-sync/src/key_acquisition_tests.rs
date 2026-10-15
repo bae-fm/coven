@@ -300,3 +300,188 @@ async fn recovering_a_creation_from_a_refused_copy_is_that_copys_record() {
     );
     assert!(ana.db.local_store_log().await.unwrap().upload.is_some());
 }
+
+/// D-11-1: someone with storage access plants an entry claiming the id of
+/// Ana's next store key, sealed with chosen bytes, and a copy of those bytes
+/// for Ben. The entry fails its checks, so its bytes never become that key in
+/// Ben's custody, and Ana's genuine rotation and the entry after it, sealed
+/// with the new key, still apply for Ben in one scan (§11).
+#[tokio::test]
+async fn a_forged_introduction_cannot_plant_its_key() {
+    let storage = storage();
+    let (mut ana, mut ben) = household(&storage).await;
+    ben.sync().await;
+    // Ana's rotation to key 3: its copies are stored, its entry is not yet.
+    let own = ana.device().await;
+    let next = ana
+        .log()
+        .await
+        .entries
+        .iter()
+        .filter(|applied| applied.entry.position.device == own)
+        .count() as u64
+        + 1;
+    ana.interrupt_entry(next).await;
+    let key_hash = ana.sync.test_key(Audience::Store, key(3));
+    assert!(ana
+        .sync
+        .make_and_upload_entry(StoreChange::RotateKey {
+            audience: Audience::Store,
+            key: key(3),
+            key_hash,
+        })
+        .await
+        .is_err());
+    ana.restore_storage();
+    let thief = coven_foundation::id_source::DeviceId(9);
+    let chosen = coven_crypto::StoreKey::generate(key(3)).unwrap();
+    let copy = ObjectPath::key_copy(store(1), thief, 1.try_into().unwrap());
+    let sealed = keys::store_copy(
+        &copy,
+        &chosen,
+        &ben.member.member(),
+        &ben.member.keys().public_keys().sealing,
+    )
+    .unwrap();
+    storage.create(&copy, &sealed).await.unwrap();
+    let forged = StoreLogEntry {
+        position: EntryId {
+            device: thief,
+            number: 1,
+        },
+        timestamp: coven_merge::Timestamp::new(5000, 0, thief).unwrap(),
+        author: member(9).member(),
+        had_read: ben.log().await.positions(),
+        change: StoreChange::RotateKey {
+            audience: Audience::Store,
+            key: key(3),
+            key_hash: chosen.hash(),
+        },
+    };
+    let path = object::path(store(1), forged.position);
+    let bytes = object::seal(
+        store(1),
+        &forged,
+        coven_format::FormatVersion::CURRENT,
+        &chosen,
+        &member(9),
+    )
+    .unwrap();
+    storage.create(&path, &bytes).await.unwrap();
+    ben.sync.scan_store_log_once(false).await.unwrap();
+    assert!(!keys::holds(
+        ben.custody.read().unwrap().as_ref(),
+        &Audience::Store,
+        key(3)
+    ));
+    // The refused entry would also stop Ana's own catch-up; that is another
+    // matter, so storage loses it before she publishes.
+    storage.delete(&path).await.unwrap();
+    ana.sync().await;
+    let after = ana.add(&member(3), MemberRole::Member).await;
+    ben.sync.scan_store_log_once(false).await.unwrap();
+    let ring = ben.custody.read().unwrap().unwrap();
+    assert_eq!(ring.store_key(key(3)).unwrap().hash(), key_hash);
+    assert!(ben.log().await.replay.entries.contains_key(&after));
+}
+
+/// An entry sealed with a candidate whose introduction fails its checks does
+/// not apply, even when its own author and signature check out: an unchecked
+/// candidate authorizes no other data (§11, `KeyPhases.admitsDependent`).
+#[tokio::test]
+async fn an_unchecked_candidate_opens_no_applied_entry() {
+    let storage = storage();
+    let (mut ana, mut ben) = household(&storage).await;
+    let mut carol = device(storage.clone(), 9, member(3), store(1)).await;
+    ana.add(&carol.member, MemberRole::Member).await;
+    carol.sync().await;
+    carol.sync.load_new_device("Carol", None).await.unwrap();
+    ben.sync().await;
+    // Writer 5, listed before Carol's 9, introduces chosen bytes as key 3 and
+    // seals Ben a copy. Carol's next entry is sealed with the same bytes.
+    let thief = coven_foundation::id_source::DeviceId(5);
+    let chosen = coven_crypto::StoreKey::generate(key(3)).unwrap();
+    let copy = ObjectPath::key_copy(store(1), thief, 1.try_into().unwrap());
+    let sealed = keys::store_copy(
+        &copy,
+        &chosen,
+        &ben.member.member(),
+        &ben.member.keys().public_keys().sealing,
+    )
+    .unwrap();
+    storage.create(&copy, &sealed).await.unwrap();
+    let positions = ben.log().await.positions();
+    let introduction = StoreLogEntry {
+        position: EntryId {
+            device: thief,
+            number: 1,
+        },
+        timestamp: coven_merge::Timestamp::new(5000, 0, thief).unwrap(),
+        author: member(5).member(),
+        had_read: positions.clone(),
+        change: StoreChange::RotateKey {
+            audience: Audience::Store,
+            key: key(3),
+            key_hash: chosen.hash(),
+        },
+    };
+    let own = carol.device().await;
+    let dependent = StoreLogEntry {
+        position: EntryId {
+            device: own,
+            number: 2,
+        },
+        timestamp: coven_merge::Timestamp::new(6000, 0, own).unwrap(),
+        author: carol.member.member(),
+        // Its own earlier entries are implicit.
+        had_read: coven_format::value::EntryPositions(
+            positions
+                .0
+                .into_iter()
+                .filter(|id| id.device != own)
+                .collect(),
+        ),
+        change: StoreChange::SetAccess {
+            member: carol.member.member(),
+            access: coven_format::MemberAccess::S3AccessKey {
+                access_key_id: "carol".into(),
+                principal: coven_format::S3Principal::Console,
+            },
+        },
+    };
+    for (entry, signer) in [(&introduction, &member(5)), (&dependent, &carol.member)] {
+        let bytes = object::seal(
+            store(1),
+            entry,
+            coven_format::FormatVersion::CURRENT,
+            &chosen,
+            signer,
+        )
+        .unwrap();
+        storage
+            .create(&object::path(store(1), entry.position), &bytes)
+            .await
+            .unwrap();
+    }
+    ben.sync.scan_store_log_once(false).await.unwrap();
+    assert!(!ben
+        .log()
+        .await
+        .replay
+        .entries
+        .contains_key(&dependent.position));
+    assert!(!keys::holds(
+        ben.custody.read().unwrap().as_ref(),
+        &Audience::Store,
+        key(3)
+    ));
+    let pending = ben.db.pending::<PendingRecord>().await.unwrap();
+    assert!(pending.iter().any(|record| {
+        record.subject == PendingSubject::Entry(dependent.position)
+            && record.reason
+                == PendingReason::KeyUnavailable {
+                    audience: Audience::Store,
+                    key: key(3),
+                }
+    }));
+}

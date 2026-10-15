@@ -40,6 +40,39 @@ runs; `rotation_requires_publication` proves that both receipts are required;
 Ana's key-free removal of Ben, then first-sending with K2. Provider access
 can remain pending while this protected data proceeds.
 
+**A tentative key enters custody only after its entry's checks.**
+[§11](../coven.md#11-keys) lets a candidate from a copy open the entry that
+introduces it before that entry's signature, identity and authority checks,
+which run only once its recorded past has applied. `KeyPhases.confirm`
+models what a scan then does with the candidate: it joins custody only
+when its entry passed those checks, and then only as an ordinary accepted
+copy, matching the agreed commitment of the received authorized
+introductions. Custody keeps one value per key id, as the device's keyring
+does. `unverified_keeps_custody` and `scan_ignores_unverified` prove that no
+unverified entry changes custody: a scan ends as it would with every
+unverified entry left out. `scan_accepted` proves that custody then holds
+only accepted keys. `genuine_confirmed` proves, under an injective hash,
+that forged entries arriving first cannot block the genuine key: once its
+checked introduction and copy are read, custody holds its bytes.
+`admitsDependent` is the rule for a later entry the scan opened with the
+same candidate: it applies only once the introduction passed and the
+candidate is accepted, and `dependent_accepted` proves it was then opened
+with the one value custody can accept for that id.
+
+The rule the code had kept the candidate once it matched the commitment of
+the opened entry itself, before its checks (conformance finding D-11-1).
+`unchecked_plants_chosen_bytes` checks the history: someone with storage
+access plants an entry claiming the id of Ana's next store key with chosen
+bytes, sealed with them, and a copy of them for Ben. Ben keeps the chosen
+bytes under that id, and `planted_key_never_accepted` (from `planted_blocks`)
+proves that no later value makes the key accepted in his custody, so Ana's
+genuine rotation and everything sealed with it stay unreadable for him.
+`checked_keeps_genuine_bytes` checks that §11's rule ends the same history
+with the genuine key. Rust's `a_forged_introduction_cannot_plant_its_key` and
+`an_unchecked_candidate_opens_no_applied_entry` exercise the scan itself;
+the model does not cover decryption, the order a scan opens entries in, or
+the signature check, which is its `verified` input.
+
 `CovenIO.Revocation.gated_first_send_revocation` joins this selection to the
 actual send in `IOTrace`. Its catch-up started less than five minutes before
 the request, including sleep, and the membership and copy scans finished

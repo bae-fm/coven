@@ -3,7 +3,7 @@
 
 use crate::member_credentials::Credentials;
 use coven_crypto::{SealingKey, StoreKeyring};
-use coven_database::{StoreLog, StoreLogState};
+use coven_database::{ReplayEntry, StoreLog, StoreLogState};
 use coven_format::{sealed_key::KeyCopyPrefix, store_log::StoreChange, value::EntryId};
 use coven_foundation::id_source::{KeyId, MemberId};
 use coven_merge::Audience;
@@ -41,7 +41,12 @@ pub(crate) struct Introduction {
 /// entry, including for landing too late, does not revoke its introduction;
 /// an unauthorized entry introduces nothing.
 pub(crate) fn introductions(log: &StoreLog) -> Vec<Introduction> {
-    log.entries
+    introductions_of(&log.entries)
+}
+
+/// [`introductions`] of checked entries, such as a replay batch's.
+pub(crate) fn introductions_of(entries: &[ReplayEntry]) -> Vec<Introduction> {
+    entries
         .iter()
         .filter(|applied| applied.check.authorized())
         .filter_map(|applied| {

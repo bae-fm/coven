@@ -55,6 +55,9 @@ impl StoreLogSync {
         let mut pending_entries = BTreeSet::new();
         let mut bytes = BTreeMap::new();
         let mut opened = BTreeMap::<EntryId, object::OpenedEntry>::new();
+        let mut tentative = super::key_acquisition::Tentative::default();
+        // Entries opened with a tentative candidate, by its introducing entry.
+        let mut introducers = BTreeMap::<EntryId, EntryId>::new();
         let mut missing_keys = BTreeMap::new();
         let mut waits = BTreeMap::new();
         let mut entries = BTreeMap::new();
@@ -168,11 +171,10 @@ impl StoreLogSync {
                     pending_entries.insert(*id);
                     continue;
                 };
-                let scanned: Vec<_> = opened.values().map(|opened| &opened.entry).collect();
                 let entry = match self
                     .open_entry(
                         &local.log,
-                        &scanned,
+                        &mut tentative,
                         &envelope,
                         &stored.path,
                         *key,
@@ -182,6 +184,10 @@ impl StoreLogSync {
                     .await?
                 {
                     super::key_acquisition::EntryOpening::Opened(entry) => entry,
+                    super::key_acquisition::EntryOpening::Tentative(entry, introducer) => {
+                        introducers.insert(*id, introducer);
+                        entry
+                    }
                     super::key_acquisition::EntryOpening::WaitsForKey => {
                         missing_keys.insert(*id, *key);
                         continue;
@@ -199,6 +205,7 @@ impl StoreLogSync {
                     counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 }
                 missing_keys.remove(id);
+                tentative.opened(&entry.entry);
                 opened.insert(*id, entry);
             }
             for entry in opened.values().map(|opened| &opened.entry) {
@@ -248,11 +255,34 @@ impl StoreLogSync {
         let mut batch = crate::replay::ReplayBatch::new(&local.log);
         let mut ordered: Vec<_> = opened.values().collect();
         ordered.sort_by_key(|opened| opened.entry.timestamp);
+        // An entry opened with another entry's tentative candidate applies
+        // only once that introduction has applied and accepts the candidate:
+        // an unchecked candidate authorizes no other data (§11,
+        // `KeyPhases.admitsDependent`). The introducing entry itself is
+        // checked with it.
+        let unaccepted = |batch: &crate::replay::ReplayBatch, id: EntryId| {
+            introducers
+                .get(&id)
+                .filter(|introducer| **introducer != id)
+                .map(|introducer| (introducer, tentative.candidate(*introducer)))
+                .filter(|(introducer, candidate)| {
+                    !batch.contains(**introducer)
+                        || crate::key_introductions::hash_for(
+                            &crate::key_introductions::introductions_of(batch.entries()),
+                            &Audience::Store,
+                            candidate.id(),
+                        ) != Some(candidate.hash())
+                })
+                .map(|(_, candidate)| candidate.id())
+        };
         loop {
             let mut advanced = false;
             for opened in &ordered {
                 let id = opened.entry.position;
-                if batch.contains(id) || pending_entries.contains(&id) {
+                if batch.contains(id)
+                    || pending_entries.contains(&id)
+                    || unaccepted(&batch, id).is_some()
+                {
                     continue;
                 }
                 match batch.push(opened, &publications, local.store) {
@@ -277,6 +307,10 @@ impl StoreLogSync {
         for entry in ordered.iter().map(|opened| &opened.entry) {
             let id = entry.position;
             if batch.contains(id) || pending_entries.contains(&id) {
+                continue;
+            }
+            if let Some(key) = unaccepted(&batch, id) {
+                missing_keys.insert(id, key);
                 continue;
             }
             match object::first_missing(entry, |past| batch.contains(past)) {
