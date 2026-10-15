@@ -117,7 +117,7 @@ impl StoreLogSync {
                 self.finality
                     .lock()
                     .expect("finality lock poisoned")
-                    .observe(stored);
+                    .observe(stored, self.clock.elapsed());
             }
             for (id, stored) in &entries {
                 if local.log.replay.entries.contains_key(id)

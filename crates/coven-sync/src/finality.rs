@@ -9,7 +9,7 @@ use coven_database::StoreLog;
 use coven_format::value::StorageTime;
 use coven_foundation::clock::Clock;
 use futures_util::FutureExt;
-use std::time::{Duration, UNIX_EPOCH};
+use std::time::Duration;
 
 /// The shared provider listing guarantee (§4); independent of timestamp precision.
 pub(crate) const LISTING_MARGIN: Duration = Duration::from_secs(60 * 60);
@@ -19,6 +19,9 @@ pub(crate) const LISTING_MARGIN: Duration = Duration::from_secs(60 * 60);
 #[derive(Default)]
 pub(crate) struct Observation {
     sample: Option<(StorageTime, Duration)>,
+    /// The monotonic reading when `sample` was observed: the storage time
+    /// now is at least the sample plus the time elapsed since (SP step 1).
+    sampled: Option<Duration>,
     /// The sample known before the reads of the latest complete catch-up.
     caught_up: Option<StorageTime>,
     /// This session's last clock-object time, paired with the sleep-inclusive
@@ -32,6 +35,9 @@ pub(crate) struct Observation {
     /// thirty-day or witness-maturity tests could change (§15).
     retention: Option<StorageTime>,
     retry: Option<std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>>,
+    /// Probes since the last one that left nothing undecided, for §3.1's
+    /// shared backoff.
+    probes: u32,
 }
 
 impl Observation {
@@ -97,8 +103,9 @@ impl Observation {
     /// A storage time a test supplies as if a pass's first phase had
     /// observed it, without that phase's store-log scan.
     #[cfg(test)]
-    pub(crate) fn test_sample(&mut self, time: StorageTime) {
+    pub(crate) fn test_sample(&mut self, time: StorageTime, elapsed: Duration) {
         self.sample = Some((time, Duration::from_secs(1)));
+        self.sampled = Some(elapsed);
     }
 
     /// Replace the retention ages the next probe schedules for.
@@ -106,14 +113,18 @@ impl Observation {
         self.retention = threshold;
     }
 
-    pub(crate) fn observe(&mut self, object: &coven_storage::StoredObject) {
+    /// Observe an object's storage time, at monotonic reading `elapsed`.
+    pub(crate) fn observe(&mut self, object: &coven_storage::StoredObject, elapsed: Duration) {
         if self.sample.is_none_or(|(time, _)| object.stored_at > time) {
             self.sample = Some((object.stored_at, object.time_resolution));
+            self.sampled = Some(elapsed);
         }
     }
 
-    /// Whether a monotonic schedule says a finality, drain or retention
-    /// threshold may have been reached that the known sample cannot decide (SP step 1).
+    /// Whether a finality, drain or retention threshold may have been
+    /// reached that the known sample cannot decide: storage time is at least
+    /// the sample plus the monotonic time since it. A probe that leaves one
+    /// undecided waits §3.1's shared backoff before the next (SP step 1).
     pub(crate) fn probe_due(
         &mut self,
         log: &StoreLog,
@@ -128,14 +139,12 @@ impl Observation {
             return false;
         }
         self.retry = None;
-        // The device clock only schedules a provider check; a reading before
-        // the epoch schedules nothing.
-        let now = StorageTime::since_epoch(
-            clock
-                .now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or(Duration::ZERO),
-        );
+        // With no sample nothing is scheduled: the return check's clock
+        // observation supplies the session's first (§15, SP step 3).
+        let (Some((sample, unit)), Some(sampled)) = (self.sample, self.sampled) else {
+            return false;
+        };
+        let now = sample + clock.elapsed().saturating_sub(sampled);
         let pending = log
             .entries
             .iter()
@@ -143,30 +152,29 @@ impl Observation {
             .map(|entry| entry.stored_at)
             .min();
         let last_late = late_times(log).max();
-        // Before the first sample, a probe must learn the provider's unit.
-        // Once known, its extra tick also belongs to the scheduling threshold.
-        let wait = match self.sample {
-            Some((_, unit)) => ENTRY_WINDOW + LISTING_MARGIN + unit,
-            None => ENTRY_WINDOW + LISTING_MARGIN,
-        };
+        // The provider's extra tick belongs to the scheduling threshold.
         let finality_due = pending.is_some_and(|pending| {
             let threshold = last_late.map_or(pending, |late| late.max(pending));
-            now.duration_since(threshold).is_some_and(|age| age > wait)
+            now.duration_since(threshold)
+                .is_some_and(|age| age > ENTRY_WINDOW + LISTING_MARGIN + unit)
         });
         // §6's drain needs a sample strictly past F + one day + five minutes.
         let drain_due = drains.iter().any(|drain| {
-            drain.drain_due().is_some_and(|deadline| {
-                now > deadline && self.sample.is_none_or(|(time, _)| time <= deadline)
-            })
+            drain
+                .drain_due()
+                .is_some_and(|deadline| now > deadline && sample <= deadline)
         });
         // A retention age or witness maturity the known sample cannot yet
         // decide (§15, SP step 1).
-        let retention_due = self.retention.is_some_and(|threshold| {
-            now > threshold && self.sample.is_none_or(|(time, _)| time <= threshold)
-        });
+        let retention_due = self
+            .retention
+            .is_some_and(|threshold| now > threshold && sample <= threshold);
         let due = finality_due || drain_due || retention_due;
         if due {
-            self.retry = Some(clock.sleep(Duration::from_secs(60)));
+            self.retry = Some(clock.sleep(coven_storage::retry_delay(self.probes)));
+            self.probes = self.probes.saturating_add(1);
+        } else {
+            self.probes = 0;
         }
         due
     }

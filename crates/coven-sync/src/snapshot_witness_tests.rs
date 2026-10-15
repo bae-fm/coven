@@ -62,8 +62,9 @@ async fn coverage_matures_one_unit_after_a_storage_day() {
 }
 
 /// SP step 1: retention leaves the witness's maturity as the next threshold;
-/// once the device clock passes it, the next pass's first phase observes
-/// storage time, and that pass's retention deletes. Before, no observation.
+/// once the last storage sample plus the monotonic time since it passes it,
+/// the next pass's first phase observes storage time, and that pass's
+/// retention deletes. Before, no observation.
 #[tokio::test]
 async fn a_pass_observes_storage_time_once_a_witness_may_have_matured() {
     let (storage, clock) = timed_snapshot_storage();
@@ -83,15 +84,15 @@ async fn a_pass_observes_storage_time_once_a_witness_may_have_matured() {
             })
             .count()
     };
-    let later = landed + DAY - Duration::from_secs(1);
-    clock.set(later);
-    a.clock.set(later);
+    // The landing is this device's sample, observed at its confirmation.
+    let sampled = coven_foundation::clock::Clock::now(a.clock.as_ref());
+    clock.set(landed + DAY - Duration::from_secs(1));
+    a.clock.set(sampled + DAY - Duration::from_secs(1));
     let before = storage.request_trace().len();
     a.sync().await;
     assert_eq!(clocks(before), 0);
-    let later = landed + DAY + Duration::from_secs(1);
-    clock.set(later);
-    a.clock.set(later);
+    clock.set(landed + DAY + Duration::from_secs(1));
+    a.clock.set(sampled + DAY + Duration::from_secs(1));
     let before = storage.request_trace().len();
     a.sync().await;
     assert_eq!(clocks(before), 1);

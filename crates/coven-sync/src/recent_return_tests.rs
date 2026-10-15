@@ -45,15 +45,18 @@ fn only_a_clock_sample_with_its_monotonic_start_certifies_a_miss() {
     let clock = Arc::new(FixedClock::new(UNIX_EPOCH));
     assert!(!miss_is_recent(&observation, clock.as_ref(), Some(time(0))));
     // An object's stored time is a lower bound, not a fresh sample.
-    observation.lock().unwrap().observe(&StoredObject {
-        path: ObjectPath::clock(store(1), DeviceId(1)),
-        size: 1,
-        stored_at: time(DAY),
-        time_resolution: Duration::from_secs(1),
-        object_id: "id".into(),
-        revision: "1".into(),
-        checksum: None,
-    });
+    observation.lock().unwrap().observe(
+        &StoredObject {
+            path: ObjectPath::clock(store(1), DeviceId(1)),
+            size: 1,
+            stored_at: time(DAY),
+            time_resolution: Duration::from_secs(1),
+            object_id: "id".into(),
+            revision: "1".into(),
+            checksum: None,
+        },
+        clock.elapsed(),
+    );
     assert!(!miss_is_recent(&observation, clock.as_ref(), Some(time(0))));
     observation
         .lock()

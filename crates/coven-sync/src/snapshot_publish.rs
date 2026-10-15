@@ -598,7 +598,7 @@ impl StoreLogSync {
         self.finality
             .lock()
             .expect("finality lock poisoned")
-            .observe(&stored);
+            .observe(&stored, self.clock.elapsed());
         if !prefix.counts(stored.stored_at) {
             tracing::debug!(path = path.as_str(), "snapshot landed too late to count");
             // Abandoned with its landing on record, so the next run deletes

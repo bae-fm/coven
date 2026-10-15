@@ -43,12 +43,10 @@ async fn observe(device: &Device) {
 /// first phase would, without that phase's store-log scan.
 async fn sample(device: &Device) {
     let now = coven_foundation::clock::Clock::now(device.clock.as_ref());
-    device
-        .sync
-        .finality
-        .lock()
-        .unwrap()
-        .test_sample(coven_format::value::StorageTime::from_system_time(now).unwrap());
+    device.sync.finality.lock().unwrap().test_sample(
+        coven_format::value::StorageTime::from_system_time(now).unwrap(),
+        coven_foundation::clock::Clock::elapsed(device.clock.as_ref()),
+    );
 }
 
 /// Replace a snapshot with `bytes` published at its original storage time,

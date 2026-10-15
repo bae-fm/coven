@@ -66,7 +66,7 @@ impl StoreLogSync {
             self.finality
                 .lock()
                 .expect("finality lock poisoned")
-                .observe(&landed);
+                .observe(&landed, self.clock.elapsed());
             // A landing that counts was stored before the abandonment
             // (`counting_abandoned_landed_before`); readers may select it.
             if !attempt.caught_at.within_day(landed.stored_at) {

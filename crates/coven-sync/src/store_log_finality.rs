@@ -81,7 +81,7 @@ impl StoreLogSync {
             StorageFailure::NotFound.with_source("published clock is absent from exact status")
         })?;
         let mut observation = self.finality.lock().expect("finality lock poisoned");
-        observation.observe(&stored);
+        observation.observe(&stored, self.clock.elapsed());
         observation.clock_observed(stored.stored_at, started);
         Ok(())
     }

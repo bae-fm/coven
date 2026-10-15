@@ -1,6 +1,7 @@
 use super::*;
 use crate::replay::tests::{device, History};
 use serde_json::{json, Value};
+use std::time::UNIX_EPOCH;
 
 fn day(n: u64) -> Duration {
     Duration::from_secs(n * 86400)
@@ -130,24 +131,34 @@ fn inclusive_late_window_recovers_earlier_checks_without_lowering_saved_finality
     );
 }
 
+/// The schedule runs from the last storage sample plus the monotonic time
+/// since it, whatever the device's wall clock says, and a probe that leaves a
+/// threshold undecided waits §3.1's shared backoff before the next (SP step 1).
 #[tokio::test]
-async fn probes_wait_for_a_possible_quiet_window_and_back_off() {
+async fn probes_follow_storage_time_and_back_off() {
     use coven_foundation::clock::FixedClock;
-    let clock = FixedClock::new(UNIX_EPOCH + day(30));
-    let mut log = history(false);
+    // The device's wall clock runs two days slow.
+    let clock = FixedClock::new(UNIX_EPOCH + day(28));
+    let log = history(false);
     let mut observation = Observation::default();
+    // No sample schedules nothing: the return check supplies the first.
     assert!(!observation.probe_due(&log, &[], &clock));
-    clock.set(UNIX_EPOCH + day(31));
+    observation.test_sample(at(day(30)), clock.elapsed());
+    assert!(!observation.probe_due(&log, &[], &clock));
+    // Entry 1 is final only past day 30, the listing margin and one tick.
+    clock.set(UNIX_EPOCH + day(28) + LISTING_MARGIN + Duration::from_secs(2));
     assert!(observation.probe_due(&log, &[], &clock));
-    assert!(!observation.probe_due(&log, &[], &clock));
-    clock.set(UNIX_EPOCH + day(31) + Duration::from_secs(60));
+    for wait in [1, 2, 4, 8] {
+        clock.set(clock.now() + Duration::from_secs(wait) - Duration::from_millis(1));
+        assert!(!observation.probe_due(&log, &[], &clock));
+        clock.set(clock.now() + Duration::from_millis(1));
+        assert!(observation.probe_due(&log, &[], &clock));
+    }
+    // A check with nothing undecided starts the backoff again.
+    clock.set(clock.now() + Duration::from_secs(16));
+    assert!(!observation.probe_due(&StoreLog::default(), &[], &clock));
     assert!(observation.probe_due(&log, &[], &clock));
-    log = history(true);
-    clock.set(UNIX_EPOCH + day(70));
-    assert!(!observation.probe_due(&log, &[], &clock));
-    // Completed timers are discarded, so repeated checks cannot poll a finished future.
-    assert!(!observation.probe_due(&log, &[], &clock));
-    clock.set(UNIX_EPOCH + day(70) + LISTING_MARGIN + Duration::from_millis(1));
+    clock.set(clock.now() + Duration::from_secs(1));
     assert!(observation.probe_due(&log, &[], &clock));
 }
 
@@ -155,13 +166,12 @@ async fn probes_wait_for_a_possible_quiet_window_and_back_off() {
 async fn probes_require_the_margin_and_the_observed_provider_tick() {
     use coven_foundation::clock::FixedClock;
     let unit = Duration::from_secs(1);
-    let mut observation = Observation {
-        sample: Some((StorageTime::UNIX_EPOCH, unit)),
-        ..Default::default()
-    };
+    let clock = FixedClock::new(UNIX_EPOCH);
+    let mut observation = Observation::default();
+    observation.test_sample(StorageTime::UNIX_EPOCH, clock.elapsed());
     let log = history(true);
     let boundary = UNIX_EPOCH + day(70) + Duration::from_secs(3600) + unit;
-    let clock = FixedClock::new(boundary);
+    clock.set(boundary);
     assert!(!observation.probe_due(&log, &[], &clock));
     clock.set(boundary + unit);
     assert!(observation.probe_due(&log, &[], &clock));
