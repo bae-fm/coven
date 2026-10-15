@@ -1535,7 +1535,7 @@ the file's ranges under `F`.
 - The app declares which tables sync. The rest stay on the device.
 - A *write* is one transaction that changes synced tables.
 - A *row change* is one row's insert, update or delete within a write.
-- SQLite's session extension records the row changes each write makes.
+- SQLite's pre-update hook records the row changes each write makes.
 - Each write commits, together:
   - its rows, as they now stand;
   - its *write record*, waiting to be uploaded in coven's `_coven_uploads`
