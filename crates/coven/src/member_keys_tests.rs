@@ -282,4 +282,79 @@ mod owner_identity {
         refused_naming(rename(ana, "ana's").await, carol);
         network.close().await;
     }
+
+    /// Ana's device snapshots the store holding Carol's note, and every log
+    /// it covers is deleted. Dan joins later and has only that snapshot: it
+    /// carries Carol's creation with the evidence of her write, which Ana
+    /// cannot sign for her, so Dan's device knows the note is Carol's and
+    /// refuses Dan's edit naming her, as Ana's does (§8.8, §15, D7).
+    #[tokio::test]
+    async fn a_snapshot_carries_another_members_ownership_to_a_new_device() {
+        use coven_storage::Storage;
+        let mut network = owned_notes().await;
+        network
+            .join_as(
+                1,
+                InviteTarget::NewMember {
+                    role: MemberRole::Member,
+                },
+            )
+            .await;
+        let carol = own_id(&network.devices[1].handle).await;
+        network.devices[1]
+            .handle
+            .write(|sql| {
+                sql.execute("INSERT INTO notes VALUES('carol','first')", [])?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        network.sync(1).await;
+        network.sync(0).await;
+        // Ana's large note makes her device publish a snapshot; a month
+        // later the logs it covers are gone.
+        let large = "x".repeat(1024 * 1024 + 1);
+        network.devices[0]
+            .handle
+            .write(move |sql| {
+                sql.execute("INSERT INTO notes VALUES('ana',?1)", [large])?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        network.sync(0).await;
+        network
+            .clock
+            .set(network.clock.now() + std::time::Duration::from_secs(31 * 24 * 3600));
+        network.sync(1).await;
+        network.sync(0).await;
+        let store = network.devices[0].store;
+        let storage = &network.devices[0].storage;
+        assert_eq!(
+            storage
+                .list(&ObjectPrefix::snapshots(store))
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(storage
+            .list(&ObjectPrefix::device_logs(store))
+            .await
+            .unwrap()
+            .is_empty());
+        network
+            .join_as(
+                2,
+                InviteTarget::NewMember {
+                    role: MemberRole::Member,
+                },
+            )
+            .await;
+        let dan = &network.devices[2].handle;
+        assert_eq!(title(dan).await, "first");
+        refused_naming(rename(dan, "dan's").await, carol);
+        refused_naming(rename(&network.devices[0].handle, "ana's").await, carol);
+        network.close().await;
+    }
 }
