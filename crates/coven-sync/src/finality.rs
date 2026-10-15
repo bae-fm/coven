@@ -121,7 +121,7 @@ impl Observation {
         }
     }
 
-    /// Whether a finality, drain or retention threshold may have been
+    /// Whether a finality, drain, retention or snapshot-expiry threshold may have been
     /// reached that the known sample cannot decide: storage time is at least
     /// the sample plus the monotonic time since it. A probe that leaves one
     /// undecided waits §3.1's shared backoff before the next (SP step 1).
@@ -129,6 +129,7 @@ impl Observation {
         &mut self,
         log: &StoreLog,
         drains: &[coven_database::RetirementFinality],
+        expiries: &[StorageTime],
         clock: &dyn Clock,
     ) -> bool {
         if self
@@ -140,7 +141,7 @@ impl Observation {
         }
         self.retry = None;
         // With no sample nothing is scheduled: the return check's clock
-        // observation supplies the session's first (§15, SP step 3).
+        // observation supplies the session's first (§15).
         let (Some((sample, unit)), Some(sampled)) = (self.sample, self.sampled) else {
             return false;
         };
@@ -169,7 +170,11 @@ impl Observation {
         let retention_due = self
             .retention
             .is_some_and(|threshold| now > threshold && sample <= threshold);
-        let due = finality_due || drain_due || retention_due;
+        // A snapshot attempt's upload expiry, `T_c` plus one day (§15).
+        let expiry_due = expiries
+            .iter()
+            .any(|expiry| now > *expiry && sample <= *expiry);
+        let due = finality_due || drain_due || retention_due || expiry_due;
         if due {
             self.retry = Some(clock.sleep(coven_storage::retry_delay(self.probes)));
             self.probes = self.probes.saturating_add(1);

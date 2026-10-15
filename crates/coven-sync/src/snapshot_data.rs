@@ -40,6 +40,8 @@ pub(crate) enum SnapshotJob {
 #[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct SnapshotAttempt {
     pub(crate) number: std::num::NonZeroU64,
+    /// Its signed `T_c`: the attempt counts only if it lands within a day.
+    pub(crate) caught_at: coven_format::value::StorageTime,
     pub(crate) session: Option<UploadSession>,
     /// Saved before its first request: once set, a request may have reached
     /// storage, so abandoning it records it (§15).

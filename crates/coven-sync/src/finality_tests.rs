@@ -142,24 +142,43 @@ async fn probes_follow_storage_time_and_back_off() {
     let log = history(false);
     let mut observation = Observation::default();
     // No sample schedules nothing: the return check supplies the first.
-    assert!(!observation.probe_due(&log, &[], &clock));
+    assert!(!observation.probe_due(&log, &[], &[], &clock));
     observation.test_sample(at(day(30)), clock.elapsed());
-    assert!(!observation.probe_due(&log, &[], &clock));
+    assert!(!observation.probe_due(&log, &[], &[], &clock));
     // Entry 1 is final only past day 30, the listing margin and one tick.
     clock.set(UNIX_EPOCH + day(28) + LISTING_MARGIN + Duration::from_secs(2));
-    assert!(observation.probe_due(&log, &[], &clock));
+    assert!(observation.probe_due(&log, &[], &[], &clock));
     for wait in [1, 2, 4, 8] {
         clock.set(clock.now() + Duration::from_secs(wait) - Duration::from_millis(1));
-        assert!(!observation.probe_due(&log, &[], &clock));
+        assert!(!observation.probe_due(&log, &[], &[], &clock));
         clock.set(clock.now() + Duration::from_millis(1));
-        assert!(observation.probe_due(&log, &[], &clock));
+        assert!(observation.probe_due(&log, &[], &[], &clock));
     }
     // A check with nothing undecided starts the backoff again.
     clock.set(clock.now() + Duration::from_secs(16));
-    assert!(!observation.probe_due(&StoreLog::default(), &[], &clock));
-    assert!(observation.probe_due(&log, &[], &clock));
+    assert!(!observation.probe_due(&StoreLog::default(), &[], &[], &clock));
+    assert!(observation.probe_due(&log, &[], &[], &clock));
     clock.set(clock.now() + Duration::from_secs(1));
-    assert!(observation.probe_due(&log, &[], &clock));
+    assert!(observation.probe_due(&log, &[], &[], &clock));
+}
+
+/// An unfinished snapshot attempt expires a day after its `T_c`: the probe
+/// schedule includes that instant, so a stale sample cannot send it late
+/// (§15, SP step 1).
+#[tokio::test]
+async fn probes_include_a_snapshot_attempts_expiry() {
+    use coven_foundation::clock::FixedClock;
+    let clock = FixedClock::new(UNIX_EPOCH);
+    let mut observation = Observation::default();
+    observation.test_sample(at(day(5)), clock.elapsed());
+    let quiet = StoreLog::default();
+    let expiry = [at(day(6))];
+    clock.set(UNIX_EPOCH + day(1));
+    assert!(!observation.probe_due(&quiet, &[], &expiry, &clock));
+    assert!(!observation.probe_due(&quiet, &[], &[], &clock));
+    clock.set(UNIX_EPOCH + day(1) + Duration::from_millis(1));
+    assert!(!observation.probe_due(&quiet, &[], &[], &clock));
+    assert!(observation.probe_due(&quiet, &[], &expiry, &clock));
 }
 
 #[tokio::test]
@@ -172,9 +191,9 @@ async fn probes_require_the_margin_and_the_observed_provider_tick() {
     let log = history(true);
     let boundary = UNIX_EPOCH + day(70) + Duration::from_secs(3600) + unit;
     clock.set(boundary);
-    assert!(!observation.probe_due(&log, &[], &clock));
+    assert!(!observation.probe_due(&log, &[], &[], &clock));
     clock.set(boundary + unit);
-    assert!(observation.probe_due(&log, &[], &clock));
+    assert!(observation.probe_due(&log, &[], &[], &clock));
 }
 
 fn run(variable: &str, input: Value) -> Value {

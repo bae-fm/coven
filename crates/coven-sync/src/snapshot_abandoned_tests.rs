@@ -189,3 +189,22 @@ async fn an_absent_abandoned_attempt_settles_after_the_listing_margin() {
     assert!(task(&a, id).await.is_none());
     assert!(storage.status(&path_of(&expired)).await.unwrap().is_none());
 }
+
+/// A prepared attempt's expiry, a day after its `T_c`, joins the time-probe
+/// schedule, so a stale sample cannot send it late (§15, SP step 1).
+#[tokio::test]
+async fn a_prepared_attempt_schedules_its_expiry() {
+    let (_storage, clock, mut a, _b) = pair().await;
+    set_time(&clock, 10_000);
+    let id = request(&a).await;
+    assert!(a.sync.snapshot_expiries().await.unwrap().is_empty());
+    {
+        let _pass = a.caught_up_pass().await;
+        assert!(matches!(step(&mut a, id).await, Some(Progress::Advanced)));
+    }
+    let caught_at = a.sync.finality.lock().unwrap().caught_up().unwrap();
+    assert_eq!(
+        a.sync.snapshot_expiries().await.unwrap(),
+        [caught_at + std::time::Duration::from_secs(DAY)]
+    );
+}

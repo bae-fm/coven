@@ -299,6 +299,7 @@ impl StoreLogSync {
             &mut task,
             Some(SnapshotAttempt {
                 number,
+                caught_at,
                 session: None,
                 sent: false,
             }),
@@ -362,6 +363,30 @@ impl StoreLogSync {
         // lists; one that landed after it waits for the next.
         tracing::debug!(?audience, "snapshot capture is behind the current snapshot");
         Ok(Some(PendingReason::Waits(Prerequisite::CatchUp)))
+    }
+
+    /// Each unfinished snapshot attempt's upload expiry, `T_c` plus one day,
+    /// for the time-probe schedule (§15, SP step 1).
+    pub(crate) async fn snapshot_expiries(&self) -> Result<Vec<StorageTime>, SyncError> {
+        let mut expiries = Vec::new();
+        for record in self.database.operations().await? {
+            if let Data::Snapshots(SnapshotTask {
+                job:
+                    SnapshotJob::Write {
+                        attempt: Some(attempt),
+                        ..
+                    },
+                ..
+            }) = Data::read(&record)?
+            {
+                expiries.extend(
+                    attempt
+                        .caught_at
+                        .checked_add(std::time::Duration::from_secs(StorageTime::DAY_SECONDS)),
+                );
+            }
+        }
+        Ok(expiries)
     }
 
     /// Whether a snapshot sampled at `caught_at` can still count: no storage
