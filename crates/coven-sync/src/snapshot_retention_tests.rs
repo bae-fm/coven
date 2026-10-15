@@ -136,7 +136,10 @@ async fn a_removed_devices_member_can_delete_its_covered_logs() {
 }
 
 #[tokio::test]
-async fn removed_member_logs_belong_to_the_store_owner_and_stay_on_google_drive() {
+/// On Google Drive the store owner cannot delete another account's file, but
+/// its delete takes the file out of the store's folder, where it stays in the
+/// uploader's own account (§15): the folder no longer lists it.
+async fn removed_member_logs_belong_to_the_store_owner_and_leave_google_drives_folder() {
     for google in [false, true] {
         let storage = if google {
             Arc::new(
@@ -157,7 +160,21 @@ async fn removed_member_logs_belong_to_the_store_owner_and_stay_on_google_drive(
         c.reopen(storage.clone(), notes_tables(), notes_migrations())
             .await;
         a.add(&b.member, MemberRole::Member).await;
-        a.add(&c.member, MemberRole::Admin).await;
+        // An admin whose account does not hold the store cannot delete or
+        // detach another member's objects.
+        if google {
+            a.sync
+                .make_and_upload_entry(StoreChange::AddMember {
+                    access: coven_format::MemberAccess::ProviderAccount("carol@example.com".into()),
+                    member: c.member.member(),
+                    keys: c.member.keys().public_keys(),
+                    role: MemberRole::Admin,
+                })
+                .await
+                .unwrap();
+        } else {
+            a.add(&c.member, MemberRole::Admin).await;
+        }
         add_device(&mut b).await;
         add_device(&mut c).await;
         a.sync().await;
@@ -198,7 +215,8 @@ async fn removed_member_logs_belong_to_the_store_owner_and_stay_on_google_drive(
                 .await
                 .unwrap()
                 .len(),
-            usize::from(google)
+            0,
+            "google {google}"
         );
     }
 }

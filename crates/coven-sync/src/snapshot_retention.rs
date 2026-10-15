@@ -209,7 +209,6 @@ impl StoreLogSync {
             .config()
             .provider();
         let owner = match provider {
-            CloudProvider::GoogleDrive => false,
             // S3 access-key ids do not identify their provider account. The
             // creation entry identifies its member; an admin role does not.
             CloudProvider::S3 => log.entries.iter().any(|entry| {
