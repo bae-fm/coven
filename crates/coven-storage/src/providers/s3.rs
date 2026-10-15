@@ -723,15 +723,18 @@ impl ProviderOps for S3Storage {
             Err(error) if matches!(error.code(), Some("NoSuchUpload" | "PreconditionFailed")) => {
                 self.recover_completed_upload(publication, session).await
             }
-            Err(error) if error.code() == Some("ConditionalRequestConflict") => {
-                self.require_restart(
-                    publication,
-                    session,
-                    StorageFailure::SessionExpired.with_source(s3_error(error)),
-                )
-                .await
-            }
-            Err(error) => Err(s3_error(error)),
+            Err(error) => match s3_error(error) {
+                // A concurrent mutation, under any service's code (§4).
+                error if error.failure() == StorageFailure::Conflict => {
+                    self.require_restart(
+                        publication,
+                        session,
+                        StorageFailure::SessionExpired.with_source(error),
+                    )
+                    .await
+                }
+                error => Err(error),
+            },
         }
     }
     async fn abort_upload(

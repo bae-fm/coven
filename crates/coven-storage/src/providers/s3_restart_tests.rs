@@ -13,6 +13,8 @@ struct Conflicts {
     parts: Vec<(String, Vec<u8>)>,
     refuse_abort: bool,
     conflict_next: bool,
+    /// The concurrent-mutation code the next publication is refused with.
+    code: &'static str,
 }
 
 async fn fixture(
@@ -29,6 +31,7 @@ async fn fixture(
     }));
     let faults = Arc::new(Mutex::new(Conflicts {
         conflict_next: true,
+        code: conflict_code(gcs),
         ..Conflicts::default()
     }));
     let state = remote.clone();
@@ -52,7 +55,7 @@ async fn fixture(
                     faults.rejected.insert(id);
                     return std::future::ready(response(
                         409,
-                        format!("<Error><Code>{}</Code></Error>", conflict_code(gcs)),
+                        format!("<Error><Code>{}</Code></Error>", faults.code),
                     ));
                 }
                 assert!(
@@ -99,7 +102,14 @@ fn conflict_code(gcs: bool) -> &'static str {
     }
 }
 
-fn assert_conflict_cause(error: &StorageError, gcs: bool) {
+/// Every code §4 names as a concurrent mutation: AWS's, GCS's and Ceph RGW's.
+const CONFLICT_CODES: [&str; 3] = [
+    "ConditionalRequestConflict",
+    "OperationAborted",
+    "ConcurrentModification",
+];
+
+fn assert_conflict_cause(error: &StorageError, gcs: bool, code: &str) {
     let native = error
         .source()
         .unwrap()
@@ -109,20 +119,24 @@ fn assert_conflict_cause(error: &StorageError, gcs: bool) {
     if gcs {
         assert_eq!(
             errors::sdk_error::<CopyObjectError>(native).code(),
-            Some(conflict_code(gcs))
+            Some(code)
         );
     } else {
         assert_eq!(
             errors::sdk_error::<CompleteMultipartUploadError>(native).code(),
-            Some(conflict_code(gcs))
+            Some(code)
         );
     }
 }
 
 #[tokio::test]
 async fn conditional_publication_conflict_restarts_with_identical_bytes() {
-    for gcs in [false, true] {
+    for (gcs, code) in [false, true]
+        .into_iter()
+        .flat_map(|gcs| CONFLICT_CODES.map(|code| (gcs, code)))
+    {
         let (_server, storage, remote, faults) = fixture(gcs).await;
+        faults.lock().unwrap().code = code;
         let bytes = vec![7; 8 * 1024 * 1024 + 1];
         let mut session = storage
             .begin_upload(&path(), bytes.len() as u64)
@@ -134,7 +148,7 @@ async fn conditional_publication_conflict_restarts_with_identical_bytes() {
         let first = storage.provider.upload_id(&session).unwrap().to_owned();
         let error = storage.finish_upload(&mut session).await.unwrap_err();
         assert_eq!(error.failure(), StorageFailure::SessionExpired);
-        assert_conflict_cause(&error, gcs);
+        assert_conflict_cause(&error, gcs, code);
         assert!(remote.lock().unwrap().uploads.is_empty());
         assert!(remote.lock().unwrap().objects.is_empty());
         let mut recorded = UploadSession::decode(session.encode().unwrap().as_bytes()).unwrap();
@@ -202,7 +216,7 @@ async fn conditional_conflict_abort_failure_preserves_both_causes_and_blocks_reu
         };
         assert_eq!(operation.failure(), StorageFailure::SessionExpired);
         assert_eq!(cleanup.failure(), StorageFailure::PermissionDenied);
-        assert_conflict_cause(&operation, gcs);
+        assert_conflict_cause(&operation, gcs, conflict_code(gcs));
         assert_eq!(
             errors::sdk_error::<AbortMultipartUploadError>(&cleanup).code(),
             Some("AccessDenied")
@@ -279,7 +293,7 @@ async fn gcs_conflict_cannot_restart_until_temporary_deletion_succeeds() {
     let StorageError::Cleanup { operation, cleanup } = error else {
         panic!("both causes required")
     };
-    assert_conflict_cause(&operation, true);
+    assert_conflict_cause(&operation, true, conflict_code(true));
     assert_eq!(
         errors::sdk_error::<aws_sdk_s3::operation::delete_object::DeleteObjectError>(&cleanup)
             .code(),
@@ -353,7 +367,7 @@ async fn gcs_copy_conflict_during_recovery_invalidates_the_recorded_session() {
     let mut session = UploadSession::decode(session.encode().unwrap().as_bytes()).unwrap();
     let error = storage.resume_upload(&mut session).await.unwrap_err();
     assert_eq!(error.failure(), StorageFailure::SessionExpired);
-    assert_conflict_cause(&error, true);
+    assert_conflict_cause(&error, true, conflict_code(true));
     let session = UploadSession::decode(session.encode().unwrap().as_bytes()).unwrap();
     assert!(remote.lock().unwrap().objects.is_empty());
     let mut next = storage.restart_upload(&session).await.unwrap();

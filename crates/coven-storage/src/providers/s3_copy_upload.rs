@@ -230,22 +230,18 @@ impl S3Storage {
                 condition,
             )
             .await;
-        let result = match result {
-            Err(error)
-                if matches!(
-                    error.code(),
-                    Some("ConditionalRequestConflict" | "OperationAborted")
-                ) =>
-            {
+        let result = match result.map_err(s3_error) {
+            // A concurrent mutation, under any service's code (§4).
+            Err(error) if error.failure() == StorageFailure::Conflict => {
                 return self
                     .require_restart(
                         publication,
                         session,
-                        StorageFailure::SessionExpired.with_source(s3_error(error)),
+                        StorageFailure::SessionExpired.with_source(error),
                     )
                     .await;
             }
-            result => result.map_err(s3_error),
+            result => result,
         };
         let result = match result {
             Ok(_) => Ok(()),
