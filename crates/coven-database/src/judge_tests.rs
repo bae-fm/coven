@@ -761,8 +761,9 @@ async fn actions_across_affinities_are_actions() {
 
 /// The receipts the model comparison checks (`judge_view::tests`), each
 /// passed with the device that received it: direct, derived, transitive and
-/// coalesced changes, triggers, unauthorized roots, a forged action payload
-/// and an action whose cause is refused.
+/// coalesced changes, triggers, unauthorized roots, a forged action payload,
+/// actions across affinities and by value alone, and an action whose cause is
+/// refused.
 pub(crate) async fn receipts(mut compare: impl FnMut(&Database, &WriteRecord)) {
     for statement in [
         "DELETE FROM tracks WHERE id='t'",
@@ -795,6 +796,29 @@ pub(crate) async fn receipts(mut compare: impl FnMut(&Database, &WriteRecord)) {
     receive(&devices.ana, &forged).await;
     compare(&devices.ana, &forged);
     devices.close().await;
+    // Ana's tag holds code 7 as text; Mallory's last write inserts his own
+    // tag before its code, so it names that code by value alone.
+    for statement in [
+        "DELETE FROM codes",
+        "UPDATE codes SET id=8",
+        "INSERT INTO tags VALUES('b','9'); INSERT INTO codes VALUES(9);
+         UPDATE codes SET id=10 WHERE id=9; DELETE FROM codes",
+    ] {
+        let devices = Devices::with(coded(true), coded(false), AFFINITY).await;
+        sql(
+            &devices.ana,
+            "INSERT INTO tags VALUES('k','7'); INSERT INTO codes VALUES(7);",
+        )
+        .await
+        .unwrap();
+        deliver(&devices.ana, &devices.mallory).await;
+        deliver(&devices.ana, &devices.carol).await;
+        sql(&devices.mallory, statement).await.unwrap();
+        let record = records(&devices.mallory).pop().unwrap();
+        receive(&devices.carol, &record).await;
+        compare(&devices.carol, &record);
+        devices.close().await;
+    }
     let devices = two_parent_devices().await;
     sql(&devices.mallory, "DELETE FROM tracks").await.unwrap();
     let genuine = records(&devices.mallory).pop().unwrap();

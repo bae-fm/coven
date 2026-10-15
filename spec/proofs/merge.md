@@ -1326,14 +1326,26 @@ received write from the receiver's reconstructed execution: the references
 behind each action the receiver found, each row's direct effect, each derived
 row's paths combined with `together`, its proposed net change, and the
 generation, setter and execution sources of every change with those that do
-not survive. `judge_view::tests::receipt_matches_the_model` receives direct,
+not survive. `store` gives a cascaded key as the child's column stores it.
+`judge_view::tests::receipt_matches_the_model` receives direct,
 derived, transitive, coalesced, trigger and unauthorized-root writes, a forged
-action payload and an action whose cause's net change differs from its steps,
+action payload, actions across affinities and through references recorded by
+value alone, and an action whose cause's net change differs from its steps,
 and requires each recorded verdict to be the model's cause, with the roots of
 each derived change (`applied_derived_recorded`) and the failed sources of each
-dependent one (`dependencies`, `dropped_contributing_root_no_effect`). The
-receiver's classification itself, which supplies those references, is not yet
-compared with `Classification.cause`.
+dependent one (`dependencies`, `dropped_contributing_root_no_effect`).
+The `classify` mode compares the receiver's classification itself, which
+supplies those references. It takes every step of a received write as D5
+records it, with the references the receiver replays for each step's row,
+and returns `Classification.cause` under `heldRule`
+([`ForeignKeyRecords.lean`](merge/CovenMerge/ForeignKeyRecords.lean)): a
+`Held` reference carries what an action through it records besides its own
+columns, the other cells sharing a reference with them and the parents the
+other references name, and `heldConsequence` builds the whole recorded step,
+named parents included. `held_follows_cause` is `follows_cause` for it.
+`judge_view::tests::classification_matches_the_model` requires the
+receiver's cause of every step of the same writes to be the model's. The
+replayed references stay inputs, as `Trace.refs` is.
 The `admission` mode decides `Admission.check` for one local write, given
 each changed row's table and owner. `local_admission_matches_the_model` runs
 Ben's statements against Ana's rows on SQLite: an authorized cascade, a key
@@ -1351,7 +1363,8 @@ COVEN_MERGE_LEAN="$PWD/spec/proofs/merge/.lake/build/bin/mergeRunner" \
   ownership::tests::creation_differential_histories \
   execution_capture::tests::lean::captured_actions_are_the_models_consequences \
   owner_permission::tests::local_admission_matches_the_model \
-  judge_view::tests::receipt_matches_the_model
+  judge_view::tests::receipt_matches_the_model \
+  judge_view::tests::classification_matches_the_model
 ```
 
 ### B19 Foreign keys on generated columns

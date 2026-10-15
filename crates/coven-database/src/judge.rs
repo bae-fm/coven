@@ -77,6 +77,32 @@ pub(crate) struct StepIndex {
 }
 
 impl StepIndex {
+    /// Every step of the write's retained parts.
+    pub(crate) fn of(db: &DatabaseConnection, header: &WriteHeader) -> Result<Self, DbError> {
+        let mut index = Self::default();
+        visit_write(db, header, |record| {
+            let row = record.row().clone();
+            let steps: Vec<_> = record.execution().steps.iter().map(Indexed::of).collect();
+            for step in &steps {
+                index
+                    .sequences
+                    .entry(step.sequence)
+                    .or_default()
+                    .push(row.clone());
+                if step.delete {
+                    let first = index
+                        .deletes
+                        .entry(row.table.clone())
+                        .or_insert(step.sequence);
+                    *first = (*first).min(step.sequence);
+                }
+            }
+            index.rows.insert(row, steps);
+            Ok(())
+        })?;
+        Ok(index)
+    }
+
     /// Whether any row of `table` was deleted before `sequence`.
     pub(crate) fn deleted_before(&self, table: &str, sequence: u32) -> bool {
         self.deletes
@@ -169,27 +195,7 @@ pub(crate) fn judge(
     header: &WriteHeader,
 ) -> Result<Judgement, DbError> {
     let authoring = Authoring::new(db, schema, header.schema_version)?;
-    let mut index = StepIndex::default();
-    visit_write(db, header, |record| {
-        let row = record.row().clone();
-        let steps: Vec<_> = record.execution().steps.iter().map(Indexed::of).collect();
-        for step in &steps {
-            index
-                .sequences
-                .entry(step.sequence)
-                .or_default()
-                .push(row.clone());
-            if step.delete {
-                let first = index
-                    .deletes
-                    .entry(row.table.clone())
-                    .or_insert(step.sequence);
-                *first = (*first).min(step.sequence);
-            }
-        }
-        index.rows.insert(row, steps);
-        Ok(())
-    })?;
+    let index = StepIndex::of(db, header)?;
     let mut actions = BTreeMap::new();
     let mut shapes = BTreeMap::new();
     visit_write(db, header, |record| {

@@ -5,9 +5,13 @@
 //! row's current incarnation, or else the value its replaced setter's
 //! authenticated original record wrote. A missing record waits. A reference
 //! names its parent by the parent the setter recorded, or, when none was
-//! recorded, by its values as the parent's key.
+//! recorded, by its values as the parent's key, at the incarnation the
+//! write's earlier steps leave that row. The references a step's row holds
+//! and the step an action through each records are Lean's `Held` and
+//! `heldConsequence`, which `tests::classification_matches_the_model`
+//! compares.
 
-use crate::judge::StepIndex;
+use crate::judge::{Indexed, StepIndex};
 use crate::removal_schema::TableRules;
 use crate::schema::{Schema, SchemaForeignKey, TableSchema};
 use crate::sqlite::DatabaseConnection;
@@ -17,7 +21,7 @@ use crate::DbError;
 use coven_format::snapshot_rows::OriginalRow;
 use coven_format::value::Value;
 use coven_format::write::Step;
-use coven_merge::{Audience, ColumnValue, Operation, Parent, RowId};
+use coven_merge::{Audience, ColumnValue, ForeignKey, Operation, Parent, RowId};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// The schema a write was authored under: the current one, unless a
@@ -193,38 +197,63 @@ impl<'a> ChildView<'a> {
         Ok(cell)
     }
 
-    /// The parent step this step is exactly the schema's action of, if any.
+    /// The parent step this step is exactly the schema's action of, if any:
+    /// of several, the nearest (Lean `Classification.cause` with `heldRule`).
     pub(crate) fn action(
         &self,
         db: &DatabaseConnection,
         index: &StepIndex,
         step: &Step,
     ) -> Result<Option<(RowId, u32)>, DbError> {
-        let Some(table) = self.authoring.table(&self.row.table) else {
-            return Ok(None);
-        };
-        if step.key_update
-            || table.foreign_keys.is_empty()
-            || matches!(step.change.operation, Operation::Insert(_))
-        {
-            return Ok(None);
-        }
-        // Of several earlier steps it is the consequence of, its cause is the
-        // nearest (Lean `Classification.cause`).
         let mut best: Option<(RowId, u32)> = None;
-        for key in &table.foreign_keys {
+        for held in self.held(db, index, step)? {
+            for parent_step in index.before(&held.parent, step.sequence) {
+                if best
+                    .as_ref()
+                    .is_some_and(|(_, s)| *s >= parent_step.sequence)
+                {
+                    break;
+                }
+                if self
+                    .consequence(db, index, &held, parent_step)?
+                    .is_some_and(|expected| expected == step.change.operation)
+                {
+                    best = Some((held.parent.clone(), parent_step.sequence));
+                }
+            }
+        }
+        Ok(best)
+    }
+
+    /// Every reference this row holds at `step` through which the step can
+    /// be a foreign-key action (Lean `Trace.refs`): one into a table a row of
+    /// which an earlier step deleted, whose columns hold a complete key now,
+    /// and, for an update, whose columns the step writes. An insert, or the
+    /// old half of the row's own key update, is never an action. A reference
+    /// names the parent its setter recorded, which must hold its key, or else
+    /// the row its values key in the child's audience or the store, at the
+    /// incarnation the write's earlier steps leave it.
+    pub(crate) fn held(
+        &self,
+        db: &DatabaseConnection,
+        index: &StepIndex,
+        step: &Step,
+    ) -> Result<Vec<HeldReference>, DbError> {
+        let Some(table) = self.authoring.table(&self.row.table) else {
+            return Ok(Vec::new());
+        };
+        if step.key_update || matches!(step.change.operation, Operation::Insert(_)) {
+            return Ok(Vec::new());
+        }
+        let mut held = Vec::new();
+        for (position, key) in table.foreign_keys.iter().enumerate() {
             let Some(parent_table) = self.authoring.table(&key.target) else {
                 continue;
             };
             if !index.deleted_before(&parent_table.name, step.sequence) {
                 continue;
             }
-            let columns: Vec<String> = key
-                .columns
-                .iter()
-                .map(|c| column_name(table, c).to_owned())
-                .collect();
-            // An update action writes the reference's own columns.
+            let columns = key_names(table, key);
             if let Operation::Update(written) = &step.change.operation {
                 if !columns.iter().all(|c| written.contains_key(c)) {
                     continue;
@@ -252,153 +281,109 @@ impl<'a> ChildView<'a> {
             let raw: Vec<Value> = values.iter().map(|cell| cell.value.clone()).collect();
             let stored = self.authoring.stored(db, parent_table, &targets, &raw)?;
             let written = parent_key(parent_table, &targets, &stored)?;
-            let candidates = match link {
+            let parents: Vec<(RowId, u64)> = match link {
                 // The parent a reference names must hold its written key.
                 Some(parent)
                     if parent.row.table != parent_table.name || parent.row.key != written =>
                 {
                     continue
                 }
-                Some(parent) => vec![(parent.row.clone(), Some(parent.generation))],
+                Some(parent) => vec![(parent.row.clone(), parent.generation)],
+                // A reference recorded without a parent names, by its values,
+                // the row as the write's earlier steps leave it: the
+                // incarnation its last step ended, or the one it made.
                 None => [self.row.audience.clone(), Audience::Store]
                     .into_iter()
-                    .map(|audience| {
-                        (
-                            RowId {
-                                table: parent_table.name.clone(),
-                                key: written.clone(),
-                                audience,
-                            },
-                            None,
-                        )
+                    .filter_map(|audience| {
+                        let row = RowId {
+                            table: parent_table.name.clone(),
+                            key: written.clone(),
+                            audience,
+                        };
+                        let last = index.last_before(&row, step.sequence)?;
+                        let generation = if last.delete {
+                            last.generation
+                        } else {
+                            last.after()
+                        };
+                        Some((row, generation))
                     })
                     .collect(),
             };
-            for (parent, generation) in candidates {
-                for parent_step in index.before(&parent, step.sequence) {
-                    if best
-                        .as_ref()
-                        .is_some_and(|(_, s)| *s >= parent_step.sequence)
-                    {
-                        break;
-                    }
-                    if !parent_step.delete
-                        || generation.is_some_and(|g| g != parent_step.generation)
-                    {
-                        continue;
-                    }
-                    let rule = if parent_step.key_update {
-                        &key.on_update
-                    } else {
-                        &key.on_delete
-                    }
-                    .to_ascii_uppercase();
-                    let replacement = match (rule.as_str(), parent_step.key_update) {
-                        ("CASCADE", false) => {
-                            if matches!(step.change.operation, Operation::Delete) {
-                                best = Some((parent.clone(), parent_step.sequence));
-                            }
-                            continue;
-                        }
-                        ("CASCADE", true) => {
-                            let Some((new_row, new_step)) =
-                                index.new_half(&parent, parent_step.sequence)
-                            else {
-                                continue;
-                            };
-                            let new = key_values(parent_table, &targets, &new_row.key)?;
-                            if new == key_values(parent_table, &targets, &parent.key)? {
-                                continue;
-                            }
-                            let stored = self.authoring.stored(db, table, &columns, &new)?;
-                            Replacement::Key {
-                                values: stored,
-                                parent: Parent {
-                                    row: new_row.clone(),
-                                    generation: new_step.after(),
-                                },
-                            }
-                        }
-                        ("SET NULL", _) => Replacement::Null,
-                        _ => continue,
-                    };
-                    let expected =
-                        self.update(db, index, table, key, &columns, replacement, step)?;
-                    if step.change.operation == Operation::Update(expected) {
-                        best = Some((parent.clone(), parent_step.sequence));
-                    }
+            let (carried, others) = match &step.change.operation {
+                Operation::Update(recorded) => {
+                    self.recorded(db, index, table, key, &columns, recorded, step)?
                 }
+                _ => (BTreeMap::new(), Some(BTreeMap::new())),
+            };
+            for (parent, generation) in parents {
+                held.push(HeldReference {
+                    key: position,
+                    parent,
+                    generation,
+                    carried: carried.clone(),
+                    others: others.clone(),
+                });
             }
         }
-        Ok(best)
+        Ok(held)
     }
 
-    /// The columns an action setting `key`'s columns writes, with every
-    /// value and parent as the author records them at that moment (D5).
-    #[allow(clippy::too_many_arguments)]
-    fn update(
+    /// What an action through `key` records besides the key's own columns
+    /// (D5): every other column sharing a reference with them, with the value
+    /// it holds now, and the parent each other reference over the recorded
+    /// columns names, given the values `recorded` holds. None when the write
+    /// does not determine those parents.
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    fn recorded(
         &self,
         db: &DatabaseConnection,
         index: &StepIndex,
         table: &TableSchema,
         key: &SchemaForeignKey,
         columns: &[String],
-        replacement: Replacement,
+        recorded: &BTreeMap<String, ColumnValue<Value>>,
         step: &Step,
-    ) -> Result<BTreeMap<String, ColumnValue<Value>>, DbError> {
+    ) -> Result<(BTreeMap<String, Value>, Option<OtherParents>), DbError> {
         let names = self.authoring.closure(table, columns);
-        let mut values = BTreeMap::new();
-        let mut written = BTreeMap::new();
-        for name in &names {
-            let value = match columns.iter().position(|c| c == name) {
-                Some(index) => match &replacement {
-                    Replacement::Null => Value::Null,
-                    Replacement::Key { values, .. } => values[index].clone(),
-                },
-                None => {
-                    let cell = self.value(db, name)?;
-                    if let Some(cell) = &cell {
-                        written.insert(name.clone(), cell.parents.clone());
-                    }
-                    cell.map_or(Value::Null, |cell| cell.value)
-                }
-            };
-            values.insert(
-                name.clone(),
-                ColumnValue {
-                    value,
-                    parents: BTreeMap::new(),
-                },
-            );
+        let mut carried = BTreeMap::new();
+        let mut setters = BTreeMap::new();
+        for name in names.iter().filter(|name| !columns.contains(name)) {
+            let cell = self.value(db, name)?;
+            if let Some(cell) = &cell {
+                setters.insert(name.clone(), cell.parents.clone());
+            }
+            carried.insert(name.clone(), cell.map_or(Value::Null, |cell| cell.value));
         }
         let acting = self.authoring.schema.foreign_key(table, key);
+        let mut others = OtherParents::new();
         for other in &table.foreign_keys {
-            let other_columns: Vec<String> = other
-                .columns
-                .iter()
-                .map(|c| column_name(table, c).to_owned())
-                .collect();
-            if !other_columns.iter().all(|c| values.contains_key(c))
-                || other_columns.iter().any(|c| values[c].value == Value::Null)
-            {
+            let name = self.authoring.schema.foreign_key(table, other);
+            let other_columns = key_names(table, other);
+            if name == acting || !other_columns.iter().all(|c| names.contains(c)) {
                 continue;
             }
-            let name = self.authoring.schema.foreign_key(table, other);
-            let parent = if name == acting {
-                match &replacement {
-                    Replacement::Key { parent, .. } => Some(parent.clone()),
-                    Replacement::Null => None,
-                }
-            } else if other_columns.iter().any(|c| columns.contains(c)) {
-                // A tuple the action changed names whatever parent its new
+            let complete = other_columns.iter().all(|c| {
+                let value = if columns.contains(c) {
+                    recorded.get(c).map(|cell| &cell.value)
+                } else {
+                    carried.get(c)
+                };
+                value.is_some_and(|value| *value != Value::Null)
+            });
+            if !complete {
+                continue;
+            }
+            let parent = if other_columns.iter().any(|c| columns.contains(c)) {
+                // A tuple the action changes names whatever parent its new
                 // values reach, which only SQLite's own capture knows here.
-                return Ok(BTreeMap::new());
+                return Ok((carried, None));
             } else {
                 // An unchanged reference keeps the parent its setter
                 // recorded, unless an earlier step of this write ended it.
                 other_columns
                     .iter()
-                    .find_map(|c| written.get(c).and_then(|parents| parents.get(&name)))
+                    .find_map(|c| setters.get(c).and_then(|parents| parents.get(&name)))
                     .cloned()
                     .and_then(
                         |parent| match index.last_before(&parent.row, step.sequence) {
@@ -412,23 +397,122 @@ impl<'a> ChildView<'a> {
                     )
             };
             if let Some(parent) = parent {
-                for column in &other_columns {
-                    values
-                        .get_mut(column)
-                        .expect("a closed column set")
-                        .parents
+                for column in other_columns {
+                    others
+                        .entry(column)
+                        .or_default()
                         .insert(name.clone(), parent.clone());
                 }
             }
         }
-        Ok(values)
+        Ok((carried, Some(others)))
+    }
+
+    /// The operation an action through `held` on the parent's step records,
+    /// if the write's schema derives one (Lean `heldConsequence`): a cascade
+    /// delete, or an update writing NULL or the parent's new key as the child
+    /// stores it into the key's columns, with the carried cells and the
+    /// parents every recorded reference names.
+    fn consequence(
+        &self,
+        db: &DatabaseConnection,
+        index: &StepIndex,
+        held: &HeldReference,
+        parent_step: &Indexed,
+    ) -> Result<Option<Operation<Value>>, DbError> {
+        let (Some(table), Some(others)) = (self.authoring.table(&self.row.table), &held.others)
+        else {
+            return Ok(None);
+        };
+        if !parent_step.delete || parent_step.generation != held.generation {
+            return Ok(None);
+        }
+        let key = &table.foreign_keys[held.key];
+        let Some(parent_table) = self.authoring.table(&key.target) else {
+            return Ok(None);
+        };
+        let columns = key_names(table, key);
+        let targets = target_columns(parent_table, key);
+        let rule = if parent_step.key_update {
+            &key.on_update
+        } else {
+            &key.on_delete
+        }
+        .to_ascii_uppercase();
+        let replacement = match (rule.as_str(), parent_step.key_update) {
+            ("CASCADE", false) => return Ok(Some(Operation::Delete)),
+            ("CASCADE", true) => {
+                let Some((new_row, new_step)) = index.new_half(&held.parent, parent_step.sequence)
+                else {
+                    return Ok(None);
+                };
+                let new = key_values(parent_table, &targets, &new_row.key)?;
+                if new == key_values(parent_table, &targets, &held.parent.key)? {
+                    return Ok(None);
+                }
+                Some((
+                    self.authoring.stored(db, table, &columns, &new)?,
+                    Parent {
+                        row: new_row.clone(),
+                        generation: new_step.after(),
+                    },
+                ))
+            }
+            ("SET NULL", _) => None,
+            _ => return Ok(None),
+        };
+        let name = self.authoring.schema.foreign_key(table, key);
+        let mut cells = BTreeMap::new();
+        for (position, column) in columns.iter().enumerate() {
+            let mut parents = others.get(column).cloned().unwrap_or_default();
+            let value = match &replacement {
+                Some((values, parent)) => {
+                    parents.insert(name.clone(), parent.clone());
+                    values[position].clone()
+                }
+                None => Value::Null,
+            };
+            cells.insert(column.clone(), ColumnValue { value, parents });
+        }
+        for (column, value) in &held.carried {
+            cells.insert(
+                column.clone(),
+                ColumnValue {
+                    value: value.clone(),
+                    parents: others.get(column).cloned().unwrap_or_default(),
+                },
+            );
+        }
+        Ok(Some(Operation::Update(cells)))
     }
 }
 
-/// What an update action writes into the child's reference.
-enum Replacement {
-    Null,
-    Key { values: Vec<Value>, parent: Parent },
+/// The parents references name, by column and reference.
+pub(crate) type OtherParents = BTreeMap<String, BTreeMap<ForeignKey, Parent>>;
+
+/// A reference a child row holds at one step, through which the step can be
+/// a foreign-key action (Lean `Classification.Held`).
+#[derive(Clone, Debug)]
+pub(crate) struct HeldReference {
+    /// The foreign key's position among the child table's.
+    pub(crate) key: usize,
+    /// The parent it names, and that parent's incarnation.
+    pub(crate) parent: RowId,
+    pub(crate) generation: u64,
+    /// The other columns an action through it records, with the values they
+    /// hold at this step.
+    pub(crate) carried: BTreeMap<String, Value>,
+    /// The parents the other references over the recorded columns name;
+    /// none when the write does not determine them.
+    pub(crate) others: Option<OtherParents>,
+}
+
+/// A foreign key's columns, as the table names them, in declaration order.
+pub(crate) fn key_names(table: &TableSchema, key: &SchemaForeignKey) -> Vec<String> {
+    key.columns
+        .iter()
+        .map(|c| column_name(table, c).to_owned())
+        .collect()
 }
 
 /// A parent's key, encoded, from its referenced values in target order.
@@ -447,7 +531,11 @@ fn parent_key(
 }
 
 /// A parent key's values in target column order.
-fn key_values(table: &TableSchema, targets: &[String], key: &[u8]) -> Result<Vec<Value>, DbError> {
+pub(crate) fn key_values(
+    table: &TableSchema,
+    targets: &[String],
+    key: &[u8],
+) -> Result<Vec<Value>, DbError> {
     let values: BTreeMap<String, Value> = key_columns(table)
         .iter()
         .map(|c| c.name.clone())

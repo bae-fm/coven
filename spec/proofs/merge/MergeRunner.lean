@@ -1,5 +1,6 @@
 import CovenMerge.Boundary
 import CovenMerge.OwnerAdmission
+import CovenMerge.ForeignKeyRecords
 import Lean
 
 /-! JSON adapter for differential tests. All merge and removal computation calls
@@ -399,7 +400,8 @@ private def runAdmission (j : Json) : Except String Json := do
 -- are numbered apart from rows, as changes of write 1; `droppedExternal` and
 -- `prior` name the external and own changes whose verdict already drops them.
 -- A direct row's proposed payload is its direct effect unless `payloads`
--- names the net change its steps do not end at. For each row:
+-- names the net change its steps do not end at. `store` gives a cascaded key
+-- as the child's column stores it. For each row:
 -- `Admission.check`, `Admission.guard`'s cause, the roots its derivation
 -- reaches and the sources `dependencies` gives it.
 open Ownership Ownership.ForeignKey Ownership.Admission in
@@ -418,7 +420,16 @@ private def runReceive (j : Json) : Except String Json := do
   let droppedExternal ← j.getObjValAs? (Array Nat) "droppedExternal"
   let prior ← j.getObjValAs? (Array Nat) "prior"
   let payloads ← (← j.getObjValAs? (Array Json) "payloads").mapM readEffect
-  let schema := resolvedSchema references
+  -- A cascaded key as the child's column stores it (SQLite affinity).
+  let store ← (← j.getObjValAs? (Array Json) "store").mapM fun e => do
+    match (← e.getArr?).toList with
+    | [c, a, b] => pure (← c.getNat?, ← a.getNat?, ← b.getNat?)
+    | _ => throw "a stored value is [column, value, stored]"
+  let stored := fun (c : Nat) (v : Option Nat) => v.map fun v =>
+    ((store.find? fun e => e.1 == c && e.2.1 == v).map (·.2.2)).getD v
+  let schema : Schema Nat (Effect Nat Nat Nat) := { resolvedSchema references with
+    consequences := fun r p => ((resolvedSchema references).consequences r p).map fun (row, e) =>
+      (row, { e with cells := e.cells.map fun cell => (cell.1, stored cell.1 cell.2) }) }
   let plain : Nat → Option (Effect Nat Nat Nat) := fun r => directs.find? (·.row == r)
   let path := fun (path : Array Nat) =>
     (path.toList.drop 1).foldl (fun (acc : Option (Derivation Nat)) child =>
@@ -483,12 +494,58 @@ private def runReceive (j : Json) : Except String Json := do
         | .foreign d => toJson (roots d)),
       ("sources", toJson ((D.sources 0 r).map fun ((w, row) : Nat × Nat) => [w, row]))]))
 
+-- The receiver's classification of one write's steps (B18,
+-- `Classification.cause` with `heldRule`): every step as D5 records it, in
+-- execution order, and the references each step's row holds at that step, as
+-- the receiver replays them. For each step: the position of its cause, or
+-- null for a direct step. Cells and parents compare in one canonical order.
+open Ownership Ownership.ForeignKey Ownership.Classification in
+private def runClassify (j : Json) : Except String Json := do
+  let readNamed (j : Json) : Except String (Nat × Nat × Nat × Nat) := do
+    match (← j.getArr?).toList with
+    | [c, n, r, g] => pure (← c.getNat?, ← n.getNat?, ← r.getNat?, ← g.getNat?)
+    | _ => throw "a named parent is [column, reference, row, generation]"
+  let normalize (s : Recorded Nat Nat Nat Nat) : Recorded Nat Nat Nat Nat :=
+    { s with
+      effect := { s.effect with cells := s.effect.cells.mergeSort fun a b => a.1 ≤ b.1 }
+      parents := s.parents.mergeSort fun a b =>
+        a.1 < b.1 || (a.1 == b.1 && (a.2.1 < b.2.1 || (a.2.1 == b.2.1 &&
+          (a.2.2.1 < b.2.2.1 || (a.2.2.1 == b.2.2.1 && a.2.2.2 ≤ b.2.2.2))))) }
+  let steps ← (← j.getObjValAs? (Array Json) "steps").mapM fun step => do
+    let effect ← readEffect (← step.getObjVal? "effect")
+    let parents ← (← step.getObjValAs? (Array Json) "parents").mapM readNamed
+    let becomes ← step.getObjValAs? (Option (Nat × Nat)) "becomes"
+    pure (normalize ⟨effect, parents.toList, becomes⟩)
+  let refs ← (← j.getObjValAs? (Array Json) "refs").mapM fun entry => do
+    let i ← natField entry "step"
+    let held ← (← entry.getObjValAs? (Array Json) "held").mapM fun h => do
+      let store ← (← h.getObjValAs? (Array Json) "store").mapM fun e => do
+        match (← e.getArr?).toList with
+        | [c, a, b] => pure (← c.getNat?, ← a.getNat?, ← b.getNat?)
+        | _ => throw "a stored value is [column, value, stored]"
+      let carried ← (← h.getObjValAs? (Array Json) "carried").mapM fun cell => do
+        pure (← natField cell "column", ← cell.getObjValAs? (Option Nat) "value")
+      let others ← match ← h.getObjVal? "others" with
+        | Json.null => pure none
+        | others => do pure (some (← (← others.getArr?).mapM readNamed).toList)
+      let reference ← readReference (← h.getObjVal? "reference")
+      let name ← natField h "name"
+      pure (⟨reference, name, store.toList, carried.toList, others⟩ : Held Nat Nat Nat Nat)
+    pure (i, held.toList)
+  let rule : Rule Nat (Held Nat Nat Nat Nat) (Recorded Nat Nat Nat Nat) :=
+    ⟨fun s => s.effect.row, fun h p => (heldConsequence h p).map normalize⟩
+  let t : Trace Nat (Held Nat Nat Nat Nat) (Recorded Nat Nat Nat Nat) := {
+    steps := steps.toList
+    refs := fun i r => (((refs.find? (·.1 == i)).map (·.2)).getD []).filter (·.ref.child == r) }
+  pure (toJson ((List.range steps.size).map fun i => cause rule t i))
+
 private def run (j : Json) : Except String Json := do
   let mode ← j.getObjValAs? String "mode"
   if mode == "freeze" then return ← runFreeze j
   if mode == "effects" then return ← runEffects j
   if mode == "admission" then return ← runAdmission j
   if mode == "receive" then return ← runReceive j
+  if mode == "classify" then return ← runClassify j
   if mode == "migration" then
     let (rows, I) ← readInputs j
     let named ← readEntries j I

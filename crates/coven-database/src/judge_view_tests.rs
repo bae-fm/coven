@@ -65,8 +65,9 @@ impl Ids {
     }
 }
 
-const TABLES: [&str; 9] = [
-    "tracks", "reviews", "comments", "pins", "keys", "labels", "albums", "logs", "notes",
+const TABLES: [&str; 11] = [
+    "tracks", "reviews", "comments", "pins", "keys", "labels", "albums", "logs", "notes", "codes",
+    "tags",
 ];
 
 fn action(rule: &str) -> &'static str {
@@ -160,6 +161,7 @@ fn input(
     let mut seen = BTreeSet::new();
     let mut roots = BTreeMap::new();
     let mut derived = Vec::new();
+    let mut store = Vec::new();
     for (row, checked) in &judgement.rows {
         let mut order: Vec<String> = Vec::new();
         let mut paths = Vec::new();
@@ -194,6 +196,25 @@ fn input(
                 .collect();
             let targets = target_columns(parent_table, fk);
             let old = key_values(schema, parent);
+            if parent_step.key_update {
+                let (new, _) = steps
+                    .iter()
+                    .find(|(r, s)| {
+                        *r != parent
+                            && r.table == parent.table
+                            && s.iter().any(|s| s.sequence == *parent_sequence)
+                    })
+                    .expect("the key update's new half");
+                let new_key = key_values(schema, new);
+                let new: Vec<Value> = targets.iter().map(|t| new_key[t].clone()).collect();
+                let stored =
+                    crate::removal_sql::reference_values(db, child_table, &columns, &new).unwrap();
+                for ((column, from), to) in columns.iter().zip(&new).zip(&stored) {
+                    if let (Some(from), Some(to)) = (ids.value(from), ids.value(to)) {
+                        store.push(json!([ids.column(&row.table, column), from, to]));
+                    }
+                }
+            }
             if seen.insert((parent.clone(), row.clone(), columns.clone())) {
                 references.push(json!({
                     "parent": ids.row(parent), "parentGeneration": parent_step.change.generation,
@@ -218,13 +239,16 @@ fn input(
             continue;
         }
         // The proposed payload is the net change, in the order the model
-        // combines the actions' cells.
-        let net = record
+        // combines the actions' cells. A row the write inserted and its
+        // actions deleted again has none: the model checks its first step.
+        let Some(net) = record
             .parts
             .iter()
             .flat_map(|p| &p.rows)
             .find(|change| change.row == *row)
-            .expect("a derived row in these cases has a net change");
+        else {
+            continue;
+        };
         let (kind, cells) = match &net.change.operation {
             coven_merge::Operation::Delete => (2, Vec::new()),
             coven_merge::Operation::Insert(columns) | coven_merge::Operation::Update(columns) => {
@@ -317,9 +341,12 @@ fn input(
     (
         json!({
             "mode": "receive", "references": references, "direct": direct, "derived": derived,
-            "rows": rows, "owned": (0..TABLES.len()).collect::<Vec<_>>(), "author": BEN,
+            "rows": rows, "author": BEN,
+            "owned": (0..TABLES.len())
+                .filter(|t| crate::ownership::owner_table(schema, TABLES[*t]))
+                .collect::<Vec<_>>(),
             "external": external, "droppedExternal": dropped, "prior": Vec::<usize>::new(),
-            "payloads": payloads,
+            "payloads": payloads, "store": store,
         }),
         ids,
         judgement,
@@ -423,4 +450,180 @@ async fn receipt_matches_the_model() {
     let mut compared = 0;
     receipts(|db, record| compared += compare(&runner, db, record)).await;
     assert!(compared >= 30, "{compared} rows compared");
+}
+
+/// One received write's classification as the receiver ran it, against the
+/// model's `Classification.cause` with `heldRule` over the same steps and
+/// held references (B18). Returns how many steps were compared, and how
+/// many of them are actions.
+fn classify(runner: &std::ffi::OsStr, db: &Database, record: &WriteRecord) -> (usize, usize) {
+    use super::{key_names, key_values, Authoring, ChildView, HeldReference};
+    use crate::judge::{visit_write, StepIndex};
+    db.inspect_writer_schema(|c, schema| {
+        let header = &record.header;
+        let authoring = Authoring::new(c, schema, header.schema_version).unwrap();
+        let index = StepIndex::of(c, header).unwrap();
+        let judgement = judge(c, schema, header).unwrap();
+        let mut all: Vec<(RowId, Step, Vec<HeldReference>)> = Vec::new();
+        visit_write(c, header, |original| {
+            let row = original.row().clone();
+            let mut view = ChildView::new(&authoring, &row, &original, header.schema_version);
+            for step in &original.execution().steps {
+                all.push((row.clone(), step.clone(), view.held(c, &index, step)?));
+                view.apply(step);
+            }
+            Ok(())
+        })
+        .unwrap();
+        // Execution order; a key update's old half before its new one.
+        all.sort_by_key(|(_, step, _)| {
+            (
+                step.sequence,
+                !matches!(step.change.operation, coven_merge::Operation::Delete),
+            )
+        });
+        let by_row: BTreeMap<RowId, Vec<Step>> =
+            all.iter().fold(BTreeMap::new(), |mut rows, (row, step, _)| {
+                rows.entry(row.clone()).or_insert_with(Vec::new).push(step.clone());
+                rows
+            });
+        let position = |row: &RowId, sequence: u32| {
+            all.iter()
+                .position(|(r, s, _)| r == row && s.sequence == sequence)
+                .unwrap()
+        };
+        let mut ids = Ids::default();
+        let mut names: BTreeMap<coven_merge::ForeignKey, usize> = BTreeMap::new();
+        let mut name = |key: &coven_merge::ForeignKey| {
+            let next = names.len();
+            *names.entry(key.clone()).or_insert(next)
+        };
+        let mut steps = Vec::new();
+        let mut refs = Vec::new();
+        for (i, (row, step, held)) in all.iter().enumerate() {
+            let mut parents = Vec::new();
+            if let coven_merge::Operation::Insert(columns) | coven_merge::Operation::Update(columns) =
+                &step.change.operation
+            {
+                for (column, cell) in columns {
+                    for (key, parent) in &cell.parents {
+                        parents.push(json!([
+                            ids.column(&row.table, column),
+                            name(key),
+                            ids.row(&parent.row),
+                            parent.generation
+                        ]));
+                    }
+                }
+            }
+            let becomes = step.key_update.then(|| {
+                let (new, new_step) = index.new_half(row, step.sequence).unwrap();
+                json!([ids.row(new), new_step.after()])
+            });
+            steps.push(json!({
+                "effect": effect(&mut ids, schema, &by_row, row, step),
+                "parents": parents, "becomes": becomes,
+            }));
+            let table = schema.table(&row.table);
+            let mut entries = Vec::new();
+            for held in held {
+                let key = &table.foreign_keys[held.key];
+                let parent_table = schema.table(&key.target);
+                let columns = key_names(table, key);
+                let targets = target_columns(parent_table, key);
+                // How the child stores each new key a key update of this
+                // parent's incarnation could cascade.
+                let mut store = Vec::new();
+                for parent_step in index.before(&held.parent, step.sequence) {
+                    if !parent_step.key_update || parent_step.generation != held.generation {
+                        continue;
+                    }
+                    let (new, _) = index.new_half(&held.parent, parent_step.sequence).unwrap();
+                    let new = key_values(parent_table, &targets, &new.key).unwrap();
+                    let stored =
+                        crate::removal_sql::reference_values(c, table, &columns, &new).unwrap();
+                    for ((column, from), to) in columns.iter().zip(&new).zip(&stored) {
+                        if let (Some(from), Some(to)) = (ids.value(from), ids.value(to)) {
+                            store.push(json!([ids.column(&row.table, column), from, to]));
+                        }
+                    }
+                }
+                let old = key_values(parent_table, &targets, &held.parent.key).unwrap();
+                let others = held.others.as_ref().map(|others| {
+                    others
+                        .iter()
+                        .flat_map(|(column, parents)| {
+                            parents.iter().map(move |(key, parent)| (column, key, parent))
+                        })
+                        .map(|(column, key, parent)| {
+                            json!([
+                                ids.column(&row.table, column),
+                                name(key),
+                                ids.row(&parent.row),
+                                parent.generation
+                            ])
+                        })
+                        .collect::<Vec<_>>()
+                });
+                entries.push(json!({
+                    "reference": {
+                        "parent": ids.row(&held.parent), "parentGeneration": held.generation,
+                        "child": ids.row(row), "childGeneration": step.change.generation,
+                        "columns": columns.iter().map(|c| ids.column(&row.table, c)).collect::<Vec<_>>(),
+                        "oldKey": old.iter().map(|v| ids.value(v)).collect::<Vec<_>>(),
+                        "onDelete": action(&key.on_delete), "onUpdate": action(&key.on_update),
+                        "parentColumns": targets.iter().map(|t| ids.column(&parent_table.name, t)).collect::<Vec<_>>(),
+                    },
+                    "name": name(&schema.foreign_key(table, key)),
+                    "store": store,
+                    "carried": held.carried.iter().map(|(column, value)| {
+                        json!({"column": ids.column(&row.table, column), "value": ids.value(value)})
+                    }).collect::<Vec<_>>(),
+                    "others": others,
+                }));
+            }
+            if !entries.is_empty() {
+                refs.push(json!({"step": i, "held": entries}));
+            }
+        }
+        let input = json!({"mode": "classify", "steps": steps, "refs": refs});
+        let result = run_lean(runner, &input);
+        let lean = result.as_array().unwrap();
+        assert_eq!(lean.len(), all.len());
+        for (i, (row, step, _)) in all.iter().enumerate() {
+            let rust = judgement.rows[row]
+                .actions
+                .iter()
+                .find(|(sequence, _)| *sequence == step.sequence)
+                .map(|(_, chain)| {
+                    let (parent, sequence) = chain.last().unwrap();
+                    position(parent, *sequence)
+                });
+            assert_eq!(
+                lean[i].as_u64().map(|cause| cause as usize),
+                rust,
+                "{row:?} {step:?}: {input}"
+            );
+        }
+        (all.len(), lean.iter().filter(|cause| !cause.is_null()).count())
+    })
+}
+
+/// The receiver's classification of every receipt case's steps is the
+/// model's (`Classification.cause`).
+#[tokio::test]
+#[ignore = "requires COVEN_MERGE_LEAN; scripts/check.sh supplies the merge runner"]
+async fn classification_matches_the_model() {
+    let runner = std::env::var_os("COVEN_MERGE_LEAN").expect("built mergeRunner");
+    let (mut compared, mut actions) = (0, 0);
+    receipts(|db, record| {
+        let (steps, found) = classify(&runner, db, record);
+        compared += steps;
+        actions += found;
+    })
+    .await;
+    assert!(
+        compared >= 30 && actions >= 10,
+        "{compared} steps, {actions} actions"
+    );
 }
