@@ -451,7 +451,7 @@ pub(crate) fn capture(
                 .iter()
                 .rposition(|depth| *depth == op.depth - 1);
             match frame.and_then(|index| ops[index].as_ref()) {
-                Some(parent) if action_of(schema, parent, &op).is_some() => Origin::ForeignKey {
+                Some(parent) if action_of(db, schema, parent, &op)? => Origin::ForeignKey {
                     cause: parent.step.clone().expect("a parent operation made a step"),
                 },
                 _ => Origin::Trigger,
@@ -471,48 +471,53 @@ pub(crate) fn capture(
     Ok(operations)
 }
 
-/// The child foreign key through which `child` is exactly the schema's
-/// action on `parent`'s delete or primary-key update (§8.4, §8.5): a cascade
-/// delete, or an update writing only the key's columns, to NULL or to the
-/// parent's new key, from a reference to the parent's old key.
-fn action_of<'a>(schema: &'a WriteSchema, parent: &Op, child: &Op) -> Option<&'a SchemaForeignKey> {
+/// Whether `child` is exactly the schema's action on `parent`'s delete or
+/// primary-key update through one of the child's foreign keys (§8.4, §8.5): a
+/// cascade delete, or an update writing only the key's columns, to NULL or to
+/// the parent's new key, from a reference to the parent's old key. Values
+/// compare as SQLite compares them: a reference holds the parent's key in the
+/// parent's affinity, and a cascade stores the new key in the child's.
+fn action_of(
+    db: &DatabaseConnection,
+    schema: &WriteSchema,
+    parent: &Op,
+    child: &Op,
+) -> Result<bool, DbError> {
     let child_table = schema.table(&child.table);
     let parent_table = schema.table(&parent.table);
-    let parent_old = parent.old.as_ref()?;
-    let child_old = child.old.as_ref()?;
-    let key_changed = |key: &SchemaForeignKey| {
-        parent.new.as_ref().is_some_and(|new| {
-            target_columns(parent_table, key)
-                .iter()
-                .any(|c| new.get(c) != parent_old.get(c))
-        })
+    let (Some(parent_old), Some(child_old)) = (parent.old.as_ref(), child.old.as_ref()) else {
+        return Ok(false);
     };
-    child_table.foreign_keys.iter().find(|key| {
+    for key in &child_table.foreign_keys {
         if !key.target.eq_ignore_ascii_case(&parent.table) {
-            return false;
+            continue;
         }
         let targets = target_columns(parent_table, key);
-        let columns: Vec<&str> = key
+        let columns: Vec<String> = key
             .columns
             .iter()
-            .map(|c| column_name(child_table, c))
+            .map(|c| column_name(child_table, c).to_owned())
             .collect();
-        let referenced = columns
-            .iter()
-            .zip(&targets)
-            .all(|(c, t)| child_old.get(*c) == parent_old.get(t) && child_old[*c] != Value::Null);
-        if !referenced {
-            return false;
+        let held: Vec<Value> = columns.iter().map(|c| child_old[c].clone()).collect();
+        if held.contains(&Value::Null) {
+            continue;
         }
+        let old_key: Vec<Value> = targets.iter().map(|t| parent_old[t].clone()).collect();
+        if crate::removal_sql::reference_values(db, parent_table, &targets, &held)? != old_key {
+            continue;
+        }
+        let key_changed = parent
+            .new
+            .as_ref()
+            .is_some_and(|new| targets.iter().any(|t| new.get(t) != parent_old.get(t)));
         let rule = match parent.action {
             Action::SQLITE_DELETE => &key.on_delete,
-            Action::SQLITE_UPDATE if key_changed(key) => &key.on_update,
-            _ => return false,
+            Action::SQLITE_UPDATE if key_changed => &key.on_update,
+            _ => continue,
         };
-        let rule = rule.to_ascii_uppercase();
         let only_key_written = |new: &AppValues| {
             new.iter().all(|(name, value)| {
-                columns.contains(&name.as_str())
+                columns.contains(name)
                     || child_table
                         .columns
                         .iter()
@@ -520,23 +525,31 @@ fn action_of<'a>(schema: &'a WriteSchema, parent: &Op, child: &Op) -> Option<&'a
                     || child_old.get(name) == Some(value)
             })
         };
-        match (rule.as_str(), child.action, &child.new) {
+        let action = match (rule.to_ascii_uppercase().as_str(), child.action, &child.new) {
             ("CASCADE", Action::SQLITE_DELETE, _) => parent.action == Action::SQLITE_DELETE,
-            ("CASCADE", Action::SQLITE_UPDATE, Some(new)) => {
+            ("CASCADE", Action::SQLITE_UPDATE, Some(new))
+                if parent.action == Action::SQLITE_UPDATE =>
+            {
                 let parent_new = parent.new.as_ref().expect("a key update has new values");
-                parent.action == Action::SQLITE_UPDATE
-                    && only_key_written(new)
+                let new_key: Vec<Value> = targets.iter().map(|t| parent_new[t].clone()).collect();
+                let stored =
+                    crate::removal_sql::reference_values(db, child_table, &columns, &new_key)?;
+                only_key_written(new)
                     && columns
                         .iter()
-                        .zip(&targets)
-                        .all(|(c, t)| new.get(*c) == parent_new.get(t))
+                        .zip(&stored)
+                        .all(|(c, v)| new.get(c) == Some(v))
             }
             ("SET NULL", Action::SQLITE_UPDATE, Some(new)) => {
-                only_key_written(new) && columns.iter().all(|c| new[*c] == Value::Null)
+                only_key_written(new) && columns.iter().all(|c| new[c] == Value::Null)
             }
             _ => false,
+        };
+        if action {
+            return Ok(true);
         }
-    })
+    }
+    Ok(false)
 }
 
 #[cfg(test)]

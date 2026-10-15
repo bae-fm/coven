@@ -21,7 +21,7 @@ a direct target and needs its row's permission.
   makes that update a delete and an insert, and the action then names the row
   the insert made.
 
-Three checked histories bound the rule. `TriggerFirst`: a shared trigger can
+Four checked histories bound the rule. `TriggerFirst`: a shared trigger can
 make the exact step SQLite's own action would have made, before the action
 reaches the row; it is classified as an action, so "action" here means "is
 the schema's consequence", not "SQLite's action code made it". `FollowBack`:
@@ -31,7 +31,9 @@ place, comparing values without the parents they name accepts a direct edit
 that points another member's row at a different parent; comparing the named
 parents refuses it. In coven a referenced key is a primary key, and changing
 it ends the incarnation an older reference names, which refuses that edit
-too. -/
+too. `Affinity`: a cascade stores the parent's new key in the child column's
+affinity; comparing the key as the parent holds it refuses an honest cascade
+into a TEXT column from an INTEGER key (`storedRule` compares stored values). -/
 namespace CovenMerge.Ownership.Classification
 
 open ForeignKey
@@ -302,6 +304,15 @@ theorem follows_cause {t : Trace Row (Reference Row Col Value) (Step Row Col Val
     simp [row, gen]
   · cases mem
 
+/-- Values as the child's columns store them. SQLite converts a value written
+into a column to that column's affinity, so a cascade stores the parent's new
+key in the child's affinity (`store`). A reference already holds its parent's
+old key in the parent's affinity (`Reference.oldKey`), as SQLite compares it. -/
+def storedRule (store : Col → Option Value → Option Value) :
+    Rule Row (Reference Row Col Value) (Effect Row Col Value) :=
+  ⟨Effect.row, fun f p => (consequence f p).map fun e =>
+    { e with cells := e.cells.map fun cell => (cell.1, store cell.1 cell.2) }⟩
+
 end Steps
 
 /-! ## Checked histories
@@ -439,5 +450,40 @@ theorem parents_refuse_retarget :
     cause stepRule named 1 = some 0 ∧ cause stepRule named 3 = some 2 := by decide
 
 end Retarget
+
+namespace Affinity
+
+/-! Ben's code 0 has the INTEGER key 7, which Ana's tag 1 holds in a TEXT
+column as the text '7'. Ben changes the code to 8, and ON UPDATE CASCADE
+stores the text '8' in the tag. Values are numbers: 7 and 8 are the integers,
+17 and 18 the texts. -/
+
+def store (c : Nat) (v : Option Nat) : Option Nat :=
+  if c = 1 then v.map (· + 10) else v
+
+def trace : Trace Nat (Reference Nat Nat Nat) (Effect Nat Nat Nat) where
+  steps := [⟨0, 1, .upd, [(0, some 8)]⟩, ⟨1, 1, .upd, [(1, some 18)]⟩]
+  refs _ r := if r = 1 then [ref 0 1 7] else []
+
+def made : Nat → Made
+  | 1 => .action 0
+  | _ => .statement
+
+theorem faithful : Faithful (storedRule store) trace made := by
+  intro i j h
+  rcases i with _ | _ | i
+  · cases h
+  · cases h
+    exact (candidate_iff _ _ 1 0).mp (by decide)
+  · cases h
+
+/-- Comparing the parent's new key with the tag's stored value calls SQLite's
+cascade a direct edit of Ana's tag, refusing Ben's honest write. -/
+theorem unstored_refuses_cascade : made 1 = .action 0 ∧ cause effectRule trace 1 = none := by
+  decide
+
+theorem stored_classifies : cause (storedRule store) trace 1 = some 0 := by decide
+
+end Affinity
 
 end CovenMerge.Ownership.Classification

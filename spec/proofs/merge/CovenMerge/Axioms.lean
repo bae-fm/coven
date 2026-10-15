@@ -321,6 +321,9 @@ open CovenMerge
 #print axioms Ownership.Classification.Retarget.faithful
 #print axioms Ownership.Classification.Retarget.values_accept_retarget
 #print axioms Ownership.Classification.Retarget.parents_refuse_retarget
+#print axioms Ownership.Classification.Affinity.faithful
+#print axioms Ownership.Classification.Affinity.unstored_refuses_cascade
+#print axioms Ownership.Classification.Affinity.stored_classifies
 -- moving owned rows and what they carry (§8.8, §14.2)
 #print axioms Ownership.Moves.refused_iff
 #print axioms Ownership.Moves.carried_foreign_refuses

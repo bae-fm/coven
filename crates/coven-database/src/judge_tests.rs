@@ -692,6 +692,73 @@ async fn a_dropped_cause_restores_the_rows_its_actions_changed() {
     }
 }
 
+/// Codes have INTEGER keys that tags hold as text. Codes are unowned, so Ana
+/// can insert one after the tag that references it, as a deferred key allows.
+const AFFINITY: &str = "CREATE TABLE codes(id INT NOT NULL PRIMARY KEY) WITHOUT ROWID;
+CREATE TABLE tags(id TEXT NOT NULL PRIMARY KEY, code TEXT REFERENCES codes(id)
+  ON DELETE CASCADE ON UPDATE CASCADE DEFERRABLE INITIALLY DEFERRED);";
+
+fn coded(owned: bool) -> Vec<SyncedTable> {
+    let tags = SyncedTable::new("tags", RowIdentity::SharedKey);
+    vec![
+        SyncedTable::new("codes", RowIdentity::SharedKey),
+        if owned { tags.owner_only() } else { tags },
+    ]
+}
+
+/// SQLite compares Ana's text '7' with code 7 in the code's affinity, and a
+/// cascade stores the new key 8 as the text '8'. Ben's delete and key update
+/// reach her tag whether she inserted the code before or after the tag: his
+/// own device commits them, and a receiver records the same derived change.
+#[tokio::test]
+async fn actions_across_affinities_are_actions() {
+    for seed in [
+        "INSERT INTO tags VALUES('k','7'); INSERT INTO codes VALUES(7);",
+        "INSERT INTO codes VALUES(7); INSERT INTO tags VALUES('k','7');",
+    ] {
+        for (statement, left) in [
+            ("DELETE FROM codes", None),
+            ("UPDATE codes SET id=8", Some("8".to_owned())),
+        ] {
+            let devices = Devices::with(coded(true), coded(false), AFFINITY).await;
+            sql(&devices.ana, seed).await.unwrap();
+            deliver(&devices.ana, &devices.ben).await;
+            deliver(&devices.ana, &devices.carol).await;
+            sql(&devices.ben, statement).await.unwrap();
+            let record = records(&devices.ben).pop().unwrap();
+            let tag = key("tags", "k");
+            let code = RowId {
+                table: "codes".into(),
+                key: coven_format::key::encode_key(&[Value::Integer(7)]).unwrap(),
+                audience: Audience::Store,
+            };
+            let derived = ChangeVerdict::Derived(vec![ChangeId {
+                write: record.header.position,
+                row: code,
+            }]);
+            assert_eq!(
+                verdict(&devices.ben, &record, &tag),
+                derived,
+                "{seed} {statement}"
+            );
+            receive(&devices.carol, &record).await;
+            assert_eq!(
+                verdict(&devices.carol, &record, &tag),
+                derived,
+                "{seed} {statement}"
+            );
+            assert_eq!(
+                text(
+                    &devices.carol,
+                    "SELECT (SELECT code FROM tags WHERE id='k')"
+                ),
+                left
+            );
+            devices.close().await;
+        }
+    }
+}
+
 /// The receipts the model comparison checks (`judge_view::tests`), each
 /// passed with the device that received it: direct, derived, transitive and
 /// coalesced changes, triggers, unauthorized roots, a forged action payload

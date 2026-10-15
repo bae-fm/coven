@@ -1229,7 +1229,7 @@ is an exact chain of consequences from such steps.
 `forbidden_row_needs_action` is the converse view: a step on a row the writer
 may not change is admitted only as an action.
 
-Three checked histories bound the rule; each was also run on SQLite.
+Four checked histories bound the rule; each was also run on SQLite.
 `TriggerFirst`: Ben deletes his track; the cascade deletes Ana's first review,
 and a shared AFTER DELETE trigger fired by that deletion deletes her second
 review before the cascade reaches it. `trigger_classified_as_action` shows
@@ -1259,6 +1259,12 @@ action names the inserted row, and a reference to the old key names an
 incarnation that ended; that refuses `Retarget`'s edit even before parents are
 compared. `FollowBack` holds either way: the second cascade's cause is a step
 on the inserted row, which the view at the write's start never names.
+`Affinity`: Ben's code has the INTEGER key 7, which Ana's tag holds in a TEXT
+column as '7'; changing the code to 8 makes SQLite store the text '8' in the
+tag. `unstored_refuses_cascade` shows that comparing the parent's new key as
+the parent holds it calls that cascade a direct edit; `stored_classifies`
+compares values as the child's columns store them (`storedRule`), as both the
+receiver and the author's own capture do.
 
 **Moving owned rows.** `OwnerMoves.lean` treats every row a move carries as
 a copy: a direct change of the mover's write, made without SQL, keeping its
