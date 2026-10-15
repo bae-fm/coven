@@ -25,6 +25,7 @@ import CovenIO.AudienceRetention
 import CovenIO.CommonReloadExamples
 import CovenIO.SnapshotWrites
 import CovenIO.SnapshotWriteExamples
+import CovenIO.RaiseCoverage
 import CovenIO.ListingMarginExamples
 import CovenIO.ListingFinality
 import CovenIO.PassPhases

@@ -289,6 +289,46 @@ It includes the empty migration marker in that prefix; later app writes wait
 for a kept raise. This package proves the resulting publication and loader
 boundary, not the application migration or choice of the winning raise.
 
+**Raise snapshots judged only by what they cover — checked counterexample.**
+A migration captures one raise snapshot per readable audience in its own
+transaction, so a newer snapshot landing afterwards cannot be taken in, and
+§15's preparation rule (cover the audience's current newest) would block the
+raise. The proposed exemption (T200, option A) lets the raise snapshot skip
+that rule, count only for the writes it covers, and leave the rest to the
+logs for peers to convert. [`RaiseCoverage`](io/CovenIO/RaiseCoverage.lean)
+adds the kept raise's boundary to the selection: once a raise is kept, only
+its named snapshot and snapshots that read the raise entry are usable
+(`boundaryCurrent`, Rust `snapshot_boundaries::allows`).
+
+`option_a_loses_write` is the failing history. Ana migrates at time 0 and
+captures the store and Gifts; Carol, the first member of Work (which Ana
+cannot read) to update, captures Work. Ben's old-schema write 1, with a part
+in all three audiences, lands at 100, and his snapshot of each audience
+covering it lands at 200. Every device posts past it, and a day later Ben
+deletes it under every §15 gate (`Eligible`). The raise snapshots land two
+days in, after a completed catch-up, and the raises are kept. In all three
+audiences the current newest is now the raise snapshot, which stops before
+write 1: a fresh catalog certifies the deletion and the reload skips the
+write as having no part there. Without the boundary the same reload would
+load Ben's snapshot. `raises_absent_at_deletion` shows no raise snapshot was
+listed when Ben deleted, so no retention rule that looks at listed snapshots
+could have held the write.
+
+`capture_unsound` places the cause: stamped with the catch-up time before
+sending, the raise snapshot omits a write stored before that time, which is
+exactly the `SnapshotHistory.Sound` premise `deleted_stays_covered` rests on.
+Stamped with its capture time instead, it is sound but lands more than a day
+later and never counts (`capture_stamp_never_counts`), so a raise naming it
+never becomes usable.
+
+`kept_late_raise_loses_write` shows a second gap that holds under the current
+rules. Ana's store raise snapshot is prepared after a completed catch-up with
+nothing landed, is sound and counts, and lands at 60; her raise entry is kept
+only after Ben's later old-schema write was covered by his newer snapshot and
+deleted. The boundary then excludes Ben's snapshot and the reload skips the
+write. Here the raise snapshot was listed when Ben deleted, so retention that
+held writes a listed, not yet kept raise snapshot omits would keep it.
+
 **3. Snapshot coverage proposal — revision 4.** This checks a proposal;
 [§15](../coven.md#15-snapshots) and Rust are unchanged. The publication and
 deletion rules remain:

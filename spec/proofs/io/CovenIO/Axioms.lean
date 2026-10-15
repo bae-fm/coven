@@ -337,6 +337,13 @@ import CovenIO
 #print axioms CovenIO.SnapshotWriteExamples.later_run
 #print axioms CovenIO.SnapshotWriteExamples.pending_run
 #print axioms CovenIO.SnapshotWriteExamples.two_audience_raise_keeps_circle_part
+#print axioms CovenIO.RaiseCoverage.no_boundary_current
+#print axioms CovenIO.RaiseCoverage.boundary_skips
+#print axioms CovenIO.RaiseCoverage.option_a_loses_write
+#print axioms CovenIO.RaiseCoverage.raises_absent_at_deletion
+#print axioms CovenIO.RaiseCoverage.capture_unsound
+#print axioms CovenIO.RaiseCoverage.capture_stamp_never_counts
+#print axioms CovenIO.RaiseCoverage.kept_late_raise_loses_write
 #print axioms CovenIO.CommonReload.Source.selectedBound
 #print axioms CovenIO.CommonReload.Source.numbered
 #print axioms CovenIO.ListingMarginExamples.provider_history
