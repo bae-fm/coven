@@ -1,6 +1,6 @@
-//! A log object goes only once, for each part audience, a counting snapshot
-//! covering it landed strictly more than one storage day ago, besides that
-//! audience's newest counting snapshot covering it (§15). The witness need
+//! A log object goes only once, for the store and each part audience, a
+//! counting snapshot covering it landed strictly more than one storage day
+//! ago, besides that audience's newest counting snapshot covering it (§15). The witness need
 //! not be current: its evidence outlives its supersession, its deletion and
 //! reopening.
 
@@ -237,7 +237,8 @@ impl Histories {
 }
 
 /// io `SnapshotPublication.retainWrites` with `Eligible` on concurrent
-/// histories: writes of two writers with parts in one or two audiences,
+/// histories: writes of two writers with parts in one or two audiences, the
+/// store holding every write,
 /// counting and late snapshot landings in any order, incomparable
 /// selections, reader posts, per-writer finality and passes across the
 /// one-day and thirty-day thresholds. Lean keeps every landing; coven keeps
@@ -245,14 +246,14 @@ impl Histories {
 /// snapshot leaves the listing once another listed one covers everything it
 /// covers. Every snapshot is listed at some pass before it leaves, so both
 /// sides delete exactly the same writes at the same passes, and every
-/// deleted write stays covered by its audiences' current newest
+/// deleted write stays covered by its holders' current newest
 /// (`SnapshotHistory.deleted_stays_covered`).
 #[test]
 #[ignore = "scripts/check.sh supplies the Lean IO runner"]
 fn io_differential_retain_writes() {
     use crate::store_log_sync::snapshots::catalog::newest_first;
     use crate::store_log_sync::snapshots::retention::waits::{reached_age, Facts};
-    use crate::store_log_sync::snapshots::retention::witness::{coverage, Coverage};
+    use crate::store_log_sync::snapshots::retention::witness::{coverage, holders, Coverage};
     use coven_format::sealed_snapshot::SnapshotObjectPrefix;
     use coven_format::value::{EntryId, EntryPositions, StorageTime};
     use serde_json::json;
@@ -435,7 +436,7 @@ fn io_differential_retain_writes() {
                             aged: reached_age(Some(time(now)), time(*stored)),
                         };
                         let parts: Vec<_> = audiences.iter().map(|n| audience(*n)).collect();
-                        if coverage(parts.iter(), id, &held, &witnesses, Some(time(now)))
+                        if coverage(holders(&parts), id, &held, &witnesses, Some(time(now)))
                             == Coverage::Mature
                             && facts.first_unmet().is_none()
                         {
@@ -443,12 +444,13 @@ fn io_differential_retain_writes() {
                         }
                     }
                     deleted.extend(&fresh);
-                    // Every deleted write stays covered by its parts' current
+                    // Every deleted write stays covered by its holders' current
                     // newest counting snapshots.
                     for (writer, number, _, audiences) in &writes {
                         if deleted.contains(&(*writer, *number)) {
-                            for part in audiences {
-                                assert!(held.get(&audience(*part)).is_some_and(|selections| {
+                            let parts: Vec<_> = audiences.iter().map(|n| audience(*n)).collect();
+                            for holder in holders(&parts) {
+                                assert!(held.get(holder).is_some_and(|selections| {
                                     selections[0].covers(coven_merge::WriteId {
                                         device: DeviceId(*writer),
                                         number: *number,

@@ -77,16 +77,12 @@ pub(crate) fn apply<P: crate::PendingValue, R: Read>(
             Ok::<_, DbError>(())
         },
     )?;
-    // A deleted write no loaded snapshot covers has no part in any loaded
-    // audience: its number passes once its device's earlier writes have.
-    let mut skipped = BTreeMap::<DeviceId, BTreeSet<u64>>::new();
+    // A deleted write some loaded audience lacks: retention kept it until the
+    // store's newest snapshot covered it, so the store's selection or kept
+    // state holds its metadata, and its number advances like any write's (§15).
     for id in absent {
         if supplied.contains(&id) || queued.contains(&id) {
             return Err(invalid("absent write also has a supplied stream"));
-        }
-        if !coverage.covered_by_snapshot(id) {
-            skipped.entry(id.device).or_default().insert(id.number);
-            continue;
         }
         let write = database.query_row(&format!("SELECT timestamp,had_read FROM _coven_writes WHERE {WRITE_DEVICE_SQL}=?1 AND number=?2"),
             (id.device.0.to_be_bytes().as_slice(), id.number.to_be_bytes().as_slice()), |r| Ok(AppliedWrite {
@@ -96,7 +92,6 @@ pub(crate) fn apply<P: crate::PendingValue, R: Read>(
         sources.insert((write.timestamp, id, false), Source::Deleted(write));
     }
     coverage.start(database)?;
-    pass_skipped(database, &skipped)?;
     let mut affected = BTreeSet::new();
     for source in sources.into_values() {
         let downloaded = match &source {
@@ -225,39 +220,9 @@ pub(crate) fn apply<P: crate::PendingValue, R: Read>(
             })?,
             None => result?,
         }
-        pass_skipped(database, &skipped)?;
     }
     coverage.finish(database)?;
     Ok(affected)
-}
-
-/// Advance each device's position over the skipped numbers that follow it.
-fn pass_skipped(
-    database: &DatabaseConnection,
-    skipped: &BTreeMap<DeviceId, BTreeSet<u64>>,
-) -> Result<(), DbError> {
-    if skipped.is_empty() {
-        return Ok(());
-    }
-    let positions = crate::download::positions(database)?;
-    for (device, numbers) in skipped {
-        let from = positions
-            .0
-            .iter()
-            .find(|position| position.device == *device)
-            .map_or(0, |position| position.number);
-        let mut to = from;
-        while numbers.contains(&(to + 1)) {
-            to += 1;
-        }
-        if to > from {
-            database.internal_execute(
-                "INSERT INTO _coven_positions(device,number) VALUES(?1,?2) ON CONFLICT(device) DO UPDATE SET number=excluded.number",
-                (device.0.to_be_bytes().as_slice(), to.to_be_bytes().as_slice()),
-            )?;
-        }
-    }
-    Ok(())
 }
 
 #[cfg(test)]

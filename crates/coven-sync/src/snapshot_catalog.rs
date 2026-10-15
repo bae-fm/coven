@@ -261,11 +261,10 @@ impl StoreLogSync {
         Ok(catalog)
     }
 
-    /// A complete catalog of every audience's snapshots, listed now, after the
-    /// reads it must follow (§15). Each readable audience's listing decides
-    /// its records as any listing does and serves the rest of this pass; a
-    /// prefix of another audience only adds its counting coverage. Returns
-    /// the readable audiences' catalogs for selecting from it.
+    /// A complete catalog of the readable audiences' snapshots, listed now,
+    /// after the reads it must follow (§15). Each audience's listing decides
+    /// its records as any listing does and serves the rest of this pass.
+    /// Returns the catalogs for selecting from it.
     pub(super) async fn fresh_catalog(
         &self,
         readable: &BTreeSet<Audience>,
@@ -277,19 +276,16 @@ impl StoreLogSync {
             .iter()
             .map(|audience| (audience.clone(), Vec::new()))
             .collect();
-        let mut others = Vec::new();
         for object in storage.list(&ObjectPrefix::snapshots(store)).await? {
             let Some(id) = object.path.snapshot_id() else {
                 continue;
             };
-            match listed.get_mut(&id.audience) {
-                Some(objects) => objects.push(object),
-                None => others.push(object),
+            if let Some(objects) = listed.get_mut(&id.audience) {
+                objects.push(object);
             }
         }
         let mut fresh = Fresh {
             readable: BTreeMap::new(),
-            others: Vec::new(),
         };
         let mut catalogs = BTreeMap::new();
         for (audience, objects) in listed {
@@ -309,16 +305,6 @@ impl StoreLogSync {
                 },
             );
             catalogs.insert(audience, catalog);
-        }
-        for object in others {
-            let prefix = match self.snapshot_prefix(&object, log).await {
-                Ok(Ok(candidate)) => candidate.prefix,
-                Ok(Err(_)) | Err(SyncError::Damaged(_)) => continue,
-                Err(error) => return Err(error),
-            };
-            if prefix.counts(object.stored_at) {
-                fresh.others.push(prefix.writes);
-            }
         }
         Ok((fresh, catalogs))
     }

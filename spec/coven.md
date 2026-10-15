@@ -273,8 +273,8 @@ are those of [§2](#2-threat-model); the write-ups state their additional limits
     replacement key for her first attempts
     ([checked histories: `departed_member_counterexample`, `remaining_member_rotates`](proofs/queue.md#checked-histories-and-limits)).
 - **Bounded storage:** §15 bounds coverage separately for each audience;
-  deleting a write object requires every one of its part audiences, because
-  its parts are stored together
+  deleting a write object requires the store and every one of its part
+  audiences, because its parts are stored together
   ([`audience_deadline`, `bounded_storage`](proofs/io/CovenIO/AudienceRetention.lean)).
   - Let `G` be a storage time from which the write is final and passes the
     reader-positions or 30-day age gate, `W` its first stored time, and `O_a`
@@ -290,7 +290,7 @@ are those of [§2](#2-threat-model); the write-ups state their additional limits
     terminal miss is a completion hypothesis, not a consequence of the
     publication rule
     ([`first_witness`](proofs/io/CovenIO/AudienceRetention.lean)).
-  - For each part audience, put `H_a = max(G, O_a, W + 1)` and
+  - For the store and each part audience, put `H_a = max(G, O_a, W + 1)` and
     `B_a = H_a + 2P + U`: a counting covering snapshot lands by `B_a`, even
     if that audience began with no snapshot
     ([`first_witness`](proofs/io/CovenIO/AudienceRetention.lean)).
@@ -298,7 +298,7 @@ are those of [§2](#2-threat-model); the write-ups state their additional limits
     both mature historical coverage and current newest counting coverage,
     assuming the same bounded service refreshes missing current coverage
     ([`audience_deadline`](proofs/io/CovenIO/AudienceRetention.lean)).
-  - For physical deletion, take `B = max_a B_a` over all part audiences and
+  - For physical deletion, take `B = max_a B_a` over those audiences and
     `R = max(G, B + one day + 1)`; the write is deleted by
     `R + 3P + U + D`, with successful coverage services for every part,
     retention scheduled within `P` after coverage, and deletion completing
@@ -4748,8 +4748,8 @@ Carol's tablet:
     ([One sync pass](sync-pass.md#what-survives-a-pass)).
 - Retention runs every pass: for each final write that passes the reader
   positions or 30-day age gate below, request a fresh snapshot in this pass
-  or the next for every readable part audience whose current newest
-  counting snapshot does not cover it, including an audience with no
+  or the next for the store and every readable part audience whose current
+  newest counting snapshot does not cover it, including an audience with no
   snapshot at all
   ([`RetentionDeadline.refreshDue`](proofs/io/CovenIO/RetentionDeadline.lean),
   [`AudienceRetention.first_witness`](proofs/io/CovenIO/AudienceRetention.lean)).
@@ -4911,25 +4911,24 @@ Carol's tablet:
     bytes for the rest; stop at the target, not a moving log tail
     ([`scan_spec`, `committed_prefix`](proofs/io/CovenIO/CommonReload.lean)).
   - After a successful missing GET inside the target, obtain a fresh,
-    complete snapshot catalog: counting coverage through that number in
-    any audience, including one the loader cannot decrypt, establishes
-    historical publication and, with the absence, a deleted number
+    complete catalog of the readable audiences: counting coverage through
+    that number establishes historical publication and, with the absence,
+    a deleted number. The store's current newest always covers one
     ([`covered_miss_published`](proofs/io/CovenIO/SnapshotWrites.lean),
     [`SnapshotHistory.deleted_miss_detected`](proofs/io/CovenIO/Reload.lean)).
   - If the loaded audience's current newest counting snapshot reaches
-    that number, select and load it; otherwise skip the number for that
-    audience, since a deleted write outside its current coverage has no
-    part there
-    ([`scan_spec`, `skipped_has_no_part`](proofs/io/CovenIO/FixedReload.lean)).
+    that number, select and load it; otherwise the write has no part
+    there, and the store's selection holds its number
+    ([`scan_spec`, `unreached_not_held`](proofs/io/CovenIO/FixedReload.lean),
+    [`committed_store_holds`](proofs/io/CovenIO/CommonReload.lean)).
   - A failed request, incomplete catalog, missing key or permanent refusal
     cannot supply this absence certificate; unresolved history remains
     pending (the successful-source premises of
     [`scan_spec`](proofs/io/CovenIO/FixedReload.lean)).
   - E.g. Ben loads Gifts through Ana's write 8 and misses required write 9:
-    a fresh store snapshot through 9 proves publication, but Gifts' current
-    snapshot still stops at 8, so the deleted write has no Gifts part and
-    Ben skips it for Gifts
-    ([`skipped_has_no_part`](proofs/io/CovenIO/FixedReload.lean)).
+    the store snapshot through 9 proves publication, but Gifts' current
+    snapshot still stops at 8, so write 9 has no Gifts part
+    ([`unreached_not_held`](proofs/io/CovenIO/FixedReload.lean)).
 - Keep each selected snapshot fixed until a certified deleted number
   forces that audience's replacement; new writes and unrelated snapshot
   arrivals do not replace the selections
@@ -5004,11 +5003,14 @@ Carol's tablet:
 - Each device advances its posted positions only over fully realized work.
   It can post new pending records without advancing them (§6).
 - Deleting a log object requires all of the following:
-  - for each part audience, a counting snapshot covering the write landed
-    strictly more than one day ago, and that audience's newest counting
-    snapshot also covers it under every boundary replay could still select
-    for it (below)
-    ([`Eligible`](proofs/io/CovenIO/Retention.lean),
+  - for the store and each part audience, a counting snapshot covering the
+    write landed strictly more than one day ago, and that audience's newest
+    counting snapshot also covers it under every boundary replay could still
+    select for it (below). Every member reads the store, whose snapshots
+    carry every consumed write's metadata, so no reader passes a deleted
+    number
+    ([`store_covered_never_passes`](proofs/io/CovenIO/AwayRead.lean),
+    [`Eligible`](proofs/io/CovenIO/Retention.lean),
     [`SnapshotHistory.deleted_stays_covered`](proofs/io/CovenIO/Reload.lean),
     [`RaiseHistory.deleted_stays_covered`](proofs/io/CovenIO/RaiseHistory.lean));
   - every store-log entry that makes this coverage usable, or makes the
@@ -5132,13 +5134,13 @@ Carol's tablet:
   - Ana's snapshot covers write 9, but Ben last posted 8. Its retention record
     names Ben. Ben posting 9 satisfies his wait, as does the object reaching
     30 storage days; neither alone bypasses the snapshot or finality checks.
-  - Coverage needs only the write header's part audiences, authenticated by
-    its store-key encryption and bound to its path and prefix. Retention
-    uses the facts retained when that device authored, applied or checked
-    the write. Only missing header facts require a read; keep its result
-    across passes. A header-only read needs no parts or whole-object author
-    signature. These fields describe
-    the object being deleted; they grant no author authority and apply no
+  - Besides the store, coverage needs only the write header's part
+    audiences, authenticated by its store-key encryption and bound to its
+    path and prefix. Retention uses the facts retained when that device
+    authored, applied or checked the write. Only missing header facts
+    require a read; keep its result across passes. A header-only read needs
+    no parts or whole-object author signature. These fields describe the
+    object being deleted; they grant no author authority and apply no
     rows. Loading a write still checks its complete signature (§6).
 - A write waiting for entries or a key copy holds retention back, with a
   `Retention` pending record naming that first prerequisite. It does not
@@ -5196,8 +5198,8 @@ Carol's tablet:
     is removed.
 - A device that needs writes already deleted loads the latest snapshot
   instead, like a new device.
-  - Use the fresh catalog and per-audience reload-or-skip rule above for
-    a missing required write; an older cached catalog alone cannot certify
+  - Use the fresh catalog and reload rule above for a missing required
+    write; an older cached catalog alone cannot certify
     its deletion ([`scan_retry_time`](proofs/io/CovenIO/FixedReload.lean)).
   - Its own writes still waiting in `_coven_uploads` keep their numbers, and
     it uploads them after.

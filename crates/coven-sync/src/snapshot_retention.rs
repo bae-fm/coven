@@ -198,9 +198,10 @@ impl StoreLogSync {
                 }
             };
             // Every device asks for coverage of a final write past its reader
-            // gate, owned or not, in each readable part audience whose current
-            // newest counting snapshot misses it, even one with no snapshot
-            // (§15; io `RetentionDeadline.refreshDue`).
+            // gate, owned or not, in the store and each readable part audience
+            // whose current newest counting snapshot misses it, even one with
+            // no snapshot (§15; io `RetentionDeadline.refreshDue`).
+            let holders = witness::holders(header.parts.iter().map(|part| &part.audience));
             let gate = |time| {
                 Facts::for_write(
                     &local.log,
@@ -214,10 +215,10 @@ impl StoreLogSync {
             };
             let gated = gate(storage_time);
             threshold.age(&gated, object.stored_at);
-            for part in &header.parts {
-                if let Some(newest) = current.get(&part.audience) {
+            for audience in &holders {
+                if let Some(newest) = current.get(*audience) {
                     if waits::refresh_due(&gated, true, newest.as_ref(), id) {
-                        due.entry(part.audience.clone()).or_insert(id);
+                        due.entry((*audience).clone()).or_insert(id);
                     }
                 }
             }
@@ -225,14 +226,14 @@ impl StoreLogSync {
                 retained.push(object);
                 continue;
             }
-            // Each part's newest counting snapshot must cover the write under
-            // every boundary replay could still select, and a counting
-            // snapshot of each part covering it must have landed strictly
-            // more than one storage day ago: a witness kept past that
-            // snapshot's supersession or deletion. Without one known, the
-            // write waits for a known covering snapshot to mature (§15).
+            // Each holder's newest counting snapshot must cover the write
+            // under every boundary replay could still select, and a counting
+            // snapshot of each covering it must have landed strictly more
+            // than one storage day ago: a witness kept past that snapshot's
+            // supersession or deletion. Without one known, the write waits
+            // for a known covering snapshot to mature (§15).
             match witness::coverage(
-                header.parts.iter().map(|part| &part.audience),
+                holders.iter().copied(),
                 id,
                 &coverage,
                 &witnesses,

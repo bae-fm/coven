@@ -2,11 +2,13 @@
 //! fixed, and the target is the frozen requirement and the selected positions.
 //! Each round reads every write some audience lacks by exact number, then
 //! establishes each missing one from a catalog listed after those reads:
-//! counting coverage in any audience shows it was published, so its absence
-//! is a deletion. Then an audience whose current newest snapshot reaches it
+//! counting coverage in a readable audience shows it was published, so its
+//! absence is a deletion, and retention keeps the store's coverage of every
+//! deleted write. Then an audience whose current newest snapshot reaches it
 //! is replaced by that snapshot, and the round starts again at the new target.
-//! Otherwise the write has no part in that audience (io `CommonReload.round`,
-//! `FixedReload.scan`).
+//! Otherwise the write has no part in that audience, and the store's start
+//! holds its number (io `CommonReload.round`, `FixedReload.scan`,
+//! `committed_store_holds`).
 
 use super::catalog::Verified;
 use crate::SyncError;
@@ -53,23 +55,21 @@ pub(crate) struct FreshAudience {
     pub(crate) unknown: Option<Unknown>,
 }
 
-/// A complete catalog of every audience's snapshots, listed after a round's
-/// reads.
+/// A complete catalog of the readable audiences' snapshots, listed after a
+/// round's reads.
 pub(crate) struct Fresh {
     pub(crate) readable: BTreeMap<Audience, FreshAudience>,
-    /// The verified counting prefixes of audiences this device cannot read.
-    pub(crate) others: Vec<WritePositions>,
 }
 
 impl Fresh {
-    /// Counting coverage in any audience, readable or not, shows the write
-    /// was published (§15; io `covered_miss_published`).
+    /// Counting coverage in a readable audience shows the write was published
+    /// (§15; io `covered_miss_published`). The store's covers every deleted
+    /// write, so no other audience's catalog is needed.
     fn published(&self, id: WriteId) -> bool {
         self.readable
             .values()
-            .flat_map(|audience| audience.verified.iter().map(|s| &s.prefix.writes))
-            .chain(&self.others)
-            .any(|positions| positions.covers(id))
+            .flat_map(|audience| &audience.verified)
+            .any(|snapshot| snapshot.prefix.writes.covers(id))
     }
 
     /// The audience's current newest counting snapshot: the newest verified
@@ -102,7 +102,8 @@ pub(crate) struct Plan<B> {
     /// Writes some audience lacks, present in the committing round.
     pub(crate) present: BTreeSet<WriteId>,
     /// Deleted writes some audience lacks. Each such audience's current
-    /// newest snapshot did not reach it, so it has no part there.
+    /// newest snapshot did not reach it, so it has no part there; the store's
+    /// start holds it.
     pub(crate) deleted: BTreeSet<WriteId>,
 }
 
@@ -222,7 +223,7 @@ pub(crate) async fn common_point<R: Reads>(
                         break 'audiences;
                     }
                     // Its current newest does not reach the write, so the
-                    // write has no part there (`skipped_has_no_part`), unless
+                    // write has no part there (`unreached_not_held`), unless
                     // an unverified prefix is the newest.
                     _ => {
                         if let Some(unknown) = &listed.unknown {

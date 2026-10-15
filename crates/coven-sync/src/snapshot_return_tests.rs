@@ -126,6 +126,67 @@ async fn returning_after_thirty_days_reloads_history_deleted_meanwhile() {
     assert_eq!(tables(&a).await, tables(&b).await);
 }
 
+/// Ana's write 1 has only a Gifts part and her write 2 only a store part.
+/// Gifts' covering snapshot alone does not let write 1 go: retention asks
+/// for the store's coverage too, and deletes it once that matures. Dave, a
+/// store member outside Gifts who joins afterwards, loads the store's
+/// snapshot rather than stopping at write 1's miss, and receives write 2
+/// (§15; io `away_read_reloads`, `away_read_receives`).
+#[tokio::test]
+async fn a_store_reader_joining_after_a_circle_only_write_is_deleted_receives_later_writes() {
+    let (storage, clock) = timed_storage();
+    let mut a = notes_device(storage.clone(), 1).await;
+    a.create(key(1)).await;
+    let gifts = crate::store_log_sync::tests::circle(1);
+    a.sync
+        .make_and_upload_entry(StoreChange::CreateCircle {
+            circle: gifts,
+            name: "Gifts".into(),
+            key: key(2),
+            key_hash: a.sync.test_key(Audience::Circle(gifts), key(2)),
+        })
+        .await
+        .unwrap();
+    write_rows(&a, 0, 1, 17, Audience::Circle(gifts)).await;
+    upload(&a, &storage).await;
+    super::retention::post(&a, &storage).await;
+    a.write_snapshot(Audience::Circle(gifts)).await.unwrap();
+    super::mature(&clock, &[&a]).await;
+    a.sync.run_retention().await.unwrap();
+    let logs = ObjectPrefix::device_logs(store(1));
+    assert_eq!(storage.list(&logs).await.unwrap().len(), 1);
+    a.write_snapshots().await.unwrap();
+    let listed = storage
+        .list(&ObjectPrefix::snapshots(store(1)))
+        .await
+        .unwrap();
+    assert!(listed
+        .iter()
+        .any(|object| object.path.snapshot_id().unwrap().audience == Audience::Store));
+    super::mature(&clock, &[&a]).await;
+    a.sync.run_retention().await.unwrap();
+    assert!(storage.list(&logs).await.unwrap().is_empty());
+    write_rows(&a, 1, 1, 17, Audience::Store).await;
+    upload(&a, &storage).await;
+
+    let mut d = device(storage.clone(), 2, member(2), store(1)).await;
+    d.reopen(storage.clone(), notes_tables(), notes_migrations())
+        .await;
+    a.add(&d.member, MemberRole::Member).await;
+    add_device(&mut d).await;
+    d.sync.prepare_return().await.unwrap();
+    d.writes.download_writes().await.unwrap();
+    let notes =
+        d.db.read(|sql| {
+            Ok(sql.query("SELECT id,audience FROM notes", [], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            })?)
+        })
+        .await
+        .unwrap();
+    assert_eq!(notes, [("1".to_owned(), "store".to_owned())]);
+}
+
 #[tokio::test]
 async fn a_failed_storage_time_observation_certifies_no_miss() {
     let (storage, _) = timed_storage();

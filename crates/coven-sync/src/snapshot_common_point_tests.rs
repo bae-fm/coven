@@ -125,10 +125,7 @@ impl History {
             };
             readable.insert(audience(*on), fresh);
         }
-        Fresh {
-            readable,
-            others: Vec::new(),
-        }
+        Fresh { readable }
     }
 
     fn starts(&self) -> BTreeMap<Audience, Start<SnapshotId>> {
@@ -325,16 +322,18 @@ async fn a_replacement_fills_the_other_audience_to_its_target() {
     assert!(plan.deleted.is_empty());
 }
 
-/// io `skipped_has_no_part`: Ben loads Gifts through Ana's write 8 and finds
-/// write 9 deleted. A store snapshot through 9 shows it was published, but
-/// Gifts' current snapshot still stops at 8, so write 9 has no Gifts part:
-/// Gifts skips it, and the commit passes its number.
+/// io `unreached_not_held`: Ben loads Gifts through Ana's write 8 and finds
+/// her store-only write 9 deleted. The store snapshot through 10 shows it was
+/// published, but Gifts' current snapshot still stops at 8, so write 9 has no
+/// Gifts part. The store's selection holds its number for the commit.
 #[tokio::test]
-async fn a_deleted_write_outside_an_audiences_current_snapshot_is_skipped_there() {
+async fn a_deleted_write_outside_an_audiences_current_snapshot_has_no_part_there() {
     let history = History {
         audiences: vec![0, 1],
         required: vec![(1, 10)],
-        writes: (1..=10).map(|n| (1, n, vec![0, 1])).collect(),
+        writes: (1..=10)
+            .map(|n| (1, n, if n == 9 { vec![0] } else { vec![0, 1] }))
+            .collect(),
         catalogs: vec![
             (
                 vec![
@@ -359,58 +358,6 @@ async fn a_deleted_write_outside_an_audiences_current_snapshot_is_skipped_there(
     let plan = plan(outcome);
     assert_eq!(plan.present, ids(&[(1, 10)]));
     assert_eq!(plan.deleted, ids(&[(1, 9)]));
-}
-
-/// Only a circle Ben cannot read proves Ana's write 1 was published: its
-/// absence is a deletion, and the store, whose current snapshot does not
-/// reach it, skips it.
-#[tokio::test]
-async fn another_audiences_prefix_alone_establishes_a_deleted_number() {
-    let history = History {
-        audiences: vec![0],
-        required: vec![(1, 2)],
-        writes: vec![(1, 1, vec![1]), (1, 2, vec![0])],
-        catalogs: vec![(Vec::new(), BTreeSet::from([(1, 1)]))],
-        kept: Vec::new(),
-        kept_at: Vec::new(),
-    };
-    let mut fake = Fake {
-        history: &history,
-        round: 0,
-        replaced: Vec::new(),
-    };
-    let log = coven_database::StoreLog::default();
-    let required = positions(&history.required);
-    let waiting = BTreeSet::new();
-    let unproved = common_point(&mut fake, &log, history.starts(), &required, &waiting);
-    assert!(matches!(
-        unproved.await.unwrap(),
-        Outcome::Unpublished(id) if id == WriteId { device: DeviceId(1), number: 1 }
-    ));
-    struct Circle<'a>(Fake<'a>);
-    impl Reads for Circle<'_> {
-        type Body = SnapshotId;
-        async fn present(&mut self, id: WriteId) -> Result<bool, SyncError> {
-            self.0.present(id).await
-        }
-        async fn refresh(&mut self) -> Result<Fresh, SyncError> {
-            let mut fresh = self.0.refresh().await?;
-            fresh.others.push(positions(&[(1, 1)]));
-            Ok(fresh)
-        }
-        async fn select(&mut self, on: &Audience) -> Result<SnapshotId, SyncError> {
-            self.0.select(on).await
-        }
-    }
-    let mut circle = Circle(Fake {
-        history: &history,
-        round: 0,
-        replaced: Vec::new(),
-    });
-    let outcome = common_point(&mut circle, &log, history.starts(), &required, &waiting);
-    let plan = plan(outcome.await.unwrap());
-    assert_eq!(plan.present, ids(&[(1, 2)]));
-    assert_eq!(plan.deleted, ids(&[(1, 1)]));
 }
 
 /// io `kept_state_replaced`: the store keeps its existing state, holding none
@@ -478,9 +425,10 @@ async fn new_tails_and_snapshots_do_not_move_the_selection() {
 /// Generate a history the IO model's premises hold for. Every write up to
 /// each writer's frontier is published. A counting snapshot of an audience
 /// covers at least what that audience's current newest does, and a write is
-/// deleted only while every audience it has a part in covers it. An audience
-/// without a part that does not cover it then never will: its absence there
-/// is the deletion the model's selection catalog already knows.
+/// deleted only while the store and every audience it has a part in cover it
+/// (`Write.holders`). An audience without a part that does not cover it then
+/// never will: its absence there is the deletion the model's selection
+/// catalog already knows.
 fn history(generator: &mut crate::tests::Generator) -> History {
     let writers = 1 + generator.pick(2) as u64;
     let audiences: Vec<u64> = (0..1 + generator.pick(2) as u64).collect();
@@ -523,7 +471,7 @@ fn history(generator: &mut crate::tests::Generator) -> History {
                 continue;
             }
             let held = |on: &u64| chain.get(&(*on, *writer)).copied().unwrap_or(0);
-            if !parts.iter().all(|on| held(on) >= *number) {
+            if !parts.iter().chain([&0]).all(|on| held(on) >= *number) {
                 continue;
             }
             deleted.insert((*writer, *number));
@@ -600,7 +548,7 @@ async fn io_differential_common_point() {
     let mut actual = Vec::new();
     let mut replacements = 0;
     let mut kept_replacements = 0;
-    let mut skips = 0;
+    let mut lacked = 0;
     for _ in 0..400 {
         let history = history(&mut generator);
         let (replaced, outcome) = run(&history).await;
@@ -618,7 +566,7 @@ async fn io_differential_common_point() {
             .filter(|on| history.kept.contains(on))
             .count();
         if let Outcome::Complete(plan) = &outcome {
-            skips += plan.deleted.len();
+            lacked += plan.deleted.len();
         }
         actual.push(output(&history, &replaced, &outcome));
         cases.push(history.case());
@@ -629,7 +577,7 @@ async fn io_differential_common_point() {
         "some histories replace a kept state lacking a deleted write"
     );
     assert!(
-        skips > 0,
+        lacked > 0,
         "some deleted writes have no part where they are lacked"
     );
     assert_eq!(actual, crate::discovery::tests::io_runner(&cases));

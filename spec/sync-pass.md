@@ -439,15 +439,15 @@ Select counting usable snapshots and read each readable audience to the maximum
 of that requirement and all selected positions; retain the checked snapshot
 bodies and write inputs throughout staging
 ([`committed_prefix`](proofs/io/CovenIO/CommonReload.lean)).
-After a missing required GET, refresh the complete catalog, including prefixes
-outside the loaded audience: counting coverage through that number proves
-publication, and absence then certifies deletion
+After a missing required GET, refresh the readable audiences' catalog:
+counting coverage through that number proves publication, and absence then
+certifies deletion; the store's current newest always covers a deleted write
 ([`covered_miss_published`](proofs/io/CovenIO/SnapshotWrites.lean),
 [`SnapshotHistory.deleted_miss_detected`](proofs/io/CovenIO/Reload.lean)).
 If the loaded audience's current snapshot reaches it, replace that audience's
-selection and recompute the common target; otherwise skip the deleted number
-for that audience, since it has no part there
-([`scan_spec`, `skipped_has_no_part`](proofs/io/CovenIO/FixedReload.lean)).
+selection and recompute the common target; otherwise the write has no part
+there, and the store's selection holds its number
+([`scan_spec`, `unreached_not_held`](proofs/io/CovenIO/FixedReload.lean)).
 Selections otherwise stay fixed; deletion evidence in their catalogs needs no
 repeated GET, and a failed request or incomplete catalog is not such evidence
 ([`scan_spec`](proofs/io/CovenIO/FixedReload.lean),
@@ -554,8 +554,9 @@ writer across disk reading or cryptography.
 Use cached signed prefixes and recorded write-part lengths to check
 growth. Evaluate retention's indexed candidates every pass; for any final
 write satisfying the reader-positions or 30-day gate, request a snapshot in
-this pass or the next for each readable part audience whose current newest
-counting snapshot lacks coverage, even if no snapshot has ever covered it
+this pass or the next for the store and each readable part audience whose
+current newest counting snapshot lacks coverage, even if no snapshot has ever
+covered it
 ([`RetentionDeadline.refreshDue`](proofs/io/CovenIO/RetentionDeadline.lean),
 [`AudienceRetention.first_witness`](proofs/io/CovenIO/AudienceRetention.lean)).
 For example, one final 30-day-old write below the growth threshold still
@@ -622,9 +623,9 @@ noon Tuesday cannot become usable by landing later
 
 From the same write, snapshot and positions catalogs, delete only objects
 whose coverage, finality, age/reader positions and ownership satisfy §15.
-For every part audience require both newest counting coverage under every
-boundary replay could still select, including each reset entry not yet final,
-kept or dropped now, and a listed raise snapshot no entry names yet until the
+For the store and every part audience require both newest counting coverage
+under every boundary replay could still select, including each reset entry not
+yet final, kept or dropped now, and a listed raise snapshot no entry names yet until the
 store-log catch-up has received every entry stored by a day after its `T_c`,
 and historical counting coverage whose landing was strictly more than one day
 ago; a replacement does not restart that historical age

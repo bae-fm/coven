@@ -268,40 +268,6 @@ async fn a_deletion_during_the_reads_replaces_only_the_audience_lacking_it() {
     assert_eq!(rows(&ben.db).await, rows(&ana.db).await);
 }
 
-/// Carol cannot read Gifts. Ana's write 1 has only a Gifts part, and it is
-/// gone; only Gifts' snapshot, which Carol cannot decrypt, shows it was
-/// published. Reloading to her own write's past, Carol establishes its
-/// deletion from that prefix alone, and since the store has no snapshot
-/// reaching it, it has no store part: she passes its number (§15).
-#[tokio::test]
-async fn another_audiences_prefix_alone_lets_a_reload_pass_a_deleted_write() {
-    let storage = storage();
-    let mut devices = household(storage.clone()).await;
-    let [ana, _, carol] = devices.as_mut_slice() else {
-        panic!("three members")
-    };
-    sql(&ana.db, "INSERT INTO pins VALUES('00000000-0000-4000-8000-000000000001','00000000-0000-0000-0000-00000000000a','gift')").await;
-    let first = ana.writes.upload_writes().await.unwrap()[0];
-    sql(&ana.db, "INSERT INTO notes VALUES('first','public','one')").await;
-    let second = ana.writes.upload_writes().await.unwrap()[0];
-    carol.writes.download_writes().await.unwrap();
-    sql(
-        &carol.db,
-        "INSERT INTO notes VALUES('second','public','two')",
-    )
-    .await;
-    carol.writes.upload_writes().await.unwrap();
-    ana.write_snapshot(Audience::Circle(GIFTS)).await.unwrap();
-    storage
-        .delete(&crate::write_seal::path(STORE_ID, first))
-        .await
-        .unwrap();
-    let before = rows(&carol.db).await;
-    carol.sync.reload_from_snapshots().await.unwrap();
-    assert_eq!(rows(&carol.db).await, before);
-    assert!(passed(carol, second).await);
-}
-
 mod histories {
     use crate::replay::tests::*;
     use coven_database::{StoreLog, StoreLogState};

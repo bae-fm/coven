@@ -41,10 +41,9 @@ pub struct SnapshotReload<R, W> {
     /// Authenticated writes needed to reach a common causal state.
     pub writes: Vec<DownloadedWriteStream<W>>,
     /// Deleted writes some loaded audience lacks, established by counting
-    /// coverage in a catalog listed after their absence (§15). One a loaded
-    /// snapshot covers advances the common position by its authenticated
-    /// metadata; one no loaded snapshot covers has no part in any loaded
-    /// audience, and its number passes after its device's earlier writes.
+    /// coverage in a catalog listed after their absence (§15). The store's
+    /// selection or kept state holds each one's metadata, which advances the
+    /// common position.
     pub absent: Vec<coven_merge::WriteId>,
     /// Authenticated coverage for the effective readable boundary entries.
     /// A reload changes their application receipts without deleting retained facts.
