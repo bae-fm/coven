@@ -2964,13 +2964,13 @@ Carol's tablet:
     request; entries never use recorded upload sessions. Finality relies on
     this: the provider timestamp of a one-request publication is its completion
     time. Multipart data writes and files do not establish entry finality.
-  - The device in the path is only where the entry was written from.
   - Each device numbers its own entries, so no two entries ever get the
     same path. There is no shared sequence or cross-device slot to claim.
   - Verify the signature against that stable author's keys in the replay of
     `had_read`, including implicit own entries; an author without keys there
-    is a signature refusal (§19.1), never an entry. The device path is not an
-    alternative author. Creation supplies its author's initial pair in its
+    is a signature refusal (§19.1), never an entry. The path's device must be
+    the author's there, or unregistered and added by this entry, else
+    `WrongIdentity`. Creation supplies its author's initial pair in its
     payload and its id in the header; verify both the signature and store path.
 
     ```
