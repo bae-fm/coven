@@ -340,6 +340,14 @@ pub(crate) mod tests;
 
 /// Prepare a set replacement before opening a durable transaction. Equal sets
 /// have no writes; unchanged records keep their suppression and retry evidence.
+/// An independent copy of records or subjects through their own encoding,
+/// for deciding on a reader before the writer applies the originals.
+pub(crate) fn copied<T: Serialize + DeserializeOwned>(value: &T) -> Result<T, DbError> {
+    serde_json::to_vec(value)
+        .and_then(|bytes| serde_json::from_slice(&bytes))
+        .map_err(DbError::PendingEncoding)
+}
+
 pub(crate) struct Replacement<P: PendingValue> {
     removed: Vec<P>,
     changed: Vec<P>,

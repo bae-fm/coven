@@ -158,7 +158,7 @@ impl Database {
 
     /// Read every unfinished operation, including permanently failed ones.
     pub async fn operations(&self) -> Result<Vec<OperationRecord>, DbError> {
-        self.call(move |inner| inner.access.with_writer(crate::operation::read))
+        self.call(move |inner| inner.access.with_committed(crate::operation::read))
             .await
     }
 
@@ -168,7 +168,7 @@ impl Database {
         self.call(move |inner| {
             inner
                 .access
-                .with_writer(|writer| crate::operation::find(writer, id))
+                .with_committed(|writer| crate::operation::find(writer, id))
         })
         .await
     }
@@ -179,7 +179,7 @@ impl Database {
         self.call(move |inner| {
             inner
                 .access
-                .with_writer(|writer| crate::operation::first(writer, &kind))
+                .with_committed(|writer| crate::operation::first(writer, &kind))
         })
         .await
     }

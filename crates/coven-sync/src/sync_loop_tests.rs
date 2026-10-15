@@ -704,7 +704,6 @@ async fn io_counts_idle_commits_nothing() {
 
 // §3.1: an idle pass takes the database writer zero times.
 #[tokio::test]
-#[ignore = "fails on main: an idle pass takes the writer 46 times without committing"]
 async fn io_counts_idle_takes_no_writer() {
     assert_eq!(scenario(Scenario::Idle).await.work, WorkCounts::default());
 }

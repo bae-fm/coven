@@ -102,6 +102,19 @@ impl<L> DatabaseAccess<L> {
         }
     }
 
+    /// Read one committed state on a reader: read-only decisions never take
+    /// the writer (§3.1).
+    fn with_committed<R, E: From<DbError>>(
+        &self,
+        run: impl FnOnce(&DatabaseConnection) -> Result<R, E>,
+    ) -> Result<R, E> {
+        self.call(|| {
+            self.readers
+                .acquire_reader()
+                .with_reader(|reader| reader.read_transaction(|| run(reader)))
+        })
+    }
+
     fn with_writer<R, E: From<DbError>>(
         &self,
         run: impl FnOnce(&DatabaseConnection) -> Result<R, E>,

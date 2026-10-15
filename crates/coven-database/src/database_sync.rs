@@ -124,6 +124,14 @@ impl Database {
         time: coven_format::value::StorageTime,
     ) -> Result<bool, DbError> {
         self.call(move |inner| {
+            // An unchanged checkpoint decides on a reader, without the writer.
+            if inner
+                .access
+                .with_committed(crate::log_input::checkpoint)?
+                .is_some_and(|saved| saved >= time)
+            {
+                return Ok(false);
+            }
             inner
                 .access
                 .with_writer(|writer| crate::log_input::save_checkpoint(writer, time))
@@ -308,6 +316,17 @@ impl Database {
         reports: Vec<P>,
     ) -> Result<(), DbError> {
         self.call(move |inner| {
+            // An unchanged scan decides on a reader, without the writer.
+            let unchanged = inner.access.with_committed(|reader| {
+                let copy = crate::pending::copied(&reports)?;
+                Ok::<_, DbError>(
+                    crate::pending::Replacement::reports(reader, inner.access.device, copy)?
+                        .is_empty(),
+                )
+            })?;
+            if unchanged {
+                return Ok(());
+            }
             inner.access.with_writer(|writer| {
                 let changes =
                     crate::pending::Replacement::reports(writer, inner.access.device, reports)?;
@@ -567,7 +586,7 @@ impl Database {
 
     /// Every unconfirmed fixed copy in writer/number order, including abandoned operations.
     pub async fn key_uploads(&self) -> Result<Vec<crate::KeyUpload>, DbError> {
-        self.call(move |inner| inner.access.with_writer(crate::key_upload::read))
+        self.call(move |inner| inner.access.with_committed(crate::key_upload::read))
             .await
     }
 
@@ -746,7 +765,7 @@ impl Database {
         keys: Vec<(coven_merge::Audience, coven_crypto::FingerprintHasher)>,
     ) -> Result<crate::SyncState, DbError> {
         self.call(move |inner| {
-            inner.access.with_writer(|writer| {
+            inner.access.with_committed(|writer| {
                 let schema_version = writer.schema_version()?;
                 let positions = crate::download::positions(writer)?;
                 let fingerprints = keys

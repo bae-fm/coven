@@ -63,10 +63,18 @@ impl Database {
                 ))
             })
             .collect::<Result<BTreeMap<_, _>, DbError>>()?;
-        self.call(move |inner| inner.access.with_writer(|writer| {
+        self.call(move |inner| {
+            // The usual unchanged scan decides on a reader, without the writer.
+            let unchanged = inner.access.with_committed(|reader| {
+                Ok::<_, DbError>(observations(reader)? == next
+                    && pending::Replacement::reports(reader, inner.access.device, pending::copied(&reports)?)?.is_empty()
+                    && local_changes(reader, inner.access.device, &local_subjects, pending::copied(&local)?)?.is_empty())
+            })?;
+            if unchanged { return Ok(()); }
+            inner.access.with_writer(|writer| {
             let previous = observations(writer)?;
             let reports = pending::Replacement::reports(writer, inner.access.device, reports)?;
-            let local = local_changes(writer, inner.access.device, local_subjects, local)?;
+            let local = local_changes(writer, inner.access.device, &local_subjects, local)?;
             if previous == next && reports.is_empty() && local.is_empty() { return Ok(()); }
             writer.pending_transaction(|db| {
                 for device in previous.keys().filter(|device| !next.contains_key(device)) {
@@ -80,7 +88,7 @@ impl Database {
                 reports.apply(db)?;
                 local.apply(db)
             })
-        })).await
+        })}).await
     }
 
     /// Replace local conditions for these exact subjects without rewriting an
@@ -94,8 +102,17 @@ impl Database {
         P::Subject: Send + 'static,
     {
         self.call(move |inner| {
+            let unchanged = inner.access.with_committed(|reader| {
+                let copy = pending::copied(&records)?;
+                Ok::<_, DbError>(
+                    local_changes(reader, inner.access.device, &subjects, copy)?.is_empty(),
+                )
+            })?;
+            if unchanged {
+                return Ok(());
+            }
             inner.access.with_writer(|writer| {
-                let changes = local_changes(writer, inner.access.device, subjects, records)?;
+                let changes = local_changes(writer, inner.access.device, &subjects, records)?;
                 if changes.is_empty() {
                     return Ok(());
                 }
@@ -139,22 +156,32 @@ impl Database {
         R::Subject: Send + 'static,
     {
         let bytes = serde_json::to_vec(&post).map_err(DbError::PendingEncoding)?;
-        self.call(move |inner| inner.access.with_writer(|writer| {
-            let previous: Option<Vec<u8>> = writer.query_row("SELECT (SELECT state FROM _coven_positions_post WHERE singleton=1)", [], |r| r.get(0))?;
-            let local = local_changes::<R>(writer, inner.access.device, completed.into_iter().collect(), Vec::new())?;
-            if previous.as_ref() == Some(&bytes) && local.is_empty() { return Ok(()); }
+        let completed: Vec<_> = completed.into_iter().collect();
+        self.call(move |inner| {
+            let device = inner.access.device;
+            let decide = |db: &DatabaseConnection| {
+                let previous: Option<Vec<u8>> = db.query_row("SELECT (SELECT state FROM _coven_positions_post WHERE singleton=1)", [], |r| r.get(0))?;
+                let local = local_changes::<R>(db, device, &completed, Vec::new())?;
+                Ok::<_, DbError>((previous.as_ref() == Some(&bytes), local))
+            };
+            // A repeated confirmation decides on a reader, without the writer.
+            let (same, local) = inner.access.with_committed(|reader| decide(reader))?;
+            if same && local.is_empty() { return Ok(()); }
+            inner.access.with_writer(|writer| {
+            let (same, local) = decide(writer)?;
+            if same && local.is_empty() { return Ok(()); }
             writer.pending_transaction(|db| {
-                db.internal_execute("INSERT INTO _coven_positions_post(singleton,state) VALUES(1,?1) ON CONFLICT(singleton) DO UPDATE SET state=excluded.state", [bytes])?;
+                db.internal_execute("INSERT INTO _coven_positions_post(singleton,state) VALUES(1,?1) ON CONFLICT(singleton) DO UPDATE SET state=excluded.state", [&bytes])?;
                 local.apply(db)
             })
-        })).await
+        })}).await
     }
 }
 
 fn local_changes<P: PendingValue>(
     db: &DatabaseConnection,
     own: DeviceId,
-    subjects: Vec<P::Subject>,
+    subjects: &[P::Subject],
     records: Vec<P>,
 ) -> Result<pending::Replacement<P>, DbError> {
     if records.iter().any(|r| {

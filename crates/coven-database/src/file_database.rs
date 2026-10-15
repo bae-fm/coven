@@ -77,6 +77,22 @@ impl FileDatabase {
         }
     }
 
+    /// A read-only query on one committed state. A writable handle reads on
+    /// its read pool, so read-only decisions never take the writer (§3.1).
+    async fn read<T: Send + 'static, E: From<DbError> + Send + 'static>(
+        &self,
+        read: impl FnOnce(&DatabaseConnection) -> Result<T, E> + Send + 'static,
+    ) -> Result<T, E> {
+        match &self.access {
+            FileDatabaseAccess::Writer(database) => {
+                database
+                    .call(move |inner| inner.access.with_committed(read))
+                    .await
+            }
+            FileDatabaseAccess::Reader(_) => self.run(move |db, _, _, _| read(db)).await,
+        }
+    }
+
     /// Validate a captured reference against one committed row version.
     pub async fn validate(&self, file: &FileRef) -> Result<(), DbError> {
         let file = file.clone();
@@ -104,7 +120,7 @@ impl FileDatabase {
     /// Pending eager work: changed references and temporary failures awaiting
     /// their retry wait, from one indexed table (§16.4, SP step 7).
     pub async fn eager_work(&self) -> Result<Vec<FileRef>, DbError> {
-        self.run(|db, _, _, _| crate::eager_work::read(db)).await
+        self.read(crate::eager_work::read).await
     }
     /// Settle eager work: downloaded, permanently refused or cancelled.
     pub async fn settle_eager_work(&self, files: Vec<FileRef>) -> Result<(), DbError> {
@@ -185,11 +201,11 @@ impl FileDatabase {
     }
     /// Durable queue, including files whose row changed after attachment.
     pub async fn uploads(&self) -> Result<Vec<FileUpload>, DbError> {
-        self.run(|db, _, _, _| file_queue::read(db)).await
+        self.read(file_queue::read).await
     }
     /// Whether the app paused uploads, as persisted (E7).
     pub async fn uploads_paused(&self) -> Result<bool, DbError> {
-        self.run(|db, _, _, _| file_queue::paused(db)).await
+        self.read(file_queue::paused).await
     }
     /// Persist the app's pause setting. A paused upload keeps its place and
     /// its provider session.
@@ -257,7 +273,7 @@ impl FileDatabase {
         index: u64,
     ) -> Result<coven_crypto::ContentHash, DbError> {
         let file = file.clone();
-        self.run(move |db, _, _, _| file_queue::chunk_hash(db, &file, index))
+        self.read(move |db| file_queue::chunk_hash(db, &file, index))
             .await
     }
     /// Open the source an upload sends, from the facts its queue entry fixed at
