@@ -295,28 +295,6 @@ impl Database {
         .await
     }
 
-    /// Retire an operation together with the S3 deletion obligations for keys
-    /// it made but never recorded, so no key outlives both its journal row and
-    /// a notice. Nothing commits unless all of it does (§13).
-    pub async fn finish_operation_with_access_keys<P: crate::PendingValue>(
-        &self,
-        id: OperationId,
-        deletions: Vec<crate::AccessKeyDeletion>,
-    ) -> Result<(), DbError> {
-        self.call(move |inner| {
-            inner.access.with_writer(|writer| {
-                writer.transaction(|db| {
-                    crate::operation::record_access_keys::<P>(db, inner.access.device, &deletions)?;
-                    if finish(db, id)? != 1 {
-                        return Err(DbError::OperationChanged(id));
-                    }
-                    Ok(())
-                })
-            })
-        })
-        .await
-    }
-
     /// Clear an S3 key's deletion obligation, after an explicit confirmation or
     /// a verified provider deletion, and retain the confirmation by key id.
     /// Confirmation before any notice prevents that notice (§13).

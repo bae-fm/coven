@@ -15,7 +15,8 @@ flight (`reclaimed_safe`, `reclaimed_never_recorded`), and once the retired
 devices' copies have stopped one catch-up and its deletions leave every key
 they made recorded (`retired_keys_settle`). With T267 a reset keeps no made
 key, so every pending deletion is the listing's and none is of a recorded
-key (`pending_never_recorded`).
+key (`pending_never_recorded`). With T269 neither does a discard: its key is
+reclaimed once its device is retired.
 
 The model has one store, so every provider key is in the listing. -/
 
@@ -239,6 +240,13 @@ theorem step_held (sealer : Sealer) (w : World) (st : Step) (k : Nat) (c' : Copy
     split at h
     · cases h
     · exact .inr (.inl ⟨k, c', h, rfl, rfl⟩)
+  | discard i =>
+    simp only [step] at h ⊢; revert h; unfold discard; split
+    · intro h; rw [put_copies] at h
+      split at h
+      · cases h; exact .inl rfl
+      · exact .inr (.inl ⟨k, c', h, rfl, rfl⟩)
+    · intro h; exact .inr (.inl ⟨k, c', h, rfl, rfl⟩)
 
 /-- A key new at the provider is the fresh key minted by an existing copy,
 named with that copy's device. -/
@@ -256,6 +264,7 @@ theorem step_provider (sealer : Sealer) (w : World) (st : Step) (p : ProviderKey
       · exact .inl hp
       · exact .inr ⟨i, _, hc, rfl, rfl, rfl, rfl⟩
     · intro hp; exact .inl hp
+  | discard i => simp only [step] at hp; unfold discard at hp; split at hp <;> exact .inl hp
   | begin i => simp only [step] at hp; unfold begin at hp; split at hp <;> exact .inl hp
   | sealKey i => simp only [step] at hp; unfold sealKey at hp; split at hp <;> exact .inl hp
   | deliver i =>
@@ -293,6 +302,7 @@ theorem step_recorded (sealer : Sealer) (w : World) (st : Step) :
     · rfl
   | clone i => left; simp only [step]; unfold clone; split <;> rfl
   | drop i => exact .inl rfl
+  | discard i => left; simp only [step]; unfold discard; split <;> rfl
 
 theorem step_next (sealer : Sealer) (w : World) (st : Step) : w.next ≤ (step sealer w st).next := by
   cases st with
@@ -310,8 +320,10 @@ theorem step_next (sealer : Sealer) (w : World) (st : Step) : w.next ≤ (step s
   | record i => simp only [step]; unfold record; split <;> exact Nat.le_refl _
   | clone i => simp only [step]; unfold clone; split <;> exact Nat.le_refl _
   | drop i => exact Nat.le_refl _
+  | discard i => simp only [step]; unfold discard; split <;> exact Nat.le_refl _
 
-/-- No step adds a pending deletion: each is one some copy already held. -/
+/-- No step adds a pending deletion: each is one some copy already held. A
+discard adds none (T269). -/
 theorem step_pending (sealer : Sealer) (w : World) (st : Step) (k x : Nat)
     (h : x ∈ (step sealer w st).pending k) : ∃ j, x ∈ w.pending j := by
   cases st with
@@ -338,6 +350,7 @@ theorem step_pending (sealer : Sealer) (w : World) (st : Step) (k x : Nat)
       · split at h <;> exact ⟨k, h⟩
     · exact ⟨k, h⟩
   | record i => simp only [step] at h; unfold record at h; split at h <;> exact ⟨k, h⟩
+  | discard i => simp only [step] at h; unfold discard at h; split at h <;> exact ⟨k, h⟩
 
 /-! #### The listing never takes a recorded or in-flight key -/
 
@@ -682,6 +695,13 @@ theorem step_device (sealer : Sealer) (w : World) (st : Step) (k : Nat) (c' : Co
       split at h
       · cases h
       · exact .inl ⟨k, c', h, rfl⟩
+    | discard i =>
+      simp only [step] at h; revert h; unfold discard; split
+      · rename_i d _ hc; intro h; rw [put_copies] at h
+        split at h
+        · cases h; exact .inl ⟨i, _, hc, rfl⟩
+        · exact .inl ⟨k, c', h, rfl⟩
+      · intro h; exact .inl ⟨k, c', h, rfl⟩
   · exact .inl ⟨j, c, hj, hd⟩
   · exact .inl ⟨k, c, hc, hd⟩
 
@@ -820,6 +840,17 @@ theorem clone_mint_spares_recorded_key :
     let after := run .random (start [7] 100)
       [.begin 0, .clone 0, .mint 0, .sealKey 0, .deliver 0, .record 0, .mint 1]
     after.recorded = [101] ∧ after.provider = [⟨101, 7⟩, ⟨103, 7⟩] := by
+  decide
+
+/-- T269: a second live copy's discard keeps the key the original records.
+The clone (slot 2) is taken after key 101 is made and checked, and discards
+its replacement. It holds nothing pending, so when the original records 101
+nothing deletes it. -/
+theorem clone_discard_spares_recorded_key :
+    let t := srun .random (sstart [7, 9] 100)
+      [.base (.begin 0), .base (.mint 0), .base (.clone 0), .base (.discard 2),
+        .base (.sealKey 0), .base (.deliver 0), .base (.record 0), .delete 2]
+    t.w.recorded = [101] ∧ t.w.pending 2 = [] ∧ t.w.provider = [⟨101, 7⟩] := by
   decide
 
 end CovenStorage.KeyDelivery.Listing

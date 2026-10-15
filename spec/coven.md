@@ -1478,12 +1478,12 @@ the file's ranges under `F`.
     `StringNotLike` `s3:prefix`: a request carrying no prefix, such as a bucket
     check, matches the negated condition and would be denied.
   - Making a key is one journaled operation (§18). Each mint call names its
-    principal from a fresh random id and deletes nothing, so a second live
+    principal from a fresh random id, deletes nothing, and makes and checks
+    the key (below) before its secret joins the journal, so a second live
     copy of the database never takes a key this one made
     ([`run_keeps_provider`](proofs/storage/CovenStorage/KeyDelivery.lean),
     [`clone_mint_spares_recorded_key`](proofs/storage/CovenStorage/KeyListing.lean)).
-    The key's secret joins the journal with those names, as an invite's key
-    does. The short name is `coven-` and 24 hex digits of the call's id, for
+    The short name is `coven-` and 24 hex digits of the call's id, for
     GCS service accounts (6 to 30 characters) and RustFS service accounts.
     The key name carries the store and the device making the key, for §13's
     reclaim: `coven-<store>-<device>-<call>`, with the first 24 hex digits of
@@ -1517,11 +1517,11 @@ the file's ranges under `F`.
     whose gateways read identity changes asynchronously. The 60-second window
     is a retry limit, not a verified provider propagation guarantee; a key
     still refused at the limit fails the operation.
-  - A failed mint or check rolls back what the call's names created — keys,
-    policy and user — and reports the failure, with the rollback's own failure
-    if that fails too. Admin access is held only by the operation that needs
-    it and released once its key is checked (a replacement's once it ends,
-    §13) or its step fails
+  - A failed mint or check rolls back what the call's names created and
+    reports the failure, with the rollback's own failure if that fails too.
+    Admin access is held only by the operation that needs it and released
+    once its key is checked (a replacement's once it ends, §13) or its call
+    fails
     ([`released_makes_nothing`, `check_keeps_admin`](proofs/storage/CovenStorage/AdminAccess.lean));
     after a restart
     the step waits with `PendingReason::AdminAccessRequired` until a retry
@@ -4222,22 +4222,22 @@ Carol's tablet:
     the lost phone holds the same old key.
   - After a restart, a replacement that has not yet made its key or deleted
     the old one waits for admin access again (§4); none is stored.
-  - Discarding a replacement leaves no key unrecorded. Once its entry is
-    reserved, the discard publishes it and the store log covers the key. Before
-    that, a made key becomes pending `DeleteAccessKey` in the transaction that
-    removes the operation; with no key yet, the operation just goes.
+  - Discarding a replacement publishes a reserved entry; before that the
+    operation just goes, since another live copy of the database may still
+    record its key
+    ([`clone_discard_spares_recorded_key`](proofs/storage/CovenStorage/KeyListing.lean)).
   - A key coven made can stay unrecorded with nothing to delete it: its
-    database lost or reset (§10) before an entry records it, or its mint
-    call's reply lost. Every
-    made key's provider-side name carries its store and minting device (§4).
-    An admin's `reclaim_access_keys` (E9), with admin access, lists the
-    store's keys and, in one transaction, makes pending `DeleteAccessKey` each
-    listed key that no stored entry records, kept or dropped, whose minting
-    device is retired with a final entry and drained (§6), with every entry it
-    received from that device applied. Only copies of the minting database
-    record its keys, and a drained device's entries are all here with none
-    left to be kept, so the listing never takes a key that is or becomes
-    recorded, nor a live device's key in flight
+    replacement discarded, its database lost or reset (§10) before an entry
+    records it, or its mint call's reply lost. Every made key's provider-side
+    name carries its store and minting device (§4). An admin's
+    `reclaim_access_keys` (E9), with admin access, lists the store's keys
+    and, in one transaction, makes pending `DeleteAccessKey` each listed key
+    that no stored entry records, kept or dropped, whose minting device is
+    retired with a final entry and drained (§6), with every entry it received
+    from that device applied. Only copies of the minting database record its keys, and a drained
+    device's entries are all here with none left to be kept, so the listing
+    never takes a key that is or becomes recorded, nor a live device's key in
+    flight
     ([`reclaimed_safe`, `reclaimed_never_recorded`](proofs/storage/CovenStorage/KeyListing.lean)).
     Once the retired devices' copies have stopped, one such catch-up and its
     deletions leave every key they made recorded
@@ -6196,10 +6196,9 @@ Carol's tablet:
   There is no preceding write or wait for row uploads.
 - Inviting a person ([§12.2](#122-adding-a-person)):
   1. share the storage with their account, or record the S3 key the admin
-     made in the console, or make the key with admin access (§4: the key and
-     its fresh principal names, then its member-side check), and record the
-     invite's chosen stable id. A failed mint rolls back; cancelling before
-     the key exists needs no admin access;
+     made in the console, or make and check the key with admin access in one
+     call (§4), and record the invite's chosen stable id. A failed call rolls
+     back; cancelling before the key exists needs no admin access;
   2. once an admin approves the exact id and new public pair, confirm the
      initial and held historical audience-key copies to that credential,
      then publish Add member or Replace member keys as the invite specifies;

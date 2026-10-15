@@ -97,12 +97,15 @@ async fn failed_minting_rolls_back_and_a_restart_needs_admin_access_again() {
     assert!(matches!(step(&mut a, id).await, Err(SyncError::Storage(_))));
     assert_eq!(admin.calls(), ["mint", "roll_back"]);
     assert!(admin.users().is_empty());
-    // A failed check also rolls back and forgets the key.
+    // A failed check, in the same call, also rolls back and journals nothing.
     a.sync.hold_admin_access(id, Arc::new(admin.clone()));
-    assert!(matches!(step(&mut a, id).await, Ok(Progress::Advanced)));
     admin.fail_next_probe();
     assert!(matches!(step(&mut a, id).await, Err(SyncError::Storage(_))));
     assert!(admin.users().is_empty());
+    assert_eq!(
+        admin.calls(),
+        ["mint", "roll_back", "mint", "probe", "roll_back"]
+    );
     // After a restart the invite waits for admin access, then finishes.
     a.restart(storage.clone()).await;
     assert!(matches!(

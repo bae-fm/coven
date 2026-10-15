@@ -54,27 +54,6 @@ pub(crate) struct EntryWork {
     pub(crate) entry: Option<Vec<u8>>,
 }
 
-/// A key coven makes with admin access (§4, §18). Each mint call draws the
-/// scope's names afresh before it reaches the provider; the minted key's
-/// secret joins the journal with them, as an invite's does.
-#[derive(Serialize, Deserialize)]
-pub(crate) struct MintWork {
-    pub(crate) scope: coven_storage::MintScope,
-    pub(crate) minted: Option<coven_storage::S3MemberKey>,
-    /// Whether the key passed its member-side check.
-    pub(crate) checked: bool,
-}
-
-impl MintWork {
-    pub(crate) fn new(scope: coven_storage::MintScope) -> Self {
-        Self {
-            scope,
-            minted: None,
-            checked: false,
-        }
-    }
-}
-
 /// An admin desktop replacing a member's S3 key (§13): make the key with admin
 /// access, deliver it sealed to the member, record it, then delete the old one.
 #[derive(Serialize, Deserialize)]
@@ -82,7 +61,10 @@ pub(crate) struct ReplaceKeyWork {
     pub(crate) member: MemberId,
     /// The attempt naming the delivery.
     pub(crate) attempt: uuid::Uuid,
-    pub(crate) mint: MintWork,
+    /// The store, member and device each mint call names afresh (§4).
+    pub(crate) scope: coven_storage::MintScope,
+    /// The made and checked key, whose secret joins the journal (§4).
+    pub(crate) minted: Option<coven_storage::S3MemberKey>,
     /// The sealed delivery's fixed bytes, retained for every retry.
     pub(crate) delivery: Option<Vec<u8>>,
     pub(crate) entry: Option<Vec<u8>>,
@@ -95,8 +77,9 @@ pub(crate) enum InviteGrant {
     Account { email: String },
     /// An S3 key and who holds it, made in the console or by coven.
     S3Key(coven_storage::S3MemberKey),
-    /// Coven is making the key with admin access.
-    Minting(MintWork),
+    /// Coven is making the key with admin access; each mint call names it
+    /// afresh from this scope (§4).
+    Minting(coven_storage::MintScope),
 }
 
 impl InviteGrant {

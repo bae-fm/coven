@@ -1,11 +1,11 @@
 import CovenStorage.Objects
 
 /-! §13's S3 key replacement as seen from the admin desktop's database:
-journal an attempt id, make a key under it (§4), seal it to the member,
+journal an attempt id, make and check a key (§4), seal it to the member,
 publish it at `<store>/access-keys/<member>/<attempt>` (D10), then record it in
-a set-access entry. The question is §10's: is a delivery path this device's
-own path, so that different stored bytes there mean another copy of this
-database, and is resetting that copy safe? -/
+a set-access entry, or discard it first. The question is §10's: is a delivery
+path this device's own path, so that different stored bytes there mean another
+copy of this database, and is resetting that copy safe? -/
 
 namespace CovenStorage.KeyDelivery
 
@@ -79,9 +79,11 @@ def begin (w : World) (i : Nat) : World :=
              next := w.next + 1 }
   | _ => w
 
-/-- §4: each mint call names its principal afresh and deletes nothing (T259);
-the new key's secret joins the journal. The key's provider-side name carries
-the minting device (T237). -/
+/-- §4: one mint call names its principal afresh, deletes nothing (T259), makes
+the key and checks it from the member's side; only a checked key's secret
+joins the journal (T269). A call that fails rolls back what its own names made
+and journals nothing, so it is no step here. The key's provider-side name
+carries the minting device (T237). -/
 def mint (w : World) (i : Nat) : World :=
   match w.copies i with
   | some ⟨d, some ⟨a, none, s, v⟩⟩ =>
@@ -136,6 +138,14 @@ def clone (w : World) (i : Nat) : World :=
 def drop (w : World) (i : Nat) : World :=
   { w.put i none with pending := fun k => if k = i then [] else w.pending k }
 
+/-- §13: discarding the replacement before its entry drops the journal and
+makes nothing pending, since another live copy may still record the made key
+(T269). §13's reclaim takes it once the device is retired. -/
+def discard (w : World) (i : Nat) : World :=
+  match w.copies i with
+  | some ⟨d, some _⟩ => w.put i (some ⟨d, none⟩)
+  | _ => w
+
 inductive Step where
   | begin (i : Nat)
   | mint (i : Nat)
@@ -144,11 +154,13 @@ inductive Step where
   | record (i : Nat)
   | clone (i : Nat)
   | drop (i : Nat)
+  | discard (i : Nat)
   deriving DecidableEq, Repr
 
-/-- Steps that copy, restore or delete a database rather than run it. -/
-def Step.copiesDatabase : Step → Bool
-  | .clone _ | .drop _ => true
+/-- Steps after which a made key can be live with no surviving journal holding
+it: copying, restoring or deleting a database, or discarding its operation. -/
+def Step.strands : Step → Bool
+  | .clone _ | .drop _ | .discard _ => true
   | _ => false
 
 def step (sealer : Sealer) (w : World) : Step → World
@@ -159,6 +171,7 @@ def step (sealer : Sealer) (w : World) : Step → World
   | .record i => record w i
   | .clone i => clone w i
   | .drop i => drop w i
+  | .discard i => discard w i
 
 def run (sealer : Sealer) (w : World) (steps : List Step) : World :=
   steps.foldl (step sealer) w
@@ -387,6 +400,13 @@ theorem deliver_inv {w : World} (h : Inv w) (i : Nat) : Inv (deliver w i) := by
           rfl rfl rfl (Nat.le_succ _)
   · exact h
 
+theorem discard_inv {w : World} (h : Inv w) (i : Nat) : Inv (discard w i) := by
+  unfold discard
+  split
+  · rename_i d _ hc
+    exact put_idle h hc (some ⟨d, none⟩) (by intro y hy; cases hy; rfl)
+  · exact h
+
 theorem step_inv {w : World} (h : Inv w) (sealer : Sealer) (s : Step) : Inv (step sealer w s) := by
   cases s with
   | begin i => exact begin_inv h i
@@ -396,6 +416,7 @@ theorem step_inv {w : World} (h : Inv w) (sealer : Sealer) (s : Step) : Inv (ste
   | record i => exact record_inv h i
   | clone i => exact clone_inv h i
   | drop i => exact drop_inv h i
+  | discard i => exact discard_inv h i
 
 theorem run_inv {w : World} (h : Inv w) (sealer : Sealer) (steps : List Step) :
     Inv (run sealer w steps) := by
@@ -425,6 +446,7 @@ theorem step_keeps_provider (sealer : Sealer) (w : World) (s : Step) :
   | record i => simp only [step]; unfold record; split <;> exact hp
   | clone i => simp only [step]; unfold clone; split <;> exact hp
   | drop i => exact hp
+  | discard i => simp only [step]; unfold discard; split <;> exact hp
 
 theorem run_keeps_provider (sealer : Sealer) (w : World) (steps : List Step) :
     ∀ p ∈ w.provider, p ∈ (run sealer w steps).provider := by
@@ -513,12 +535,13 @@ theorem unique_put {w : World} (h : Settled w) {i : Nat} {c c' : Copy}
   exact h.unique k₁ k₂ z z' a hz hz' (hza ▸ hx) (hza' ▸ hx')
 
 theorem settled_step {w : World} (h : Settled w) (sealer : Sealer) (s : Step)
-    (hs : s.copiesDatabase = false) :
+    (hs : s.strands = false) :
     Settled (step sealer w s) ∧ (step sealer w s).resets = w.resets := by
   have inv := step_inv h.toInv sealer s
   cases s with
-  | clone i => simp [Step.copiesDatabase] at hs
-  | drop i => simp [Step.copiesDatabase] at hs
+  | clone i => simp [Step.strands] at hs
+  | drop i => simp [Step.strands] at hs
+  | discard i => simp [Step.strands] at hs
   | begin i =>
     simp only [step] at inv ⊢
     revert inv; unfold begin; split
@@ -658,10 +681,11 @@ theorem settled_step {w : World} (h : Settled w) (sealer : Sealer) (s : Step)
     · intro _; exact ⟨h, rfl⟩
 
 /-- An installation whose database is never backed up, restored or cloned
-never takes a delivery reset, and every key it makes stays recorded or
-journaled. The reset fires only when another copy of the database exists. -/
+never takes a delivery reset, and while it also discards nothing, every key it
+makes stays recorded or journaled. The reset fires
+only when another copy of the database exists. -/
 theorem uncopied_never_resets {w : World} (h : Settled w) (sealer : Sealer)
-    (steps : List Step) (hs : ∀ s ∈ steps, s.copiesDatabase = false) :
+    (steps : List Step) (hs : ∀ s ∈ steps, s.strands = false) :
     Settled (run sealer w steps) ∧ (run sealer w steps).resets = w.resets := by
   induction steps generalizing w with
   | nil => exact ⟨h, rfl⟩

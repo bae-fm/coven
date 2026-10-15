@@ -3120,7 +3120,7 @@ impl CovenHandle {
     /// the person to keep, and the old key's outcome. A dropped entry returns
     /// its refusal, with the made key pending deletion beside the old one.
     /// After a restart the operation waits with AdminAccessRequired.
-    /// Discarding it leaves no key unrecorded (§13).
+    /// Discarding it before its entry leaves the key to reclaim (§13).
     pub async fn replace_member_access_key(&self, member: &MemberId, admin: Arc<dyn AccessKeyAdmin>) -> Result<AccessKeyReplacement, SyncError>;
 
     /// Publishes the removal of this member and all their devices (§13).

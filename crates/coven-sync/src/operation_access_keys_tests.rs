@@ -248,10 +248,11 @@ async fn discard(d: &mut Device, id: OperationId) -> Result<Begun, SyncError> {
 }
 
 #[tokio::test]
-async fn discarding_a_replacement_leaves_no_key_it_holds_unrecorded() {
+async fn discarding_a_replacement_takes_no_key() {
     let (_storage, mut a, b) = household().await;
     let ben = b.member.member();
-    // A made key becomes pending deletion as the row goes.
+    // A made key stays for §13's reclaim, since another live copy of this
+    // database may still record it.
     let admin = MemoryKeyAdmin::default();
     let id = begin(
         &mut a,
@@ -261,10 +262,8 @@ async fn discarding_a_replacement_leaves_no_key_it_holds_unrecorded() {
     assert!(matches!(a.step(id).await.unwrap(), Progress::Advanced));
     assert!(matches!(discard(&mut a, id).await, Ok(Begun::Value(_))));
     assert!(a.db.operation(id).await.unwrap().is_none());
-    assert!(access_keys(&a.db)
-        .await
-        .iter()
-        .any(|key| key.access_key_id == "minted-1" && key.member.as_ref() == Some(&ben)));
+    assert!(deletion_for(&a, "minted-1").await.is_none());
+    assert_eq!(admin.users().len(), 1);
     // A failed mint call rolls back what its names created.
     let admin = MemoryKeyAdmin::default();
     let id = begin(
@@ -276,6 +275,12 @@ async fn discarding_a_replacement_leaves_no_key_it_holds_unrecorded() {
     assert!(a.step(id).await.is_err());
     assert!(admin.users().is_empty());
     assert_eq!(admin.calls(), ["mint", "roll_back"]);
+    // So does a failed member-side check, before its key joins the journal.
+    a.sync.hold_admin_access(id, Arc::new(admin.clone()));
+    admin.fail_next_probe();
+    assert!(a.step(id).await.is_err());
+    assert!(admin.users().is_empty());
+    assert_eq!(a.operation(id).await.last_step, 0);
     // With no key the row goes without admin access. A key a lost call made,
     // under names no journal holds, waits for §13's reclaim.
     let lost = MintScope::new(
@@ -310,8 +315,8 @@ async fn a_failed_mint_or_check_needs_admin_access_again() {
         a.step(id).await.unwrap(),
         Progress::Waiting(PendingReason::AdminAccessRequired)
     ));
+    // The check runs in the same call as the mint (T269).
     a.sync.hold_admin_access(id, Arc::new(admin.clone()));
-    assert!(matches!(a.step(id).await.unwrap(), Progress::Advanced));
     admin.fail_next_probe();
     assert!(matches!(a.step(id).await, Err(SyncError::Storage(_))));
     assert!(matches!(
@@ -361,6 +366,43 @@ async fn a_second_copys_mint_keeps_the_key_the_original_records() {
         .key_exists(&made.credentials.access_key_id, &made.principal)
         .await
         .unwrap());
+}
+
+/// T269 (KeyListing `clone_discard_spares_recorded_key`): a backup of Ana's
+/// desktop, taken once its key is made and checked, runs as a second copy.
+/// Its steps reach no provider, since the key was checked in the call that
+/// made it, and its discard holds nothing pending, so the key the original
+/// records stays live.
+#[tokio::test]
+async fn a_second_copy_takes_no_key_the_original_records() {
+    use crate::store_log_sync::store_log_identity::tests::{backup, restored};
+    let (storage, mut a, b) = household().await;
+    let admin = MemoryKeyAdmin::default();
+    let ben = b.member.member();
+    let id = begin(
+        &mut a,
+        crate::operations::Command::ReplaceAccessKey(ben, Arc::new(admin.clone())),
+    )
+    .await;
+    assert!(matches!(a.step(id).await.unwrap(), Progress::Advanced));
+    let copy = backup(&mut a, &storage, (vec![], vec![])).await;
+    let mut c = restored(&a, copy, &storage, (vec![], vec![])).await;
+    c.sync.hold_admin_access(id, Arc::new(admin.clone()));
+    admin.fail_next_probe();
+    assert!(matches!(c.step(id).await.unwrap(), Progress::Advanced));
+    assert!(matches!(discard(&mut c, id).await, Ok(Begun::Value(_))));
+    let Output::AccessKeyReplaced(replaced) = finish(&mut a, id).await.unwrap() else {
+        panic!("replacement result")
+    };
+    let made = replaced.key;
+    assert!(deletion_for(&c, &made.credentials.access_key_id)
+        .await
+        .is_none());
+    assert!(admin
+        .key_exists(&made.credentials.access_key_id, &made.principal)
+        .await
+        .unwrap());
+    assert_eq!(admin.calls(), ["mint", "probe", "key_exists"]);
 }
 
 /// The replacement's delivery path once its fixed bytes are sealed.
@@ -511,20 +553,19 @@ fn a_reset_carries_each_owed_deletion_and_no_made_key() {
             started_by: operation.started_by,
         }
     };
-    let mut mint = crate::operation_data::MintWork::new(coven_storage::MintScope::new(
-        store(1),
-        &ben.to_string(),
-        coven_foundation::id_source::DeviceId(1),
-        uuid::Uuid::from_u128(5),
-    ));
-    mint.minted = Some(key("made"));
     let owed = key("owed");
     let records = [
         record(crate::operation_data::Data::ReplaceAccessKey(
             crate::operation_data::ReplaceKeyWork {
                 member: ben,
                 attempt: uuid::Uuid::from_u128(5),
-                mint,
+                scope: coven_storage::MintScope::new(
+                    store(1),
+                    &ben.to_string(),
+                    coven_foundation::id_source::DeviceId(1),
+                    uuid::Uuid::from_u128(5),
+                ),
+                minted: Some(key("made")),
                 delivery: None,
                 entry: None,
             },

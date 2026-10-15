@@ -480,40 +480,4 @@ mod conformance {
             db.close().await.unwrap();
         }
     }
-
-    #[tokio::test]
-    async fn finishing_with_access_keys_commits_the_notices_only_with_the_retirement() {
-        let store = TestStore::new();
-        let db = store.builder(vec![], vec![]).open().await.unwrap();
-        let start = || {
-            db.start_operation(NewOperation {
-                kind: "replace-access-key".into(),
-                data: vec![1],
-                started_by: "replace_member_access_key".into(),
-                pauses_writes: false,
-            })
-        };
-        let id = start().await.unwrap();
-        db.finish_operation(id).await.unwrap();
-        // A row already gone keeps no notice behind.
-        assert!(matches!(
-            db.finish_operation_with_access_keys::<crate::pending::tests::Record>(
-                id,
-                vec![deletion("made")],
-            )
-            .await,
-            Err(DbError::OperationChanged(changed)) if changed == id
-        ));
-        assert!(pending(&db).await.is_empty());
-        let id = start().await.unwrap();
-        db.finish_operation_with_access_keys::<crate::pending::tests::Record>(
-            id,
-            vec![deletion("made")],
-        )
-        .await
-        .unwrap();
-        assert_eq!(pending(&db).await, ["made"]);
-        assert!(db.operation(id).await.unwrap().is_none());
-        assert_eq!(db.operations().await.unwrap().len(), 1);
-    }
 }

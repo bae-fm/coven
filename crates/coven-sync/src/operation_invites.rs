@@ -1,9 +1,8 @@
 //! The inviting device's one-time invitation and authenticated approval (§12.2).
 
-use super::operation_minting::Minting;
 use super::StoreLogSync;
 use crate::{
-    operation_data::{Data, InviteBinding, InviteGrant, InviteState, InviteWork, MintWork},
+    operation_data::{Data, InviteBinding, InviteGrant, InviteState, InviteWork},
     operations::{Begun, Output, Progress},
     *,
 };
@@ -110,12 +109,12 @@ impl StoreLogSync {
             InviteAccess::S3AdminAccess(access) => {
                 admin = Some(access);
                 // The key is tagged with the invite; its member id is not chosen yet.
-                InviteGrant::Minting(MintWork::new(MintScope::new(
+                InviteGrant::Minting(MintScope::new(
                     local.store,
                     &format!("invite-{}", id.0),
                     local.device,
                     self.ids.new_id(),
-                )))
+                ))
             }
         };
         let secret = InviteSecret::generate()?;
@@ -242,28 +241,15 @@ impl StoreLogSync {
         let records_access = work.records_access();
         match &mut work.state {
             InviteState::Grant if matches!(work.access, InviteGrant::Minting(_)) => {
-                let InviteGrant::Minting(mint) = &mut work.access else {
+                let InviteGrant::Minting(scope) = &work.access else {
                     unreachable!()
                 };
                 let Some(admin) = self.admin_access(record.id) else {
                     return Ok(Progress::Waiting(PendingReason::AdminAccessRequired));
                 };
-                match self.advance_mint(admin.as_ref(), mint).await {
-                    Minting::Ready(key) => {
-                        work.access = InviteGrant::S3Key(key);
-                        self.release_admin_access(record.id);
-                    }
-                    Minting::Advanced => {}
-                    Minting::Failed { error, reset } => {
-                        if reset {
-                            self.database
-                                .advance_operation(data.update(record, 0)?)
-                                .await?;
-                        }
-                        self.release_admin_access(record.id);
-                        return Err(error);
-                    }
-                }
+                let minted = self.mint_checked(admin.as_ref(), scope).await;
+                self.release_admin_access(record.id);
+                work.access = InviteGrant::S3Key(minted?);
                 self.save_invite(Some(record), &data, 0).await?;
                 Ok(Progress::Advanced)
             }
@@ -400,19 +386,11 @@ impl StoreLogSync {
                 Ok(Progress::Advanced)
             }
             InviteState::Revoking if matches!(work.access, InviteGrant::Minting(_)) => {
-                let InviteGrant::Minting(mint) = &work.access else {
-                    unreachable!()
-                };
-                if let Some(key) = &mint.minted {
-                    // A made key is pending deletion like any invite's key.
-                    work.access = InviteGrant::S3Key(key.clone());
-                } else {
-                    // No key was made: a failed mint call rolled back what its
-                    // names created, and a lost call's key is reclaimed once
-                    // this device is retired (§4, §13).
-                    self.release_admin_access(record.id);
-                    work.state = InviteState::Settled;
-                }
+                // No key was made: a failed mint call rolled back what its
+                // names created, and a lost call's key is reclaimed once this
+                // device is retired (§4, §13).
+                self.release_admin_access(record.id);
+                work.state = InviteState::Settled;
                 self.database
                     .advance_operation(data.update(record, record.last_step)?)
                     .await?;

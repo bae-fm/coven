@@ -518,7 +518,7 @@ with a dropped database), and its made key is the listing's once its device
 is retired (below). So deliveries join §10's own-path list.
 
 The model leaves out the store log, entry admission, the old key's deletion,
-the member's side, failed comparison reads, the discard call, invites (whose
+the member's side, failed comparison reads, invites (whose
 made keys sit in the journal the same way) and other members writing the
 path. The reading chosen for §10's "nothing newer in storage" is that a
 delivery stored after the backup counts as newer, so the reset itself is
@@ -591,6 +591,18 @@ Each mint call now names its principal afresh and deletes nothing:
 `run_keeps_provider` proves no step of a database removes a key at the
 provider, and `clone_mint_spares_recorded_key` checks that history. A key a
 lost mint call made is the listing's once its device is retired.
+
+**T269: no copy takes a key another copy may record (proved).** A clone taken
+after the key was journaled shared it, and its failed member-side check rolled
+the key back, or its discard made it pending deletion, while the original
+recorded it (checked against the old rules). Now one mint call makes and
+checks the key, so only a checked key is journaled and a failed call rolls
+back names no journal holds; and `discard` drops the journal holding nothing
+pending. `step_pending` still holds, so `pending_never_recorded` covers the
+discard, and `clone_discard_spares_recorded_key` checks the history. The
+discarded key is the listing's once its device is retired.
+`uncopied_never_resets` now also excludes discards, after which a made key is
+no longer journaled.
 
 **T241: a failed step releases admin access (proved).**
 [AdminAccess](storage/CovenStorage/AdminAccess.lean) follows one replacement's

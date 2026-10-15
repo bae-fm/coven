@@ -1,25 +1,15 @@
-//! Member S3 keys coven makes with admin access, one journaled step at a time
-//! (§4, §18). Each mint call names its principal afresh and deletes nothing,
-//! so a second copy of the journal never takes a key this one made (KeyListing
-//! `clone_mint_spares_recorded_key`). A failure that cannot finish rolls back
-//! what the call's names created and reports both causes. Admin access stays
-//! in memory with its operation.
+//! Member S3 keys coven makes with admin access (§4, §18). One mint call names
+//! its principal afresh, deletes nothing, makes the key and checks it from the
+//! member's side; only a checked key joins the journal. A failed call rolls
+//! back what its own names made and reports both causes if that fails too, so
+//! no copy of the journal holds a key another copy could delete (KeyListing
+//! `clone_mint_spares_recorded_key`, `clone_discard_spares_recorded_key`).
+//! Admin access stays in memory with its operation.
 
 use super::StoreLogSync;
-use crate::{operation_data::MintWork, *};
+use crate::*;
 use coven_storage::{AccessKeyAdmin, MintScope, S3MemberKey};
 use std::sync::Arc;
-
-/// Where one mint step left its work.
-pub(crate) enum Minting {
-    /// The key passed its member-side check and may be delivered.
-    Ready(S3MemberKey),
-    /// The work advanced; the caller commits it.
-    Advanced,
-    /// The step failed. When `reset` the provider state was rolled back and the
-    /// caller commits the cleared work before reporting the error.
-    Failed { error: SyncError, reset: bool },
-}
 
 impl StoreLogSync {
     /// Keep admin access for this operation only, replacing any earlier one.
@@ -36,46 +26,32 @@ impl StoreLogSync {
         self.admin_access.get(&id).cloned()
     }
 
-    /// Mint, then check from the member's side, one provider step per call.
-    pub(crate) async fn advance_mint(
+    /// Make a key under names fresh for this call and check it from the
+    /// member's side, or roll back what the call made.
+    pub(crate) async fn mint_checked(
         &self,
         admin: &dyn AccessKeyAdmin,
-        work: &mut MintWork,
-    ) -> Minting {
-        let result = match &work.minted {
-            None => {
-                let scope = &work.scope;
-                work.scope =
-                    MintScope::new(scope.store, &scope.member, scope.device, self.ids.new_id());
-                admin.mint(&work.scope).await.map(|key| {
-                    work.minted = Some(key);
-                })
-            }
-            Some(key) if !work.checked => admin
-                .probe(&work.scope, &key.credentials)
-                .await
-                .map(|()| work.checked = true),
-            Some(key) => return Minting::Ready(key.clone()),
+        template: &MintScope,
+    ) -> Result<S3MemberKey, SyncError> {
+        let scope = MintScope::new(
+            template.store,
+            &template.member,
+            template.device,
+            self.ids.new_id(),
+        );
+        let error = match admin.mint(&scope).await {
+            Ok(key) => match admin.probe(&scope, &key.credentials).await {
+                Ok(()) => return Ok(key),
+                Err(error) => SyncError::Storage(error),
+            },
+            Err(error) => SyncError::Storage(error),
         };
-        match result {
-            Ok(()) => Minting::Advanced,
-            Err(error) => {
-                let error = SyncError::Storage(error);
-                match admin.roll_back(&work.scope).await {
-                    Ok(()) => {
-                        work.minted = None;
-                        work.checked = false;
-                        Minting::Failed { error, reset: true }
-                    }
-                    Err(cleanup) => Minting::Failed {
-                        error: SyncError::Cleanup {
-                            operation: Box::new(error),
-                            cleanup: Box::new(SyncError::Storage(cleanup)),
-                        },
-                        reset: false,
-                    },
-                }
-            }
+        match admin.roll_back(&scope).await {
+            Ok(()) => Err(error),
+            Err(cleanup) => Err(SyncError::Cleanup {
+                operation: Box::new(error),
+                cleanup: Box::new(SyncError::Storage(cleanup)),
+            }),
         }
     }
 }

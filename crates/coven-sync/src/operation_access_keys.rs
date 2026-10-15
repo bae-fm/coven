@@ -1,14 +1,13 @@
 //! Replacing a member's S3 key from the desktop holding admin access (§13):
-//! make the key with admin access and check it from the member's side,
-//! deliver it sealed to the member, record it for them in the store log, then
-//! delete the old key and read that it is gone. Recording makes the old key
+//! make the key with admin access and check it from the member's side in one
+//! call, deliver it sealed to the member, record it for them in the store log,
+//! then delete the old key and read that it is gone. Recording makes the old key
 //! pending deletion in the same transaction (§13), so a failed deletion
 //! leaves it listed rather than forgotten.
 
-use super::operation_minting::Minting;
 use super::StoreLogSync;
 use crate::{
-    operation_data::{Data, MintWork, ReplaceKeyWork},
+    operation_data::{Data, ReplaceKeyWork},
     operations::{Begun, Output, Progress},
     *,
 };
@@ -56,12 +55,8 @@ impl StoreLogSync {
         let data = Data::ReplaceAccessKey(ReplaceKeyWork {
             member,
             attempt,
-            mint: MintWork::new(MintScope::new(
-                local.store,
-                &member.to_string(),
-                local.device,
-                attempt,
-            )),
+            scope: MintScope::new(local.store, &member.to_string(), local.device, attempt),
+            minted: None,
             delivery: None,
             entry: None,
         });
@@ -86,30 +81,16 @@ impl StoreLogSync {
             let Some(admin) = self.admin_access(record.id) else {
                 return Ok(Progress::Waiting(PendingReason::AdminAccessRequired));
             };
-            return match self.advance_mint(admin.as_ref(), &mut work.mint).await {
-                Minting::Ready(_) => {
-                    self.database
-                        .advance_operation(data.update(record, 1)?)
-                        .await?;
-                    Ok(Progress::Advanced)
-                }
-                Minting::Advanced => {
-                    self.database
-                        .advance_operation(data.update(record, 0)?)
-                        .await?;
-                    Ok(Progress::Advanced)
-                }
-                Minting::Failed { error, reset } => {
-                    if reset {
-                        self.database
-                            .advance_operation(data.update(record, 0)?)
-                            .await?;
-                    }
-                    // A failed step needs admin access supplied again (§4).
-                    self.release_admin_access(record.id);
-                    Err(error)
-                }
-            };
+            let minted = self.mint_checked(admin.as_ref(), &work.scope).await;
+            if minted.is_err() {
+                // A failed call needs admin access supplied again (§4).
+                self.release_admin_access(record.id);
+            }
+            work.minted = Some(minted?);
+            self.database
+                .advance_operation(data.update(record, 1)?)
+                .await?;
+            return Ok(Progress::Advanced);
         }
         let member = work.member;
         let path = ObjectPath::access_key(self.directory.id(), &member, work.attempt);
@@ -228,12 +209,12 @@ impl StoreLogSync {
         )))
     }
 
-    /// Discarding a replacement leaves no key it holds unrecorded (§13, §18).
-    /// A reserved entry is published by the generic discard and the store log
-    /// covers its key, so this returns `None`. A made key becomes pending
-    /// deletion as the row goes. With no key yet the row simply goes: each
-    /// failed mint call rolled back what its names created, and a lost call's
-    /// key is reclaimed once this device is retired.
+    /// Discarding a replacement (§13, §18). A reserved entry is published by
+    /// the generic discard and the store log covers its key, so this returns
+    /// `None`. Before that the row just goes: another live copy of this
+    /// database may still record the made key, so this one takes nothing, and
+    /// §13's reclaim removes it once this device is retired (KeyListing
+    /// `clone_discard_spares_recorded_key`).
     pub(super) async fn discard_replacement(
         &mut self,
         record: &OperationRecord,
@@ -244,19 +225,7 @@ impl StoreLogSync {
         if work.entry.is_some() {
             return Ok(None);
         }
-        let deletions = match &work.mint.minted {
-            Some(key) => {
-                let made = MemberAccess::S3AccessKey {
-                    access_key_id: key.credentials.access_key_id.clone(),
-                    principal: key.principal.clone(),
-                };
-                vec![crate::access_keys::deletion(&made, Some(work.member)).expect("an S3 key")?]
-            }
-            None => Vec::new(),
-        };
-        self.database
-            .finish_operation_with_access_keys::<PendingRecord>(record.id, deletions)
-            .await?;
+        self.database.finish_operation(record.id).await?;
         self.release_admin_access(record.id);
         Ok(Some(Begun::Value(Output::Unit)))
     }
@@ -382,16 +351,12 @@ impl StoreLogSync {
 }
 
 fn minted(work: &ReplaceKeyWork) -> Result<&S3MemberKey, SyncError> {
-    work.mint
-        .minted
-        .as_ref()
-        .filter(|_| work.mint.checked)
-        .ok_or_else(|| {
-            coven_database::DbError::Invariant {
-                what: "a key replacement past minting holds its checked key",
-            }
-            .into()
-        })
+    work.minted.as_ref().ok_or_else(|| {
+        coven_database::DbError::Invariant {
+            what: "a key replacement past minting holds its checked key",
+        }
+        .into()
+    })
 }
 
 #[cfg(test)]
