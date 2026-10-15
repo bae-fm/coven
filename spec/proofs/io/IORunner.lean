@@ -345,6 +345,79 @@ private def snapshotWrites (j : Json) : Except String Json := do
     | _ => throw "unknown snapshot write event"
   pure (toJson out)
 
+/-- `SnapshotPublication.step` over one audience driven by a device trace:
+writes landing, a catch-up (`beginCatchup`, then `read` of every writer
+until its terminal miss, all at one time), `prepare`, `land` and ticks. A
+catch-up first drops its writer's earlier session that never prepared: that
+session is local state the device discarded. Each event reports whether its
+step succeeded; a catch-up also reports the positions it reached, a landing
+whether it counts, and every event the `catalogCurrent .writes` selection. -/
+private def publication (j : Json) : Except String Json := do
+  let writers ← j.getObjValAs? (List Nat) "writers"
+  let events ← j.getObjValAs? (Array Json) "events"
+  let order := SnapshotOrder.writes
+  let mut s := SnapshotPublication.initial writers
+  let mut out := #[]
+  for event in events do
+    let time ← event.getObjValAs? Nat "time"
+    let kind ← event.getObjValAs? String "event"
+    let writer := (event.getObjValAs? Nat "writer").toOption.getD 0
+    let number := (event.getObjValAs? Nat "number").toOption.getD 0
+    let mut fields : List (String × Json) := []
+    let mut ok := false
+    match kind with
+    | "write" =>
+      if let some next := SnapshotPublication.step order s time (.write writer [0]) then
+        s := next
+        ok := true
+    | "catchup" =>
+      let fresh := { s with catching := s.catching.filter (·.snapshot.writer != writer) }
+      if let some begun := SnapshotPublication.step order fresh time (.beginCatchup 0 writer number) then
+        let mut t := begun
+        let mut complete := true
+        for logWriter in writers do
+          let mut missed := false
+          for _ in [0:4096] do
+            if missed then
+              break
+            match SnapshotPublication.step order t time (.read writer logWriter) with
+            | none =>
+              complete := false
+              missed := true
+            | some next =>
+              t := next
+              missed := (t.catching.find? (·.snapshot.writer == writer)).any
+                (·.missed.contains logWriter)
+          if !missed then
+            complete := false
+        s := t
+        ok := complete
+        let positions := match t.catching.find? (·.snapshot.writer == writer) with
+          | some c => (c.snapshot.positions.filter (fun (p : Nat × Nat) => p.2 > 0)).mergeSort
+              (fun a b => decide (a.1 ≤ b.1))
+          | none => []
+        fields := [("positions", toJson positions)]
+    | "prepare" =>
+      if let some next := SnapshotPublication.step order s time (.prepare writer) then
+        s := next
+        ok := true
+    | "land" =>
+      if let some next := SnapshotPublication.step order s time (.land 0 writer number) then
+        s := next
+        ok := true
+        let counted := (s.landed.head?.map (·.counts)).getD false
+        fields := [("counts", toJson counted)]
+    | "tick" =>
+      if let some next := SnapshotPublication.step order s time .tick then
+        s := next
+        ok := true
+    | other => throw s!"unknown publication event {other}"
+    let current := match SnapshotPublication.current order s 0 with
+      | some snap => toJson [snap.writer, snap.number]
+      | none => Json.null
+    out := out.push (Json.mkObj ([("ok", toJson ok), ("current", current)] ++ fields))
+  pure (toJson out)
+
 /-- `Waiting`: the delay after `failures` unsuccessful attempts, the restart
 arm `max 0 (min (T - now) W)`, and whether a timer whose ordinary deadline is
 `ordinary` and whose provider cooldown ends at `provider` is due at `at`,
@@ -532,6 +605,7 @@ private def run (j : Json) : Except String Json := do
   | "retirements" => retirementDevices j
   | "phases" => phases j
   | "snapshot_writes" => snapshotWrites j
+  | "publication" => publication j
   | "waiting" => waiting j
   | "evidence" => evidence j
   | "wakes" => wakes j

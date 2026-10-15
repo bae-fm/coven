@@ -193,7 +193,7 @@ async fn a_late_landing_is_ignored_even_when_it_covers_more_writes() {
     a.create(key(1)).await;
     write_rows(&a, 0, 1, 17, Audience::Store).await;
     upload(&a, &storage).await;
-    let timely = a.sync.write_snapshot(Audience::Store).await.unwrap();
+    let timely = a.write_snapshot(Audience::Store).await.unwrap();
     write_rows(&a, 1, 2, 17, Audience::Store).await;
     upload(&a, &storage).await;
     // Prepare from a catch-up, then let the upload land a day and a second later.
@@ -202,7 +202,7 @@ async fn a_late_landing_is_ignored_even_when_it_covers_more_writes() {
             audience: Audience::Store,
             device: a.device().await,
             trigger: crate::snapshot_data::SnapshotTrigger::Requested,
-            session: None,
+            attempt: None,
         },
         temporary: Vec::new(),
     });
@@ -210,7 +210,29 @@ async fn a_late_landing_is_ignored_even_when_it_covers_more_writes() {
         a.db.start_operation(data.new_operation("coven").unwrap())
             .await
             .unwrap();
+    {
+        let _pass = a.caught_up_pass().await;
+        let record = a.operation(id).await;
+        assert!(matches!(
+            a.sync
+                .operation_step(&record, Data::read(&record).unwrap())
+                .await
+                .unwrap(),
+            Progress::Advanced
+        ));
+    }
     let record = a.operation(id).await;
+    let Data::Snapshots(task) = Data::read(&record).unwrap() else {
+        panic!("a snapshot task")
+    };
+    let published = task.published().unwrap();
+    clock.set(
+        UNIX_EPOCH
+            + Duration::from_secs(
+                1_760_400_000 + coven_format::value::StorageTime::DAY_SECONDS + 1,
+            ),
+    );
+    // Sent late, it lands and is abandoned for a fresh attempt (§15).
     assert!(matches!(
         a.sync
             .operation_step(&record, Data::read(&record).unwrap())
@@ -218,32 +240,13 @@ async fn a_late_landing_is_ignored_even_when_it_covers_more_writes() {
             .unwrap(),
         Progress::Advanced
     ));
-    clock.set(
-        UNIX_EPOCH
-            + Duration::from_secs(
-                1_760_400_000 + coven_format::value::StorageTime::DAY_SECONDS + 1,
-            ),
-    );
-    loop {
-        let Some(record) =
-            a.db.operations()
-                .await
-                .unwrap()
-                .into_iter()
-                .find(|r| r.id == id)
-        else {
-            break;
-        };
-        a.sync
-            .operation_step(&record, Data::read(&record).unwrap())
-            .await
-            .unwrap();
-    }
+    assert_eq!(a.operation(id).await.last_step, 0);
+    a.db.finish_operation(id).await.unwrap();
     let late = ObjectPath::snapshot(
         store(1),
         Audience::Store,
         a.device().await,
-        NonZeroU64::new(id.0.try_into().unwrap()).unwrap(),
+        NonZeroU64::new(published.number).unwrap(),
     );
     let bytes = storage.read(&late).await.unwrap();
     let prefix =
@@ -263,7 +266,7 @@ async fn a_late_landing_is_ignored_even_when_it_covers_more_writes() {
     );
     assert_eq!(selected_snapshot(&mut c).await, timely);
     // A fresh preparation samples the later storage time and counts.
-    let fresh = a.sync.write_snapshot(Audience::Store).await.unwrap();
+    let fresh = a.write_snapshot(Audience::Store).await.unwrap();
     assert_eq!(
         selected_snapshot(&mut c).await,
         ObjectPath::snapshot(
@@ -287,17 +290,16 @@ async fn a_device_reloads_its_own_tied_snapshot_and_reads_the_rest_from_logs() {
     let mut b = notes_device(storage.clone(), 2).await;
     add_device(&mut b).await;
     a.sync().await;
+    // Each prepares before the other's write is stored, so neither covers
+    // the other's; each sends once its own write is stored (§15).
     write_rows(&a, 0, 1, 17, Audience::Store).await;
-    upload(&a, &storage).await;
     write_rows(&b, 1, 1, 17, Audience::Store).await;
-    upload(&b, &storage).await;
-    // Ben prepares before Ana's snapshot lands, so neither covers the other.
     let data = Data::Snapshots(SnapshotTask {
         job: SnapshotJob::Write {
             audience: Audience::Store,
             device: b.device().await,
             trigger: crate::snapshot_data::SnapshotTrigger::Requested,
-            session: None,
+            attempt: None,
         },
         temporary: Vec::new(),
     });
@@ -305,12 +307,24 @@ async fn a_device_reloads_its_own_tied_snapshot_and_reads_the_rest_from_logs() {
         b.db.start_operation(data.new_operation("coven").unwrap())
             .await
             .unwrap();
-    let record = b.operation(id).await;
-    b.sync
-        .operation_step(&record, Data::read(&record).unwrap())
-        .await
-        .unwrap();
-    let own = a.sync.write_snapshot(Audience::Store).await.unwrap();
+    {
+        let _pass = b.caught_up_pass().await;
+        let record = b.operation(id).await;
+        assert!(matches!(
+            b.sync
+                .operation_step(&record, Data::read(&record).unwrap())
+                .await
+                .unwrap(),
+            Progress::Advanced
+        ));
+    }
+    assert!(matches!(
+        a.write_snapshot(Audience::Store).await,
+        Err(SyncError::Pending(_))
+    ));
+    upload(&a, &storage).await;
+    upload(&b, &storage).await;
+    a.sync.sync_store_log().await.unwrap();
     while let Some(record) =
         b.db.operations()
             .await
@@ -318,11 +332,23 @@ async fn a_device_reloads_its_own_tied_snapshot_and_reads_the_rest_from_logs() {
             .into_iter()
             .find(|r| r.id == id)
     {
-        b.sync
-            .operation_step(&record, Data::read(&record).unwrap())
-            .await
-            .unwrap();
+        assert!(!matches!(
+            b.sync
+                .operation_step(&record, Data::read(&record).unwrap())
+                .await
+                .unwrap(),
+            Progress::Waiting(_)
+        ));
     }
+    let ana = a.device().await;
+    let own = storage
+        .list(&ObjectPrefix::snapshots(store(1)))
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|o| o.path.snapshot_id().unwrap())
+        .find(|id| id.device == ana)
+        .unwrap();
     let mut scores = Vec::new();
     for object in storage
         .list(&ObjectPrefix::snapshots(store(1)))
@@ -359,8 +385,8 @@ async fn selection_orders_coverage_then_path_and_waits_on_a_damaged_newest() {
     .await
     .unwrap();
     upload(&a, &storage).await;
-    let a_id = a.sync.write_snapshot(Audience::Store).await.unwrap();
-    let b_id = b.sync.write_snapshot(Audience::Store).await.unwrap();
+    let a_id = a.write_snapshot(Audience::Store).await.unwrap();
+    let b_id = b.write_snapshot(Audience::Store).await.unwrap();
     let path = |s: coven_format::store_log::SnapshotId| {
         ObjectPath::snapshot(
             store(1),
@@ -377,7 +403,7 @@ async fn selection_orders_coverage_then_path_and_waits_on_a_damaged_newest() {
     );
     write_rows(&a, 1, 1, 17, Audience::Store).await;
     upload(&a, &storage).await;
-    let newer = path(a.sync.write_snapshot(Audience::Store).await.unwrap());
+    let newer = path(a.write_snapshot(Audience::Store).await.unwrap());
     assert_eq!(selected_snapshot(&mut c).await, newer);
     let size = storage
         .list(&ObjectPrefix::snapshots(store(1)))
@@ -471,7 +497,7 @@ async fn a_snapshot_in_a_newer_format_waits_for_an_update_while_the_logs_go_on()
     a.create(key(1)).await;
     write_rows(&a, 0, 1, 17, Audience::Store).await;
     upload(&a, &storage).await;
-    let id = a.sync.write_snapshot(Audience::Store).await.unwrap();
+    let id = a.write_snapshot(Audience::Store).await.unwrap();
     let path = ObjectPath::snapshot(
         store(1),
         id.audience,
@@ -520,7 +546,7 @@ async fn a_reload_parses_each_body_once_and_refuses_one_that_fails_to_load() {
     a.create(key(1)).await;
     write_rows(&a, 0, 1, 17, Audience::Store).await;
     upload(&a, &storage).await;
-    a.sync.write_snapshot(Audience::Store).await.unwrap();
+    a.write_snapshot(Audience::Store).await.unwrap();
     let mut b = notes_device(storage.clone(), 2).await;
     add_device(&mut b).await;
     let work = coven_database::test_utils::WorkCounter::default();

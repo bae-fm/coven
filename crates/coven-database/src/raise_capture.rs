@@ -2,9 +2,9 @@
 //! transaction through its empty marker, so no later app write can extend the
 //! cut (§17.1, §18.1). A capture is sent only after a completed catch-up that
 //! applied nothing past it; otherwise it is captured again from the current
-//! state, and the device's later writes join its prefix (§15). Sync confirms
-//! the captured own prefix, then seals and publishes these frames; the header
-//! gains its snapshot identity only then.
+//! state, and the device's later writes join its prefix (§15). Sync seals
+//! these frames, the header gaining its snapshot identity only then, and
+//! sends them once the captured own prefix is confirmed.
 
 use crate::sqlite::DatabaseConnection;
 use crate::write_encoding::{audience, audience_text, counter, decoded, encoded};
@@ -299,28 +299,6 @@ pub(crate) fn discard(
         params![audience_text(audience), version],
     )?;
     Ok(())
-}
-
-/// The first own queued write the captured prefix still needs confirmed.
-pub(crate) fn unconfirmed(
-    db: &DatabaseConnection,
-    through: WriteId,
-) -> Result<Option<WriteId>, DbError> {
-    Ok(db
-        .query(
-            "SELECT number FROM _coven_uploads WHERE device=?1 AND number<=?2 ORDER BY number LIMIT 1",
-            params![
-                through.device.0.to_be_bytes().as_slice(),
-                through.number.to_be_bytes().as_slice()
-            ],
-            |r| {
-                Ok(WriteId {
-                    device: through.device,
-                    number: counter(r.get(0)?),
-                })
-            },
-        )?
-        .pop())
 }
 
 #[cfg(test)]

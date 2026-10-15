@@ -291,14 +291,6 @@ impl Data {
             kind: self.journal_kind().into(),
             data: serde_json::to_vec(self)?,
             started_by: started_by.into(),
-            // A snapshot takes its operation's id as its number (§10, §15).
-            reserves_snapshot: matches!(
-                self,
-                Self::Snapshots(SnapshotTask {
-                    job: SnapshotJob::Write { .. },
-                    ..
-                })
-            ),
         })
     }
     pub(crate) fn update(

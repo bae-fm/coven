@@ -377,8 +377,7 @@ mod snapshot_window {
         third.sync.sync_store_log().await.unwrap();
         third.writes.download_writes().await.unwrap();
         assert!(rows(&third.db).await.is_empty());
-        let Err(SyncError::Pending(pending)) = third.sync.write_snapshot(Audience::Store).await
-        else {
+        let Err(SyncError::Pending(pending)) = third.write_snapshot(Audience::Store).await else {
             panic!("the snapshot waits for the removal");
         };
         assert_eq!(
@@ -393,7 +392,7 @@ mod snapshot_window {
         later(31);
         let third = &mut devices[2];
         third.sync.sync_store_log().await.unwrap();
-        let snapshot = third.sync.write_snapshot(Audience::Store).await.unwrap();
+        let snapshot = third.write_snapshot(Audience::Store).await.unwrap();
         let path = ObjectPath::snapshot(
             STORE_ID,
             snapshot.audience,

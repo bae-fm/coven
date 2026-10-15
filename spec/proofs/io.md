@@ -331,7 +331,23 @@ of her raise's actual positions, and each raise attempt a request. Over 32
 generated histories the Rust request is sent exactly when `Step.request`'s
 precondition admits it, both admitted and refused requests occur, every
 capture satisfies `Captured`, and every landed raise covers only published
-numbers. Ordinary snapshots are outside this comparison.
+numbers. `io_differential_ordinary_snapshot_writes` makes the same comparison
+for two devices' ordinary snapshots: each capture follows its author's
+completed catch-up and may hold its own unsent writes, and over 32 histories
+its request is sent exactly when the model admits it.
+
+`io_differential_publication` runs `SnapshotPublication.step` (the runner's
+`publication` check) over two devices' actual publications at controlled
+storage times: writes landing, a catch-up sampled fresh (`beginCatchup`, then
+`read` of every writer to its miss), preparation, with the other device's
+write or whole snapshot landing in between at the same time, sending, and
+ticks of up to a day and a second. Over 24 histories the positions each
+catch-up reaches, each preparation's admission (including refusals because a
+counting snapshot landed after the catch-up), whether each landing counts, and
+the `catalogCurrent .writes` selection after every step agree. A catch-up
+first drops its author's earlier session that never prepared, local state the
+device discarded; an attempt Rust abandons before sending has no landing, as
+one the model leaves uploading. The abandonment itself stays outside the model.
 
 The [queue proposal](queue.md#spec-edits-required-by-this-proposal) keeps old
 upload records unchanged and drains the captured prefix before the raise.

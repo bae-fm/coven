@@ -241,6 +241,31 @@ pub(crate) fn prepare(
     })
 }
 
+/// The first own queued write at or before `through` not yet confirmed
+/// stored. A snapshot covering own writes through `through` is sent only
+/// once this is none: capture may precede confirmation, but neither settles
+/// a queue slot (§15).
+pub(crate) fn unconfirmed(
+    db: &DatabaseConnection,
+    through: WriteId,
+) -> Result<Option<WriteId>, DbError> {
+    Ok(db
+        .query(
+            "SELECT number FROM _coven_uploads WHERE device=?1 AND number<=?2 ORDER BY number LIMIT 1",
+            params![
+                through.device.0.to_be_bytes().as_slice(),
+                through.number.to_be_bytes().as_slice()
+            ],
+            |r| {
+                Ok(WriteId {
+                    device: through.device,
+                    number: counter(r.get(0)?),
+                })
+            },
+        )?
+        .pop())
+}
+
 pub(crate) fn succeeded(database: &DatabaseConnection, write: WriteId) -> Result<bool, DbError> {
     database.stream_transaction(|database| {
         let exists = database.query_row(

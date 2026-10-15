@@ -639,7 +639,6 @@ async fn closing_erases_custody_even_when_releasing_a_worker_fails() {
             kind: "create-circle".into(),
             data: b"malformed operation".to_vec(),
             started_by: "create_circle".into(),
-            reserves_snapshot: false,
         })
         .await
         .unwrap();

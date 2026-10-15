@@ -221,7 +221,7 @@ async fn the_unconfirmed_prefix_names_each_own_write_through_the_marker() {
     let through = db.raise_captures().await.unwrap()[0].through;
     for number in [1, 2] {
         assert_eq!(
-            db.unconfirmed_raise_prefix(through).await.unwrap(),
+            db.unconfirmed_own_prefix(through).await.unwrap(),
             Some(WriteId {
                 device: through.device,
                 number
@@ -234,7 +234,7 @@ async fn the_unconfirmed_prefix_names_each_own_write_through_the_marker() {
         assert!(db.upload_succeeded(write).await.unwrap());
     }
     // The later app write is still queued; it is not part of the prefix.
-    assert_eq!(db.unconfirmed_raise_prefix(through).await.unwrap(), None);
+    assert_eq!(db.unconfirmed_own_prefix(through).await.unwrap(), None);
     assert_eq!(queue(&db).len(), 1);
     db.close().await.unwrap();
 }
@@ -414,7 +414,7 @@ async fn an_unchanged_capture_is_kept_and_a_recapture_takes_in_later_own_writes(
         Some(own.number)
     );
     assert_eq!(
-        db.unconfirmed_raise_prefix(again.through).await.unwrap(),
+        db.unconfirmed_own_prefix(again.through).await.unwrap(),
         Some(WriteId {
             device: own.device,
             number: 1

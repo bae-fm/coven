@@ -414,6 +414,20 @@ impl Device {
         self.sync.catch_up_writes(&mut self.writes).await.unwrap();
         pass
     }
+    /// Publish a requested snapshot after this device's own fresh catch-up (§15).
+    pub(crate) async fn write_snapshot(
+        &mut self,
+        audience: Audience,
+    ) -> Result<coven_format::store_log::SnapshotId, SyncError> {
+        self.sync.write_snapshot(&mut self.writes, audience).await
+    }
+    /// SP step 8 of two passes: the first requests growth snapshots, which
+    /// wait for the next pass's catch-up, sampled fresh, to prepare (§15).
+    pub(crate) async fn write_snapshots(&mut self) -> Result<bool, SyncError> {
+        self.sync.write_snapshots().await?;
+        let _pass = self.caught_up_pass().await;
+        self.sync.write_snapshots().await
+    }
     pub(crate) async fn log(&self) -> StoreLog {
         self.db.local_store_log().await.unwrap().log
     }

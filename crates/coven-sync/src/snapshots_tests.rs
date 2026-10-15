@@ -10,6 +10,8 @@ use std::num::NonZeroU64;
 
 #[path = "snapshot_boundaries_tests.rs"]
 mod boundaries;
+#[path = "snapshot_publish_tests.rs"]
+mod publication;
 #[path = "snapshot_retention_tests.rs"]
 mod retention;
 #[path = "snapshot_return_tests.rs"]
@@ -171,7 +173,7 @@ async fn far_future_threshold_snapshot_and_later_writes_reload_on_a_new_device()
     a.clock.set(UNIX_EPOCH + Duration::from_secs(365 * 86400));
     write_rows(&a, 0, 10, 32768, Audience::Store).await;
     upload(&a, &storage).await;
-    a.sync.write_snapshots().await.unwrap();
+    a.write_snapshots().await.unwrap();
     assert!(storage
         .list(&ObjectPrefix::snapshots(store(1)))
         .await
@@ -179,7 +181,7 @@ async fn far_future_threshold_snapshot_and_later_writes_reload_on_a_new_device()
         .is_empty());
     write_rows(&a, 10, 30, 32768, Audience::Store).await;
     upload(&a, &storage).await;
-    a.sync.write_snapshots().await.unwrap();
+    a.write_snapshots().await.unwrap();
     assert_eq!(
         storage
             .list(&ObjectPrefix::snapshots(store(1)))
@@ -217,7 +219,7 @@ async fn loading_a_snapshot_advances_the_timestamp_clock() {
     write_rows(&a, 0, 40, 32768, Audience::Store).await;
     let covered = a.db.test_queued_writes().await.unwrap().pop().unwrap();
     upload(&a, &storage).await;
-    a.sync.write_snapshots().await.unwrap();
+    a.write_snapshots().await.unwrap();
     assert_eq!(
         storage
             .list(&ObjectPrefix::snapshots(store(1)))
@@ -279,7 +281,7 @@ async fn the_signed_catch_up_time_is_a_provider_sample_never_device_time() {
         let sampled = sampled + Duration::from_secs(later);
         clock.set(sampled);
         let expected = coven_format::value::StorageTime::from_system_time(sampled).unwrap();
-        let id = a.sync.write_snapshot(Audience::Store).await.unwrap();
+        let id = a.write_snapshot(Audience::Store).await.unwrap();
         let path = ObjectPath::snapshot(
             store(1),
             id.audience,
@@ -312,7 +314,7 @@ async fn writing_resumes_after_each_recorded_step_with_identical_ciphertext() {
                 audience: Audience::Store,
                 device: a.device().await,
                 trigger: crate::snapshot_data::SnapshotTrigger::Growth,
-                session: None,
+                attempt: None,
             },
             temporary: Vec::new(),
         });
@@ -320,6 +322,8 @@ async fn writing_resumes_after_each_recorded_step_with_identical_ciphertext() {
             a.db.start_operation(data.new_operation("coven").unwrap())
                 .await
                 .unwrap();
+        // Preparation follows this pass's fresh catch-up (§15).
+        let pass = a.caught_up_pass().await;
         for _ in 0..crash_step {
             let record = a.operation(id).await;
             match a
@@ -351,10 +355,11 @@ async fn writing_resumes_after_each_recorded_step_with_identical_ciphertext() {
         } else {
             None
         };
+        drop(pass);
         a.reopen(storage.clone(), notes_tables(), notes_migrations())
             .await;
         a.catch_up().await;
-        a.sync.write_snapshots().await.unwrap();
+        a.write_snapshots().await.unwrap();
         let objects = storage
             .list(&ObjectPrefix::snapshots(store(1)))
             .await
@@ -395,7 +400,7 @@ async fn uncovered_logs_survive_thirty_days_and_never_posting_devices_hold_cover
     write_rows(&a, 35, 1, 17, Audience::Store).await;
     upload(&a, &storage).await;
     a.catch_up().await;
-    a.sync.write_snapshots().await.unwrap();
+    a.write_snapshots().await.unwrap();
     let held = logs(storage.clone()).await;
     assert_eq!(held.len(), 1);
     assert_ne!(held[0].path, old[0].path);
@@ -429,10 +434,36 @@ async fn concurrent_snapshots_covering_different_pasts_converge_from_either_one(
     write_rows(&b, 2, 1, 17, Audience::Store).await;
     let a_write = a.db.test_queued_writes().await.unwrap().remove(0);
     let b_write = b.db.test_queued_writes().await.unwrap().remove(0);
-    let a_snapshot = a.sync.write_snapshot(Audience::Store).await.unwrap();
-    let b_snapshot = b.sync.write_snapshot(Audience::Store).await.unwrap();
+    // Each captures before the other's write lands, and sends once its own
+    // write is stored (§15).
+    for device in [&mut a, &mut b] {
+        assert!(matches!(
+            device.write_snapshot(Audience::Store).await,
+            Err(SyncError::Pending(_))
+        ));
+    }
     upload(&a, &storage).await;
     upload(&b, &storage).await;
+    a.sync.sync_store_log().await.unwrap();
+    b.sync.sync_store_log().await.unwrap();
+    let snapshots: Vec<_> = storage
+        .list(&ObjectPrefix::snapshots(store(1)))
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|o| o.path.snapshot_id().unwrap())
+        .collect();
+    let a_device = a.device().await;
+    let a_snapshot = snapshots
+        .iter()
+        .find(|id| id.device == a_device)
+        .unwrap()
+        .clone();
+    let b_snapshot = snapshots
+        .iter()
+        .find(|id| id.device != a_device)
+        .unwrap()
+        .clone();
     a.db.apply_downloaded::<crate::PendingRecord>(
         b_write.into(),
         coven_database::test_utils::published(coven_format::value::StorageTime::UNIX_EPOCH),
@@ -506,13 +537,10 @@ async fn store_and_gifts_snapshots_at_different_points_load_in_one_transaction()
         .unwrap();
         upload(&a, &storage).await;
         if number == 0 {
-            a.sync
-                .write_snapshot(Audience::Circle(gifts))
-                .await
-                .unwrap();
+            a.write_snapshot(Audience::Circle(gifts)).await.unwrap();
         }
         if number == 1 {
-            a.sync.write_snapshot(Audience::Store).await.unwrap();
+            a.write_snapshot(Audience::Store).await.unwrap();
         }
     }
     let mut b = notes_device(storage.clone(), 2).await;
@@ -556,7 +584,7 @@ async fn deleted_history_reload_preserves_waiting_numbers_and_late_writes_conver
     a.clock.set(UNIX_EPOCH + Duration::from_secs(31 * 86400));
     storage_clock.set(UNIX_EPOCH + Duration::from_secs(31 * 86400));
     a.catch_up().await;
-    a.sync.write_snapshot(Audience::Store).await.unwrap();
+    a.write_snapshot(Audience::Store).await.unwrap();
     assert!(storage
         .list(&ObjectPrefix::device_logs(store(1)))
         .await
@@ -579,16 +607,33 @@ async fn waiting_parts_alone_can_trigger_a_snapshot() {
     a.create(key(1)).await;
     write_rows(&a, 0, 35, 32768, Audience::Store).await;
     let waiting = a.db.test_queued_writes().await.unwrap();
-    a.sync.write_snapshots().await.unwrap();
-    assert_eq!(
+    a.write_snapshots().await.unwrap();
+    // The growth snapshot is prepared but sent only once the own writes it
+    // covers are stored, so no loader mistakes them for deleted history (§15).
+    let listed = || async {
         storage
             .list(&ObjectPrefix::snapshots(store(1)))
             .await
             .unwrap()
-            .len(),
-        1
-    );
+            .len()
+    };
+    assert_eq!(listed().await, 0);
     assert_eq!(a.db.test_queued_writes().await.unwrap(), waiting);
+    let device = a.device().await;
+    assert!(a
+        .db
+        .pending::<crate::PendingRecord>()
+        .await
+        .unwrap()
+        .iter()
+        .any(|r| r.reason
+            == crate::PendingReason::Waits(crate::Prerequisite::Object(crate::write_seal::path(
+                store(1),
+                coven_merge::WriteId { device, number: 1 }
+            )))));
+    upload(&a, &storage).await;
+    a.sync.sync_store_log().await.unwrap();
+    assert_eq!(listed().await, 1);
     let mut b = notes_device(storage.clone(), 2).await;
     add_device(&mut b).await;
     b.sync.reload_from_snapshots().await.unwrap();
@@ -635,7 +680,7 @@ async fn replay_reload_is_journaled_and_keeps_its_boundary_snapshot() {
     a.sync().await;
     write_rows(&a, 0, 1, 17, Audience::Store).await;
     upload(&a, &storage).await;
-    let reset = a.sync.write_snapshot(Audience::Store).await.unwrap();
+    let reset = a.write_snapshot(Audience::Store).await.unwrap();
     a.sync
         .make_and_upload_entry(StoreChange::Reset {
             snapshot: reset.clone(),
@@ -649,7 +694,7 @@ async fn replay_reload_is_journaled_and_keeps_its_boundary_snapshot() {
     assert_eq!(fingerprint(&a).await, fingerprint(&b).await);
     write_rows(&a, 1, 1, 17, Audience::Store).await;
     upload(&a, &storage).await;
-    a.sync.write_snapshot(Audience::Store).await.unwrap();
+    a.write_snapshot(Audience::Store).await.unwrap();
     a.sync.run_retention().await.unwrap();
     assert!(storage
         .list(&ObjectPrefix::snapshots(store(1)))
@@ -670,7 +715,8 @@ async fn a_snapshot_exceeding_the_transfer_memory_budget_streams_in_bounded_buff
     for batch in 0..36 {
         write_rows(&a, batch * 32, 32, 32768, Audience::Store).await;
     }
-    a.sync.write_snapshots().await.unwrap();
+    upload(&a, &storage).await;
+    a.write_snapshots().await.unwrap();
     let snapshots = storage
         .list(&ObjectPrefix::snapshots(store(1)))
         .await
@@ -699,7 +745,7 @@ async fn reload_reselects_after_store_log_changes_and_preserves_interleaved_app_
     a.sync().await;
     write_rows(&a, 0, 1, 17, Audience::Store).await;
     upload(&a, &storage).await;
-    a.sync.write_snapshot(Audience::Store).await.unwrap();
+    a.write_snapshot(Audience::Store).await.unwrap();
     let data = Data::Snapshots(SnapshotTask {
         job: SnapshotJob::Reload {
             scope: crate::snapshot_data::ReloadScope::All,
@@ -769,7 +815,7 @@ async fn idle_pass_uses_bounded_header_ranges_and_reuses_overread_bytes() {
     }
     for device in [&mut a, &mut b, &mut c] {
         device.writes().download_writes().await.unwrap();
-        device.sync.write_snapshot(Audience::Store).await.unwrap();
+        device.write_snapshot(Audience::Store).await.unwrap();
     }
     let mut bounds = std::collections::BTreeMap::new();
     for object in storage
@@ -860,7 +906,7 @@ async fn a_pass_reuses_loaded_snapshot_and_write_references() {
             b.clock.set(UNIX_EPOCH + Duration::from_secs(31 * 86400));
             storage_clock.set(UNIX_EPOCH + Duration::from_secs(31 * 86400));
             b.catch_up().await;
-            b.sync.write_snapshot(Audience::Store).await.unwrap();
+            b.write_snapshot(Audience::Store).await.unwrap();
             assert!(storage
                 .list(&ObjectPrefix::device_logs(store(1)))
                 .await

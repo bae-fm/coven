@@ -97,7 +97,7 @@ async fn a_lost_reply_keeps_the_prefix_unconfirmed_until_the_stored_bytes_match(
     assert!(ana.writes.upload_writes().await.is_err());
     assert_eq!(
         ana.db
-            .unconfirmed_raise_prefix(WriteId { device, number: 3 })
+            .unconfirmed_own_prefix(WriteId { device, number: 3 })
             .await
             .unwrap(),
         Some(WriteId { device, number: 2 })
@@ -654,11 +654,7 @@ mod recapture {
         sql(&devices[1].db, "UPDATE notes SET title='Shopping'").await;
         sql(&devices[1].db, "UPDATE notes SET body='list'").await;
         devices[1].writes.upload_writes().await.unwrap();
-        devices[1]
-            .sync
-            .write_snapshot(Audience::Store)
-            .await
-            .unwrap();
+        devices[1].write_snapshot(Audience::Store).await.unwrap();
         let edit = WriteId {
             device: BEN,
             number: 1,
@@ -712,6 +708,32 @@ mod recapture {
         let mut devices = group(storage.clone(), 2).await;
         seed(&mut devices).await;
         update(&mut devices[0], storage.clone(), true, true).await;
+        // Ben, still on the old schema, edits the note twice and prepares a
+        // snapshot covering his edits before Ana's marker is stored, so his
+        // catch-up completes; his edits are not stored yet either.
+        sql(&devices[1].db, "UPDATE notes SET title='Shopping'").await;
+        sql(&devices[1].db, "UPDATE notes SET body='list'").await;
+        let data = crate::operation_data::Data::Snapshots(crate::snapshot_data::SnapshotTask {
+            job: crate::snapshot_data::SnapshotJob::Write {
+                audience: Audience::Store,
+                device: BEN,
+                trigger: crate::snapshot_data::SnapshotTrigger::Requested,
+                attempt: None,
+            },
+            temporary: Vec::new(),
+        });
+        let bens = devices[1]
+            .db
+            .start_operation(data.new_operation("coven").unwrap())
+            .await
+            .unwrap();
+        {
+            let _pass = devices[1].caught_up_pass().await;
+            assert!(matches!(
+                devices[1].step(bens).await.unwrap(),
+                crate::operations::Progress::Advanced
+            ));
+        }
         // Ana's raise snapshot is prepared and lands; her raise entry does not.
         devices[0].catch_up().await;
         devices[0].writes.upload_writes().await.unwrap();
@@ -728,9 +750,29 @@ mod recapture {
         }
         let (_, listed) = store_snapshots(&storage, ANA).await.remove(0);
         assert_eq!(listed.raise.map(|v| v.get()), Some(2));
-        // Ben's later old-schema edit is covered by his newer snapshot, and every
-        // device posts past it.
-        let edit = bens_covered_edit(&mut devices).await;
+        // Ben's edits are stored and his snapshot lands after Ana's, covering
+        // them and counting more writes; every device posts past them.
+        devices[1].writes.upload_writes().await.unwrap();
+        while devices[1]
+            .db
+            .operations()
+            .await
+            .unwrap()
+            .iter()
+            .any(|record| record.id == bens)
+        {
+            assert!(!matches!(
+                devices[1].step(bens).await.unwrap(),
+                crate::operations::Progress::Waiting(_)
+            ));
+        }
+        let edit = WriteId {
+            device: BEN,
+            number: 1,
+        };
+        assert!(stored(&storage, edit).await);
+        let (_, ben_snapshot) = store_snapshots(&storage, BEN).await.remove(0);
+        assert!(ben_snapshot.writes.covers(edit));
         assert!(!listed.writes.covers(edit));
         devices[0].writes.download_writes().await.unwrap();
         for device in &mut devices {
@@ -767,11 +809,7 @@ mod recapture {
         devices[1].sync.run_retention().await.unwrap();
         assert!(stored(&storage, edit).await);
         // A snapshot that read the raise and covers the edit releases it.
-        devices[1]
-            .sync
-            .write_snapshot(Audience::Store)
-            .await
-            .unwrap();
+        devices[1].write_snapshot(Audience::Store).await.unwrap();
         for device in &mut devices {
             device.writes.post_positions().await.unwrap();
         }

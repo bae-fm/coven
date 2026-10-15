@@ -482,11 +482,7 @@ async fn fingerprint_comparison_leaves_recovery_to_an_explicit_reload() {
             device.writes.download_writes().await.unwrap();
             assert!(device.writes.post_positions().await.unwrap());
         }
-        devices[0]
-            .sync
-            .write_snapshot(Audience::Store)
-            .await
-            .unwrap();
+        devices[0].write_snapshot(Audience::Store).await.unwrap();
         let expected = devices[0]
             .writes
             .current_positions()
@@ -791,11 +787,7 @@ mod stuck {
                 .len(),
             1
         );
-        let snapshot = devices[0]
-            .sync
-            .write_snapshot(Audience::Store)
-            .await
-            .unwrap();
+        let snapshot = devices[0].write_snapshot(Audience::Store).await.unwrap();
         devices[0]
             .sync
             .make_and_upload_entry(StoreChange::Reset { snapshot })
@@ -959,11 +951,7 @@ mod stuck {
         }
         // A snapshot covering the refused write lands: the waiting reload
         // loads it without reading the write, and the local edit stays on top.
-        devices[0]
-            .sync
-            .write_snapshot(Audience::Store)
-            .await
-            .unwrap();
+        devices[0].write_snapshot(Audience::Store).await.unwrap();
         let before = storage.reads().await;
         devices[1].elapse_retry_delays();
         devices[1].sync.reload_from_snapshots().await.unwrap();

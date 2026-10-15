@@ -11,7 +11,7 @@ async fn maintenance_failures_are_visible_and_wait_for_a_changed_connection() {
             audience: Audience::Store,
             device: DeviceId(1),
             trigger: SnapshotTrigger::Requested,
-            session: None,
+            attempt: None,
         },
         SnapshotJob::Reload {
             scope: ReloadScope::All,
@@ -151,7 +151,7 @@ async fn migration_and_audience_publication_share_the_schema_change_purpose() {
                     version: 2,
                     entry: None,
                 },
-                session: None,
+                attempt: None,
             },
             temporary: Vec::new(),
         })

@@ -6,16 +6,17 @@ import CovenStorage.Identity
   gap-free from one sequence and confirms them in order, so a live copy's
   stored copies never pass its reservation, and one beyond it resets:
   `live_copy_sends`, `key_copy_ahead_resets`.
-- Own snapshot numbers are operation ids: one local sequence numbers every
-  operation, and a snapshot takes its operation's id. The check compares
-  stored snapshot numbers with the greatest number a snapshot operation
-  reserved, which never resets a live copy (`live_copy_sends`) and resets a
-  copy whose listing passes it (`snapshot_ahead_resets`); every snapshot
-  reserved after a passing check gets a number beyond every listed one
-  (`later_numbers_fresh`). Comparing with the whole operation sequence
-  instead is weaker: a restored copy's other operations advance the sequence
-  past a newer own snapshot, so the restored copy sends, and its own earlier
-  snapshot operation publishes at a path its newer self used and deleted
+- Own snapshot numbers have their own sequence: each preparation reserves
+  the next, so the counter is the sequence (`key_copies_counted`). The check
+  compares stored snapshot numbers with the greatest number reserved, which
+  never resets a live copy (`live_copy_sends`) and resets a copy whose
+  listing passes it (`snapshot_ahead_resets`); every snapshot reserved after
+  a passing check gets a number beyond every listed one
+  (`later_numbers_fresh`). Comparing with a sequence that numbers every
+  operation, when a snapshot took its operation's id, is weaker: a restored
+  copy's other operations advance that sequence past a newer own snapshot,
+  so the restored copy sends, and its own earlier snapshot operation
+  publishes at a path its newer self used and deleted
   (`operation_ids_hide_newer_snapshot`).
 - A store that never set up storage has no stored history and published
   nothing. Its reset is the new-device path with nothing to load and no
@@ -30,10 +31,10 @@ open CovenStorage
 
 /-- One local numbering sequence. `last` is the greatest number it reserved;
 `kind` holds the reserved numbers that name an object of the counted kind.
-Writes, entries and key copies reserve only their own kind. The operation
-sequence (`sqlite_sequence` of `_coven_operations`) numbers every operation,
-and only a snapshot operation's id is a snapshot number. Finishing an
-operation never lowers the sequence. -/
+Writes, entries, key copies and snapshots (Rust `_coven_snapshot_reservation`)
+reserve only their own kind. A sequence that also numbers other things, as an
+operation sequence numbering every operation would, counts only some of its
+reservations. Finishing or abandoning work never lowers a sequence. -/
 structure Sequence where
   last : Nat
   kind : List Nat
@@ -126,7 +127,7 @@ theorem later_numbers_fresh {s : Sequence} (steps : List Bool) {m : Nat} (h : m 
 
 /-- One live copy's own counters: write and entry ends, its key-copy sequence
 (every reservation a copy, Rust `key_upload::last_reserved`) and the
-greatest id its operation sequence gave a snapshot operation (Rust
+greatest snapshot number its snapshot sequence `ops` reserved (Rust
 `_coven_snapshot_reservation`). Stored copies and snapshots are ones it
 published. With custody and no removal or replacement, the check sends,
 whatever it deleted (§10: an outstanding reservation is not stale). -/
@@ -154,7 +155,7 @@ theorem key_copy_ahead_resets (d : Nat) (r : Counters) (e : Evidence)
   simp [checkIdentity, removed, replaced, this]
 
 /-- A stored own snapshot beyond the greatest reserved snapshot number
-resets the copy, whatever else its operation sequence numbered. -/
+resets the copy, whatever else any other sequence numbered. -/
 theorem snapshot_ahead_resets (d : Nat) (r : Counters) (e : Evidence)
     (removed : e.removed = false) (replaced : e.replaced = false)
     (ahead : r.snapshot < e.listed.snapshot) :

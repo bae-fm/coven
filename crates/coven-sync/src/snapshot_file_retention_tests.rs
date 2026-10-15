@@ -69,7 +69,11 @@ async fn an_excluded_snapshot_prevents_proving_file_absence() {
     let f = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
     let (mut sync, author, mut writes) = sync(&f).await;
     let file = f.uploaded("old", vec![31; CHUNK]).await;
-    sync.write_snapshot(Audience::Store).await.unwrap();
+    // A snapshot is sent once its own writes are stored (§15).
+    writes.upload_writes().await.unwrap();
+    sync.write_snapshot(&mut writes, Audience::Store)
+        .await
+        .unwrap();
     f.database
         .write(|sql| {
             sql.execute("DELETE FROM files", [])?;
@@ -106,7 +110,11 @@ async fn file_references_survive_in_waiting_writes_and_kept_snapshots() {
     let (mut sync, _, mut writes) = sync(&f).await;
     let old = f.uploaded("old", vec![31; CHUNK]).await;
     let kept = f.uploaded("kept", vec![32; CHUNK]).await;
-    sync.write_snapshot(Audience::Store).await.unwrap();
+    // A snapshot is sent once its own writes are stored (§15).
+    writes.upload_writes().await.unwrap();
+    sync.write_snapshot(&mut writes, Audience::Store)
+        .await
+        .unwrap();
     f.database
         .write(|sql| {
             sql.execute("DELETE FROM files WHERE id='old'", [])?;
@@ -121,7 +129,9 @@ async fn file_references_survive_in_waiting_writes_and_kept_snapshots() {
     assert!(writes.post_positions().await.unwrap());
     sync.run_retention().await.unwrap();
     assert!(f.storage.read(&path(&f, &old)).await.is_ok());
-    sync.write_snapshot(Audience::Store).await.unwrap();
+    sync.write_snapshot(&mut writes, Audience::Store)
+        .await
+        .unwrap();
     sync.run_retention().await.unwrap();
     let objects = f
         .storage
@@ -143,7 +153,9 @@ async fn a_replaced_files_upload_stays_while_its_attaching_write_names_it() {
     assert!(f.storage.read(&path(&f, &old)).await.is_ok());
     writes.upload_writes().await.unwrap();
     assert!(writes.post_positions().await.unwrap());
-    sync.write_snapshot(Audience::Store).await.unwrap();
+    sync.write_snapshot(&mut writes, Audience::Store)
+        .await
+        .unwrap();
     sync.run_retention().await.unwrap();
     // Nothing retained names A any more; B still waits in the queue.
     assert!(f
@@ -161,9 +173,13 @@ async fn a_replaced_files_upload_stays_while_its_attaching_write_names_it() {
 #[tokio::test]
 async fn locally_protected_files_reuse_the_checked_snapshot_prefix() {
     let f = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
-    let (mut sync, _, _) = sync(&f).await;
+    let (mut sync, _, mut writes) = sync(&f).await;
     f.uploaded("kept", vec![32; CHUNK]).await;
-    sync.write_snapshot(Audience::Store).await.unwrap();
+    // A snapshot is sent once its own writes are stored (§15).
+    writes.upload_writes().await.unwrap();
+    sync.write_snapshot(&mut writes, Audience::Store)
+        .await
+        .unwrap();
     let object = f
         .storage
         .list(&ObjectPrefix::snapshots(f.directory.id()))
@@ -207,7 +223,9 @@ async fn a_late_upload_goes_once_nothing_retained_names_it() {
         assert!(writes.post_positions().await.unwrap());
         // The snapshot names only the kept file; the covered, posted writes
         // naming the late one go with this snapshot's retention.
-        sync.write_snapshot(Audience::Store).await.unwrap();
+        sync.write_snapshot(&mut writes, Audience::Store)
+            .await
+            .unwrap();
         assert!(f
             .storage
             .list(&ObjectPrefix::device_logs(f.directory.id()))
@@ -282,7 +300,9 @@ async fn data_differential_file_deletion() {
         if case == "snapshot and deleting log" {
             writes.upload_writes().await.unwrap();
             assert!(writes.post_positions().await.unwrap());
-            sync.write_snapshot(Audience::Store).await.unwrap();
+            sync.write_snapshot(&mut writes, Audience::Store)
+                .await
+                .unwrap();
         }
         if case != "row" {
             f.database
@@ -298,7 +318,9 @@ async fn data_differential_file_deletion() {
             assert!(writes.post_positions().await.unwrap());
         }
         if matches!(case, "released" | "queued upload" | "unreadable snapshot") {
-            sync.write_snapshot(Audience::Store).await.unwrap();
+            sync.write_snapshot(&mut writes, Audience::Store)
+                .await
+                .unwrap();
         }
         if case == "unreadable snapshot" {
             let snapshot = f

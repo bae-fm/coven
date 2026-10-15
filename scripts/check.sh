@@ -424,6 +424,8 @@ proofs() {
             device_log_sync::drain::tests::io_differential_retired_drain \
             operations::pass::tests::io_differential_pass_phases \
             device_log_sync::tests::schema::raise_publication::differential::io_differential_snapshot_writes \
+            store_log_sync::tests::snapshots::publication::io_differential_publication \
+            store_log_sync::tests::snapshots::publication::io_differential_ordinary_snapshot_writes \
             store_log_sync::tests::snapshots::selection::held::io_differential_held \
             retry_waits::tests::io_differential_waiting \
             files::tests::upload_retry::io_differential_upload_worker \

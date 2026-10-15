@@ -244,7 +244,7 @@ async fn another_members_snapshot_signatures_never_authorize_selection_loading_o
         if !a.send.can_send() {
             a.catch_up().await;
         }
-        a.sync.write_snapshot(Audience::Store).await.unwrap();
+        a.write_snapshot(Audience::Store).await.unwrap();
         a.sync.run_retention().await.unwrap();
         assert!(storage
             .list(&ObjectPrefix::device_logs(store(1)))
@@ -266,7 +266,7 @@ async fn coverage_checks_read_exactly_the_signed_prefix_without_an_audience_key(
     let mut b = notes_device(storage.clone(), 2).await;
     add_device(&mut b).await;
     b.writes.download_writes().await.unwrap();
-    a.sync.write_snapshot(Audience::Store).await.unwrap();
+    a.write_snapshot(Audience::Store).await.unwrap();
     let object = storage
         .list(&ObjectPrefix::snapshots(store(1)))
         .await
@@ -315,7 +315,7 @@ async fn signed_coverage_does_not_require_opening_the_body_but_loading_does() {
     let unsigned = unsigned_snapshot(&a, id).await;
     let wrong_body_signature = signed_snapshot(&unsigned, &path, &a.member, &member(2));
     storage.create(&path, &wrong_body_signature).await.unwrap();
-    a.sync.write_snapshots().await.unwrap();
+    a.write_snapshots().await.unwrap();
     a.clock.set(UNIX_EPOCH + Duration::from_secs(31 * 86400));
     storage_clock.set(UNIX_EPOCH + Duration::from_secs(31 * 86400));
     a.sync.run_retention().await.unwrap();
@@ -332,7 +332,7 @@ async fn signed_coverage_does_not_require_opening_the_body_but_loading_does() {
     if !a.send.can_send() {
         a.catch_up().await;
     }
-    a.sync.write_snapshot(Audience::Store).await.unwrap();
+    a.write_snapshot(Audience::Store).await.unwrap();
     b.elapse_retry_delays();
     b.sync.reload_from_snapshots().await.unwrap();
     assert_eq!(tables(&a).await, tables(&b).await);
@@ -350,7 +350,7 @@ async fn a_truncated_body_does_not_erase_signed_required_history() {
     if !a.send.can_send() {
         a.catch_up().await;
     }
-    a.sync.write_snapshot(Audience::Store).await.unwrap();
+    a.write_snapshot(Audience::Store).await.unwrap();
     assert!(storage
         .list(&ObjectPrefix::device_logs(store(1)))
         .await
@@ -425,7 +425,7 @@ async fn authors_must_be_in_the_applied_store_log_and_remain_known_after_removal
     let before = a.log().await;
     let mut b = notes_device(storage.clone(), 2).await;
     add_device(&mut b).await;
-    b.sync.write_snapshot(Audience::Store).await.unwrap();
+    b.write_snapshot(Audience::Store).await.unwrap();
     super::retention::post(&b, &storage).await;
     let path = ObjectPath::positions(store(1), b.device().await);
     let bytes = storage.read(&path).await.unwrap();

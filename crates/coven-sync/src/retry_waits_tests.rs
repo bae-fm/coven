@@ -186,7 +186,6 @@ async fn new_evidence_makes_an_operation_due_once_without_resetting_its_backoff(
             kind: "circle".into(),
             data: vec![1],
             started_by: "app".into(),
-            reserves_snapshot: false,
         })
         .await
         .unwrap();
@@ -300,7 +299,6 @@ async fn io_differential_waiting() {
                 kind: "circle".into(),
                 data: vec![1],
                 started_by: "app".into(),
-                reserves_snapshot: false,
             })
             .await
             .unwrap();

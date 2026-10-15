@@ -494,10 +494,21 @@ async fn a_snapshot_waiting_for_its_audience_key_leaves_the_pass_going() {
         .test_rotate(circle.clone(), KeyId(Uuid::from_u128(11)))
         .await;
     devices[1].custody.persist(&ring).unwrap();
+    // Its copy of the replacement key has not landed yet, so the snapshot's
+    // own fresh catch-up cannot acquire it (§15).
+    let copy = crate::store_log_sync::tests::find_copy(
+        &*storage,
+        circle.clone(),
+        KeyId(Uuid::from_u128(11)),
+        &identity(4).member(),
+    )
+    .await
+    .unwrap();
+    storage.delete(&copy.path).await.unwrap();
     // The circle has grown past the first snapshot's threshold. Its snapshot
     // waits for the replacement key without failing the pass's snapshots (§11).
     sql(&devices[1].db, "INSERT INTO pins VALUES('00000000-0000-4000-8000-000000000001','00000000-0000-0000-0000-00000000000a',hex(zeroblob(600000)))").await;
-    devices[1].sync.write_snapshots().await.unwrap();
+    devices[1].write_snapshots().await.unwrap();
     let wait = PendingReason::KeyUnavailable {
         audience: circle.clone(),
         key: KeyId(Uuid::from_u128(11)),
@@ -524,9 +535,10 @@ async fn a_snapshot_waiting_for_its_audience_key_leaves_the_pass_going() {
     };
     assert_eq!(listed(circle.clone()).await, 0);
     // Once the key arrives the waiting snapshot goes out.
+    storage.create(&copy.path, &copy.bytes).await.unwrap();
     devices[1].sync.sync_store_log().await.unwrap();
     devices[1].writes.upload_writes().await.unwrap();
-    devices[1].sync.write_snapshots().await.unwrap();
+    devices[1].write_snapshots().await.unwrap();
     assert_eq!(listed(circle).await, 1);
     assert!(!devices[1]
         .db

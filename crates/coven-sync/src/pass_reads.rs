@@ -19,10 +19,10 @@ struct Reads {
     drains: BTreeMap<DeviceId, coven_format::value::StorageTime>,
     /// This pass's first phase: whether it completed with sending authority.
     membership: Option<bool>,
-    /// The storage sample taken before this pass's write discovery, once
-    /// that discovery completed: every writer's log read through its miss and
-    /// every found write applied. A raise snapshot prepared now records it as
-    /// its `T_c` (§15).
+    /// The fresh storage sample taken before this pass's write discovery,
+    /// once that discovery completed: every writer's log read through its
+    /// miss and every found write applied, with no reload since. A snapshot
+    /// prepared now records it as its `T_c` (§15).
     write_catch_up: Option<coven_format::value::StorageTime>,
     /// Audience snapshot listings shared while one return observation lasts.
     snapshot_listings: Option<BTreeMap<String, Vec<StoredObject>>>,
@@ -149,6 +149,17 @@ impl PassReads {
         if reads.scopes > 0 {
             reads.write_catch_up = Some(sample);
         }
+    }
+
+    /// A reload invalidates every earlier terminal write miss and the
+    /// catch-up they completed: a preparation needs another catch-up, whose
+    /// write discovery probes every writer again (§15; io
+    /// `SnapshotPublication.act`).
+    pub(crate) fn reloaded(&self) {
+        self.0
+            .lock()
+            .expect("pass reads lock poisoned")
+            .write_catch_up = None;
     }
 
     /// The sample before this pass's completed write discovery, if one completed.

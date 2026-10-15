@@ -24,7 +24,7 @@ async fn unsigned_positions_cannot_authorize_log_deletion() {
     a.add(&other, MemberRole::Member).await;
     write_rows(&a, 0, 1, 17, Audience::Store).await;
     upload(&a, &storage).await;
-    a.sync.write_snapshot(Audience::Store).await.unwrap();
+    a.write_snapshot(Audience::Store).await.unwrap();
     post(&a, &storage).await;
     let path = ObjectPath::positions(store(1), a.device().await);
     let bytes = storage.read(&path).await.unwrap();
@@ -75,7 +75,7 @@ async fn every_active_device_must_post_before_covered_logs_are_deleted() {
     b.sync().await;
     write_rows(&a, 0, 1, 17, Audience::Store).await;
     upload(&a, &storage).await;
-    a.sync.write_snapshot(Audience::Store).await.unwrap();
+    a.write_snapshot(Audience::Store).await.unwrap();
     b.sync.reload_from_snapshots().await.unwrap();
     c.sync.reload_from_snapshots().await.unwrap();
     post(&a, &storage).await;
@@ -118,7 +118,7 @@ async fn a_removed_devices_member_can_delete_its_covered_logs() {
     a.sync().await;
     write_rows(&a, 0, 1, 17, Audience::Store).await;
     upload(&a, &storage).await;
-    a.sync.write_snapshot(Audience::Store).await.unwrap();
+    a.write_snapshot(Audience::Store).await.unwrap();
     b.sync.reload_from_snapshots().await.unwrap();
     b.sync
         .make_and_upload_entry(StoreChange::RemoveDevice {
@@ -187,7 +187,7 @@ async fn removed_member_logs_belong_to_the_store_owner_and_leave_google_drives_f
         .await
         .unwrap();
         upload(&b, &storage).await;
-        a.sync.write_snapshot(Audience::Store).await.unwrap();
+        a.write_snapshot(Audience::Store).await.unwrap();
         a.sync
             .make_and_upload_entry(StoreChange::RemoveMember {
                 member: b.member.member(),
@@ -247,6 +247,7 @@ async fn a_file_named_only_by_a_retained_log_write_stays_until_that_log_goes() {
         .unwrap();
     a.sync.database = a.db.clone();
     a.sync.prerequisites = std::sync::Mutex::new(a.sync.database.operation_prerequisite_changes());
+    a.writes = a.writes();
     a.create(key(1)).await;
     let files = crate::Files::new(
         FileDatabase::new(a.db.clone()),
@@ -304,7 +305,7 @@ async fn a_file_named_only_by_a_retained_log_write_stays_until_that_log_goes() {
     if !a.send.can_send() {
         a.catch_up().await;
     }
-    a.sync.write_snapshot(Audience::Store).await.unwrap();
+    a.write_snapshot(Audience::Store).await.unwrap();
     assert!(storage
         .list(&ObjectPrefix::device_logs(store(1)))
         .await
@@ -345,7 +346,9 @@ async fn a_snapshot_keeps_its_key_when_a_removal_is_dropped() {
         .unwrap(),
         coven_database::ApplyOutcome::Applied
     );
-    a.sync.write_snapshot(Audience::Store).await.unwrap();
+    // Ana's snapshot is sent once her write is stored (§15).
+    upload(&a, &storage).await;
+    a.write_snapshot(Audience::Store).await.unwrap();
     write_rows(&b, 1, 1, 17, Audience::Store).await;
     let write = b.db.test_queued_writes().await.unwrap()[0].header.position;
     upload(&b, &storage).await;
@@ -367,7 +370,7 @@ async fn a_snapshot_keeps_its_key_when_a_removal_is_dropped() {
         .unwrap();
     // In Ben's view Ana is out, so his snapshot first rotates the store key,
     // sealing the replacement to himself and Carol only (§11).
-    let selected = b.sync.write_snapshot(Audience::Store).await.unwrap();
+    let selected = b.write_snapshot(Audience::Store).await.unwrap();
     let replacement = b.newest(Audience::Store).await;
     assert_ne!(replacement, key(1));
     assert!(find_copy(
@@ -433,38 +436,101 @@ async fn republish(storage: &MemoryStorage, clock: &FixedClock, path: &ObjectPat
     clock.set(now);
 }
 
+/// Prepare `device`'s requested store snapshot after a fresh catch-up,
+/// without sending it.
+async fn prepare_requested(device: &mut Device) -> crate::OperationId {
+    let data = Data::Snapshots(crate::snapshot_data::SnapshotTask {
+        job: crate::snapshot_data::SnapshotJob::Write {
+            audience: Audience::Store,
+            device: device.device().await,
+            trigger: crate::snapshot_data::SnapshotTrigger::Requested,
+            attempt: None,
+        },
+        temporary: Vec::new(),
+    });
+    let id = device
+        .db
+        .start_operation(data.new_operation("coven").unwrap())
+        .await
+        .unwrap();
+    let _pass = device.caught_up_pass().await;
+    let record = device.operation(id).await;
+    assert!(matches!(
+        device
+            .sync
+            .operation_step(&record, Data::read(&record).unwrap())
+            .await
+            .unwrap(),
+        Progress::Advanced
+    ));
+    id
+}
+
+/// Send a prepared snapshot and finish its task, with no store-log scan;
+/// returns its identity.
+async fn send_prepared(
+    device: &mut Device,
+    id: crate::OperationId,
+) -> coven_format::store_log::SnapshotId {
+    let record = device.operation(id).await;
+    let Data::Snapshots(task) = Data::read(&record).unwrap() else {
+        panic!("a snapshot task")
+    };
+    let published = task.published().unwrap();
+    while let Some(record) = device
+        .db
+        .operations()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|r| r.id == id)
+    {
+        assert!(!matches!(
+            device
+                .sync
+                .operation_step(&record, Data::read(&record).unwrap())
+                .await
+                .unwrap(),
+            Progress::Waiting(_)
+        ));
+    }
+    published
+}
+
 /// `newer_snapshot_retention_counterexample` (storelog-data `PendingScans`):
 /// Ana's snapshot covers her writes 1 to 4. Ben's covers her 1 to 3 and his
-/// own 1 and 2, more writes, so his is the store's newest (§15). `registered`
-/// is whether Ana has applied Ben's device registration. Storage time is
-/// past 30 days after the writes, so coverage alone decides deletion.
+/// own 1 and 2, more writes, so his is the store's newest (§15). Each is
+/// prepared before the other lands: Ana captures her write 4 before it is
+/// stored, Ben's catch-up misses it, and Ana's lands first.
+/// `registered` is whether Ana has applied Ben's device registration.
+/// Storage time is past 30 days after the writes, so coverage alone decides
+/// deletion.
 async fn bens_snapshot_is_newest(registered: bool) -> Fixture {
     let (storage, storage_clock) = timed_snapshot_storage();
     let mut a = notes_device(storage.clone(), 1).await;
     a.create(key(1)).await;
-    for n in 0..4 {
+    for n in 0..3 {
         write_rows(&a, n, 1, 17, Audience::Store).await;
     }
-    let writes = a.db.test_queued_writes().await.unwrap();
     upload(&a, &storage).await;
-    a.sync.write_snapshot(Audience::Store).await.unwrap();
+    write_rows(&a, 3, 1, 17, Audience::Store).await;
+    let device = a.device().await;
+    let writes: Vec<_> = (1..=4)
+        .map(|number| crate::write_seal::path(store(1), coven_merge::WriteId { device, number }))
+        .collect();
+    let anas = prepare_requested(&mut a).await;
     let mut b = notes_device(storage.clone(), 2).await;
     add_device(&mut b).await;
     if registered {
         a.sync().await;
     }
-    for write in writes.iter().take(3) {
-        b.db.apply_downloaded::<crate::PendingRecord>(
-            write.clone().into(),
-            coven_database::test_utils::published(coven_format::value::StorageTime::UNIX_EPOCH),
-        )
-        .await
-        .unwrap();
-    }
     write_rows(&b, 10, 1, 17, Audience::Store).await;
     write_rows(&b, 11, 1, 17, Audience::Store).await;
     upload(&b, &storage).await;
-    let id = b.sync.write_snapshot(Audience::Store).await.unwrap();
+    let bens = prepare_requested(&mut b).await;
+    upload(&a, &storage).await;
+    send_prepared(&mut a, anas).await;
+    let id = send_prepared(&mut b, bens).await;
     a.clock.set(UNIX_EPOCH + Duration::from_secs(31 * 86400));
     storage_clock.set(UNIX_EPOCH + Duration::from_secs(31 * 86400));
     let ben = ObjectPath::snapshot(
@@ -473,10 +539,6 @@ async fn bens_snapshot_is_newest(registered: bool) -> Fixture {
         id.device,
         NonZeroU64::new(id.number).unwrap(),
     );
-    let writes = writes
-        .iter()
-        .map(|write| crate::write_seal::path(store(1), write.header.position))
-        .collect();
     (storage, storage_clock, a, ben, writes)
 }
 
@@ -561,34 +623,46 @@ async fn ana_ten_ben_twenty() -> Fixture {
     for n in 0..3 {
         write_rows(&a, n, 1, 17, Audience::Store).await;
     }
-    for write in a.db.test_queued_writes().await.unwrap() {
-        b.db.apply_downloaded::<crate::PendingRecord>(
-            write.into(),
-            coven_database::test_utils::published(coven_format::value::StorageTime::UNIX_EPOCH),
-        )
-        .await
-        .unwrap();
-    }
+    upload(&a, &storage).await;
     for n in 100..120 {
         write_rows(&b, n, 1, 17, Audience::Store).await;
     }
-    for write in b.db.test_queued_writes().await.unwrap().into_iter().take(2) {
-        a.db.apply_downloaded::<crate::PendingRecord>(
-            write.into(),
-            coven_database::test_utils::published(coven_format::value::StorageTime::UNIX_EPOCH),
-        )
-        .await
-        .unwrap();
-    }
     upload(&b, &storage).await;
+    // Each snapshot is prepared before the other lands, and Ana's lands
+    // first. Ana's catch-up reads only Ben's writes 1 and 2, his later ones
+    // not yet listed, and she captures her writes 4 to 10 before they are
+    // stored; Ben's catch-up then reads only her writes 1 to 3.
+    let ben_device = b.device().await;
+    let mut hidden = Vec::new();
+    for object in storage
+        .list(&ObjectPrefix::device_logs(store(1)))
+        .await
+        .unwrap()
+    {
+        let id = object.path.write_id().unwrap();
+        if id.device == ben_device && id.number > 2 {
+            hidden.push((
+                object.path.clone(),
+                storage.read(&object.path).await.unwrap(),
+            ));
+            storage.delete(&object.path).await.unwrap();
+        }
+    }
     for n in 3..10 {
         write_rows(&a, n, 1, 17, Audience::Store).await;
     }
-    let writes = a.db.test_queued_writes().await.unwrap();
-    assert_eq!(writes.len(), 10);
+    let device = a.device().await;
+    let writes: Vec<_> = (1..=10)
+        .map(|number| crate::write_seal::path(store(1), coven_merge::WriteId { device, number }))
+        .collect();
+    let anas = prepare_requested(&mut a).await;
+    for (path, bytes) in hidden {
+        storage.create(&path, &bytes).await.unwrap();
+    }
+    let bens = prepare_requested(&mut b).await;
     upload(&a, &storage).await;
-    a.sync.write_snapshot(Audience::Store).await.unwrap();
-    let id = b.sync.write_snapshot(Audience::Store).await.unwrap();
+    send_prepared(&mut a, anas).await;
+    let id = send_prepared(&mut b, bens).await;
     a.clock.set(UNIX_EPOCH + Duration::from_secs(31 * 86400));
     storage_clock.set(UNIX_EPOCH + Duration::from_secs(31 * 86400));
     let ben = ObjectPath::snapshot(
@@ -597,10 +671,6 @@ async fn ana_ten_ben_twenty() -> Fixture {
         id.device,
         NonZeroU64::new(id.number).unwrap(),
     );
-    let writes = writes
-        .iter()
-        .map(|write| crate::write_seal::path(store(1), write.header.position))
-        .collect();
     (storage, storage_clock, a, ben, writes)
 }
 
@@ -734,7 +804,7 @@ async fn a_stalled_snapshot_body_does_not_hold_the_database_writer() {
     add_device(&mut b).await;
     write_rows(&b, 0, 10, 20_000, Audience::Store).await;
     upload(&b, &storage).await;
-    b.sync.write_snapshot(Audience::Store).await.unwrap();
+    b.write_snapshot(Audience::Store).await.unwrap();
     a.sync().await;
     let snapshot = storage
         .list(&ObjectPrefix::snapshots(store(1)))
@@ -812,7 +882,7 @@ async fn a_device_clock_jump_never_ages_a_log() {
     a.sync().await;
     write_rows(&a, 0, 1, 17, Audience::Store).await;
     upload(&a, &storage).await;
-    a.sync.write_snapshot(Audience::Store).await.unwrap();
+    a.write_snapshot(Audience::Store).await.unwrap();
     let logs = || async {
         storage
             .list(&ObjectPrefix::device_logs(store(1)))

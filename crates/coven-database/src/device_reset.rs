@@ -74,9 +74,8 @@ pub struct IdentityReservations {
     pub entries: u64,
     /// Reserved sealed key copies, confirmed or not.
     pub key_copies: u64,
-    /// The greatest snapshot number reserved: the id of the last snapshot
-    /// operation started, finished or not. Ids of other operations reserve
-    /// no snapshot number (§10).
+    /// The greatest snapshot number reserved: every snapshot preparation
+    /// takes the next of its own sequence, published, abandoned or not (§10).
     pub snapshots: u64,
 }
 

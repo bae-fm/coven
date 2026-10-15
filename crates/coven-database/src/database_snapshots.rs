@@ -227,15 +227,16 @@ impl Database {
         .await
     }
 
-    /// The first own write of a captured prefix not yet confirmed stored.
-    /// A raise snapshot is sent only once this is `None` (§15).
-    pub async fn unconfirmed_raise_prefix(
+    /// The first own write of a snapshot's captured prefix, through its
+    /// own position, not yet confirmed stored. Any snapshot, ordinary, raise
+    /// or reset, is sent only once this is `None` (§15).
+    pub async fn unconfirmed_own_prefix(
         &self,
         through: coven_merge::WriteId,
     ) -> Result<Option<coven_merge::WriteId>, DbError> {
         self.call(move |inner| {
             let reader = inner.access.readers.acquire_reader();
-            reader.with_reader(|reader| crate::raise_capture::unconfirmed(reader, through))
+            reader.with_reader(|reader| crate::upload::unconfirmed(reader, through))
         })
         .await
     }

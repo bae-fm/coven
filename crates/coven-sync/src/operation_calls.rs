@@ -229,7 +229,7 @@ impl StoreLogSync {
                         audience,
                         device: local.device,
                         trigger: crate::snapshot_data::SnapshotTrigger::Reset,
-                        session: None,
+                        attempt: None,
                     },
                     temporary: Vec::new(),
                 });

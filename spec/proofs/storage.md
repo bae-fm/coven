@@ -307,8 +307,8 @@ runs `beginReset`, `retryReset`, `finishReset` and the first `commitWrite`
 against coven's recorded reset, failed `reset_device` retries and the
 published replacement, and `resetUnconnected` against the reset of a store
 that never set up storage. Its `sequence` check runs `IdentityCounters.Sequence`
-against the operation ids and the snapshot reservation coven-database records
-after starting and finishing snapshot and other operations.
+against the snapshot reservation coven-database records as preparations
+reserve numbers among other operations started and finished.
 It executes `ReplacementRead.acceptsView` and `loadViews` against coven-sync's
 write authority and entry replay for old-id objects whose recorded pasts read
 any subset of kept, concurrent and unauthorized replacements, and for the two
@@ -332,14 +332,16 @@ everything listed then. `send_of_within` is the converse of
   proves that a live copy's own stored copies and snapshots never reset it,
   whatever it deleted, and `key_copy_ahead_resets` that a stored copy beyond
   the reservation does.
-- Snapshot numbers (proved, with a checked counterexample for the earlier
-  rule). One sequence numbers every operation, and a snapshot takes its
-  operation's id. The reservation is the greatest id a snapshot operation
-  took, finished or not (Rust `_coven_snapshot_reservation`, recorded with
-  the operation's insert). `live_copy_sends` proves a live copy is never
-  reset by it and `snapshot_ahead_resets` that a listing beyond it resets.
-  Comparing with the whole operation sequence, as Rust did before T162, is
-  weaker: `operation_ids_hide_newer_snapshot`. Ana's backup holds operations
+- Snapshot numbers (proved, with a checked counterexample for an earlier
+  rule). Snapshots have their own sequence: each preparation reserves the
+  next number, so every reservation is a snapshot number and the counter is
+  the sequence, as for key copies (`key_copies_counted`; Rust
+  `_coven_snapshot_reservation`). An abandoned attempt keeps its number
+  reserved and the next attempt takes a new path (§15). `live_copy_sends`
+  proves a live copy is never reset by it and `snapshot_ahead_resets` that a
+  listing beyond it resets. Comparing with a sequence that also numbers other
+  operations, as Rust did before T162 when a snapshot took its operation's
+  id, is weaker: `operation_ids_hide_newer_snapshot`. Ana's backup holds operations
   1 to 5. Her live copy then writes store snapshots 6 and 7 and deletes 6,
   which 7 covers. Restored with custody intact, the backup starts a snapshot
   operation (6) and another operation (7) before its first check. Storage

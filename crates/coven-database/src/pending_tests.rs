@@ -241,7 +241,6 @@ async fn completed_steps_replace_or_clear_the_condition_in_the_same_commit() {
             kind: "fixture".into(),
             data: vec![0],
             started_by: "test".into(),
-            reserves_snapshot: false,
         })
         .await
         .unwrap();
@@ -467,7 +466,6 @@ async fn a_failed_condition_change_rolls_back_its_completed_step() {
                 kind: "fixture".into(),
                 data: vec![0],
                 started_by: "test".into(),
-                reserves_snapshot: false,
             })
             .await
             .unwrap();

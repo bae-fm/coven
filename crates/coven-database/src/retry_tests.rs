@@ -19,7 +19,6 @@ fn operation() -> NewOperation {
         kind: "invite".into(),
         data: vec![1],
         started_by: "app".into(),
-        reserves_snapshot: false,
     }
 }
 

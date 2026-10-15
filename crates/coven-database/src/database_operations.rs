@@ -194,6 +194,18 @@ impl Database {
         .await
     }
 
+    /// Reserve the path number of a snapshot attempt about to be prepared:
+    /// the next of this device's snapshot sequence, never reused, which §10
+    /// compares with its stored snapshots.
+    pub async fn reserve_snapshot_number(&self) -> Result<std::num::NonZeroU64, DbError> {
+        self.call(move |inner| {
+            inner
+                .access
+                .with_writer(|writer| writer.transaction(crate::operation::reserve_snapshot))
+        })
+        .await
+    }
+
     /// Commit a local step's state after an idempotent storage effect.
     pub async fn advance_operation(&self, update: OperationUpdate) -> Result<(), DbError> {
         self.call(move |inner| {

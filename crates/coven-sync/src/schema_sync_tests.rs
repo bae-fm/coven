@@ -704,11 +704,7 @@ async fn a_newer_snapshot_format_stays_pending_until_the_required_update() {
     let storage = storage();
     let mut devices = group(storage.clone(), 2).await;
     seed(&mut devices).await;
-    let id = devices[0]
-        .sync
-        .write_snapshot(Audience::Store)
-        .await
-        .unwrap();
+    let id = devices[0].write_snapshot(Audience::Store).await.unwrap();
     let path = ObjectPath::snapshot(
         STORE_ID,
         id.audience.clone(),

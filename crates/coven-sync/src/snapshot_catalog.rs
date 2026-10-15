@@ -39,8 +39,8 @@ pub(super) struct Catalog {
     /// later version may verify it (§19.1). It establishes no coverage, but
     /// it may be the audience's current newest, so nothing that needs that
     /// newest snapshot can decide until it verifies or is no longer listed
-    /// (§15).
-    pub(super) newest_unknown: bool,
+    /// (§15). Names the first such listed snapshot, whose own record says why.
+    pub(super) newest_unknown: Option<coven_storage::ObjectPath>,
     /// A listed snapshot in a newer format: work that selects among this
     /// audience's snapshots waits for that update (§15, §17.2).
     pub(super) update: Option<crate::RequiredUpdate>,
@@ -117,7 +117,7 @@ impl StoreLogSync {
         };
         let mut candidates = Vec::new();
         let mut verified = Vec::new();
-        let mut newest_unknown = false;
+        let mut newest_unknown = None;
         let refused = self.refused_snapshots(audience).await?;
         let mut conditions = Vec::new();
         for object in objects {
@@ -130,7 +130,7 @@ impl StoreLogSync {
                 let input =
                     crate::object_input::ObjectInput::observe(&self.database, &object).await?;
                 if input.metadata().await?.is_none() {
-                    newest_unknown = true;
+                    newest_unknown.get_or_insert(object.path.clone());
                     continue;
                 }
             }
@@ -138,7 +138,7 @@ impl StoreLogSync {
                 Ok(candidate) => candidate,
                 // A wait or a refusal: no coverage until the prefix checks.
                 Err(reason) => {
-                    newest_unknown = true;
+                    newest_unknown.get_or_insert(object.path.clone());
                     if refusal.is_none() {
                         conditions.push((id, reason));
                     }
@@ -147,7 +147,7 @@ impl StoreLogSync {
             };
             let prefix = &candidate.prefix;
             if prefix.audience != *audience {
-                newest_unknown = true;
+                newest_unknown.get_or_insert(object.path.clone());
                 if refusal.is_none() {
                     let reason = self
                         .snapshot_condition(&object, Refusal::WrongIdentity { cause: None })

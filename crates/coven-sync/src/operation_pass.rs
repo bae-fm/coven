@@ -42,11 +42,38 @@ impl OperationRun {
         }
         let discovery = self.sync.catch_up_writes(&mut self.writes).await?;
         self.files.sync_files().await?;
-        self.sync.write_snapshots().await?;
+        // A reset's snapshot is prepared here, after the catch-up; its entry
+        // follows in step 5's request order without another pass.
+        if self.sync.write_snapshots().await? {
+            self.drive_pass().await?;
+        }
         self.sync.run_retention().await?;
         self.sync
             .finish_pass(&mut self.writes, discovery.complete, checkpoint)
             .await
+    }
+
+    /// Outside a pass, run the catch-up a waiting snapshot preparation
+    /// follows, keeping its scope for the drive (§15). A failed catch-up is
+    /// each waiting preparation's own condition, and an app call waiting on
+    /// one receives it.
+    pub(super) async fn catch_up_for_preparation(
+        &mut self,
+    ) -> Result<Option<crate::pass_reads::ReadScope>, SyncError> {
+        match self.sync.catch_up_outside_pass(&mut self.writes).await? {
+            Ok(scope) => Ok(scope),
+            Err((error, waiting)) => {
+                let mut error = Some(error);
+                for (id, pending) in waiting {
+                    if let Some(reply) = self.waiters.remove(&id) {
+                        let _ = reply.send(Err(error
+                            .take()
+                            .unwrap_or_else(|| SyncError::Pending(Box::new(pending)))));
+                    }
+                }
+                Ok(None)
+            }
+        }
     }
 
     /// SP step 5's due operations. A local entry that changes membership

@@ -27,6 +27,8 @@ mod file_scan;
 mod io;
 #[path = "snapshot_prefix.rs"]
 mod prefix;
+#[path = "snapshot_publish.rs"]
+mod publish;
 #[path = "snapshot_reload.rs"]
 mod reload;
 #[path = "snapshot_retention.rs"]
@@ -40,31 +42,59 @@ mod verify;
 #[path = "snapshot_write_input.rs"]
 mod write_input;
 
+/// How far driving one snapshot task got.
+pub(crate) enum Driven {
+    /// It finished, publishing this snapshot if it prepared one.
+    Finished(Option<SnapshotId>),
+    /// It recorded the condition it waits for.
+    Waiting,
+    /// A reset's snapshot is published; its operation continues with the
+    /// entry that names it (SP step 5).
+    Entry,
+}
+
 impl StoreLogSync {
-    /// Resume retained snapshot work, then write each readable audience whose
-    /// encoded parts since its latest signed snapshot prefix exceed the listed
-    /// plaintext size, or 1 MiB when it has none (§15). Uploads always use the
-    /// recorded disk bytes.
-    pub async fn write_snapshots(&mut self) -> Result<(), SyncError> {
+    /// SP step 8: request a snapshot of each readable audience whose encoded
+    /// parts since its latest signed snapshot prefix exceed the listed
+    /// plaintext size, or 1 MiB when it has none (§15), then drive retained
+    /// snapshot work. Every preparation follows this pass's completed
+    /// catch-up, sampled fresh because a preparation was waiting for it; a
+    /// pass that cannot supply one leaves the preparation pending for the
+    /// next. Returns whether a reset's snapshot was published, so its entry
+    /// can follow. Uploads always use the recorded disk bytes.
+    pub async fn write_snapshots(&mut self) -> Result<bool, SyncError> {
         let _reads = self.reads.enter();
-        self.resume_snapshots().await?;
+        let mut handed = self.resume_snapshots().await?;
         if let Some(id) = self.pending_reload().await? {
             return Err(SyncError::ReloadPending(id));
         }
         let local = self.database.local_store_log().await?;
         self.check_stopped(&local, &self.operation_member()?)?;
+        let tasks = self.database.operations().await?;
+        let mut started = false;
         for audience in self.snapshot_audiences(&local.log)? {
-            let record = self
-                .start_snapshot_task(SnapshotJob::Write {
-                    audience,
-                    device: local.device,
-                    trigger: SnapshotTrigger::Growth,
-                    session: None,
-                })
-                .await?;
-            self.drive_snapshot(record.id).await?;
+            let job = SnapshotJob::Write {
+                audience: audience.clone(),
+                device: local.device,
+                trigger: SnapshotTrigger::Growth,
+                attempt: None,
+            };
+            let mut requested = false;
+            for record in &tasks {
+                if let Data::Snapshots(task) = Data::read(record)? {
+                    requested |= record.started_by == "coven" && task.job.same_work(&job);
+                }
+            }
+            // A task is created only for an audience that needs a snapshot.
+            if !requested && self.snapshot_grew(&audience, &local.log).await? {
+                self.start_snapshot_task(job).await?;
+                started = true;
+            }
         }
-        Ok(())
+        if started {
+            handed |= self.resume_snapshots().await?;
+        }
+        Ok(handed)
     }
 
     /// Apply the writes that follow a reload's target by next-number discovery
@@ -109,12 +139,16 @@ impl StoreLogSync {
         Ok(())
     }
 
-    /// Write and publish a requested audience snapshot regardless of growth.
-    /// Reset and schema-change operations record the returned identity only
-    /// after this durable publication has completed. A snapshot waiting for
-    /// its audience's key stays journaled and returns that pending condition.
-    pub async fn write_snapshot(&mut self, audience: Audience) -> Result<SnapshotId, SyncError> {
-        let _reads = self.reads.enter();
+    /// Write and publish a requested audience snapshot regardless of growth,
+    /// after a catch-up of `writes` sampled fresh (§15). A snapshot waiting
+    /// for its audience's key, a catch-up or its own uploads stays journaled
+    /// and returns that pending condition.
+    pub async fn write_snapshot(
+        &mut self,
+        writes: &mut crate::DeviceLogSync,
+        audience: Audience,
+    ) -> Result<SnapshotId, SyncError> {
+        let _pass = self.begin_pass(writes);
         self.resume_snapshots().await?;
         if let Some(id) = self.pending_reload().await? {
             return Err(SyncError::ReloadPending(id));
@@ -130,31 +164,30 @@ impl StoreLogSync {
             .await?;
         let record = self
             .start_snapshot_task(SnapshotJob::Write {
-                audience: audience.clone(),
+                audience,
                 device: local.device,
                 trigger: SnapshotTrigger::Requested,
-                session: None,
+                attempt: None,
             })
             .await?;
-        if !self.drive_snapshot(record.id).await? {
-            let pending = self
-                .database
-                .operation_pending::<crate::PendingRecord>(record.id)
-                .await?
-                .ok_or(coven_database::DbError::Invariant {
-                    what: "an operation not ready has its condition",
-                })?;
-            return Err(SyncError::Pending(Box::new(pending)));
+        self.catch_up_for_snapshots(writes).await?;
+        match self.drive_snapshot(record.id).await? {
+            Driven::Finished(Some(id)) => Ok(id),
+            Driven::Waiting => {
+                let pending = self
+                    .database
+                    .operation_pending::<crate::PendingRecord>(record.id)
+                    .await?
+                    .ok_or(coven_database::DbError::Invariant {
+                        what: "an operation not ready has its condition",
+                    })?;
+                Err(SyncError::Pending(Box::new(pending)))
+            }
+            Driven::Finished(None) | Driven::Entry => Err(coven_database::DbError::Invariant {
+                what: "a requested snapshot publishes or waits",
+            }
+            .into()),
         }
-        Ok(SnapshotId {
-            audience,
-            device: local.device,
-            number: record
-                .id
-                .0
-                .try_into()
-                .map_err(|_| coven_database::DbError::DamagedDatabase)?,
-        })
     }
 
     pub(super) async fn start_snapshot_task(
@@ -181,23 +214,34 @@ impl StoreLogSync {
         self.snapshot_record(id).await
     }
 
-    pub(super) async fn resume_snapshots(&mut self) -> Result<(), SyncError> {
+    /// Drive every ready snapshot task, raises first. A reset's snapshot
+    /// steps run here too, after this pass's catch-up, and wait while a raise
+    /// is pending as its entry would (SP steps 5 and 8). Returns whether a
+    /// reset's snapshot was published, so its entry can follow.
+    pub(super) async fn resume_snapshots(&mut self) -> Result<bool, SyncError> {
         let _reads = self.reads.enter();
+        let mut handed = false;
         loop {
             let mut work = Vec::new();
+            let mut raising = false;
+            let mut tasks = Vec::new();
             for record in self.database.operations().await? {
-                if let Data::Snapshots(task) = Data::read(&record)? {
-                    if self.operation_ready(&record).await?
-                        && !matches!(
-                            task.job,
-                            SnapshotJob::Write {
-                                trigger: SnapshotTrigger::Reset,
-                                ..
-                            }
-                        )
-                    {
-                        work.push((record, task.job));
+                let data = Data::read(&record)?;
+                raising |= data.raises_version();
+                if let Data::Snapshots(task) = data {
+                    tasks.push((record, task.job));
+                }
+            }
+            for (record, job) in tasks {
+                let reset = matches!(
+                    job,
+                    SnapshotJob::Write {
+                        trigger: SnapshotTrigger::Reset,
+                        ..
                     }
+                );
+                if !(reset && raising) && self.operation_ready(&record).await? {
+                    work.push((record, job));
                 }
             }
             work.sort_by_key(|(_, job)| match job {
@@ -220,10 +264,14 @@ impl StoreLogSync {
                 {
                     continue;
                 }
-                advanced |= self.drive_snapshot(record.id).await?;
+                match self.drive_snapshot(record.id).await? {
+                    Driven::Finished(_) => advanced = true,
+                    Driven::Entry => (advanced, handed) = (true, true),
+                    Driven::Waiting => (),
+                }
             }
             if !advanced {
-                return Ok(());
+                return Ok(handed);
             }
         }
     }
@@ -242,7 +290,11 @@ impl StoreLogSync {
         mut task: SnapshotTask,
     ) -> Result<(), SyncError> {
         if let SnapshotJob::Write {
-            session: Some(session),
+            attempt:
+                Some(SnapshotAttempt {
+                    session: Some(session),
+                    ..
+                }),
             ..
         } = &task.job
         {
@@ -262,9 +314,13 @@ impl StoreLogSync {
             .ok_or_else(|| coven_database::DbError::OperationChanged(id).into())
     }
 
-    async fn drive_snapshot(&mut self, id: crate::OperationId) -> Result<bool, SyncError> {
+    async fn drive_snapshot(&mut self, id: crate::OperationId) -> Result<Driven, SyncError> {
         loop {
             let record = self.snapshot_record(id).await?;
+            let data = Data::read(&record)?;
+            let Data::Snapshots(task) = data else {
+                return Ok(Driven::Entry);
+            };
             if !self.operation_ready(&record).await? {
                 let pending = self
                     .database
@@ -275,13 +331,7 @@ impl StoreLogSync {
                     })?;
                 return Err(SyncError::Pending(Box::new(pending)));
             }
-            let data = Data::read(&record)?;
-            let Data::Snapshots(task) = data else {
-                return Err(coven_database::DbError::Invariant {
-                    what: "a snapshot record holds snapshot work",
-                }
-                .into());
-            };
+            let published = task.published();
             let progress = match self.snapshot_step(&record, task).await {
                 Ok(progress) => progress,
                 Err(error) => {
@@ -290,10 +340,10 @@ impl StoreLogSync {
                 }
             };
             match progress {
-                Progress::Finished(_) => return Ok(true),
+                Progress::Finished(_) => return Ok(Driven::Finished(published)),
                 Progress::Waiting(reason) => {
                     self.record_operation_condition(&record, reason).await?;
-                    return Ok(false);
+                    return Ok(Driven::Waiting);
                 }
                 Progress::Advanced => (),
                 _ => unreachable!("snapshot steps complete or return a typed failure"),
@@ -317,255 +367,6 @@ impl StoreLogSync {
                 Ok(Progress::Finished(Output::Unit))
             }
         }
-    }
-
-    async fn write_snapshot_step(
-        &mut self,
-        record: &OperationRecord,
-        task: SnapshotTask,
-    ) -> Result<Progress, SyncError> {
-        let SnapshotJob::Write {
-            audience,
-            device,
-            trigger,
-            ..
-        } = task.job.clone()
-        else {
-            unreachable!("snapshot writing step")
-        };
-        if matches!(trigger, SnapshotTrigger::Reset) && record.last_step == 0 {
-            self.catch_up().await?;
-        }
-        if !matches!(trigger, SnapshotTrigger::Raise { .. }) {
-            if let Some(id) = self.pending_reload().await? {
-                return Err(SyncError::ReloadPending(id));
-            }
-        }
-        let local = self.database.local_store_log().await?;
-        let member = self.operation_member()?;
-        self.check_stopped(&local, &member)?;
-        if matches!(trigger, SnapshotTrigger::Reset) {
-            crate::effects::Authority::reset(&audience)
-                .check(&local.log.replay.state, &member.member())?;
-        }
-        let id = SnapshotId {
-            audience: audience.clone(),
-            device,
-            number: record
-                .id
-                .0
-                .try_into()
-                .map_err(|_| coven_database::DbError::DamagedDatabase)?,
-        };
-        let path = snapshot_path(self.directory.id(), &id)?;
-        let mut raise = None;
-        if let SnapshotTrigger::Raise { version, ref entry } = trigger {
-            if entry.is_none()
-                && super::schema_sync::schema_in_place(&local.log.replay.state, &audience, version)
-            {
-                self.discard_snapshot(record, task).await?;
-                self.database
-                    .discard_raise_capture(audience.clone(), version)
-                    .await?;
-                self.database.finish_operation(record.id).await?;
-                return Ok(Progress::Finished(Output::Unit));
-            }
-            if record.last_step >= 2 {
-                return self.raise_snapshot_step(record, task, version, id).await;
-            }
-            // A later breaking migration replaced this capture: its own
-            // raise supersedes this one.
-            let Some(capture) = self
-                .database
-                .raise_captures()
-                .await?
-                .into_iter()
-                .find(|c| c.audience == audience && c.version == version)
-            else {
-                self.discard_snapshot(record, task).await?;
-                self.database.finish_operation(record.id).await?;
-                return Ok(Progress::Finished(Output::Unit));
-            };
-            if record.last_step == 0 {
-                // Like any snapshot, a raise snapshot is prepared right after
-                // a completed catch-up, taken again if that catch-up applied
-                // anything past the capture (§15; io `RaiseHistory`).
-                match self.raise_capture(&audience, version, &local.log).await? {
-                    RaiseCapture::Ready(caught_at) => {
-                        raise = Some((version, caught_at));
-                    }
-                    RaiseCapture::Replaced => {
-                        self.discard_snapshot(record, task).await?;
-                        self.database.finish_operation(record.id).await?;
-                        return Ok(Progress::Finished(Output::Unit));
-                    }
-                    RaiseCapture::Waiting(reason) => {
-                        return Ok(Progress::Waiting(reason));
-                    }
-                }
-            } else if let Some(write) = self
-                .database
-                .unconfirmed_raise_prefix(capture.through)
-                .await?
-            {
-                // Confirm the captured own prefix, marker and any later
-                // writes a recapture took in, before sending the snapshot
-                // that covers it (§15, §17.1).
-                return Ok(Progress::Waiting(crate::PendingReason::Waits(
-                    crate::Prerequisite::Object(crate::write_seal::path(
-                        self.directory.id(),
-                        write,
-                    )),
-                )));
-            }
-        }
-        match record.last_step {
-            0 => {
-                self.prepare_snapshot(record, task, &path, &local.log, &member, raise)
-                    .await
-            }
-            1 => self.upload_snapshot(record, task, &path).await,
-            2 => self.finish_snapshot(record, task, id).await,
-            _ => Err(coven_database::DbError::Invariant {
-                what: "a snapshot write has three steps",
-            }
-            .into()),
-        }
-    }
-
-    async fn prepare_snapshot(
-        &self,
-        record: &OperationRecord,
-        mut task: SnapshotTask,
-        path: &ObjectPath,
-        log: &StoreLog,
-        member: &coven_crypto::MemberIdentity,
-        raise: Option<(u32, coven_format::value::StorageTime)>,
-    ) -> Result<Progress, SyncError> {
-        let id = path.snapshot_id().expect("snapshot path");
-        self.clear_snapshot_files(record, &mut task).await?;
-        if matches!(
-            task.job,
-            SnapshotJob::Write {
-                trigger: SnapshotTrigger::Growth,
-                ..
-            }
-        ) && !self.snapshot_grew(&id.audience, log).await?
-        {
-            self.database.finish_operation(record.id).await?;
-            return Ok(Progress::Finished(Output::Unit));
-        }
-        if !self.snapshot_audiences(log)?.contains(&id.audience) {
-            return Err(SyncError::Rejected(coven_database::DropReason::NotAllowed));
-        }
-        let ring = self.store_keys.read()?.ok_or_else(|| {
-            SyncError::KeyUnavailable(
-                crate::key_introductions::newest(log, &id.audience)
-                    .expect("readable audience has a key"),
-            )
-        })?;
-        // A snapshot's first upload is a first attempt in its audience (§11).
-        // Without a usable key it waits; other audiences' sends go on.
-        let observation = self.copy_observation()?;
-        let key_id = match crate::write_seal::first_attempt(
-            log,
-            &observation,
-            &ring,
-            &member.member(),
-            &id.audience,
-        ) {
-            Ok(key) => key,
-            Err(SyncError::KeyUnavailable(key)) => {
-                return Ok(Progress::Waiting(crate::PendingReason::KeyUnavailable {
-                    audience: id.audience.clone(),
-                    key,
-                }))
-            }
-            Err(error) => return Err(error),
-        };
-        let key = io::key(&ring, &id.audience, key_id)?;
-        let caught_at = match raise {
-            Some((_, caught_at)) => caught_at,
-            None => self.catch_up_time().await?,
-        };
-        // Every covered write's retirement-window verdict must be final, so
-        // a loader holds what the final replay holds (§15, storelog-data
-        // `prepared_final`). A raise's capture was kept only if nothing it
-        // was taken from has applied since, so this check of the current
-        // state covers its verdicts too (io `RaiseHistory`).
-        let latest = self
-            .finality
-            .lock()
-            .expect("finality lock poisoned")
-            .caught_up_window();
-        if let Some(wait) = self
-            .database
-            .snapshot_verdict_wait(
-                id.audience.clone(),
-                member.keys().public_keys().signing,
-                latest,
-            )
-            .await?
-        {
-            return Ok(Progress::Waiting(crate::PendingReason::Waits(match wait {
-                coven_database::VerdictWait::Entry(entry) => {
-                    crate::Prerequisite::EntryFinality(entry)
-                }
-                coven_database::VerdictWait::CatchUp => crate::Prerequisite::CatchUp,
-            })));
-        }
-        let name = self
-            .reserve_snapshot_files(record, &mut task, 1)
-            .await?
-            .remove(0);
-        let (sealed, captured) = self
-            .seal_snapshot(
-                id.clone(),
-                raise.map(|(version, _)| version),
-                (key_id, key),
-                caught_at,
-                member,
-                path,
-                &name,
-            )
-            .await?;
-        // Open it as a reader would before anything is sent (§15). A failed
-        // check stops publication and reaches the caller.
-        let opened = verify::SealedPlaintext::open(
-            io::SnapshotInput::open(&self.directory, &name)?,
-            path,
-            &sealed,
-            io::key(&ring, &id.audience, key_id)?,
-            member.keys().public_keys().signing,
-        )?;
-        self.database
-            .verify_snapshot(id, sealed.prefix, opened, captured)
-            .await?;
-        self.save_snapshot_task(record, &task, 1).await?;
-        Ok(Progress::Advanced)
-    }
-
-    /// §15's `T_c`: a fresh provider sample taken before a complete
-    /// catch-up. An older sample could already be more than a day old, so
-    /// every preparation observes storage time first; the device clock never
-    /// stands in for it.
-    pub(super) async fn catch_up_time(
-        &self,
-    ) -> Result<coven_format::value::StorageTime, SyncError> {
-        self.observe_clock(&self.database.local_store_log().await?)
-            .await?;
-        // T_c must precede this catch-up's reads, so the pass's earlier first
-        // phase cannot serve here.
-        self.scan_store_log(true).await?;
-        Ok(self
-            .finality
-            .lock()
-            .expect("finality lock poisoned")
-            .caught_up()
-            .ok_or_else(|| {
-                coven_storage::StorageFailure::Protocol
-                    .with_source("a complete catch-up recorded no storage time")
-            })?)
     }
 
     async fn snapshot_grew(&self, audience: &Audience, log: &StoreLog) -> Result<bool, SyncError> {
@@ -633,159 +434,6 @@ impl StoreLogSync {
         Ok(bytes > u128::from(threshold))
     }
 
-    async fn upload_snapshot(
-        &self,
-        record: &OperationRecord,
-        mut task: SnapshotTask,
-        path: &ObjectPath,
-    ) -> Result<Progress, SyncError> {
-        let SnapshotJob::Write { session, .. } = task.job.clone() else {
-            unreachable!("snapshot upload step")
-        };
-        let name = task
-            .temporary
-            .first()
-            .ok_or(coven_database::DbError::Invariant {
-                what: "an uploading snapshot has its prepared file",
-            })?;
-        let input = io::SnapshotInput::open(&self.directory, name)?;
-        let storage = self.storage.as_deref().ok_or(SyncError::NoStorage)?;
-        self.check_snapshot_signer(&input).await?;
-        let recorded = session.clone();
-        let mut transfer = SnapshotTransfer {
-            sync: self,
-            record,
-            task: &mut task,
-            input: &input,
-        };
-        match crate::recorded_upload::upload(storage, path, input.size(), session, &mut transfer)
-            .await?
-        {
-            crate::recorded_upload::Uploaded::Occupied(expected) => {
-                // A lost reply may have published this snapshot; another copy
-                // of this device may also have used its number (§10). Equal
-                // complete bytes are the stored confirmation too.
-                crate::identity::settle_occupied(storage, &self.send, path, expected).await?;
-                if let Some(session) = &recorded {
-                    storage.abort_upload(session).await?;
-                }
-            }
-            // The provider's report of success is not confirmation of the
-            // stored bytes (§15).
-            crate::recorded_upload::Uploaded::Stored => {
-                verify::confirm_stored(storage, path, input.size(), |offset, length| {
-                    input.read_at(offset, length)
-                })
-                .await?;
-            }
-            crate::recorded_upload::Uploaded::Paused => {
-                unreachable!("snapshot uploads keep going")
-            }
-        }
-        self.save_snapshot_task(record, &task, 2).await?;
-        Ok(Progress::Advanced)
-    }
-
-    /// A snapshot's both signatures are fixed with its sealed file. Each
-    /// request, first or retried, needs that signer to be this member's key
-    /// in the snapshot's signed coverage and its current key now: current
-    /// custody never sends a file signed under replaced keys (§10, D9).
-    async fn check_snapshot_signer(&self, input: &io::SnapshotInput) -> Result<(), SyncError> {
-        use coven_format::sealed_snapshot::SnapshotObjectPrefix;
-        let member = self.operation_member()?;
-        let local = self.database.local_store_log().await?;
-        crate::write_seal::check_member(&local.log, &member, local.device)?;
-        let bytes = input.read_at(
-            0,
-            (SnapshotObjectPrefix::MAX_SIGNED_PREFIX as u64).min(input.size()) as usize,
-        )?;
-        let length = SnapshotObjectPrefix::length(&bytes)?;
-        let (prefix, _) = SnapshotObjectPrefix::decode_signed(
-            bytes
-                .get(..length + 64)
-                .ok_or(coven_format::Error::Truncated)?,
-        )?;
-        crate::object_author::check_signer(
-            &member,
-            crate::object_author::recorded_signer(&local.log, &prefix.store_log, &member.member()),
-        )
-    }
-
-    async fn finish_snapshot(
-        &self,
-        record: &OperationRecord,
-        mut task: SnapshotTask,
-        id: SnapshotId,
-    ) -> Result<Progress, SyncError> {
-        if matches!(
-            task.job,
-            SnapshotJob::Write {
-                trigger: SnapshotTrigger::Reset,
-                ..
-            }
-        ) {
-            self.clear_snapshot_files(record, &mut task).await?;
-            let data = Data::Entry(crate::operation_data::EntryWork {
-                intent: crate::operation_data::Intent::Reset { snapshot: id },
-                entry: None,
-            });
-            self.database
-                .advance_operation(data.update(record, 3)?)
-                .await?;
-            return Ok(Progress::Advanced);
-        }
-        self.retain_snapshot_objects().await?;
-        self.clear_snapshot_files(record, &mut task).await?;
-        self.database.finish_operation(record.id).await?;
-        Ok(Progress::Finished(Output::Unit))
-    }
-
-    /// The capture a raise snapshot is prepared from, right after this pass's
-    /// completed write catch-up: kept when that catch-up applied nothing past
-    /// it, otherwise captured again from the current state (§15, §17.1).
-    /// It must still cover the audience's current newest counting snapshot.
-    async fn raise_capture(
-        &self,
-        audience: &Audience,
-        version: u32,
-        log: &coven_database::StoreLog,
-    ) -> Result<RaiseCapture, SyncError> {
-        let Some(caught_at) = self.reads.write_catch_up() else {
-            return Ok(RaiseCapture::Waiting(crate::PendingReason::Waits(
-                crate::Prerequisite::CatchUp,
-            )));
-        };
-        let Some(capture) = self
-            .database
-            .prepare_raise_capture(audience.clone(), version)
-            .await?
-        else {
-            return Ok(RaiseCapture::Replaced);
-        };
-        let catalog = self.current_snapshot_candidates(audience, log).await?;
-        if let Some(newest) = catalog
-            .verified
-            .iter()
-            .find(|snapshot| snapshot.follows_boundary(log))
-        {
-            if !newest
-                .prefix
-                .writes
-                .0
-                .iter()
-                .all(|id| capture.writes.covers(*id))
-            {
-                // A completed catch-up reads every position a counting
-                // snapshot lists; one it could not reach waits for the next.
-                tracing::debug!(?audience, "raise capture is behind the current snapshot");
-                return Ok(RaiseCapture::Waiting(crate::PendingReason::Waits(
-                    crate::Prerequisite::CatchUp,
-                )));
-            }
-        }
-        Ok(RaiseCapture::Ready(caught_at))
-    }
-
     pub(super) fn snapshot_audiences(
         &self,
         log: &StoreLog,
@@ -836,15 +484,6 @@ impl StoreLogSync {
         self.save_snapshot_task(record, task, record.last_step)
             .await
     }
-}
-
-/// Whether a raise snapshot can be prepared now.
-enum RaiseCapture {
-    /// From the capture, with this `T_c`.
-    Ready(coven_format::value::StorageTime),
-    /// A later breaking migration replaced the capture.
-    Replaced,
-    Waiting(crate::PendingReason),
 }
 
 /// The audiences a member can read and snapshot (§15). Which key seals each
@@ -902,32 +541,4 @@ pub(super) fn point(positions: &WritePositions, device: DeviceId) -> u64 {
         .iter()
         .find(|id| id.device == device)
         .map_or(0, |id| id.number)
-}
-
-struct SnapshotTransfer<'a> {
-    sync: &'a StoreLogSync,
-    record: &'a OperationRecord,
-    task: &'a mut SnapshotTask,
-    input: &'a io::SnapshotInput,
-}
-impl crate::recorded_upload::UploadSource for SnapshotTransfer<'_> {
-    type Error = SyncError;
-    async fn read(&mut self, offset: u64, length: usize) -> Result<Vec<u8>, SyncError> {
-        self.input.read_at(offset, length)
-    }
-    async fn save(&mut self, session: coven_storage::UploadSession) -> Result<(), SyncError> {
-        let SnapshotJob::Write {
-            session: recorded, ..
-        } = &mut self.task.job
-        else {
-            unreachable!()
-        };
-        *recorded = Some(session);
-        self.sync
-            .save_snapshot_task(self.record, self.task, 1)
-            .await
-    }
-    fn keep_going(&self) -> bool {
-        true
-    }
 }

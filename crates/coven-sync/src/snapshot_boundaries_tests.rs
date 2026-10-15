@@ -15,7 +15,7 @@ async fn unusable_snapshots_do_not_turn_deleted_history_into_an_empty_audience()
         if !a.send.can_send() {
             a.catch_up().await;
         }
-        a.sync.write_snapshot(Audience::Store).await.unwrap();
+        a.write_snapshot(Audience::Store).await.unwrap();
         assert_eq!(
             storage
                 .list(&ObjectPrefix::device_logs(store(1)))
@@ -131,14 +131,9 @@ async fn a_reload_waits_on_a_newest_snapshot_whose_body_it_refused() {
     for number in 0..2 {
         write_both(&a, gifts, number).await;
         upload(&a, &storage).await;
-        newest = Some(
-            a.sync
-                .write_snapshot(Audience::Circle(gifts))
-                .await
-                .unwrap(),
-        );
+        newest = Some(a.write_snapshot(Audience::Circle(gifts)).await.unwrap());
     }
-    a.sync.write_snapshot(Audience::Store).await.unwrap();
+    a.write_snapshot(Audience::Store).await.unwrap();
     let newest = newest.unwrap();
     let refused = ObjectPath::snapshot(
         store(1),
@@ -171,10 +166,7 @@ async fn a_reload_waits_on_a_newest_snapshot_whose_body_it_refused() {
     assert!(tables(&b).await.is_empty());
     write_both(&a, gifts, 2).await;
     upload(&a, &storage).await;
-    a.sync
-        .write_snapshot(Audience::Circle(gifts))
-        .await
-        .unwrap();
+    a.write_snapshot(Audience::Circle(gifts)).await.unwrap();
     b.elapse_retry_delays();
     b.sync.reload_from_snapshots().await.unwrap();
     b.writes.download_writes().await.unwrap();
@@ -200,7 +192,7 @@ async fn a_newer_schema_snapshot_makes_the_reload_wait_for_the_app_update() {
     .await
     .unwrap();
     upload(&a, &storage).await;
-    b.sync.write_snapshot(Audience::Store).await.unwrap();
+    b.write_snapshot(Audience::Store).await.unwrap();
     write_rows(&a, 1, 1, 17, Audience::Store).await;
     upload(&a, &storage).await;
     let mut migrations = notes_migrations();
@@ -214,7 +206,7 @@ async fn a_newer_schema_snapshot_makes_the_reload_wait_for_the_app_update() {
     if !a.send.can_send() {
         a.catch_up().await;
     }
-    let newer = a.sync.write_snapshot(Audience::Store).await.unwrap();
+    let newer = a.write_snapshot(Audience::Store).await.unwrap();
     let mut c = notes_device(storage.clone(), 3).await;
     add_device(&mut c).await;
     let result = c.sync.reload_from_snapshots().await;
@@ -251,7 +243,7 @@ async fn a_removed_device_cannot_start_or_resume_snapshot_publication() {
                     audience: Audience::Store,
                     device: a.device().await,
                     trigger: crate::snapshot_data::SnapshotTrigger::Requested,
-                    session: None,
+                    attempt: None,
                 },
                 temporary: Vec::new(),
             });
@@ -278,9 +270,9 @@ async fn a_removed_device_cannot_start_or_resume_snapshot_publication() {
             Err(SyncError::Removed)
         ));
         let result = if recorded_step.is_some() {
-            a.sync.write_snapshots().await.map(|_| ())
+            a.write_snapshots().await.map(|_| ())
         } else {
-            a.sync.write_snapshot(Audience::Store).await.map(|_| ())
+            a.write_snapshot(Audience::Store).await.map(|_| ())
         };
         assert!(matches!(result, Err(SyncError::Removed)));
         assert!(
@@ -299,7 +291,7 @@ async fn reload_retries_with_the_stored_copy_when_a_waiting_write_finishes_uploa
     let storage = snapshot_storage();
     let mut a = notes_device(storage.clone(), 1).await;
     a.create(key(1)).await;
-    a.sync.write_snapshot(Audience::Store).await.unwrap();
+    a.write_snapshot(Audience::Store).await.unwrap();
     write_rows(&a, 0, 1, 17, Audience::Store).await;
     let expected = tables(&a).await;
     let data = Data::Snapshots(SnapshotTask {
@@ -338,7 +330,7 @@ async fn queued_entries_wait_for_reload_and_finishing_a_queued_reset_blocks_new_
     let storage = snapshot_storage();
     let mut a = notes_device(storage.clone(), 1).await;
     a.create(key(1)).await;
-    let reset = a.sync.write_snapshot(Audience::Store).await.unwrap();
+    let reset = a.write_snapshot(Audience::Store).await.unwrap();
     a.sync.storage = Some(key_distribution::failing_creation(
         storage.clone(),
         ObjectPath::store_log(store(1), DeviceId(1), 2.try_into().unwrap()),
@@ -433,7 +425,7 @@ async fn a_failed_internal_reload_prevents_snapshot_publication_until_it_can_res
     let storage = snapshot_storage();
     let mut a = notes_device(storage.clone(), 1).await;
     a.create(key(1)).await;
-    let reset = a.sync.write_snapshot(Audience::Store).await.unwrap();
+    let reset = a.write_snapshot(Audience::Store).await.unwrap();
     a.sync
         .make_and_upload_entry(StoreChange::Reset { snapshot: reset })
         .await
@@ -450,7 +442,7 @@ async fn a_failed_internal_reload_prevents_snapshot_publication_until_it_can_res
     for _ in 0..2 {
         // Each explicit call retries the reload once its delay has elapsed.
         a.elapse_retry_delays();
-        let error = a.sync.write_snapshot(Audience::Store).await.unwrap_err();
+        let error = a.write_snapshot(Audience::Store).await.unwrap_err();
         assert!(
             matches!(&error, SyncError::Storage(error) if error.failure() == StorageFailure::NotFound),
             "{error:?}"
@@ -476,7 +468,7 @@ async fn a_failed_internal_reload_prevents_snapshot_publication_until_it_can_res
         .is_some());
     storage.create(&snapshot, &bytes).await.unwrap();
     a.elapse_retry_delays();
-    a.sync.write_snapshot(Audience::Store).await.unwrap();
+    a.write_snapshot(Audience::Store).await.unwrap();
     assert!(a.db.operations().await.unwrap().is_empty());
 }
 
@@ -487,7 +479,7 @@ async fn repeating_an_applied_reset_does_not_reject_snapshots_written_since_that
     a.create(key(1)).await;
     write_rows(&a, 0, 1, 17, Audience::Store).await;
     upload(&a, &storage).await;
-    let reset = a.sync.write_snapshot(Audience::Store).await.unwrap();
+    let reset = a.write_snapshot(Audience::Store).await.unwrap();
     a.sync
         .make_and_upload_entry(StoreChange::Reset {
             snapshot: reset.clone(),
@@ -497,7 +489,7 @@ async fn repeating_an_applied_reset_does_not_reject_snapshots_written_since_that
     a.sync.sync_store_log().await.unwrap();
     write_rows(&a, 1, 1, 17, Audience::Store).await;
     upload(&a, &storage).await;
-    let latest = a.sync.write_snapshot(Audience::Store).await.unwrap();
+    let latest = a.write_snapshot(Audience::Store).await.unwrap();
     a.sync
         .make_and_upload_entry(StoreChange::Reset { snapshot: reset })
         .await
@@ -522,7 +514,10 @@ mod reset {
         id
     }
 
+    /// One reset step inside a pass whose catch-up, sampled fresh while the
+    /// reset's snapshot waits to be prepared, precedes it (§15).
     async fn reset_step(d: &mut Device, id: OperationId) -> Progress {
+        let _pass = d.caught_up_pass().await;
         d.step(id).await.unwrap()
     }
 
@@ -681,25 +676,30 @@ mod reset {
         upload(&a, &storage).await;
         let id = begin_reset(&mut a, Audience::Store).await;
         // The reset snapshot is sealed with its catch-up time, then its upload
-        // and entry land more than a day later.
-        reset_step(&mut a, id).await;
+        // lands more than a day later. Ana abandons that attempt, so her
+        // reset never names it (§15).
+        assert!(matches!(reset_step(&mut a, id).await, Progress::Advanced));
+        let record = a.operation(id).await;
+        let Data::Snapshots(task) = Data::read(&record).unwrap() else {
+            panic!("a reset snapshot task")
+        };
+        let late = task.published().unwrap();
         clock.set(start + Duration::from_secs(coven_format::value::StorageTime::DAY_SECONDS + 1));
-        // The author steps until its entry is published; its own reload of
-        // the late snapshot stops the operation there.
-        while !a.log().await.boundaries().any(|_| true) {
-            let record = a.operation(id).await;
-            match a
-                .sync
+        assert!(matches!(
+            a.sync
                 .operation_step(&record, Data::read(&record).unwrap())
                 .await
-            {
-                Ok(Progress::Waiting(_)) => {
-                    a.sync.sync_store_log().await.unwrap();
-                }
-                Ok(Progress::Advanced) => (),
-                Ok(_) | Err(_) => break,
-            }
-        }
+                .unwrap(),
+            Progress::Advanced
+        ));
+        assert_eq!(a.operation(id).await.last_step, 0);
+        a.db.finish_operation(id).await.unwrap();
+        // A reset entry naming it anyway is kept, as one from a device that
+        // did not abandon it would be.
+        a.sync
+            .make_and_upload_entry(StoreChange::Reset { snapshot: late })
+            .await
+            .unwrap();
         assert!(
             a.log().await.boundaries().any(|_| true),
             "the reset entry is kept"

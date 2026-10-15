@@ -153,7 +153,7 @@ impl StoreLogSync {
         let _reads = self.reads.enter();
         self.step().await?;
         self.schedule_version_changes().await?;
-        self.resume_snapshots().await
+        self.resume_snapshots().await.map(|_| ())
     }
 
     /// Catch up, then settle key work and the reserved entry in that order:

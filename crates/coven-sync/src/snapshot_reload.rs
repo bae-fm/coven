@@ -111,7 +111,7 @@ impl StoreLogSync {
                             ))
                         }
                         Ok(None) => {
-                            unknown_empty |= catalog.newest_unknown;
+                            unknown_empty |= catalog.newest_unknown.is_some();
                             files.empty.push(audience.clone());
                             continue;
                         }
@@ -332,6 +332,9 @@ impl StoreLogSync {
                     ),
                     operation: Some(Data::Snapshots(task.clone()).update(record, 2)?),
                 };
+                // Whether or not it commits, earlier write misses and the
+                // catch-up they completed no longer describe this device (§15).
+                self.reads.reloaded();
                 let result = match self
                     .database
                     .load_snapshots::<crate::PendingRecord, _, _>(reload)

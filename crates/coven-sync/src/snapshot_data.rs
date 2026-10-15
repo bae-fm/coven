@@ -19,13 +19,24 @@ pub(crate) enum SnapshotJob {
         audience: Audience,
         device: DeviceId,
         trigger: SnapshotTrigger,
-        session: Option<UploadSession>,
+        /// The prepared attempt; none before preparation and again once an
+        /// expired attempt is abandoned (§15).
+        attempt: Option<SnapshotAttempt>,
     },
     Reload {
         scope: ReloadScope,
         files: Option<ReloadFiles>,
     },
     Retain,
+}
+
+/// One preparation's publication: the path number it reserved and the
+/// upload session its sealed file is sent through. Its signed `T_c` and
+/// sealed bytes stay fixed on retry; a new attempt takes a new number.
+#[derive(Clone, Serialize, Deserialize)]
+pub(crate) struct SnapshotAttempt {
+    pub(crate) number: std::num::NonZeroU64,
+    pub(crate) session: Option<UploadSession>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]

@@ -35,7 +35,7 @@ async fn a_new_device_discovers_snapshots_before_trusting_a_miss() {
     a.create(key(1)).await;
     write_rows(&a, 0, 2, 17, Audience::Store).await;
     upload(&a, &storage).await;
-    a.sync.write_snapshot(Audience::Store).await.unwrap();
+    a.write_snapshot(Audience::Store).await.unwrap();
     let mut b = notes_device(storage.clone(), 2).await;
     add_device(&mut b).await;
     assert_eq!(b.db.return_checkpoint().await.unwrap(), None);
@@ -59,7 +59,7 @@ async fn a_snapshot_that_does_not_advance_leaves_local_state_alone() {
     a.create(key(1)).await;
     write_rows(&a, 0, 1, 17, Audience::Store).await;
     upload(&a, &storage).await;
-    a.sync.write_snapshot(Audience::Store).await.unwrap();
+    a.write_snapshot(Audience::Store).await.unwrap();
     let mut b = notes_device(storage.clone(), 2).await;
     add_device(&mut b).await;
     b.writes.download_writes().await.unwrap();
@@ -106,7 +106,7 @@ async fn returning_after_thirty_days_reloads_history_deleted_meanwhile() {
     if !a.send.can_send() {
         a.catch_up().await;
     }
-    a.sync.write_snapshot(Audience::Store).await.unwrap();
+    a.write_snapshot(Audience::Store).await.unwrap();
     assert!(storage
         .list(&ObjectPrefix::device_logs(store(1)))
         .await

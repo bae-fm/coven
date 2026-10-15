@@ -500,7 +500,7 @@ impl OperationRun {
                 }
                 _ = &mut retry => {}
             }
-            if let Err(error) = self.drive().await {
+            if let Err(error) = self.drive(true).await {
                 // A journal failure cannot be recorded in the journal. Stop this
                 // owner and fail every waiter with one shared typed cause.
                 tracing::error!(error = %error, "operation journal failed; worker stopped");
@@ -555,17 +555,25 @@ impl OperationRun {
     }
 
     async fn drive_pass(&mut self) -> Result<(), SyncError> {
-        match self.drive().await? {
+        match self.drive(false).await? {
             Some(error) => Err(error),
             None => Ok(()),
         }
     }
 
     // Journal failures stop the worker; maintenance failures stop only the pass.
-    async fn drive(&mut self) -> Result<Option<SyncError>, SyncError> {
+    // Outside a pass, a snapshot waiting to be prepared, such as an app's
+    // reset, first gets the catch-up it follows (§15); in a pass, step 8
+    // prepares it after step 6.
+    async fn drive(&mut self, outside_pass: bool) -> Result<Option<SyncError>, SyncError> {
         self.sync
             .set_discovery_download_limit(self.files.transfer_limits().downloads);
         self.sync.forget_join_requests();
+        let _caught_up = if outside_pass {
+            self.catch_up_for_preparation().await?
+        } else {
+            None
+        };
         // Maintenance that failed and has not recovered within this drive.
         let mut maintenance_failures: Vec<(OperationId, SyncError)> = Vec::new();
         loop {

@@ -150,7 +150,7 @@ pub(super) async fn confirm_stored(
     path: &ObjectPath,
     size: u64,
     read: impl Fn(u64, usize) -> Result<Vec<u8>, SyncError>,
-) -> Result<(), SyncError> {
+) -> Result<coven_storage::StoredObject, SyncError> {
     let stored = storage
         .status(path)
         .await?
@@ -182,7 +182,7 @@ pub(super) async fn confirm_stored(
             "stored snapshot bytes differ from the sealed file",
         ));
     }
-    Ok(())
+    Ok(stored)
 }
 
 fn integrity(reason: &'static str) -> SyncError {

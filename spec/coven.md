@@ -2079,9 +2079,9 @@ Two mechanisms order writes:
 - `_coven_key_publications` retains each writer's last confirmed copy number.
   Confirmation advances it atomically with removing that copy's queue row,
   so an empty queue cannot restart the writer's numbering.
-- `_coven_snapshot_reservation` retains the id of the last snapshot
-  operation this device started, recorded with that operation's insert, so
-  finishing operations cannot lower the snapshot number §10 compares.
+- `_coven_snapshot_reservation` retains the greatest snapshot number this
+  device reserved, advanced as each preparation reserves its path, so
+  finishing or abandoning an attempt cannot lower the number §10 compares.
 - Received store-log entries and key copies are retained apart from what
   replay applied (§6). `_coven_log_inputs` keeps each complete object read by
   its exact number, with its provider observation, including objects waiting
@@ -3310,14 +3310,15 @@ Carol's tablet:
       ([`live_copy_sends`, `key_copy_ahead_resets`](proofs/storage/CovenStorage/IdentityCounters.lean)).
       A number within the reservations whose clear prefix does not decode
       is storage damage, not a stale copy: it waits (§11).
-    - A snapshot's number is its operation's id. Snapshots compare with the
-      id of the last snapshot operation started, finished or not; ids other
-      operations took reserve no snapshot number. A live copy's stored
-      snapshots never pass it, and a stored snapshot beyond it resets the
-      copy. Comparing with every operation id instead would let a restored
-      copy's other operations hide its newer self's snapshot, whose deleted
-      path the restored copy could then reuse
-      ([`live_copy_sends`, `snapshot_ahead_resets`, `operation_ids_hide_newer_snapshot`](proofs/storage/CovenStorage/IdentityCounters.lean)).
+    - Snapshot numbers come from their own sequence: each snapshot
+      preparation reserves the next number before sealing, so an abandoned
+      attempt's path is never reused (§15). Snapshots compare with the
+      greatest number reserved, published or not; other operations reserve
+      none. A live copy's stored snapshots never pass it, and a stored
+      snapshot beyond it resets the copy. Comparing with every operation id
+      instead would let a restored copy's other operations hide its newer
+      self's snapshot, whose deleted path the restored copy could then reuse
+      ([`live_copy_sends`, `snapshot_ahead_resets`, `key_copies_counted`, `operation_ids_hide_newer_snapshot`](proofs/storage/CovenStorage/IdentityCounters.lean)).
   - The device id also lives in custody that backups do not copy. A missing
     or different custody id requires the same device reset.
   - Finish this check before sending writes, entries, snapshots, files,
@@ -4644,7 +4645,10 @@ Carol's tablet:
     ([`late_snapshot_ignored`](proofs/io/CovenIO/Retention.lean)).
   - Once an attempt passes that day without confirmed counting publication,
     abandon it and catch up and prepare afresh at a new snapshot path;
-    stopping locally does not prevent the old request landing remotely.
+    stopping locally does not prevent the old request landing remotely. It
+    has passed once a storage time the device observed, or its confirmed
+    landing time, is later than `T_c + one day`; each preparation reserves
+    its own path number (§10).
     [`late_snapshot_ignored`](proofs/io/CovenIO/Retention.lean) proves that
     selection ignores a late landing. `SnapshotPublication.act` permits a
     fresh path while an old request can still land, but has no local

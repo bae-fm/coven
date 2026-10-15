@@ -64,11 +64,6 @@ pub struct NewOperation {
     pub data: Vec<u8>,
     /// App method name or `coven`.
     pub started_by: String,
-    /// Its id is the number of a snapshot this device may write: inserting it
-    /// reserves that snapshot number, which §10's identity check compares
-    /// with this device's stored snapshots. Other operations' ids are never
-    /// snapshot numbers and reserve none.
-    pub reserves_snapshot: bool,
 }
 
 /// A step transition, guarded against stale callers.
@@ -86,13 +81,23 @@ pub struct OperationUpdate {
 pub(crate) fn insert(db: &DatabaseConnection, new: &NewOperation) -> Result<OperationId, DbError> {
     let id = db.query_row("INSERT INTO _coven_operations(kind,last_step,data,started_by) VALUES(?1,0,?2,?3) RETURNING id",
         (&new.kind, &new.data, &new.started_by), |r| Ok(OperationId(r.get(0)?)))?;
-    if new.reserves_snapshot {
-        db.internal_execute(
-            "UPDATE _coven_snapshot_reservation SET number=max(number,?1) WHERE singleton=1",
-            [id.0],
-        )?;
-    }
     Ok(id)
+}
+
+/// Reserve the next number of this device's snapshot sequence. Every
+/// preparation takes a fresh one, so an abandoned attempt's path is never
+/// reused, and §10's identity check compares stored snapshots with the
+/// greatest number reserved, published or not.
+pub(crate) fn reserve_snapshot(db: &DatabaseConnection) -> Result<std::num::NonZeroU64, DbError> {
+    let number = db.query_row(
+        "UPDATE _coven_snapshot_reservation SET number=number+1 WHERE singleton=1 RETURNING number",
+        [],
+        |r| r.get::<_, i64>(0),
+    )?;
+    u64::try_from(number)
+        .ok()
+        .and_then(std::num::NonZeroU64::new)
+        .ok_or(DbError::DamagedDatabase)
 }
 
 pub(crate) fn read(db: &DatabaseConnection) -> Result<Vec<OperationRecord>, DbError> {

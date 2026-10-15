@@ -82,7 +82,7 @@ impl StoreLogSync {
             // no longer listed (§15, §19.1; `waiting_retention_safe`,
             // storelog-data `holding_safe`, `refused_prefix_holds`). That
             // prefix's record says why. A refused body never holds.
-            if catalog.newest_unknown {
+            if catalog.newest_unknown.is_some() {
                 tracing::debug!(
                     ?audience,
                     "unverified snapshot prefix holds back log retention"

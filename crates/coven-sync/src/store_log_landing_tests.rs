@@ -336,8 +336,12 @@ async fn operations_retry_late_entries_with_new_numbers_and_introduced_keys() {
         let Begun::Operation(id) = b.sync.begin_operation_call(command).await.unwrap() else {
             panic!("operation")
         };
-        while b.db.local_store_log().await.unwrap().upload.is_none() {
-            assert!(matches!(b.step(id).await.unwrap(), Progress::Advanced));
+        {
+            // A reset's snapshot follows a fresh catch-up (§15).
+            let _pass = b.caught_up_pass().await;
+            while b.db.local_store_log().await.unwrap().upload.is_none() {
+                assert!(matches!(b.step(id).await.unwrap(), Progress::Advanced));
+            }
         }
         let fixed = b.db.local_store_log().await.unwrap().upload.unwrap();
         b.step(id).await.unwrap(); // prerequisite copies

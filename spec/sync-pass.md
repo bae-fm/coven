@@ -577,6 +577,13 @@ the sample through preparation and landing are checked by
 [`SnapshotPublication.begin_samples_time`, `read_uses_prior_sample`,
 `prepare_preserves_sample`, `land_preserves_sample`](proofs/io/CovenIO/SnapshotTiming.lean);
 signed encoding and exact-byte retries are not proved by those theorems.
+While a snapshot waits to be prepared, including a migration's raise,
+step 6 takes its sample by replacing this device's clock object and
+completing the store-log catch-up again before the write reads. A reload
+invalidates the write misses and any catch-up completed before it; the
+catch-up reads every writer again after it. A snapshot requested here, as
+growth requests one, therefore waits for the next pass's step 6. Work
+driven outside a pass, such as an app's reset, runs that catch-up first.
 If this pass cannot supply that catch-up, leave publication pending
 ([`SnapshotPublication.act`](proofs/io/CovenIO/Retention.lean)).
 Capture it and verify its sealed bytes locally as §15 requires; before
@@ -594,7 +601,9 @@ has no complete-object checksum. That confirmation is shared with any
 occupied-path comparison. No snapshot task is created and deleted merely
 to record an idle check.
 Abandon an attempt that passes `T_c + one day` without confirmed counting
-publication and prepare afresh at a new path. The model has no local
+publication and prepare afresh at a new path, which each preparation
+reserves (§10). It has passed once a storage time this device observed, or
+its confirmed landing time, is later than `T_c + one day`. The model has no local
 confirmation or abandonment state, so that rule is not proved. Every reader
 ignores an old attempt landing after that deadline
 ([`late_snapshot_ignored`](proofs/io/CovenIO/Retention.lean)).
