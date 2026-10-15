@@ -390,13 +390,12 @@ async fn deletion_for(d: &Device, access_key_id: &str) -> Option<OperationId> {
     None
 }
 
-/// T203 (KeyDelivery `restored_before_seal_keeps_key_pending`): Ana's desktop
-/// made Ben's new key, and a backup of that database is what §10 resets. The
-/// replacement database, loaded from storage, holds the key the discarded
-/// journal made as pending deletion, and deleting it with admin access
-/// revokes it at the provider.
+/// T267 (KeyListing `reset_spares_recorded_key`): Ana's desktop makes Ben's
+/// new key, and a second live copy of its database, holding the same
+/// journal, resets. Its replacement keeps no made key, so when the original
+/// records the key nothing holds it pending and it stays live.
 #[tokio::test]
-async fn a_reset_keeps_a_key_its_discarded_database_made_pending_deletion() {
+async fn a_reset_copy_leaves_the_key_the_original_records() {
     let (storage, mut a, b) = household().await;
     let admin = MemoryKeyAdmin::default();
     let ben = b.member.member();
@@ -408,19 +407,15 @@ async fn a_reset_keeps_a_key_its_discarded_database_made_pending_deletion() {
     while a.operation(id).await.last_step < 1 {
         assert!(matches!(a.step(id).await.unwrap(), Progress::Advanced));
     }
-    let made = match crate::operation_data::Data::read(&a.operation(id).await).unwrap() {
-        crate::operation_data::Data::ReplaceAccessKey(work) => {
-            work.mint
-                .minted
-                .expect("made key")
-                .credentials
-                .access_key_id
-        }
-        _ => panic!("replacement"),
+    // The copy holding this journal finds the original's delivery and resets.
+    let owed = crate::owed_access_key_deletions(&a.db.operations().await.unwrap()).unwrap();
+    assert!(owed.is_empty());
+    // The original records the key before it reads the replacement (§10).
+    let Output::AccessKeyReplaced(replaced) = finish(&mut a, id).await.unwrap() else {
+        panic!("replacement result")
     };
-    assert_eq!(admin.users().len(), 1);
-    let discarded = a.db.operations().await.unwrap();
-    // The reset copy registers a fresh device for Ana and loads the store.
+    let made = replaced.key.credentials.access_key_id;
+    // The copy's replacement registers a fresh device for Ana and loads the store.
     let mut c = device(storage.clone(), 3, member(1), store(1)).await;
     c.sync().await;
     c.sync
@@ -430,43 +425,27 @@ async fn a_reset_keeps_a_key_its_discarded_database_made_pending_deletion() {
         )
         .await
         .unwrap();
-    crate::carry_access_keys(&c.db, crate::discarded_access_keys(&discarded).unwrap())
+    c.db.record_access_key_deletions::<PendingRecord>(None, owed)
         .await
         .unwrap();
-    let pending = access_keys(&c.db).await;
-    assert_eq!(pending.len(), 1);
-    assert_eq!(pending[0].access_key_id, made);
-    assert_eq!(pending[0].member, Some(ben));
-    // Carrying again changes nothing: a key already pending is skipped.
-    crate::carry_access_keys(&c.db, crate::discarded_access_keys(&discarded).unwrap())
-        .await
-        .unwrap();
-    assert_eq!(access_keys(&c.db).await.len(), 1);
-    let operation = deletion_for(&c, &made).await.expect("pending deletion");
-    c.sync.delete_access_key(operation, &admin).await.unwrap();
-    assert!(admin.users().is_empty());
-    assert!(access_keys(&c.db).await.is_empty());
+    c.sync().await;
+    for d in [&a, &c] {
+        assert!(deletion_for(d, &made).await.is_none());
+    }
+    assert_eq!(admin.users().len(), 1);
 }
 
-/// A made key the loaded store log records as a member's current access is
-/// in use and is not deleted; a deletion the old database owed stays owed,
-/// even for that key, since replay never cancels one (§13).
-#[tokio::test]
-async fn carrying_skips_a_made_key_in_use_and_keeps_every_owed_deletion() {
-    let (_storage, a, b) = household().await;
-    let ben = b.member.member();
-    let current = match &a.log().await.replay.state.members[&ben].access {
-        MemberAccess::S3AccessKey {
-            access_key_id,
-            principal,
-        } => coven_storage::S3MemberKey {
-            credentials: coven_storage::S3Credentials {
-                access_key_id: access_key_id.clone(),
-                secret_access_key: coven_crypto::SecretText::new("secret".into()),
-            },
-            principal: principal.clone(),
+/// A reset keeps each deletion its discarded journal owed, which replay never
+/// cancels (§13), and no key it made.
+#[test]
+fn a_reset_carries_each_owed_deletion_and_no_made_key() {
+    let ben = member(2).member();
+    let key = |id: &str| coven_storage::S3MemberKey {
+        credentials: coven_storage::S3Credentials {
+            access_key_id: id.into(),
+            secret_access_key: coven_crypto::SecretText::new("secret".into()),
         },
-        other => panic!("S3 access: {other:?}"),
+        principal: S3Principal::Console,
     };
     let record = |data: crate::operation_data::Data| {
         let operation = data.new_operation("test").unwrap();
@@ -478,39 +457,35 @@ async fn carrying_skips_a_made_key_in_use_and_keeps_every_owed_deletion() {
             started_by: operation.started_by,
         }
     };
-    let made = |key: &coven_storage::S3MemberKey| {
-        let mut mint = crate::operation_data::MintWork::new(coven_storage::MintScope::new(
-            store(1),
-            &ben.to_string(),
-            coven_foundation::id_source::DeviceId(1),
-            uuid::Uuid::from_u128(5),
-        ));
-        mint.minted = Some(key.clone());
-        crate::operation_data::Data::ReplaceAccessKey(crate::operation_data::ReplaceKeyWork {
-            member: ben,
-            attempt: uuid::Uuid::from_u128(5),
-            mint,
-            delivery: None,
-            entry: None,
-            abandoned: false,
-        })
-    };
+    let mut mint = crate::operation_data::MintWork::new(coven_storage::MintScope::new(
+        store(1),
+        &ben.to_string(),
+        coven_foundation::id_source::DeviceId(1),
+        uuid::Uuid::from_u128(5),
+    ));
+    mint.minted = Some(key("made"));
+    let owed = key("owed");
     let records = [
-        record(made(&current)),
+        record(crate::operation_data::Data::ReplaceAccessKey(
+            crate::operation_data::ReplaceKeyWork {
+                member: ben,
+                attempt: uuid::Uuid::from_u128(5),
+                mint,
+                delivery: None,
+                entry: None,
+                abandoned: false,
+            },
+        )),
         record(crate::operation_data::Data::DeleteAccessKey(
             crate::AccessKeyToDelete {
-                access_key_id: current.credentials.access_key_id.clone(),
-                principal: current.principal.clone(),
+                access_key_id: owed.credentials.access_key_id,
+                principal: owed.principal,
                 member: Some(ben),
             },
         )),
     ];
-    let keys = crate::discarded_access_keys(&records[..1]).unwrap();
-    crate::carry_access_keys(&a.db, keys).await.unwrap();
-    assert!(access_keys(&a.db).await.is_empty());
-    let keys = crate::discarded_access_keys(&records).unwrap();
-    crate::carry_access_keys(&a.db, keys).await.unwrap();
-    let pending = access_keys(&a.db).await;
-    assert_eq!(pending.len(), 1);
-    assert_eq!(pending[0].access_key_id, current.credentials.access_key_id);
+    let carried = crate::owed_access_key_deletions(&records).unwrap();
+    assert_eq!(carried.len(), 1);
+    assert_eq!(carried[0].key.access_key_id, "owed");
+    assert_eq!(carried[0].key.member, Some(ben));
 }

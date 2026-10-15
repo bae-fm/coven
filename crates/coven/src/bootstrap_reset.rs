@@ -7,8 +7,7 @@ use super::*;
 /// credentials, the connection and both key custodies are checked before
 /// anything moves; a failure leaves the files in place with its typed error.
 /// The new device names the old id as the one it replaces (§12.1). Only the
-/// old database's operation journal is read, for the S3 keys it made or owed
-/// (T203).
+/// old database's operation journal is read, for the S3 key deletions it owed.
 pub(crate) async fn reset_device(
     mut builder: CovenBuilder,
     store: StoreId,
@@ -110,12 +109,9 @@ pub(crate) async fn reset_device(
     .ok_or_else(|| SyncError::from(StorageFailure::MemberKeysMissing).into())
 }
 
-/// Keep what the discarded database made or owed at the provider pending
-/// deletion in its replacement, which has loaded the store log (§10, T203).
-/// A database too damaged to read, whatever the reset's reason, carries
-/// nothing; a key only it recorded stays live at the provider, which only a
-/// listing of the provider's keys could find (T204, undecided). Any other
-/// failure fails the reset, which retries.
+/// Keep the S3 key deletions the discarded database owed pending in its
+/// replacement (§10). A database too damaged to read carries nothing. Any
+/// other failure fails the reset, which retries.
 pub(super) async fn carry_discarded_keys(
     database: &coven_database::Database,
     pending: &BootstrapStore,
@@ -128,12 +124,13 @@ pub(super) async fn carry_discarded_keys(
         Err(error) => return Err(SyncError::from(error).into()),
     };
     // A journal row that does not decode is damage too.
-    let Ok(keys) = coven_sync::discarded_access_keys(&records) else {
+    let Ok(deletions) = coven_sync::owed_access_key_deletions(&records) else {
         return Ok(());
     };
-    coven_sync::carry_access_keys(database, keys)
+    database
+        .record_access_key_deletions::<coven_sync::PendingRecord>(None, deletions)
         .await
-        .map_err(Into::into)
+        .map_err(|error| SyncError::from(error).into())
 }
 
 /// A store that never set up storage has no stored history and no published

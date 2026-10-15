@@ -207,11 +207,6 @@ import CovenStorage
 #print axioms CovenStorage.KeyDelivery.Examples.bound_sealing_continues
 #print axioms CovenStorage.KeyDelivery.Examples.restored_after_seal_continues
 #print axioms CovenStorage.KeyDelivery.Examples.restored_before_mint_orphans_key
-#print axioms CovenStorage.KeyDelivery.reset_keeps_accounted
-#print axioms CovenStorage.KeyDelivery.accounted_step
-#print axioms CovenStorage.KeyDelivery.accounted_run
-#print axioms CovenStorage.KeyDelivery.Examples.restored_before_seal_keeps_key_pending
-#print axioms CovenStorage.KeyDelivery.Examples.restored_before_mint_keeps_key_pending
 
 #print axioms CovenStorage.CopyPublication.copy_is_create
 #print axioms CovenStorage.CopyPublication.copy_outcome
@@ -294,6 +289,8 @@ import CovenStorage
 #print axioms CovenStorage.KeyDelivery.Listing.retired_keys_settle
 #print axioms CovenStorage.KeyDelivery.Listing.device_rule_spares_in_flight_key
 #print axioms CovenStorage.KeyDelivery.Listing.lost_database_key_reclaimed_once_retired
-#print axioms CovenStorage.KeyDelivery.Listing.reset_carry_deletes_recorded_key
-#print axioms CovenStorage.KeyDelivery.Listing.listing_spares_key_the_carry_takes
+#print axioms CovenStorage.KeyDelivery.Listing.step_pending
+#print axioms CovenStorage.KeyDelivery.Listing.pending_never_recorded
+#print axioms CovenStorage.KeyDelivery.Listing.reset_spares_recorded_key
+#print axioms CovenStorage.KeyDelivery.Listing.reset_key_reclaimed_once_retired
 #print axioms CovenStorage.KeyDelivery.Listing.same_name_mint_deletes_recorded_key

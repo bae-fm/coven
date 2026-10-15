@@ -496,11 +496,10 @@ and that every key it makes stays recorded or journaled.
 is backed up before sealing it. The live database seals and delivers; the
 backup is then restored. Nothing was written to a numbered log since the
 backup, so §10's counted evidence passes. The restored copy re-seals with
-fresh randomness, finds different bytes and resets. §10's reset reads
-nothing from the discarded database, so key 101 is now live at the provider,
-in no kept entry and in no surviving journal: nothing records it or will
-delete it. §13 says discarding a replacement leaves no key unrecorded; this
-reset discards one that does.
+fresh randomness, finds different bytes and resets. The reset keeps no made
+key, so key 101 is live at the provider, in no kept entry and in no
+surviving journal, until §13's reclaim takes it once device 7 is retired
+(`reset_key_reclaimed_once_retired` in KeyListing).
 
 Sealing bound to its inputs would not remove the loss. With it the same
 restore resends the stored bytes and records the key
@@ -510,35 +509,21 @@ sealing (`restored_after_seal_continues`). But in
 copy's mint deletes key 101 under the attempt's name and makes 103. The
 stored delivery holds the deleted key, so counting it would leave Ben unable
 to install the recorded one; the comparison is right to refuse it. The reset
-then orphans 103 under either sealer. The loss comes from the reset
-discarding a made key, not from the comparison.
+then leaves 103 unrecorded under either sealer.
 
-**T203: the reset keeps the key pending deletion (proved).** §10's reset now
-reads the old database's journal and keeps its made key, and every deletion
-it already owed, pending `DeleteAccessKey` in the new database (`deliver`'s
-reset branch; each database copy's pending deletions are `World.pending`,
-copied by a clone and lost with a dropped database). The pre-T203 reset is
-kept as `discardingReset` for the two counterexamples above.
-- `reset_keeps_accounted`: the reset step never leaves a live key outside a
-  kept entry, a surviving journal or a pending deletion.
-- `accounted_step`, `accounted_run`: no step but losing a database outright
-  (`drop`) does either, in any history of backups, clones and resets.
-- `restored_before_seal_keeps_key_pending` and
-  `restored_before_mint_keeps_key_pending` (checked): both restore points now
-  end with the made key pending deletion in the reset copy.
-
-So deliveries join §10's own-path list. A database lost before its key is
-recorded, rather than reset, still orphans the key; in Rust a database too
-damaged to read is that case. Rust's "made key that the loaded store log
-records as an active member's current access is in use" exception is outside
-the model; there the key is in `recorded` anyway.
+**T267: the reset keeps only owed deletions.** T203 had the reset also keep
+its made key pending deletion; with a second live copy of the database that
+deleted a key the original then recorded. The reset now keeps only the
+deletions the old database owed (`World.pending`, copied by a clone and lost
+with a dropped database), and its made key is the listing's once its device
+is retired (below). So deliveries join §10's own-path list.
 
 The model leaves out the store log, entry admission, the old key's deletion,
 the member's side, failed comparison reads, the discard call, invites (whose
 made keys sit in the journal the same way) and other members writing the
 path. The reading chosen for §10's "nothing newer in storage" is that a
 delivery stored after the backup counts as newer, so the reset itself is
-permitted; the loss is what it discards.
+permitted.
 
 **T204: listing the provider's keys (checked counterexample).**
 [KeyListing](storage/CovenStorage/KeyListing.lean) adds T204's catch-up as
@@ -567,7 +552,7 @@ The catch-up (`reclaim`) takes only listed keys whose device is retired and
 that no entry records. A retired copy can no longer record or deliver, since
 §10 bounds its publications to finality plus one day and five minutes and the
 drain reads its logs after that; it resets when it reads its retirement
-(`stop`), with T203's carry.
+(`stop`), keeping only its owed deletions.
 - `reclaimed_safe` (proved): in every history of backups, clones, resets,
   retirements, catch-ups and deletions, a key the listing made pending is in
   no entry and held by no copy of a live device. The invariant (`Good`) rests
@@ -576,6 +561,10 @@ drain reads its logs after that; it resets when it reads its retirement
   holds it, and only a copy holding a key records it.
 - `reclaimed_never_recorded` (proved): such a key is not recorded later in
   the same history either.
+- `pending_never_recorded` (proved): every deletion a copy holds pending is
+  one the listing made (`step_pending`: no step of the base model adds one),
+  so no copy deletes a recorded key. A clone and the original may both reset
+  or record; `reset_spares_recorded_key` checks that history.
 - `retired_keys_settle` (proved): once no copy of a retired device remains,
   one catch-up and the deletion of what it made pending leave every live key
   of a retired device recorded, and no later step except another retirement
@@ -583,9 +572,10 @@ drain reads its logs after that; it resets when it reads its retirement
   two steps; `settled_sstep` shows that a step other than a retirement then
   makes no key of a retired device.
 - Checked histories: T204's history now keeps Ben's key, which Ana records
-  (`device_rule_spares_in_flight_key`); a key whose database was lost is kept
-  while its device is live and reclaimed once it is retired
-  (`lost_database_key_reclaimed_once_retired`).
+  (`device_rule_spares_in_flight_key`); a key whose database was lost or
+  reset is kept while its device is live and reclaimed once it is retired
+  (`lost_database_key_reclaimed_once_retired`,
+  `reset_key_reclaimed_once_retired`).
 
 The rule's Rust side reads "retired with a final entry" as drained (§6): a
 drain needs the retiring entry final, the one day and five minutes, and every
@@ -595,20 +585,10 @@ store-log replay, what a drain reads, provider listing lag (a key missing from
 one listing is found by a later one), and keys handed out of band in an invite
 code before an entry records them.
 
-**Two other deletions take a recorded key (checked counterexamples).** Both
-need two live copies of one database, and neither is the listing's.
-- `reset_carry_deletes_recorded_key`: T203's carry. A clone of Ana's desktop
-  finds the original's delivery, resets and carries key 101 pending deletion,
-  since no entry records it yet. The original then records 101 as Ben's
-  access, as §10 allows an entry made before reading its replacement.
-  Deleting what the reset carried removes Ben's recorded key. Under T237 the
-  listing leaves 101 alone once the original records it
-  (`listing_spares_key_the_carry_takes`), so the carry's made keys are the
-  listing's job; its owed deletions are not, since their keys are recorded.
-- `same_name_mint_deletes_recorded_key`: §4's retry rule. A clone taken after
-  the attempt was journaled and before its key was made mints under the same
-  name after the original recorded 101, and deletes 101 as a key whose secret
-  it does not hold.
+**§4's retry deletes a recorded key (checked counterexample).**
+`same_name_mint_deletes_recorded_key`: a clone taken after the attempt was
+journaled and before its key was made mints under the same name after the
+original recorded 101, and deletes 101 as a key whose secret it does not hold.
 
 ## Undecodable own key copies
 

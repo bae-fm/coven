@@ -17,13 +17,13 @@ def beforeSealSteps : List Step :=
 
 /-- §10's counted evidence cannot see the restore: nothing was written to a
 numbered log since the backup, so its counters equal storage. The delivery
-comparison alone resets the restored copy. Under the reset before T203,
-which read nothing from the old database, no database journals key 101 and
-no kept entry records it, but it is live at the provider: §13's "leaves no
-key unrecorded" fails, and nothing will delete it. -/
+comparison alone resets the restored copy. The reset keeps no made key
+(T267): no database journals key 101 and no kept entry records it, but it is
+live at the provider until §13's reclaim takes it once device 7 is retired
+(KeyListing `reset_key_reclaimed_once_retired`). -/
 theorem restored_before_seal_orphans_key :
     let restored := run .random desktop beforeSealSteps
-    let after := discardingReset restored 1 7
+    let after := deliver restored 1
     checkIdentity 7 ⟨⟨0, 1⟩, 0, 0⟩ (some 7) (.ok ⟨⟨⟨0, 1⟩, 0, 0⟩, ⟨0, 0⟩, ⟨0, 0⟩, false, false⟩) = .send ∧
     restored.copies 1 = some ⟨7, some ⟨100, some 101, some [101, 103], false⟩⟩ ∧
     restored.storage 100 = some ⟨[101, 102], 7⟩ ∧
@@ -32,19 +32,6 @@ theorem restored_before_seal_orphans_key :
     after.copies 1 = some ⟨104, none⟩ ∧
     after.provider = [⟨101, 100, 7⟩] ∧ after.recorded = [] ∧
     ¬ Accounted after := by decide
-
-/-- The same restore under T203's reset: the new database holds key 101 as
-pending `DeleteAccessKey`, so it is accounted and will be deleted. -/
-theorem restored_before_seal_keeps_key_pending :
-    let restored := run .random desktop beforeSealSteps
-    let after := deliver restored 1
-    after.resets = [7] ∧
-    after.copies 1 = some ⟨104, none⟩ ∧
-    after.pending 1 = [101] ∧
-    after.provider = [⟨101, 100, 7⟩] ∧ after.recorded = [] ∧
-    Accounted after := by decide
-
-example : Accounted (run .random desktop (beforeSealSteps ++ [.deliver 1])) := by decide
 
 /-- The same restore with sealing bound to its inputs resends the stored bytes,
 counts the delivery and records the key. -/
@@ -62,25 +49,17 @@ theorem restored_after_seal_continues :
 /-- A backup taken before the key is made: the restored copy's mint deletes
 key 101 under the attempt's name (§4) and makes 103. The stored delivery holds
 the deleted key, so counting it would leave Ben unable to install the
-recorded one; the comparison must refuse it. The reset then orphans 103,
-whatever the sealer: the loss is the reset discarding a made key. -/
+recorded one; the comparison must refuse it. The reset then leaves 103
+unrecorded, whatever the sealer. -/
 theorem restored_before_mint_orphans_key :
     let restored := run .bound desktop
       [.begin 0, .clone 0, .mint 0, .sealKey 0, .deliver 0, .drop 0, .mint 1, .sealKey 1]
-    let after := discardingReset restored 1 7
+    let after := deliver restored 1
     restored.storage 100 = some ⟨[101], 7⟩ ∧
     restored.provider = [⟨103, 100, 7⟩] ∧
     restored.copies 1 = some ⟨7, some ⟨100, some 103, some [103], false⟩⟩ ∧
     Accounted restored ∧
     after.resets = [7] ∧ after.provider = [⟨103, 100, 7⟩] ∧ after.recorded = [] ∧
     ¬ Accounted after := by decide
-
-/-- Under T203's reset the made key 103 stays pending deletion. -/
-theorem restored_before_mint_keeps_key_pending :
-    let after := run .bound desktop
-      [.begin 0, .clone 0, .mint 0, .sealKey 0, .deliver 0, .drop 0, .mint 1, .sealKey 1,
-        .deliver 1]
-    after.resets = [7] ∧ after.pending 1 = [103] ∧ after.provider = [⟨103, 100, 7⟩] ∧
-    after.recorded = [] ∧ Accounted after := by decide
 
 end CovenStorage.KeyDelivery.Examples

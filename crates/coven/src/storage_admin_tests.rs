@@ -180,67 +180,27 @@ async fn invited_with_made_key() -> (Network, coven_storage::test_utils::MemoryK
     (network, made)
 }
 
-/// T203 (KeyDelivery `reset_keeps_accounted`): the owner's copy is reset as a
-/// stale copy (§10) while its invite's made key is still only in its journal.
-/// The replacement installation lists that key as pending deletion, and
-/// deleting it with admin access revokes it.
+/// A reset keeps no key its discarded database made (T267): another live
+/// copy may still record it, and §13's reclaim takes it once the old device
+/// is retired. A database too damaged to read carries nothing either, and
+/// the reset still completes.
 #[tokio::test]
-async fn a_reset_keeps_an_invites_made_key_pending_deletion() {
-    let (mut network, made) = invited_with_made_key().await;
-    let device = network.devices.remove(0);
-    device.handle.close().await.unwrap();
-    let directory = device.layout.store_dir(&device.store);
-    directory
-        .record_device_reset(&coven_foundation::files::DeviceReset {
-            old_device: directory.settings().unwrap().device_id,
-            new_device: DeviceId(9000),
-            reason: coven_foundation::files::DeviceResetReason::SlotMismatch,
-        })
-        .unwrap();
-    let handle = network
-        .reopen(&device)
-        .reset_device(device.store, "Reset desktop")
-        .await
-        .unwrap();
-    let pending = pending_keys(&handle.pending().await.unwrap());
-    assert_eq!(pending.len(), 1);
-    let (operation, key) = &pending[0];
-    assert_eq!(key.member, None);
-    assert!(matches!(&key.principal, S3Principal::IamUser { .. }));
-    let admin = handle
-        .admin_access(AdminAccessSource::Pasted(AdminCredential::AccessKey {
-            access_key_id: "admin".into(),
-            secret_access_key: SecretText::new("admin-secret".into()),
-            session_token: None,
-            iam_endpoint: None,
-        }))
-        .await
-        .unwrap();
-    handle.delete_access_key(*operation, admin).await.unwrap();
-    assert!(made.users().is_empty());
-    assert!(pending_keys(&handle.pending().await.unwrap()).is_empty());
-    handle.close().await.unwrap();
-    network.close().await;
-}
-
-/// A database too damaged to read carries nothing, whatever the reset's
-/// reason: the reset still completes, leaving its made key to an admin's
-/// provider listing (§13).
-#[tokio::test]
-async fn an_unreadable_discarded_database_resets_without_carrying_keys() {
-    for recorded in [false, true] {
+async fn a_reset_leaves_an_invites_made_key_live() {
+    for (damaged, recorded) in [(false, true), (true, false), (true, true)] {
         let (mut network, made) = invited_with_made_key().await;
         let device = network.devices.remove(0);
         device.handle.close().await.unwrap();
         let directory = device.layout.store_dir(&device.store);
-        let database = directory.database_path();
-        for suffix in ["-wal", "-shm"] {
-            let path = std::path::PathBuf::from(format!("{}{suffix}", database.display()));
-            if path.exists() {
-                std::fs::remove_file(path).unwrap();
+        if damaged {
+            let database = directory.database_path();
+            for suffix in ["-wal", "-shm"] {
+                let path = std::path::PathBuf::from(format!("{}{suffix}", database.display()));
+                if path.exists() {
+                    std::fs::remove_file(path).unwrap();
+                }
             }
+            std::fs::write(&database, b"not a database").unwrap();
         }
-        std::fs::write(&database, b"not a database").unwrap();
         // Without a recorded stale-copy reset the reset records damage itself.
         if recorded {
             directory

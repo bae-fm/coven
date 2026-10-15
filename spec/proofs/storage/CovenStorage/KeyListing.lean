@@ -13,7 +13,9 @@ takes only unrecorded keys whose minting device is retired with a final
 entry and drained. That never takes a recorded key or a live device's key in
 flight (`reclaimed_safe`, `reclaimed_never_recorded`), and once the retired
 devices' copies have stopped one catch-up and its deletions leave every key
-they made recorded (`retired_keys_settle`).
+they made recorded (`retired_keys_settle`). With T267 a reset keeps no made
+key, so every pending deletion is the listing's and none is of a recorded
+key (`pending_never_recorded`).
 
 The model has one store, so every provider key is in the listing. -/
 
@@ -86,7 +88,7 @@ Once a device is drained no copy of it records anything more: §10 bounds its
 publications to its retirement's finality plus one day and five minutes, and
 the drain reads its logs after that (§6, §13). So a retired copy's `record`
 and `deliver` change nothing here. It resets when it reads its retirement
-(`stop`), carrying its made key pending deletion as §10's reset does. Only
+(`stop`), keeping only the deletions it owed, as §10's reset does. Only
 copies of the minting database record a key: a replacement's or an invite's
 entry comes from the operation that made it. -/
 
@@ -114,15 +116,13 @@ def retire (s : Sys) (d : Nat) : Sys :=
   if d < s.w.next then { s with retired := d :: s.retired } else s
 
 /-- A copy that reads its device's retirement resets as a new device (§10),
-keeping its made key and its owed deletions pending (T203). -/
+keeping the deletions it owed but not its made key (T267). -/
 def stop (s : Sys) (i : Nat) : Sys :=
   match s.w.copies i with
   | some c =>
     if c.device ∈ s.retired then
       { s with w := { s.w with
           copies := fun x => if x = i then some ⟨s.w.next, none⟩ else s.w.copies x
-          pending := fun x => if x = i then (heldKey (some c)).toList ++ s.w.pending x
-                              else s.w.pending x
           resets := c.device :: s.w.resets, next := s.w.next + 1 } }
     else s
   | none => s
@@ -311,6 +311,34 @@ theorem step_next (sealer : Sealer) (w : World) (st : Step) : w.next ≤ (step s
   | clone i => simp only [step]; unfold clone; split <;> exact Nat.le_refl _
   | drop i => exact Nat.le_refl _
 
+/-- No step adds a pending deletion: each is one some copy already held. -/
+theorem step_pending (sealer : Sealer) (w : World) (st : Step) (k x : Nat)
+    (h : x ∈ (step sealer w st).pending k) : ∃ j, x ∈ w.pending j := by
+  cases st with
+  | clone i =>
+    simp only [step] at h; revert h; unfold clone; split
+    · intro h; change x ∈ (if k = w.slots then _ else _) at h
+      split at h
+      · exact ⟨i, h⟩
+      · exact ⟨k, h⟩
+    · intro h; exact ⟨k, h⟩
+  | drop i =>
+    simp only [step, drop] at h; change x ∈ (if k = i then [] else w.pending k) at h
+    split at h
+    · cases h
+    · exact ⟨k, h⟩
+  | begin i => simp only [step] at h; unfold begin at h; split at h <;> exact ⟨k, h⟩
+  | mint i => simp only [step] at h; unfold mint at h; split at h <;> exact ⟨k, h⟩
+  | sealKey i => simp only [step] at h; unfold sealKey at h; split at h <;> exact ⟨k, h⟩
+  | deliver i =>
+    simp only [step] at h; unfold deliver at h
+    split at h
+    · split at h
+      · exact ⟨k, h⟩
+      · split at h <;> exact ⟨k, h⟩
+    · exact ⟨k, h⟩
+  | record i => simp only [step] at h; unfold record at h; split at h <;> exact ⟨k, h⟩
+
 /-! #### The listing never takes a recorded or in-flight key -/
 
 structure Good (s : Sys) : Prop where
@@ -327,6 +355,8 @@ structure Good (s : Sys) : Prop where
   /-- No live copy holds one in flight. -/
   notInFlight : ∀ x ∈ s.reclaimed, ∀ k c, s.w.copies k = some c → c.device ∉ s.retired →
     heldKey (some c) ≠ some x
+  /-- Every pending deletion is one the listing made. -/
+  pendingReclaimed : ∀ k x, x ∈ s.w.pending k → x ∈ s.reclaimed
 
 theorem live_of {s : Sys} {i : Nat} (h : s.live i = true) :
     ∃ c, s.w.copies i = some c ∧ c.device ∉ s.retired := by
@@ -341,7 +371,7 @@ theorem good_base {s : Sys} (h : Good s) (sealer : Sealer) (st : Step) :
   split
   · rename_i allowed
     have hn := step_next sealer s.w st
-    refine ⟨step_inv h.inv sealer st, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
+    refine ⟨step_inv h.inv sealer st, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
     · intro k c' x hk hx
       rcases step_held sealer s.w st k c' hk with none | ⟨j, c, hj, -, hjx⟩ | ⟨c, -, -, hx', hnext, -⟩
       · rw [none] at hx; cases hx
@@ -381,6 +411,9 @@ theorem good_base {s : Sys} (h : Good s) (sealer : Sealer) (st : Step) :
       · exact h.notInFlight x hx j c hj (hdev ▸ hlive) (hjx.trans hheld)
       · rw [hx'] at hheld; cases hheld
         have := h.reclaimedFresh _ hx; omega
+    · intro k x hx
+      obtain ⟨j, hj⟩ := step_pending sealer s.w st k x hx
+      exact h.pendingReclaimed j x hj
   · exact h
 
 theorem good_retire {s : Sys} (h : Good s) (d : Nat) : Good (retire s d) := by
@@ -388,13 +421,14 @@ theorem good_retire {s : Sys} (h : Good s) (d : Nat) : Good (retire s d) := by
   split
   · rename_i hd
     refine ⟨h.inv, h.heldFresh, h.providerFresh, h.heldProvider, ?_, h.reclaimedFresh,
-      h.unrecorded, ?_⟩
+      h.unrecorded, ?_, ?_⟩
     · intro e he
       rcases List.mem_cons.mp he with rfl | old
       · exact hd
       · exact h.retiredFresh e old
     · intro x hx k c hk hlive
       exact h.notInFlight x hx k c hk (fun hr => hlive (List.mem_cons_of_mem _ hr))
+    · exact h.pendingReclaimed
   · exact h
 
 theorem good_stop {s : Sys} (h : Good s) (i : Nat) : Good (stop s i) := by
@@ -405,8 +439,6 @@ theorem good_stop {s : Sys} (h : Good s) (i : Nat) : Good (stop s i) := by
     · have inv := inv_congr (put_idle h.inv hc (some ⟨s.w.next, none⟩) (by intro y hy; cases hy; rfl))
         (w' := { s.w with
           copies := fun x => if x = i then some ⟨s.w.next, none⟩ else s.w.copies x
-          pending := fun x => if x = i then (heldKey (some c)).toList ++ s.w.pending x
-                              else s.w.pending x
           resets := c.device :: s.w.resets, next := s.w.next + 1 })
         rfl rfl rfl (Nat.le_succ _)
       -- the stopped copy holds nothing; every other copy is unchanged
@@ -416,7 +448,7 @@ theorem good_stop {s : Sys} (h : Good s) (i : Nat) : Good (stop s i) := by
         split at hk
         · cases hk; exact .inl rfl
         · exact .inr hk
-      refine ⟨inv, ?_, ?_, ?_, ?_, ?_, h.unrecorded, ?_⟩
+      refine ⟨inv, ?_, ?_, ?_, ?_, ?_, h.unrecorded, ?_, h.pendingReclaimed⟩
       · intro k c' x hk hx
         rcases view k c' hk with none | old
         · rw [none] at hx; cases hx
@@ -445,7 +477,7 @@ theorem mem_stray {s : Sys} {x : Nat} (hx : x ∈ stray s) :
 
 theorem good_reclaim {s : Sys} (h : Good s) (i : Nat) : Good (reclaim s i) := by
   refine ⟨inv_congr h.inv rfl rfl rfl (Nat.le_refl _), h.heldFresh, h.providerFresh,
-    h.heldProvider, h.retiredFresh, ?_, ?_, ?_⟩
+    h.heldProvider, h.retiredFresh, ?_, ?_, ?_, ?_⟩
   · intro x hx
     rcases List.mem_append.mp hx with new | old
     · obtain ⟨p, hp, rfl, -, -⟩ := mem_stray new; exact h.providerFresh p hp
@@ -460,12 +492,24 @@ theorem good_reclaim {s : Sys} (h : Good s) (i : Nat) : Good (reclaim s i) := by
       obtain ⟨p, hp, rfl, hret, -⟩ := mem_stray new
       exact hlive (h.heldProvider k c _ p hk hheld hp rfl ▸ hret)
     · exact h.notInFlight x old k c hk hlive hheld
+  · intro k x hx
+    change x ∈ (if k = i then stray s ++ s.w.pending k else s.w.pending k) at hx
+    split at hx
+    · rcases List.mem_append.mp hx with new | old
+      · exact List.mem_append_left _ new
+      · exact List.mem_append_right _ (h.pendingReclaimed k x old)
+    · exact List.mem_append_right _ (h.pendingReclaimed k x hx)
 
 theorem good_delete {s : Sys} (h : Good s) (i : Nat) : Good (delete s i) := by
   refine ⟨inv_congr h.inv rfl rfl rfl (Nat.le_refl _), h.heldFresh, ?_, ?_, h.retiredFresh,
-    h.reclaimedFresh, h.unrecorded, h.notInFlight⟩
+    h.reclaimedFresh, h.unrecorded, h.notInFlight, ?_⟩
   · intro p hp; exact h.providerFresh p (List.mem_filter.mp hp).1
   · intro k c x p hk hx hp hpx; exact h.heldProvider k c x p hk hx (List.mem_filter.mp hp).1 hpx
+  · intro k x hx
+    change x ∈ (if k = i then [] else s.w.pending k) at hx
+    split at hx
+    · cases hx
+    · exact h.pendingReclaimed k x hx
 
 theorem good_sstep {s : Sys} (h : Good s) (sealer : Sealer) (st : SStep) :
     Good (sstep sealer s st) := by
@@ -483,7 +527,7 @@ theorem good_srun {s : Sys} (h : Good s) (sealer : Sealer) (steps : List SStep) 
   | cons st sts ih => exact ih (good_sstep h sealer st)
 
 theorem good_start (devices : List Nat) (next : Nat) : Good (sstart devices next) := by
-  refine ⟨start_inv devices next, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
+  refine ⟨start_inv devices next, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
   · intro k c x hk hx
     simp only [sstart, start, Option.map_eq_some_iff] at hk
     obtain ⟨_, -, rfl⟩ := hk; simp [heldKey] at hx
@@ -493,6 +537,7 @@ theorem good_start (devices : List Nat) (next : Nat) : Good (sstart devices next
   · intro x hx; simp [sstart] at hx
   · intro x hx; simp [sstart] at hx
   · intro x hx; simp [sstart] at hx
+  · intro k x hx; simp [sstart, start] at hx
 
 /-- T237's rule is safe: in every history of backups, clones, resets,
 retirements and catch-ups, a key the listing made pending is in no entry,
@@ -535,6 +580,15 @@ theorem reclaimed_never_recorded (devices : List Nat) (next : Nat) (sealer : Sea
   rw [srun_append]
   exact (good_srun (good_srun (good_start devices next) sealer steps) sealer later).unrecorded x
     (reclaimed_grows_run sealer _ later x hx)
+
+/-- No copy deletes a recorded key: every deletion a copy holds pending is the
+listing's, so no entry records it, now or later. A reset adds none (T267). -/
+theorem pending_never_recorded (devices : List Nat) (next : Nat) (sealer : Sealer)
+    (steps later : List SStep) (k x : Nat)
+    (hx : x ∈ (srun sealer (sstart devices next) steps).w.pending k) :
+    x ∉ (srun sealer (sstart devices next) (steps ++ later)).w.recorded :=
+  reclaimed_never_recorded devices next sealer steps later x
+    ((good_srun (good_start devices next) sealer steps).pendingReclaimed k x hx)
 
 /-! #### Every key a retired device made ends recorded or deleted -/
 
@@ -730,30 +784,32 @@ theorem lost_database_key_reclaimed_once_retired :
     (delete t 1).w.provider = [] := by
   decide
 
-/-- T203's reset carry deletes a recorded key when two live copies of one
-database exist (checked counterexample). Ana's desktop makes key 101, a clone
+/-- T267: a reset keeps no made key, so a second live copy of one database
+cannot delete a recorded key through it. Ana's desktop makes key 101, a clone
 of its database runs elsewhere, and both seal. The original delivers first;
-the clone finds different bytes, resets and carries 101 pending deletion,
-since no entry records it yet. The original then records 101 as Ben's access,
-as §10 allows an entry made before reading its replacement. Deleting what the
-reset carried removes Ben's recorded key. -/
-theorem reset_carry_deletes_recorded_key :
-    let both := run .random (start [7] 100)
-      [.begin 0, .mint 0, .clone 0, .sealKey 0, .deliver 0, .sealKey 1, .deliver 1, .record 0]
-    both.resets = [7] ∧ both.pending 1 = [101] ∧ both.recorded = [101] ∧
-    (deletePending both 1).provider = [] := by
-  decide
-
-/-- The same history under T237's listing: device 7 is retired once the
-reset's replacement is final and drained, the original copy stops, and
-Carol's catch-up finds 101 recorded and leaves it. Only the reset's carry
-(slot 2) still holds it pending. -/
-theorem listing_spares_key_the_carry_takes :
+the clone finds different bytes and resets. The original then records 101
+as Ben's access, as §10 allows an entry made before reading its replacement.
+Device 7 is retired, the original copy stops, and Carol's catch-up finds 101
+recorded: nothing holds it pending and it stays live. -/
+theorem reset_spares_recorded_key :
     let t := srun .random (sstart [7, 9] 100)
       [.base (.begin 0), .base (.mint 0), .base (.clone 0), .base (.sealKey 0),
         .base (.deliver 0), .base (.sealKey 2), .base (.deliver 2), .base (.record 0),
-        .retire 7, .stop 0, .reclaim 1]
-    t.w.recorded = [101] ∧ t.w.pending 1 = [] ∧ t.w.pending 2 = [101] := by
+        .retire 7, .stop 0, .reclaim 1, .delete 1, .delete 2]
+    t.w.resets = [7, 7] ∧ t.w.recorded = [101] ∧ t.w.provider = [⟨101, 100, 7⟩] := by
+  decide
+
+/-- The key a reset leaves (KeyDeliveryExamples `restored_before_seal_orphans_key`)
+is reclaimed once its device is retired. Ana's desktop makes key 101 and is
+backed up before sealing; the live database delivers, the backup is restored
+over it, re-seals, finds different bytes and resets. Once device 7 is
+retired, Carol's catch-up makes 101 pending and deletes it. -/
+theorem reset_key_reclaimed_once_retired :
+    let reset := srun .random (sstart [7, 9] 100)
+      [.base (.begin 0), .base (.mint 0), .base (.clone 0), .base (.sealKey 0),
+        .base (.deliver 0), .base (.drop 0), .base (.sealKey 2), .base (.deliver 2)]
+    reset.w.resets = [7] ∧ reset.w.provider = [⟨101, 100, 7⟩] ∧ reset.w.recorded = [] ∧
+    (srun .random reset [.retire 7, .reclaim 1, .delete 1]).w.provider = [] := by
   decide
 
 /-- §4's retry rule deletes a recorded key under the same two live copies

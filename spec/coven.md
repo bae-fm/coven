@@ -3497,16 +3497,12 @@ Carol's tablet:
 - A stale copy resets as a new device using storage and saved custody.
   - Stop its local writes and transfers. Discard its database and pending
     local work; do not salvage or renumber waiting writes.
-  - Keep the S3 keys the old database made or owed. Its operation journal,
-    read in place, names every key made for an unfinished replacement or
-    invite and every key pending `DeleteAccessKey`. Each becomes pending
-    `DeleteAccessKey` in the new database, after it loads the store log and
-    before it is published, except a made key that store log records as an
-    active member's current access, which is in use (§13). So the reset
-    leaves every key coven made recorded or pending deletion, whichever
-    restore point the old copy came from
-    ([`reset_keeps_accounted`, `accounted_step`, `accounted_run`](proofs/storage/CovenStorage/KeyDelivery.lean);
-    [`restored_before_seal_keeps_key_pending`, `restored_before_mint_keeps_key_pending`](proofs/storage/CovenStorage/KeyDeliveryExamples.lean)).
+  - Keep the deletions the old database owed: each key its operation
+    journal, read in place, holds pending `DeleteAccessKey` stays pending in
+    the new database before it is published. A key it made but never
+    recorded is not kept, since another live copy may still record it; §13's
+    reclaim takes it once the old device is retired
+    ([`reset_spares_recorded_key`, `pending_never_recorded`, `reset_key_reclaimed_once_retired`](proofs/storage/CovenStorage/KeyListing.lean)).
     A database too damaged to read carries nothing.
   - Use the existing new-device installation path (§12.1), with a fresh id.
     Load the stored history, then allow app writes again.
@@ -4218,15 +4214,14 @@ Carol's tablet:
     the lost phone holds the same old key.
   - After a restart, a replacement that has not yet made its key or deleted
     the old one waits for admin access again (§4); none is stored.
-  - Discarding a replacement, or a §10 reset discarding the database that
-    made its key, leaves no key unrecorded. Once its entry is
+  - Discarding a replacement leaves no key unrecorded. Once its entry is
     reserved, the discard publishes it and the store log covers the key. Before
     that, a made key becomes pending `DeleteAccessKey` in the transaction that
     removes the operation; with no key yet, what the attempt may have made is
     rolled back with admin access, and without it the operation waits for
     admin access with only that rollback left.
   - A key coven made can stay unrecorded with nothing to delete it: its
-    database lost, or too damaged to read, before an entry records it. Every
+    database lost or reset (§10) before an entry records it. Every
     made key's provider-side name carries its store and minting device (§4).
     An admin's `reclaim_access_keys` (E9), with admin access, lists the
     store's keys and, in one transaction, makes pending `DeleteAccessKey` each
@@ -4241,7 +4236,7 @@ Carol's tablet:
     deletions leave every key they made recorded
     ([`retired_keys_settle`](proofs/storage/CovenStorage/KeyListing.lean)),
     whether the database was reset, lost or never copied
-    ([`lost_database_key_reclaimed_once_retired`](proofs/storage/CovenStorage/KeyListing.lean)).
+    ([`lost_database_key_reclaimed_once_retired`, `reset_key_reclaimed_once_retired`](proofs/storage/CovenStorage/KeyListing.lean)).
     A live device's key waits: removing a lost device retires it.
     - E.g. Ana's desktop makes and delivers a key for Ben, and Carol's
       catch-up runs before Ana records it. Ana's desktop is live, so the key

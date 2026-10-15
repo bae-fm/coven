@@ -100,19 +100,10 @@ def sealKey (sealer : Sealer) (w : World) (i : Nat) : World :=
              next := w.next + 1 }
   | _ => w
 
-/-- Before T203, §10's reset read nothing from the old database: the copy
-became a new device with an empty database, keeping no pending deletion. Kept
-only for the counterexamples in `KeyDeliveryExamples`. -/
-def discardingReset (w : World) (i : Nat) (d : Nat) : World :=
-  { w with copies := fun x => if x = i then some ⟨w.next, none⟩ else w.copies x
-           pending := fun x => if x = i then [] else w.pending x
-           resets := d :: w.resets, next := w.next + 1 }
-
 /-- §10 on an occupied path: equal complete bytes count as delivered;
-different bytes reset this copy as a new device. The reset carries the old
-database's made, unrecorded key and its pending deletions into the new
-database as pending `DeleteAccessKey` (T203). A failed comparison read
-changes nothing and is not a step here. -/
+different bytes reset this copy as a new device, which keeps the deletions
+the old database owed but not the key it made (T267). A failed comparison
+read changes nothing and is not a step here. -/
 def deliver (w : World) (i : Nat) : World :=
   match w.copies i with
   | some ⟨d, some ⟨a, k, some b, false⟩⟩ =>
@@ -123,7 +114,6 @@ def deliver (w : World) (i : Nat) : World :=
     | some o =>
       if o.bytes = b then w.put i (some ⟨d, some ⟨a, k, some b, true⟩⟩)
       else { w with copies := fun x => if x = i then some ⟨w.next, none⟩ else w.copies x
-                    pending := fun x => if x = i then k.toList ++ w.pending x else w.pending x
                     resets := d :: w.resets, next := w.next + 1 }
   | _ => w
 
@@ -659,123 +649,5 @@ theorem start_settled (devices : List Nat) (next : Nat) : Settled (start devices
     obtain ⟨_, -, rfl⟩ := hk; simp [att] at ha
   · intro k c j o _ _ ho; simp [start] at ho
   · intro p hp; simp [start] at hp
-
-/-! ### The reset keeps every made key recorded or pending deletion (T203) -/
-
-/-- Steps that lose a database outright: a restore overwriting it. -/
-def Step.dropsDatabase : Step → Bool
-  | .drop _ => true
-  | _ => false
-
-/-- The reset branch of `deliver`: the old copy's journaled key and its
-pending deletions stay pending in the slot's new database. -/
-theorem reset_keeps_accounted {w : World} (ha : Accounted w) (i d a : Nat) (k : Option Nat)
-    (b : Bytes) (hc : w.copies i = some ⟨d, some ⟨a, k, some b, false⟩⟩) :
-    Accounted { w with copies := fun x => if x = i then some ⟨w.next, none⟩ else w.copies x
-                       pending := fun x => if x = i then k.toList ++ w.pending x else w.pending x
-                       resets := d :: w.resets, next := w.next + 1 } := by
-  intro p hp
-  rcases ha p hp with r | ⟨j, hj, held⟩ | ⟨j, hj, pend⟩
-  · exact .inl r
-  · by_cases hji : j = i
-    · subst j
-      simp [heldKey, hc] at held
-      refine .inr (.inr ⟨i, hj, ?_⟩)
-      simp [held]
-    · refine .inr (.inl ⟨j, hj, ?_⟩)
-      simp only [hji, ↓reduceIte]; exact held
-  · refine .inr (.inr ⟨j, hj, ?_⟩)
-    simp only
-    split
-    · subst j; exact List.mem_append_right _ pend
-    · exact pend
-
-/-- Every step but losing a database keeps every live key recorded, journaled
-or pending deletion. In particular §10's reset on a delivery path does. -/
-theorem accounted_step {w : World} (h : Inv w) (ha : Accounted w) (sealer : Sealer) (s : Step)
-    (hs : s.dropsDatabase = false) : Accounted (step sealer w s) := by
-  cases s with
-  | drop i => simp [Step.dropsDatabase] at hs
-  | begin i =>
-    simp only [step]; unfold begin; split
-    · rename_i d hc
-      intro p hp
-      rcases ha p hp with r | ⟨k, hk', held⟩ | pend
-      · exact .inl r
-      · refine .inr (.inl ⟨k, hk', ?_⟩)
-        change heldKey (if k = i then _ else _) = _
-        split
-        · subst k; simp [heldKey, hc] at held
-        · exact held
-      · exact .inr (.inr pend)
-    · exact ha
-  | mint i =>
-    simp only [step]; unfold mint; split
-    · rename_i d a s v hc
-      intro p hp
-      have hi := slot_bound h hc
-      simp only [List.mem_append, List.mem_filter, List.mem_singleton] at hp
-      rcases hp with ⟨hp, -⟩ | rfl
-      · rcases ha p hp with r | ⟨k, hk', held⟩ | pend
-        · exact .inl r
-        · refine .inr (.inl ⟨k, hk', ?_⟩)
-          change heldKey (if k = i then _ else _) = _
-          split
-          · subst k; simp [heldKey, hc] at held
-          · exact held
-        · exact .inr (.inr pend)
-      · exact .inr (.inl ⟨i, hi, by simp [heldKey]⟩)
-    · exact ha
-  | sealKey i =>
-    simp only [step]; unfold sealKey; split
-    · rename_i d a k v hc
-      exact accounted_put_same ha hc (by simp [heldKey])
-    · exact ha
-  | record i =>
-    simp only [step]; unfold record; split
-    · rename_i d a k sealed hc
-      intro p hp
-      rcases ha p hp with r | ⟨k₁, hk', held⟩ | pend
-      · exact .inl (List.mem_cons_of_mem _ r)
-      · by_cases hki : k₁ = i
-        · subst k₁; simp [heldKey, hc] at held; subst held; exact .inl List.mem_cons_self
-        · refine .inr (.inl ⟨k₁, hk', ?_⟩)
-          change heldKey (if k₁ = i then _ else _) = _
-          simp only [hki, ↓reduceIte]; exact held
-      · exact .inr (.inr pend)
-    · exact ha
-  | clone i =>
-    simp only [step]; unfold clone; split
-    · rename_i c hc
-      intro p hp
-      rcases ha p hp with r | ⟨k, hk', held⟩ | ⟨k, hk', pend⟩
-      · exact .inl r
-      · refine .inr (.inl ⟨k, by simp only; omega, ?_⟩)
-        change heldKey (if k = w.slots then _ else _) = _
-        simp only [show ¬ k = w.slots by omega, ↓reduceIte]; exact held
-      · refine .inr (.inr ⟨k, by simp only; omega, ?_⟩)
-        simp only [show ¬ k = w.slots by omega, ↓reduceIte]; exact pend
-    · exact ha
-  | deliver i =>
-    simp only [step]; unfold deliver; split
-    · rename_i d a k b hc
-      split
-      · exact accounted_put_same (c' := ⟨d, some ⟨a, k, some b, true⟩⟩) ha hc rfl
-      · split
-        · exact accounted_put_same (c' := ⟨d, some ⟨a, k, some b, true⟩⟩) ha hc rfl
-        · exact reset_keeps_accounted ha i d a k b hc
-    · exact ha
-
-/-- A history that never loses a database outright keeps every key it made
-recorded, journaled or pending deletion, whatever it backs up, clones or
-resets. Only a database lost before its key is recorded can orphan one. -/
-theorem accounted_run {w : World} (h : Inv w) (ha : Accounted w) (sealer : Sealer)
-    (steps : List Step) (hs : ∀ s ∈ steps, s.dropsDatabase = false) :
-    Accounted (run sealer w steps) := by
-  induction steps generalizing w with
-  | nil => exact ha
-  | cons s ss ih =>
-    exact ih (step_inv h sealer s) (accounted_step h ha sealer s (hs s List.mem_cons_self))
-      (fun x hx => hs x (List.mem_cons_of_mem _ hx))
 
 end CovenStorage.KeyDelivery
