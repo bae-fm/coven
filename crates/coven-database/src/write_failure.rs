@@ -1,4 +1,5 @@
 //! Preserve the facade's callback failure when a transaction or cleanup also fails.
+//! A committed result never becomes a failure because of cleanup (§3, §16.6).
 
 use crate::{CovenError, DbError};
 
@@ -8,10 +9,32 @@ use crate::{CovenError, DbError};
 pub trait WriteFailure: From<DbError> + From<rusqlite::Error> {
     /// Retain a failed rollback alongside the original failure.
     fn with_rollback(self, rollback: rusqlite::Error) -> Self;
-    /// Retain the write's outcome and every failed byte-removal operation.
-    fn with_cleanup(write: Result<(), Self>, failures: Vec<DbError>) -> Self
+    /// Retain the failed write's error and every failed byte-removal operation.
+    fn with_cleanup(write: Self, failures: Vec<DbError>) -> Self
     where
         Self: Sized;
+}
+
+/// The outcome of an operation whose released bytes were then removed. A
+/// failed removal stays recorded for the next write or open (§16.6): it
+/// joins a failed operation's error, and leaves a committed result as it is.
+pub(crate) fn after_cleanup<R, E: WriteFailure>(
+    result: Result<R, E>,
+    failures: Vec<DbError>,
+) -> Result<R, E> {
+    if failures.is_empty() {
+        return result;
+    }
+    match result {
+        Ok(result) => {
+            tracing::error!(
+                ?failures,
+                "removing released file bytes failed; their records stay for the next write or open"
+            );
+            Ok(result)
+        }
+        Err(error) => Err(E::with_cleanup(error, failures)),
+    }
 }
 
 impl WriteFailure for DbError {
@@ -21,9 +44,9 @@ impl WriteFailure for DbError {
             rollback,
         }
     }
-    fn with_cleanup(write: Result<(), Self>, failures: Vec<DbError>) -> Self {
+    fn with_cleanup(write: Self, failures: Vec<DbError>) -> Self {
         Self::FileCleanup {
-            write: write.map_err(Box::new),
+            write: Err(Box::new(write)),
             failures,
         }
     }
@@ -39,14 +62,11 @@ impl WriteFailure for CovenError {
             },
         }
     }
-    fn with_cleanup(write: Result<(), Self>, failures: Vec<DbError>) -> Self {
+    fn with_cleanup(write: Self, failures: Vec<DbError>) -> Self {
         match write {
-            Ok(()) => Self::Database(DbError::with_cleanup(Ok(()), failures)),
-            Err(Self::Database(error)) => {
-                Self::Database(DbError::with_cleanup(Err(error), failures))
-            }
-            Err(error) => Self::FileCleanup {
-                write: Err(Box::new(error)),
+            Self::Database(error) => Self::Database(DbError::with_cleanup(error, failures)),
+            error => Self::FileCleanup {
+                write: Box::new(error),
                 failures,
             },
         }

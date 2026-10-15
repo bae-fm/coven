@@ -4,6 +4,9 @@ use crate::{
     *,
 };
 
+/// A committed write returns its own result while a removal fails: the
+/// removal stays recorded, and an app that retries on `Err` would apply its
+/// change twice (§3, §16.6). Opening reports the failure.
 #[tokio::test]
 async fn failed_deletions_remain_recorded_until_a_write_or_open_retries_them() {
     for reopen in [false, true] {
@@ -18,8 +21,9 @@ async fn failed_deletions_remain_recorded_until_a_write_or_open_retries_them() {
         std::fs::remove_file(&path).unwrap();
         std::fs::create_dir(&path).unwrap();
         // Upload completion releases the queue's copy.
-        let error = complete(&db).await.unwrap_err();
-        assert!(matches!(error, DbError::FileCleanup { write: Ok(()), .. }));
+        complete(&db).await.unwrap();
+        // Later writes still commit and return their results.
+        assert_eq!(db.write(|_| Ok(7)).await.unwrap(), 7);
         assert_eq!(local_count(&db, "files"), 1);
         assert_eq!(local_count(&db, "_coven_device_files"), 0);
         assert_eq!(local_count(&db, "_coven_file_removals"), 1);
@@ -68,10 +72,7 @@ async fn deleting_a_pending_record_can_fail_without_losing_the_retry() {
             "record stays",
         )
     });
-    let error = complete(&db).await.unwrap_err();
-    assert!(
-        matches!(error, DbError::FileCleanup { write: Ok(()), failures } if matches!(failures.as_slice(), [DbError::Sqlite(_)]))
-    );
+    complete(&db).await.unwrap();
     assert_eq!(local_count(&db, "_coven_file_removals"), 1);
     assert!(owned_paths(&store).is_empty());
     db.inspect_writer(|sql| sql.batch("DROP TRIGGER _coven_fail_cleanup").unwrap());

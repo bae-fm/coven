@@ -21,11 +21,11 @@ pub enum CovenError {
         #[source]
         rollback: rusqlite::Error,
     },
-    /// File cleanup failed, retaining the callback's outcome and every failure.
-    #[error("file cleanup failed: {failures:?}; write outcome: {write:?}")]
+    /// File cleanup failed after the callback failed, retaining both.
+    #[error("file cleanup failed: {failures:?}; write failed: {write}")]
     FileCleanup {
-        /// Ok if the transaction committed; otherwise its original error.
-        write: Result<(), Box<CovenError>>,
+        /// The callback's original error.
+        write: Box<CovenError>,
         /// Each failed byte removal or pending-record update.
         failures: Vec<DbError>,
     },
@@ -493,10 +493,11 @@ pub enum DbError {
     /// Retaining the store while staging file bytes failed.
     #[error(transparent)]
     Lock(#[from] StoreLockError),
-    /// File cleanup failed, retaining the write's outcome and every failure.
+    /// File cleanup failed, retaining every failure: on opening (`Ok`), or
+    /// after a failed write, whose error it keeps (§16.6).
     #[error("file cleanup failed: {failures:?}; write outcome: {write:?}")]
     FileCleanup {
-        /// Ok if the transaction committed; otherwise its original error.
+        /// `Ok` on opening; otherwise the failed write's error.
         write: Result<(), Box<DbError>>,
         /// Each failed byte removal or pending-record update.
         failures: Vec<DbError>,

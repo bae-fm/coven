@@ -311,19 +311,13 @@ impl DatabaseInner {
     }
 
     /// `result`, after removing the files it released, as `chosen` names
-    /// them; a failed removal keeps its record for the next write or open
-    /// and joins the result.
+    /// them; a failed removal keeps its record for the next write or open.
     fn finish_removals<R, E: crate::WriteFailure>(
         &self,
         result: Result<R, E>,
         chosen: crate::file_removals::Chosen,
     ) -> Result<R, E> {
-        let failures = self.remove_chosen(chosen);
-        if failures.is_empty() {
-            result
-        } else {
-            Err(E::with_cleanup(result.map(|_| ()), failures))
-        }
+        crate::write_failure::after_cleanup(result, self.remove_chosen(chosen))
     }
 }
 

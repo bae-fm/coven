@@ -514,14 +514,7 @@ impl FileDatabase {
     }
     async fn removed(&self, chosen: crate::file_removals::Chosen) -> Result<(), DbError> {
         let failures = self.remove_released(chosen).await?;
-        if failures.is_empty() {
-            Ok(())
-        } else {
-            Err(DbError::FileCleanup {
-                write: Ok(()),
-                failures,
-            })
-        }
+        crate::write_failure::after_cleanup(Ok(()), failures)
     }
     /// Evict unpinned chunks in least-recently-read order, independently per namespace.
     pub async fn trim_cache(&self, namespace: &str) -> Result<(), DbError> {

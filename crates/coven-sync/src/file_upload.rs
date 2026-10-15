@@ -172,9 +172,6 @@ impl FilesInner {
                 }
                 Ok(stored)
             }
-            Err(UploadFailure::File(FileReadError::Database(
-                error @ DbError::FileCleanup { write: Ok(()), .. },
-            ))) => Err(error.into()),
             Err(error) => {
                 tracing::debug!(?error, file = %item.file.id(), "file upload attempt failed");
                 self.record_failure(&item, &error).await?;

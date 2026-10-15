@@ -305,7 +305,7 @@ pub enum CovenError {
     /// calls fail with `DbError::RollbackFailed` until the store is reopened (§5).
     Rollback { operation: Box<CovenError>, rollback: rusqlite::Error },
     /// Cleanup also failed after an app callback failed.
-    FileCleanup { write: Result<(), Box<CovenError>>, failures: Vec<DbError> },
+    FileCleanup { write: Box<CovenError>, failures: Vec<DbError> },
     /// The database or a write's validation failed.
     Database(DbError),
     /// An app migration failed or cannot run on this schema.
@@ -459,8 +459,8 @@ pub enum DbError {
     FileKey(CryptoError),
     /// Retaining the store while staging file bytes failed.
     Lock(StoreLockError),
-    /// Removing owned bytes or their pending records failed. A committed write
-    /// stays committed; an unsuccessful write retains its original error (§16.6).
+    /// Removing owned bytes or their records failed: on opening (`Ok`), or
+    /// after a failed write, whose error it retains (§16.6).
     FileCleanup { write: Result<(), Box<DbError>>, failures: Vec<DbError> },
     /// A transaction failed and rolling it back failed too. Later calls fail
     /// with `RollbackFailed` until the store is reopened (§5).

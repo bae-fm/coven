@@ -184,15 +184,7 @@ pub(super) fn put<L>(
         Ok(false) => Ok(()),
         Err(error) => Err(error),
     };
-    let failures = release(access, name);
-    if failures.is_empty() {
-        result
-    } else {
-        Err(DbError::FileCleanup {
-            write: result.map_err(Box::new),
-            failures,
-        })
-    }
+    crate::write_failure::after_cleanup(result, release(access, name))
 }
 /// Whether any chunk of the range already has a stored entry.
 fn overlaps(

@@ -156,7 +156,7 @@ are those of [§2](#2-threat-model); the write-ups state their additional limits
     ([E3](api.md#e3-writing)). SQLite/disk failures, `TransactionEnded` and
     rollback failures are local failures too; a closed or unusable installation
     cannot accept writes (§10, [E1](api.md#e1-opening)). A post-commit file-cleanup
-    failure preserves and reports the committed outcome (§16.6).
+    failure leaves the committed result returned (§16.6).
   Uncached file reads require storage (§16.3); administrative calls require
   online catch-up (§9). The [queue model's `reloading_blocks_commit`](proofs/queue.md#availability-and-commit-refusals)
   proves the reload gate. Commit has no network precondition in its transition
@@ -5669,9 +5669,9 @@ Carol's tablet:
     Names still held by staging or cache reservations are retained. Cancelling
     either releases its active names synchronously, without requiring an async
     runtime. The durable removal records retain its abandoned bytes for the next
-    write or open, which reports any deletion failure.
-  - A deletion that fails stays recorded and is tried again then; the
-    write that let the bytes go stays committed, and reports the failure.
+    write or open.
+  - A deletion that fails stays recorded and is tried again then. A
+    committed write still returns its result; opening reports the failure.
 
 ## 17. Schema changes
 
