@@ -1,6 +1,10 @@
-//! Download first, then replace all selected audiences and the journal together.
+//! Choose each audience's start and read to their common point
+//! (`snapshot_common_point.rs`), download, then replace all selected
+//! audiences and the journal together.
 
-use super::{catalog::inconsistent, io, point, StoreLogSync};
+use super::catalog::{inconsistent, Catalog};
+use super::common_point::{common_point, Origin, Outcome, Reads, Start, Unknown};
+use super::{io, prefix::Candidate, StoreLogSync};
 use crate::{
     operation_data::Data,
     operations::{Output, Progress},
@@ -10,9 +14,13 @@ use crate::{
 };
 use coven_database::{
     DownloadedPartStream, DownloadedWriteStream, OperationRecord, SnapshotReload, SnapshotSource,
+    StoreLog,
 };
-use coven_format::{sealed_snapshot::SnapshotObjectPrefix, write_stream::WriteHeaderFrame};
-use coven_merge::WriteId;
+use coven_format::{
+    sealed_snapshot::SnapshotObjectPrefix, value::WritePositions, write_stream::WriteHeaderFrame,
+};
+use coven_merge::{Audience, WriteId};
+use coven_storage::StoredObject;
 use std::collections::{BTreeMap, BTreeSet};
 
 impl StoreLogSync {
@@ -59,23 +67,15 @@ impl StoreLogSync {
                         },
                     ));
                 }
-                let mut files = ReloadFiles {
-                    snapshots: Vec::new(),
-                    empty: Vec::new(),
-                    absent: Vec::new(),
-                    writes: Vec::new(),
-                    boundaries: self.snapshot_boundaries(&local.log).await?,
-                    expected_entries: local
-                        .log
-                        .entries
-                        .iter()
-                        .map(|e| (e.entry.position.device, e.entry.position.number))
-                        .collect::<BTreeSet<_>>()
-                        .into_iter()
-                        .collect(),
-                };
-                let mut highest = BTreeMap::new();
-                let mut unknown_empty = false;
+                let boundaries = self.snapshot_boundaries(&local.log).await?;
+                let expected_entries = local
+                    .log
+                    .entries
+                    .iter()
+                    .map(|e| (e.entry.position.device, e.entry.position.number))
+                    .collect::<BTreeSet<_>>()
+                    .into_iter()
+                    .collect();
                 let mut catalogs = Vec::new();
                 for audience in &audiences {
                     catalogs.push((
@@ -95,11 +95,13 @@ impl StoreLogSync {
                 // one whose coverage would skip a deleted write's part in that
                 // audience (§15, §19.1; storelog-data `ReloadWait.choose`,
                 // `deleted_part_never_skipped`).
-                let mut selections = Vec::new();
+                let mut starts = BTreeMap::new();
+                let mut unknown_empty = BTreeSet::new();
                 for (audience, mut catalog) in catalogs {
-                    super::include_positions(&mut highest, &catalog.required_positions.0);
-                    let candidate = match catalog.take_current(&local.log) {
-                        Ok(Some(candidate)) => candidate,
+                    let (positions, origin) = match catalog.take_current(&local.log) {
+                        Ok(Some(candidate)) => {
+                            (candidate.prefix.writes.clone(), Origin::Selected(candidate))
+                        }
                         Err(reason) => {
                             return Err(SyncError::Pending(Box::new(
                                 self.operation_condition(record, reason).await?,
@@ -111,119 +113,74 @@ impl StoreLogSync {
                             ))
                         }
                         Ok(None) => {
-                            unknown_empty |= catalog.newest_unknown.is_some();
-                            files.empty.push(audience.clone());
-                            continue;
+                            if catalog.newest_unknown.is_some() {
+                                unknown_empty.insert(audience.clone());
+                            }
+                            (WritePositions(Vec::new()), Origin::Empty)
                         }
                     };
-                    selections.push(candidate);
+                    let start = Start {
+                        positions,
+                        selected_at: 0,
+                        origin,
+                    };
+                    starts.insert(audience.clone(), start);
                 }
-                let mut names = self
-                    .reserve_snapshot_files(record, &mut task, selections.len())
-                    .await?
-                    .into_iter();
-                for candidate in selections {
-                    let file = names.next().expect("reserved snapshot files");
-                    match self.download_snapshot(candidate, file).await? {
-                        Ok(snapshot) => files.snapshots.push(snapshot),
-                        Err(reason) => {
-                            return Err(SyncError::Pending(Box::new(
-                                self.operation_condition(record, reason).await?,
-                            )))
-                        }
-                    }
-                }
-                let selected = files
-                    .snapshots
-                    .iter()
-                    .map(|snapshot| {
-                        SnapshotObjectPrefix::decode(&snapshot.prefix).map(|p| p.writes)
-                    })
-                    .collect::<Result<Vec<_>, _>>()?;
-                let mut positions = selected.clone();
-                // Unchanged audiences keep their local frontier. Download the
-                // shared headers and any still-unread parts needed to bring
-                // those audiences through the selected snapshots' positions.
+                // Unchanged audiences keep their state at the local positions,
+                // which also join the frozen requirement (`committed_safe`).
                 if audiences.len() < readable.len() {
-                    positions.push(self.database.sync_state(Vec::new()).await?.positions);
+                    let positions = self.database.sync_state(Vec::new()).await?.positions;
+                    for audience in readable.difference(&audiences) {
+                        let start = Start {
+                            positions: positions.clone(),
+                            selected_at: 0,
+                            origin: Origin::Kept,
+                        };
+                        starts.insert(audience.clone(), start);
+                    }
                 }
                 let (required, waiting) = self.database.reload_positions().await?;
                 let waiting: BTreeSet<_> = waiting.into_iter().collect();
-                super::include_positions(
-                    &mut highest,
-                    positions.iter().flat_map(|p| &p.0).chain(&required.0),
-                );
-                let stuck = crate::pending_logs::local_refusals(&self.database).await?;
-                let readable = readable.into_iter().collect();
-                let storage = self.storage.as_deref().ok_or(SyncError::NoStorage)?;
-                let mut replays = ReplayCache::new(&local.log);
-                let mut needed = Vec::new();
-                for (device, highest) in highest {
-                    let lowest = if files.empty.is_empty() {
-                        positions
-                            .iter()
-                            .map(|p| point(p, device))
-                            .min()
-                            .expect("a readable store audience")
-                    } else {
-                        0
-                    };
-                    for previous in lowest..highest {
-                        let number = previous + 1;
-                        let id = WriteId { device, number };
-                        if waiting.contains(&id) {
-                            continue;
-                        }
-                        // The reload waits on the refused write, whose own
-                        // record is the refusal. Recording the refusal here
-                        // would retry only after an update, so a snapshot
-                        // covering the gap would never be tried (§15;
-                        // storelog-data `refused_write_reload_counterexample`,
-                        // `waiting_on_the_write_loads`).
-                        if let Some(refused) =
-                            stuck.iter().find_map(|refusal| match refusal.object {
-                                coven_database::LogObject::Write(refused)
-                                    if refusal.blocks(coven_database::LogObject::Write(id)) =>
-                                {
-                                    Some(refused)
-                                }
-                                _ => None,
-                            })
-                        {
-                            let reason = crate::PendingReason::Waits(crate::Prerequisite::Object(
-                                crate::write_seal::path(self.directory.id(), refused),
-                            ));
-                            return Err(SyncError::Pending(Box::new(
-                                self.operation_condition(record, reason).await?,
-                            )));
-                        }
-                        // Read to the fixed target by exact number, never a
-                        // listing of the moving log tail.
+                let mut reads = ReloadReads {
+                    sync: self,
+                    record,
+                    log: &local.log,
+                    readable: &readable,
+                    refused: crate::pending_logs::local_refusals(&self.database).await?,
+                    objects: BTreeMap::new(),
+                    catalogs: BTreeMap::new(),
+                };
+                let plan = match common_point(&mut reads, &local.log, starts, &required, &waiting)
+                    .await?
+                {
+                    Outcome::Complete(plan) => plan,
+                    // Unresolved history waits for the write, or for a snapshot
+                    // showing its absence is a deletion (§15).
+                    Outcome::Unpublished(id) => {
                         let path = crate::write_seal::path(self.directory.id(), id);
-                        match storage.status(&path).await? {
-                            Some(object) => needed.push(object),
-                            // Only a selected snapshot accounts for a missing
-                            // write. The local frontier passed it for unchanged
-                            // audiences, while a returning circle may have
-                            // skipped its part there (§14.4).
-                            None if selected.iter().any(|p| p.covers(id)) => {
-                                files.absent.push((device, number))
-                            }
-                            None => {
-                                return Err(coven_database::DbError::Snapshot(
-                                    coven_database::SnapshotError::MissingWrites {
-                                        missing: vec![id],
-                                    },
-                                )
-                                .into())
-                            }
-                        }
+                        let reason = crate::PendingReason::Waits(crate::Prerequisite::Object(path));
+                        return Err(SyncError::Pending(Box::new(
+                            self.operation_condition(record, reason).await?,
+                        )));
                     }
-                }
+                    Outcome::Unknown(Unknown::Update(update)) => {
+                        return Err(SyncError::UpdateRequired(update))
+                    }
+                    Outcome::Unknown(Unknown::Unverified(path)) => {
+                        let reason = crate::PendingReason::Waits(crate::Prerequisite::Object(path));
+                        return Err(SyncError::Pending(Box::new(
+                            self.operation_condition(record, reason).await?,
+                        )));
+                    }
+                };
                 // An unverified prefix may cover deleted history. An empty
                 // audience is established only while some log still starts
                 // at its first write.
-                if unknown_empty && needed.is_empty() {
+                let empty_unknown = plan.starts.iter().any(|(audience, start)| {
+                    matches!(start.origin, Origin::Empty) && unknown_empty.contains(audience)
+                });
+                if empty_unknown && plan.present.is_empty() {
+                    let storage = self.storage.as_deref().ok_or(SyncError::NoStorage)?;
                     let mut present = false;
                     for device in local.log.replay.state.devices.keys() {
                         let first = WriteId {
@@ -240,6 +197,46 @@ impl StoreLogSync {
                         return Err(inconsistent("unreadable snapshot prefixes and missing logs cannot establish an empty audience"));
                     }
                 }
+                let objects = std::mem::take(&mut reads.objects);
+                let mut files = ReloadFiles {
+                    snapshots: Vec::new(),
+                    empty: Vec::new(),
+                    absent: plan
+                        .deleted
+                        .iter()
+                        .map(|id| (id.device, id.number))
+                        .collect(),
+                    writes: Vec::new(),
+                    boundaries,
+                    expected_entries,
+                };
+                let mut selections = Vec::new();
+                for (audience, start) in plan.starts {
+                    match start.origin {
+                        Origin::Selected(candidate) => selections.push(candidate),
+                        Origin::Empty => files.empty.push(audience),
+                        Origin::Kept => (),
+                    }
+                }
+                let mut names = self
+                    .reserve_snapshot_files(record, &mut task, selections.len())
+                    .await?
+                    .into_iter();
+                for candidate in selections {
+                    let file = names.next().expect("reserved snapshot files");
+                    match self.download_snapshot(candidate, file).await? {
+                        Ok(snapshot) => files.snapshots.push(snapshot),
+                        Err(reason) => {
+                            return Err(SyncError::Pending(Box::new(
+                                self.operation_condition(record, reason).await?,
+                            )))
+                        }
+                    }
+                }
+                // The committing round's own reads: each write some audience
+                // lacks, retained as checked bytes until the commit.
+                let needed: Vec<_> = plan.present.iter().map(|id| objects[id].clone()).collect();
+                let mut replays = ReplayCache::new(&local.log);
                 let mut count = 0;
                 for object in &needed {
                     match self.open_write_header(object).await {
@@ -526,6 +523,83 @@ impl StoreLogSync {
                     .map_err(|_| coven_database::DbError::DamagedDatabase)?,
             },
         })
+    }
+}
+
+/// A reload's reads of storage: exact write statuses and fresh catalogs.
+struct ReloadReads<'a> {
+    sync: &'a StoreLogSync,
+    record: &'a OperationRecord,
+    log: &'a StoreLog,
+    readable: &'a BTreeSet<Audience>,
+    /// This device's permanent log refusals.
+    refused: Vec<coven_database::LogRefusal>,
+    /// Each present write's object, from its latest status.
+    objects: BTreeMap<WriteId, StoredObject>,
+    /// The readable audiences' catalogs from the latest refresh.
+    catalogs: BTreeMap<Audience, Catalog>,
+}
+
+impl Reads for ReloadReads<'_> {
+    type Body = Candidate;
+
+    async fn present(&mut self, id: WriteId) -> Result<bool, SyncError> {
+        // The reload waits on the refused write, whose own record is the
+        // refusal. Recording the refusal here would retry only after an
+        // update, so a snapshot covering the gap would never be tried (§15;
+        // storelog-data `refused_write_reload_counterexample`,
+        // `waiting_on_the_write_loads`).
+        let blocked = self
+            .refused
+            .iter()
+            .find_map(|refusal| match refusal.object {
+                coven_database::LogObject::Write(refused)
+                    if refusal.blocks(coven_database::LogObject::Write(id)) =>
+                {
+                    Some(refused)
+                }
+                _ => None,
+            });
+        if let Some(refused) = blocked {
+            let reason = crate::PendingReason::Waits(crate::Prerequisite::Object(
+                crate::write_seal::path(self.sync.directory.id(), refused),
+            ));
+            return Err(SyncError::Pending(Box::new(
+                self.sync.operation_condition(self.record, reason).await?,
+            )));
+        }
+        let storage = self.sync.storage.as_deref().ok_or(SyncError::NoStorage)?;
+        let path = crate::write_seal::path(self.sync.directory.id(), id);
+        Ok(match storage.status(&path).await? {
+            Some(object) => {
+                self.objects.insert(id, object);
+                true
+            }
+            None => {
+                self.objects.remove(&id);
+                false
+            }
+        })
+    }
+
+    async fn refresh(&mut self) -> Result<super::common_point::Fresh, SyncError> {
+        let (fresh, catalogs) = self.sync.fresh_catalog(self.readable, self.log).await?;
+        self.catalogs = catalogs;
+        Ok(fresh)
+    }
+
+    async fn select(&mut self, audience: &Audience) -> Result<Candidate, SyncError> {
+        let catalog = self
+            .catalogs
+            .get_mut(audience)
+            .expect("a replaced audience is readable");
+        match catalog.take_current(self.log) {
+            Ok(Some(candidate)) => Ok(candidate),
+            Ok(None) => Err(inconsistent("a replacement has no current snapshot")),
+            Err(reason) => Err(SyncError::Pending(Box::new(
+                self.sync.operation_condition(self.record, reason).await?,
+            ))),
+        }
     }
 }
 

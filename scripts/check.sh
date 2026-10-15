@@ -436,6 +436,7 @@ proofs() {
             store_log_sync::tests::snapshots::publication::io_differential_publication \
             store_log_sync::tests::snapshots::publication::io_differential_ordinary_snapshot_writes \
             store_log_sync::tests::snapshots::held::io_differential_held \
+            store_log_sync::tests::snapshots::common_point::io_differential_common_point \
             retry_waits::tests::io_differential_waiting \
             store_log_sync::tests::operations::evidence::io_differential_waiting_evidence \
             store_log_sync::tests::operations::evidence::io_differential_wait_rows \

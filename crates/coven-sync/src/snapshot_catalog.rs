@@ -1,5 +1,6 @@
 //! Prefix-only ordering followed by streamed authentication and database checks.
 
+use super::common_point::{Fresh, FreshAudience, Unknown};
 use super::prefix::Candidate;
 use super::{io, StoreLogSync};
 use crate::{snapshot_data::SavedSnapshot, Refusal, SyncError};
@@ -9,12 +10,13 @@ use coven_database::{FileEvidence, StoreLog, UnprovenFiles};
 use coven_format::sealed_snapshot::{SnapshotObjectLayout, SnapshotObjectPrefix};
 use coven_merge::Audience;
 use coven_storage::{ObjectPrefix, StoredObject};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// A listed snapshot whose signed prefix verified, names this audience and
 /// counts. Its positions establish coverage whatever this device found in its
 /// body and whether it accepts its key: readers choose by the authenticated
 /// prefix (§15, §19.1).
+#[derive(Clone)]
 pub(crate) struct Verified {
     pub(crate) object: StoredObject,
     pub(crate) prefix: SnapshotObjectPrefix,
@@ -103,9 +105,6 @@ impl StoreLogSync {
         log: &StoreLog,
     ) -> Result<Catalog, SyncError> {
         let storage = self.storage.as_deref().ok_or(SyncError::NoStorage)?;
-        // A snapshot's authorized key stays eligible when replay drops its
-        // introduction; an unauthorized or conflicting one never is (§11).
-        let keys = crate::key_introductions::needed(log);
         let prefix = ObjectPrefix::audience_snapshots(self.directory.id(), audience);
         let objects = match self.reads.snapshot_listing(prefix.as_str()) {
             Some(objects) => objects,
@@ -115,6 +114,19 @@ impl StoreLogSync {
                 objects
             }
         };
+        self.listed_catalog(audience, log, objects).await
+    }
+
+    /// Check each listed snapshot of an audience and decide its record.
+    async fn listed_catalog(
+        &self,
+        audience: &Audience,
+        log: &StoreLog,
+        objects: Vec<StoredObject>,
+    ) -> Result<Catalog, SyncError> {
+        // A snapshot's authorized key stays eligible when replay drops its
+        // introduction; an unauthorized or conflicting one never is (§11).
+        let keys = crate::key_introductions::needed(log);
         let mut candidates = Vec::new();
         let mut verified = Vec::new();
         let mut newest_unknown = None;
@@ -234,6 +246,68 @@ impl StoreLogSync {
             )
         });
         Ok(catalog)
+    }
+
+    /// A complete catalog of every audience's snapshots, listed now, after the
+    /// reads it must follow (§15). Each readable audience's listing decides
+    /// its records as any listing does and serves the rest of this pass; a
+    /// prefix of another audience only adds its counting coverage. Returns
+    /// the readable audiences' catalogs for selecting from it.
+    pub(super) async fn fresh_catalog(
+        &self,
+        readable: &BTreeSet<Audience>,
+        log: &StoreLog,
+    ) -> Result<(Fresh, BTreeMap<Audience, Catalog>), SyncError> {
+        let storage = self.storage.as_deref().ok_or(SyncError::NoStorage)?;
+        let store = self.directory.id();
+        let mut listed: BTreeMap<_, Vec<_>> = readable
+            .iter()
+            .map(|audience| (audience.clone(), Vec::new()))
+            .collect();
+        let mut others = Vec::new();
+        for object in storage.list(&ObjectPrefix::snapshots(store)).await? {
+            let Some(id) = object.path.snapshot_id() else {
+                continue;
+            };
+            match listed.get_mut(&id.audience) {
+                Some(objects) => objects.push(object),
+                None => others.push(object),
+            }
+        }
+        let mut fresh = Fresh {
+            readable: BTreeMap::new(),
+            others: Vec::new(),
+        };
+        let mut catalogs = BTreeMap::new();
+        for (audience, objects) in listed {
+            let prefix = ObjectPrefix::audience_snapshots(store, &audience);
+            self.reads.keep_snapshot_listing(prefix.as_str(), &objects);
+            let catalog = self.listed_catalog(&audience, log, objects).await?;
+            let unknown = match (catalog.update, &catalog.newest_unknown) {
+                (Some(update), _) => Some(Unknown::Update(update)),
+                (None, Some(path)) => Some(Unknown::Unverified(path.clone())),
+                (None, None) => None,
+            };
+            fresh.readable.insert(
+                audience.clone(),
+                FreshAudience {
+                    verified: catalog.verified.clone(),
+                    unknown,
+                },
+            );
+            catalogs.insert(audience, catalog);
+        }
+        for object in others {
+            let prefix = match self.snapshot_prefix(&object, log).await {
+                Ok(Ok(candidate)) => candidate.prefix,
+                Ok(Err(_)) | Err(SyncError::Damaged(_)) => continue,
+                Err(error) => return Err(error),
+            };
+            if prefix.counts(object.stored_at) {
+                fresh.others.push(prefix.writes);
+            }
+        }
+        Ok((fresh, catalogs))
     }
 
     /// This device's refusals of an audience's snapshots that this version

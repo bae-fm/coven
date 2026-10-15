@@ -738,6 +738,7 @@ pub(crate) const POLICY: Policy = Policy {
         "InputStream",
         "SnapshotWriteParts",
         "SnapshotTransfer",
+        "ReloadReads",
         "FileTransfer",
         "FileRangeStream",
         "FileWorker",

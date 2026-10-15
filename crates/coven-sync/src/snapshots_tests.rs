@@ -10,6 +10,8 @@ use std::num::NonZeroU64;
 
 #[path = "snapshot_boundaries_tests.rs"]
 mod boundaries;
+#[path = "snapshot_common_point_tests.rs"]
+mod common_point;
 #[path = "snapshot_held_tests.rs"]
 mod held;
 #[path = "snapshot_publish_tests.rs"]
@@ -412,7 +414,10 @@ async fn concurrent_snapshots_covering_different_pasts_converge_from_either_one(
     .unwrap();
     let mut c = notes_device(storage.clone(), 3).await;
     add_device(&mut c).await;
+    // The reload stops at its selection's target; the other device's write
+    // outside it comes from its log.
     c.sync.reload_from_snapshots().await.unwrap();
+    c.writes.download_writes().await.unwrap();
     assert_eq!(fingerprint(&a).await, fingerprint(&b).await);
     assert_eq!(fingerprint(&a).await, fingerprint(&c).await);
     let path = ObjectPath::snapshot(

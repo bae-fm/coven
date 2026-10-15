@@ -15,6 +15,8 @@ use std::num::NonZeroU64;
 pub(super) mod boundaries;
 #[path = "snapshot_catalog.rs"]
 pub(super) mod catalog;
+#[path = "snapshot_common_point.rs"]
+pub(super) mod common_point;
 #[path = "snapshot_file_retention.rs"]
 mod file_retention;
 #[path = "snapshot_file_scan.rs"]

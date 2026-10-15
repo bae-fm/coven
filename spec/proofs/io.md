@@ -648,6 +648,20 @@ snapshot remains through 1. The new target is 2; the reader obtains audience
 The original `replacement_exceeds_target` remains a checked counterexample to
 committing the independent fixed-target loaders without this fill.
 
+The Rust comparison `io_differential_common_point` (runner check `reload`)
+drives coven's reload rounds over generated histories: snapshots land and
+writes are deleted between rounds, each catalog is listed after the round's
+reads, and the runner repeats `CommonReload.scan`, one `FixedReload.scan` per
+audience, replacing the retried audience from the catalog after its round.
+Both sides report the replaced audience of each round, the final selections,
+the common target and each audience's log receipts, and they agree. Rust
+learns a deletion only from an absent read and a catalog covering the number,
+while the model's selection catalog already knows every earlier deletion. The
+histories therefore keep an audience that lacks a deleted write, and has no
+part in it, from ever covering it later, so that knowledge decides nothing
+the reads do not. Coven also replaces an audience whose existing state the
+reload keeps, which the model has no start for.
+
 **Termination bound.** Let A be the number of readable audiences. After the
 last deletion, a retry can only come from an audience whose selection predates
 that deletion. Its replacement catalog includes every deleted number: the

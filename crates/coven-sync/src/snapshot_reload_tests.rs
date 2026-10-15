@@ -4,7 +4,7 @@ use crate::device_log_sync::tests::circles::{household, identity};
 use crate::device_log_sync::tests::{rows, sql, storage, STORE_ID};
 use crate::store_log_sync::tests::Device;
 use crate::SyncError;
-use coven_database::{Database, DbError, SnapshotError, StoreLogState};
+use coven_database::{Database, DbError, StoreLogState};
 use coven_format::store_log::{MemberRole, StoreChange};
 use coven_foundation::id_source::{CircleId, KeyId};
 use coven_merge::{Audience, WriteId};
@@ -50,8 +50,9 @@ async fn passed(device: &Device, write: WriteId) -> bool {
 /// Ben leaves Gifts, and Ana's write 2 adds a note and a Gifts pin. Ben applies
 /// the note, so his position passes write 2. When Ana readmits him, that
 /// position is no proof he read the pin: he reloads Gifts from storage, and
-/// while write 2 is missing the reload fails as a whole. Removed again before
-/// it commits, he waits for no reload; readmitted, he waits again.
+/// while write 2 is missing with no snapshot showing it published, the whole
+/// reload waits for it (§15). Removed again before it commits, he waits for
+/// no reload; readmitted, he waits again.
 #[tokio::test]
 async fn a_rejoined_member_reloads_the_part_its_passed_position_skipped() {
     let storage = storage();
@@ -95,11 +96,12 @@ async fn a_rejoined_member_reloads_the_part_its_passed_position_skipped() {
         .make_and_upload_entry(membership(true))
         .await
         .unwrap();
+    let waits_on_write = |result: &Result<(), SyncError>| {
+        matches!(result, Err(SyncError::Pending(waiting)) if waiting.reason
+            == crate::PendingReason::Waits(crate::Prerequisite::Object(path.clone())))
+    };
     let failed = ben.sync.sync_store_log().await;
-    assert!(
-        matches!(&failed, Err(SyncError::Database(DbError::Snapshot(SnapshotError::MissingWrites { missing }))) if *missing == [skipped[0]]),
-        "{failed:?}"
-    );
+    assert!(waits_on_write(&failed), "{failed:?}");
     assert_eq!(
         ben.db.reloading_audiences().await.unwrap(),
         BTreeSet::from([Audience::Circle(GIFTS)])
@@ -134,12 +136,8 @@ async fn a_rejoined_member_reloads_the_part_its_passed_position_skipped() {
         .make_and_upload_entry(membership(true))
         .await
         .unwrap();
-    assert!(matches!(
-        ben.sync.sync_store_log().await,
-        Err(SyncError::Database(DbError::Snapshot(
-            SnapshotError::MissingWrites { .. }
-        )))
-    ));
+    let failed = ben.sync.sync_store_log().await;
+    assert!(waits_on_write(&failed), "{failed:?}");
     assert_eq!(
         ben.db.reloading_audiences().await.unwrap(),
         BTreeSet::from([Audience::Circle(GIFTS)])
@@ -232,6 +230,76 @@ async fn a_circle_whose_creation_dropped_reloads_when_it_returns() {
     assert!(state.reads_circle(plans, &identity(5).member()));
     assert!(carol.db.reloading_audiences().await.unwrap().is_empty());
     assert_eq!(pins(&carol.db).await, ["plan"]);
+}
+
+/// io `replacement_fills_other_audience` over real snapshots: Ben selects the
+/// store's snapshot through Ana's write 2 and Gifts' through her write 1.
+/// While he reads, Gifts' snapshot through 2 lands and write 2 is deleted.
+/// Its absence is a deletion the store's snapshot shows, Gifts' new current
+/// snapshot reaches it, so only Gifts is replaced, by that snapshot, and both
+/// commit at 2 with write 2's Gifts part (§15).
+#[tokio::test]
+async fn a_deletion_during_the_reads_replaces_only_the_audience_lacking_it() {
+    let storage = storage();
+    let mut devices = household(storage.clone()).await;
+    let [ana, ben, _] = devices.as_mut_slice() else {
+        panic!("three members")
+    };
+    sql(&ana.db, "INSERT INTO notes VALUES('first','public','one'); INSERT INTO pins VALUES('00000000-0000-4000-8000-000000000001','00000000-0000-0000-0000-00000000000a','one')").await;
+    ana.writes.upload_writes().await.unwrap();
+    ana.write_snapshot(Audience::Circle(GIFTS)).await.unwrap();
+    sql(&ana.db, "INSERT INTO notes VALUES('second','public','two'); INSERT INTO pins VALUES('00000000-0000-4000-8000-000000000002','00000000-0000-0000-0000-00000000000a','two')").await;
+    let second = ana.writes.upload_writes().await.unwrap()[0];
+    ana.write_snapshot(Audience::Store).await.unwrap();
+    let (listed, observed) = tokio::sync::oneshot::channel();
+    let (resume, release) = tokio::sync::oneshot::channel();
+    let gifts = coven_storage::ObjectPrefix::audience_snapshots(STORE_ID, &Audience::Circle(GIFTS));
+    storage.hold_next_listing(gifts, listed, release).await;
+    let path = crate::write_seal::path(STORE_ID, second);
+    let race = async {
+        observed.await.unwrap();
+        ana.write_snapshot(Audience::Circle(GIFTS)).await.unwrap();
+        storage.delete(&path).await.unwrap();
+        resume.send(()).unwrap();
+    };
+    let (reloaded, ()) = tokio::join!(ben.sync.reload_from_snapshots(), race);
+    reloaded.unwrap();
+    assert_eq!(pins(&ben.db).await, ["one", "two"]);
+    assert_eq!(rows(&ben.db).await, rows(&ana.db).await);
+}
+
+/// Carol cannot read Gifts. Ana's write 1 has only a Gifts part, and it is
+/// gone; only Gifts' snapshot, which Carol cannot decrypt, shows it was
+/// published. Reloading to her own write's past, Carol establishes its
+/// deletion from that prefix alone, and since the store has no snapshot
+/// reaching it, it has no store part: she passes its number (§15).
+#[tokio::test]
+async fn another_audiences_prefix_alone_lets_a_reload_pass_a_deleted_write() {
+    let storage = storage();
+    let mut devices = household(storage.clone()).await;
+    let [ana, _, carol] = devices.as_mut_slice() else {
+        panic!("three members")
+    };
+    sql(&ana.db, "INSERT INTO pins VALUES('00000000-0000-4000-8000-000000000001','00000000-0000-0000-0000-00000000000a','gift')").await;
+    let first = ana.writes.upload_writes().await.unwrap()[0];
+    sql(&ana.db, "INSERT INTO notes VALUES('first','public','one')").await;
+    let second = ana.writes.upload_writes().await.unwrap()[0];
+    carol.writes.download_writes().await.unwrap();
+    sql(
+        &carol.db,
+        "INSERT INTO notes VALUES('second','public','two')",
+    )
+    .await;
+    carol.writes.upload_writes().await.unwrap();
+    ana.write_snapshot(Audience::Circle(GIFTS)).await.unwrap();
+    storage
+        .delete(&crate::write_seal::path(STORE_ID, first))
+        .await
+        .unwrap();
+    let before = rows(&carol.db).await;
+    carol.sync.reload_from_snapshots().await.unwrap();
+    assert_eq!(rows(&carol.db).await, before);
+    assert!(passed(carol, second).await);
 }
 
 mod histories {

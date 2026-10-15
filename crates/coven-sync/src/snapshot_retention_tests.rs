@@ -454,13 +454,14 @@ async fn a_newer_format_snapshot_holds_log_retention_like_the_reload() {
         ))
     );
     // A version that reads Ben's snapshot selects it as the newest; it
-    // covers Ana's writes 1 to 3 only, and the reload needs her write 4.
-    // Ana's retained bytes are the newer format's, so a new device reads it.
+    // covers Ana's writes 1 to 3 only, so a new device reads her write 4
+    // from her log, which retention kept.
     republish(&storage, &clock, &ben, &readable).await;
     let mut c = notes_device(storage.clone(), 3).await;
     add_device(&mut c).await;
     c.sync.reload_from_snapshots().await.unwrap();
     assert_eq!(selected_snapshot(&mut c).await, ben);
+    c.writes.download_writes().await.unwrap();
     assert!(tables(&c).await.iter().any(|(id, _, _)| id == "3"));
 }
 
@@ -565,13 +566,15 @@ const JUDGED_BY_BENS: [bool; 10] = [
     false, false, false, true, true, true, true, true, true, true,
 ];
 
-/// A version that loads Ben's snapshot selects it as the newest and reads
-/// Ana's write 4, which it does not cover, from her log.
+/// A version that loads Ben's snapshot selects it as the newest; the reload
+/// stops at its target, and Ana's write 4, which it does not cover, comes
+/// from her log.
 async fn a_passing_version_needs_write_4(storage: &Arc<MemoryStorage>, ben: &ObjectPath) {
     let mut c = notes_device(storage.clone(), 3).await;
     add_device(&mut c).await;
     c.sync.reload_from_snapshots().await.unwrap();
     assert_eq!(selected_snapshot(&mut c).await, *ben);
+    c.writes.download_writes().await.unwrap();
     assert!(tables(&c).await.iter().any(|(id, _, _)| id == "3"));
 }
 
