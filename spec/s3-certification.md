@@ -31,7 +31,10 @@ and Versity Gateway 1.9.0 passed it with versioning disabled and enabled
 ([GCS and Versity Gateway](#gcs-and-versity-gateway-2026-10-14)). On
 2026-10-15 the named `VersityGw` entry passed suite 5 in both states and its
 minter passed the member-key lifecycle
-([Versity Gateway profile](#versity-gateway-profile-2026-10-15)).
+([Versity Gateway profile](#versity-gateway-profile-2026-10-15)). After every
+S3 session came to be recorded before its native upload, it passed suite 5
+three times in each state
+([Versity Gateway reruns](#versity-gateway-reruns-2026-10-15)).
 The selected entries are in
 [`s3_profile.rs`](../crates/coven-storage/src/providers/s3_profile.rs); the
 contract and certification procedure are in [§4](coven.md#4-storage-providers-and-access).
@@ -2906,6 +2909,35 @@ By hand, the IAM service also took a user path such as
 `PathPrefix`. Afterwards it listed no users. RustFS, SeaweedFS and Ceph RGW
 were not running for this change; their listings are checked only against
 the in-process fakes.
+
+## Versity Gateway reruns, 2026-10-15
+
+Once every S3 session was recorded before its native upload, so a
+`ConditionalCompletion` profile's first part initiates the upload at the
+destination, the first suite 5 run against `VersityGw` reported one
+violation in the 200 two-writer multipart races; its output was not kept, and
+the next run passed. To look for it again, suite 5 ran three times per bucket
+on 2026-10-15 between 19:25 and 19:29 UTC from `main` at `809ec652f`, with
+`COVEN_LIVE_S3_PROFILE=VersityGw`, against the container and image of the
+[profile run](#versity-gateway-profile-2026-10-15) (`versity/versitygw:v1.9.0`,
+image `sha256:d0b4ec48c463`, digest `sha256:f9768331c89d`, standalone IAM).
+
+| Bucket | Run | Suite 5 races (2×200, 8×50, mixed 200, replace 200) | Sequential contracts | Listing lag median / max | Verdict |
+| --- | --- | --- | --- | --- | --- |
+| Disabled | 1 | one winner in every trial | all PASS | 0.006 s / 0.008 s | suite 5 PASS |
+| Disabled | 2 | one winner in every trial | all PASS | 0.007 s / 0.019 s | suite 5 PASS |
+| Disabled | 3 | one winner in every trial | all PASS | 0.011 s / 0.014 s | suite 5 PASS |
+| Enabled | 1 | one winner in every trial | all PASS | 0.005 s / 0.005 s | suite 5 PASS |
+| Enabled | 2 | one winner in every trial | all PASS | 0.010 s / 0.027 s | suite 5 PASS |
+| Enabled | 3 | one winner in every trial | all PASS | 0.011 s / 0.162 s | suite 5 PASS |
+
+Each run printed the profile run's lines apart from timings: setup's safety
+check passed, detection reproduced `[VersityGw]`, every race summary read
+`violations=0` with every trial overlapping, every case's cleanup passed and
+versioning stayed in its state. Across the six runs every losing writer of
+the 5,400 trials was refused `AlreadyExists HTTP 412`; no reply was a
+`Conflict` or any other failure. The earlier violation did not recur, so its
+cause, coven or the gateway, is not established.
 
 ## SeaweedFS every-object copy publication, 2026-10-15
 
