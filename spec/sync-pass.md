@@ -621,13 +621,14 @@ noon Tuesday cannot become usable by landing later
 From the same write, snapshot and positions catalogs, delete only objects
 whose coverage, finality, age/reader positions and ownership satisfy §15.
 For every part audience require both newest counting coverage under every
-boundary replay could still select, including a listed raise snapshot no
-entry names yet until the store-log catch-up has received every entry stored
-by a day after its `T_c`, and historical counting coverage whose landing was
-strictly more than one day ago; a replacement does not restart that
-historical age
+boundary replay could still select, including each reset entry not yet final,
+kept or dropped now, and a listed raise snapshot no entry names yet until the
+store-log catch-up has received every entry stored by a day after its `T_c`,
+and historical counting coverage whose landing was strictly more than one day
+ago; a replacement does not restart that historical age
 ([`Eligible`, `maturity_survives_new_snapshots`](proofs/io/CovenIO/Retention.lean),
-[`RaiseHistory.deleted_stays_covered`, `listed_raise_hold_ends`](proofs/io/CovenIO/RaiseHistory.lean)).
+[`RaiseHistory.deleted_stays_covered`, `listed_raise_hold_ends`](proofs/io/CovenIO/RaiseHistory.lean),
+[`dropped_reset_held`](proofs/io/CovenIO/RaiseHistoryExamples.lean)).
 For example, replacing Monday noon's covering snapshot on Tuesday morning
 still permits deletion after Tuesday noon if all other gates hold
 ([`eligible_after_day`](proofs/io/CovenIO/Retention.lean)).

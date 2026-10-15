@@ -33,12 +33,13 @@ impl PossibleBoundary {
 /// select for this audience, which must all cover a write before its part
 /// here is deleted. Those boundaries are the current one, the one the final
 /// entries alone select, every non-final raise entry above the final version,
-/// and every listed raise snapshot above it that no held entry names, which a
-/// raise entry published later could still name. A raise entry counts only if
-/// it lands within a day of its snapshot's `T_c` (§9), so once every entry
-/// stored by then is received (`entries_through`) and none names it, that
-/// snapshot no longer holds anything (io `RaiseHistory.expire`). None when
-/// one of them selects nothing.
+/// every non-final reset entry, kept or dropped now (io `dropped_reset_held`),
+/// and every listed raise snapshot above the final version that no held entry
+/// names, which a raise entry published later could still name. A raise entry
+/// counts only if it lands within a day of its snapshot's `T_c` (§9), so once
+/// every entry stored by then is received (`entries_through`) and none names
+/// it, that snapshot no longer holds anything (io `RaiseHistory.expire`). None
+/// when one of them selects nothing.
 pub(crate) fn held_coverage(
     log: &StoreLog,
     audience: &Audience,
@@ -70,11 +71,26 @@ pub(crate) fn held_coverage(
         let decided = applied.check.landed_too_late()
             || (log.is_final(position)
                 && log.replay.entries.get(&position) != Some(&coven_database::EntryOutcome::Kept));
-        if let Some(Boundary::SchemaChange(version)) = Boundary::from_entry(&applied.entry) {
-            if version.snapshot.audience == *audience && version.number > final_version && !decided
+        match Boundary::from_entry(&applied.entry) {
+            Some(Boundary::SchemaChange(version))
+                if version.snapshot.audience == *audience
+                    && version.number > final_version
+                    && !decided =>
             {
                 possible.push(Some(named(Boundary::SchemaChange(version))));
             }
+            // A reset replay may keep later: one not final, whether kept or
+            // dropped now. A final reset is the final boundary above or one a
+            // later final boundary replaces for good, since every entry not
+            // yet final read every final one (§9).
+            Some(reset @ Boundary::Reset { .. })
+                if reset.snapshot().audience == *audience
+                    && !applied.check.landed_too_late()
+                    && !log.is_final(position) =>
+            {
+                possible.push(Some(named(reset)));
+            }
+            _ => (),
         }
     }
     // A listed raise snapshot no held entry names yet: an entry published

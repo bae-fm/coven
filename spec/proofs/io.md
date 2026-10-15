@@ -492,12 +492,28 @@ snapshot, so retention can see it before any entry names it.
 
 Deleting a write then needs, for each part audience, coverage under every
 boundary replay could still select (`Held`): the current one, the one final
-entries fix, every raise entry not ruled out, and every listed counting raise
-snapshot that a raise could still name, each with the snapshots whose signed
-view read the entry naming it. The model's history (`Step`) lets snapshots
-land with the entries their views read, raise entries publish, replay keep an
-entry's boundary among the possible ones, finality rule boundaries out, a
-listed raise snapshot expire, time pass and writes be deleted under the hold.
+entries fix, every raise or reset entry not ruled out, and every listed
+counting raise snapshot that a raise could still name, each with the
+snapshots whose signed view read the entry naming it. The model's history
+(`Step`) lets snapshots land with the entries their views read, raise and
+reset entries publish, replay keep an entry's boundary among the possible
+ones, finality rule boundaries out, a listed raise snapshot expire, time pass
+and writes be deleted under the hold. Selection under one boundary and how a
+landing changes it are in [`RaiseSelection`](io/CovenIO/RaiseSelection.lean);
+the checked histories are in
+[`RaiseHistoryExamples`](io/CovenIO/RaiseHistoryExamples.lean).
+
+A reset entry (T225) is a boundary like a raise entry, and replay can keep a
+reset that is dropped now until it is final, so the hold checks it. Under a
+kept reset only its snapshot and the writes that read its entry count
+(§19.3); a write that read the entry was stored after it. So the model
+judges a deleted write under a reset boundary only where it counts there
+(`Applies`): its snapshot covers it, or it was stored at or after the reset
+entry. A reset snapshot is unmarked and needs no hold while it is listed
+before its entry: every write deleted by then was stored before the entry,
+so under the reset it counts only if the snapshot covers it, and the
+snapshot is then its only usable selection (`publish_valid`). A reset's
+named snapshot must mark no raise (`usable`).
 
 A raise entry may name any snapshot: one not listed yet, one that never
 counts, or one whose prefix does not mark the raise (T216). Replay can keep
@@ -510,9 +526,11 @@ time is a day past a listed raise snapshot's `T_c` and no entry names it,
 
 - `deleted_stays_covered`: in every reachable state, under whatever usable
   boundary replay keeps, each part audience's newest usable counting snapshot
-  covers every deleted write. `reload_never_skips` turns this into the
+  covers every deleted write that counts under it (always under a raise or no
+  boundary, `applies_unless_reset`). `reload_never_skips` turns this into the
   reload: a missing deleted write is loaded from a snapshot or the reload
-  waits; it is never skipped as having no part there.
+  waits; it is never skipped as having no part there, except a write a kept
+  reset ignores.
 - The key step, `late_landing_covers`: a counting sound snapshot that lands
   after a deletion covers the deleted write, because its catch-up began after
   the write's mature witness landed. This is why a raise snapshot, or a
@@ -525,8 +543,9 @@ time is a day past a listed raise snapshot's `T_c` and no entry names it,
 - `listed_raise_hold_ends`: a day after a listed raise snapshot's `T_c` with
   no entry naming it, expiry is a step of every history and leaves every
   other boundary in place. `expired_stays_out`: afterwards it is never a
-  possible boundary again, no published entry names it and replay never keeps
-  it, since no entry stored later counts. `abandoned_raise_released` and
+  possible boundary again, no published raise entry names it and replay never
+  keeps it, since no raise entry stored later counts (a reset naming it is
+  ruled out with it, and a raise snapshot is never usable as a reset's). `abandoned_raise_released` and
   `abandoned_raise_expires`: in the kept-late history, Ana's device is gone
   before her entry; at Ben's deletion time her snapshot has expired and the
   hold is the current coverage his snapshot gives.
@@ -535,14 +554,33 @@ time is a day past a listed raise snapshot's `T_c` and no entry names it,
   `kept_late_held`: in the kept-late history, Ana's listed raise snapshot is
   a possible store boundary that omits Ben's write, so the hold refuses the
   deletion.
+- `dropped_reset_held` and `dropped_reset_skips` (checked counterexample to a
+  hold without non-final resets, which Rust had): Carl's final reset `F` and
+  his kept reset `C` both select Ben's snapshot, which covers his write 5.
+  Ana's concurrent reset `R` is dropped now but not final; her reset
+  snapshot was prepared before `F`'s entry landed and holds her own writes
+  through 50, so under `R` it outranks Ben's snapshot and omits his write.
+  Every snapshot is sound. A hold over `C` and `F` alone deletes write 5;
+  replay then keeps `R` (Carl's reset drops), write 5 counts under it since
+  Ben read `R`, and the reload skips it. `Held`, which includes `R`, refuses
+  the deletion. Rust's `io_differential_held` comparison does not cover which
+  boundaries are possible; `a_dropped_reset_that_is_not_final_holds_what_its_selection_omits`
+  replays this history through `held_coverage`.
 
 The Rust comparison `io_differential_held` (runner check `held`) computes
 Rust's selection under each possible boundary on generated listings; a
 boundary naming an unlisted snapshot admits only that entry's readers.
 
-Outside the model: that Rust replay never makes a raise at or below the
-audience's finally kept version its boundary (the `finalize` premise): a
-lower raise ordered after it is already in place (`Boundary::schema_in_place`),
+Outside the model: that a final reset entry Rust leaves out of the possible
+boundaries is never the boundary again (the `finalize` premise): dropped and
+final, replay never keeps it; kept and final, it is the final boundary or one
+a later final boundary replaces for good, since every entry not yet final
+read every final one (§9's landing rule) and replays after it. That an entry
+names its author's snapshot of its own kind, so one snapshot is never named
+by both a raise and a reset (the `publish` premise; the model keys readers by
+named snapshot, Rust by entry). That Rust replay never makes a raise at or
+below the audience's finally kept version its boundary (the `finalize`
+premise): a lower raise ordered after it is already in place (`Boundary::schema_in_place`),
 an equal one with another snapshot conflicts with it when concurrent, and a
 device prepares a raise entry only while no raise to its version or above is
 kept in its replay (`schema_sync`), so it never authors one after reading such

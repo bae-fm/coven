@@ -227,3 +227,82 @@ fn a_listed_raise_snapshot_stops_holding_a_day_after_its_catch_up() {
     // Every entry stored by then received and none names it: it is out.
     assert!(covered(Some(50 + day + 1)));
 }
+
+/// T225 (`dropped_reset_held`): Carl's final reset `F` and his kept reset `C`
+/// both select Ben's snapshot, which covers his write 5; Ana's concurrent
+/// reset `R`, dropped now but not final, selects her own snapshot, which has
+/// more writes but not his. Replay can still keep `R`, and Ben read it, so
+/// the hold keeps write 5; once `R` is final, or landed too late, it never
+/// can be kept.
+#[test]
+fn a_dropped_reset_that_is_not_final_holds_what_its_selection_omits() {
+    use crate::store_log_sync::snapshots::held::held_coverage;
+    use coven_database::{
+        DropReason, EntryOutcome, ReplayEntry, StoreLog, StoreLogCheck, StoreLogReplay,
+    };
+    use coven_format::store_log::{StoreChange, StoreLogEntry};
+    use coven_foundation::id_source::MemberId;
+    // Devices: Ana 1, Ben 2, Carl 3. Indexes: F's snapshot, Ana's reset
+    // snapshot, C's snapshot, Ben's snapshot; `reads` names the resets read.
+    let listing: Vec<Listed> = vec![
+        (3, 1, 93, 92, vec![(1, 40), (3, 1)], vec![]),
+        (1, 1, 101, 90, vec![(1, 50)], vec![]),
+        (3, 2, 99, 95, vec![(1, 40), (3, 2)], vec![0]),
+        (2, 1, 105, 100, vec![(1, 40), (2, 5), (3, 2)], vec![0, 2, 1]),
+    ];
+    let snapshots = verified(&listing);
+    let write = WriteId {
+        device: DeviceId(2),
+        number: 5,
+    };
+    // The reset naming listed snapshot `index`, stored at `stored`.
+    let reset = |index: usize, stored: u64, check: StoreLogCheck| ReplayEntry {
+        entry: StoreLogEntry {
+            position: entry(index),
+            timestamp: coven_merge::Timestamp::new(stored * 1000, 0, entry(index).device).unwrap(),
+            author: MemberId(uuid::Uuid::from_u128(index as u128 + 1)),
+            had_read: EntryPositions(Vec::new()),
+            change: StoreChange::Reset {
+                snapshot: id(listing[index].0, listing[index].1),
+            },
+        },
+        stored_at: StorageTime::new(stored, 0).unwrap(),
+        check,
+    };
+    let covered = |ana: StoreLogCheck, horizon: u64| {
+        let ana_outcome = if ana.landed_too_late() {
+            EntryOutcome::Dropped(DropReason::LandedTooLate)
+        } else {
+            EntryOutcome::Dropped(DropReason::BeatenBy(entry(2)))
+        };
+        let log = StoreLog {
+            entries: vec![
+                reset(0, 94, StoreLogCheck::Allowed),
+                reset(2, 100, StoreLogCheck::Allowed),
+                reset(1, 102, ana),
+            ],
+            replay: StoreLogReplay {
+                state: Default::default(),
+                entries: [
+                    (entry(0), EntryOutcome::Kept),
+                    (entry(2), EntryOutcome::Kept),
+                    (entry(1), ana_outcome),
+                ]
+                .into(),
+            },
+            horizon: Some(StorageTime::new(horizon, 0).unwrap()),
+        };
+        held_coverage(&log, &Audience::Store, &snapshots, None)
+            .is_some_and(|selections| selections.iter().all(|p| p.covers(write)))
+    };
+    // `F` final; `C` and `R` not: `R` may still be kept, and its selection,
+    // Ana's snapshot, omits write 5.
+    assert!(!covered(StoreLogCheck::Allowed, 95));
+    // Every reset final: `R` stays dropped, and `C` and `F` select Ben's.
+    assert!(covered(StoreLogCheck::Allowed, 103));
+    // `R` landed too late: replay never keeps it.
+    assert!(covered(
+        StoreLogCheck::LandedTooLate { authorized: true },
+        95
+    ));
+}

@@ -1,4 +1,4 @@
-import CovenIO.RaiseCoverage
+import CovenIO.RaiseSelection
 
 namespace CovenIO.RaiseCoverage
 
@@ -14,9 +14,9 @@ raise snapshot, so retention sees it while no entry names it yet.
 
 Deleting a write's parts then needs coverage under every boundary replay
 could still select for each part audience (`Held`): the current one, the
-one final entries fix, every raise entry not ruled out, and each listed
-counting raise snapshot that a raise could still name. Under each, the newest
-usable counting snapshot must cover the write.
+one final entries fix, every raise or reset entry not ruled out, and each
+listed counting raise snapshot that a raise could still name. Under each, the
+newest usable counting snapshot must cover the write.
 
 A raise entry may name any snapshot: one not listed yet, one that never
 counts, or one whose prefix does not mark the raise. Replay can keep such an
@@ -27,32 +27,25 @@ counts and marks the raise is `Usable`.
 A raise entry counts only if it is stored at most one day after its
 snapshot's `T_c`, which it carries (§9; replay drops it as landed too late
 otherwise). So once storage time passes that day and no entry names a listed
-raise snapshot, no entry ever will: it stops being a possible boundary
+raise snapshot, no raise entry ever will: it stops being a possible boundary
 (`expire`). Its author being removed, or simply gone, holds nothing longer
-than that day (`expired_stays_out`, `listed_raise_hold_ends`). -/
+than that day (`expired_stays_out`, `listed_raise_hold_ends`).
+
+A reset entry (§19.3) is a boundary too, and the hold checks it like a
+raise entry while replay could still select it: a reset that is dropped now
+but not final can be kept later. Under a kept reset only its snapshot and
+later writes that read its entry count; a write outside the snapshot that
+did not read the entry is ignored, so skipping it is the reset's rule, not a
+loss. A write reads an entry only after it is stored, so a write stored
+before the entry never read it (`Applies`). The reset's snapshot marks no
+raise, so retention cannot see it before its entry, and needs no hold on it:
+a write deleted by then never read the entry, so it counts under the reset
+only if the reset's snapshot covers it (`publish_valid`).
+`dropped_reset_skips` shows a hold without the non-final resets losing a
+write. -/
 namespace RaiseHistory
 
 open SnapshotHistory
-
-/-- Usable under a possible boundary: everything without one; otherwise the
-named snapshot and every snapshot whose signed store-log view read an entry
-naming it (`reads` pairs a reader with the named snapshot). -/
-def admits (reads : List (Snapshot × Snapshot)) : Option Snapshot → Snapshot → Bool
-  | none, _ => true
-  | some named, s => samePath s named || decide ((s, named) ∈ reads)
-
-/-- §15's newest counting snapshot of audience `a` under boundary `b`. -/
-def selected (order : SnapshotOrder) (landed : List Snapshot)
-    (reads : List (Snapshot × Snapshot)) (a : Nat) (b : Option Snapshot) : Option Snapshot :=
-  newest order (landed.filter fun s => s.audience == a && s.counts && admits reads b s)
-
-def CoversIn (selection : Option Snapshot) (w : Write) (a : Nat) : Prop :=
-  match selection with
-  | none => False
-  | some s => s.covers w a
-
-instance (selection : Option Snapshot) (w : Write) (a : Nat) : Decidable (CoversIn selection w a) := by
-  cases selection <;> unfold CoversIn <;> infer_instance
 
 structure State where
   time : Nat
@@ -61,7 +54,8 @@ structure State where
   marked : List Snapshot
   deleted : List Write
   reads : List (Snapshot × Snapshot)
-  /-- Snapshots named by a published raise entry stored within its window. -/
+  /-- Snapshots named by a published entry: a raise stored within its
+  window, or a reset. -/
   entries : List Snapshot
   /-- The boundary replay currently keeps for each audience. -/
   kept : Nat → Option Snapshot
@@ -71,14 +65,53 @@ structure State where
   ruledOut : List Snapshot
   /-- Listed raise snapshots no entry named by a day after their `T_c`. -/
   expired : List Snapshot
+  /-- The snapshots named by published reset entries, each with the storage
+  time its entry was stored at; these are among `entries`. -/
+  resets : List (Snapshot × Nat)
 
-def initial : State := ⟨0, [], [], [], [], [], fun _ => none, fun _ => [none], [], []⟩
+def initial : State := ⟨0, [], [], [], [], [], fun _ => none, fun _ => [none], [], [], []⟩
+
+/-- Whether a reset entry names this snapshot; otherwise its entries raise. -/
+def isReset (s : State) (r : Snapshot) : Bool := decide (r ∈ s.resets.map Prod.fst)
 
 /-- A boundary whose named snapshot did not land, does not count, or does
-not mark the raise is refused by the reload, which waits. -/
+not mark the raise is refused by the reload, which waits; a reset's named
+snapshot must mark none. -/
+def marking (s : State) (r : Snapshot) : Bool :=
+  if isReset s r then !decide (r ∈ s.marked) else decide (r ∈ s.marked)
+
 def usable (s : State) : Option Snapshot → Bool
   | none => true
-  | some r => decide (r ∈ s.landed) && r.counts && decide (r ∈ s.marked)
+  | some r => decide (r ∈ s.landed) && r.counts && marking s r
+
+theorem usable_some (s : State) (r : Snapshot) :
+    usable s (some r) = (decide (r ∈ s.landed) && r.counts && marking s r) := rfl
+
+/-- Usability depends only on the named snapshot's landing, mark and kind. -/
+theorem usable_of {s t : State} {r : Snapshot} (use : usable t (some r) = true)
+    (landed : decide (r ∈ t.landed) = decide (r ∈ s.landed))
+    (marked : decide (r ∈ t.marked) = decide (r ∈ s.marked))
+    (reset : isReset t r = isReset s r) : usable s (some r) = true := by
+  rw [usable_some, landed] at use
+  unfold marking at use
+  rw [reset, marked] at use
+  exact use
+
+theorem marked_reset_unusable (s : State) (r : Snapshot) (reset : isReset s r = true)
+    (marked : r ∈ s.marked) : usable s (some r) = false := by
+  simp [usable_some, marking, reset, marked]
+
+theorem unmarked_raise_unusable (s : State) (r : Snapshot) (raise : isReset s r = false)
+    (unmarked : r ∉ s.marked) : usable s (some r) = false := by
+  simp [usable_some, marking, raise, unmarked]
+
+/-- Whether write `w`'s part in audience `a` counts under a boundary. Under a
+reset only the snapshot's contents and writes that read its entry count
+(§19.3); a write that read the entry was stored after it. -/
+def Applies (s : State) (w : Write) (a : Nat) : Option Snapshot → Prop
+  | none => True
+  | some r => isReset s r = true →
+      (∃ t, (r, t) ∈ s.resets ∧ t ≤ w.storedAt) ∨ r.covers w a
 
 def excluded (s : State) (r : Snapshot) : Bool :=
   decide (r ∈ s.ruledOut) || decide (r ∈ s.expired)
@@ -98,6 +131,14 @@ def addPossible (possible : Nat → List (Option Snapshot)) (snap : Snapshot) :
 def removed (possible : List (Option Snapshot)) (remaining : List (Option Snapshot)) :
     List Snapshot :=
   (possible.filterMap id).filter fun r => !decide (some r ∈ remaining)
+
+/-- The state once an entry naming `r` is published: a raise, or a reset
+(`reset`) stored now. -/
+def State.withEntry (s : State) (r : Snapshot) (reset : Bool) : State :=
+  { s with
+    entries := r :: s.entries
+    possible := if excluded s r then s.possible else addPossible s.possible r
+    resets := if reset then (r, s.time) :: s.resets else s.resets }
 
 /-- Catch-up, reads and finality decisions happen outside this boundary.
 Replay keeps only an entry's boundary among the possible ones, and finality
@@ -122,12 +163,15 @@ inductive Step (published : Write → Prop) (order : SnapshotOrder) : State → 
         reads := read.map (snap, ·) ++ s.reads
         possible := if raise && !excluded s snap then addPossible s.possible snap else s.possible }
   /-- A raise entry is stored within a day of its snapshot's `T_c`; it may
-  name a snapshot not yet listed, or one that never counts. -/
-  | publish (s : State) (r : Snapshot) (onTime : s.time ≤ r.caughtAt + day)
-      (path : ∀ x ∈ s.landed, samePath x r = true → x = r) :
-      Step published order s { s with
-        entries := r :: s.entries
-        possible := if excluded s r then s.possible else addPossible s.possible r }
+  name a snapshot not yet listed, or one that never counts. A reset entry
+  (`reset`) has no such window; replay can keep it while it is not final.
+  An entry names its author's snapshot of its own kind: a snapshot already
+  named by an entry is named again only by one of the same kind. -/
+  | publish (s : State) (r : Snapshot) (reset : Bool)
+      (onTime : reset = false → s.time ≤ r.caughtAt + day)
+      (path : ∀ x ∈ s.landed, samePath x r = true → x = r)
+      (kind : r ∈ s.entries → isReset s r = reset) :
+      Step published order s (s.withEntry r reset)
   | replay (s : State) (a : Nat) (b : Option Snapshot) (possible : b ∈ s.possible a)
       (named : ∀ r, b = some r → r ∈ s.entries) :
       Step published order s { s with kept := fun x => if x = a then b else s.kept x }
@@ -154,13 +198,13 @@ inductive Run (published : Write → Prop) (order : SnapshotOrder) : State → P
   | initial : Run published order initial
   | step {s t : State} : Run published order s → Step published order s t → Run published order t
 
-/-- What a deleted write keeps under one possible boundary: coverage once the
-boundary is usable, and, while its named snapshot has not landed, coverage by
-whatever its readers select. -/
+/-- What a deleted write keeps under one possible boundary where it counts:
+coverage once the boundary is usable, and, while its named snapshot has not
+landed, coverage by whatever its readers select. -/
 def Good (order : SnapshotOrder) (s : State) (w : Write) (a : Nat) (b : Option Snapshot) : Prop :=
-  (∀ r, b = some r → r ∉ s.landed →
+  Applies s w a b → ((∀ r, b = some r → r ∉ s.landed →
       selected order s.landed s.reads a b = none ∨ CoversIn (selected order s.landed s.reads a b) w a) ∧
-    (usable s b = true → CoversIn (selected order s.landed s.reads a b) w a)
+    (usable s b = true → CoversIn (selected order s.landed s.reads a b) w a))
 
 structure Valid (published : Write → Prop) (order : SnapshotOrder) (s : State) : Prop where
   sound : ∀ snap ∈ s.landed, Sound published snap
@@ -173,45 +217,11 @@ structure Valid (published : Write → Prop) (order : SnapshotOrder) (s : State)
   audience : ∀ a r, some r ∈ s.possible a → r.audience = a
   paths : ∀ x ∈ s.landed, ∀ r ∈ s.entries, samePath x r = true → x = r
   expiredOut : ∀ x ∈ s.expired, some x ∉ s.possible x.audience
-  expiredUnnamed : ∀ x ∈ s.expired, x ∉ s.entries ∧ x.caughtAt + day < s.time
+  expiredUnnamed : ∀ x ∈ s.expired, (x ∈ s.entries → isReset s x = true) ∧ x.caughtAt + day < s.time
   deleted : ∀ w ∈ s.deleted, published w ∧ MatureCoverage s.landed s.time w ∧
     ∀ a ∈ w.audiences, ∀ b ∈ s.possible a, Good order s w a b
-
-theorem samePath_self (s : Snapshot) : samePath s s = true := by simp [samePath]
-
-theorem samePath_symm (a b : Snapshot) : samePath a b = samePath b a := by
-  have comm : ∀ x y : Nat, (x == y) = (y == x) := fun x y => by
-    by_cases e : x = y
-    · subst e; rfl
-    · have e' : y ≠ x := fun h => e h.symm
-      rw [beq_false_of_ne e, beq_false_of_ne e']
-  unfold samePath
-  rw [comm a.audience b.audience, comm a.writer b.writer, comm a.number b.number]
-
-/-- The newest of a list with one more element covering the write still covers it. -/
-theorem newest_cons_covers (order : SnapshotOrder) (snap : Snapshot) (rest : List Snapshot)
-    (w : Write) (a : Nat) (new : snap.covers w a)
-    (old : rest = [] ∨ CoversIn (newest order rest) w a) :
-    CoversIn (newest order (snap :: rest)) w a := by
-  simp only [newest]
-  cases h : newest order rest with
-  | none => simpa [CoversIn] using new
-  | some other =>
-      have previous : other.covers w a := by
-        rcases old with empty | covered
-        · subst empty; simp [newest] at h
-        · simpa [h, CoversIn] using covered
-      by_cases pick : newer order snap other = true
-      · simpa [pick, CoversIn] using new
-      · simpa [pick, CoversIn] using previous
-
-theorem newest_none (order : SnapshotOrder) (xs : List Snapshot) :
-    newest order xs = none ↔ xs = [] := by
-  cases xs with
-  | nil => simp [newest]
-  | cons x rest =>
-    simp only [newest, reduceCtorEq, iff_false]
-    cases newest order rest <;> simp
+  resetsNamed : ∀ p ∈ s.resets, p.1 ∈ s.entries
+  possibleSource : ∀ a r, some r ∈ s.possible a → r ∈ s.entries ∨ r ∈ s.marked
 
 /-- A counting sound snapshot landing after a deletion covers the deleted
 write: its catch-up began after the write's mature witness landed. -/
@@ -227,60 +237,6 @@ theorem late_landing_covers {published : Write → Prop} {order : SnapshotOrder}
   have admission : snap.storedAt ≤ snap.caughtAt + day := by simpa [Snapshot.counts] using counts
   exact sound.caught w pub relevant (by omega)
 
-theorem admits_old (reads : List (Snapshot × Snapshot)) (read : List Snapshot)
-    (snap x : Snapshot) (b : Option Snapshot) (other : samePath x snap = false) :
-    admits (read.map (snap, ·) ++ reads) b x = admits reads b x := by
-  cases b with
-  | none => rfl
-  | some named =>
-      have different : x ≠ snap := by
-        intro same; subst same; simp [samePath_self] at other
-      simp only [admits, List.mem_append, List.mem_map]
-      congr 1
-      apply decide_eq_decide.mpr
-      constructor
-      · rintro (⟨n, _, eq⟩ | old)
-        · exact absurd (congrArg Prod.fst eq).symm different
-        · exact old
-      · exact Or.inr
-
-/-- Landing changes a possible boundary's selection only by the new snapshot. -/
-theorem selected_after_land (landed : List Snapshot)
-    (reads : List (Snapshot × Snapshot)) (read : List Snapshot) (snap : Snapshot)
-    (a : Nat) (b : Option Snapshot) (fresh : ∀ x ∈ landed, samePath x snap = false) :
-    (landed.filter fun s => s.audience == a && s.counts &&
-        admits (read.map (snap, ·) ++ reads) b s) =
-      landed.filter fun s => s.audience == a && s.counts && admits reads b s := by
-  apply List.filter_congr
-  intro x member
-  rw [admits_old reads read snap x b (fresh x member)]
-
-/-- After a landing, a selection is the new snapshot's newest with the old
-candidates, or the old selection. -/
-theorem landed_selection (order : SnapshotOrder) (landed : List Snapshot)
-    (reads : List (Snapshot × Snapshot)) (read : List Snapshot) (snap : Snapshot)
-    (a : Nat) (b : Option Snapshot) (fresh : ∀ x ∈ landed, samePath x snap = false)
-    (w : Write) (covers : snap.audience = a → snap.counts = true → snap.covers w a) :
-    (selected order landed reads a b = none ∨ CoversIn (selected order landed reads a b) w a) →
-      (selected order (snap :: landed) (read.map (snap, ·) ++ reads) a b = none ∨
-        CoversIn (selected order (snap :: landed) (read.map (snap, ·) ++ reads) a b) w a) ∧
-      (CoversIn (selected order landed reads a b) w a →
-        CoversIn (selected order (snap :: landed) (read.map (snap, ·) ++ reads) a b) w a) := by
-  intro before
-  unfold selected at before ⊢
-  rw [List.filter_cons, selected_after_land landed reads read snap a b fresh]
-  split
-  · rename_i admitted
-    simp only [Bool.and_eq_true, beq_iff_eq] at admitted
-    have previous : (landed.filter fun s => s.audience == a && s.counts && admits reads b s) = [] ∨
-        CoversIn (newest order (landed.filter fun s =>
-          s.audience == a && s.counts && admits reads b s)) w a := by
-      rcases before with none | covered
-      · exact .inl ((newest_none order _).mp none)
-      · exact .inr covered
-    have new := newest_cons_covers order snap _ w a (covers admitted.1.1 admitted.1.2) previous
-    exact ⟨.inr new, fun _ => new⟩
-  · exact ⟨before, id⟩
 
 theorem excluded_mono {s t : State} (r : Snapshot)
     (ruled : ∀ x, x ∈ s.ruledOut → x ∈ t.ruledOut) (gone : ∀ x, x ∈ s.expired → x ∈ t.expired)
@@ -380,7 +336,7 @@ theorem land_valid {published : Write → Prop} {order : SnapshotOrder} {s : Sta
   · intro w hw
     obtain ⟨pub, mature, before⟩ := valid.deleted w hw
     refine ⟨pub, maturity_survives_new_snapshots s.landed [snap] s.time w mature, ?_⟩
-    intro a ha b hb
+    intro a ha b hb app
     have covers : snap.audience = a → snap.counts = true → snap.covers w a := by
       intro same counted
       subst same
@@ -394,7 +350,7 @@ theorem land_valid {published : Write → Prop} {order : SnapshotOrder} {s : Sta
       intro isSnap
       subst isSnap
       rcases shape a (some snap) hb with old | ⟨_, audience, _, notEx⟩
-      · exact (before a ha (some snap) old).1 snap rfl notLanded
+      · exact (before a ha (some snap) old app).1 snap rfl notLanded
       · cases sel : selected order s.landed s.reads a (some snap) with
         | none => exact .inl rfl
         | some x =>
@@ -408,7 +364,7 @@ theorem land_valid {published : Write → Prop} {order : SnapshotOrder} {s : Sta
             · exact valid.reads _ readX
           have possibleOld := valid.entriesPossible snap entry notEx
           rw [← audience] at possibleOld
-          have g := (before a ha (some snap) possibleOld).1 snap rfl notLanded
+          have g := (before a ha (some snap) possibleOld app).1 snap rfl notLanded
           rw [sel] at g
           exact g
     constructor
@@ -417,17 +373,18 @@ theorem land_valid {published : Write → Prop} {order : SnapshotOrder} {s : Sta
       have prior : selected order s.landed s.reads a b = none ∨
           CoversIn (selected order s.landed s.reads a b) w a := by
         rcases shape a b hb with old | ⟨eq, _, _, _⟩
-        · exact (before a ha b old).1 r hr notOld
+        · exact (before a ha b old app).1 r hr notOld
         · subst hr; cases eq; exact absurd List.mem_cons_self notNow
       exact (step prior).1
     · intro use
       rcases shape a b hb with old | ⟨eq, audience, isRaise, notEx⟩
       · cases b with
         | none =>
-          exact (step (.inr ((before a ha none old).2 rfl))).2 ((before a ha none old).2 rfl)
+          exact (step (.inr ((before a ha none old app).2 rfl))).2 ((before a ha none old app).2 rfl)
         | some r =>
+          have whole := use
           simp only [usable, Bool.and_eq_true, decide_eq_true_eq] at use
-          obtain ⟨⟨landedR, countsR⟩, markedR⟩ := use
+          obtain ⟨⟨landedR, countsR⟩, _⟩ := use
           by_cases isSnap : r = snap
           · subst isSnap
             have prior := own rfl
@@ -445,16 +402,15 @@ theorem land_valid {published : Write → Prop} {order : SnapshotOrder} {s : Sta
               rcases List.mem_cons.mp landedR with eq | old
               · exact absurd eq isSnap
               · exact old
-            have oldMarked : r ∈ s.marked := by
-              split at markedR
-              · rcases List.mem_cons.mp markedR with eq | old
-                · exact absurd eq isSnap
-                · exact old
-              · exact markedR
-            have oldUse : usable s (some r) = true := by
-              simp [usable, oldLanded, countsR, oldMarked]
-            exact (step (.inr ((before a ha (some r) old).2 oldUse))).2
-              ((before a ha (some r) old).2 oldUse)
+            have markedSame : decide (r ∈ (if raise then snap :: s.marked else s.marked)) =
+                decide (r ∈ s.marked) := by
+              split <;> simp [isSnap]
+            have landedSame : decide (r ∈ snap :: s.landed) = decide (r ∈ s.landed) := by
+              simp [isSnap]
+            have oldUse : usable s (some r) = true :=
+              usable_of whole landedSame markedSame rfl
+            exact (step (.inr ((before a ha (some r) old app).2 oldUse))).2
+              ((before a ha (some r) old app).2 oldUse)
       · cases eq
         have prior := own rfl
         rcases (step prior).1 with none | covered
@@ -468,6 +424,234 @@ theorem land_valid {published : Write → Prop} {order : SnapshotOrder} {s : Sta
           rw [none] at mem
           simp at mem
         · exact covered
+  · exact valid.resetsNamed
+  · intro a r hr
+    rcases shape a _ hr with old | ⟨eq, _, isRaise, _⟩
+    · rcases valid.possibleSource a r old with entry | marked
+      · exact .inl entry
+      · right; split
+        · exact List.mem_cons_of_mem _ marked
+        · exact marked
+    · cases eq; right; simp [isRaise]
+
+/-- A deleted write was stored before now: its mature witness covers it. -/
+theorem deleted_before {published : Write → Prop} {order : SnapshotOrder} {s : State}
+    (valid : Valid published order s) (w : Write) (deleted : w ∈ s.deleted) (a : Nat)
+    (relevant : a ∈ w.audiences) : w.storedAt < s.time := by
+  obtain ⟨pub, mature, _⟩ := valid.deleted w deleted
+  obtain ⟨witness, member, _, covers, age⟩ := mature a relevant
+  have causal := (valid.sound witness member).causal w pub (covers.1 ▸ relevant)
+    (by simpa [covers.1] using covers)
+  omega
+
+/-- Publishing a raise or reset entry preserves every part of the invariant.
+A reset that becomes a possible boundary only now holds nothing back: every
+write deleted before it was stored before its entry, so under it that write
+counts only if its snapshot covers it, and then its snapshot is its only
+usable selection. -/
+theorem publish_valid {published : Write → Prop} {order : SnapshotOrder} {s : State}
+    (valid : Valid published order s) (r : Snapshot) (reset : Bool)
+    (onTime : reset = false → s.time ≤ r.caughtAt + day)
+    (path : ∀ x ∈ s.landed, samePath x r = true → x = r)
+    (kind : r ∈ s.entries → isReset s r = reset) :
+    Valid published order (s.withEntry r reset) := by
+  have sameExcluded : ∀ x, excluded (s.withEntry r reset) x =
+      excluded s x := fun _ => rfl
+  have grows : ∀ a b, b ∈ s.possible a →
+      b ∈ (if excluded s r then s.possible else addPossible s.possible r) a := by
+    intro a b hb
+    split
+    · exact hb
+    · simp only [addPossible]; split <;> simp [hb]
+  have shape : ∀ a b, b ∈ (if excluded s r then s.possible else addPossible s.possible r) a →
+      b ∈ s.possible a ∨ (b = some r ∧ a = r.audience ∧ excluded s r = false) := by
+    intro a b hb
+    split at hb
+    · exact .inl hb
+    · rename_i notEx
+      simp only [addPossible] at hb
+      split at hb
+      · rcases List.mem_cons.mp hb with rfl | old
+        · exact .inr ⟨rfl, by assumption, by simpa using notEx⟩
+        · exact .inl old
+      · exact .inl hb
+  -- Which snapshots reset entries name after the publication.
+  have resetOther : ∀ x, x ≠ r → isReset (s.withEntry r reset) x = isReset s x := by
+    intro x ne
+    cases reset with
+    | false => rfl
+    | true => exact decide_eq_decide.mpr (by simp [State.withEntry, ne])
+  have resetGrows : ∀ x, isReset s x = true → isReset (s.withEntry r reset) x = true := by
+    intro x was
+    cases reset with
+    | false => exact was
+    | true =>
+      simp only [isReset, decide_eq_true_eq] at was ⊢
+      exact List.mem_cons_of_mem _ was
+  have resetNamed : reset = true → isReset (s.withEntry r reset) r = true := by
+    intro isR; subst isR
+    simp only [isReset, decide_eq_true_eq]
+    exact List.mem_cons_self
+  have resetSame : reset = false → ∀ x, isReset (s.withEntry r reset) x = isReset s x := by
+    intro notR x; subst notR; rfl
+  -- A pair naming `r` that the publication adds is stored now, after every
+  -- deleted write.
+  have resetPairs : ∀ x t, (x, t) ∈ (if reset then (r, s.time) :: s.resets else s.resets) →
+      (x, t) ∈ s.resets ∨ (x = r ∧ t = s.time) := by
+    intro x t mem
+    split at mem
+    · rcases List.mem_cons.mp mem with eq | old
+      · cases eq; exact .inr ⟨rfl, rfl⟩
+      · exact .inl old
+    · exact .inl mem
+  refine ⟨valid.sound, fun p hp => List.mem_cons_of_mem _ (valid.reads p hp),
+    fun a => grows a _ (valid.keptPossible a),
+    fun a x hx => List.mem_cons_of_mem _ (valid.keptNamed a x hx), valid.markedLanded,
+    fun m hm notEx => grows _ _ (valid.markedPossible m hm (by rwa [sameExcluded] at notEx)),
+    ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
+  · intro x hx notEx
+    rw [sameExcluded] at notEx
+    rcases List.mem_cons.mp hx with rfl | old
+    · simp [State.withEntry, notEx, addPossible]
+    · exact grows _ _ (valid.entriesPossible x old notEx)
+  · intro a x hx
+    rcases shape a _ hx with old | ⟨eq, audience, _⟩
+    · exact valid.audience a x old
+    · cases eq; exact audience.symm
+  · intro x hx e he same
+    rcases List.mem_cons.mp he with rfl | old
+    · exact path x hx same
+    · exact valid.paths x hx e old same
+  · intro x hx member
+    rcases shape _ _ member with old | ⟨eq, _, notEx⟩
+    · exact valid.expiredOut x hx old
+    · cases eq
+      simp only [excluded, Bool.or_eq_false_iff, decide_eq_false_iff_not] at notEx
+      exact notEx.2 hx
+  · intro x hx
+    obtain ⟨unnamed, late⟩ := valid.expiredUnnamed x hx
+    refine ⟨?_, late⟩
+    intro member
+    rcases List.mem_cons.mp member with rfl | old
+    · cases reset with
+      | true => exact resetNamed rfl
+      | false => have := onTime rfl; omega
+    · exact resetGrows x (unnamed old)
+  · intro w hw
+    obtain ⟨pub, mature, before⟩ := valid.deleted w hw
+    refine ⟨pub, mature, ?_⟩
+    intro a ha b hb app
+    have early := deleted_before valid w hw a ha
+    by_cases known : b ∈ s.possible a
+    · cases b with
+      | none => exact before a ha none known trivial
+      | some x =>
+        by_cases same : isReset (s.withEntry r reset) x = isReset s x
+        · have appOld : Applies s w a (some x) := by
+            intro isR
+            rcases app (same ▸ isR) with ⟨t, mem, le⟩ | covers
+            · rcases resetPairs x t mem with old | ⟨_, now⟩
+              · exact .inl ⟨t, old, le⟩
+              · omega
+            · exact .inr covers
+          have good := before a ha (some x) known appOld
+          exact ⟨good.1, fun use => good.2 (usable_of use rfl rfl same)⟩
+        · -- A snapshot first named by a reset now, already possible as a
+          -- listed raise snapshot: marked, so never usable as a reset.
+          have isR : x = r := by
+            by_cases ne : x = r
+            · exact ne
+            · exact absurd (resetOther x ne) same
+          subst isR
+          have notEntry : x ∉ s.entries := by
+            intro entry
+            apply same
+            cases reset with
+            | true => rw [resetNamed rfl, kind entry]
+            | false => exact resetSame rfl x
+          have markedX : x ∈ s.marked := (valid.possibleSource a x known).resolve_left notEntry
+          have landedX := (valid.markedLanded x markedX).1
+          have nowReset : reset = true := by
+            cases reset with
+            | true => rfl
+            | false => exact absurd (resetSame rfl x) same
+          refine ⟨fun y hy notLanded => ?_, fun use => ?_⟩
+          · cases hy; exact absurd landedX notLanded
+          · rw [marked_reset_unusable _ x (resetNamed nowReset) markedX] at use
+            exact absurd use Bool.false_ne_true
+    · rcases shape a b hb with old | ⟨eq, audience, notEx⟩
+      · exact absurd old known
+      subst eq
+      -- Not yet possible: no entry named `r` before, so no snapshot read
+      -- one, and a landed `r` does not mark a raise.
+      have unnamed : r ∉ s.entries := fun named =>
+        known (audience ▸ valid.entriesPossible r named notEx)
+      have unmarked : r ∉ s.marked := fun marked =>
+        known (audience ▸ valid.markedPossible r marked notEx)
+      have only : ∀ x ∈ s.landed, admits s.reads (some r) x = true → x = r := by
+        intro x hx admitted
+        simp only [admits, Bool.or_eq_true, decide_eq_true_eq] at admitted
+        rcases admitted with same | readR
+        · exact path x hx same
+        · exact absurd (valid.reads _ readR) unnamed
+      have none : selected order s.landed s.reads a (some r) = none ∨ r ∈ s.landed := by
+        by_cases landedR : r ∈ s.landed
+        · exact .inr landedR
+        · left
+          unfold selected
+          rw [newest_none, List.filter_eq_nil_iff]
+          intro x hx
+          simp only [Bool.and_eq_true, not_and]
+          intro _ admitted
+          exact landedR ((only x hx admitted) ▸ hx)
+      constructor
+      · intro x hx notLanded
+        cases hx
+        rcases none with none | landedR
+        · exact .inl none
+        · exact absurd landedR notLanded
+      · intro use
+        have whole := use
+        simp only [usable, Bool.and_eq_true, decide_eq_true_eq] at use
+        obtain ⟨⟨landedR, countsR⟩, _⟩ := use
+        by_cases isR : isReset (s.withEntry r reset) r = true
+        · -- A reset's snapshot covers every deleted write that counts under it.
+          have covers : r.covers w a := by
+            rcases app isR with ⟨t, mem, le⟩ | covers
+            · rcases resetPairs r t mem with old | ⟨_, now⟩
+              · exact absurd (valid.resetsNamed _ old) unnamed
+              · omega
+            · exact covers
+          have landedOld : r ∈ s.landed := landedR
+          show CoversIn (selected order s.landed s.reads a (some r)) w a
+          cases sel : selected order s.landed s.reads a (some r) with
+          | none =>
+            exfalso
+            unfold selected at sel
+            rw [newest_none] at sel
+            have mem : r ∈ s.landed.filter fun x => x.audience == a && x.counts &&
+                admits s.reads (some r) x := by
+              simp [List.mem_filter, admits, samePath_self, countsR, landedOld, audience]
+            rw [sel] at mem
+            simp at mem
+          | some x =>
+            have member := newest_member order _ x sel
+            simp only [List.mem_filter, Bool.and_eq_true] at member
+            obtain ⟨landedX, _, admitted⟩ := member
+            have := only x landedX admitted
+            subst this
+            exact covers
+        · simp only [Bool.not_eq_true] at isR
+          rw [unmarked_raise_unusable _ r isR unmarked] at whole
+          exact absurd whole Bool.false_ne_true
+  · intro p hp
+    rcases resetPairs p.1 p.2 hp with old | ⟨named, _⟩
+    · exact List.mem_cons_of_mem _ (valid.resetsNamed p old)
+    · rw [named]; exact List.mem_cons_self
+  · intro a x hx
+    rcases shape a _ hx with old | ⟨eq, _, _⟩
+    · exact (valid.possibleSource a x old).imp (List.mem_cons_of_mem _) id
+    · cases eq; exact .inl List.mem_cons_self
 
 theorem step_valid {published : Write → Prop} {order : SnapshotOrder} {s t : State}
     (step : Step published order s t) (valid : Valid published order s) :
@@ -476,7 +660,7 @@ theorem step_valid {published : Write → Prop} {order : SnapshotOrder} {s t : S
   | tick time later =>
       refine ⟨valid.sound, valid.reads, valid.keptPossible, valid.keptNamed, valid.markedLanded,
         valid.markedPossible, valid.entriesPossible, valid.audience, valid.paths, valid.expiredOut,
-        ?_, ?_⟩
+        ?_, ?_, valid.resetsNamed, valid.possibleSource⟩
       · intro x hx
         obtain ⟨unnamed, late⟩ := valid.expiredUnnamed x hx
         exact ⟨unnamed, by dsimp only; omega⟩
@@ -488,102 +672,12 @@ theorem step_valid {published : Write → Prop} {order : SnapshotOrder} {s t : S
         exact ⟨snap, member, counted, covers, by dsimp only; omega⟩
   | land snap read raise now good fresh named path counting =>
       exact land_valid valid snap read raise now good fresh named path counting
-  | publish r onTime path =>
-      have sameExcluded : ∀ x, excluded { s with
-          entries := r :: s.entries
-          possible := if excluded s r then s.possible else addPossible s.possible r } x =
-          excluded s x := fun _ => rfl
-      have grows : ∀ a b, b ∈ s.possible a →
-          b ∈ (if excluded s r then s.possible else addPossible s.possible r) a := by
-        intro a b hb
-        split
-        · exact hb
-        · simp only [addPossible]; split <;> simp [hb]
-      have shape : ∀ a b, b ∈ (if excluded s r then s.possible else addPossible s.possible r) a →
-          b ∈ s.possible a ∨ (b = some r ∧ a = r.audience ∧ excluded s r = false) := by
-        intro a b hb
-        split at hb
-        · exact .inl hb
-        · rename_i notEx
-          simp only [addPossible] at hb
-          split at hb
-          · rcases List.mem_cons.mp hb with rfl | old
-            · exact .inr ⟨rfl, by assumption, by simpa using notEx⟩
-            · exact .inl old
-          · exact .inl hb
-      have notExpired : r ∉ s.expired := fun gone => by
-        have := (valid.expiredUnnamed r gone).2; omega
-      refine ⟨valid.sound, fun p hp => List.mem_cons_of_mem _ (valid.reads p hp),
-        fun a => grows a _ (valid.keptPossible a),
-        fun a x hx => List.mem_cons_of_mem _ (valid.keptNamed a x hx), valid.markedLanded,
-        fun m hm notEx => grows _ _ (valid.markedPossible m hm (by rwa [sameExcluded] at notEx)),
-        ?_, ?_, ?_, ?_, ?_, ?_⟩
-      · intro x hx notEx
-        rw [sameExcluded] at notEx
-        rcases List.mem_cons.mp hx with rfl | old
-        · simp [notEx, addPossible]
-        · exact grows _ _ (valid.entriesPossible x old notEx)
-      · intro a x hx
-        rcases shape a _ hx with old | ⟨eq, audience, _⟩
-        · exact valid.audience a x old
-        · cases eq; exact audience.symm
-      · intro x hx e he same
-        rcases List.mem_cons.mp he with rfl | old
-        · exact path x hx same
-        · exact valid.paths x hx e old same
-      · intro x hx member
-        rcases shape _ _ member with old | ⟨eq, _, notEx⟩
-        · exact valid.expiredOut x hx old
-        · cases eq; exact notExpired hx
-      · intro x hx
-        obtain ⟨unnamed, late⟩ := valid.expiredUnnamed x hx
-        refine ⟨?_, late⟩
-        intro member
-        rcases List.mem_cons.mp member with rfl | old
-        · exact notExpired hx
-        · exact unnamed old
-      · intro w hw
-        obtain ⟨pub, mature, before⟩ := valid.deleted w hw
-        refine ⟨pub, mature, ?_⟩
-        intro a ha b hb
-        rcases shape a b hb with old | ⟨eq, audience, notEx⟩
-        · exact before a ha b old
-        · subst eq
-          by_cases known : some r ∈ s.possible a
-          · exact before a ha (some r) known
-          · -- Not yet possible: no entry named `r` before, so no snapshot
-            -- read one, and a landed `r` does not mark a raise.
-            have unnamed : r ∉ s.entries := fun named =>
-              known (audience ▸ valid.entriesPossible r named notEx)
-            have none : selected order s.landed s.reads a (some r) = none ∨ r ∈ s.landed := by
-              by_cases landedR : r ∈ s.landed
-              · exact .inr landedR
-              · left
-                unfold selected
-                rw [newest_none, List.filter_eq_nil_iff]
-                intro x hx
-                simp only [admits, Bool.and_eq_true, Bool.or_eq_true, beq_iff_eq,
-                  decide_eq_true_eq, not_and, not_or]
-                intro _
-                constructor
-                · intro same
-                  exact landedR ((path x hx same) ▸ hx)
-                · intro readR
-                  exact unnamed (valid.reads _ readR)
-            constructor
-            · intro x hx notLanded
-              cases hx
-              rcases none with none | landedR
-              · exact .inl none
-              · exact absurd landedR notLanded
-            · intro use
-              simp only [usable, Bool.and_eq_true, decide_eq_true_eq] at use
-              obtain ⟨⟨_, _⟩, markedR⟩ := use
-              exact absurd (audience ▸ valid.markedPossible r markedR notEx) known
+  | publish r reset onTime path kind =>
+      exact publish_valid valid r reset onTime path kind
   | replay a b possible named =>
       refine ⟨valid.sound, valid.reads, ?_, ?_, valid.markedLanded, valid.markedPossible,
         valid.entriesPossible, valid.audience, valid.paths, valid.expiredOut,
-        valid.expiredUnnamed, valid.deleted⟩
+        valid.expiredUnnamed, valid.deleted, valid.resetsNamed, valid.possibleSource⟩
       · intro x
         by_cases same : x = a
         · subst same; simpa using possible
@@ -620,7 +714,8 @@ theorem step_valid {published : Write → Prop} {order : SnapshotOrder} {s t : S
           not_or] at h ⊢
         exact ⟨⟨h.1.2, h.2⟩, h.1.1⟩
       refine ⟨valid.sound, valid.reads, ?_, valid.keptNamed, valid.markedLanded, ?_, ?_,
-        fun x r hr => valid.audience x r (shrink x _ hr), valid.paths, ?_, valid.expiredUnnamed, ?_⟩
+        fun x r hr => valid.audience x r (shrink x _ hr), valid.paths, ?_, valid.expiredUnnamed, ?_,
+        valid.resetsNamed, fun x r hr => valid.possibleSource x r (shrink x _ hr)⟩
       · intro x
         by_cases same : x = a
         · subst same; simpa using keeps
@@ -670,7 +765,8 @@ theorem step_valid {published : Write → Prop} {order : SnapshotOrder} {s t : S
           not_or] at h ⊢
         exact ⟨⟨h.1, h.2.2⟩, h.2.1⟩
       refine ⟨valid.sound, valid.reads, ?_, valid.keptNamed, valid.markedLanded, ?_, ?_,
-        fun y r hr => valid.audience y r (inOld y _ hr), valid.paths, ?_, ?_, ?_⟩
+        fun y r hr => valid.audience y r (inOld y _ hr), valid.paths, ?_, ?_, ?_,
+        valid.resetsNamed, fun y r hr => valid.possibleSource y r (inOld y _ hr)⟩
       · intro y
         apply keep y _ (valid.keptPossible y)
         intro isX
@@ -689,7 +785,7 @@ theorem step_valid {published : Write → Prop} {order : SnapshotOrder} {s t : S
         · exact valid.expiredOut y old (inOld _ _ member)
       · intro y hy
         rcases List.mem_cons.mp hy with rfl | old
-        · exact ⟨unnamed, late⟩
+        · exact ⟨fun named => absurd named unnamed, late⟩
         · exact valid.expiredUnnamed y old
       · intro w hw
         obtain ⟨pub, mature, before⟩ := valid.deleted w hw
@@ -697,10 +793,10 @@ theorem step_valid {published : Write → Prop} {order : SnapshotOrder} {s t : S
   | delete w publishedWrite mature held =>
       refine ⟨valid.sound, valid.reads, valid.keptPossible, valid.keptNamed, valid.markedLanded,
         valid.markedPossible, valid.entriesPossible, valid.audience, valid.paths, valid.expiredOut,
-        valid.expiredUnnamed, ?_⟩
+        valid.expiredUnnamed, ?_, valid.resetsNamed, valid.possibleSource⟩
       intro other member
       rcases List.mem_cons.mp member with rfl | old
-      · exact ⟨publishedWrite, mature, fun a ha b hb =>
+      · exact ⟨publishedWrite, mature, fun a ha b hb _ =>
           ⟨fun _ _ _ => .inr (held a ha b hb), fun _ => held a ha b hb⟩⟩
       · exact valid.deleted other old
 
@@ -715,13 +811,24 @@ theorem run_valid {published : Write → Prop} {order : SnapshotOrder} {s : Stat
   | step _ step ih => exact step_valid step ih
 
 /-- Every deleted write stays covered by its audiences' current selection
-under whatever usable boundary replay keeps, for all three orders. -/
+under whatever usable boundary replay keeps, for all three orders, wherever
+it counts under that boundary: always under a raise or none, and under a
+reset when its snapshot covers the write or the write was stored after its
+entry, as every write that read the entry was. -/
 theorem deleted_stays_covered {published : Write → Prop} {order : SnapshotOrder} {s : State}
     (run : Run published order s) (w : Write) (deleted : w ∈ s.deleted) (a : Nat)
-    (relevant : a ∈ w.audiences) (use : usable s (s.kept a) = true) :
+    (relevant : a ∈ w.audiences) (counts : Applies s w a (s.kept a))
+    (use : usable s (s.kept a) = true) :
     CoversIn (selected order s.landed s.reads a (s.kept a)) w a := by
   have valid := run_valid run
-  exact ((valid.deleted w deleted).2.2 a relevant (s.kept a) (valid.keptPossible a)).2 use
+  exact ((valid.deleted w deleted).2.2 a relevant (s.kept a) (valid.keptPossible a) counts).2 use
+
+/-- Under no boundary or a raise, every write counts. -/
+theorem applies_unless_reset (s : State) (w : Write) (a : Nat) (b : Option Snapshot)
+    (raise : ∀ r, b = some r → isReset s r = false) : Applies s w a b := by
+  cases b with
+  | none => trivial
+  | some r => intro isR; simp [raise r rfl] at isR
 
 /-- §15's reload under the kept boundary: it waits while that boundary's
 named snapshot is not listed, does not count or does not mark its raise
@@ -732,15 +839,17 @@ def reload (order : SnapshotOrder) (s : State) (a : Nat) (w : Write) : Missing :
   else .uncertified
 
 /-- So a reload that finds a deleted write missing loads a snapshot holding
-it in every part audience, or waits; it never skips it as having no part
-there. -/
+it in every part audience where it counts, or waits; it never skips it as
+having no part there. Under a kept reset it skips only a write that the
+reset ignores (§19.3): one outside its snapshot that never read its entry. -/
 theorem reload_never_skips {published : Write → Prop} {order : SnapshotOrder} {s : State}
     (run : Run published order s) (w : Write) (deleted : w ∈ s.deleted) (a : Nat)
-    (relevant : a ∈ w.audiences) : reload order s a w ≠ .skip := by
+    (relevant : a ∈ w.audiences) (counts : Applies s w a (s.kept a)) :
+    reload order s a w ≠ .skip := by
   unfold reload
   split
   · rename_i use
-    have covered := deleted_stays_covered run w deleted a relevant use
+    have covered := deleted_stays_covered run w deleted a relevant counts use
     unfold missing
     split
     · cases h : selected order s.landed s.reads a (s.kept a) with
@@ -785,14 +894,21 @@ theorem listed_raise_hold_ends (published : Write → Prop) (order : SnapshotOrd
   · subst same; simp
   · simp [same]
 
-/-- After expiry the snapshot never becomes a possible boundary again, and no
-kept entry ever names it: no entry stored a day after its `T_c` counts. -/
+/-- After expiry the snapshot never becomes a possible boundary again, no
+raise entry names it (none stored a day after its `T_c` counts), and replay
+never keeps it, even under a reset entry naming it. -/
 theorem expired_stays_out {published : Write → Prop} {order : SnapshotOrder} {s : State}
     (run : Run published order s) (x : Snapshot) (gone : x ∈ s.expired) :
-    some x ∉ s.possible x.audience ∧ x ∉ s.entries ∧ ∀ a, s.kept a ≠ some x := by
+    some x ∉ s.possible x.audience ∧ (x ∈ s.entries → isReset s x = true) ∧
+      ∀ a, s.kept a ≠ some x := by
   have valid := run_valid run
   obtain ⟨unnamed, _⟩ := valid.expiredUnnamed x gone
-  exact ⟨valid.expiredOut x gone, unnamed, fun a kept => unnamed (valid.keptNamed a x kept)⟩
+  refine ⟨valid.expiredOut x gone, unnamed, fun a kept => ?_⟩
+  have possible := valid.keptPossible a
+  rw [kept] at possible
+  have audience := valid.audience a x possible
+  subst audience
+  exact valid.expiredOut x gone possible
 
 /-- A migration's capture can be sent when the completed catch-up that
 sampled its `T_c` applied nothing past it: every counting snapshot of its
@@ -808,78 +924,6 @@ theorem unchanged_capture_prepares (order : SnapshotOrder) (landed : List Snapsh
   obtain ⟨member, audience, counted⟩ := current_member order landed capture.audience old selected
   exact ⟨audience.symm, fun writer => Nat.le_trans (read old member audience counted writer)
     (unchanged writer)⟩
-
-/-! ### The two failing histories under these rules -/
-
-/-- `option_a_loses_write`: the migration-time raise snapshots are unsound
-(`capture_unsound`), so none can land. Ana's recapture after a completed
-catch-up at `sentAt` covers Ben's writes, and with it as the kept boundary
-every audience's reload loads write 1. -/
-def recaptured (audience writer number : Nat) : Snapshot :=
-  ⟨audience, writer, number, sentAt, sentAt, [(writer, 1), (1, 2)]⟩
-def recaptures : List Snapshot := [recaptured 0 0 1, recaptured 1 0 2, recaptured 2 2 1]
-def recapturedKept : Boundary := fun a =>
-  if a = 0 then some (recaptured 0 0 1) else if a = 1 then some (recaptured 1 0 2)
-  else if a = 2 then some (recaptured 2 2 1) else none
-
-theorem recapture_keeps_write :
-    SnapshotHistory.Sound (· ∈ [benOne, benTwo]) (recaptured 0 0 1) ∧
-      missing (recaptures ++ bens)
-        (boundaryCurrent .writes (recaptures ++ bens) recapturedKept noLaterSnapshot) 0 benOne =
-          .load (recaptured 0 0 1) ∧
-      missing (recaptures ++ bens)
-        (boundaryCurrent .writes (recaptures ++ bens) recapturedKept noLaterSnapshot) 1 benOne =
-          .load (recaptured 1 0 2) ∧
-      missing (recaptures ++ bens)
-        (boundaryCurrent .writes (recaptures ++ bens) recapturedKept noLaterSnapshot) 2 benOne =
-          .load (recaptured 2 2 1) := by
-  refine ⟨⟨?_, ?_⟩, by decide, by decide, by decide⟩
-  · intro w published
-    simp only [List.mem_cons, List.not_mem_nil, or_false] at published
-    rcases published with rfl | rfl <;> decide
-  · intro w published
-    simp only [List.mem_cons, List.not_mem_nil, or_false] at published
-    rcases published with rfl | rfl <;> decide
-
-/-- `kept_late_raise_loses_write`: while Ana's raise snapshot is listed and
-no raise entry names it, it is a possible boundary of the store, and under
-it the store's selection is that snapshot, which omits Ben's write: the
-hold refuses Ben's deletion. -/
-def lateState : State :=
-  ⟨deletedAt, lateListing, [earlyRaise], [], [], [], fun _ => none,
-    fun a => if a = 0 then [some earlyRaise, none] else [none], [], []⟩
-
-theorem kept_late_held :
-    selected .writes lateState.landed lateState.reads 0 (some earlyRaise) = some earlyRaise ∧
-      Covered (catalogCurrent .writes lateListing) benLate ∧ ¬ Held .writes lateState benLate := by
-  refine ⟨by decide, by decide, ?_⟩
-  intro held
-  have := held 0 (by decide) (some earlyRaise) (by decide)
-  revert this
-  decide
-
-/-- T216: Ana's store raise snapshot from `kept_late_raise_loses_write` is
-listed, but her device is removed before it publishes the raise entry. A day
-after its `T_c` (50) no entry can name it; at Ben's deletion time it has
-expired, and the hold is §15's current coverage again, which his snapshot
-gives. -/
-def releasedState : State :=
-  { lateState with
-    possible := fun a => if a = 0 then [none] else [none]
-    expired := [earlyRaise] }
-
-theorem abandoned_raise_released :
-    earlyRaise.caughtAt + day < deletedAt ∧ earlyRaise ∉ lateState.entries ∧
-      ¬ Held .writes lateState benLate ∧ Held .writes releasedState benLate := by
-  refine ⟨by decide, by decide, ?_, by decide⟩
-  intro held
-  have := held 0 (by decide) (some earlyRaise) (by decide)
-  revert this
-  decide
-
-theorem abandoned_raise_expires :
-    ∃ t, Step (· ∈ [anaMarker, benLate]) .writes lateState t ∧ Held .writes t benLate := by
-  exact ⟨_, .expire lateState earlyRaise (by decide) (by decide), by decide⟩
 
 end RaiseHistory
 

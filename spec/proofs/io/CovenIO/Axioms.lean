@@ -415,6 +415,12 @@ import CovenIO
 #print axioms CovenIO.RaiseCoverage.RaiseHistory.expired_stays_out
 #print axioms CovenIO.RaiseCoverage.RaiseHistory.abandoned_raise_released
 #print axioms CovenIO.RaiseCoverage.RaiseHistory.abandoned_raise_expires
+#print axioms CovenIO.RaiseCoverage.RaiseHistory.publish_valid
+#print axioms CovenIO.RaiseCoverage.RaiseHistory.deleted_before
+#print axioms CovenIO.RaiseCoverage.RaiseHistory.usable_of
+#print axioms CovenIO.RaiseCoverage.RaiseHistory.applies_unless_reset
+#print axioms CovenIO.RaiseCoverage.RaiseHistory.dropped_reset_held
+#print axioms CovenIO.RaiseCoverage.RaiseHistory.dropped_reset_skips
 #print axioms CovenIO.CommonReload.Source.selectedBound
 #print axioms CovenIO.CommonReload.Source.numbered
 #print axioms CovenIO.ListingMarginExamples.provider_history

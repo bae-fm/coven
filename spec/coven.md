@@ -3058,7 +3058,7 @@ Carol's tablet:
   - Drop a raise entry if it lands more than one day after the `T_c` it
     carries for its snapshot (D6); exactly one day does not drop it.
     Retention stops holding writes for a listed raise snapshot a day after
-    its `T_c`, so no entry naming it may count later (§15;
+    its `T_c`, so no raise entry naming it may count later (§15;
     [`expired_stays_out`](proofs/io/CovenIO/RaiseHistory.lean)).
   - Judge this against all stored entries, including dropped ones and
     entries from newly discovered devices, not only the author's past.
@@ -4787,7 +4787,8 @@ Carol's tablet:
     nothing past it. Otherwise the device captures that audience again from
     its current state, through its newest write; its own later writes join
     the captured prefix and are confirmed before the snapshot is sent
-    ([`RaiseHistory.unchanged_capture_prepares`, `recapture_keeps_write`](proofs/io/CovenIO/RaiseHistory.lean)).
+    ([`RaiseHistory.unchanged_capture_prepares`](proofs/io/CovenIO/RaiseHistory.lean),
+    [`recapture_keeps_write`](proofs/io/CovenIO/RaiseHistoryExamples.lean)).
     A capture sent with a later sample would omit writes stored before it
     ([`capture_unsound`, `option_a_loses_write`](proofs/io/CovenIO/RaiseCoverage.lean)).
   - Its raise entry carries the snapshot's `T_c` and counts only if it lands
@@ -4981,11 +4982,25 @@ Carol's tablet:
     ([`maturity_survives_new_snapshots`, `eligible_after_day`](proofs/io/CovenIO/Retention.lean)).
   - The boundaries replay could still select for an audience are its
     current one, the one its final entries alone select, each non-final
-    raise entry above the final version, and each listed counting raise
-    snapshot above it, which a raise entry published later could still
-    name. Under each, the newest counting snapshot it admits must cover the
-    write. Without a pending raise this is the current newest alone
+    raise entry above the final version, each non-final reset entry, kept
+    or dropped now, and each listed counting raise snapshot above the final
+    version, which a raise entry published later could still name. Under
+    each, the newest counting snapshot it admits must cover the write.
+    Without a pending raise or reset this is the current newest alone
     ([`held_without_raises`, `reload_never_skips`](proofs/io/CovenIO/RaiseHistory.lean)).
+  - Under a kept reset, a reload skips a deleted write only when the reset
+    ignores it: outside its snapshot and stored before its entry, so it
+    never read it (§19.3;
+    [`reload_never_skips`](proofs/io/CovenIO/RaiseHistory.lean)). A reset
+    snapshot marks no raise, and retention needs no hold on one listed
+    before its entry: a write deleted by then never read that entry.
+  - E.g. Carl's kept reset and Ana's concurrent reset, dropped now, are both
+    not final. Ben read Ana's reset, then wrote 5 and captured it in his
+    snapshot, which Carl's reset and the final boundary both select. Ana's
+    reset snapshot has more writes but not Ben's 5, and is the newest her
+    reset admits. If Carl's reset later drops, replay keeps Ana's, and a
+    reload would skip write 5, so Ben keeps it
+    ([`dropped_reset_held`, `dropped_reset_skips`](proofs/io/CovenIO/RaiseHistoryExamples.lean)).
   - A raise entry can name a snapshot that is not listed yet, never counts,
     or does not mark its raise. Replay can keep it, but the reload refuses
     that boundary and waits until its named snapshot is listed, counting
@@ -4996,19 +5011,20 @@ Carol's tablet:
     complete endpoint `T′` is past that day) and none names it: no entry
     landing later counts. Its author being removed, or simply gone, holds
     other writers' writes no longer than that
-    ([`listed_raise_hold_ends`, `expired_stays_out`, `abandoned_raise_released`](proofs/io/CovenIO/RaiseHistory.lean)).
+    ([`listed_raise_hold_ends`, `expired_stays_out`](proofs/io/CovenIO/RaiseHistory.lean),
+    [`abandoned_raise_released`](proofs/io/CovenIO/RaiseHistoryExamples.lean)).
   - E.g. Ana's store raise snapshot is listed, but her raise entry is not
     published yet. Ben's newer snapshot covers his old-schema write 5, which
     Ana's raise snapshot omits. Ben keeps write 5: once Ana's raise is
     kept, only her snapshot and those that read her entry are usable, and a
     reload would skip write 5 as having no store part
     ([`kept_late_raise_loses_write`](proofs/io/CovenIO/RaiseCoverage.lean),
-    [`kept_late_held`](proofs/io/CovenIO/RaiseHistory.lean)).
+    [`kept_late_held`](proofs/io/CovenIO/RaiseHistoryExamples.lean)).
   - E.g. Ana's device is removed before her raise entry is published. A
     day after her raise snapshot's `T_c`, once Ben has received every entry
     stored by then, her snapshot no longer holds his write 5, which his
     newer snapshot covers
-    ([`abandoned_raise_released`](proofs/io/CovenIO/RaiseHistory.lean)).
+    ([`abandoned_raise_released`](proofs/io/CovenIO/RaiseHistoryExamples.lean)).
   - While an audience lists a snapshot whose prefix this device has not
     verified, its current newest counting snapshot is unknown: the prefix
     is in a newer format, by an author whose device registration has not
@@ -5741,7 +5757,8 @@ Carol's tablet:
     completed catch-up, from the capture if that catch-up applied nothing
     past it and otherwise from a fresh capture of the audience through the
     device's newest write
-    ([`RaiseHistory.unchanged_capture_prepares`, `recapture_keeps_write`](proofs/io/CovenIO/RaiseHistory.lean)).
+    ([`RaiseHistory.unchanged_capture_prepares`](proofs/io/CovenIO/RaiseHistory.lean),
+    [`recapture_keeps_write`](proofs/io/CovenIO/RaiseHistoryExamples.lean)).
     Own writes up to that newest write join the captured prefix: the upload
     gate admits them by number before any raise is kept, and the raise
     publishes once they are confirmed
