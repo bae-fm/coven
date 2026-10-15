@@ -579,8 +579,9 @@ private def fileScan (j : Json) : Except String Json := do
   return Json.arr results
 
 /-- `Writers.retirements` over Rust's replay verdicts: the devices that kept
-retirements and dropped registrations of unregistered devices retire. Entry
-`i` is the `i`th received entry; its storage time is irrelevant here. -/
+retirements and dropped registrations of unregistered devices retire, late
+registrations among the dropped ones as in §9's timed replay. Entry `i` is
+the `i`th received entry; its storage time is irrelevant here. -/
 private def retirementDevices (j : Json) : Except String Json := do
   let entries ← j.getObjValAs? (Array Json) "entries"
   let kept ← j.getObjValAs? (List Nat) "kept"

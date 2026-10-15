@@ -239,8 +239,9 @@ fn io_differential_dropped_registration_retires() {
 
 /// Advance `reader`'s horizon past every entry it holds, then report the
 /// devices it records retirement finality for, with the IO case projecting
-/// its entries and its replay's kept and dropped verdicts.
-async fn retired_devices(reader: &Device) -> (serde_json::Value, serde_json::Value) {
+/// its entries and its replay's kept and dropped verdicts. A late entry is
+/// among the dropped ones, as in §9's timed replay (`ReplayPolicy.resolve`).
+pub(crate) async fn retired_devices(reader: &Device) -> (serde_json::Value, serde_json::Value) {
     use coven_format::value::StorageTime;
     let log: StoreLog = reader.db.local_store_log().await.unwrap().log;
     let mut members = Vec::new();
@@ -282,7 +283,6 @@ async fn retired_devices(reader: &Device) -> (serde_json::Value, serde_json::Val
         entries.push(projected);
         match log.replay.entries[&entry.position] {
             EntryOutcome::Kept => kept.push(number),
-            EntryOutcome::Dropped(coven_database::DropReason::LandedTooLate) => {}
             EntryOutcome::Dropped(_) => dropped.push(number),
         }
     }

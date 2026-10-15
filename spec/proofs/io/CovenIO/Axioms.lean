@@ -470,3 +470,15 @@ import CovenIO
 #print axioms CovenIO.Writers.carol_device_needs_dropped_registration
 #print axioms CovenIO.Writers.phone_needs_dropped_registration
 #print axioms CovenIO.Writers.phone_write_window
+#print axioms CovenIO.Writers.policy_kept_lt
+#print axioms CovenIO.Writers.policy_disposed
+#print axioms CovenIO.Writers.final_unkept_registration
+#print axioms CovenIO.Writers.final_registration_retires
+#print axioms CovenIO.Writers.catchup_after_final_unbound
+#print axioms CovenIO.Writers.registration_sees_final
+#print axioms CovenIO.Writers.registration_closed
+#print axioms CovenIO.Writers.registration_drain_complete
+#print axioms CovenIO.Writers.reregistration_lifts_retirement
+#print axioms CovenIO.Writers.carol_again_registers_twice
+#print axioms CovenIO.Writers.carol_registers_once
+#print axioms CovenIO.Writers.late_phone_retired

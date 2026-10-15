@@ -272,22 +272,61 @@ leaves the polled set once its drain completes (`dropped_drain_stops_polling`
 keeps the request bound). `phone_write_window` checks the 30-day boundary on
 the phone.
 
-A registration that landed too late (§9) is not a retirement here: its device
-registers again with a new entry, and draining it on the late entry would
-stop discovery of that re-registration. Entries and key copies of a device
-retired this way need the same publication witness `Retired.drain_complete`
-takes for kept retirements: a catch-up after the drop is final finds the
-device unregistered, and its member cannot hold a kept binding with the same
-keys again (§9's fresh keys), so it sends nothing. That last step is a reading
-of the identity gate, not a theorem here. A later kept registration of the same
-id would lift the retirement, and with it any late verdict it caused; nothing
-in Rust registers an id again after its registration's drop is final, but the
-model does not exclude it.
+**One entry registers each device id — decided and proved, with the
+counterexample checked.** Two open ends remained after the rule above. The
+drain is exact only if the device sends nothing once the registration's drop
+is final, and the late verdicts the retirement causes are final only if no
+kept entry ever registers that id again. Replay alone gives neither: a later
+entry can register the same id.
+[`RegisteredOnceExamples`](io/CovenIO/RegisteredOnceExamples.lean) checks the
+history (`reregistration_lifts_retirement`): Carol's device registration drops
+with her addition, Ana adds Carol again, and the same device registers again
+after reading everything. Replay keeps the second registration, so nothing
+retires the device any more; a reader that had already drained it never reads
+that second entry in the device's own folder, while every other reader keeps
+it. The history registers the id twice (`carol_again_registers_twice`).
+
+The rule chosen (§10): one entry ever registers a device id, the
+installation's addition of itself or creation, whatever replay decides about
+it. [`RegisteredOnce`](io/CovenIO/RegisteredOnce.lean) states it as
+`RegistersOnce` and works in §9's timed replay, whose dropped entries include
+the late ones (`policy_disposed`, `policy_kept_lt`).
+`final_unkept_registration` proves no kept entry registers the id again: once
+the registration is final and not kept, every later replay holding the
+certified old prefix keeps no registration of it, because that entry is the
+only candidate and C10 fixes its verdict. `final_registration_retires` makes
+the device retired in every such replay, at the registration's own storage
+time, so the window verdicts it causes are final with it.
+`catchup_after_final_unbound` and `registration_sees_final` give the send gate
+its part: a catch-up of the device started after that finality finds it
+unbound, which is `Retired.Publication`'s `seesFinal` for a gate that computes
+its binding from its own replay. `registration_closed` and
+`registration_drain_complete` then close the device's logs after the wait:
+every object there is the registration itself, stored before the finality
+sample, or a gated send landing within five minutes and a day after it.
+`carol_registers_once` checks the rule on Carol's history.
+
+A registration that landed too late is one replay never keeps, so the same
+theorems retire its device: under the rule it never registers that id again,
+so draining on the late entry stops nothing. `late_phone_retired` checks a
+phone whose only registration lands just past 30 days after an entry it never
+read: replay drops it, no kept entry registers the phone, and the late
+entry retires it at its own storage time. No write of such a device counts,
+since no recorded view registers it; the retirement only ends its polling.
+
+What stays outside the model: that the installation computes its binding from
+its own complete replay (Rust's `Binding::Device` needs a kept registration in
+its catch-up), and that it never makes a second registration (Rust refuses
+one before reserving an entry, with the stored registration's reason).
+
 [`IORunner.lean`](io/IORunner.lean)'s `retirements` case computes the retired
-devices from Rust's replay verdicts, and
+devices from Rust's replay verdicts, late entries among the dropped ones, and
 [`io_differential_dropped_registration_retires`](../../crates/coven-sync/src/write_object_tests.rs)
 compares them with the devices each reader records finality for, on the
-phone history, in both arrival orders.
+phone history, in both arrival orders;
+[`io_differential_late_registration_retires`](../../crates/coven-sync/src/store_log_landing_tests.rs)
+does the same for a registration that landed too late, on the late device and
+on a reader that received it.
 
 **Snapshot positions name published writes — proved.**
 [`SnapshotWrites`](io/CovenIO/SnapshotWrites.lean) composes the existing
@@ -859,7 +898,7 @@ reference-safe deletion remain implementation obligations.
 `idle_gets` and `idle_requests` give exactly two listings and 3N next-number
 GETs. N counts the known writers not yet drained, including this one:
 active, removed and replaced devices, and devices named only by dropped
-registrations until a dropped registration drains them
+registrations until a dropped or late registration drains them
 (`Writers.known_requests`, `Writers.dropped_drain_stops_polling`). Drained ids add no log probes; their permanent folders and
 positions still occupy listing pages. The trace depends on no history or
 file count. Three devices give 11 requests (`idle_three_devices`).

@@ -1,8 +1,11 @@
 //! Retired devices are drained once (§6): after an entry retiring the device
 //! has been final for more than one day and five minutes, its three logs are
 //! read forward to a miss once and it is never probed again. A kept removal or
-//! replacement retires a device, and so does a dropped registration of a
-//! device that no kept entry registers (`Writers.retirements`).
+//! replacement retires a device, and so does a registration replay does not
+//! keep, dropped or landed too late, of a device that no kept entry registers
+//! (`Writers.retirements`). One entry ever registers a device id (§10,
+//! `Writers.RegistersOnce`), so once that registration is final no kept entry
+//! registers the id again (`Writers.final_unkept_registration`).
 //!
 //! `_coven_retirement_finality` keeps the qualifying storage time `F` of the
 //! finality observation that first found a kept retiring entry final, saved in
@@ -32,7 +35,7 @@ pub struct RetirementFinality {
     /// The retired device.
     pub device: DeviceId,
     /// The final entry retiring it: a kept removal or replacement, or a
-    /// dropped registration of a device no kept entry registers.
+    /// dropped or late registration of a device no kept entry registers.
     pub entry: EntryId,
     /// `F`: the qualifying sample `T` of that finality observation, never the
     /// entry's own publication time.
@@ -63,8 +66,10 @@ fn device_bytes(device: DeviceId) -> [u8; 8] {
 
 /// Record `F = sample` for every device retired by an entry stored strictly
 /// before `horizon` that has no finality evidence yet, choosing its earliest
-/// such entry: a kept removal or replacement, or a dropped registration of a
-/// device no kept entry registers (`Writers.registered_or_retired`). Called in the transaction that advances the horizon, so the
+/// such entry: a kept removal or replacement, or a dropped or late
+/// registration of a device no kept entry registers
+/// (`Writers.registered_or_retired`, `Writers.final_registration_retires`).
+/// Called in the transaction that advances the horizon, so the
 /// evidence and the observation commit together. Existing evidence is never
 /// refreshed: a later `F` would only delay the drain.
 pub(crate) fn record_finality(
@@ -81,7 +86,7 @@ pub(crate) fn record_finality(
          WHERE l.retires_member IS NOT NULL AND l.outcome='kept'
          UNION ALL
          SELECT l.registers_device,l.device,l.number,l.stored_at FROM _coven_store_log l
-         WHERE l.registers_device IS NOT NULL AND l.outcome NOT IN ('kept','late')
+         WHERE l.registers_device IS NOT NULL AND l.outcome<>'kept'
            AND NOT EXISTS(SELECT 1 FROM _coven_devices d WHERE d.device=l.registers_device)
          ORDER BY 1,4,2,3",
         [],
@@ -122,8 +127,8 @@ pub(crate) fn record_finality(
 /// The device is polled again.
 pub(crate) fn forget_dropped(db: &DatabaseConnection) -> Result<(), DbError> {
     // The entry still retires the device: kept and not a registration of it,
-    // or a dropped (not late) registration of it while no kept entry
-    // registers it (`Writers.retirements`). `mark` checks the same condition.
+    // or a dropped or late registration of it while no kept entry registers
+    // it (`Writers.retirements`). `mark` checks the same condition.
     db.internal_execute(
         "DELETE FROM _coven_retirement_finality WHERE NOT EXISTS(
             SELECT 1 FROM _coven_store_log l WHERE l.device=entry_device
@@ -131,7 +136,7 @@ pub(crate) fn forget_dropped(db: &DatabaseConnection) -> Result<(), DbError> {
             AND ((l.outcome='kept' AND (l.registers_device IS NULL
                     OR l.registers_device<>_coven_retirement_finality.device))
                 OR (l.registers_device=_coven_retirement_finality.device
-                    AND l.outcome NOT IN ('kept','late')
+                    AND l.outcome<>'kept'
                     AND NOT EXISTS(SELECT 1 FROM _coven_devices r
                         WHERE r.device=_coven_retirement_finality.device))))",
         [],
@@ -201,7 +206,7 @@ pub(crate) fn mark(
     let retires: bool = db.query_row(
         "SELECT EXISTS(SELECT 1 FROM _coven_store_log l WHERE l.device=?1 AND l.number=?2
             AND ((l.outcome='kept' AND (l.registers_device IS NULL OR l.registers_device<>?3))
-                OR (l.registers_device=?3 AND l.outcome NOT IN ('kept','late')
+                OR (l.registers_device=?3 AND l.outcome<>'kept'
                     AND NOT EXISTS(SELECT 1 FROM _coven_devices r WHERE r.device=?3))))",
         params![
             device_bytes(current.entry.device).as_slice(),

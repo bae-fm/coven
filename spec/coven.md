@@ -418,7 +418,8 @@ a zero-body pass cannot hide a listing of the whole history.
   miss per polled device for each of three logs: store-log entries, writes
   and key copies. `N` counts §6's known writers not yet drained: active,
   removed and replaced devices, and devices named only by registrations
-  replay dropped, until one of those registrations drains them (§6)
+  replay does not keep, dropped or late, until one of those registrations
+  drains them (§6)
   ([`known_requests`](proofs/io/CovenIO/Writers.lean),
   [`dropped_registration_polled`](proofs/io/CovenIO/WritersExamples.lean),
   [`dropped_drain_stops_polling`](proofs/io/CovenIO/DroppedRegistrations.lean)).
@@ -1670,12 +1671,19 @@ File uploads run in their own worker (§16.5); a pass does not wait for them.
 - Poll removed and replaced devices like active ones until a kept entry
   retiring them has been final for more than one day and five minutes (§9,
   §10). A device that no kept entry registers, known only from registrations
-  replay dropped, is retired by each of those dropped registrations instead
-  (§10): it drains once one of them has been final, and still dropped, for
-  that long. Without this, Carol's device after her own addition drops, or
-  Ben's phone registered while Ana removes Ben, would be polled forever
+  replay does not keep, is retired by each of those registrations instead,
+  dropped or landed too late (§10): it drains once one of them has been
+  final, and still not kept, for that long. Without this, Carol's device
+  after her own addition drops, Ben's phone registered while Ana removes
+  Ben, or a phone whose only registration landed too late, would be polled
+  forever
   ([`registered_or_retired`, `dropped_registration_retires`, `dropped_drain_stops_polling`](proofs/io/CovenIO/DroppedRegistrations.lean),
-  [`carol_device_needs_dropped_registration`, `phone_needs_dropped_registration`](proofs/io/CovenIO/DroppedRegistrationExamples.lean)).
+  [`carol_device_needs_dropped_registration`, `phone_needs_dropped_registration`](proofs/io/CovenIO/DroppedRegistrationExamples.lean),
+  [`late_phone_retired`](proofs/io/CovenIO/RegisteredOnceExamples.lean)).
+  Such a drain is exact because one entry ever registers a device id (§10):
+  once that registration is final and not kept, no later replay keeps a
+  registration of the id, and the installation sends nothing more under it
+  ([`final_unkept_registration`, `final_registration_retires`, `registration_drain_complete`](proofs/io/CovenIO/RegisteredOnce.lean)).
   Only that drain stops polling a known writer. Finality itself requires a provider sample more than 30 storage days
   plus one hour plus δ after that entry, and can take longer while late
   entries arrive.
@@ -1697,21 +1705,23 @@ File uploads run in their own worker (§16.5); a pass does not wait for them.
   and §19.1's refusal rules. It is never a completed drain.
 
   `_coven_drained_devices` is local, keyed by device id, and records the
-  retiring entry, kept or a dropped registration, that justified each
-  completed drain. Set it only in
+  retiring entry, kept, or a registration replay does not keep, that
+  justified each completed drain. Set it only in
   the successful transaction retaining all three completed observations,
-  checking that the entry is still kept and the wait above has elapsed.
+  checking that the entry still retires the device and the wait above has
+  elapsed.
   It survives reopening, but is neither posted nor included in snapshots.
   Later passes skip that device's entries, writes and key-copy probes;
   keep its received history.
   Cached writes waiting for keys or application remain pending and are
   processed from retained inputs; draining does not claim they are applied.
 
-  Replay derives retirement from kept entries and dropped registrations. In
-  the same replay transaction, remove any drain record and timing evidence
-  whose retiring entry is no longer kept, or, for a dropped registration,
-  is kept again or whose device a kept entry now registers; if the device is
-  active again, poll it again. A non-final
+  Replay derives retirement from kept entries and from registrations it
+  does not keep. In the same replay transaction, remove any drain record and
+  timing evidence whose retiring entry is no longer kept, or, for a dropped
+  registration, is kept again or whose device a kept entry now registers; if
+  the device is active again, poll it again. Neither can happen once the
+  registration is final (§10); a late one is never kept. A non-final
   removal can drop before any drain is allowed; a correctly established
   final entry cannot drop (§9).
   Remembered retirement alone never suppresses discovery.
@@ -3052,7 +3062,8 @@ Carol's tablet:
     Its keys and recorded storage access still follow §11 and §13.
   - Its author's device records `Dropped(LandedTooLate)` in the pending
     list: “landed too late”. A new attempt at the action catches up online
-    and uses a new entry; it cannot rewrite the stored one (§18).
+    and uses a new entry; it cannot rewrite the stored one (§18). A device
+    registration is the exception: its id is never registered again (§10).
   - Online calls read the log first, but an upload racing another device
     or retrying after a connection failure can still land late. The rule
     applies to every store-log entry, including device registrations.
@@ -3318,6 +3329,27 @@ Carol's tablet:
 
 - A device is one install of the app, with its own device id, belonging to
   one member, who adds it to the store log ([§9](#9-members-and-roles)).
+- One entry ever registers a device id: the installation's addition of
+  itself, or creation for the first device. Once that entry is stored,
+  whatever replay decides, no entry registers the id again. Making a
+  registration first checks the stored history and refuses a second one with
+  `SyncError::Rejected`, giving the stored registration's own drop reason
+  (`NotAllowed` if replay keeps it).
+  If replay drops that registration or it lands too late, the installation
+  never sends under that id: it can register only as a new device with a
+  fresh id, through restore or join (§12).
+  - Without this rule a device could register its id again after its first
+    registration's drop became final and readers drained the id. They never
+    read that device's folder again, so they would miss a second
+    registration every other reader keeps
+    ([`reregistration_lifts_retirement`, `carol_again_registers_twice`](proofs/io/CovenIO/RegisteredOnceExamples.lean)).
+  - With it, a registration that is final and not kept stays not kept in
+    every later replay that holds the certified old prefix, so no kept entry
+    registers the id again and its retirement below is final. Every
+    catch-up started after that finality finds the device unbound, so the
+    installation sends nothing more, and §6's drain reads its logs to their
+    end
+    ([`final_unkept_registration`, `final_registration_retires`, `catchup_after_final_unbound`, `registration_sees_final`, `registration_closed`, `registration_drain_complete`](proofs/io/CovenIO/RegisteredOnce.lean)).
 - Before any upload, check that this installation still owns its counters.
   - Use the pass's next-number reads of its own writes, store-log entries
     and key copies, plus checked own posted positions and signed snapshot
@@ -3476,7 +3508,8 @@ Carol's tablet:
     over the id of the device whose replacement it read.
   - Replacement does not exempt an entry from §9's landing rule. A stale
     registration or replacement retry that lands too late is consumed and
-    reported; registering again uses a new entry after catching up online.
+    reported. Its id is never registered again (above); registering again
+    takes a new device with a fresh id.
   - Other devices keep polling the old id until a kept replacement has been
     final for more than one day and five minutes, then drain its three logs
     once and record completion locally (§6).
@@ -3530,15 +3563,18 @@ Carol's tablet:
   by itself
   ([`writeAllowed_iff`, `read_retirement_judged_by_time`, `read_unretired_write_counts`](proofs/io/CovenIO/Retired.lean)).
   A device that no kept entry registers is retired the same way by each
-  dropped entry that registered it, at that entry's storage time: its writes,
+  entry registering it that replay does not keep, dropped or landed too
+  late, at that entry's storage time: its writes,
   which count by their own recorded view (§7.1), count only if published no
   more than 30 days after it. Every reader holding the same entries reaches
   the same verdict, and once that registration's drop is final no later
   write of the device counts, so its drain is exact
   ([`late_after_dropped_registration`, `dropped_verdict_agrees`, `drained_device_writes_late`](proofs/io/CovenIO/DroppedRegistrations.lean),
   [`phone_write_window`](proofs/io/CovenIO/DroppedRegistrationExamples.lean)).
-  A registration that landed too late retires nothing: its device registers
-  again with a new entry.
+  A registration that landed too late is never kept, so it retires its
+  device for good; no write of such a device counts, since no recorded view
+  registers it, and the retirement only ends its polling
+  ([`late_phone_retired`](proofs/io/CovenIO/RegisteredOnceExamples.lean)).
   Ordinary authority, causality, schema and reset checks still apply.
   - Use first complete publication times, never authored timestamps or
     device clocks. Retries change neither bytes nor storage time (§4).
@@ -3956,6 +3992,10 @@ Carol's tablet:
   a new admin-approved replacement invite. It then adds itself to the store
   log, signing with the current member key (§9), and follows the same landing
   rule as existing devices; finality does not depend on knowing it in advance.
+  That entry is its one registration (§10): retrying an interrupted load
+  publishes the same entry, and if replay drops it or it lands too late, the
+  load fails with its reason and only a new restore or join, with a fresh
+  id, registers this installation.
 - The person writes the code down when they create or join a store, as
   part of setup.
 - On Apple platforms, coven writes the code to iCloud Keychain whenever it

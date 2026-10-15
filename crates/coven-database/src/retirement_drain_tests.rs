@@ -54,11 +54,12 @@ pub(crate) async fn drop_retirement(db: &crate::Database, entry: EntryId, device
 /// F is the sample before the observation whose horizon first made a
 /// retirement final, never its publication time, and a later observation
 /// never refreshes it (§6). Device removal, member removal and replacement
-/// each retire their device, and so does a dropped registration of a device
-/// no kept entry registers (`Writers.registered_or_retired`).
+/// each retire their device, and so does a dropped or late registration of a
+/// device no kept entry registers (`Writers.registered_or_retired`,
+/// `Writers.final_registration_retires`).
 #[tokio::test]
 async fn the_first_final_observation_records_its_sample_as_f() {
-    for kind in ["device", "member", "replacement", "registration"] {
+    for kind in ["device", "member", "replacement", "registration", "late"] {
         let store = TestStore::new();
         let db = store.builder(vec![], vec![]).open().await.unwrap();
         let writer = DeviceId(5);
@@ -189,4 +190,42 @@ async fn keeping_a_dropped_registration_forgets_its_drain() {
     assert!(db.drained_devices().await.unwrap().is_empty());
     assert!(db.retirement_finalities().await.unwrap().is_empty());
     assert!(!db.mark_drained(finality, at(43 * DAY)).await.unwrap());
+}
+
+/// A registration that landed too late retires its device for good: replay
+/// never keeps it, and no other entry registers the id (§10,
+/// `Writers.final_registration_retires`), so a later replay keeps its drain.
+#[tokio::test]
+async fn a_late_registrations_drain_survives_later_replays() {
+    let store = TestStore::new();
+    let db = store.builder(vec![], vec![]).open().await.unwrap();
+    let writer = DeviceId(5);
+    let entry = retire(&db, writer, 1, "late", 100).await;
+    advance(&db, 101, at(40 * DAY)).await;
+    let finality = db.retirement_finalities().await.unwrap()[0];
+    assert_eq!((finality.device, finality.entry), (writer, entry));
+    assert!(db.mark_drained(finality, at(42 * DAY)).await.unwrap());
+    let replay = db.store_log().await.unwrap().replay;
+    let other = StoreLogEntry {
+        position: EntryId {
+            device: DeviceId(98),
+            number: 1,
+        },
+        timestamp: coven_merge::Timestamp::new(1, 0, DeviceId(98)).unwrap(),
+        author: crate::store_log::tests::member(1),
+        had_read: EntryPositions(Vec::new()),
+        change: StoreChange::RenameCircle {
+            circle: coven_foundation::id_source::CircleId(uuid::Uuid::from_u128(1)),
+            name: "renamed".into(),
+        },
+    };
+    let mut replay = replay;
+    replay.entries.insert(other.position, EntryOutcome::Kept);
+    db.apply_store_log::<Record>(checked(other), replay, Vec::new())
+        .await
+        .unwrap();
+    assert_eq!(
+        db.drained_devices().await.unwrap(),
+        BTreeSet::from([writer])
+    );
 }

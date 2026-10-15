@@ -1,6 +1,6 @@
 use crate::{
     store_log_object as object,
-    store_log_sync::tests::{device, key, member, public, store},
+    store_log_sync::tests::{device, key, member, public, store, Device},
     SyncError,
 };
 use coven_database::EntryOutcome;
@@ -69,8 +69,19 @@ async fn own_publication_is_observed_even_when_the_listing_lags() {
     );
 }
 
-#[tokio::test]
-async fn stale_registration_is_consumed_after_an_unknown_devices_entry() {
+/// Device 2 registers itself, but its first attempt is interrupted; device 3
+/// registers at day 1, and device 2's retry lands at day 31, more than thirty
+/// days after that registration it never read: it landed too late (§9).
+struct LateRegistration {
+    clock: Arc<FixedClock>,
+    storage: Arc<MemoryStorage>,
+    a: Device,
+    b: Device,
+    fixed: coven_database::StoreLogUpload,
+    witness: EntryId,
+}
+
+async fn late_registration() -> LateRegistration {
     let clock = Arc::new(FixedClock::new(UNIX_EPOCH));
     let storage = Arc::new(
         MemoryStorage::builder()
@@ -107,6 +118,26 @@ async fn stale_registration_is_consumed_after_an_unknown_devices_entry() {
         .unwrap();
     clock.set(UNIX_EPOCH + Duration::from_secs(31 * 86400) + Duration::from_millis(1));
     b.sync().await;
+    LateRegistration {
+        clock,
+        storage,
+        a,
+        b,
+        fixed,
+        witness,
+    }
+}
+
+#[tokio::test]
+async fn stale_registration_is_consumed_after_an_unknown_devices_entry() {
+    let LateRegistration {
+        clock,
+        storage,
+        mut a,
+        mut b,
+        fixed,
+        witness,
+    } = late_registration().await;
     let log = b.log().await;
     assert!(!log.replay.state.devices.contains_key(&DeviceId(2)));
     assert_eq!(log.replay.entries[&witness], EntryOutcome::Kept);
@@ -136,30 +167,64 @@ async fn stale_registration_is_consumed_after_an_unknown_devices_entry() {
         b.db.pending::<crate::PendingRecord>().await.unwrap(),
         std::slice::from_ref(&dropped)
     );
-    // A caught-up new attempt reads the dropped entry implicitly on its own
-    // device. Its consumed number and first publication time survive reopening.
+    // One entry ever registers an id (§10, `Writers.RegistersOnce`): a
+    // caught-up new attempt is refused with the stored registration's reason
+    // and reserves no entry, so the late registration retires device 2 for
+    // good. Only a new device with a fresh id registers this installation.
     clock.set(UNIX_EPOCH + Duration::from_secs(100 * 86400));
     b.catch_up().await;
-    let replacement = b
+    let refused = b
         .sync
         .make_and_upload_entry(fixed.entry.change.clone())
-        .await
-        .unwrap();
-    assert_eq!(replacement.number, fixed.entry.position.number + 1);
-    let after = b.log().await;
-    assert_eq!(
-        after.replay.entries[&fixed.entry.position],
-        log.replay.entries[&fixed.entry.position]
-    );
-    assert_eq!(after.replay.entries[&replacement], EntryOutcome::Kept);
-    assert_eq!(
-        b.db.pending::<crate::PendingRecord>().await.unwrap(),
-        [dropped]
-    );
+        .await;
+    assert!(matches!(
+        refused,
+        Err(SyncError::Rejected(
+            coven_database::DropReason::LandedTooLate
+        ))
+    ));
+    // Loading the installation again is refused the same way.
+    assert!(matches!(
+        b.sync.load_new_device("restored", None).await,
+        Err(SyncError::Rejected(
+            coven_database::DropReason::LandedTooLate
+        ))
+    ));
+    assert!(b.db.local_store_log().await.unwrap().upload.is_none());
+    assert_eq!(b.log().await.entries, log.entries);
     a.sync().await;
     let received = a.log().await;
-    assert_eq!(received.entries, after.entries);
-    assert_eq!(received.replay, after.replay);
+    assert_eq!(received.entries, log.entries);
+    assert_eq!(received.replay, log.replay);
+    for reader in [&a, &b] {
+        assert_eq!(
+            crate::write_object::tests::retired_devices(reader).await.1,
+            serde_json::json!([2])
+        );
+    }
+}
+
+/// The late registration's retirement agrees with the IO model's
+/// `Writers.retirements` on both the late device and the reader that saw it
+/// land: replay never keeps a late entry, so it is among the dropped ones.
+#[test]
+#[ignore = "requires COVEN_IO_RUNNER"]
+fn io_differential_late_registration_retires() {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let (cases, results): (Vec<_>, Vec<_>) = runtime.block_on(async {
+        let LateRegistration { mut a, b, .. } = late_registration().await;
+        a.sync().await;
+        vec![
+            crate::write_object::tests::retired_devices(&a).await,
+            crate::write_object::tests::retired_devices(&b).await,
+        ]
+        .into_iter()
+        .unzip()
+    });
+    assert!(results
+        .iter()
+        .all(|devices| devices == &serde_json::json!([2])));
+    assert_eq!(results, crate::discovery::tests::io_runner(&cases));
 }
 
 #[tokio::test]

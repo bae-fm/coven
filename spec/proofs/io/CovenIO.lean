@@ -36,3 +36,5 @@ import CovenIO.Writers
 import CovenIO.WritersExamples
 import CovenIO.DroppedRegistrations
 import CovenIO.DroppedRegistrationExamples
+import CovenIO.RegisteredOnce
+import CovenIO.RegisteredOnceExamples

@@ -248,6 +248,11 @@ impl StoreLogSync {
             }
         }
         keys::check_shared_keys(&local.log, &change, &ring)?;
+        if let StoreChange::AddDevice { device, .. } = &change {
+            if let Some(reason) = object::registration_refused(&local.log, *device) {
+                return Err(SyncError::Rejected(reason));
+            }
+        }
         let bootstrap = !local.log.replay.state.devices.contains_key(&local.device)
             && (matches!(&change, StoreChange::CreateStore { .. })
                 || matches!(&change, StoreChange::AddDevice { device, .. } if *device == local.device));

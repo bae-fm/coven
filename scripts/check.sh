@@ -441,7 +441,8 @@ proofs() {
             files::tests::upload_retry::io_differential_upload_worker \
             store_log_sync::snapshots::file_scan::tests::io_differential_file_scan \
             write_object::tests::io_differential_dropped_registration \
-            write_object::tests::io_differential_dropped_registration_retires
+            write_object::tests::io_differential_dropped_registration_retires \
+            store_log_landing::tests::io_differential_late_registration_retires
     fi
 
     if proof_selected io || crate_selected coven-database; then

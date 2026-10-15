@@ -83,3 +83,36 @@ async fn bootstrap_rejects_a_conflicting_name_without_applying_creation() {
     assert!(log.entries.is_empty());
     assert!(log.replay.state.store.is_none());
 }
+
+/// An interrupted registration is this installation's one registration (§10,
+/// `Writers.RegistersOnce`): retrying the load publishes the queued entry and
+/// makes no second one, even though replay keeps the first.
+#[tokio::test]
+async fn a_retried_load_publishes_the_queued_registration_only() {
+    let storage = Arc::new(MemoryStorage::builder().build().unwrap());
+    let mut ana = device(storage.clone(), 1, member(1), store(1)).await;
+    let mut ben = device(storage.clone(), 2, member(2), store(1)).await;
+    ana.create(key(1)).await;
+    ana.add(&ben.member, coven_format::store_log::MemberRole::Member)
+        .await;
+    ben.sync().await;
+    ben.interrupt_entry(1).await;
+    assert!(ben.sync.load_new_device("Ben", None).await.is_err());
+    assert!(ben.db.local_store_log().await.unwrap().upload.is_some());
+    ben.catch_up().await;
+    ben.sync.load_new_device("Ben", None).await.unwrap();
+    let id = ben.device().await;
+    let log = ben.log().await;
+    let registrations: Vec<_> = log
+        .entries
+        .iter()
+        .filter(|applied| {
+            matches!(&applied.entry.change,
+                StoreChange::AddDevice { device, .. } if *device == id)
+        })
+        .map(|applied| applied.entry.position)
+        .collect();
+    assert_eq!(registrations.len(), 1, "{registrations:?}");
+    assert_eq!(registrations[0].number, 1);
+    assert!(log.replay.state.devices.contains_key(&id));
+}

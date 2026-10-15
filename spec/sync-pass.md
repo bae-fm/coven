@@ -81,8 +81,8 @@ These local records survive reopening and have no pass-end expiry:
   retried on a later due observation unless a retirement drain completes.
 - **Drained devices:** `_coven_drained_devices` records each local completed
   drain by device id and the final retiring entry that justified it: a kept
-  retirement, or a dropped registration of a device no kept entry registers
-  (§6). While waiting, the catalog retains that entry's qualifying finality
+  retirement, or a registration replay does not keep, dropped or late, of a
+  device no kept entry registers (§6, §10). While waiting, the catalog retains that entry's qualifying finality
   storage time `F`, atomically with the finality observation. The drain needs
   a storage time `T > F + one day + five minutes`; reopening keeps this evidence.
   Persist the mark only after all three logs reach terminal misses after `T`
@@ -90,7 +90,8 @@ These local records survive reopening and have no pass-end expiry:
   pending and retries under shared backoff; reopening retains progress.
   Replay removes a mark and its timing evidence if its retiring entry drops,
   or if a dropped registration is kept again or a kept entry registers its
-  device, in the same transaction; an active device is polled again. These marks
+  device, in the same transaction (neither once the registration is final:
+  one entry ever registers an id, §10); an active device is polled again. These marks
   never enter snapshots or posts.
 - **Sealed-key presence:** retain each whole copy and its clear audience,
   key id, stable recipient id and exact sealing public key by writer and
@@ -275,8 +276,8 @@ strictly with that horizon; an unchanged horizon causes no update.
 A storage time learned during discovery or any later request can be used by
 a later observation, never retroactively as the time before this one.
 Reading this device's removal or replacement stops sends as §10 requires.
-Once a kept retirement, or a dropped registration of a device no kept entry
-registers, is final, retain the qualifying sample T as `F`,
+Once a kept retirement, or a registration replay does not keep of a device
+no kept entry registers, is final, retain the qualifying sample T as `F`,
 keeping it distinct from the earlier finality endpoint T′.
 This observation's entry and copy misses can supply two parts of its drain
 only if they follow a storage time `T > F + one day + five minutes` (§6).

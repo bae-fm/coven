@@ -159,6 +159,21 @@ impl StoreLogSync {
         // newest snapshot this device cannot load waits on it (§19.1), and
         // only a reload that cannot finish fails this call.
         self.resume_snapshots().await?;
+        // A registration an interrupted attempt queued is this installation's
+        // one registration (§10): publish it instead of making another. Once
+        // a registration of this id is stored, replay alone decides it; a
+        // dropped or late one refuses another below, and only a new device
+        // with a fresh id registers again.
+        let local = if local.upload.is_some() {
+            {
+                let _scope = self.reads.enter();
+                self.reads.reset_discovery();
+                self.settle_queued_entry().await?;
+            }
+            self.database.local_store_log().await?
+        } else {
+            local
+        };
         match local.log.replay.state.devices.get(&local.device) {
             Some(device) if device.member != member.member() => {
                 return Err(SyncError::Rejected(coven_database::DropReason::NotAllowed))

@@ -240,13 +240,37 @@ pub(crate) fn author_matches_view(
     match view.devices.get(&entry.position.device) {
         Some(device) => device.member == entry.author,
         // Creation and self-registration establish an absent binding. Replay
-        // separately checks authority, including a retry of a dropped registration.
+        // separately checks authority.
         None => match &entry.change {
             StoreChange::CreateStore { .. } => true,
             StoreChange::AddDevice { device, .. } => *device == entry.position.device,
             _ => false,
         },
     }
+}
+
+/// Why a new registration of `device` is refused: one entry ever registers a
+/// device id (§10, `Writers.RegistersOnce`). Once an entry registering it is
+/// stored, whatever replay makes of it, no other entry may: a reader that has
+/// drained the id after that registration's drop is final never reads a later
+/// one. The refusal repeats the stored registration's own drop reason; a kept
+/// one makes another registration only a repeat, which is not allowed either.
+pub(crate) fn registration_refused(
+    log: &StoreLog,
+    device: coven_foundation::id_source::DeviceId,
+) -> Option<coven_database::DropReason> {
+    let registration = log
+        .entries
+        .iter()
+        .find(|applied| match &applied.entry.change {
+            StoreChange::AddDevice { device: named, .. } => *named == device,
+            StoreChange::CreateStore { .. } => applied.entry.position.device == device,
+            _ => false,
+        })?;
+    Some(match log.replay.entries.get(&registration.entry.position) {
+        Some(coven_database::EntryOutcome::Dropped(reason)) => reason.clone(),
+        _ => coven_database::DropReason::NotAllowed,
+    })
 }
 
 /// An absent prerequisite waits; a present, inconsistent past is damaged.

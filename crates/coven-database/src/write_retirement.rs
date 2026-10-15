@@ -15,7 +15,7 @@ use rusqlite::params;
 /// the device a removal or device replacement retires, the member a removal
 /// retires, a member-key replacement's target and new signing key (§10), and
 /// the device a registration names, which retires that device if replay
-/// drops the registration and keeps none (§6, §10).
+/// drops the registration, or it landed too late, and keeps none (§6, §10).
 #[derive(Default)]
 pub(crate) struct Retires {
     pub(crate) device: Option<Vec<u8>>,
@@ -52,11 +52,12 @@ pub(crate) fn retires(entry: &coven_format::store_log::StoreLogEntry) -> Retires
     }
 }
 
-/// Every entry retiring this write, except permanently late ones, with
-/// whether it is in force and whether it is final (stored strictly before the
-/// horizon, §9). A retirement is in force while replay keeps it; a dropped
-/// registration of the write's device is one while no kept entry registers
-/// that device (`Writers.droppedRetirements`). A key replacement retires it only when the write's own
+/// Every entry retiring this write, except permanently late removals and key
+/// replacements, with whether it is in force and whether it is final (stored
+/// strictly before the horizon, §9). A retirement is in force while replay
+/// keeps it; a registration of the write's device that replay does not keep,
+/// dropped or late, is one while no kept entry registers that device
+/// (`Writers.droppedRetirements`). A key replacement retires it only when the write's own
 /// `store_log_read` did not cover it and it installs a signing key other than
 /// `signer`, the key current for the owner in that recorded view: a read
 /// replacement cannot retire a later key current there, and the winner's
@@ -78,7 +79,8 @@ pub(crate) fn candidates(
 }
 
 /// Every entry that can retire a write of `device` signed with `signer`,
-/// except permanently late ones, with whether replay keeps it, whether it is
+/// except permanently late removals and key replacements, with whether it is
+/// in force, whether it is
 /// final, and whether it is a key replacement, read or not.
 pub(crate) fn of_device(
     db: &DatabaseConnection,
@@ -99,7 +101,7 @@ pub(crate) fn of_device(
          UNION ALL
          SELECT device,number,stored_at,
            NOT EXISTS(SELECT 1 FROM _coven_devices WHERE device=?1),0 FROM _coven_store_log
-         WHERE registers_device=?1 AND outcome NOT IN ('kept','late')",
+         WHERE registers_device=?1 AND outcome<>'kept'",
         params![device.0.to_be_bytes().as_slice(), signer.as_bytes().as_slice()],
         |r| {
             Ok((
