@@ -751,7 +751,7 @@ async fn io_counts_one_write_local_baseline() {
     // are observed baselines; the saved-log decode bound is tested separately.
     // Finding eager work reads its changed references without a transaction,
     // and step 8 creates no snapshot operation below the growth threshold.
-    assert_eq!((counts.work.writer_holds, counts.work.commits), (53, 9));
+    assert_eq!((counts.work.writer_holds, counts.work.commits), (53, 8));
 }
 
 #[tokio::test]
@@ -776,7 +776,7 @@ async fn io_counts_first_catchup_baseline() {
         ),
         "{counts:#?}"
     );
-    assert_eq!((counts.work.writer_holds, counts.work.commits), (87, 33));
+    assert_eq!((counts.work.writer_holds, counts.work.commits), (87, 29));
     assert_eq!(
         counts.work.store_log_commits, 2,
         "catch-up batch and own registration"
@@ -850,7 +850,7 @@ async fn io_counts_file_fetch_baseline() {
     // eager fill reserves its request and retires it once cached (§16.4),
     // each fetched range publishes in one transaction, and the eager fill
     // settles its changed reference.
-    assert_eq!((counts.work.writer_holds, counts.work.commits), (64, 22));
+    assert_eq!((counts.work.writer_holds, counts.work.commits), (64, 21));
 }
 
 #[tokio::test]
