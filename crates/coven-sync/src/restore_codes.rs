@@ -372,36 +372,44 @@ impl RestoreCodesInner {
     }
 }
 
-/// The restore code kept beside this store's credentials, which the keychain
-/// syncs to the person's other Apple devices (§12.1). Member-key replacement
-/// refreshes it once custody installs the new pair; storage-credential
-/// changes leave it unchanged (E9).
-pub struct RestoreCodeCustody {
-    credentials: Arc<DeviceCredentials>,
-    settings: StorageSettings,
+/// Where an owner keeps this store's restore code beside its credentials.
+/// Member-key replacement refreshes it once custody installs the new pair;
+/// storage-credential changes leave it unchanged (§12.1, E9). Every store-log
+/// owner states which it has, so none skips the refresh by omission.
+pub enum RestoreCodeCustody {
+    /// The device keychain holding this store's credentials. It syncs the
+    /// code to the person's other Apple devices where it supports synced
+    /// entries, and keeps nothing elsewhere.
+    Keychain {
+        /// The store's committed device credentials and their keychain.
+        credentials: Arc<DeviceCredentials>,
+        /// The settings naming the store's location.
+        settings: StorageSettings,
+    },
+    /// No code is kept: an owner that never replaces member keys, such as
+    /// bootstrap's loader, whose opened store keeps its own code.
+    Unkept,
 }
 
 impl RestoreCodeCustody {
-    /// Compose at the opening root beside the store's device credentials and
-    /// the storage settings naming its location.
-    pub fn new(credentials: Arc<DeviceCredentials>, settings: StorageSettings) -> Self {
-        Self {
-            credentials,
-            settings,
-        }
-    }
-
     /// Keep the code for `identity`'s active pair. Nothing is kept before
-    /// storage has a location, or where the keychain syncs no entries.
+    /// storage has a location.
     pub(crate) fn refresh(
         &self,
         local: &coven_database::LocalStoreLog,
         identity: &MemberIdentity,
     ) -> Result<(), SyncError> {
+        let Self::Keychain {
+            credentials,
+            settings,
+        } = self
+        else {
+            return Ok(());
+        };
         let Some(store) = local.log.replay.state.store.clone() else {
             return Ok(());
         };
-        let Some(location) = self.settings.read()? else {
+        let Some(location) = settings.read()? else {
             return Ok(());
         };
         let code = RestoreCode {
@@ -411,7 +419,7 @@ impl RestoreCodeCustody {
             member_keys: identity.keys().clone(),
             storage: location.encode()?,
         };
-        self.credentials.write(|keychain| {
+        credentials.write(|keychain| {
             if keychain.supports_synced_entries() {
                 keychain
                     .set_synced_restore_code(&coven_crypto::SecretBytes::new(

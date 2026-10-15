@@ -89,6 +89,7 @@ async fn restored(
         original.ids.clone(),
         directory.clone(),
         waits.clone(),
+        crate::RestoreCodeCustody::Unkept,
     );
     Device {
         waits,

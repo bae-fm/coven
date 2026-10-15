@@ -442,7 +442,11 @@ impl OpeningOwners {
         database: coven_database::Database,
         waits: Arc<coven_sync::RetryWaits>,
     ) -> coven_sync::StoreLogSync {
-        let mut sync = match &self.storage {
+        let restore_code = coven_sync::RestoreCodeCustody::Keychain {
+            credentials: self.credentials.clone(),
+            settings: coven_storage::StorageSettings::new(self.directory.clone()),
+        };
+        match &self.storage {
             Some(storage) => coven_sync::StoreLogSync::new(
                 storage.clone(),
                 database,
@@ -453,6 +457,7 @@ impl OpeningOwners {
                 self.ids.clone(),
                 self.directory.clone(),
                 waits,
+                restore_code,
             ),
             None => coven_sync::StoreLogSync::disconnected(
                 database,
@@ -463,13 +468,9 @@ impl OpeningOwners {
                 self.ids.clone(),
                 self.directory.clone(),
                 waits,
+                restore_code,
             ),
-        };
-        sync.keep_restore_code(coven_sync::RestoreCodeCustody::new(
-            self.credentials.clone(),
-            coven_storage::StorageSettings::new(self.directory.clone()),
-        ));
-        sync
+        }
     }
 
     fn handle(

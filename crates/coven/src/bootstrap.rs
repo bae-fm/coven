@@ -399,6 +399,9 @@ async fn prepare_and_load(
         builder.ids.clone(),
         directory,
         waits.clone(),
+        // The loading owner runs no operation; the opened store's owner
+        // refreshes the restore code its custody keeps.
+        coven_sync::RestoreCodeCustody::Unkept,
     );
     let loading = async {
         if let Admission::Joining(joining) = &mut admission {

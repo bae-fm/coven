@@ -37,6 +37,7 @@ fn start(device: Device) -> (Operations, Device) {
             device.ids.clone(),
             device.directory.clone(),
             waits,
+            crate::RestoreCodeCustody::Unkept,
         ),
     );
     let spare = device.writes();

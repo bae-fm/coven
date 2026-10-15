@@ -384,6 +384,8 @@ impl StoreLogSync {
             self.ids.clone(),
             self.directory.clone(),
             self.waits.clone(),
+            // It only catches up; the store's owner keeps the restore code.
+            crate::RestoreCodeCustody::Unkept,
         );
         candidate.set_discovery_download_limit(self.download_limit);
         candidate.catch_up().await?;

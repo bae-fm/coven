@@ -49,10 +49,9 @@ pub struct StoreLogSync {
     /// This drive's one `join-requests/` listing, serving every open
     /// invite's due check, or the failure it met (SP step 5).
     join_requests: Option<Result<operation_invites::RequestListing, StorageFailure>>,
-    /// The synced copy of the restore code, refreshed when a self-replacement
-    /// installs its new pair (§11). Absent where no code is kept beside the
-    /// store, which is also what a keychain without synced entries keeps.
-    restore_code: Option<crate::restore_codes::RestoreCodeCustody>,
+    /// Where the restore code is kept beside the store, refreshed when a
+    /// self-replacement installs its new pair (§11).
+    restore_code: crate::restore_codes::RestoreCodeCustody,
 }
 
 impl StoreLogSync {
@@ -67,6 +66,7 @@ impl StoreLogSync {
         ids: IdSourceRef,
         directory: coven_foundation::files::StoreDir,
         waits: Arc<crate::RetryWaits>,
+        restore_code: crate::restore_codes::RestoreCodeCustody,
     ) -> Self {
         Self {
             #[cfg(test)]
@@ -86,7 +86,7 @@ impl StoreLogSync {
             directory,
             admin_access: Default::default(),
             join_requests: None,
-            restore_code: None,
+            restore_code,
         }
     }
 
@@ -100,6 +100,7 @@ impl StoreLogSync {
         ids: IdSourceRef,
         directory: coven_foundation::files::StoreDir,
         waits: Arc<crate::RetryWaits>,
+        restore_code: crate::restore_codes::RestoreCodeCustody,
     ) -> Self {
         Self {
             #[cfg(test)]
@@ -119,13 +120,8 @@ impl StoreLogSync {
             directory,
             admin_access: Default::default(),
             join_requests: None,
-            restore_code: None,
+            restore_code,
         }
-    }
-
-    /// Keep the synced restore code current through member-key replacement.
-    pub fn keep_restore_code(&mut self, custody: crate::restore_codes::RestoreCodeCustody) {
-        self.restore_code = Some(custody);
     }
 
     /// Bound simultaneous membership and key-copy requests in subsequent scans.

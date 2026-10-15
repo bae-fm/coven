@@ -269,3 +269,114 @@ async fn discarding_before_reservation_needs_the_held_pair_current() {
         Err(DbError::MemberKeysChanging)
     ));
 }
+
+/// Carol's snapshot of the store, as a maintenance operation.
+async fn snapshot(d: &Device) -> OperationId {
+    let data = crate::operation_data::Data::Snapshots(crate::snapshot_data::SnapshotTask {
+        job: crate::snapshot_data::SnapshotJob::Write {
+            audience: Audience::Store,
+            device: d.device().await,
+            trigger: crate::snapshot_data::SnapshotTrigger::Requested,
+            attempt: None,
+        },
+        temporary: Vec::new(),
+    });
+    d.db.start_operation(data.new_operation("coven").unwrap())
+        .await
+        .unwrap()
+}
+
+/// The path snapshot operation `id`'s prepared attempt reserved.
+async fn attempt_path(d: &Device, id: OperationId) -> ObjectPath {
+    let record = d.operation(id).await;
+    let crate::operation_data::Data::Snapshots(crate::snapshot_data::SnapshotTask {
+        job:
+            crate::snapshot_data::SnapshotJob::Write {
+                audience,
+                device,
+                attempt: Some(attempt),
+                ..
+            },
+        ..
+    }) = crate::operation_data::Data::read(&record).unwrap()
+    else {
+        panic!("a prepared snapshot attempt")
+    };
+    let id = coven_format::store_log::SnapshotId {
+        audience,
+        device,
+        number: attempt.number.get(),
+    };
+    crate::store_log_sync::snapshots::snapshot_path(store(1), &id).unwrap()
+}
+
+/// A snapshot's file is signed when it is sealed, and nothing sends a file
+/// signed by a pair a kept replacement retired (§10, D9). So Carol's
+/// self-replacement reserves its entry only once her sealed snapshot is
+/// stored, and while her reserved replacement is unsettled no snapshot is
+/// sealed. A snapshot started meanwhile seals under the installed pair and
+/// is stored once the exposed store key is rotated.
+#[tokio::test]
+async fn self_replacement_and_snapshots_never_strand_a_file_signed_by_a_retired_pair() {
+    let storage = google();
+    let [_a, _b, mut c] = accounts_with(storage.clone(), notes, schema).await;
+    write_note(&c, "row").await.unwrap();
+    c.catch_up().await;
+    c.writes.upload_writes().await.unwrap();
+    let sealed = snapshot(&c).await;
+    // Preparation follows a completed catch-up of every writer's log (§15).
+    let pass = c.caught_up_pass().await;
+    assert!(matches!(
+        step(&mut c, sealed).await.unwrap(),
+        Progress::Advanced
+    ));
+    drop(pass);
+    let path = attempt_path(&c, sealed).await;
+    let operation = begin(&mut c, Command::ReplaceOwnKeys).await;
+    assert!(matches!(
+        step(&mut c, operation).await.unwrap(),
+        Progress::Waiting(PendingReason::Waits(Prerequisite::Object(waiting))) if waiting == path
+    ));
+    while !matches!(step(&mut c, sealed).await.unwrap(), Progress::Finished(_)) {}
+    assert!(storage.status(&path).await.unwrap().is_some());
+    // Keep the candidate and reserve the entry, then start another snapshot.
+    while c.db.local_store_log().await.unwrap().upload.is_none() {
+        assert!(matches!(
+            step(&mut c, operation).await.unwrap(),
+            Progress::Advanced
+        ));
+    }
+    let entry =
+        c.db.local_store_log()
+            .await
+            .unwrap()
+            .upload
+            .unwrap()
+            .entry
+            .position;
+    let later = snapshot(&c).await;
+    assert!(matches!(
+        step(&mut c, later).await.unwrap(),
+        Progress::Waiting(PendingReason::Waits(Prerequisite::Object(waiting)))
+            if waiting == crate::store_log_object::path(store(1), entry)
+    ));
+    assert!(matches!(settle(&mut c, operation).await, Ok(Output::Unit)));
+    // The kept replacement exposed the store key to Carol's old credential;
+    // she rotates it, then the snapshot seals under her installed pair.
+    c.catch_up().await;
+    assert!(c.sync.rotate_exposed_keys().await.unwrap());
+    for record in c.db.operations().await.unwrap() {
+        if record.id != later {
+            finish(&mut c, record.id).await;
+        }
+    }
+    let _pass = c.caught_up_pass().await;
+    loop {
+        match step(&mut c, later).await {
+            Ok(Progress::Finished(_)) => break,
+            Ok(Progress::Advanced) => (),
+            other => panic!("{:?}", other.map(|_| ())),
+        }
+    }
+    assert!(c.db.operations().await.unwrap().is_empty());
+}

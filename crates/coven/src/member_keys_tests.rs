@@ -40,11 +40,24 @@ async fn member_keys_are_replaced_through_the_public_calls() {
     let initial = members.next().await.unwrap();
     let mine = |list: &[MemberInfo]| list.iter().find(|m| m.id == carol).unwrap().clone();
     assert_eq!(mine(&initial).keys, old.member_keys.public_keys());
+    // The keychain syncs Carol's code to her other Apple devices.
+    let synced = || {
+        let bytes = StoreKeychain::new(first.keychain.clone(), owner.directory.id())
+            .synced_restore_code()
+            .unwrap()
+            .unwrap();
+        RestoreCode::from_bytes(bytes.as_bytes())
+            .unwrap()
+            .member_keys
+            .public_keys()
+    };
+    assert_eq!(synced(), old.member_keys.public_keys());
     handle.replace_member_keys().await.unwrap();
     let code = coven_sync::read_restore_code(&handle.restore_code().await.unwrap()).unwrap();
     assert_eq!(code.member, carol);
     let replaced = code.member_keys.public_keys();
     assert_ne!(replaced, old.member_keys.public_keys());
+    assert_eq!(synced(), replaced);
     let current = loop {
         let list = members.next().await.unwrap();
         if mine(&list).keys == replaced {

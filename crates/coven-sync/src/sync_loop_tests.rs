@@ -166,6 +166,7 @@ impl Device<StoreLogSync> {
             ids.clone(),
             directory.clone(),
             waits,
+            crate::RestoreCodeCustody::Unkept,
         );
         let entry_decodes = Arc::new(AtomicUsize::new(0));
         sync.test_track_received_entries(entry_decodes.clone());
@@ -432,6 +433,7 @@ impl Device<Operations> {
             data.ids.clone(),
             data.directory.clone(),
             waits,
+            crate::RestoreCodeCustody::Unkept,
         );
         data.entry_decodes = Arc::new(AtomicUsize::new(0));
         sync.test_track_received_entries(data.entry_decodes.clone());

@@ -45,6 +45,7 @@ async fn sync(f: &Fixture) -> (StoreLogSync, MemberIdentity, crate::DeviceLogSyn
                 .await
                 .unwrap(),
         ),
+        crate::RestoreCodeCustody::Unkept,
     );
     sync.make_and_upload_entry(StoreChange::CreateStore {
         access: coven_format::MemberAccess::ProviderAccount("owner".into()),

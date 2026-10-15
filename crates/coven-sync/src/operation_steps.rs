@@ -45,6 +45,15 @@ impl StoreLogSync {
             return self.provider_access_step(record, account).await;
         }
         if let Data::ReplaceMemberKeys(work) = &data {
+            // Until its entry is reserved, a self-replacement waits for every
+            // sealed snapshot to be stored under the pair it is about to retire.
+            if work.own && data.entry()?.is_none() {
+                if let Some(path) = self.sealed_snapshot().await? {
+                    return Ok(Progress::Waiting(PendingReason::Waits(
+                        Prerequisite::Object(path),
+                    )));
+                }
+            }
             if record.last_step < data.entry_step_number(0) {
                 return self.member_keys_prelude(record, data).await;
             }

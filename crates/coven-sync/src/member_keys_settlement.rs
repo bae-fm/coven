@@ -64,11 +64,8 @@ impl StoreLogSync {
     }
 
     async fn refresh_restore_code(&self) -> Result<(), SyncError> {
-        let Some(codes) = &self.restore_code else {
-            return Ok(());
-        };
         let local = self.database.local_store_log().await?;
-        codes.refresh(&local, &self.operation_member()?)
+        self.restore_code.refresh(&local, &self.operation_member()?)
     }
 
     /// Discarding a self-replacement releases its pause only when nothing

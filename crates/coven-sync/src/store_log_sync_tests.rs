@@ -263,6 +263,7 @@ impl Device {
             ids.clone(),
             directory.clone(),
             waits.clone(),
+            crate::RestoreCodeCustody::Unkept,
         );
         Self {
             waits,
@@ -313,6 +314,7 @@ impl Device {
             self.ids.clone(),
             self.directory.clone(),
             waits.clone(),
+            crate::RestoreCodeCustody::Unkept,
         );
         self.waits = waits;
     }

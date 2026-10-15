@@ -129,6 +129,9 @@ impl StoreLogSync {
         if !self.snapshot_audiences(log)?.contains(&audience) {
             return Err(SyncError::Rejected(coven_database::DropReason::NotAllowed));
         }
+        if let Some(reason) = self.replacement_holds_snapshots().await? {
+            return Ok(Progress::Waiting(reason));
+        }
         // Only right after this pass's catch-up read every writer's log
         // through its next-number miss, with nothing pending; its sample from
         // before those reads is `T_c` (§15; io `completed_catchup_covers_old`).

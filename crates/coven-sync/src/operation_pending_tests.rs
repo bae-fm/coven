@@ -126,6 +126,7 @@ async fn app_reload_and_reset_stay_pending_until_explicit_retry() {
                     .await
                     .unwrap(),
             ),
+            crate::RestoreCodeCustody::Unkept,
         );
         let files = file_owner(&a);
         let operations = operation_owner(a.sync, files);

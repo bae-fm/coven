@@ -15,6 +15,7 @@ use coven_crypto::{MemberIdentity, MemberKeys, MemberPublicKeys};
 use coven_database::{DropReason, LocalStoreLog, OperationRecord};
 use coven_format::store_log::StoreChange;
 use coven_foundation::id_source::MemberId;
+use coven_storage::ObjectPath;
 
 /// The held active pair is this member's current binding: only it can sign
 /// a self-replacement, or cancel one without leaving the installation's
@@ -168,5 +169,56 @@ impl StoreLogSync {
         };
         self.validate_administration(local, &member.member(), &change)?;
         Ok(change)
+    }
+
+    /// This installation's first snapshot sealed but not yet confirmed
+    /// stored. Its bytes are signed by the held pair; once a kept replacement
+    /// retires that pair they could never be sent (§10, D9), so a
+    /// self-replacement reserves its entry only when there is none.
+    pub(super) async fn sealed_snapshot(&self) -> Result<Option<ObjectPath>, SyncError> {
+        for record in self.database.operations().await? {
+            if let Data::Snapshots(crate::snapshot_data::SnapshotTask {
+                job:
+                    crate::snapshot_data::SnapshotJob::Write {
+                        audience,
+                        device,
+                        attempt: Some(attempt),
+                        ..
+                    },
+                ..
+            }) = Data::read(&record)?
+            {
+                // Step one holds the sealed attempt until it is confirmed stored.
+                if record.last_step == 1 {
+                    let id = coven_format::store_log::SnapshotId {
+                        audience,
+                        device,
+                        number: attempt.number.get(),
+                    };
+                    return super::snapshots::snapshot_path(self.directory.id(), &id).map(Some);
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    /// While this member's own reserved replacement is unsettled, no snapshot
+    /// is sealed: one signed by the pair it may retire could never be sent
+    /// (§10). It waits for that entry and seals under the installed pair.
+    pub(super) async fn replacement_holds_snapshots(
+        &self,
+    ) -> Result<Option<PendingReason>, SyncError> {
+        for record in self.database.operations().await? {
+            let data = Data::read(&record)?;
+            if !matches!(&data, Data::ReplaceMemberKeys(work) if work.own) {
+                continue;
+            }
+            if let Some(entry) = data.entry()? {
+                return Ok(Some(PendingReason::Waits(Prerequisite::Object(
+                    crate::store_log_object::path(self.directory.id(), entry.position),
+                ))));
+            }
+        }
+        Ok(None)
     }
 }
