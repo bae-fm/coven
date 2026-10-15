@@ -49,6 +49,10 @@ pub struct StoreLogSync {
     /// This drive's one `join-requests/` listing, serving every open
     /// invite's due check, or the failure it met (SP step 5).
     join_requests: Option<Result<operation_invites::RequestListing, StorageFailure>>,
+    /// The synced copy of the restore code, refreshed when a self-replacement
+    /// installs its new pair (§11). Absent where no code is kept beside the
+    /// store, which is also what a keychain without synced entries keeps.
+    restore_code: Option<crate::restore_codes::RestoreCodeCustody>,
 }
 
 impl StoreLogSync {
@@ -82,6 +86,7 @@ impl StoreLogSync {
             directory,
             admin_access: Default::default(),
             join_requests: None,
+            restore_code: None,
         }
     }
 
@@ -114,7 +119,13 @@ impl StoreLogSync {
             directory,
             admin_access: Default::default(),
             join_requests: None,
+            restore_code: None,
         }
+    }
+
+    /// Keep the synced restore code current through member-key replacement.
+    pub fn keep_restore_code(&mut self, custody: crate::restore_codes::RestoreCodeCustody) {
+        self.restore_code = Some(custody);
     }
 
     /// Bound simultaneous membership and key-copy requests in subsequent scans.
@@ -342,9 +353,15 @@ impl StoreLogSync {
         // the installation keeps its device id and queues (§10). A pair no
         // kept entry ever bound is a candidate still awaiting its binding
         // (§12.2): it is not replaced, and it holds no sending authority.
+        // Nor is an installation whose own kept self-replacement bound the
+        // candidate it holds: that operation installs it next (§18).
         let keys = member.keys().public_keys();
-        if crate::effects::member(state, &member.member()).is_some_and(|held| held.keys != keys)
-            && state.bound_keys.contains(&keys)
+        if crate::effects::member(state, &member.member()).is_some_and(|bound| {
+            bound.keys != keys
+                && member
+                    .candidate()
+                    .is_none_or(|c| c.public_keys() != bound.keys)
+        }) && state.bound_keys.contains(&keys)
         {
             return Err(SyncError::MemberKeysReplaced {
                 member: member.member(),
@@ -744,6 +761,10 @@ impl StoreLogSync {
 #[path = "store_log_sync_tests.rs"]
 pub(crate) mod tests;
 
+#[path = "member_keys_replacement.rs"]
+mod member_keys_replacement;
+#[path = "member_keys_settlement.rs"]
+mod member_keys_settlement;
 #[path = "operation_access.rs"]
 mod operation_access;
 #[path = "operation_access_keys.rs"]

@@ -44,6 +44,14 @@ impl StoreLogSync {
         if let Data::ProviderAccess { account } = data {
             return self.provider_access_step(record, account).await;
         }
+        if let Data::ReplaceMemberKeys(work) = &data {
+            if record.last_step < data.entry_step_number(0) {
+                return self.member_keys_prelude(record, data).await;
+            }
+            if record.last_step >= data.entry_step_number(5) {
+                return self.member_keys_finish(record, work).await;
+            }
+        }
         if record.last_step < data.entry_step_number(5) {
             return self.entry_step(record, data).await;
         }
@@ -172,11 +180,15 @@ impl StoreLogSync {
                         entry.position,
                     )
                     .await?;
+                    // Applying a removal or a replacement of this member's
+                    // keys can stop this installation; the entry's committed
+                    // outcome is still final and settles the operation.
                     match self
                         .apply(&mut local, entry.clone(), &publications, &member, &mut ring)
                         .await
                     {
-                        Ok(()) | Err(SyncError::Removed) => (),
+                        Ok(()) | Err(SyncError::Removed | SyncError::MemberKeysReplaced { .. }) => {
+                        }
                         Err(error) => return Err(error),
                     }
                 }
@@ -190,11 +202,11 @@ impl StoreLogSync {
         }
         // Completion uses replay after downloading concurrent entries; within
         // a pass, its first phase already did, and own publication extended
-        // it (SP step 4). Applying our own removal can stop this device; its
-        // kept result is still final.
+        // it (SP step 4). Applying our own removal, or a replacement of this
+        // member's keys, can stop this device; its kept result is still final.
         if self.reads.membership().is_none() {
             match self.step().await {
-                Ok(_) | Err(SyncError::Removed) => (),
+                Ok(_) | Err(SyncError::Removed | SyncError::MemberKeysReplaced { .. }) => (),
                 Err(error) => return Err(error),
             }
         }
@@ -206,6 +218,13 @@ impl StoreLogSync {
             .ok_or(coven_database::DbError::OperationChanged(record.id))?;
         match local.log.replay.entries.get(&entry.position) {
             Some(EntryOutcome::Kept) => {
+                // A kept self-replacement retired the held pair: install its
+                // candidate before any other work signs (§10, §18).
+                if let Data::ReplaceMemberKeys(work) = &data {
+                    if work.own {
+                        self.install_member_keys(work)?;
+                    }
+                }
                 self.database
                     .advance_operation(data.update(&current, data.entry_step_number(5))?)
                     .await?
@@ -235,6 +254,16 @@ impl StoreLogSync {
                 work.state = InviteState::Revoking;
                 self.save_invite(Some(&current), &data, data.entry_step_number(5))
                     .await?;
+                return Ok(Progress::Reply(Err(SyncError::Rejected(reason))));
+            }
+            Some(EntryOutcome::Dropped(reason)) if matches!(&data, Data::ReplaceMemberKeys(_)) => {
+                // A losing replacement is reported with its replay reason,
+                // never published again over the winner (§9, E9).
+                let reason = reason.clone();
+                let Data::ReplaceMemberKeys(work) = &data else {
+                    unreachable!()
+                };
+                self.reject_member_keys(&current, work).await?;
                 return Ok(Progress::Reply(Err(SyncError::Rejected(reason))));
             }
             Some(EntryOutcome::Dropped(reason)) if matches!(&data, Data::ReplaceAccessKey(_)) => {
@@ -302,6 +331,9 @@ impl StoreLogSync {
                 }
                 self.validate_administration(local, me, &change)?;
                 return Ok(Some(change));
+            }
+            Data::ReplaceMemberKeys(work) => {
+                return self.member_keys_change(local, work).map(Some);
             }
             Data::ProviderAccess { .. }
             | Data::DeleteAccessKey(_)

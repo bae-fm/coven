@@ -164,6 +164,9 @@ impl StoreLogSync {
                 if let Some(begun) = self.discard_replacement(&record).await? {
                     return Ok(begun);
                 }
+                if let Some(begun) = self.discard_member_keys(&record).await? {
+                    return Ok(begun);
+                }
                 if let Some(begun) = self.discard_invite(&record).await? {
                     return Ok(begun);
                 }
@@ -333,6 +336,12 @@ impl StoreLogSync {
             Command::ReplaceAccessKey(member, admin) => {
                 return self
                     .begin_replace_access_key(&local, &me, member, admin)
+                    .await
+            }
+            Command::ReplaceOwnKeys => return self.begin_member_keys(&local, &member, None).await,
+            Command::ReplaceKeysFor(target, keys) => {
+                return self
+                    .begin_member_keys(&local, &member, Some((target, keys)))
                     .await
             }
             Command::Approve(request) => {

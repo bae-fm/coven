@@ -341,6 +341,13 @@ pub(crate) const POLICY: Policy = Policy {
             "RestoreCodes",
             "new",
         ),
+        // The synced restore code's custody, composed once per opened store
+        // and injected into the store-log owner that refreshes it (§11).
+        (
+            "crates/coven-sync/src/restore_codes.rs",
+            "RestoreCodeCustody",
+            "new",
+        ),
         (
             "crates/coven-sync/src/restore_codes.rs",
             "RestoreCodes",

@@ -9,6 +9,9 @@ mod credentials;
 #[path = "handle_sync.rs"]
 mod sync_control;
 
+#[path = "member_keys.rs"]
+mod member_keys;
+
 use crate::*;
 use coven_crypto::custody::StoreCustody;
 use coven_database::Database;

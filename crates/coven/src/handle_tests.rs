@@ -639,6 +639,7 @@ async fn closing_erases_custody_even_when_releasing_a_worker_fails() {
             kind: "create-circle".into(),
             data: b"malformed operation".to_vec(),
             started_by: "create_circle".into(),
+            pauses_writes: false,
         })
         .await
         .unwrap();
@@ -856,6 +857,10 @@ fn local_and_access_failures_require_app_action() {
         PendingReason::Failed(LocalFailure::Crypto),
         PendingReason::Failed(LocalFailure::Operation),
         PendingReason::Paused,
+        // Sending needs the member's current keys: restore with them (§10).
+        PendingReason::MemberKeysReplaced {
+            member: MemberId(uuid::Uuid::from_u128(3)),
+        },
     ] {
         assert_eq!(retry(reason.clone()), Retry::AppAction, "{reason:?}");
     }

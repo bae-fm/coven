@@ -847,6 +847,7 @@ mod queued {
                     kind: "test-publication".into(),
                     data: version.to_be_bytes().to_vec(),
                     started_by: "coven".into(),
+                    pauses_writes: false,
                 })
             })
             .open()

@@ -64,6 +64,10 @@ pub struct NewOperation {
     pub data: Vec<u8>,
     /// App method name or `coven`.
     pub started_by: String,
+    /// App writes are refused with `DbError::MemberKeysChanging` from its
+    /// insertion until it finishes: a self-replacement of member keys
+    /// confirms its queue and installs its binding meanwhile (§10, §18).
+    pub pauses_writes: bool,
 }
 
 /// A step transition, guarded against stale callers.
@@ -81,7 +85,28 @@ pub struct OperationUpdate {
 pub(crate) fn insert(db: &DatabaseConnection, new: &NewOperation) -> Result<OperationId, DbError> {
     let id = db.query_row("INSERT INTO _coven_operations(kind,last_step,data,started_by) VALUES(?1,0,?2,?3) RETURNING id",
         (&new.kind, &new.data, &new.started_by), |r| Ok(OperationId(r.get(0)?)))?;
+    if new.pauses_writes {
+        // Finishing or discarding the operation deletes its row and with it
+        // the pause, in that same transaction.
+        db.internal_execute(
+            "INSERT INTO _coven_write_pause(paused,operation) VALUES(1,?1)",
+            [id.0],
+        )?;
+    }
     Ok(id)
+}
+
+/// Refuse an app write while a self-replacement pauses writes (§10).
+pub(crate) fn check_write_pause(db: &DatabaseConnection) -> Result<(), DbError> {
+    let paused: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM _coven_write_pause WHERE paused=1)",
+        [],
+        |r| r.get(0),
+    )?;
+    if paused {
+        return Err(DbError::MemberKeysChanging);
+    }
+    Ok(())
 }
 
 /// Reserve the next number of this device's snapshot sequence. Every

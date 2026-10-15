@@ -56,6 +56,8 @@ pub(crate) enum Command {
     DeleteKey(OperationId, Arc<dyn coven_storage::AccessKeyAdmin>),
     RetryWithAdmin(OperationId, Arc<dyn coven_storage::AccessKeyAdmin>),
     ReplaceAccessKey(MemberId, Arc<dyn coven_storage::AccessKeyAdmin>),
+    ReplaceOwnKeys,
+    ReplaceKeysFor(MemberId, coven_crypto::MemberPublicKeys),
     DeliveredKey(Option<String>),
     Credentials {
         previous: Option<coven_storage::ConnectionCredentials>,
@@ -330,6 +332,28 @@ impl Operations {
             Output::AccessKeyReplaced(value) => Ok(value),
             _ => unreachable!("replacement result"),
         }
+    }
+    /// Replace this member's signing and sealing pair (§9, §11). App writes
+    /// pause until it finishes; this installation's queued writes and entries
+    /// are confirmed first. A fresh pair is kept in identity custody before
+    /// its prerequisite copies and the entry signed by the current pair are
+    /// published. Once replay keeps the binding, custody installs the new
+    /// pair and the synced restore code is refreshed before writes resume.
+    /// Publication and custody failures keep the attempt and both pairs for
+    /// an idempotent retry; a replay rejection is reported, never reattempted.
+    pub async fn replace_member_keys(&self) -> Result<(), SyncError> {
+        self.unit(Command::ReplaceOwnKeys).await
+    }
+    /// Publish a prepared public pair for another active member, under the
+    /// recorded authority of an admin (§9). The call changes no private
+    /// custody or provider access; it returns once replay keeps the entry,
+    /// and reports a rejection without publishing again over the winner.
+    pub async fn replace_member_keys_for(
+        &self,
+        member: &MemberId,
+        keys: coven_crypto::MemberPublicKeys,
+    ) -> Result<(), SyncError> {
+        self.unit(Command::ReplaceKeysFor(*member, keys)).await
     }
     /// The key an admin delivered to this member that the store log now
     /// records as their access, if this device can read it and does not

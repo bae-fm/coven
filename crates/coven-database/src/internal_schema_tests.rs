@@ -166,6 +166,7 @@ async fn only_the_spec_tables_are_created() {
                 "_coven_write_inputs",
                 "_coven_write_landing_parts",
                 "_coven_write_landings",
+                "_coven_write_pause",
                 "_coven_write_upload_sessions",
                 "_coven_writes",
                 "_coven_written_values",
@@ -330,6 +331,7 @@ mod fixture {
      INSERT INTO _coven_file_candidates SELECT device,substr(key,17,16) FROM fixture;
      INSERT INTO _coven_file_scans SELECT n,device,n FROM fixture;
      INSERT INTO _coven_upload_pause VALUES(1);
+     INSERT INTO _coven_write_pause VALUES(1,1);
      INSERT INTO _coven_eager_cancel VALUES(1);
      INSERT INTO _coven_eager_requests SELECT audience,'file_' || i,key FROM fixture;
      INSERT INTO _coven_eager_rows SELECT tab,key,'file_' || i FROM fixture;
@@ -369,6 +371,7 @@ mod fixture {
                 | "_coven_device_reset"
                 | "_coven_catch_up"
                 | "_coven_upload_pause"
+                | "_coven_write_pause"
                 | "_coven_eager_cancel"
                 | "_coven_finality" => {
                     assert_eq!(count, 1)

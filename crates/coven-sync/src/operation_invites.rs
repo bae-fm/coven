@@ -637,6 +637,7 @@ impl StoreLogSync {
         Ok(JoinRequest {
             invite: request.invite,
             member: request.member,
+            keys: request.keys,
             device_name: request.device_name,
             provider_account_email: match &work.access {
                 InviteGrant::Account { email } => Some(email.clone()),

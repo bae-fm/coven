@@ -407,6 +407,7 @@ impl DatabaseConnection {
             })?;
             files.retain_rows(affected)?;
             if let Some(record) = &record {
+                crate::operation::check_write_pause(database)?;
                 crate::write_commit::queue(database, record)?;
             }
             files.queue_attached(now)?;

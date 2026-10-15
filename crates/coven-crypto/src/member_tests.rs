@@ -139,6 +139,8 @@ fn identity_custody_pins_the_id_before_the_unchanged_private_pair() {
     let mut expected = b"CVMI\x01".to_vec();
     expected.extend_from_slice(member.0.as_bytes());
     expected.extend_from_slice(&pair);
+    // No retired pair and no candidate.
+    expected.extend_from_slice(&[0, 0]);
     assert_eq!(identity.to_secret_bytes().as_bytes(), expected);
     let restored = MemberIdentity::from_secret_bytes(&expected).unwrap();
     assert_eq!(restored.member(), member);
@@ -163,6 +165,72 @@ fn identity_custody_pins_the_id_before_the_unchanged_private_pair() {
     let debug = format!("{identity:?}");
     assert!(debug.contains(&member.to_string()));
     assert!(!debug.contains("9d61b19d"));
+}
+
+/// Custody holds the active pair, retired ones and a candidate, each once,
+/// in that order. A copy opens with the exact credential it names; replay's
+/// current binding picks the active pair, and every other one stays held.
+#[test]
+fn identity_custody_keeps_retired_and_candidate_pairs() {
+    let pair = |seed: u8| {
+        let mut bytes = b"CVMK\x01".to_vec();
+        bytes.extend([seed; 64]);
+        MemberKeys::from_secret_bytes(&bytes).unwrap()
+    };
+    let member = MemberId(Uuid::from_u128(9));
+    let (old, new, other) = (pair(1), pair(2), pair(3));
+    let identity = MemberIdentity::new(member, old.clone()).with_candidate(new.clone());
+    assert!(identity.holds(&new.public_keys()));
+    assert!(identity
+        .credential(&new.public_keys().sealing)
+        .is_some_and(|keys| keys.public_keys() == new.public_keys()));
+    assert!(identity.credential(&other.public_keys().sealing).is_none());
+    let mut expected = b"CVMI\x01".to_vec();
+    expected.extend_from_slice(member.0.as_bytes());
+    expected.extend_from_slice(old.to_secret_bytes().as_bytes());
+    expected.push(0);
+    expected.push(1);
+    expected.extend_from_slice(new.to_secret_bytes().as_bytes());
+    assert_eq!(identity.to_secret_bytes().as_bytes(), expected);
+    // The kept binding installs the candidate; the old pair stays held.
+    let installed = identity.activate(&new.public_keys()).unwrap();
+    assert_eq!(installed.keys().public_keys(), new.public_keys());
+    assert!(installed.candidate().is_none());
+    assert!(installed.holds(&old.public_keys()));
+    let mut expected = b"CVMI\x01".to_vec();
+    expected.extend_from_slice(member.0.as_bytes());
+    expected.extend_from_slice(new.to_secret_bytes().as_bytes());
+    expected.push(1);
+    expected.extend_from_slice(old.to_secret_bytes().as_bytes());
+    expected.push(0);
+    let bytes = installed.to_secret_bytes();
+    assert_eq!(bytes.as_bytes(), expected);
+    let restored = MemberIdentity::from_secret_bytes(bytes.as_bytes()).unwrap();
+    assert_eq!(restored.keys().public_keys(), new.public_keys());
+    assert!(restored.holds(&old.public_keys()));
+    assert!(identity.activate(&other.public_keys()).is_none());
+    // A losing candidate stays held; a cancelled one never sent a copy.
+    let lost = identity.with_candidate(other.clone()).retire_candidate();
+    assert!(lost.candidate().is_none());
+    assert!(lost.holds(&new.public_keys()) && lost.holds(&other.public_keys()));
+    assert!(!identity.without_candidate().holds(&new.public_keys()));
+    // A credential held twice, or an unknown candidate flag, is refused.
+    let mut twice = b"CVMI\x01".to_vec();
+    twice.extend_from_slice(member.0.as_bytes());
+    twice.extend_from_slice(old.to_secret_bytes().as_bytes());
+    twice.push(0);
+    twice.push(1);
+    twice.extend_from_slice(old.to_secret_bytes().as_bytes());
+    assert!(MemberIdentity::from_secret_bytes(&twice).is_err());
+    let mut flag = MemberIdentity::new(member, old)
+        .to_secret_bytes()
+        .as_bytes()
+        .to_vec();
+    *flag.last_mut().unwrap() = 2;
+    assert!(MemberIdentity::from_secret_bytes(&flag).is_err());
+    for end in 0..expected.len() {
+        assert!(MemberIdentity::from_secret_bytes(&expected[..end]).is_err());
+    }
 }
 
 #[test]

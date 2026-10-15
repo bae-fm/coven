@@ -69,9 +69,29 @@ pub(crate) fn google() -> Arc<MemoryStorage> {
     )
 }
 pub(crate) async fn accounts(storage: Arc<MemoryStorage>) -> [Device; 3] {
-    let mut a = device(storage.clone(), 1, member(1), store(1)).await;
-    let mut b = device(storage.clone(), 2, member(2), store(1)).await;
-    let mut c = device(storage.clone(), 3, member(3), store(1)).await;
+    accounts_with(storage, Vec::new, Vec::new).await
+}
+/// Ana (owner, admin), Ben (admin) and Carol (member), each on one device
+/// whose database declares `tables` and runs `migrations`.
+async fn accounts_with(
+    storage: Arc<MemoryStorage>,
+    tables: impl Fn() -> Vec<coven_database::SyncedTable>,
+    migrations: impl Fn() -> Vec<coven_database::Migration>,
+) -> [Device; 3] {
+    let open = |n: u8| {
+        Device::new(
+            storage.clone(),
+            n.into(),
+            member(n),
+            store(1),
+            tables(),
+            migrations(),
+            Arc::new(coven_foundation::id_source::UuidIds),
+        )
+    };
+    let mut a = open(1).await;
+    let mut b = open(2).await;
+    let mut c = open(3).await;
     a.sync
         .make_and_upload_entry(StoreChange::CreateStore {
             store: store(1),
@@ -353,6 +373,12 @@ mod invites;
 
 #[path = "join_admission_tests.rs"]
 mod join_admission;
+
+#[path = "member_keys_replacement_tests.rs"]
+mod member_keys_replacement;
+
+#[path = "member_keys_settlement_tests.rs"]
+mod member_keys_settlement;
 
 #[tokio::test]
 async fn independent_removals_keep_their_original_attempts() {

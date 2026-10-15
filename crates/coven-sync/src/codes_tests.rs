@@ -76,7 +76,8 @@ fn metadata_validates_kind_checksum_and_storage_without_exposing_secrets() {
         store: restore.store,
         name: restore.name.clone(),
         invite: InviteId(uuid::Uuid::from_u128(2)),
-        member: restore.member,
+        // The admin's chosen id for the invited person, not the inviter's.
+        member: crate::store_log_sync::tests::member(2).member(),
         secret: InviteSecret::generate().unwrap(),
         initial_key: KeyId(uuid::Uuid::from_u128(3)),
         inviting_writer: DeviceId(4),
@@ -93,9 +94,9 @@ fn metadata_validates_kind_checksum_and_storage_without_exposing_secrets() {
     assert_eq!(decoded.initial_key, invite.initial_key);
     assert_eq!(decoded.inviting_writer, invite.inviting_writer);
     assert_eq!(decoded.key_copy_number, invite.key_copy_number);
-    for (text, kind) in [
-        (&restore_text, CodeKind::Restore),
-        (&invite_text, CodeKind::Invite),
+    for (text, kind, member) in [
+        (&restore_text, CodeKind::Restore, restore.member),
+        (&invite_text, CodeKind::Invite, invite.member),
     ] {
         assert_eq!(
             decode_code_info(text).unwrap(),
@@ -103,6 +104,7 @@ fn metadata_validates_kind_checksum_and_storage_without_exposing_secrets() {
                 kind,
                 store_id: restore.store,
                 store_name: "Household".into(),
+                member,
                 cloud_provider: CloudProvider::S3,
                 oauth_access: None
             }

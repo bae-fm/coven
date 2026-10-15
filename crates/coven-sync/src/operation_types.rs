@@ -42,6 +42,9 @@ pub enum OperationKind {
     DeleteAccessKey,
     /// An admin desktop replacing a member's S3 key (§13).
     ReplaceAccessKey,
+    /// Replace a member's signing and sealing pair: this member's own, with a
+    /// candidate kept in identity custody, or a prepared pair as an admin (§9).
+    ReplaceMemberKeys,
 }
 
 /// A member's replaced S3 key (§13): the new key, which the member keeps
@@ -129,6 +132,9 @@ pub struct JoinRequest {
     pub invite: InviteId,
     /// The stable member id the invite fixed and the request repeats.
     pub member: MemberId,
+    /// The fresh public pair the request's signature proves it holds;
+    /// approval binds exactly this pair to `member` (§12.2).
+    pub keys: coven_crypto::MemberPublicKeys,
     /// The device's name, covered by its signature.
     pub device_name: String,
     /// Account invited by the owner, absent on S3.

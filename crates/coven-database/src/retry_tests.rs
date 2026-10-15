@@ -19,6 +19,7 @@ fn operation() -> NewOperation {
         kind: "invite".into(),
         data: vec![1],
         started_by: "app".into(),
+        pauses_writes: false,
     }
 }
 

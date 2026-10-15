@@ -1,0 +1,149 @@
+use super::*;
+
+/// Carol joins (the request she is approved by names her exact pair), then
+/// replaces her own keys through the public call: her id, role and device
+/// stay, members show the new pair live, her restore code carries it and the
+/// old code no longer restores. Ana, an admin, then publishes a pair Carol
+/// prepared elsewhere: Carol's installation reports the replacement, and a
+/// code holding the prepared pair restores her on a new device.
+#[tokio::test]
+async fn member_keys_are_replaced_through_the_public_calls() {
+    let owner = Owner::new(CloudProvider::S3, false).await;
+    let invite = owner.invite().await;
+    let first = Installation::new();
+    let (_, cancel) = watch::channel(false);
+    let joining = first.run(
+        &owner,
+        Installation::join_request(&invite),
+        owner.recipient(),
+        &cancel,
+        |_| {},
+    );
+    let requested = std::sync::Mutex::new(None);
+    let (result, carol) = join_and_approve(&owner.handle, joining, |request| {
+        assert_eq!(request.member, invite.member);
+        *requested.lock().unwrap() = Some(request.keys);
+        async {}
+    })
+    .await;
+    let handle = result.unwrap().unwrap();
+    let old_code = handle.restore_code().await.unwrap();
+    let old = coven_sync::read_restore_code(&old_code).unwrap();
+    assert_eq!(old.member, carol);
+    assert_eq!(decode_code_info(&old_code).unwrap().member, carol);
+    assert_eq!(decode_code_info(&invite.code).unwrap().member, carol);
+    assert_eq!(
+        Some(old.member_keys.public_keys()),
+        *requested.lock().unwrap()
+    );
+    let mut members = handle.subscribe_members();
+    let initial = members.next().await.unwrap();
+    let mine = |list: &[MemberInfo]| list.iter().find(|m| m.id == carol).unwrap().clone();
+    assert_eq!(mine(&initial).keys, old.member_keys.public_keys());
+    handle.replace_member_keys().await.unwrap();
+    let code = coven_sync::read_restore_code(&handle.restore_code().await.unwrap()).unwrap();
+    assert_eq!(code.member, carol);
+    let replaced = code.member_keys.public_keys();
+    assert_ne!(replaced, old.member_keys.public_keys());
+    let current = loop {
+        let list = members.next().await.unwrap();
+        if mine(&list).keys == replaced {
+            break mine(&list);
+        }
+    };
+    let before = mine(&initial);
+    assert_eq!(
+        (current.role, current.devices.clone()),
+        (before.role, before.devices.clone())
+    );
+    assert!(handle
+        .pending()
+        .await
+        .unwrap()
+        .iter()
+        .all(|record| !matches!(record.subject, PendingSubject::Operation { .. })));
+    handle
+        .write(|sql| {
+            sql.execute("INSERT INTO notes VALUES('carol',x'01')", [])?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    owner.sync().await;
+    let seen = owner.handle.members().await.unwrap();
+    assert_eq!(mine(&seen).keys, replaced);
+    let carol_key = || S3Credentials {
+        access_key_id: "invited-key".into(),
+        secret_access_key: SecretText::new("invited-secret".into()),
+    };
+    // The old code cannot bind its pair back.
+    let stale = Installation::new();
+    let restored = restore_from_code(
+        stale.builder(&owner, owner.storage.clone()),
+        &old_code,
+        Some(carol_key()),
+        "Carol's old code",
+        |_| {},
+        &cancel,
+    )
+    .await;
+    assert!(
+        matches!(&restored, Err(BootstrapError::Sync(SyncError::MemberKeysReplaced { member })) if *member == carol),
+        "{:?}",
+        restored.as_ref().err()
+    );
+    stale.absent(owner.directory.id()).await;
+    // Ana publishes a pair Carol prepared; no private key reaches Ana.
+    let prepared = MemberKeys::generate().unwrap();
+    owner
+        .handle
+        .replace_member_keys_for(&carol, prepared.public_keys())
+        .await
+        .unwrap();
+    assert!(matches!(
+        owner
+            .handle
+            .replace_member_keys_for(&carol, prepared.public_keys())
+            .await,
+        Err(SyncError::Rejected(DropReason::KeysAlreadyUsed))
+    ));
+    let stopped = handle.circles().create("Garden").await;
+    assert!(
+        matches!(&stopped, Err(SyncError::MemberKeysReplaced { member }) if *member == carol),
+        "{stopped:?}"
+    );
+    assert!(matches!(
+        handle.restore_code().await,
+        Err(SyncError::MemberKeysReplaced { member }) if member == carol
+    ));
+    handle.close().await.unwrap();
+    // A code holding the prepared pair restores Carol on a new device.
+    let fresh = RestoreCode {
+        member_keys: prepared,
+        ..code
+    };
+    let next = Installation::new();
+    let restored = restore_from_code(
+        next.builder(&owner, owner.storage.clone()),
+        &fresh.to_text().unwrap(),
+        Some(carol_key()),
+        "Carol's new phone",
+        |_| {},
+        &cancel,
+    )
+    .await
+    .unwrap();
+    let list = restored.members().await.unwrap();
+    let info = mine(&list);
+    assert!(info.is_self);
+    assert_eq!(info.keys, fresh.member_keys.public_keys());
+    assert_eq!(
+        info.devices
+            .iter()
+            .filter(|d| d.state == DeviceState::Active)
+            .count(),
+        2
+    );
+    restored.close().await.unwrap();
+    owner.close().await;
+}

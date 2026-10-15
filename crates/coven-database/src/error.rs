@@ -492,6 +492,10 @@ pub enum DbError {
     /// This writer has reserved every key-copy number.
     #[error("key-copy numbers exhausted")]
     KeyCopyNumberExhausted,
+    /// Self-replacement has paused app writes while queued objects settle
+    /// and the new binding and custody are installed (§10, E9).
+    #[error("member keys are changing; app writes are paused")]
+    MemberKeysChanging,
     /// Reservation or confirmation cannot skip a number or change fixed bytes.
     #[error("key copy {writer:?}/{number} is not the next fixed upload")]
     KeyUploadChanged {

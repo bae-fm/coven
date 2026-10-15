@@ -1,7 +1,7 @@
 //! Checked code metadata used by bootstrap (E10).
 
 use coven_format::codes::{InviteCode, RestoreCode};
-use coven_foundation::id_source::StoreId;
+use coven_foundation::id_source::{MemberId, StoreId};
 use coven_storage::{
     CloudProvider, ConnectionCredentials, GoogleDriveAccess, InviteStorage, OAuthAccess,
     StorageConfig,
@@ -10,10 +10,11 @@ use coven_storage::{
 /// The two codes that can open a store on a new device.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CodeKind {
-    /// This person's identity, store id and name, and storage location only.
+    /// This person's member id and current private pair, store id and name,
+    /// and storage location only.
     Restore,
-    /// A one-time request carrying the initial key, inviting writer and its
-    /// published key-copy number; approval is required.
+    /// A one-time request carrying the chosen member id, initial key,
+    /// inviting writer and its published key-copy number; approval is required.
     Invite,
 }
 
@@ -26,6 +27,9 @@ pub struct CodeInfo {
     pub store_id: StoreId,
     /// The shared store's name.
     pub store_name: String,
+    /// The stable member id either kind of code fixes: the restoring
+    /// person's own, or the one the invite's admin chose (§12).
+    pub member: MemberId,
     /// The storage provider.
     pub cloud_provider: CloudProvider,
     /// The sign-in required by this code; S3 and CloudKit do not use OAuth.
@@ -51,14 +55,15 @@ pub enum CodeError {
 /// Decode and validate the complete code before returning public metadata.
 pub fn decode_code_info(code: &str) -> Result<CodeInfo, CodeError> {
     let (code, location) = decode(code)?;
-    let (kind, store_id, store_name) = match code {
-        DecodedCode::Restore(code) => (CodeKind::Restore, code.store, code.name),
-        DecodedCode::Invite(code) => (CodeKind::Invite, code.store, code.name),
+    let (kind, store_id, store_name, member) = match code {
+        DecodedCode::Restore(code) => (CodeKind::Restore, code.store, code.name, code.member),
+        DecodedCode::Invite(code) => (CodeKind::Invite, code.store, code.name, code.member),
     };
     Ok(CodeInfo {
         kind,
         store_id,
         store_name,
+        member,
         cloud_provider: location.provider(),
         oauth_access: if kind == CodeKind::Invite
             && location.provider() == CloudProvider::GoogleDrive

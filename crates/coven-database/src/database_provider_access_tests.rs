@@ -12,6 +12,7 @@ fn change(intended: bool) -> ProviderAccessChange {
             kind: "provider-access".into(),
             data: b"account@example.com".to_vec(),
             started_by: "coven".into(),
+            pauses_writes: false,
         },
     }
 }
@@ -27,6 +28,7 @@ async fn confirmed_invitation_tokens_are_redacted() {
             kind: "invite".into(),
             data: vec![0],
             started_by: "test".into(),
+            pauses_writes: false,
         },
         vec![intended],
     )
@@ -142,6 +144,7 @@ async fn obsolete_completion_and_its_correction_are_one_commit() {
                     kind: "invite".into(),
                     data: vec![0],
                     started_by: "test".into(),
+                    pauses_writes: false,
                 },
                 vec![change(false)],
             )

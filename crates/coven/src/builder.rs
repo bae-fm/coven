@@ -442,7 +442,7 @@ impl OpeningOwners {
         database: coven_database::Database,
         waits: Arc<coven_sync::RetryWaits>,
     ) -> coven_sync::StoreLogSync {
-        match &self.storage {
+        let mut sync = match &self.storage {
             Some(storage) => coven_sync::StoreLogSync::new(
                 storage.clone(),
                 database,
@@ -464,7 +464,12 @@ impl OpeningOwners {
                 self.directory.clone(),
                 waits,
             ),
-        }
+        };
+        sync.keep_restore_code(coven_sync::RestoreCodeCustody::new(
+            self.credentials.clone(),
+            coven_storage::StorageSettings::new(self.directory.clone()),
+        ));
+        sync
     }
 
     fn handle(

@@ -203,6 +203,22 @@ pub(crate) enum InviteState {
     Settled,
 }
 
+/// A replacement of one member's signing and sealing pair (§9, §18).
+#[derive(Serialize, Deserialize)]
+pub(crate) struct MemberKeysWork {
+    /// The member whose pair is replaced.
+    pub(crate) member: MemberId,
+    /// This member's own replacement: it pauses app writes, keeps its
+    /// candidate in identity custody, and installs it once the binding is
+    /// kept. Otherwise an admin publishes a pair prepared elsewhere.
+    pub(crate) own: bool,
+    /// The pair the entry binds: the prepared one, or the candidate once
+    /// identity custody keeps it.
+    #[serde(with = "crate::pending_encoding::member_keys")]
+    pub(crate) keys: Option<coven_crypto::MemberPublicKeys>,
+    pub(crate) entry: Option<Vec<u8>>,
+}
+
 #[derive(Serialize, Deserialize)]
 pub(crate) enum Data {
     PublishSchema {
@@ -218,6 +234,7 @@ pub(crate) enum Data {
     /// One S3 key's deletion obligation; its pending notice lives on this row.
     DeleteAccessKey(#[serde(with = "crate::pending_encoding::AccessKey")] crate::AccessKeyToDelete),
     ReplaceAccessKey(ReplaceKeyWork),
+    ReplaceMemberKeys(MemberKeysWork),
 }
 
 impl Data {
@@ -253,6 +270,7 @@ impl Data {
             Self::ProviderAccess { .. } => OperationKind::RevokeAccess,
             Self::DeleteAccessKey(_) => OperationKind::DeleteAccessKey,
             Self::ReplaceAccessKey(_) => OperationKind::ReplaceAccessKey,
+            Self::ReplaceMemberKeys(_) => OperationKind::ReplaceMemberKeys,
         }
     }
 
@@ -284,6 +302,7 @@ impl Data {
             Self::ProviderAccess { .. } => "provider-access",
             Self::DeleteAccessKey(_) => "delete-access-key",
             Self::ReplaceAccessKey(_) => "replace-access-key",
+            Self::ReplaceMemberKeys(_) => "replace-member-keys",
         }
     }
     pub(crate) fn new_operation(&self, started_by: &str) -> Result<NewOperation, SyncError> {
@@ -291,6 +310,9 @@ impl Data {
             kind: self.journal_kind().into(),
             data: serde_json::to_vec(self)?,
             started_by: started_by.into(),
+            // Self-replacement refuses app writes until its binding and
+            // custody are installed (§10, §18).
+            pauses_writes: matches!(self, Self::ReplaceMemberKeys(work) if work.own),
         })
     }
     pub(crate) fn update(
@@ -317,6 +339,8 @@ impl Data {
             }) => 3,
             // Minting and delivery precede the entry.
             Self::ReplaceAccessKey(_) => 2,
+            // Confirming the queue and keeping the candidate precede it.
+            Self::ReplaceMemberKeys(work) if work.own => 1,
             _ => 0,
         }
     }
@@ -346,6 +370,7 @@ impl Data {
                 ..
             }) => entry.as_ref(),
             Self::ReplaceAccessKey(work) => work.entry.as_ref(),
+            Self::ReplaceMemberKeys(work) => work.entry.as_ref(),
             _ => None,
         };
         bytes
@@ -374,6 +399,7 @@ impl Data {
                 ..
             }) => *entry = value,
             Self::ReplaceAccessKey(work) => work.entry = value,
+            Self::ReplaceMemberKeys(work) => work.entry = value,
             _ => {
                 return Err(coven_database::DbError::Invariant {
                     what: "only entry-publishing work fixes an entry",
@@ -399,6 +425,7 @@ impl Data {
                 self,
                 Self::Entry(_)
                     | Self::ReplaceAccessKey(_)
+                    | Self::ReplaceMemberKeys(_)
                     | Self::Invite(InviteWork {
                         state: InviteState::Approving { .. } | InviteState::Recording { .. },
                         ..

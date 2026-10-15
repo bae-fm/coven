@@ -224,6 +224,12 @@ pub enum PendingReason {
     AdminAccessRequired,
     /// This installation was removed.
     Removed,
+    /// Sending needs this stable member's current credentials, which this
+    /// installation does not hold (§10).
+    MemberKeysReplaced {
+        /// The member whose held keys were replaced.
+        member: MemberId,
+    },
 }
 
 /// What can permit another attempt; no attempt count determines it.

@@ -161,7 +161,7 @@ impl MemberKeys {
 
     /// Encode both private seeds for custody or the person's restore code (§12.1).
     pub fn to_secret_bytes(&self) -> SecretBytes {
-        let mut bytes = Zeroizing::new(Vec::with_capacity(69));
+        let mut bytes = Zeroizing::new(Vec::with_capacity(MEMBER_KEYS_LENGTH));
         bytes.extend_from_slice(b"CVMK\x01");
         bytes.extend_from_slice(self.signing.as_bytes());
         bytes.extend_from_slice(self.sealing.as_bytes());
@@ -264,19 +264,30 @@ impl fmt::Debug for MemberKeys {
     }
 }
 
-/// This device's member: the stable id and the private pair it signs and
-/// opens copies with (E1, E11). Identity custody keeps it; the id never
-/// derives from the keys.
+/// This device's member: the stable id and every private pair it holds
+/// (E1, E11). Identity custody keeps it; the id never derives from the keys.
+/// The active pair is the one the last installed binding made current. A
+/// self-replacement keeps its candidate here before publishing it, and every
+/// pair a kept replacement retired stays held, because copies name the exact
+/// credential they open with (§11). Which pair may sign is replay's decision,
+/// never this record's (§10).
 #[derive(Clone)]
 pub struct MemberIdentity {
     member: MemberId,
     keys: MemberKeys,
+    retained: Vec<MemberKeys>,
+    candidate: Option<MemberKeys>,
 }
 
 impl MemberIdentity {
     /// Bind a private pair to the stable id the store log names for it.
     pub fn new(member: MemberId, keys: MemberKeys) -> Self {
-        Self { member, keys }
+        Self {
+            member,
+            keys,
+            retained: Vec::new(),
+            candidate: None,
+        }
     }
 
     /// Make both key pairs for an independently generated id (§9).
@@ -289,41 +300,159 @@ impl MemberIdentity {
         self.member
     }
 
-    /// The private pair this device signs and opens copies with.
+    /// The active private pair: the one this device signs with and a
+    /// restore code exports.
     pub fn keys(&self) -> &MemberKeys {
         &self.keys
+    }
+
+    /// A self-replacement's fresh pair, kept before its binding is published.
+    pub fn candidate(&self) -> Option<&MemberKeys> {
+        self.candidate.as_ref()
+    }
+
+    /// Every held pair: the active one, retired ones, then the candidate.
+    fn held(&self) -> impl Iterator<Item = &MemberKeys> {
+        std::iter::once(&self.keys)
+            .chain(&self.retained)
+            .chain(&self.candidate)
     }
 
     /// The held private pair whose sealing key is `sealing`. A copy names the
     /// exact credential it is sealed to, and opens only with that one, never
     /// with whichever pair is latest (§11).
     pub fn credential(&self, sealing: &SealingKey) -> Option<&MemberKeys> {
-        (self.keys.public_keys().sealing == *sealing).then_some(&self.keys)
+        self.held()
+            .find(|keys| keys.public_keys().sealing == *sealing)
     }
 
-    /// Encode the id and private pair for identity custody. This custody
+    /// Whether some held pair is exactly `keys`.
+    pub fn holds(&self, keys: &MemberPublicKeys) -> bool {
+        self.held().any(|held| held.public_keys() == *keys)
+    }
+
+    /// This identity keeping `candidate` for a self-replacement. A candidate
+    /// already held stays held as a retired credential: its copies may exist.
+    pub fn with_candidate(&self, candidate: MemberKeys) -> Self {
+        let mut next = self.clone();
+        next.retained.extend(next.candidate.replace(candidate));
+        next
+    }
+
+    /// This identity with the held pair `current` active, as replay's current
+    /// binding selects it (§10). The previously active pair and any other
+    /// candidate stay held as retired credentials. `None` when no held pair
+    /// is `current`.
+    pub fn activate(&self, current: &MemberPublicKeys) -> Option<Self> {
+        if self.keys.public_keys() == *current && self.candidate.is_none() {
+            return Some(self.clone());
+        }
+        let mut pairs: Vec<MemberKeys> = self.held().cloned().collect();
+        let index = pairs
+            .iter()
+            .position(|keys| keys.public_keys() == *current)?;
+        let keys = pairs.remove(index);
+        let mut retained = Vec::new();
+        for pair in pairs {
+            if !retained
+                .iter()
+                .any(|held: &MemberKeys| held.public_keys() == pair.public_keys())
+            {
+                retained.push(pair);
+            }
+        }
+        Some(Self {
+            member: self.member,
+            keys,
+            retained,
+            candidate: None,
+        })
+    }
+
+    /// This identity with its candidate retired: a replacement that never
+    /// became current leaves its copies, so its pair stays held (§11).
+    pub fn retire_candidate(&self) -> Self {
+        let mut next = self.clone();
+        next.retained.extend(next.candidate.take());
+        next
+    }
+
+    /// This identity without its candidate: a self-replacement cancelled
+    /// before reserving anything never sent a copy to it.
+    pub fn without_candidate(&self) -> Self {
+        let mut next = self.clone();
+        next.candidate = None;
+        next
+    }
+
+    /// Encode the id and every held private pair for identity custody: the
+    /// active pair, the retired ones, then the candidate if any. This custody
     /// encoding is not a restore code (D13).
     pub fn to_secret_bytes(&self) -> SecretBytes {
-        let keys = self.keys.to_secret_bytes();
-        let mut bytes = Zeroizing::new(Vec::with_capacity(21 + keys.as_bytes().len()));
+        let mut bytes = Zeroizing::new(Vec::new());
         bytes.extend_from_slice(b"CVMI\x01");
         bytes.extend_from_slice(self.member.0.as_bytes());
-        bytes.extend_from_slice(keys.as_bytes());
+        bytes.extend_from_slice(self.keys.to_secret_bytes().as_bytes());
+        let retained =
+            u8::try_from(self.retained.len()).expect("a member holds fewer than 256 retired pairs");
+        bytes.push(retained);
+        for keys in &self.retained {
+            bytes.extend_from_slice(keys.to_secret_bytes().as_bytes());
+        }
+        match &self.candidate {
+            Some(keys) => {
+                bytes.push(1);
+                bytes.extend_from_slice(keys.to_secret_bytes().as_bytes());
+            }
+            None => bytes.push(0),
+        }
         SecretBytes(bytes)
     }
 
-    /// Restore the id and pair from identity custody.
+    /// Restore the id and every held pair from identity custody.
     pub fn from_secret_bytes(mut bytes: &[u8]) -> Result<Self, MaterialError> {
+        fn pair(bytes: &mut &[u8]) -> Result<MemberKeys, MaterialError> {
+            MemberKeys::from_secret_bytes(wire::take(bytes, MEMBER_KEYS_LENGTH)?)
+        }
         wire::prefix(&mut bytes, b"CVMI\x01")?;
         let member = MemberId(uuid::Uuid::from_bytes(wire::array(&mut bytes)?));
-        Ok(Self::new(member, MemberKeys::from_secret_bytes(bytes)?))
+        let keys = pair(&mut bytes)?;
+        let [count] = wire::array(&mut bytes)?;
+        let retained = (0..count)
+            .map(|_| pair(&mut bytes))
+            .collect::<Result<Vec<_>, _>>()?;
+        let candidate = match wire::array(&mut bytes)? {
+            [0] => None,
+            [1] => Some(pair(&mut bytes)?),
+            _ => return Err(MaterialError::Encoding),
+        };
+        wire::end(bytes)?;
+        let identity = Self {
+            member,
+            keys,
+            retained,
+            candidate,
+        };
+        // Each credential is held once.
+        let mut public: Vec<_> = identity.held().map(MemberKeys::public_keys).collect();
+        public.sort();
+        public.dedup();
+        if public.len() != identity.held().count() {
+            return Err(MaterialError::Encoding);
+        }
+        Ok(identity)
     }
 }
+
+/// The length of a private-pair blob, `CVMK 01` and both 32-byte secrets.
+const MEMBER_KEYS_LENGTH: usize = 69;
 
 impl fmt::Debug for MemberIdentity {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("MemberIdentity")
             .field("member", &self.member)
+            .field("retained", &self.retained.len())
+            .field("candidate", &self.candidate.is_some())
             .finish_non_exhaustive()
     }
 }

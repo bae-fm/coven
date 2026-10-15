@@ -661,6 +661,7 @@ async fn journal_lookups_read_current_steps_and_keep_failed_rows_in_order() {
                 kind: kind.into(),
                 data: vec![1],
                 started_by: "coven".into(),
+                pauses_writes: false,
             })
             .await
             .unwrap(),
@@ -724,6 +725,7 @@ async fn finished_operation_ids_cannot_address_a_new_operation_after_reopening()
             kind: "reload-snapshots".into(),
             data: vec![1],
             started_by: "coven".into(),
+            pauses_writes: false,
         }
     }
     let store = TestStore::new();
@@ -842,4 +844,55 @@ async fn a_failed_rollback_after_snapshot_checks_fails_the_handle() {
         db.write(|_| Ok(())).await.unwrap();
         db.close().await.unwrap();
     }
+}
+
+/// A self-replacement's operation pauses app writes from its insertion until
+/// it finishes; finishing it removes the pause in the same transaction (§10).
+#[tokio::test]
+async fn a_pausing_operation_refuses_app_writes_until_it_finishes() {
+    let store = TestStore::new();
+    let db = store
+        .builder(notes_tables(), notes_migrations())
+        .open()
+        .await
+        .unwrap();
+    let insert = |n: u32| {
+        let db = db.clone();
+        async move {
+            db.write(move |sql| -> Result<(), DbError> {
+                sql.execute(
+                    "INSERT INTO notes VALUES(?1,'title','')",
+                    [format!("00000000-0000-4000-8000-{n:012}")],
+                )?;
+                Ok(())
+            })
+            .await
+        }
+    };
+    insert(1).await.unwrap();
+    let operation = |pauses_writes| crate::NewOperation {
+        kind: "replace-member-keys".into(),
+        data: vec![0],
+        started_by: "test".into(),
+        pauses_writes,
+    };
+    let other = db.start_operation(operation(false)).await.unwrap();
+    insert(2).await.unwrap();
+    let paused = db.start_operation(operation(true)).await.unwrap();
+    assert!(matches!(insert(3).await, Err(DbError::MemberKeysChanging)));
+    // A write that changes no synced row queues nothing and is not refused.
+    db.write(|_| Ok(())).await.unwrap();
+    db.finish_operation(other).await.unwrap();
+    assert!(matches!(insert(4).await, Err(DbError::MemberKeysChanging)));
+    db.finish_operation(paused).await.unwrap();
+    insert(5).await.unwrap();
+    let ids: Vec<String> = db
+        .read(|sql| Ok(sql.query("SELECT id FROM notes ORDER BY id", [], |r| r.get(0))?))
+        .await
+        .unwrap();
+    let expected: Vec<String> = [1, 2, 5]
+        .map(|n| format!("00000000-0000-4000-8000-{n:012}"))
+        .into();
+    assert_eq!(ids, expected);
+    db.close().await.unwrap();
 }

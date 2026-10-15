@@ -94,6 +94,7 @@ pub(crate) fn dismiss(
         .apply(Some(&record), BTreeSet::new())?;
         files.retain_rows(affected)?;
         files.before_commit()?;
+        crate::operation::check_write_pause(database)?;
         crate::write_commit::queue(database, &record)
     })
 }

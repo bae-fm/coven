@@ -263,6 +263,7 @@ async fn entry_copies_and_operation_commit_or_roll_back_as_one_reservation() {
             kind: "copy test".into(),
             data: vec![],
             started_by: "test".into(),
+            pauses_writes: false,
         })
         .await
         .unwrap();

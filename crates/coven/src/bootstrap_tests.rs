@@ -970,3 +970,6 @@ mod restore_credentials;
 
 #[path = "bootstrap_join_tests.rs"]
 mod join;
+
+#[path = "member_keys_tests.rs"]
+mod member_keys;

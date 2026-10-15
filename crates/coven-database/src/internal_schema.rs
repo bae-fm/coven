@@ -869,6 +869,15 @@ macro_rules! coven_tables {
             );
             CREATE INDEX _coven_operations_kind ON _coven_operations(kind);
         ");
+        // The one operation pausing app writes while it replaces this
+        // member's keys (§10). Its row goes with the operation's.
+        $visit!(_coven_write_pause, "
+            CREATE TABLE _coven_write_pause (
+                paused INTEGER PRIMARY KEY CHECK(paused=1),
+                operation INTEGER NOT NULL UNIQUE
+                    REFERENCES _coven_operations(id) ON DELETE CASCADE
+            ) STRICT;
+        ");
         // One persisted retry wait, T and W, per waiting operation, queued
         // upload, eager file download, joiner poll or provider cooldown
         // (§16.5). Work rows take their waits with them; a download's work

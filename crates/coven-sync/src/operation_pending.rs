@@ -162,6 +162,9 @@ impl StoreLogSync {
             SyncError::NoStorage => PendingReason::NoStorage,
             SyncError::UpdateRequired(update) => PendingReason::UpdateRequired(*update),
             SyncError::Removed => PendingReason::Removed,
+            SyncError::MemberKeysReplaced { member } => {
+                PendingReason::MemberKeysReplaced { member: *member }
+            }
             SyncError::Storage(error)
                 if error.failure() == coven_storage::StorageFailure::CatchUpRequired =>
             {

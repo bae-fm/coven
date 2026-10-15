@@ -97,3 +97,29 @@ pub(crate) struct AccessKey {
     principal: coven_format::S3Principal,
     member: Option<coven_foundation::id_source::MemberId>,
 }
+
+/// A member's public pair as its two 32-byte keys; decoding refuses an
+/// invalid or weak signing point as the format does.
+pub(crate) mod member_keys {
+    use super::*;
+    pub(crate) fn serialize<S: serde::Serializer>(
+        v: &Option<coven_crypto::MemberPublicKeys>,
+        s: S,
+    ) -> Result<S::Ok, S::Error> {
+        v.map(|keys| (*keys.signing.as_bytes(), *keys.sealing.as_bytes()))
+            .serialize(s)
+    }
+    pub(crate) fn deserialize<'de, D: serde::Deserializer<'de>>(
+        d: D,
+    ) -> Result<Option<coven_crypto::MemberPublicKeys>, D::Error> {
+        Option::<([u8; 32], [u8; 32])>::deserialize(d)?
+            .map(|(signing, sealing)| {
+                Ok(coven_crypto::MemberPublicKeys {
+                    signing: coven_crypto::SigningKey::from_bytes(signing)
+                        .map_err(serde::de::Error::custom)?,
+                    sealing: coven_crypto::SealingKey::from_bytes(sealing),
+                })
+            })
+            .transpose()
+    }
+}

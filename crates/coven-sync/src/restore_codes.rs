@@ -67,7 +67,10 @@ impl RestoreCodes {
         coven_storage::ProviderAuth::new(credentials, self.credentials.clone())
     }
 
-    /// Encode this member's identity, store id and name, and storage location only.
+    /// Encode this member's stable id and current private pair, store id and
+    /// name, and storage location only. The pair is the held one replay
+    /// binds now; without it the call reports `MemberKeysReplaced` rather
+    /// than exporting a retired pair (§12.1).
     pub async fn restore_code(&self) -> Result<String, SyncError> {
         let guard = self.inner.lock().await;
         let owner = guard.as_ref().ok_or(DbError::StoreClosed)?;
@@ -301,17 +304,28 @@ impl RestoreCodesInner {
 
     async fn code(&self) -> Result<RestoreCode, SyncError> {
         let local = self.database.local_store_log().await?;
-        let store = local.log.replay.state.store.ok_or(SyncError::NoStorage)?;
+        let state = &local.log.replay.state;
+        let store = state.store.clone().ok_or(SyncError::NoStorage)?;
         let location = self.settings.read()?.ok_or(SyncError::NoStorage)?;
         let identity = self
             .identity
             .read()?
             .ok_or(coven_storage::StorageFailure::MemberKeysMissing)?;
+        let current = crate::effects::member(state, &identity.member())
+            .ok_or(SyncError::Removed)?
+            .keys;
+        // A kept self-replacement's candidate is current before custody
+        // installs it; a retired pair never is.
+        let selected = identity
+            .activate(&current)
+            .ok_or(SyncError::MemberKeysReplaced {
+                member: identity.member(),
+            })?;
         Ok(RestoreCode {
             store: store.id,
             name: store.name,
             member: identity.member(),
-            member_keys: identity.keys().clone(),
+            member_keys: selected.keys().clone(),
             storage: location.encode()?,
         })
     }
@@ -355,6 +369,58 @@ impl RestoreCodesInner {
                 }),
             )
             .await
+    }
+}
+
+/// The restore code kept beside this store's credentials, which the keychain
+/// syncs to the person's other Apple devices (§12.1). Member-key replacement
+/// refreshes it once custody installs the new pair; storage-credential
+/// changes leave it unchanged (E9).
+pub struct RestoreCodeCustody {
+    credentials: Arc<DeviceCredentials>,
+    settings: StorageSettings,
+}
+
+impl RestoreCodeCustody {
+    /// Compose at the opening root beside the store's device credentials and
+    /// the storage settings naming its location.
+    pub fn new(credentials: Arc<DeviceCredentials>, settings: StorageSettings) -> Self {
+        Self {
+            credentials,
+            settings,
+        }
+    }
+
+    /// Keep the code for `identity`'s active pair. Nothing is kept before
+    /// storage has a location, or where the keychain syncs no entries.
+    pub(crate) fn refresh(
+        &self,
+        local: &coven_database::LocalStoreLog,
+        identity: &MemberIdentity,
+    ) -> Result<(), SyncError> {
+        let Some(store) = local.log.replay.state.store.clone() else {
+            return Ok(());
+        };
+        let Some(location) = self.settings.read()? else {
+            return Ok(());
+        };
+        let code = RestoreCode {
+            store: store.id,
+            name: store.name,
+            member: identity.member(),
+            member_keys: identity.keys().clone(),
+            storage: location.encode()?,
+        };
+        self.credentials.write(|keychain| {
+            if keychain.supports_synced_entries() {
+                keychain
+                    .set_synced_restore_code(&coven_crypto::SecretBytes::new(
+                        code.to_bytes()?.to_vec(),
+                    ))
+                    .map_err(SyncError::from)?;
+            }
+            Ok(())
+        })
     }
 }
 
