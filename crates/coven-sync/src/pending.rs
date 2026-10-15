@@ -284,6 +284,19 @@ pub(crate) enum Clears {
     Never,
 }
 
+/// Storage failures that work other than coven's own operations, such as
+/// file uploads, retries automatically (E5).
+pub(crate) fn automatic_storage(failure: StorageFailure) -> bool {
+    matches!(
+        failure,
+        StorageFailure::Network
+            | StorageFailure::Conflict
+            | StorageFailure::RateLimited
+            | StorageFailure::NotFound
+            | StorageFailure::SessionExpired
+    )
+}
+
 /// How a provider failure clears.
 pub(crate) fn storage_clears(failure: StorageFailure) -> Clears {
     use StorageFailure::*;
@@ -331,9 +344,7 @@ impl PendingReason {
             | Self::PendingOwner { .. }
             | Self::AccountInUse { .. }
             | Self::InvalidPositions(_) => Retry::Automatic,
-            Self::Storage { failure, .. } if storage_clears(*failure) == Clears::ByItself => {
-                Retry::Automatic
-            }
+            Self::Storage { failure, .. } if automatic_storage(*failure) => Retry::Automatic,
             Self::Refused(_) | Self::UpdateRequired(_) => Retry::AfterUpdate,
             Self::Dropped(_) | Self::Removed => Retry::Never,
             _ => Retry::AppAction,

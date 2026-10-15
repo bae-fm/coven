@@ -1684,7 +1684,8 @@ while let Ok(values) = lost.next().await {
   - Reset and coven-update retry rules are in §19.1. Neither a disagreement
     nor a peer's silence triggers recovery on its own.
 - `Offline` describes the last failed attempt, not the connection's history.
-  `Failed`: storage refused the whole pass, or coven's own operation failed.
+  `Failed`: storage refused the whole pass, or coven's own operation failed;
+  one that never clears stops sync until a reset.
   - Keep whether the provider answered; `StorageFailure::Network` alone
     cannot decide this. A server error response is not an offline device.
   - A denied store listing can fail the pass. A refused write, missing key,
@@ -2376,15 +2377,14 @@ pub enum Retry {
 impl PendingRecord {
     /// Automatic: missing objects, prerequisites, keys, pending provider/owner
     /// work, shared-account waits, invalid replaceable positions, and storage
-    /// failures that clear on their own (Network/Conflict/RateLimited/
-    /// NotFound/SessionExpired/QuotaExceeded/File).
+    /// Network/Conflict/RateLimited/NotFound/SessionExpired.
     /// AfterUpdate: Refused and UpdateRequired.
     /// Never: a dropped entry or write, or this device's removal.
     /// AppAction: every other reason, including source files, disagreements
     /// and an app operation replay dropped.
-    /// Coven's own operation: Automatic on a drop or database, disk or custody
-    /// failure; AppAction, retried on new credentials or connection, if a
-    /// person clears it; else Never.
+    /// Coven's own operation: Automatic on a drop, a database, disk or custody
+    /// failure, or storage QuotaExceeded/File; AppAction, retried on new
+    /// credentials or connection, if a person clears it; else Never.
     /// A replay change can clear a replay-dependent reason without retrying
     /// its subject. It cannot undo an entry's LandedTooLate, but can undo a
     /// write's retirement-dependent LandedTooLate (§10).

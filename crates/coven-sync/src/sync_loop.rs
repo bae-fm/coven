@@ -31,8 +31,9 @@ pub enum SyncStatus {
         finished_at: SystemTime,
     },
     /// The last pass failed as a whole, including a provider's error
-    /// response, or coven's own work failed its last attempt; other
-    /// per-subject failures belong only in pending().
+    /// response, or coven's own work failed its last attempt; work that
+    /// never clears also stops sync. Other per-subject failures belong only
+    /// in pending().
     Failed {
         /// The failure and its original cause.
         error: SyncFailure,
@@ -514,7 +515,12 @@ impl SyncRun {
                             self.backoff = None;
                             self.status.send_replace(match failing {
                                 None => SyncStatus::Synced { finished_at: self.clock.now() },
-                                Some(record) => SyncStatus::Failed { error: SyncFailure::Operation(Box::new(record)) },
+                                Some(record) => {
+                                    // Work that never clears stalls sync until
+                                    // a person resets it (E5).
+                                    self.started = record.retry() != crate::Retry::Never;
+                                    SyncStatus::Failed { error: SyncFailure::Operation(Box::new(record)) }
+                                }
                             });
                         }
                         Err(error) => {

@@ -89,9 +89,10 @@ impl StoreLogSync {
     }
 
     /// Coven's own operation whose last attempt failed or replay dropped, if
-    /// any: it retries under backoff, and the store is not synced until it
+    /// any, first one that never clears: the store is not synced until it
     /// succeeds (E5).
     pub(crate) async fn failing_work(&self) -> Result<Option<PendingRecord>, SyncError> {
+        let mut failing = None;
         for record in self.database.operations().await? {
             let Some(pending) = self
                 .database
@@ -108,10 +109,13 @@ impl StoreLogSync {
                         | PendingReason::Dropped(_)
                 )
             {
-                return Ok(Some(pending));
+                if pending.retry() == Retry::Never {
+                    return Ok(Some(pending));
+                }
+                failing.get_or_insert(pending);
             }
         }
-        Ok(None)
+        Ok(failing)
     }
 
     /// The storage connection changed: waits for storage are woken.

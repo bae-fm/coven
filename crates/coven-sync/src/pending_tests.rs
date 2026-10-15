@@ -68,7 +68,7 @@ fn operation_failures_retry_as_they_clear_and_only_app_operations_wait_for_it() 
         }
         let app = match &reason {
             PendingReason::Storage {
-                failure: StorageFailure::Network | StorageFailure::QuotaExceeded,
+                failure: StorageFailure::Network,
                 ..
             } => Retry::Automatic,
             _ => Retry::AppAction,

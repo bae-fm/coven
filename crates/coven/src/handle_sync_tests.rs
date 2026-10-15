@@ -400,15 +400,15 @@ async fn a_refused_file_upload_leaves_the_pass_synced_with_its_pending_record() 
         .storage
         .set_faults(Faults {
             fail_next: 1,
-            failure: StorageFailure::PermissionDenied,
-            response: Some(403),
+            failure: StorageFailure::QuotaExceeded,
+            response: Some(507),
             ..Faults::none()
         })
         .await;
     let refused = |records: &[PendingRecord]| {
         records.iter().any(|record| {
             matches!(record.subject, PendingSubject::File { .. })
-                && matches!(record.reason, PendingReason::Storage { failure, .. } if failure == StorageFailure::PermissionDenied)
+                && matches!(record.reason, PendingReason::Storage { failure, .. } if failure == StorageFailure::QuotaExceeded)
         })
     };
     let mut pending = device.handle.subscribe_pending();
@@ -442,12 +442,13 @@ async fn a_refused_file_upload_leaves_the_pass_synced_with_its_pending_record() 
     network.close().await;
 }
 
-/// Coven's own rotation that the provider refuses for want of space is
-/// never shown as `Synced`: the pass reports it while it retries itself, and
-/// status turns `Synced` once a retry succeeds, with no app call (E5).
-#[tokio::test]
-async fn a_refused_rotation_is_reported_until_it_retries_itself() {
-    let network = Network::new(2).await;
+/// Remove device 1's member, with the provider refusing the store-key
+/// rotation that removal requires as `failure`; returns the rotation's path.
+async fn refuse_rotation(
+    network: &Network,
+    failure: StorageFailure,
+    status: u16,
+) -> coven_storage::ObjectPath {
     let owner = &network.devices[0];
     network.devices[1].handle.stop_sync();
     let members = owner.handle.members().await.unwrap();
@@ -468,11 +469,14 @@ async fn a_refused_rotation_is_reported_until_it_retries_itself() {
     let mut faults = Faults::none();
     faults
         .create_failures
-        .insert(rotation.clone(), (StorageFailure::QuotaExceeded, 507));
+        .insert(rotation.clone(), (failure, status));
     owner.storage.set_faults(faults).await;
     owner.handle.remove_member(&removed).await.unwrap();
-    let mut status = owner.handle.subscribe_sync_status();
-    owner.handle.sync_now();
+    rotation
+}
+
+/// Waits until status reports the failing rotation.
+async fn rotation_failed(status: &mut tokio::sync::watch::Receiver<SyncStatus>) {
     tokio::time::timeout(
         Duration::from_secs(15),
         status.wait_for(|s| {
@@ -483,6 +487,19 @@ async fn a_refused_rotation_is_reported_until_it_retries_itself() {
     .await
     .unwrap()
     .unwrap();
+}
+
+/// Coven's own rotation that the provider refuses for want of space is
+/// never shown as `Synced`: the pass reports it while it retries itself, and
+/// status turns `Synced` once a retry succeeds, with no app call (E5).
+#[tokio::test]
+async fn a_refused_rotation_is_reported_until_it_retries_itself() {
+    let network = Network::new(2).await;
+    let owner = &network.devices[0];
+    let rotation = refuse_rotation(&network, StorageFailure::QuotaExceeded, 507).await;
+    let mut status = owner.handle.subscribe_sync_status();
+    owner.handle.sync_now();
+    rotation_failed(&mut status).await;
     owner.storage.set_faults(Faults::none()).await;
     tokio::time::timeout(Duration::from_secs(15), async {
         owner.handle.sync_now();
@@ -511,6 +528,28 @@ async fn a_refused_rotation_is_reported_until_it_retries_itself() {
                 ..
             }
         )));
+    network.close().await;
+}
+
+/// A rotation the provider refuses outright never clears: sync stops,
+/// status stays `Failed` with its record, and no later pass runs (E5).
+#[tokio::test]
+async fn a_rotation_refused_outright_stalls_sync() {
+    let network = Network::new(2).await;
+    let owner = &network.devices[0];
+    refuse_rotation(&network, StorageFailure::Refused, 400).await;
+    let mut status = owner.handle.subscribe_sync_status();
+    owner.handle.sync_now();
+    rotation_failed(&mut status).await;
+    let before = passes(owner);
+    owner.handle.sync_now();
+    insert(&owner.handle, "after the stall").await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(passes(owner), before);
+    assert!(matches!(
+        &*status.borrow(),
+        SyncStatus::Failed { error: SyncFailure::Operation(record) } if record.retry() == Retry::Never
+    ));
     network.close().await;
 }
 

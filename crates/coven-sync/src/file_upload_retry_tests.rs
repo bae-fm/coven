@@ -149,28 +149,6 @@ async fn reopening_keeps_the_remaining_delay_and_its_exponent() {
     f.close().await;
 }
 
-/// A full provider can clear on its own: the upload retries under backoff.
-#[tokio::test]
-async fn a_full_provider_retries_the_upload_under_backoff() {
-    let clock = Arc::new(FixedClock::new(
-        SystemTime::UNIX_EPOCH + Duration::from_secs(1000),
-    ));
-    let f = fixture(&clock).await;
-    let file = f.attach("files", "photo", b"photo".to_vec()).await;
-    f.storage
-        .set_faults(fail_next(StorageFailure::QuotaExceeded, None))
-        .await;
-    assert_eq!(drained(f.files.inner.drain_uploads(true).await.unwrap()), 0);
-    assert_eq!(retry(&f).await.unwrap().wait, Duration::from_secs(1));
-    advance(&f, &clock, 1);
-    assert_eq!(
-        drained(f.files.inner.drain_uploads(false).await.unwrap()),
-        1
-    );
-    assert!(!f.queued(&file).await);
-    f.close().await;
-}
-
 #[tokio::test]
 async fn failures_needing_the_app_wait_for_retry_uploads_now() {
     let clock = Arc::new(FixedClock::new(
@@ -179,12 +157,13 @@ async fn failures_needing_the_app_wait_for_retry_uploads_now() {
     let f = fixture(&clock).await;
     let file = f.attach("files", "photo", b"photo".to_vec()).await;
     for failure in [
+        StorageFailure::QuotaExceeded,
         StorageFailure::PermissionDenied,
         StorageFailure::Authentication,
     ] {
         f.storage.set_faults(fail_next(failure, None)).await;
         assert_eq!(drained(f.files.inner.drain_uploads(true).await.unwrap()), 0);
-        // A condition a person clears is not retried on a timer.
+        // A whole-store condition is not retried on a timer.
         assert_eq!(
             f.upload_reason(&file).await,
             Some(PendingReason::Storage {

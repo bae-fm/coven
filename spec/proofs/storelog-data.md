@@ -375,7 +375,9 @@ Rust observes every storage failure, nor model every native error payload.
 Coven's own operations retry as their failure clears (`operationRetry`,
 `Clears`): `coven_owned_retries_as_it_clears`, and
 `coven_owned_waits_only_on_people` proves they wait for the app only on a
-failure a person must clear.
+failure a person must clear. Outside those operations, such as for file
+uploads, Rust still counts only the transient provider failures as clearing
+on their own.
 
 **Two more ways a record ends are proved safe.** A loaded snapshot can move
 this device's write positions past a write that was waiting. `Pending.cover`
