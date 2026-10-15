@@ -389,22 +389,20 @@ mod waits {
         let bytes = storage.read(&copy).await.unwrap();
         storage.delete(&copy).await.unwrap();
         ben.sync().await;
-        // The first entry sealed with the missing key waits for it; the
-        // later one waits behind it in its log and has no record of its own.
+        // A key wait does not stop the log: each entry sealed with the missing
+        // key records that wait (§19.1, storelog-data `Reading.stops`).
         assert!(!ben.log().await.replay.entries.contains_key(&sealed));
+        let waiting = PendingReason::KeyUnavailable {
+            audience: Audience::Store,
+            key: key(3),
+        };
         assert_eq!(
             entry_records(&ben).await,
-            [(
-                sealed,
-                PendingReason::KeyUnavailable {
-                    audience: Audience::Store,
-                    key: key(3),
-                }
-            )]
+            [(sealed, waiting.clone()), (later, waiting)]
         );
-        // An unchanged scan keeps the same record.
+        // An unchanged scan keeps the same records.
         ben.sync().await;
-        assert_eq!(entry_records(&ben).await.len(), 1);
+        assert_eq!(entry_records(&ben).await.len(), 2);
         storage.create(&copy, &bytes).await.unwrap();
         ben.sync().await;
         assert!(ben.log().await.replay.entries.contains_key(&later));

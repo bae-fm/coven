@@ -129,6 +129,9 @@ impl StoreLogSync {
                 {
                     continue;
                 }
+                // A key wait does not stop its log: the next entry is read
+                // and records its own first unmet condition (§19.1,
+                // storelog-data `Reading.stops`).
                 if id.number > 1 {
                     let prior = EntryId {
                         number: id.number - 1,
@@ -136,6 +139,7 @@ impl StoreLogSync {
                     };
                     if !local.log.replay.entries.contains_key(&prior)
                         && !opened.contains_key(&prior)
+                        && !missing_keys.contains_key(&prior)
                     {
                         continue;
                     }
