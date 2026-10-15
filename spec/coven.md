@@ -6461,8 +6461,8 @@ holds failures and rejected entries, without making either wait look completed.
     and so still moves the return checkpoint (§15). An audience without a
     usable key posts no fingerprint; with no completed observation since
     opening, current positions wait and the confirmed post stands
-    ([`PositionPublication.pass_confirms_unchanged`, `pass_reading_advances`,
-    `readings_store_alike`, `late_passes_stall`](proofs/storelog/CovenStorelog/PositionPublication.lean));
+    ([`PositionPublication.pass_confirms_unchanged`, `pass_reading_advances`, `waiting_unconfirmed`,
+    `closed_keeps_storage`, `readings_store_alike`, `late_passes_stall`](proofs/storelog/CovenStorelog/PositionPublication.lean));
   - each device posts its fingerprints with its positions ([§6](#6-syncing-writes));
   - two devices that have applied exactly the same writes must have the
     same fingerprints;
