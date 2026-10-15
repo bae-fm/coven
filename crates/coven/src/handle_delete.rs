@@ -23,8 +23,13 @@ impl CovenHandle {
             if unsent == IfUnsent::Refuse && !work.is_empty() {
                 return Err(StoreDeletionError::Unsent(work));
             }
-            // The removal needs the connection a stopped loop released.
+            // The removal needs a connection; a started loop's pass makes one.
             self.sync.start().await?;
+            self.sync
+                .subscribe()
+                .wait_for(|status| !matches!(status, SyncStatus::Syncing))
+                .await
+                .map_err(|_| SyncError::from(DbError::StoreClosed))?;
             self.operations.remove_device(self.device).await?;
         }
         self.close().await?;
