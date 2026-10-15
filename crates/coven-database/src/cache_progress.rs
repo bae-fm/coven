@@ -194,19 +194,23 @@ pub(crate) fn cancel_eager(db: &DatabaseConnection) -> Result<(), DbError> {
     Ok(())
 }
 
-/// Retire the requested set together once every file in it is complete.
-/// Returns whether it retired.
-pub(crate) fn retire_eager(db: &DatabaseConnection, device: DeviceId) -> Result<bool, DbError> {
-    if cancelled(db)? {
-        return Ok(false);
-    }
-    for file in requests(db)? {
-        if covered(db, &file, device)? != file.plaintext_size() {
-            return Ok(false);
-        }
+/// Retire the requested set together once every file in it has settled:
+/// downloaded, permanently refused or left to the app. Coverage cannot
+/// decide it, since a refusal or a later eviction never covers its file
+/// again (§16.4). A cancelled set stays until a new request replaces it.
+pub(crate) fn retire_eager(db: &DatabaseConnection) -> Result<(), DbError> {
+    if cancelled(db)?
+        || db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM _coven_eager_requests JOIN _coven_eager_work
+             USING(namespace,file_id))",
+            [],
+            |r| r.get::<_, bool>(0),
+        )?
+    {
+        return Ok(());
     }
     db.internal_execute("DELETE FROM _coven_eager_requests", [])?;
-    Ok(true)
+    Ok(())
 }
 
 /// Pin answers in key order; a key with no row carrying a file is `None`.

@@ -149,6 +149,9 @@ async fn one_files_failure_leaves_its_record_while_the_fill_continues() {
         clock.clone(),
     )
     .await;
+    // One explicit fill requests all four as one set; the background worker
+    // would fill and retire each arriving file on its own.
+    b.files.stop_background_for_counts().await;
     b.files
         .set_storage(Some(a.storage.clone()), std::future::ready(Ok(())))
         .await
@@ -246,6 +249,11 @@ async fn one_files_failure_leaves_its_record_while_the_fill_continues() {
     );
     assert_eq!(damaged_reads(&a.storage.reads().await), before);
     assert_eq!(file_records(&b).await.len(), 2);
+    // Every request has settled, refusals included: the set retires.
+    assert_eq!(
+        b.database.eager_cache_fill_status().await.unwrap(),
+        EagerCacheFillStatus::Idle
+    );
     b.close().await;
     a.close().await;
 }

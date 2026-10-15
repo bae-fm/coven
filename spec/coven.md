@@ -5419,7 +5419,7 @@ Carol's tablet:
 - Eager-fill work and progress are derived from cache reservations and verified
   cached ranges. Reservations retain the requested fixed references and
   cancellation; they do not duplicate byte counters or failure reasons.
-  Completed reservations stay in their requested set until that set finishes,
+  Reservations stay in their set until each settles, refusals included,
   then retire together. Evicting a completed fill does not request it again.
   A new changed file reference can request a new fill.
   - `eager_cache_fill_status()` and its subscription execute one query.

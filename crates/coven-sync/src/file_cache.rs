@@ -171,8 +171,6 @@ impl FilesInner {
                 }
             }
         }
-        // The set retires together once every file in it is cached.
-        self.database.retire_eager().await?;
         Ok(())
     }
 

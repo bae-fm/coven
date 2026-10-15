@@ -40,13 +40,18 @@ async fn eager_reservations_and_cancellation_survive_reopening() {
         EagerCacheFillStatus::Cancelled(whole.clone())
     );
     // A cancelled set never retires; a new request starts a fresh set.
-    assert!(!owner.retire_eager().await.unwrap());
+    owner.settle_eager_work(Vec::new()).await.unwrap();
+    assert!(matches!(
+        db.eager_cache_fill_status().await.unwrap(),
+        EagerCacheFillStatus::Cancelled(_)
+    ));
     owner.request_eager(vec![file.clone()]).await.unwrap();
     assert_eq!(
         db.eager_cache_fill_status().await.unwrap(),
         EagerCacheFillStatus::Downloading(whole)
     );
-    assert!(owner.retire_eager().await.unwrap());
+    // With no work left, settling retires it.
+    owner.settle_eager_work(Vec::new()).await.unwrap();
     assert_eq!(
         db.eager_cache_fill_status().await.unwrap(),
         EagerCacheFillStatus::Idle

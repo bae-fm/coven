@@ -122,14 +122,17 @@ impl FileDatabase {
     pub async fn eager_work(&self) -> Result<Vec<FileRef>, DbError> {
         self.read(crate::eager_work::read).await
     }
-    /// Settle eager work: downloaded, permanently refused or cancelled.
+    /// Settle eager work: downloaded, permanently refused or cancelled. The
+    /// requested set retires with its last settled file.
     pub async fn settle_eager_work(&self, files: Vec<FileRef>) -> Result<(), DbError> {
         self.require_writer()?;
         self.run(move |db, _, _, _| {
             db.transaction(|db| {
-                files
-                    .iter()
-                    .try_for_each(|file| crate::eager_work::settle(db, file))
+                for file in &files {
+                    crate::eager_work::settle(db, file)?;
+                }
+                // The last settled request retires its set with it (§16.4).
+                crate::cache_progress::retire_eager(db)
             })
         })
         .await
@@ -601,14 +604,6 @@ impl FileDatabase {
         self.require_writer()?;
         self.run(|db, _, _, _| db.transaction(crate::cache_progress::cancel_eager))
             .await
-    }
-    /// Retire the requested eager set together once all of it is cached.
-    pub async fn retire_eager(&self) -> Result<bool, DbError> {
-        self.require_writer()?;
-        self.run(|db, _, _, device| {
-            db.transaction(|db| crate::cache_progress::retire_eager(db, device))
-        })
-        .await
     }
     /// An absent budget leaves that namespace unlimited.
     pub async fn budget(&self, namespace: &str) -> Result<Option<u64>, DbError> {

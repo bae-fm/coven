@@ -66,6 +66,8 @@ pub(super) fn reason(statement: &Statement, relation: &str) -> Option<&'static s
     Some("the eager fill reads every pending changed reference"),
 ("cache_progress.rs", "SELECT reference FROM _coven_eager_requests ORDER BY namespace,file_id", "_coven_eager_requests") =>
     Some("eager progress covers the whole requested set"),
+("cache_progress.rs", "SELECT EXISTS(SELECT 1 FROM _coven_eager_requests JOIN _coven_eager_work USING(namespace,file_id))", "_coven_eager_requests") =>
+    Some("retirement stops at the first requested file still holding work"),
 ("file_queue.rs", "SELECT EXISTS(SELECT 1 FROM _coven_upload_pause)", "_coven_upload_pause") =>
     Some("the pause table holds at most one row"),
 ("retry.rs", "SELECT scope,operation,upload,download,failures,not_before,wait FROM _coven_retries", "_coven_retries") =>
