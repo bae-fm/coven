@@ -19,11 +19,22 @@ pub(crate) async fn reset_device(
         .map_err(CovenError::from)?;
     let settings = directory.settings().map_err(CovenError::from)?;
     let keychain = Arc::new(StoreKeychain::new(builder.keychain()?, store));
+    // Calling reset_device is the app's approval of a missing device entry.
+    let missing = keychain.device_id()? != Some(settings.device_id);
     let location = StorageSettings::new(directory.clone());
     if location.read().map_err(SyncError::from)?.is_none() {
-        // Only a decided reset may proceed without storage to load from.
+        // Only a decided reset or a missing entry proceeds without storage.
         if recorded.is_none() {
-            return Err(SyncError::NoStorage.into());
+            if !missing {
+                return Err(SyncError::NoStorage.into());
+            }
+            record(
+                &builder,
+                &directory,
+                &settings,
+                DeviceResetReason::IdentityMismatch,
+            )
+            .await?;
         }
         return reset_unconnected(builder, store, &settings.name, keychain).await;
     }
@@ -75,16 +86,12 @@ pub(crate) async fn reset_device(
         .await
         .map_err(SyncError::from)?;
     if recorded.is_none() {
-        // The writer lock excludes a live handle while the decision is made.
-        let lock = directory.lock_for_open().await.map_err(CovenError::from)?;
-        directory
-            .record_device_reset(&DeviceReset {
-                old_device: settings.device_id,
-                new_device: builder.ids.new_device_id(),
-                reason: DeviceResetReason::DatabaseDamage,
-            })
-            .map_err(SyncError::from)?;
-        drop(lock);
+        let reason = if missing {
+            DeviceResetReason::IdentityMismatch
+        } else {
+            DeviceResetReason::DatabaseDamage
+        };
+        record(&builder, &directory, &settings, reason).await?;
     }
     let code = RestoreCode {
         store,
@@ -107,6 +114,25 @@ pub(crate) async fn reset_device(
     )
     .await?
     .ok_or_else(|| SyncError::from(StorageFailure::MemberKeysMissing).into())
+}
+
+/// Record the reset under the writer lock, which excludes a live handle.
+async fn record(
+    builder: &CovenBuilder,
+    directory: &StoreDir,
+    settings: &coven_foundation::files::StoreSettings,
+    reason: DeviceResetReason,
+) -> Result<(), BootstrapError> {
+    let lock = directory.lock_for_open().await.map_err(CovenError::from)?;
+    directory
+        .record_device_reset(&DeviceReset {
+            old_device: settings.device_id,
+            new_device: builder.ids.new_device_id(),
+            reason,
+        })
+        .map_err(SyncError::from)?;
+    drop(lock);
+    Ok(())
 }
 
 /// Keep the S3 key deletions the discarded database owed pending in its

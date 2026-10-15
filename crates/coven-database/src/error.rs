@@ -50,6 +50,21 @@ pub enum CovenError {
         /// The missing choice.
         field: &'static str,
     },
+    /// The keychain holds no entry naming this directory's device; opening
+    /// changed nothing (§10).
+    #[error("store {store}: this device's keychain entry is missing")]
+    DeviceKeyMissing {
+        /// The store whose device entry is missing.
+        store: coven_foundation::id_source::StoreId,
+    },
+    /// A connected store's identity custody holds no member keys either,
+    /// beside the missing device entry; only restoring with the restore code
+    /// continues. Opening changed nothing (§10, §12).
+    #[error("store {store}: this device's entry and member keys are missing")]
+    MemberKeysMissing {
+        /// The store whose member keys are missing.
+        store: coven_foundation::id_source::StoreId,
+    },
 }
 
 impl From<rusqlite::Error> for CovenError {

@@ -318,6 +318,10 @@ pub enum CovenError {
     Lock(StoreLockError),
     /// A required builder choice was not supplied (E1).
     MissingConfiguration { field: &'static str },
+    /// The keychain has no entry for this device; nothing changed (§10).
+    DeviceKeyMissing { store: StoreId },
+    /// A connected store's member keys are missing too; only restore continues.
+    MemberKeysMissing { store: StoreId },
 }
 
 /// A failed database call or a write the database refuses (§5, §8, §14, §16).
@@ -880,10 +884,9 @@ impl CovenBuilder {
     /// opens as `Stopped`; otherwise its status is `Disconnected`.
     pub async fn open(self, store: StoreId) -> CovenResult<CovenHandle>;
 
-    /// Replaces a damaged local database with a new device loaded from storage
-    /// (§19.2), or finishes a stale copy's recorded reset (§10), which `open`
-    /// refuses with `BootstrapPending`. Uses saved settings and custody, with
-    /// no data salvage.
+    /// Replaces a damaged local database, or a copy whose device entry is
+    /// missing (§10), with a new device loaded from storage (§19.2); finishes
+    /// a reset sync recorded. Uses saved settings and custody; no salvage.
     /// Checks storage and keys before moving the old directory aside.
     /// Uses the existing bootstrap state and errors; an interrupted call
     /// resumes with the same fresh id. The returned handle holds a device-reset

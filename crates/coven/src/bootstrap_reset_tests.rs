@@ -121,6 +121,17 @@ fn reopen(f: &Fixture) -> CovenBuilder {
     builder(&f.app, &f._root, &f.clock, &f.storage)
 }
 
+/// What an approved reset records before loading, as if it stopped there.
+fn interrupted_reset(f: &Fixture) -> DeviceReset {
+    f.directory
+        .record_device_reset(&DeviceReset {
+            old_device: f.directory.settings().unwrap().device_id,
+            new_device: UuidIds.new_device_id(),
+            reason: DeviceResetReason::IdentityMismatch,
+        })
+        .unwrap()
+}
+
 /// The installation's id in device-only custody, which backups do not copy.
 fn custody(f: &Fixture) -> coven_crypto::custody::StoreKeychain {
     f.app.store_keychain(f.directory.id())
@@ -145,16 +156,17 @@ async fn missing_custody_resets_as_a_new_device_and_keeps_the_notice() {
     let old = f.directory.settings().unwrap().device_id;
     custody(&f).delete_device_id().unwrap();
     let before = f.storage.request_count();
-    assert!(matches!(
-        reopen(&f).open(f.directory.id()).await,
-        Err(CovenError::Lock(StoreLockError::BootstrapPending(_)))
-    ));
-    // Deciding sends nothing; ordinary opens keep refusing the old copy.
+    // Opening refuses and changes nothing: no reset is recorded, nothing sent.
+    for _ in 0..2 {
+        assert!(matches!(
+            reopen(&f).open(f.directory.id()).await,
+            Err(CovenError::DeviceKeyMissing { store }) if store == f.directory.id()
+        ));
+    }
+    assert_eq!(f.directory.device_reset().unwrap(), None);
+    assert_eq!(f.directory.settings().unwrap().device_id, old);
     assert_eq!(f.storage.request_count(), before);
-    assert!(matches!(
-        reopen(&f).open(f.directory.id()).await,
-        Err(CovenError::Lock(StoreLockError::BootstrapPending(_)))
-    ));
+    // Calling reset_device is the app's approval.
     let handle = reopen(&f)
         .reset_device(f.directory.id(), "Restored phone")
         .await
@@ -194,8 +206,8 @@ async fn an_interrupted_reset_keeps_its_fresh_id_and_stays_unavailable() {
     uploaded(&f, "kept").await;
     f.handle.close().await.unwrap();
     custody(&f).delete_device_id().unwrap();
-    assert!(reopen(&f).open(f.directory.id()).await.is_err());
-    let decided = f.directory.device_reset().unwrap().unwrap();
+    // An approved reset recorded its decision, then stopped.
+    let decided = interrupted_reset(&f);
     f.storage.set_online(false);
     assert!(reopen(&f)
         .reset_device(f.directory.id(), "Restored phone")
@@ -290,8 +302,7 @@ async fn st_differential_reset_boundary() {
                 assert_eq!(queued(&f).await.len(), queued_writes);
                 let old = f.directory.settings().unwrap().device_id;
                 custody(&f).delete_device_id().unwrap();
-                assert!(reopen(&f).open(f.directory.id()).await.is_err());
-                let decided = f.directory.device_reset().unwrap().unwrap();
+                let decided = interrupted_reset(&f);
                 let mut writable = Vec::new();
                 f.storage.set_online(false);
                 for _ in 0..retries {
@@ -357,4 +368,28 @@ async fn st_differential_reset_boundary() {
         actual,
         serde_json::from_slice::<Vec<serde_json::Value>>(&output.stdout).unwrap()
     );
+}
+
+#[tokio::test]
+async fn a_keychain_without_the_store_refuses_and_names_the_missing_member_keys() {
+    let f = Fixture::new().await;
+    f.setup().await.unwrap();
+    status(&f.handle, |s| matches!(s, SyncStatus::Synced { .. })).await;
+    f.handle.close().await.unwrap();
+    let old = f.directory.settings().unwrap().device_id;
+    // Another keychain, as after the app changes its service name: neither the
+    // device entry nor the member keys are there, so only a restore continues.
+    let renamed = TestCoven::new();
+    assert!(matches!(
+        builder(&renamed, &f._root, &f.clock, &f.storage)
+            .open(f.directory.id())
+            .await,
+        Err(CovenError::MemberKeysMissing { store }) if store == f.directory.id()
+    ));
+    assert_eq!(f.directory.device_reset().unwrap(), None);
+    assert_eq!(f.directory.settings().unwrap().device_id, old);
+    // The original keychain still opens the untouched store.
+    let handle = reopen(&f).open(f.directory.id()).await.unwrap();
+    assert_eq!(handle.device_reset().await.unwrap(), None);
+    handle.close().await.unwrap();
 }

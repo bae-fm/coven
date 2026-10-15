@@ -332,15 +332,17 @@ async fn a_restored_install_resets_as_a_new_device_before_its_first_write() {
         .unwrap();
     handle.close().await.unwrap();
     // Backup bytes survive, but the new installation has no device-only entry.
-    // It resets as a new device; nothing of the old copy is renumbered (§10).
+    // Opening refuses; an approved reset makes a new device, and nothing of
+    // the old copy is renumbered (§10).
     let restored = TestCoven::new();
     let old_device = directory.settings().unwrap().device_id;
     assert!(matches!(
         builder(&restored, layout.clone(), ids.clone())
             .open(directory.id())
             .await,
-        Err(CovenError::Lock(StoreLockError::BootstrapPending(_)))
+        Err(CovenError::DeviceKeyMissing { .. })
     ));
+    assert_eq!(directory.device_reset().unwrap(), None);
     let handle = builder(&restored, layout.clone(), ids.clone())
         .reset_device(directory.id(), "Restored")
         .await

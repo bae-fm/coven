@@ -3457,8 +3457,8 @@ Carol's tablet:
       instead would let a restored copy's other operations hide its newer
       self's snapshot, whose deleted path the restored copy could then reuse
       ([`live_copy_sends`, `snapshot_ahead_resets`, `key_copies_counted`, `operation_ids_hide_newer_snapshot`](proofs/storage/CovenStorage/IdentityCounters.lean)).
-  - The device id also lives in custody that backups do not copy. A missing
-    or different custody id requires the same device reset.
+  - The device id also lives in custody that backups do not copy. Opening
+    refuses a missing or different one, changing nothing; `reset_device` resets.
   - Finish this check before sending writes, entries, snapshots, files,
     key copies, positions or clock observations, including sends outside
     the periodic sync loop.

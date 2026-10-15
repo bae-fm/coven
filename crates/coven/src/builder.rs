@@ -159,8 +159,9 @@ impl CovenBuilder {
     }
 
     /// Replace this installation with a new device loaded from storage (§10,
-    /// §19.2), completing a reset that sync or opening decided. Uses saved
-    /// settings, credentials and member keys; nothing unsent is salvaged.
+    /// §19.2): for a reset sync decided, a damaged database, or a device entry
+    /// `open` found missing. Uses saved settings, credentials and member keys;
+    /// nothing unsent is salvaged.
     /// An interrupted call resumes with the same fresh id. The returned
     /// handle's `device_reset()` names the old and new ids.
     pub async fn reset_device(
@@ -266,30 +267,38 @@ impl CovenBuilder {
         let lock = directory.lock_for_open().await?;
         let closing = lock.closing_guard();
         let result = crate::coven::blocking(move || {
+            let mut builder = self;
             let settings = lock.settings()?;
-            let keychain = Arc::new(StoreKeychain::new(self.keychain()?, settings.id));
-            // A copy restored without its non-backed-up custody id, or one
-            // sync already decided to replace, resets as a new device (§10).
-            let reset = match directory.unfinished_device_reset()? {
-                Some(reset) => Some(reset),
-                None if keychain.device_id()? != Some(settings.device_id) => Some(
-                    directory
-                        .record_device_reset(&DeviceReset {
-                            old_device: settings.device_id,
-                            new_device: self.ids.new_device_id(),
-                            reason: DeviceResetReason::IdentityMismatch,
-                        })
-                        .map_err(StoreLockError::from)?,
-                ),
-                None => None,
-            };
-            if reset.is_some() {
+            let keychain = Arc::new(StoreKeychain::new(builder.keychain()?, settings.id));
+            // A reset sync already decided waits for reset_device (§10).
+            if directory.unfinished_device_reset()?.is_some() {
                 return Err(StoreLockError::BootstrapPending(settings.id).into());
+            }
+            // A copy restored without its non-backed-up custody id, or a
+            // keychain that no longer names it, changes nothing (§10).
+            if keychain.device_id()? != Some(settings.device_id) {
+                let identity = Self::make_identity(
+                    std::mem::replace(&mut builder.identity, IdentityCustody::InMemory),
+                    &directory,
+                    settings.id,
+                    keychain,
+                );
+                let store = settings.id;
+                // Without member keys a connected store can only be restored
+                // with its code; reset_device reads them from custody.
+                let connected = coven_storage::StorageSettings::new(directory.clone())
+                    .read()
+                    .map_err(|error| SettingsError::Corrupt(Box::new(error)))?
+                    .is_some();
+                return Err(match KeySession::member(identity)?.read()? {
+                    None if connected => CovenError::MemberKeysMissing { store },
+                    _ => CovenError::DeviceKeyMissing { store },
+                });
             }
             Ok(OpeningStore {
                 database,
                 lock,
-                builder: self,
+                builder,
                 directory,
                 keychain,
             })
