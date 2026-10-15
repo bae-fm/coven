@@ -854,7 +854,8 @@ satisfied before the reopen delays it at most that long
 wall-clock jump each reopen adds at most one start, the attempt it cut short
 ([`reopen_rate`](proofs/io/CovenIO/WaitingReopen.lean)). Every recorded condition names what unblocks it: an entry held back by a
 pending reload waits on that reload, except a schema raise, which goes first
-unless it waits on that reload, so the two never wait on each other
+unless it waits on that reload or on a write, which only step 6 sends or
+receives, so the two never wait on each other
 ([`no_cycle`](proofs/io/CovenIO/DriveOrder.lean)).
 Key waits share the keys observation, invite waits share the join-request
 observation, and agreement/retention share positions. Unchanged app-action
