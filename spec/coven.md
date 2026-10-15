@@ -452,7 +452,9 @@ a zero-body pass cannot hide a listing of the whole history.
   lengthen them.
   For `W` unchanged waits in one uninterrupted run, at most
   `W * (1 + floor(t / 1 second))` attempts start in any interval of length
-  `t`; after reaching the cap it is `W * (1 + floor(t / 300 seconds))`.
+  `t`; after reaching the cap it is `W * (1 + floor(t / 300 seconds))`
+  ([`unchanged_rate`](proofs/io/CovenIO/WaitingEvidence.lean),
+  [`unchanged_capped`](proofs/io/CovenIO/WaitingEvidence.lean)).
   Multiply by each wait's declared request allowance, counting pages and
   retries within it. Neither pass completion nor a one-second worker tick
   resets a delay. Reopen uses the persisted T and W in §16.5. Pages are

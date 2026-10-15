@@ -482,7 +482,7 @@ impl OperationRun {
                         }
                         self.writes.set_storage(storage.clone());
                         // A connection is a prerequisite of waiting storage work.
-                        self.sync.prerequisites_changed();
+                        self.sync.connection_changed();
                     }
                     if matches!(command, Command::ForgetKeys) {
                         let result = self.files.set_storage(None, async {
@@ -495,14 +495,14 @@ impl OperationRun {
                         let result = self.files.set_storage(Some(storage.clone()), self.sync.unlock_storage(storage.clone())).await;
                         if result.is_ok() {
                             self.writes.set_storage(Some(storage));
-                            self.sync.prerequisites_changed();
+                            self.sync.connection_changed();
                         }
                         let _ = reply.send(result.map(|()| Output::Unit));
                     } else if let Command::Setup(storage, access, device_name, commit) = command {
                         let result = self.files.set_storage(Some(storage.clone()), self.sync.setup_storage(storage.clone(), access, device_name, commit)).await;
                         if result.is_ok() {
                             self.writes.set_storage(Some(storage));
-                            self.sync.prerequisites_changed();
+                            self.sync.connection_changed();
                         }
                         if result.is_err() { self.sync.invalidate_sends(); }
                         let _ = reply.send(result.map(|()| Output::Unit));
@@ -645,9 +645,15 @@ impl OperationRun {
                     .find(|(data, _)| data.writes_entry() && (!raising || data.raises_version()))
                     .map(|(_, record)| record.id);
             }
-            let raising_first = records
-                .iter()
-                .any(|(data, record)| Some(record.id) == writer && data.raises_version());
+            // A raise holding the writer slot goes before reloads, unless it
+            // waits on one: it then yields, so the two never wait on each
+            // other (IO `DriveOrder.no_cycle`).
+            let mut raising_first = false;
+            for (data, record) in &records {
+                if Some(record.id) == writer && data.raises_version() {
+                    raising_first = !self.sync.waits_on_reload(record.id).await?;
+                }
+            }
             for (snapshot_data, snapshot) in records {
                 // Replay and invite settlement can retire another account's queued work.
                 let Some(record) = self.sync.operation_record(snapshot.id).await? else {
@@ -736,8 +742,6 @@ impl OperationRun {
                     .next()
                     .map(|(_, error)| error));
             }
-            // Progress is committed evidence for every waiting operation.
-            self.sync.prerequisites_changed();
         }
     }
 }

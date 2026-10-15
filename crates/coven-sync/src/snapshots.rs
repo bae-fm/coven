@@ -364,11 +364,11 @@ impl StoreLogSync {
         record: &OperationRecord,
         task: SnapshotTask,
     ) -> Result<Progress, SyncError> {
-        let attempt = self.attempt_scope();
+        let attempt = self.waits.begin_attempt(record.id);
         attempt.run(self.snapshot_attempt(record, task)).await
     }
 
-    async fn snapshot_attempt(
+    pub(super) async fn snapshot_attempt(
         &mut self,
         record: &OperationRecord,
         task: SnapshotTask,

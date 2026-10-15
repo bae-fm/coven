@@ -172,6 +172,13 @@ impl StoreLogSync {
         // A plain app call may have fixed the next entry before this open ran
         // migrations. Its reserved number must finish before preparing a raise.
         self.publish(&mut local, &member, &mut ring).await?;
+        if local.upload.is_some() {
+            // Publication waits for a pending reload: the wait names that
+            // operation, which is what unblocks it (IO `WaitingEvidence`).
+            if let Some(id) = self.pending_reload().await? {
+                return Ok(Progress::Waiting(self.reload_condition(id).await?));
+            }
+        }
         if let Some(upload) = &local.upload {
             return Ok(Progress::Waiting(PendingReason::Waits(
                 Prerequisite::Object(crate::store_log_object::path(

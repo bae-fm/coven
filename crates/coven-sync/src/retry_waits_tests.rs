@@ -178,42 +178,6 @@ async fn a_provider_cooldown_holds_every_consumer_across_reopening() {
 }
 
 #[tokio::test]
-async fn new_evidence_makes_an_operation_due_once_without_resetting_its_backoff() {
-    let fixture = Fixture::new();
-    let (database, waits) = fixture.open().await;
-    let id = database
-        .start_operation(coven_database::NewOperation {
-            kind: "circle".into(),
-            data: vec![1],
-            started_by: "app".into(),
-            pauses_writes: false,
-        })
-        .await
-        .unwrap();
-    let operation = RetrySubject::Operation(id);
-    for _ in 0..3 {
-        let previous = database.retry_wait(operation).await.unwrap();
-        waits.fail(operation, previous.as_ref()).await.unwrap();
-    }
-    assert!(!due(&database, &waits, operation).await);
-    waits.prerequisites_changed();
-    assert!(due(&database, &waits, operation).await);
-    // Still waiting: the next failure continues from four seconds.
-    let previous = database.retry_wait(operation).await.unwrap();
-    waits.fail(operation, previous.as_ref()).await.unwrap();
-    assert_eq!(
-        database.retry_wait(operation).await.unwrap().unwrap().wait,
-        Duration::from_secs(8)
-    );
-    assert!(!due(&database, &waits, operation).await);
-    // Evidence never releases other kinds of work.
-    waits.fail(JOIN, None).await.unwrap();
-    waits.prerequisites_changed();
-    assert!(!due(&database, &waits, JOIN).await);
-    database.close().await.unwrap();
-}
-
-#[tokio::test]
 async fn a_wait_that_cannot_be_persisted_holds_until_the_app_retries() {
     let fixture = Fixture::new();
     let (database, waits) = fixture.open().await;
@@ -230,8 +194,9 @@ async fn a_wait_that_cannot_be_persisted_holds_until_the_app_retries() {
 }
 
 /// IO `Waiting`: the ordinary delay, the restart arm and whether a timer is
-/// due before and after an app retry, from the Rust owner's decisions; and
-/// `WaitingEvidence`'s evidence-triggered attempts on an operation's wait.
+/// due before and after an app retry, from the Rust owner's decisions.
+/// `WaitingEvidence` runs through the operation owner
+/// (`io_differential_waiting_evidence`).
 #[tokio::test]
 #[ignore = "requires COVEN_IO_RUNNER"]
 async fn io_differential_waiting() {
@@ -288,66 +253,6 @@ async fn io_differential_waiting() {
             "due": timer_due,
             "retried": retried,
         }));
-    }
-    // IO `WaitingEvidence`: one operation's wait through monotonic time,
-    // committed prerequisite evidence and automatic attempts, each failing
-    // when due. Evidence makes it due once and keeps its backoff. A raced
-    // attempt fails after other work committed while it ran; any attempt may
-    // commit to a prerequisite table itself, which the model does not see.
-    for _ in 0..32 {
-        let fixture = Fixture::new();
-        let (database, waits) = fixture.open().await;
-        let id = database
-            .start_operation(coven_database::NewOperation {
-                kind: "circle".into(),
-                data: vec![1],
-                started_by: "app".into(),
-                pauses_writes: false,
-            })
-            .await
-            .unwrap();
-        let operation = RetrySubject::Operation(id);
-        let mut actions = Vec::new();
-        let mut attempts = Vec::new();
-        for _ in 0..32 {
-            match pick(5) {
-                0 => {
-                    waits.prerequisites_changed();
-                    actions.push(json!({"op": "evidence"}));
-                }
-                1 => {
-                    let seconds = pick(400);
-                    fixture.advance(seconds);
-                    actions.push(json!({"op": "advance", "seconds": seconds}));
-                }
-                choice => {
-                    let raced = choice == 2;
-                    let previous = database.retry_wait(operation).await.unwrap();
-                    let due = waits.due(operation, previous.as_ref());
-                    if due {
-                        // Every prerequisite commit while it ran counts for
-                        // other waits, its own included.
-                        if raced || pick(2) == 0 {
-                            waits.prerequisites_changed();
-                        }
-                        waits
-                            .fail_attempt(operation, previous.as_ref(), raced)
-                            .await
-                            .unwrap();
-                    }
-                    let failures = database
-                        .retry_wait(operation)
-                        .await
-                        .unwrap()
-                        .map_or(0, |wait| wait.failures);
-                    attempts.push(json!({"due": due, "failures": failures}));
-                    actions.push(json!({"op": if raced { "raced" } else { "attempt" }}));
-                }
-            }
-        }
-        cases.push(json!({"check": "evidence", "actions": actions}));
-        actual.push(json!(attempts));
-        database.close().await.unwrap();
     }
     assert_eq!(actual, crate::discovery::tests::io_runner(&cases));
 }

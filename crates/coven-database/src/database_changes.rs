@@ -24,6 +24,24 @@ impl DatabaseChanges {
         Ok(false)
     }
 
+    /// Resolves once a relevant commit happened since the previous
+    /// observation, or the handle failed or closed. It owns its subscription,
+    /// so a worker can wait on it beside other wakes; `take_changed` then
+    /// consumes the change.
+    pub fn changed(&self) -> impl std::future::Future<Output = ()> + Send + 'static {
+        let mut commits = self.commits.clone();
+        let first = self.first;
+        async move {
+            loop {
+                let state = commits.state();
+                if first || state.changed || state.error().is_some() {
+                    return;
+                }
+                commits.changed().await;
+            }
+        }
+    }
+
     /// The initial state, then each relevant commit. No timer or polling is used.
     pub async fn next(&mut self) -> Result<(), DbError> {
         loop {

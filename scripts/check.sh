@@ -437,6 +437,7 @@ proofs() {
             store_log_sync::tests::snapshots::publication::io_differential_ordinary_snapshot_writes \
             store_log_sync::tests::snapshots::selection::held::io_differential_held \
             retry_waits::tests::io_differential_waiting \
+            store_log_sync::tests::operations::evidence::io_differential_waiting_evidence \
             files::tests::upload_retry::io_differential_upload_worker \
             store_log_sync::snapshots::file_scan::tests::io_differential_file_scan \
             write_object::tests::io_differential_dropped_registration \

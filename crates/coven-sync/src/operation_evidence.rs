@@ -1,0 +1,256 @@
+//! What each waiting operation's wait names, and the evidence that it changed
+//! (§3.1, SP waiting; IO `WaitingEvidence`). A wait is due by evidence only
+//! when what it names changes: its rows commit outside the attempt that ended
+//! in it, the key it lacks arrives, or the storage connection it lacks changes.
+//! Nothing else wakes it, so a wait whose prerequisite never changes keeps
+//! §3.1's unchanged-wait rate (`unchanged_rate`).
+
+use crate::{PendingReason, PendingRecord, Prerequisite, Retry, RetryWaits, SyncError};
+use coven_database::{
+    AttemptCommits, CommitScope, DatabaseChanges, DbError, OperationId, PrerequisiteRows,
+    RetrySubject,
+};
+use coven_foundation::id_source::KeyId;
+use coven_merge::Audience;
+use coven_storage::ObjectPath;
+use std::collections::{BTreeMap, BTreeSet};
+
+#[derive(Default)]
+pub(crate) struct Evidence {
+    /// Counts storage connection changes.
+    connection: u64,
+    waits: BTreeMap<OperationId, Wait>,
+}
+
+enum Wait {
+    /// An attempt runs in `scope`. Other work's commits since it began are
+    /// kept until it names what it waits on.
+    Attempt {
+        scope: CommitScope,
+        commits: AttemptCommits,
+    },
+    /// The wait an attempt ended in.
+    Waiting {
+        rows: DatabaseChanges,
+        /// The key it lacks; whether this device held it when the wait
+        /// began, unknown for a wait armed on opening.
+        key: Option<(Audience, KeyId, Option<bool>)>,
+        /// The connection count when a wait for storage began.
+        connection: Option<u64>,
+        woken: bool,
+    },
+}
+
+/// What a wait for `reason` names (IO `Armed.prereq`).
+#[derive(Default)]
+struct Needs {
+    rows: Vec<PrerequisiteRows>,
+    key: Option<(Audience, KeyId)>,
+    connection: bool,
+}
+
+fn object_rows(path: &ObjectPath) -> Vec<PrerequisiteRows> {
+    if let Some((device, number)) = path.store_log_position() {
+        vec![PrerequisiteRows::Entry(coven_database::EntryId {
+            device,
+            number: number.get(),
+        })]
+    } else if let Some((writer, number)) = path.key_copy_position() {
+        vec![PrerequisiteRows::KeyCopy {
+            writer,
+            number: number.get(),
+        }]
+    } else if let Some(write) = path.write_id() {
+        vec![PrerequisiteRows::Write(write)]
+    } else {
+        // A snapshot, file, request or other object arrives only in storage:
+        // its wait ends by time.
+        Vec::new()
+    }
+}
+
+fn needs(reason: &PendingReason) -> Needs {
+    let rows = |rows| Needs {
+        rows,
+        ..Needs::default()
+    };
+    match reason {
+        PendingReason::Missing { path } => rows(object_rows(path)),
+        PendingReason::Waits(prerequisite) => match prerequisite {
+            Prerequisite::CatchUp => Needs::default(),
+            Prerequisite::Object(path) => rows(object_rows(path)),
+            Prerequisite::DeviceRegistration(device) => {
+                rows(vec![PrerequisiteRows::Device(*device)])
+            }
+            Prerequisite::SchemaPublication { .. } => rows(vec![PrerequisiteRows::Boundaries]),
+            Prerequisite::Reload(audience) => {
+                rows(vec![PrerequisiteRows::Reload(audience.clone())])
+            }
+            Prerequisite::Positions(device) => rows(vec![PrerequisiteRows::PeerPositions(*device)]),
+            Prerequisite::EntryFinality(_) => rows(vec![PrerequisiteRows::Finality]),
+        },
+        PendingReason::KeyUnavailable { audience, key } => Needs {
+            key: Some((audience.clone(), *key)),
+            ..Needs::default()
+        },
+        PendingReason::ProviderPending { account, .. }
+        | PendingReason::PendingOwner { account }
+        | PendingReason::AccountInUse { account } => {
+            rows(vec![PrerequisiteRows::ProviderAccess(account.clone())])
+        }
+        PendingReason::Storage { .. } | PendingReason::NoStorage => Needs {
+            connection: true,
+            ..Needs::default()
+        },
+        // Every other condition waits for time, the app or an update.
+        _ => Needs::default(),
+    }
+}
+
+impl RetryWaits {
+    fn evidence(&self) -> std::sync::MutexGuard<'_, Evidence> {
+        self.evidence.lock().expect("operation evidence poisoned")
+    }
+
+    /// Opening watches every persisted operation wait from now: commits after
+    /// the store opened, by any work, are evidence for it.
+    pub(crate) async fn watch_persisted(&self) -> Result<(), DbError> {
+        let Some(database) = &self.database else {
+            return Ok(());
+        };
+        for (subject, _) in database.retry_waits().await? {
+            let RetrySubject::Operation(id) = subject else {
+                continue;
+            };
+            let Some(pending) = database.operation_pending::<PendingRecord>(id).await? else {
+                continue;
+            };
+            if pending.retry() == Retry::Automatic {
+                let reload = match pending.reason {
+                    PendingReason::Waits(Prerequisite::Reload(_)) => database
+                        .first_operation(crate::operation_data::Data::RELOAD_KIND)
+                        .await?
+                        .map(|record| record.id),
+                    _ => None,
+                };
+                self.arm_evidence(id, &pending.reason, None, reload);
+            }
+        }
+        Ok(())
+    }
+
+    /// Begin an attempt at the operation: commits the attempt makes belong to
+    /// the returned scope and are no evidence against the wait it ends in.
+    pub(crate) fn begin_attempt(&self, id: OperationId) -> CommitScope {
+        let scope = CommitScope::new();
+        if let Some(database) = &self.database {
+            let commits = database.attempt_commits(scope);
+            self.evidence()
+                .waits
+                .insert(id, Wait::Attempt { scope, commits });
+        }
+        scope
+    }
+
+    /// The scope of the operation's running attempt, or a fresh one.
+    pub(crate) fn attempt_scope(&self, id: OperationId) -> CommitScope {
+        match self.evidence().waits.get(&id) {
+            Some(Wait::Attempt { scope, .. }) => *scope,
+            _ => CommitScope::new(),
+        }
+    }
+
+    /// The attempt ended waiting on `reason`: watch what that names. Other
+    /// work's commits to it while the attempt ran wake the wait at once (IO
+    /// `racing_commit_wakes`). `held` says whether this device holds a key
+    /// the reason lacks; `reload` is the reload operation a reload wait names.
+    pub(crate) fn arm_evidence(
+        &self,
+        id: OperationId,
+        reason: &PendingReason,
+        held: Option<bool>,
+        reload: Option<OperationId>,
+    ) {
+        let Some(database) = &self.database else {
+            return;
+        };
+        let mut needs = needs(reason);
+        needs.rows.extend(reload.map(PrerequisiteRows::Operation));
+        let mut evidence = self.evidence();
+        let commits = match evidence.waits.remove(&id) {
+            Some(Wait::Attempt { commits, .. }) => commits,
+            _ => database.attempt_commits(CommitScope::new()),
+        };
+        let connection = needs.connection.then_some(evidence.connection);
+        evidence.waits.insert(
+            id,
+            Wait::Waiting {
+                rows: commits.watch(&needs.rows),
+                key: needs.key.map(|(audience, key)| (audience, key, held)),
+                connection,
+                woken: false,
+            },
+        );
+    }
+
+    /// The key the operation's wait lacks, if it lacks one.
+    pub(crate) fn lacks_key(reason: &PendingReason) -> Option<(Audience, KeyId)> {
+        needs(reason).key
+    }
+
+    pub(crate) fn clear_evidence(&self, id: OperationId) {
+        self.evidence().waits.remove(&id);
+    }
+
+    pub(crate) fn retain_evidence(&self, live: &BTreeSet<OperationId>) {
+        self.evidence().waits.retain(|id, _| live.contains(id));
+    }
+
+    /// Whether what the operation's wait names changed since it began: its
+    /// rows, the key it lacks (`holds` reads this device's keys), or the
+    /// connection. It stays woken until the next attempt begins.
+    pub(crate) fn evidence_woken(
+        &self,
+        id: OperationId,
+        holds: impl Fn(&Audience, KeyId) -> Result<bool, SyncError>,
+    ) -> Result<bool, SyncError> {
+        let mut evidence = self.evidence();
+        let connection = evidence.connection;
+        let Some(Wait::Waiting {
+            rows,
+            key,
+            connection: began,
+            woken,
+        }) = evidence.waits.get_mut(&id)
+        else {
+            return Ok(false);
+        };
+        *woken |= rows.take_changed()?;
+        if let Some((audience, key, held)) = key {
+            if *held != Some(true) {
+                *woken |= holds(audience, *key)?;
+            }
+        }
+        *woken |= began.is_some_and(|began| began != connection);
+        Ok(*woken)
+    }
+
+    /// The storage connection changed: waits for storage are woken.
+    pub(crate) fn connection_changed(&self) {
+        self.evidence().connection += 1;
+    }
+
+    /// Wakes for waits not yet woken, when their rows commit.
+    pub(crate) fn evidence_wakes(&self) -> Vec<crate::retry_waits::Wake> {
+        self.evidence()
+            .waits
+            .values()
+            .filter_map(|wait| match wait {
+                Wait::Waiting {
+                    rows, woken: false, ..
+                } => Some(Box::pin(rows.changed()) as crate::retry_waits::Wake),
+                _ => None,
+            })
+            .collect()
+    }
+}

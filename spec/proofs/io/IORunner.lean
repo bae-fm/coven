@@ -478,13 +478,13 @@ private def waiting (j : Json) : Except String Json := do
     ("due", toJson (Waiting.due timer time)),
     ("retried", toJson (Waiting.due (Waiting.appRetry timer time) time))]
 
-/-- `Waiting.step` for one operation's wait: monotonic `advance`s, committed
-prerequisite `evidence` by other work, and automatic `attempt`s, each starting
-only when `Session.ready` and failing. A `raced` attempt fails after other
-work committed while it ran; an attempt's own commits are no evidence.
-Reports, per attempt, whether it was due and the persisted failure count
-afterward (`evidence_due_once`, `evidence_keeps_backoff`,
-`racing_commit_wakes`). -/
+/-- `Waiting.step` for one operation's wait: monotonic `advance`s, `commit`s
+by other work changing one prerequisite, and automatic `attempt`s, each
+starting only when `Session.ready` and failing on its `prereq`, after other
+work committed the prerequisites in `raced` while it ran; an attempt's own
+commits are no evidence. Reports, per attempt, whether it was due and the
+persisted failure count afterward (`evidence_due_once`,
+`evidence_keeps_backoff`, `racing_commit_wakes`, `unrelated_commit_ignored`). -/
 private def evidence (j : Json) : Except String Json := do
   let actions ← j.getObjValAs? (Array Json) "actions"
   let mut s : Waiting.Session := ⟨0, 0, none, none⟩
@@ -494,12 +494,14 @@ private def evidence (j : Json) : Except String Json := do
     let mut events : List Waiting.Event := []
     match op with
     | "advance" => events := [.tick (← action.getObjValAs? Nat "seconds")]
-    | "evidence" => events := [.evidence]
-    | "attempt" => if s.ready then events := [.start, .finish]
-    | "raced" => if s.ready then events := [.start, .evidence, .finish]
+    | "commit" => events := [.commit (← action.getObjValAs? Nat "prereq")]
+    | "attempt" =>
+        let raced ← action.getObjValAs? (List Nat) "raced"
+        let prereq ← action.getObjValAs? Nat "prereq"
+        if s.ready then events := [.start] ++ raced.map .commit ++ [.finish prereq]
     | other => throw s!"unknown evidence action {other}"
     let some next := Waiting.run s events | throw "invalid wait transition"
-    if op == "attempt" || op == "raced" then
+    if op == "attempt" then
       out := out.push (Json.mkObj [("due", toJson s.ready),
         ("failures", toJson ((next.armed.map (·.failures)).getD 0))])
     s := next

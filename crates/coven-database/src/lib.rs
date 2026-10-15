@@ -176,5 +176,7 @@ pub use operation::{
 
 mod commit_scope;
 pub use commit_scope::CommitScope;
+mod prerequisite_rows;
+pub use prerequisite_rows::{AttemptCommits, PrerequisiteRows};
 mod database_changes;
 pub use database_changes::DatabaseChanges;

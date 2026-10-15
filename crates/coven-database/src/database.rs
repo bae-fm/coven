@@ -275,46 +275,16 @@ impl Database {
     /// and wakes nothing (SP step 9). Register before the first sync to
     /// include writes committed while a pass is running.
     pub fn sync_changes(&self) -> crate::DatabaseChanges {
-        self.table_changes(&["_coven_uploads"], true, true, None)
-    }
-
-    /// Observe commits that can satisfy a waiting operation's prerequisites:
-    /// own uploads and queued entries, received and applied store-log
-    /// entries and key copies, reloads, provider access and write positions.
-    /// Operation journal and pending rows, which every attempt rewrites, are
-    /// not among them (SP waiting). Only commits after this call count, and
-    /// none made within `outside`.
-    pub fn operation_prerequisite_changes(
-        &self,
-        outside: Option<crate::CommitScope>,
-    ) -> crate::DatabaseChanges {
-        self.table_changes(
-            &[
-                "_coven_uploads",
-                "_coven_store_log",
-                "_coven_store_log_uploads",
-                "_coven_log_downloads",
-                "_coven_log_inputs",
-                "_coven_key_uploads",
-                "_coven_data_reloads",
-                "_coven_provider_access",
-                "_coven_positions",
-            ],
-            false,
-            false,
-            outside,
-        )
+        self.table_changes(&["_coven_uploads"], true, true)
     }
 
     /// `first` reports the initial state as a change; `inserted_only`
-    /// ignores updates and deletions; commits made within `outside` are not
-    /// changes.
+    /// ignores updates and deletions.
     fn table_changes(
         &self,
         tables: &[&str],
         first: bool,
         inserted_only: bool,
-        outside: Option<crate::CommitScope>,
     ) -> crate::DatabaseChanges {
         let slot = self.inner.read().expect("database lock poisoned");
         let reads: Vec<_> = tables
@@ -327,7 +297,7 @@ impl Database {
             })
             .collect();
         let commits = match slot.as_ref() {
-            Some(inner) => inner.access.observer.subscribe_outside(outside),
+            Some(inner) => inner.access.observer.subscribe(),
             None => CommitSubscription::closed(),
         };
         commits.begin();
@@ -337,6 +307,19 @@ impl Database {
             reads,
             first,
         }
+    }
+
+    /// Observe, from now, every commit made outside `attempt`: an operation
+    /// attempt's own commits are no evidence against the wait it ends in,
+    /// and which rows matter is known only when it ends (SP waiting).
+    pub fn attempt_commits(&self, attempt: crate::CommitScope) -> crate::AttemptCommits {
+        let slot = self.inner.read().expect("database lock poisoned");
+        let commits = match slot.as_ref() {
+            Some(inner) => inner.access.observer.subscribe_outside(Some(attempt)),
+            None => CommitSubscription::closed(),
+        };
+        commits.begin();
+        crate::AttemptCommits { commits }
     }
 
     /// Open the local source of a file this device still has queued for upload,

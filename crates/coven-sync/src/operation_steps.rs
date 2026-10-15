@@ -20,7 +20,7 @@ impl StoreLogSync {
         record: &OperationRecord,
         data: Data,
     ) -> Result<Progress, SyncError> {
-        let attempt = self.attempt_scope();
+        let attempt = self.waits.begin_attempt(record.id);
         attempt.run(self.operation_attempt(record, data)).await
     }
 
@@ -33,7 +33,7 @@ impl StoreLogSync {
             return self.schema_publication_step(record, version).await;
         }
         if let Data::Snapshots(task) = data {
-            return self.snapshot_step(record, task).await;
+            return self.snapshot_attempt(record, task).await;
         }
         if matches!(data, Data::Invite(_)) {
             return self.invite_step(record, data).await;

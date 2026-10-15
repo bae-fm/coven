@@ -5,31 +5,8 @@ use crate::{
     snapshot_data::{ReloadScope, SnapshotJob},
     *,
 };
-use coven_database::{CommitScope, Database, DatabaseChanges, OperationRecord};
+use coven_database::OperationRecord;
 use coven_merge::Audience;
-
-/// Commits that can satisfy waiting operations' prerequisites (SP waiting).
-pub(crate) struct Prerequisites {
-    /// Every operation attempt's commits belong to this scope.
-    attempt: CommitScope,
-    /// Every prerequisite commit: evidence for each operation then waiting.
-    all: DatabaseChanges,
-    /// Prerequisite commits outside any attempt. Attempts run one at a time,
-    /// so during one these are other work's commits (IO
-    /// `racing_commit_wakes`).
-    others: DatabaseChanges,
-}
-
-impl Prerequisites {
-    pub(crate) fn new(database: &Database) -> Self {
-        let attempt = CommitScope::new();
-        Self {
-            attempt,
-            all: database.operation_prerequisite_changes(None),
-            others: database.operation_prerequisite_changes(Some(attempt)),
-        }
-    }
-}
 
 impl StoreLogSync {
     pub(crate) async fn operation_can_retry(
@@ -67,51 +44,50 @@ impl StoreLogSync {
     }
 
     /// Whether automatic work may run this operation now: its condition
-    /// permits a retry, and its retry wait has elapsed or its prerequisites
-    /// changed since, outside any provider cooldown (§16.5, SP step 5).
+    /// permits a retry, and its retry wait has elapsed or what it waits on
+    /// changed since, outside any provider cooldown (§16.5, SP step 5; IO
+    /// `WaitingEvidence`).
     pub(crate) async fn operation_ready(
         &self,
         record: &OperationRecord,
     ) -> Result<bool, SyncError> {
         let subject = coven_database::RetrySubject::Operation(record.id);
+        // Evaluating the operation consumes the change that woke the worker.
+        let woken = self.waits.evidence_woken(record.id, |audience, key| {
+            Ok(crate::store_log_keys::holds(
+                self.store_keys.read()?.as_ref(),
+                audience,
+                key,
+            ))
+        })?;
         if !self.operation_can_retry(record).await? {
             self.waits.seen(subject);
             return Ok(false);
         }
-        // An attempt starting here sees only other work's commits from now
-        // on as evidence against the wait it may end in.
-        self.observe_prerequisites()?;
         let persisted = self.database.retry_wait(subject).await?;
-        Ok(self.waits.due(subject, persisted.as_ref()))
+        let due = self.waits.due(subject, persisted.as_ref());
+        // Evidence ends only a persisted wait, never a cooldown or a wait
+        // that could not be saved.
+        Ok(due || woken && persisted.is_some() && self.waits.cooldown().is_none())
     }
 
-    /// The scope every operation attempt's commits belong to.
-    pub(crate) fn attempt_scope(&self) -> CommitScope {
-        self.prerequisites
-            .lock()
-            .expect("prerequisite observation poisoned")
-            .attempt
+    /// Whether the operation's recorded condition waits on a reload.
+    pub(crate) async fn waits_on_reload(&self, id: OperationId) -> Result<bool, SyncError> {
+        Ok(self
+            .database
+            .operation_pending::<PendingRecord>(id)
+            .await?
+            .is_some_and(|pending| {
+                matches!(
+                    pending.reason,
+                    PendingReason::Waits(Prerequisite::Reload(_))
+                )
+            }))
     }
 
-    /// A commit that can satisfy a prerequisite, such as an own upload or an
-    /// applied entry, makes every operation then waiting due once. Returns
-    /// whether a commit outside the attempts landed since the last
-    /// observation.
-    fn observe_prerequisites(&self) -> Result<bool, SyncError> {
-        let mut prerequisites = self
-            .prerequisites
-            .lock()
-            .expect("prerequisite observation poisoned");
-        if prerequisites.all.take_changed()? {
-            self.waits.prerequisites_changed();
-        }
-        Ok(prerequisites.others.take_changed()?)
-    }
-
-    /// Committed work may satisfy waiting operations' prerequisites: each
-    /// becomes due once, keeping its backoff (SP waiting).
-    pub(crate) fn prerequisites_changed(&self) {
-        self.waits.prerequisites_changed();
+    /// The storage connection changed: waits for storage are woken.
+    pub(crate) fn connection_changed(&self) {
+        self.waits.connection_changed();
     }
 
     /// Forget the waits of operations that no longer exist.
@@ -119,15 +95,27 @@ impl StoreLogSync {
         self.waits.retain_operations(live);
     }
 
-    /// When the earliest waiting operation's retry is due.
+    /// When the earliest waiting operation's retry is due, or what one waits
+    /// on changes.
     pub(crate) fn next_operation_wake(&self) -> Option<crate::retry_waits::Wake> {
-        self.waits
-            .next_wake(|subject| matches!(subject, coven_database::RetrySubject::Operation(_)))
+        let timer = self
+            .waits
+            .next_wake(|subject| matches!(subject, coven_database::RetrySubject::Operation(_)));
+        let evidence = self.waits.evidence_wakes();
+        if evidence.is_empty() {
+            return timer;
+        }
+        let wakes = evidence.into_iter().chain(timer);
+        Some(Box::pin(futures_util::FutureExt::map(
+            futures_util::future::select_all(wakes),
+            |_| (),
+        )))
     }
 
     /// After an unsuccessful attempt, persist the next retry wait before the
-    /// operation waits; a condition that waits for anything but time keeps no
-    /// wait. A completed catch-up is the next pass's, so it is no backoff.
+    /// operation waits, and watch what it waits on; a condition that waits
+    /// for anything but time keeps no wait. A completed catch-up is the next
+    /// pass's, so it is no backoff.
     pub(crate) async fn schedule_retry(
         &self,
         record: &OperationRecord,
@@ -137,15 +125,25 @@ impl StoreLogSync {
         if pending.retry() == Retry::Automatic
             && pending.reason != PendingReason::Waits(Prerequisite::CatchUp)
         {
-            // The attempt's own commits are not evidence against the wait
-            // it ends in; other work's commits while it ran are, so that wait
-            // is due at once (IO `racing_commit_wakes`).
-            let raced = self.observe_prerequisites()?;
-            let previous = self.database.retry_wait(subject).await?;
+            let held = match crate::RetryWaits::lacks_key(&pending.reason) {
+                Some((audience, key)) => Some(crate::store_log_keys::holds(
+                    self.store_keys.read()?.as_ref(),
+                    &audience,
+                    key,
+                )),
+                None => None,
+            };
+            // A reload wait names the reload operation: it advances or finishes.
+            let reload = match pending.reason {
+                PendingReason::Waits(Prerequisite::Reload(_)) => self.pending_reload().await?,
+                _ => None,
+            };
             self.waits
-                .fail_attempt(subject, previous.as_ref(), raced)
-                .await
+                .arm_evidence(record.id, &pending.reason, held, reload);
+            let previous = self.database.retry_wait(subject).await?;
+            self.waits.fail(subject, previous.as_ref()).await
         } else {
+            self.waits.clear_evidence(record.id);
             self.waits.clear(subject).await
         }
     }
@@ -186,7 +184,8 @@ impl StoreLogSync {
         record: &OperationRecord,
         reason: PendingReason,
     ) -> Result<PendingRecord, SyncError> {
-        self.attempt_scope()
+        self.waits
+            .attempt_scope(record.id)
             .run(async {
                 let pending = self.operation_condition(record, reason).await?;
                 self.database.record_pending(pending.clone()).await?;
@@ -203,7 +202,8 @@ impl StoreLogSync {
         record: &OperationRecord,
         error: &SyncError,
     ) -> Result<(), SyncError> {
-        self.attempt_scope()
+        self.waits
+            .attempt_scope(record.id)
             .run(self.record_attempt_error(record, error))
             .await
     }

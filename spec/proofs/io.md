@@ -1140,42 +1140,69 @@ and failure to persist a delay remain Rust obligations.
 runs the IO runner's `waiting` check against the Rust delay, restart arm and
 due decisions before and after an app retry.
 
-**Evidence-triggered attempts — the bound changes; checked counterexample to
-the unchanged-wait bound.** `WaitingEvidence.lean` models one operation's wait
-as `retry_waits.rs` runs it: due when its monotonic deadline passes, or when a
-prerequisite commit arrived after the wait began. An attempt that fails again
-continues the count (`evidence_keeps_backoff`), and the wait it arms is not due
-again until new evidence or its delay (`evidence_due_once`).
+**Evidence-triggered attempts — proved, with §3.1's unchanged-wait bound.**
+`WaitingEvidence.lean` models one operation's wait as `retry_waits.rs` and
+`operation_evidence.rs` run it. The wait names the prerequisite its attempt
+ended on, and is due when its monotonic deadline passes or when a commit
+changing that prerequisite arrives after the wait began. A commit changing any
+other prerequisite leaves it as it was (`unrelated_commit_ignored`). An attempt
+that fails again continues the count (`evidence_keeps_backoff`), and the wait
+it arms is not due again until its prerequisite changes or its delay passes
+(`evidence_due_once`).
 
-`evidence_rate` proves the bound that does hold: in any run, starts are at most
-one, plus one per evidence commit, plus the elapsed time over the delay
-(`evidence_one_second` for 1 second, `evidence_capped` for 300 once nine
-failures are counted; `evidence_waits_rate` sums `W` waits). Every start after
-the first is paid for by a full delay or by one commit.
+`evidence_rate` proves that in any run starts are at most one, plus one per
+commit that woke a wait, plus the elapsed time over the delay: every start
+after the first is paid for by a full delay or by one such commit. A wait
+whose prerequisite no commit changes is §3.1's unchanged wait, and
+`unchanged_rate` proves §3.1's bound for it: at most `1 + floor(t / d)`
+starts (`unchanged_one_second` for 1 second, `unchanged_capped` for 300 once
+nine failures are counted; `unchanged_waits_rate` sums `W` waits).
 
-§3.1's `W * (1 + floor(t / d))` does not hold for such a wait.
-`evidence_exceeds_unchanged_bound` runs a capped wait through three commits at
-one instant, three operations advancing in one drive say, and gets three
-starts where the bound allows one. Rust counts any commit to a prerequisite
-table, or any operation advancing, as evidence for every waiting operation,
-so a wait whose own prerequisite never changed is not held to §3.1's rate:
-its starts follow the commit rate.
+T190 checked the rule this replaces, where any commit to a prerequisite table,
+or any operation advancing, counted for every waiting operation: three
+operations advancing in one drive started a capped wait three times at one
+instant, where §3.1 allows one. `unrelated_burst_starts_none` runs the same
+three commits, now to other prerequisites, and no attempt starts;
+`own_commits_each_wake` shows three commits to the wait's own prerequisite
+each paying for a start.
 
 A commit landing while an attempt runs, after the attempt read its
-prerequisite, is evidence against the wait the attempt ends in: that wait
-begins when the attempt started (`step`'s `finish` arms it with the start's
-evidence count). `racing_evidence_due` and `racing_commit_wakes` prove the
-wait is then due at once, and `racing_commit_wakes_at_once` checks it on a
-capped wait whose delay is 300 seconds; `unraced_waits_full_delay` checks
-that the same attempt without the racing commit waits that delay. The
-attempt's own commits are no evidence events in the model: Rust attributes
-every commit a running attempt makes to one `CommitScope` and observes
-prerequisite commits outside it separately, so they cannot make the attempt's
-own wait due at once. `evidence_rate` holds with this rule too: each start
-after the first is still paid by a delay or by one commit.
-[`io_differential_waiting`](../../crates/coven-sync/src/retry_waits_tests.rs)
-runs attempts that commit to a prerequisite table themselves and attempts
-other work races against the model.
+prerequisite, is evidence against the wait the attempt ends in when it changes
+the prerequisite that wait names: the wait begins when the attempt started.
+`racing_evidence_due` and `racing_commit_wakes` prove the wait is then due at
+once, and `racing_commit_wakes_at_once` checks it on a capped wait whose delay
+is 300 seconds; `unraced_waits_full_delay` checks that the same attempt
+without the racing commit, or with one changing another prerequisite, waits
+that delay. The attempt's own commits are no evidence events in the model:
+Rust attributes each commit an attempt makes to that attempt's `CommitScope`
+and its wait observes only commits outside it, so they cannot make the
+attempt's own wait due at once.
+
+In Rust a prerequisite is a set of database rows (`PrerequisiteRows`: an
+entry, key copy or write, a device's registration, a peer's positions, an
+audience's reload and the reload operation it waits for, the finality
+horizon, the boundaries, a provider account's access), the key a
+`KeyUnavailable` wait lacks, or the storage connection. Opening the store
+watches each persisted wait from then on, so commits by any work after opening
+count; a wait armed before opening sees nothing from before it.
+Rows are the granularity: a write's rows include its writer's applied
+position, so a commit advancing that writer counts even when it stops short
+of the write. A condition naming none of these (a snapshot, a request, a
+local failure) waits for time only.
+[`io_differential_waiting_evidence`](../../crates/coven-sync/src/operation_evidence_tests.rs)
+runs the real operation owner against the model: other work posts devices'
+positions, and attempts fail waiting on one device's positions after other
+work posted some while they ran.
+
+**A raise and a reload never wait on each other — proved.** A queued entry's
+publication waits while a reload is pending, so a raise whose own queued
+entry has not published records a wait on that reload, naming the reload
+operation. The worker used to skip every reload while a raise held the
+writer slot, so each waited on the other (`DriveOrder.old_cycle`). Now a raise
+that waits on a reload yields its place, and the reload runs (`no_cycle`); a
+raise waiting on anything else still goes first (`raise_keeps_its_place`).
+[`DriveOrder`](io/CovenIO/DriveOrder.lean) models only this choice, not the
+rest of the drive.
 
 **Wakes — proved.** `Wakes.lean` models the sync loop and its write-queue
 observation (`sync_loop.rs`, `Database::sync_changes`). `write_never_lost`:

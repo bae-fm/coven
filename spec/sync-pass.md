@@ -815,11 +815,19 @@ pass completion that supplied new evidence, or its next due timer. There
 is no unconditional one-second database/operation scan. A wake reevaluates
 only affected work and never resets an unchanged wait's backoff (§3.1;
 [`evidence_keeps_backoff`](proofs/io/CovenIO/WaitingEvidence.lean),
-[`evidence_due_once`](proofs/io/CovenIO/WaitingEvidence.lean)). A wait begins
-when the attempt that ends in it started: a prerequisite commit by other work
-while the attempt runs makes that wait due at once, while the attempt's own
-commits never do
-([`racing_commit_wakes`](proofs/io/CovenIO/WaitingEvidence.lean)).
+[`evidence_due_once`](proofs/io/CovenIO/WaitingEvidence.lean)). A wait names
+the prerequisite its attempt ended on, and only a commit changing that
+prerequisite is evidence for it; a commit changing anything else never wakes
+it, so an unchanged wait keeps §3.1's rate
+([`unrelated_commit_ignored`](proofs/io/CovenIO/WaitingEvidence.lean),
+[`unchanged_rate`](proofs/io/CovenIO/WaitingEvidence.lean)). A wait begins
+when the attempt that ends in it started: a change to its prerequisite by
+other work while the attempt runs makes that wait due at once, while the
+attempt's own commits never do
+([`racing_commit_wakes`](proofs/io/CovenIO/WaitingEvidence.lean)). Every recorded condition names what unblocks it: a queued entry held
+back by a pending reload waits on that reload, and a schema raise waiting on
+a reload yields its place before reloads, so the two never wait on each other
+([`no_cycle`](proofs/io/CovenIO/DriveOrder.lean)).
 Key waits share the keys observation, invite waits share the join-request
 observation, and agreement/retention share positions. Unchanged app-action
 and after-update pending records issue no automatic requests.

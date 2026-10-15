@@ -44,18 +44,13 @@ pub struct RetryWaits {
     /// Absent for a read-only handle, whose cooldowns last for its session.
     database: Option<Database>,
     state: Mutex<State>,
+    /// What each waiting operation's wait names, and whether it changed.
+    evidence: Mutex<operation_evidence::Evidence>,
 }
 
 #[derive(Default)]
 struct State {
     armed: BTreeMap<RetrySubject, Armed>,
-    /// Committed evidence that can satisfy a waiting operation's
-    /// prerequisites; each change makes every operation wait due once.
-    evidence: u64,
-    /// The evidence count when each operation was last judged due or not,
-    /// which starts any attempt at it: the wait that attempt ends in begins
-    /// there when other work committed while it ran.
-    started: BTreeMap<RetrySubject, u64>,
 }
 
 #[derive(Clone)]
@@ -64,7 +59,6 @@ struct Armed {
     not_before: SystemTime,
     /// Monotonic deadline and its timer; `None` waits for the app.
     timer: Option<(Duration, Timer)>,
-    evidence: u64,
     /// Its owner has evaluated it since its wait ended, so the ended wait
     /// needs no further wake.
     seen: bool,
@@ -87,6 +81,7 @@ impl RetryWaits {
             clock,
             database: Some(database),
             state: Mutex::new(State::default()),
+            evidence: Mutex::default(),
         };
         for (subject, wait) in waits {
             owner.arm_for(
@@ -95,6 +90,7 @@ impl RetryWaits {
                 restart_wait(wait.not_before, now, wait.wait),
             );
         }
+        owner.watch_persisted().await?;
         Ok(owner)
     }
 
@@ -104,6 +100,7 @@ impl RetryWaits {
             clock,
             database: None,
             state: Mutex::new(State::default()),
+            evidence: Mutex::default(),
         }
     }
 
@@ -140,26 +137,12 @@ impl RetryWaits {
     }
 
     fn arm_for(&self, subject: RetrySubject, not_before: SystemTime, wait: Duration) {
-        self.arm_since(subject, not_before, wait, None);
-    }
-
-    /// Arm a wait that began at evidence count `since`, or now.
-    fn arm_since(
-        &self,
-        subject: RetrySubject,
-        not_before: SystemTime,
-        wait: Duration,
-        since: Option<u64>,
-    ) {
         let timer = (self.clock.elapsed() + wait, self.clock.sleep(wait).shared());
-        let mut state = self.lock();
-        let evidence = since.unwrap_or(state.evidence);
-        state.armed.insert(
+        self.lock().armed.insert(
             subject,
             Armed {
                 not_before,
                 timer: Some(timer),
-                evidence,
                 seen: false,
             },
         );
@@ -168,14 +151,11 @@ impl RetryWaits {
     /// A wait that could not be persisted holds until the app retries; it is
     /// never permission to retry at once (§16.5).
     pub(crate) fn hold(&self, subject: RetrySubject) {
-        let mut state = self.lock();
-        let evidence = state.evidence;
-        state.armed.insert(
+        self.lock().armed.insert(
             subject,
             Armed {
                 not_before: SystemTime::UNIX_EPOCH,
                 timer: None,
-                evidence,
                 seen: false,
             },
         );
@@ -183,9 +163,7 @@ impl RetryWaits {
 
     /// The subject's work succeeded, changed or waits for the app instead.
     pub(crate) fn forget(&self, subject: RetrySubject) {
-        let mut state = self.lock();
-        state.armed.remove(&subject);
-        state.started.remove(&subject);
+        self.lock().armed.remove(&subject);
     }
 
     /// Forget operation waits whose operations no longer exist.
@@ -193,13 +171,11 @@ impl RetryWaits {
         &self,
         live: &std::collections::BTreeSet<coven_database::OperationId>,
     ) {
-        let live = |subject: &RetrySubject| match subject {
+        self.lock().armed.retain(|subject, _| match subject {
             RetrySubject::Operation(id) => live.contains(id),
             _ => true,
-        };
-        let mut state = self.lock();
-        state.armed.retain(|subject, _| live(subject));
-        state.started.retain(|subject, _| live(subject));
+        });
+        self.retain_evidence(live);
     }
 
     /// Whether the subject holds an armed wait in this session.
@@ -207,24 +183,13 @@ impl RetryWaits {
         self.lock().armed.contains_key(&subject)
     }
 
-    /// Committed work may satisfy waiting operations' prerequisites. Each
-    /// becomes due once without resetting its backoff.
-    pub(crate) fn prerequisites_changed(&self) {
-        self.lock().evidence += 1;
-    }
-
     /// Whether automatic work on the subject may start now, given its
     /// persisted wait. No subject is due while the provider cooldown lasts.
     /// An absent row means the work advanced or the app retried it, unless
     /// this session holds the subject because persisting its wait failed.
-    /// For an operation, an attempt starting now begins at this evidence count.
+    /// An operation's wait can also end by evidence (`operation_evidence.rs`).
     pub(crate) fn due(&self, subject: RetrySubject, persisted: Option<&RetryWait>) -> bool {
         let elapsed = self.clock.elapsed();
-        if matches!(subject, RetrySubject::Operation(_)) {
-            let mut state = self.lock();
-            let current = state.evidence;
-            state.started.insert(subject, current);
-        }
         let Some(persisted) = persisted else {
             let mut state = self.lock();
             if state
@@ -248,15 +213,11 @@ impl RetryWaits {
             self.arm_for(subject, persisted.not_before, wait);
         }
         let mut state = self.lock();
-        let current = state.evidence;
         let cooling = Self::cooling(&state, elapsed);
         let armed = state.armed.get_mut(&subject).expect("armed above");
         let over = armed.over(elapsed);
         armed.seen |= over;
-        let evidence = matches!(subject, RetrySubject::Operation(_))
-            && armed.timer.is_some()
-            && armed.evidence < current;
-        !cooling && (over || evidence)
+        !cooling && over
     }
 
     /// The owner evaluated the subject's work without running it, e.g.
@@ -350,38 +311,14 @@ impl RetryWaits {
         subject: RetrySubject,
         previous: Option<&RetryWait>,
     ) -> Result<(), SyncError> {
-        self.fail_since(subject, previous, None).await
-    }
-
-    /// An operation's attempt failed. Commits it made itself are no evidence
-    /// against the wait it ends in. When other work's commits landed while
-    /// it ran (`raced`), that wait begins where the attempt started, so they
-    /// make it due at once (IO `racing_commit_wakes`).
-    pub(crate) async fn fail_attempt(
-        &self,
-        subject: RetrySubject,
-        previous: Option<&RetryWait>,
-        raced: bool,
-    ) -> Result<(), SyncError> {
-        let started = self.lock().started.remove(&subject);
-        self.fail_since(subject, previous, started.filter(|_| raced))
-            .await
-    }
-
-    async fn fail_since(
-        &self,
-        subject: RetrySubject,
-        previous: Option<&RetryWait>,
-        since: Option<u64>,
-    ) -> Result<(), SyncError> {
         let wait = self.next(previous)?;
         let Some(database) = &self.database else {
-            self.arm_since(subject, wait.not_before, wait.wait, since);
+            self.arm(subject, &wait);
             return Ok(());
         };
         match database.record_retry(subject, wait).await {
             Ok(()) => {
-                self.arm_since(subject, wait.not_before, wait.wait, since);
+                self.arm(subject, &wait);
                 Ok(())
             }
             Err(error) => {
@@ -438,6 +375,9 @@ impl coven_storage::Cooldown for RetryWaits {
         }
     }
 }
+
+#[path = "operation_evidence.rs"]
+mod operation_evidence;
 
 #[cfg(test)]
 #[path = "retry_waits_tests.rs"]

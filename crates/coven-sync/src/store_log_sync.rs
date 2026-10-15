@@ -44,8 +44,6 @@ pub struct StoreLogSync {
         std::collections::BTreeMap<crate::OperationId, Arc<dyn coven_storage::AccessKeyAdmin>>,
     /// Operation and joining retry waits, and the provider cooldown (§16.5).
     waits: Arc<crate::RetryWaits>,
-    /// Commits that can satisfy waiting operations' prerequisites.
-    prerequisites: std::sync::Mutex<operation_pending::Prerequisites>,
     /// This drive's one `join-requests/` listing, serving every open
     /// invite's due check, or the failure it met (SP step 5).
     join_requests: Option<Result<operation_invites::RequestListing, StorageFailure>>,
@@ -76,7 +74,6 @@ impl StoreLogSync {
             reads: crate::pass_reads::PassReads::default(),
             send,
             waits,
-            prerequisites: std::sync::Mutex::new(operation_pending::Prerequisites::new(&database)),
             storage: Some(storage),
             database,
             store_keys,
@@ -110,7 +107,6 @@ impl StoreLogSync {
             reads: crate::pass_reads::PassReads::default(),
             send,
             waits,
-            prerequisites: std::sync::Mutex::new(operation_pending::Prerequisites::new(&database)),
             storage: None,
             database,
             store_keys,
@@ -772,7 +768,7 @@ mod operation_invites;
 #[path = "operation_minting.rs"]
 mod operation_minting;
 #[path = "operation_pending.rs"]
-pub(crate) mod operation_pending;
+mod operation_pending;
 #[path = "operation_steps.rs"]
 mod operation_steps;
 
