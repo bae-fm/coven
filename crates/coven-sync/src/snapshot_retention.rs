@@ -11,10 +11,13 @@ use coven_format::{
 use coven_foundation::id_source::DeviceId;
 use coven_storage::{CloudProvider, ObjectPath, ObjectPrefix, StoredObject};
 use std::collections::{BTreeMap, BTreeSet};
-use waits::{reached_age, Dependencies, Facts};
+use waits::{Dependencies, Facts};
+use witness::Threshold;
 
 #[path = "snapshot_retention_waits.rs"]
 pub(crate) mod waits;
+#[path = "snapshot_witness.rs"]
+pub(crate) mod witness;
 
 impl StoreLogSync {
     pub(super) async fn retain_snapshot_objects(&self) -> Result<(), SyncError> {
@@ -131,8 +134,13 @@ impl StoreLogSync {
             }
         }
         let positions = self.retention_positions().await?;
-        let mut storage_time = self.storage_time();
-        let mut observed = false;
+        // Age compares storage times only: the provider time T observed
+        // before this pass's reads against the object's first stored time
+        // and its witnesses' landings. A device clock never establishes age;
+        // it schedules the next observation through SP step 1 (§9, §15).
+        let storage_time = self.storage_time();
+        let witnesses = self.database.snapshot_witnesses().await?;
+        let mut threshold = Threshold::default();
         let mut stuck = crate::pending_logs::local_refusals(&self.database).await?;
         let mut retained = Vec::new();
         let mut failures = Vec::new();
@@ -201,17 +209,8 @@ impl StoreLogSync {
                     &positions,
                 )
             };
-            let mut gated = gate(storage_time);
-            if gated.first_unmet().is_some()
-                && !gated.aged
-                && !observed
-                && self.age_may_have_passed(&object)
-            {
-                self.observe_clock(&local).await?;
-                observed = true;
-                storage_time = self.storage_time();
-                gated = gate(storage_time);
-            }
+            let gated = gate(storage_time);
+            threshold.age(&gated, object.stored_at);
             for part in &header.parts {
                 if let Some(newest) = current.get(&part.audience) {
                     if waits::refresh_due(&gated, true, newest.as_ref(), id) {
@@ -223,14 +222,29 @@ impl StoreLogSync {
                 retained.push(object);
                 continue;
             }
-            let covered = header.parts.iter().all(|part| {
-                coverage
-                    .get(&part.audience)
-                    .is_some_and(|selections| selections.iter().all(|p| p.covers(id)))
-            });
-            if !covered {
-                retained.push(object);
-                continue;
+            // Each part's newest counting snapshot must cover the write under
+            // every boundary replay could still select, and a counting
+            // snapshot of each part covering it must have landed strictly
+            // more than one storage day ago: a witness kept past that
+            // snapshot's supersession or deletion. Without one known, the
+            // write waits for a known covering snapshot to mature (§15).
+            match witness::coverage(
+                header.parts.iter().map(|part| &part.audience),
+                id,
+                &coverage,
+                &witnesses,
+                storage_time,
+            ) {
+                witness::Coverage::Mature => (),
+                witness::Coverage::Missing => {
+                    retained.push(object);
+                    continue;
+                }
+                witness::Coverage::Maturing(landed) => {
+                    threshold.maturity(landed);
+                    retained.push(object);
+                    continue;
+                }
             }
             // Coverage already holds under every boundary replay could still
             // select, so no boundary's fate decides it; the removal that lets
@@ -251,18 +265,8 @@ impl StoreLogSync {
                 )
             };
             let known = facts(storage_time);
-            let mut unmet = known.first_unmet();
-            // Age compares storage times only: the observed provider time T
-            // against the object's first stored time. The device clock only
-            // schedules one fresh observation when the known T is too old to
-            // decide; it never establishes storage age (§9, §15).
-            if unmet.is_some() && !known.aged && !observed && self.age_may_have_passed(&object) {
-                self.observe_clock(&local).await?;
-                observed = true;
-                storage_time = self.storage_time();
-                unmet = facts(storage_time).first_unmet();
-            }
-            match unmet {
+            threshold.age(&known, object.stored_at);
+            match known.first_unmet() {
                 None => {
                     if let Err(error) = self.delete_retained(&object).await {
                         failures.push((object.path.clone(), error));
@@ -290,6 +294,12 @@ impl StoreLogSync {
                 failures.push((object.path, error));
             }
         }
+        // The next pass's first phase observes storage time once a device
+        // clock says one of these ages may have been reached (SP step 1).
+        self.finality
+            .lock()
+            .expect("finality lock poisoned")
+            .retention_threshold(threshold.0);
         if failures.is_empty() {
             self.retain_uploaded_files(&retained, &mut failures).await?;
         }
@@ -370,18 +380,11 @@ impl StoreLogSync {
     }
 
     /// The newest provider time this session knows, a lower bound on storage's.
-    fn storage_time(&self) -> Option<StorageTime> {
+    pub(super) fn storage_time(&self) -> Option<StorageTime> {
         self.finality
             .lock()
             .expect("finality lock poisoned")
             .sample_time()
-    }
-
-    /// Whether the device clock says a write may have reached its storage age,
-    /// which schedules an observation only.
-    fn age_may_have_passed(&self, object: &coven_storage::StoredObject) -> bool {
-        StorageTime::from_system_time(self.clock.now())
-            .is_ok_and(|now| reached_age(Some(now), object.stored_at))
     }
 
     pub(super) fn can_delete_device(

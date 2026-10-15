@@ -26,6 +26,53 @@ mod returns;
 mod selection;
 #[path = "snapshot_prefix_tests.rs"]
 mod signatures;
+#[path = "snapshot_witness_tests.rs"]
+mod witnesses;
+
+/// Have `device` observe storage time now, as a pass's first phase does once
+/// its clock says a retention age or witness maturity may have been reached
+/// (§15, SP step 1).
+async fn observe(device: &Device) {
+    let local = device.db.local_store_log().await.unwrap();
+    device.sync.observe_clock(&local).await.unwrap();
+}
+
+/// Give `device` storage's current time as its known sample, as a pass's
+/// first phase would, without that phase's store-log scan.
+async fn sample(device: &Device) {
+    let now = coven_foundation::clock::Clock::now(device.clock.as_ref());
+    device
+        .sync
+        .finality
+        .lock()
+        .unwrap()
+        .test_sample(coven_format::value::StorageTime::from_system_time(now).unwrap());
+}
+
+/// Replace a snapshot with `bytes` published at its original storage time,
+/// as if its author had published them: whether a prefix counts depends on
+/// its storage time (§15).
+async fn republish(storage: &MemoryStorage, clock: &FixedClock, path: &ObjectPath, bytes: &[u8]) {
+    let now = coven_foundation::clock::Clock::now(clock);
+    let published = storage.status(path).await.unwrap().unwrap().stored_at;
+    clock.set(UNIX_EPOCH + published.elapsed_since_epoch());
+    storage.delete(path).await.unwrap();
+    storage.create(path, bytes).await.unwrap();
+    clock.set(now);
+}
+
+/// Move storage and each device's clock one storage day and a second on, so
+/// every snapshot landed so far has matured as a historical witness, and
+/// have each device observe that storage time (§15).
+async fn mature(clock: &FixedClock, devices: &[&Device]) {
+    use coven_foundation::clock::Clock;
+    let later = clock.now() + Duration::from_secs(86400 + 1);
+    clock.set(later);
+    for device in devices {
+        device.clock.set(later);
+        observe(device).await;
+    }
+}
 
 /// This device's record for the snapshot at `path`, if any.
 async fn snapshot_record(device: &Device, path: &ObjectPath) -> Option<crate::PendingReason> {
@@ -327,15 +374,21 @@ async fn uncovered_logs_survive_thirty_days_and_never_posting_devices_hold_cover
     // Thirty-one storage days later no snapshot covers the log: it stays.
     a.clock.set(day(31));
     storage_clock.set(day(31));
+    observe(&a).await;
     a.sync.run_retention().await.unwrap();
     let old = logs(storage.clone()).await;
     assert_eq!(old.len(), 1);
-    // A snapshot covers it and a new log. Ben never posts: the old log goes
-    // by its storage age, the new one waits for him.
+    // A snapshot covers it and a new log. Neither goes before that snapshot
+    // is a storage day old (§15).
     write_rows(&a, 35, 1, 17, Audience::Store).await;
     upload(&a, &storage).await;
     a.catch_up().await;
     a.write_snapshots().await.unwrap();
+    a.sync.run_retention().await.unwrap();
+    assert_eq!(logs(storage.clone()).await.len(), 2);
+    // Ben never posts: then the old log goes by its storage age, the new one
+    // waits for him.
+    mature(&storage_clock, &[&a]).await;
     a.sync.run_retention().await.unwrap();
     let held = logs(storage.clone()).await;
     assert_eq!(held.len(), 1);
@@ -343,6 +396,7 @@ async fn uncovered_logs_survive_thirty_days_and_never_posting_devices_hold_cover
     // Thirty storage days after it, the new log goes too.
     a.clock.set(day(62));
     storage_clock.set(day(62));
+    observe(&a).await;
     a.sync.run_retention().await.unwrap();
     assert!(logs(storage.clone()).await.is_empty());
     b.sync.reload_from_snapshots().await.unwrap();
@@ -524,6 +578,7 @@ async fn deleted_history_reload_preserves_waiting_numbers_and_late_writes_conver
     storage_clock.set(UNIX_EPOCH + Duration::from_secs(31 * 86400));
     a.catch_up().await;
     a.write_snapshot(Audience::Store).await.unwrap();
+    mature(&storage_clock, &[&a]).await;
     a.sync.run_retention().await.unwrap();
     assert!(storage
         .list(&ObjectPrefix::device_logs(store(1)))
@@ -847,6 +902,7 @@ async fn a_pass_reuses_loaded_snapshot_and_write_references() {
             storage_clock.set(UNIX_EPOCH + Duration::from_secs(31 * 86400));
             b.catch_up().await;
             b.write_snapshot(Audience::Store).await.unwrap();
+            mature(&storage_clock, &[&b]).await;
             b.sync.run_retention().await.unwrap();
             assert!(storage
                 .list(&ObjectPrefix::device_logs(store(1)))

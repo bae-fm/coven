@@ -69,6 +69,7 @@ async fn a_removed_devices_member_deletes_its_covered_logs_once_the_removal_is_f
         .await
         .unwrap();
     post(&b, &storage).await;
+    mature(&storage_clock, &[&b]).await;
     b.sync.run_retention().await.unwrap();
     let log = logs(&storage).await;
     assert_eq!(log.len(), 1);
@@ -193,6 +194,7 @@ async fn the_first_lagging_reader_names_the_wait_until_thirty_storage_days() {
     upload(&a, &storage).await;
     a.write_snapshot(Audience::Store).await.unwrap();
     post(&a, &storage).await;
+    mature(&storage_clock, &[&a]).await;
     a.sync.run_retention().await.unwrap();
     let log = logs(&storage).await;
     let ben = b.device().await;
@@ -225,6 +227,7 @@ async fn the_first_lagging_reader_names_the_wait_until_thirty_storage_days() {
     for (less, deleted) in [(1, false), (0, true)] {
         storage_clock.set(at(30, less));
         a.clock.set(at(30, less));
+        observe(&a).await;
         a.sync.run_retention().await.unwrap();
         assert_eq!(logs(&storage).await.is_empty(), deleted, "{less}");
     }
@@ -254,6 +257,7 @@ async fn a_silent_readers_provisional_removal_holds_deletion_until_final() {
     upload(&a, &storage).await;
     a.write_snapshot(Audience::Store).await.unwrap();
     post(&a, &storage).await;
+    mature(&storage_clock, &[&a]).await;
     a.sync.run_retention().await.unwrap();
     let first = logs(&storage).await;
     assert_eq!(
@@ -271,6 +275,7 @@ async fn a_silent_readers_provisional_removal_holds_deletion_until_final() {
     a.catch_up().await;
     a.write_snapshot(Audience::Store).await.unwrap();
     post(&a, &storage).await;
+    mature(&storage_clock, &[&a]).await;
     a.sync.run_retention().await.unwrap();
     assert!(logs(&storage).await.is_empty());
     assert!(records(&a).await.is_empty());
@@ -304,6 +309,7 @@ async fn a_provisional_reset_holds_a_superseded_own_snapshot_but_not_covered_log
     let superseded =
         crate::store_log_sync::snapshots::snapshot_path(store(1), &superseded[0]).unwrap();
     post(&a, &storage).await;
+    mature(&storage_clock, &[&a]).await;
     a.sync.run_retention().await.unwrap();
     assert!(logs(&storage).await.is_empty());
     assert!(storage.read(&superseded).await.is_ok());
@@ -504,6 +510,7 @@ async fn an_old_write_below_the_growth_threshold_requests_the_first_snapshot() {
     assert!(coverage_requests(&a).await.is_empty());
     storage_clock.set(at(30, 0));
     a.clock.set(at(30, 0));
+    observe(&a).await;
     a.sync.run_retention().await.unwrap();
     assert_eq!(coverage_requests(&a).await, [Audience::Store]);
     // The same due write asks once.
@@ -512,6 +519,10 @@ async fn an_old_write_below_the_growth_threshold_requests_the_first_snapshot() {
     a.write_snapshots().await.unwrap();
     assert_eq!(snapshots(&storage).await.len(), 1);
     assert!(a.db.operations().await.unwrap().is_empty());
+    // The write goes once that first snapshot is a storage day old.
+    a.sync.run_retention().await.unwrap();
+    assert_eq!(logs(&storage).await.len(), 1);
+    mature(&storage_clock, &[&a]).await;
     a.sync.run_retention().await.unwrap();
     assert!(logs(&storage).await.is_empty());
 }
@@ -522,7 +533,7 @@ async fn an_old_write_below_the_growth_threshold_requests_the_first_snapshot() {
 /// runs: the request then ends without publishing, and the write goes.
 #[tokio::test]
 async fn coverage_a_newer_snapshot_leaves_out_is_requested_until_supplied() {
-    let storage = snapshot_storage();
+    let (storage, storage_clock) = timed_snapshot_storage();
     let mut a = notes_device(storage.clone(), 1).await;
     a.create(key(1)).await;
     let mut b = notes_device(storage.clone(), 2).await;
@@ -573,6 +584,7 @@ async fn coverage_a_newer_snapshot_leaves_out_is_requested_until_supplied() {
     a.write_snapshots().await.unwrap();
     assert!(coverage_requests(&a).await.is_empty());
     assert_eq!(snapshots(&storage).await.len(), listed);
+    mature(&storage_clock, &[&a]).await;
     a.sync.run_retention().await.unwrap();
     let ana = a.device().await;
     assert!(!logs(&storage)

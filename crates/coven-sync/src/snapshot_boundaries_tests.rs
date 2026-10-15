@@ -16,6 +16,9 @@ async fn unusable_snapshots_do_not_turn_deleted_history_into_an_empty_audience()
             a.catch_up().await;
         }
         a.write_snapshot(Audience::Store).await.unwrap();
+        if deleted {
+            mature(&storage_clock, &[&a]).await;
+        }
         a.sync.run_retention().await.unwrap();
         assert_eq!(
             storage
@@ -36,8 +39,7 @@ async fn unusable_snapshots_do_not_turn_deleted_history_into_an_empty_audience()
         } else {
             *bytes.last_mut().unwrap() ^= 1;
         }
-        storage.delete(&object.path).await.unwrap();
-        storage.create(&object.path, &bytes).await.unwrap();
+        republish(&storage, &storage_clock, &object.path, &bytes).await;
         let mut b = notes_device(storage.clone(), 2).await;
         add_device(&mut b).await;
         write_rows(&b, 99, 1, 17, Audience::Store).await;

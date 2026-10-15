@@ -156,6 +156,7 @@ async fn only_the_spec_tables_are_created() {
                 "_coven_rows",
                 "_coven_snapshot_reservation",
                 "_coven_snapshot_schema",
+                "_coven_snapshot_witnesses",
                 "_coven_store_log",
                 "_coven_store_log_uploads",
                 "_coven_table_origins",
@@ -252,6 +253,7 @@ mod fixture {
               CASE WHEN i%3=2 THEN member END,CASE WHEN i%3=2 THEN key END FROM fixture;
      INSERT INTO _coven_retirement_finality SELECT n,device,n,zeroblob(12) FROM fixture;
      INSERT INTO _coven_drained_devices SELECT n,device,n FROM fixture;
+     INSERT INTO _coven_snapshot_witnesses SELECT audience,device,n,zeroblob(12) FROM fixture;
      INSERT INTO _coven_write_landings SELECT device,n,zeroblob(12),x'00',zeroblob(32),i%2 FROM fixture;
      INSERT INTO _coven_write_landing_parts SELECT device,n,audience FROM fixture;
      INSERT INTO _coven_store_log_uploads VALUES(counter(1),counter(1),zeroblob(128),CAST(counter(1) || counter(1) AS BLOB),zeroblob(16));

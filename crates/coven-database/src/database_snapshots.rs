@@ -281,6 +281,54 @@ impl Database {
         .await
     }
 
+    /// Every audience's retained historical coverage evidence (§15).
+    pub async fn snapshot_witnesses(&self) -> Result<crate::SnapshotWitnesses, DbError> {
+        self.call(move |inner| {
+            inner
+                .access
+                .readers
+                .acquire_reader()
+                .with_reader(crate::snapshot_witnesses::read)
+        })
+        .await
+    }
+
+    /// Keep the landing of each checked counting snapshot just listed for
+    /// `audience` as historical coverage evidence, which outlives the
+    /// snapshot, its body and reopening (§15). `now`, the newest storage time
+    /// known, drops evidence a mature witness makes redundant. Unchanged
+    /// evidence takes no writer.
+    pub async fn record_snapshot_witnesses(
+        &self,
+        audience: coven_merge::Audience,
+        observed: Vec<(
+            coven_format::value::WritePositions,
+            coven_format::value::StorageTime,
+        )>,
+        now: Option<coven_format::value::StorageTime>,
+    ) -> Result<(), DbError> {
+        self.call(move |inner| {
+            let known = inner
+                .access
+                .readers
+                .acquire_reader()
+                .with_reader(crate::snapshot_witnesses::read)?;
+            if crate::snapshot_witnesses::update(known, &audience, &observed, now).is_none() {
+                return Ok(());
+            }
+            inner.access.with_writer(|writer| {
+                writer.transaction(|db| {
+                    let known = crate::snapshot_witnesses::read(db)?;
+                    match crate::snapshot_witnesses::update(known, &audience, &observed, now) {
+                        Some(changed) => crate::snapshot_witnesses::write(db, &changed, &audience),
+                        None => Ok(()),
+                    }
+                })
+            })
+        })
+        .await
+    }
+
     /// Load authenticated snapshots and gap writes supplied by sync. Each stored
     /// snapshot supplies its identity, authenticated prefix and plaintext. Snapshot
     /// frames and write parts are read in chunks of at most 64 KiB; only one

@@ -15,7 +15,7 @@ use std::time::Duration;
 
 /// A covered write object whose readers have not all posted past it may go
 /// once its storage age reaches thirty days (§15).
-const RETENTION_AGE: Duration = Duration::from_secs(30 * 24 * 60 * 60);
+pub(crate) const RETENTION_AGE: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 
 /// Whether storage time `now` is at least thirty days after `stored_at`;
 /// equality counts (§15, IO `Deletable`).

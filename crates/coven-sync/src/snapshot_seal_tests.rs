@@ -704,7 +704,14 @@ mod recapture {
 
     #[tokio::test]
     async fn retention_keeps_a_write_a_listed_raise_snapshot_omits() {
-        let storage = storage();
+        let clock = Arc::new(coven_foundation::clock::FixedClock::new(UNIX_EPOCH));
+        let storage = Arc::new(
+            MemoryStorage::builder()
+                .clock(clock.clone())
+                .transfer_limits(1024 * 1024, 64 * 1024)
+                .build()
+                .unwrap(),
+        );
         let mut devices = group(storage.clone(), 2).await;
         seed(&mut devices).await;
         update(&mut devices[0], storage.clone(), true, true).await;
@@ -813,6 +820,12 @@ mod recapture {
         for device in &mut devices {
             device.writes.post_positions().await.unwrap();
         }
+        // Once that snapshot is a storage day old (§15).
+        let later = UNIX_EPOCH + Duration::from_secs(86400 + 1);
+        clock.set(later);
+        devices[1].clock.set(later);
+        let local = devices[1].db.local_store_log().await.unwrap();
+        devices[1].sync.observe_clock(&local).await.unwrap();
         devices[1].sync.run_retention().await.unwrap();
         assert!(!stored(&storage, edit).await);
     }

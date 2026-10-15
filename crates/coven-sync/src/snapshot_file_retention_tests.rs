@@ -65,6 +65,25 @@ fn path(f: &Fixture, file: &FileRef) -> ObjectPath {
     f.path(file)
 }
 
+/// A fixture on one clock, storage's and the device's, that the test moves.
+async fn timed_fixture() -> (Fixture, Arc<coven_foundation::clock::FixedClock>) {
+    let clock = Arc::new(coven_foundation::clock::FixedClock::new(
+        SystemTime::UNIX_EPOCH + Duration::from_secs(100),
+    ));
+    let f = Fixture::with_clock(Provenance::AppProvided, CacheFill::CacheLazy, clock.clone()).await;
+    (f, clock)
+}
+
+/// One storage day and a second on, observed, so every snapshot landed so far
+/// is a mature historical witness for log deletion (§15).
+async fn mature(sync: &StoreLogSync, f: &Fixture, clock: &coven_foundation::clock::FixedClock) {
+    use coven_foundation::clock::Clock;
+    clock.set(clock.now() + Duration::from_secs(86400 + 1));
+    sync.observe_clock(&f.database.local_store_log().await.unwrap())
+        .await
+        .unwrap();
+}
+
 #[tokio::test]
 async fn an_excluded_snapshot_prevents_proving_file_absence() {
     let f = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
@@ -111,7 +130,7 @@ async fn an_excluded_snapshot_prevents_proving_file_absence() {
 #[tokio::test]
 async fn a_refused_log_write_blocks_proving_file_absence() {
     for refused in [false, true] {
-        let f = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
+        let (f, clock) = timed_fixture().await;
         let (mut sync, _, mut writes) = sync(&f).await;
         let old = f.uploaded("old", vec![31; CHUNK]).await;
         f.database
@@ -141,6 +160,7 @@ async fn a_refused_log_write_blocks_proving_file_absence() {
                 .await
                 .unwrap();
         }
+        mature(&sync, &f, &clock).await;
         sync.run_retention().await.unwrap();
         assert_eq!(f.storage.read(&path(&f, &old)).await.is_ok(), refused);
         assert!(f.storage.read(&later.path).await.is_ok());
@@ -150,7 +170,7 @@ async fn a_refused_log_write_blocks_proving_file_absence() {
 
 #[tokio::test]
 async fn file_references_survive_in_waiting_writes_and_kept_snapshots() {
-    let f = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
+    let (f, clock) = timed_fixture().await;
     let (mut sync, _, mut writes) = sync(&f).await;
     let old = f.uploaded("old", vec![31; CHUNK]).await;
     let kept = f.uploaded("kept", vec![32; CHUNK]).await;
@@ -176,6 +196,7 @@ async fn file_references_survive_in_waiting_writes_and_kept_snapshots() {
     sync.write_snapshot(&mut writes, Audience::Store)
         .await
         .unwrap();
+    mature(&sync, &f, &clock).await;
     sync.run_retention().await.unwrap();
     let objects = f
         .storage
@@ -189,7 +210,7 @@ async fn file_references_survive_in_waiting_writes_and_kept_snapshots() {
 
 #[tokio::test]
 async fn a_replaced_files_upload_stays_while_its_attaching_write_names_it() {
-    let f = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
+    let (f, clock) = timed_fixture().await;
     let (mut sync, _, mut writes) = sync(&f).await;
     let (old, new) = super::uploads::retargeted_upload(&f).await;
     // The waiting attaching write names A's fixed path.
@@ -200,6 +221,7 @@ async fn a_replaced_files_upload_stays_while_its_attaching_write_names_it() {
     sync.write_snapshot(&mut writes, Audience::Store)
         .await
         .unwrap();
+    mature(&sync, &f, &clock).await;
     sync.run_retention().await.unwrap();
     // Nothing retained names A any more; B still waits in the queue.
     assert!(f
@@ -254,7 +276,7 @@ async fn locally_protected_files_reuse_the_checked_snapshot_prefix() {
 #[tokio::test]
 async fn a_late_upload_goes_once_nothing_retained_names_it() {
     for damaged in [false, true] {
-        let f = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
+        let (f, clock) = timed_fixture().await;
         let (mut sync, _, mut writes) = sync(&f).await;
         let kept = f.uploaded("kept", vec![32; CHUNK]).await;
         f.files.set_uploads_paused(true).await.unwrap();
@@ -273,6 +295,7 @@ async fn a_late_upload_goes_once_nothing_retained_names_it() {
         sync.write_snapshot(&mut writes, Audience::Store)
             .await
             .unwrap();
+        mature(&sync, &f, &clock).await;
         sync.run_retention().await.unwrap();
         assert!(f
             .storage
@@ -336,7 +359,7 @@ async fn data_differential_file_deletion() {
         ("snapshot and deleting log", &["snapshots", "logs"][..]),
         ("unreadable snapshot", &[][..]),
     ] {
-        let f = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
+        let (f, clock) = timed_fixture().await;
         let (mut sync, _, mut writes) = sync(&f).await;
         // The fixture starts with uploads paused: these stay queued.
         let file = match case {
@@ -384,6 +407,8 @@ async fn data_differential_file_deletion() {
             // The upload completing releases the last local protection.
             f.drain().await;
         }
+        // Covered logs go once their snapshot is a storage day old (§15).
+        mature(&sync, &f, &clock).await;
         sync.run_retention().await.unwrap();
         let path = path(&f, &file);
         deleted.push(Value::Bool(f.storage.request_trace().iter().any(

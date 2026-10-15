@@ -424,6 +424,8 @@ proofs() {
             store_log_sync::tests::snapshots::selection::io_differential_catalog_current \
             store_log_sync::tests::snapshots::retention_waits::io_differential_deletable \
             store_log_sync::tests::snapshots::retention_waits::io_differential_refresh_due \
+            store_log_sync::tests::snapshots::witnesses::io_differential_retain_writes \
+            store_log_sync::tests::snapshots::witnesses::io_differential_storage_deadline \
             recent_return::tests::io_differential_needs_snapshots \
             recent_return::tests::io_differential_recent_return \
             device_log_sync::tests::validation::io_differential_streaming_download_dispositions \

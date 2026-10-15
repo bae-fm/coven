@@ -188,6 +188,7 @@ async fn another_members_snapshot_signatures_never_authorize_selection_loading_o
         storage.create(&path, &forged).await.unwrap();
         a.clock.set(UNIX_EPOCH + Duration::from_secs(31 * 86400));
         storage_clock.set(UNIX_EPOCH + Duration::from_secs(31 * 86400));
+        observe(&a).await;
         a.sync.run_retention().await.unwrap();
         assert_eq!(
             storage
@@ -245,6 +246,7 @@ async fn another_members_snapshot_signatures_never_authorize_selection_loading_o
             a.catch_up().await;
         }
         a.write_snapshot(Audience::Store).await.unwrap();
+        mature(&storage_clock, &[&a]).await;
         a.sync.run_retention().await.unwrap();
         assert!(storage
             .list(&ObjectPrefix::device_logs(store(1)))
@@ -318,6 +320,7 @@ async fn signed_coverage_does_not_require_opening_the_body_but_loading_does() {
     a.write_snapshots().await.unwrap();
     a.clock.set(UNIX_EPOCH + Duration::from_secs(31 * 86400));
     storage_clock.set(UNIX_EPOCH + Duration::from_secs(31 * 86400));
+    observe(&a).await;
     a.sync.run_retention().await.unwrap();
     assert!(storage
         .list(&ObjectPrefix::device_logs(store(1)))
@@ -351,6 +354,7 @@ async fn a_truncated_body_does_not_erase_signed_required_history() {
         a.catch_up().await;
     }
     a.write_snapshot(Audience::Store).await.unwrap();
+    mature(&storage_clock, &[&a]).await;
     a.sync.run_retention().await.unwrap();
     assert!(storage
         .list(&ObjectPrefix::device_logs(store(1)))
@@ -364,8 +368,7 @@ async fn a_truncated_body_does_not_erase_signed_required_history() {
         .remove(0);
     let mut bytes = storage.read(&object.path).await.unwrap();
     bytes.truncate(SnapshotObjectPrefix::length(&bytes).unwrap() + 64);
-    storage.delete(&object.path).await.unwrap();
-    storage.create(&object.path, &bytes).await.unwrap();
+    republish(&storage, &storage_clock, &object.path, &bytes).await;
     let mut b = notes_device(storage.clone(), 2).await;
     add_device(&mut b).await;
     assert!(b.sync.discover_snapshots().await.is_err());

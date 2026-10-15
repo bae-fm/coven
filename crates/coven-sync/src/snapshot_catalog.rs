@@ -202,6 +202,19 @@ impl StoreLogSync {
         });
         self.replace_snapshot_conditions(audience, conditions)
             .await?;
+        // Every checked counting prefix is historical coverage evidence that
+        // outlives this listing, the snapshot's supersession and its
+        // deletion (§15, SP "What survives a pass").
+        self.database
+            .record_snapshot_witnesses(
+                audience.clone(),
+                verified
+                    .iter()
+                    .map(|snapshot| (snapshot.prefix.writes.clone(), snapshot.object.stored_at))
+                    .collect(),
+                self.storage_time(),
+            )
+            .await?;
         candidates.sort_by(|a, b| newest_first((&a.object, &a.prefix), (&b.object, &b.prefix)));
         verified.sort_by(|a, b| newest_first((&a.object, &a.prefix), (&b.object, &b.prefix)));
         // A snapshot prepared for a concurrent raise can include its author's

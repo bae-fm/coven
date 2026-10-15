@@ -28,6 +28,9 @@ pub(crate) struct Observation {
     /// The sample before this session's last completed snapshot discovery;
     /// later misses are judged against it as against a saved checkpoint.
     discovered: Option<StorageTime>,
+    /// The earliest storage time at which the last retention evaluation's
+    /// thirty-day or witness-maturity tests could change (§15).
+    retention: Option<StorageTime>,
     retry: Option<std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>>,
 }
 
@@ -91,14 +94,26 @@ impl Observation {
             .and_then(|(time, unit)| observation_time(time, unit).map(|through| (through, unit)))
     }
 
+    /// A storage time a test supplies as if a pass's first phase had
+    /// observed it, without that phase's store-log scan.
+    #[cfg(test)]
+    pub(crate) fn test_sample(&mut self, time: StorageTime) {
+        self.sample = Some((time, Duration::from_secs(1)));
+    }
+
+    /// Replace the retention ages the next probe schedules for.
+    pub(crate) fn retention_threshold(&mut self, threshold: Option<StorageTime>) {
+        self.retention = threshold;
+    }
+
     pub(crate) fn observe(&mut self, object: &coven_storage::StoredObject) {
         if self.sample.is_none_or(|(time, _)| object.stored_at > time) {
             self.sample = Some((object.stored_at, object.time_resolution));
         }
     }
 
-    /// Whether a monotonic schedule says a finality or drain threshold may
-    /// have been reached that the known sample cannot decide (SP step 1).
+    /// Whether a monotonic schedule says a finality, drain or retention
+    /// threshold may have been reached that the known sample cannot decide (SP step 1).
     pub(crate) fn probe_due(
         &mut self,
         log: &StoreLog,
@@ -144,7 +159,12 @@ impl Observation {
                 now > deadline && self.sample.is_none_or(|(time, _)| time <= deadline)
             })
         });
-        let due = finality_due || drain_due;
+        // A retention age or witness maturity the known sample cannot yet
+        // decide (§15, SP step 1).
+        let retention_due = self.retention.is_some_and(|threshold| {
+            now > threshold && self.sample.is_none_or(|(time, _)| time <= threshold)
+        });
+        let due = finality_due || drain_due || retention_due;
         if due {
             self.retry = Some(clock.sleep(Duration::from_secs(60)));
         }

@@ -17,7 +17,7 @@ pub(super) async fn post(device: &Device, storage: &Arc<MemoryStorage>) {
 
 #[tokio::test]
 async fn unsigned_positions_cannot_authorize_log_deletion() {
-    let storage = snapshot_storage();
+    let (storage, storage_clock) = timed_snapshot_storage();
     let mut a = notes_device(storage.clone(), 1).await;
     a.create(key(1)).await;
     let other = member(2);
@@ -26,6 +26,7 @@ async fn unsigned_positions_cannot_authorize_log_deletion() {
     upload(&a, &storage).await;
     a.write_snapshot(Audience::Store).await.unwrap();
     post(&a, &storage).await;
+    mature(&storage_clock, &[&a]).await;
     let path = ObjectPath::positions(store(1), a.device().await);
     let bytes = storage.read(&path).await.unwrap();
     let unsigned = coven_format::sealed_single::SingleChunkObject::decode(&bytes)
@@ -64,7 +65,7 @@ async fn unsigned_positions_cannot_authorize_log_deletion() {
 
 #[tokio::test]
 async fn every_active_device_must_post_before_covered_logs_are_deleted() {
-    let storage = snapshot_storage();
+    let (storage, storage_clock) = timed_snapshot_storage();
     let mut a = notes_device(storage.clone(), 1).await;
     a.create(key(1)).await;
     let mut b = notes_device(storage.clone(), 2).await;
@@ -80,6 +81,7 @@ async fn every_active_device_must_post_before_covered_logs_are_deleted() {
     c.sync.reload_from_snapshots().await.unwrap();
     post(&a, &storage).await;
     post(&b, &storage).await;
+    mature(&storage_clock, &[&a]).await;
     a.sync.run_retention().await.unwrap();
     assert_eq!(
         storage
@@ -190,6 +192,7 @@ async fn a_file_named_only_by_a_retained_log_write_stays_until_that_log_goes() {
         a.catch_up().await;
     }
     a.write_snapshot(Audience::Store).await.unwrap();
+    mature(&storage_clock, &[&a]).await;
     a.sync.run_retention().await.unwrap();
     assert!(storage
         .list(&ObjectPrefix::device_logs(store(1)))
@@ -309,18 +312,6 @@ type Fixture = (
     Vec<ObjectPath>,
 );
 
-/// Replace Ben's snapshot with `bytes` published at its original storage
-/// time, as if he had published them: whether a prefix counts depends on
-/// its storage time (§15).
-async fn republish(storage: &MemoryStorage, clock: &FixedClock, path: &ObjectPath, bytes: &[u8]) {
-    let now = coven_foundation::clock::Clock::now(clock);
-    let published = storage.status(path).await.unwrap().unwrap().stored_at;
-    clock.set(UNIX_EPOCH + published.elapsed_since_epoch());
-    storage.delete(path).await.unwrap();
-    storage.create(path, bytes).await.unwrap();
-    clock.set(now);
-}
-
 /// Prepare `device`'s requested store snapshot after a fresh catch-up,
 /// without sending it.
 async fn prepare_requested(device: &mut Device) -> crate::OperationId {
@@ -418,6 +409,7 @@ async fn bens_snapshot_is_newest(registered: bool) -> Fixture {
     let id = send_prepared(&mut b, bens).await;
     a.clock.set(UNIX_EPOCH + Duration::from_secs(31 * 86400));
     storage_clock.set(UNIX_EPOCH + Duration::from_secs(31 * 86400));
+    sample(&a).await;
     let ben = ObjectPath::snapshot(
         store(1),
         id.audience,
@@ -551,6 +543,7 @@ async fn ana_ten_ben_twenty() -> Fixture {
     let id = send_prepared(&mut b, bens).await;
     a.clock.set(UNIX_EPOCH + Duration::from_secs(31 * 86400));
     storage_clock.set(UNIX_EPOCH + Duration::from_secs(31 * 86400));
+    sample(&a).await;
     let ben = ObjectPath::snapshot(
         store(1),
         id.audience,
@@ -781,9 +774,13 @@ async fn a_device_clock_jump_never_ages_a_log() {
     assert_eq!(logs().await, 1);
     storage_clock.set(day(1));
     a.clock.set(day(366));
+    observe(&a).await;
     a.sync.run_retention().await.unwrap();
     assert_eq!(logs().await, 1);
     storage_clock.set(day(30));
+    a.sync.run_retention().await.unwrap();
+    assert_eq!(logs().await, 1, "only an observed storage time decides");
+    observe(&a).await;
     a.sync.run_retention().await.unwrap();
     assert_eq!(logs().await, 0);
 }
@@ -828,6 +825,7 @@ async fn a_confirmed_snapshot_finishes_despite_a_failed_deletion() {
         .iter()
         .any(|request| matches!(request, MemoryRequest::Delete(_))));
     assert!(a.db.operations().await.unwrap().is_empty());
+    mature(&storage_clock, &[&a]).await;
     let retention = || async {
         a.db.pending::<crate::PendingRecord>()
             .await

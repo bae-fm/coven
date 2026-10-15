@@ -80,6 +80,8 @@ mod snapshot_load;
 mod snapshot_metadata;
 mod snapshot_reload;
 mod snapshot_state;
+mod snapshot_witnesses;
+pub use snapshot_witnesses::SnapshotWitnesses;
 mod snapshot_write;
 mod snapshot_writes;
 mod sql;

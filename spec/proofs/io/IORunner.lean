@@ -15,6 +15,7 @@ import CovenIO.RaiseCoverage
 import CovenIO.RetentionDeadline
 import CovenIO.RaiseHistory
 import CovenIO.CommonReload
+import CovenIO.AudienceRetention
 import Lean
 
 /-! The IO differential runner. Each case names the executable transition it
@@ -835,6 +836,61 @@ private def reload (j : Json) : Except String Json := do
     pure (⟨0, landed, gone⟩ : SnapshotHistory.State)
   let h : ReloadHistory := ⟨audiences, required, writes, catalogs⟩
   h.run (writes.length + audiences.length + catalogs.length + 2) 0 (fun _ => 0) []
+/-- `SnapshotPublication.retainWrites` over a concurrent history: writes and
+counting or late snapshot landings arrive in any order, and each `pass` at
+storage time `time` deletes every write `Eligible` under the active readers'
+`posted` positions (reader, writer, position), with the entries a write
+depends on final exactly for the writers in `finals`.
+`landed` keeps every snapshot that ever landed, so a superseded or deleted
+witness still counts (`maturity_survives_new_snapshots`). Returns each pass's
+newly deleted writes as (writer, number). -/
+private def retain (j : Json) : Except String Json := do
+  let writers ← j.getObjValAs? (List Nat) "writers"
+  let mut s : SnapshotPublication.State := ⟨0, writers, [], [], [], [], []⟩
+  let mut passes : Array Json := #[]
+  for event in ← j.getObjValAs? (Array Json) "events" do
+    match ← event.getObjValAs? String "op" with
+    | "write" =>
+      let w : Write := ⟨← event.getObjValAs? Nat "writer", ← event.getObjValAs? Nat "number",
+        ← event.getObjValAs? Nat "stored", ← event.getObjValAs? (List Nat) "audiences"⟩
+      s := { s with writes := s.writes ++ [w] }
+    | "land" =>
+      let snap : Snapshot := ⟨← event.getObjValAs? Nat "audience", ← event.getObjValAs? Nat "writer",
+        ← event.getObjValAs? Nat "number", ← event.getObjValAs? Nat "stored",
+        ← event.getObjValAs? Nat "caught", ← event.getObjValAs? (List (Nat × Nat)) "positions"⟩
+      s := { s with landed := snap :: s.landed }
+    | "pass" =>
+      let posted ← event.getObjValAs? (List (Nat × Nat × Nat)) "posted"
+      let finals ← event.getObjValAs? (List Nat) "finals"
+      let before := s.deleted
+      s := SnapshotPublication.retainWrites .writes { s with time := ← event.getObjValAs? Nat "time" }
+        posted (fun w => finals.contains w.writer)
+      let fresh := s.deleted.filter (fun w => !before.contains w)
+      passes := passes.push (toJson (fresh.map fun w => [w.writer, w.number]))
+    | op => throw s!"unknown retention event {op}"
+  return toJson passes
+
+/-- §3's bounded-storage deadlines (`AudienceRetention.ready`, `witnessBound`,
+`bounded_storage`) for one write stored at `stored`, gated from `gated`, with
+parts in the audiences of `online` (audience, time its reader can serve),
+pass spacing `passGap`, successful publication `upload` and deletion
+`latency`: per part `H_a`, `B_a` and `R_a`, then `B`, `R` and the deletion
+deadline `R + 3P + U + D`. -/
+private def deadline (j : Json) : Except String Json := do
+  let gated ← j.getObjValAs? Nat "gated"
+  let passGap ← j.getObjValAs? Nat "passGap"
+  let upload ← j.getObjValAs? Nat "upload"
+  let online ← j.getObjValAs? (List (Nat × Nat)) "online"
+  let w : Write := ⟨0, 1, ← j.getObjValAs? Nat "stored", online.map (·.1)⟩
+  let reader (a : Nat) : Nat := ((online.find? (·.1 == a)).map (·.2)).getD 0
+  let parts := online.map fun (a, serves) =>
+    let h := AudienceRetention.ready w gated serves
+    Json.mkObj [("audience", toJson a), ("H", toJson h), ("B", toJson (h + 2 * passGap + upload)),
+      ("R", toJson (h + 2 * passGap + upload + day + 1))]
+  let bound := AudienceRetention.witnessBound w gated reader passGap upload
+  let r := max gated (bound + day + 1)
+  return Json.mkObj [("parts", toJson parts), ("B", toJson bound), ("R", toJson r),
+    ("deadline", toJson (r + 3 * passGap + upload + (← j.getObjValAs? Nat "latency")))]
 
 private def run (j : Json) : Except String Json := do
   match ← j.getObjValAs? String "check" with
@@ -864,6 +920,8 @@ private def run (j : Json) : Except String Json := do
   | "wakes" => wakes j
   | "held" => held j
   | "reload" => reload j
+  | "retain" => retain j
+  | "deadline" => deadline j
   | check => throw s!"unknown IO check {check}"
 
 def main : IO UInt32 := do

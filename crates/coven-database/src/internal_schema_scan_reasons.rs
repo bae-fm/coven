@@ -34,6 +34,8 @@ pub(super) fn reason(statement: &Statement, relation: &str) -> Option<&'static s
     Some("replay checks every completed file scan against the entries it keeps"),
 ("retirement_drain.rs", "SELECT device FROM _coven_retirement_finality", "_coven_retirement_finality") =>
     Some("finality recording skips every retired device that already has its F"),
+("snapshot_witnesses.rs", "SELECT audience,device,number,landed FROM _coven_snapshot_witnesses ORDER BY audience,device,number", "_coven_snapshot_witnesses") =>
+    Some("retention reads every audience's witness staircase, bounded by the snapshots of the last day"),
 ("retirement_drain.rs", "SELECT device FROM _coven_drained_devices", "_coven_drained_devices") =>
     Some("discovery skips every drained device"),
 ("retirement_drain.rs", sql, "f") if sql.starts_with("SELECT f.device,f.entry_device,f.entry_number,f.final_at FROM _coven_retirement_finality f") =>

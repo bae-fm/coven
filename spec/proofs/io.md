@@ -594,13 +594,30 @@ outstanding remote requests and permits a new path while an old one can land.
 The Rust comparison `io_differential_deletable` runs coven's deletion
 decision for one covered or uncovered write against `Deletable`: finality,
 each active reader's posted position, and thirty storage days counting at
-equality. Mature historical coverage (`MatureCoverage`) is not yet in that
-decision. `io_differential_refresh_due` compares coven's request for a
+equality. `io_differential_retain_writes` compares the whole decision,
+`Eligible` with `MatureCoverage`, through `retainWrites` on generated
+concurrent histories: writes of two writers with parts in one or two
+audiences, counting and late landings in any order, incomparable
+selections, reader posts, finality that differs by writer, and passes at and
+just past the one-day and thirty-day thresholds. The model keeps every
+landing; coven keeps only the listed snapshots plus its own witness
+evidence, so a superseded snapshot may leave the listing once another listed
+one covers all it covers. Both delete the same writes at the same passes,
+and each deleted write stays covered by the newest selections
+(`SnapshotHistory.deleted_stays_covered`). Every snapshot in these histories
+is listed at some pass before it leaves: coven cannot use a witness it never
+checked, and waits for a known one to mature instead.
+`io_differential_refresh_due` compares coven's request for a
 fresh snapshot with `RetentionDeadline.refreshDue` on generated catalogs,
 including late landings, a newer snapshot that leaves the write out and an
 audience with none; there the historical-witness-only trigger
-`witnessedRefreshDue` never asks (`no_first_witness`). The deadline bounds
-of `AudienceRetention` are not compared.
+`witnessedRefreshDue` never asks (`no_first_witness`).
+`io_differential_storage_deadline` runs passes at fixed spacings, with
+publication and deletion inside the pass (`U = D = 0`), over a write that no
+snapshot covers at first, in one audience or two: each audience's first
+witness lands by its `B_a`, and the write goes by `R + 3P + U + D`, after
+every witness is more than a day old (`bounded_storage`). The model's
+`offlinePart` remains the case with no bound.
 
 The required lower bound is frozen at reload start, including the remote past
 of waiting writes, already uploaded own writes and their past, and the positions

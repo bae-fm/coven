@@ -287,6 +287,18 @@ macro_rules! coven_tables {
                 reason TEXT NOT NULL CHECK(reason IN ('identity-mismatch','storage-ahead','slot-mismatch','replaced','database-damage'))
             ) STRICT;
         ");
+        // §15's historical coverage: per audience and writer, the earliest
+        // landing of a checked counting snapshot reaching each position. It
+        // outlives the snapshots themselves (snapshot_witnesses.rs).
+        $visit!(_coven_snapshot_witnesses, "
+            CREATE TABLE _coven_snapshot_witnesses (
+                audience TEXT NOT NULL,
+                device BLOB NOT NULL CHECK(length(device)=8),
+                number BLOB NOT NULL CHECK(length(number)=8 AND number>x'0000000000000000'),
+                landed BLOB NOT NULL CHECK(length(landed)=12),
+                PRIMARY KEY(audience,device,number)
+            ) STRICT, WITHOUT ROWID;
+        ");
         $visit!(_coven_snapshot_reservation, "
             CREATE TABLE _coven_snapshot_reservation (
                 singleton INTEGER PRIMARY KEY CHECK(singleton=1),
