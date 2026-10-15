@@ -141,7 +141,7 @@ async fn a_requested_cooldown_is_recorded_before_the_response_returns_and_holds_
         Duration::from_secs(600)
     );
     assert_eq!(requests(), 1);
-    assert!(!fresh.reached(), "a local refusal has not reached storage");
+    assert!(!refused.answered(), "a local refusal is no provider answer");
 }
 
 #[tokio::test]

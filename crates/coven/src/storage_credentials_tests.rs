@@ -178,3 +178,53 @@ async fn dropping_a_replacement_waiter_does_not_interrupt_key_installation_or_pu
     assert_eq!(handle.restore_code().await.unwrap(), before);
     handle.close().await.unwrap();
 }
+
+#[tokio::test]
+async fn custody_failure_rolls_back_credentials_and_the_reserved_creation_requires_the_same_access()
+{
+    let f = Fixture::new().await;
+    f.handle.close().await.unwrap();
+    let handle = builder(
+        &f.app,
+        StoreLayout::new(f._root.path().into()),
+        f.clock.clone(),
+        f.storage.clone(),
+    )
+    .key_custody(KeyCustody::Custom(Arc::new(RefusePersist {
+        keys: std::sync::Mutex::new(None),
+        refuse: AtomicBool::new(true),
+    })))
+    .open(f.directory.id())
+    .await
+    .unwrap();
+    let setup = |key: &str| {
+        handle.setup_s3_storage(
+            f.storage.config(),
+            "Test device",
+            key.into(),
+            SecretText::new("secret".into()),
+        )
+    };
+    assert!(setup("original").await.is_err());
+    assert_eq!(handle.store_key_state().unwrap(), StoreKeyState::Locked);
+    assert!(handle.restore_code().await.is_err());
+    assert!(matches!(
+        &*handle.subscribe_sync_status().borrow(),
+        SyncStatus::Disconnected
+    ));
+    let path = f
+        .storage
+        .list(&ObjectPrefix::store_logs(f.directory.id()))
+        .await
+        .unwrap()[0]
+        .path
+        .clone();
+    let original = f.storage.read(&path).await.unwrap();
+    assert!(
+        setup("changed").await.is_err(),
+        "a reserved creation cannot silently record another access key"
+    );
+    setup("original").await.unwrap();
+    assert_eq!(f.storage.read(&path).await.unwrap(), original);
+    handle.close().await.unwrap();
+}

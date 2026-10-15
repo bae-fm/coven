@@ -244,7 +244,6 @@ async fn bootstrap_device(
                     pending.directory(),
                     Arc::new(StoreKeychain::new(keychain, id)),
                 )?;
-                storage.reset_reachability();
                 send.invalidate();
                 owners.send = send;
                 owners.storage = Some(storage);

@@ -161,6 +161,17 @@ impl StorageError {
         }
     }
 
+    /// Whether the provider answered the request behind this failure, even
+    /// with an error (E5). `Network` alone cannot say: a server's error
+    /// response is an answer; a refused connection or a timeout is not.
+    pub fn answered(&self) -> bool {
+        match self {
+            Self::Provider { source, .. } => crate::providers::response_arrived(source.as_ref()),
+            Self::Cleanup { operation, .. } => operation.answered(),
+            Self::Failure(_) | Self::Caused { .. } => false,
+        }
+    }
+
     /// The wait a provider response asked every consumer to observe, from
     /// its `Retry-After` or, for Dropbox, its error's `retry_after`.
     pub(crate) fn retry_after(&self) -> Option<crate::RetryAfter> {

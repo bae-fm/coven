@@ -1,19 +1,12 @@
 //! One connected provider, shared by sync steps, operations and file transfers.
 
 use crate::*;
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc,
-};
+use std::sync::Arc;
 
-/// Applies the storage contract around native provider calls and records whether
-/// this connection has reached storage (E5). Every consumer uses this capability,
-/// so a successful file read counts even before a sync succeeds, and every
-/// consumer waits for the same provider cooldown. Reconnecting creates a new
-/// observation lifetime.
+/// Applies the storage contract around native provider calls (E5). Every
+/// consumer uses this capability and waits for the same provider cooldown.
 pub struct StorageConnection<P: ?Sized = dyn ProviderOps> {
     pub(crate) provider: Arc<P>,
-    reached: AtomicBool,
     pub(crate) publications: Arc<dyn PublicationGate>,
     pub(crate) cooldown: Arc<dyn Cooldown>,
 }
@@ -38,7 +31,6 @@ impl<P: ProviderOps + ?Sized> StorageConnection<P> {
             provider,
             publications,
             cooldown,
-            reached: AtomicBool::new(false),
         }
     }
 
@@ -59,28 +51,9 @@ impl<P: ProviderOps + ?Sized> StorageConnection<P> {
         Ok(request)
     }
 
-    /// Begin the installed connection's observation after setup or bootstrap checks.
-    pub fn reset_reachability(&self) {
-        self.reached.store(false, Ordering::Release);
-    }
-
-    /// A provider operation has succeeded or returned a response other than a
-    /// network failure. Installing credentials alone does not establish contact.
-    pub fn reached(&self) -> bool {
-        self.reached.load(Ordering::Acquire)
-    }
-
-    /// Record whether storage answered, and a requested cooldown before any
-    /// consumer sees the response that asked for it (SP waiting).
+    /// Record a requested cooldown before any consumer sees the response
+    /// that asked for it (SP waiting).
     async fn observed<T>(&self, result: Result<T, StorageError>) -> Result<T, StorageError> {
-        if !result.as_ref().is_err_and(|error| {
-            matches!(
-                error.failure(),
-                StorageFailure::Network | StorageFailure::CatchUpRequired
-            )
-        }) {
-            self.reached.store(true, Ordering::Release);
-        }
         let error = match result {
             Ok(value) => return Ok(value),
             Err(error) => error,

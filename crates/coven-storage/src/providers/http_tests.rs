@@ -186,6 +186,12 @@ async fn network_errors_are_distinct_and_response_bodies_do_not_print() {
     let error = transport(CloudProvider::OneDrive, error);
     assert_eq!(error.failure(), StorageFailure::Network);
     assert!(error.retryable());
+    assert!(!error.answered(), "a refused connection is no answer");
+    // A server error is classified Network, but the provider answered (E5).
+    let outage = ProviderResponse::new(503, reqwest::header::HeaderMap::new(), Vec::new())
+        .into_error(CloudProvider::OneDrive);
+    assert_eq!(outage.failure(), StorageFailure::Network);
+    assert!(outage.answered());
     let source = ProviderResponse {
         status: 403,
         headers: reqwest::header::HeaderMap::new(),
@@ -556,6 +562,10 @@ async fn interrupted_bodies_keep_the_transport_failure() {
             .await
             .unwrap_err();
         assert_eq!(error.failure(), StorageFailure::Network);
+        assert!(
+            !error.answered(),
+            "an interrupted body is no usable response"
+        );
         let StorageError::Provider { source, .. } = error else {
             panic!("transport cause discarded")
         };

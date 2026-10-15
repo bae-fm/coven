@@ -431,7 +431,7 @@ async fn stop_start_idle_tick_offline_recovery_and_close_use_the_injected_clock(
         })
         .await;
     f.advance(Duration::from_secs(30));
-    status(&f.handle, |s| matches!(s, SyncStatus::Failed { .. })).await;
+    status(&f.handle, |s| matches!(s, SyncStatus::Offline { .. })).await;
     f.storage.set_faults(Faults::none()).await;
     f.advance(Duration::from_secs(30));
     status(&f.handle, |s| matches!(s, SyncStatus::Synced { .. })).await;
@@ -479,7 +479,7 @@ async fn unlocking_preserves_the_requested_connection_lifetime() {
 }
 
 #[tokio::test]
-async fn reconnect_is_offline_until_reached_and_stop_and_close_finish_the_active_pass() {
+async fn reconnecting_without_network_is_offline_and_stop_and_close_finish_the_active_pass() {
     let f = Fixture::new().await;
     f.setup().await.unwrap();
     status(&f.handle, |s| matches!(s, SyncStatus::Synced { .. })).await;
@@ -585,6 +585,55 @@ impl StorageConnector for Locations {
     }
 }
 
+/// Stopping ends the connection's own evidence: its backoff and the last
+/// attempt's status. The provider's cooldown is the provider's and holds.
+#[tokio::test]
+async fn reconnecting_clears_the_connections_backoff_but_not_the_providers_cooldown() {
+    let f = Fixture::new().await;
+    f.setup().await.unwrap();
+    status(&f.handle, |s| matches!(s, SyncStatus::Synced { .. })).await;
+    f.storage.set_online(false);
+    f.handle.sync_now();
+    status(&f.handle, |s| matches!(s, SyncStatus::Offline { .. })).await;
+    f.storage.set_online(true);
+    // The failed connection backs off: no pass runs until its timer ends.
+    let before = f.storage.request_count();
+    f.handle.sync_now();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(f.storage.request_count(), before);
+    f.handle.stop_sync();
+    status(&f.handle, |s| matches!(s, SyncStatus::Stopped)).await;
+    f.handle.start_sync().await.unwrap();
+    status(&f.handle, |s| matches!(s, SyncStatus::Synced { .. })).await;
+    f.storage
+        .set_faults(Faults {
+            fail_next: 1,
+            failure: StorageFailure::RateLimited,
+            retry_after: Some(600),
+            ..Faults::none()
+        })
+        .await;
+    f.handle.sync_now();
+    status(&f.handle, |s| matches!(s, SyncStatus::Failed { .. })).await;
+    f.handle.stop_sync();
+    status(&f.handle, |s| matches!(s, SyncStatus::Stopped)).await;
+    let before = f.storage.request_count();
+    f.handle.start_sync().await.unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(
+        f.storage.request_count(),
+        before,
+        "a reconnected pass ran inside the provider's cooldown"
+    );
+    assert!(matches!(
+        &*f.handle.subscribe_sync_status().borrow(),
+        SyncStatus::Syncing
+    ));
+    f.advance(Duration::from_secs(600));
+    status(&f.handle, |s| matches!(s, SyncStatus::Synced { .. })).await;
+    f.handle.close().await.unwrap();
+}
+
 #[tokio::test]
 async fn two_stores_share_one_location_without_reading_each_others_history() {
     let f = Fixture::new().await;
@@ -643,33 +692,6 @@ async fn two_stores_share_one_location_without_reading_each_others_history() {
         assert_eq!(body, expected);
         handle.close().await.unwrap();
     }
-}
-
-#[tokio::test]
-async fn a_first_pass_that_reaches_storage_then_loses_network_is_failed() {
-    let f = Fixture::new().await;
-    f.setup().await.unwrap();
-    status(&f.handle, |s| matches!(s, SyncStatus::Synced { .. })).await;
-    f.handle.stop_sync();
-    status(&f.handle, |s| matches!(s, SyncStatus::Stopped)).await;
-    let (listed, listing) = tokio::sync::oneshot::channel();
-    let (resume, resumed) = tokio::sync::oneshot::channel();
-    f.storage
-        .hold_next_listing(ObjectPrefix::device_logs(f.directory.id()), listed, resumed)
-        .await;
-    f.handle.start_sync().await.unwrap();
-    listing.await.unwrap();
-    f.storage.set_online(false);
-    resume.send(()).unwrap();
-    status(&f.handle, |s| {
-        matches!(s, SyncStatus::Failed { .. } | SyncStatus::Offline { .. })
-    })
-    .await;
-    assert!(matches!(
-        &*f.handle.subscribe_sync_status().borrow(),
-        SyncStatus::Failed { .. }
-    ));
-    f.handle.close().await.unwrap();
 }
 
 #[tokio::test]
@@ -814,56 +836,6 @@ impl StoreKeyCustody for RefusePersist {
     fn close(&self) {
         self.keys.lock().unwrap().take();
     }
-}
-
-#[tokio::test]
-async fn custody_failure_rolls_back_credentials_and_the_reserved_creation_requires_the_same_access()
-{
-    let f = Fixture::new().await;
-    f.handle.close().await.unwrap();
-    let handle = builder(
-        &f.app,
-        StoreLayout::new(f._root.path().into()),
-        f.clock.clone(),
-        f.storage.clone(),
-    )
-    .key_custody(KeyCustody::Custom(Arc::new(RefusePersist {
-        keys: std::sync::Mutex::new(None),
-        refuse: AtomicBool::new(true),
-    })))
-    .open(f.directory.id())
-    .await
-    .unwrap();
-    let setup = |key: &str| {
-        handle.setup_s3_storage(
-            f.storage.config(),
-            "Test device",
-            key.into(),
-            SecretText::new("secret".into()),
-        )
-    };
-    assert!(setup("original").await.is_err());
-    assert_eq!(handle.store_key_state().unwrap(), StoreKeyState::Locked);
-    assert!(handle.restore_code().await.is_err());
-    assert!(matches!(
-        &*handle.subscribe_sync_status().borrow(),
-        SyncStatus::Disconnected
-    ));
-    let path = f
-        .storage
-        .list(&ObjectPrefix::store_logs(f.directory.id()))
-        .await
-        .unwrap()[0]
-        .path
-        .clone();
-    let original = f.storage.read(&path).await.unwrap();
-    assert!(
-        setup("changed").await.is_err(),
-        "a reserved creation cannot silently record another access key"
-    );
-    setup("original").await.unwrap();
-    assert_eq!(f.storage.read(&path).await.unwrap(), original);
-    handle.close().await.unwrap();
 }
 
 #[tokio::test]

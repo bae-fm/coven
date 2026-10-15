@@ -81,10 +81,15 @@ async fn transfer_limits_bound_requests_and_an_active_batch_keeps_its_limit() {
         assert_eq!(handle.read_file(&uploaded[0]).await.unwrap(), vec![0; 2048]);
         memory.set_online(false);
         let before = memory.request_count();
+        status.borrow_and_update();
         handle.sync_now();
         requests.wait_for(|n| *n > before).await.unwrap();
-        status.wait_for(|s| matches!(s, SyncStatus::Offline { .. } | SyncStatus::Failed { .. })).await.unwrap();
-        assert!(matches!(&*status.borrow(), SyncStatus::Failed { .. }), "a file read reached this connection before the failed sync");
+        // The earlier Offline is stale; wait for this attempt's outcome.
+        loop {
+            status.changed().await.unwrap();
+            if matches!(&*status.borrow(), SyncStatus::Offline { .. } | SyncStatus::Failed { .. }) { break; }
+        }
+        assert!(matches!(&*status.borrow(), SyncStatus::Offline { .. }), "the failed attempt decides, not the file read that reached storage before it");
         handle.close().await.unwrap();
     }).await.expect("bounded transfers finished");
 }

@@ -364,3 +364,184 @@ async fn an_uploads_retry_after_holds_the_next_pass() {
     assert!(stored(device, "photo").await);
     network.close().await;
 }
+
+/// One bad photo while the rest syncs leaves `Synced` with a pending file
+/// record (E5): a provider's refusal of one subject does not fail the pass.
+#[tokio::test]
+async fn a_refused_file_upload_leaves_the_pass_synced_with_its_pending_record() {
+    let network = file_network().await;
+    let device = &network.devices[0];
+    device.handle.set_uploads_paused(true).await.unwrap();
+    attach(&device.handle, "photo", vec![3; 2048]).await;
+    network.sync(0).await;
+    device
+        .storage
+        .set_faults(Faults {
+            fail_next: 1,
+            failure: StorageFailure::QuotaExceeded,
+            response: Some(507),
+            ..Faults::none()
+        })
+        .await;
+    let refused = |records: &[PendingRecord]| {
+        records.iter().any(|record| {
+            matches!(record.subject, PendingSubject::File { .. })
+                && matches!(record.reason, PendingReason::Storage { failure, .. } if failure == StorageFailure::QuotaExceeded)
+        })
+    };
+    let mut pending = device.handle.subscribe_pending();
+    device.handle.set_uploads_paused(false).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !refused(&pending.next().await.unwrap()) {}
+    })
+    .await
+    .unwrap();
+    let writes = stored_writes(device).await;
+    let mut status = device.handle.subscribe_sync_status();
+    status.borrow_and_update();
+    insert(&device.handle, "the rest").await;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            status.changed().await.unwrap();
+            if !matches!(&*status.borrow(), SyncStatus::Syncing) {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert!(
+        matches!(&*status.borrow(), SyncStatus::Synced { .. }),
+        "{:?}",
+        &*status.borrow()
+    );
+    assert_eq!(stored_writes(device).await, writes + 1);
+    assert!(refused(&device.handle.pending().await.unwrap()));
+    network.close().await;
+}
+
+/// The failing request's storage error, for either failed status.
+fn storage_error(status: &SyncStatus) -> Option<std::sync::Arc<coven_storage::StorageError>> {
+    match status {
+        SyncStatus::Offline { error }
+        | SyncStatus::Failed {
+            error: SyncFailure::Storage(error),
+        } => Some(error.clone()),
+        _ => None,
+    }
+}
+
+/// Request a pass and return its outcome once a status after it matches.
+async fn attempt(
+    device: &crate::tests::Device,
+    expected: impl Fn(&SyncStatus) -> bool,
+) -> std::sync::Arc<coven_storage::StorageError> {
+    let mut status = device.handle.subscribe_sync_status();
+    status.borrow_and_update();
+    device.handle.sync_now();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            status.changed().await.unwrap();
+            if expected(&status.borrow()) {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("timed out at {:?}", &*status.borrow()));
+    let error = storage_error(&status.borrow());
+    error.expect("a storage failure")
+}
+
+/// Status describes the latest attempt, not the connection's history (E5):
+/// no response is Offline, a provider's error response is Failed.
+#[tokio::test]
+async fn each_attempt_is_offline_or_failed_by_whether_storage_answered() {
+    let network = Network::new(1).await;
+    let device = &network.devices[0];
+    // Ana syncs, then loses Wi-Fi: the next attempt is Offline.
+    device.storage.set_online(false);
+    let offline = attempt(device, |s| matches!(s, SyncStatus::Offline { .. })).await;
+    assert_eq!(offline.failure(), StorageFailure::Network);
+    assert!(!offline.answered());
+    device.storage.set_online(true);
+    // A provider outage is classified Network, but storage answered.
+    device
+        .storage
+        .set_faults(Faults {
+            fail_next: usize::MAX,
+            failure: StorageFailure::Network,
+            response: Some(503),
+            ..Faults::none()
+        })
+        .await;
+    let outage = attempt(device, |s| matches!(s, SyncStatus::Failed { .. })).await;
+    assert_eq!(outage.failure(), StorageFailure::Network);
+    assert!(outage.answered());
+    // A denied store listing fails the pass too.
+    device
+        .storage
+        .set_faults(Faults {
+            fail_next: usize::MAX,
+            failure: StorageFailure::PermissionDenied,
+            response: Some(403),
+            ..Faults::none()
+        })
+        .await;
+    let denied = attempt(device, |s| {
+        storage_error(s).is_some_and(|error| error.failure() == StorageFailure::PermissionDenied)
+    })
+    .await;
+    assert!(denied.answered());
+    // An earlier answer does not make a later unanswered attempt Failed.
+    device.storage.set_faults(Faults::none()).await;
+    device.storage.set_online(false);
+    attempt(device, |s| matches!(s, SyncStatus::Offline { .. })).await;
+    device.storage.set_online(true);
+    let mut status = device.handle.subscribe_sync_status();
+    device.handle.sync_now();
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        status.wait_for(|s| matches!(s, SyncStatus::Synced { .. })),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    network.close().await;
+}
+
+/// A pass that reached storage, then lost the network, is Offline: its own
+/// earlier responses do not decide the request that failed.
+#[tokio::test]
+async fn a_pass_losing_the_network_after_reaching_storage_is_offline() {
+    let network = Network::new(1).await;
+    let device = &network.devices[0];
+    let (listed, listing) = tokio::sync::oneshot::channel();
+    let (resume, resumed) = tokio::sync::oneshot::channel();
+    device
+        .storage
+        .hold_next_listing(ObjectPrefix::device_logs(device.store), listed, resumed)
+        .await;
+    let mut status = device.handle.subscribe_sync_status();
+    status.borrow_and_update();
+    device.handle.sync_now();
+    listing.await.unwrap();
+    device.storage.set_online(false);
+    resume.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            status.changed().await.unwrap();
+            if !matches!(&*status.borrow(), SyncStatus::Syncing) {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert!(
+        matches!(&*status.borrow(), SyncStatus::Offline { .. }),
+        "{:?}",
+        &*status.borrow()
+    );
+    network.close().await;
+}

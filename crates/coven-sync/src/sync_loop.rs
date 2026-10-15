@@ -17,7 +17,8 @@ pub enum SyncStatus {
     Disconnected,
     /// Storage is set up and synchronization is stopped; a client may be absent.
     Stopped,
-    /// Storage has not been reached since connecting.
+    /// The last attempt could not reach storage, regardless of earlier
+    /// success: the request preventing the pass received no provider response.
     Offline {
         /// The network failure and its original cause.
         error: Arc<StorageError>,
@@ -29,7 +30,8 @@ pub enum SyncStatus {
         /// The injected wall clock after every step completed.
         finished_at: SystemTime,
     },
-    /// The last pass failed as a whole.
+    /// The last pass failed as a whole, including a provider's error
+    /// response; per-subject failures belong only in pending().
     Failed {
         /// The failure and its original cause.
         error: SyncFailure,
@@ -151,7 +153,6 @@ impl SyncLoop {
         store_name: String,
     ) -> Result<(), SyncError> {
         let (reply, result) = oneshot::channel();
-        storage.reset_reachability();
         self.commands
             .send(SyncCommand::Setup {
                 storage,
@@ -168,7 +169,6 @@ impl SyncLoop {
     /// Open the member's sealed keys and retain a stopped connection.
     pub async fn unlock(&self, storage: Arc<StorageConnection>) -> Result<(), SyncError> {
         let (reply, result) = oneshot::channel();
-        storage.reset_reachability();
         self.commands
             .send(SyncCommand::Unlock { storage, reply })
             .map_err(|_| DbError::StoreClosed)?;
@@ -250,14 +250,20 @@ impl SyncRun {
                 self.waits.clone(),
             )
             .await?;
-        // A new connection starts its own backoff; provider cooldowns hold.
-        self.failures = 0;
-        self.backoff = None;
         self.operations
             .set_storage(Some(connection.clone()))
             .await?;
         self.connection = Some(connection);
+        self.new_connection();
         Ok(())
+    }
+
+    /// A newly installed connection starts its own backoff. Provider
+    /// cooldowns are the provider's, shared through `waits`, and hold
+    /// across it (SP waiting).
+    fn new_connection(&mut self) {
+        self.failures = 0;
+        self.backoff = None;
     }
 
     async fn release_connection(&mut self) -> Result<(), SyncError> {
@@ -400,7 +406,7 @@ impl SyncRun {
                             // needs before it can finish and receive this command.
                             let result = self.setup(storage.clone(), access, device_name, connection, sign_in, store_name).await;
                             if result.is_ok() {
-                                self.connection = Some(storage); self.configured = true;
+                                self.connection = Some(storage); self.new_connection(); self.configured = true;
                                 self.started = true; pending = true;
                                 self.status.send_replace(SyncStatus::Syncing);
                             }
@@ -409,7 +415,7 @@ impl SyncRun {
                         Some(SyncCommand::Unlock { storage, reply }) => {
                             let result = self.operations.unlock_storage(storage.clone()).await;
                             if result.is_ok() {
-                                self.connection = Some(storage); self.configured = true; self.started = false; pending = false;
+                                self.connection = Some(storage); self.new_connection(); self.configured = true; self.started = false; pending = false;
                                 self.status.send_replace(SyncStatus::Stopped);
                             }
                             let _ = reply.send(result);
@@ -508,9 +514,10 @@ impl SyncRun {
                             ));
                             let error = SyncFailure::from(error);
                             self.started = !matches!(error, SyncFailure::Removed | SyncFailure::DeviceReset(_) | SyncFailure::UpdateRequired(_));
-                            let reached = self.connection.as_ref().is_some_and(|connection| connection.reached());
+                            // Only this attempt decides: a provider's error
+                            // response, even one classified Network, is Failed.
                             let status = match error {
-                                SyncFailure::Storage(error) if !reached && error.failure() == StorageFailure::Network => SyncStatus::Offline { error },
+                                SyncFailure::Storage(error) if error.failure() == StorageFailure::Network && !error.answered() => SyncStatus::Offline { error },
                                 error => SyncStatus::Failed { error },
                             };
                             self.status.send_replace(status);

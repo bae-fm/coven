@@ -39,8 +39,13 @@ pub struct Faults {
     pub body_failures: BTreeMap<ObjectPath, BodyFailure>,
     /// The classification of injected failures.
     pub failure: StorageFailure,
-    /// Injected failures arrive as an HTTP 429 response asking every
-    /// consumer to wait this many seconds (`Retry-After`).
+    /// Injected failures arrive as a provider response with this HTTP
+    /// status (E5). None, without `retry_after`, is a request that received
+    /// no response.
+    pub response: Option<u16>,
+    /// Injected failures arrive as a response, a 429 unless `response`
+    /// names another status, asking every consumer to wait this many
+    /// seconds (`Retry-After`).
     pub retry_after: Option<u64>,
     /// Delay each call without blocking its executor.
     pub delay: Duration,
@@ -71,6 +76,7 @@ impl Faults {
             read_chunk_size: 64 * 1024,
             body_failures: BTreeMap::new(),
             failure: StorageFailure::Network,
+            response: None,
             retry_after: None,
             delay: Duration::ZERO,
             drop_part: false,
@@ -465,7 +471,11 @@ impl MemoryProvider {
             }
             let failure = if state.faults.fail_next > 0 {
                 state.faults.fail_next -= 1;
-                Some((state.faults.failure, state.faults.retry_after))
+                Some((
+                    state.faults.failure,
+                    state.faults.response,
+                    state.faults.retry_after,
+                ))
             } else {
                 None
             };
@@ -475,12 +485,15 @@ impl MemoryProvider {
             self.clock.sleep(delay).await;
         }
         match failure {
-            Some((failure, None)) => Err(StorageError::Failure(failure)),
-            Some((failure, Some(seconds))) => Err(crate::providers::ProviderResponse::throttled(
-                self.config.provider(),
-                failure,
-                seconds,
-            )),
+            Some((failure, None, None)) => Err(StorageError::Failure(failure)),
+            Some((failure, status, retry_after)) => {
+                Err(crate::providers::ProviderResponse::injected(
+                    self.config.provider(),
+                    failure,
+                    status.unwrap_or(429),
+                    retry_after,
+                ))
+            }
             None => self.authorize(request).await,
         }
     }

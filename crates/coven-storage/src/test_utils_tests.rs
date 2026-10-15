@@ -28,24 +28,23 @@ async fn equal_size_and_time_replacements_have_distinct_identity() {
 }
 
 #[tokio::test]
-async fn failed_status_is_not_absence_and_does_not_supply_reachability() {
+async fn failed_status_is_not_absence_and_says_whether_storage_answered() {
     let storage = MemoryStorage::builder().build().unwrap();
     let path = ObjectPath::positions(STORE_ID, coven_foundation::id_source::DeviceId(31));
     assert_eq!(storage.status(&path).await.unwrap(), None);
-    assert!(storage.reached());
-    storage.reset_reachability();
-    storage
-        .set_faults(Faults {
-            fail_next: 1,
-            failure: StorageFailure::Network,
-            ..Faults::none()
-        })
-        .await;
-    assert_eq!(
-        storage.status(&path).await.unwrap_err().failure(),
-        StorageFailure::Network
-    );
-    assert!(!storage.reached());
+    for response in [None, Some(503)] {
+        storage
+            .set_faults(Faults {
+                fail_next: 1,
+                failure: StorageFailure::Network,
+                response,
+                ..Faults::none()
+            })
+            .await;
+        let error = storage.status(&path).await.unwrap_err();
+        assert_eq!(error.failure(), StorageFailure::Network);
+        assert_eq!(error.answered(), response.is_some());
+    }
 }
 #[tokio::test]
 async fn memory_conforms() {
@@ -224,13 +223,11 @@ async fn failed_automatic_upload_is_aborted_without_publishing() {
         coven_foundation::id_source::DeviceId(31),
         std::num::NonZeroU64::MIN,
     );
-    assert_eq!(
-        storage.create(&path, &[1; 17]).await.unwrap_err().failure(),
-        StorageFailure::Network
-    );
+    let error = storage.create(&path, &[1; 17]).await.unwrap_err();
+    assert_eq!(error.failure(), StorageFailure::Network);
     assert!(
-        !storage.reached(),
-        "inner upload calls must not mask its network failure"
+        !error.answered(),
+        "inner upload calls must not mask its lost reply"
     );
     assert!(storage
         .list(&ObjectPrefix::all(STORE_ID))
@@ -238,11 +235,7 @@ async fn failed_automatic_upload_is_aborted_without_publishing() {
         .unwrap()
         .is_empty());
     assert!(storage.provider.state.lock().await.uploads.is_empty());
-    assert!(storage.reached());
-    storage.reset_reachability();
-    assert!(!storage.reached());
     storage.create(&path, &[1; 17]).await.unwrap();
-    assert!(storage.reached());
     assert_eq!(storage.read(&path).await.unwrap(), [1; 17]);
 }
 

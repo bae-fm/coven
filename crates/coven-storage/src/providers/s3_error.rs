@@ -44,11 +44,16 @@ where
 /// The native HTTP status behind an S3 adapter error, when a response arrived.
 pub(super) fn native_status(error: &StorageError) -> Option<u16> {
     match error {
-        StorageError::Provider { source, .. } => source
-            .downcast_ref::<S3ResponseError>()
-            .and_then(|response| response.status),
+        StorageError::Provider { source, .. } => response_status(source.as_ref()),
         _ => None,
     }
+}
+
+/// The status of the response behind an S3 failure's native cause, if one arrived.
+pub(crate) fn response_status(source: &(dyn std::error::Error + 'static)) -> Option<u16> {
+    source
+        .downcast_ref::<S3ResponseError>()
+        .and_then(|response| response.status)
 }
 
 fn s3_service_failure(

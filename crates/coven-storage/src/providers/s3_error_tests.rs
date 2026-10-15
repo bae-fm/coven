@@ -83,6 +83,7 @@ async fn status_only_responses_distinguish_quota_from_transient_failures() {
             .unwrap_err();
         assert_eq!(error.failure(), failure, "status {status}");
         assert_eq!(error.retryable(), retryable);
+        assert!(error.answered(), "status {status} is the provider's answer");
         assert_eq!(
             sdk_error::<ListObjectsV2Error>(&error)
                 .raw_response()
@@ -207,6 +208,7 @@ async fn sdk_request_construction_is_invalid_configuration() {
     let error = s3_error(native);
     assert_eq!(error.failure(), StorageFailure::InvalidConfiguration);
     assert!(!error.retryable());
+    assert!(!error.answered());
     assert!(matches!(
         sdk_error::<ListObjectsV2Error>(&error),
         SdkError::ConstructionFailure(_)
@@ -224,6 +226,7 @@ fn sdk_transport_failures_remain_retryable_and_retain_native_causes() {
         let error = s3_error(native);
         assert_eq!(error.failure(), StorageFailure::Network);
         assert!(error.retryable());
+        assert!(!error.answered());
         assert!(sdk_error::<ListObjectsV2Error>(&error).source().is_some());
         assert!(!format!("{error:?} {error}").contains("credential-echo"));
     }

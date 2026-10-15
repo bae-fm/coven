@@ -243,20 +243,24 @@ impl ProviderResponse {
             body: SecretBytes::new(body),
         }
     }
-    /// An HTTP 429 asking for `seconds` of `Retry-After`, classified as
-    /// `failure`, as the in-memory provider injects it.
+    /// A `status` response, asking for `retry_after` seconds of
+    /// `Retry-After` when given, classified as `failure`, as the in-memory
+    /// provider injects it.
     #[cfg(any(test, feature = "test-utils"))]
-    pub(crate) fn throttled(
+    pub(crate) fn injected(
         provider: CloudProvider,
         failure: StorageFailure,
-        seconds: u64,
+        status: u16,
+        retry_after: Option<u64>,
     ) -> StorageError {
         let mut headers = reqwest::header::HeaderMap::new();
-        headers.insert(reqwest::header::RETRY_AFTER, seconds.into());
+        if let Some(seconds) = retry_after {
+            headers.insert(reqwest::header::RETRY_AFTER, seconds.into());
+        }
         StorageError::Provider {
             provider,
             failure,
-            source: Box::new(Self::new(429, headers, Vec::new())),
+            source: Box::new(Self::new(status, headers, Vec::new())),
         }
     }
     /// The provider's requested wait: `Retry-After` as delay-seconds, or as an

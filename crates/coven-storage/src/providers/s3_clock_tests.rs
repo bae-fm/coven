@@ -285,8 +285,8 @@ async fn the_retry_waits_for_the_cooldown_and_rechecks_publication_authority() {
     .any(|cause| cause.is::<CoolingDown>()));
     assert_eq!(f.remote.lock().unwrap().seen.len(), 1);
     assert!(
-        f.storage.reached(),
-        "the refused attempt reached storage; the withheld retry did not change that"
+        !error.answered(),
+        "the error reports the withheld retry, which no response answered"
     );
 
     let gate = Arc::new(Lapsing::default());

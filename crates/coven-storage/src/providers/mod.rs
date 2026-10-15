@@ -27,6 +27,13 @@ pub fn s3_member_policy(
 ) -> Result<String, crate::StorageError> {
     s3::member_policy(config, store)
 }
+/// Whether a provider failure's native cause is a response the provider sent,
+/// even an error one (E5).
+pub(crate) fn response_arrived(source: &(dyn std::error::Error + 'static)) -> bool {
+    source.is::<ProviderResponse>()
+        || source.is::<OAuthRedirectError>()
+        || s3::response_status(source).is_some()
+}
 pub(crate) use s3::{
     admit_s3_setup, check_new_store as check_new_s3_store, check_s3_versioning,
     detect as detect_s3, s3_key_scope, s3_settings, S3KeyScope, S3Storage,

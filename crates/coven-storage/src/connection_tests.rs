@@ -339,9 +339,7 @@ async fn publication_checks_after_the_provider_creation_permit() {
     .await;
     gate.0.store(false, Ordering::SeqCst);
     drop(held);
-    assert_eq!(
-        request.await.unwrap_err().failure(),
-        StorageFailure::CatchUpRequired
-    );
-    assert!(!storage.reached());
+    let refused = request.await.unwrap_err();
+    assert_eq!(refused.failure(), StorageFailure::CatchUpRequired);
+    assert!(!refused.answered());
 }
