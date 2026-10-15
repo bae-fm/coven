@@ -85,3 +85,51 @@ async fn cloudkit_live_sharing() {
         _ => panic!("COVEN_CLOUDKIT_TEST_ROLE must be owner or recipient"),
     }
 }
+
+fn seen(id: Option<&str>, email: Option<&str>, owner: bool, participant_id: &str) -> Seen {
+    Seen {
+        id: id.map(str::to_owned),
+        email: email.map(str::to_owned),
+        owner,
+        participant_id: participant_id.to_owned(),
+    }
+}
+
+/// A public share keeps reaching everyone while it stays public; the member
+/// is still removed from it, so turning public access off cuts them off.
+#[test]
+fn revoking_from_a_public_share_removes_the_participant_and_reports_public_access() {
+    let participants = [
+        seen(Some("_owner"), None, true, "p-owner"),
+        seen(Some("_ben"), Some("ben@example.test"), false, "p-ben"),
+        seen(None, Some("cy@example.test"), false, "p-cy"),
+        seen(None, None, false, "p-unknown"),
+    ];
+    for public in [false, true] {
+        let (removed, retained) = revocation(
+            "share",
+            public,
+            &participants,
+            Some("_ben"),
+            "ben@example.test",
+        );
+        assert_eq!(removed, [1]);
+        let mut expected = vec![RetainedAccess {
+            provider_id: "p-unknown".into(),
+            reason: RetainedAccessReason::UnidentifiedAccount,
+        }];
+        if public {
+            expected.insert(
+                0,
+                RetainedAccess {
+                    provider_id: "share".into(),
+                    reason: RetainedAccessReason::OtherAccounts,
+                },
+            );
+        }
+        assert_eq!(retained, expected);
+    }
+    // A participant not yet resolved to a user record matches by email.
+    let (removed, _) = revocation("share", true, &participants, None, "CY@example.test");
+    assert_eq!(removed, [2]);
+}

@@ -30,6 +30,61 @@ struct Metadata(Retained<CKShareMetadata>);
 // one acceptance operation. No alias can mutate it during that transfer.
 unsafe impl Send for Metadata {}
 
+/// One share participant as revocation sees it.
+struct Seen {
+    /// The participant's user record name, once CloudKit knows it.
+    id: Option<String>,
+    /// The email address it was looked up by, if any.
+    email: Option<String>,
+    owner: bool,
+    participant_id: String,
+}
+
+/// What removing `account`, whose user record name is `target` when known,
+/// does to a share: the participants to remove and the access that stays
+/// (§4). A public share still reaches the removed member while it stays
+/// public, which is reported; the participant is removed all the same, so
+/// turning public access off later cuts them off.
+fn revocation(
+    share_name: &str,
+    public: bool,
+    participants: &[Seen],
+    target: Option<&str>,
+    account: &str,
+) -> (Vec<usize>, Vec<RetainedAccess>) {
+    let mut removed = Vec::new();
+    let mut retained = Vec::new();
+    if public {
+        retained.push(RetainedAccess {
+            provider_id: share_name.to_owned(),
+            reason: RetainedAccessReason::OtherAccounts,
+        });
+    }
+    for (index, person) in participants.iter().enumerate() {
+        let matches = match (target, &person.id) {
+            (Some(target), Some(id)) => target == id,
+            _ => person
+                .email
+                .as_deref()
+                .is_some_and(|email| email.eq_ignore_ascii_case(account)),
+        };
+        if matches && person.owner {
+            retained.push(RetainedAccess {
+                provider_id: person.participant_id.clone(),
+                reason: RetainedAccessReason::StoreOwner,
+            });
+        } else if matches {
+            removed.push(index);
+        } else if person.id.is_none() && person.email.is_none() {
+            retained.push(RetainedAccess {
+                provider_id: person.participant_id.clone(),
+                reason: RetainedAccessReason::UnidentifiedAccount,
+            });
+        }
+    }
+    (removed, retained)
+}
+
 fn participant(container: &CKContainer, email: &str) -> CloudKitRequest<Participant> {
     let (complete, result) = completion();
     let value = Arc::new(Mutex::new(None));
@@ -275,49 +330,39 @@ impl CloudKitStorage {
             Err(error) if error.failure() == StorageFailure::NotFound => return Ok(vec![]),
             Err(error) => return Err(error),
         };
-        let mut retained = Vec::new();
-        let mut removed = false;
-        unsafe {
+        let (removed, retained) = unsafe {
             let native_share = share.share()?;
-            if native_share.publicPermission() != CKShareParticipantPermission::None {
-                return Ok(vec![RetainedAccess {
-                    provider_id: self.share_name(),
-                    reason: RetainedAccessReason::OtherAccounts,
-                }]);
+            let people: Vec<_> = native_share.participants().into_iter().collect();
+            let seen: Vec<Seen> = people
+                .iter()
+                .map(|person| {
+                    let identity = person.userIdentity();
+                    Seen {
+                        id: identity
+                            .userRecordID()
+                            .map(|id| id.recordName().to_string()),
+                        email: identity
+                            .lookupInfo()
+                            .and_then(|lookup| lookup.emailAddress())
+                            .map(|email| email.to_string()),
+                        owner: person.role() == CKShareParticipantRole::Owner,
+                        participant_id: person.participantID().to_string(),
+                    }
+                })
+                .collect();
+            let public = native_share.publicPermission() != CKShareParticipantPermission::None;
+            let (removed, retained) = revocation(
+                &self.share_name(),
+                public,
+                &seen,
+                target_id.as_deref(),
+                account,
+            );
+            for index in &removed {
+                native_share.removeParticipant(&people[*index]);
             }
-            for person in native_share.participants() {
-                let identity = person.userIdentity();
-                let id = identity
-                    .userRecordID()
-                    .map(|id| id.recordName().to_string());
-                let matches = match (&target_id, &id) {
-                    (Some(target), Some(id)) => target == id,
-                    _ => identity
-                        .lookupInfo()
-                        .and_then(|lookup| lookup.emailAddress())
-                        .is_some_and(|email| email.to_string().eq_ignore_ascii_case(account)),
-                };
-                if matches && person.role() == CKShareParticipantRole::Owner {
-                    retained.push(RetainedAccess {
-                        provider_id: person.participantID().to_string(),
-                        reason: RetainedAccessReason::StoreOwner,
-                    });
-                } else if matches {
-                    native_share.removeParticipant(&person);
-                    removed = true;
-                } else if id.is_none()
-                    && identity
-                        .lookupInfo()
-                        .and_then(|lookup| lookup.emailAddress())
-                        .is_none()
-                {
-                    retained.push(RetainedAccess {
-                        provider_id: person.participantID().to_string(),
-                        reason: RetainedAccessReason::UnidentifiedAccount,
-                    });
-                }
-            }
-        }
+            (!removed.is_empty(), retained)
+        };
         if removed {
             native::modify(
                 &self.database,
