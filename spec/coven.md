@@ -87,8 +87,8 @@
 - Rows can carry files, like audio, images or documents, which sync with
   them.
 - No server. It syncs through storage the members already have.
-- Everything coven writes to the provider is encrypted: with the store key,
-  a circle's key, or a member's public key.
+- Everything coven writes to the provider is encrypted ([§11](#11-keys)),
+  except the store's creation marker and S3 detection's probes.
 - Only members' devices hold the store key.
 
 ## 2. Threat model
@@ -3754,7 +3754,7 @@ Carol's tablet:
 
 - Coven uses four kinds of key:
   - the store key, which encrypts what coven writes to storage, except a
-    circle's rows and files and the sealed keys;
+    circle's rows and files, sealed keys and join requests;
   - each circle's key, which encrypts that circle's rows and files
     ([§14.3](#143-circles));
   - each member's current signing and sealing keys, bound to their stable
@@ -3970,9 +3970,7 @@ Carol's tablet:
   Ed25519 public key with invalid and weak points refused; `SealingKey` is a
   32-byte X25519 public key. The public `MemberKeys` pair in D2 contains both.
   Replacing it requires fresh keys of both kinds (§9); it never changes the id.
-- Everything coven writes to storage is encrypted with XChaCha20-Poly1305:
-  write records, store log entries, snapshots, sealed keys and file
-  chunks.
+- Coven encrypts with XChaCha20-Poly1305.
   - Each object's storage path is bound into its authentication, so the
     provider can't swap one object for another.
   - Each chunk of a file binds its index; each chunk of a write or a
