@@ -597,9 +597,11 @@ mod source {
         for entry in std::fs::read_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("src")).unwrap() {
             let path = entry.unwrap().path();
             let name = path.file_name().unwrap().to_str().unwrap();
+            // The scan reasons are this test's own table, not shipping SQL.
             if path.extension().is_some_and(|e| e == "rs")
                 && !name.ends_with("_tests.rs")
                 && name != "test_utils.rs"
+                && name != "internal_schema_scan_reasons.rs"
             {
                 let text = std::fs::read_to_string(&path).unwrap();
                 let mut source = Source {
