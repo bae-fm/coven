@@ -232,8 +232,9 @@ async fn a_reload_call_receives_its_native_failure_and_automatic_retry_replaces_
     storage.delete(&snapshot).await.unwrap();
     // The failed reload backs off one second before its automatic retry.
     clock.set(coven_foundation::clock::Clock::now(clock.as_ref()) + Duration::from_secs(1));
-    // The pass reports the reload that holds its data phase; the reload's
-    // own native failure is its recorded reason below.
+    // The pass reports the reload that holds its data phase; the retried
+    // reload's recorded reason replaces the network failure with a wait on
+    // its reset's snapshot, which is no longer listed (§15).
     let error = operations.sync().await.unwrap_err();
     assert!(
         matches!(&error, SyncError::ReloadPending(id) if *id == retained[0].id),
@@ -247,13 +248,7 @@ async fn a_reload_call_receives_its_native_failure_and_automatic_retry_replaces_
         OperationKind::ReloadFromSnapshot
     );
     assert!(
-        matches!(
-            &conditions[0].reason,
-            PendingReason::Storage {
-                failure: StorageFailure::NotFound,
-                ..
-            }
-        ),
+        conditions[0].reason == PendingReason::Waits(Prerequisite::Object(snapshot)),
         "{:?}",
         conditions[0].reason
     );
