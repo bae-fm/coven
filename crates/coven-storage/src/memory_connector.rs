@@ -101,7 +101,7 @@ impl crate::providers::StorageConnector for MemoryStorage {
 pub const DETECTED_S3_SETTINGS: S3Settings = S3Settings {
     signing: S3Signing::AwsSigV4,
     single_put: S3SinglePut::IfNoneMatch,
-    multipart: S3Multipart::ConditionalCompletion,
+    copy_publication: S3CopyPublication::Never,
     multipart_timestamp: S3MultipartTimestamp::Completion,
     checksums: S3Checksums::Absent,
     listing: S3Listing::V2,
@@ -119,7 +119,7 @@ pub fn conforming_detection(settings: S3Settings) -> S3Detection {
         (S3Probe::PartialUploadHidden, true),
         (
             S3Probe::ConditionalCompletion,
-            settings.multipart == S3Multipart::ConditionalCompletion,
+            settings.copy_publication == S3CopyPublication::Never,
         ),
         (S3Probe::CompletionTimestamp, completion),
         (S3Probe::CopyTimestamp, true),
@@ -145,10 +145,12 @@ pub fn conforming_detection(settings: S3Settings) -> S3Detection {
         (S3Probe::BucketList, true),
     ]
     .into_iter()
-    .chain(match settings.multipart {
-        S3Multipart::Copy(condition) => Some((S3Probe::CopyPublication(condition), true)),
-        S3Multipart::ConditionalCompletion => None,
-    })
+    .chain(
+        settings
+            .copy_publication
+            .multipart()
+            .map(|condition| (S3Probe::CopyPublication(condition), true)),
+    )
     .map(|(probe, held)| S3Observation {
         probe,
         held,

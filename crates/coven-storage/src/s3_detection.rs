@@ -2,9 +2,9 @@
 //! safety check of effective settings against it (§4). The probes themselves
 //! run in the adapter; this is the pure decision over their observations.
 use crate::{
-    S3BucketVersioning, S3Checksums, S3CopyCondition, S3Listing, S3Multipart, S3MultipartTimestamp,
-    S3Profile, S3ResponseHeaders, S3Revision, S3Settings, S3Signing, S3SinglePut, StorageCheck,
-    StorageConfig, StorageError, StorageFailure, StorageSetupError,
+    S3BucketVersioning, S3Checksums, S3CopyCondition, S3CopyPublication, S3Listing,
+    S3MultipartTimestamp, S3Profile, S3ResponseHeaders, S3Revision, S3Settings, S3Signing,
+    S3SinglePut, StorageCheck, StorageConfig, StorageError, StorageFailure, StorageSetupError,
 };
 use std::sync::Arc;
 
@@ -103,18 +103,20 @@ impl S3Detection {
         } else {
             S3MultipartTimestamp::Start
         };
-        settings.multipart = if held(S3Probe::ConditionalCompletion)
+        // Sequential probes cannot show that racing PUTs and copies need
+        // every object published by copy, so detection never chooses `Every`.
+        settings.copy_publication = if held(S3Probe::ConditionalCompletion)
             && held(S3Probe::PartialUploadHidden)
             && held(S3Probe::CompletionTimestamp)
         {
-            S3Multipart::ConditionalCompletion
+            S3CopyPublication::Never
         } else if let (Some(S3Probe::CopyPublication(condition)), true) = (
             first(&COPY_CONDITIONS.map(S3Probe::CopyPublication)),
             held(S3Probe::CopyTimestamp),
         ) {
-            S3Multipart::Copy(condition)
+            S3CopyPublication::Multipart(condition)
         } else {
-            S3Multipart::ConditionalCompletion
+            S3CopyPublication::Never
         };
         settings.listing = if held(S3Probe::Listing(S3Listing::V2)) {
             S3Listing::V2
@@ -172,12 +174,12 @@ impl S3Detection {
                 "the single-PUT condition did not refuse an occupied name with its bytes and time unchanged",
             );
         }
-        let (create_once, dated) = match settings.multipart {
-            S3Multipart::ConditionalCompletion => (
+        let (create_once, dated) = match settings.copy_publication.multipart() {
+            None => (
                 held(S3Probe::ConditionalCompletion) && held(S3Probe::PartialUploadHidden),
                 held(S3Probe::CompletionTimestamp),
             ),
-            S3Multipart::Copy(condition) => (
+            Some(condition) => (
                 held(S3Probe::CopyPublication(condition)),
                 held(S3Probe::CopyTimestamp),
             ),

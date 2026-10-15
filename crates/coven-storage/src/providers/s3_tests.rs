@@ -305,6 +305,12 @@ fn respond(
             };
             state.revisions.insert(key.clone(), revision);
             state.objects.insert(key.clone(), body.to_vec());
+            match headers.get("x-amz-meta-coven-upload") {
+                Some(token) => state
+                    .metadata
+                    .insert(key.clone(), token.to_str().unwrap().to_owned()),
+                None => state.metadata.remove(&key),
+            };
             if std::mem::replace(&mut state.lose_create_reply, false) {
                 return response(503, "<Error><Code>ServiceUnavailable</Code></Error>");
             }

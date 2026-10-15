@@ -14,9 +14,16 @@ pub(super) enum Race {
 }
 
 pub(super) enum Write {
-    Put { header: &'static str, value: String },
+    Put {
+        header: &'static str,
+        value: String,
+    },
     Complete(UploadSession),
-    Copy(UploadSession),
+    /// A staged or assembled temporary, published by the profile's copy.
+    Copy {
+        temporary: String,
+        condition: S3CopyCondition,
+    },
 }
 
 pub(super) struct Reply {
@@ -62,16 +69,51 @@ pub(super) async fn prepare(
 ) -> Result<Write, StorageError> {
     let mut session = s.begin_upload(target, bytes.len() as u64).await?;
     s.upload_part(&mut session, bytes).await?;
-    if s.provider.settings.multipart.uses_copy() {
+    if let Some(condition) = s.provider.settings.copy_publication.multipart() {
         // The profile's publication request is the copy, not temporary assembly.
         multipart_request(&s.provider, &session)?
             .send()
             .await
             .map_err(s3_error)?;
-        Ok(Write::Copy(session))
+        Ok(Write::Copy {
+            temporary: s.provider.session_key(&session)?,
+            condition,
+        })
     } else {
         Ok(Write::Complete(session))
     }
+}
+
+/// A single-request create as the profile publishes it: a conditional PUT,
+/// or on a profile publishing every object by copy, a staged temporary whose
+/// copy is the publication request.
+pub(super) async fn single(
+    s: &S3Storage,
+    target: &ObjectPath,
+    bytes: &[u8],
+) -> Result<Write, StorageError> {
+    let Some(condition) = s.settings.copy_publication.single_request() else {
+        let (header, value) = s.settings.single_put.header();
+        return Ok(Write::Put {
+            header,
+            value: value.to_owned(),
+        });
+    };
+    let token = SecretText::new(s.ids.new_id().to_string());
+    let temporary = s.temporary_key(target, &token)?;
+    s.client
+        .put_object()
+        .bucket(&s.bucket)
+        .key(&temporary)
+        .body(ByteStream::from(bytes.to_vec()))
+        .metadata("coven-upload", token.as_str())
+        .send()
+        .await
+        .map_err(s3_error)?;
+    Ok(Write::Copy {
+        temporary,
+        condition,
+    })
 }
 
 pub(super) async fn fire(
@@ -109,16 +151,16 @@ pub(super) async fn fire(
                 .await
                 .map_err(s3_error)?;
         }
-        Write::Copy(session) => {
-            let S3Multipart::Copy(condition) = s.settings.multipart else {
-                unreachable!()
-            };
+        Write::Copy {
+            temporary,
+            condition,
+        } => {
             let (header, value) = condition.header();
             s.client
                 .copy_object()
                 .bucket(&s.bucket)
                 .key(target.under(&s.prefix))
-                .copy_source(format!("/{}/{}", s.bucket, s.session_key(&session)?))
+                .copy_source(format!("/{}/{temporary}", s.bucket))
                 .customize()
                 .mutate_request(move |request| {
                     request.headers_mut().insert(header, value);

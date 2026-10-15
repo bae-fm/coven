@@ -540,11 +540,12 @@ async fn detection_reproduces_each_catalogued_entry() {
             .unwrap_or_else(|error| panic!("{name:?}: {error:?}"));
         let entry = profile::CataloguedProfile::named(name).settings;
         // Detection prefers enforced conditional completion; only the
-        // certification races showed SeaweedFS's racing completions both
-        // succeed, so its entry publishes by copy instead (§4).
+        // certification races showed SeaweedFS's racing completions, and a
+        // racing PUT and copy, both succeed, so its entry publishes every
+        // object by copy instead (§4).
         let detected = match name {
             S3ProfileName::SeaweedFs => S3Settings {
-                multipart: S3Multipart::ConditionalCompletion,
+                copy_publication: S3CopyPublication::Never,
                 ..entry
             },
             _ => entry,
@@ -607,7 +608,14 @@ async fn overrides_contradicting_observations_are_refused_by_the_check_they_brea
     for (settings, check) in [
         (
             S3Settings {
-                multipart: S3Multipart::Copy(S3CopyCondition::GenerationMatch),
+                copy_publication: S3CopyPublication::Multipart(S3CopyCondition::GenerationMatch),
+                ..detected
+            },
+            StorageCheck::MultipartCreateOnce,
+        ),
+        (
+            S3Settings {
+                copy_publication: S3CopyPublication::Every(S3CopyCondition::GenerationMatch),
                 ..detected
             },
             StorageCheck::MultipartCreateOnce,
@@ -674,8 +682,8 @@ async fn a_visible_unfinished_upload_rules_out_conditional_completion() {
     let detection = fixture.detect(None).await.unwrap();
     assert!(!detection.held(S3Probe::PartialUploadHidden));
     assert_eq!(
-        detection.settings.multipart,
-        S3Multipart::Copy(S3CopyCondition::CloudflareIfNoneMatch)
+        detection.settings.copy_publication,
+        S3CopyPublication::Multipart(S3CopyCondition::CloudflareIfNoneMatch)
     );
     detection.check(&detection.settings).unwrap();
     let named = fixture.location(Some(S3Profile::Named(S3ProfileName::R2)));

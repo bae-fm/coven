@@ -51,7 +51,7 @@ fn catalogued_hosts_require_https_and_their_own_profile_name() {
     let custom = Some(S3Profile::Custom(S3Settings {
         signing: S3Signing::AwsSigV4,
         single_put: S3SinglePut::IfNoneMatch,
-        multipart: S3Multipart::ConditionalCompletion,
+        copy_publication: S3CopyPublication::Never,
         multipart_timestamp: S3MultipartTimestamp::Completion,
         checksums: S3Checksums::Absent,
         listing: S3Listing::V1,
@@ -258,7 +258,7 @@ fn a_base_prefix_needs_member_keys_limited_to_a_prefix() {
     let custom = Some(S3Profile::Custom(S3Settings {
         signing: S3Signing::AwsSigV4,
         single_put: S3SinglePut::IfNoneMatch,
-        multipart: S3Multipart::ConditionalCompletion,
+        copy_publication: S3CopyPublication::Never,
         multipart_timestamp: S3MultipartTimestamp::Completion,
         checksums: S3Checksums::Absent,
         listing: S3Listing::V2,

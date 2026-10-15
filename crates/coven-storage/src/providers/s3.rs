@@ -25,7 +25,7 @@ use error::s3_error;
 mod profile;
 #[path = "s3_versioning.rs"]
 mod versioning;
-pub(crate) use profile::{admit_setup as admit_s3_setup, settings as s3_settings, S3KeyScope};
+pub(crate) use profile::{settings as s3_settings, S3KeyScope};
 pub(crate) use versioning::check as check_s3_versioning;
 #[path = "s3_checksum_headers.rs"]
 mod checksum_headers;
@@ -246,11 +246,23 @@ impl S3Storage {
         let SessionState::S3 { token, .. } = &session.state else {
             return Err(StorageFailure::SessionMismatch.into());
         };
+        self.confirm_marker(&session.path, session.total, token)
+            .await
+    }
+    /// Whether `path` holds the object this publication's marker names: its
+    /// `coven-upload` token and size. Another object is `AlreadyExists`; an
+    /// absent one `SessionExpired`.
+    async fn confirm_marker(
+        &self,
+        path: &ObjectPath,
+        total: u64,
+        token: &SecretText,
+    ) -> Result<(), StorageError> {
         let response = self
             .client
             .head_object()
             .bucket(&self.bucket)
-            .key(session.path.under(&self.prefix))
+            .key(path.under(&self.prefix))
             .send()
             .await
             .map_err(s3_error);
@@ -264,7 +276,7 @@ impl S3Storage {
         if response
             .content_length()
             .and_then(|size| u64::try_from(size).ok())
-            != Some(session.total)
+            != Some(total)
             || response
                 .metadata()
                 .and_then(|metadata| metadata.get("coven-upload"))
@@ -327,7 +339,13 @@ impl ProviderOps for S3Storage {
         path: &ObjectPath,
         bytes: &[u8],
     ) -> Result<(), StorageError> {
-        self.put(publication, path, bytes, true).await
+        match self.settings.copy_publication.single_request() {
+            Some(condition) => {
+                self.create_by_copy(publication, path, bytes, condition)
+                    .await
+            }
+            None => self.put(publication, path, bytes, true).await,
+        }
     }
     async fn replace(
         &self,
@@ -401,7 +419,7 @@ impl ProviderOps for S3Storage {
                 let relative = key
                     .strip_prefix(&root)
                     .ok_or(StorageFailure::Protocol.with_source("S3 listed another location"))?;
-                if self.settings.multipart.uses_copy()
+                if self.settings.copy_publication.multipart().is_some()
                     && copy_upload::is_temporary(relative, &prefix)?
                 {
                     tracing::debug!("S3 upload temporary retained for session cleanup");
@@ -482,7 +500,7 @@ impl ProviderOps for S3Storage {
         total: u64,
     ) -> Result<UploadSession, StorageError> {
         // A copy above the single-copy limit cannot publish atomically (§4).
-        if let S3Multipart::Copy(condition) = self.settings.multipart {
+        if let Some(condition) = self.settings.copy_publication.multipart() {
             if let Some(limit) = condition.single_copy_limit().filter(|limit| total > *limit) {
                 return Err(StorageFailure::CopyTooLarge { size: total, limit }.into());
             }
@@ -681,7 +699,7 @@ impl ProviderOps for S3Storage {
                     .set_parts(Some(completed))
                     .build(),
             );
-        if self.settings.multipart == S3Multipart::ConditionalCompletion {
+        if self.settings.copy_publication == S3CopyPublication::Never {
             request = request.if_none_match("*");
         }
         let result = request
@@ -691,7 +709,7 @@ impl ProviderOps for S3Storage {
             .await;
         match result {
             Ok(_) => {
-                if self.settings.multipart.uses_copy() {
+                if self.settings.copy_publication.multipart().is_some() {
                     return self.publish_copy(publication, session).await;
                 }
                 session.state = SessionState::Complete;
@@ -734,7 +752,7 @@ impl ProviderOps for S3Storage {
             }
             Err(error) => Err(s3_error(error)),
         };
-        if self.settings.multipart.uses_copy() {
+        if self.settings.copy_publication.multipart().is_some() {
             crate::transfer::with_cleanup(result, self.delete_temporary(session).await)
         } else {
             result

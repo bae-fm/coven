@@ -31,10 +31,11 @@ expose the model to the Rust differential tests run by that script. The create-o
 the S3 adapter against the test server through every catalogued profile,
 and the OneDrive adapter through Graph. It checks occupied-path refusals and
 stored bytes for single-request and multipart uploads. For profiles publishing
-multipart uploads by copy (AWS, GCS and SeaweedFS) it compares the multipart
-creates with `CopyPublication.publish`, and races three assembled sessions on
-one name in two arrival orders against `CopyPublication.run`: which copy wins,
-the stored bytes, and that no temporary is left.
+by copy it compares the creates that copy with `CopyPublication.publish`:
+multipart creates on AWS and GCS, and every create on SeaweedFS, which
+publishes every object by copy. On each of them it races three assembled
+sessions on one name in two arrival orders against `CopyPublication.run`:
+which copy wins, the stored bytes, and that no temporary is left.
 
 ## Copy publication
 
@@ -66,9 +67,30 @@ it checks and writes the destination in one step.
   SeaweedFS 4.48's conditional multipart completion behaved in certification
   suite 4.
 
-Outside the model: whether a real provider's copy is atomic, which suite 4's
-races test live; the 5 GiB single-copy limit, which the adapter enforces
-before any request; and the provider's metadata copying of the marker.
+A profile can publish every object by copy, single-request creates
+included (`S3CopyPublication::Every`), so that every publication of a name
+is a conditional copy: a run of staged temporaries and copies. The provider
+assumption is then copy against copy only: the provider applies the
+conditional copies of one name one at a time, each checking and writing the
+destination in one step. Nothing is assumed of a conditional PUT racing a
+copy.
+
+- `every_copy_at_most_one`: in any run of stagings and copies, in any arrival
+  order, at most one copy publishes a given name. `copied_at_most` adds that
+  none does when the name was already occupied; `publish_elsewhere`,
+  `publish_unchanged`, `publish_occupies` and `publish_occupied` are its
+  steps.
+- `put_racing_copy_two_winners` is a checked example of why PUTs stay
+  outside the assumption: a conditional PUT checks a free name, a copy of it
+  lands, then the PUT writes. Both are accepted, and the copy's session no
+  longer finds its marker. SeaweedFS 4.48's unversioned bucket accepted both
+  writers of this race in 14 of 200 suite 5 trials, which is why its profile
+  publishes every object by copy.
+
+Outside the model: whether a real provider's copies are atomic against each
+other, which the suite's races test live; the 5 GiB single-copy limit, which
+the adapter enforces before any request; and the provider's metadata copying
+of the marker.
 
 ## Restore, another live copy, and writes
 

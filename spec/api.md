@@ -1543,9 +1543,8 @@ while let Ok(values) = lost.next().await {
   multipart uploads. Hosts ending in `.r2.cloudflarestorage.com` select R2,
   using conditional PUT and multipart completion and ignoring checksums
   without stated scope. The self-hosted RustFS, SeaweedFS, Ceph RGW and
-  Versity Gateway profiles are selected only by name. Setup refuses SeaweedFS before any request with
-  `StorageSetupError::S3ProfileRefused { profile: SeaweedFs }`: its concurrent
-  conditional multipart completions failed certification (§4). A name or custom profile contradicting a
+  Versity Gateway profiles are selected only by name; SeaweedFS publishes
+  every object by conditional copy (§4). A name or custom profile contradicting a
   catalogued host, a name other than AWS or any custom profile without an
   endpoint, or plain `http` to a catalogued host is `InvalidConfiguration`;
   other endpoints may use `http`.
@@ -1754,8 +1753,8 @@ pub struct S3Settings {
     pub signing: S3Signing,
     /// The condition a create-once single PUT sends.
     pub single_put: S3SinglePut,
-    /// How a multipart upload is published.
-    pub multipart: S3Multipart,
+    /// Which creates publish by a conditional copy of a staged temporary.
+    pub copy_publication: S3CopyPublication,
     /// What the native multipart `Last-Modified` dates.
     pub multipart_timestamp: S3MultipartTimestamp,
     pub checksums: S3Checksums,
@@ -1770,11 +1769,16 @@ pub struct S3Settings {
 pub enum S3Signing { AwsSigV4, GoogleHmac }
 /// `If-None-Match: *` or `x-goog-if-generation-match: 0`.
 pub enum S3SinglePut { IfNoneMatch, GenerationMatch }
-pub enum S3Multipart {
-    /// `If-None-Match: *` on CompleteMultipartUpload.
-    ConditionalCompletion,
-    /// Upload to a reserved temporary, then copy it with this destination condition.
-    Copy(S3CopyCondition),
+pub enum S3CopyPublication {
+    /// None: single PUTs and multipart completions (`If-None-Match: *` on
+    /// CompleteMultipartUpload) carry the create-once condition.
+    Never,
+    /// Multipart uploads go to a reserved temporary, then a copy with this
+    /// destination condition; single PUTs carry the create-once condition.
+    Multipart(S3CopyCondition),
+    /// Every create, single-request or multipart, is staged at a reserved
+    /// temporary and published by a copy with this destination condition.
+    Every(S3CopyCondition),
 }
 /// `If-None-Match: *` (AWS), `x-goog-if-generation-match: 0` (GCS) or
 /// `cf-copy-destination-if-none-match: *` (R2).
@@ -2061,9 +2065,6 @@ impl ProviderResponse {
 
 /// Storage setup failed before committing credentials and keys (E5).
 pub enum StorageSetupError {
-    /// The named catalogued S3 profile failed certification's concurrent
-    /// create-once races; setup refuses it before any request (§4).
-    S3ProfileRefused { profile: S3ProfileName },
     /// The profile has no certification with bucket versioning enabled.
     S3VersioningUnsupported { state: S3BucketVersioning },
     /// The bucket state is unknown and the profile has no versioning certification.

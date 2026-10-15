@@ -99,7 +99,7 @@ fn differences(entry: &S3Settings, detected: &S3Settings) -> String {
     compare!(
         signing,
         single_put,
-        multipart,
+        copy_publication,
         multipart_timestamp,
         checksums,
         listing,
@@ -305,7 +305,7 @@ async fn run_race(
     race: races::Race,
     width: usize,
 ) -> Result<(), StorageError> {
-    use races::{fire, judge, prepare, Race, Reply, Write};
+    use races::{fire, judge, prepare, single, Race, Reply, Write};
     let trials = if width == 8 { 50 } else { 200 };
     let mut overlapping = 0;
     let mut violations = 0;
@@ -316,10 +316,10 @@ async fn run_race(
         } else {
             path(store, trial)
         };
-        let (header, value) = if matches!(race, Race::Replace) {
+        let replacement = if matches!(race, Race::Replace) {
             s.replace(&target, b"initial revision").await?;
             let head = head(&s.provider, &target.under(&s.provider.prefix)).await?;
-            match s.provider.settings.revision {
+            Some(match s.provider.settings.revision {
                 S3Revision::ETag => (
                     "if-match",
                     metadata::required(head.e_tag(), "missing current ETag")?.to_owned(),
@@ -328,10 +328,9 @@ async fn run_race(
                     "x-goog-if-generation-match",
                     metadata::required(head.version_id(), "missing current generation")?.to_owned(),
                 ),
-            }
+            })
         } else {
-            let (header, value) = s.provider.settings.single_put.header();
-            (header, value.to_owned())
+            None
         };
         let payloads: Vec<_> = (0..width)
             .map(|writer| {
@@ -343,17 +342,21 @@ async fn run_race(
             })
             .collect();
         let mut prepared = Vec::new();
+        // Each writer publishes as the profile does: a single-request create
+        // is a copy too where the profile publishes every object by copy.
         for (writer, bytes) in payloads.iter().enumerate() {
-            prepared.push(
-                if matches!(race, Race::Multipart) || matches!(race, Race::Mixed) && writer == 1 {
-                    prepare(&s, &target, bytes).await?
-                } else {
-                    Write::Put {
-                        header,
-                        value: value.clone(),
-                    }
+            prepared.push(match &replacement {
+                Some((header, value)) => Write::Put {
+                    header,
+                    value: value.clone(),
                 },
-            );
+                None if matches!(race, Race::Multipart)
+                    || matches!(race, Race::Mixed) && writer == 1 =>
+                {
+                    prepare(&s, &target, bytes).await?
+                }
+                None => single(&s.provider, &target, bytes).await?,
+            });
         }
         let barrier = Arc::new(Barrier::new(width + 1));
         let origin = Instant::now();
@@ -422,12 +425,7 @@ async fn s3_certification() {
     report(&detection, &settings.config);
     // A named profile is certified with its own settings, which the safety
     // check below compares with the observations; otherwise the detected ones.
-    let StorageConfig::S3 {
-        endpoint,
-        profile: named,
-        ..
-    } = &settings.config
-    else {
+    let StorageConfig::S3 { profile: named, .. } = &settings.config else {
         unreachable!()
     };
     let profile = match named {
@@ -435,11 +433,6 @@ async fn s3_certification() {
         _ => detection.settings,
     };
     println!("candidate {profile:?}");
-    // Setup's verdict on a refused profile stays separate from certification.
-    match admit_setup(endpoint.as_ref(), named.as_ref()) {
-        Ok(()) => println!("setup_profile_check PASS"),
-        Err(error) => println!("setup_profile_check refused: {error}"),
-    }
     let mut passed = detection.check(&profile).is_ok();
     println!(
         "§4 native_behavior_detection {}",
@@ -617,14 +610,17 @@ fn print_profile(
     } else {
         "Uncertified"
     };
-    let multipart = match p.multipart {
-        S3Multipart::ConditionalCompletion => "S3Multipart::ConditionalCompletion".into(),
-        S3Multipart::Copy(condition) => {
-            format!("S3Multipart::Copy(S3CopyCondition::{condition:?})")
+    let copy_publication = match p.copy_publication {
+        S3CopyPublication::Never => "S3CopyPublication::Never".into(),
+        S3CopyPublication::Multipart(condition) => {
+            format!("S3CopyPublication::Multipart(S3CopyCondition::{condition:?})")
+        }
+        S3CopyPublication::Every(condition) => {
+            format!("S3CopyPublication::Every(S3CopyCondition::{condition:?})")
         }
     };
     println!(
-        "CataloguedProfile {{\n    name: S3ProfileName::{name},\n    endpoint: {endpoint},\n    settings: S3Settings {{\n        signing: S3Signing::{:?},\n        single_put: S3SinglePut::{:?},\n        multipart: {multipart},\n        multipart_timestamp: S3MultipartTimestamp::{:?},\n        checksums: S3Checksums::{:?},\n        listing: S3Listing::{:?},\n        revision: S3Revision::{:?},\n        response_headers: S3ResponseHeaders::{:?},\n        request_checksums: {},\n    }},\n    key_scope: S3KeyScope::{key_scope:?},\n    versioned_buckets: Certification::{versioned},\n    certification: Certification::{certification},\n}},",
+        "CataloguedProfile {{\n    name: S3ProfileName::{name},\n    endpoint: {endpoint},\n    settings: S3Settings {{\n        signing: S3Signing::{:?},\n        single_put: S3SinglePut::{:?},\n        copy_publication: {copy_publication},\n        multipart_timestamp: S3MultipartTimestamp::{:?},\n        checksums: S3Checksums::{:?},\n        listing: S3Listing::{:?},\n        revision: S3Revision::{:?},\n        response_headers: S3ResponseHeaders::{:?},\n        request_checksums: {},\n    }},\n    key_scope: S3KeyScope::{key_scope:?},\n    versioned_buckets: Certification::{versioned},\n    certification: Certification::{certification},\n}},",
         p.signing, p.single_put, p.multipart_timestamp, p.checksums, p.listing,
         p.revision, p.response_headers, p.request_checksums,
     );
@@ -699,7 +695,13 @@ pub(super) async fn multipart(connected: Arc<StorageConnection<S3Storage>>, stor
         .upload_part(&mut resumed, &bytes[session.part_size()..])
         .await
         .unwrap();
-    if connected.provider.settings.multipart.uses_copy() {
+    if connected
+        .provider
+        .settings
+        .copy_publication
+        .multipart()
+        .is_some()
+    {
         // Assemble without publishing, as when the completion reply is lost.
         let SessionState::S3 { id, parts, .. } = &resumed.state else {
             panic!("S3 session");

@@ -5,7 +5,7 @@ use crate::S3ProfileName;
 const SERVICE: S3Settings = S3Settings {
     signing: S3Signing::AwsSigV4,
     single_put: S3SinglePut::IfNoneMatch,
-    multipart: S3Multipart::ConditionalCompletion,
+    copy_publication: S3CopyPublication::Never,
     multipart_timestamp: S3MultipartTimestamp::Completion,
     checksums: S3Checksums::Absent,
     listing: S3Listing::V2,
@@ -79,15 +79,22 @@ fn checks_run_in_order_and_name_the_first_failure() {
         (
             S3Settings {
                 single_put: S3SinglePut::GenerationMatch,
-                multipart: S3Multipart::Copy(S3CopyCondition::IfNoneMatch),
+                copy_publication: S3CopyPublication::Multipart(S3CopyCondition::IfNoneMatch),
                 ..SERVICE
             },
             StorageCheck::CreateOnce,
         ),
         (
             S3Settings {
-                multipart: S3Multipart::Copy(S3CopyCondition::IfNoneMatch),
+                copy_publication: S3CopyPublication::Multipart(S3CopyCondition::IfNoneMatch),
                 multipart_timestamp: S3MultipartTimestamp::Start,
+                ..SERVICE
+            },
+            StorageCheck::MultipartCreateOnce,
+        ),
+        (
+            S3Settings {
+                copy_publication: S3CopyPublication::Every(S3CopyCondition::IfNoneMatch),
                 ..SERVICE
             },
             StorageCheck::MultipartCreateOnce,
@@ -127,9 +134,18 @@ fn checks_run_in_order_and_name_the_first_failure() {
 }
 
 #[test]
+fn every_object_copy_passes_with_its_copy_condition_enforced() {
+    let every = S3Settings {
+        copy_publication: S3CopyPublication::Every(S3CopyCondition::IfNoneMatch),
+        ..SERVICE
+    };
+    conforming_detection(every).check(&every).unwrap();
+}
+
+#[test]
 fn a_start_timestamp_needs_an_enforced_copy_dated_by_publication() {
     let mut detection = conforming_detection(S3Settings {
-        multipart: S3Multipart::Copy(S3CopyCondition::IfNoneMatch),
+        copy_publication: S3CopyPublication::Multipart(S3CopyCondition::IfNoneMatch),
         multipart_timestamp: S3MultipartTimestamp::Start,
         ..SERVICE
     });

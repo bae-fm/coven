@@ -15,8 +15,11 @@ Earlier certificates do not establish versioned-bucket support. On
 failed SeaweedFS in both states, withdrawing its suite 2 certificate.
 Suite version 5 races a named profile's own publication. The same day it
 passed SeaweedFS's copy publication in both states, but failed the
-unversioned bucket on a conditional PUT racing a copy, so SeaweedFS stays
+unversioned bucket on a conditional PUT racing a copy, so SeaweedFS stayed
 uncertified and refused ([suite 5](#seaweedfs-448-copy-publication-suite-5)).
+On 2026-10-15 its entry, now publishing every object by copy, passed suite 5
+with versioning disabled and enabled
+([SeaweedFS every-object copy publication](#seaweedfs-every-object-copy-publication-2026-10-15)).
 A [full battery](#full-battery-2026-10-14) run later that day ran suite 5
 against R2, RustFS, Ceph RGW, SeaweedFS and Garage in every bucket state they
 support, the cloud drives' and CloudKit's live tests, and the member-key
@@ -2841,3 +2844,181 @@ roll_back PASS cleanup PASS
 ```
 
 Afterwards the IAM service listed no users and `coven-live` held no objects.
+
+## SeaweedFS every-object copy publication, 2026-10-15
+
+Suite 5 showed SeaweedFS 4.48 keeping one winner whenever copies raced
+copies, while a conditional PUT racing a conditional copy of one name could
+both succeed in an unversioned bucket. Its entry now publishes every object
+by copy (`S3CopyPublication::Every(IfNoneMatch)`): a single-request create
+stages its bytes at a reserved temporary and publishes it with one
+`CopyObject` carrying `If-None-Match: *`, as multipart uploads already did.
+The suite races each writer as the entry publishes, so the PUT and mixed
+races were copies against copies here; the replacement race still sends
+conditional PUTs, which this entry never uses for creates.
+
+Run on 2026-10-15 from `seg-t208` (based on `main` at `24ca3a4d7`) against a
+local podman container of `chrislusf/seaweedfs:4.48` (image
+`sha256:8f17c8c82e03`, the image of the suite 5 run; `weed server -dir=/data
+-s3 -s3.config=<identities> -master.volumeSizeLimitMB=128 -volume.max=16`),
+selecting `COVEN_LIVE_S3_PROFILE=SeaweedFs`, in a new unversioned bucket and
+a new bucket with versioning `Enabled`. Each race below shows its first
+trial and its summary; every trial of every race kept exactly one winner,
+with the winner's bytes stored and all intervals overlapping, in both
+buckets. Both runs pass, so the entry records suite 5 certificates for
+unversioned and versioned buckets and setup admits it. The
+`setup_profile_check` and `setup_safety_check` lines are the verdicts of the
+code under test before this entry changed: the run predates the recorded
+certificate.
+
+### Versioning disabled
+
+```text
+bucket versioning=Disabled
+setup_safety_check PASS
+candidate S3Settings { signing: AwsSigV4, single_put: IfNoneMatch, copy_publication: Every(IfNoneMatch), multipart_timestamp: Completion, checksums: Absent, listing: V2, revision: ETag, response_headers: S3, request_checksums: false }
+setup_profile_check refused: S3 profile SeaweedFs is refused: concurrent create-once publication failed certification
+§4 native_behavior_detection PASS
+race Put writers=2 trial=1 writer=0 start_us=298 end_us=5370 outcome=accepted
+race Put writers=2 trial=1 writer=1 start_us=114 end_us=5658 outcome=AlreadyExists HTTP 412
+race Put writers=2 trial=1 overlap=true successes=1 pass=true
+race SUMMARY Put writers=2 trials=200 overlapping=200 successes=200 violations=0
+§4 concurrent_put_2 PASS cleanup=PASS
+race Put writers=8 trial=1 writer=0 start_us=228 end_us=1029405 outcome=AlreadyExists HTTP 412
+race Put writers=8 trial=1 writer=1 start_us=290 end_us=3031852 outcome=AlreadyExists HTTP 412
+race Put writers=8 trial=1 writer=2 start_us=612 end_us=6035720 outcome=AlreadyExists HTTP 412
+race Put writers=8 trial=1 writer=3 start_us=553 end_us=7036552 outcome=AlreadyExists HTTP 412
+race Put writers=8 trial=1 writer=4 start_us=483 end_us=2030207 outcome=AlreadyExists HTTP 412
+race Put writers=8 trial=1 writer=5 start_us=359 end_us=28863 outcome=accepted
+race Put writers=8 trial=1 writer=6 start_us=411 end_us=5034466 outcome=AlreadyExists HTTP 412
+race Put writers=8 trial=1 writer=7 start_us=69 end_us=4032928 outcome=AlreadyExists HTTP 412
+race Put writers=8 trial=1 overlap=true successes=1 pass=true
+race SUMMARY Put writers=8 trials=50 overlapping=50 successes=50 violations=0
+§4 concurrent_put_8 PASS cleanup=PASS
+race Multipart writers=2 trial=1 writer=0 start_us=261 end_us=7997 outcome=accepted
+race Multipart writers=2 trial=1 writer=1 start_us=23 end_us=1010730 outcome=AlreadyExists HTTP 412
+race Multipart writers=2 trial=1 overlap=true successes=1 pass=true
+race SUMMARY Multipart writers=2 trials=200 overlapping=200 successes=200 violations=0
+§4 concurrent_multipart_publication_2 PASS cleanup=PASS
+race Multipart writers=8 trial=1 writer=0 start_us=264 end_us=3899 outcome=AlreadyExists HTTP 412
+race Multipart writers=8 trial=1 writer=1 start_us=228 end_us=3869 outcome=AlreadyExists HTTP 412
+race Multipart writers=8 trial=1 writer=2 start_us=299 end_us=3857 outcome=AlreadyExists HTTP 412
+race Multipart writers=8 trial=1 writer=3 start_us=190 end_us=3889 outcome=AlreadyExists HTTP 412
+race Multipart writers=8 trial=1 writer=4 start_us=339 end_us=4143 outcome=AlreadyExists HTTP 412
+race Multipart writers=8 trial=1 writer=5 start_us=137 end_us=3831 outcome=AlreadyExists HTTP 412
+race Multipart writers=8 trial=1 writer=6 start_us=95 end_us=4064 outcome=AlreadyExists HTTP 412
+race Multipart writers=8 trial=1 writer=7 start_us=47 end_us=2789 outcome=accepted
+race Multipart writers=8 trial=1 overlap=true successes=1 pass=true
+race SUMMARY Multipart writers=8 trials=50 overlapping=50 successes=50 violations=0
+§4 concurrent_multipart_publication_8 PASS cleanup=PASS
+race Mixed writers=2 trial=1 writer=0 start_us=275 end_us=6674 outcome=accepted
+race Mixed writers=2 trial=1 writer=1 start_us=26 end_us=8084 outcome=AlreadyExists HTTP 412
+race Mixed writers=2 trial=1 overlap=true successes=1 pass=true
+race SUMMARY Mixed writers=2 trials=200 overlapping=200 successes=200 violations=0
+§4 concurrent_put_and_multipart_publication PASS cleanup=PASS
+race Replace writers=2 trial=1 writer=0 start_us=371 end_us=12795 outcome=AlreadyExists HTTP 412
+race Replace writers=2 trial=1 writer=1 start_us=35 end_us=10057 outcome=accepted
+race Replace writers=2 trial=1 overlap=true successes=1 pass=true
+race SUMMARY Replace writers=2 trials=200 overlapping=200 successes=200 violations=0
+§4 concurrent_replace_current_revision PASS cleanup=PASS
+§4 create_once_single_put PASS cleanup=PASS
+§4 whole_object_reads PASS cleanup=PASS
+§4 ranged_reads PASS cleanup=PASS
+§4 prefix_listing PASS cleanup=PASS
+§4 exact_status PASS cleanup=PASS
+§4 deletion PASS cleanup=PASS
+§4 setup_provider_check PASS cleanup=PASS
+§4 create_once_multipart PASS cleanup=PASS
+§4 partial_uploads_hidden PASS cleanup=PASS
+§4 multipart_resume PASS cleanup=PASS
+publication multipart=false before=StorageTime { seconds: 1792039267, nanos: 0 } published=StorageTime { seconds: 1792039267, nanos: 0 } after=StorageTime { seconds: 1792039267, nanos: 0 }
+publication multipart=true before=StorageTime { seconds: 1792039269, nanos: 0 } published=StorageTime { seconds: 1792039269, nanos: 0 } after=StorageTime { seconds: 1792039269, nanos: 0 }
+§4 single_put_timestamp_equals_completion PASS cleanup=PASS
+§4 multipart_timestamp_equals_completion PASS cleanup=PASS
+replacement changed=true same_size=true same_tick=true
+replacement changed=true same_size=true same_tick=true
+replacement changed=true same_size=true same_tick=true
+replacement changed=true same_size=true same_tick=true
+§4 revision_changes_on_replace PASS cleanup=PASS
+listing_lag SUMMARY provider_case=S3_object trials=20 min_s=0.003241417 median_s=0.007254062 max_s=0.051068708 omitted_trials=0 timeouts=0
+§4 listing_lag PASS cleanup=PASS
+§4 immediate_device_folders PASS cleanup=PASS
+bucket versioning_after=Disabled stable=true
+certification suite=5 PASS
+```
+
+### Versioning enabled
+
+```text
+bucket versioning=Enabled
+setup_safety_check refused: S3 bucket versioning Enabled is not certified for this profile
+candidate S3Settings { signing: AwsSigV4, single_put: IfNoneMatch, copy_publication: Every(IfNoneMatch), multipart_timestamp: Completion, checksums: Absent, listing: V2, revision: ETag, response_headers: S3, request_checksums: false }
+setup_profile_check refused: S3 profile SeaweedFs is refused: concurrent create-once publication failed certification
+§4 native_behavior_detection PASS
+race Put writers=2 trial=1 writer=0 start_us=177 end_us=1103174 outcome=AlreadyExists HTTP 412
+race Put writers=2 trial=1 writer=1 start_us=29 end_us=103739 outcome=accepted
+race Put writers=2 trial=1 overlap=true successes=1 pass=true
+race SUMMARY Put writers=2 trials=200 overlapping=200 successes=200 violations=0
+§4 concurrent_put_2 PASS cleanup=PASS
+race Put writers=8 trial=1 writer=0 start_us=368 end_us=6015747 outcome=AlreadyExists HTTP 412
+race Put writers=8 trial=1 writer=1 start_us=144 end_us=5015086 outcome=AlreadyExists HTTP 412
+race Put writers=8 trial=1 writer=2 start_us=404 end_us=1009321 outcome=AlreadyExists HTTP 412
+race Put writers=8 trial=1 writer=3 start_us=245 end_us=3011742 outcome=AlreadyExists HTTP 412
+race Put writers=8 trial=1 writer=4 start_us=287 end_us=7017420 outcome=AlreadyExists HTTP 412
+race Put writers=8 trial=1 writer=5 start_us=193 end_us=2011271 outcome=AlreadyExists HTTP 412
+race Put writers=8 trial=1 writer=6 start_us=327 end_us=4013341 outcome=AlreadyExists HTTP 412
+race Put writers=8 trial=1 writer=7 start_us=33 end_us=8739 outcome=accepted
+race Put writers=8 trial=1 overlap=true successes=1 pass=true
+race SUMMARY Put writers=8 trials=50 overlapping=50 successes=50 violations=0
+§4 concurrent_put_8 PASS cleanup=PASS
+race Multipart writers=2 trial=1 writer=0 start_us=276 end_us=1011247 outcome=AlreadyExists HTTP 412
+race Multipart writers=2 trial=1 writer=1 start_us=37 end_us=6570 outcome=accepted
+race Multipart writers=2 trial=1 overlap=true successes=1 pass=true
+race SUMMARY Multipart writers=2 trials=200 overlapping=200 successes=200 violations=0
+§4 concurrent_multipart_publication_2 PASS cleanup=PASS
+race Multipart writers=8 trial=1 writer=0 start_us=1263 end_us=2042938 outcome=AlreadyExists HTTP 412
+race Multipart writers=8 trial=1 writer=1 start_us=1110 end_us=2042572 outcome=AlreadyExists HTTP 412
+race Multipart writers=8 trial=1 writer=2 start_us=765 end_us=39647 outcome=AlreadyExists HTTP 412
+race Multipart writers=8 trial=1 writer=3 start_us=939 end_us=18926 outcome=accepted
+race Multipart writers=8 trial=1 writer=4 start_us=344 end_us=1041918 outcome=AlreadyExists HTTP 412
+race Multipart writers=8 trial=1 writer=5 start_us=253 end_us=40434 outcome=AlreadyExists HTTP 412
+race Multipart writers=8 trial=1 writer=6 start_us=457 end_us=2021194 outcome=AlreadyExists HTTP 412
+race Multipart writers=8 trial=1 writer=7 start_us=55 end_us=1019932 outcome=AlreadyExists HTTP 412
+race Multipart writers=8 trial=1 overlap=true successes=1 pass=true
+race SUMMARY Multipart writers=8 trials=50 overlapping=50 successes=50 violations=0
+§4 concurrent_multipart_publication_8 PASS cleanup=PASS
+race Mixed writers=2 trial=1 writer=0 start_us=247 end_us=81728 outcome=AlreadyExists HTTP 412
+race Mixed writers=2 trial=1 writer=1 start_us=24 end_us=8086 outcome=accepted
+race Mixed writers=2 trial=1 overlap=true successes=1 pass=true
+race SUMMARY Mixed writers=2 trials=200 overlapping=200 successes=200 violations=0
+§4 concurrent_put_and_multipart_publication PASS cleanup=PASS
+race Replace writers=2 trial=1 writer=0 start_us=344 end_us=117660 outcome=AlreadyExists HTTP 412
+race Replace writers=2 trial=1 writer=1 start_us=19 end_us=11680 outcome=accepted
+race Replace writers=2 trial=1 overlap=true successes=1 pass=true
+race SUMMARY Replace writers=2 trials=200 overlapping=200 successes=200 violations=0
+§4 concurrent_replace_current_revision PASS cleanup=PASS
+§4 create_once_single_put PASS cleanup=PASS
+§4 whole_object_reads PASS cleanup=PASS
+§4 ranged_reads PASS cleanup=PASS
+§4 prefix_listing PASS cleanup=PASS
+§4 exact_status PASS cleanup=PASS
+§4 deletion PASS cleanup=PASS
+§4 setup_provider_check PASS cleanup=PASS
+§4 create_once_multipart PASS cleanup=PASS
+§4 partial_uploads_hidden PASS cleanup=PASS
+§4 multipart_resume PASS cleanup=PASS
+publication multipart=false before=StorageTime { seconds: 1792040511, nanos: 0 } published=StorageTime { seconds: 1792040511, nanos: 0 } after=StorageTime { seconds: 1792040511, nanos: 0 }
+publication multipart=true before=StorageTime { seconds: 1792040513, nanos: 0 } published=StorageTime { seconds: 1792040513, nanos: 0 } after=StorageTime { seconds: 1792040513, nanos: 0 }
+§4 single_put_timestamp_equals_completion PASS cleanup=PASS
+§4 multipart_timestamp_equals_completion PASS cleanup=PASS
+replacement changed=true same_size=true same_tick=true
+replacement changed=true same_size=true same_tick=false
+replacement changed=true same_size=true same_tick=true
+replacement changed=true same_size=true same_tick=true
+§4 revision_changes_on_replace PASS cleanup=PASS
+listing_lag SUMMARY provider_case=S3_object trials=20 min_s=0.006007416 median_s=0.012257978 max_s=0.190505875 omitted_trials=0 timeouts=0
+§4 listing_lag PASS cleanup=PASS
+§4 immediate_device_folders PASS cleanup=PASS
+bucket versioning_after=Enabled stable=true
+certification suite=5 PASS
+```

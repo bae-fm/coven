@@ -69,7 +69,7 @@ pub use coven_storage::{AccessKeyAdmin, AdminCredential, MintScope, S3MemberKey}
 pub use coven_storage::{
     ByteRange, ChecksumValue, CloudProvider, DropboxAccess, DropboxLocation, GoogleDriveAccess,
     OAuthAccess, ObjectChecksum, ObjectPath, ObjectPrefix, OwnBucketReason, S3BucketVersioning,
-    S3Checksums, S3CopyCondition, S3Credentials, S3Detection, S3Listing, S3Multipart,
+    S3Checksums, S3CopyCondition, S3CopyPublication, S3Credentials, S3Detection, S3Listing,
     S3MultipartTimestamp, S3Observation, S3Probe, S3Profile, S3ProfileName, S3ResponseHeaders,
     S3Revision, S3Settings, S3Signing, S3SinglePut, StorageConfig, StorageError, StorageFailure,
     StoredObject,

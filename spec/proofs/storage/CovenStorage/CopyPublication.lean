@@ -287,4 +287,141 @@ theorem check_then_write_two_winners :
       confirm after.1 1 (.write 31 1) = .reset := by
   decide
 
+/-! ## Every object by copy
+
+A profile that publishes every object by copy (`S3CopyPublication::Every`)
+stages each create, whatever its size, as a session temporary and publishes
+it with one conditional copy, so every publication of a name is a copy: a
+run of `Op`s. The provider assumption is copy against copy only: the
+provider applies conditional copies of one name one at a time, each checking
+the destination and writing it in one step (`copy`). Nothing is assumed of
+a conditional PUT racing a copy (`put_racing_copy_two_winners`). -/
+
+/-- 1 when this step was a copy that published `dest`. -/
+def Op.copiedTo (dest : Path) : Op → Option Outcome → Nat
+  | .publish _ d _, some .copied => if d = dest then 1 else 0
+  | _, _ => 0
+
+/-- How many of a run's copies published `dest`. -/
+def copiedAt (dest : Path) : Bucket → List Op → Nat
+  | _, [] => 0
+  | b, op :: ops => op.copiedTo dest (op.apply b).2 + copiedAt dest (op.apply b).1 ops
+
+theorem publish_elsewhere (b : Bucket) (s : Nat) (d dest : Path) (time : Nat)
+    (other : d ≠ dest) : (publish b s d time).1.published dest = b.published dest := by
+  have : dest ≠ d := fun eq => other eq.symm
+  simp only [publish, discard_hidden, copy]
+  cases b.staging s with
+  | none => rfl
+  | some _ => cases b.published d <;> simp [this]
+
+/-- A publication that did not copy left the published objects as they were. -/
+theorem publish_unchanged (b : Bucket) (s : Nat) (d : Path) (time : Nat)
+    (refused : (publish b s d time).2 ≠ .copied) :
+    (publish b s d time).1.published = b.published := by
+  simp only [publish, discard_hidden, copy] at refused ⊢
+  cases hs : b.staging s with
+  | none => rfl
+  | some _ =>
+      cases hd : b.published d with
+      | some _ => rfl
+      | none => simp [hs, hd] at refused
+
+/-- A copy that published `d` leaves it occupied. -/
+theorem publish_occupies (b : Bucket) (s : Nat) (d : Path) (time : Nat)
+    (copied : (publish b s d time).2 = .copied) :
+    ((publish b s d time).1.published d).isSome := by
+  simp only [publish, discard_hidden, copy] at copied ⊢
+  cases hs : b.staging s with
+  | none => simp [hs] at copied
+  | some _ =>
+      cases hd : b.published d with
+      | some _ => simp [hs, hd] at copied
+      | none => simp
+
+/-- Copies into an occupied name never publish. -/
+theorem publish_occupied (b : Bucket) (s : Nat) (d : Path) (time : Nat)
+    (occupied : (b.published d).isSome) : (publish b s d time).2 ≠ .copied := by
+  simp only [publish, copy]
+  cases hs : b.staging s with
+  | none => simp
+  | some _ =>
+      cases hd : b.published d with
+      | none => simp [hd] at occupied
+      | some _ => simp
+
+theorem copiedAt_stage (dest : Path) (b : Bucket) (s : Nat) (bytes : Bytes) (ops : List Op) :
+    copiedAt dest b (.stage s bytes :: ops) = copiedAt dest (stage b s bytes) ops := by
+  simp [copiedAt, Op.apply, Op.copiedTo]
+
+theorem copiedAt_publish (dest : Path) (b : Bucket) (s : Nat) (d : Path) (time : Nat)
+    (ops : List Op) :
+    copiedAt dest b (.publish s d time :: ops) =
+      (if d = dest ∧ (publish b s d time).2 = .copied then 1 else 0) +
+        copiedAt dest (publish b s d time).1 ops := by
+  simp only [copiedAt, Op.apply]
+  cases (publish b s d time).2 <;> simp [Op.copiedTo]
+
+/-- Of a run's copies to one name, in any arrival order and with any
+temporaries staged, at most one publishes, and none when the name was
+already occupied. -/
+theorem copied_at_most (dest : Path) (b : Bucket) (ops : List Op) :
+    copiedAt dest b ops ≤ 1 ∧ ((b.published dest).isSome → copiedAt dest b ops = 0) := by
+  induction ops generalizing b with
+  | nil => simp [copiedAt]
+  | cons op ops ih =>
+      cases op with
+      | stage s bytes =>
+          rw [copiedAt_stage]
+          exact ih (stage b s bytes)
+      | publish s d time =>
+          rw [copiedAt_publish]
+          have rest := ih (publish b s d time).1
+          by_cases same : d = dest
+          · subst same
+            by_cases copied : (publish b s d time).2 = .copied
+            · have zero := rest.2 (publish_occupies b s d time copied)
+              have free : (b.published d).isSome = false := by
+                cases h : (b.published d).isSome
+                · rfl
+                · exact absurd copied (publish_occupied b s d time h)
+              simp [copied, zero, free]
+            · have kept := publish_unchanged b s d time copied
+              rw [kept] at rest
+              simpa [copied] using rest
+          · have kept := publish_elsewhere b s d dest time same
+            rw [kept] at rest
+            simpa [same] using rest
+
+/-- When every publication of a name is a conditional copy, at most one is
+accepted, given the provider applies one name's copies one at a time. -/
+theorem every_copy_at_most_one (dest : Path) (b : Bucket) (ops : List Op) :
+    copiedAt dest b ops ≤ 1 :=
+  (copied_at_most dest b ops).1
+
+/-- A conditional PUT the provider checks and writes in two steps, between
+which a copy of the same name can land. -/
+def putCheck (b : Bucket) (dest : Path) : Bool := (b.published dest).isNone
+
+def putWrite (b : Bucket) (checked : Bool) (s : Nat) (dest : Path) (bytes : Bytes)
+    (time : Nat) : Bucket × Bool :=
+  if checked then
+    ({ b with published := fun p => if p = dest then some ⟨⟨bytes, time⟩, s⟩ else b.published p },
+      true)
+  else (b, false)
+
+/-- Why the assumption covers copies only: a conditional PUT checks a free
+name, a copy of that name lands, then the PUT writes. Both are accepted and
+the PUT replaces the copy's object, so the copy's session no longer finds its
+marker. SeaweedFS 4.48's unversioned bucket accepted both writers of this
+race in 14 of 200 suite 5 trials. -/
+theorem put_racing_copy_two_winners :
+    let dest := Path.write 31 1
+    let staged := stage empty 2 [2]
+    let copied := publish staged 2 dest 0
+    let put := putWrite copied.1 (putCheck staged dest) 1 dest [1] 0
+    copied.2 = .copied ∧ put.2 = true ∧ put.1.objects dest = some ⟨[1], 0⟩ ∧
+      confirm put.1 2 dest = .reset := by
+  decide
+
 end CovenStorage.CopyPublication

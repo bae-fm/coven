@@ -15,8 +15,11 @@ async fn lean_differential_s3_create() {
             Arc::get_mut(&mut storage.provider)
                 .unwrap()
                 .single_request_limit = limit;
-            // Multipart creates below the limit publish by copy on copy profiles.
-            let copy = limit == 3 && profile.settings.multipart.uses_copy();
+            // Multipart creates below the limit publish by copy on copy
+            // profiles; an every-object profile copies every create.
+            let publication = profile.settings.copy_publication;
+            let copy = limit == 3 && publication.multipart().is_some()
+                || publication.single_request().is_some();
             crate::providers::tests::compare_create_model(&storage, copy).await;
             assert!(state.lock().unwrap().uploads.is_empty());
             assert_eq!(state.lock().unwrap().objects.len(), 4);
@@ -409,10 +412,8 @@ async fn s3_copy_profiles_refuse_uploads_above_the_single_copy_limit() {
         );
         let result = storage.begin_upload(&path, limit + 1).await;
         let limited = matches!(
-            profile.settings.multipart,
-            S3Multipart::Copy(
-                S3CopyCondition::IfNoneMatch | S3CopyCondition::CloudflareIfNoneMatch
-            )
+            profile.settings.copy_publication.multipart(),
+            Some(S3CopyCondition::IfNoneMatch | S3CopyCondition::CloudflareIfNoneMatch)
         );
         if limited {
             assert!(matches!(
@@ -426,10 +427,110 @@ async fn s3_copy_profiles_refuse_uploads_above_the_single_copy_limit() {
         }
         assert!(storage.begin_upload(&path, limit).await.is_ok() || !limited);
     }
-    assert!(matches!(
+    assert_eq!(
         profile::CataloguedProfile::named(S3ProfileName::SeaweedFs)
             .settings
-            .multipart,
-        S3Multipart::Copy(S3CopyCondition::IfNoneMatch)
-    ));
+            .copy_publication,
+        S3CopyPublication::Every(S3CopyCondition::IfNoneMatch)
+    );
+}
+
+async fn every_object_provider() -> (TestServer, Arc<Mutex<Remote>>, StorageConnection<S3Storage>) {
+    let state = Arc::new(Mutex::new(Remote::default()));
+    let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
+    let settings = profile::CataloguedProfile::named(S3ProfileName::SeaweedFs).settings;
+    let storage = profile_provider(&server.url, settings);
+    (server, state, storage)
+}
+
+fn temporaries(state: &Mutex<Remote>) -> usize {
+    state
+        .lock()
+        .unwrap()
+        .objects
+        .keys()
+        .filter(|key| key.contains("/.coven-uploads/"))
+        .count()
+}
+
+/// A profile publishing every object by copy stages even a single-request
+/// create and publishes it with one conditional copy, which an occupied name
+/// refuses with its bytes unchanged; no temporary outlives the call (§4).
+#[tokio::test]
+async fn every_object_copy_publishes_single_request_creates_by_conditional_copy() {
+    let (_server, state, storage) = every_object_provider().await;
+    let path = ObjectPath::device_log(
+        STORE_ID,
+        coven_foundation::id_source::DeviceId(31),
+        std::num::NonZeroU64::MIN,
+    );
+    storage.create(&path, b"original").await.unwrap();
+    assert_eq!(state.lock().unwrap().copies, 1);
+    for bytes in [&b"replacement"[..], b"original"] {
+        assert_eq!(
+            storage.create(&path, bytes).await.unwrap_err().failure(),
+            StorageFailure::AlreadyExists
+        );
+    }
+    assert_eq!(state.lock().unwrap().copies, 3);
+    assert_eq!(storage.read(&path).await.unwrap(), b"original");
+    assert_eq!(temporaries(&state), 0);
+    assert!(state.lock().unwrap().uploads.is_empty());
+    // Store-log entries publish in one request, here one copy too.
+    let entry = ObjectPath::store_log(
+        STORE_ID,
+        coven_foundation::id_source::DeviceId(31),
+        std::num::NonZeroU64::MIN,
+    );
+    storage.create(&entry, b"entry").await.unwrap();
+    assert_eq!(state.lock().unwrap().copies, 4);
+    // Replacements stay unconditional PUTs of a device's own objects.
+    let positions = ObjectPath::positions(STORE_ID, coven_foundation::id_source::DeviceId(31));
+    storage.replace(&positions, b"positions").await.unwrap();
+    assert_eq!(state.lock().unwrap().copies, 4);
+    assert_eq!(temporaries(&state), 0);
+    let listed = storage.list(&ObjectPrefix::all(STORE_ID)).await.unwrap();
+    assert_eq!(listed.len(), 3);
+}
+
+/// A lost copy reply: the copy landed, and the create settles by this
+/// attempt's marker at the destination, not as another object's occupation.
+#[tokio::test]
+async fn every_object_copy_settles_a_lost_copy_reply_by_its_marker() {
+    let (_server, state, storage) = every_object_provider().await;
+    let path = ObjectPath::device_log(
+        STORE_ID,
+        coven_foundation::id_source::DeviceId(31),
+        std::num::NonZeroU64::MIN,
+    );
+    state.lock().unwrap().fail_copy_reply = true;
+    storage.create(&path, b"landed").await.unwrap();
+    assert_eq!(state.lock().unwrap().copies, 1);
+    assert_eq!(storage.read(&path).await.unwrap(), b"landed");
+    assert_eq!(temporaries(&state), 0);
+}
+
+/// A temporary that cannot be deleted fails the create even when the copy
+/// published it; the occupied retry is then compared by its bytes (§10).
+#[tokio::test]
+async fn every_object_copy_reports_a_failed_temporary_deletion() {
+    let (_server, state, storage) = every_object_provider().await;
+    let path = ObjectPath::device_log(
+        STORE_ID,
+        coven_foundation::id_source::DeviceId(31),
+        std::num::NonZeroU64::MIN,
+    );
+    state.lock().unwrap().refuse_temporary_delete = true;
+    assert_eq!(
+        storage.create(&path, b"bytes").await.unwrap_err().failure(),
+        StorageFailure::PermissionDenied
+    );
+    assert_eq!(storage.read(&path).await.unwrap(), b"bytes");
+    assert_eq!(temporaries(&state), 1);
+    state.lock().unwrap().refuse_temporary_delete = false;
+    assert_eq!(
+        storage.create(&path, b"bytes").await.unwrap_err().failure(),
+        StorageFailure::AlreadyExists
+    );
+    assert_eq!(temporaries(&state), 1);
 }

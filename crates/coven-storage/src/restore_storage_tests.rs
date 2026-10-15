@@ -31,7 +31,7 @@ fn restore_storage_is_exactly_the_location_for_every_provider() {
                 profile: Some(crate::S3Profile::Custom(crate::S3Settings {
                     signing: crate::S3Signing::AwsSigV4,
                     single_put: crate::S3SinglePut::IfNoneMatch,
-                    multipart: crate::S3Multipart::Copy(
+                    copy_publication: crate::S3CopyPublication::Multipart(
                         crate::S3CopyCondition::CloudflareIfNoneMatch,
                     ),
                     multipart_timestamp: crate::S3MultipartTimestamp::Start,
@@ -43,7 +43,7 @@ fn restore_storage_is_exactly_the_location_for_every_provider() {
                 })),
                 prefix: String::new(),
             },
-            r#"{"S3":{"bucket":"bucket","region":"region","endpoint":"http://localhost:9000/","profile":{"Custom":{"signing":"AwsSigV4","single_put":"IfNoneMatch","multipart":{"Copy":"CloudflareIfNoneMatch"},"multipart_timestamp":"Start","checksums":"Absent","listing":"V1","revision":"ETag","response_headers":"S3","request_checksums":false}},"prefix":""}}"#,
+            r#"{"S3":{"bucket":"bucket","region":"region","endpoint":"http://localhost:9000/","profile":{"Custom":{"signing":"AwsSigV4","single_put":"IfNoneMatch","copy_publication":{"Multipart":"CloudflareIfNoneMatch"},"multipart_timestamp":"Start","checksums":"Absent","listing":"V1","revision":"ETag","response_headers":"S3","request_checksums":false}},"prefix":""}}"#,
         ),
         (
             StorageConfig::GoogleDrive {

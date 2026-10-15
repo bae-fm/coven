@@ -652,10 +652,12 @@ the file's ranges under `F`.
   - An S3 service's behaviors are data, the public `S3Settings`
     ([E5](api.md#e5-storage-and-sync)), one enum value each: AWS SigV4 or
     Google HMAC signing; the single-PUT create-once condition
-    (`If-None-Match: *` or `x-goog-if-generation-match: 0`); multipart
-    publication by conditional completion, or by copy with a destination
-    condition (`If-None-Match: *`, `x-goog-if-generation-match: 0` or
-    `cf-copy-destination-if-none-match: *`); the native multipart timestamp
+    (`If-None-Match: *` or `x-goog-if-generation-match: 0`); copy
+    publication (`S3CopyPublication`): never, so single PUTs and multipart
+    completions carry the create-once condition; multipart uploads only; or
+    every object, single-request creates included, each by copy with a
+    destination condition (`If-None-Match: *`, `x-goog-if-generation-match: 0`
+    or `cf-copy-destination-if-none-match: *`); the native multipart timestamp
     (completion or start); the checksum policy (scope stated, unstated scope
     ignored, or none returned); listing V2 or V1; ETag or generation revision;
     S3 or Google response headers; and
@@ -838,15 +840,14 @@ the file's ranges under `F`.
     passed Ceph RGW 20.2.4 with versioning disabled on **2026-10-14**, and
     RustFS 1.0.1 the same day with versioning both disabled and enabled. It
     failed SeaweedFS 4.48 in both states: concurrent conditional multipart
-    completions both succeeded, so SeaweedFS's suite 2 certificate is
-    withdrawn and it is **uncertified**. Setup refuses the SeaweedFS profile
-    before any request with `StorageSetupError::S3ProfileRefused` naming it;
-    detection does not identify a service, so this refusal covers only the
-    named profile. Suite version 5, which races the named entry's own
-    publication, passed SeaweedFS's copy publication with versioning disabled
-    and enabled on **2026-10-14**, but with versioning disabled a conditional
-    PUT racing a conditional copy of one name both succeeded in 14 of 200
-    trials, so the refusal stands. The same day suite 5 passed R2, RustFS
+    completions both succeeded, so SeaweedFS's suite 2 certificate was
+    withdrawn. Suite version 5, which races the named entry's own
+    publication, passed SeaweedFS's multipart copy publication with
+    versioning disabled and enabled on **2026-10-14**, but with versioning
+    disabled a conditional PUT racing a conditional copy of one name both
+    succeeded in 14 of 200 trials. Its entry now publishes every object by
+    copy, and on **2026-10-15** suite 5 passed it with versioning disabled
+    and enabled; its certificates cover both states. On 2026-10-14 suite 5 passed R2, RustFS
     1.0.1 with versioning disabled and enabled, and Ceph RGW 20.2.4 and GCS
     with versioning disabled; those entries record suite 5 certificates. It
     also passed Versity Gateway 1.9.0 with versioning disabled and enabled
@@ -855,26 +856,26 @@ the file's ranges under `F`.
     is **uncertified**: there is no live account. The table's selected
     behaviors are:
 
-    | Profile | Signing | Single PUT | Multipart publication | Native multipart time | Checksums | Listing | Revision |
+    | Profile | Signing | Single PUT | Copy publication | Native multipart time | Checksums | Listing | Revision |
     | --- | --- | --- | --- | --- | --- | --- | --- |
-    | AWS (uncertified) | AWS SigV4 | `If-None-Match: *` | Copy with `If-None-Match: *` | Start | Scope stated | V2 | ETag |
-    | GCS (certified) | Google HMAC | `x-goog-if-generation-match: 0` | Copy with the same generation condition | Completion | Scope stated | V2 | Generation |
-    | R2 (certified) | AWS SigV4 | `If-None-Match: *` | Conditional completion | Completion | Unstated scope ignored | V2 | ETag |
-    | RustFS (certified, versioned too) | AWS SigV4 | `If-None-Match: *` | Conditional completion | Completion | None returned | V2 | ETag |
-    | SeaweedFS (uncertified, refused) | AWS SigV4 | `If-None-Match: *` | Copy with `If-None-Match: *` | Completion | None returned | V2 | ETag |
-    | Ceph RGW (certified, unversioned) | AWS SigV4 | `If-None-Match: *` | Conditional completion | Completion | None returned | V2 | ETag |
-    | Versity Gateway (certified, versioned too) | AWS SigV4 | `If-None-Match: *` | Conditional completion | Completion | Scope stated | V2 | ETag |
+    | AWS (uncertified) | AWS SigV4 | `If-None-Match: *` | Multipart, `If-None-Match: *` | Start | Scope stated | V2 | ETag |
+    | GCS (certified) | Google HMAC | `x-goog-if-generation-match: 0` | Multipart, the same generation condition | Completion | Scope stated | V2 | Generation |
+    | R2 (certified) | AWS SigV4 | `If-None-Match: *` | Never (conditional completion) | Completion | Unstated scope ignored | V2 | ETag |
+    | RustFS (certified, versioned too) | AWS SigV4 | `If-None-Match: *` | Never (conditional completion) | Completion | None returned | V2 | ETag |
+    | SeaweedFS (certified, versioned too) | AWS SigV4 | `If-None-Match: *` | Every object, `If-None-Match: *` | Completion | None returned | V2 | ETag |
+    | Ceph RGW (certified, unversioned) | AWS SigV4 | `If-None-Match: *` | Never (conditional completion) | Completion | None returned | V2 | ETag |
+    | Versity Gateway (certified, versioned too) | AWS SigV4 | `If-None-Match: *` | Never (conditional completion) | Completion | Scope stated | V2 | ETag |
 
-    RustFS and Versity Gateway support versioned buckets: RustFS 1.0.1 and
-    Versity Gateway 1.9.0 (POSIX backend with `--versioning-dir`) passed every
-    suite 5 race with versioning enabled. GCS ran only with versioning disabled, so it
-    has no versioned-bucket evidence.
-    SeaweedFS 4.48 fails the multipart races with versioning enabled or not.
-    AWS remains uncertified. R2 has no versioning feature. Ceph
+    RustFS, SeaweedFS and Versity Gateway support versioned buckets: RustFS
+    1.0.1, SeaweedFS 4.48 publishing every object by copy, and Versity Gateway
+    1.9.0 (POSIX backend with `--versioning-dir`) passed every suite 5 race
+    with versioning enabled. GCS ran only with versioning disabled, so it
+    has no versioned-bucket evidence. AWS remains uncertified. R2 has no versioning feature. Ceph
     RGW 20.2.4 fails the versioned races. See the
     [suite 4 evidence](s3-certification.md#concurrent-certification-suite-4),
-    the [full battery](s3-certification.md#full-battery-2026-10-14) and the
+    the [full battery](s3-certification.md#full-battery-2026-10-14), the
     [GCS and Versity Gateway runs](s3-certification.md#gcs-and-versity-gateway-2026-10-14)
+    and the [SeaweedFS every-object run](s3-certification.md#seaweedfs-every-object-copy-publication-2026-10-15)
     for the live runs and their bucket states.
 
     AWS, R2 and Versity Gateway request checksums; every profile but GCS consumes S3
@@ -896,7 +897,10 @@ the file's ranges under `F`.
     version 5 a named profile's own entry is the candidate, checked against
     those observations; otherwise the detected settings are. Sequential probes
     cannot show that a race needs copy publication, so detection alone would
-    race SeaweedFS's conditional completion instead of its copy. A profile
+    race SeaweedFS's conditional completion instead of its copy, and
+    detection never chooses copy publication for every object. A profile
+    publishing every object by copy races its single-request creates as
+    copies too, so its PUT and mixed races are copies against copies. A profile
     setup refuses prints that verdict separately. The candidate
     then runs the adapter's full live contracts, including setup, reads,
     ranges, resumption, replacement revisions and listing lag. Suite 4 records
@@ -969,6 +973,18 @@ the file's ranges under `F`.
     Network failures and throttling retain it for the same session.
     A failed deletion fails the call and retains the recording for retry;
     an operation error and deletion error are both preserved.
+  - A profile publishing every object by copy (SeaweedFS) publishes a
+    single-request create the same way: one unconditional PUT stages its
+    bytes at `<prefix>/<store>/.coven-uploads/<attempt>`, carrying a fresh
+    attempt id as its marker, then one conditional copy publishes it.
+    Store-log entries are such creates, each still dated by one request's
+    completion: the copy's. A refused copy, or one whose reply was lost, is
+    this attempt's own exactly when the destination carries its marker;
+    otherwise the copy's answer stands. Nothing resumes a single request,
+    so its temporary is deleted whatever the copy's outcome, and a failed
+    deletion fails the call with both errors preserved. A crash between
+    staging and deletion leaves the temporary in the reserved namespace,
+    outside every listing and read.
   - Given a copy that checks and publishes its destination atomically,
     copy publication is create-once: the copy changes published objects
     exactly as a create does, a temporary is never visible as a published
@@ -981,6 +997,16 @@ the file's ranges under `F`.
     the provider property certification's races test: a completion that checks
     a free name and then writes it lets two racers both succeed
     ([`check_then_write_two_winners`](proofs/storage/CovenStorage/CopyPublication.lean)).
+    When every publication of a name is a conditional copy, at most one is
+    accepted, in any arrival order, given only that the provider applies one
+    name's copies one at a time; none is when the name was already taken
+    ([`every_copy_at_most_one`, `copied_at_most`](proofs/storage/CovenStorage/CopyPublication.lean)).
+    That assumption says nothing of a conditional PUT racing a copy: a PUT
+    that checks a free name, then writes it after a copy landed, is accepted
+    beside the copy
+    ([`put_racing_copy_two_winners`](proofs/storage/CovenStorage/CopyPublication.lean)).
+    A profile whose service keeps copies, but not PUTs, exclusive against
+    copies therefore publishes every object by copy.
   - One S3 `CopyObject` copies at most 5 GiB. A profile publishing by S3
     copy (AWS, SeaweedFS) refuses a larger upload before any request with
     `StorageFailure::CopyTooLarge`; such an object cannot be published
@@ -1027,8 +1053,10 @@ the file's ranges under `F`.
     multipart `Last-Modified` fell between the completion markers, so they use
     conditional completion without a copy. That sequential refusal does not
     hold under concurrency on SeaweedFS 4.48: two racing conditional
-    completions of one name both succeed. The SeaweedFS profile therefore
-    publishes multipart uploads by copy with `If-None-Match: *`. None returned a checksum, even
+    completions of one name both succeed, and in an unversioned bucket a
+    conditional PUT racing a conditional copy of one name both succeed too,
+    while copies racing copies keep one winner. The SeaweedFS profile
+    therefore publishes every object by copy with `If-None-Match: *`. None returned a checksum, even
     with checksum mode; their profiles do not request one and rely on the
     complete-byte comparison required for a missing checksum (below).
     Versity Gateway 1.9.0, versioned or not, refused occupied names the same

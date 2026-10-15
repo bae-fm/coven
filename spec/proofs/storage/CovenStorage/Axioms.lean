@@ -212,6 +212,15 @@ import CovenStorage
 #print axioms CovenStorage.CopyPublication.other_marker_refuses
 #print axioms CovenStorage.CopyPublication.marker_settles_bytes
 #print axioms CovenStorage.CopyPublication.check_then_write_two_winners
+#print axioms CovenStorage.CopyPublication.publish_elsewhere
+#print axioms CovenStorage.CopyPublication.publish_unchanged
+#print axioms CovenStorage.CopyPublication.publish_occupies
+#print axioms CovenStorage.CopyPublication.publish_occupied
+#print axioms CovenStorage.CopyPublication.copiedAt_stage
+#print axioms CovenStorage.CopyPublication.copiedAt_publish
+#print axioms CovenStorage.CopyPublication.copied_at_most
+#print axioms CovenStorage.CopyPublication.every_copy_at_most_one
+#print axioms CovenStorage.CopyPublication.put_racing_copy_two_winners
 
 #print axioms CovenStorage.OwnCopyDamage.step_inv
 #print axioms CovenStorage.OwnCopyDamage.run_inv

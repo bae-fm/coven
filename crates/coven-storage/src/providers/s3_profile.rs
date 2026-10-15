@@ -7,7 +7,7 @@
 //! entry stays uncertified. Commit either with the evidence. A location that
 //! names no profile at an uncatalogued endpoint gets detected settings at setup.
 use crate::{
-    S3Checksums, S3CopyCondition, S3Listing, S3Multipart, S3MultipartTimestamp, S3Profile,
+    S3Checksums, S3CopyCondition, S3CopyPublication, S3Listing, S3MultipartTimestamp, S3Profile,
     S3ProfileName, S3ResponseHeaders, S3Revision, S3Settings, S3Signing, S3SinglePut, StorageError,
     StorageFailure,
 };
@@ -54,11 +54,6 @@ impl S3CopyCondition {
         }
     }
 }
-impl S3Multipart {
-    pub(super) fn uses_copy(self) -> bool {
-        matches!(self, Self::Copy(_))
-    }
-}
 /// The finest scope a member key can have on a service (§4).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum S3KeyScope {
@@ -71,13 +66,6 @@ pub(crate) enum S3KeyScope {
 pub(super) enum Certification<'date> {
     Uncertified,
     Passed { date: &'date str, suite: u32 },
-}
-/// Whether setup admits a catalogued profile. A profile that failed a
-/// certification race is refused before any request, whatever its bucket.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum Setup {
-    Admitted,
-    Refused,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct CataloguedProfile {
@@ -93,7 +81,6 @@ pub(super) struct CataloguedProfile {
     /// the console makes them (§4).
     pub(super) minter: Option<&'static super::minting::KeyMinter>,
     pub(super) certification: Certification<'static>,
-    pub(super) setup: Setup,
 }
 
 /// Every catalogued service; hosted ones match hostnames in this order.
@@ -104,7 +91,7 @@ pub(super) const PROFILES: &[CataloguedProfile] =
 pub(super) const PLAIN: S3Settings = S3Settings {
     signing: S3Signing::AwsSigV4,
     single_put: S3SinglePut::IfNoneMatch,
-    multipart: S3Multipart::ConditionalCompletion,
+    copy_publication: S3CopyPublication::Never,
     multipart_timestamp: S3MultipartTimestamp::Completion,
     checksums: S3Checksums::ScopeStated,
     listing: S3Listing::V2,
@@ -120,7 +107,7 @@ const AWS: CataloguedProfile = CataloguedProfile {
     name: S3ProfileName::Aws,
     endpoint: Some(EndpointMatch::HostSuffix(".amazonaws.com")),
     settings: S3Settings {
-        multipart: S3Multipart::Copy(S3CopyCondition::IfNoneMatch),
+        copy_publication: S3CopyPublication::Multipart(S3CopyCondition::IfNoneMatch),
         multipart_timestamp: S3MultipartTimestamp::Start,
         ..PLAIN
     },
@@ -130,7 +117,6 @@ const AWS: CataloguedProfile = CataloguedProfile {
     versioned_buckets: Certification::Uncertified,
     minter: Some(&super::iam::AWS_IAM),
     certification: Certification::Uncertified,
-    setup: Setup::Admitted,
 };
 // Suite 5 passed GCS's generation-conditioned copy publication with
 // versioning disabled on 2026-10-14; no versioned bucket was run.
@@ -140,7 +126,7 @@ const GCS: CataloguedProfile = CataloguedProfile {
     settings: S3Settings {
         signing: S3Signing::GoogleHmac,
         single_put: S3SinglePut::GenerationMatch,
-        multipart: S3Multipart::Copy(S3CopyCondition::GenerationMatch),
+        copy_publication: S3CopyPublication::Multipart(S3CopyCondition::GenerationMatch),
         multipart_timestamp: S3MultipartTimestamp::Completion,
         checksums: S3Checksums::ScopeStated,
         listing: S3Listing::V2,
@@ -157,7 +143,6 @@ const GCS: CataloguedProfile = CataloguedProfile {
         date: "2026-10-14",
         suite: 5,
     },
-    setup: Setup::Admitted,
 };
 // Detected by certification suite 1; the raw observations are in spec/s3-certification.md.
 // Cloudflare documents the API differences at https://developers.cloudflare.com/r2/api/s3/api/.
@@ -180,7 +165,6 @@ const R2: CataloguedProfile = CataloguedProfile {
         date: "2026-10-14",
         suite: 5,
     },
-    setup: Setup::Admitted,
 };
 // Self-hosted services are reached at arbitrary endpoints and selected only by
 // name. The raw observations are in spec/s3-certification.md.
@@ -210,21 +194,21 @@ const RUSTFS: CataloguedProfile = CataloguedProfile {
         date: "2026-10-14",
         suite: 5,
     },
-    setup: Setup::Admitted,
 };
 // SeaweedFS 4.48 failed suite 4 with versioning disabled and enabled:
-// concurrent conditional multipart completions both succeeded, so its suite 2
-// certificate, which predates the races, is withdrawn and setup refuses it.
-// Multipart uploads therefore assemble a temporary and publish it with one
-// `CopyObject` conditioned on `If-None-Match: *`, as AWS does.
-// Suite 5 (2026-10-14) passed that copy publication's races in both bucket
-// states, but an unversioned bucket let a conditional PUT and a conditional
-// copy of one name both succeed (14 of 200), so setup still refuses it.
+// concurrent conditional multipart completions both succeeded. Suite 5
+// (2026-10-14) then held copies racing copies in both bucket states, but an
+// unversioned bucket let a conditional PUT and a conditional copy of one name
+// both succeed (14 of 200). So every create, single-request or multipart,
+// stages a temporary and publishes it with one `CopyObject` conditioned on
+// `If-None-Match: *`, and no conditional PUT races a copy. Suite 5 passed
+// that publication with versioning disabled and enabled on 2026-10-15. See
+// spec/s3-certification.md.
 const SEAWEEDFS: CataloguedProfile = CataloguedProfile {
     name: S3ProfileName::SeaweedFs,
     endpoint: None,
     settings: S3Settings {
-        multipart: S3Multipart::Copy(S3CopyCondition::IfNoneMatch),
+        copy_publication: S3CopyPublication::Every(S3CopyCondition::IfNoneMatch),
         checksums: S3Checksums::Absent,
         request_checksums: false,
         ..PLAIN
@@ -232,10 +216,15 @@ const SEAWEEDFS: CataloguedProfile = CataloguedProfile {
     // An identity's S3 policy takes `s3:prefix` conditions and object
     // resources under the store's prefix.
     key_scope: S3KeyScope::Prefix,
-    versioned_buckets: Certification::Uncertified,
+    versioned_buckets: Certification::Passed {
+        date: "2026-10-15",
+        suite: 5,
+    },
     minter: Some(&super::iam::SEAWEEDFS_IAM),
-    certification: Certification::Uncertified,
-    setup: Setup::Refused,
+    certification: Certification::Passed {
+        date: "2026-10-15",
+        suite: 5,
+    },
 };
 
 // Ceph RGW 20.2.4 has the same detected settings as RustFS. It passed suite 5
@@ -255,7 +244,6 @@ const CEPH_RGW: CataloguedProfile = CataloguedProfile {
         date: "2026-10-14",
         suite: 5,
     },
-    setup: Setup::Admitted,
 };
 
 // Versity Gateway 1.9.0 (POSIX backend) detected the plain S3 settings and
@@ -278,7 +266,6 @@ const VERSITY_GW: CataloguedProfile = CataloguedProfile {
         date: "2026-10-15",
         suite: 5,
     },
-    setup: Setup::Admitted,
 };
 
 impl CataloguedProfile {
@@ -362,22 +349,6 @@ pub(super) fn select(
         }
         (None, Some(S3Profile::Custom(settings))) => Ok(Selected::Custom(*settings)),
         (None, None) => Ok(Selected::Undetected),
-    }
-}
-
-/// Refuse a location whose catalogued profile setup does not admit, before
-/// any request (§4).
-pub(crate) fn admit_setup(
-    endpoint: Option<&Url>,
-    profile: Option<&S3Profile>,
-) -> Result<(), crate::StorageSetupError> {
-    match select(endpoint, profile)? {
-        Selected::Catalogued(CataloguedProfile {
-            name,
-            setup: Setup::Refused,
-            ..
-        }) => Err(crate::StorageSetupError::S3ProfileRefused { profile: name }),
-        _ => Ok(()),
     }
 }
 
