@@ -5,7 +5,7 @@ use super::{io, StoreLogSync};
 use crate::{snapshot_data::SavedSnapshot, Refusal, SyncError};
 use crate::{PendingReason, PendingRecord, PendingSubject};
 use coven_crypto::ObjectHasher;
-use coven_database::StoreLog;
+use coven_database::{FileEvidence, StoreLog, UnprovenFiles};
 use coven_format::sealed_snapshot::{SnapshotObjectLayout, SnapshotObjectPrefix};
 use coven_merge::Audience;
 use coven_storage::{ObjectPrefix, StoredObject};
@@ -25,7 +25,6 @@ pub(super) struct Verified {
 }
 
 pub(super) struct Catalog {
-    pub(super) listed: usize,
     /// The verified snapshots this device may load: no body refusal it may
     /// not check again, and a key it accepts. Newest first.
     pub(super) candidates: Vec<Candidate>,
@@ -116,7 +115,6 @@ impl StoreLogSync {
                 objects
             }
         };
-        let listed = objects.len();
         let mut candidates = Vec::new();
         let mut verified = Vec::new();
         let mut newest_unknown = false;
@@ -205,7 +203,6 @@ impl StoreLogSync {
             super::include_positions(&mut positions, &snapshot.prefix.writes.0);
         }
         Ok(Catalog {
-            listed,
             candidates,
             verified,
             required_positions: coven_format::value::WritePositions(
@@ -341,14 +338,25 @@ impl StoreLogSync {
         Ok(())
     }
 
+    /// The fixed file paths a snapshot names, from its retained evidence once
+    /// this version checked it (§16.5). A schema this version cannot interpret
+    /// leaves it unproven, and its body is not read again until the app's
+    /// schema range covers that version.
     pub(super) async fn snapshot_file_references(
         &self,
         candidate: &Candidate,
-    ) -> Result<crate::pass_reads::FileReferences, SyncError> {
+    ) -> Result<FileEvidence, SyncError> {
         let retained =
             crate::object_input::ObjectInput::observe(&self.database, &candidate.object).await?;
-        if let Some(Some(files)) = retained.files().await? {
-            return Ok(files);
+        match retained.files().await? {
+            Some(evidence @ FileEvidence::Complete(_)) => return Ok(evidence),
+            Some(FileEvidence::Unproven(unproven))
+                if !unproven
+                    .changed(|_, _| false, &self.database.write_schema_versions().await?) =>
+            {
+                return Ok(FileEvidence::Unproven(unproven))
+            }
+            _ => (),
         }
         // Validation holds the database writer; it reads only local input.
         retained
@@ -370,10 +378,19 @@ impl StoreLogSync {
             input,
         );
         let (transferred, checked) = tokio::join!(transfer, check);
-        transferred?;
-        let files = checked?;
-        retained.keep_files(Some(files.clone())).await?;
-        Ok(files)
+        let evidence = match checked {
+            // An unsupported schema stops validation before the body ends.
+            Err(coven_database::DbError::Snapshot(coven_database::SnapshotError::Schema {
+                snapshot,
+                ..
+            })) => FileEvidence::Unproven(UnprovenFiles::Schema(snapshot)),
+            checked => {
+                transferred?;
+                FileEvidence::Complete(checked?)
+            }
+        };
+        retained.keep_files(evidence.clone()).await?;
+        Ok(evidence)
     }
 
     async fn stream_snapshot(

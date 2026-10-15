@@ -21,6 +21,8 @@ mod boundaries;
 pub(super) mod catalog;
 #[path = "snapshot_file_retention.rs"]
 mod file_retention;
+#[path = "snapshot_file_scan.rs"]
+mod file_scan;
 #[path = "snapshot_io.rs"]
 mod io;
 #[path = "snapshot_prefix.rs"]

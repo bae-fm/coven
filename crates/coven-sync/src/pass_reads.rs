@@ -1,11 +1,9 @@
 //! Discovery misses and listings shared within one completed observation.
 
-use coven_foundation::id_source::{DeviceId, FileId};
+use coven_foundation::id_source::DeviceId;
 use coven_storage::StoredObject;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
-
-pub(crate) type FileReferences = BTreeSet<(DeviceId, FileId)>;
 
 #[derive(Clone, Default)]
 pub(crate) struct PassReads(Arc<Mutex<Reads>>);

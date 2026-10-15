@@ -416,7 +416,7 @@ impl Device {
     pub(crate) async fn restart(&mut self, storage: Arc<MemoryStorage>) {
         self.reopen(storage, vec![], vec![]).await;
     }
-    async fn device(&self) -> DeviceId {
+    pub(crate) async fn device(&self) -> DeviceId {
         self.db.local_store_log().await.unwrap().device
     }
 }

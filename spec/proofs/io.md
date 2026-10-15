@@ -726,8 +726,10 @@ invalidation of obsolete marks. A correctly established final basis cannot
 drop. Failed or incomplete scans do not certify completion.
 
 `failed_scan_not_complete` and `completed_scan_retained` model the durable
-one-time removed-device file-folder scan. Orphan enumeration, restoration of
-access and reference-safe deletion remain implementation obligations.
+one-time removed-device file-folder scan. The Rust comparison
+`io_differential_file_scan` folds `observeFiles` over failed and completed
+listings after a cut-off. Orphan enumeration, restoration of access and
+reference-safe deletion remain implementation obligations.
 
 ## Requests and retained observations
 

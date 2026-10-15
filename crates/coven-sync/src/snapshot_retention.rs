@@ -8,7 +8,7 @@ use coven_format::{
     value::{StorageTime, WritePositions},
 };
 use coven_foundation::id_source::DeviceId;
-use coven_storage::{CloudProvider, ObjectPrefix};
+use coven_storage::{CloudProvider, ObjectPrefix, StoredObject};
 use std::{
     collections::{BTreeMap, BTreeSet},
     time::Duration,
@@ -121,7 +121,7 @@ impl StoreLogSync {
                             .iter()
                             .all(|id| chosen.prefix.writes.covers(*id))
                     {
-                        superseded.push(older.object.path.clone());
+                        superseded.push(older.object.clone());
                     }
                 }
             }
@@ -130,6 +130,7 @@ impl StoreLogSync {
         let mut storage_time = self.storage_time();
         let mut observed = false;
         let mut stuck = crate::pending_logs::local_refusals(&self.database).await?;
+        let mut retained = Vec::new();
         for object in storage
             .list(&ObjectPrefix::device_logs(self.directory.id()))
             .await?
@@ -139,12 +140,14 @@ impl StoreLogSync {
                 .write_id()
                 .ok_or_else(|| inconsistent("device listing has another path layout"))?;
             if !self.can_delete_device(&local.log, local.device, id.device)? {
+                retained.push(object);
                 continue;
             }
             if stuck
                 .iter()
                 .any(|record| record.blocks(coven_database::LogObject::Write(id)))
             {
+                retained.push(object);
                 continue;
             }
             let header = match self.open_write_header(&object).await {
@@ -160,6 +163,7 @@ impl StoreLogSync {
                         });
                     }
                     failure(&object.path, error)?;
+                    retained.push(object);
                     continue;
                 }
             };
@@ -187,13 +191,32 @@ impl StoreLogSync {
                 aged = reached_age(storage_time, object.stored_at);
             }
             if covered && (posted || aged) {
-                storage.delete(&object.path).await?;
+                self.delete_retained(&object).await?;
+            } else {
+                retained.push(object);
             }
         }
-        for path in superseded {
-            storage.delete(&path).await?;
+        for object in superseded {
+            self.delete_retained(&object).await?;
         }
-        self.retain_uploaded_files().await
+        self.retain_uploaded_files(&retained).await
+    }
+
+    /// Delete a log write or snapshot. The files its checked references named
+    /// lose that protection, so they become retention candidates first: a
+    /// candidate is only a reason to check, while a deletion committed
+    /// without one would leave its files unconsidered (§16.5).
+    async fn delete_retained(&self, object: &StoredObject) -> Result<(), SyncError> {
+        let storage = self.storage.as_deref().ok_or(SyncError::NoStorage)?;
+        let evidence = crate::object_input::ObjectInput::observe(&self.database, object)
+            .await?
+            .files()
+            .await?;
+        if let Some(coven_database::FileEvidence::Complete(files)) = evidence {
+            self.database.add_file_candidates(files).await?;
+        }
+        storage.delete(&object.path).await?;
+        Ok(())
     }
 
     /// The newest provider time this session knows, a lower bound on storage's.

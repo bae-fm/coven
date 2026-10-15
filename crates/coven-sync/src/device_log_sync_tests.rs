@@ -832,6 +832,14 @@ mod stuck {
             coven_foundation::id_source::FileId(Uuid::from_u128(99)),
         );
         storage.create(&unused, b"file").await.unwrap();
+        devices[1]
+            .db
+            .add_file_candidates(std::collections::BTreeSet::from([(
+                unused.device().unwrap(),
+                unused.file_id().unwrap(),
+            )]))
+            .await
+            .unwrap();
         let before = storage.reads().await;
         devices[1].sync.run_retention().await.unwrap();
         assert_eq!(storage.reads().await, before);

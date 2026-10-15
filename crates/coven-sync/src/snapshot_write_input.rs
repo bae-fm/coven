@@ -111,6 +111,7 @@ impl StoreLogSync {
             targets,
         };
         let opens = files.iter().map(Option::is_some).collect::<Vec<_>>();
+        let skipped = opened.unopened(&opens);
         let published = coven_database::Published {
             stored_at: object.stored_at,
             signer,
@@ -124,8 +125,10 @@ impl StoreLogSync {
             };
             crate::write_object::finish(&mut stream, ring, &signer, opened, &mut sink).await
         };
-        let (transferred, checked) =
-            tokio::join!(transfer, self.database.write_file_references(input));
+        let (transferred, checked) = tokio::join!(
+            transfer,
+            self.database.write_file_references(input, skipped)
+        );
         transferred?;
         retained.keep_files(checked?).await?;
         Ok(SavedWrite {

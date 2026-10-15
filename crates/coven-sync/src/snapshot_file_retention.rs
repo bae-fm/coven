@@ -1,48 +1,92 @@
-//! Prove absence across retained data before deleting an uploader's files.
+//! Delete uploaded files once no retained data names them (§16.5).
+//!
+//! The database keeps the candidates: paths whose last local protection ended,
+//! paths named by objects this device deleted, and what a removed uploader's
+//! one-time folder scan found (`snapshot_file_scan.rs`). Retention reads only the candidates of uploaders
+//! this device deletes for, checks local protection first, and proves remote
+//! absence from checked references kept by object identity. Nothing else
+//! lists `files/`.
 
 use super::{prefix::failure, StoreLogSync};
 use crate::{replay_cache::ReplayCache, SyncError};
-use coven_storage::{ObjectPath, ObjectPrefix};
-use std::collections::BTreeSet;
+use coven_database::{FileEvidence, StoreLog, UnprovenFiles};
+use coven_foundation::id_source::{DeviceId, FileId, KeyId};
+use coven_merge::Audience;
+use coven_storage::{ObjectPath, ObjectPrefix, StoredObject};
+use std::collections::{BTreeMap, BTreeSet};
 
 impl StoreLogSync {
-    pub(super) async fn retain_uploaded_files(&self) -> Result<(), SyncError> {
+    /// Delete the candidates no retained row, loss, input, queued write,
+    /// upload, snapshot or log write names. `logs` is this pass's listing of
+    /// retained writes, less the ones it deleted.
+    pub(super) async fn retain_uploaded_files(
+        &self,
+        logs: &[StoredObject],
+    ) -> Result<(), SyncError> {
         let storage = self.storage.as_deref().ok_or(SyncError::NoStorage)?;
-        // List first: the attaching write fixes a file's path in its row and
-        // this device's queue in one transaction, before storage can list it.
-        // A later upload is outside this deletion set.
-        let objects = storage
-            .list(&ObjectPrefix::files(self.directory.id()))
-            .await?;
-        if objects.is_empty() {
-            return Ok(());
-        }
         let local = self.database.local_store_log().await?;
-        let readable = self.snapshot_audiences(&local.log)?;
-        let mut references: BTreeSet<_> = self
-            .database
-            .retained_files()
-            .await?
-            .references
-            .into_iter()
-            .map(|(device, id)| ObjectPath::file(self.directory.id(), device, id))
-            .collect();
-        let paths: BTreeSet<_> = objects.into_iter().map(|object| object.path).collect();
-        let mut eligible = BTreeSet::new();
-        for path in paths {
-            let device = path.device().ok_or(coven_database::DbError::Invariant {
-                what: "a file listing names devices",
-            })?;
-            if self.can_delete_device(&local.log, local.device, device)?
-                && !references.contains(&path)
-            {
-                eligible.insert(path);
+        let mut uploaders = BTreeSet::from([local.device]);
+        for device in local.log.replay.state.devices.keys() {
+            if self.can_delete_device(&local.log, local.device, *device)? {
+                uploaders.insert(*device);
             }
         }
-        if eligible.is_empty() {
+        self.scan_removed_uploaders(&local.log, &uploaders).await?;
+        let candidates = self.database.file_candidates(uploaders).await?;
+        let (protected, open): (Vec<_>, Vec<_>) = candidates
+            .into_iter()
+            .partition(|candidate| candidate.protected);
+        // Local protection decides first; its release adds the path again.
+        self.database
+            .settle_file_candidates(
+                protected.iter().map(|c| (c.device, c.file)).collect(),
+                Vec::new(),
+            )
+            .await?;
+        let open: BTreeSet<_> = open.into_iter().map(|c| (c.device, c.file)).collect();
+        if open.is_empty() {
             return Ok(());
         }
-        let mut audiences = BTreeSet::new();
+        let Some(references) = self.remote_file_references(&local.log, logs, &open).await? else {
+            return Ok(());
+        };
+        let mut deleted = Vec::new();
+        let mut result = Ok(());
+        for (device, file) in open.difference(&references) {
+            // Idempotent deletion also confirms absence after a lost reply.
+            match storage
+                .delete(&ObjectPath::file(self.directory.id(), *device, *file))
+                .await
+            {
+                Ok(()) => deleted.push((*device, *file)),
+                Err(error) => {
+                    result = Err(error.into());
+                    break;
+                }
+            }
+        }
+        self.database
+            .settle_file_candidates(Vec::new(), deleted)
+            .await?;
+        result
+    }
+
+    /// Every path the retained snapshots and log writes name, or `None` when
+    /// some retained object cannot prove absence: an unreadable audience, an
+    /// excluded or refused snapshot, a refused, waiting or unreadable write.
+    /// Checked references and unproven verdicts are kept by object identity,
+    /// so no body is read again for this until its prerequisite changes.
+    async fn remote_file_references(
+        &self,
+        log: &StoreLog,
+        logs: &[StoredObject],
+        open: &BTreeSet<(DeviceId, FileId)>,
+    ) -> Result<Option<BTreeSet<(DeviceId, FileId)>>, SyncError> {
+        let storage = self.storage.as_deref().ok_or(SyncError::NoStorage)?;
+        let readable = self.snapshot_audiences(log)?;
+        let versions = self.database.write_schema_versions().await?;
+        let mut references = BTreeSet::new();
+        let mut listed: BTreeMap<Audience, BTreeSet<ObjectPath>> = BTreeMap::new();
         for object in storage
             .list(&ObjectPrefix::snapshots(self.directory.id()))
             .await?
@@ -58,57 +102,57 @@ impl StoreLogSync {
                     path = object.path.as_str(),
                     "unreadable retained snapshot prevents proving file absence"
                 );
-                return Ok(());
+                return Ok(None);
             }
-            audiences.insert(id.audience);
+            listed.entry(id.audience).or_default().insert(object.path);
         }
-        for audience in audiences {
+        for (audience, paths) in listed {
             // A snapshot that waits, was refused or cannot be read is not a
             // candidate; any of them prevents proving absence.
-            let candidates = self.snapshot_candidates(&audience, &local.log).await?;
-            if candidates.listed != candidates.candidates.len() {
+            let candidates: Vec<_> = self
+                .snapshot_candidates(&audience, log)
+                .await?
+                .candidates
+                .into_iter()
+                .filter(|candidate| paths.contains(&candidate.object.path))
+                .collect();
+            if candidates.len() != paths.len() {
                 tracing::debug!(
                     ?audience,
                     "excluded retained snapshots prevent proving file absence"
                 );
-                return Ok(());
+                return Ok(None);
             }
-            for candidate in candidates.candidates {
+            for candidate in candidates {
                 match self.snapshot_file_references(&candidate).await {
-                    Ok(files) => references.extend(
-                        files
-                            .into_iter()
-                            .map(|(device, id)| ObjectPath::file(self.directory.id(), device, id)),
-                    ),
-                    Err(SyncError::Database(coven_database::DbError::Snapshot(
-                        coven_database::SnapshotError::Schema { .. },
-                    ))) => {
+                    Ok(FileEvidence::Complete(files)) => references.extend(files),
+                    Ok(FileEvidence::Unproven(unproven)) => {
                         tracing::debug!(
                             path = candidate.object.path.as_str(),
+                            ?unproven,
                             "unsupported retained snapshot prevents proving file absence"
                         );
-                        return Ok(());
+                        return Ok(None);
                     }
                     Err(error) => {
                         self.refuse_snapshot(&candidate.object, error).await?;
                         // Refused data cannot establish absence.
-                        return Ok(());
+                        return Ok(None);
                     }
                 }
             }
         }
-        eligible.retain(|path| !references.contains(path));
-        if eligible.is_empty() {
-            return Ok(());
-        }
-        let mut replays = ReplayCache::new(&local.log);
+        let mut replays = ReplayCache::new(log);
         let stuck = crate::pending_logs::local_refusals(&self.database).await?;
-        for object in storage
-            .list(&ObjectPrefix::device_logs(self.directory.id()))
-            .await?
-        {
-            if eligible.iter().all(|path| references.contains(path)) {
-                return Ok(());
+        let ring = self.store_keys.read()?;
+        let needed = crate::key_introductions::needed(log);
+        let opens = |audience: &Audience, key: KeyId| {
+            readable.contains(audience)
+                && crate::key_introductions::accepted(ring.as_ref(), &needed, audience, key)
+        };
+        for object in logs {
+            if open.is_subset(&references) {
+                break;
             }
             let id = object
                 .path
@@ -121,82 +165,91 @@ impl StoreLogSync {
                 .any(|record| record.blocks(coven_database::LogObject::Write(id)))
             {
                 tracing::debug!(?id, "stuck write prevents proving file absence");
-                return Ok(());
+                return Ok(None);
             }
-            let files = match self
-                .retained_write_references(&object, &local.log, &mut replays, &readable)
+            match self
+                .retained_write_references(object, log, &mut replays, &readable, &opens, &versions)
                 .await
             {
-                Ok(Some(files)) => files,
-                Ok(None) => {
+                Ok(FileEvidence::Complete(files)) => references.extend(files),
+                Ok(FileEvidence::Unproven(unproven)) => {
                     tracing::debug!(
                         path = object.path.as_str(),
+                        ?unproven,
                         "unreadable or unsupported retained write prevents proving file absence"
                     );
-                    return Ok(());
+                    return Ok(None);
                 }
-                Err(error) if super::retention::waiting(&object.path, &error) => return Ok(()),
+                Err(error) if super::retention::waiting(&object.path, &error) => return Ok(None),
                 Err(error) => {
                     if let SyncError::Damaged(damage) = &error {
                         crate::write_object::refuse(
                             &self.database,
                             storage,
-                            crate::object_input::ObjectInput::observe(&self.database, &object)
+                            crate::object_input::ObjectInput::observe(&self.database, object)
                                 .await?,
                             &damage.failure,
                         )
                         .await?;
                     }
                     failure(&object.path, error)?;
-                    return Ok(());
+                    return Ok(None);
                 }
-            };
-            references.extend(
-                files
-                    .into_iter()
-                    .map(|(device, id)| ObjectPath::file(self.directory.id(), device, id)),
-            );
-        }
-        for path in eligible {
-            if !references.contains(&path) {
-                // Idempotent deletion also confirms absence after a lost reply.
-                storage.delete(&path).await?;
             }
         }
-        Ok(())
+        Ok(Some(references))
     }
 
     async fn retained_write_references(
         &self,
-        object: &coven_storage::StoredObject,
-        log: &coven_database::StoreLog,
+        object: &StoredObject,
+        log: &StoreLog,
         replays: &mut ReplayCache<'_>,
-        readable: &BTreeSet<coven_merge::Audience>,
-    ) -> Result<Option<crate::pass_reads::FileReferences>, SyncError> {
+        readable: &BTreeSet<Audience>,
+        opens_part: &impl Fn(&Audience, KeyId) -> bool,
+        versions: &std::ops::RangeInclusive<u32>,
+    ) -> Result<FileEvidence, SyncError> {
         let retained = crate::object_input::ObjectInput::observe(&self.database, object).await?;
-        if let Some(Some(files)) = retained.files().await? {
-            return Ok(Some(files));
+        match retained.files().await? {
+            Some(evidence @ FileEvidence::Complete(_)) => return Ok(evidence),
+            // The same bytes are not read again until one of their unopened
+            // parts opens or the app's schema range covers the write (§16.5).
+            Some(FileEvidence::Unproven(unproven)) if !unproven.changed(opens_part, versions) => {
+                return Ok(FileEvidence::Unproven(unproven))
+            }
+            _ => (),
         }
         let storage = self.storage.as_deref().ok_or(SyncError::NoStorage)?;
         let ring = self.store_keys.read()?;
         let mut stream = retained.stream(storage).await;
+        let ready = crate::write_object::download(&mut stream, ring.as_ref(), log, replays, || {
+            Ok(self.operation_member()?.member())
+        })
+        .await?;
         let crate::write_object::ReadyWrite {
             opened,
             signer,
             parts: mut opens,
-        } = crate::write_object::download(&mut stream, ring.as_ref(), log, replays, || {
-            Ok(self.operation_member()?.member())
-        })
-        .await?
-        .map_err(crate::write_object::Unready::into_snapshot_error)?;
+        } = match ready {
+            Ok(ready) => ready,
+            // A key this device lacks is that key's wait (§11, §16.5).
+            Err(crate::write_object::Unready::Key { audience, key }) => {
+                let evidence =
+                    FileEvidence::Unproven(UnprovenFiles::Parts(BTreeSet::from([(audience, key)])));
+                retained.keep_files(evidence.clone()).await?;
+                return Ok(evidence);
+            }
+            Err(unready) => return Err(unready.into_snapshot_error()),
+        };
         let ring = ring.as_ref().expect("opened header has its store key");
         for (opens, part) in opens.iter_mut().zip(&opened.header.parts) {
             *opens &= readable.contains(&part.audience);
         }
         if opens.contains(&false) {
             stream.drain().await?;
-            retained.keep_files(None).await?;
-            return Ok(None);
+            let evidence = FileEvidence::Unproven(UnprovenFiles::Parts(opened.unopened(&opens)));
+            retained.keep_files(evidence.clone()).await?;
+            return Ok(evidence);
         }
         let (mut sink, input) = crate::stream_input::ChannelParts::new(
             opened.header.clone(),
@@ -212,12 +265,14 @@ impl StoreLogSync {
             drop(sink);
             result
         };
-        let (transferred, checked) =
-            tokio::join!(transfer, self.database.write_file_references(input));
+        let (transferred, checked) = tokio::join!(
+            transfer,
+            self.database.write_file_references(input, BTreeSet::new())
+        );
         transferred?;
-        let files =
+        let evidence =
             checked.map_err(|error| crate::write_object::database_failure(&object.path, error))?;
-        retained.keep_files(files.clone()).await?;
-        Ok(files)
+        retained.keep_files(evidence.clone()).await?;
+        Ok(evidence)
     }
 }

@@ -456,7 +456,7 @@ impl StoreLogSync {
                                 &saved.object,
                             )
                             .await?
-                            .keep_files(Some(loaded.files))
+                            .keep_files(coven_database::FileEvidence::Complete(loaded.files))
                             .await?;
                         }
                     }

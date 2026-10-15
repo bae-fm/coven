@@ -760,9 +760,9 @@ async fn io_counts_first_catchup_baseline() {
     assert_eq!(
         (counts.requests, counts.requests_by_kind()),
         (
-            65,
+            64,
             RequestCounts {
-                lists: 8,
+                lists: 7,
                 gets: 40,
                 creates: 1,
                 replaces: 2,
@@ -830,9 +830,9 @@ async fn io_counts_file_fetch_baseline() {
     assert_eq!(
         (counts.requests, counts.requests_by_kind()),
         (
-            21,
+            20,
             RequestCounts {
-                lists: 6,
+                lists: 5,
                 gets: 7,
                 ranges: 2,
                 replaces: 1,
@@ -901,9 +901,9 @@ async fn io_counts_reopen_baseline() {
     assert_eq!(
         (counts.requests, counts.requests_by_kind()),
         (
-            21,
+            20,
             RequestCounts {
-                lists: 7,
+                lists: 6,
                 gets: 7,
                 replaces: 1,
                 statuses: 5,

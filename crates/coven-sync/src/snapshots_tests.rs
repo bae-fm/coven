@@ -876,14 +876,21 @@ async fn a_pass_reuses_loaded_snapshot_and_write_references() {
             .await
             .unwrap();
         assert_eq!(objects.len(), 1);
-        // This device owns an unreferenced upload, so retention must prove
-        // absence across the object the pass is about to load.
+        // This device owns an unreferenced upload whose last reference went,
+        // so retention must prove absence across the object the pass is about
+        // to load.
         let orphan = ObjectPath::file(
             store(1),
             a.device().await,
             coven_foundation::id_source::FileId(uuid::Uuid::from_u128(999)),
         );
         storage.create(&orphan, b"orphan").await.unwrap();
+        a.db.add_file_candidates(std::collections::BTreeSet::from([(
+            orphan.device().unwrap(),
+            orphan.file_id().unwrap(),
+        )]))
+        .await
+        .unwrap();
         let files = crate::Files::new(
             coven_database::FileDatabase::new(a.db.clone()),
             a.directory.clone(),

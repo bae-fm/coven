@@ -4,6 +4,7 @@ import CovenStorelogData.Snapshots
 import CovenStorelogData.CurrentData
 import StorelogDataEffects
 import PendingJson
+import CovenStorelogData.RetentionSafety
 
 /-! Compare replay realization, effective snapshot boundaries and circle
 reloads with Rust. The adapter calls the model's functions on checked causal
@@ -82,10 +83,34 @@ private def reloads (j : Json) : Except String Json := do
     previous := subset
   pure (toJson results)
 
+/-- §16.5: `RetentionSafety.fileDeletable` per case. `references` is null
+when some retained data cannot be read, else the file ids each kind of
+retained reference names. -/
+private def fileDeletable (j : Json) : Except String Json := do
+  let file ← j.getObjValAs? Nat "file"
+  let refs := j.getObjValD "references"
+  let get (kind : String) : Except String (List Nat) := refs.getObjValAs? (List Nat) kind
+  let references : Option RetentionSafety.References ← match refs with
+    | .null => pure none
+    | _ => do
+      let rows ← get "rows"
+      let losses ← get "losses"
+      let snapshots ← get "snapshots"
+      let logs ← get "logs"
+      let localRows ← get "localRows"
+      let waitingWrites ← get "waitingWrites"
+      let uploadQueues ← get "uploadQueues"
+      let reversible ← get "reversible"
+      pure (some ⟨rows, losses, snapshots, logs, localRows, waitingWrites, uploadQueues,
+        reversible⟩)
+  pure (toJson (RetentionSafety.fileDeletable file references))
+
 def main : IO UInt32 := do
   let input ← (← IO.getStdin).readToEnd
   let output := do
     let j ← Json.parse input
+    if let .ok cases := j.getObjVal? "files" then
+      return toJson (← (← cases.getArr?).mapM fileDeletable)
     match j.getObjVal? "reloads", j.getObjVal? "circles", j.getObjVal? "effects",
         j.getObjVal? "pending", j.getObjVal? "choices" with
     | .ok histories, _, _, _, _ => toJson <$> (← histories.getArr?).mapM reloads

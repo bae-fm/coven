@@ -30,6 +30,8 @@ pub(super) fn reason(statement: &Statement, relation: &str) -> Option<&'static s
     Some("the member list returns every current member"),
 ("write_landing.rs", "SELECT device,number,stored_at,header,signer,late FROM _coven_write_landings", "_coven_write_landings") =>
     Some("replay, release and retention check every verdict a retirement can still change"),
+("database_file_retention.rs", sql, "_coven_file_scans") if sql.starts_with("DELETE FROM _coven_file_scans WHERE NOT EXISTS(") =>
+    Some("replay checks every completed file scan against the entries it keeps"),
 ("retirement_drain.rs", "SELECT device FROM _coven_retirement_finality", "_coven_retirement_finality") =>
     Some("finality recording skips every retired device that already has its F"),
 ("retirement_drain.rs", "SELECT device FROM _coven_drained_devices", "_coven_drained_devices") =>

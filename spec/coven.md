@@ -5239,6 +5239,14 @@ Carol's tablet:
     the transaction that changes the row, so finding eager work reads no
     unchanged row;
   - `_coven_file_removals`: unused local copies waiting to be deleted;
+  - `_coven_file_candidates`: stored files awaiting a deletion decision
+    (§16.5). The transaction ending a file's last local reference adds it;
+    so does a retained object's checked reference list before this device
+    deletes that object, and a removed uploader's folder scan. A candidate
+    goes once storage confirms its deletion, or while local data still
+    protects it, since that protection's end adds it again;
+  - `_coven_file_scans`: each removed uploader whose file folder this device
+    listed after its cut-off, with the kept removal that cut-off followed;
   - `_coven_retries`: each waiting upload's, operation's and approval
     poll's persisted deadline `T` and full wait `W` with the consecutive
     failures that chose `W`, and the provider cooldown (§16.5). An upload's

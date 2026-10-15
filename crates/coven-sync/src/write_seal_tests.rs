@@ -822,6 +822,14 @@ async fn retention_waits_for_key_copies_without_failing() {
             coven_foundation::id_source::FileId(Uuid::from_u128(99)),
         );
         storage.create(&unused, b"unused").await.unwrap();
+        devices[reader]
+            .db
+            .add_file_candidates(std::collections::BTreeSet::from([(
+                unused.device().unwrap(),
+                unused.file_id().unwrap(),
+            )]))
+            .await
+            .unwrap();
         match devices[reader].sync.run_retention().await {
             Ok(()) => (),
             Err(error) => failed.push((reader, error)),
@@ -838,6 +846,41 @@ async fn retention_waits_for_key_copies_without_failing() {
         failed.is_empty(),
         "waiting keys failed retention: {failed:?}"
     );
+}
+
+/// §16.5: a write with a part this device cannot read proves no file
+/// absent. That verdict is kept by the write's identity, so later retention
+/// runs do not download the write again until the part's key opens for it.
+#[tokio::test]
+async fn an_unreadable_part_proves_nothing_and_is_not_read_again() {
+    let storage = storage();
+    let mut devices = household(storage.clone()).await;
+    sql(&devices[0].db, "INSERT INTO pins VALUES('00000000-0000-4000-8000-000000000001','00000000-0000-0000-0000-00000000000a','private')").await;
+    devices[0].writes.upload_writes().await.unwrap();
+    let write = ObjectPath::device_log(STORE_ID, DeviceId(1), 1.try_into().unwrap());
+    let unused = ObjectPath::file(
+        STORE_ID,
+        DeviceId(3),
+        coven_foundation::id_source::FileId(Uuid::from_u128(99)),
+    );
+    storage.create(&unused, b"unused").await.unwrap();
+    devices[2]
+        .db
+        .add_file_candidates(std::collections::BTreeSet::from([(
+            DeviceId(3),
+            unused.file_id().unwrap(),
+        )]))
+        .await
+        .unwrap();
+    for attempt in 0..2 {
+        let start = storage.reads().await.len();
+        devices[2].sync.run_retention().await.unwrap();
+        let read = storage.reads().await[start..]
+            .iter()
+            .any(|(path, _, _)| path == &write);
+        assert_eq!(read, attempt == 0);
+        assert_eq!(storage.read(&unused).await.unwrap(), b"unused");
+    }
 }
 
 #[tokio::test]

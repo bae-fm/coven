@@ -743,14 +743,20 @@ async fn a_stalled_snapshot_body_does_not_hold_the_database_writer() {
         .remove(0);
     let at = snapshot.size - 100;
     assert!(at > 2 * coven_format::chunks::CHUNK_SIZE as u64);
-    // This device owns an unreferenced upload, so retention must read every
-    // retained snapshot's references before deleting it.
+    // This device owns an upload whose last reference went, so retention
+    // must read every retained snapshot's references before deleting it.
     let orphan = ObjectPath::file(
         store(1),
         a.device().await,
         coven_foundation::id_source::FileId(uuid::Uuid::from_u128(999)),
     );
     storage.create(&orphan, b"orphan").await.unwrap();
+    a.db.add_file_candidates(std::collections::BTreeSet::from([(
+        orphan.device().unwrap(),
+        orphan.file_id().unwrap(),
+    )]))
+    .await
+    .unwrap();
     let (stalled, observed) = tokio::sync::oneshot::channel();
     let (resume, held) = tokio::sync::oneshot::channel();
     storage

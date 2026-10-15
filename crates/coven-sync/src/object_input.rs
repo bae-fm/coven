@@ -1,7 +1,7 @@
 //! Reuse the exact bytes of a durable observation across consumers and reopening.
 
 use crate::SyncError;
-use coven_database::{Database, RetainedInput};
+use coven_database::{Database, FileEvidence, RetainedInput};
 use coven_storage::{ByteRange, Storage, StorageFailure, StoredObject};
 
 #[path = "input_stream.rs"]
@@ -71,15 +71,10 @@ impl ObjectInput {
     pub(crate) async fn keep_metadata(&self, bytes: Vec<u8>) -> Result<(), SyncError> {
         Ok(self.retained.keep_metadata(bytes).await?)
     }
-    pub(crate) async fn files(
-        &self,
-    ) -> Result<Option<Option<crate::pass_reads::FileReferences>>, SyncError> {
+    pub(crate) async fn files(&self) -> Result<Option<FileEvidence>, SyncError> {
         Ok(self.retained.files().await?)
     }
-    pub(crate) async fn keep_files(
-        &self,
-        files: Option<crate::pass_reads::FileReferences>,
-    ) -> Result<(), SyncError> {
+    pub(crate) async fn keep_files(&self, files: FileEvidence) -> Result<(), SyncError> {
         Ok(self.retained.keep_files(files).await?)
     }
     pub(crate) async fn release_ranges(self) -> Result<(), SyncError> {

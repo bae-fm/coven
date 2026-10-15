@@ -583,6 +583,14 @@ async fn retention_waits_for_store_log_entries() {
             coven_foundation::id_source::FileId(Uuid::from_u128(99)),
         );
         storage.create(&unused, b"unused").await.unwrap();
+        devices[1]
+            .db
+            .add_file_candidates(std::collections::BTreeSet::from([(
+                unused.device().unwrap(),
+                unused.file_id().unwrap(),
+            )]))
+            .await
+            .unwrap();
         devices[1].sync.run_retention().await.unwrap();
         assert_eq!(storage.read(&unused).await.unwrap(), b"unused");
         devices[1].sync.sync_store_log().await.unwrap();

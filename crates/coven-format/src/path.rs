@@ -153,6 +153,14 @@ impl ObjectPath {
         }
     }
 
+    /// The fixed id of a stored file's path.
+    pub fn file_id(&self) -> Option<FileId> {
+        match self.relative().split('/').collect::<Vec<_>>().as_slice() {
+            ["files", _, name] => Some(FileId(name.parse().expect("validated file id"))),
+            _ => None,
+        }
+    }
+
     /// The canonical path components, for providers with folder objects.
     pub fn components(&self) -> Vec<&str> {
         self.0.split('/').collect()
@@ -216,7 +224,7 @@ impl From<ObjectPath> for String {
 }
 
 /// A prefix of the validated object layout, used for provider listing.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ObjectPrefix(String);
 impl ObjectPrefix {
     /// All objects belonging to this store.
@@ -254,6 +262,10 @@ impl ObjectPrefix {
     /// Every stored file.
     pub fn files(store: StoreId) -> Self {
         Self(format!("{store}/files/"))
+    }
+    /// The files one device uploaded (§16.2).
+    pub fn device_files(store: StoreId, device: DeviceId) -> Self {
+        Self(format!("{store}/files/{}/", device.0))
     }
     /// Every waiting join request.
     pub fn join_requests(store: StoreId) -> Self {

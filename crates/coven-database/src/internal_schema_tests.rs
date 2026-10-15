@@ -118,8 +118,10 @@ async fn only_the_spec_tables_are_created() {
                 "_coven_eager_requests",
                 "_coven_eager_rows",
                 "_coven_eager_work",
+                "_coven_file_candidates",
                 "_coven_file_chunks",
                 "_coven_file_removals",
+                "_coven_file_scans",
                 "_coven_file_uploads",
                 "_coven_finality",
                 "_coven_fingerprint_leaves",
@@ -325,6 +327,8 @@ mod fixture {
      INSERT INTO _coven_retries(scope,failures,not_before,wait)
        VALUES('join',1,zeroblob(13),1000),('provider',0,zeroblob(13),600000);
      INSERT INTO _coven_device_files SELECT device,substr(key,17,16),'path_' || i FROM fixture;
+     INSERT INTO _coven_file_candidates SELECT device,substr(key,17,16) FROM fixture;
+     INSERT INTO _coven_file_scans SELECT n,device,n FROM fixture;
      INSERT INTO _coven_upload_pause VALUES(1);
      INSERT INTO _coven_eager_cancel VALUES(1);
      INSERT INTO _coven_eager_requests SELECT audience,'file_' || i,key FROM fixture;
@@ -570,6 +574,8 @@ mod source {
                 "identity",
                 "namespace",
                 "size",
+                "device",
+                "file",
             ]
             .iter()
             .enumerate()

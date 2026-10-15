@@ -2,7 +2,7 @@
 
 use super::{with_locked, Database};
 use crate::{sqlite::DatabaseConnection, DbError};
-use coven_foundation::id_source::{DeviceId, FileId};
+use coven_foundation::id_source::{DeviceId, FileId, KeyId};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, Weak};
 
@@ -491,48 +491,149 @@ impl RetainedInput {
         .await
     }
 
-    /// Unread, partially checked, or completely checked file protection.
-    pub async fn files(&self) -> Result<Option<Option<BTreeSet<(DeviceId, FileId)>>>, DbError> {
-        self.read(|db,id| {
-            let complete: Option<bool> = db.query_row("SELECT files_complete FROM _coven_input_objects WHERE id=?1", [id], |r| r.get(0))?;
-            match complete {
-                None => Ok(None),
-                Some(false) => Ok(Some(None)),
-                Some(true) => Ok(Some(Some(db.query("SELECT device,file FROM _coven_input_files WHERE object=?1 ORDER BY device,file", [id], |r| Ok((DeviceId(u64::from_be_bytes(r.get(0)?)),FileId(uuid::Uuid::from_bytes(r.get(1)?)))))?.into_iter().collect()))),
-            }
-        }).await
+    /// The checked file evidence of these bytes, if any (§16.5).
+    pub async fn files(&self) -> Result<Option<FileEvidence>, DbError> {
+        self.read(|db, id| {
+            let (complete, schema): (Option<bool>, Option<u32>) = db.query_row(
+                "SELECT files_complete,files_schema FROM _coven_input_objects WHERE id=?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?;
+            Ok(match (complete, schema) {
+                (None, _) => None,
+                (Some(false), Some(version)) => {
+                    Some(FileEvidence::Unproven(UnprovenFiles::Schema(version)))
+                }
+                (Some(false), None) => {
+                    let parts = db
+                        .query(
+                            "SELECT audience,key FROM _coven_input_unread WHERE object=?1",
+                            [id],
+                            |r| Ok((r.get::<_, String>(0)?, r.get::<_, [u8; 16]>(1)?)),
+                        )?
+                        .into_iter()
+                        .map(|(audience, key)| {
+                            Ok((
+                                crate::write_encoding::audience(&audience)
+                                    .map_err(|_| DbError::DamagedDatabase)?,
+                                KeyId(uuid::Uuid::from_bytes(key)),
+                            ))
+                        })
+                        .collect::<Result<BTreeSet<_>, DbError>>()?;
+                    if parts.is_empty() {
+                        return Err(DbError::DamagedDatabase);
+                    }
+                    Some(FileEvidence::Unproven(UnprovenFiles::Parts(parts)))
+                }
+                (Some(true), _) => Some(FileEvidence::Complete(
+                    db.query(
+                        "SELECT device,file FROM _coven_input_files WHERE object=?1 ORDER BY device,file",
+                        [id],
+                        |r| {
+                            Ok((
+                                DeviceId(u64::from_be_bytes(r.get(0)?)),
+                                FileId(uuid::Uuid::from_bytes(r.get(1)?)),
+                            ))
+                        },
+                    )?
+                    .into_iter()
+                    .collect(),
+                )),
+            })
+        })
+        .await
     }
 
-    /// Record references only after complete authentication. Incomplete knowledge
-    /// remains protective and can be retried when keys or schema become available.
-    pub async fn keep_files(
-        &self,
-        files: Option<BTreeSet<(DeviceId, FileId)>>,
-    ) -> Result<(), DbError> {
+    /// Record references only after complete authentication. Unproven evidence
+    /// proves no file absent and names what must change before these bytes
+    /// are checked again.
+    pub async fn keep_files(&self, files: FileEvidence) -> Result<(), DbError> {
         if self.files().await?.as_ref() == Some(&files) {
             return Ok(());
         }
         self.write(move |db, id| {
             db.internal_execute("DELETE FROM _coven_input_files WHERE object=?1", [id])?;
+            db.internal_execute("DELETE FROM _coven_input_unread WHERE object=?1", [id])?;
+            let (complete, schema) = match &files {
+                FileEvidence::Complete(_) => (true, None),
+                FileEvidence::Unproven(UnprovenFiles::Schema(version)) => (false, Some(*version)),
+                FileEvidence::Unproven(UnprovenFiles::Parts(_)) => (false, None),
+            };
             db.internal_execute(
-                "UPDATE _coven_input_objects SET files_complete=?2 WHERE id=?1",
-                (id, files.is_some()),
+                "UPDATE _coven_input_objects SET files_complete=?2,files_schema=?3 WHERE id=?1",
+                (id, complete, schema),
             )?;
-            if let Some(files) = files {
-                for (device, file) in files {
-                    db.internal_execute(
-                        "INSERT INTO _coven_input_files(object,device,file) VALUES(?1,?2,?3)",
-                        (
-                            id,
-                            device.0.to_be_bytes().as_slice(),
-                            file.0.as_bytes().as_slice(),
-                        ),
-                    )?;
+            match files {
+                FileEvidence::Complete(files) => {
+                    for (device, file) in files {
+                        db.internal_execute(
+                            "INSERT INTO _coven_input_files(object,device,file) VALUES(?1,?2,?3)",
+                            (
+                                id,
+                                device.0.to_be_bytes().as_slice(),
+                                file.0.as_bytes().as_slice(),
+                            ),
+                        )?;
+                    }
                 }
+                FileEvidence::Unproven(UnprovenFiles::Parts(parts)) => {
+                    if parts.is_empty() {
+                        return Err(DbError::Invariant {
+                            what: "unproven file evidence names a part",
+                        });
+                    }
+                    for (audience, key) in parts {
+                        db.internal_execute(
+                            "INSERT INTO _coven_input_unread(object,audience,key) VALUES(?1,?2,?3)",
+                            (
+                                id,
+                                crate::write_encoding::audience_text(&audience),
+                                key.0.as_bytes().as_slice(),
+                            ),
+                        )?;
+                    }
+                }
+                FileEvidence::Unproven(UnprovenFiles::Schema(_)) => (),
             }
             Ok(())
         })
         .await
+    }
+}
+
+/// What checked retained bytes establish about the uploaded files they name
+/// (§16.5).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FileEvidence {
+    /// Every fixed file path the bytes name, after complete authentication.
+    Complete(BTreeSet<(DeviceId, FileId)>),
+    /// The bytes cannot prove any file absent, and are not read again for that
+    /// purpose until this prerequisite changes.
+    Unproven(UnprovenFiles),
+}
+
+/// Why retained bytes cannot yet name every file they refer to (§16.5).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum UnprovenFiles {
+    /// Parts sealed for these audiences under these keys, which this device
+    /// could not open: it lacked the key or could not read the audience.
+    Parts(BTreeSet<(coven_merge::Audience, KeyId)>),
+    /// A schema version this version cannot interpret.
+    Schema(u32),
+}
+
+impl UnprovenFiles {
+    /// Whether reading the same bytes again could now succeed: one of the
+    /// parts now opens, or the schema version is now supported.
+    pub fn changed(
+        &self,
+        opens: impl Fn(&coven_merge::Audience, KeyId) -> bool,
+        versions: &std::ops::RangeInclusive<u32>,
+    ) -> bool {
+        match self {
+            Self::Parts(parts) => parts.iter().any(|(audience, key)| opens(audience, *key)),
+            Self::Schema(version) => versions.contains(version),
+        }
     }
 }
 

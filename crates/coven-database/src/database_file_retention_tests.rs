@@ -38,18 +38,82 @@ async fn overwritten_and_deleted_old_values_protect_their_uploaded_files() {
             .flat_map(Result::unwrap)
             .collect();
         let references = db
-            .write_file_references(DownloadedWriteStream {
+            .write_file_references(
+                DownloadedWriteStream {
+                    published: crate::test_utils::published(
+                        coven_format::value::StorageTime::UNIX_EPOCH,
+                    ),
+                    header,
+                    parts: vec![DownloadedPartStream::Opened(std::io::Cursor::new(bytes))],
+                },
+                BTreeSet::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            references,
+            FileEvidence::Complete(BTreeSet::from([(DeviceId(1), file)]))
+        );
+    }
+    // A skipped part proves nothing and is named by the caller with its key,
+    // so the same bytes wait for that key; the stream's skipped parts must
+    // agree with the ones named. A schema this version cannot interpret
+    // proves no file absent either.
+    let write = coven_format::test_utils::write();
+    let encoder = coven_format::write_stream::WriteEncoder::new(&write).unwrap();
+    let header =
+        coven_format::write_stream::WriteHeaderFrame::decode(encoder.header_frame()).unwrap();
+    let part = (
+        write.parts[0].audience.clone(),
+        coven_foundation::id_source::KeyId(uuid::Uuid::from_u128(3)),
+    );
+    for named in [BTreeSet::new(), BTreeSet::from([part.clone()])] {
+        let skipped = db
+            .write_file_references(
+                DownloadedWriteStream::<std::io::Cursor<Vec<u8>>> {
+                    published: crate::test_utils::published(
+                        coven_format::value::StorageTime::UNIX_EPOCH,
+                    ),
+                    header: header.clone(),
+                    parts: vec![DownloadedPartStream::Skipped],
+                },
+                named.clone(),
+            )
+            .await;
+        if named.is_empty() {
+            assert!(matches!(
+                skipped,
+                Err(DbError::Snapshot(crate::SnapshotError::Inconsistent(_)))
+            ));
+        } else {
+            assert_eq!(
+                skipped.unwrap(),
+                FileEvidence::Unproven(UnprovenFiles::Parts(named))
+            );
+        }
+    }
+    let mut newer = write.clone();
+    newer.header.schema_version = 7;
+    let encoder = coven_format::write_stream::WriteEncoder::new(&newer).unwrap();
+    let header =
+        coven_format::write_stream::WriteHeaderFrame::decode(encoder.header_frame()).unwrap();
+    let unsupported = db
+        .write_file_references(
+            DownloadedWriteStream::<std::io::Cursor<Vec<u8>>> {
                 published: crate::test_utils::published(
                     coven_format::value::StorageTime::UNIX_EPOCH,
                 ),
                 header,
-                parts: vec![DownloadedPartStream::Opened(std::io::Cursor::new(bytes))],
-            })
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(references, BTreeSet::from([(DeviceId(1), file)]));
-    }
+                parts: vec![DownloadedPartStream::Skipped],
+            },
+            BTreeSet::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        unsupported,
+        FileEvidence::Unproven(UnprovenFiles::Schema(7))
+    );
 }
 
 async fn file_loss_fixture() -> (
@@ -379,4 +443,202 @@ async fn queued_original_file_references_survive_removing_their_declaration() {
         .unwrap()
         .references
         .contains(&expected));
+}
+
+fn candidates_of(device: DeviceId) -> BTreeSet<DeviceId> {
+    BTreeSet::from([device])
+}
+
+/// §16.5: a frozen loss keeps its file path protected. Dismissing it leaves
+/// the reversible input's protection, so no candidate appears; releasing that
+/// input, the last local reference, makes the path a candidate in the same
+/// transaction, without any listing of storage.
+#[tokio::test]
+async fn a_frozen_loss_protects_its_file_until_its_last_local_reference_goes() {
+    let (_store, db, mut record, file) = file_loss_fixture().await;
+    let device = DeviceId(4);
+    record.header.position = coven_merge::WriteId { device, number: 1 };
+    record.header.timestamp = coven_merge::Timestamp::new(3, 0, device).unwrap();
+    record.header.schema_version = 0;
+    db.exclude_version_zero().await;
+    record.parts[0].rows[0].row.table = "removed_files".into();
+    let Operation::Insert(columns) = &mut record.parts[0].rows[0].change.operation else {
+        panic!()
+    };
+    columns.insert(
+        "x".into(),
+        coven_format::test_utils::column(Value::Text(format!("file 4 {file} {}", "ef".repeat(32)))),
+    );
+    db.receive(record.into()).await.unwrap();
+    let frozen: i64 = db.inspect_writer(|db| {
+        db.query_row("SELECT count(*) FROM _coven_lost WHERE frozen=1", [], |r| {
+            r.get(0)
+        })
+        .unwrap()
+    });
+    assert_eq!(frozen, 1);
+    assert!(db
+        .file_candidates(candidates_of(device))
+        .await
+        .unwrap()
+        .is_empty());
+    db.dismiss_lost_values(&db.lost_values().await.unwrap())
+        .await
+        .unwrap();
+    assert!(db
+        .file_candidates(candidates_of(device))
+        .await
+        .unwrap()
+        .is_empty());
+    db.inspect_writer(|sql| {
+        sql.transaction(|sql| crate::entry_inputs::forget(sql, &coven_merge::Audience::Store, None))
+            .unwrap()
+    });
+    assert_eq!(
+        db.file_candidates(candidates_of(device)).await.unwrap(),
+        vec![FileCandidate {
+            device,
+            file,
+            protected: false
+        }]
+    );
+}
+
+/// A protected candidate is settled only while local data still protects it,
+/// so a release racing the settlement keeps the candidate; a deleted one goes.
+#[tokio::test]
+async fn protected_candidates_settle_only_while_still_protected() {
+    let (_store, db, _, _) = file_loss_fixture().await;
+    let named = (DeviceId(3), FileId(uuid::Uuid::from_u128(8)));
+    let orphan = (DeviceId(3), FileId(uuid::Uuid::from_u128(80)));
+    db.add_file_candidates(BTreeSet::from([named, orphan]))
+        .await
+        .unwrap();
+    assert_eq!(
+        db.file_candidates(candidates_of(DeviceId(3)))
+            .await
+            .unwrap(),
+        vec![
+            FileCandidate {
+                device: named.0,
+                file: named.1,
+                protected: true
+            },
+            FileCandidate {
+                device: orphan.0,
+                file: orphan.1,
+                protected: false
+            },
+        ]
+    );
+    // Other uploaders' candidates are not read.
+    assert!(db
+        .file_candidates(candidates_of(DeviceId(2)))
+        .await
+        .unwrap()
+        .is_empty());
+    db.settle_file_candidates(vec![named, orphan], Vec::new())
+        .await
+        .unwrap();
+    let left = db
+        .file_candidates(candidates_of(DeviceId(3)))
+        .await
+        .unwrap();
+    assert_eq!(left.len(), 1);
+    assert_eq!((left[0].device, left[0].file), orphan);
+    db.settle_file_candidates(Vec::new(), vec![orphan])
+        .await
+        .unwrap();
+    assert!(db
+        .file_candidates(candidates_of(DeviceId(3)))
+        .await
+        .unwrap()
+        .is_empty());
+}
+
+/// A removed uploader's completed scan records its paths as candidates with
+/// the kept removal. Replay dropping that removal, which restores access,
+/// forgets the scan in the replay transaction, so a later cut-off scans again;
+/// a scan finishing after the drop records nothing. Access restored while
+/// the removal stays kept forgets it too (§16.5).
+#[tokio::test]
+async fn a_scan_stands_only_while_its_removal_is_kept() {
+    let store = TestStore::new();
+    let db = store.builder(vec![], vec![]).open().await.unwrap();
+    let uploader = DeviceId(5);
+    let removal = crate::write_landing::tests::retire(&db, uploader, 1, "member", 100).await;
+    let found = FileId(uuid::Uuid::from_u128(11));
+    assert_eq!(db.file_scan(uploader).await.unwrap(), None);
+    assert!(db
+        .complete_file_scan(uploader, removal, BTreeSet::from([found]))
+        .await
+        .unwrap());
+    assert_eq!(db.file_scan(uploader).await.unwrap(), Some(removal));
+    assert_eq!(
+        db.file_candidates(candidates_of(uploader)).await.unwrap(),
+        vec![FileCandidate {
+            device: uploader,
+            file: found,
+            protected: false
+        }]
+    );
+    db.close().await.unwrap();
+    let db = store.builder(vec![], vec![]).open().await.unwrap();
+    assert_eq!(db.file_scan(uploader).await.unwrap(), Some(removal));
+    crate::retirement_drain::tests::drop_retirement(&db, removal, uploader).await;
+    assert_eq!(db.file_scan(uploader).await.unwrap(), None);
+    assert!(!db
+        .complete_file_scan(uploader, removal, BTreeSet::new())
+        .await
+        .unwrap());
+    assert_eq!(db.file_scan(uploader).await.unwrap(), None);
+    let again = crate::write_landing::tests::retire(&db, uploader, 2, "member", 200).await;
+    assert!(db
+        .complete_file_scan(uploader, again, BTreeSet::new())
+        .await
+        .unwrap());
+    assert_eq!(db.file_scan(uploader).await.unwrap(), Some(again));
+    // Restored access forgets the scan; the candidates it found stay.
+    db.forget_file_scan(uploader).await.unwrap();
+    assert_eq!(db.file_scan(uploader).await.unwrap(), None);
+    assert_eq!(
+        db.file_candidates(candidates_of(uploader))
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+/// Cut-off needs this device's confirmation of every recorded access: each
+/// account revoked with nothing outstanding and each S3 key deleted. Nothing
+/// recorded confirms nothing.
+#[tokio::test]
+async fn access_is_taken_away_only_with_every_confirmation() {
+    let store = TestStore::new();
+    let db = store.builder(vec![], vec![]).open().await.unwrap();
+    db.inspect_writer(|sql| {
+        for statement in [
+            "INSERT INTO _coven_provider_access(account,intended,granted) VALUES('revoked@example.com',0,0)",
+            "INSERT INTO _coven_provider_access(account,intended,granted) VALUES('granted@example.com',0,1)",
+            "INSERT INTO _coven_provider_access(account,intended,granted) VALUES('unknown@example.com',0,NULL)",
+            "INSERT INTO _coven_access_keys(access_key_id,operation) VALUES('deleted',NULL)",
+            "INSERT INTO _coven_access_keys(access_key_id,operation) VALUES('pending',7)",
+        ] {
+            sql.internal_execute(statement, []).unwrap();
+        }
+    });
+    let taken = |accounts: &[&str], keys: &[&str]| {
+        let db = db.clone();
+        let accounts = accounts.iter().map(|a| (*a).to_owned()).collect();
+        let keys = keys.iter().map(|k| (*k).to_owned()).collect();
+        async move { db.access_taken_away(accounts, keys).await.unwrap() }
+    };
+    assert!(!taken(&[], &[]).await);
+    assert!(taken(&["revoked@example.com"], &["deleted"]).await);
+    assert!(!taken(&["revoked@example.com", "granted@example.com"], &[]).await);
+    assert!(!taken(&["unknown@example.com"], &[]).await);
+    assert!(!taken(&["never@example.com"], &[]).await);
+    assert!(!taken(&[], &["deleted", "pending"]).await);
+    assert!(!taken(&[], &["unrecorded"]).await);
 }

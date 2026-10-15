@@ -115,8 +115,10 @@ mod write_sources;
 pub use coven_format::value::EntryId;
 pub use coven_merge::WriteId;
 pub use database::file_database::{CacheReservation, FileDatabase};
-pub use database::file_retention::FileRetention;
-pub use database::input_database::{InputBudget, RetainedInput, RetainedRange};
+pub use database::file_retention::{FileCandidate, FileRetention};
+pub use database::input_database::{
+    FileEvidence, InputBudget, RetainedInput, RetainedRange, UnprovenFiles,
+};
 pub use database::{Database, DatabaseBuilder, DatabaseReadHandle, IdentityReservations};
 pub use declaration::{CacheFill, FileDecl, Provenance, RowIdentity, SyncedTable};
 pub use download::{ApplyOutcome, DownloadedPart, DownloadedWrite, SyncState, WriteWait};

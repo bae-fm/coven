@@ -18,6 +18,21 @@ pub(crate) struct OpenedWrite {
     hash: ObjectHasher,
 }
 
+impl OpenedWrite {
+    /// The audience and key of each part `opens` leaves closed: what must
+    /// change before these bytes can name every file they refer to (§16.5).
+    pub(crate) fn unopened(&self, opens: &[bool]) -> std::collections::BTreeSet<(Audience, KeyId)> {
+        self.header
+            .parts
+            .iter()
+            .zip(&self.prefix.part_keys)
+            .zip(opens)
+            .filter(|(_, opens)| !**opens)
+            .map(|((part, key), _)| (part.audience.clone(), *key))
+            .collect()
+    }
+}
+
 /// Each consumer chooses its opened parts and handles bounded plaintext chunks.
 pub(crate) trait PartSink: Send {
     fn opens(&self, part: usize) -> bool;

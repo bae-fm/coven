@@ -184,29 +184,167 @@ async fn locally_protected_files_reuse_the_checked_snapshot_prefix() {
     f.close().await;
 }
 
+/// §16.5: a file uploaded after its row was deleted becomes a candidate when
+/// its upload completes, and is deleted once no retained object names it. A
+/// damaged retained snapshot cannot prove that, so the file stays. Retention
+/// never lists `files/`.
 #[tokio::test]
-async fn a_damaged_snapshot_cannot_prove_file_absence() {
-    let f = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
-    let (mut sync, _, _) = sync(&f).await;
-    let kept = f.uploaded("kept", vec![32; CHUNK]).await;
-    sync.write_snapshot(Audience::Store).await.unwrap();
-    let orphan = ObjectPath::file(
-        f.directory.id(),
-        kept.uploader(),
-        coven_foundation::id_source::FileId(uuid::Uuid::from_u128(999)),
+async fn a_late_upload_goes_once_nothing_retained_names_it() {
+    for damaged in [false, true] {
+        let f = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
+        let (mut sync, _, mut writes) = sync(&f).await;
+        let kept = f.uploaded("kept", vec![32; CHUNK]).await;
+        f.files.set_uploads_paused(true).await.unwrap();
+        let late = f.attach("files", "late", vec![33; CHUNK]).await;
+        f.database
+            .write(|sql| {
+                sql.execute("DELETE FROM files WHERE id='late'", [])?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        writes.upload_writes().await.unwrap();
+        assert!(writes.post_positions().await.unwrap());
+        // The snapshot names only the kept file; the covered, posted writes
+        // naming the late one go with this snapshot's retention.
+        sync.write_snapshot(Audience::Store).await.unwrap();
+        assert!(f
+            .storage
+            .list(&ObjectPrefix::device_logs(f.directory.id()))
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(f.queued(&late).await);
+        f.drain().await;
+        assert!(!f.queued(&late).await);
+        assert!(f.storage.read(&path(&f, &late)).await.is_ok());
+        if damaged {
+            let snapshot = f
+                .storage
+                .list(&ObjectPrefix::snapshots(f.directory.id()))
+                .await
+                .unwrap()
+                .remove(0);
+            f.storage
+                .corrupt_byte(&snapshot.path, snapshot.size as usize - 1)
+                .await
+                .unwrap();
+        }
+        sync.run_retention().await.unwrap();
+        assert_eq!(f.storage.read(&path(&f, &late)).await.is_ok(), damaged);
+        assert!(f.storage.read(&path(&f, &kept)).await.is_ok());
+        assert!(!f.storage.request_trace().iter().any(|request| matches!(
+            request,
+            coven_storage::test_utils::MemoryRequest::List(prefix)
+                if prefix.as_str().contains("/files/")
+        )));
+        f.close().await;
+    }
+}
+
+/// SD `RetentionSafety.fileDeletable`: one uploaded file is named by exactly
+/// the retained references each case leaves, or by retained data this device
+/// cannot read. Retention deletes it exactly when the model allows.
+#[tokio::test]
+#[ignore = "requires COVEN_STORELOG_DATA_LEAN, supplied by scripts/check.sh"]
+async fn data_differential_file_deletion() {
+    use serde_json::{json, Value};
+    let kinds = [
+        "rows",
+        "losses",
+        "snapshots",
+        "logs",
+        "localRows",
+        "waitingWrites",
+        "uploadQueues",
+        "reversible",
+    ];
+    let mut cases = Vec::new();
+    let mut deleted = Vec::new();
+    for (case, naming) in [
+        ("released", &[][..]),
+        ("row", &["rows"][..]),
+        ("waiting write", &["waitingWrites"][..]),
+        ("queued upload", &["uploadQueues"][..]),
+        ("retained log", &["logs"][..]),
+        ("snapshot and deleting log", &["snapshots", "logs"][..]),
+        ("unreadable snapshot", &[][..]),
+    ] {
+        let f = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
+        let (mut sync, _, mut writes) = sync(&f).await;
+        // The fixture starts with uploads paused: these stay queued.
+        let file = match case {
+            "queued upload" | "unreadable snapshot" => {
+                f.attach("files", "x", vec![34; CHUNK]).await
+            }
+            _ => f.uploaded("x", vec![34; CHUNK]).await,
+        };
+        if case == "snapshot and deleting log" {
+            writes.upload_writes().await.unwrap();
+            assert!(writes.post_positions().await.unwrap());
+            sync.write_snapshot(Audience::Store).await.unwrap();
+        }
+        if case != "row" {
+            f.database
+                .write(|sql| {
+                    sql.execute("DELETE FROM files", [])?;
+                    Ok(())
+                })
+                .await
+                .unwrap();
+        }
+        if case != "waiting write" && case != "row" {
+            writes.upload_writes().await.unwrap();
+            assert!(writes.post_positions().await.unwrap());
+        }
+        if matches!(case, "released" | "queued upload" | "unreadable snapshot") {
+            sync.write_snapshot(Audience::Store).await.unwrap();
+        }
+        if case == "unreadable snapshot" {
+            let snapshot = f
+                .storage
+                .list(&ObjectPrefix::snapshots(f.directory.id()))
+                .await
+                .unwrap()
+                .remove(0);
+            f.storage
+                .corrupt_byte(&snapshot.path, snapshot.size as usize - 1)
+                .await
+                .unwrap();
+            // The upload completing releases the last local protection.
+            f.drain().await;
+        }
+        sync.run_retention().await.unwrap();
+        let path = path(&f, &file);
+        deleted.push(Value::Bool(f.storage.request_trace().iter().any(
+            |request| matches!(request, coven_storage::test_utils::MemoryRequest::Delete(p) if *p == path),
+        )));
+        let references = if case == "unreadable snapshot" {
+            Value::Null
+        } else {
+            Value::Object(
+                kinds
+                    .iter()
+                    .map(|kind| {
+                        let ids = if naming.contains(kind) {
+                            json!([1])
+                        } else {
+                            json!([])
+                        };
+                        ((*kind).to_owned(), ids)
+                    })
+                    .collect(),
+            )
+        };
+        cases.push(json!({ "file": 1, "references": references }));
+        f.close().await;
+    }
+    let output = crate::tests::run_lean("COVEN_STORELOG_DATA_LEAN", &json!({ "files": cases }));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
     );
-    f.storage.create(&orphan, b"orphan").await.unwrap();
-    let snapshot = f
-        .storage
-        .list(&ObjectPrefix::snapshots(f.directory.id()))
-        .await
-        .unwrap()
-        .remove(0);
-    f.storage
-        .corrupt_byte(&snapshot.path, snapshot.size as usize - 1)
-        .await
-        .unwrap();
-    sync.run_retention().await.unwrap();
-    assert!(f.storage.read(&orphan).await.is_ok());
-    f.close().await;
+    let lean: Vec<Value> = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(deleted, lean);
 }

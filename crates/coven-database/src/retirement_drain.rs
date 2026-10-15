@@ -201,4 +201,4 @@ pub(crate) fn mark(
 
 #[cfg(test)]
 #[path = "retirement_drain_tests.rs"]
-mod tests;
+pub(crate) mod tests;

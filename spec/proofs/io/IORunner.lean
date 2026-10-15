@@ -379,6 +379,30 @@ private def writers (j : Json) : Except String Json := do
   let known := Writers.known (fun w => log.getD w blank) (List.range log.size) listed
   return toJson ((Retired.polling life known).filter (· ≠ own) |>.mergeSort)
 
+/-- `Retired.observeFiles` folded over one removed writer's file-folder
+listings: each either fails or completes with the file ids it found. After
+each listing, the scan is `null` while pending or the ids its completion
+recorded; a completed scan is never replaced (`completed_scan_retained`). -/
+private def fileScan (j : Json) : Except String Json := do
+  let writer ← j.getObjValAs? Nat "writer"
+  let listings ← j.getObjValAs? (Array Json) "listings"
+  let mut scan := Retired.FileScan.pending
+  let mut results := #[]
+  for listing in listings do
+    let result : Except Failure (List Path) ←
+      match listing.getObjValAs? (List Nat) "found" with
+      | .ok ids => pure (.ok (ids.map (Path.file writer)))
+      | .error _ => do
+          let _ ← listing.getObjValAs? Bool "failed"
+          pure (.error .network)
+    scan := Retired.observeFiles scan result
+    results := results.push (match scan with
+      | .pending => Json.null
+      | .complete paths => toJson (paths.filterMap fun
+          | .file _ id => some id
+          | _ => none))
+  return Json.arr results
+
 private def run (j : Json) : Except String Json := do
   match ← j.getObjValAs? String "check" with
   | "discovery" => discovery j
@@ -392,6 +416,7 @@ private def run (j : Json) : Except String Json := do
   | "post" => post j
   | "send_gate" => sendGate j
   | "drain" => drain j
+  | "file_scan" => fileScan j
   | "writers" => writers j
   | "phases" => phases j
   | "snapshot_writes" => snapshotWrites j

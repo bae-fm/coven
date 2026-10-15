@@ -396,6 +396,9 @@ proofs() {
         step "Rust / Lean reload choice and wait records"
         COVEN_STORELOG_DATA_LEAN="$runner" exact_ignored coven-sync --all-features -- \
             store_log_sync::snapshots::reload::tests::data_differential_reload_choice
+        step "Rust / Lean uploaded-file deletion"
+        COVEN_STORELOG_DATA_LEAN="$runner" exact_ignored coven-sync --all-features -- \
+            files::tests::retention::data_differential_file_deletion
     fi
 
     if proof_selected io || crate_selected coven-sync; then
@@ -422,6 +425,7 @@ proofs() {
             device_log_sync::tests::schema::raise_publication::differential::io_differential_snapshot_writes \
             retry_waits::tests::io_differential_waiting \
             files::tests::upload_retry::io_differential_upload_worker \
+            store_log_sync::snapshots::file_scan::tests::io_differential_file_scan \
             write_object::tests::io_differential_dropped_registration
     fi
 

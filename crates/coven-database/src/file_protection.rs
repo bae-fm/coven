@@ -156,11 +156,28 @@ pub(crate) fn refresh(
             loss(schema, &record, &mut references)
         },
     )?;
-    db.internal_execute(
-        "DELETE FROM _coven_row_file_refs WHERE table_name=?1 AND key=?2",
-        params![key.0, key.1],
-    )?;
-    for (device, file) in &references {
+    // Change only the references that differ: deleting a kept one would make
+    // its file a retention candidate (§16.5) although nothing released it.
+    let previous: BTreeSet<_> = db
+        .query(
+            "SELECT device,file FROM _coven_row_file_refs WHERE table_name=?1 AND key=?2",
+            params![key.0, key.1],
+            |r| {
+                Ok((
+                    DeviceId(u64::from_be_bytes(r.get(0)?)),
+                    FileId(uuid::Uuid::from_bytes(r.get(1)?)),
+                ))
+            },
+        )?
+        .into_iter()
+        .collect();
+    for (device, file) in previous.difference(&references) {
+        db.internal_execute(
+            "DELETE FROM _coven_row_file_refs WHERE device=?1 AND file=?2 AND table_name=?3 AND key=?4",
+            params![device.0.to_be_bytes(), file.0.as_bytes(), key.0, key.1],
+        )?;
+    }
+    for (device, file) in references.difference(&previous) {
         db.internal_execute(
             "INSERT INTO _coven_row_file_refs(device,file,table_name,key) VALUES(?1,?2,?3,?4)",
             params![device.0.to_be_bytes(), file.0.as_bytes(), key.0, key.1],

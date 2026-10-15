@@ -33,6 +33,8 @@ pub struct Faults {
     pub read_failures: BTreeMap<ObjectPath, StorageFailure>,
     /// Fail exact status calls at these paths, independently of reads.
     pub status_failures: BTreeMap<ObjectPath, StorageFailure>,
+    /// Fail listings of exactly these prefixes.
+    pub list_failures: BTreeMap<ObjectPrefix, StorageFailure>,
     /// Maximum bytes returned by each body read; nonzero.
     pub read_chunk_size: usize,
     /// Failures after metadata, independently of request-start failures.
@@ -73,6 +75,7 @@ impl Faults {
             fail_next: 0,
             read_failures: BTreeMap::new(),
             status_failures: BTreeMap::new(),
+            list_failures: BTreeMap::new(),
             read_chunk_size: 64 * 1024,
             body_failures: BTreeMap::new(),
             failure: StorageFailure::Network,
@@ -704,6 +707,9 @@ impl ProviderOps for MemoryProvider {
         self.before(MemoryRequest::List(prefix.clone())).await?;
         let now = self.storage_time()?;
         let mut state = self.state.lock().await;
+        if let Some(failure) = state.faults.list_failures.get(prefix) {
+            return Err((*failure).into());
+        }
         let objects: Vec<_> = state
             .objects
             .iter()

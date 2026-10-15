@@ -744,6 +744,43 @@ macro_rules! coven_tables {
                     ON DELETE CASCADE
             ) STRICT, WITHOUT ROWID;
         ");
+        // Fixed file paths awaiting a storage-deletion decision (§16.5): the
+        // transaction ending a path's last local protection adds it, so
+        // retention never lists files/.
+        $visit!(_coven_file_candidates, "
+            CREATE TABLE _coven_file_candidates (
+                device BLOB NOT NULL CHECK(length(device)=8),
+                file BLOB NOT NULL CHECK(length(file)=16),
+                PRIMARY KEY(device,file)
+            ) STRICT, WITHOUT ROWID;
+            CREATE VIEW _coven_file_protection(device,file) AS
+                SELECT device,file FROM _coven_row_file_refs UNION ALL SELECT device,file FROM _coven_input_file_refs
+                UNION ALL SELECT device,file FROM _coven_queued_file_refs UNION ALL SELECT device,file FROM _coven_file_uploads;
+            CREATE TRIGGER _coven_row_file_ref_released AFTER DELETE ON _coven_row_file_refs BEGIN
+                INSERT INTO _coven_file_candidates SELECT OLD.device,OLD.file WHERE NOT EXISTS(SELECT 1 FROM _coven_file_protection WHERE device=OLD.device AND file=OLD.file) ON CONFLICT DO NOTHING;
+            END;
+            CREATE TRIGGER _coven_input_file_ref_released AFTER DELETE ON _coven_input_file_refs BEGIN
+                INSERT INTO _coven_file_candidates SELECT OLD.device,OLD.file WHERE NOT EXISTS(SELECT 1 FROM _coven_file_protection WHERE device=OLD.device AND file=OLD.file) ON CONFLICT DO NOTHING;
+            END;
+            CREATE TRIGGER _coven_queued_file_ref_released AFTER DELETE ON _coven_queued_file_refs BEGIN
+                INSERT INTO _coven_file_candidates SELECT OLD.device,OLD.file WHERE NOT EXISTS(SELECT 1 FROM _coven_file_protection WHERE device=OLD.device AND file=OLD.file) ON CONFLICT DO NOTHING;
+            END;
+            CREATE TRIGGER _coven_file_upload_released AFTER DELETE ON _coven_file_uploads BEGIN
+                INSERT INTO _coven_file_candidates SELECT OLD.device,OLD.file WHERE NOT EXISTS(SELECT 1 FROM _coven_file_protection WHERE device=OLD.device AND file=OLD.file) ON CONFLICT DO NOTHING;
+            END;
+        ");
+        // A removed uploader's file folder, listed once after its access was
+        // confirmed taken away, and the kept removal that justified it. Replay
+        // deletes it once that removal is no longer kept: a later cut-off
+        // scans again (§16.5). The paths found are candidates.
+        $visit!(_coven_file_scans, "
+            CREATE TABLE _coven_file_scans (
+                device BLOB PRIMARY KEY NOT NULL CHECK(length(device)=8),
+                entry_device BLOB NOT NULL CHECK(length(entry_device)=8),
+                entry_number BLOB NOT NULL CHECK(length(entry_number)=8),
+                FOREIGN KEY(entry_device,entry_number) REFERENCES _coven_store_log(device,number)
+            ) STRICT, WITHOUT ROWID;
+        ");
         $visit!(_coven_cache, "
             CREATE TABLE _coven_cache (
                 namespace TEXT NOT NULL,
@@ -875,80 +912,9 @@ pub(crate) fn initial_schema() -> String {
     sql
 }
 
-// Independently committed remote input, owned by the same store lifetime.
-macro_rules! coven_input_tables {
-    ($visit:ident) => {
-        $visit!(
-            _coven_input_objects,
-            "
-    CREATE TABLE _coven_input_objects (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        path TEXT NOT NULL UNIQUE,
-        identity BLOB NOT NULL,
-        observation BLOB NOT NULL,
-        released INTEGER NOT NULL DEFAULT 0 CHECK(released IN (0,1)),
-        received INTEGER NOT NULL DEFAULT 0 CHECK(received IN (0,1)),
-        metadata BLOB,
-        files_complete INTEGER CHECK(files_complete IN (0,1))
-    ) STRICT;
-        "
-        );
-        $visit!(
-            _coven_input_ranges,
-            "
-    CREATE TABLE _coven_input_ranges (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        object INTEGER NOT NULL REFERENCES _coven_input_objects(id) ON DELETE CASCADE,
-        start INTEGER NOT NULL CHECK(start>=0),
-        end INTEGER NOT NULL CHECK(end>start),
-        bytes BLOB NOT NULL CHECK(length(bytes)=end-start),
-        UNIQUE(object,start)
-    ) STRICT;
-        "
-        );
-        $visit!(
-            _coven_input_files,
-            "
-    CREATE TABLE _coven_input_files (
-        object INTEGER NOT NULL REFERENCES _coven_input_objects(id) ON DELETE CASCADE,
-        device BLOB NOT NULL CHECK(length(device)=8),
-        file BLOB NOT NULL CHECK(length(file)=16),
-        PRIMARY KEY(object,device,file)
-    ) STRICT, WITHOUT ROWID;
-        "
-        );
-        $visit!(
-            _coven_input_budget,
-            "
-    CREATE TABLE _coven_input_budget (
-        singleton INTEGER PRIMARY KEY CHECK(singleton=1),
-        maximum INTEGER NOT NULL CHECK(maximum>=0),
-        retained INTEGER NOT NULL CHECK(retained>=0),
-        evicted INTEGER NOT NULL CHECK(evicted>=0)
-    ) STRICT;
-    INSERT INTO _coven_input_budget VALUES(1,67108864,0,0);
-    CREATE TRIGGER _coven_input_range_added AFTER INSERT ON _coven_input_ranges BEGIN
-        UPDATE _coven_input_budget SET retained=retained+length(NEW.bytes) WHERE singleton=1;
-    END;
-    CREATE TRIGGER _coven_input_range_removed AFTER DELETE ON _coven_input_ranges BEGIN
-        UPDATE _coven_input_budget SET retained=retained-length(OLD.bytes) WHERE singleton=1;
-    END;
-    PRAGMA application_id=1;
-        "
-        );
-    };
-}
-
-pub(crate) fn initial_input_schema() -> String {
-    let mut sql = String::new();
-    macro_rules! append {
-        ($table:ident, $sql:literal) => {
-            sql.push_str($sql);
-        };
-    }
-    coven_input_tables!(append);
-    sql
-}
+#[path = "internal_schema_input.rs"]
+mod input;
+pub(crate) use input::initial_input_schema;
 
 #[cfg(test)]
 #[path = "internal_schema_tests.rs"]

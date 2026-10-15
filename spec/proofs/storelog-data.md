@@ -875,6 +875,9 @@ The current spec resolves or narrows the historical witnesses as follows:
   SQL cascades or arbitrary migrations.
 - **Frozen file references:** `RetentionSafety.loss_protects_file` rules out
   the predicate error checked by `RetentionExamples.frozen_file_counterexample`.
+  The Rust comparison `data_differential_file_deletion` runs retention on a
+  file named by each kind of retained reference in turn, by none, and behind
+  an unreadable snapshot, and compares its deletions with `fileDeletable`.
 - **Snapshot pins returning:** retention must retain every still-possible
   boundary, not just currently selected ones. The dependency theorem covers
   this provided its conditions name all such entries. Automatic discovery of

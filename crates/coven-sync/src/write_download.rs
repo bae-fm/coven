@@ -95,6 +95,7 @@ impl DeviceLogSync {
             stored_at: object.stored_at,
             signer,
         };
+        let skipped = opened.unopened(&opens);
         let (primary, download) = ChannelParts::new(opened.header.clone(), &opens, published);
         let (references, input) = ChannelParts::new(opened.header.clone(), &opens, published);
         let (validation, validated) = oneshot::channel();
@@ -116,8 +117,10 @@ impl DeviceLogSync {
             result
         };
         let transfer = async {
-            let (downloaded, references) =
-                tokio::join!(download, self.database.write_file_references(input));
+            let (downloaded, references) = tokio::join!(
+                download,
+                self.database.write_file_references(input, skipped)
+            );
             let result = downloaded.and_then(|()| references.map_err(SyncError::from));
             // Both authentication and reference validation finish before rows
             // can commit. A failed transfer drops the sender, so the apply rolls

@@ -15,7 +15,19 @@ async fn ranges_facts_and_uncertainty_survive_reopen_and_explicit_eviction() {
     let first = input(&db, "write", 1, false).await;
     first.keep_range(0, vec![1, 2, 3, 4]).await.unwrap();
     first.keep_metadata(vec![9]).await.unwrap();
-    first.keep_files(None).await.unwrap();
+    let unreadable = FileEvidence::Unproven(UnprovenFiles::Parts(BTreeSet::from([
+        (
+            coven_merge::Audience::Circle(coven_foundation::id_source::CircleId(
+                uuid::Uuid::from_u128(4),
+            )),
+            coven_foundation::id_source::KeyId(uuid::Uuid::from_u128(5)),
+        ),
+        (
+            coven_merge::Audience::Store,
+            coven_foundation::id_source::KeyId(uuid::Uuid::from_u128(6)),
+        ),
+    ])));
+    first.keep_files(unreadable.clone()).await.unwrap();
     db.close().await.unwrap();
     let db = store.builder(vec![], vec![]).open().await.unwrap();
     let first = input(&db, "write", 1, false).await;
@@ -25,7 +37,7 @@ async fn ranges_facts_and_uncertainty_survive_reopen_and_explicit_eviction() {
         (1, &[2, 3][..])
     );
     assert_eq!(first.metadata().await.unwrap(), Some(vec![9]));
-    assert_eq!(first.files().await.unwrap(), Some(None));
+    assert_eq!(first.files().await.unwrap(), Some(unreadable.clone()));
     first.release_ranges().await.unwrap();
     assert_eq!(
         db.set_input_budget(3).await.unwrap(),
@@ -38,9 +50,21 @@ async fn ranges_facts_and_uncertainty_survive_reopen_and_explicit_eviction() {
     let first = input(&db, "write", 1, false).await;
     assert!(first.ranges(0, 4).await.unwrap().is_empty());
     assert_eq!(first.metadata().await.unwrap(), Some(vec![9]));
-    assert_eq!(first.files().await.unwrap(), Some(None));
+    assert_eq!(first.files().await.unwrap(), Some(unreadable.clone()));
     first.keep_range(1, vec![2, 3]).await.unwrap();
     assert_eq!(db.input_budget().await.unwrap().retained, 2);
+    // Each new verdict replaces the previous one whole: no unopened part or
+    // reference of an earlier verdict survives it.
+    let files = BTreeSet::from([(DeviceId(5), FileId(uuid::Uuid::from_u128(6)))]);
+    for evidence in [
+        FileEvidence::Complete(files.clone()),
+        FileEvidence::Unproven(UnprovenFiles::Schema(9)),
+        unreadable.clone(),
+        FileEvidence::Complete(BTreeSet::new()),
+    ] {
+        first.keep_files(evidence.clone()).await.unwrap();
+        assert_eq!(first.files().await.unwrap(), Some(evidence));
+    }
 }
 
 #[tokio::test]
@@ -75,12 +99,18 @@ async fn eviction_keeps_authenticated_file_references() {
     let db = store.builder(vec![], vec![]).open().await.unwrap();
     let input = input(&db, "snapshot", 1, false).await;
     let files = BTreeSet::from([(DeviceId(5), FileId(uuid::Uuid::from_u128(6)))]);
-    input.keep_files(Some(files.clone())).await.unwrap();
+    input
+        .keep_files(FileEvidence::Complete(files.clone()))
+        .await
+        .unwrap();
     input.keep_range(0, vec![1, 2]).await.unwrap();
     input.release_ranges().await.unwrap();
     db.set_input_budget(0).await.unwrap();
     let input = self::input(&db, "snapshot", 1, false).await;
-    assert_eq!(input.files().await.unwrap(), Some(Some(files)));
+    assert_eq!(
+        input.files().await.unwrap(),
+        Some(FileEvidence::Complete(files))
+    );
 }
 
 #[tokio::test]
@@ -90,14 +120,15 @@ async fn unchanged_observations_and_facts_take_no_writer_or_transaction() {
     let saved = input(&db, "write", 1, false).await;
     saved.keep_range(0, vec![1, 2]).await.unwrap();
     saved.keep_metadata(vec![3]).await.unwrap();
-    saved.keep_files(None).await.unwrap();
+    let unsupported = FileEvidence::Unproven(UnprovenFiles::Schema(9));
+    saved.keep_files(unsupported.clone()).await.unwrap();
     let work = crate::test_utils::WorkCounter::default();
     db.test_track_work(work.clone()).await.unwrap();
     for _ in 0..3 {
         let saved = input(&db, "write", 1, false).await;
         assert_eq!(saved.ranges(0, 2).await.unwrap()[0].bytes, [1, 2]);
         saved.keep_metadata(vec![3]).await.unwrap();
-        saved.keep_files(None).await.unwrap();
+        saved.keep_files(unsupported.clone()).await.unwrap();
     }
     assert_eq!(work.take(), crate::test_utils::WorkCounts::default());
 }

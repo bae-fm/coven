@@ -21,7 +21,7 @@ async fn advance(db: &crate::Database, horizon: u64, sample: StorageTime) {
 
 /// Drop `entry` in a replay that also applies an unrelated entry, as a replay
 /// reversing a non-final retirement would: the device is active again.
-async fn drop_retirement(db: &crate::Database, entry: EntryId, device: DeviceId) {
+pub(crate) async fn drop_retirement(db: &crate::Database, entry: EntryId, device: DeviceId) {
     let log = db.store_log().await.unwrap();
     let mut replay = log.replay;
     replay.entries.insert(

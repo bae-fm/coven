@@ -60,7 +60,7 @@ pub(crate) fn operation_owner(sync: StoreLogSync, files: Files) -> Operations {
     Operations::new(sync, files, writes, clock)
 }
 
-fn google() -> Arc<MemoryStorage> {
+pub(crate) fn google() -> Arc<MemoryStorage> {
     Arc::new(
         MemoryStorage::builder()
             .provider(coven_storage::CloudProvider::GoogleDrive)
@@ -68,7 +68,7 @@ fn google() -> Arc<MemoryStorage> {
             .unwrap(),
     )
 }
-async fn accounts(storage: Arc<MemoryStorage>) -> [Device; 3] {
+pub(crate) async fn accounts(storage: Arc<MemoryStorage>) -> [Device; 3] {
     let mut a = device(storage.clone(), 1, member(1), store(1)).await;
     let mut b = device(storage.clone(), 2, member(2), store(1)).await;
     let mut c = device(storage.clone(), 3, member(3), store(1)).await;
@@ -141,7 +141,7 @@ async fn finish(d: &mut Device, id: OperationId) -> Output {
     }
 }
 
-async fn publish(d: &mut Device, command: Command) {
+pub(crate) async fn publish(d: &mut Device, command: Command) {
     assert!(matches!(
         d.sync.begin_operation_call(command).await.unwrap(),
         Begun::Value(Output::Unit)
@@ -167,7 +167,7 @@ async fn queue_removal(d: &mut Device, command: Command) -> coven_database::Stor
     );
     d.db.local_store_log().await.unwrap().upload.unwrap()
 }
-async fn drive_access(d: &mut Device) {
+pub(crate) async fn drive_access(d: &mut Device) {
     for record in d.db.operations().await.unwrap() {
         if matches!(Data::read(&record).unwrap(), Data::ProviderAccess { .. }) {
             loop {
