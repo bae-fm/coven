@@ -23,7 +23,6 @@ impl StoreLogSync {
         // that storage was ahead of this copy (§10).
         let reserved = self.database.identity_reservations().await?;
         let mut listed_entries = 0;
-        let mut listed_copies = 0;
         let _scope = self.reads.enter();
         self.reads.reset_discovery();
         let (through, sample) = {
@@ -31,6 +30,7 @@ impl StoreLogSync {
             (finality.through(), finality.sample_time())
         };
         let mut local = self.database.local_store_log().await?;
+        self.reads.forget_applied(&local.log);
         let member = self
             .member_keys
             .read()?
@@ -92,28 +92,15 @@ impl StoreLogSync {
                 );
                 crate::store_log_landing::add_observation(&mut paths, received.metadata)?;
             }
-            for copy in crate::discovery::scan(
+            keys::refresh_copies(
                 &self.database,
                 &self.reads,
+                self.download_limit,
                 storage,
                 local.store,
-                coven_database::LogKind::KeyCopy,
-                &unseen.iter().map(|writer| (*writer, 0)).collect(),
-                self.download_limit,
+                unseen.iter().copied(),
             )
-            .await?
-            {
-                if let Some((writer, number)) = copy.metadata.path.key_copy_position() {
-                    // A number beyond the reservations is storage ahead,
-                    // whatever its bytes. Undecodable bytes within them are
-                    // provider damage, never another copy's object: the
-                    // copy reading below reports them and the phase waits
-                    // (§11, `OwnCopyDamage.unreadable_is_damage`).
-                    if writer == local.device {
-                        listed_copies = listed_copies.max(number.get());
-                    }
-                }
-            }
+            .await?;
             probed.extend(&writers);
             for stored in &paths {
                 let (device, number) = stored.path.store_log_position().ok_or(
@@ -153,6 +140,13 @@ impl StoreLogSync {
                         continue;
                     }
                 }
+                // An entry opened by an earlier scan is not decrypted again.
+                if let Some(entry) = self.reads.opened(*id) {
+                    missing_keys.remove(id);
+                    tentative.opened(&entry.entry);
+                    opened.insert(*id, entry);
+                    continue;
+                }
                 let envelope = match SingleChunkObject::decode(&bytes[id]) {
                     Ok(envelope) => envelope,
                     Err(error) => {
@@ -184,7 +178,10 @@ impl StoreLogSync {
                     )
                     .await?
                 {
-                    super::key_acquisition::EntryOpening::Opened(entry) => entry,
+                    super::key_acquisition::EntryOpening::Opened(entry) => {
+                        self.reads.keep_opened(entry.clone());
+                        entry
+                    }
                     super::key_acquisition::EntryOpening::Tentative(entry, introducer) => {
                         introducers.insert(*id, introducer);
                         entry
@@ -223,6 +220,11 @@ impl StoreLogSync {
                 break;
             }
         }
+        // A number beyond the reservations is storage ahead, whatever its
+        // bytes. Undecodable bytes within them are provider damage, never
+        // another copy's object: the copy reading below reports them and the
+        // phase waits (§11, `OwnCopyDamage.unreadable_is_damage`).
+        let listed_copies = self.reads.with_copies(|copies| copies.newest(local.device));
         // Entry and key-copy misses following this scan's sample supply two
         // of a retired device's three drain reads (§6, SP step 2).
         let drains = match sample {

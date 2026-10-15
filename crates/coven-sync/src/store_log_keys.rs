@@ -11,10 +11,10 @@ use coven_format::{
     sealed_key::KeyCopyPrefix,
     store_log::{StoreChange, StoreLogEntry},
 };
-use coven_foundation::id_source::{KeyId, MemberId};
+use coven_foundation::id_source::{DeviceId, KeyId, MemberId};
 use coven_merge::Audience;
 use coven_storage::ObjectPath;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 pub(crate) fn introduced(change: &StoreChange) -> Option<(Audience, KeyId)> {
     crate::key_introductions::introduction(change).map(|(audience, key, _)| (audience, key))
@@ -304,33 +304,95 @@ impl CopyReading {
     }
 }
 
-pub(crate) async fn read_copies(
+/// Retained key copies decoded so far. Retained input never changes, so each
+/// copy's clear prefix is decoded once, by the reading that first finds it,
+/// and later readings ask storage and the database only for newer numbers.
+/// A retained copy with its clear prefix, or the object whose prefix fails.
+pub(crate) type DecodedCopy = Result<ObservedCopy, (ObjectPath, crate::Refusal)>;
+
+#[derive(Default)]
+pub(crate) struct DecodedCopies {
+    /// Per writer, the number through which every retained copy is here.
+    through: BTreeMap<DeviceId, u64>,
+    decoded: BTreeMap<(DeviceId, u64), DecodedCopy>,
+}
+
+impl DecodedCopies {
+    pub(crate) fn after(
+        &self,
+        writers: impl IntoIterator<Item = DeviceId>,
+    ) -> BTreeMap<DeviceId, u64> {
+        writers
+            .into_iter()
+            .map(|writer| (writer, self.through.get(&writer).copied().unwrap_or(0)))
+            .collect()
+    }
+
+    pub(crate) fn keep(&mut self, decoded: Vec<((DeviceId, u64), DecodedCopy)>) {
+        let writers: BTreeSet<_> = decoded.iter().map(|((writer, _), _)| *writer).collect();
+        self.decoded.extend(decoded);
+        for writer in writers {
+            let through = self.through.entry(writer).or_insert(0);
+            while self.decoded.contains_key(&(writer, *through + 1)) {
+                *through += 1;
+            }
+        }
+    }
+
+    /// The newest copy number this device knows in `writer`'s log.
+    pub(crate) fn newest(&self, writer: DeviceId) -> u64 {
+        self.decoded
+            .range((writer, 0)..=(writer, u64::MAX))
+            .next_back()
+            .map_or(0, |((_, number), _)| *number)
+    }
+
+    pub(crate) fn reading(&self) -> CopyReading {
+        let mut reading = CopyReading {
+            copies: Vec::new(),
+            unreadable: Vec::new(),
+        };
+        for decoded in self.decoded.values() {
+            match decoded {
+                Ok(copy) => reading.copies.push(copy.clone()),
+                Err(unreadable) => reading.unreadable.push(unreadable.clone()),
+            }
+        }
+        reading
+    }
+}
+
+/// Read `writers`' key-copy logs through their next misses and decode the
+/// copies not decoded before.
+pub(crate) async fn refresh_copies(
     database: &coven_database::Database,
     reads: &crate::pass_reads::PassReads,
     limit: std::num::NonZeroUsize,
     storage: &dyn coven_storage::Storage,
     store: coven_foundation::id_source::StoreId,
-) -> Result<CopyReading, SyncError> {
-    let mut reading = CopyReading {
-        copies: Vec::new(),
-        unreadable: Vec::new(),
-    };
-    let writers = crate::discovery::writers(database, reads, storage, store).await?;
+    writers: impl IntoIterator<Item = DeviceId>,
+) -> Result<(), SyncError> {
+    let after = reads.with_copies(|copies| copies.after(writers));
+    let mut decoded = Vec::new();
     for read in crate::discovery::scan(
         database,
         reads,
         storage,
         store,
         coven_database::LogKind::KeyCopy,
-        &writers.into_iter().map(|writer| (writer, 0)).collect(),
+        &after,
         limit,
     )
     .await?
     {
         let object = read.metadata;
+        let (writer, number) = object.path.key_copy_position().ok_or(
+            coven_storage::StorageFailure::Protocol
+                .with_source("key-copy observation returned another layout"),
+        )?;
         let bytes = read.bytes;
-        match coven_format::sealed_key::SealedKey::decode(&bytes) {
-            Ok(sealed) => reading.copies.push(ObservedCopy {
+        let copy = match coven_format::sealed_key::SealedKey::decode(&bytes) {
+            Ok(sealed) => Ok(ObservedCopy {
                 path: object.path,
                 prefix: sealed.prefix().clone(),
                 bytes,
@@ -341,11 +403,27 @@ pub(crate) async fn read_copies(
                     return Err(SyncError::UpdateRequired(update));
                 }
                 tracing::warn!(path = object.path.as_str(), error = %failure, "key copy has no readable prefix");
-                reading.unreadable.push((object.path, failure));
+                Err((object.path, failure))
             }
-        }
+        };
+        decoded.push(((writer, number.get()), copy));
     }
-    Ok(reading)
+    reads.with_copies(|copies| copies.keep(decoded));
+    Ok(())
+}
+
+/// Every retained key copy: those whose clear prefix decodes, and every
+/// object whose prefix does not.
+pub(crate) async fn read_copies(
+    database: &coven_database::Database,
+    reads: &crate::pass_reads::PassReads,
+    limit: std::num::NonZeroUsize,
+    storage: &dyn coven_storage::Storage,
+    store: coven_foundation::id_source::StoreId,
+) -> Result<CopyReading, SyncError> {
+    let writers = crate::discovery::writers(database, reads, storage, store).await?;
+    refresh_copies(database, reads, limit, storage, store, writers).await?;
+    Ok(reads.with_copies(|copies| copies.reading()))
 }
 
 /// Open this member's copy of a store key, trying each retained copy in writer/number order.

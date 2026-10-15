@@ -26,6 +26,11 @@ struct Reads {
     write_catch_up: Option<coven_format::value::StorageTime>,
     /// Audience snapshot listings shared while one return observation lasts.
     snapshot_listings: Option<BTreeMap<String, Vec<StoredObject>>>,
+    /// Retained input decoded once for the session: it never changes, so
+    /// unlike the facts above it outlives every pass.
+    copies: crate::store_log_keys::DecodedCopies,
+    /// Received entries opened with a held key that have not applied yet.
+    opened: BTreeMap<coven_format::value::EntryId, crate::store_log_object::OpenedEntry>,
 }
 
 impl PassReads {
@@ -198,6 +203,37 @@ impl PassReads {
         {
             listings.insert(prefix.to_owned(), objects.to_vec());
         }
+    }
+}
+
+impl PassReads {
+    pub(crate) fn with_copies<R>(
+        &self,
+        use_copies: impl FnOnce(&mut crate::store_log_keys::DecodedCopies) -> R,
+    ) -> R {
+        use_copies(&mut self.0.lock().expect("pass reads lock poisoned").copies)
+    }
+
+    /// An entry opened by an earlier scan that has not applied since.
+    pub(crate) fn opened(
+        &self,
+        entry: coven_format::value::EntryId,
+    ) -> Option<crate::store_log_object::OpenedEntry> {
+        let reads = self.0.lock().expect("pass reads lock poisoned");
+        reads.opened.get(&entry).cloned()
+    }
+
+    pub(crate) fn keep_opened(&self, opened: crate::store_log_object::OpenedEntry) {
+        let mut reads = self.0.lock().expect("pass reads lock poisoned");
+        reads.opened.insert(opened.entry.position, opened);
+    }
+
+    /// Forget opened entries that have applied: the decoded log holds them.
+    pub(crate) fn forget_applied(&self, log: &coven_database::StoreLog) {
+        let mut reads = self.0.lock().expect("pass reads lock poisoned");
+        reads
+            .opened
+            .retain(|entry, _| !log.replay.entries.contains_key(entry));
     }
 }
 

@@ -114,6 +114,62 @@ async fn arriving_registration_extends_discovery_before_the_batch_commits() {
     assert!(log.replay.state.devices.contains_key(&DeviceId(10)));
 }
 
+/// An entry opened while its recorded past is missing waits across scans
+/// without being decrypted again; once that past arrives it applies from
+/// the opening it already has (D-IO-3).
+#[tokio::test]
+async fn a_waiting_entry_is_opened_once() {
+    use coven_storage::Storage;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let storage = Arc::new(MemoryStorage::builder().build().unwrap());
+    let mut author = device(storage.clone(), 1, member(1), store(1)).await;
+    author.create(key(1)).await;
+    let registration = author
+        .sync
+        .make_and_upload_entry(StoreChange::AddDevice {
+            device: DeviceId(2),
+            name: "second".into(),
+            replaces: None,
+        })
+        .await
+        .unwrap();
+    let mut second = device(storage.clone(), 2, member(1), store(1)).await;
+    second.sync.step().await.unwrap();
+    let waiting = second
+        .sync
+        .make_and_upload_entry(StoreChange::AddDevice {
+            device: DeviceId(10),
+            name: "third".into(),
+            replaces: None,
+        })
+        .await
+        .unwrap();
+    // The receiver finds the second device's entry, but not the
+    // registration it read.
+    let path = crate::store_log_object::path(store(1), registration);
+    let bytes = storage.read(&path).await.unwrap();
+    storage.delete(&path).await.unwrap();
+    let mut receiver = device(storage.clone(), 3, member(1), store(1)).await;
+    let decodes = Arc::new(AtomicUsize::new(0));
+    receiver.sync.test_track_received_entries(decodes.clone());
+    // The first scan opens it with the creation's tentative key; the next,
+    // with the held key, keeps that opening for later scans.
+    receiver.sync.step().await.unwrap();
+    receiver.sync.step().await.unwrap();
+    let opened = decodes.load(Ordering::Relaxed);
+    receiver.sync.step().await.unwrap();
+    assert_eq!(decodes.load(Ordering::Relaxed), opened);
+    assert!(!receiver.log().await.replay.entries.contains_key(&waiting));
+    storage.create(&path, &bytes).await.unwrap();
+    receiver.sync.step().await.unwrap();
+    assert_eq!(
+        decodes.load(Ordering::Relaxed),
+        opened + 1,
+        "only the registration is new"
+    );
+    assert!(receiver.log().await.replay.entries.contains_key(&waiting));
+}
+
 #[test]
 #[ignore = "requires COVEN_STORELOG_LEAN, supplied by scripts/check.sh"]
 fn lean_differential_batch_partitions() {
@@ -403,4 +459,56 @@ mod waits {
         assert!(entry_records(&c).await.is_empty());
         assert_eq!(c.log().await, b.log().await);
     }
+}
+
+fn unreadable_copy(
+    writer: u64,
+    number: u64,
+) -> ((DeviceId, u64), crate::store_log_keys::DecodedCopy) {
+    let path = coven_storage::ObjectPath::key_copy(
+        crate::store_log_sync::tests::store(1),
+        DeviceId(writer),
+        number.try_into().unwrap(),
+    );
+    (
+        (DeviceId(writer), number),
+        Err((path, crate::Refusal::WrongIdentity { cause: None })),
+    )
+}
+
+/// A reading asks only for copies past the contiguous run already decoded;
+/// a copy beyond a gap is asked for again until the gap fills (D-IO-3).
+#[test]
+fn decoded_copies_are_asked_for_only_past_their_contiguous_run() {
+    let mut copies = crate::store_log_keys::DecodedCopies::default();
+    let writers = [DeviceId(1), DeviceId(2)];
+    assert_eq!(
+        copies.after(writers),
+        std::collections::BTreeMap::from([(DeviceId(1), 0), (DeviceId(2), 0)])
+    );
+    copies.keep(vec![
+        unreadable_copy(1, 1),
+        unreadable_copy(1, 2),
+        unreadable_copy(1, 4),
+    ]);
+    assert_eq!(
+        copies.after(writers),
+        std::collections::BTreeMap::from([(DeviceId(1), 2), (DeviceId(2), 0)])
+    );
+    assert_eq!(copies.newest(DeviceId(1)), 4);
+    copies.keep(vec![unreadable_copy(1, 3), unreadable_copy(1, 4)]);
+    assert_eq!(
+        copies.after([DeviceId(1)]),
+        std::collections::BTreeMap::from([(DeviceId(1), 4)])
+    );
+    let reading = copies.reading();
+    assert!(reading.copies.is_empty());
+    assert_eq!(
+        reading
+            .unreadable
+            .iter()
+            .map(|(path, _)| path.key_copy_position().unwrap().1.get())
+            .collect::<Vec<_>>(),
+        [1, 2, 3, 4]
+    );
 }
