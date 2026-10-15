@@ -1,6 +1,6 @@
 //! Prove absence across retained data before deleting an uploader's files.
 
-use super::{catalog::failure, StoreLogSync};
+use super::{prefix::failure, StoreLogSync};
 use crate::{replay_cache::ReplayCache, SyncError};
 use coven_storage::{ObjectPath, ObjectPrefix};
 use std::collections::BTreeSet;

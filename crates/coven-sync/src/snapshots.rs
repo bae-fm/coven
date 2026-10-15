@@ -23,6 +23,8 @@ pub(super) mod catalog;
 mod file_retention;
 #[path = "snapshot_io.rs"]
 mod io;
+#[path = "snapshot_prefix.rs"]
+mod prefix;
 #[path = "snapshot_reload.rs"]
 mod reload;
 #[path = "snapshot_retention.rs"]

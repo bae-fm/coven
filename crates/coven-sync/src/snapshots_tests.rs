@@ -15,6 +15,8 @@ mod retention;
 #[path = "snapshot_return_tests.rs"]
 mod returns;
 #[path = "snapshot_catalog_tests.rs"]
+mod selection;
+#[path = "snapshot_prefix_tests.rs"]
 mod signatures;
 
 /// This device's record for the snapshot at `path`, if any.

@@ -1,9 +1,6 @@
 //! Deletion follows authenticated coverage, posted positions and ownership.
 
-use super::{
-    catalog::{failure, inconsistent},
-    snapshot_path, StoreLogSync,
-};
+use super::{catalog::inconsistent, prefix::failure, snapshot_path, StoreLogSync};
 use crate::SyncError;
 use coven_database::{EntryOutcome, StoreLog};
 use coven_format::{
