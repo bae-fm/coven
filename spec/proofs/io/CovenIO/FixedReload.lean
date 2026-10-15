@@ -153,46 +153,56 @@ theorem skipped_has_no_part (source : Source order target) (audience time : Nat)
     (uncovered : ¬ w.number ≤ position (selected source audience time) w.writer) :
     audience ∉ w.audiences := fun relevant => uncovered (deleted_selected source audience time w deleted relevant)
 
-/-- The result carries actual log receipts or snapshot coverage. Every retry
-spends a previously undeleted target number; cross-audience skips are safe. -/
-theorem scan_spec (source : Source order target) (audience start time : Nat)
+/-- A start the scan may skip a known deleted number for: every known
+deletion with a part in this audience is already within its positions. -/
+def KnownCovered (target : List Write) (audience : Nat) (loaded : Option Snapshot)
+    (knownDeleted : List Write) : Prop :=
+  ∀ w ∈ target, deletedNumber knownDeleted w = true → audience ∈ w.audiences →
+    w.number ≤ position loaded w.writer
+
+/-- `scan_spec` for any start whose known deletions it already covers: a
+selected snapshot with its catalog's deletions, or a kept state that knows
+none. Every retry spends a deletion the start did not know. -/
+theorem scan_spec_with (source : Source order target) (audience start time : Nat)
+    (loaded : Option Snapshot) (knownDeleted : List Write)
+    (known : KnownCovered target audience loaded knownDeleted)
     (afterStart : start ≤ time) (available : source.availableFrom ≤ time) (todo : List Write) (subset : todo ⊆ target) :
-    match scan source.world source.history order audience (selected source audience start)
-        (source.history start).deleted todo time with
+    match scan source.world source.history order audience loaded knownDeleted todo time with
     | .complete received =>
-        (∀ w ∈ todo, Realized audience (selected source audience start) received w) ∧
+        (∀ w ∈ todo, Realized audience loaded received w) ∧
         (∀ w ∈ received, ∃ t o, start ≤ t ∧ source.world t (.log .write w.writer w.number) = some o)
     | .retry next w => start < next ∧ w ∈ todo ∧
-        w ∈ (source.history next).deleted ∧ w ∉ (source.history start).deleted
+        w ∈ (source.history next).deleted ∧ deletedNumber knownDeleted w = false
     | .uncertified _ => False := by
   induction todo generalizing time with
   | nil => simp [scan]
   | cons w rest ih =>
       have tailSubset : rest ⊆ target := fun v hv => subset (List.mem_cons_of_mem _ hv)
-      simp only [scan, deleted_number source start w (subset (by simp))]
-      by_cases already : w.number ≤ position (selected source audience start) w.writer ∨ w ∈ (source.history start).deleted
+      simp only [scan]
+      by_cases already : w.number ≤ position loaded w.writer ∨ deletedNumber knownDeleted w = true
       · simp only [ite_eq_left already]
         have result := ih time afterStart available tailSubset
-        cases h : scan source.world source.history order audience (selected source audience start)
-            (source.history start).deleted rest time with
+        cases h : scan source.world source.history order audience loaded knownDeleted rest time with
         | complete received =>
             simp only [h] at result ⊢
             refine ⟨?_, result.2⟩
             intro v hv relevant
             rcases List.mem_cons.mp hv with rfl | tail
-            · exact Or.inl (already.elim id (fun hd => deleted_selected source audience start v hd relevant))
+            · exact Or.inl (already.elim id (fun hd => known v (subset (by simp)) hd relevant))
             · exact result.1 v tail relevant
         | retry next missing =>
             simp only [h] at result ⊢
             exact ⟨result.1, List.mem_cons_of_mem _ result.2.1, result.2.2⟩
         | uncertified missing => simp [h] at result
       · simp only [ite_eq_right already]
-        have notDeleted : w ∉ (source.history start).deleted := fun h => already (Or.inr h)
+        have notKnown : deletedNumber knownDeleted w = false := by
+          cases h : deletedNumber knownDeleted w
+          · rfl
+          · exact False.elim (already (Or.inr h))
         cases found : source.world time (.log .write w.writer w.number) with
         | some object =>
             have result := ih (time + 1) (by omega) (by omega) tailSubset
-            cases h : scan source.world source.history order audience (selected source audience start)
-                (source.history start).deleted rest (time + 1) with
+            cases h : scan source.world source.history order audience loaded knownDeleted rest (time + 1) with
             | complete received =>
                 simp only [h] at result ⊢
                 constructor
@@ -213,16 +223,14 @@ theorem scan_spec (source : Source order target) (audience start time : Nat)
         | none =>
             have deleted := source.absent time w available (subset (by simp)) found
             simp only [deleted_number source (time + 1) w (subset (by simp)), deleted, ↓reduceIte]
-            by_cases covered : w.number ≤ position (selected source audience (time + 1)) w.writer
-            · simp only [selected] at covered
-              simp only [ite_eq_left covered]
-              exact ⟨by omega, by simp, deleted, notDeleted⟩
-            · have irrelevant := skipped_has_no_part source audience (time + 1) w deleted covered
-              simp only [selected] at covered
+            by_cases covered : w.number ≤ position (catalogCurrent order (source.history (time + 1)).landed audience) w.writer
+            · simp only [ite_eq_left covered]
+              exact ⟨by omega, by simp, deleted, notKnown⟩
+            · have irrelevant := skipped_has_no_part source audience (time + 1) w deleted
+                (by simpa only [selected] using covered)
               simp only [ite_eq_right covered]
               have result := ih (time + 1) (by omega) (by omega) tailSubset
-              cases h : scan source.world source.history order audience (selected source audience start)
-                  (source.history start).deleted rest (time + 1) with
+              cases h : scan source.world source.history order audience loaded knownDeleted rest (time + 1) with
               | complete received =>
                   simp only [h] at result ⊢
                   refine ⟨?_, result.2⟩
@@ -234,6 +242,37 @@ theorem scan_spec (source : Source order target) (audience start time : Nat)
                   simp only [h] at result ⊢
                   exact ⟨result.1, List.mem_cons_of_mem _ result.2.1, result.2.2⟩
               | uncertified missing => simp [h] at result
+
+/-- A selection's catalog deletions are within it (`deleted_selected`). -/
+theorem selected_known (source : Source order target) (audience start : Nat) :
+    KnownCovered target audience (selected source audience start) (source.history start).deleted := by
+  intro w hw known relevant
+  exact deleted_selected source audience start w ((deleted_number source start w hw).mp known) relevant
+
+/-- The result carries actual log receipts or snapshot coverage. Every retry
+spends a previously undeleted target number; cross-audience skips are safe. -/
+theorem scan_spec (source : Source order target) (audience start time : Nat)
+    (afterStart : start ≤ time) (available : source.availableFrom ≤ time) (todo : List Write) (subset : todo ⊆ target) :
+    match scan source.world source.history order audience (selected source audience start)
+        (source.history start).deleted todo time with
+    | .complete received =>
+        (∀ w ∈ todo, Realized audience (selected source audience start) received w) ∧
+        (∀ w ∈ received, ∃ t o, start ≤ t ∧ source.world t (.log .write w.writer w.number) = some o)
+    | .retry next w => start < next ∧ w ∈ todo ∧
+        w ∈ (source.history next).deleted ∧ w ∉ (source.history start).deleted
+    | .uncertified _ => False := by
+  have spec := scan_spec_with source audience start time (selected source audience start)
+    (source.history start).deleted (selected_known source audience start) afterStart available todo subset
+  cases h : scan source.world source.history order audience (selected source audience start)
+      (source.history start).deleted todo time with
+  | complete received => simpa [h] using spec
+  | uncertified missing => simp [h] at spec
+  | retry next w =>
+      simp only [h] at spec ⊢
+      refine ⟨spec.1, spec.2.1, spec.2.2.1, fun member => ?_⟩
+      have := (deleted_number source start w (subset spec.2.1)).mpr member
+      rw [spec.2.2.2] at this
+      cases this
 
 def remaining (source : Source order target) (time : Nat) : List Write :=
   target.filter (fun w => !decide (w ∈ (source.history time).deleted))

@@ -759,6 +759,9 @@ private structure ReloadHistory where
   required : List (Nat × Nat)
   writes : List Write
   catalogs : List SnapshotHistory.State
+  /-- Audiences whose existing state the reload keeps, at `keptAt`. -/
+  kept : List Nat
+  keptAt : List (Nat × Nat)
 
 private def ReloadHistory.catalog (h : ReloadHistory) (k : Nat) : SnapshotHistory.State :=
   h.catalogs.getD k (h.catalogs.getLastD ⟨0, [], []⟩)
@@ -772,24 +775,33 @@ private def ReloadHistory.world (h : ReloadHistory) (r : Nat) : Store := fun pat
   | _ => none
 
 /-- `CommonReload.selected`, with `chosen a` the catalog audience `a`'s
-selection came from. -/
-private def ReloadHistory.selected (h : ReloadHistory) (chosen : Nat → Nat) (a : Nat) :
+selection came from, or none while its kept state stands. -/
+private def ReloadHistory.selected (h : ReloadHistory) (chosen : Nat → Option Nat) (a : Nat) :
     Option Snapshot :=
-  catalogCurrent .writes (h.catalog (chosen a)).landed a
+  match chosen a with
+  | none => some (CommonReload.keptStart a h.keptAt)
+  | some k => catalogCurrent .writes (h.catalog k).landed a
 
-private def ReloadHistory.target (h : ReloadHistory) (chosen : Nat → Nat) (writer : Nat) : Nat :=
+/-- `CommonReload.known`: a kept state knows no deletion. -/
+private def ReloadHistory.known (h : ReloadHistory) (chosen : Nat → Option Nat) (a : Nat) :
+    List Write :=
+  match chosen a with
+  | none => []
+  | some k => (h.catalog k).deleted
+
+private def ReloadHistory.target (h : ReloadHistory) (chosen : Nat → Option Nat) (writer : Nat) : Nat :=
   max ((h.required.lookup writer).getD 0)
     (CommonReload.maximum h.audiences (fun a => FixedReload.position (h.selected chosen a) writer))
 
 /-- `CommonReload.scan` in round `r`: each audience's `FixedReload.scan` of
-the cut from its selection, knowing that selection's catalog's deletions. -/
-private def ReloadHistory.scan (h : ReloadHistory) (r : Nat) (chosen : Nat → Nat) :
+the cut from its start, knowing the deletions that start accounts for. -/
+private def ReloadHistory.scan (h : ReloadHistory) (r : Nat) (chosen : Nat → Option Nat) :
     List Nat → CommonReload.Result
   | [] => .complete []
   | a :: rest =>
       let cut := h.writes.filter fun w => decide (w.number ≤ h.target chosen w.writer)
       match FixedReload.scan (fun _ => h.world r) (fun _ => h.catalog (r + 1)) .writes a
-          (h.selected chosen a) (h.catalog (chosen a)).deleted cut 0 with
+          (h.selected chosen a) (h.known chosen a) cut 0 with
       | .complete received => match h.scan r chosen rest with
           | .complete receipts => .complete ((a, received) :: receipts)
           | other => other
@@ -799,7 +811,7 @@ private def ReloadHistory.scan (h : ReloadHistory) (r : Nat) (chosen : Nat → N
 /-- `CommonReload.Loads`: rounds until one commits. A retry replaces only its
 audience, from the catalog listed after that round's reads. -/
 private def ReloadHistory.run (h : ReloadHistory) :
-    Nat → Nat → (Nat → Nat) → List Json → Except String Json
+    Nat → Nat → (Nat → Option Nat) → List Json → Except String Json
   | 0, _, _, _ => throw "the reload did not commit"
   | fuel + 1, r, chosen, replaced =>
       match h.scan r chosen h.audiences with
@@ -808,14 +820,14 @@ private def ReloadHistory.run (h : ReloadHistory) :
           pure <| Json.mkObj [
             ("rounds", toJson (replaced ++ [Json.null])),
             ("selections", toJson (h.audiences.map fun a =>
-              match h.selected chosen a with
-              | some s => toJson [s.writer, s.number]
-              | none => Json.null)),
+              match chosen a, h.selected chosen a with
+              | some _, some s => toJson [s.writer, s.number]
+              | _, _ => Json.null)),
             ("target", toJson ((writers.map fun w => (w, h.target chosen w)).filter (·.2 > 0))),
             ("received", toJson (receipts.map fun (a, received) =>
               (a, received.map fun (w : Write) => (w.writer, w.number))))]
       | .retry a _ _ =>
-          h.run fuel (r + 1) (fun b => if b = a then r + 1 else chosen b) (replaced ++ [toJson a])
+          h.run fuel (r + 1) (fun b => if b = a then some (r + 1) else chosen b) (replaced ++ [toJson a])
       | .uncertified _ w => pure <| Json.mkObj [("uncertified", toJson [w.writer, w.number])]
 
 /-- A reload over a generated history: its replacements, final selections,
@@ -834,8 +846,11 @@ private def reload (j : Json) : Except String Json := do
     let deleted ← c.getObjValAs? (List (Nat × Nat)) "deleted"
     let gone := writes.filter fun w => deleted.contains (w.writer, w.number)
     pure (⟨0, landed, gone⟩ : SnapshotHistory.State)
-  let h : ReloadHistory := ⟨audiences, required, writes, catalogs⟩
-  h.run (writes.length + audiences.length + catalogs.length + 2) 0 (fun _ => 0) []
+  let kept ← j.getObjValAs? (List Nat) "kept"
+  let keptAt ← j.getObjValAs? (List (Nat × Nat)) "keptAt"
+  let h : ReloadHistory := ⟨audiences, required, writes, catalogs, kept, keptAt⟩
+  h.run (writes.length + audiences.length + catalogs.length + 2) 0
+    (fun a => if kept.contains a then none else some 0) []
 /-- `SnapshotPublication.retainWrites` over a concurrent history: writes and
 counting or late snapshot landings arrive in any order, and each `pass` at
 storage time `time` deletes every write `Eligible` under the active readers'

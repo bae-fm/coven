@@ -105,7 +105,7 @@ def source (order : SnapshotOrder) : CommonReload.Source order [0] where
       have hit : snapshotStore laterCut (.log .write secondPart.writer secondPart.number) ≠ none := by decide
       exact False.elim (hit missing)
 
-def initialLoader : CommonReload.State := ⟨0, fun _ => 0⟩
+def initialLoader : CommonReload.State := ⟨0, fun _ => 0, fun _ => none⟩
 def replacement : CommonReload.State := CommonReload.replace initialLoader 0 1
 
 /-- The 2/1 history raises the common target to 2, obtains audience
@@ -129,12 +129,46 @@ example (order : SnapshotOrder) :
     CommonReload.Valid (source order) [0, 1] (fun _ => 1) replacement := by
   constructor
   · intro t ht; simp [source, show t ≠ 0 by omega]
-  · constructor
+  · refine ⟨?_, ?_, ?_⟩
     · intro a ha; simp [replacement, CommonReload.replace, initialLoader]; split <;> omega
     · intro w hw; simp [CommonReload.Source.frontier, source, replacement, CommonReload.replace,
         SnapshotWriteExamples.later, SnapshotWriteExamples.state, SnapshotWriteExamples.oneWriter,
         SnapshotWriteExamples.logTwo]
       split <;> simp_all
+    · intro a _ positions kept
+      simp [replacement, CommonReload.replace, initialLoader] at kept
+
+/-- The store keeps its existing state, which holds none of Ana's writes,
+while Gifts is selected after write 1 was deleted. A selection from that
+catalog would already account for the deletion; the kept state knows none,
+so it reads write 1, finds it deleted, and is replaced by the store's current
+snapshot through 2. The common target becomes 2 and Gifts reads write 2. -/
+def keptLoader : CommonReload.State := ⟨1, fun _ => 1, fun a => if a = 0 then some [] else none⟩
+def keptReplaced : CommonReload.State := CommonReload.replace keptLoader 0 2
+
+theorem kept_state_replaced (order : SnapshotOrder) :
+    CommonReload.Valid (source order) [0, 1] (fun _ => 1) keptLoader ∧
+    CommonReload.round (source order) [0, 1] (fun _ => 1) keptLoader = .retry 0 2 firstPart ∧
+    CommonReload.round (source order) [0, 1] (fun _ => 1) keptReplaced =
+      .complete [(0, []), (1, [secondPart])] ∧
+    CommonReload.Loads (source order) [0, 1] (fun _ => 1) keptLoader 1 keptReplaced
+      [(0, []), (1, [secondPart])] := by
+  have first : CommonReload.round (source order) [0, 1] (fun _ => 1) keptLoader = .retry 0 2 firstPart := by
+    cases order <;> decide
+  have last : CommonReload.round (source order) [0, 1] (fun _ => 1) keptReplaced =
+      .complete [(0, []), (1, [secondPart])] := by cases order <;> decide
+  refine ⟨?_, first, last, .retry keptLoader keptReplaced 0 2 0 firstPart _ first (.commit keptReplaced _ last)⟩
+  refine ⟨?_, ?_, ?_⟩
+  · intro a _; simp [keptLoader]
+  · intro w hw; simp [CommonReload.Source.frontier, source, keptLoader,
+      SnapshotWriteExamples.later, SnapshotWriteExamples.state, SnapshotWriteExamples.oneWriter,
+      SnapshotWriteExamples.logTwo]
+    split <;> simp_all
+  · intro a _ positions kept w _
+    simp only [keptLoader] at kept
+    split at kept
+    · cases kept; simp [CommonReload.keptStart, Snapshot.position]
+    · cases kept
 
 /-- Bundles are sufficient when their common cut also reaches the frozen
 past. Independent circle readers need not provide any all-circle bundle;

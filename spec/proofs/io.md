@@ -721,12 +721,30 @@ learns a deletion only from an absent read and a catalog covering the number,
 while the model's selection catalog already knows every earlier deletion. The
 histories therefore keep an audience that lacks a deleted write, and has no
 part in it, from ever covering it later, so that knowledge decides nothing
-the reads do not. Coven also replaces an audience whose existing state the
-reload keeps, which the model has no start for.
+the reads do not.
+
+**Kept state — proved.** An audience whose existing state the reload keeps
+starts at this device's positions (`CommonReload.State.kept`). It knows no
+deletion, so it reads every write it lacks up to the target. A deleted one its
+current newest snapshot reaches replaces it by that snapshot, like any
+selection; otherwise the write has no part there and is skipped.
+`FixedReload.scan_spec_with` proves the scan for any start that already
+covers the deletions it knows: a selection with its catalog's deletions
+(`selected_known`), or a kept state with none (`known_covered`). The common-point
+theorems keep their statements: `committed_safe`, `committed_number` and
+`common_cut_commits` hold with kept starts, each kept state holding only
+published writes (`Valid`, `start_bound`). A kept audience counts as stale
+until replaced, so the termination bound below is unchanged.
+`kept_state_replaced` executes a store kept with none of Ana's writes while
+Gifts is selected after write 1 was deleted: a selection from that catalog
+would already account for the deletion, but the kept state reads write 1,
+finds it deleted, and is replaced by the store's snapshot through 2; Gifts
+then reads write 2. The Rust comparison generates kept audiences at random
+positions and agrees on every history, including replacements of kept states.
 
 **Termination bound.** Let A be the number of readable audiences. After the
-last deletion, a retry can only come from an audience whose selection predates
-that deletion. Its replacement catalog includes every deleted number: the
+last deletion, a retry can only come from a kept audience or one whose
+selection predates that deletion. Its replacement catalog includes every deleted number: the
 snapshot covers every relevant deleted part, and the catalog certifies that
 any remaining deleted number has no part in that audience. That audience
 cannot request another replacement, regardless of later writes or snapshots.

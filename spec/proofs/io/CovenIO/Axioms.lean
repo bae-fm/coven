@@ -298,6 +298,8 @@ import CovenIO
 #print axioms CovenIO.FixedReload.deleted_selected
 #print axioms CovenIO.FixedReload.skipped_has_no_part
 #print axioms CovenIO.FixedReload.scan_spec
+#print axioms CovenIO.FixedReload.scan_spec_with
+#print axioms CovenIO.FixedReload.selected_known
 #print axioms CovenIO.FixedReload.deletion_decreases
 #print axioms CovenIO.FixedReload.terminates
 #print axioms CovenIO.FixedReload.committed_contains
@@ -350,6 +352,8 @@ import CovenIO
 #print axioms CovenIO.CommonReload.target_ready
 #print axioms CovenIO.CommonReload.scan_spec
 #print axioms CovenIO.CommonReload.retry_stale
+#print axioms CovenIO.CommonReload.start_bound
+#print axioms CovenIO.CommonReload.known_covered
 #print axioms CovenIO.CommonReload.replace_valid
 #print axioms CovenIO.CommonReload.stale_decreases
 #print axioms CovenIO.CommonReload.terminates
@@ -364,6 +368,7 @@ import CovenIO
 #print axioms CovenIO.CommonReloadExamples.snapshots_sound
 #print axioms CovenIO.CommonReloadExamples.catalog_runs
 #print axioms CovenIO.CommonReloadExamples.replacement_fills_other_audience
+#print axioms CovenIO.CommonReloadExamples.kept_state_replaced
 #print axioms CovenIO.CommonReloadExamples.offline_reachable
 #print axioms CovenIO.CommonReloadExamples.first_coverage_sound
 #print axioms CovenIO.CommonReloadExamples.first_snapshot_deleted

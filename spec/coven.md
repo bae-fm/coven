@@ -4900,6 +4900,11 @@ Carol's tablet:
   forces that audience's replacement; new writes and unrelated snapshot
   arrivals do not replace the selections
   ([`retry_stale`](proofs/io/CovenIO/CommonReload.lean)).
+  - A kept audience's state knows no deletion: it reads every write it lacks
+    up to the target, and a certified deleted number its current newest
+    snapshot reaches replaces it by that snapshot, like a selection
+    ([`known_covered`](proofs/io/CovenIO/CommonReload.lean),
+    [`kept_state_replaced`](proofs/io/CovenIO/CommonReloadExamples.lean)).
   - A replacement changes only that audience's selection; recompute the
     common target and read all audiences to it before committing, even
     when the replacement reaches beyond the original target

@@ -67,13 +67,29 @@ def Source.fixed (source : Source order writers) (cut : Nat → Nat) (start : Na
   availableFrom := start
   absent := source.absent start cut ready
 
-/-- Selections survive rounds. Only a deleted hole replaces its audience. -/
+/-- Selections survive rounds. Only a deleted hole replaces its audience.
+An audience whose existing state the reload keeps starts at `kept`'s
+positions; it knows no deletion, and a deleted hole replaces it by its
+current snapshot like any selection (§15). -/
 structure State where
   time : Nat
   selectedAt : Nat → Nat
+  kept : Nat → Option (List (Nat × Nat))
+
+/-- A kept state's positions, in the shape a selection has. -/
+def keptStart (a : Nat) (positions : List (Nat × Nat)) : Snapshot := ⟨a, 0, 0, 0, 0, positions⟩
 
 def selected (source : Source order writers) (s : State) (a : Nat) : Option Snapshot :=
-  catalogCurrent order (source.history (s.selectedAt a)).landed a
+  match s.kept a with
+  | some positions => some (keptStart a positions)
+  | none => catalogCurrent order (source.history (s.selectedAt a)).landed a
+
+/-- The deletions an audience's start already accounts for: its selection
+catalog's, or none for a kept state. -/
+def known (source : Source order writers) (s : State) (a : Nat) : List Write :=
+  match s.kept a with
+  | some _ => []
+  | none => (source.history (s.selectedAt a)).deleted
 
 def maximum (audiences : List Nat) (values : Nat → Nat) : Nat :=
   (audiences.map values).foldr max 0
@@ -98,19 +114,33 @@ theorem maximum_le (audiences : List Nat) (values : Nat → Nat) (bound : Nat)
   | cons a rest ih =>
       exact Nat.max_le.mpr ⟨bounded a (by simp), ih (fun b hb => bounded b (by simp [hb]))⟩
 
+/-- A kept state holds only published writes. -/
 def Valid (source : Source order writers) (audiences : List Nat) (required : Nat → Nat) (s : State) : Prop :=
   (∀ a ∈ audiences, s.selectedAt a ≤ s.time) ∧
-    ∀ w ∈ writers, required w ≤ source.frontier s.time w
+    (∀ w ∈ writers, required w ≤ source.frontier s.time w) ∧
+    ∀ a ∈ audiences, ∀ positions, s.kept a = some positions → ∀ w ∈ writers,
+      (keptStart a positions).position w ≤ source.frontier s.time w
+
+theorem start_bound (source : Source order writers) (audiences : List Nat) (required : Nat → Nat)
+    (s : State) (valid : Valid source audiences required s) (a : Nat) (ha : a ∈ audiences)
+    (w : Nat) (hw : w ∈ writers) :
+    position (selected source s a) w ≤ source.frontier s.time w := by
+  cases kept : s.kept a with
+  | some positions =>
+      simpa [selected, kept, position] using valid.2.2 a ha positions kept w hw
+  | none =>
+      simp only [selected, kept]
+      exact Nat.le_trans (source.selectedBound _ a w)
+        (source.frontierMono _ _ (valid.1 a ha) w hw)
 
 theorem target_ready (source : Source order writers) (audiences : List Nat) (required : Nat → Nat)
     (s : State) (valid : Valid source audiences required s) :
     ∀ w ∈ writers, target source audiences required s w ≤ source.frontier s.time w := by
   intro w hw
   apply Nat.max_le.mpr
-  refine ⟨valid.2 w hw, maximum_le _ _ _ ?_⟩
+  refine ⟨valid.2.1 w hw, maximum_le _ _ _ ?_⟩
   intro a ha
-  exact Nat.le_trans (source.selectedBound _ a w)
-    (source.frontierMono _ _ (valid.1 a ha) w hw)
+  exact start_bound source audiences required s valid a ha w hw
 
 inductive Result where
   | complete (receipts : List (Nat × List Write))
@@ -124,7 +154,7 @@ def scan (source : Source order writers) (s : State) (cut : Nat → Nat) : List 
   | [] => .complete []
   | a :: rest =>
       match FixedReload.scan source.world source.history order a (selected source s a)
-        (source.history (s.selectedAt a)).deleted (source.inventory cut) s.time with
+        (known source s a) (source.inventory cut) s.time with
       | .complete received => match scan source s cut rest with
           | .complete receipts => .complete ((a, received) :: receipts)
           | other => other
@@ -132,7 +162,19 @@ def scan (source : Source order writers) (s : State) (cut : Nat → Nat) : List 
       | .uncertified missing => .uncertified a missing
 
 def replace (s : State) (a next : Nat) : State :=
-  ⟨next, fun b => if b = a then next else s.selectedAt b⟩
+  ⟨next, fun b => if b = a then next else s.selectedAt b, fun b => if b = a then none else s.kept b⟩
+
+/-- Each start covers the deletions it knows. -/
+theorem known_covered (source : Source order writers) (s : State) (cut : Nat → Nat) (start : Nat)
+    (ready : ∀ w ∈ writers, cut w ≤ source.frontier start w) (a : Nat) :
+    FixedReload.KnownCovered (source.inventory cut) a (selected source s a) (known source s a) := by
+  cases kept : s.kept a with
+  | some positions =>
+      intro w _ found
+      simp [known, kept, deletedNumber] at found
+  | none =>
+      simp only [selected, known, kept]
+      exact FixedReload.selected_known (source.fixed cut start ready) a (s.selectedAt a)
 
 def round (source : Source order writers) (audiences : List Nat) (required : Nat → Nat) (s : State) : Result :=
   scan source s (target source audiences required s) audiences
@@ -150,26 +192,28 @@ theorem scan_spec (source : Source order writers) (audiences : List Nat) (s : St
     match scan source s cut audiences with
     | .complete receipts => Complete source audiences s cut receipts
     | .retry a next w => a ∈ audiences ∧ s.time < next ∧
-        w ∈ (source.history next).deleted ∧ w ∉ (source.history (s.selectedAt a)).deleted
+        w ∈ (source.history next).deleted ∧ w ∈ source.inventory cut ∧
+        deletedNumber (known source s a) w = false
     | .uncertified _ _ => False := by
   induction audiences with
   | nil => simp [scan, Complete]
   | cons a rest ih =>
       let fixed := source.fixed cut s.time ready
-      have spec := FixedReload.scan_spec fixed a (s.selectedAt a) s.time (times a (by simp))
+      have spec := FixedReload.scan_spec_with fixed a (s.selectedAt a) s.time (selected source s a)
+        (known source s a) (known_covered source s cut s.time ready a) (times a (by simp))
         (Nat.le_refl _) (source.inventory cut) (fun _ h => h)
       change (match FixedReload.scan source.world source.history order a (selected source s a)
-        (source.history (s.selectedAt a)).deleted (source.inventory cut) s.time with
+        (known source s a) (source.inventory cut) s.time with
         | .complete r => _ | .retry t w => _ | .uncertified _ => _) at spec
       have tail := ih (fun b hb => times b (by simp [hb]))
       simp only [scan]
       cases head : FixedReload.scan source.world source.history order a (selected source s a)
-          (source.history (s.selectedAt a)).deleted (source.inventory cut) s.time with
+          (known source s a) (source.inventory cut) s.time with
       | uncertified w => simp [head] at spec
       | retry next w =>
           simp only [head] at spec ⊢
           have clock := FixedReload.scan_retry_time _ _ _ _ _ _ _ _ _ _ head
-          exact ⟨by simp, clock, spec.2.2⟩
+          exact ⟨by simp, clock, spec.2.2.1, spec.2.1, spec.2.2.2⟩
       | complete received =>
           simp only [head] at spec ⊢
           cases restResult : scan source s cut rest with
@@ -189,8 +233,10 @@ theorem scan_spec (source : Source order writers) (audiences : List Nat) (s : St
 def Quiescent (source : Source order writers) (stop : Nat) : Prop :=
   ∀ t, stop ≤ t → (source.history t).deleted = (source.history stop).deleted
 
+/-- Audiences a later deletion can still replace: kept ones, which know no
+deletion, and those selected before deletion stopped. -/
 def stale (audiences : List Nat) (s : State) (stop : Nat) : List Nat :=
-  audiences.filter (fun a => decide (s.selectedAt a < stop))
+  audiences.filter (fun a => (s.kept a).isSome || decide (s.selectedAt a < stop))
 
 theorem retry_stale (source : Source order writers) (audiences : List Nat) (required : Nat → Nat)
     (s : State) (stop : Nat) (quiet : Quiescent source stop) (afterStop : stop ≤ s.time)
@@ -200,25 +246,41 @@ theorem retry_stale (source : Source order writers) (audiences : List Nat) (requ
   have spec := scan_spec source audiences s _ valid.1 (target_ready source audiences required s valid)
   change (match round source audiences required s with | .complete r => _ | .retry a t w => _ | .uncertified a w => _) at spec
   rw [again] at spec
-  have old : s.selectedAt a < stop := by
-    apply Nat.lt_of_not_ge
-    intro h
-    have eq := quiet (s.selectedAt a) (by omega)
-    have eqNext := quiet next (by omega)
-    exact spec.2.2.2 (by rw [eq, ← eqNext]; exact spec.2.2.1)
-  exact ⟨by simp [stale, spec.1, old], spec.2.1⟩
+  have old : (s.kept a).isSome = true ∨ s.selectedAt a < stop := by
+    cases kept : s.kept a with
+    | some _ => exact Or.inl rfl
+    | none =>
+        refine Or.inr (Nat.lt_of_not_ge fun h => ?_)
+        have eq := quiet (s.selectedAt a) (by omega)
+        have eqNext := quiet next (by omega)
+        have unknown := spec.2.2.2.2
+        simp only [known, kept] at unknown
+        have member : w ∈ (source.history (s.selectedAt a)).deleted := by
+          rw [eq, ← eqNext]; exact spec.2.2.1
+        have found : deletedNumber (source.history (s.selectedAt a)).deleted w = true :=
+          List.any_eq_true.mpr ⟨w, member, by simp⟩
+        rw [unknown] at found
+        cases found
+  refine ⟨?_, spec.2.1⟩
+  simp only [stale, List.mem_filter, Bool.or_eq_true, decide_eq_true_eq]
+  exact ⟨spec.1, old⟩
 
 theorem replace_valid (source : Source order writers) (audiences : List Nat) (required : Nat → Nat)
     (s : State) (valid : Valid source audiences required s) (a next : Nat) (later : s.time ≤ next) :
     Valid source audiences required (replace s a next) := by
-  constructor
+  refine ⟨?_, ?_, ?_⟩
   · intro b hb
     simp only [replace]
     split
     · exact Nat.le_refl _
     · exact Nat.le_trans (valid.1 b hb) later
   · intro w hw
-    exact Nat.le_trans (valid.2 w hw) (source.frontierMono _ _ later w hw)
+    exact Nat.le_trans (valid.2.1 w hw) (source.frontierMono _ _ later w hw)
+  · intro b hb positions kept w hw
+    simp only [replace] at kept
+    split at kept
+    · cases kept
+    · exact Nat.le_trans (valid.2.2 b hb positions kept w hw) (source.frontierMono _ _ later w hw)
 
 theorem stale_decreases (audiences : List Nat) (s : State) (stop a next : Nat)
     (member : a ∈ stale audiences s stop) (later : stop ≤ next) :
@@ -330,7 +392,8 @@ theorem eventually_terminates (source : Source order writers) (audiences : List 
       by_cases afterStop : stop ≤ s.time
       · obtain ⟨retries, last, receipts, run, bound, complete⟩ :=
           terminates source audiences required s stop quiet afterStop valid
-        have le := List.length_filter_le (fun a => decide (s.selectedAt a < stop)) audiences
+        have le := List.length_filter_le
+          (fun a => (s.kept a).isSome || decide (s.selectedAt a < stop)) audiences
         exact ⟨retries, last, receipts, run, by dsimp [stale] at bound; omega, complete⟩
       · have spec := scan_spec source audiences s _ valid.1 (target_ready source audiences required s valid)
         change (match round source audiences required s with | .complete r => _ | .retry a t w => _ | .uncertified a w => _) at spec
@@ -416,7 +479,7 @@ theorem bundle_complete (source : Source order writers) (audiences : List Nat) (
   | nil => rfl
   | cons a rest ih =>
       have covered := FixedReload.scan_covered source.world source.history order a (selected source s a)
-        (source.history (s.selectedAt a)).deleted (source.inventory cut) s.time (by
+        (known source s a) (source.inventory cut) s.time (by
           intro w hw
           have facts := source.within cut w hw
           rw [bundle a (by simp) w.writer facts.1]

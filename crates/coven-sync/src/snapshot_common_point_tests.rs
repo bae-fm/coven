@@ -35,6 +35,10 @@ struct History {
     /// `(writer, number, audiences)`, by writer and number.
     writes: Vec<(u64, u64, Vec<u64>)>,
     catalogs: Vec<Catalog>,
+    /// Audiences whose existing state the reload keeps, at `kept_at`, this
+    /// device's positions.
+    kept: Vec<u64>,
+    kept_at: Vec<(u64, u64)>,
 }
 
 fn audience(n: u64) -> Audience {
@@ -132,8 +136,16 @@ impl History {
         let log = coven_database::StoreLog::default();
         self.audiences
             .iter()
-            .map(|on| {
-                let on = audience(*on);
+            .map(|n| {
+                let on = audience(*n);
+                if self.kept.contains(n) {
+                    let start = Start {
+                        positions: positions(&self.kept_at),
+                        selected_at: 0,
+                        origin: Origin::Kept,
+                    };
+                    return (on, start);
+                }
                 let start = match fresh.current(&on, &log) {
                     Some(current) => Start {
                         positions: current.prefix.writes.clone(),
@@ -167,6 +179,8 @@ impl History {
                 "landed": landed.iter().map(snap).collect::<Vec<_>>(),
                 "deleted": deleted,
             })).collect::<Vec<_>>(),
+            "kept": self.kept,
+            "keptAt": self.kept_at,
         })
     }
 }
@@ -297,6 +311,8 @@ async fn a_replacement_fills_the_other_audience_to_its_target() {
                 BTreeSet::from([(1, 1)]),
             ),
         ],
+        kept: Vec::new(),
+        kept_at: Vec::new(),
     };
     let (replaced, outcome) = run(&history).await;
     assert_eq!(replaced, [0]);
@@ -335,6 +351,8 @@ async fn a_deleted_write_outside_an_audiences_current_snapshot_is_skipped_there(
                 BTreeSet::from([(1, 9)]),
             ),
         ],
+        kept: Vec::new(),
+        kept_at: Vec::new(),
     };
     let (replaced, outcome) = run(&history).await;
     assert!(replaced.is_empty());
@@ -353,6 +371,8 @@ async fn another_audiences_prefix_alone_establishes_a_deleted_number() {
         required: vec![(1, 2)],
         writes: vec![(1, 1, vec![1]), (1, 2, vec![0])],
         catalogs: vec![(Vec::new(), BTreeSet::from([(1, 1)]))],
+        kept: Vec::new(),
+        kept_at: Vec::new(),
     };
     let mut fake = Fake {
         history: &history,
@@ -393,6 +413,39 @@ async fn another_audiences_prefix_alone_establishes_a_deleted_number() {
     assert_eq!(plan.deleted, ids(&[(1, 1)]));
 }
 
+/// io `kept_state_replaced`: the store keeps its existing state, holding none
+/// of Ana's writes, while Gifts is selected after write 1 was deleted. The
+/// kept state knows no deletion: it reads write 1, finds it deleted, and is
+/// replaced by the store's current snapshot through 2. Gifts then reads
+/// write 2 for the common point.
+#[tokio::test]
+async fn a_kept_state_lacking_a_deleted_write_is_replaced() {
+    let history = History {
+        audiences: vec![0, 1],
+        required: vec![(1, 1)],
+        writes: vec![(1, 1, vec![0, 1]), (1, 2, vec![0, 1])],
+        catalogs: vec![(
+            vec![(1, 1, 1, 0, 0, vec![(1, 1)]), (0, 1, 2, 1, 1, vec![(1, 2)])],
+            BTreeSet::from([(1, 1)]),
+        )],
+        kept: vec![0],
+        kept_at: Vec::new(),
+    };
+    let (replaced, outcome) = run(&history).await;
+    assert_eq!(replaced, [0]);
+    let plan = plan(outcome);
+    assert!(matches!(
+        &plan.starts[&Audience::Store].origin,
+        Origin::Selected(id) if id.number == 2
+    ));
+    assert_eq!(
+        target(&positions(&history.required), &plan.starts),
+        BTreeMap::from([(DeviceId(1), 2)])
+    );
+    assert_eq!(plan.present, ids(&[(1, 2)]));
+    assert!(plan.deleted.is_empty());
+}
+
 /// New writes and snapshots landing during the reads change neither the
 /// selections nor the target (io `retry_stale`): only a deleted number the
 /// selection lacks forces a replacement.
@@ -409,6 +462,8 @@ async fn new_tails_and_snapshots_do_not_move_the_selection() {
                 BTreeSet::new(),
             ),
         ],
+        kept: Vec::new(),
+        kept_at: Vec::new(),
     };
     let (replaced, outcome) = run(&history).await;
     assert!(replaced.is_empty());
@@ -510,16 +565,30 @@ fn history(generator: &mut crate::tests::Generator) -> History {
         delete(generator, &chain, &mut cap, &mut deleted);
         catalogs.push((landed.clone(), deleted.clone()));
     }
+    // Some audiences keep their existing state at this device's positions.
+    let kept = audiences
+        .iter()
+        .copied()
+        .filter(|_| generator.pick(3) == 0)
+        .collect();
+    let kept_at = frontier
+        .iter()
+        .map(|(writer, top)| (*writer, generator.pick(*top as usize + 1) as u64))
+        .filter(|(_, number)| *number > 0)
+        .collect();
     History {
         audiences,
         required,
         writes,
         catalogs,
+        kept,
+        kept_at,
     }
 }
 
-/// IO `CommonReload.round`/`replace` over generated histories, each round's
-/// audience scans being `FixedReload.scan`: the real rounds' replacements,
+/// IO `CommonReload.round`/`replace` over generated histories, some of whose
+/// audiences keep their existing state, each round's audience scans being
+/// `FixedReload.scan`: the real rounds' replacements,
 /// final selections, common target (`committed_number`, `committed_safe`)
 /// and log receipts agree with the model's. Once deletion stops, at most one
 /// replacement per audience follows (`terminates`).
@@ -530,6 +599,7 @@ async fn io_differential_common_point() {
     let mut cases = Vec::new();
     let mut actual = Vec::new();
     let mut replacements = 0;
+    let mut kept_replacements = 0;
     let mut skips = 0;
     for _ in 0..400 {
         let history = history(&mut generator);
@@ -543,6 +613,10 @@ async fn io_differential_common_point() {
             "{replaced:?} after deletion stopped at {stop}"
         );
         replacements += replaced.len();
+        kept_replacements += replaced
+            .iter()
+            .filter(|on| history.kept.contains(on))
+            .count();
         if let Outcome::Complete(plan) = &outcome {
             skips += plan.deleted.len();
         }
@@ -550,6 +624,10 @@ async fn io_differential_common_point() {
         cases.push(history.case());
     }
     assert!(replacements > 0, "some histories replace a selection");
+    assert!(
+        kept_replacements > 0,
+        "some histories replace a kept state lacking a deleted write"
+    );
     assert!(
         skips > 0,
         "some deleted writes have no part where they are lacked"
