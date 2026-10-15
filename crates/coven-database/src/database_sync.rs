@@ -672,13 +672,16 @@ impl Database {
                         return Ok(());
                     }
                     writer.transaction(|database| {
+                        let open = crate::file_write::sources::Open::before(database)?;
                         database.internal_execute(
                             "UPDATE _coven_finality SET horizon=?1 WHERE singleton=1",
                             [crate::storage_time::encode(horizon)],
                         )?;
                         crate::retirement_drain::record_finality(database, horizon, sample)?;
                         // Inputs whose boundary entries all became final are released.
-                        crate::entry_inputs::release(database)
+                        crate::entry_inputs::release(database)?;
+                        // So are originals whose rows this horizon settles (§16.5).
+                        open.release(database, &inner.access.write_schema)
                     })?;
                     current.horizon = Some(horizon);
                     Ok(())

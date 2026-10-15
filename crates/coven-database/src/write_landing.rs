@@ -391,6 +391,15 @@ fn audiences(db: &DatabaseConnection, write: WriteId) -> Result<Vec<Audience>, D
     )
 }
 
+/// Every write whose window verdict is still recorded: received, and not yet
+/// final or late with retained inputs (`release`).
+pub(crate) fn recorded_writes(db: &DatabaseConnection) -> Result<BTreeSet<WriteId>, DbError> {
+    Ok(landings(db)?
+        .into_iter()
+        .map(|(write, _, _)| write)
+        .collect())
+}
+
 /// Audiences whose retained inputs a verdict that can still change needs.
 pub(crate) fn open_audiences(db: &DatabaseConnection) -> Result<BTreeSet<Audience>, DbError> {
     let mut open = BTreeSet::new();

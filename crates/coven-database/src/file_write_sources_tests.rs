@@ -1,8 +1,12 @@
 //! An original's record while its row is hidden, returns or is deleted
 //! (§14.7, §16.5, `RetentionSafety.LocalSources`).
 use crate::file_write::tests::{complete_uploads, local_count, owned_paths};
+use crate::pending::tests::Record;
+use crate::test_utils::published;
+use crate::write::tests::records;
 use crate::{tests::TestStore, *};
-use coven_foundation::id_source::CircleId;
+use coven_format::value::StorageTime;
+use coven_foundation::id_source::{CircleId, SequentialIds};
 use serde_json::json;
 
 const CIRCLE: &str = "00000000-0000-4000-8000-00000000000c";
@@ -11,7 +15,8 @@ const ROW: &str = "00000000-0000-4000-8000-000000000001";
 /// A circle deletion hides rows without deleting them: their originals' records
 /// and queued copies stay, the hidden files still upload, and a dropped
 /// deletion returns them whole (§14.7, §16.5). A real row delete releases the
-/// original record, as `original_size_is_checked_against_the_final_row_and_clearing_keeps_the_original` shows.
+/// original record once its verdict is final
+/// (`a_received_delete_keeps_the_original_until_its_verdict_is_final`).
 #[tokio::test]
 async fn a_circle_deletion_keeps_sources_until_the_deletion_drops() {
     let circle = CircleId(uuid::Uuid::parse_str(CIRCLE).unwrap());
@@ -110,11 +115,10 @@ async fn a_circle_deletion_keeps_sources_until_the_deletion_drops() {
     db.close().await.unwrap();
 }
 
-/// A store whose `originals` rows live in one circle, holding one row that
-/// names a user-provided original, recorded on this device.
-async fn original_in_circle() -> (TestStore, Database, CircleId, tempfile::NamedTempFile) {
-    let circle = CircleId(uuid::Uuid::parse_str(CIRCLE).unwrap());
-    let store = TestStore::new();
+/// A device of the fixture store holding the `originals` table, drawing its
+/// id from `ids`, and a member of `circle`.
+async fn originals_device(ids: &SequentialIds, circle: CircleId) -> (TestStore, Database) {
+    let store = TestStore::with_ids(ids);
     let db = store
         .schema(
             vec![SyncedTable::new("originals", RowIdentity::IndependentUuid)
@@ -129,6 +133,16 @@ async fn original_in_circle() -> (TestStore, Database, CircleId, tempfile::Named
         .await
         .unwrap();
     store.join_circle(&db, circle);
+    (store, db)
+}
+
+/// A store whose `originals` rows live in one circle, holding one row that
+/// names a user-provided original, recorded on this device.
+async fn original_in_circle(
+    ids: &SequentialIds,
+) -> (TestStore, Database, CircleId, tempfile::NamedTempFile) {
+    let circle = CircleId(uuid::Uuid::parse_str(CIRCLE).unwrap());
+    let (store, db) = originals_device(ids, circle).await;
     let original = tempfile::NamedTempFile::new().unwrap();
     std::fs::write(original.path(), b"original").unwrap();
     let prepared = prepare_user_file(original.path(), |_| {}).await.unwrap();
@@ -146,13 +160,106 @@ async fn original_in_circle() -> (TestStore, Database, CircleId, tempfile::Named
     (store, db, circle, original)
 }
 
+/// Another device of the circle receives the row from `db`, deletes it, and
+/// `db` receives that delete as a write first published at `stored`: its own
+/// window verdict, which a later retirement could still change, decides it
+/// (§10). Returns the peer, whose store must outlive the call's use.
+async fn receive_delete(
+    db: &Database,
+    ids: &SequentialIds,
+    circle: CircleId,
+    stored: StorageTime,
+) -> (TestStore, Database) {
+    let (store, peer) = originals_device(ids, circle).await;
+    for write in records(db) {
+        peer.apply_downloaded::<Record>(write.into(), published(StorageTime::UNIX_EPOCH))
+            .await
+            .unwrap();
+    }
+    peer.write(|sql| {
+        sql.execute(&format!("DELETE FROM originals WHERE id='{ROW}'"), [])?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    let delete = records(&peer).remove(0);
+    db.apply_downloaded::<Record>(delete.into(), published(stored))
+        .await
+        .unwrap();
+    assert_eq!(local_count(db, "originals"), 0);
+    (store, peer)
+}
+
+/// The horizon every earlier entry and window verdict falls under (§9).
+fn horizon() -> StorageTime {
+    StorageTime::new(4_200_000_000, 0).unwrap()
+}
+
+async fn make_final(db: &Database) {
+    db.advance_store_log_horizon(db.store_log().await.unwrap(), horizon(), horizon())
+        .await
+        .unwrap();
+}
+
+/// A hidden row keeps its original's record until its circle's deletion is
+/// kept and final; it is then cleaned up and the record goes, while its
+/// merge row and loss record stay for later writes (§14.7,
+/// `hidden_released_when_final`).
+#[tokio::test]
+async fn a_final_circle_deletion_releases_its_rows_originals() {
+    let ids = SequentialIds::new();
+    let (_store, db, circle, original) = original_in_circle(&ids).await;
+    crate::store_log::tests::delete_circle(&db, circle)
+        .await
+        .unwrap();
+    assert_eq!(local_count(&db, "_coven_user_files"), 1);
+    let lost = local_count(&db, "_coven_lost");
+    let rows = local_count(&db, "_coven_rows");
+    make_final(&db).await;
+    assert_eq!(local_count(&db, "_coven_user_files"), 0);
+    assert_eq!(local_count(&db, "_coven_lost"), lost);
+    assert_eq!(local_count(&db, "_coven_rows"), rows);
+    // Forgetting the record never touches the person's file.
+    assert_eq!(std::fs::read(original.path()).unwrap(), b"original");
+    db.close().await.unwrap();
+}
+
+/// A received delete keeps the original's record while its window verdict
+/// can change, and releases it in the transaction that makes the verdict
+/// final (§10, §16.5, `deleted_kept_until_final`,
+/// `deleted_released_when_final`). This device's own delete is never
+/// rejudged here, so it releases the record at once.
+#[tokio::test]
+async fn a_received_delete_keeps_the_original_until_its_verdict_is_final() {
+    let ids = SequentialIds::new();
+    let (_store, db, circle, _original) = original_in_circle(&ids).await;
+    let _peer = receive_delete(
+        &db,
+        &ids,
+        circle,
+        StorageTime::new(4_100_000_000, 0).unwrap(),
+    )
+    .await;
+    assert_eq!(local_count(&db, "_coven_user_files"), 1);
+    make_final(&db).await;
+    assert_eq!(local_count(&db, "_coven_user_files"), 0);
+    db.close().await.unwrap();
+
+    let (_store, own, _, _original) = original_in_circle(&ids).await;
+    own.write(|sql| {
+        sql.execute(&format!("DELETE FROM originals WHERE id='{ROW}'"), [])?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    assert_eq!(local_count(&own, "_coven_user_files"), 0);
+    own.close().await.unwrap();
+}
+
 /// `RetentionSafety.LocalSources`: after each event, whether this device
-/// still records the original, against the model's implemented rule. The
-/// model's stated rule differs in two places this test pins: a hidden row's
-/// record outlives its deletion's finality, since nothing physically removes a
-/// deleted circle's rows (`implemented_keeps_hidden_forever`), and a row
-/// delete forgets it before the deleting write is final
-/// (`implemented_releases_returning_row`).
+/// still records the original, against the model's stated rule (§14.7,
+/// §16.5). The row delete is a received write: a delete published after a
+/// final horizon has an open verdict again (`deleted_kept_until_final`).
 #[tokio::test]
 #[ignore = "requires COVEN_STORELOG_DATA_LEAN, supplied by scripts/check.sh"]
 async fn data_differential_local_sources() {
@@ -168,7 +275,10 @@ async fn data_differential_local_sources() {
     let mut cases = Vec::new();
     let mut observed = Vec::new();
     for events in histories {
-        let (_store, db, circle, _original) = original_in_circle().await;
+        let ids = SequentialIds::new();
+        let (_store, db, circle, _original) = original_in_circle(&ids).await;
+        let mut peers = Vec::new();
+        let mut finalized = false;
         let mut recorded = Vec::new();
         for event in &events {
             match *event {
@@ -179,18 +289,28 @@ async fn data_differential_local_sources() {
                     .await
                     .unwrap(),
                 "final" => {
-                    let after = coven_format::value::StorageTime::new(4_000_000_000, 0).unwrap();
-                    db.advance_store_log_horizon(db.store_log().await.unwrap(), after, after)
-                        .await
-                        .unwrap();
+                    make_final(&db).await;
+                    finalized = true;
                 }
-                "deleteRow" => db
-                    .write(|sql| {
-                        sql.execute(&format!("DELETE FROM originals WHERE id='{ROW}'"), [])?;
-                        Ok(())
-                    })
-                    .await
-                    .unwrap(),
+                // Published within the horizon's settling window, or more
+                // than thirty days past it once the horizon stands.
+                "deleteRow" => peers.push(
+                    receive_delete(
+                        &db,
+                        &ids,
+                        circle,
+                        StorageTime::new(
+                            if finalized {
+                                4_300_000_000
+                            } else {
+                                4_100_000_000
+                            },
+                            0,
+                        )
+                        .unwrap(),
+                    )
+                    .await,
+                ),
                 _ => unreachable!(),
             }
             // The record itself: `user_file` reads through the visible row,
@@ -215,30 +335,6 @@ async fn data_differential_local_sources() {
         .unwrap();
     let output = child.wait_with_output().unwrap();
     assert!(output.status.success());
-    let model: Vec<Vec<serde_json::Value>> = serde_json::from_slice(&output.stdout).unwrap();
-    let implemented: Vec<Vec<bool>> = model
-        .iter()
-        .map(|steps| {
-            steps
-                .iter()
-                .map(|s| s["implemented"].as_bool().unwrap())
-                .collect()
-        })
-        .collect();
-    let stated: Vec<Vec<bool>> = model
-        .iter()
-        .map(|steps| {
-            steps
-                .iter()
-                .map(|s| s["stated"].as_bool().unwrap())
-                .collect()
-        })
-        .collect();
-    assert_eq!(observed, implemented);
-    // Where the stated rule differs: the final hidden row, and the deletes
-    // before their write is final.
-    assert_eq!(stated[0], [true, false]);
-    assert_eq!(observed[0], [true, true]);
-    assert_eq!(stated[3], [true]);
-    assert_eq!(observed[3], [false]);
+    let model: Vec<Vec<bool>> = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(observed, model);
 }

@@ -109,16 +109,15 @@ private def fileDeletable (j : Json) : Except String Json := do
 
 /-- `RetentionSafety.LocalSources`: one user-provided original's record
 through a row's life. The circle deletion is id 0 and the deleting write id 1;
-`final` makes every id so far final, and the stated rule then cleans up a
-hidden row; the implemented one never does. After each event, whether the record is still kept under the
-stated rule and under the implemented one; a released record stays released. -/
+`final` makes every id so far final, which cleans up a hidden row whose
+deletion is kept. After each event, whether the stated rule still keeps the
+record; a released record stays released. -/
 private def sources (j : Json) : Except String Json := do
   let events ← j.getObjValAs? (Array String) "events"
   let mut row : RetentionSafety.RowState := .live
   let mut kept : List Nat := []
   let mut final : List Nat := []
   let mut stated := true
-  let mut implemented := true
   let mut out := #[]
   for event in events do
     match event with
@@ -132,13 +131,10 @@ private def sources (j : Json) : Except String Json := do
     | other => throw s!"unknown source event {other}"
     let keptF := fun e => kept.contains e
     let finalF := fun e => final.contains e
-    -- Only the stated rule cleans a hidden row up; Rust never does.
-    let cleaned := RetentionSafety.cleanup keptF finalF row
+    row := RetentionSafety.cleanup keptF finalF row
     stated := stated && !RetentionSafety.mayDelete keptF finalF
-      (RetentionSafety.localSource 0 (RetentionSafety.sourceNeed cleaned))
-    implemented := implemented && !RetentionSafety.mayDelete keptF finalF
-      (RetentionSafety.localSource 0 (RetentionSafety.implementedNeed row))
-    out := out.push (Json.mkObj [("stated", toJson stated), ("implemented", toJson implemented)])
+      (RetentionSafety.localSource 0 (RetentionSafety.sourceNeed row))
+    out := out.push (toJson stated)
   return toJson out
 
 /-- §15/§18.1: the listed snapshots of one audience that a retention

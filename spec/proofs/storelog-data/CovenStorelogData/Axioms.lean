@@ -148,8 +148,6 @@ import CovenStorelogData
 #print axioms CovenStorelogData.RetentionSafety.hidden_released_when_final
 #print axioms CovenStorelogData.RetentionSafety.deleted_released_when_final
 #print axioms CovenStorelogData.RetentionSafety.sources_bounded
-#print axioms CovenStorelogData.RetentionSafety.implemented_keeps_hidden_forever
-#print axioms CovenStorelogData.RetentionSafety.implemented_releases_returning_row
 #print axioms CovenStorelogData.RetentionSafety.retained_count_bound
 #print axioms CovenStorelogData.RetentionSafety.loss_protects_file
 #print axioms CovenStorelogData.RetentionSafety.reversible_input_protects_file

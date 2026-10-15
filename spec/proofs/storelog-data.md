@@ -1083,7 +1083,7 @@ the audit permits only Lean's own `propext`, `Classical.choice`, and
 
 ## An original's record
 
-**The stated rule is proved safe and bounded; Rust breaks both, checked.**
+**The stated rule is proved safe and bounded, and Rust follows it.**
 [`LocalSources`](storelog-data/CovenStorelogData/LocalSources.lean) models
 this device's record of a user-provided original (`_coven_user_files`) as a
 `localSource` retention input. Its row is live, hidden by a circle deletion
@@ -1104,22 +1104,27 @@ record goes once the deciding entry or write is kept and final, and that the
 hidden row may then be physically removed; `sources_bounded` says that once
 every dependency is final exactly the records of current rows remain.
 
-The rule Rust implements (`FileWrite::retain_rows`, after T60) keeps the
-record while a merge row names the original, hidden or not, and forgets it as
-soon as a deleting generation lands. Nothing physically removes a deleted
-circle's rows. `implemented_keeps_hidden_forever` shows a hidden row's record
-is then never released, kept and final deletion included.
-`implemented_releases_returning_row` gives the other failure: a deleting write
-kept but not final releases the record, and a later rejudging that excludes
-the write brings the row back without it.
+Rust (`file_write_sources`, T214) follows the stated rule. A row a kept and
+final circle deletion hides is cleaned up on this device: it names no
+original any more, so its record goes in the transaction that makes the
+deletion final. A deleted row keeps its key's records while the deleting
+write's window verdict can change, which is while a received write keeps its
+landing record; that record goes once the verdict is final (§10), and the
+original's record goes with it. This device's own deletes are never rejudged
+on it, so they release the record at once. Before T214 a hidden row's record
+outlived the deletion's finality and a received delete released it before its
+verdict was final.
 
-`StorelogDataRunner`'s `sources` input runs both rules over a row's events.
+`StorelogDataRunner`'s `sources` input runs the stated rule over a row's
+events.
 [`data_differential_local_sources`](../../crates/coven-database/src/file_write_sources_tests.rs)
-drives a real database through circle deletion, its drop, finality and a row
-delete, checks the record after every event against the implemented rule,
-and pins the two places the stated rule differs. What a record is used for
-once its row is gone, and the cost of keeping hidden rows, are outside the
-model.
+drives a real database through circle deletion, its drop, finality and a
+received row delete, published before or after the horizon's settling
+window, and checks the record after every event against the stated rule.
+What cleaning up a hidden row removes besides its original's record is
+outside the model: Rust keeps its merge row and loss record, which later
+writes into the circle still merge into (§14.7). The cost of keeping them is
+not modeled.
 
 ## Rust differential coverage
 

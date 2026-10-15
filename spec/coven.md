@@ -4558,6 +4558,14 @@ Carol's tablet:
 - Physical cleanup waits for the deletion's finality (§9) and the snapshot
   and file-reference checks (§15, §16.5). Loss records that still name a
   file retain it.
+  - Once the deletion is kept and final, its rows can never return. In the
+    transaction that makes it final, this device cleans them up: they name
+    no original any more, so their originals' records go (§16.5). Their
+    merge rows and loss records stay. A write into the circle that had not
+    read the deletion can still arrive and merges into them, and the app
+    can still read and dismiss those losses, so every device holding the
+    same writes keeps the same merge state whenever it cleaned up
+    ([`hidden_released_when_final`](proofs/storelog-data/CovenStorelogData/LocalSources.lean)).
 
 ## 15. Snapshots
 
@@ -5314,9 +5322,12 @@ Carol's tablet:
 - This device's record of a user-provided original (`_coven_user_files`)
   stays while its row is current or could become current again, apart from
   the queue's own source facts. A row a circle deletion hides keeps it until
-  that deletion is final and the row is physically removed (§14.7); a
+  that deletion is kept and final and the row is cleaned up (§14.7); a
   deleted row keeps it until the deleting write's window verdict is final
-  (§10). Then it goes, so no record outlives every row that could name it
+  (§10). A received delete's verdict is final once no retirement able to
+  exclude it can still change; this device's own delete is never rejudged on
+  it, so its record goes with the delete. The release commits with the
+  finality that allows it, so no record outlives every row that could name it
   ([`source_kept_while_row_returns`, `hidden_kept_until_final`, `deleted_kept_until_final`, `hidden_released_when_final`, `deleted_released_when_final`, `sources_bounded`](proofs/storelog-data/CovenStorelogData/LocalSources.lean)).
 - Every attempt, including retries and resumed provider sessions, checks
   the source's size and whole-file content hash, and a user-provided

@@ -28,7 +28,7 @@ pub(crate) struct StagedFile {
 }
 
 #[path = "file_write_sources.rs"]
-mod sources;
+pub(crate) mod sources;
 
 #[cfg(test)]
 #[path = "file_write_tests.rs"]
