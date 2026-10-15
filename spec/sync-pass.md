@@ -465,7 +465,7 @@ For example, replacing the store snapshot through write 2 while Gifts remains
 through 1 requires fetching write 2's Gifts part before either state is visible
 ([`replacement_fills_other_audience`](proofs/io/CovenIO/CommonReloadExamples.lean)).
 The records checked by the reader are the records applied; do not decrypt and
-parse the body again. No entry operation runs while a reload is active.
+parse the body again.
 Ordinary recent-return-protected sync adds no snapshot listing for this rule.
 
 Every create uses fixed attempted bytes and the collision rule of §10;
@@ -851,9 +851,9 @@ seen, and the wait is due within its persisted full wait, so a prerequisite
 satisfied before the reopen delays it at most that long
 ([`reopened_due`](proofs/io/CovenIO/WaitingReopen.lean)). Without a forward
 wall-clock jump each reopen adds at most one start, the attempt it cut short
-([`reopen_rate`](proofs/io/CovenIO/WaitingReopen.lean)). Every recorded condition names what unblocks it: a queued entry held
-back by a pending reload waits on that reload, and a schema raise waiting on
-a reload yields its place before reloads, so the two never wait on each other
+([`reopen_rate`](proofs/io/CovenIO/WaitingReopen.lean)). Every recorded condition names what unblocks it: an entry held back by a
+pending reload waits on that reload, except a schema raise, which goes first
+unless it waits on that reload, so the two never wait on each other
 ([`no_cycle`](proofs/io/CovenIO/DriveOrder.lean)).
 Key waits share the keys observation, invite waits share the join-request
 observation, and agreement/retention share positions. Unchanged app-action

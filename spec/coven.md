@@ -6083,8 +6083,7 @@ Carol's tablet:
     number. The old copies and entry remain in storage; the guarantee about
     fixed data applies separately to each recorded attempt
     ([checked history: `restart_changes_key`](proofs/queue.md#checked-histories-and-limits)).
-- A device runs one operation that writes store log entries at a time, and
-  none while it reloads from a snapshot.
+- A device runs one operation that writes store log entries at a time.
 - An app call first satisfies the online checks of §9. Once its operation
   starts, the call returns when it finishes or cannot proceed without app
   action. Dropping the call does not stop the recorded operation.
