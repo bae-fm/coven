@@ -1,7 +1,7 @@
 //! R2 minting against an in-process Cloudflare API. Minting, revocation and
 //! reads use only that API; the location names the account in its host.
 use super::*;
-use crate::providers::tests::{response, TestServer};
+use crate::providers::tests::{query, response, TestServer};
 use crate::{AccessKeyAdmin, AdminCredential, S3Profile, S3ProfileName};
 use axum::{
     body::{Body, Bytes},
@@ -222,6 +222,9 @@ async fn bucket(
     // so it answers the member check's read as a disabled bucket.
     if key.is_empty() && uri.query() == Some("versioning") {
         return response(200, "<VersioningConfiguration/>");
+    }
+    if key.is_empty() && query(&uri).contains_key("uploads") {
+        return response(200, "<ListMultipartUploadsResult><IsTruncated>false</IsTruncated></ListMultipartUploadsResult>");
     }
     if key.is_empty() {
         return response(200, "<ListBucketResult><Name>household</Name><IsTruncated>false</IsTruncated></ListBucketResult>");

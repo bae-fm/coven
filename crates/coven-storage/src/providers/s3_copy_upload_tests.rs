@@ -713,3 +713,175 @@ async fn every_object_copy_settles_a_copy_whose_shared_temporary_is_gone() {
         assert_eq!(temporaries(&state), 0);
     }
 }
+
+// Every S3 session is recorded before its native upload exists: the first
+// part initiates it, and resuming or aborting a recording made before an
+// initiation's reply arrived aborts every native upload at its name (§4).
+// Here on the plain profile, whose upload's name is the destination.
+
+const PLANNED_PART: usize = 8 * 1024 * 1024;
+
+async fn planned_fixture() -> (TestServer, StorageConnection<S3Storage>, Arc<Mutex<Remote>>) {
+    let state = Arc::new(Mutex::new(Remote::default()));
+    let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
+    let storage = provider(&server.url);
+    (server, storage, state)
+}
+
+fn planned_path() -> ObjectPath {
+    ObjectPath::device_log(
+        STORE_ID,
+        coven_foundation::id_source::DeviceId(31),
+        std::num::NonZeroU64::MIN,
+    )
+}
+
+/// A crash after the first part initiated the upload, before the caller
+/// recorded its id, leaves nothing behind: the recording aborts the upload
+/// at its name and starts over.
+#[tokio::test]
+async fn an_initiation_the_recording_missed_is_aborted_not_stranded() {
+    for lost in ["initiation", "part"] {
+        let (_server, storage, state) = planned_fixture().await;
+        let bytes = vec![5; PLANNED_PART + 1];
+        let mut upload = storage
+            .begin_upload(&planned_path(), bytes.len() as u64)
+            .await
+            .unwrap();
+        assert!(
+            state.lock().unwrap().uploads.is_empty(),
+            "begin sends nothing"
+        );
+        let recorded = upload.encode().unwrap();
+        match lost {
+            "initiation" => state.lock().unwrap().lose_initiation_reply = true,
+            _ => state.lock().unwrap().fail_part_reply = true,
+        }
+        assert_eq!(
+            storage
+                .upload_part(&mut upload, &bytes[..PLANNED_PART])
+                .await
+                .unwrap_err()
+                .failure(),
+            StorageFailure::Network
+        );
+        assert_eq!(state.lock().unwrap().uploads.len(), 1);
+        let mut upload = UploadSession::decode(recorded.as_bytes()).unwrap();
+        storage.resume_upload(&mut upload).await.unwrap();
+        assert!(state.lock().unwrap().uploads.is_empty());
+        assert_eq!(upload.confirmed_bytes(), 0);
+        for part in bytes.chunks(upload.part_size()) {
+            storage.upload_part(&mut upload, part).await.unwrap();
+        }
+        storage.finish_upload(&mut upload).await.unwrap();
+        assert_eq!(storage.read(&planned_path()).await.unwrap(), bytes);
+        assert!(state.lock().unwrap().uploads.is_empty());
+    }
+}
+
+/// Aborting that recording aborts the upload and leaves the destination,
+/// which is the upload's own name, alone.
+#[tokio::test]
+async fn aborting_a_recording_before_initiation_keeps_the_destination() {
+    let (_server, storage, state) = planned_fixture().await;
+    storage.create(&planned_path(), b"published").await.unwrap();
+    let mut upload = storage
+        .begin_upload(&planned_path(), PLANNED_PART as u64 + 1)
+        .await
+        .unwrap();
+    let recorded = UploadSession::decode(upload.encode().unwrap().as_bytes()).unwrap();
+    state.lock().unwrap().lose_initiation_reply = true;
+    storage
+        .upload_part(&mut upload, &vec![1; PLANNED_PART])
+        .await
+        .unwrap_err();
+    storage.abort_upload(&recorded).await.unwrap();
+    assert!(state.lock().unwrap().uploads.is_empty());
+    assert_eq!(storage.read(&planned_path()).await.unwrap(), b"published");
+}
+
+/// A recording with its native id whose upload is gone, and whose destination
+/// is empty, has expired; its replacement starts at zero.
+#[tokio::test]
+async fn missing_session_and_destination_is_expired() {
+    let (_server, storage, state) = planned_fixture().await;
+    let bytes = vec![3; PLANNED_PART + 1];
+    let mut upload = storage
+        .begin_upload(&planned_path(), bytes.len() as u64)
+        .await
+        .unwrap();
+    storage
+        .upload_part(&mut upload, &bytes[..PLANNED_PART])
+        .await
+        .unwrap();
+    state.lock().unwrap().uploads.clear();
+    let error = storage.resume_upload(&mut upload).await.unwrap_err();
+    assert_eq!(error.failure(), StorageFailure::SessionExpired);
+    assert!(std::error::Error::source(&error).is_some());
+    let mut replacement = storage.restart_upload(&upload).await.unwrap();
+    assert_eq!(replacement.path(), &planned_path());
+    assert_eq!(replacement.confirmed_bytes(), 0);
+    for part in bytes.chunks(replacement.part_size()) {
+        storage.upload_part(&mut replacement, part).await.unwrap();
+    }
+    storage.finish_upload(&mut replacement).await.unwrap();
+    assert_eq!(storage.read(&planned_path()).await.unwrap(), bytes);
+}
+
+/// A part the provider stored but whose reply was lost is found by listing
+/// the recorded upload's parts.
+#[tokio::test]
+async fn multipart_recovers_a_lost_part_reply() {
+    let (_server, storage, state) = planned_fixture().await;
+    assert_eq!(storage.single_request_limit(), 5 * 1024 * 1024 * 1024);
+    let mut bytes = vec![42; 2 * PLANNED_PART];
+    bytes.push(b'z');
+    let mut upload = storage
+        .begin_upload(&planned_path(), bytes.len() as u64)
+        .await
+        .unwrap();
+    storage
+        .upload_part(&mut upload, &bytes[..PLANNED_PART])
+        .await
+        .unwrap();
+    let recorded = upload.encode().unwrap();
+    state.lock().unwrap().fail_part_reply = true;
+    assert_eq!(
+        storage
+            .upload_part(&mut upload, &bytes[PLANNED_PART..2 * PLANNED_PART])
+            .await
+            .unwrap_err()
+            .failure(),
+        StorageFailure::Network
+    );
+    let mut upload = UploadSession::decode(recorded.as_bytes()).unwrap();
+    storage.resume_upload(&mut upload).await.unwrap();
+    assert_eq!(upload.confirmed_bytes(), 2 * PLANNED_PART as u64);
+    storage.upload_part(&mut upload, b"z").await.unwrap();
+    storage.finish_upload(&mut upload).await.unwrap();
+    storage.finish_upload(&mut upload).await.unwrap();
+    assert_eq!(storage.read(&planned_path()).await.unwrap(), bytes);
+}
+
+#[tokio::test]
+async fn resumed_multipart_parts_follow_every_page_before_advancing() {
+    let (_server, storage, state) = planned_fixture().await;
+    let mut upload = storage
+        .begin_upload(&planned_path(), PLANNED_PART as u64 * 2 + 1)
+        .await
+        .unwrap();
+    storage
+        .upload_part(&mut upload, &vec![1; PLANNED_PART])
+        .await
+        .unwrap();
+    let mut recorded = upload.clone();
+    storage
+        .upload_part(&mut upload, &vec![2; PLANNED_PART])
+        .await
+        .unwrap();
+    storage.upload_part(&mut upload, b"z").await.unwrap();
+    storage.resume_upload(&mut recorded).await.unwrap();
+    assert_eq!(state.lock().unwrap().part_pages, 3);
+    assert_eq!(recorded.confirmed_bytes(), recorded.total_bytes());
+    storage.finish_upload(&mut recorded).await.unwrap();
+}

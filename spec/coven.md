@@ -974,15 +974,16 @@ the file's ranges under `F`.
     completion. Coven therefore publishes by copy. Every copy-publication
     profile uploads unconditionally to
     `<prefix>/<store>/.coven-uploads/<session>`, where `<session>` is the
-    upload's coven-generated UUID. The session is recorded with that name
-    before its native multipart upload exists: the first part initiates it,
-    and the recording then gains the native id. A recording that predates an
-    initiation whose reply was lost still names it, so resuming or aborting
-    that recording aborts every native upload at the name and settles a
-    temporary already assembled there as a completed upload's. This reserved
-    namespace is distinct from every coven object path in D10. Retrying or
-    resuming that recording derives the same name, including after multipart
-    completion or a lost copy reply.
+    upload's coven-generated UUID; other profiles upload at the destination,
+    a path only its device writes. Every S3 session is recorded with its
+    name before its native multipart upload exists: the first part initiates
+    it, and the recording then gains the native id. A recording that
+    predates an initiation whose reply was lost still names it, so resuming
+    or aborting it aborts every native upload at the name and settles an
+    object already assembled there as a completed upload's; aborting never
+    deletes a destination. The reserved namespace is distinct from every
+    coven object path in D10. Retrying or resuming a recording derives the
+    same name, including after multipart completion or a lost copy reply.
   - Copy publication sends the assembled temporary with one server-side
     `CopyObject` to the destination, carrying the profile's destination
     condition (`x-goog-if-generation-match: 0` for GCS). The
@@ -1502,7 +1503,7 @@ the file's ranges under `F`.
   - Before delivery the key is checked from the member's side. Under it, an
     object in `<store>/.coven-check/<run>/` is created, refused a second time,
     read back and deleted, and that prefix is listed, with its multipart
-    uploads on a copy profile. Bucket versioning is read as setup reads it.
+    uploads. Bucket versioning is read as setup reads it.
     Where keys reach a
     prefix, a listing of the location's base prefix, outside every store,
     must be refused; where they reach a whole bucket, the account's bucket

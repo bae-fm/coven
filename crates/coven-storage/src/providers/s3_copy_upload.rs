@@ -89,9 +89,10 @@ impl S3Storage {
         Ok(SecretText::new(id.into()))
     }
 
-    /// Abort every native upload at a planned session's temporary: one its
-    /// initiation started before the reply was lost. The name is the
-    /// recording's own, so no other session's upload is there (§4).
+    /// Abort every native upload at a planned session's name: one its
+    /// initiation started before the reply was lost. A copy temporary's name
+    /// is the recording's own; a destination is the writing device's own
+    /// path, where only its earlier sessions for the same write upload (§4).
     pub(super) async fn abort_initiated(
         &self,
         publication: &PublicationRequest,
@@ -162,7 +163,15 @@ impl S3Storage {
         session: &mut UploadSession,
     ) -> Result<(), StorageError> {
         if self.settings.copy_publication.multipart().is_none() {
-            return self.completed(session).await;
+            return match (self.completed(session).await, &session.state) {
+                // A planned session that never published starts over.
+                (Err(error), SessionState::S3Planned { .. })
+                    if error.failure() == StorageFailure::SessionExpired =>
+                {
+                    Ok(())
+                }
+                (result, _) => result,
+            };
         }
         // NoSuchUpload leaves exactly one unknown: did assembly create the
         // temporary? If not, only this session's already-published object counts.

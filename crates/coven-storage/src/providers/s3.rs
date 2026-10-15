@@ -488,7 +488,7 @@ impl ProviderOps for S3Storage {
     }
     async fn begin_upload(
         &self,
-        publication: &PublicationRequest,
+        _publication: &PublicationRequest,
         path: &ObjectPath,
         total: u64,
     ) -> Result<UploadSession, StorageError> {
@@ -499,28 +499,16 @@ impl ProviderOps for S3Storage {
             }
         }
         let part_size = crate::session::s3_part_size(total)?;
+        // The upload is named before any request: the caller records the
+        // session, and the first part initiates the native upload (§4).
         let token = SecretText::new(self.ids.new_id().to_string());
-        // A copy profile's temporary is named before any request: the caller
-        // records the session, and the first part initiates the upload (§4).
-        let state = if self.settings.copy_publication.multipart().is_some() {
-            SessionState::S3Planned { token }
-        } else {
-            let id = self
-                .initiate(publication, &path.under(&self.prefix), &token)
-                .await?;
-            SessionState::S3 {
-                id,
-                token,
-                parts: Vec::new(),
-            }
-        };
         Ok(UploadSession {
             location: self.config(),
             path: path.clone(),
             total,
             confirmed: 0,
             part_size,
-            state,
+            state: SessionState::S3Planned { token },
         })
     }
     async fn resume_upload(
@@ -743,10 +731,12 @@ impl ProviderOps for S3Storage {
         session: &UploadSession,
     ) -> Result<(), StorageError> {
         if matches!(session.state, SessionState::S3Planned { .. }) {
-            return crate::transfer::with_cleanup(
-                self.abort_initiated(publication, session).await,
-                self.delete_temporary(session).await,
-            );
+            let aborted = self.abort_initiated(publication, session).await;
+            // Without a copy the upload's name is the destination itself.
+            if self.settings.copy_publication.multipart().is_none() {
+                return aborted;
+            }
+            return crate::transfer::with_cleanup(aborted, self.delete_temporary(session).await);
         }
         let result = match self
             .client

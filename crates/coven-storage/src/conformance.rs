@@ -441,7 +441,6 @@ impl Conformance {
                 .err()
                 .unwrap(),
             storage.delete(&path).await.err().unwrap(),
-            storage.begin_upload(&path, 4).await.err().unwrap(),
             storage.resume_upload(&mut pending).await.err().unwrap(),
             storage
                 .upload_part(&mut pending, b"data")
@@ -452,6 +451,8 @@ impl Conformance {
             storage.abort_upload(&pending).await.err().unwrap(),
         ];
         if storage.config().provider() != CloudProvider::S3 {
+            // S3 names its upload before any request (§4).
+            errors.push(storage.begin_upload(&path, 4).await.err().unwrap());
             errors.push(storage.grant_access("member").await.err().unwrap());
             errors.push(storage.revoke_access("member").await.err().unwrap());
         }

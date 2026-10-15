@@ -81,9 +81,9 @@ pub(crate) enum SessionState {
         id: SecretText,
         token: SecretText,
     },
-    /// A copy profile's session whose temporary name is recorded before the
-    /// native multipart upload is initiated, so no upload exists that its
-    /// recording does not name (§4).
+    /// A session whose upload name is recorded before the native multipart
+    /// upload is initiated, so no upload exists that its recording does not
+    /// name (§4).
     S3Planned {
         token: SecretText,
     },

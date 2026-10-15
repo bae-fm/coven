@@ -736,12 +736,10 @@ pub(super) async fn multipart(connected: Arc<StorageConnection<S3Storage>>, stor
         .copy_publication
         .multipart()
         .is_some();
-    // A copy profile records its session before the upload exists, so a
-    // recording older than its first part aborts that upload and starts over
-    // (§4); otherwise resumption finds the accepted part.
-    let resumed_at = if copy { 0 } else { part_size };
-    assert_eq!(resumed.confirmed_bytes(), resumed_at as u64);
-    for part in bytes[resumed_at..].chunks(part_size) {
+    // Every session is recorded before its upload exists, so a recording
+    // older than its first part aborts that upload and starts over (§4).
+    assert_eq!(resumed.confirmed_bytes(), 0);
+    for part in bytes.chunks(part_size) {
         connected.upload_part(&mut resumed, part).await.unwrap();
     }
     if copy {

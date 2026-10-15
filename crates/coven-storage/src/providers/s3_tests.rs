@@ -455,18 +455,6 @@ async fn real_s3_client_conforms_with_pagination() {
         .unwrap();
 }
 #[tokio::test]
-async fn multipart_recovers_a_lost_part_reply() {
-    let state = Arc::new(Mutex::new(Remote::default()));
-    let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
-    let storage = provider(&server.url);
-    assert_eq!(storage.single_request_limit(), 5 * 1024 * 1024 * 1024);
-    crate::test_utils::Conformance::new(Arc::new(storage), STORE_ID)
-        .lost_part_reply(8 * 1024 * 1024, async {
-            state.lock().unwrap().fail_part_reply = true;
-        })
-        .await;
-}
-#[tokio::test]
 async fn errors_and_manual_key_instructions() {
     let state = Arc::new(Mutex::new(Remote::default()));
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
@@ -537,19 +525,6 @@ async fn shared_location_ignores_unrelated_objects() {
         ))
         .await;
     assert_eq!(state.lock().unwrap().objects.len(), 1);
-}
-
-#[tokio::test]
-async fn missing_session_and_destination_is_expired() {
-    let state = Arc::new(Mutex::new(Remote::default()));
-    let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
-    let storage = provider(&server.url);
-    let error = crate::test_utils::Conformance::new(Arc::new(storage), STORE_ID)
-        .expired_session(async {
-            state.lock().unwrap().uploads.clear();
-        })
-        .await;
-    assert!(std::error::Error::source(&error).is_some());
 }
 
 #[tokio::test]
@@ -716,32 +691,6 @@ async fn multipart_publication_and_abort_are_bound_to_the_native_session() {
     ));
     assert_eq!(storage.read(&path).await.unwrap(), b"data");
     assert!(state.lock().unwrap().uploads.is_empty());
-}
-
-#[tokio::test]
-async fn resumed_multipart_parts_follow_every_page_before_advancing() {
-    let state = Arc::new(Mutex::new(Remote::default()));
-    let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
-    let storage = provider(&server.url);
-    let path = ObjectPath::device_log(
-        STORE_ID,
-        coven_foundation::id_source::DeviceId(31),
-        std::num::NonZeroU64::MIN,
-    );
-    let mut upload = storage
-        .begin_upload(&path, 8 * 1024 * 1024 + 1)
-        .await
-        .unwrap();
-    let mut recorded = upload.clone();
-    storage
-        .upload_part(&mut upload, &vec![1; 8 * 1024 * 1024])
-        .await
-        .unwrap();
-    storage.upload_part(&mut upload, b"z").await.unwrap();
-    storage.resume_upload(&mut recorded).await.unwrap();
-    assert_eq!(state.lock().unwrap().part_pages, 2);
-    assert_eq!(recorded.confirmed_bytes(), recorded.total_bytes());
-    storage.finish_upload(&mut recorded).await.unwrap();
 }
 
 #[tokio::test]
