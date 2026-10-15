@@ -328,13 +328,10 @@ impl DeviceLogSync {
         let fingerprints = selected
             .into_iter()
             .zip(state.fingerprints)
-            .map(|((audience, key), (actual, bytes))| {
-                assert_eq!(audience, actual);
-                Fingerprint {
-                    audience,
-                    key,
-                    bytes,
-                }
+            .map(|((audience, key), (_, bytes))| Fingerprint {
+                audience,
+                key,
+                bytes,
             })
             .collect();
         Ok(Some(PostedPositions {

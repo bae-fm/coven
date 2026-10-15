@@ -730,8 +730,9 @@ impl Database {
     }
 
     /// Read the schema version, positions and fingerprints from one committed state.
-    /// Supply fresh hashers derived from the store or circle keys. Audiences whose
-    /// keys are unavailable can be omitted without interrupting sum maintenance.
+    /// Supply fresh hashers derived from the store or circle keys; fingerprints
+    /// return in the same order. Audiences whose keys are unavailable can be
+    /// omitted without interrupting sum maintenance.
     pub async fn sync_state(
         &self,
         keys: Vec<(coven_merge::Audience, coven_crypto::FingerprintHasher)>,
