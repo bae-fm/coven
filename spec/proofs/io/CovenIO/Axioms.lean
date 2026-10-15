@@ -22,6 +22,7 @@ import CovenIO
 #print axioms CovenIO.Downloads.committed_range_checked
 #print axioms CovenIO.Downloads.permanent_never_retries
 #print axioms CovenIO.Downloads.temporary_uses_shared_delay
+#print axioms CovenIO.Downloads.permanent_storage_never_retries
 #print axioms CovenIO.Downloads.removed_not_waiting
 #print axioms CovenIO.Downloads.replaced_not_waiting
 #print axioms CovenIO.Downloads.active_absence_retries

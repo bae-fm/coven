@@ -257,13 +257,15 @@ impl FilesInner {
     }
 }
 
-/// Temporary conditions retry on a later pass; refusals of immutable bytes,
-/// a missing file and a required update wait for app action or an update.
+/// Temporary conditions retry on a later pass; a permanent provider
+/// failure, refusals of immutable bytes, a missing file and a required
+/// update wait for app action or an update (§16.3; io `Downloads.automatic`).
 fn retries(reason: &PendingReason) -> bool {
-    !matches!(
-        reason,
+    match reason {
+        PendingReason::Storage { failure, .. } => crate::pending::automatic_storage(*failure),
         PendingReason::Refused(_)
-            | PendingReason::FileUnavailable(_)
-            | PendingReason::UpdateRequired(_)
-    )
+        | PendingReason::FileUnavailable(_)
+        | PendingReason::UpdateRequired(_) => false,
+        _ => true,
+    }
 }

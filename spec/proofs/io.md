@@ -1394,7 +1394,8 @@ missing row key, authentication/hash failure, disk failure and database failure.
 a file reference exists.
 
 `temporary_uses_shared_delay` and `permanent_never_retries` separate temporary
-retry from app/update work. `eviction_preserves_refusal` preserves permanent
+retry from app/update work; `permanent_storage_never_retries` keeps a
+permanent provider failure for the app. `eviction_preserves_refusal` preserves permanent
 reasons when bytes are evicted. `completed_eviction_does_not_refill` does not
 requeue completed eager work after budget eviction.
 

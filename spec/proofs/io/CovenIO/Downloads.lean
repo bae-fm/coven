@@ -3,8 +3,11 @@ import CovenStorage.Files
 
 namespace CovenIO.Downloads
 
+/-- `storage temporary`: a provider failure, retried only when temporary
+(§16.3; Rust `automatic_storage`). -/
 inductive Reason where
-  | noStorage | network | storage | disk | database
+  | noStorage | network | disk | database
+  | storage (temporary : Bool)
   | object (path : Path)
   | range (path : Path) (index : Nat)
   | unavailable (reason : CovenStorage.Files.MissingReason)
@@ -13,7 +16,8 @@ inductive Reason where
   deriving DecidableEq, Repr
 
 def automatic : Reason → Bool
-  | .noStorage | .network | .storage | .object _ | .range _ _ | .key _ | .disk | .database => true
+  | .storage temporary => temporary
+  | .noStorage | .network | .object _ | .range _ _ | .key _ | .disk | .database => true
   | .unavailable _ | .authentication | .contentHash => false
 
 /-- Before decrypting the row there is a pending write/snapshot subject, no
@@ -179,6 +183,10 @@ theorem permanent_never_retries (s : State) (timer : Waiting.Timer) (now : Nat) 
 theorem temporary_uses_shared_delay (s : State) (timer : Waiting.Timer) (now : Nat)
     (reason : Reason) (has_pending : pending s = some reason) (temporary : automatic reason = true) :
     canRetry s timer now = Waiting.due timer now := by simp [canRetry, has_pending, temporary]
+
+theorem permanent_storage_never_retries (s : State) (timer : Waiting.Timer) (now : Nat)
+    (has_pending : pending s = some (.storage false)) : canRetry s timer now = false :=
+  permanent_never_retries s timer now _ has_pending rfl
 
 def absence (path : Path) (uploader : CovenStorage.Files.DeviceState)
     (source : Option CovenStorage.Files.SourceFailure) : Reason :=
