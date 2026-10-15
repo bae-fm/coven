@@ -283,20 +283,12 @@ This observation's entry and copy misses can supply two parts of its drain
 only if they follow a storage time `T > F + one day + five minutes` (§6).
 The device remains undrained until step 6 supplies the write-log miss too.
 
-### 3. Observe positions, return coverage and identity
+### 3. Observe positions and identity
 
 List **`<store>/positions/` once**, including this device's post. Agreement,
 retention and reports share it. Positions never supply log discovery bounds:
 uploading and posting are separate requests, so a crash between them must
 not hide an uploaded object.
-
-For a new device or one failing §15's recent-return check, list each readable
-**`<store>/snapshots/<audience>/`** folder. Check previously unchecked signed
-prefixes by range to select the newest usable snapshot. Load it only if it
-covers past that audience's local position on some writer; otherwise keep
-the existing state and use ordinary next-number write reads. Apply §15's
-common-point loading rules, not each audience independently. Snapshots are
-never found by next number: retention can remove 2 while 3 remains.
 
 On reopening or reconnecting, these read-only observations also supply own
 counter evidence for §10, including snapshots in any audience needed to
@@ -480,6 +472,14 @@ Never invent a publication time from the device clock.
 
 ### 6. Send waiting writes, then receive writes
 
+First, for a new device or one failing §15's recent-return check, list
+each readable **`<store>/snapshots/<audience>/`** folder. Check previously unchecked signed
+prefixes by range to select the newest usable snapshot. Load it only if it
+covers past that audience's local position on some writer; otherwise keep
+the existing state and use ordinary next-number write reads. Apply §15's
+common-point loading rules, not each audience independently. Snapshots are
+never found by next number: retention can remove 2 while 3 remains.
+
 Create queued writes in device-number order, with the key and format rules
 of §6. Settle a tried write with its original bytes. An untried write uses
 the newest usable key under the received store log. Each success retires
@@ -502,7 +502,7 @@ dropped stays in that set: its writes can still count (§7.1)
 At each use of a miss, including a cached or parallel read's result, check
 `T + monotonic elapsed < S + 29 days` (§15), counting sleep. A pass-start
 check cannot authorize a later miss.
-At equality or later, take step 3's away-device snapshot discovery and
+At equality or later, take this step's away-device snapshot discovery and
 complete any required reload before using further write misses. Discovery
 from before expiry is insufficient. A new device or one without usable time
 evidence takes that path too; failure leaves history pending.
