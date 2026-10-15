@@ -173,7 +173,10 @@ impl StoreLogSync {
                 self.release_admin_access(id);
                 let data = Data::read(&record)?;
                 if let Data::Snapshots(task) = &data {
-                    self.discard_snapshot(&record, task.clone()).await?;
+                    // A discarded write settles what it can of its abandoned
+                    // attempts now; it cannot wait out the listing margin.
+                    let task = self.settle_abandoned(&record, task.clone()).await?;
+                    self.discard_snapshot(&record, task).await?;
                 }
                 // Publication numbers cannot be abandoned. Publishing fixed bytes
                 // does not perform any later access or invite step.
@@ -233,6 +236,7 @@ impl StoreLogSync {
                         device: local.device,
                         trigger: crate::snapshot_data::SnapshotTrigger::Reset,
                         attempt: None,
+                        abandoned: Vec::new(),
                     },
                     temporary: Vec::new(),
                 });

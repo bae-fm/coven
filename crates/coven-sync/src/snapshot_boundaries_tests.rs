@@ -247,6 +247,7 @@ async fn a_removed_device_cannot_start_or_resume_snapshot_publication() {
                     device: a.device().await,
                     trigger: crate::snapshot_data::SnapshotTrigger::Requested,
                     attempt: None,
+                    abandoned: Vec::new(),
                 },
                 temporary: Vec::new(),
             });

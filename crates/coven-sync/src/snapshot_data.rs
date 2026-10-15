@@ -23,6 +23,10 @@ pub(crate) enum SnapshotJob {
         /// The prepared attempt; none before preparation and again once an
         /// expired attempt is abandoned (§15).
         attempt: Option<SnapshotAttempt>,
+        /// Abandoned attempts whose request may land, or has landed too late
+        /// to count: the operation deletes each landing that does not count
+        /// and finishes only once each is settled (§15).
+        abandoned: Vec<AbandonedAttempt>,
     },
     Reload {
         scope: ReloadScope,
@@ -37,9 +41,34 @@ pub(crate) enum SnapshotJob {
 pub(crate) struct SnapshotAttempt {
     pub(crate) number: std::num::NonZeroU64,
     pub(crate) session: Option<UploadSession>,
-    /// Its landing was confirmed too late to count: the abandoning operation
-    /// deletes it before preparing afresh, resuming after a crash (§15).
-    pub(crate) late: bool,
+    /// Saved before its first request: once set, a request may have reached
+    /// storage, so abandoning it records it (§15).
+    pub(crate) sent: bool,
+}
+
+/// An attempt given up before a counting landing was confirmed, recorded
+/// with the abandonment. A landing at its path counts only if it is at most
+/// a day after `caught_at`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct AbandonedAttempt {
+    pub(crate) number: std::num::NonZeroU64,
+    /// The attempt's signed `T_c`.
+    pub(crate) caught_at: coven_format::value::StorageTime,
+    pub(crate) landing: AbandonedLanding,
+}
+
+/// What the device knew of an abandoned attempt's landing (§15).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) enum AbandonedLanding {
+    /// Its landing was confirmed too late to count: once its path is absent
+    /// the deletion is done.
+    Late,
+    /// Abandoned before any landing was confirmed, at this observed storage
+    /// time: a request may still land. An absent path is settled once an
+    /// observed storage time is more than the listing margin past it.
+    Unconfirmed {
+        abandoned_at: coven_format::value::StorageTime,
+    },
 }
 
 #[derive(Clone, Serialize, Deserialize)]

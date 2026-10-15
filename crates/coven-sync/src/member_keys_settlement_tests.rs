@@ -278,6 +278,7 @@ async fn snapshot(d: &Device) -> OperationId {
             device: d.device().await,
             trigger: crate::snapshot_data::SnapshotTrigger::Requested,
             attempt: None,
+            abandoned: Vec::new(),
         },
         temporary: Vec::new(),
     });

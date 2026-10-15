@@ -3,12 +3,16 @@
 //! once its own captured prefix is confirmed, and is abandoned for a new path
 //! once it can no longer count (§15, SP step 8).
 use super::*;
+use crate::snapshot_data::AbandonedLanding;
 use coven_format::sealed_snapshot::SnapshotObjectPrefix;
 use coven_format::store_log::SnapshotId;
 use coven_format::value::StorageTime;
 use coven_merge::WriteId;
 
 const DAY: u64 = StorageTime::DAY_SECONDS;
+
+#[path = "snapshot_abandoned_tests.rs"]
+mod abandoned;
 
 /// Ana and her second device Ben in one store, on storage whose provider
 /// time the test sets.
@@ -78,6 +82,7 @@ async fn request(device: &Device) -> crate::OperationId {
             device: device.device().await,
             trigger: crate::snapshot_data::SnapshotTrigger::Requested,
             attempt: None,
+            abandoned: Vec::new(),
         },
         temporary: Vec::new(),
     });
@@ -358,6 +363,7 @@ async fn an_arrival_before_preparation_waits_and_one_after_does_not() {
 /// A landing exactly one day after the signed sample counts. Once an
 /// observed storage time passes that day before sending, the attempt is
 /// abandoned without a request, and a fresh catch-up prepares a new path.
+/// Never sent, it leaves nothing to settle.
 #[tokio::test]
 async fn an_attempt_counts_through_its_day_and_is_abandoned_after_it() {
     let (storage, clock, mut a, _b) = pair().await;
@@ -390,6 +396,7 @@ async fn an_attempt_counts_through_its_day_and_is_abandoned_after_it() {
     let before = storage.request_trace().len();
     assert!(matches!(step(&mut a, id).await, Some(Progress::Advanced)));
     assert_eq!(task(&a, id).await, Some((0, None)));
+    assert!(abandoned::recorded(&a, id).await.is_empty());
     assert!(!storage.request_trace()[before..]
         .iter()
         .any(|request| matches!(
@@ -440,7 +447,11 @@ async fn late_landing(resumed: bool) {
     set_time(&clock, 10_000 + DAY + 1);
     assert!(matches!(step(&mut a, id).await, Some(Progress::Advanced)));
     // The abandoning operation records the late attempt for deletion.
-    assert_eq!(task(&a, id).await, Some((0, Some(late.clone()))));
+    assert_eq!(task(&a, id).await, Some((0, None)));
+    assert_eq!(
+        abandoned::recorded(&a, id).await,
+        vec![(late.number, AbandonedLanding::Late)]
+    );
     let snapshots = listed(&storage).await;
     let landed = snapshots
         .iter()
@@ -458,8 +469,10 @@ async fn late_landing(resumed: bool) {
     if resumed {
         storage.delete(&path_of(&late)).await.unwrap();
     }
-    assert!(matches!(step(&mut a, id).await, Some(Progress::Advanced)));
+    // Preparing afresh then waits for a catch-up.
+    assert!(matches!(step(&mut a, id).await, Some(Progress::Waiting(_))));
     assert_eq!(task(&a, id).await, Some((0, None)));
+    assert!(abandoned::recorded(&a, id).await.is_empty());
     assert!(storage.status(&path_of(&late)).await.unwrap().is_none());
     assert_eq!(current(&storage).await, Some(path_of(&timely)));
     // Within the same pass the abandoned sample cannot serve again.
@@ -846,6 +859,7 @@ async fn writing_resumes_after_each_recorded_step_with_identical_ciphertext() {
                 device: a.device().await,
                 trigger: crate::snapshot_data::SnapshotTrigger::Growth,
                 attempt: None,
+                abandoned: Vec::new(),
             },
             temporary: Vec::new(),
         });

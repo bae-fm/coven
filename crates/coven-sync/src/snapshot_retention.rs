@@ -325,6 +325,7 @@ impl StoreLogSync {
                     number: write.number,
                 },
                 attempt: None,
+                abandoned: Vec::new(),
             })
             .await?;
         }

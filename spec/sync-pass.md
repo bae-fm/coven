@@ -614,6 +614,11 @@ attempt never reuses its path
 ([`abandoned_never_counts_later`, `retry_new_path`](proofs/io/CovenIO/SnapshotAttempts.lean)). Every reader
 ignores an old attempt landing after that deadline
 ([`late_snapshot_ignored`](proofs/io/CovenIO/Retention.lean)).
+The operation records an attempt it abandons once a request for it may
+have been sent or its landing was confirmed late, deletes such a landing
+that does not count on a later run, and finishes only once each record is
+settled (§15;
+[`abandoned_landing_unseen`](proofs/io/CovenIO/LateDeletion.lean)).
 For example, an attempt caught up at noon Monday and still unconfirmed after
 noon Tuesday cannot become usable by landing later
 ([`late_snapshot_ignored`](proofs/io/CovenIO/Retention.lean)).

@@ -203,6 +203,7 @@ async fn a_late_landing_is_ignored_even_when_it_covers_more_writes() {
             device: a.device().await,
             trigger: crate::snapshot_data::SnapshotTrigger::Requested,
             attempt: None,
+            abandoned: Vec::new(),
         },
         temporary: Vec::new(),
     });
@@ -300,6 +301,7 @@ async fn a_device_reloads_its_own_tied_snapshot_and_reads_the_rest_from_logs() {
             device: b.device().await,
             trigger: crate::snapshot_data::SnapshotTrigger::Requested,
             attempt: None,
+            abandoned: Vec::new(),
         },
         temporary: Vec::new(),
     });
@@ -638,6 +640,7 @@ async fn data_differential_snapshot_pruning() {
                 device: device.device().await,
                 trigger: crate::snapshot_data::SnapshotTrigger::Requested,
                 attempt: None,
+                abandoned: Vec::new(),
             },
             temporary: Vec::new(),
         });

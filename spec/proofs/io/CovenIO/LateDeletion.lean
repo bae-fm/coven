@@ -36,4 +36,32 @@ theorem late_landing_never_counts (snap : Snapshot) (late : snap.caughtAt + day 
     snap.counts = false := by
   simp [Snapshot.counts]; omega
 
+/-! T224: an attempt abandoned before its landing was confirmed. A request
+already sent may still land, so its author records the attempt with the
+abandonment and later checks its path: a landing that does not count is
+deleted, which no reader notices (`late_deletion_unseen`); one that counts
+stays an ordinary snapshot. -/
+
+/-- A request of an attempt abandoned once an observed storage time was past
+its sample plus a day lands no earlier than that time, so it never counts:
+no reader selects, loads or takes coverage from it, and deleting it changes
+nothing a reader decides. -/
+theorem abandoned_landing_unseen (order : SnapshotOrder) (l : Snapshot) (rest : List Snapshot)
+    (abandonedAt : Nat) (passed : l.caughtAt + day < abandonedAt)
+    (after : abandonedAt ≤ l.storedAt) :
+    l.counts = false ∧ catalogCurrent order (l :: rest) = catalogCurrent order rest ∧
+      (∀ writer position, coveredMiss (l :: rest) writer position =
+        coveredMiss rest writer position) ∧
+      ∀ time w, MatureCoverage (l :: rest) time w ↔ MatureCoverage rest time w := by
+  have never := late_landing_never_counts l (by omega)
+  exact ⟨never, late_deletion_unseen order l rest never⟩
+
+/-- So a landing of such an attempt that counts was stored before the
+abandonment: a request whose reply was lost. Readers may select it, and the
+cleanup keeps it. -/
+theorem counting_abandoned_landed_before (l : Snapshot) (abandonedAt : Nat)
+    (passed : l.caughtAt + day < abandonedAt) (counts : l.counts = true) :
+    l.storedAt < abandonedAt := by
+  simp [Snapshot.counts] at counts; omega
+
 end CovenIO

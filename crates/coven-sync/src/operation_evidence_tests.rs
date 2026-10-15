@@ -198,6 +198,7 @@ async fn a_raise_waiting_on_a_reload_yields_to_it() {
                     entry: None,
                 },
                 attempt: None,
+                abandoned: Vec::new(),
             }))
             .await
             .unwrap();

@@ -564,6 +564,7 @@ async fn coverage_a_newer_snapshot_leaves_out_is_requested_until_supplied() {
             device: b.device().await,
             trigger: crate::snapshot_data::SnapshotTrigger::Requested,
             attempt: None,
+            abandoned: Vec::new(),
         },
         temporary: Vec::new(),
     });
@@ -624,6 +625,7 @@ async fn a_late_landing_does_not_supply_coverage() {
             device: a.device().await,
             trigger: crate::snapshot_data::SnapshotTrigger::Requested,
             attempt: None,
+            abandoned: Vec::new(),
         },
         temporary: Vec::new(),
     });

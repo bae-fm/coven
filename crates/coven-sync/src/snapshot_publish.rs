@@ -31,6 +31,7 @@ impl StoreLogSync {
             device,
             trigger,
             attempt,
+            ..
         } = task.job.clone()
         else {
             unreachable!("snapshot writing step")
@@ -50,6 +51,8 @@ impl StoreLogSync {
             crate::effects::Authority::reset(&audience)
                 .check(&local.log.replay.state, &member.member())?;
         }
+        // Each run first settles what an earlier abandonment left (§15).
+        let task = self.settle_abandoned(record, task).await?;
         let published = |attempt: &SnapshotAttempt| SnapshotId {
             audience: audience.clone(),
             device,
@@ -63,6 +66,9 @@ impl StoreLogSync {
                     version,
                 )
             {
+                if let Some(wait) = self.unsettled(&task)? {
+                    return Ok(wait);
+                }
                 self.discard_snapshot(record, task).await?;
                 self.database
                     .discard_raise_capture(audience.clone(), version)
@@ -76,7 +82,8 @@ impl StoreLogSync {
                 // `T_c` and counts only if it lands within a day of it (§9,
                 // §15). Past that day the attempt is abandoned and the raise
                 // prepared afresh at a new path; an entry already sent that
-                // lands late is dropped, which restarts it the same way.
+                // lands late is dropped, which restarts it the same way. Its
+                // snapshot landed counting and stays an own snapshot.
                 let caught_at = match entry {
                     Some(_) => None,
                     None => {
@@ -92,7 +99,7 @@ impl StoreLogSync {
                                 .caught_at;
                         if !self.may_count(caught_at) {
                             tracing::debug!("a raise's entry window passed before its entry");
-                            return self.abandon_snapshot(record, task).await;
+                            return self.abandon_snapshot(record, task, None).await;
                         }
                         Some(caught_at)
                     }
@@ -110,18 +117,15 @@ impl StoreLogSync {
                 .iter()
                 .any(|c| c.audience == audience && c.version == version)
             {
+                if let Some(wait) = self.unsettled(&task)? {
+                    return Ok(wait);
+                }
                 self.discard_snapshot(record, task).await?;
                 self.database.finish_operation(record.id).await?;
                 return Ok(Progress::Finished(Output::Unit));
             }
         }
         match (record.last_step, attempt) {
-            // A landing confirmed too late can never count; the operation
-            // that abandoned it deletes it first (§15; io `late_deletion_unseen`).
-            (0, Some(late)) if late.late => {
-                self.delete_late_attempt(record, task, published(&late))
-                    .await
-            }
             (0, _) => {
                 self.prepare_snapshot(record, task, &local.log, &member)
                     .await
@@ -154,6 +158,9 @@ impl StoreLogSync {
         self.clear_snapshot_files(record, &mut task).await?;
         if matches!(trigger, SnapshotTrigger::Growth) && !self.snapshot_grew(&audience, log).await?
         {
+            if let Some(wait) = self.unsettled(&task)? {
+                return Ok(wait);
+            }
             self.database.finish_operation(record.id).await?;
             return Ok(Progress::Finished(Output::Unit));
         }
@@ -163,6 +170,9 @@ impl StoreLogSync {
                 number,
             };
             if self.currently_covered(&audience, log, write).await? {
+                if let Some(wait) = self.unsettled(&task)? {
+                    return Ok(wait);
+                }
                 self.database.finish_operation(record.id).await?;
                 return Ok(Progress::Finished(Output::Unit));
             }
@@ -198,6 +208,9 @@ impl StoreLogSync {
                     .prepare_raise_capture(audience.clone(), version)
                     .await?
                 else {
+                    if let Some(wait) = self.unsettled(&task)? {
+                        return Ok(wait);
+                    }
                     self.discard_snapshot(record, task).await?;
                     self.database.finish_operation(record.id).await?;
                     return Ok(Progress::Finished(Output::Unit));
@@ -300,7 +313,7 @@ impl StoreLogSync {
             Some(SnapshotAttempt {
                 number,
                 session: None,
-                late: false,
+                sent: false,
             }),
         );
         self.save_snapshot_task(record, &task, 1).await?;
@@ -528,7 +541,16 @@ impl StoreLogSync {
             if let Some(session) = &attempt.session {
                 storage.abort_upload(session).await?;
             }
-            return self.abandon_snapshot(record, task).await;
+            // An earlier run's request may still land; the record lets this
+            // operation delete it if it does (§15). One never sent needs none.
+            let abandoned = attempt.sent.then_some(AbandonedAttempt {
+                number: attempt.number,
+                caught_at: prefix.caught_at,
+                landing: AbandonedLanding::Unconfirmed {
+                    abandoned_at: self.observed_time()?,
+                },
+            });
+            return self.abandon_snapshot(record, task, abandoned).await;
         }
         // Capture may precede own-upload confirmation, but the snapshot is
         // sent only once every own write it covers is stored, so a loader
@@ -540,6 +562,16 @@ impl StoreLogSync {
                     Prerequisite::Object(crate::write_seal::path(self.directory.id(), write)),
                 )));
             }
+        }
+        if !attempt.sent {
+            set_attempt(
+                &mut task,
+                Some(SnapshotAttempt {
+                    sent: true,
+                    ..attempt.clone()
+                }),
+            );
+            self.save_snapshot_task(record, &task, 1).await?;
         }
         let recorded = attempt.session.clone();
         let number = attempt.number;
@@ -589,64 +621,55 @@ impl StoreLogSync {
             .observe(&stored);
         if !prefix.counts(stored.stored_at) {
             tracing::debug!(path = path.as_str(), "snapshot landed too late to count");
-            for name in &task.temporary {
-                io::remove(&self.directory, name)?;
-            }
-            task.temporary.clear();
-            set_attempt(
-                &mut task,
-                Some(SnapshotAttempt {
-                    number,
-                    session: None,
-                    late: true,
-                }),
-            );
-            self.database
-                .advance_operation(Data::Snapshots(task).update(record, 0)?)
-                .await?;
-            return Ok(Progress::Advanced);
+            // Abandoned with its landing on record, so the next run deletes
+            // it before preparing afresh (§15; io `late_deletion_unseen`).
+            let abandoned = AbandonedAttempt {
+                number,
+                caught_at: prefix.caught_at,
+                landing: AbandonedLanding::Late,
+            };
+            return self.abandon_snapshot(record, task, Some(abandoned)).await;
         }
         self.save_snapshot_task(record, &task, 2).await?;
         Ok(Progress::Advanced)
     }
 
-    /// Delete this device's own attempt whose landing was confirmed too late:
-    /// no reader selects, loads or counts it, so nothing needs it (§15, §16).
-    /// An absent object was deleted by an earlier run of this step.
-    async fn delete_late_attempt(
-        &self,
-        record: &OperationRecord,
-        mut task: SnapshotTask,
-        id: SnapshotId,
-    ) -> Result<Progress, SyncError> {
-        let storage = self.storage.as_deref().ok_or(SyncError::NoStorage)?;
-        let path = snapshot_path(self.directory.id(), &id)?;
-        if storage.status(&path).await?.is_some() {
-            storage.delete(&path).await?;
-        }
-        set_attempt(&mut task, None);
-        self.database
-            .advance_operation(Data::Snapshots(task).update(record, 0)?)
-            .await?;
-        Ok(Progress::Advanced)
-    }
-
     /// Give up an attempt that cannot count and prepare afresh after another
-    /// catch-up, at a new path (§15).
+    /// catch-up, at a new path. One without a confirmed counting landing is
+    /// recorded in the same transaction, so its landing is settled even after
+    /// a crash (§15).
     async fn abandon_snapshot(
         &self,
         record: &OperationRecord,
         mut task: SnapshotTask,
+        to_settle: Option<AbandonedAttempt>,
     ) -> Result<Progress, SyncError> {
         for name in &task.temporary {
             io::remove(&self.directory, name)?;
         }
         task.temporary.clear();
         set_attempt(&mut task, None);
+        let SnapshotJob::Write { abandoned, .. } = &mut task.job else {
+            unreachable!("only a snapshot write abandons attempts")
+        };
+        abandoned.extend(to_settle);
         self.database
             .advance_operation(Data::Snapshots(task).update(record, 0)?)
             .await?;
         Ok(Progress::Advanced)
+    }
+
+    /// The newest storage time this session observed, which abandonment
+    /// needs: an attempt expires only against an observed time (§15).
+    fn observed_time(&self) -> Result<StorageTime, SyncError> {
+        Ok(self
+            .finality
+            .lock()
+            .expect("finality lock poisoned")
+            .sample_time()
+            .ok_or(coven_database::DbError::Invariant {
+                what: "an expired snapshot attempt has an observed storage time",
+            })?)
     }
 
     /// A snapshot's both signatures are fixed with its sealed file. Each
@@ -675,6 +698,10 @@ impl StoreLogSync {
         mut task: SnapshotTask,
         id: SnapshotId,
     ) -> Result<Progress, SyncError> {
+        // Every abandoned attempt is settled before the snapshot's work ends.
+        if let Some(wait) = self.unsettled(&task)? {
+            return Ok(wait);
+        }
         if matches!(
             task.job,
             SnapshotJob::Write {

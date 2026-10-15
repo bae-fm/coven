@@ -11,6 +11,8 @@ use coven_storage::{ObjectPath, ObjectPrefix};
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroU64;
 
+#[path = "snapshot_abandoned.rs"]
+mod abandoned;
 #[path = "snapshot_boundaries.rs"]
 pub(super) mod boundaries;
 #[path = "snapshot_catalog.rs"]
@@ -78,6 +80,7 @@ impl StoreLogSync {
                 device: local.device,
                 trigger: SnapshotTrigger::Growth,
                 attempt: None,
+                abandoned: Vec::new(),
             };
             let mut requested = false;
             for record in &tasks {
@@ -176,6 +179,7 @@ impl StoreLogSync {
                 device: local.device,
                 trigger: SnapshotTrigger::Requested,
                 attempt: None,
+                abandoned: Vec::new(),
             })
             .await?;
         self.catch_up_for_snapshots(writes).await?;

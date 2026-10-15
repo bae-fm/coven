@@ -726,6 +726,7 @@ mod recapture {
                 device: BEN,
                 trigger: crate::snapshot_data::SnapshotTrigger::Requested,
                 attempt: None,
+                abandoned: Vec::new(),
             },
             temporary: Vec::new(),
         });

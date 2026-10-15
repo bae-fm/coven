@@ -436,7 +436,14 @@ shows the current selection, a fresh catalog's deletion certificate
 snapshot that does not count, and `late_landing_never_counts` that a landing
 more than a day after its sample is one. So the author may delete its own
 attempt once it confirms that landing (§15); Rust tests cover the deletion
-recorded with the abandonment and its resumption.
+recorded with the abandonment and its resumption. For an attempt abandoned
+before any landing was confirmed (T224), `abandoned_landing_unseen` shows a
+request landing at or after the abandonment never counts and its deletion is
+unseen, and `counting_abandoned_landed_before` that a landing which counts was
+stored before the abandonment, so the cleanup, which deletes only a landing
+that does not count, never removes a snapshot a reader may select. When an
+absent path is settled (the listing margin past the abandonment) is a Rust
+rule; a request landing after it stays in storage and never counts.
 
 **Raise snapshots judged only by what they cover — checked counterexample.**
 A migration captures one raise snapshot per readable audience in its own

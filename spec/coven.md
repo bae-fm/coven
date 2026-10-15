@@ -5110,15 +5110,23 @@ Carol's tablet:
 - A device deletes a snapshot of its own once a newer one of the same
   audience covers everything it covers, and the entries that make that
   replacement usable are final (§9).
-  - It also deletes its own attempt whose landing it confirmed too late to
-    count, in the operation that abandons that attempt: the operation
-    records the attempt for deletion with the abandonment and deletes it
-    before preparing afresh, resuming after a crash. No reader selects,
-    loads or takes coverage, deletion evidence or a witness from a
+  - It also deletes its own abandoned attempts that land too late to
+    count, in the operation that abandons them. The operation records each
+    attempt with the abandonment when its landing was confirmed too late,
+    or when a request for it may have been sent; one never sent needs no
+    record. Each later run checks every recorded path by exact status: a
+    landing that does not count is deleted; one that counts was stored
+    before the abandonment, a request whose reply was lost, and stays an
+    ordinary snapshot; a confirmed late landing now absent is done; any
+    other absent path is settled once an observed storage time is more than
+    the listing margin `M` past the abandonment. The operation finishes only
+    once every record is settled, and resumes them after a crash. No reader
+    selects, loads or takes coverage, deletion evidence or a witness from a
     snapshot that never counts, so nothing needs it
-    ([`late_deletion_unseen`, `late_landing_never_counts`](proofs/io/CovenIO/LateDeletion.lean)).
-    An abandoned request whose landing the device never confirms is not
-    covered by this rule.
+    ([`late_deletion_unseen`, `late_landing_never_counts`, `abandoned_landing_unseen`, `counting_abandoned_landed_before`](proofs/io/CovenIO/LateDeletion.lean)).
+    A request still in flight after that margin, or one of an operation the
+    app discards, lands undeleted; it never counts
+    ([`abandoned_never_counts_later`](proofs/io/CovenIO/SnapshotAttempts.lean)).
   - A snapshot named by a kept reset or version-raise entry that changes
     the replayed state stays: new devices need its authenticated coverage
     to judge late writes and select a snapshot following that boundary.

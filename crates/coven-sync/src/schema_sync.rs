@@ -112,6 +112,7 @@ impl StoreLogSync {
                         entry: None,
                     },
                     attempt: None,
+                    abandoned: Vec::new(),
                 })
                 .await?;
             }
@@ -156,6 +157,9 @@ impl StoreLogSync {
     ) -> Result<Progress, SyncError> {
         let mut data = Data::Snapshots(task.clone());
         if record.last_step >= data.entry_step_number(5) {
+            if let Some(wait) = self.unsettled(&task)? {
+                return Ok(wait);
+            }
             self.clear_snapshot_files(record, &mut task).await?;
             self.database
                 .discard_raise_capture(snapshot.audience.clone(), version)
@@ -189,6 +193,9 @@ impl StoreLogSync {
             )));
         }
         if schema_in_place(&local.log.replay.state, &snapshot.audience, version) {
+            if let Some(wait) = self.unsettled(&task)? {
+                return Ok(wait);
+            }
             self.clear_snapshot_files(record, &mut task).await?;
             self.database
                 .discard_raise_capture(snapshot.audience.clone(), version)

@@ -12,6 +12,7 @@ async fn maintenance_failures_are_visible_and_wait_for_a_changed_connection() {
             device: DeviceId(1),
             trigger: SnapshotTrigger::Requested,
             attempt: None,
+            abandoned: Vec::new(),
         },
         SnapshotJob::Reload {
             scope: ReloadScope::All,
@@ -152,6 +153,7 @@ async fn migration_and_audience_publication_share_the_schema_change_purpose() {
                     entry: None,
                 },
                 attempt: None,
+                abandoned: Vec::new(),
             },
             temporary: Vec::new(),
         })
